@@ -628,3 +628,123 @@ Review follow-up:
   docs (the mask doc, `PROBE_PTR`, varlen/paged "the mask is") are updated.
 - New tests: a sliding window over packed dense K/V, over a paged cache and with fp8, and a bidirectional packed
   encoder (no causality, mask from lengths only). The crate has 32 tests.
+
+## Run 10 - 2026-10-05 02:11
+
+Question: can fattn take over paged decode on the FlashInfer-layout (HND) cache, the first engine path to move, at
+parity with FlashInfer decode in correctness and throughput, including under CUDA graphs?
+
+Wiring:
+- inference-nn depends on inference-fattn under `cuda`. `PagedAttention::try_run_fattn_decode` runs between the FA3
+  attempt and FlashInfer in `run_flashinfer_decode`. It reads the padded block tables and context lens the layer
+  already selects (`ctx.block_tables`, the windowed view for a sliding layer, the full one otherwise), with
+  `causal: true`, `window_left = window - 1`, softcap and fp8 scales. Multi-token decode (MTP verify) has one table
+  row per query row, so each row is its own sequence of one query.
+- Decode metadata built only FlashInfer's CSR form for this layout; `conservative()` now always builds the padded
+  tables too. Graph capture keeps them (they exist at capture) and drops the tile plan when nothing used it.
+- `inference_fattn::supported_paged`: false for kernel limits (non-power-of-two block size, MLA head dim, fp8 scales
+  outside (0, 146]), an error for malformed operands. The op's descriptor building is now `Fattn::describe`, shared
+  by the launch and the probe, so the probe cannot drift from the call it predicts; `supported()` uses it too.
+- Graph capture: fattn's pool allocations are `cudaMallocAsync` on the caller's stream, which relaxed-mode capture
+  records as graph alloc nodes. Qwen3.5-0.8B captures and replays (`Captured 1 CUDA decode graphs`), and the bench
+  ran with graphs on throughout.
+
+Found by the new probe test: softcap at head dim 64 passed `supported()` but trapped (`NO_DEVICE_CODE` at
+fattn-mma-f16.cuh:1946). Every kernel skips its softcap variants outside head dims 128/256/512 ("Skip unused kernel
+variants"), and selection never checked. Selection now returns none there, for dense calls too.
+
+Bench 1, engine, `inference bench -m Qwen3.5-0.8B --prompt-len 0 --gen-len 128`, CUDA graphs on (TPOT ms):
+
+| depth | master (FlashInfer) | fattn, first cut |
+|---|---|---|
+| 4 | 2.54 | 2.54 |
+| 4096 | 2.64 | 2.67 |
+| 16384 | 2.77 | 2.98 |
+| 16000 | 2.76 | 2.83 |
+
+nsys at 16384: FlashInfer decode 46.6 us + merge 5.1 us per call (grid 256, 60 regs); fattn mma 84 us + uniform
+fixup 4.7 us (grid 82, 235 regs). The graph's block table spans a power-of-two bucket (16512 tokens -> 32768), and
+stream-k split the padded length, so about half the blocks got only tiles past the sequence. Depth 16000 fits the
+16384 bucket and lost only 2.5%.
+
+Fix: `fattn_iter_k`. With lengths on the device (paged or packed), the mma split covers only the longest sequence's
+KV tiles (a warp max over `seq_lens` or `cu_kv`). Both fixups follow it:
+- First the general fixup for every such call (it already handles blocks with no data): the main kernel fell to
+  57-58 us, but the general fixup took 21.9 us (a serial walk back over ~40 blocks per tile).
+- Then the uniform fixup with a `continue` for blocks without data: 11 us. The branch stopped the loop's loads from
+  batching. Selects instead of the branch: 5.5 us.
+- Then only the blocks that hold data. With fewer KV tiles than blocks, KV tile t falls in block
+  `ceil((t + 1) * bpt / iter_k) - 1` (checked exhaustively against the kernel's split for bpt < 200, iter_k < 400),
+  and a tile one block covered alone is left as written. The data-block choice sits outside the loop, so the dense
+  loop is upstream's.
+- The general fixup keeps upstream's fastdiv, with its divisors recomputed on the device (`fattn_fastdiv_values`)
+  only when the lengths are there. A plain-division version had cost Qwen 1 x 512 x 512 21%.
+- New test `graph_padded_tables_split_by_live_length` (120-250 spare table entries). It fails when the uniform fixup
+  is used without the skip, and three varlen tests fail when the general fixup ignores the device split.
+
+Dead end, the gap at long context: f16 K/V through cp.async is 15-17% faster than bf16 through the synchronous
+converting loads at 16k decode (32.6 vs 38.1 us, isolated). Tried: bf16 tiles copied as stored by cp.async, with
+fragments converted after each `ldmatrix` (a runtime `fattn_layout` flag, no new instances). Interleaved A/B
+against master (patchelf'd binaries, min of 5, one test thread): batched paged decode -17% to -21% (b 8). But
+single decode at 2-4k was +7-15%, prefill at or under 512 rows +5-28%, and rows over 512, which never take the path,
++4-13%. The runtime branch in the mma inner loop costs every instance, as in Run 7. A compile-time flag would double
+the mma instances. Reverted. (The first two A/B runs here were void: one libtest process ran both benches on parallel
+threads on one GPU. `--test-threads=1` from now on.)
+
+Cost of the device split: the length-derived `iter_k` cannot be rematerialized from kernel parameters, so 190 of
+1419 kernels gain 4-10 registers (some 255-register instances spill 16 bytes more). A/B against master over the
+fattn benches, min of 5: prefill within +-4% except Llama q 16 (+6%); dense decode with a mask tensor (not an engine
+path) +6-10% at 2-4k. Without the device split (a build where `fattn_iter_k` returns the host value), engine decode
+at 16384 is +8.3% against master, and +3.3% with it, so it stays.
+
+Bench 2, engine, final build, min of 3 interleaved rounds (TPOT ms):
+
+| depth | master (FlashInfer) | fattn | fattn, host split |
+|---|---|---|---|
+| 4 | 2.51 | 2.55 (+1.6%) | 2.55 |
+| 4096 | 2.64 | 2.63 (-0.4%) | 2.69 |
+| 16000 | 2.73 | 2.83 (+3.7%) | 2.83 |
+| 16384 | 2.76 | 2.85 (+3.3%) | 2.99 |
+
+- fp8 e4m3 cache (`--pa-cache-type f8e4m3`): master 3.45 / 5.45 ms at d4 / d16000, fattn 2.55 / 2.86 (-26% / -48%).
+  FlashInfer's fp8 decode is slow on sm86; fattn's bit-placement decode (Run 7) is not.
+- Graphs off (eager, CPU-bound): fattn +2%. The eager metadata now also uploads the padded tables, 2 more pageable
+  host-to-device copies per step at ~65 us each. FlashInfer's 8 CSR and plan tensors go when FlashInfer does.
+- What is left at 16k is the kernel: the mma decode tile (sync bf16 loads, one 4-warp block per SM at head dim 256)
+  streams about 590 GB/s against FlashInfer's ~720. A single tile also costs ~13 us of latency in the engine against
+  FlashInfer's 8.7 at short contexts.
+
+Correctness:
+- `fattn_decode_tests` (inference-nn, GPU) runs the layer's decode on real decode metadata
+  (`DecodePagedRows::build_materialized`) and compares with `flashinfer_decode` on the same plan. Head dims
+  64/128/256/512 with bf16, f16 and fp8 caches, and windowed models with block sizes 16 and 32, for a sliding layer
+  (with and without softcap) and a full one. It also checks that FlashInfer's plan went unused, and that softcap at
+  64 falls back to FlashInfer. Max abs diff is 1-2 bf16 ulps (0.0039-0.0078); halving the window gives 0.705.
+- Real checkpoint: master's and the branch's plain greedy traces (Qwen3.5-0.8B Q8_0 GGUF, two prompts, 25-40
+  steps) agree on every id. Logprobs move by 0.002-0.036 on average, 0.1 at most. That is fattn's f16 P*V
+  accumulators (`T_C_VKQ = tile<16, 4, half2>` on Ampere) against FlashInfer's f32; the engine's MTP and plain
+  paths already differ by up to ~0.12.
+- `gguf_builtin_mtp_accepts_drafts_and_keeps_greedy_output` failed: at step 8 of the nursery-rhyme prompt the MTP
+  trace's top two tie exactly (bf16 logits step logprob gaps by 0.125) and it took the plain trace's runner-up.
+  The test only accepted a tie on the plain side and assumed none before step 16. On master the same prompt has
+  near ties (0.125 < `TIE_MARGIN` 0.25) at steps 5 and 8. The check is now symmetric, with `MIN_AGREED` 5.
+
+Next: packed and chunked prefill onto fattn (`supported_varlen`, `supported_paged_varlen` over the same `probe`),
+then delete FlashInfer decode, which takes the CSR and tile-plan metadata with it. A decode-shaped kernel path that
+keeps cp.async for bf16 (without a branch in the shared mma loop) is the open lead for the 16k gap.
+
+Review and CI follow-up:
+- CI: 10 tiny vision-language tests failed with `fattn takes f16, bf16 or fp8 e4m3 K and V of one dtype, got F32
+  and F32`. Those run f32 caches, which FlashInfer takes, and `supported_paged` errored instead of answering false.
+  The review found the same independently. K/V dtype, row alignment and the device ordinal are now limits
+  (`operand_limit`, shared with `validate_operands`), so the layer falls back. New engine test
+  `f32_caches_fall_back_to_flashinfer`.
+- The review found `fattn_iter_k`'s full-mask warp shuffle undefined in a fixup at head dim 80 or 112, whose last
+  warp is half full (block = DV threads). Not reachable from the engine (FlashInfer layers are 64/128/256/512), but
+  reachable through the API. It now reduces over 16-lane groups under `__activemask()`.
+  `graph_padded_tables_split_by_live_length` covers 80 and 112.
+- New engine test `multi_token_decode_matches_flashinfer` (3 query rows per sequence, one table row each, as MTP
+  verify builds them).
+- `MIN_AGREED` is per prompt: 16 for counting, which never parts before it, and 5 for the rhyme.
+- Not covered: on SM90 the FA3 fp8 decode runs before fattn, and the decode test's "plan unused" check cannot tell
+  the two apart. This machine is sm86.

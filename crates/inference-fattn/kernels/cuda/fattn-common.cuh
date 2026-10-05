@@ -43,6 +43,33 @@ static __device__ __forceinline__ int2 fattn_q_rows(const fattn_layout & lay, co
     return lay.cu_q ? make_int2(lay.cu_q[s], lay.cu_q[s + 1] - lay.cu_q[s]) : make_int2(s*ne01, ne01);
 }
 
+// Stream-k KV tiles: with device-side lengths only the longest sequence's, so a graph's padded table idles no block.
+static __device__ __forceinline__ int fattn_iter_k(const fattn_layout & lay, const int nseq, const int ne11, const int nbatch_fa) {
+    const int iter_k = (ne11 + nbatch_fa - 1) / nbatch_fa;
+    if (!lay.seq_lens && !lay.cu_kv) {
+        return iter_k;
+    }
+    // groups of 16 lanes each reduce on their own: a fixup at head dim 80 or 112 ends in a half warp
+    constexpr int group = WARP_SIZE/2;
+    int len = 0;
+    for (int s = threadIdx.x % group; s < nseq; s += group) {
+        len = max(len, lay.seq_lens ? __ldg(lay.seq_lens + s) : lay.cu_kv[s + 1] - lay.cu_kv[s]);
+    }
+    const unsigned mask = __activemask();
+#pragma unroll
+    for (int offset = group/2; offset > 0; offset >>= 1) {
+        len = max(len, __shfl_xor_sync(mask, len, offset, group));
+    }
+    return max(1, min(iter_k, (len + nbatch_fa - 1) / nbatch_fa));
+}
+
+// init_fastdiv_values on the device, for divisors that only the device knows
+static __device__ __forceinline__ uint3 fattn_fastdiv_values(const uint32_t d) {
+    const uint32_t L = d > 1 ? 32 - __clz(d - 1) : 0;
+    const uint32_t mp = (uint32_t) ((uint64_t{1} << 32) * ((uint64_t{1} << L) - d) / d + 1);
+    return make_uint3(mp, L, d);
+}
+
 // entry.cu stores a pointer to the call's fattn_layout in the dst op_params from this int32 slot on
 #define FATTN_OP_PARAMS_LAYOUT 6
 
@@ -819,12 +846,22 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         const uint3 fd_iter_j_z_ne12,
         const uint3 fd_iter_j_z,
         const uint3 fd_iter_j,
+        const int ne03, const int ne11, const int nbatch_fa,
         const bool dst_bf16,
-        const int32_t * cu_q) {
+        const fattn_layout lay) {
     constexpr int ncols = ncols1*ncols2;
     ggml_cuda_pdl_lc();
     void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
     const float2 * GGML_CUDA_RESTRICT dst_fixup = dst_fixup_ptr;
+    const int32_t * cu_q = lay.cu_q;
+
+    // tiles still start on multiples of blocks_per_tile, but a split shortened by device-side lengths gives some blocks
+    // none of the tile's KV: with fewer KV tiles than blocks only the block each KV tile falls in holds a partial
+    const int iter_k  = fattn_iter_k(lay, ne03, ne11, nbatch_fa);
+    const int ndata   = min(iter_k, blocks_per_tile);
+    if (ndata == 1) {
+        return; // the last block covered the tile alone and wrote dst itself
+    }
 
     const int tile_idx = blockIdx.x; // One block per output tile.
     const int j        = blockIdx.y;
@@ -870,7 +907,7 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
     }
 
     // Combine with all previous blocks in this tile.
-    for (int bidx = b_last - 1; bidx >= b_first; --bidx) {
+    auto combine = [&] (const int bidx) {
         const float dst_add = dst_fixup_data[bidx*ncols*D + jc*D + tid];
 
         const float2 tmp = dst_fixup[(nblocks_stream_k + bidx)*ncols + jc];
@@ -887,6 +924,16 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         rowsum  = scale_val*rowsum  + scale_add*tmp.y;
 
         max_val = max_val_new;
+    };
+    if (iter_k >= blocks_per_tile) {
+        for (int bidx = b_last - 1; bidx >= b_first; --bidx) {
+            combine(bidx);
+        }
+    } else {
+        // the block KV tile t falls in
+        for (int t = ndata - 2; t >= 0; --t) {
+            combine(b_first + ((t + 1)*blocks_per_tile + iter_k - 1)/iter_k - 1);
+        }
     }
 
     // Write back final result:
@@ -902,16 +949,29 @@ static __global__ void flash_attn_stream_k_fixup_general(
         const float2 * dst_fixup_ptr,
         const int ne01, const int ne02,
         const int gqa_ratio,
-        const int total_work,
-        const uint3 fd_iter_k_j_z_ne12,
-        const uint3 fd_iter_k_j_z,
-        const uint3 fd_iter_k_j,
-        const uint3 fd_iter_k,
+        int total_work,
+        uint3 fd_iter_k_j_z_ne12,
+        uint3 fd_iter_k_j_z,
+        uint3 fd_iter_k_j,
+        uint3 fd_iter_k,
+        const int ne03, const int ne11, const int nbatch_fa,
         const bool dst_bf16,
-        const int32_t * cu_q) {
+        const fattn_layout lay) {
     void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
     const float2 * GGML_CUDA_RESTRICT dst_fixup = dst_fixup_ptr;
     constexpr int ncols = ncols1*ncols2;
+    const int32_t * cu_q = lay.cu_q;
+
+    // lengths on the device set the mma kernel's split there, so the divisors follow it
+    if (lay.seq_lens || lay.cu_kv) {
+        const int iter_k     = fattn_iter_k(lay, ne03, ne11, nbatch_fa);
+        const int seq_tiles  = fd_iter_k_j_z_ne12.z / fd_iter_k.z;
+        total_work          = total_work / fd_iter_k.z * iter_k;
+        fd_iter_k_j_z_ne12   = fattn_fastdiv_values(seq_tiles*iter_k);
+        fd_iter_k_j_z        = fattn_fastdiv_values(fd_iter_k_j_z.z / fd_iter_k.z * iter_k);
+        fd_iter_k_j          = fattn_fastdiv_values(fd_iter_k_j.z / fd_iter_k.z * iter_k);
+        fd_iter_k            = fattn_fastdiv_values(iter_k);
+    }
 
     const int bidx0 = blockIdx.x;
     const int j     = blockIdx.y;
@@ -1375,7 +1435,7 @@ void launch_fattn(
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_uniform<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], K->ne[2], nblocks_sk,
-                 gqa_ratio, bpt, fd0, fd1, fd2, dst_bf16, lay.cu_q);
+                 gqa_ratio, bpt, fd0, fd1, fd2, int(Q->ne[3]), int(n_kv), nbatch_fa, dst_bf16, lay);
         } else if (ntiles_dst % blocks_num.x != 0) {
             // General fixup for the cases where nblocks_stream_k < ntiles_dst.
             const int total_work = ntiles_KV * ntiles_dst;
@@ -1392,7 +1452,7 @@ void launch_fattn(
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_general<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], gqa_ratio, total_work,
-                 fd_k_j_z_ne12, fd_k_j_z, fd_k_j, fd_k, dst_bf16, lay.cu_q);
+                 fd_k_j_z_ne12, fd_k_j_z, fd_k_j, fd_k, int(Q->ne[3]), int(n_kv), nbatch_fa, dst_bf16, lay);
         }
     } else if (parallel_blocks > 1) {
         const dim3 block_dim_combine(DV, 1, 1);

@@ -598,6 +598,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             return BEST_FATTN_KERNEL_NONE;
     }
 
+    float logit_softcap = 0.0f;
+    memcpy(&logit_softcap, (const float *) KQV->op_params + 2, sizeof(float));
+    // every kernel skips its softcap variants at other head dims ("Skip unused kernel variants")
+    if (logit_softcap != 0.0f && K->ne[0] != 128 && K->ne[0] != 256 && K->ne[0] != 512) {
+        return BEST_FATTN_KERNEL_NONE;
+    }
+
     const fattn_layout lay = fattn_get_layout(dst);
     if (!lay.fp8 && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {
         return BEST_FATTN_KERNEL_NONE;

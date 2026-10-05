@@ -27,6 +27,7 @@ indexmap.workspace = true
 indicatif.workspace = true
 inference-audio.workspace = true
 inference-flash-attn = { workspace = true, optional = true }
+inference-fattn = { workspace = true, optional = true }
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
 itertools.workspace = true
@@ -68,6 +69,8 @@ cuda = [
     "inference-quant/cuda",
     "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
+    "dep:inference-fattn",
+    "inference-fattn/cuda",
 ]
 cutile = ["cuda", "inference-quant/cutile"]
 metal = [

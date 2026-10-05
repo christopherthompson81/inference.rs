@@ -3,7 +3,8 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use inference_fattn::{
-    FattnOptions, PagedKv, causal_mask, flash_attn_paged, paged_causal_mask, paged_kv_len,
+    FattnOptions, KvScales, PagedKv, causal_mask, flash_attn_paged, paged_causal_mask,
+    paged_kv_len, supported_paged,
 };
 
 use crate::fp8::{FP8_SCALES, FP8_TOLERANCE, store};
@@ -208,6 +209,30 @@ fn one_sequence_with_spare_table_entries() -> Result<()> {
 }
 
 #[test]
+fn graph_padded_tables_split_by_live_length() -> Result<()> {
+    // a CUDA graph's table spans a power-of-two bucket: stream-k splits the live rows only, so most blocks get none
+    // 80 and 112 leave the fixups a half warp
+    for (d, seq_q) in [(128, 1), (256, 1), (128, 4), (80, 1), (112, 2)] {
+        check(PagedCase {
+            head_dim: d,
+            n_head_kv: 2,
+            block_size: 32,
+            seq_lens: &[40, 5, 300],
+            seq_q,
+            spare_blocks: 120,
+        })?;
+    }
+    check(PagedCase {
+        head_dim: 128,
+        n_head_kv: 2,
+        block_size: 16,
+        seq_lens: &[9],
+        seq_q: 1,
+        spare_blocks: 250,
+    })
+}
+
+#[test]
 fn long_prefill_converts_in_the_loads() -> Result<()> {
     // past 512 Q rows dense bf16 K/V is converted first, which a paged cache cannot take
     check(PagedCase {
@@ -253,5 +278,71 @@ fn rejects_a_short_mask_and_odd_blocks() -> Result<()> {
         &dev,
     )?);
     assert!(flash_attn_paged(&q, &odd, &opts).is_err());
+    Ok(())
+}
+
+#[test]
+fn supported_paged_answers_for_kernel_limits() -> Result<()> {
+    let Some(dev) = cuda() else { return Ok(()) };
+    let block_table = Tensor::zeros((2, 3), DType::U32, &dev)?;
+    let seq_lens = Tensor::ones(2, DType::U32, &dev)?;
+    let probe = |dtype: DType, bs: usize, d: usize, opts: &FattnOptions| -> Result<bool> {
+        let cache = Tensor::zeros((4, 2, bs, d), dtype, &dev)?;
+        let kv = PagedKv {
+            k_cache: &cache,
+            v_cache: &cache,
+            block_table: &block_table,
+            seq_lens: &seq_lens,
+        };
+        let q = Tensor::zeros((2, 1, 8, d), DType::BF16, &dev)?;
+        let supported = supported_paged(&q, &kv, opts)?;
+        // the probe must agree with the call it stands for
+        assert_eq!(supported, flash_attn_paged(&q, &kv, opts).is_ok());
+        Ok(supported)
+    };
+    let opts = FattnOptions {
+        scale: 1.,
+        causal: true,
+        ..Default::default()
+    };
+    let windowed = FattnOptions {
+        window_left: Some(7),
+        softcap: 30.,
+        ..opts.clone()
+    };
+    let fp8 = |k: f32| FattnOptions {
+        kv_scales: Some(KvScales { k, v: 0.5 }),
+        ..opts.clone()
+    };
+    for d in [64, 128, 256, 512] {
+        assert!(probe(DType::BF16, 32, d, &opts)?, "head dim {d}");
+        assert!(probe(DType::F8E4M3, 32, d, &fp8(0.25))?, "head dim {d}");
+        // no kernel instantiates softcap at other head dims
+        assert_eq!(
+            probe(DType::F16, 16, d, &windowed)?,
+            d != 64,
+            "head dim {d}"
+        );
+    }
+    assert!(!probe(DType::BF16, 24, 128, &opts)?);
+    assert!(!probe(DType::F32, 32, 128, &opts)?);
+    assert!(!probe(DType::F8E4M3, 32, 128, &fp8(200.))?);
+    assert!(!probe(DType::BF16, 32, 576, &opts)?);
+    // a malformed call is an error, not an unsupported one
+    let cache = Tensor::zeros((4, 2, 32, 64), DType::BF16, &dev)?;
+    let kv = PagedKv {
+        k_cache: &cache,
+        v_cache: &cache,
+        block_table: &Tensor::zeros((3, 3), DType::U32, &dev)?,
+        seq_lens: &seq_lens,
+    };
+    assert!(
+        supported_paged(
+            &Tensor::zeros((2, 1, 8, 64), DType::BF16, &dev)?,
+            &kv,
+            &opts
+        )
+        .is_err()
+    );
     Ok(())
 }

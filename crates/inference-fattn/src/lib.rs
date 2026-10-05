@@ -6,7 +6,7 @@ mod cuda;
 #[cfg(feature = "cuda")]
 pub use cuda::{
     causal_mask, flash_attn, flash_attn_paged, flash_attn_paged_varlen, flash_attn_varlen,
-    paged_causal_mask, paged_kv_len, supported, varlen_causal_mask, varlen_kv_len,
+    paged_causal_mask, paged_kv_len, supported, supported_paged, varlen_causal_mask, varlen_kv_len,
 };
 
 /// Options for `flash_attn` beyond the operands.

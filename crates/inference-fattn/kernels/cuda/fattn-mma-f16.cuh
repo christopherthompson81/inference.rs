@@ -2000,7 +2000,7 @@ static __global__ void flash_attn_ext_f16(
 
     const int stride_V = V_is_K_view ? stride_K : nb21 / sizeof(half2);
 
-    const int iter_k     = (ne11      + (nbatch_fa - 1)) / nbatch_fa;
+    const int iter_k     = fattn_iter_k(lay, ne03, ne11, nbatch_fa);
     const int iter_j     = (ne01.z    + (ncols1    - 1)) / ncols1;
     const int iter_z_gqa = (gqa_ratio + (ncols2    - 1)) / ncols2;
 

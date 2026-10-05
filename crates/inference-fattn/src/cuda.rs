@@ -153,30 +153,70 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
     validate_operands(q, k, v, opts)
 }
 
-// Checks shared by every call: dtypes, alignment, mask and sinks layout, the device.
-fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<()> {
-    let h = q.dim(D::Minus2)?;
-    let rows_aligned = |t: &Tensor| {
-        let l = t.layout();
-        let es = t.dtype().size_in_bytes();
-        (l.start_offset() * es).is_multiple_of(KV_LOAD_ALIGN)
-            && l.stride().split_last().is_some_and(|(_, outer)| {
-                outer
-                    .iter()
-                    .all(|&s| (s * es).is_multiple_of(KV_LOAD_ALIGN))
-            })
-    };
+fn fp8_scale_limit(opts: &FattnOptions) -> Option<String> {
+    let KvScales { k, v } = opts.kv_scales?;
+    let in_range = |s: f32| s.is_finite() && s > 0. && s <= FP8_MAX_SCALE;
+    (!in_range(k) || !in_range(v))
+        .then(|| format!("fattn's fp8 scales must lie in (0, {FP8_MAX_SCALE}], got k {k} v {v}"))
+}
+
+// What paged calls cannot do, as opposed to malformed operands: `supported_paged` answers false for these.
+fn paged_limit(q: &Tensor, kv: &PagedKv, opts: &FattnOptions) -> Result<Option<String>> {
+    let (block_size, head_dim) = (kv.k_cache.dim(2)?, q.dim(D::Minus1)?);
+    if let Some(limit) = operand_limit(q, kv.k_cache, kv.v_cache) {
+        return Ok(Some(limit));
+    }
+    Ok(if !block_size.is_power_of_two() {
+        Some(format!(
+            "paged fattn needs a power-of-two block size, got {block_size}"
+        ))
+    } else if head_dim == MLA_HEAD_DIM {
+        Some(format!(
+            "fattn reads V out of K at head dim {MLA_HEAD_DIM}, which separate paged caches cannot give"
+        ))
+    } else {
+        fp8_scale_limit(opts)
+    })
+}
+
+fn rows_aligned(t: &Tensor) -> bool {
+    let l = t.layout();
+    let es = t.dtype().size_in_bytes();
+    (l.start_offset() * es).is_multiple_of(KV_LOAD_ALIGN)
+        && l.stride().split_last().is_some_and(|(_, outer)| {
+            outer
+                .iter()
+                .all(|&s| (s * es).is_multiple_of(KV_LOAD_ALIGN))
+        })
+}
+
+// K/V dtypes, alignment and the device: what fattn cannot take, whatever the call.
+fn operand_limit(q: &Tensor, k: &Tensor, v: &Tensor) -> Option<String> {
     if !rows_aligned(k) || !rows_aligned(v) {
-        candle_core::bail!(
+        return Some(format!(
             "fattn reads K/V rows in {KV_LOAD_ALIGN}-byte chunks; their offsets and strides must align"
-        );
+        ));
     }
     if !matches!(k.dtype(), DType::F16 | DType::BF16 | DType::F8E4M3) || k.dtype() != v.dtype() {
-        candle_core::bail!(
+        return Some(format!(
             "fattn takes f16, bf16 or fp8 e4m3 K and V of one dtype, got {:?} and {:?}",
             k.dtype(),
             v.dtype()
-        );
+        ));
+    }
+    if let Device::Cuda(dev) = q.device()
+        && dev.cuda_stream().context().ordinal() >= MAX_DEVICES
+    {
+        return Some(format!("fattn supports CUDA devices 0..{MAX_DEVICES}"));
+    }
+    None
+}
+
+// Checks shared by every call: dtypes, alignment, mask and sinks layout, the device.
+fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<()> {
+    let h = q.dim(D::Minus2)?;
+    if let Some(limit) = operand_limit(q, k, v) {
+        candle_core::bail!("{limit}");
     }
     let fp8 = k.dtype() == DType::F8E4M3;
     if opts.kv_scales.is_some() && !fp8 {
@@ -185,14 +225,8 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
             k.dtype()
         );
     }
-    if let Some(KvScales { k: ks, v: vs }) = opts.kv_scales
-        && ![ks, vs]
-            .iter()
-            .all(|s| s.is_finite() && *s > 0. && *s <= FP8_MAX_SCALE)
-    {
-        candle_core::bail!(
-            "fattn's fp8 scales must lie in (0, {FP8_MAX_SCALE}], got k {ks} v {vs}"
-        );
+    if let Some(limit) = fp8_scale_limit(opts) {
+        candle_core::bail!("{limit}");
     }
     // at 576 V is read out of K's tiles, which are dequantized with the K scale
     if fp8 && q.dim(D::Minus1)? == MLA_HEAD_DIM {
@@ -222,11 +256,6 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
             "fattn needs contiguous f32 sinks of length {h}, got {:?}",
             sinks.shape()
         );
-    }
-    if let Device::Cuda(dev) = q.device()
-        && dev.cuda_stream().context().ordinal() >= MAX_DEVICES
-    {
-        candle_core::bail!("fattn supports CUDA devices 0..{MAX_DEVICES}");
     }
     Ok(())
 }
@@ -378,33 +407,61 @@ fn packed_descriptor(
     })
 }
 
-fn optional_ptr<'a>(
+fn held_ptr<'a>(
     held: &'a Option<(candle_core::StorageRef<'_>, &Layout)>,
     stream: &'a Arc<CudaStream>,
     guards: &mut Guards<'a>,
-) -> Result<*const core::ffi::c_void> {
+) -> Result<Option<u64>> {
     let Some((storage, layout)) = held else {
-        return Ok(std::ptr::null());
+        return Ok(None);
     };
     let Storage::Cuda(storage) = &**storage else {
         candle_core::bail!("fattn operands must be on CUDA")
     };
-    Ok(device_ptr(storage, layout, stream, guards)? as *const _)
+    device_ptr(storage, layout, stream, guards).map(Some)
 }
 
-fn extra_operand<'a>(
-    held: &'a Option<(candle_core::StorageRef<'_>, &Layout)>,
-    descriptor: fn(u64, &Layout) -> Result<ffi::Tensor>,
-    stream: &'a Arc<CudaStream>,
-    guards: &mut Guards<'a>,
-) -> Result<ffi::Tensor> {
-    let Some((storage, layout)) = held else {
-        return Ok(ABSENT);
-    };
-    let Storage::Cuda(storage) = &**storage else {
-        candle_core::bail!("fattn operands must be on CUDA")
-    };
-    descriptor(device_ptr(storage, layout, stream, guards)?, layout)
+fn held(t: Option<&Tensor>) -> Option<(candle_core::StorageRef<'_>, &Layout)> {
+    t.map(Tensor::storage_and_layout)
+}
+
+fn null_or(ptr: Option<u64>) -> *const core::ffi::c_void {
+    ptr.map_or(std::ptr::null(), |p| p as *const _)
+}
+
+// Device addresses of a call's operands; a probe puts PROBE_PTR at each one present.
+struct Addrs {
+    q: u64,
+    k: u64,
+    v: u64,
+    mask: Option<u64>,
+    sinks: Option<u64>,
+    block_table: Option<u64>,
+    seq_lens: Option<u64>,
+    cu_q: Option<u64>,
+    cu_kv: Option<u64>,
+}
+
+// A call's descriptors; the args point at `lay`, so they must not outlive it.
+struct Call {
+    q: ffi::Tensor,
+    k: ffi::Tensor,
+    v: ffi::Tensor,
+    mask: ffi::Tensor,
+    sinks: ffi::Tensor,
+    lay: ffi::FattnLayout,
+    uses_lay: bool,
+    out_shape: Shape,
+}
+
+impl Call {
+    fn args(&self, opts: &FattnOptions, stream: &CudaStream) -> ffi::Args {
+        let mut args = args(self.q, self.k, self.v, self.mask, self.sinks, opts, stream);
+        if self.uses_lay {
+            args.lay = &self.lay;
+        }
+        args
+    }
 }
 
 struct Fattn<'a> {
@@ -413,6 +470,123 @@ struct Fattn<'a> {
     // packed sequences of Q (and dst), and of dense K/V
     q_seqs: Option<Packed<'a>>,
     kv_seqs: Option<Packed<'a>>,
+}
+
+impl Fattn<'_> {
+    fn describe(
+        &self,
+        a: &Addrs,
+        (q_dt, q_l): (DType, &Layout),
+        (k_dt, k_l): (DType, &Layout),
+        (v_dt, v_l): (DType, &Layout),
+    ) -> Result<Call> {
+        let (b, q_t, out_rows, h, sq) = match &self.q_seqs {
+            Some(p) => {
+                let (total, h, _) = q_l.shape().dims3()?;
+                let b = p.cu_seqlens.dim(0)? - 1;
+                (
+                    b,
+                    packed_descriptor(a.q, q_dt, q_l, p.max_len, b)?,
+                    total,
+                    h,
+                    p.max_len,
+                )
+            }
+            None => {
+                let (b, sq, h, _) = q_l.shape().dims4()?;
+                (b, bhsd(a.q, q_dt, q_l)?, b * sq, h, sq)
+            }
+        };
+        let mut lay = dense_layout(k_dt, self.opts, sq, q_l.dims()[q_l.dims().len() - 1]);
+        if let Some(p) = &self.paged {
+            let es = k_dt.size_in_bytes() as i64;
+            lay.block_table = null_or(a.block_table);
+            lay.seq_lens = null_or(a.seq_lens);
+            lay.max_blocks = p.block_table.dim(1)? as i32;
+            lay.block_size_log2 = k_l.dims()[2].trailing_zeros() as i32;
+            lay.block_stride_k = k_l.stride()[0] as i64 * es;
+            lay.block_stride_v = v_l.stride()[0] as i64 * es;
+        }
+        lay.cu_q = null_or(a.cu_q);
+        lay.cu_kv = null_or(a.cu_kv);
+        let (k_t, v_t) = match (&self.paged, &self.kv_seqs) {
+            (Some(p), _) => {
+                let n_kv = paged_kv_len(p)?;
+                (
+                    cache_descriptor(a.k, k_dt, k_l, b, n_kv)?,
+                    cache_descriptor(a.v, v_dt, v_l, b, n_kv)?,
+                )
+            }
+            (None, Some(p)) => {
+                let n_kv = varlen_kv_len(p.max_len);
+                (
+                    packed_descriptor(a.k, k_dt, k_l, n_kv, b)?,
+                    packed_descriptor(a.v, v_dt, v_l, n_kv, b)?,
+                )
+            }
+            (None, None) => (bhsd(a.k, k_dt, k_l)?, bhsd(a.v, v_dt, v_l)?),
+        };
+        let sequences = self.paged.is_some() || self.q_seqs.is_some() || self.kv_seqs.is_some();
+        // sequences of their own lengths need a mask; without a tensor the kernel builds it from the lengths
+        if self.opts.mask.is_none() && sequences {
+            lay.implicit_mask = 1;
+        }
+        let mask = match (&self.opts.mask, a.mask) {
+            _ if lay.implicit_mask != 0 => implicit_mask_descriptor(sq, k_t.ne[1] as usize),
+            (Some(m), Some(ptr)) => mask_descriptor(ptr, m.layout())?,
+            _ => ABSENT,
+        };
+        let sinks = match (&self.opts.sinks, a.sinks) {
+            (Some(s), Some(ptr)) => sinks_descriptor(ptr, s.layout())?,
+            _ => ABSENT,
+        };
+        let dv = v_l.shape().dim(D::Minus1)?;
+        let out_shape = match &self.q_seqs {
+            Some(_) => Shape::from((out_rows, h, dv)),
+            None => Shape::from((b, sq, h, dv)),
+        };
+        Ok(Call {
+            q: q_t,
+            k: k_t,
+            v: v_t,
+            mask,
+            sinks,
+            uses_lay: sequences || lay.fp8 != 0 || lay.implicit_mask != 0,
+            lay,
+            out_shape,
+        })
+    }
+
+    // Whether fattn has a kernel for this call, from shapes, dtypes and strides alone; operands are validated.
+    fn probe(&self, q: &Tensor, k: &Tensor, v: &Tensor) -> Result<bool> {
+        let Device::Cuda(dev) = q.device() else {
+            return Ok(false);
+        };
+        let q_layout = if q_passes_through(q) {
+            q.layout().clone()
+        } else {
+            Layout::contiguous(q.shape())
+        };
+        let present = |t: Option<&Tensor>| t.map(|_| PROBE_PTR);
+        let addrs = Addrs {
+            q: PROBE_PTR,
+            k: PROBE_PTR,
+            v: PROBE_PTR,
+            mask: present(self.opts.mask.as_ref()),
+            sinks: present(self.opts.sinks.as_ref()),
+            block_table: present(self.paged.map(|p| p.block_table)),
+            seq_lens: present(self.paged.map(|p| p.seq_lens)),
+            cu_q: present(self.q_seqs.map(|p| p.cu_seqlens)),
+            cu_kv: present(self.kv_seqs.map(|p| p.cu_seqlens)),
+        };
+        let call = self.describe(
+            &addrs,
+            (native_q_dtype(q.dtype()), &q_layout),
+            (k.dtype(), k.layout()),
+            (v.dtype(), v.layout()),
+        )?;
+        Ok(unsafe { ffi::inference_fattn_supported(&call.args(self.opts, &dev.cuda_stream())) })
+    }
 }
 
 impl candle_core::CustomOp3 for Fattn<'_> {
@@ -446,85 +620,26 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         if stream.cu_stream().is_null() {
             candle_core::bail!("fattn needs a non-default CUDA stream");
         }
-        let mask = self.opts.mask.as_ref().map(|t| t.storage_and_layout());
-        let sinks = self.opts.sinks.as_ref().map(|t| t.storage_and_layout());
-        let tables = self.paged.map(|p| {
-            (
-                p.block_table.storage_and_layout(),
-                p.seq_lens.storage_and_layout(),
-            )
-        });
-        let cu_q = self.q_seqs.map(|p| p.cu_seqlens.storage_and_layout());
-        let cu_kv = self.kv_seqs.map(|p| p.cu_seqlens.storage_and_layout());
+        let mask = held(self.opts.mask.as_ref());
+        let sinks = held(self.opts.sinks.as_ref());
+        let block_table = held(self.paged.map(|p| p.block_table));
+        let seq_lens = held(self.paged.map(|p| p.seq_lens));
+        let cu_q = held(self.q_seqs.map(|p| p.cu_seqlens));
+        let cu_kv = held(self.kv_seqs.map(|p| p.cu_seqlens));
         let mut guards = Guards::new();
-        let q_ptr = device_ptr(q, q_l, &stream, &mut guards)?;
-        let (b, q_t, out_rows, h, sq) = match &self.q_seqs {
-            Some(p) => {
-                let (total, h, _) = q_l.shape().dims3()?;
-                let b = p.cu_seqlens.dim(0)? - 1;
-                (
-                    b,
-                    packed_descriptor(q_ptr, q.dtype(), q_l, p.max_len, b)?,
-                    total,
-                    h,
-                    p.max_len,
-                )
-            }
-            None => {
-                let (b, sq, h, _) = q_l.shape().dims4()?;
-                (b, bhsd(q_ptr, q.dtype(), q_l)?, b * sq, h, sq)
-            }
+        let addrs = Addrs {
+            q: device_ptr(q, q_l, &stream, &mut guards)?,
+            k: device_ptr(k, k_l, &stream, &mut guards)?,
+            v: device_ptr(v, v_l, &stream, &mut guards)?,
+            mask: held_ptr(&mask, &stream, &mut guards)?,
+            sinks: held_ptr(&sinks, &stream, &mut guards)?,
+            block_table: held_ptr(&block_table, &stream, &mut guards)?,
+            seq_lens: held_ptr(&seq_lens, &stream, &mut guards)?,
+            cu_q: held_ptr(&cu_q, &stream, &mut guards)?,
+            cu_kv: held_ptr(&cu_kv, &stream, &mut guards)?,
         };
-        let k_ptr = device_ptr(k, k_l, &stream, &mut guards)?;
-        let v_ptr = device_ptr(v, v_l, &stream, &mut guards)?;
-        let fp8 = k.dtype() == DType::F8E4M3;
-        let mut lay = dense_layout(k.dtype(), self.opts, sq, q_l.dims()[q_l.dims().len() - 1]);
-        if let (Some(p), Some(((table, table_l), (lens, lens_l)))) = (&self.paged, &tables) {
-            let (Storage::Cuda(table), Storage::Cuda(lens)) = (&**table, &**lens) else {
-                candle_core::bail!("fattn operands must be on CUDA")
-            };
-            let es = k.dtype().size_in_bytes() as i64;
-            lay.block_table = device_ptr(table, table_l, &stream, &mut guards)? as *const _;
-            lay.seq_lens = device_ptr(lens, lens_l, &stream, &mut guards)? as *const _;
-            lay.max_blocks = p.block_table.dim(1)? as i32;
-            lay.block_size_log2 = k_l.dims()[2].trailing_zeros() as i32;
-            lay.block_stride_k = k_l.stride()[0] as i64 * es;
-            lay.block_stride_v = v_l.stride()[0] as i64 * es;
-        }
-        lay.cu_q = optional_ptr(&cu_q, &stream, &mut guards)?;
-        lay.cu_kv = optional_ptr(&cu_kv, &stream, &mut guards)?;
-        let (k_t, v_t) = match (&self.paged, &self.kv_seqs) {
-            (Some(p), _) => {
-                let n_kv = paged_kv_len(p)?;
-                (
-                    cache_descriptor(k_ptr, k.dtype(), k_l, b, n_kv)?,
-                    cache_descriptor(v_ptr, v.dtype(), v_l, b, n_kv)?,
-                )
-            }
-            (None, Some(p)) => {
-                let n_kv = varlen_kv_len(p.max_len);
-                (
-                    packed_descriptor(k_ptr, k.dtype(), k_l, n_kv, b)?,
-                    packed_descriptor(v_ptr, v.dtype(), v_l, n_kv, b)?,
-                )
-            }
-            (None, None) => (bhsd(k_ptr, k.dtype(), k_l)?, bhsd(v_ptr, v.dtype(), v_l)?),
-        };
-        let sequences = self.paged.is_some() || self.q_seqs.is_some() || self.kv_seqs.is_some();
-        // sequences of their own lengths need a mask; without a tensor the kernel builds it from the lengths
-        if self.opts.mask.is_none() && sequences {
-            lay.implicit_mask = 1;
-        }
-        let mask_t = if lay.implicit_mask != 0 {
-            implicit_mask_descriptor(sq, k_t.ne[1] as usize)
-        } else {
-            extra_operand(&mask, mask_descriptor, &stream, &mut guards)?
-        };
-        let sinks_t = extra_operand(&sinks, sinks_descriptor, &stream, &mut guards)?;
-        let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, self.opts, &stream);
-        if sequences || fp8 || lay.implicit_mask != 0 {
-            args.lay = &lay;
-        }
+        let call = self.describe(&addrs, (q.dtype(), q_l), (k.dtype(), k_l), (v.dtype(), v_l))?;
+        let mut args = call.args(self.opts, &stream);
         if !unsafe { ffi::inference_fattn_supported(&args) } {
             candle_core::bail!(
                 "fattn has no kernel for q {:?} k {:?} v {:?}",
@@ -533,8 +648,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
                 v_l.shape()
             );
         }
-        let dv = v_l.shape().dim(D::Minus1)?;
-        let n = out_rows * h * dv;
+        let n = call.out_shape.elem_count();
         let launch = |args: &mut ffi::Args, ptr: u64| -> Result<()> {
             args.dst = ptr as *mut _;
             match unsafe { ffi::inference_fattn_forward(args) } {
@@ -555,11 +669,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
             }
         };
         drop(guards);
-        let shape = match &self.q_seqs {
-            Some(_) => Shape::from((out_rows, h, dv)),
-            None => Shape::from((b, sq, h, dv)),
-        };
-        Ok((out, shape))
+        Ok((out, call.out_shape))
     }
 }
 
@@ -660,34 +770,14 @@ pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Re
 
 /// Whether a kernel exists for these operands on this device; reads only shapes, dtypes and strides.
 pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<bool> {
-    let Device::Cuda(dev) = q.device() else {
-        return Ok(false);
-    };
     validate(q, k, v, opts)?;
-    let layout = |t: &Tensor| t.layout().clone();
-    let q_layout = if q_passes_through(q) {
-        layout(q)
-    } else {
-        Layout::contiguous(q.shape())
-    };
-    let q_t = bhsd(PROBE_PTR, native_q_dtype(q.dtype()), &q_layout)?;
-    let k_t = bhsd(PROBE_PTR, k.dtype(), &layout(k))?;
-    let v_t = bhsd(PROBE_PTR, v.dtype(), &layout(v))?;
-    let lay = dense_layout(k.dtype(), opts, q.dim(1)?, q.dim(D::Minus1)?);
-    let mask_t = match &opts.mask {
-        Some(m) => mask_descriptor(PROBE_PTR, &layout(m))?,
-        None if lay.implicit_mask != 0 => implicit_mask_descriptor(q.dim(1)?, k.dim(1)?),
-        None => ABSENT,
-    };
-    let sinks_t = match &opts.sinks {
-        Some(s) => sinks_descriptor(PROBE_PTR, &layout(s))?,
-        None => ABSENT,
-    };
-    let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, opts, &dev.cuda_stream());
-    if lay.fp8 != 0 || lay.implicit_mask != 0 {
-        args.lay = &lay;
+    Fattn {
+        opts,
+        paged: None,
+        q_seqs: None,
+        kv_seqs: None,
     }
-    Ok(unsafe { ffi::inference_fattn_supported(&args) })
+    .probe(q, k, v)
 }
 
 /// Additive f16 causal mask `(1, seq_q, seq_kv)`, with the queries aligned to the end of the keys.
@@ -724,8 +814,8 @@ fn validate_paged(
 ) -> Result<()> {
     let (nb, h_kv, bs, kd) = kv.k_cache.dims4()?;
     let (vnb, vh, vbs, _) = kv.v_cache.dims4()?;
-    if !bs.is_power_of_two() {
-        candle_core::bail!("paged fattn needs a power-of-two block size, got {bs}");
+    if let Some(limit) = paged_limit(q, kv, opts)? {
+        candle_core::bail!("{limit}");
     }
     if kd != d || (nb, h_kv, bs) != (vnb, vh, vbs) {
         candle_core::bail!(
@@ -733,11 +823,6 @@ fn validate_paged(
             q.shape(),
             kv.k_cache.shape(),
             kv.v_cache.shape()
-        );
-    }
-    if d == MLA_HEAD_DIM {
-        candle_core::bail!(
-            "fattn reads V out of K at head dim {MLA_HEAD_DIM}, which separate paged caches cannot give"
         );
     }
     if kv.block_table.dim(1)? == 0 {
@@ -766,6 +851,22 @@ fn validate_paged(
         candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
     }
     Ok(())
+}
+
+/// Whether `flash_attn_paged` has a kernel for these operands; false for limits such as f32 K/V or odd block sizes.
+pub fn supported_paged(q: &Tensor, kv: &PagedKv, opts: &FattnOptions) -> Result<bool> {
+    if paged_limit(q, kv, opts)?.is_some() {
+        return Ok(false);
+    }
+    validate_paged(q, q.dims4()?, kv, opts)?;
+    validate_operands(q, kv.k_cache, kv.v_cache, opts)?;
+    Fattn {
+        opts,
+        paged: Some(*kv),
+        q_seqs: None,
+        kv_seqs: None,
+    }
+    .probe(q, kv.k_cache, kv.v_cache)
 }
 
 /// Attention of `q (b, seq_q, n_head, d)` over each sequence's rows in a paged cache; a mask spans `paged_kv_len`.

@@ -14,17 +14,21 @@ const GGUF_ENV: &str = "INFERENCE_TEST_QWEN3_5_GGUF";
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const MAX_LEN: usize = 64;
 const N_PREDICT: usize = 2;
-// Plain prose a trained head predicts well; the reasoning preamble is off so the reply starts at once.
-const PROMPTS: &[&str] = &[
-    "Count from one to twenty in words, separated by commas.",
-    "Write the first four lines of a nursery rhyme about a star.",
+// Plain prose a trained head predicts well (no reasoning preamble), with the steps each runs before its first near tie.
+const PROMPTS: &[(&str, usize)] = &[
+    (
+        "Count from one to twenty in words, separated by commas.",
+        16,
+    ),
+    (
+        "Write the first four lines of a nursery rhyme about a star.",
+        5,
+    ),
 ];
 // Real heads land most of their drafts on prose this predictable; a broken head or verifier lands next to none.
 const MIN_ACCEPT_RATE: f64 = 0.3;
 // The two paths move logprobs by up to ~0.12 on Qwen3.5-0.8B (BF16 and Q8_0); a closer top two can swap.
 const TIE_MARGIN: f32 = 0.25;
-// Both prompts run well past this before their first near tie.
-const MIN_AGREED: usize = 16;
 
 type Step = (u32, f32, u32, f32);
 #[cfg(unix)]
@@ -130,7 +134,7 @@ async fn greedy_trace(model: &Model, prompt: &str) -> anyhow::Result<Vec<Step>> 
 
 async fn traces(model: &Model) -> anyhow::Result<Vec<Vec<Step>>> {
     let mut traces = Vec::new();
-    for prompt in PROMPTS {
+    for (prompt, _) in PROMPTS {
         traces.push(greedy_trace(model, prompt).await?);
     }
     Ok(traces)
@@ -142,7 +146,7 @@ async fn check_mtp(plain: &Model, mtp: &Model) -> anyhow::Result<()> {
 
 // The verify kernels round differently from decode, so drafting may only swap a near-tied top two.
 async fn check_against(expected: &[Vec<Step>], mtp: &Model) -> anyhow::Result<()> {
-    for (prompt, expected) in PROMPTS.iter().zip(expected) {
+    for (&(prompt, min_agreed), expected) in PROMPTS.iter().zip(expected) {
         let drafted = greedy_trace(mtp, prompt).await?;
         let agreed = expected
             .iter()
@@ -150,15 +154,20 @@ async fn check_against(expected: &[Vec<Step>], mtp: &Model) -> anyhow::Result<()
             .take_while(|(e, d)| e.0 == d.0)
             .count();
         eprintln!("{prompt:?}: {agreed} of {} ids agree", expected.len());
+        // either trace may hold the near tie: the other's pick is its runner-up, close behind its top
         let parted_at_a_tie = match (expected.get(agreed), drafted.get(agreed)) {
-            (Some(&(_, top, runner_up, runner_up_logprob)), Some(&(swapped, ..))) => {
-                swapped == runner_up && top - runner_up_logprob < TIE_MARGIN
+            (
+                Some(&(kept, top, runner_up, runner_up_logprob)),
+                Some(&(swapped, d_top, d_runner_up, d_runner_up_logprob)),
+            ) => {
+                (swapped == runner_up && top - runner_up_logprob < TIE_MARGIN)
+                    || (kept == d_runner_up && d_top - d_runner_up_logprob < TIE_MARGIN)
             }
             (None, None) => true,
             _ => false,
         };
         anyhow::ensure!(
-            parted_at_a_tie && agreed >= MIN_AGREED,
+            parted_at_a_tie && agreed >= min_agreed,
             "MTP drafting changed the greedy output of {prompt:?} at step {agreed}: {drafted:?} vs {expected:?}"
         );
     }

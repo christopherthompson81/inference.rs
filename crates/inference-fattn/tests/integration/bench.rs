@@ -115,7 +115,9 @@ fn fattn_vs_fa2() -> Result<()> {
 }
 
 // (batch, seq_q, seq_kv) for paged against dense: decode, a decode batch, and a prefill chunk over a cache
-const PAGED_RUNS: [(usize, usize, usize); 6] = [
+const PAGED_RUNS: [(usize, usize, usize); 8] = [
+    (1, 1, 128),
+    (1, 1, 2048),
     (1, 1, 4096),
     (1, 1, 16384),
     (8, 1, 4096),

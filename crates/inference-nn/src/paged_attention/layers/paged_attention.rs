@@ -5,6 +5,8 @@ use std::{collections::HashMap, sync::Once};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
+use inference_fattn::{FattnOptions, KvScales as FattnKvScales, PagedKv};
+#[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_paged_attn::{
     DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, FlashInferDecodeScratch,
     KvCacheScales as FlashInferKvCacheScales, fa3_fp8_decode, flashinfer_decode,
@@ -1940,9 +1942,60 @@ impl PagedAttention {
         Ok(Some(output))
     }
 
+    // fattn reads the cache in place through the padded block tables and needs none of FlashInfer's plan.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn try_run_fattn_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Option<Tensor>> {
+        let FlashInferDecodeCall {
+            ctx,
+            query,
+            key_cache,
+            value_cache,
+            dev,
+            ..
+        } = call;
+        let (Some(block_table), Some(seq_lens)) = (ctx.block_tables(dev), ctx.context_lens(dev))
+        else {
+            return Ok(None);
+        };
+        // one table row per query row, multi-token decode included
+        if block_table.dim(0)? != query.dim(0)? {
+            return Ok(None);
+        }
+        let kv = PagedKv {
+            k_cache: key_cache,
+            v_cache: value_cache,
+            block_table,
+            seq_lens,
+        };
+        let opts = FattnOptions {
+            scale: ctx.sdpa_params.softmax_scale,
+            softcap: ctx.sdpa_params.softcap.unwrap_or(0.),
+            kv_scales: (key_cache.dtype() == DType::F8E4M3).then(|| {
+                let scales = self.cache_scales(key_cache).flashinfer(key_cache);
+                FattnKvScales {
+                    k: scales.k,
+                    v: scales.v,
+                }
+            }),
+            causal: true,
+            window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
+            ..Default::default()
+        };
+        let query = query.unsqueeze(1)?;
+        if !inference_fattn::supported_paged(&query, &kv, &opts)? {
+            return Ok(None);
+        }
+        inference_fattn::flash_attn_paged(&query, &kv, &opts)?
+            .squeeze(1)
+            .map(Some)
+    }
+
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     fn run_flashinfer_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Tensor> {
         if let Some(output) = self.try_run_fa3_decode(call)? {
+            return Ok(output);
+        }
+        if let Some(output) = self.try_run_fattn_decode(call)? {
             return Ok(output);
         }
         let FlashInferDecodeCall {
@@ -3282,3 +3335,6 @@ mod mixed_cached_prefix_tests {
         Ok(())
     }
 }
+
+#[cfg(all(test, feature = "cuda", target_family = "unix"))]
+mod fattn_decode_tests;

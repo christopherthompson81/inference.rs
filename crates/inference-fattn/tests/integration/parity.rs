@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use candle_core::{D, DType, Device, Tensor};
-use inference_fattn::{FattnOptions, causal_mask, flash_attn};
+use inference_fattn::{FattnOptions, causal_mask, flash_attn, supported};
 
 const BATCH: usize = 2;
 pub(super) const N_HEAD: usize = 8;
@@ -377,9 +377,17 @@ fn rejects_mismatched_operands() -> Result<()> {
     assert!(flash_attn(&t(8, 64)?, &odd_k, &t(2, 64)?, &opts).is_err());
     let f32_mask = FattnOptions {
         mask: Some(Tensor::zeros((1, 8, 8), DType::F32, &dev)?),
-        ..opts
+        ..opts.clone()
     };
     assert!(flash_attn(&t(8, 64)?, &t(2, 64)?, &t(2, 64)?, &f32_mask).is_err());
+    // softcap exists only at head dims 128, 256 and 512, in every kernel
+    let softcap = FattnOptions {
+        softcap: 30.,
+        ..opts
+    };
+    assert!(!supported(&t(8, 64)?, &t(2, 64)?, &t(2, 64)?, &softcap)?);
+    assert!(flash_attn(&t(8, 64)?, &t(2, 64)?, &t(2, 64)?, &softcap).is_err());
+    assert!(supported(&t(8, 128)?, &t(2, 128)?, &t(2, 128)?, &softcap)?);
     Ok(())
 }
 
