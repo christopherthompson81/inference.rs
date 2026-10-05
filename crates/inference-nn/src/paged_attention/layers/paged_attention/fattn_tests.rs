@@ -30,6 +30,8 @@ const PREFILL_BLOCK_SIZE: usize = 16;
 
 struct Case {
     head_dim: usize,
+    // (q heads, kv heads)
+    heads: (usize, usize),
     block_size: usize,
     cache_dtype: DType,
     full_lens: &'static [usize],
@@ -50,6 +52,7 @@ fn check(c: Case) -> Result<()> {
 fn check_with(c: Case, capture: bool) -> Result<()> {
     crate::skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
+    let (n_head, n_head_kv) = c.heads;
     let (d, bs) = (c.head_dim, c.block_size);
     let b = c.full_lens.len();
     let mut next = 0;
@@ -95,7 +98,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
         sliding_window: c.model_window,
         decode_window: 1,
         devices: vec![dev.clone()],
-        num_kv_heads: N_HEAD_KV,
+        num_kv_heads: n_head_kv,
     });
     let mut metadata = rows.build_materialized().map_err(candle_core::Error::msg)?;
     metadata.flashinfer = metadata.flashinfer.map(|m| m.track_decode_tile_plan());
@@ -103,14 +106,14 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
     let fp8 = c.cache_dtype == DType::F8E4M3;
     let q_dtype = if fp8 { DType::BF16 } else { c.cache_dtype };
     let cache = || {
-        Tensor::randn(0f32, 1., (NUM_BLOCKS, N_HEAD_KV, bs, d), &Device::Cpu)?
+        Tensor::randn(0f32, 1., (NUM_BLOCKS, n_head_kv, bs, d), &Device::Cpu)?
             .to_dtype(c.cache_dtype)?
             .to_device(&dev)
     };
     let (k_cache, v_cache) = (cache()?, cache()?);
-    let query = Tensor::randn(0f32, 1., (b, N_HEAD, q, d), &dev)?.to_dtype(q_dtype)?;
+    let query = Tensor::randn(0f32, 1., (b, n_head, q, d), &dev)?.to_dtype(q_dtype)?;
     let sdpa = SdpaParams {
-        n_kv_groups: N_HEAD / N_HEAD_KV,
+        n_kv_groups: n_head / n_head_kv,
         softcap: c.softcap,
         softmax_scale: 1. / f32::from(u16::try_from(d).unwrap()).sqrt(),
         sliding_window: c.layer_window,
@@ -154,7 +157,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
     // every query row against its sequence's rows from the full tables, the window applied by position
     let packed = query
         .permute((1, 0, 2, 3))?
-        .reshape((1, N_HEAD, b * q, d))?;
+        .reshape((1, n_head, b * q, d))?;
     let expected = attention_reference(
         &Reference {
             head_dim: d,
@@ -164,6 +167,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
             causal: true,
             window: c.layer_window,
             softcap: c.softcap,
+            heads: c.heads,
         },
         &packed,
         (&k_cache, &v_cache),
@@ -193,10 +197,12 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
 
 #[test]
 fn decode_matches_a_reference() -> Result<()> {
-    for head_dim in [64, 128, 256, 512] {
+    // every head dim the HND layout admits
+    for head_dim in [64, 80, 96, 112, 128, 256, 512] {
         for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
             check(Case {
                 head_dim,
+                heads: (N_HEAD, N_HEAD_KV),
                 block_size: 32,
                 cache_dtype,
                 full_lens: &[1, 37, 300, 64],
@@ -217,6 +223,7 @@ fn sliding_window_decode_matches_a_reference() -> Result<()> {
         for (layer_window, softcap) in [(Some(100), None), (None, None), (Some(100), Some(30.))] {
             check(Case {
                 head_dim: 128,
+                heads: (N_HEAD, N_HEAD_KV),
                 block_size,
                 cache_dtype: DType::BF16,
                 full_lens: &[5, 99, 101, 333],
@@ -235,6 +242,7 @@ fn sliding_window_decode_matches_a_reference() -> Result<()> {
 fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
     check(Case {
         head_dim: 64,
+        heads: (N_HEAD, N_HEAD_KV),
         block_size: 32,
         cache_dtype: DType::BF16,
         full_lens: &[17, 90],
@@ -247,10 +255,31 @@ fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
 }
 
 #[test]
+fn decode_with_any_gqa_group() -> Result<()> {
+    // groups that are not a multiple of the kernel's head tile, and MQA's one KV head
+    for heads in [(6, 2), (18, 2), (71, 1)] {
+        check(Case {
+            head_dim: 128,
+            heads,
+            block_size: 32,
+            cache_dtype: DType::BF16,
+            full_lens: &[1, 37, 300],
+            query_len: 1,
+            model_window: None,
+            layer_window: None,
+            softcap: None,
+            gather: false,
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
 fn gather_decode_refuses_graph_capture() -> Result<()> {
     check_with(
         Case {
             head_dim: 64,
+            heads: (N_HEAD, N_HEAD_KV),
             block_size: 32,
             cache_dtype: DType::BF16,
             full_lens: &[17, 90],
@@ -268,6 +297,7 @@ fn gather_decode_refuses_graph_capture() -> Result<()> {
 fn multi_token_decode_matches_a_reference() -> Result<()> {
     check(Case {
         head_dim: 256,
+        heads: (N_HEAD, N_HEAD_KV),
         block_size: 32,
         cache_dtype: DType::BF16,
         full_lens: &[40, 333, 64],
@@ -283,6 +313,7 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
 fn f32_caches_fall_back_to_the_gather() -> Result<()> {
     check(Case {
         head_dim: 128,
+        heads: (N_HEAD, N_HEAD_KV),
         block_size: 32,
         cache_dtype: DType::F32,
         full_lens: &[17, 90],
@@ -307,6 +338,8 @@ struct PrefillCase {
 // The shape of a reference attention: each sequence's queries are the last of its rows.
 struct Reference<'a> {
     head_dim: usize,
+    // (q heads, kv heads)
+    heads: (usize, usize),
     block_size: usize,
     kv_lens: &'a [usize],
     query_lens: &'a [usize],
@@ -349,10 +382,11 @@ fn attention_reference(
             })
             .collect();
         let mask = Tensor::from_vec(mask, (q_len, kv_len), &Device::Cpu)?;
-        let heads = (0..N_HEAD)
+        let (n_head, n_head_kv) = c.heads;
+        let heads = (0..n_head)
             .map(|h| {
                 let q = query.get(0)?.get(h)?.narrow(0, q_start, q_len)?;
-                let kh = h / (N_HEAD / N_HEAD_KV);
+                let kh = h / (n_head / n_head_kv);
                 let (k, v) = (k.get(kh)?, v.get(kh)?);
                 let mut att = (q.matmul(&k.t()?)? * scale)?;
                 if let Some(cap) = c.softcap {
@@ -492,6 +526,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             causal: c.causal,
             window: c.window,
             softcap: None,
+            heads: (N_HEAD, N_HEAD_KV),
         },
         &packed,
         (&k_cache, &v_cache),

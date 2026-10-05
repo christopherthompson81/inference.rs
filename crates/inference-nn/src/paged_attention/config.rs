@@ -458,23 +458,41 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_flashinfer_group_uses_standard_paged_attention() {
-        let config = ModelConfigMetadata {
+    fn hnd_layout_takes_any_gqa_group_but_only_fattns_head_dims() {
+        let config = |num_attn_heads, num_kv_heads, k_head_dim| ModelConfigMetadata {
             max_seq_len: 32_768,
             num_layers: 24,
             hidden_size: 1152,
-            num_kv_heads: 2,
-            num_attn_heads: 18,
+            num_kv_heads,
+            num_attn_heads,
             sliding_window: None,
-            k_head_dim: 64,
-            v_head_dim: 64,
+            k_head_dim,
+            v_head_dim: k_head_dim,
             kv_cache_layout: KvCacheLayout::Standard,
         };
-
+        #[cfg(feature = "cuda")]
+        let hnd =
+            inference_fattn::mma_available() && crate::perf_flags::flashinfer_decode_enabled();
+        #[cfg(not(feature = "cuda"))]
+        let hnd = false;
+        let fattn = if hnd {
+            AttentionBackendKind::FlashInfer
+        } else {
+            AttentionBackendKind::Standard
+        };
+        // a group of 9 and an 80-dim head both decode on fattn
+        assert_eq!(config(18, 2, 64).attention_backend_kind(), fattn);
+        assert_eq!(config(18, 2, 80).attention_backend_kind(), fattn);
+        // 512 runs only GQA-batched
+        assert_eq!(config(18, 2, 512).attention_backend_kind(), fattn);
         assert_eq!(
-            config.attention_backend_kind(),
+            config(2, 2, 512).attention_backend_kind(),
             AttentionBackendKind::Standard
         );
-        assert_eq!(config.kv_cache_layout(), KvCacheLayout::Standard);
+        assert_eq!(
+            config(18, 2, 72).attention_backend_kind(),
+            AttentionBackendKind::Standard
+        );
+        assert_eq!(config(18, 2, 72).kv_cache_layout(), KvCacheLayout::Standard);
     }
 }

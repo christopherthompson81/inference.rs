@@ -977,3 +977,57 @@ and the softmax in bf16 (one softcap case measured 0.0188).
 
 Still open: eager decode builds the CSR page lists and the tile plan every step, though only MLA and FA3 read them.
 Gating them on the model (MLA layout, FA3) would recover Run 10's 2% eager cost.
+
+## Run 15 - 2026-10-05 (late)
+
+Question: which CUDA layers still use the Standard layout and vLLM's paged v1/v2 decode, and can the HND layout (fattn
+decode) take them?
+
+Who is on Standard on CUDA:
+- gpt-oss and Llama 4 opt out (`KvCacheLayout::StandardNoFlashInfer`). gpt-oss for its sinks (FlashInfer's
+  decode had none). Llama 4 for its chunked attention: a query sees keys from `floor(qp / chunk) * chunk` on,
+  through custom masks, which is not a sliding window.
+- Every model whose layers the FlashInfer layout refused: head dims other than 64/128/256/512, and GQA groups
+  outside 1-8 and 16 (FlashInfer's `DISPATCH_GQA_GROUP_SIZE`).
+- Metal, which keeps Standard by design.
+- Neither gpt-oss nor Llama 4 has a local checkpoint or a tiny test fixture. Each needs a test-time tiny checkpoint
+  before it moves.
+
+This PR: the HND layout admits what fattn decodes. Head dims 64/80/96/112/128/256/512 (512 only GQA-batched, so
+only with more Q heads than KV heads), any GQA group, and only when fattn's mma runs on every device. Without it,
+decode would gather, slower than the Standard kernels. The group-size check stays for FA3's prefill split, which
+needs it. The decode test covers the new head dims (80/96/112).
+
+Bench, TinyLlama 1.1B Q4_K_M (head dim 64, GQA 8, so already HND on master), Standard (vLLM v1/v2 decode,
+`INFERENCE_RS_FLASHINFER_DECODE=0`) against HND (fattn), TPOT ms:
+
+| depth | graphs: Standard / HND | eager: Standard / HND |
+|---|---|---|
+| 4 | 1.57 / 1.62 | 2.24 / 2.41 |
+| 1024 | 1.85 / 1.70 (-8%) | 2.65 / 2.48 |
+| 1900 | 1.91 / 1.76 (-8%) | 2.62 / 2.62 |
+
+Found on the way: the Standard layout with CUDA graphs crashes (`CUDA_ERROR_ILLEGAL_ADDRESS`, "invalid CUDA top-1
+output") when one process decodes at depth 4 and then at 1024/1900, while each depth alone runs. It reproduces at
+#278, before any of this work, and not with graphs off. So it is a latent fault in the Standard layout's graph
+replay across context buckets, and one more reason to move CUDA models off that layout. Not chased here.
+
+Next: tiny gpt-oss and Llama 4 checkpoints, then fattn sinks for gpt-oss (moving it to HND and retiring the sinks
+kernel), a chunked mode in fattn's implicit mask for Llama 4, and then the vLLM v1/v2 CUDA kernels. Head dims fattn
+lacks would then gather.
+
+Review follow-up:
+- Gemma 4 chose its layout with its own copy of the old rule: head dims 64/128/256/512, any group, no Turing gate.
+  On a pre-Turing GPU it would have taken HND caches and then gathered every decode step. It now asks the same
+  `supports_layer`.
+- The rule lives in one place, `inference_fattn::paged_shape_supported(head_dim, q_heads, kv_heads)`: mma on every
+  device, a paged head dim (64/80/96/112/128/256/512), and 512 only GQA-batched. `supports_layer` and Gemma 4 use
+  it.
+- FA3's fp8 decode only ever saw groups 1-8 and 16 (the layout admitted no others). Its schedule key now asks for
+  those groups again (`fa3_group_size_supported`, renamed from the FlashInfer decode check), so a group-12 fp8 layer
+  on Hopper decodes on fattn, not on an untested FA3 shape.
+- "Any group" is now tested at the layer: `decode_with_any_gqa_group` covers 6/2, 18/2 and 71/1 (MQA, as
+  Falcon-7B) against the reference. The layout test checks the 512 rule both ways, an 80-dim head and a head dim
+  fattn lacks (72).
+- Not measured: MHA (group 1) at 80/96/112, which Phi-2 and Phi-3-mini now take to HND. No such checkpoint is local.
+  Phi-3-mini's window gains: Standard with a window gathered, HND runs fattn's window.
