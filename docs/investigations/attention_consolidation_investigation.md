@@ -258,3 +258,93 @@ Review follow-up:
 - More coverage: a contiguous Q at an odd offset; strided and f32 Q on the vec (decode) and tile (hd 72) kernels.
 
 Next: bf16 K/V read straight by the mma kernel (drops `convert_to_f16`), then paged K/V.
+
+## Run 5 - 2026-10-04 19:34
+
+Question: what does the bf16 to f16 K/V conversion (`convert_to_f16`, before every mma launch) cost, and can the
+mma kernel read bf16 K/V itself?
+
+Measurement (nsys, as in Run 4), decode rows after #273:
+
+| row | convert_to_f16 | fattn kernel | total |
+|---|---|---|---|
+| Qwen3.5-0.8B q 1 kv 16384 | 2 x 59.4 us | 47.7 us | 175.6 us |
+| Llama-8B q 1 kv 4096 | 2 x 30.5 us | 27.9 us | 96.7 us |
+| Llama-8B q 1 kv 16384 | 2 x 117.3 us | 85.5 us | 360.7 us |
+
+In decode the conversion is about two thirds of the call: the GQA-optimised mma path copies the whole cache to f16
+on every step.
+
+Change: the mma tile loader (`flash_attn_ext_f16_load_tile`) takes a runtime `KV_bf16` flag. With it, each 16-byte
+chunk is loaded into registers, converted to f16 and stored to shared memory. cp.async cannot convert, so the chunk
+goes the synchronous way. Sync stores land no later than the async ones they replace, and every reader already sits
+behind `cp_async_wait_all(); __syncthreads()` (the mask still loads with cp.async), so the stage ordering holds. This adds no instances: the flag joins `Q_bf16` / `dst_bf16` on the kernel
+signature (vec and tile ignore it; vec has bf16 instances and tile still converts).
+
+First result, with the in-kernel conversion always on:
+- Decode was 3-4x faster.
+- Long prefill got slower: Llama 1 x 8192 went from 7218 to 8068 us, 2 x 2048 from 1399 to 1554 us. Each K/V tile is
+  loaded once per Q tile, so with many Q tiles the lost cp.async pipelining costs more than the single conversion pass.
+
+Crossover, with a temporary env switch between the two modes and new bench rows of q 16 to 1024 over a 4096 cache
+(fattn us, converted pass / in kernel):
+
+| row | Qwen3.5-0.8B | Llama-8B |
+|---|---|---|
+| q 16 kv 4096 | 97.7 / 64.0 | 94.5 / 45.7 |
+| q 64 kv 4096 | 107.3 / 79.1 | 135.2 / 75.7 |
+| q 256 kv 4096 | 185.3 / 157.1 | 304.3 / 278.8 |
+| q 512 kv 4096 | 316.1 / 297.8 | 554.5 / 550.2 |
+| q 1024 kv 4096 | 574.2 / 535.2 | 867.7 / 952.6 |
+| 2 x 512 x 512 | 98.3 / 84.5 | 139.6 / 140.8 |
+| 2 x 2048 x 2048 | 698.2 / 784.5 | 1409.5 / 1555.0 |
+| 1 x 8192 x 8192 | 3673.2 / 4214.5 | 7298.9 / 8096.5 |
+
+The in-kernel path wins or ties up to 512 Q rows per sequence and loses beyond. The mma launcher now uses it for
+bf16 K/V when `Q->ne[1] <= FATTN_MMA_KV_BF16_MAX_Q` (512), and converts first otherwise.
+
+Bench with the rule (us, fattn / FA2):
+
+| row | Qwen3.5-0.8B | Llama-8B |
+|---|---|---|
+| q 1 kv 512 | 11.4 / 44.8 | 11.2 / 46.8 |
+| q 1 kv 4096 | 23.1 / 317.1 | 31.9 / 333.4 |
+| q 1 kv 16384 | 52.3 / 1212.9 (was 154.9) | 87.7 / 1260.9 (was 303.7) |
+| q 16 kv 4096 | 68.0 / 345.0 | 45.4 / 163.3 |
+| q 256 kv 4096 | 171.2 / 347.6 | 278.7 / 306.3 |
+| 1 x 512 x 512 | 107.2 / 48.8 | 92.6 / 65.7 |
+| 2 x 512 x 512 | 84.1 / 79.2 | 140.2 / 101.8 |
+| 1 x 2048 x 2048 | 356.8 / 364.0 | 555.4 / 604.5 |
+| 2 x 2048 x 2048 | 688.0 / 677.7 | 1426.1 / 1163.5 |
+| 1 x 8192 x 8192 | 3694.3 / 4548.4 | 7267.8 / 8180.0 |
+
+Tests: the 13 parity tests pass. Their bf16 cases cover both modes: decode, chunked prefill and MLA run in the
+kernel, and `stream_k_fixups` at 1024 rows converts first.
+
+Remaining gaps vs FA2: Qwen 1 x 512 (the general stream-k fixup, Run 4), Llama 512 prefill (1.4x), and Llama
+2 x 2048 (1.23x). All three are kernel-side.
+
+Next: paged K/V (block tables), which also needs bf16 read in place, so the paged cache never takes a conversion
+pass.
+
+Review follow-up:
+- f16 K/V cost. The sync path is now compiled into every cp.async instance behind a runtime branch, and the bench
+  only ran bf16, so it gained `FATTN_BENCH_F16`. f16, master kernels vs this branch, three runs each (us):
+
+  | Qwen3.5-0.8B row | master | branch |
+  |---|---|---|
+  | q 1024 kv 4096 | 568.7 / 531.4 / 530.3 | 581.7 / 539.4 / 542.9 |
+  | 2 x 512 x 512 | 146.3 / 138.5 / 139.1 | 147.2 / 140.3 / 142.5 |
+  | 1 x 2048 x 2048 | 451.2 / 416.3 / 416.2 | 459.3 / 429.7 / 428.1 |
+  | 2 x 2048 x 2048 | 842.9 / 851.4 / 849.7 | 866.5 / 872.1 / 873.4 |
+
+  Register counts are unchanged: the 256/256 instance has 255 registers and 40 B of stack on both; 128/128 has 220
+  on master and 213 here. Keeping the original direct 16-byte copy for f16 (the conversion goes through a register
+  chunk only when bf16) did not remove it. That leaves about 2-3% on f16 head-dim-256 prefill, likely code size in
+  an already huge instance. Llama (128) rows are flat. Accepted, since bf16 is the main path.
+- The same f16 run shows f16 Q is slower than bf16 overall (Qwen 2 x 512: 139 us f16 vs 84 us bf16). f16 Q still
+  goes through candle casts to f32 and back. Native f16 Q/out can be added the same way as bf16.
+- K/V are read in place with 16-byte loads, and bf16 K/V used to get an aligned copy first. `validate` now rejects K/V
+  whose offset or strides are not 16-byte aligned, rather than letting them fault.
+- A new test, `long_prefill_converts_bf16_kv_first` (600 and 640 Q rows at head dims 128 and 256), covers the
+  convert-first mode beyond `stream_k_fixups`.

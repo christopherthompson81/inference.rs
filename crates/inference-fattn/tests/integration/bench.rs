@@ -10,6 +10,8 @@ const WARMUP: usize = 5;
 const ITERS: usize = 50;
 // Runs only the rows whose label contains this, e.g. to profile one shape under nsys
 const FILTER_ENV: &str = "FATTN_BENCH_FILTER";
+// Set to run every row in f16 instead of bf16
+const F16_ENV: &str = "FATTN_BENCH_F16";
 
 struct Shape {
     name: &'static str,
@@ -34,7 +36,12 @@ const SHAPES: [Shape; 2] = [
 ];
 // (batch, seq_q, seq_kv): prefill without a cache, then decode. fattn skips fully masked KV tiles only for
 // seq_q >= 1024 or batch > 1 (fattn-common.cuh), hence the batch-2 prefill rows.
-const RUNS: [(usize, usize, usize); 8] = [
+const RUNS: [(usize, usize, usize); 13] = [
+    (1, 16, 4096),
+    (1, 64, 4096),
+    (1, 256, 4096),
+    (1, 512, 4096),
+    (1, 1024, 4096),
     (1, 512, 512),
     (2, 512, 512),
     (1, 2048, 2048),
@@ -63,6 +70,11 @@ fn time(dev: &Device, f: impl Fn() -> candle_core::Result<Tensor>) -> Result<f64
 fn fattn_vs_fa2() -> Result<()> {
     let dev = Device::new_cuda(0)?;
     let filter = std::env::var(FILTER_ENV).unwrap_or_default();
+    let dtype = if std::env::var_os(F16_ENV).is_some() {
+        DType::F16
+    } else {
+        DType::BF16
+    };
     for shape in SHAPES {
         for (batch, seq_q, seq_kv) in RUNS {
             let label = format!("{:<24} b {batch} q {seq_q:>5} kv {seq_kv:>5}", shape.name);
@@ -72,7 +84,7 @@ fn fattn_vs_fa2() -> Result<()> {
             let rand = |s: usize, h: usize| -> Result<Tensor> {
                 Ok(
                     Tensor::randn(0f32, 1., (batch, s, h, shape.head_dim), &dev)?
-                        .to_dtype(DType::BF16)?,
+                        .to_dtype(dtype)?,
                 )
             };
             let (q, k, v) = (
