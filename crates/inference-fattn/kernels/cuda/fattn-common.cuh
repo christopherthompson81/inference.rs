@@ -18,8 +18,9 @@
 // The macro on the following line shifts it by a factor of 2**3=8, as was needed to fix https://github.com/ggml-org/llama.cpp/issues/18606 .
 #define FATTN_KQ_MAX_OFFSET (3.0f*0.6931f)
 
-// Where K/V live (paged: the blocks a sequence's table lists; dense when null) and whether they are e4m3 times a scale.
-struct fattn_kv_src {
+// How the operands are laid out: K/V paged (the blocks a sequence's table lists) or dense, optionally packed per sequence
+// (cu_kv), stored as e4m3 times a scale or not; Q and dst packed per sequence (cu_q) or batched.
+struct fattn_layout {
     const int32_t * block_table; // [n_seq, max_blocks]
     const int32_t * seq_lens;    // [n_seq], valid rows per sequence
     int32_t max_blocks;
@@ -29,18 +30,26 @@ struct fattn_kv_src {
     int32_t fp8;
     float   k_scale;
     float   v_scale;
+    const int32_t * cu_q;        // [n_seq + 1] start rows of each sequence's Q and dst; null: batched
+    const int32_t * cu_kv;       // [n_seq + 1] start rows of each sequence's dense K/V; null: batched
 };
 
-// entry.cu stores a pointer to the call's fattn_kv_src in the dst op_params from this int32 slot on
-#define FATTN_OP_PARAMS_KV_SRC 6
-
-static inline fattn_kv_src fattn_get_kv_src(const ggml_tensor * dst) {
-    const fattn_kv_src * src;
-    memcpy(&src, dst->op_params + FATTN_OP_PARAMS_KV_SRC, sizeof(src));
-    return src ? *src : fattn_kv_src{};
+// Rows of sequence s's Q and dst: its packed start and length, or s's batch slot of ne01 rows.
+static __device__ __forceinline__ int2 fattn_q_rows(const fattn_layout & lay, const int s, const int ne01) {
+    return lay.cu_q ? make_int2(lay.cu_q[s], lay.cu_q[s + 1] - lay.cu_q[s]) : make_int2(s*ne01, ne01);
 }
 
-// One sequence's view of the rows for K or V: paged when table is set, with the block stride in half2 (4-byte) units.
+// entry.cu stores a pointer to the call's fattn_layout in the dst op_params from this int32 slot on
+#define FATTN_OP_PARAMS_LAYOUT 6
+
+static inline fattn_layout fattn_get_layout(const ggml_tensor * dst) {
+    const fattn_layout * src;
+    memcpy(&src, dst->op_params + FATTN_OP_PARAMS_LAYOUT, sizeof(src));
+    return src ? *src : fattn_layout{};
+}
+
+// One sequence's view of the rows for K or V: paged when table is set, with the block stride in half2 (4-byte) units;
+// dense rows start at base. len bounds the rows read (INT_MAX when batched and dense).
 struct fattn_kv_rows {
     const int32_t * table;
     int32_t block_size_log2;
@@ -48,14 +57,15 @@ struct fattn_kv_rows {
     int64_t block_stride;
     bool    fp8;
     float   scale;
+    int32_t base;
 };
 
 // Row i in half2; rows past the sequence reuse its first row (masked). __ldg lets lookups move above smem stores.
 static __device__ __forceinline__ int64_t fattn_kv_row(const fattn_kv_rows & rows, const int i, const int stride) {
-    if (rows.table == nullptr) {
-        return int64_t(i)*stride;
-    }
     const int r = i < rows.len ? i : 0;
+    if (rows.table == nullptr) {
+        return int64_t(rows.base + r)*stride;
+    }
     const int block = __ldg(rows.table + (r >> rows.block_size_log2));
     return int64_t(block)*rows.block_stride + (r & ((1 << rows.block_size_log2) - 1))*stride;
 }
@@ -107,7 +117,7 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33,
-        const bool Q_bf16, const bool dst_bf16, const bool KV_convert, const fattn_kv_src kv_src);
+        const bool Q_bf16, const bool dst_bf16, const bool KV_convert, const fattn_layout lay);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -732,7 +742,7 @@ constexpr __device__ dequantize_V_t get_dequantize_V() {
 template <int ncols1>
 __launch_bounds__(FATTN_KQ_STRIDE/2, 1)
 static __global__ void flash_attn_mask_to_KV_max(
-        const half2 * mask_ptr, int * KV_max_ptr, const int ne30, const int64_t s31, const int64_t s33) {
+        const half2 * mask_ptr, int * KV_max_ptr, const int ne30, const int64_t s31, const int64_t s33, const int n_rows) {
     const half2 * GGML_CUDA_RESTRICT mask   = mask_ptr;
     int         * GGML_CUDA_RESTRICT KV_max = KV_max_ptr;
 
@@ -756,6 +766,10 @@ static __global__ void flash_attn_mask_to_KV_max(
 
 #pragma unroll
         for (int j = 0; j < ncols1; ++j) {
+            // the last tile may run past the mask's rows (n_rows of them), which would read past its allocation
+            if (jt*ncols1 + j >= n_rows) {
+                break;
+            }
             const float2 tmp = __half22float2(mask[j*s31 + KV_max_sj/2 + tid]);
             all_inf = all_inf && int(isinf(tmp.x)) && int(isinf(tmp.y));
         }
@@ -801,7 +815,8 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         const uint3 fd_iter_j_z_ne12,
         const uint3 fd_iter_j_z,
         const uint3 fd_iter_j,
-        const bool dst_bf16) {
+        const bool dst_bf16,
+        const int32_t * cu_q) {
     constexpr int ncols = ncols1*ncols2;
     ggml_cuda_pdl_lc();
     void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
@@ -831,11 +846,13 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
 
     const int zt_Q = z_KV*gqa_ratio + zt_gqa*ncols2; // Global Q head start index.
 
-    if (jt*ncols1 + j >= ne01 || zt_gqa*ncols2 + c >= gqa_ratio) {
+    const int q0    = cu_q ? cu_q[sequence] : sequence*ne01;
+    const int q_len = cu_q ? cu_q[sequence + 1] - q0 : ne01;
+    if (jt*ncols1 + j >= q_len || zt_gqa*ncols2 + c >= gqa_ratio) {
         return;
     }
 
-    const int64_t i_dst = sequence*ne02*ne01*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
+    const int64_t i_dst = int64_t(q0)*ne02*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
 
     ggml_cuda_pdl_sync();
     // Load the partial result that needs a fixup; a bf16 dst keeps it in f32 after the per-block partials.
@@ -886,7 +903,8 @@ static __global__ void flash_attn_stream_k_fixup_general(
         const uint3 fd_iter_k_j_z,
         const uint3 fd_iter_k_j,
         const uint3 fd_iter_k,
-        const bool dst_bf16) {
+        const bool dst_bf16,
+        const int32_t * cu_q) {
     void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
     const float2 * GGML_CUDA_RESTRICT dst_fixup = dst_fixup_ptr;
     constexpr int ncols = ncols1*ncols2;
@@ -922,11 +940,13 @@ static __global__ void flash_attn_stream_k_fixup_general(
 
     const int zt_Q = z_KV*gqa_ratio + zt_gqa*ncols2; // Global Q head start index.
 
-    if (jt*ncols1 + j >= ne01 || zt_gqa*ncols2 + c >= gqa_ratio) {
+    const int q0    = cu_q ? cu_q[sequence] : sequence*ne01;
+    const int q_len = cu_q ? cu_q[sequence + 1] - q0 : ne01;
+    if (jt*ncols1 + j >= q_len || zt_gqa*ncols2 + c >= gqa_ratio) {
         return;
     }
 
-    const int64_t i_dst = sequence*ne02*ne01*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
+    const int64_t i_dst = int64_t(q0)*ne02*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
 
     // Load the partial result that needs a fixup:
     float dst_val = 0.0f;
@@ -1065,16 +1085,16 @@ void launch_fattn(
     GGML_ASSERT(KQV->type == GGML_TYPE_F32 || KQV->type == GGML_TYPE_BF16);
     const bool Q_bf16   = Q->type == GGML_TYPE_BF16;
     const bool dst_bf16 = KQV->type == GGML_TYPE_BF16;
-    const fattn_kv_src kv_src = fattn_get_kv_src(KQV);
-    // K/V the mma loads convert themselves (bf16, or fp8 via kv_src); vec has bf16 instances and ignores the flag
+    const fattn_layout lay = fattn_get_layout(KQV);
+    // K/V the mma loads convert themselves (bf16, or fp8 via lay); vec has bf16 instances and ignores the flag
     const bool KV_bf16_in_loads = K->type == GGML_TYPE_BF16 && !need_f16_K;
     GGML_ASSERT(!KV_bf16_in_loads || (V->type == GGML_TYPE_BF16 && !need_f16_V));
-    GGML_ASSERT(!kv_src.fp8 || (!need_f16_K && !need_f16_V));
+    GGML_ASSERT(!lay.fp8 || (!need_f16_K && !need_f16_V));
     // at 576 V comes out of K's tiles, already scaled by the K scale
-    GGML_ASSERT(!kv_src.fp8 || Q->ne[0] != 576);
-    const bool KV_convert = KV_bf16_in_loads || kv_src.fp8;
-    // a paged or fp8 source is read in place: no f16 copy of it, and no sparse gather on top
-    GGML_ASSERT(!(kv_src.block_table || kv_src.fp8) || ((KV_convert || K->type == GGML_TYPE_F16) && !use_sparse));
+    GGML_ASSERT(!lay.fp8 || Q->ne[0] != 576);
+    const bool KV_convert = KV_bf16_in_loads || lay.fp8;
+    // a paged, packed or fp8 source is read in place: no f16 copy of it, and no sparse gather on top
+    GGML_ASSERT(!(lay.block_table || lay.fp8 || lay.cu_kv || lay.cu_q) || ((KV_convert || K->type == GGML_TYPE_F16) && !use_sparse));
 
     GGML_ASSERT(Q->nb[0] == ggml_element_size(Q));
     GGML_ASSERT(K->nb[0] == ggml_element_size(K));
@@ -1199,7 +1219,7 @@ void launch_fattn(
         KV_max.alloc(ne_KV_max);
         ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_KV_max, block_dim_KV_max, 0, main_stream);
         ggml_cuda_kernel_launch(flash_attn_mask_to_KV_max<ncols1>, launch_params,
-            (const half2 *) mask->data, KV_max.ptr, iter_k, s31, s33);
+            (const half2 *) mask->data, KV_max.ptr, iter_k, s31, s33, int(mask->ne[1]));
         CUDA_CHECK(cudaGetLastError());
     }
 
@@ -1328,7 +1348,7 @@ void launch_fattn(
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
-        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16, KV_convert, kv_src
+        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16, KV_convert, lay
     );
     CUDA_CHECK(cudaGetLastError());
 
@@ -1349,7 +1369,7 @@ void launch_fattn(
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_uniform<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], K->ne[2], nblocks_sk,
-                 gqa_ratio, bpt, fd0, fd1, fd2, dst_bf16);
+                 gqa_ratio, bpt, fd0, fd1, fd2, dst_bf16, lay.cu_q);
         } else if (ntiles_dst % blocks_num.x != 0) {
             // General fixup for the cases where nblocks_stream_k < ntiles_dst.
             const int total_work = ntiles_KV * ntiles_dst;
@@ -1366,7 +1386,7 @@ void launch_fattn(
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_general<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], gqa_ratio, total_work,
-                 fd_k_j_z_ne12, fd_k_j_z, fd_k_j, fd_k, dst_bf16);
+                 fd_k_j_z_ne12, fd_k_j_z, fd_k_j, fd_k, dst_bf16, lay.cu_q);
         }
     } else if (parallel_blocks > 1) {
         const dim3 block_dim_combine(DV, 1, 1);

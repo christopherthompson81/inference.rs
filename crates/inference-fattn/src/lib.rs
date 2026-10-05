@@ -5,7 +5,8 @@ mod cuda;
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    causal_mask, flash_attn, flash_attn_paged, paged_causal_mask, paged_kv_len, supported,
+    causal_mask, flash_attn, flash_attn_paged, flash_attn_paged_varlen, flash_attn_varlen,
+    paged_causal_mask, paged_kv_len, supported, varlen_causal_mask, varlen_kv_len,
 };
 
 /// Options for `flash_attn` beyond the operands.
@@ -45,4 +46,14 @@ pub struct PagedKv<'a> {
     pub block_table: &'a candle_core::Tensor,
     /// `(batch,)` u32: the rows each sequence holds, at least 1 (unused rows read the sequence's first row).
     pub seq_lens: &'a candle_core::Tensor,
+}
+
+/// Sequences packed along dim 0 of a `(total, heads, dim)` tensor.
+#[derive(Debug, Clone, Copy)]
+pub struct Packed<'a> {
+    /// `(batch + 1,)` u32: sequence `i` holds rows `cu_seqlens[i]..cu_seqlens[i + 1]`, from 0 up to the total. For
+    /// K/V every sequence holds at least one row (rows past a sequence's end read its first row).
+    pub cu_seqlens: &'a candle_core::Tensor,
+    /// The longest sequence, at least each sequence's length (it sizes the kernel's grid).
+    pub max_len: usize,
 }
