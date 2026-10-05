@@ -816,7 +816,7 @@ pub mod text_models_inputs_processor {
                 },
                 cu_seqlens_kv: if has_any_cache_hit {
                     // Cumulative KV lengths: [0, c0+q0, c0+q0+c1+q1, ...]
-                    // U32 to match flash-attn varlen expectations
+                    // U32, as the varlen flash kernels read them
                     let mut cu_kv = vec![0u32];
                     for (&nc, &ql) in num_cached_tokens_vec.iter().zip(query_lens_vec.iter()) {
                         cu_kv.push(cu_kv.last().unwrap() + (nc + ql) as u32);

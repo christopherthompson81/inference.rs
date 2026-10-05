@@ -26,7 +26,6 @@ image.workspace = true
 indexmap.workspace = true
 indicatif.workspace = true
 inference-audio.workspace = true
-inference-flash-attn = { workspace = true, optional = true }
 inference-fattn = { workspace = true, optional = true }
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
@@ -82,6 +81,5 @@ metal = [
     "inference-paged-attn/metal",
     "dep:objc2-metal"
 ]
-flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda"]
 flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate"]

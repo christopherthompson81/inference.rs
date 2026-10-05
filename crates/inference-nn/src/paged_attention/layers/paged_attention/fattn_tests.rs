@@ -292,7 +292,8 @@ fn prefill_reference(
             .flat_map(|j| {
                 let qp = kv_len - q_len + j;
                 (0..kv_len).map(move |kp| {
-                    let hidden = c.causal && (kp > qp || c.window.is_some_and(|w| qp - kp >= w));
+                    let too_old = kp <= qp && c.window.is_some_and(|w| qp - kp >= w);
+                    let hidden = c.causal && kp > qp || too_old;
                     if hidden { f32::NEG_INFINITY } else { 0. }
                 })
             })
@@ -483,7 +484,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         causal: true,
         window: Some(24),
     })?;
-    // a bidirectional prompt chunk sees every row of its sequence
+    // a bidirectional prompt chunk sees every row of its sequence, and a window bounds only its left
     check_prefill(PrefillCase {
         head_dim: 128,
         cache_dtype: DType::BF16,
@@ -491,5 +492,13 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         query_lens: &[16, 12],
         causal: false,
         window: None,
+    })?;
+    check_prefill(PrefillCase {
+        head_dim: 128,
+        cache_dtype: DType::BF16,
+        kv_lens: &[60, 30],
+        query_lens: &[16, 12],
+        causal: false,
+        window: Some(20),
     })
 }

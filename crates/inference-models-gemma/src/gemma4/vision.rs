@@ -392,7 +392,7 @@ impl VisionAttention {
         let v = v.contiguous()?;
 
         let attn_output = if !matches!(attention_mask, AttentionMask::None) {
-            // CUDA flash-attn in the shared backend does not consume arbitrary
+            // CUDA flash attention in the shared backend does not consume arbitrary
             // dense masks, so padded vision batches must stay on the masked path.
             Sdpa.run_attention_noflash(
                 &q,

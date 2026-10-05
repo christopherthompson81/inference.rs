@@ -892,3 +892,52 @@ Review follow-up:
   - Remaining refusals the static check cannot see: fp8 scales outside (0, 146], more than 16 devices.
 - f16 activations: fattn computes f16 queries in f32 (an f32 Q copy and f32 output beside the f16 result), so the
   planner reserves 5 output-sized units for `FattnPaged` at f16 instead of 2.
+
+## Run 13 - 2026-10-05 (evening)
+
+Question: with every prefill path on fattn (Runs 11-12) and FA2 buying nothing on the measured paths, can FA2
+(`inference-flash-attn`, Dao-AILab's v2) and the `flash-attn` feature go?
+
+Remaining direct callers, and what replaced them:
+- The DFlash drafter's windowed paged attention (`flash_attn_varlen_paged_windowed`). It now calls
+  `flash_attn_paged_varlen` over the pool's HND caches (u32 tables and offsets already), with seq lens from the
+  kv offsets on the device. Its non-causal layers used FA2's symmetric window (`right = window - 1`). Each draft
+  block sits at the end of its keys, so only the left side ever binds. fattn now takes a window without causal
+  masking (left-only; the kernel's mask already computed it, only the Rust check refused it), and
+  `implicit_sliding_window` gained a non-causal row. The whole windowed DFlash path (the windowed pool, its CUDA
+  graphs, the speculative wiring) was gated on `flash-attn`. It now builds and is linted in cuda builds, which
+  surfaced one clippy `collapsible_if` in code CI had never compiled.
+- `PrefixPrefillPlan::FlashAttentionPaged` and `run_flash_attention_paged_prefill`. FA2 builds sent image prefix
+  ranges (bidirectional image spans inside causal attention) there. They now gather like every other build: the
+  gather applies the ranges through its masks.
+- The FA2 arm of `backends::flash_attn`. What is left: FA3 (feature `flash-attn-v3`, Hopper only, kept; it cannot
+  be tested on this sm86 machine) for its head dims, else fattn, else eager.
+- `mixed_cached_prefix_tests` (engine-level mixed cached-prefix packed prefill against per-sequence runs and a
+  reference) was gated on `flash-attn`. It now runs in cuda builds against `FattnPaged`.
+
+Elsewhere:
+- Feature `flash-attn` removed from all crates and the CLI.
+- The installers only add `flash-attn-v3` on Hopper; the doctor checks fattn's 7.5 requirement instead of FA2's
+  8.0. The CI cutile lane no longer excludes the crate.
+- Docs and CLAUDE.md build commands drop the feature.
+- fattn's bench loses its FA2 column (`bench-fa2`); the numbers it compared are in Runs 4-12.
+- The dev kernel library `libflashattention.so` (23.9 MB at sm86) is gone from every CUDA build.
+
+Review follow-up:
+- Every cuda build now creates the DFlash windowed pool, with no capability check before the fattn call. A
+  pre-Turing GPU or a drafter head dim fattn lacks would have failed every draft step, eager fallback included,
+  where it used to run DFlash's eager masked path. `windowed_kv_fits_fattn` now gates both the pool and its memory
+  reservation: fattn takes the head dim on this device, every layer has a window, and every non-causal window is
+  at least a draft block wide. A left-only window equals FA2's symmetric one only when the block fits inside it:
+  the block sits at the end of its keys, so the keys to a query's right number at most `block - 1`. New test
+  `windowed_kv_needs_every_layer_windowed_and_non_causal_windows_past_a_block`.
+- With left-only windows in fattn, `Sdpa` and `FattnPaged` no longer refuse non-causal windows. That gives back
+  the flash path FA2 builds had for those calls (FA2's `window_size_right = None`). The paged prefill runner passes
+  the window for non-causal chunks too, and the prefill test gained a non-causal windowed case.
+- Cleanup:
+  - a doubled cfg in plan.rs;
+  - the dead NHD pool view (`paged_attention_layer_cache`, FA2's layout);
+  - stale "requires CUDA FlashAttention" and "fa2 aligns" wording;
+  - two doc lines still listing `flash-attn`;
+  - dflash's per-layer `seq_lens` now computed once per forward;
+  - a cfg that my helper had split from `windowed_kv_cache_size_in_bytes`.

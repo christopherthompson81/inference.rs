@@ -11,7 +11,7 @@ use std::sync::{Arc, atomic::Ordering};
 use candle_core::{IndexOp, Result, Tensor};
 use rand::Rng;
 
-#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+#[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::cuda::graph_capture::{CudaGraphComponent, CudaGraphEvent, CudaGraphEventGuard};
 use crate::{
     attention::AttentionMask,
@@ -68,7 +68,7 @@ fn dflash_speculative_batch(batch: DFlashProposalBatch) -> Result<SpeculativePro
         DFlashProposalBatch::Tokens(tokens) => {
             tokens.into_iter().map(SpeculativeProposal::new).collect()
         }
-        #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
         DFlashProposalBatch::DeviceTokens(tokens) => {
             let batch = tokens.dim(0)?;
             (0..batch)
@@ -593,7 +593,7 @@ impl Qwen3_5TextModel {
         if let Some(proposals) = graph_proposals {
             return dflash_speculative_batch(proposals).map(Some);
         }
-        #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
         let graph_event =
             CudaGraphEventGuard::new(CudaGraphComponent::DFlash, CudaGraphEvent::EagerFallback);
         let fallback_result = (|| {
@@ -607,7 +607,7 @@ impl Qwen3_5TextModel {
             )?)
             .map(Some)
         })();
-        #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
         if fallback_result.is_ok() {
             graph_event.success();
         }
@@ -1122,7 +1122,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         vec![SpeculativeGraphPlan::new(n, None)]
     }
 
-    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
     fn precapture_speculative_cuda_graphs(&self) -> Result<()> {
         let Some(drafter) = self.dflash.lock().expect("dflash poisoned").clone() else {
             return Ok(());

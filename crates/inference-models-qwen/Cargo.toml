@@ -17,7 +17,7 @@ anyhow.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
 image.workspace = true
-inference-flash-attn = { workspace = true, optional = true }
+inference-fattn = { workspace = true, optional = true }
 inference-nn.workspace = true
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
@@ -38,10 +38,11 @@ tempfile.workspace = true
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",
+    "dep:inference-fattn",
+    "inference-fattn/cuda",
     "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
     "inference-quant/cuda",
     "inference-nn/cuda",
 ]
 metal = ["candle-core/metal", "candle-nn/metal", "inference-quant/metal", "inference-nn/metal"]
-flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda", "inference-nn/flash-attn"]

@@ -240,9 +240,11 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
     }
     if opts
         .window_left
-        .is_some_and(|w| !opts.causal || w > i32::MAX as usize)
+        .is_some_and(|w| opts.mask.is_some() || w > i32::MAX as usize)
     {
-        candle_core::bail!("fattn's window_left needs causal masking and must fit an i32");
+        candle_core::bail!(
+            "fattn's window_left is an implicit mask (no mask tensor) and must fit an i32"
+        );
     }
     if let Some(mask) = &opts.mask
         && (mask.dtype() != DType::F16 || mask.layout().stride()[2] != 1)
@@ -736,7 +738,7 @@ fn dense_layout(
         v_scale: scales.v,
         cu_q: std::ptr::null(),
         cu_kv: std::ptr::null(),
-        implicit_mask: (opts.mask.is_none() && causal) as i32,
+        implicit_mask: (opts.mask.is_none() && (causal || opts.window_left.is_some())) as i32,
         causal: causal as i32,
         window_left: opts.window_left.map_or(-1, |w| w as i32),
     }

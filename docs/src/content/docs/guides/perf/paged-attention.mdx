@@ -137,8 +137,8 @@ INFERENCE_RS_FLASHINFER_DECODE=0 inference serve --paged-attn on -m <model>
 
 Paged attention and flash attention compose; both can be on simultaneously. They are not the same backend:
 
-- `flash-attn` (compute capability 8.0+) and `flash-attn-v3` (Hopper) are Cargo features for the standard attention path and fallback varlen paths. See [cargo features](/reference/cargo-features/).
-- FlashInfer paged decode and prefill kernels are built with the `cuda` feature as part of paged attention. They do not require the `flash-attn` Cargo feature.
+- Flash attention (fattn) is built with the `cuda` feature and runs on compute capability 7.5+; `flash-attn-v3` (Hopper) adds FA3 ahead of it for the standard attention path. See [cargo features](/reference/cargo-features/).
+- The paged decode and prefill kernels are built with the `cuda` feature as part of paged attention; fattn serves those too.
 
 Set `INFERENCE_RS_FLASHINFER_DECODE=0` only when debugging or comparing against the generic paged path.
 

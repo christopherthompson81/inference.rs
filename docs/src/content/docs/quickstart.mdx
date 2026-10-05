@@ -60,8 +60,8 @@ What you get per platform:
 | Platform | Binary | Acceleration |
 |---|---|---|
 | Apple Silicon (macOS) | prebuilt | Metal |
-| Linux x86_64 + NVIDIA GPU | prebuilt, matched to GPU and driver | CUDA, flash-attn, cuTile-capable on supported CUDA/SM pairs |
-| Linux aarch64 + NVIDIA GPU (Grace: GH200/GB200/GB10) | prebuilt, matched to GPU and driver | CUDA, flash-attn, cuTile-capable on supported CUDA/SM pairs |
+| Linux x86_64 + NVIDIA GPU | prebuilt, matched to GPU and driver | CUDA (with flash attention), cuTile-capable on supported CUDA/SM pairs |
+| Linux aarch64 + NVIDIA GPU (Grace: GH200/GB200/GB10) | prebuilt, matched to GPU and driver | CUDA (with flash attention), cuTile-capable on supported CUDA/SM pairs |
 | Linux x86_64 / aarch64, no GPU | prebuilt | CPU |
 | Windows x86_64 | prebuilt | CPU |
 | anything else (Intel Mac, an unlisted GPU) | source build | detected at build time |
@@ -128,7 +128,7 @@ inference doctor
 
 ```
 [INFO] CUDA: build 12.8, local nvcc 12.8, driver 615.71.09 (supports CUDA 13.4)
-[INFO] Build features: cuda, flash-attn
+[INFO] Build features: cuda
 ```
 
 If your accelerator is missing from build features, rebuild with the right `--features`. For other failures, see [Troubleshooting](/reference/troubleshooting/).

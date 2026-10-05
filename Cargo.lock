@@ -2745,7 +2745,6 @@ dependencies = [
  "cudaforge",
  "float8",
  "half",
- "inference-flash-attn",
 ]
 
 [[package]]
@@ -2767,17 +2766,6 @@ dependencies = [
  "rand_distr",
  "serde_json",
  "tempfile",
-]
-
-[[package]]
-name = "inference-flash-attn"
-version = "0.9.3"
-dependencies = [
- "anyhow",
- "candle-core",
- "candle-nn",
- "cudaforge",
- "half",
 ]
 
 [[package]]
@@ -2983,7 +2971,7 @@ dependencies = [
  "candle-nn",
  "image",
  "inference-audio",
- "inference-flash-attn",
+ "inference-fattn",
  "inference-nn",
  "inference-paged-attn",
  "inference-quant",
@@ -3032,7 +3020,6 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-audio",
  "inference-fattn",
- "inference-flash-attn",
  "inference-paged-attn",
  "inference-quant",
  "itertools 0.14.0",

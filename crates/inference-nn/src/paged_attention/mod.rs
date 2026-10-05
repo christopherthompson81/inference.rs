@@ -19,10 +19,7 @@ pub mod mm_prefix;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
 pub mod plan;
 mod scales;
-#[cfg(any(
-    test,
-    all(feature = "cuda", feature = "flash-attn", target_family = "unix")
-))]
+#[cfg(any(test, all(feature = "cuda", target_family = "unix")))]
 pub mod windowed_pool;
 pub const _PAD_SLOT_ID: i64 = -1;
 

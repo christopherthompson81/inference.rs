@@ -44,12 +44,11 @@ pub const fn paged_attn_supported() -> bool {
     false
 }
 
-/// `true` if a CUDA FlashAttention backend runs here: fattn on Turing or newer, FA2/FA3 with their features.
+/// `true` if a CUDA FlashAttention backend runs here: fattn on Turing or newer, FA3 with its feature.
 pub fn using_flash_attn() -> bool {
     #[cfg(feature = "cuda")]
     {
-        cfg!(any(feature = "flash-attn", feature = "flash-attn-v3"))
-            || inference_fattn::mma_available()
+        cfg!(feature = "flash-attn-v3") || inference_fattn::mma_available()
     }
     #[cfg(not(feature = "cuda"))]
     {
