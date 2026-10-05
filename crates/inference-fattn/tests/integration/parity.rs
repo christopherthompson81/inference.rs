@@ -309,6 +309,13 @@ fn stream_k_fixups() -> Result<()> {
 }
 
 #[test]
+fn long_prefill_converts_bf16_kv_first() -> Result<()> {
+    // past 512 Q rows the mma kernel takes f16 copies of bf16 K/V rather than converting in its tile loads
+    check(case(128, 2, 600, 600))?;
+    check(case(256, 8, 640, 1024))
+}
+
+#[test]
 fn strided_misaligned_and_f32_queries() -> Result<()> {
     check(Case {
         q_layout: QLayout::Transposed,
@@ -352,6 +359,8 @@ fn rejects_mismatched_operands() -> Result<()> {
     let mla = |d: usize| Tensor::zeros((1, 8, 1, d), DType::F16, &dev);
     let separate_v = flash_attn(&t(8, MLA_HEAD_DIM)?, &mla(MLA_HEAD_DIM)?, &mla(512)?, &opts);
     assert!(separate_v.is_err());
+    let odd_k = Tensor::zeros((1, 8, 2, 65), DType::F16, &dev)?.narrow(3, 1, 64)?;
+    assert!(flash_attn(&t(8, 64)?, &odd_k, &t(2, 64)?, &opts).is_err());
     let f32_mask = FattnOptions {
         mask: Some(Tensor::zeros((1, 8, 8), DType::F32, &dev)?),
         ..opts

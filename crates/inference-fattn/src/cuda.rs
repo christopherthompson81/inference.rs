@@ -18,6 +18,8 @@ const MAX_DEVICES: usize = 16;
 const MLA_HEAD_DIM: usize = 576;
 // ggml_cuda_get_max_cpy_bytes: f32 Q rows load in 16-byte chunks, and gqa_opt_applies wants 16-byte Q strides
 const Q_LOAD_ALIGN: usize = 16;
+// the kernels load K/V rows in place in chunks of this many bytes; only bf16 K/V for the tile kernel is copied first
+const KV_LOAD_ALIGN: usize = 16;
 // supported() never launches, but fattn reads a null mask or sinks pointer as absent, so it describes operands at this
 const PROBE_PTR: u64 = 256;
 
@@ -98,6 +100,19 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
                 "fattn at head dim {MLA_HEAD_DIM} needs v to be a view of k's leading dims"
             );
         }
+    }
+    let rows_aligned = |t: &Tensor| {
+        let l = t.layout();
+        let es = t.dtype().size_in_bytes();
+        (l.start_offset() * es).is_multiple_of(KV_LOAD_ALIGN)
+            && l.stride()[..3]
+                .iter()
+                .all(|&s| (s * es).is_multiple_of(KV_LOAD_ALIGN))
+    };
+    if !rows_aligned(k) || !rows_aligned(v) {
+        candle_core::bail!(
+            "fattn reads K/V rows in {KV_LOAD_ALIGN}-byte chunks; their offsets and strides must align"
+        );
     }
     if h_kv == 0 || h % h_kv != 0 {
         candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");

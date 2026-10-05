@@ -65,7 +65,7 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33,
-        const bool Q_bf16, const bool dst_bf16);
+        const bool Q_bf16, const bool dst_bf16, const bool KV_bf16);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -1023,6 +1023,9 @@ void launch_fattn(
     GGML_ASSERT(KQV->type == GGML_TYPE_F32 || KQV->type == GGML_TYPE_BF16);
     const bool Q_bf16   = Q->type == GGML_TYPE_BF16;
     const bool dst_bf16 = KQV->type == GGML_TYPE_BF16;
+    // K/V the kernel reads as bf16 itself; only the mma kernel uses the flag, vec has bf16 instances instead
+    const bool KV_bf16  = K->type == GGML_TYPE_BF16 && !need_f16_K;
+    GGML_ASSERT(!KV_bf16 || (V->type == GGML_TYPE_BF16 && !need_f16_V));
 
     GGML_ASSERT(Q->nb[0] == ggml_element_size(Q));
     GGML_ASSERT(K->nb[0] == ggml_element_size(K));
@@ -1276,7 +1279,7 @@ void launch_fattn(
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
-        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16
+        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16, KV_bf16
     );
     CUDA_CHECK(cudaGetLastError());
 
