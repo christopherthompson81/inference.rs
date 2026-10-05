@@ -3031,6 +3031,7 @@ dependencies = [
  "indexmap",
  "indicatif 0.18.3",
  "inference-audio",
+ "inference-fattn",
  "inference-flash-attn",
  "inference-paged-attn",
  "inference-quant",

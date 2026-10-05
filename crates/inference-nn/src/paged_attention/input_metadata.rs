@@ -488,10 +488,11 @@ pub struct PagedDecodeMetadataRequirements {
 }
 
 impl PagedDecodeMetadataRequirements {
-    fn conservative(rows: &DecodePagedRows) -> Self {
+    // the padded tables serve the standard kernel and fattn alike; the FlashInfer plan only its fallback
+    fn conservative() -> Self {
         Self {
-            block_tables: rows.use_standard_metadata || rows.decode_window > 1,
-            context_lens: rows.use_standard_metadata,
+            block_tables: true,
+            context_lens: true,
             flashinfer_paged_kv: true,
             flashinfer_tile_plan: true,
         }
@@ -749,12 +750,12 @@ impl DecodePagedRows {
         if stage_on_host {
             self.build_graph_staged()
         } else {
-            self.build_inner(false, PagedDecodeMetadataRequirements::conservative(self))
+            self.build_inner(false, PagedDecodeMetadataRequirements::conservative())
         }
     }
 
     pub fn build_materialized(self: &Arc<Self>) -> Result<PagedAttentionInputMetadata> {
-        self.build_inner(false, PagedDecodeMetadataRequirements::conservative(self))
+        self.build_inner(false, PagedDecodeMetadataRequirements::conservative())
     }
 
     pub fn build_graph_update(
