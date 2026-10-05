@@ -1329,7 +1329,9 @@ void launch_fattn(
             const int efficiency_loss_percent = nblocks_stream_k_rounded > 0
                 ? 100 * (nblocks_stream_k_raw - nblocks_stream_k_rounded) / nblocks_stream_k_raw
                 : 100;
-            const int nblocks_stream_k = efficiency_loss_percent <= max_efficiency_loss_percent
+            // past one block per tile the general fixup (a CUDA block per output column) costs more than the rounding
+            const bool uniform_pays = nblocks_stream_k_rounded > ntiles_dst;
+            const int nblocks_stream_k = efficiency_loss_percent <= max_efficiency_loss_percent || uniform_pays
                 ? nblocks_stream_k_rounded
                 : nblocks_stream_k_raw;
 

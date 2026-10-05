@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use candle_core::cuda_backend::cudarc::driver::{CudaStream, DevicePtr, DevicePtrMut};
 use candle_core::{
@@ -7,6 +7,9 @@ use candle_core::{
 };
 
 use crate::{FattnOptions, KvScales, Packed, PagedKv};
+
+// Turing: causal, packed and paged calls run on the mma kernel alone (ggml_cuda_get_best_fattn_kernel)
+const MMA_MIN_COMPUTE: (i32, i32) = (7, 5);
 
 // ggml_type ids
 const GGML_TYPE_F32: i32 = 0;
@@ -768,8 +771,41 @@ pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Re
         .to_dtype(q.dtype())
 }
 
-/// Whether a kernel exists for these operands on this device; reads only shapes, dtypes and strides.
+/// Whether every visible CUDA device runs fattn's mma kernel, which causal, packed and paged calls need.
+pub fn mma_available() -> bool {
+    static AVAILABLE: OnceLock<bool> = OnceLock::new();
+    *AVAILABLE.get_or_init(|| {
+        use candle_core::cuda_backend::cudarc::driver::{result, sys::CUdevice_attribute};
+        let all_turing = || -> std::result::Result<bool, result::DriverError> {
+            result::init()?;
+            let count = result::device::get_count()?;
+            (0..count).try_fold(count > 0, |ok, ordinal| {
+                let dev = result::device::get(ordinal)?;
+                // SAFETY: dev comes from device::get
+                let compute = unsafe {
+                    (
+                        result::device::get_attribute(
+                            dev,
+                            CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
+                        )?,
+                        result::device::get_attribute(
+                            dev,
+                            CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
+                        )?,
+                    )
+                };
+                Ok(ok && compute >= MMA_MIN_COMPUTE)
+            })
+        };
+        all_turing().unwrap_or(false)
+    })
+}
+
+/// Whether a kernel exists for these operands on this device (false for limits such as f32 K/V); reads no data.
 pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<bool> {
+    if operand_limit(q, k, v).is_some() || fp8_scale_limit(opts).is_some() {
+        return Ok(false);
+    }
     validate(q, k, v, opts)?;
     Fattn {
         opts,
@@ -984,6 +1020,53 @@ pub fn flash_attn_varlen(
     kv_seqs: &Packed,
     opts: &FattnOptions,
 ) -> Result<Tensor> {
+    validate_varlen(q, k, v, (q_seqs, kv_seqs), opts)?;
+    kernel_q(q)?
+        .apply_op3_no_bwd(
+            k,
+            v,
+            &Fattn {
+                opts,
+                paged: None,
+                q_seqs: Some(*q_seqs),
+                kv_seqs: Some(*kv_seqs),
+            },
+        )?
+        .to_dtype(q.dtype())
+}
+
+/// Whether `flash_attn_varlen` has a kernel for these operands; false for limits such as f32 K/V.
+pub fn supported_varlen(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    q_seqs: &Packed,
+    kv_seqs: &Packed,
+    opts: &FattnOptions,
+) -> Result<bool> {
+    if operand_limit(q, k, v).is_some()
+        || fp8_scale_limit(opts).is_some()
+        || q.dim(D::Minus1)? == MLA_HEAD_DIM
+    {
+        return Ok(false);
+    }
+    validate_varlen(q, k, v, (q_seqs, kv_seqs), opts)?;
+    Fattn {
+        opts,
+        paged: None,
+        q_seqs: Some(*q_seqs),
+        kv_seqs: Some(*kv_seqs),
+    }
+    .probe(q, k, v)
+}
+
+fn validate_varlen(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    (q_seqs, kv_seqs): (&Packed, &Packed),
+    opts: &FattnOptions,
+) -> Result<()> {
     let (tq, h, d) = q.dims3()?;
     let (tk, h_kv, kd) = k.dims3()?;
     let (vt, vh, _) = v.dims3()?;
@@ -1005,19 +1088,7 @@ pub fn flash_attn_varlen(
         candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
     }
     check_mask(opts, (b, q_seqs.max_len, varlen_kv_len(kv_seqs.max_len)))?;
-    validate_operands(q, k, v, opts)?;
-    kernel_q(q)?
-        .apply_op3_no_bwd(
-            k,
-            v,
-            &Fattn {
-                opts,
-                paged: None,
-                q_seqs: Some(*q_seqs),
-                kv_seqs: Some(*kv_seqs),
-            },
-        )?
-        .to_dtype(q.dtype())
+    validate_operands(q, k, v, opts)
 }
 
 /// Attention of packed `q (total_q, n_head, d)`, delimited by `q_seqs`, over each sequence's rows in a paged cache;

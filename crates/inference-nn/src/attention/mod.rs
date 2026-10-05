@@ -298,6 +298,8 @@ impl Sdpa {
         }
 
         // CausalFlash or None: try flash attention, fall back to eager
+        let needs_mask = matches!(mask, AttentionMask::CausalFlash) && q.dim(2)? > 1
+            || sdpa_params.sliding_window.is_some();
         let can_use_flash = q.device().is_cpu()
             || q.device().is_cuda() && crate::utils::using_flash_attn() && q.dtype() != DType::F32;
 
@@ -366,13 +368,76 @@ impl Sdpa {
             let k = k.transpose(1, 2)?;
             let v = v.transpose(1, 2)?;
 
-            if q.device().is_cpu() {
+            // a CPU-mapped layer of a CUDA model gets the model's CausalFlash mask, which the CPU kernel cannot apply
+            if q.device().is_cpu() && !needs_mask {
                 return run_flash_attn_cpu_for_dtype(&q, &k, &v, None, sdpa_params);
-            } else {
-                return flash_attn(&q, &k, &v, flash_params, sdpa_params)?.transpose(1, 2);
             }
+            if q.device().is_cpu() {
+                let (q, k, v) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
+                let causal = matches!(mask, AttentionMask::CausalFlash) || do_causal;
+                let fallback_mask = eager_attention_mask(
+                    q.dim(2)?,
+                    k.dim(2)?,
+                    causal,
+                    sdpa_params.sliding_window,
+                    q.dtype(),
+                    q.device(),
+                )?;
+                return self.run_attention_noflash(
+                    &q,
+                    &k,
+                    &v,
+                    fallback_mask.as_ref(),
+                    sdpa_params,
+                    causal,
+                );
+            }
+            if let Some(out) = flash_attn(&q, &k, &v, flash_params, sdpa_params)? {
+                return out.transpose(1, 2);
+            }
+            if flash_params.is_some_and(|params| params.packed) {
+                candle_core::bail!("no FlashAttention kernel takes this packed prefill");
+            }
+            let (q, k, v) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
+            let causal = matches!(mask, AttentionMask::CausalFlash) || do_causal;
+            let fallback_mask = eager_attention_mask(
+                q.dim(2)?,
+                k.dim(2)?,
+                causal,
+                sdpa_params.sliding_window,
+                q.dtype(),
+                q.device(),
+            )?;
+            return self.run_attention_noflash(
+                &q,
+                &k,
+                &v,
+                fallback_mask.as_ref(),
+                sdpa_params,
+                causal,
+            );
         }
 
+        // CausalFlash carries no tensor, and the eager kernels apply neither its causality nor a window themselves
+        if needs_mask {
+            let causal = matches!(mask, AttentionMask::CausalFlash) || do_causal;
+            let fallback_mask = eager_attention_mask(
+                q.dim(2)?,
+                k.dim(2)?,
+                causal,
+                sdpa_params.sliding_window,
+                q.dtype(),
+                q.device(),
+            )?;
+            return self.run_attention_noflash(
+                q,
+                k,
+                v,
+                fallback_mask.as_ref(),
+                sdpa_params,
+                causal,
+            );
+        }
         self.run_attention_noflash(q, k, v, None, sdpa_params, do_causal)
     }
 
@@ -612,6 +677,7 @@ mod tests {
     use candle_core::{D, Result as CandleResult};
 
     const EPS: f32 = 1e-4;
+    const CAUSAL_FLASH_TOLERANCE: f32 = 1e-2;
 
     fn assert_close(lhs: &Tensor, rhs: &Tensor) -> CandleResult<()> {
         let lhs = lhs.flatten_all()?.to_vec1::<f32>()?;
@@ -690,6 +756,67 @@ mod tests {
 
         assert_eq!(out.shape().dims(), &[b, h, q_len, d]);
         assert_close(&out, &expected)
+    }
+
+    // softmax(q k^T + mask) v with an explicit causal (and optionally windowed) mask, the reference for CausalFlash
+    fn causal_reference(
+        q: &Tensor,
+        k: &Tensor,
+        v: &Tensor,
+        window: Option<usize>,
+    ) -> CandleResult<Tensor> {
+        let mask =
+            eager_attention_mask(q.dim(2)?, k.dim(2)?, true, window, DType::F32, q.device())?
+                .unwrap();
+        let logits = q.matmul(&k.transpose(2, 3)?)?.broadcast_add(&mask)?;
+        candle_nn::ops::softmax(&logits, D::Minus1)?.matmul(v)
+    }
+
+    fn causal_flash_case(device: &Device, window: Option<usize>) -> CandleResult<()> {
+        let (b, h, len, d) = (1, 2, 6, 64);
+        let rand = || Tensor::randn(0f32, 1., (b, h, len, d), device);
+        let (q, k, v) = (rand()?, rand()?, rand()?);
+        let sdpa_params = SdpaParams {
+            n_kv_groups: 1,
+            softcap: None,
+            softmax_scale: 1.0,
+            sliding_window: window,
+            sinks: None,
+        };
+        let out = Sdpa.run_attention(
+            &q,
+            &k,
+            &v,
+            &AttentionMask::CausalFlash,
+            Some(&FlashParams::empty(true)),
+            &sdpa_params,
+        )?;
+        let expected = causal_reference(&q, &k, &v, window)?;
+        let diff = (out - expected)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        // a dropped causal mask moves outputs by O(1); the eager paths round within this
+        assert!(diff < CAUSAL_FLASH_TOLERANCE, "max abs diff {diff}");
+        Ok(())
+    }
+
+    #[test]
+    fn causal_flash_masks_a_cpu_mapped_layer() -> CandleResult<()> {
+        // a CUDA model's CausalFlash mask reaches the layers a device map puts on the CPU
+        causal_flash_case(&Device::Cpu, None)?;
+        causal_flash_case(&Device::Cpu, Some(3))
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn causal_flash_masks_f32_on_cuda() -> CandleResult<()> {
+        crate::skip_without_cuda!();
+        let dev = Device::new_cuda(0)?;
+        // f32 never takes the flash kernels, so its eager path has to build the causal and window mask
+        causal_flash_case(&dev, None)?;
+        causal_flash_case(&dev, Some(3))
     }
 
     #[cfg(any(

@@ -1,12 +1,28 @@
 use candle_core::{Result, Tensor};
 
-#[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
+#[cfg(feature = "cuda")]
 use crate::attention::FlashKMeta;
-#[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
+#[cfg(feature = "cuda")]
 use crate::attention::sliding_window_left;
 use crate::attention::{FlashParams, SdpaParams};
 
-pub fn flash_backend_supports(head_dim: usize, has_softcap: bool) -> bool {
+// Head dims fattn takes in every layout (dense, packed, any GQA ratio): 192/320/512/576 run only GQA-batched
+const FATTN_HEAD_DIMS: [usize; 6] = [64, 80, 96, 112, 128, 256];
+// fattn instantiates softcap only at these (and 512)
+const FATTN_SOFTCAP_HEAD_DIMS: [usize; 2] = [128, 256];
+
+fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
+    #[cfg(feature = "cuda")]
+    let available = inference_fattn::mma_available();
+    #[cfg(not(feature = "cuda"))]
+    let available = false;
+    available
+        && FATTN_HEAD_DIMS.contains(&head_dim)
+        && (!has_softcap || FATTN_SOFTCAP_HEAD_DIMS.contains(&head_dim))
+}
+
+// Dao-AILab's FA2 and FA3, behind fattn where built
+fn dao_supports(head_dim: usize, has_softcap: bool) -> bool {
     let head_dim_supported = if cfg!(feature = "flash-attn") {
         head_dim.is_multiple_of(8) && head_dim <= 512
     } else if cfg!(feature = "flash-attn-v3") {
@@ -17,12 +33,20 @@ pub fn flash_backend_supports(head_dim: usize, has_softcap: bool) -> bool {
     head_dim_supported && (!has_softcap || cfg!(feature = "flash-attn") && head_dim <= 256)
 }
 
+pub fn flash_backend_supports(head_dim: usize, has_softcap: bool) -> bool {
+    fattn_supports(head_dim, has_softcap) || dao_supports(head_dim, has_softcap)
+}
+
 pub fn flash_backend_supports_sdpa(
     head_dim: usize,
     has_softcap: bool,
     has_sliding_window: bool,
 ) -> bool {
-    if !flash_backend_supports(head_dim, has_softcap) {
+    // fattn's windows are causal; a bidirectional one falls back to FA2 or eager at the call
+    if fattn_supports(head_dim, has_softcap) {
+        return true;
+    }
+    if !dao_supports(head_dim, has_softcap) {
         return false;
     }
     if !has_sliding_window {
@@ -32,7 +56,7 @@ pub fn flash_backend_supports_sdpa(
     cfg!(feature = "flash-attn") && head_dim <= 256
 }
 
-#[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
+#[cfg(feature = "cuda")]
 fn varlen_metadata<'a>(
     q: &Tensor,
     params: &'a FlashParams,
@@ -53,6 +77,59 @@ fn varlen_metadata<'a>(
         return Ok(None);
     };
     Ok(Some((cumulative_seqlens_q, k_meta, cumulative_seqlens_k)))
+}
+
+// fattn (llama.cpp's kernels) first; None for what it cannot take (head dims, softcap, f32 K/V, bidirectional windows)
+#[cfg(feature = "cuda")]
+fn try_fattn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    flash_params: Option<&FlashParams>,
+    sdpa_params: &SdpaParams,
+) -> Result<Option<Tensor>> {
+    use inference_fattn::{FattnOptions, Packed};
+
+    let (b_sz, seq_len, _n_attn_heads, _head_dim) = q.dims4()?;
+    // one query per sequence sees the same keys causal or not (decode over gathered K/V passes causal false)
+    let causal = flash_params.map_or(seq_len > 1, |p| p.causal) || seq_len == 1;
+    if !q.device().is_cuda() || sdpa_params.sliding_window.is_some() && !causal {
+        return Ok(None);
+    }
+    let opts = FattnOptions {
+        scale: sdpa_params.softmax_scale,
+        softcap: sdpa_params.softcap.unwrap_or(0.),
+        causal,
+        window_left: sliding_window_left(sdpa_params.sliding_window),
+        ..Default::default()
+    };
+    let use_varlen =
+        b_sz > 1 || seq_len != k.dim(1)? || flash_params.is_some_and(|params| params.packed);
+    if use_varlen
+        && let Some(params) = flash_params
+        && let Some((cumulative_seqlens_q, k_meta, cumulative_seqlens_k)) =
+            varlen_metadata(q, params, sdpa_params.sliding_window)?
+    {
+        let q_seqs = Packed {
+            cu_seqlens: cumulative_seqlens_q,
+            max_len: params.max_q as usize,
+        };
+        let kv_seqs = Packed {
+            cu_seqlens: cumulative_seqlens_k,
+            max_len: k_meta.max as usize,
+        };
+        let (qf, kf, vf) = (q.flatten_to(1)?, k.flatten_to(1)?, v.flatten_to(1)?);
+        if !inference_fattn::supported_varlen(&qf, &kf, &vf, &q_seqs, &kv_seqs, &opts)? {
+            return Ok(None);
+        }
+        return inference_fattn::flash_attn_varlen(&qf, &kf, &vf, &q_seqs, &kv_seqs, &opts)?
+            .reshape(q.shape())
+            .map(Some);
+    }
+    if !inference_fattn::supported(q, k, v, &opts)? {
+        return Ok(None);
+    }
+    inference_fattn::flash_attn(q, k, v, &opts).map(Some)
 }
 
 #[cfg(feature = "flash-attn")]
@@ -203,68 +280,51 @@ fn flash_attn_v3(
     )
 }
 
-#[cfg(feature = "flash-attn-v3")]
+/// Flash attention over `(b, seq, heads, head_dim)` operands; None when no built kernel takes the call.
 pub fn flash_attn(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
     flash_params: Option<&FlashParams>,
     sdpa_params: &SdpaParams,
-) -> Result<Tensor> {
-    let q_dims = q.dims4()?;
-    let head_dim = q_dims.3;
-    if !flash_backend_supports_sdpa(
-        head_dim,
-        sdpa_params.softcap.is_some(),
-        sdpa_params.sliding_window.is_some(),
-    ) {
-        candle_core::bail!(
-            "FlashAttention does not support head_dim={head_dim} with softcap={}",
-            sdpa_params.softcap.is_some()
-        );
-    }
+) -> Result<Option<Tensor>> {
+    let head_dim = q.dim(3)?;
+    #[cfg(not(feature = "cuda"))]
+    let _ = (k, v, flash_params);
     // v3 wins on single-sequence prefill and ties elsewhere, so it takes the head dims it supports.
     // v3 never sets is_local, so its sliding window is a no-op; leave those to v2.
+    #[cfg(feature = "flash-attn-v3")]
     if matches!(head_dim, 64 | 128 | 256 | 512)
         && sdpa_params.softcap.is_none()
         && sdpa_params.sliding_window.is_none()
     {
-        return flash_attn_v3(q, k, v, flash_params, sdpa_params);
+        return flash_attn_v3(q, k, v, flash_params, sdpa_params).map(Some);
     }
-
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_fattn(q, k, v, flash_params, sdpa_params)? {
+        return Ok(Some(out));
+    }
+    let supported = dao_supports(head_dim, sdpa_params.softcap.is_some())
+        && (sdpa_params.sliding_window.is_none()
+            || cfg!(feature = "flash-attn") && head_dim <= 256);
+    if !supported {
+        return Ok(None);
+    }
     #[cfg(feature = "flash-attn")]
     {
-        flash_attn_v2(q, k, v, flash_params, sdpa_params)
+        flash_attn_v2(q, k, v, flash_params, sdpa_params).map(Some)
     }
-    #[cfg(not(feature = "flash-attn"))]
+    #[cfg(all(feature = "flash-attn-v3", not(feature = "flash-attn")))]
     {
-        flash_attn_v3(q, k, v, flash_params, sdpa_params)
+        flash_attn_v3(q, k, v, flash_params, sdpa_params).map(Some)
+    }
+    #[cfg(not(any(feature = "flash-attn", feature = "flash-attn-v3")))]
+    {
+        Ok(None)
     }
 }
 
-#[cfg(all(feature = "flash-attn", not(feature = "flash-attn-v3")))]
-pub fn flash_attn(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    flash_params: Option<&FlashParams>,
-    sdpa_params: &SdpaParams,
-) -> Result<Tensor> {
-    flash_attn_v2(q, k, v, flash_params, sdpa_params)
-}
-
-#[cfg(not(any(feature = "flash-attn", feature = "flash-attn-v3")))]
-pub fn flash_attn(
-    _: &Tensor,
-    _: &Tensor,
-    _: &Tensor,
-    _: Option<&FlashParams>,
-    _: &SdpaParams,
-) -> Result<Tensor> {
-    unimplemented!("Compile with `--features flash-attn` or `--features flash-attn-v3`.")
-}
-
-#[cfg(all(test, any(feature = "flash-attn", feature = "flash-attn-v3")))]
+#[cfg(all(test, feature = "cuda"))]
 mod tests {
     use std::collections::HashMap;
 
@@ -330,8 +390,9 @@ mod tests {
     #[test]
     fn backend_capabilities_reject_unsupported_softcap_and_head_dims() {
         assert!(!flash_backend_supports(640, false));
+        assert!(flash_backend_supports(128, true));
         assert_eq!(
-            flash_backend_supports(128, true),
+            flash_backend_supports(64, true),
             cfg!(feature = "flash-attn")
         );
         assert!(!flash_backend_supports(512, true));
