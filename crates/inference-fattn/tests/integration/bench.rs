@@ -4,7 +4,10 @@ use std::time::Instant;
 
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use inference_fattn::{FattnOptions, causal_mask, flash_attn};
+use inference_fattn::{
+    FattnOptions, PagedKv, causal_mask, flash_attn, flash_attn_paged, paged_causal_mask,
+    paged_kv_len,
+};
 
 const WARMUP: usize = 5;
 const ITERS: usize = 50;
@@ -105,6 +108,79 @@ fn fattn_vs_fa2() -> Result<()> {
             println!(
                 "{label}: fattn {fattn_us:9.1} us  fa2 {fa2_us:9.1} us  ratio {:.2}",
                 fattn_us / fa2_us
+            );
+        }
+    }
+    Ok(())
+}
+
+// (batch, seq_q, seq_kv) for paged against dense: decode, a decode batch, and a prefill chunk over a cache
+const PAGED_RUNS: [(usize, usize, usize); 6] = [
+    (1, 1, 4096),
+    (1, 1, 16384),
+    (8, 1, 4096),
+    (8, 1, 16384),
+    (1, 256, 4096),
+    (1, 1024, 4096),
+];
+const PAGED_BLOCK_SIZE: usize = 32;
+
+#[test]
+#[ignore]
+fn paged_vs_dense() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let filter = std::env::var(FILTER_ENV).unwrap_or_default();
+    for shape in SHAPES {
+        for (batch, seq_q, seq_kv) in PAGED_RUNS {
+            let label = format!("{:<24} b {batch} q {seq_q:>5} kv {seq_kv:>5}", shape.name);
+            if !label.contains(&filter) {
+                continue;
+            }
+            let d = shape.head_dim;
+            let h_kv = shape.n_head_kv;
+            let blocks = seq_kv / PAGED_BLOCK_SIZE;
+            let rand = |dims: &[usize]| -> Result<Tensor> {
+                Ok(Tensor::randn(0f32, 1., dims, &dev)?.to_dtype(DType::BF16)?)
+            };
+            let q = rand(&[batch, seq_q, shape.n_head, d])?;
+            let k_cache = rand(&[batch * blocks, h_kv, PAGED_BLOCK_SIZE, d])?;
+            let v_cache = rand(&[batch * blocks, h_kv, PAGED_BLOCK_SIZE, d])?;
+            // sequence s owns blocks s, s + batch, s + 2 * batch, ...: interleaved, as a shared pool hands them out
+            let table: Vec<u32> = (0..batch)
+                .flat_map(|s| (0..blocks).map(move |j| (j * batch + s) as u32))
+                .collect();
+            let block_table = Tensor::from_vec(table, (batch, blocks), &dev)?;
+            let seq_lens = Tensor::from_vec(vec![seq_kv as u32; batch], batch, &dev)?;
+            let kv = PagedKv {
+                k_cache: &k_cache,
+                v_cache: &v_cache,
+                block_table: &block_table,
+                seq_lens: &seq_lens,
+            };
+            let lens = vec![seq_kv; batch];
+            let scale = 1. / (d as f32).sqrt();
+            let paged_opts = FattnOptions {
+                scale,
+                mask: Some(paged_causal_mask(&lens, seq_q, paged_kv_len(&kv)?, &dev)?),
+                ..Default::default()
+            };
+            let dense = |c: &Tensor| -> Result<Tensor> {
+                Ok(c.reshape((blocks, batch, h_kv, PAGED_BLOCK_SIZE, d))?
+                    .permute((1, 0, 3, 2, 4))?
+                    .reshape((batch, seq_kv, h_kv, d))?
+                    .contiguous()?)
+            };
+            let (k, v) = (dense(&k_cache)?, dense(&v_cache)?);
+            let dense_opts = FattnOptions {
+                scale,
+                mask: Some(paged_causal_mask(&lens, seq_q, seq_kv, &dev)?),
+                ..Default::default()
+            };
+            let paged_us = time(&dev, || flash_attn_paged(&q, &kv, &paged_opts))?;
+            let dense_us = time(&dev, || flash_attn(&q, &k, &v, &dense_opts))?;
+            println!(
+                "{label}: paged {paged_us:9.1} us  dense {dense_us:9.1} us  ratio {:.2}",
+                paged_us / dense_us
             );
         }
     }

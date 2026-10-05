@@ -6,7 +6,7 @@ use candle_core::{
     backend::BackendStorage,
 };
 
-use crate::FattnOptions;
+use crate::{FattnOptions, PagedKv};
 
 // ggml_type ids
 const GGML_TYPE_F32: i32 = 0;
@@ -22,6 +22,8 @@ const Q_LOAD_ALIGN: usize = 16;
 const KV_LOAD_ALIGN: usize = 16;
 // supported() never launches, but fattn reads a null mask or sinks pointer as absent, so it describes operands at this
 const PROBE_PTR: u64 = 256;
+// FATTN_KQ_STRIDE: a paged call's K/V length is padded to it, which the GQA-batched kernels and tile skipping need
+const PAGED_KV_PAD: usize = 256;
 
 mod ffi {
     #[repr(C)]
@@ -31,6 +33,17 @@ mod ffi {
         pub ty: i32,
         pub ne: [i64; 4],
         pub nb: [i64; 4],
+    }
+
+    // fattn_paged_kv in fattn-common.cuh
+    #[repr(C)]
+    pub struct Paged {
+        pub block_table: *const core::ffi::c_void,
+        pub seq_lens: *const core::ffi::c_void,
+        pub max_blocks: i32,
+        pub block_size_log2: i32,
+        pub block_stride_k: i64,
+        pub block_stride_v: i64,
     }
 
     #[repr(C)]
@@ -47,6 +60,7 @@ mod ffi {
         pub softcap: f32,
         pub device: i32,
         pub stream: *mut core::ffi::c_void,
+        pub paged: *const Paged,
     }
 
     unsafe extern "C" {
@@ -101,6 +115,26 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
             );
         }
     }
+    if h_kv == 0 || h % h_kv != 0 {
+        candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
+    }
+    if let Some(mask) = &opts.mask {
+        let (mb, mq, mkv) = mask.dims3()?;
+        if (mq, mkv) != (q.dim(1)?, s_kv) || mb == 0 || b % mb != 0 {
+            candle_core::bail!(
+                "fattn mask {:?} does not fit q {:?} and k {:?}",
+                mask.shape(),
+                q.shape(),
+                k.shape()
+            );
+        }
+    }
+    validate_operands(q, k, v, opts)
+}
+
+// Checks shared by dense and paged calls: dtypes, alignment, mask and sinks layout, the device.
+fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<()> {
+    let h = q.dim(2)?;
     let rows_aligned = |t: &Tensor| {
         let l = t.layout();
         let es = t.dtype().size_in_bytes();
@@ -114,9 +148,6 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
             "fattn reads K/V rows in {KV_LOAD_ALIGN}-byte chunks; their offsets and strides must align"
         );
     }
-    if h_kv == 0 || h % h_kv != 0 {
-        candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
-    }
     if !matches!(k.dtype(), DType::F16 | DType::BF16) || k.dtype() != v.dtype() {
         candle_core::bail!(
             "fattn takes f16 or bf16 K and V of one dtype, got {:?} and {:?}",
@@ -124,22 +155,13 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
             v.dtype()
         );
     }
-    if let Some(mask) = &opts.mask {
-        let (mb, mq, mkv) = mask.dims3()?;
-        if mask.dtype() != DType::F16 || mask.layout().stride()[2] != 1 {
-            candle_core::bail!(
-                "fattn needs an f16 mask with a contiguous last dim, got {:?}",
-                mask.dtype()
-            );
-        }
-        if (mq, mkv) != (q.dim(1)?, s_kv) || mb == 0 || b % mb != 0 {
-            candle_core::bail!(
-                "fattn mask {:?} does not fit q {:?} and k {:?}",
-                mask.shape(),
-                q.shape(),
-                k.shape()
-            );
-        }
+    if let Some(mask) = &opts.mask
+        && (mask.dtype() != DType::F16 || mask.layout().stride()[2] != 1)
+    {
+        candle_core::bail!(
+            "fattn needs an f16 mask with a contiguous last dim, got {:?}",
+            mask.dtype()
+        );
     }
     if let Some(sinks) = &opts.sinks
         && (sinks.dtype() != DType::F32 || sinks.dims1()? != h || !sinks.is_contiguous())
@@ -221,6 +243,10 @@ fn device_ptr<'a>(
             let (p, g) = storage.as_cuda_slice::<half::bf16>()?.device_ptr(stream);
             (p, Box::new(g))
         }
+        DType::U32 => {
+            let (p, g) = storage.as_cuda_slice::<u32>()?.device_ptr(stream);
+            (p, Box::new(g))
+        }
         dt => candle_core::bail!("fattn does not take {dt:?}"),
     };
     guards.push(guard);
@@ -249,7 +275,27 @@ fn args(
         softcap: opts.softcap,
         device: stream.context().ordinal() as i32,
         stream: stream.cu_stream() as *mut _,
+        paged: std::ptr::null(),
     }
+}
+
+// A `(num_blocks, n_head_kv, block_size, dim)` cache as ggml's `[dim, n_kv, n_head_kv, batch]`; the table picks blocks.
+fn cache_descriptor(
+    ptr: u64,
+    dtype: DType,
+    layout: &Layout,
+    b: usize,
+    n_kv: usize,
+) -> Result<ffi::Tensor> {
+    let (_, h_kv, _, d) = layout.shape().dims4()?;
+    let st = layout.stride();
+    let es = dtype.size_in_bytes() as i64;
+    Ok(ffi::Tensor {
+        data: ptr as *const _,
+        ty: ggml_type(dtype)?,
+        ne: [d as i64, n_kv as i64, h_kv as i64, b as i64],
+        nb: [es, st[2] as i64 * es, st[1] as i64 * es, 0],
+    })
 }
 
 fn extra_operand<'a>(
@@ -269,6 +315,7 @@ fn extra_operand<'a>(
 
 struct Fattn<'a> {
     opts: &'a FattnOptions,
+    paged: Option<PagedKv<'a>>,
 }
 
 impl candle_core::CustomOp3 for Fattn<'_> {
@@ -304,13 +351,51 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         }
         let mask = self.opts.mask.as_ref().map(|t| t.storage_and_layout());
         let sinks = self.opts.sinks.as_ref().map(|t| t.storage_and_layout());
+        let tables = self.paged.map(|p| {
+            (
+                p.block_table.storage_and_layout(),
+                p.seq_lens.storage_and_layout(),
+            )
+        });
         let mut guards = Guards::new();
+        let (b, sq, h, _) = q_l.shape().dims4()?;
         let q_t = bhsd(device_ptr(q, q_l, &stream, &mut guards)?, q.dtype(), q_l)?;
-        let k_t = bhsd(device_ptr(k, k_l, &stream, &mut guards)?, k.dtype(), k_l)?;
-        let v_t = bhsd(device_ptr(v, v_l, &stream, &mut guards)?, v.dtype(), v_l)?;
+        let k_ptr = device_ptr(k, k_l, &stream, &mut guards)?;
+        let v_ptr = device_ptr(v, v_l, &stream, &mut guards)?;
+        let paged = match (&self.paged, &tables) {
+            (Some(p), Some(((table, table_l), (lens, lens_l)))) => {
+                let (Storage::Cuda(table), Storage::Cuda(lens)) = (&**table, &**lens) else {
+                    candle_core::bail!("fattn operands must be on CUDA")
+                };
+                let block_size = k_l.dims()[2];
+                let es = k.dtype().size_in_bytes() as i64;
+                Some(ffi::Paged {
+                    block_table: device_ptr(table, table_l, &stream, &mut guards)? as *const _,
+                    seq_lens: device_ptr(lens, lens_l, &stream, &mut guards)? as *const _,
+                    max_blocks: p.block_table.dim(1)? as i32,
+                    block_size_log2: block_size.trailing_zeros() as i32,
+                    block_stride_k: k_l.stride()[0] as i64 * es,
+                    block_stride_v: v_l.stride()[0] as i64 * es,
+                })
+            }
+            _ => None,
+        };
+        let (k_t, v_t) = match &self.paged {
+            Some(p) => {
+                let n_kv = paged_kv_len(p)?;
+                (
+                    cache_descriptor(k_ptr, k.dtype(), k_l, b, n_kv)?,
+                    cache_descriptor(v_ptr, v.dtype(), v_l, b, n_kv)?,
+                )
+            }
+            None => (bhsd(k_ptr, k.dtype(), k_l)?, bhsd(v_ptr, v.dtype(), v_l)?),
+        };
         let mask_t = extra_operand(&mask, mask_descriptor, &stream, &mut guards)?;
         let sinks_t = extra_operand(&sinks, sinks_descriptor, &stream, &mut guards)?;
         let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, self.opts, &stream);
+        if let Some(paged) = &paged {
+            args.paged = paged;
+        }
         if !unsafe { ffi::inference_fattn_supported(&args) } {
             candle_core::bail!(
                 "fattn has no kernel for q {:?} k {:?} v {:?}",
@@ -319,7 +404,6 @@ impl candle_core::CustomOp3 for Fattn<'_> {
                 v_l.shape()
             );
         }
-        let (b, sq, h, _) = q_l.shape().dims4()?;
         let dv = v_l.shape().dims4()?.3;
         let n = b * sq * h * dv;
         let launch = |args: &mut ffi::Args, ptr: u64| -> Result<()> {
@@ -382,7 +466,7 @@ fn kernel_q(q: &Tensor) -> Result<Tensor> {
 pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<Tensor> {
     validate(q, k, v, opts)?;
     kernel_q(q)?
-        .apply_op3_no_bwd(k, v, &Fattn { opts })?
+        .apply_op3_no_bwd(k, v, &Fattn { opts, paged: None })?
         .to_dtype(q.dtype())
 }
 
@@ -430,4 +514,106 @@ pub fn causal_mask(seq_q: usize, seq_kv: usize, device: &Device) -> Result<Tenso
         })
         .collect();
     Tensor::from_vec(mask, (1, seq_q, seq_kv), device)?.to_dtype(DType::F16)
+}
+
+/// The K/V length a paged call attends over (the mask's last dim): the block table's span, padded to fattn's KV tile.
+pub fn paged_kv_len(kv: &PagedKv) -> Result<usize> {
+    let block_size = kv.k_cache.dim(2)?;
+    Ok((kv.block_table.dim(1)? * block_size).next_multiple_of(PAGED_KV_PAD))
+}
+
+fn validate_paged(q: &Tensor, kv: &PagedKv, opts: &FattnOptions) -> Result<()> {
+    let (b, sq, h, d) = q.dims4()?;
+    let (nb, h_kv, bs, kd) = kv.k_cache.dims4()?;
+    let (vnb, vh, vbs, _) = kv.v_cache.dims4()?;
+    if !bs.is_power_of_two() {
+        candle_core::bail!("paged fattn needs a power-of-two block size, got {bs}");
+    }
+    if kd != d || (nb, h_kv, bs) != (vnb, vh, vbs) {
+        candle_core::bail!(
+            "fattn paged operands disagree: q {:?} k cache {:?} v cache {:?}",
+            q.shape(),
+            kv.k_cache.shape(),
+            kv.v_cache.shape()
+        );
+    }
+    if d == MLA_HEAD_DIM {
+        candle_core::bail!(
+            "fattn reads V out of K at head dim {MLA_HEAD_DIM}, which separate paged caches cannot give"
+        );
+    }
+    if kv.block_table.dim(1)? == 0 {
+        candle_core::bail!("paged fattn needs at least one block per sequence");
+    }
+    let tables_ok = kv.block_table.dtype() == DType::U32
+        && kv.block_table.dims2()?.0 == b
+        && kv.block_table.is_contiguous()
+        && kv.seq_lens.dtype() == DType::U32
+        && kv.seq_lens.dims1()? == b
+        && kv.seq_lens.is_contiguous();
+    if !tables_ok {
+        candle_core::bail!(
+            "fattn needs contiguous u32 block tables (batch, max_blocks) and seq lens (batch,), got {:?} and {:?}",
+            kv.block_table.shape(),
+            kv.seq_lens.shape()
+        );
+    }
+    // rows past a sequence's length are read from its first row, so only the mask keeps them out
+    let n_kv = paged_kv_len(kv)?;
+    match &opts.mask {
+        Some(mask) if mask.dims3()? == (b, sq, n_kv) => {}
+        _ => candle_core::bail!(
+            "paged fattn needs a (batch, seq_q, {n_kv}) mask hiding each sequence's unused rows"
+        ),
+    }
+    if kv.k_cache.layout().stride()[3] != 1 || kv.v_cache.layout().stride()[3] != 1 {
+        candle_core::bail!("fattn needs the paged caches' head dim contiguous");
+    }
+    if h_kv == 0 || h % h_kv != 0 {
+        candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
+    }
+    Ok(())
+}
+
+/// Attention of `q (b, seq_q, n_head, d)` over each sequence's rows in a paged cache; the mask spans `paged_kv_len`.
+pub fn flash_attn_paged(q: &Tensor, kv: &PagedKv, opts: &FattnOptions) -> Result<Tensor> {
+    validate_paged(q, kv, opts)?;
+    validate_operands(q, kv.k_cache, kv.v_cache, opts)?;
+    kernel_q(q)?
+        .apply_op3_no_bwd(
+            kv.k_cache,
+            kv.v_cache,
+            &Fattn {
+                opts,
+                paged: Some(*kv),
+            },
+        )?
+        .to_dtype(q.dtype())
+}
+
+/// Additive f16 causal mask `(b, seq_q, n_kv)`; sequence `i`'s queries are the last `seq_q` of its `seq_lens[i]` rows.
+pub fn paged_causal_mask(
+    seq_lens: &[usize],
+    seq_q: usize,
+    n_kv: usize,
+    device: &Device,
+) -> Result<Tensor> {
+    let mut mask = Vec::with_capacity(seq_lens.len() * seq_q * n_kv);
+    for &len in seq_lens {
+        let Some(offset) = len.checked_sub(seq_q) else {
+            candle_core::bail!(
+                "a causal mask needs seq_q ({seq_q}) <= the sequence's length ({len})"
+            );
+        };
+        for i in 0..seq_q {
+            mask.extend((0..n_kv).map(|j| {
+                if j <= i + offset {
+                    0f32
+                } else {
+                    f32::NEG_INFINITY
+                }
+            }));
+        }
+    }
+    Tensor::from_vec(mask, (seq_lens.len(), seq_q, n_kv), device)?.to_dtype(DType::F16)
 }

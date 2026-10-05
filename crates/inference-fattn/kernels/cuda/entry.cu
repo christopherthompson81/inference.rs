@@ -1,5 +1,6 @@
 // C entry points: wrap raw device pointers in ggml tensor descriptors and run fattn on the caller's stream.
 
+#include "fattn-common.cuh"
 #include "fattn.cuh"
 
 extern thread_local cudaStream_t inference_fattn_current_stream;
@@ -21,6 +22,7 @@ struct inference_fattn_args {
     float   softcap;
     int32_t device;
     void *  stream; // cudaStream_t
+    const fattn_paged_kv * paged; // null: dense K/V; otherwise k/v describe one block's head and row strides
 };
 
 namespace {
@@ -60,6 +62,7 @@ struct operands {
         dst.src[4] = a.sinks.data ? &sinks : nullptr;
         const float params[3] = {a.scale, a.max_bias, a.softcap};
         memcpy(dst.op_params, params, sizeof(params));
+        memcpy(dst.op_params + FATTN_OP_PARAMS_PAGED, &a.paged, sizeof(a.paged));
     }
 };
 

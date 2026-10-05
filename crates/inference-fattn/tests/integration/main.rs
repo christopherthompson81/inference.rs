@@ -2,4 +2,5 @@
 
 #[cfg(feature = "bench-fa2")]
 mod bench;
+mod paged;
 mod parity;
