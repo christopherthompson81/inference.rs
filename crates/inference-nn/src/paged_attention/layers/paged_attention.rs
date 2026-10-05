@@ -14,7 +14,7 @@ use inference_paged_attn::{
 use inference_paged_attn::{paged_attention, reshape_and_cache};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::attention::sliding_window_left;
+use crate::attention::{fattn_sinks, sliding_window_left};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::flashinfer::{
     Fa3DecodeScheduleKey, Fa3DecodeView, Fa3PagedScheduleShape, fa3_device_num_sm,
@@ -1555,8 +1555,10 @@ impl PagedAttention {
             return Ok(None);
         }
 
+        // fattn takes packed sinks as it takes any packed query; Metal's sinks kernel wants it padded per sequence
         let att = if ctx.flash_params.is_some_and(|params| params.packed)
             && ctx.sdpa_params.sinks.is_some()
+            && !tensors.query.device().is_cuda()
         {
             let query_lens = ctx.input_metadata.query_lens.as_deref().ok_or_else(|| {
                 candle_core::Error::msg("packed sinks prefill is missing logical query lengths")
@@ -1660,7 +1662,6 @@ impl PagedAttention {
             attention_backend,
             head_size: ctx.dims.head_size,
             has_alibi: ctx.alibi_slopes.is_some(),
-            has_sinks: ctx.sdpa_params.sinks.is_some(),
             has_sliding_window: ctx.sdpa_params.sliding_window.is_some(),
         })? {
             DecodePlan::GatherSdpa => self.run_decode_gather_sdpa(
@@ -1945,6 +1946,7 @@ impl PagedAttention {
             causal,
             // a non-causal chunk's window bounds the left only, as the gather's masks do
             window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
+            sinks: fattn_sinks(ctx.sdpa_params.sinks.as_ref())?,
             ..Default::default()
         };
         let q = query.transpose(1, 2)?;
@@ -2015,6 +2017,7 @@ impl PagedAttention {
             }),
             causal: true,
             window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
+            sinks: fattn_sinks(ctx.sdpa_params.sinks.as_ref())?,
             ..Default::default()
         };
         let query = query.unsqueeze(1)?;

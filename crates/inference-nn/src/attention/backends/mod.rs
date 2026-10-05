@@ -5,6 +5,8 @@ pub mod metal_flash_attn;
 pub(super) mod naive;
 mod sinks;
 
+#[cfg(feature = "cuda")]
+pub use flash::fattn_sinks;
 pub use flash::{fattn_supports, flash_attn, flash_backend_supports, flash_backend_supports_sdpa};
 pub use naive::naive_sdpa;
 pub use sinks::{sinks_attn, sinks_backend_is_available, sinks_backend_supports};

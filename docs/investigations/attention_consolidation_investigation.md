@@ -1092,3 +1092,56 @@ Review follow-up:
   alone; `--stress-count 300` failed 1 of 93 before stopping. The inputs are unseeded `randn` with d = 64 and
   scale 1.0, so logits have std ~8. With queries scaled by 1/sqrt(d), as real models do, 2000 of 2000 runs pass.
   It predates this PR and is not touched by the kernel fixes (6 queries, binary mask rows).
+
+## Run 17 - 2026-10-05 14:29
+
+Question: can gpt-oss run on fattn's sinks (prefill, paged prefill, HND decode), so `flash_attn_sinks.cu` can go?
+
+Changes: Sdpa tries fattn first for sinks on CUDA (FA3 never takes sinks), and builds the causal/window mask
+explicitly when it falls back to the unfused path. The paged fattn decode and prefill pass the sinks; the HND
+decode plan and fattn's paged-prefill plan no longer reject them; packed sinks prefill stays packed on CUDA (only
+Metal's kernel wants it padded). `sinks_backend_supports` now means fattn on CUDA (f16/bf16, its head dims, Turing+)
+and the sinks kernels on Metal. gpt-oss drops its `StandardNoFlashInfer` pin and its forced custom masks, which had
+sent every unpacked CUDA prompt through the unfused path.
+
+Layer checks first (all pass): `decode_with_sinks_matches_a_reference` (head dim 64, bf16/f16/fp8, no window, a
+100-token window, a full layer of a windowed model, and an 8-token window shorter than a 32-row block) and
+`prefix_prefill_with_sinks_matches_a_reference` against a hand reference with the sink as an extra softmax logit;
+`sinks_prefill_on_cuda_matches_the_cpu` for the dense Sdpa path. At gpt-oss-like magnitudes (queries x4, sinks 8)
+bf16 decode stays under 0.01 max abs and the dense prefill at ~1 ulp once the reference sees bf16-rounded inputs.
+
+End to end the tiny gpt-oss test then failed: prompt 3 split at step 5 with the GPU's top token (logprob -1.51)
+outside the CPU's top three (-1.81/-2.00/-2.78). Bisected with env toggles: graphs off fails, Standard decode
+(`INFERENCE_RS_FLASHINFER_DECODE=0`) fails, skipping only the fattn prefill passes, so fattn's dense prefill was
+the trigger. Inside the model, fattn against the unfused path on the same inputs differed by 0.05-0.125 (1-2 bf16
+ulps at these output magnitudes), with layouts reproduced exactly in the unit test, which passes. So not a kernel
+bug: the old GPU path was the same unfused bf16 algorithm as the CPU and rounded alike, fattn rounds differently,
+and the fixture's top-1-of-2 MoE routing turns ulps into a different expert.
+
+Fixture changes, and the numbers behind them:
+- Every expert per token (both models), so routing is continuous: still 16 agreed steps of 72 for gpt-oss in bf16,
+  every split now a genuine runner-up swap at margins 0.03-0.06.
+- The extra routing made gpt-oss sample its end token, so the requests ignore EOS (each step still checks attention).
+- gpt-oss in f16: 72 of 72 steps match, with fattn and with the fallback alike. Llama 4 stays bf16 (f16 overflowed
+  to NaN on the GPU in Run 16) and still matches.
+- Mutations, each reverted: no sinks in fattn decode fails; no sinks in fattn prefill fails.
+
+Deleted: `flash_attn_sinks.cu` and its bindings (six FFI entry points). Metal keeps its sinks kernels; a CUDA call
+fattn cannot take (pre-Turing, f32, head dims it lacks) takes the unfused path, and a varlen one fails loudly
+rather than run the CPU loop that applies no mask.
+
+Not measured: no gpt-oss checkpoint is local, so there are no real-model numbers here. Prefill had run the unfused
+path for every unpacked prompt and sliding decode gathered, so both should only get faster.
+
+Next: Llama 4's chunked attention as a fattn mask mode, then the vLLM v1/v2 CUDA kernels.
+
+Review follow-up:
+- The explicit causal/window mask was built for every CausalFlash call on any device. On Metal that sent a fused
+  sinks call to the unfused path, and built an unused O(max_q x total_kv) host mask for packed prefill. It is now
+  built only where no fused kernel follows. `causal_flash_with_sinks_masks_the_unfused_path` covers the CPU side, which
+  had silently dropped causality when a CausalFlash mask reached a CPU-mapped layer of a CUDA model.
+- `DecodePlanInput::has_sinks` was dead after the HND plan stopped reading it; removed. The Metal sinks shader no
+  longer says it ports the deleted CUDA file.
+- Left as follow-ups: sinks are cast to f32 on every fattn call (one 64-element kernel per layer per step; each
+  backend wants a different dtype, so a load-time copy needs its own field), and f32 caches on Turing+ take HND and
+  then gather every decode (all models, not just gpt-oss; f32 serving is rare).

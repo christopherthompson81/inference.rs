@@ -4,12 +4,7 @@ use inference_quant::MatMul;
 
 use crate::attention::{SdpaParams, repeat_kv};
 
-/// Fused attention with per-head sinks.
-///
-/// Dispatches to:
-///   CUDA  -> flash_attn_sinks / flash_attn_sinks_varlen
-///   Metal -> flash_attn_sinks_metal / flash_attn_sinks_varlen_metal
-///   CPU   -> unfused matmul + softmax_with_sinks
+/// Attention with per-head sinks where fattn does not take the call: Metal's fused kernels, else unfused.
 ///
 /// Varlen is used when flash_params contains cu_seqlens_k for this device AND
 /// q has batch > 1.
@@ -68,21 +63,25 @@ pub fn sinks_backend_is_available(query: &Tensor, head_size: usize) -> bool {
     sinks_backend_supports(query.dtype(), query.device().location(), head_size)
 }
 
+/// Whether a fused kernel takes sinks attention here: fattn on CUDA, the sinks kernels on Metal.
 pub fn sinks_backend_supports(dtype: DType, location: DeviceLocation, head_size: usize) -> bool {
-    if !sinks_kernel_supports(dtype, head_size) {
-        return false;
-    }
-
     match location {
         #[cfg(all(feature = "cuda", target_family = "unix"))]
-        DeviceLocation::Cuda { .. } => true,
+        DeviceLocation::Cuda { .. } => {
+            matches!(dtype, DType::F16 | DType::BF16)
+                && crate::attention::fattn_supports(head_size, false)
+        }
         #[cfg(feature = "metal")]
-        DeviceLocation::Metal { .. } => true,
-        _ => false,
+        DeviceLocation::Metal { .. } => metal_sinks_kernel_supports(dtype, head_size),
+        _ => {
+            let _ = (dtype, head_size);
+            false
+        }
     }
 }
 
-fn sinks_kernel_supports(dtype: DType, head_size: usize) -> bool {
+#[cfg(any(feature = "metal", test))]
+fn metal_sinks_kernel_supports(dtype: DType, head_size: usize) -> bool {
     matches!(dtype, DType::F16 | DType::BF16 | DType::F32)
         && matches!(head_size, 64 | 80 | 96 | 112 | 128 | 192 | 256)
 }
@@ -92,10 +91,7 @@ fn kv_layout_is_packed(dims: &[usize]) -> bool {
 }
 
 /// Non-varlen sinks attention: Q [B, H, q_len, D], K/V [B, kv_H, kv_len, D]
-#[cfg_attr(
-    not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(feature = "metal"), allow(unused_variables))]
 fn sinks_attn_regular(
     q: &Tensor,
     k: &Tensor,
@@ -107,18 +103,6 @@ fn sinks_attn_regular(
 ) -> Result<Tensor> {
     if mask.is_some() {
         return sinks_attn_unfused(q, k, v, sinks, mask, sdpa_params);
-    }
-
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
-    if q.device().is_cuda() {
-        return inference_paged_attn::flash_attn_sinks(
-            q,
-            k,
-            v,
-            Some(sinks),
-            sdpa_params.softmax_scale,
-            window_size,
-        );
     }
 
     #[cfg(feature = "metal")]
@@ -133,16 +117,12 @@ fn sinks_attn_regular(
         );
     }
 
-    // CPU: unfused matmul + softmax_with_sinks
     sinks_attn_unfused(q, k, v, sinks, mask, sdpa_params)
 }
 
 /// Varlen sinks attention: Q [B, H, max_q, D], K/V packed [total_kv, kv_H, D]
 /// or K/V [1, kv_H, total_kv, D] (squeezed+transposed automatically).
-#[cfg_attr(
-    not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")),
-    allow(unused_variables)
-)]
+#[cfg_attr(not(feature = "metal"), allow(unused_variables))]
 fn sinks_attn_varlen(
     q: &Tensor,
     k: &Tensor,
@@ -173,18 +153,9 @@ fn sinks_attn_varlen(
         candle_core::bail!("sinks varlen metadata does not match the query batch");
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    // the per-sequence loop below applies neither causality nor a window, which only CPU callers can do without
     if device.is_cuda() {
-        return inference_paged_attn::flash_attn_sinks_varlen(
-            q,
-            &k_packed,
-            &v_packed,
-            Some(sinks),
-            cu_seqlens_q,
-            cu_seqlens_k,
-            sdpa_params.softmax_scale,
-            window_size,
-        );
+        candle_core::bail!("no fattn kernel takes this varlen sinks attention");
     }
 
     #[cfg(feature = "metal")]
@@ -283,7 +254,7 @@ fn sinks_attn_cpu_varlen(
 
 #[cfg(test)]
 mod tests {
-    use super::{kv_layout_is_packed, sinks_backend_supports, sinks_kernel_supports};
+    use super::{kv_layout_is_packed, metal_sinks_kernel_supports, sinks_backend_supports};
     use candle_core::{DType, DeviceLocation};
 
     #[test]
@@ -295,11 +266,11 @@ mod tests {
     }
 
     #[test]
-    fn fused_sinks_accepts_only_compiled_kernel_shapes() {
-        assert!(sinks_kernel_supports(DType::F32, 64));
-        assert!(sinks_kernel_supports(DType::BF16, 256));
-        assert!(!sinks_kernel_supports(DType::F16, 320));
-        assert!(!sinks_kernel_supports(DType::U32, 128));
+    fn metal_sinks_accepts_only_compiled_kernel_shapes() {
+        assert!(metal_sinks_kernel_supports(DType::F32, 64));
+        assert!(metal_sinks_kernel_supports(DType::BF16, 256));
+        assert!(!metal_sinks_kernel_supports(DType::F16, 320));
+        assert!(!metal_sinks_kernel_supports(DType::U32, 128));
     }
 
     #[test]
@@ -308,7 +279,13 @@ mod tests {
         assert_eq!(
             sinks_backend_supports(DType::BF16, DeviceLocation::Cuda { gpu_id: 0 }, 128),
             cfg!(all(feature = "cuda", target_family = "unix"))
+                && crate::attention::fattn_supports(128, false)
         );
+        assert!(!sinks_backend_supports(
+            DType::F32,
+            DeviceLocation::Cuda { gpu_id: 0 },
+            128
+        ));
         assert_eq!(
             sinks_backend_supports(DType::F32, DeviceLocation::Metal { gpu_id: 0 }, 256),
             cfg!(feature = "metal")

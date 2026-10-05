@@ -21,6 +21,14 @@ pub fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
         && (!has_softcap || FATTN_SOFTCAP_HEAD_DIMS.contains(&head_dim))
 }
 
+/// Sinks as fattn takes them: contiguous f32, one per query head.
+#[cfg(feature = "cuda")]
+pub fn fattn_sinks(sinks: Option<&Tensor>) -> Result<Option<Tensor>> {
+    sinks
+        .map(|sinks| sinks.to_dtype(candle_core::DType::F32)?.contiguous())
+        .transpose()
+}
+
 // Dao-AILab's FA3 (Hopper), ahead of fattn for the head dims it takes when built
 fn fa3_supports(head_dim: usize, has_softcap: bool) -> bool {
     cfg!(feature = "flash-attn-v3") && matches!(head_dim, 64 | 128 | 256 | 512) && !has_softcap
@@ -86,6 +94,7 @@ fn try_fattn(
         softcap: sdpa_params.softcap.unwrap_or(0.),
         causal,
         window_left: sliding_window_left(sdpa_params.sliding_window),
+        sinks: fattn_sinks(sdpa_params.sinks.as_ref())?,
         ..Default::default()
     };
     let use_varlen =
@@ -192,6 +201,7 @@ pub fn flash_attn(
     #[cfg(feature = "flash-attn-v3")]
     if fa3_supports(q.dim(3)?, sdpa_params.softcap.is_some())
         && sdpa_params.sliding_window.is_none()
+        && sdpa_params.sinks.is_none()
     {
         return flash_attn_v3(q, k, v, flash_params, sdpa_params).map(Some);
     }
