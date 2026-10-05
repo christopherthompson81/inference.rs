@@ -98,7 +98,7 @@ fn fattn_vs_fa2() -> Result<()> {
             let scale = 1. / (shape.head_dim as f32).sqrt();
             let opts = FattnOptions {
                 scale,
-                mask: Some(causal_mask(seq_q, seq_kv, &dev)?),
+                causal: true,
                 ..Default::default()
             };
             let fattn_us = time(&dev, || flash_attn(&q, &k, &v, &opts))?;

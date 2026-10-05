@@ -32,6 +32,10 @@ struct fattn_layout {
     float   v_scale;
     const int32_t * cu_q;        // [n_seq + 1] start rows of each sequence's Q and dst; null: batched
     const int32_t * cu_kv;       // [n_seq + 1] start rows of each sequence's dense K/V; null: batched
+    // no mask tensor: kp is visible to qp = kv_len - q_len + row iff kp < kv_len, causal: kp <= qp, window: qp - kp <= w
+    int32_t implicit_mask;
+    int32_t causal;
+    int32_t window_left;
 };
 
 // Rows of sequence s's Q and dst: its packed start and length, or s's batch slot of ne01 rows.
@@ -1206,7 +1210,9 @@ void launch_fattn(
     // Optional optimization where the mask is scanned to determine whether part of the calculation can be skipped.
     // Only worth the overhead if there is at lease one FATTN_KQ_STRIDE x FATTN_KQ_STRIDE square to be skipped or
     //     multiple sequences of possibly different lengths.
-    if (!use_sparse && mask && K->ne[1] % FATTN_KQ_STRIDE == 0 && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
+    // an implicit mask has no tensor to scan; the kernel ends each sequence and causal Q tile at its last visible tile
+    const bool scan_mask = mask && !lay.implicit_mask && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    if (!use_sparse && scan_mask && (Q->ne[1] >= 1024 || Q->ne[3] > 1)) {
         const int64_t s31 = mask->nb[1] / sizeof(half2);
         const int64_t s33 = mask->nb[3] / sizeof(half2);
 

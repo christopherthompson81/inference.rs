@@ -153,29 +153,42 @@ fn check(case: Case) -> Result<()> {
             sinks: sinks.clone(),
             ..Default::default()
         };
-        assert!(inference_fattn::supported(&q, &k, &v, &opts)?);
-        let got = flash_attn(&q, &k, &v, &opts)?;
-        assert_eq!(got.dtype(), q.dtype());
-        assert_eq!(
-            got.dims4()?,
-            (case.batch, case.seq_q, N_HEAD, case.head_dim_v)
-        );
-        let want = reference(&q, &k, &v, mask.as_ref(), sinks.as_ref(), &case, scale)?;
-        let diff = (got.to_dtype(DType::F32)? - &want)?
-            .abs()?
-            .flatten_all()?
-            .max(0)?
-            .to_scalar::<f32>()?;
-        let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        assert!(
-            diff <= tolerance * peak,
-            "hd {}/{} kv_heads {} q {} kv {} {dtype:?}: max diff {diff}, peak {peak}",
-            case.head_dim,
-            case.head_dim_v,
-            case.n_head_kv,
-            case.seq_q,
-            case.seq_kv
-        );
+        // a causal case runs twice: with the mask tensor, and with the kernel's implicit causal mask
+        let implicit = FattnOptions {
+            causal: true,
+            mask: None,
+            ..opts.clone()
+        };
+        let runs: &[&FattnOptions] = if case.causal {
+            &[&opts, &implicit]
+        } else {
+            &[&opts]
+        };
+        for opts in runs {
+            assert!(inference_fattn::supported(&q, &k, &v, opts)?);
+            let got = flash_attn(&q, &k, &v, opts)?;
+            assert_eq!(got.dtype(), q.dtype());
+            assert_eq!(
+                got.dims4()?,
+                (case.batch, case.seq_q, N_HEAD, case.head_dim_v)
+            );
+            let want = reference(&q, &k, &v, mask.as_ref(), sinks.as_ref(), &case, scale)?;
+            let diff = (got.to_dtype(DType::F32)? - &want)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+            assert!(
+                diff <= tolerance * peak,
+                "hd {}/{} kv_heads {} q {} kv {} {dtype:?}: max diff {diff}, peak {peak}",
+                case.head_dim,
+                case.head_dim_v,
+                case.n_head_kv,
+                case.seq_q,
+                case.seq_kv
+            );
+        }
     }
     Ok(())
 }
@@ -367,5 +380,79 @@ fn rejects_mismatched_operands() -> Result<()> {
         ..opts
     };
     assert!(flash_attn(&t(8, 64)?, &t(2, 64)?, &t(2, 64)?, &f32_mask).is_err());
+    Ok(())
+}
+
+#[test]
+fn implicit_sliding_window() -> Result<()> {
+    // the kernel's causal mask with window_left against the reference over the same window as a tensor
+    let Some(dev) = cuda() else { return Ok(()) };
+    for (seq_q, seq_kv, window) in [(64usize, 300usize, 40usize), (1, 512, 100), (200, 200, 7)] {
+        let c = case(128, 2, seq_q, seq_kv);
+        let q =
+            Tensor::randn(0f32, 1., (BATCH, seq_q, N_HEAD, 128), &dev)?.to_dtype(DType::BF16)?;
+        let k = Tensor::randn(0f32, 1., (BATCH, seq_kv, 2, 128), &dev)?.to_dtype(DType::BF16)?;
+        let v = Tensor::randn(0f32, 1., (BATCH, seq_kv, 2, 128), &dev)?.to_dtype(DType::BF16)?;
+        let offset = seq_kv - seq_q;
+        let window_mask: Vec<f32> = (0..seq_q)
+            .flat_map(|i| {
+                (0..seq_kv).map(move |j| {
+                    let qp = i + offset;
+                    if j <= qp && qp - j <= window {
+                        0.
+                    } else {
+                        f32::NEG_INFINITY
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_vec(window_mask, (1, seq_q, seq_kv), &dev)?.to_dtype(DType::F16)?;
+        let scale = 1. / (128f32).sqrt();
+        let opts = FattnOptions {
+            scale,
+            causal: true,
+            window_left: Some(window),
+            ..Default::default()
+        };
+        let got = flash_attn(&q, &k, &v, &opts)?.to_dtype(DType::F32)?;
+        let want = reference(&q, &k, &v, Some(&mask), None, &c, scale)?;
+        let diff = (got - &want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        assert!(
+            diff <= 1e-2 * peak,
+            "window {window} q {seq_q} kv {seq_kv}: max diff {diff}, peak {peak}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn rejects_a_mask_with_causal_and_a_window_without() -> Result<()> {
+    let Some(dev) = cuda() else { return Ok(()) };
+    let t = |s: usize, h: usize| Tensor::zeros((1, s, h, 64), DType::BF16, &dev);
+    let both = FattnOptions {
+        scale: 1.,
+        causal: true,
+        mask: Some(causal_mask(8, 8, &dev)?),
+        ..Default::default()
+    };
+    assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &both).is_err());
+    let window_only = FattnOptions {
+        scale: 1.,
+        window_left: Some(4),
+        ..Default::default()
+    };
+    assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &window_only).is_err());
+    // causal needs the queries to be the last positions of the keys
+    let causal = FattnOptions {
+        scale: 1.,
+        causal: true,
+        ..Default::default()
+    };
+    assert!(flash_attn(&t(9, 8)?, &t(8, 2)?, &t(8, 2)?, &causal).is_err());
     Ok(())
 }

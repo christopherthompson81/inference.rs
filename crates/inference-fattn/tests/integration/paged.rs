@@ -111,30 +111,37 @@ fn check(c: PagedCase) -> Result<()> {
             kv_scales,
             ..Default::default()
         };
-        let got = flash_attn_paged(&q, &kv, &opts)?;
-        assert_eq!(got.dims4()?, (b, seq_q, N_HEAD, d));
-        for (s, &len) in seq_lens.iter().enumerate() {
-            let seq = Case {
-                batch: 1,
-                q_layout: QLayout::Contiguous,
-                ..case(d, h_kv, seq_q, len)
-            };
-            let k = rows[s].1.0.to_device(&dev)?.unsqueeze(0)?;
-            let v = rows[s].1.1.to_device(&dev)?.unsqueeze(0)?;
-            let q_s = q.narrow(0, s, 1)?;
-            let mask = causal_mask(seq_q, len, &dev)?;
-            let want = reference(&q_s, &k, &v, Some(&mask), None, &seq, scale)?;
-            let got_s = got.narrow(0, s, 1)?.to_dtype(DType::F32)?;
-            let diff = (got_s - &want)?
-                .abs()?
-                .flatten_all()?
-                .max(0)?
-                .to_scalar::<f32>()?;
-            let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            assert!(
-                diff <= tolerance * peak,
-                "hd {d} bs {bs} seq {s} (len {len}) q {seq_q} {kv_dtype:?}: max diff {diff}, peak {peak}"
-            );
+        let implicit = FattnOptions {
+            causal: true,
+            mask: None,
+            ..opts.clone()
+        };
+        for opts in [&opts, &implicit] {
+            let got = flash_attn_paged(&q, &kv, opts)?;
+            assert_eq!(got.dims4()?, (b, seq_q, N_HEAD, d));
+            for (s, &len) in seq_lens.iter().enumerate() {
+                let seq = Case {
+                    batch: 1,
+                    q_layout: QLayout::Contiguous,
+                    ..case(d, h_kv, seq_q, len)
+                };
+                let k = rows[s].1.0.to_device(&dev)?.unsqueeze(0)?;
+                let v = rows[s].1.1.to_device(&dev)?.unsqueeze(0)?;
+                let q_s = q.narrow(0, s, 1)?;
+                let mask = causal_mask(seq_q, len, &dev)?;
+                let want = reference(&q_s, &k, &v, Some(&mask), None, &seq, scale)?;
+                let got_s = got.narrow(0, s, 1)?.to_dtype(DType::F32)?;
+                let diff = (got_s - &want)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+                assert!(
+                    diff <= tolerance * peak,
+                    "hd {d} bs {bs} seq {s} (len {len}) q {seq_q} {kv_dtype:?}: max diff {diff}, peak {peak}"
+                );
+            }
         }
     }
     Ok(())
@@ -214,7 +221,7 @@ fn long_prefill_converts_in_the_loads() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_missing_or_short_mask_and_odd_blocks() -> Result<()> {
+fn rejects_a_short_mask_and_odd_blocks() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let cache = Tensor::zeros((4, 2, 32, 64), DType::BF16, &dev)?;
     let block_table = Tensor::zeros((1, 2), DType::U32, &dev)?;
@@ -230,7 +237,8 @@ fn rejects_a_missing_or_short_mask_and_odd_blocks() -> Result<()> {
         scale: 1.,
         ..Default::default()
     };
-    assert!(flash_attn_paged(&q, &kv, &opts).is_err());
+    // no mask is fine (the kernel masks from the lengths); a mask of the wrong width is not
+    assert!(flash_attn_paged(&q, &kv, &opts).is_ok());
     opts.mask = Some(Tensor::zeros((1, 1, 64), DType::F16, &dev)?);
     assert!(flash_attn_paged(&q, &kv, &opts).is_err());
     let odd_blocks = Tensor::zeros((4, 2, 24, 64), DType::BF16, &dev)?;
