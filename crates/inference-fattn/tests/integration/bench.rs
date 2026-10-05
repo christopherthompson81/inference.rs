@@ -152,6 +152,7 @@ fn paged_vs_dense() -> Result<()> {
                 v_cache: &v_cache,
                 block_table: &block_table,
                 seq_lens: &seq_lens,
+                full_lens: None,
             };
             let lens = vec![seq_kv; batch];
             let scale = 1. / (d as f32).sqrt();

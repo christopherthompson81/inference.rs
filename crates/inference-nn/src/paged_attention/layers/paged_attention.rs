@@ -754,6 +754,25 @@ impl PagedForwardCtx<'_> {
         }
     }
 
+    // fattn's chunks count absolute positions, so over a window's tables it needs each sequence's full length
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn chunk_full_lens(&self, dev: &DeviceLocation) -> Result<Option<&Tensor>> {
+        if self.sdpa_params.chunk.is_none() || self.use_full {
+            return Ok(None);
+        }
+        match self
+            .input_metadata
+            .full_context_lens
+            .as_ref()
+            .and_then(|lens| lens.get(dev))
+        {
+            Some(lens) => Ok(Some(lens)),
+            None => candle_core::bail!(
+                "chunked attention over a window's tables needs the full context lengths"
+            ),
+        }
+    }
+
     fn context_lens_cpu(&self) -> Option<&[usize]> {
         if self.use_full {
             self.input_metadata.full_paged_context_lens_cpu.as_deref()
@@ -1189,6 +1208,9 @@ impl PagedAttention {
                 return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
             }
             prefill_plan = PrefixPrefillPlan::choose_without_fattn(prefill_plan_input);
+        }
+        if ctx.sdpa_params.chunk.is_some() && !tensors.attention_mask.is_custom() {
+            candle_core::bail!("chunked prefill over the paged cache runs only on fattn");
         }
         if matches!(prefill_plan, PrefixPrefillPlan::GatherSdpa)
             && let Some(limit) = ctx.input_metadata.prefix_gather_workspace_limit
@@ -1658,6 +1680,11 @@ impl PagedAttention {
             );
         }
         let attention_backend = AttentionBackendKind::from_cache(key_cache_ref, value_cache_ref);
+        if ctx.sdpa_params.chunk.is_some()
+            && !matches!(attention_backend, AttentionBackendKind::FlashInfer)
+        {
+            candle_core::bail!("chunked decode runs only on fattn, over the HND cache layout");
+        }
         match DecodePlan::choose(DecodePlanInput {
             attention_backend,
             head_size: ctx.dims.head_size,
@@ -1932,6 +1959,7 @@ impl PagedAttention {
             v_cache: value_cache,
             block_table: block_tables,
             seq_lens: &seq_lens,
+            full_lens: ctx.chunk_full_lens(&query.device().location())?,
         };
         let opts = FattnOptions {
             scale: ctx.sdpa_params.softmax_scale,
@@ -1947,6 +1975,7 @@ impl PagedAttention {
             // a non-causal chunk's window bounds the left only, as the gather's masks do
             window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
             sinks: fattn_sinks(ctx.sdpa_params.sinks.as_ref())?,
+            chunk: ctx.sdpa_params.chunk,
             ..Default::default()
         };
         let q = query.transpose(1, 2)?;
@@ -2004,6 +2033,7 @@ impl PagedAttention {
             v_cache: value_cache,
             block_table,
             seq_lens,
+            full_lens: ctx.chunk_full_lens(dev)?,
         };
         let opts = FattnOptions {
             scale: ctx.sdpa_params.softmax_scale,
@@ -2018,6 +2048,7 @@ impl PagedAttention {
             causal: true,
             window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
             sinks: fattn_sinks(ctx.sdpa_params.sinks.as_ref())?,
+            chunk: ctx.sdpa_params.chunk,
             ..Default::default()
         };
         let query = query.unsqueeze(1)?;
@@ -2037,6 +2068,9 @@ impl PagedAttention {
         }
         if let Some(output) = self.try_run_fattn_decode(call)? {
             return Ok(output);
+        }
+        if call.ctx.sdpa_params.chunk.is_some() {
+            candle_core::bail!("chunked decode over the paged cache runs only on fattn");
         }
         let HndDecodeCall {
             ctx,
@@ -3176,6 +3210,7 @@ mod mixed_cached_prefix_tests {
                 softcap: None,
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             };
             assert!(query_layout_is_dense(query_lens, 1, tokens));
             assert_eq!(

@@ -1145,3 +1145,57 @@ Review follow-up:
 - Left as follow-ups: sinks are cast to f32 on every fattn call (one 64-element kernel per layer per step; each
   backend wants a different dtype, so a load-time copy needs its own field), and f32 caches on Turing+ take HND and
   then gather every decode (all models, not just gpt-oss; f32 serving is rare).
+
+## Run 18 - 2026-10-05 15:35
+
+Question: can fattn's implicit mask express Llama 4's chunked attention (a query sees keys from the start of its
+own chunk), so Llama 4 decodes on fattn over the HND layout instead of gathering K/V for a custom mask every step?
+
+Kernel: `fattn_layout` gains `chunk` and `full_lens`; the mma tile's implicit mask adds "same chunk of absolute
+positions", with row 0 of a sequence at `full_lens[s] - kv_len` (0 without full lengths). The per-sequence `qkv`
+became an `int3` carrying that origin. Absolute positions matter because a chunked layer's paged tables are a
+window's: they start at a block-aligned row, which is a chunk edge only when the chunk divides the block size.
+Masking only, as the window already is: tiles before the chunk are still computed, since bounding the left of the
+stream-k loop would rework its fixups (a later optimization for window and chunk alike).
+
+Rust: `FattnOptions::chunk`, `PagedKv::full_lens`. `SdpaParams` gained `chunk` (73 literals, scripted; a grep
+confirms none lacks it, Metal-only files included). Sdpa sends a chunked call without a mask to fattn or fails;
+the paged decode and prefill pass the chunk and, over a window's tables, the device full lengths (failing if the
+metadata lacks them). A chunked layer that would decode off HND, or prefill on the gather, fails rather than
+silently attending by window.
+
+Llama 4: a chunked layer sets `chunk` where fattn serves it (CUDA, f16/bf16, Turing+) and then takes the plain
+causal mask; elsewhere it keeps its host-built chunk masks, which the model now builds only if some layer needs
+them. Both layout pins (model and loader) are gone, so its caches take HND.
+
+Tests:
+- `parity::implicit_chunks` (dense: decode at and after a chunk edge, prefill over many chunks, a non-causal block)
+  and `paged::chunks_count_from_full_lens` (tables starting mid-chunk, at an edge, and at 0); each fails with its
+  chunk, or the full lengths, removed.
+- `chunked_decode_matches_a_reference` (bf16 and fp8, 1 and 3 query rows, chunk 100 over 32-row blocks, through the
+  real decode metadata) and `chunked_prefix_prefill_matches_a_reference`; the decode one fails without full lengths.
+- The tiny Llama 4's chunk went from 8 to 12: 8 divides the 32-row blocks, so a wrong origin still landed on an
+  edge. At 12, bf16 ties left 16 matched steps of 72 (a runner-up swap at margin 0.031, not a fault); f16 still
+  overflows on the GPU (as in Run 16, before any of this), so the fixture now has six prompts: 64 matched steps for
+  Llama 4, 144 of 144 for gpt-oss. Removing the chunk from fattn decode, from fattn prefill, or the full lengths from
+  decode each fails it.
+
+Not measured: no Llama 4 checkpoint is local (Scout is 109B). Decode moves from a per-step gather plus custom mask to
+fattn over HND; Llama 4 still declines CUDA decode graphs, which can now be revisited.
+
+Next: delete the vLLM v1/v2 CUDA kernels (Standard layout on CUDA gathers for head dims fattn lacks; Metal keeps it).
+
+Review follow-up (three real faults, all fixed):
+- Eager CUDA (no paged attention) read the wrong keys: Llama 4's config advertises its chunk as a sliding window, so
+  the eager inputs describe K as the window's last rows, and the chunked layers' `sliding_window` sent fattn down the
+  varlen path over the full, unrotated cache. Silent past one chunk. The eager call now drops the window (the chunk
+  is the tighter bound). The fixture gained an eager GPU run, which fails with the fix reverted ("Eager").
+- Padded later prompt chunks would have failed on the new "runs only on fattn" guard, since fattn's paged prefill
+  takes no padding. Llama 4 now builds its chunk masks (and gathers) for such a step. Neither path reaches it today:
+  Llama 4 is on the multimodal pipeline, whose prompts are atomic, and its loader does not opt into prefix caching.
+  The fixture's repeat run (prompts again, concurrently, 16-token prefill chunks) exercises padded prefix prefill
+  for gpt-oss only; Llama 4's chunked prefix prefill is covered at the layer.
+- `INFERENCE_RS_FLASHINFER_DECODE=0` (or any shape HND does not admit) would have failed every chunked decode:
+  `chunks_on_fattn` now also asks `FlashInferAttentionBackend::supports_layer`, as Gemma 4 does.
+- Also: a missing device entry in the full lengths now fails instead of counting from 0, and the unused
+  `KvCacheLayout::StandardNoFlashInfer` is gone.

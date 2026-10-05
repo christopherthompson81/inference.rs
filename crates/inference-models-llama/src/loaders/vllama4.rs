@@ -370,7 +370,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             sliding_window: Some(cfg.attention_chunk_size),
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::StandardNoFlashInfer,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
         Ok(Box::new(cfg))

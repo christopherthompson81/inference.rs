@@ -204,6 +204,7 @@ mod decode_attn_bench {
                 softmax_scale: 0.088,
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             };
             let _ = run_flash_attn_cpu::<half::f16>(&q, &k, &v, None, &params).unwrap();
             let t = std::time::Instant::now();

@@ -30,6 +30,9 @@ pub struct FattnOptions {
     /// Each query sees only the `window_left` keys before it (FA2's `window_size_left`), and with `causal` none
     /// after; tiles wholly before the window are still computed. Excludes `mask`.
     pub window_left: Option<usize>,
+    /// Each query sees only keys in its own chunk of this many absolute positions (Llama 4's chunked attention);
+    /// positions count from 0 at a sequence's first row, or as `PagedKv::full_lens` places it. Excludes `mask`.
+    pub chunk: Option<usize>,
 }
 
 /// Per-tensor scales of an fp8 K/V cache, in (0, 146]: dequantized values must stay inside f16's range.
@@ -54,6 +57,9 @@ pub struct PagedKv<'a> {
     pub block_table: &'a candle_core::Tensor,
     /// `(batch,)` u32: the rows each sequence holds, at least 1 (unused rows read the sequence's first row).
     pub seq_lens: &'a candle_core::Tensor,
+    /// `(batch,)` u32: each sequence's full length when its table holds only its last `seq_lens` rows (a sliding
+    /// window's), so `chunk` sees absolute positions; `None` when the table starts at position 0.
+    pub full_lens: Option<&'a candle_core::Tensor>,
 }
 
 /// Sequences packed along dim 0 of a `(total, heads, dim)` tensor.

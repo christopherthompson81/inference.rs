@@ -479,6 +479,7 @@ impl Attention {
                 softmax_scale: 1.0,
                 sliding_window,
                 sinks: None,
+                chunk: None,
             },
             q_norm,
             k_norm,
@@ -909,6 +910,7 @@ impl Attention {
             softcap: self.sdpa_params.softcap,
             softmax_scale: self.sdpa_params.softmax_scale,
             sinks: self.sdpa_params.sinks.clone(),
+            chunk: None,
         };
         let attn_output = Sdpa
             .run_attention(

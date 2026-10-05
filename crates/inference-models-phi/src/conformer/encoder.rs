@@ -114,6 +114,7 @@ impl Attention {
                 softcap: None,
                 softmax_scale: self.scale,
                 sinks: None,
+                chunk: None,
             },
         )?;
 

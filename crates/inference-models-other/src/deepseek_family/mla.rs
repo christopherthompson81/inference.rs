@@ -268,6 +268,7 @@ impl FamilyAttention for MlaAttention {
                 softmax_scale: mla.softmax_scale,
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             },
             mla_weights,
         })

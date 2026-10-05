@@ -186,6 +186,7 @@ impl MLlamaVisionAttention {
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             },
             num_heads: cfg.num_attention_heads,
             head_dim,

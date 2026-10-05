@@ -95,6 +95,7 @@ fn try_fattn(
         causal,
         window_left: sliding_window_left(sdpa_params.sliding_window),
         sinks: fattn_sinks(sdpa_params.sinks.as_ref())?,
+        chunk: sdpa_params.chunk,
         ..Default::default()
     };
     let use_varlen =
@@ -202,6 +203,7 @@ pub fn flash_attn(
     if fa3_supports(q.dim(3)?, sdpa_params.softcap.is_some())
         && sdpa_params.sliding_window.is_none()
         && sdpa_params.sinks.is_none()
+        && sdpa_params.chunk.is_none()
     {
         return flash_attn_v3(q, k, v, flash_params, sdpa_params).map(Some);
     }

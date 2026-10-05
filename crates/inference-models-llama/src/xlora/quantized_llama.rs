@@ -396,6 +396,7 @@ impl FromAdapterGGML for ModelWeights {
                     softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                     sliding_window: None,
                     sinks: None,
+                    chunk: None,
                 },
                 dtype,
             })
@@ -686,6 +687,7 @@ impl FromAdapterGGUF for ModelWeights {
                     softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                     sliding_window: None,
                     sinks: None,
+                    chunk: None,
                 },
                 dtype,
             })

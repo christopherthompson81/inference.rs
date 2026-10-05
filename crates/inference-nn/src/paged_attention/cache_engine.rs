@@ -208,7 +208,7 @@ impl CacheEngine {
                     requested_kv_cache_layout
                 };
             let (key_blocks, value_blocks) = match kv_cache_layout {
-                KvCacheLayout::Standard | KvCacheLayout::StandardNoFlashInfer => {
+                KvCacheLayout::Standard => {
                     let key_block_shape = Self::calculate_key_block_shape(
                         model_config,
                         dtype,
