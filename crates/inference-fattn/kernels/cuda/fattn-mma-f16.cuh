@@ -561,6 +561,38 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
     }
 }
 
+// The KV tiles Q tile jt can see: a paged or packed sequence ends at its length, a causal tile at its last query.
+template<int ncols1, int nbatch_fa>
+static __device__ __forceinline__ int fattn_kv_tiles_visible(
+        const fattn_layout & lay, const int sequence, const int jt, const int q_len, const int ne11) {
+    if (!(lay.block_table || lay.cu_kv || (lay.implicit_mask && lay.causal))) {
+        return INT_MAX;
+    }
+    const int kv_len  = lay.block_table || lay.cu_kv ? fattn_sequence_rows(lay, sequence, false).len : ne11;
+    const int visible = lay.implicit_mask && lay.causal ? kv_len - q_len + min((jt + 1)*ncols1, q_len) : kv_len;
+    return (visible + nbatch_fa - 1) / nbatch_fa;
+}
+
+// Writes the implicit mask (fattn_layout) where load_mask loads one; row j's query sits at qkv.x + j0 + j of qkv.y.
+template<int ncols1, int nwarps, int nbatch_fa>
+static __device__ __forceinline__ void flash_attn_ext_f16_make_mask(
+        half * const __restrict__ tile_mask, const int k_VKQ_0, const int j0, const int2 qkv, const fattn_layout & lay) {
+    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
+#pragma unroll
+    for (int e0 = 0; e0 < ncols1*nbatch_fa; e0 += nwarps*warp_size) {
+        const int e = e0 + threadIdx.y*warp_size + threadIdx.x;
+        if (e0 + nwarps*warp_size > ncols1*nbatch_fa && e >= ncols1*nbatch_fa) {
+            break;
+        }
+        const int j  = e / nbatch_fa;
+        const int i  = e % nbatch_fa;
+        const int qp = qkv.x + j0 + j;
+        const int kp = k_VKQ_0 + i;
+        const bool visible = kp < qkv.y && (!lay.causal || kp <= qp) && (lay.window_left < 0 || qp - kp <= lay.window_left);
+        tile_mask[j*(nbatch_fa + 8) + i] = visible ? half(0.0f) : half(-INFINITY);
+    }
+}
+
 template<int ncols1, int nwarps, int nbatch_fa, bool use_cp_async, bool oob_check, bool use_sparse>
 static __device__ __forceinline__ void flash_attn_ext_f16_load_mask(
         const half * const __restrict__ mask_h, half * const __restrict__ tile_mask,
@@ -680,7 +712,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         const int k_VKQ_sup,
         const bool KV_convert,
         const fattn_layout & lay,
-        const int sequence) {
+        const int sequence,
+        const int2 qkv) {
 #if defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
     constexpr int  warp_size       = ggml_cuda_get_physical_warp_size();
     constexpr int  ncols           = ncols1 * ncols2;
@@ -721,8 +754,12 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         // the sparse mask values are gathered per element, always load them synchronously
         constexpr bool use_cp_async = nstages == 1 && !use_sparse;
         if (ncols2 > 1 || mask_h) {
-            flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
-                (mask_h, tile_mask, stride_mask, k_VKQ_0, k_VKQ_sup, jt*ncols1, ne01, indices);
+            if (lay.implicit_mask) {
+                flash_attn_ext_f16_make_mask<ncols1, nwarps, nbatch_fa>(tile_mask, k_VKQ_0, jt*ncols1, qkv, lay);
+            } else {
+                flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+                    (mask_h, tile_mask, stride_mask, k_VKQ_0, k_VKQ_sup, jt*ncols1, ne01, indices);
+            }
         }
     }
 
@@ -1069,8 +1106,12 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         __syncthreads();
         if (!last_iter) {
             if (ncols2 > 1 || mask_h) {
-                flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
-                    (mask_h, tile_mask, stride_mask, k_VKQ_0 + nbatch_fa, k_VKQ_sup, jt*ncols1, ne01, nullptr);
+                if (lay.implicit_mask) {
+                    flash_attn_ext_f16_make_mask<ncols1, nwarps, nbatch_fa>(tile_mask, k_VKQ_0 + nbatch_fa, jt*ncols1, qkv, lay);
+                } else {
+                    flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+                        (mask_h, tile_mask, stride_mask, k_VKQ_0 + nbatch_fa, k_VKQ_sup, jt*ncols1, ne01, nullptr);
+                }
             }
             flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
                 (K_h2, tile_K, nbatch_K2, stride_K, k_VKQ_0 + nbatch_fa, k_VKQ_sup, nullptr, KV_convert, lay, sequence, false, 0);
@@ -1148,7 +1189,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         scale, slope, logit_softcap, ne01, ne02,
         stride_K, stride_V, stride_mask,
         tile_Q, tile_K, tile_V, tile_mask,
-        Q_B, VKQ_C, KQ_max, KQ_rowsum, kb0, KV_convert, lay, sequence);
+        Q_B, VKQ_C, KQ_max, KQ_rowsum, kb0, KV_convert, lay, sequence, qkv);
     NO_DEVICE_CODE;
 #endif // defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
 }
@@ -1276,6 +1317,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         const int q_len) {
 #if defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
     //In this kernel Q, K, V are matrices while i, j, k are matrix indices.
+    const int  kv_len = lay.block_table || lay.cu_kv ? fattn_sequence_rows(lay, sequence, false).len : ne11;
+    const int2 qkv    = make_int2(kv_len - q_len, kv_len);
 
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
     constexpr int ncols = ncols1 * ncols2;
@@ -1401,8 +1444,12 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
         constexpr bool oob_check    = false;
         constexpr int  k_VKQ_sup    = nbatch_fa;
         if (ncols2 > 1 || mask_h) {
-            flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
-                (mask_h, tile_mask, stride_mask, kb0*nbatch_fa, k_VKQ_sup, jt*ncols1, ne01, nullptr);
+            if (lay.implicit_mask) {
+                flash_attn_ext_f16_make_mask<ncols1, nwarps, nbatch_fa>(tile_mask, kb0*nbatch_fa, jt*ncols1, qkv, lay);
+            } else {
+                flash_attn_ext_f16_load_mask<ncols1, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+                    (mask_h, tile_mask, stride_mask, kb0*nbatch_fa, k_VKQ_sup, jt*ncols1, ne01, nullptr);
+            }
         }
         flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
             (K_h2, tile_K, nbatch_K2, stride_K, kb0*nbatch_fa, k_VKQ_sup, nullptr, KV_convert, lay, sequence, false, 0);
@@ -1419,7 +1466,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                  T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
                 (Q_f2, K_h2, V_h2, mask_h, indices, dstk, dstk_fixup, scale, slope, logit_softcap,
                  ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
-                 KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence);
+                 KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence, qkv);
         }
         constexpr bool last_iter = true;
         const     int  k_VKQ_sup = ne11 - kb0*nbatch_fa;
@@ -1428,7 +1475,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
               T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
             (Q_f2, K_h2, V_h2, mask_h, indices, dstk, dstk_fixup, scale, slope, logit_softcap,
              ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
-             KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence);
+             KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence, qkv);
     } else {
         constexpr bool oob_check = false;
         for (; kb0 < kb0_stop-1; ++kb0) {
@@ -1439,7 +1486,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                  T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
                 (Q_f2, K_h2, V_h2, mask_h, indices, dstk, dstk_fixup, scale, slope, logit_softcap,
                  ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
-                 KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence);
+                 KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence, qkv);
         }
         constexpr bool last_iter = true;
         constexpr int  k_VKQ_sup = nbatch_fa;
@@ -1448,7 +1495,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
              T_A_KQ, T_B_KQ, T_C_KQ, T_A_VKQ, T_B_VKQ, T_C_VKQ>
             (Q_f2, K_h2, V_h2, mask_h, indices, dstk, dstk_fixup, scale, slope, logit_softcap,
              ne01, ne02, stride_K, stride_V, stride_mask, tile_Q, tile_K, tile_V, tile_mask, Q_B, VKQ_C,
-             KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence);
+             KQ_max, KQ_rowsum, jt, kb0, k_VKQ_sup, KV_convert, lay, sequence, qkv);
     }
 
     // With multi-stage loading there is no __syncthreads at the end of the iter,
@@ -1994,10 +2041,7 @@ static __global__ void flash_attn_ext_f16(
         if (KV_max) {
             kb0_stop = min(kb0_stop, KV_max[sequence*iter_j + jt] / nbatch_fa);
         }
-        // a paged or packed sequence ends at its length; the K/V span often reaches further
-        if (lay.block_table || lay.cu_kv) {
-            kb0_stop = min(kb0_stop, (fattn_sequence_rows(lay, sequence, false).len + nbatch_fa - 1) / nbatch_fa);
-        }
+        kb0_stop = min(kb0_stop, fattn_kv_tiles_visible<ncols1, nbatch_fa>(lay, sequence, jt, q_rows.y, ne11));
         constexpr bool is_fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
         // a packed sequence shorter than the longest leaves tiles with no Q rows; the fixups skip them too
         const bool has_rows = jt*ncols1 < q_rows.y;
@@ -2050,10 +2094,7 @@ static __global__ void flash_attn_ext_f16(
     if (KV_max) {
         kb0_stop = min(kb0_stop, KV_max[sequence*iter_j + jt] / nbatch_fa);
     }
-    // a paged or packed sequence ends at its length; the K/V span often reaches further
-    if (lay.block_table || lay.cu_kv) {
-        kb0_stop = min(kb0_stop, (fattn_sequence_rows(lay, sequence, false).len + nbatch_fa - 1) / nbatch_fa);
-    }
+    kb0_stop = min(kb0_stop, fattn_kv_tiles_visible<ncols1, nbatch_fa>(lay, sequence, jt, q_rows.y, ne11));
 
     if (jt*ncols1 >= q_rows.y) {
         return;

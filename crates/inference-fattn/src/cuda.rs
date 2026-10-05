@@ -18,11 +18,13 @@ const GGML_TYPE_I8: i32 = 24;
 const MAX_DEVICES: usize = 16;
 // The MLA head dim: fattn reads V out of K's tiles for it (`V_is_K_view = DKQ == 576`, fattn-mma-f16.cuh)
 const MLA_HEAD_DIM: usize = 576;
+// fattn.cu runs these head dims only with the GQA optimisation, which needs a mask (ggml_cuda_get_best_fattn_kernel)
+const GQA_ONLY_HEAD_DIMS: [usize; 4] = [192, 320, 512, 576];
 // ggml_cuda_get_max_cpy_bytes: f32 Q rows load in 16-byte chunks, and gqa_opt_applies wants 16-byte Q strides
 const Q_LOAD_ALIGN: usize = 16;
 // the kernels load K/V rows in place in chunks of this many bytes; only bf16 K/V for the tile kernel is copied first
 const KV_LOAD_ALIGN: usize = 16;
-// supported() never launches, but fattn reads a null mask or sinks pointer as absent, so it describes operands at this
+// a never-read address: supported() describes operands at it (null reads as absent), and implicit masks point at it
 const PROBE_PTR: u64 = 256;
 // e4m3's largest value times this reaches f16's largest (65504 / 448), where dequantized K/V would overflow
 const FP8_MAX_SCALE: f32 = 146.;
@@ -53,6 +55,9 @@ mod ffi {
         pub v_scale: f32,
         pub cu_q: *const core::ffi::c_void,
         pub cu_kv: *const core::ffi::c_void,
+        pub implicit_mask: i32,
+        pub causal: i32,
+        pub window_left: i32,
     }
 
     #[repr(C)]
@@ -111,6 +116,12 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
             q.shape(),
             k.shape(),
             v.shape()
+        );
+    }
+    if opts.causal && q.dim(1)? > s_kv {
+        candle_core::bail!(
+            "causal fattn needs seq_q ({}) <= seq_kv ({s_kv})",
+            q.dim(1)?
         );
     }
     if d_qk == MLA_HEAD_DIM {
@@ -186,6 +197,15 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
     // at 576 V is read out of K's tiles, which are dequantized with the K scale
     if fp8 && q.dim(D::Minus1)? == MLA_HEAD_DIM {
         candle_core::bail!("fattn does not take fp8 K/V at head dim {MLA_HEAD_DIM}");
+    }
+    if opts.mask.is_some() && opts.causal {
+        candle_core::bail!("fattn takes a mask tensor or causal masking, not both");
+    }
+    if opts
+        .window_left
+        .is_some_and(|w| !opts.causal || w > i32::MAX as usize)
+    {
+        candle_core::bail!("fattn's window_left needs causal masking and must fit an i32");
     }
     if let Some(mask) = &opts.mask
         && (mask.dtype() != DType::F16 || mask.layout().stride()[2] != 1)
@@ -458,7 +478,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         let k_ptr = device_ptr(k, k_l, &stream, &mut guards)?;
         let v_ptr = device_ptr(v, v_l, &stream, &mut guards)?;
         let fp8 = k.dtype() == DType::F8E4M3;
-        let mut lay = dense_layout(k.dtype(), self.opts);
+        let mut lay = dense_layout(k.dtype(), self.opts, sq, q_l.dims()[q_l.dims().len() - 1]);
         if let (Some(p), Some(((table, table_l), (lens, lens_l)))) = (&self.paged, &tables) {
             let (Storage::Cuda(table), Storage::Cuda(lens)) = (&**table, &**lens) else {
                 candle_core::bail!("fattn operands must be on CUDA")
@@ -490,10 +510,19 @@ impl candle_core::CustomOp3 for Fattn<'_> {
             }
             (None, None) => (bhsd(k_ptr, k.dtype(), k_l)?, bhsd(v_ptr, v.dtype(), v_l)?),
         };
-        let mask_t = extra_operand(&mask, mask_descriptor, &stream, &mut guards)?;
+        let sequences = self.paged.is_some() || self.q_seqs.is_some() || self.kv_seqs.is_some();
+        // sequences of their own lengths need a mask; without a tensor the kernel builds it from the lengths
+        if self.opts.mask.is_none() && sequences {
+            lay.implicit_mask = 1;
+        }
+        let mask_t = if lay.implicit_mask != 0 {
+            implicit_mask_descriptor(sq, k_t.ne[1] as usize)
+        } else {
+            extra_operand(&mask, mask_descriptor, &stream, &mut guards)?
+        };
         let sinks_t = extra_operand(&sinks, sinks_descriptor, &stream, &mut guards)?;
         let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, self.opts, &stream);
-        if self.paged.is_some() || fp8 || self.q_seqs.is_some() || self.kv_seqs.is_some() {
+        if sequences || fp8 || lay.implicit_mask != 0 {
             args.lay = &lay;
         }
         if !unsafe { ffi::inference_fattn_supported(&args) } {
@@ -569,9 +598,19 @@ fn kernel_q(q: &Tensor) -> Result<Tensor> {
     }
 }
 
-// The layout of a batched dense call: only fp8 storage and its scales; callers fill in paging and packing.
-fn dense_layout(k_dtype: DType, opts: &FattnOptions) -> ffi::FattnLayout {
+// The layout of a batched dense call (fp8 storage, scales, causal masking); callers fill in paging and packing.
+fn dense_layout(
+    k_dtype: DType,
+    opts: &FattnOptions,
+    seq_q: usize,
+    head_dim: usize,
+) -> ffi::FattnLayout {
     let scales = opts.kv_scales.unwrap_or_default();
+    // one query with no window sees every key, so causal masks nothing and the call can keep the vec kernel; the
+    // head dims that only run GQA-batched still need a mask (real or implicit) to be selected at all
+    let masks_nothing =
+        seq_q == 1 && opts.window_left.is_none() && !GQA_ONLY_HEAD_DIMS.contains(&head_dim);
+    let causal = opts.causal && !masks_nothing;
     ffi::FattnLayout {
         block_table: std::ptr::null(),
         seq_lens: std::ptr::null(),
@@ -584,6 +623,21 @@ fn dense_layout(k_dtype: DType, opts: &FattnOptions) -> ffi::FattnLayout {
         v_scale: scales.v,
         cu_q: std::ptr::null(),
         cu_kv: std::ptr::null(),
+        implicit_mask: (opts.mask.is_none() && causal) as i32,
+        causal: causal as i32,
+        window_left: opts.window_left.map_or(-1, |w| w as i32),
+    }
+}
+
+// An implicit mask's descriptor: never read, but its presence and shape select the GQA-batched kernels as a mask would.
+fn implicit_mask_descriptor(n_q: usize, n_kv: usize) -> ffi::Tensor {
+    let es = DType::F16.size_in_bytes() as i64;
+    let (n_q, n_kv) = (n_q as i64, n_kv as i64);
+    ffi::Tensor {
+        data: PROBE_PTR as *const _,
+        ty: GGML_TYPE_F16,
+        ne: [n_kv, n_q, 1, 1],
+        nb: [es, n_kv * es, n_kv * n_q * es, n_kv * n_q * es],
     }
 }
 
@@ -619,8 +673,10 @@ pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Res
     let q_t = bhsd(PROBE_PTR, native_q_dtype(q.dtype()), &q_layout)?;
     let k_t = bhsd(PROBE_PTR, k.dtype(), &layout(k))?;
     let v_t = bhsd(PROBE_PTR, v.dtype(), &layout(v))?;
+    let lay = dense_layout(k.dtype(), opts, q.dim(1)?, q.dim(D::Minus1)?);
     let mask_t = match &opts.mask {
         Some(m) => mask_descriptor(PROBE_PTR, &layout(m))?,
+        None if lay.implicit_mask != 0 => implicit_mask_descriptor(q.dim(1)?, k.dim(1)?),
         None => ABSENT,
     };
     let sinks_t = match &opts.sinks {
@@ -628,8 +684,7 @@ pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Res
         None => ABSENT,
     };
     let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, opts, &dev.cuda_stream());
-    let lay = dense_layout(k.dtype(), opts);
-    if lay.fp8 != 0 {
+    if lay.fp8 != 0 || lay.implicit_mask != 0 {
         args.lay = &lay;
     }
     Ok(unsafe { ffi::inference_fattn_supported(&args) })
@@ -703,12 +758,7 @@ fn validate_paged(
     }
     // rows past a sequence's length are read from its first row, so only the mask keeps them out
     let n_kv = paged_kv_len(kv)?;
-    match &opts.mask {
-        Some(mask) if mask.dims3()? == (b, sq, n_kv) => {}
-        _ => candle_core::bail!(
-            "paged fattn needs a (batch, seq_q, {n_kv}) mask hiding each sequence's unused rows"
-        ),
-    }
+    check_mask(opts, (b, sq, n_kv))?;
     if kv.k_cache.layout().stride()[3] != 1 || kv.v_cache.layout().stride()[3] != 1 {
         candle_core::bail!("fattn needs the paged caches' head dim contiguous");
     }
@@ -718,7 +768,7 @@ fn validate_paged(
     Ok(())
 }
 
-/// Attention of `q (b, seq_q, n_head, d)` over each sequence's rows in a paged cache; the mask spans `paged_kv_len`.
+/// Attention of `q (b, seq_q, n_head, d)` over each sequence's rows in a paged cache; a mask spans `paged_kv_len`.
 pub fn flash_attn_paged(q: &Tensor, kv: &PagedKv, opts: &FattnOptions) -> Result<Tensor> {
     validate_paged(q, q.dims4()?, kv, opts)?;
     validate_operands(q, kv.k_cache, kv.v_cache, opts)?;
@@ -813,16 +863,18 @@ fn validate_packed(seqs: &Packed, rows: usize, what: &str) -> Result<usize> {
 }
 
 fn check_mask(opts: &FattnOptions, dims: (usize, usize, usize)) -> Result<()> {
+    // without one the kernel masks each sequence's unused rows (and causally, if asked) itself
     match &opts.mask {
-        Some(mask) if mask.dims3()? == dims => Ok(()),
-        _ => candle_core::bail!(
-            "varlen fattn needs a {dims:?} mask hiding each sequence's unused rows"
-        ),
+        Some(mask) if mask.dims3()? != dims => {
+            candle_core::bail!("fattn mask {:?} does not fit {dims:?}", mask.shape())
+        }
+        _ => Ok(()),
     }
 }
 
 /// Attention over sequences packed along dim 0: `q (total_q, n_head, d)`, `k (total_kv, n_head_kv, d)`,
-/// `v (total_kv, n_head_kv, d_v)`, delimited by `q_seqs` and `kv_seqs`. The mask is `(b, q max_len, varlen_kv_len)`.
+/// `v (total_kv, n_head_kv, d_v)`, delimited by `q_seqs` and `kv_seqs`. A mask, if given, is
+/// `(b, q max_len, varlen_kv_len)`; without one the kernel masks from the lengths (and causally, if `causal`).
 pub fn flash_attn_varlen(
     q: &Tensor,
     k: &Tensor,
@@ -868,7 +920,7 @@ pub fn flash_attn_varlen(
 }
 
 /// Attention of packed `q (total_q, n_head, d)`, delimited by `q_seqs`, over each sequence's rows in a paged cache;
-/// the mask is `(b, q max_len, paged_kv_len)`.
+/// a mask, if given, is `(b, q max_len, paged_kv_len)`, else the kernel masks from the lengths.
 pub fn flash_attn_paged_varlen(
     q: &Tensor,
     q_seqs: &Packed,

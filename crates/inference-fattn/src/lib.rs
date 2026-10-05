@@ -16,12 +16,19 @@ pub struct FattnOptions {
     pub scale: f32,
     /// `softcap * tanh(x / softcap)` on the scores; 0 disables it.
     pub softcap: f32,
-    /// Additive f16 mask `(batch | 1, seq_q, seq_kv)`; `-inf` hides a position. Causal attention passes one too.
+    /// Additive f16 mask `(batch | 1, seq_q, seq_kv)`; `-inf` hides a position. `causal` needs no tensor.
     pub mask: Option<candle_core::Tensor>,
     /// Per-head f32 attention sinks `(n_head,)`: an extra logit that takes softmax mass but contributes no value.
     pub sinks: Option<candle_core::Tensor>,
     /// Dequantization scales of fp8 e4m3 K and V (`x * scale`); `None` is 1.0.
     pub kv_scales: Option<KvScales>,
+    /// Causal masking without a mask tensor: each sequence's queries are its last positions, so every sequence needs
+    /// at least as many keys as queries (a sequence with no visible key comes out NaN). Excludes `mask`. Runs on the
+    /// mma kernel, except a single query with no window, which needs no mask at all.
+    pub causal: bool,
+    /// With `causal`, each query also sees only the `window_left` keys before it (FA2's `window_size_left`); tiles
+    /// wholly before the window are still computed.
+    pub window_left: Option<usize>,
 }
 
 /// Per-tensor scales of an fp8 K/V cache, in (0, 146]: dequantized values must stay inside f16's range.

@@ -607,8 +607,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_NONE;
     }
 
-    // only the mma kernel resolves paged or packed rows and dequantizes fp8; vec and tile walk fixed strides
-    if (lay.block_table || lay.fp8 || lay.cu_q || lay.cu_kv) {
+    // only the mma kernel resolves paged or packed rows, dequantizes fp8 and builds an implicit mask
+    if (lay.block_table || lay.fp8 || lay.cu_q || lay.cu_kv || lay.implicit_mask) {
         const bool kv_ok = (lay.fp8 ? K->type == GGML_TYPE_I8 : K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16)
             && V->type == K->type;
         return kv_ok && turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72

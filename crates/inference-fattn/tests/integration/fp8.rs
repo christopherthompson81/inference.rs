@@ -70,6 +70,7 @@ fn check(c: Fp8Case) -> Result<()> {
         mask: Some(mask.clone()),
         sinks: sinks.clone(),
         kv_scales: Some(FP8_SCALES),
+        ..Default::default()
     };
     assert!(supported(&q, &k, &v, &opts)?);
     let got = flash_attn(&q, &k, &v, &opts)?;

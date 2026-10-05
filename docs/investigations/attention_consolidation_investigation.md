@@ -570,3 +570,61 @@ Review follow-up:
   sinks, batch 1, and a `max_len` 20 rows past the true maximum (with padded mask rows). The crate has 29 tests.
 - Not done yet, needed for the wiring: a `supported()` probe for varlen and paged calls, so a caller can route by
   capability (pre-Turing, head dims 40/72, 192 without GQA) instead of by error.
+
+## Run 9 - 2026-10-04 23:22
+
+Question: how does the engine mask fattn calls during decode and chunked or packed prefill? Paged and varlen calls
+required an f16 mask tensor, and building one per step on the host means a host-to-device copy per layer. CLAUDE.md
+rules that out in hot loops, and a captured CUDA graph cannot contain it.
+
+Design: an implicit mask, built by the kernel from the sequence lengths.
+- `fattn_layout` gains `implicit_mask`, `causal` and `window_left`. Key `kp` is visible to the query at
+  `qp = kv_len - q_len + row` iff `kp < kv_len`, and, when causal, `kp <= qp`, and, with a window,
+  `qp - kp <= window_left`. That is the FA2/FlashInfer window convention.
+- `flash_attn_ext_f16_make_mask` writes each KV tile's mask into shared memory where `load_mask` would have loaded
+  one, at all three load sites. A placeholder mask descriptor (never read) keeps the GQA-batched kernels selectable,
+  and the host skips the KV_max mask scan.
+- Causal Q tiles end at their last visible KV tile, which replaces the scan's tile skipping and applies at every
+  length, not only batch > 1 or q >= 1024.
+- Implicit masks select the mma kernel. Found by the tests: a batched causal decode first chose the vec kernel,
+  which read the placeholder pointer (`CUDA_ERROR_ILLEGAL_ADDRESS` in `decode_vec`).
+- Rust: `FattnOptions::{causal, window_left}`. Paged and varlen calls without a mask use the implicit mask; a
+  batched call uses it with `causal: true`. A mask together with `causal` is an error, a window needs `causal`, and
+  causal needs `seq_q <= seq_kv`.
+
+Tests: every causal case of the dense, paged and varlen suites also runs without the mask tensor, against the same
+reference. That covers MLA, sinks, softcap, fp8, packed and paged layouts. `implicit_sliding_window` checks windows
+of 40, 100 and 7 against a reference built over a window mask tensor. The crate has 31 tests.
+
+Bench, interleaved A/B, median of 5. Master uses an explicit causal mask tensor; the branch uses `causal: true` (us):
+
+| row | Qwen3.5-0.8B master / branch | Llama-8B master / branch |
+|---|---|---|
+| 1 x 512 x 512 | 114.7 / 110.3 | 95.3 / 76.0 (-20%) |
+| 2 x 512 x 512 | 98.9 / 85.7 (-13%) | 148.9 / 122.2 (-18%) |
+| 1 x 2048 x 2048 | 420.4 / 360.9 (-14%) | 602.5 / 559.3 (-7%) |
+| 2 x 2048 x 2048 | 780.0 / 593.9 (-24%) | 1459.5 / 1075.6 (-26%) |
+| 1 x 8192 x 8192 | 3988.0 / 3783.2 (-5%) | 7389.5 / 7290.2 |
+| q 16-256 over kv 4096 | +1-5% | +2-3% |
+| q 1024 kv 4096 | -3.5% | +1% |
+| decode kv 512 / 4096 / 16384 | +2 / +5 / +2% | -4 / -3 / -1% |
+
+- Where tile skipping applies (causal prefill), the gains are large.
+- Where it does not (a short chunk over a long cache, decode), building the mask costs up to 5% against
+  cp.async-loading a tensor.
+- Against FA2, fattn now matches or beats it everywhere except Qwen 1 x 512 (2.24x, Run 4's general stream-k fixup)
+  and Llama 512 prefill (1.15-1.21x).
+
+Review follow-up:
+- `causal: true` sent every dense call to mma, even a single query with no window, where causal masks nothing.
+  That cost decode its vec kernel (the likely source of the +2-5% Qwen decode above), and the `decode_vec` test's
+  implicit run no longer reached vec. Such calls now drop the mask entirely, except at the head dims fattn runs only
+  GQA-batched (192/320/512/576), which need a mask, real or implicit, to be selected at all. The first version of
+  this rule missed that exception, and the 512 and 576 tests caught it.
+- Documented, not checked on the device: with `causal`, each paged or varlen sequence needs at least as many keys as
+  queries, since a sequence with no visible key comes out NaN. Tiles wholly before a sliding window are still
+  computed, which needs a lower clamp in stream-k.
+- The two copies of the tile clamp are one helper, `fattn_kv_tiles_visible`. The redundant `min` is gone, and stale
+  docs (the mask doc, `PROBE_PTR`, varlen/paged "the mask is") are updated.
+- New tests: a sliding window over packed dense K/V, over a paged cache and with fp8, and a bidirectional packed
+  encoder (no causality, mask from lengths only). The crate has 32 tests.

@@ -4,8 +4,8 @@
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use inference_fattn::{
-    FattnOptions, KvScales, Packed, PagedKv, causal_mask, flash_attn_paged_varlen,
-    flash_attn_varlen, paged_kv_len, varlen_causal_mask, varlen_kv_len,
+    FattnOptions, KvScales, Packed, PagedKv, flash_attn_paged_varlen, flash_attn_varlen,
+    paged_kv_len, varlen_causal_mask, varlen_kv_len,
 };
 
 use crate::fp8::{FP8_SCALES, FP8_TOLERANCE, store};
@@ -34,6 +34,54 @@ struct Extras {
     sinks: bool,
     // added to the true longest Q length, as a caller sizing the grid generously would
     max_q_slack: usize,
+    // implicit-mask-only modes: a causal sliding window, or no causality at all (an encoder over packed sequences)
+    window_left: Option<usize>,
+    bidirectional: bool,
+}
+
+impl Extras {
+    fn implicit_only(&self) -> bool {
+        self.window_left.is_some() || self.bidirectional
+    }
+}
+
+// The reference's mask for one sequence: causal (optionally windowed) with the queries last, or none.
+fn reference_mask(
+    q_len: usize,
+    kv_len: usize,
+    extras: Extras,
+    dev: &Device,
+) -> Result<Option<Tensor>> {
+    if extras.bidirectional {
+        return Ok(None);
+    }
+    let offset = kv_len - q_len;
+    let window = extras.window_left.unwrap_or(usize::MAX);
+    let mask: Vec<f32> = (0..q_len)
+        .flat_map(|i| {
+            (0..kv_len).map(move |j| {
+                let qp = i + offset;
+                if j <= qp && qp - j <= window {
+                    0.
+                } else {
+                    f32::NEG_INFINITY
+                }
+            })
+        })
+        .collect();
+    Ok(Some(
+        Tensor::from_vec(mask, (1, q_len, kv_len), dev)?.to_dtype(DType::F16)?,
+    ))
+}
+
+// The kernel's own mask for these modes (causal by default).
+fn implicit_opts(opts: &FattnOptions, extras: Extras) -> FattnOptions {
+    FattnOptions {
+        causal: !extras.bidirectional,
+        window_left: extras.window_left,
+        mask: None,
+        ..opts.clone()
+    }
 }
 
 fn cu(lens: &[usize], dev: &Device) -> Result<Tensor> {
@@ -86,14 +134,22 @@ fn compare(
         let seq = |t: &Tensor, at: usize, len: usize| t.narrow(0, at, len)?.unsqueeze(0);
         let q_s = seq(q, q_starts[s], q_len)?;
         let (k_s, v_s) = (seq(k, kv_starts[s], kv_len)?, seq(v, kv_starts[s], kv_len)?);
-        let mask = causal_mask(q_len, kv_len, dev)?;
+        let mask = reference_mask(q_len, kv_len, extras, dev)?;
         let reference_case = Case {
             softcap: extras.softcap,
             sinks: extras.sinks,
             ..case(d, c.n_head_kv, q_len, kv_len)
         };
-        let want =
-            reference(&q_s, &k_s, &v_s, Some(&mask), sinks, &reference_case, scale)?.squeeze(0)?;
+        let want = reference(
+            &q_s,
+            &k_s,
+            &v_s,
+            mask.as_ref(),
+            sinks,
+            &reference_case,
+            scale,
+        )?
+        .squeeze(0)?;
         let got_s = got.narrow(0, q_starts[s], q_len)?.to_dtype(DType::F32)?;
         let diff = (got_s - &want)?
             .abs()?
@@ -156,23 +212,32 @@ fn check_dense(c: VarlenCase, extras: Extras) -> Result<()> {
             mask: Some(mask),
             sinks: sinks.clone(),
             kv_scales: extras.fp8.then_some(scales),
+            ..Default::default()
         };
-        let got = flash_attn_varlen(&q, &k, &v, &q_seqs, &kv_seqs, &opts)?;
-        assert_eq!(got.dims3()?, (tq, N_HEAD, d));
-        compare(
-            &got,
-            (&q, &k_ref, &v_ref),
-            &c,
-            extras,
-            sinks.as_ref(),
-            tolerance,
-        )?;
+        let implicit = implicit_opts(&opts, extras);
+        let runs: &[&FattnOptions] = if extras.implicit_only() {
+            &[&implicit]
+        } else {
+            &[&opts, &implicit]
+        };
+        for opts in runs {
+            let got = flash_attn_varlen(&q, &k, &v, &q_seqs, &kv_seqs, opts)?;
+            assert_eq!(got.dims3()?, (tq, N_HEAD, d));
+            compare(
+                &got,
+                (&q, &k_ref, &v_ref),
+                &c,
+                extras,
+                sinks.as_ref(),
+                tolerance,
+            )?;
+        }
     }
     Ok(())
 }
 
 // The same sequences in a paged cache: sequence s's blocks are laid out in reverse order of the pool.
-fn check_paged(c: VarlenCase) -> Result<()> {
+fn check_paged(c: VarlenCase, extras: Extras) -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let (tq, tk): (usize, usize) = (c.q_lens.iter().sum(), c.kv_lens.iter().sum());
     let d = c.head_dim;
@@ -235,8 +300,16 @@ fn check_paged(c: VarlenCase) -> Result<()> {
             )?),
             ..Default::default()
         };
-        let got = flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?;
-        compare(&got, (&q, &k, &v), &c, Extras::default(), None, tolerance)?;
+        let implicit = implicit_opts(&opts, extras);
+        let runs: &[&FattnOptions] = if extras.implicit_only() {
+            &[&implicit]
+        } else {
+            &[&opts, &implicit]
+        };
+        for opts in runs {
+            let got = flash_attn_paged_varlen(&q, &q_seqs, &kv, opts)?;
+            compare(&got, (&q, &k, &v), &c, extras, None, tolerance)?;
+        }
     }
     Ok(())
 }
@@ -304,12 +377,15 @@ fn fp8_softcap_sinks_one_sequence_and_a_generous_max_len() -> Result<()> {
 #[test]
 fn packed_queries_over_a_paged_cache() -> Result<()> {
     for d in [64, 128] {
-        check_paged(VarlenCase {
-            head_dim: d,
-            n_head_kv: 2,
-            q_lens: Q_LENS,
-            kv_lens: KV_LENS,
-        })?;
+        check_paged(
+            VarlenCase {
+                head_dim: d,
+                n_head_kv: 2,
+                q_lens: Q_LENS,
+                kv_lens: KV_LENS,
+            },
+            Extras::default(),
+        )?;
     }
     Ok(())
 }
@@ -333,8 +409,8 @@ fn rejects_bad_sequences_and_masks() -> Result<()> {
         scale: 1.,
         ..Default::default()
     };
-    // no mask, then a mask of the wrong width, then the right one
-    assert!(flash_attn_varlen(&q, &k, &k, &q_seqs, &kv_seqs, &opts).is_err());
+    // no mask (the kernel masks from the lengths), then a mask of the wrong width, then the right one
+    assert!(flash_attn_varlen(&q, &k, &k, &q_seqs, &kv_seqs, &opts).is_ok());
     opts.mask = Some(Tensor::zeros((2, 6, 7), DType::F16, &dev)?);
     assert!(flash_attn_varlen(&q, &k, &k, &q_seqs, &kv_seqs, &opts).is_err());
     opts.mask = Some(Tensor::zeros((2, 6, varlen_kv_len(7)), DType::F16, &dev)?);
@@ -352,4 +428,41 @@ fn rejects_bad_sequences_and_masks() -> Result<()> {
     };
     assert!(flash_attn_varlen(&q, &k, &k, &too_long, &kv_seqs, &opts).is_err());
     Ok(())
+}
+
+#[test]
+fn implicit_windows_and_bidirectional_packed_sequences() -> Result<()> {
+    let c = VarlenCase {
+        head_dim: 128,
+        n_head_kv: 2,
+        q_lens: Q_LENS,
+        kv_lens: KV_LENS,
+    };
+    let window = Extras {
+        window_left: Some(30),
+        ..Default::default()
+    };
+    check_dense(c, window)?;
+    check_paged(c, window)?;
+    check_dense(
+        c,
+        Extras {
+            fp8: true,
+            ..window
+        },
+    )?;
+    // an encoder over packed sequences: every query sees its whole sequence
+    let encoder = VarlenCase {
+        head_dim: 64,
+        n_head_kv: N_HEAD,
+        q_lens: &[20, 77, 5],
+        kv_lens: &[20, 77, 5],
+    };
+    check_dense(
+        encoder,
+        Extras {
+            bidirectional: true,
+            ..Default::default()
+        },
+    )
 }
