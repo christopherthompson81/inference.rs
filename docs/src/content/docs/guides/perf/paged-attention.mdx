@@ -109,8 +109,7 @@ MLA (Multi-head Latent Attention)'s latent cache is supported through a dedicate
 
 On CUDA, paged attention dispatches to one of three paths:
 
-- Default decode: FlashInfer-backed paged decode kernels, used when the model's KV-cache shape is compatible.
-- Eligible prefill chunks: also use FlashInfer.
+- Default decode and eligible prefill chunks: fattn (llama.cpp's FlashAttention kernels) reading the FlashInfer-layout paged cache in place, used when the model's KV-cache shape is compatible.
 - Generic fallback: when a request falls outside those constraints, the runtime gathers blocks and then dispatches to the available attention backend.
 
 CUDA prompts are chunked from the batch-wide token budget. The per-sequence chunk is the budget
@@ -122,12 +121,12 @@ trims excess cached allocations while idle and under memory pressure. Reserved C
 therefore include reusable scratch space as well as live tensors.
 
 `f8e4m3` stores K and V at half the bytes of BF16. CUDA accepts FP16, BF16, or FP32 activations and
-converts at cache-write time; FlashInfer decode applies the K scale to logits and the V scale to
-outputs without gathering a full-precision cache. Scales are immutable for the cache lifetime, so
+converts at cache-write time; paged decode and prefill (fattn) dequantize K and V with their scales as
+they load them, without gathering a full-precision cache. Scales are immutable for the cache lifetime, so
 previously written entries are never reinterpreted. The default scale is 1.0, matching the common
 vLLM and SGLang serving configuration. FP8 cache is not currently supported for MLA layouts.
 
-To compare with the non-FlashInfer paged decode path, disable the FlashInfer cache layout:
+To compare with the generic paged decode path (the Standard cache layout), disable the FlashInfer cache layout:
 
 ```bash
 INFERENCE_RS_FLASHINFER_DECODE=0 inference serve --paged-attn on -m <model>
@@ -171,7 +170,7 @@ If any condition is not met, inference.rs runs the normal CUDA path.
 
 The first time a decode shape is seen, inference.rs runs a normal warmup forward, captures a graph for that shape, uploads it, and caches it. Later matching decode steps copy the current input ids and paged-attention metadata into graph-owned buffers and replay the graph.
 
-Supported pipelines also capture common batch sizes during startup. Ordinary single-token FlashInfer decode reserves metadata capacity through 2048 context tokens, bounded by the available cache and sliding window. This lets startup graphs handle changing admission and drain batches within that capacity. It adds a bounded amount of attention scratch memory; longer contexts can still require another capture.
+Supported pipelines also capture common batch sizes during startup. Ordinary single-token decode reserves metadata capacity through 2048 context tokens, bounded by the available cache and sliding window. This lets startup graphs handle changing admission and drain batches within that capacity; longer contexts can still require another capture.
 
 The decode graph cache holds a small number of recent graph entries. New batch sizes, tensor shapes, or metadata layouts can trigger another capture.
 

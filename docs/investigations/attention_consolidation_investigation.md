@@ -941,3 +941,39 @@ Review follow-up:
   - two doc lines still listing `flash-attn`;
   - dflash's per-layer `seq_lens` now computed once per forward;
   - a cfg that my helper had split from `windowed_kv_cache_size_in_bytes`.
+
+## Run 14 - 2026-10-05 (night)
+
+Question: can FlashInfer's GQA paged decode go, now that fattn serves HND-layout decode (Run 10) and the gather
+path can take what fattn refuses?
+
+What stays: FlashInfer's library, for the MLA decode (`flashinfer_mla_decode`, which fattn cannot serve from separate
+caches). With it stay the CSR page lists (FA3's fp8 decode reads them) and the tile plan (MLA reads it). What goes:
+the GQA decode kernel (`flashinfer_decode*.cu/.cuh`, its FFI and Rust wrapper, and its test), the graph's decode
+scratch (`tmp_v`/`tmp_s`), and `decode_metadata`. HND decode is now FA3's fp8 decode where it applies, then fattn,
+then the gather (`run_decode_gather_sdpa`). The gather takes softcap at head dims fattn lacks (64), f32 caches, and fp8
+scales above 146. MLA reads its view through `decode_view`, which marks the tile plan used for graph replays. The
+review found the missing mark was never live: MLA families keep `CUDA_DECODE_GRAPHS = false`.
+
+Found by the link step: the HND cache write and gather kernels (`reshape_and_cache_flashinfer`,
+`gather_kv_cache_flashinfer`) lived in the deleted `flashinfer_decode.cu`. They moved, unchanged, to
+`hnd_cache_kernel.cu`.
+
+Found by the review, and my claim was wrong: I had written that a gather during graph capture fails the capture
+because it uploads host-built offsets. The engine enables candle's byte-keyed host-to-device cache around capture,
+and the eager warmup before capture has just uploaded the same bytes, so the upload hits the cache and the capture
+succeeds. The graph then replays the lengths it captured with: wrong output from the first step past them, no error.
+At HEAD, FlashInfer served these cases with device-side metadata, so this would have been a regression. The
+Standard layout with a sliding window also gathers, so graph-enabled models there likely had the same latent bug.
+Fix: `run_decode_gather_sdpa` refuses to run while its stream captures (`device_is_capturing`). The capture fails and
+the engine falls back to eager, which is what the capture-failure path is for. New test
+`gather_decode_refuses_graph_capture` begins a relaxed capture and runs a softcap-64 decode. Without the guard the
+capture succeeds and the test fails.
+
+Tests: the decode tests compared against `flashinfer_decode`, and now compare against the hand reference the prefill
+tests use, generalized to block sizes and softcap. Each case asserts which path ran: the gather keeps a query axis
+(rank 4), fattn does not (rank 3). The gather cases get a bf16 tolerance of 4e-2, since its eager attention runs tanh
+and the softmax in bf16 (one softcap case measured 0.0188).
+
+Still open: eager decode builds the CSR page lists and the tile plan every step, though only MLA and FA3 read them.
+Gating them on the model (MLA layout, FA3) would recover Run 10's 2% eager cost.

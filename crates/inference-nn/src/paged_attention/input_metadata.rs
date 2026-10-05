@@ -419,8 +419,6 @@ impl PagedAttentionInputMetadata {
                     });
             FlashInferMetadata {
                 views: FlashInferPagedAttentionViews { logical, sliding },
-                decode_tmp_v: None,
-                decode_tmp_s: None,
                 fa3_decode: None,
                 #[cfg(feature = "cuda")]
                 decode_tile_plan_used: None,
@@ -488,7 +486,7 @@ pub struct PagedDecodeMetadataRequirements {
 }
 
 impl PagedDecodeMetadataRequirements {
-    // the padded tables serve the standard kernel and fattn alike; the FlashInfer plan only its fallback
+    // the padded tables serve the standard kernel and fattn; the CSR page lists FA3, and the tile plan MLA decode
     fn conservative() -> Self {
         Self {
             block_tables: true,

@@ -21,8 +21,7 @@ pub use fa3::{
 };
 pub use flash_attn_sinks::{flash_attn_sinks, flash_attn_sinks_varlen};
 pub use flashinfer::{
-    FlashInferDecodeScratch, flashinfer_decode, gather_kv_cache_flashinfer, is_flashinfer_cache,
-    reshape_and_cache_flashinfer,
+    gather_kv_cache_flashinfer, is_flashinfer_cache, reshape_and_cache_flashinfer,
 };
 pub use gather_kv::gather_kv_cache;
 pub use mla::{concat_and_cache_mla, flashinfer_mla_decode, gather_mla_cache};

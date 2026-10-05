@@ -111,7 +111,6 @@ fn main() -> Result<()> {
 
     let mut builder = cudaforge::KernelBuilder::new()
         .source_glob("kernels/cuda/*.cu")
-        .source_glob("kernels/cuda/flashinfer_decode/*.cu")
         .watch(["kernels/cuda"])
         .out_dir(&kernel_build_dir)
         .compress_fatbin()
