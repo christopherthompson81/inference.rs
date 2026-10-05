@@ -1,12 +1,13 @@
-//! The layer's fattn paths: decode against FlashInfer decode on the same plan, prefix prefill against a reference.
+//! The layer's fattn paths, decode and prefix prefill, and decode's gather fallback against a reference by hand.
 
 use std::sync::Arc;
 
+use candle_core::cuda_backend::cudarc::driver::sys;
 use candle_core::{DType, Device, Result, Tensor};
-use inference_paged_attn::{KvCacheScales, flashinfer_decode};
+use inference_paged_attn::KvCacheScales;
 
 use super::{FattnPrefillCall, PagedAttention, PagedForwardCtx, PagedForwardDims};
-use crate::attention::{AttentionMask, SdpaParams, sliding_window_left};
+use crate::attention::{AttentionMask, SdpaParams};
 use crate::paged_attention::{
     _PAD_SLOT_ID, Fp8AttentionScales, PagedAttentionInputMetadata,
     block_aligned_sliding_window_start, block_table_rows::BlockTableSnapshot,
@@ -22,6 +23,8 @@ const BLOCK_OFFSET: usize = 7;
 // Max abs difference from the references: one or two ulps of an O(1) output, more for bf16 than f16
 const F16_TOLERANCE: f32 = 4e-3;
 const BF16_TOLERANCE: f32 = 1.6e-2;
+// the gather's eager attention runs softcap's tanh and the softmax in bf16
+const BF16_GATHER_TOLERANCE: f32 = 4e-2;
 const FP8_SCALES: KvCacheScales = KvCacheScales { k: 0.5, v: 0.25 };
 const PREFILL_BLOCK_SIZE: usize = 16;
 
@@ -36,17 +39,21 @@ struct Case {
     model_window: Option<usize>,
     layer_window: Option<usize>,
     softcap: Option<f32>,
-    // whether fattn serves the call; otherwise the layer falls back to FlashInfer
-    fattn: bool,
+    // fattn refuses the call, so the layer gathers (its output keeps a query axis: rank 4 against fattn's 3)
+    gather: bool,
 }
 
 fn check(c: Case) -> Result<()> {
+    check_with(c, false)
+}
+
+fn check_with(c: Case, capture: bool) -> Result<()> {
     crate::skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let (d, bs) = (c.head_dim, c.block_size);
     let b = c.full_lens.len();
     let mut next = 0;
-    let tables: Vec<Vec<usize>> = c
+    let full_tables: Vec<Vec<usize>> = c
         .full_lens
         .iter()
         .map(|len| {
@@ -78,7 +85,7 @@ fn check(c: Case) -> Result<()> {
         .collect();
     let rows = Arc::new(DecodePagedRows {
         slot_mappings: vec![vec![_PAD_SLOT_ID; q]; b],
-        block_tables: BlockTableSnapshot::from_owned_sequence_tables(tables, q),
+        block_tables: BlockTableSnapshot::from_owned_sequence_tables(full_tables.clone(), q),
         context_lens,
         full_context_lens,
         query_len: q,
@@ -115,6 +122,25 @@ fn check(c: Case) -> Result<()> {
         v: FP8_SCALES.v,
     });
     let layer = PagedAttention::new_with_fp8_attention_scales(d, &dev, None, scales)?;
+    if capture {
+        // a gather inside a capture would replay these lengths forever after
+        let stream = dev.as_cuda_device()?.cuda_stream();
+        stream
+            .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
+            .map_err(candle_core::Error::wrap)?;
+        let captured = layer.forward_donor_cache(
+            &query,
+            &k_cache,
+            &v_cache,
+            &AttentionMask::None,
+            &metadata,
+            &sdpa,
+            None,
+        );
+        crate::cuda::graph_capture::end_cuda_capture_discard(&stream);
+        assert!(captured.is_err(), "the gather ran inside a graph capture");
+        return Ok(());
+    }
     let out = layer.forward_donor_cache(
         &query,
         &k_cache,
@@ -124,52 +150,49 @@ fn check(c: Case) -> Result<()> {
         &sdpa,
         None,
     )?;
-    let plan = metadata.flashinfer.as_ref().unwrap();
-    assert_eq!(
-        !plan.decode_tile_plan_was_used(),
-        c.fattn,
-        "which kernel served decode"
-    );
-
-    let fi = plan.decode_metadata(&dev.location(), c.layer_window)?;
-    let expected = flashinfer_decode(
-        &query.transpose(1, 2)?.reshape((b * q, N_HEAD, d))?,
-        &k_cache,
-        &v_cache,
+    assert_eq!(out.rank() == 4, c.gather, "which path served decode");
+    // every query row against its sequence's rows from the full tables, the window applied by position
+    let packed = query
+        .permute((1, 0, 2, 3))?
+        .reshape((1, N_HEAD, b * q, d))?;
+    let expected = attention_reference(
+        &Reference {
+            head_dim: d,
+            block_size: bs,
+            kv_lens: c.full_lens,
+            query_lens: &vec![q; b],
+            causal: true,
+            window: c.layer_window,
+            softcap: c.softcap,
+        },
+        &packed,
+        (&k_cache, &v_cache),
+        &full_tables,
         if fp8 {
             FP8_SCALES
         } else {
             KvCacheScales { k: 1., v: 1. }
         },
-        fi.paged_kv_indptr,
-        fi.paged_kv_indices,
-        fi.paged_kv_last_page_len,
-        fi.request_indices,
-        fi.kv_tile_indices,
-        fi.o_indptr,
-        fi.kv_chunk_size,
-        fi.block_valid_mask,
-        sdpa.softmax_scale,
-        sliding_window_left(c.layer_window),
-        c.softcap,
-        None,
-    )?;
-    let diff = (out.to_dtype(DType::F32)? - expected.to_dtype(DType::F32)?)?
-        .abs()?
-        .flatten_all()?
-        .max(0)?
-        .to_scalar::<f32>()?;
-    let tolerance = if q_dtype == DType::BF16 {
-        BF16_TOLERANCE
-    } else {
-        F16_TOLERANCE
+    )?
+    .transpose(0, 1)?
+    .to_device(&dev)?;
+    // the gather returns (rows, heads, 1, d) where fattn returns (rows, heads, d); the order is the same
+    let diff = (out.to_dtype(DType::F32)?.flatten_all()?
+        - expected.to_dtype(DType::F32)?.flatten_all()?)?
+    .abs()?
+    .max(0)?
+    .to_scalar::<f32>()?;
+    let tolerance = match (q_dtype, c.gather) {
+        (DType::BF16, true) => BF16_GATHER_TOLERANCE,
+        (DType::BF16, false) => BF16_TOLERANCE,
+        _ => F16_TOLERANCE,
     };
     assert!(diff <= tolerance, "max abs diff {diff} over {tolerance}");
     Ok(())
 }
 
 #[test]
-fn decode_matches_flashinfer() -> Result<()> {
+fn decode_matches_a_reference() -> Result<()> {
     for head_dim in [64, 128, 256, 512] {
         for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
             check(Case {
@@ -181,7 +204,7 @@ fn decode_matches_flashinfer() -> Result<()> {
                 model_window: None,
                 layer_window: None,
                 softcap: None,
-                fattn: true,
+                gather: false,
             })?;
         }
     }
@@ -189,7 +212,7 @@ fn decode_matches_flashinfer() -> Result<()> {
 }
 
 #[test]
-fn sliding_window_decode_matches_flashinfer() -> Result<()> {
+fn sliding_window_decode_matches_a_reference() -> Result<()> {
     for block_size in [16, 32] {
         for (layer_window, softcap) in [(Some(100), None), (None, None), (Some(100), Some(30.))] {
             check(Case {
@@ -201,7 +224,7 @@ fn sliding_window_decode_matches_flashinfer() -> Result<()> {
                 model_window: Some(100),
                 layer_window,
                 softcap,
-                fattn: true,
+                gather: false,
             })?;
         }
     }
@@ -209,7 +232,7 @@ fn sliding_window_decode_matches_flashinfer() -> Result<()> {
 }
 
 #[test]
-fn softcap_without_a_kernel_falls_back_to_flashinfer() -> Result<()> {
+fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
     check(Case {
         head_dim: 64,
         block_size: 32,
@@ -219,12 +242,30 @@ fn softcap_without_a_kernel_falls_back_to_flashinfer() -> Result<()> {
         model_window: None,
         layer_window: None,
         softcap: Some(30.),
-        fattn: false,
+        gather: true,
     })
 }
 
 #[test]
-fn multi_token_decode_matches_flashinfer() -> Result<()> {
+fn gather_decode_refuses_graph_capture() -> Result<()> {
+    check_with(
+        Case {
+            head_dim: 64,
+            block_size: 32,
+            cache_dtype: DType::BF16,
+            full_lens: &[17, 90],
+            query_len: 1,
+            model_window: None,
+            layer_window: None,
+            softcap: Some(30.),
+            gather: true,
+        },
+        true,
+    )
+}
+
+#[test]
+fn multi_token_decode_matches_a_reference() -> Result<()> {
     check(Case {
         head_dim: 256,
         block_size: 32,
@@ -234,12 +275,12 @@ fn multi_token_decode_matches_flashinfer() -> Result<()> {
         model_window: None,
         layer_window: None,
         softcap: None,
-        fattn: true,
+        gather: false,
     })
 }
 
 #[test]
-fn f32_caches_fall_back_to_flashinfer() -> Result<()> {
+fn f32_caches_fall_back_to_the_gather() -> Result<()> {
     check(Case {
         head_dim: 128,
         block_size: 32,
@@ -249,7 +290,7 @@ fn f32_caches_fall_back_to_flashinfer() -> Result<()> {
         model_window: None,
         layer_window: None,
         softcap: None,
-        fattn: false,
+        gather: true,
     })
 }
 
@@ -263,22 +304,31 @@ struct PrefillCase {
     window: Option<usize>,
 }
 
-// Each sequence's queries against its rows gathered from the cache by hand, one head at a time in f32.
-fn prefill_reference(
-    c: &PrefillCase,
+// The shape of a reference attention: each sequence's queries are the last of its rows.
+struct Reference<'a> {
+    head_dim: usize,
+    block_size: usize,
+    kv_lens: &'a [usize],
+    query_lens: &'a [usize],
+    causal: bool,
+    window: Option<usize>,
+    softcap: Option<f32>,
+}
+
+// Each sequence's queries against its rows gathered from the cache by hand, one head at a time in f32; the packed
+// `(1, heads, total, d)` query gives `(heads, total, d)`.
+fn attention_reference(
+    c: &Reference<'_>,
     query: &Tensor,
     caches: (&Tensor, &Tensor),
     tables: &[Vec<usize>],
     scales: KvCacheScales,
 ) -> Result<Tensor> {
+    let bs = c.block_size;
     let rows = |cache: &Tensor, s: usize, scale: f32| -> Result<Tensor> {
         let cache = (cache.to_device(&Device::Cpu)?.to_dtype(DType::F32)? * f64::from(scale))?;
         let picked = (0..c.kv_lens[s])
-            .map(|p| {
-                cache
-                    .get(tables[s][p / PREFILL_BLOCK_SIZE])?
-                    .narrow(1, p % PREFILL_BLOCK_SIZE, 1)
-            })
+            .map(|p| cache.get(tables[s][p / bs])?.narrow(1, p % bs, 1))
             .collect::<Result<Vec<_>>>()?;
         Tensor::cat(&picked, 1)
     };
@@ -304,8 +354,11 @@ fn prefill_reference(
                 let q = query.get(0)?.get(h)?.narrow(0, q_start, q_len)?;
                 let kh = h / (N_HEAD / N_HEAD_KV);
                 let (k, v) = (k.get(kh)?, v.get(kh)?);
-                let att = ((q.matmul(&k.t()?)? * scale)? + &mask)?;
-                candle_nn::ops::softmax_last_dim(&att)?.matmul(&v)
+                let mut att = (q.matmul(&k.t()?)? * scale)?;
+                if let Some(cap) = c.softcap {
+                    att = ((att / f64::from(cap))?.tanh()? * f64::from(cap))?;
+                }
+                candle_nn::ops::softmax_last_dim(&(att + &mask)?)?.matmul(&v)
             })
             .collect::<Result<Vec<_>>>()?;
         outs.push(Tensor::stack(&heads, 0)?);
@@ -430,7 +483,21 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
     } else {
         out
     };
-    let expected = prefill_reference(&c, &packed, (&k_cache, &v_cache), &tables, scales)?;
+    let expected = attention_reference(
+        &Reference {
+            head_dim: d,
+            block_size: bs,
+            kv_lens: c.kv_lens,
+            query_lens: c.query_lens,
+            causal: c.causal,
+            window: c.window,
+            softcap: None,
+        },
+        &packed,
+        (&k_cache, &v_cache),
+        &tables,
+        scales,
+    )?;
     let diff = (out
         .to_dtype(DType::F32)?
         .to_device(&Device::Cpu)?

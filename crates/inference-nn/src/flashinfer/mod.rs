@@ -463,26 +463,10 @@ pub struct FlashInferPagedAttentionViews {
 #[derive(Clone, Debug)]
 pub struct FlashInferMetadata {
     pub views: FlashInferPagedAttentionViews,
-    pub decode_tmp_v: Option<DeviceTensorMap>,
-    pub decode_tmp_s: Option<DeviceTensorMap>,
     #[cfg_attr(not(all(feature = "cuda", target_family = "unix")), allow(dead_code))]
     pub fa3_decode: Option<Fa3DecodeState>,
     #[cfg(feature = "cuda")]
     pub decode_tile_plan_used: Option<Arc<AtomicBool>>,
-}
-
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-pub struct FlashInferDecodeMetadata<'a> {
-    pub paged_kv_indptr: &'a Tensor,
-    pub paged_kv_indices: &'a Tensor,
-    pub paged_kv_last_page_len: &'a Tensor,
-    pub request_indices: &'a Tensor,
-    pub kv_tile_indices: &'a Tensor,
-    pub o_indptr: &'a Tensor,
-    pub kv_chunk_size: &'a Tensor,
-    pub block_valid_mask: &'a Tensor,
-    pub tmp_v: Option<&'a Tensor>,
-    pub tmp_s: Option<&'a Tensor>,
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -510,11 +494,11 @@ pub struct FlashInferDecodePlanInput {
 pub fn decode_plan(input: FlashInferDecodePlanInput) -> Result<FlashInferDecodePlan> {
     // Decode can fall back for size limits, but unsupported attention features are hard errors.
     if input.has_alibi || input.has_sinks {
-        candle_core::bail!("FlashInfer paged attention does not support alibi/sinks");
+        candle_core::bail!("HND-layout decode does not support alibi/sinks");
     }
     if input.head_size > FLASHINFER_DECODE_MAX_HEAD_SIZE {
         candle_core::bail!(
-            "FlashInfer decode does not support head_size={}",
+            "HND-layout decode does not support head_size={}",
             input.head_size
         );
     }
@@ -615,54 +599,13 @@ impl FlashInferMetadata {
         Ok(())
     }
 
-    #[cfg(all(feature = "cuda", target_family = "unix"))]
-    pub fn decode_metadata(
-        &self,
-        device: &DeviceLocation,
-        sliding_window: Option<usize>,
-    ) -> Result<FlashInferDecodeMetadata<'_>> {
+    /// The decode view with its tile plan (FlashInfer's MLA decode), marked so a graph keeps replaying the plan.
+    pub fn decode_view(&self, sliding_window: Option<usize>) -> &FlashInferPagedAttentionView {
+        #[cfg(feature = "cuda")]
         if let Some(used) = self.decode_tile_plan_used.as_ref() {
             used.store(true, Ordering::Relaxed);
         }
-        let view = self.views.select(sliding_window);
-        Ok(FlashInferDecodeMetadata {
-            paged_kv_indptr: metadata_tensor(&view.paged_kv.indptr, device, "paged_kv_indptr")?,
-            paged_kv_indices: metadata_tensor(&view.paged_kv.indices, device, "paged_kv_indices")?,
-            paged_kv_last_page_len: metadata_tensor(
-                &view.paged_kv.last_page_len,
-                device,
-                "paged_kv_last_page_len",
-            )?,
-            request_indices: metadata_tensor(
-                &view.tile_plan.request_indices,
-                device,
-                "paged_kv_request_indices",
-            )?,
-            kv_tile_indices: metadata_tensor(
-                &view.tile_plan.kv_tile_indices,
-                device,
-                "paged_kv_tile_indices",
-            )?,
-            o_indptr: metadata_tensor(&view.tile_plan.o_indptr, device, "paged_kv_o_indptr")?,
-            kv_chunk_size: metadata_tensor(
-                &view.tile_plan.kv_chunk_size,
-                device,
-                "paged_kv_chunk_size",
-            )?,
-            block_valid_mask: metadata_tensor(
-                &view.tile_plan.block_valid_mask,
-                device,
-                "paged_kv_block_valid_mask",
-            )?,
-            tmp_v: self
-                .decode_tmp_v
-                .as_ref()
-                .and_then(|tensors| tensors.get(device)),
-            tmp_s: self
-                .decode_tmp_s
-                .as_ref()
-                .and_then(|tensors| tensors.get(device)),
-        })
+        self.views.select(sliding_window)
     }
 }
 

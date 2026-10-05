@@ -470,10 +470,6 @@ struct CudaGraphTensorKey {
 }
 
 type CudaGraphVarMap = HashMap<DeviceLocation, Var>;
-type FlashInferDecodeScratchMaps = (
-    Option<HashMap<DeviceLocation, Tensor>>,
-    Option<HashMap<DeviceLocation, Tensor>>,
-);
 
 pub(crate) struct CudaDecodeGraphCaptureCtx<'a> {
     pub(crate) key: CudaDecodeGraphKey,
@@ -525,8 +521,6 @@ pub(crate) struct CudaDecodeGraphMetadataBuffers {
     full_paged_kv_o_indptr: Option<CudaGraphVarMap>,
     full_paged_kv_chunk_size: Option<CudaGraphVarMap>,
     full_paged_kv_block_valid_mask: Option<CudaGraphVarMap>,
-    flashinfer_decode_tmp_v: Option<HashMap<DeviceLocation, Tensor>>,
-    flashinfer_decode_tmp_s: Option<HashMap<DeviceLocation, Tensor>>,
     fa3_decode: Option<Fa3DecodeState>,
     rope_positions: CudaGraphVarMap,
 }
@@ -625,13 +619,6 @@ impl CudaDecodeGraphMetadataBuffers {
         }
         let rope_positions =
             rope_positions_var_map(&metadata.slot_mappings, position_ids, seq_len)?;
-        let (flashinfer_decode_tmp_v, flashinfer_decode_tmp_s) = flashinfer_decode_scratch_maps(
-            metadata,
-            seqlen_offsets.len(),
-            kv_cache,
-            model_metadata,
-            activation_dtype,
-        )?;
         let fa3_decode = metadata
             .flashinfer
             .as_ref()
@@ -724,8 +711,6 @@ impl CudaDecodeGraphMetadataBuffers {
                 flashinfer_full_view(metadata).map(|view| &view.tile_plan.block_valid_mask),
                 flashinfer_views_alias,
             )?,
-            flashinfer_decode_tmp_v,
-            flashinfer_decode_tmp_s,
             fa3_decode,
             rope_positions,
         };
@@ -942,8 +927,6 @@ impl CudaDecodeGraphMetadataBuffers {
         Some(
             FlashInferMetadata {
                 views: FlashInferPagedAttentionViews { logical, sliding },
-                decode_tmp_v: self.flashinfer_decode_tmp_v.clone(),
-                decode_tmp_s: self.flashinfer_decode_tmp_s.clone(),
                 fa3_decode: self.fa3_decode.clone(),
                 decode_tile_plan_used: None,
             }
@@ -1870,90 +1853,6 @@ pub(crate) fn cuda_decode_graph_supported_for_model(
     }
 }
 
-fn flashinfer_decode_scratch_maps(
-    metadata: &PagedAttentionInputMetadata,
-    batch: usize,
-    kv_cache: &[(Tensor, Tensor)],
-    model_metadata: Option<&(dyn ModelConfigLike + Send + Sync)>,
-    activation_dtype: DType,
-) -> candle_core::Result<FlashInferDecodeScratchMaps> {
-    let Some(model_metadata) = model_metadata else {
-        return Ok((None, None));
-    };
-    let split_rows = flashinfer_split_rows(metadata, batch)?;
-    if split_rows.is_empty() {
-        return Ok((None, None));
-    }
-
-    let mut specs: HashMap<DeviceLocation, (Device, DType, usize, usize)> = HashMap::new();
-    let layer_count = model_metadata.num_layers().min(kv_cache.len());
-    for (layer_idx, (key_cache, value_cache)) in kv_cache.iter().enumerate().take(layer_count) {
-        if model_metadata.attention_backend_kind_for_layer(layer_idx)
-            != AttentionBackendKind::FlashInfer
-        {
-            continue;
-        }
-        let location = key_cache.device().location();
-        if !split_rows.contains_key(&location) {
-            continue;
-        }
-        if key_cache.dtype() != value_cache.dtype() {
-            candle_core::bail!("FlashInfer graph scratch expects matching KV cache dtypes");
-        }
-        let (_, _, _, head_dim) = key_cache.dims4()?;
-        let num_qo_heads = model_metadata.num_attn_heads_for_layer(layer_idx);
-        let entry = specs.entry(location).or_insert((
-            key_cache.device().clone(),
-            activation_dtype,
-            num_qo_heads,
-            head_dim,
-        ));
-        if entry.1 != activation_dtype {
-            candle_core::bail!("FlashInfer graph scratch expects one activation dtype per device");
-        }
-        entry.2 = entry.2.max(num_qo_heads);
-        entry.3 = entry.3.max(head_dim);
-    }
-
-    let mut tmp_v = HashMap::new();
-    let mut tmp_s = HashMap::new();
-    for (location, rows) in split_rows {
-        let Some((device, dtype, num_qo_heads, head_dim)) = specs.get(&location) else {
-            continue;
-        };
-        tmp_v.insert(location, unsafe {
-            Tensor::empty((rows, *num_qo_heads, *head_dim), *dtype, device)?
-        });
-        tmp_s.insert(location, unsafe {
-            Tensor::empty((rows, *num_qo_heads), DType::F32, device)?
-        });
-    }
-
-    if tmp_v.is_empty() {
-        Ok((None, None))
-    } else {
-        Ok((Some(tmp_v), Some(tmp_s)))
-    }
-}
-
-fn flashinfer_split_rows(
-    metadata: &PagedAttentionInputMetadata,
-    batch: usize,
-) -> candle_core::Result<HashMap<DeviceLocation, usize>> {
-    let mut rows = HashMap::new();
-    collect_flashinfer_split_rows(
-        flashinfer_paged_view(metadata).map(|view| &view.tile_plan.request_indices),
-        batch,
-        &mut rows,
-    )?;
-    collect_flashinfer_split_rows(
-        flashinfer_full_view(metadata).map(|view| &view.tile_plan.request_indices),
-        batch,
-        &mut rows,
-    )?;
-    Ok(rows)
-}
-
 fn device_location_sort_key(location: &DeviceLocation) -> (u8, usize) {
     match location {
         DeviceLocation::Cpu => (0, 0),
@@ -2111,26 +2010,6 @@ fn flashinfer_tile_plan_from_vars(
         kv_chunk_size: option_tensor_map_from_var_map(kv_chunk_size)?,
         block_valid_mask: option_tensor_map_from_var_map(block_valid_mask)?,
     })
-}
-
-fn collect_flashinfer_split_rows(
-    map: Option<&HashMap<DeviceLocation, Tensor>>,
-    batch: usize,
-    split_rows: &mut HashMap<DeviceLocation, usize>,
-) -> candle_core::Result<()> {
-    let Some(map) = map else {
-        return Ok(());
-    };
-    for (location, tensor) in map {
-        let rows = tensor.dims1()?;
-        if rows > batch {
-            split_rows
-                .entry(*location)
-                .and_modify(|current| *current = (*current).max(rows))
-                .or_insert(rows);
-        }
-    }
-    Ok(())
 }
 
 fn bucket_context_len_from_vars(map: &Option<CudaGraphVarMap>, block_size: usize) -> Option<usize> {

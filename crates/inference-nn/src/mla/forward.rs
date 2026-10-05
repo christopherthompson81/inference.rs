@@ -200,7 +200,7 @@ pub fn mla_decode_forward(
         .flashinfer
         .as_ref()
         .ok_or_else(|| candle_core::Error::msg("FlashInfer metadata missing"))?;
-    let view = flashinfer.views.select(sdpa_params.sliding_window);
+    let view = flashinfer.decode_view(sdpa_params.sliding_window);
     let paged_kv_indptr = view
         .paged_kv
         .indptr

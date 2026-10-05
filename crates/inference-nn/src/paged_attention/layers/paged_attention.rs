@@ -8,9 +8,8 @@ use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 use inference_fattn::{FattnOptions, KvScales as FattnKvScales, Packed, PagedKv};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_paged_attn::{
-    DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, FlashInferDecodeScratch,
-    KvCacheScales as FlashInferKvCacheScales, fa3_fp8_decode, flashinfer_decode,
-    gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
+    DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, KvCacheScales as FlashInferKvCacheScales,
+    fa3_fp8_decode, gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
 };
 use inference_paged_attn::{paged_attention, reshape_and_cache};
 
@@ -73,7 +72,7 @@ impl Fa3DecodeCandidate {
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 #[derive(Clone, Copy)]
-struct FlashInferDecodeCall<'call, 'ctx> {
+struct HndDecodeCall<'call, 'ctx> {
     ctx: &'call PagedForwardCtx<'ctx>,
     query: &'call Tensor,
     key_cache: &'call Tensor,
@@ -1673,7 +1672,7 @@ impl PagedAttention {
                 tensors.attention_mask,
             ),
             #[cfg(all(feature = "cuda", target_family = "unix"))]
-            DecodePlan::FlashInfer(_) => self.run_flashinfer_decode(FlashInferDecodeCall {
+            DecodePlan::FlashInfer(_) => self.run_hnd_decode(HndDecodeCall {
                 ctx,
                 query: &query,
                 key_cache: key_cache_ref,
@@ -1696,6 +1695,12 @@ impl PagedAttention {
         dev: &DeviceLocation,
         attention_mask: &AttentionMask,
     ) -> Result<Tensor> {
+        // the gather sizes its work from host lengths, which a captured graph would replay stale: failing the capture
+        // makes the engine run these steps eagerly
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if crate::cuda::graph_capture::device_is_capturing(query.device()) {
+            candle_core::bail!("paged decode over gathered K/V cannot be captured in a CUDA graph");
+        }
         let block_tables = ctx.block_tables(dev).unwrap();
         let kv_lens: Vec<usize> = match ctx.context_lens_cpu() {
             Some(lens) => lens.to_vec(),
@@ -1814,8 +1819,8 @@ impl PagedAttention {
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    fn try_run_fa3_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Option<Tensor>> {
-        let FlashInferDecodeCall {
+    fn try_run_fa3_decode(&self, call: HndDecodeCall<'_, '_>) -> Result<Option<Tensor>> {
+        let HndDecodeCall {
             ctx,
             query,
             key_cache,
@@ -1975,8 +1980,8 @@ impl PagedAttention {
 
     // fattn reads the cache in place through the padded block tables and needs none of FlashInfer's plan.
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    fn try_run_fattn_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Option<Tensor>> {
-        let FlashInferDecodeCall {
+    fn try_run_fattn_decode(&self, call: HndDecodeCall<'_, '_>) -> Result<Option<Tensor>> {
+        let HndDecodeCall {
             ctx,
             query,
             key_cache,
@@ -2021,60 +2026,24 @@ impl PagedAttention {
             .map(Some)
     }
 
+    // HND-layout decode: FA3's fp8 kernel where it applies, fattn, else the gather (which refuses graph capture).
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    fn run_flashinfer_decode(&self, call: FlashInferDecodeCall<'_, '_>) -> Result<Tensor> {
+    fn run_hnd_decode(&self, call: HndDecodeCall<'_, '_>) -> Result<Tensor> {
         if let Some(output) = self.try_run_fa3_decode(call)? {
             return Ok(output);
         }
         if let Some(output) = self.try_run_fattn_decode(call)? {
             return Ok(output);
         }
-        let FlashInferDecodeCall {
+        let HndDecodeCall {
             ctx,
             query,
             key_cache,
             value_cache,
             dev,
-            ..
+            attention_mask,
         } = call;
-        let fi_meta = ctx
-            .input_metadata
-            .flashinfer
-            .as_ref()
-            .ok_or_else(|| candle_core::Error::msg("FlashInfer metadata missing"))?
-            .decode_metadata(dev, ctx.sdpa_params.sliding_window)?;
-        let (_, num_kv_heads, _, _) = key_cache.dims4()?;
-        flashinfer_decode(
-            query,
-            key_cache,
-            value_cache,
-            self.cache_scales(key_cache).flashinfer(key_cache),
-            fi_meta.paged_kv_indptr,
-            fi_meta.paged_kv_indices,
-            fi_meta.paged_kv_last_page_len,
-            fi_meta.request_indices,
-            fi_meta.kv_tile_indices,
-            fi_meta.o_indptr,
-            fi_meta.kv_chunk_size,
-            fi_meta.block_valid_mask,
-            ctx.sdpa_params.softmax_scale,
-            sliding_window_left(ctx.sdpa_params.sliding_window),
-            ctx.sdpa_params.softcap,
-            fi_meta
-                .tmp_v
-                .zip(fi_meta.tmp_s)
-                .map(|(tmp_v, tmp_s)| FlashInferDecodeScratch { tmp_v, tmp_s }),
-        )
-        .map_err(|err| {
-            err.context(format!(
-                "FlashInfer decode failed: batch={} padded_batch={} qo_heads={} kv_heads={} head_size={}",
-                ctx.dims.batch_size,
-                fi_meta.request_indices.dims1().unwrap_or(ctx.dims.batch_size),
-                ctx.dims.attention_heads,
-                num_kv_heads,
-                ctx.dims.head_size,
-            ))
-        })
+        self.run_decode_gather_sdpa(ctx, query, key_cache, value_cache, dev, attention_mask)
     }
 
     fn run_standard_paged_decode(

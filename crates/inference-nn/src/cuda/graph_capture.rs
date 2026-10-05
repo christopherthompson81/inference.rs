@@ -773,6 +773,17 @@ pub fn restore_event_tracking_after_capture(stream: &Arc<CudaStream>, restore: b
     }
 }
 
+/// Whether `device`'s stream is capturing a CUDA graph.
+pub fn device_is_capturing(device: &candle_core::Device) -> bool {
+    let candle_core::Device::Cuda(dev) = device else {
+        return false;
+    };
+    matches!(
+        dev.cuda_stream().capture_status(),
+        Ok(status) if status != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+    )
+}
+
 pub fn end_cuda_capture_discard(stream: &Arc<CudaStream>) {
     if matches!(
         stream.capture_status(),
