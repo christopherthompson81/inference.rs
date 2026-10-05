@@ -11,7 +11,7 @@ const FATTN_HEAD_DIMS: [usize; 6] = [64, 80, 96, 112, 128, 256];
 // fattn instantiates softcap only at these (and 512)
 const FATTN_SOFTCAP_HEAD_DIMS: [usize; 2] = [128, 256];
 
-fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
+pub fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
     #[cfg(feature = "cuda")]
     let available = inference_fattn::mma_available();
     #[cfg(not(feature = "cuda"))]

@@ -59,8 +59,8 @@ pub use backends::cpu::fast_exp;
 #[cfg(feature = "cuda")]
 use backends::naive::maybe_synchronize;
 pub use backends::{
-    flash_attn, flash_backend_supports, flash_backend_supports_sdpa, naive_sdpa, sinks_attn,
-    sinks_backend_is_available, sinks_backend_supports,
+    fattn_supports, flash_attn, flash_backend_supports, flash_backend_supports_sdpa, naive_sdpa,
+    sinks_attn, sinks_backend_is_available, sinks_backend_supports,
 };
 
 /// Chunk size for attention computation to avoid OOM on long sequences

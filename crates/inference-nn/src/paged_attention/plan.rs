@@ -9,6 +9,10 @@ use crate::attention::flash_backend_supports_sdpa;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::flashinfer::{self, FlashInferDecodePlan, FlashInferDecodePlanInput};
 
+// fattn's f16 peak in output-sized units: an f32 Q copy and f32 output (two each) and the f16 result
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+const FATTN_F16_OUTPUT_PEAK: usize = 5;
+
 #[derive(Clone, Copy, Debug)]
 pub struct PrefixPrefillPlanInput {
     pub device_is_cuda: bool,
@@ -37,6 +41,9 @@ pub struct PrefixPrefillPlanInput {
 pub enum PrefixPrefillPlan {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     Fa3Fp8Paged,
+    // fattn over the paged cache in place, dense or packed queries
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    FattnPaged,
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     FlashAttentionPaged,
     GatherSdpa,
@@ -44,6 +51,17 @@ pub enum PrefixPrefillPlan {
 
 impl PrefixPrefillPlan {
     pub fn choose(input: PrefixPrefillPlanInput) -> Self {
+        Self::select(input, true)
+    }
+
+    /// The plan when fattn refused the call at run time: FA2's paged kernel where built, else the gather.
+    pub fn choose_without_fattn(input: PrefixPrefillPlanInput) -> Self {
+        Self::select(input, false)
+    }
+
+    fn select(input: PrefixPrefillPlanInput, fattn: bool) -> Self {
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        let _ = fattn;
         #[cfg(not(all(feature = "cuda", feature = "flash-attn", target_family = "unix")))]
         let _ = (
             input.device_is_cuda,
@@ -73,6 +91,11 @@ impl PrefixPrefillPlan {
             return Self::Fa3Fp8Paged;
         }
 
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if fattn && fattn_paged_prefill_supported(input) {
+            return Self::FattnPaged;
+        }
+
         #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
         if input.device_is_cuda
             && matches!(input.dtype, DType::F16 | DType::BF16)
@@ -95,6 +118,24 @@ impl PrefixPrefillPlan {
 
         Self::GatherSdpa
     }
+}
+
+// Image prefix ranges (bidirectional spans inside causal attention), sinks and padded rows are left to the other plans.
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+pub fn fattn_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
+    input.device_is_cuda
+        && input.query_layout_is_dense
+        && matches!(input.dtype, DType::F16 | DType::BF16)
+        && matches!(input.cache_dtype, DType::F16 | DType::BF16 | DType::F8E4M3)
+        && !input.has_alibi
+        && !input.has_sinks
+        && !input.has_custom_mask
+        && input.causality_known
+        && !input.has_noncausal_mm_context
+        && (input.is_causal || !input.has_sliding_window)
+        && input.block_size.is_power_of_two()
+        && matches!(input.attention_backend, AttentionBackendKind::FlashInfer)
+        && crate::attention::fattn_supports(input.head_size, input.has_softcap)
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -530,7 +571,18 @@ pub fn prompt_prefill_workspace(
                 input.activation_dtype.size_in_bytes(),
                 "paged FlashAttention output",
             )?;
-            let output_peak = output.checked_mul(2).ok_or_else(|| {
+            // fattn runs f16 queries through f32: an f32 Q copy and f32 output beside the f16 result
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            let outputs = if matches!(plan, PrefixPrefillPlan::FattnPaged)
+                && input.activation_dtype == DType::F16
+            {
+                FATTN_F16_OUTPUT_PEAK
+            } else {
+                2
+            };
+            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+            let outputs = 2;
+            let output_peak = output.checked_mul(outputs).ok_or_else(|| {
                 candle_core::Error::msg("paged FlashAttention output workspace overflow")
             })?;
             max_layer_transient = max_layer_transient.max(output_peak);
@@ -697,6 +749,17 @@ mod tests {
         HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigMetadata,
     };
 
+    // Whether fattn reads these test models' caches in place (a CUDA build on a Turing or newer device)
+    fn fattn_reads_cache(head_dim: usize) -> bool {
+        cfg!(all(feature = "cuda", target_family = "unix"))
+            && crate::attention::fattn_supports(head_dim, false)
+    }
+
+    // The output-only workspace of the paged plans: two outputs of the test model's 16 heads x 256 dims, 2 bytes each
+    fn paged_output_workspace(total_q: usize) -> usize {
+        2 * total_q * 16 * 256 * DType::BF16.size_in_bytes()
+    }
+
     struct DonorWorkspaceModel;
 
     impl ModelConfigLike for DonorWorkspaceModel {
@@ -823,6 +886,48 @@ mod tests {
         })
     }
 
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[test]
+    fn fattn_reads_the_cache_only_without_padded_rows() {
+        let input = PrefixPrefillPlanInput {
+            device_is_cuda: true,
+            dtype: DType::BF16,
+            cache_dtype: DType::BF16,
+            has_alibi: false,
+            has_sinks: false,
+            has_custom_mask: false,
+            causality_known: true,
+            head_size: 128,
+            has_softcap: false,
+            has_sliding_window: true,
+            query_layout_is_dense: true,
+            query_len: 64,
+            q_heads: 24,
+            kv_heads: 4,
+            writes_cache: true,
+            is_causal: true,
+            has_noncausal_mm_context: false,
+            fa3_supported: false,
+            block_size: 32,
+            attention_backend: AttentionBackendKind::FlashInfer,
+        };
+        assert_eq!(fattn_paged_prefill_supported(input), fattn_reads_cache(128));
+        // padded rows put each sequence's queries at the wrong end of its keys
+        assert!(!fattn_paged_prefill_supported(PrefixPrefillPlanInput {
+            query_layout_is_dense: false,
+            ..input
+        }));
+        // fattn's windows are causal
+        assert!(!fattn_paged_prefill_supported(PrefixPrefillPlanInput {
+            is_causal: false,
+            ..input
+        }));
+        assert!(!matches!(
+            PrefixPrefillPlan::choose_without_fattn(input),
+            PrefixPrefillPlan::FattnPaged
+        ));
+    }
+
     #[test]
     fn paged_prefix_rejects_disabled_large_head_features() {
         assert!(matches!(
@@ -836,7 +941,7 @@ mod tests {
     }
 
     #[test]
-    fn paged_prefix_gathers_mixed_dtype_cache() {
+    fn paged_prefix_reads_an_fp8_cache_in_place_or_gathers() {
         let plan = PrefixPrefillPlan::choose(PrefixPrefillPlanInput {
             device_is_cuda: true,
             dtype: DType::BF16,
@@ -859,6 +964,11 @@ mod tests {
             block_size: 32,
             attention_backend: AttentionBackendKind::FlashInfer,
         });
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if fattn_reads_cache(128) {
+            assert!(matches!(plan, PrefixPrefillPlan::FattnPaged));
+            return;
+        }
         assert!(matches!(plan, PrefixPrefillPlan::GatherSdpa));
     }
 
@@ -911,6 +1021,8 @@ mod tests {
         let plan = PrefixPrefillPlan::choose(input);
         if inference_paged_attn::USE_FA3_FP8_PAGED {
             assert!(matches!(plan, PrefixPrefillPlan::Fa3Fp8Paged));
+        } else if fattn_reads_cache(256) {
+            assert!(matches!(plan, PrefixPrefillPlan::FattnPaged));
         } else {
             assert!(matches!(plan, PrefixPrefillPlan::GatherSdpa));
         }
@@ -1020,7 +1132,7 @@ mod tests {
     }
 
     #[test]
-    fn donor_cache_first_prompt_requires_gather_workspace() {
+    fn donor_cache_first_prompt_gathers_unless_fattn_reads_the_cache() {
         let model = DonorWorkspaceModel;
         assert!(model_has_donor_paged_cache_layers(&model));
         let query_lens = [128];
@@ -1028,7 +1140,11 @@ mod tests {
         let workspace =
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap();
-        assert!(workspace.gather_workspace_bytes > 0);
+        // fattn reads a donor's cache in place; the gather needs room for it
+        assert_eq!(
+            workspace.gather_workspace_bytes > 0,
+            !fattn_reads_cache(256)
+        );
         assert!(workspace.bytes >= workspace.gather_workspace_bytes);
     }
 
@@ -1061,7 +1177,11 @@ mod tests {
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap()
                 .bytes,
-            739_889_152
+            if fattn_reads_cache(256) {
+                paged_output_workspace(256)
+            } else {
+                739_889_152
+            }
         );
     }
 
@@ -1075,7 +1195,9 @@ mod tests {
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap()
                 .bytes,
-            if crate::utils::using_flash_attn() {
+            if fattn_reads_cache(256) {
+                paged_output_workspace(258)
+            } else if crate::utils::using_flash_attn() {
                 38_977_536
             } else {
                 742_821_536
@@ -1118,8 +1240,13 @@ mod tests {
             } else {
                 739_889_152
             };
-            assert_eq!(workspace.bytes, gather);
-            assert_eq!(workspace.gather_workspace_bytes, gather);
+            if fattn_reads_cache(256) {
+                assert_eq!(workspace.bytes, paged_output_workspace(256));
+                assert_eq!(workspace.gather_workspace_bytes, 0);
+            } else {
+                assert_eq!(workspace.bytes, gather);
+                assert_eq!(workspace.gather_workspace_bytes, gather);
+            }
         }
     }
 

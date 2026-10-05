@@ -1091,6 +1091,29 @@ fn validate_varlen(
     validate_operands(q, k, v, opts)
 }
 
+/// Whether `flash_attn_paged_varlen` has a kernel for these operands; false for limits as in `supported_paged`.
+pub fn supported_paged_varlen(
+    q: &Tensor,
+    q_seqs: &Packed,
+    kv: &PagedKv,
+    opts: &FattnOptions,
+) -> Result<bool> {
+    if paged_limit(q, kv, opts)?.is_some() {
+        return Ok(false);
+    }
+    let (tq, h, d) = q.dims3()?;
+    let b = validate_packed(q_seqs, tq, "q")?;
+    validate_paged(q, (b, q_seqs.max_len, h, d), kv, opts)?;
+    validate_operands(q, kv.k_cache, kv.v_cache, opts)?;
+    Fattn {
+        opts,
+        paged: Some(*kv),
+        q_seqs: Some(*q_seqs),
+        kv_seqs: None,
+    }
+    .probe(q, kv.k_cache, kv.v_cache)
+}
+
 /// Attention of packed `q (total_q, n_head, d)`, delimited by `q_seqs`, over each sequence's rows in a paged cache;
 /// a mask, if given, is `(b, q max_len, paged_kv_len)`, else the kernel masks from the lengths.
 pub fn flash_attn_paged_varlen(
