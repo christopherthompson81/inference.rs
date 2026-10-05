@@ -488,3 +488,85 @@ Review follow-up:
   small scale keeps its precision (on its own it would round to an f16 subnormal below 6.1e-5).
 - Scales must be finite and in (0, 146]: 448 * 146 is just under f16's 65504.
 - C-side assert: no fp8 at head dim 576.
+
+## Run 8 - 2026-10-04 22:36
+
+Question: can fattn take varlen (packed) batches, the `[total_tokens, heads, dim]` + `cu_seqlens` form that packed
+prefill hands FA2 today, without padding Q to the longest sequence?
+
+Design:
+- `fattn_kv_src` became `fattn_layout`, gaining `cu_q` (Q/dst starts per sequence) and `cu_kv` (dense K/V starts).
+- Q and dst are described as `[d, max_q, h, n_seq]` with a batch stride of 0. The mma driver puts each sequence's Q and
+  dst at `cu_q[s]`, bounds its tile loads and stores by that sequence's length (`process_tile` takes `q_len`), and
+  skips Q tiles past it outright. Both stream-k fixup kernels take `cu_q` for their dst offsets and bounds.
+- Dense packed K/V rows read from `cu_kv[s] + i`. Rows past the sequence's length read its first row, which keeps
+  the last sequence from reading past the buffer, and the mask hides them. Each sequence ends at its own last KV
+  tile. The K/V length is padded to 256 (`varlen_kv_len`), as for paged.
+- Varlen calls take the mma kernel and always convert bf16 in the loads, because the f16 copy pass would size its
+  copy from the padded descriptor.
+- Rust: `Packed { cu_seqlens, max_len }`; `flash_attn_varlen` (packed Q over packed dense K/V);
+  `flash_attn_paged_varlen` (packed Q over a paged cache); `varlen_kv_len`; `varlen_causal_mask`, which
+  `paged_causal_mask` now delegates to. The mask is `(b, max_q, n_kv)` and is required. cu tensors are u32, and their
+  device-side values are documented, not checked.
+
+Tests (`tests/integration/varlen.rs`, 3 tests): f16 and bf16, each sequence against the dense reference. Q lengths are
+5/37/1/64 over K/V lengths 5/100/40/64 (a chunk over a cached prefix included), at head dims 64 (GQA 4), 128 and
+256 (GQA 2), plus one long sequence beside short ones (300/3/17 over 300/3/600) without GQA. Packed K/V are the head
+of a buffer whose tail is NaN, so a read past the last sequence fails. The paged variant uses reversed blocks and
+NaN padding. A rejection test covers a missing or wrongly sized mask, a batch mismatch and max_len past the rows.
+28 tests in the crate pass.
+
+Performance: what it took to stay level with master.
+- First varlen build vs master. bf16 bench, interleaved master/branch runs, median of 3 (single runs drift 5-7% with
+  GPU clocks: FA2's own times move that much): Qwen head-dim-256 prefill past 512 Q rows was 9-10% slower (1 x 8192:
+  3878 vs 4235 us), and 128 was within 3%.
+- The same A/B showed master itself 6-12% slower on long prefill than Run 5 (Qwen 1 x 8192 3924 vs 3694 us, Llama
+  b2 x 2048 1530 vs 1426 us). So #275/#276 had cost bf16 too; Run 7's "matches master" had checked selected rows only.
+- Cause, part 1: the per-sequence row structs (`fattn_kv_rows` for K and V, about 8 registers each) passed by value
+  through process_tile and iter. 256/16/4 had 255 registers and 152 bytes of stack. They became a reference to the
+  kernel's own layout parameter plus the sequence index, with `load_tile` resolving the rows itself. Stack fell to
+  56 bytes, but Qwen long prefill was still slower.
+- Cause, part 2: the general row lookup (paged table or packed base, length redirect) in loops that plain dense K/V
+  run. Both load loops are now instantiated for plain dense rows (`i * stride`, master's code) and for general rows,
+  chosen once per tile like fp8.
+- Tooling: dev test binaries load the fattn kernels from an absolute-path shared library. The A/B swapped that file
+  between runs at first, then used patchelf to point each binary at its own copy.
+
+Final A/B, median of 5 interleaved runs, master / branch (us):
+
+| row | Qwen3.5-0.8B | Llama-8B |
+|---|---|---|
+| q 16 kv 4096 | 72.3 / 69.6 | 52.6 / 51.1 |
+| q 256 kv 4096 | 173.5 / 170.1 | 300.2 / 282.8 |
+| q 512 kv 4096 | 320.8 / 313.1 | 602.1 / 565.3 |
+| q 1024 kv 4096 | 541.5 / 572.0 | 950.5 / 882.5 |
+| 2 x 512 x 512 | 94.7 / 93.5 | 151.4 / 145.6 |
+| 1 x 2048 x 2048 | 387.5 / 389.0 | 610.1 / 573.2 |
+| 2 x 2048 x 2048 | 755.7 / 755.9 | 1537.3 / 1439.1 |
+| 1 x 8192 x 8192 | 3928.4 / 3945.7 | 7896.1 / 7365.1 |
+| q 1 kv 512 | 12.5 / 11.2 | 12.4 / 11.7 |
+| q 1 kv 4096 | 24.4 / 27.0 | 35.3 / 37.0 |
+| q 1 kv 16384 | 56.3 / 57.3 | 94.2 / 92.0 |
+
+Llama recovers the #275/#276 cost: 3-7% faster than master on every prefill row, and 1 x 8192 is back near Run 5's
+7268 us. Qwen is level except q 1024 kv 4096 (+5.6%) and decode at kv 4096 (+10.7%, Llama +4.8%). Spreads are
+tight, so these are real, but kv 512 is 10% faster and kv 16384 flat, which points at layout effects in specific grid
+configurations rather than per-row cost. Recorded, not chased. Register and stack counts turned out to be a rough
+proxy only: 256/16/4 ends at 96 bytes of stack and still benches level with master's 40.
+
+Next: wiring. CUDA paged caches move to the HND layout, and the paged decode, prefix-prefill and packed-prefill paths
+move to fattn behind parity tests. Then FA2, FlashInfer decode and vLLM paged v1/v2 are deleted.
+
+Review follow-up:
+- Inherited from upstream: the `KV_max` mask scan (`flash_attn_mask_to_KV_max`) read mask rows up to `ncols1 - 1`
+  past the mask on the last Q tile when `max_q % ncols1 != 0`. That is harmless to the result (extra rows can only
+  raise KV_max), but it is an out-of-bounds read, and varlen always runs the scan (batch > 1, K/V padded to 256).
+  The scan now takes the mask's row count and stops there.
+- A dense packed sequence with 0 K/V rows would redirect to row `cu_kv[s]`, one past the buffer for the last
+  sequence. `Packed` now documents at least one K/V row per sequence. Packed totals above `i32::MAX` are rejected,
+  since the kernels read `cu_seqlens` and row indices as i32.
+- Tests: the last K/V length was 64, which fills a 64-row KV tile, so no tail row was read and the NaN-tail check
+  only caught overreads in one case. It is now 70, leaving a partial tile. New cases cover fp8 varlen, softcap with
+  sinks, batch 1, and a `max_len` 20 rows past the true maximum (with padded mask rows). The crate has 29 tests.
+- Not done yet, needed for the wiring: a `supported()` probe for varlen and paged calls, so a caller can route by
+  capability (pre-Turing, head dims 40/72, 192 without GQA) instead of by error.

@@ -598,8 +598,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
             return BEST_FATTN_KERNEL_NONE;
     }
 
-    const fattn_kv_src kv_src = fattn_get_kv_src(dst);
-    if (!kv_src.fp8 && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {
+    const fattn_layout lay = fattn_get_layout(dst);
+    if (!lay.fp8 && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {
         return BEST_FATTN_KERNEL_NONE;
     }
 
@@ -607,9 +607,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_NONE;
     }
 
-    // only the mma kernel resolves paged rows and dequantizes fp8; the vec and tile kernels walk K/V with fixed strides
-    if (kv_src.block_table || kv_src.fp8) {
-        const bool kv_ok = (kv_src.fp8 ? K->type == GGML_TYPE_I8 : K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16)
+    // only the mma kernel resolves paged or packed rows and dequantizes fp8; vec and tile walk fixed strides
+    if (lay.block_table || lay.fp8 || lay.cu_q || lay.cu_kv) {
+        const bool kv_ok = (lay.fp8 ? K->type == GGML_TYPE_I8 : K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16)
             && V->type == K->type;
         return kv_ok && turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72
             ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
