@@ -16,6 +16,10 @@ const GGML_TYPE_BF16: i32 = 30;
 const MAX_DEVICES: usize = 16;
 // The MLA head dim: fattn reads V out of K's tiles for it (`V_is_K_view = DKQ == 576`, fattn-mma-f16.cuh)
 const MLA_HEAD_DIM: usize = 576;
+// ggml_cuda_get_max_cpy_bytes: f32 Q rows load in 16-byte chunks, and gqa_opt_applies wants 16-byte Q strides
+const Q_LOAD_ALIGN: usize = 16;
+// supported() never launches, but fattn reads a null mask or sinks pointer as absent, so it describes operands at this
+const PROBE_PTR: u64 = 256;
 
 mod ffi {
     #[repr(C)]
@@ -35,6 +39,7 @@ mod ffi {
         pub mask: Tensor,
         pub sinks: Tensor,
         pub dst: *mut core::ffi::c_void,
+        pub dst_type: i32,
         pub scale: f32,
         pub max_bias: f32,
         pub softcap: f32,
@@ -44,7 +49,6 @@ mod ffi {
 
     unsafe extern "C" {
         pub fn inference_fattn_supported(args: *const Args) -> bool;
-        pub fn inference_fattn_alloc_size(args: *const Args) -> usize;
         pub fn inference_fattn_forward(args: *const Args) -> i32;
     }
 }
@@ -224,6 +228,7 @@ fn args(
         mask,
         sinks,
         dst: std::ptr::null_mut(),
+        dst_type: q.ty,
         scale: opts.scale,
         max_bias: 0.,
         softcap: opts.softcap,
@@ -301,36 +306,69 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         }
         let (b, sq, h, _) = q_l.shape().dims4()?;
         let dv = v_l.shape().dims4()?.3;
-        let bytes = unsafe { ffi::inference_fattn_alloc_size(&args) };
-        let mut dst = unsafe { dev.alloc::<f32>(bytes.div_ceil(DType::F32.size_in_bytes()))? };
-        {
-            let (ptr, _dst_guard) = dst.device_ptr_mut(&stream);
+        let n = b * sq * h * dv;
+        let launch = |args: &mut ffi::Args, ptr: u64| -> Result<()> {
             args.dst = ptr as *mut _;
-            let err = unsafe { ffi::inference_fattn_forward(&args) };
-            if err != 0 {
-                candle_core::bail!("fattn launch failed with CUDA error {err}");
+            match unsafe { ffi::inference_fattn_forward(args) } {
+                0 => Ok(()),
+                err => candle_core::bail!("fattn launch failed with CUDA error {err}"),
             }
-        }
+        };
+        let out = match q.dtype() {
+            DType::BF16 => {
+                let mut dst = unsafe { dev.alloc::<half::bf16>(n)? };
+                launch(&mut args, dst.device_ptr_mut(&stream).0)?;
+                CudaStorage::wrap_cuda_slice(dst, dev.clone())
+            }
+            _ => {
+                let mut dst = unsafe { dev.alloc::<f32>(n)? };
+                launch(&mut args, dst.device_ptr_mut(&stream).0)?;
+                CudaStorage::wrap_cuda_slice(dst, dev.clone())
+            }
+        };
         drop(guards);
-        Ok((
-            CudaStorage::wrap_cuda_slice(dst, dev.clone()),
-            Shape::from((b, sq, h, dv)),
-        ))
+        Ok((out, Shape::from((b, sq, h, dv))))
+    }
+}
+
+// fattn reads Q and writes its result in f32 or bf16; f16 queries go through f32.
+fn native_q_dtype(dtype: DType) -> DType {
+    match dtype {
+        DType::BF16 => DType::BF16,
+        _ => DType::F32,
+    }
+}
+
+// Q passes through as is when fattn takes its dtype, its rows meet the 16-byte loads and its strides fit the i32 nb0x.
+fn q_passes_through(q: &Tensor) -> bool {
+    let l = q.layout();
+    let es = q.dtype().size_in_bytes();
+    let aligned = |n: usize| (n * es).is_multiple_of(Q_LOAD_ALIGN);
+    native_q_dtype(q.dtype()) == q.dtype()
+        && l.stride()[3] == 1
+        && aligned(l.start_offset())
+        && l.stride()[..3]
+            .iter()
+            .all(|&s| aligned(s) && s * es <= i32::MAX as usize)
+}
+
+// Anything else becomes a fresh offset-0 copy; `contiguous()` would keep a contiguous view at an unaligned offset.
+fn kernel_q(q: &Tensor) -> Result<Tensor> {
+    if q_passes_through(q) {
+        Ok(q.clone())
+    } else if native_q_dtype(q.dtype()) == q.dtype() {
+        q.force_contiguous()
+    } else {
+        q.to_dtype(native_q_dtype(q.dtype()))
     }
 }
 
 /// Attention over `q (b, seq_q, n_head, d_qk)`, `k (b, seq_kv, n_head_kv, d_qk)`, `v (b, seq_kv, n_head_kv, d_v)`.
 pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<Tensor> {
     validate(q, k, v, opts)?;
-    let out = q
-        .to_dtype(DType::F32)?
-        .apply_op3_no_bwd(k, v, &Fattn { opts })?;
-    // the output buffer also holds fattn's f16 K/V scratch; a copy releases it with the result
-    if q.dtype() == DType::F32 {
-        out.copy()
-    } else {
-        out.to_dtype(q.dtype())
-    }
+    kernel_q(q)?
+        .apply_op3_no_bwd(k, v, &Fattn { opts })?
+        .to_dtype(q.dtype())
 }
 
 /// Whether a kernel exists for these operands on this device; reads only shapes, dtypes and strides.
@@ -340,15 +378,20 @@ pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Res
     };
     validate(q, k, v, opts)?;
     let layout = |t: &Tensor| t.layout().clone();
-    let q_t = bhsd(0, DType::F32, &Layout::contiguous(q.shape()))?;
-    let k_t = bhsd(0, k.dtype(), &layout(k))?;
-    let v_t = bhsd(0, v.dtype(), &layout(v))?;
+    let q_layout = if q_passes_through(q) {
+        layout(q)
+    } else {
+        Layout::contiguous(q.shape())
+    };
+    let q_t = bhsd(PROBE_PTR, native_q_dtype(q.dtype()), &q_layout)?;
+    let k_t = bhsd(PROBE_PTR, k.dtype(), &layout(k))?;
+    let v_t = bhsd(PROBE_PTR, v.dtype(), &layout(v))?;
     let mask_t = match &opts.mask {
-        Some(m) => mask_descriptor(0, &layout(m))?,
+        Some(m) => mask_descriptor(PROBE_PTR, &layout(m))?,
         None => ABSENT,
     };
     let sinks_t = match &opts.sinks {
-        Some(s) => sinks_descriptor(0, &layout(s))?,
+        Some(s) => sinks_descriptor(PROBE_PTR, &layout(s))?,
         None => ABSENT,
     };
     let args = args(q_t, k_t, v_t, mask_t, sinks_t, opts, &dev.cuda_stream());

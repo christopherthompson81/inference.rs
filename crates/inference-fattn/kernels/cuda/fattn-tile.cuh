@@ -811,7 +811,8 @@ static __global__ void flash_attn_tile(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const bool Q_bf16, const bool dst_bf16) {
 #ifdef FLASH_ATTN_AVAILABLE
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
     const char * GGML_CUDA_RESTRICT K        = K_ptr;
@@ -833,7 +834,7 @@ static __global__ void flash_attn_tile(
                   nb11, nb12, nb13,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
-                  nb31, nb32, nb33);
+                  nb31, nb32, nb33, Q_bf16, dst_bf16);
         NO_DEVICE_CODE;
         return;
     }
@@ -854,6 +855,7 @@ static __global__ void flash_attn_tile(
     const int head0 = blockIdx.z*ncols2 - sequence*ne02; // == blockIdx.z % (ne02/ncols2)
     const int gqa_ratio = ne02 / ne12; // With grouped query attention there are > 1 Q matrices per K, V matrix.
     const float * Q_f  = (const float *) (Q + nb03*sequence + nb02* head0);
+    const int     Q_ts = Q_bf16 ? sizeof(nv_bfloat16) : sizeof(float);
     const half2 * K_h2 = (const half2 *) (K + nb13*sequence + nb12*(head0 / gqa_ratio));
     const half2 * V_h2 = (const half2 *) (V + nb23*sequence + nb22*(head0 / gqa_ratio)); // K and V have same shape
 
@@ -916,9 +918,16 @@ static __global__ void flash_attn_tile(
         for (int i0 = 0; i0 < DKQp; i0 += np*warp_size*cpy_ne_D) {
             if (i0 + np*warp_size*cpy_ne_D <= DKQ || i0 + (threadIdx.y % np)*(warp_size*cpy_ne_D) + threadIdx.x*cpy_ne_D < DKQ) {
                 __align__(16) float tmp_f[cpy_ne_D] = {0.0f};
-                ggml_cuda_memcpy_1<sizeof(tmp_f)>
-                    (tmp_f, &Q_f[c*(nb02/sizeof(float)) + fastmodulo(col_Q_0 + j, ne01)*(nb01/sizeof(float))
-                                 + i0 + (threadIdx.y % np)*(warp_size*cpy_ne_D) + threadIdx.x*cpy_ne_D]);
+                const int64_t i_Q = c*(nb02/Q_ts) + fastmodulo(col_Q_0 + j, ne01)*(nb01/Q_ts)
+                    + i0 + (threadIdx.y % np)*(warp_size*cpy_ne_D) + threadIdx.x*cpy_ne_D;
+                if (Q_bf16) {
+#pragma unroll
+                    for (int i1 = 0; i1 < cpy_ne_D; ++i1) {
+                        tmp_f[i1] = fattn_load_q(Q_f, Q_bf16, i_Q + i1);
+                    }
+                } else {
+                    ggml_cuda_memcpy_1<sizeof(tmp_f)>(tmp_f, &Q_f[i_Q]);
+                }
 
 #pragma unroll
                 for (int i1 = 0; i1 < cpy_ne_D; ++i1) {
@@ -1107,7 +1116,14 @@ static __global__ void flash_attn_tile(
                 tmp[i1].y *= scale;
             }
             if (i0 + warp_size*cpy_ne_D <= DV/2 || i0 + threadIdx.x*cpy_ne_D < DV/2) {
-                ggml_cuda_memcpy_1<sizeof(tmp)>(&dst[j_dst_unrolled*DV + 2*i0 + threadIdx.x*(2*cpy_ne_D)], tmp);
+                if (dst_bf16) {
+#pragma unroll
+                    for (int i1 = 0; i1 < cpy_ne_D; ++i1) {
+                        fattn_store_dst2(dst, dst_bf16, (j_dst_unrolled*DV)/2 + i0 + threadIdx.x*cpy_ne_D + i1, tmp[i1]);
+                    }
+                } else {
+                    ggml_cuda_memcpy_1<sizeof(tmp)>(&dst[j_dst_unrolled*DV + 2*i0 + threadIdx.x*(2*cpy_ne_D)], tmp);
+                }
             }
         }
 #else
@@ -1120,9 +1136,17 @@ static __global__ void flash_attn_tile(
                     VKQ[jc0*((DVp/2)/warp_size) + i0/(2*warp_size) + i1].x *= scale;
                     VKQ[jc0*((DVp/2)/warp_size) + i0/(2*warp_size) + i1].y *= scale;
                 }
-                ggml_cuda_memcpy_1<cpy_ne_D*4>(
-                    &dst[j_dst_unrolled*DV + i0 + threadIdx.x*cpy_ne_D],
-                    &VKQ[jc0*((DVp/2)/warp_size) + i0/(2*warp_size)]);
+                if (dst_bf16) {
+#pragma unroll
+                    for (int i1 = 0; i1 < cpy_ne_D/2; ++i1) {
+                        fattn_store_dst2(dst, dst_bf16, (j_dst_unrolled*DV + i0 + threadIdx.x*cpy_ne_D)/2 + i1,
+                            VKQ[jc0*((DVp/2)/warp_size) + i0/(2*warp_size) + i1]);
+                    }
+                } else {
+                    ggml_cuda_memcpy_1<cpy_ne_D*4>(
+                        &dst[j_dst_unrolled*DV + i0 + threadIdx.x*cpy_ne_D],
+                        &VKQ[jc0*((DVp/2)/warp_size) + i0/(2*warp_size)]);
+                }
             }
         }
 #endif // FAST_FP16_AVAILABLE
@@ -1140,7 +1164,7 @@ static __global__ void flash_attn_tile(
               nb11, nb12, nb13,
               nb21, nb22, nb23,
               ne31, ne32, ne33,
-              nb31, nb32, nb33);
+              nb31, nb32, nb33, Q_bf16, dst_bf16);
     NO_DEVICE_CODE;
 #endif // FLASH_ATTN_AVAILABLE
 }

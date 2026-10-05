@@ -11,10 +11,11 @@ struct inference_fattn_tensor {
     int64_t      nb[4]; // bytes
 };
 
-// Operands in ggml_flash_attn_ext's layout (ggml.h); dst is f32 [d_v, n_head, n_q, n_seq], contiguous.
+// Operands in ggml_flash_attn_ext's layout (ggml.h); q is f32 or bf16, dst is [d_v, n_head, n_q, n_seq], contiguous.
 struct inference_fattn_args {
     inference_fattn_tensor q, k, v, mask, sinks;
     void *  dst;
+    int32_t dst_type; // ggml_type: F32 or BF16
     float   scale;
     float   max_bias;
     float   softcap;
@@ -41,13 +42,13 @@ struct operands {
     explicit operands(const inference_fattn_args & a) :
             q(descriptor(a.q)), k(descriptor(a.k)), v(descriptor(a.v)), mask(descriptor(a.mask)),
             sinks(descriptor(a.sinks)), dst{} {
-        dst.type = GGML_TYPE_F32;
+        dst.type = (ggml_type) a.dst_type;
         dst.op = GGML_OP_FLASH_ATTN_EXT;
         dst.ne[0] = v.ne[0];
         dst.ne[1] = q.ne[2];
         dst.ne[2] = q.ne[1];
         dst.ne[3] = q.ne[3];
-        dst.nb[0] = sizeof(float);
+        dst.nb[0] = ggml_type_size(dst.type);
         for (int i = 1; i < GGML_MAX_DIMS; ++i) {
             dst.nb[i] = dst.nb[i - 1]*dst.ne[i - 1];
         }
@@ -77,12 +78,6 @@ ggml_backend_cuda_context & context(int device, cudaStream_t stream) {
 extern "C" bool inference_fattn_supported(const inference_fattn_args * args) {
     operands ops(*args);
     return ggml_cuda_flash_attn_ext_supported(args->device, &ops.dst);
-}
-
-// Bytes `dst` must hold: the output plus the f16 copies of K/V the mma kernels need for other K/V types.
-extern "C" size_t inference_fattn_alloc_size(const inference_fattn_args * args) {
-    operands ops(*args);
-    return ggml_cuda_flash_attn_ext_get_alloc_size(args->device, &ops.dst);
 }
 
 extern "C" int inference_fattn_forward(const inference_fattn_args * args) {
