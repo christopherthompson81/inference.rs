@@ -57,6 +57,8 @@ pub use dispatch::AttentionDispatch;
 
 pub use backends::cpu::fast_exp;
 #[cfg(feature = "cuda")]
+pub use backends::fattn_sinks;
+#[cfg(feature = "cuda")]
 use backends::naive::maybe_synchronize;
 pub use backends::{
     fattn_supports, flash_attn, flash_backend_supports, flash_backend_supports_sdpa, naive_sdpa,
@@ -218,17 +220,19 @@ fn run_flash_attn_cpu_for_dtype(
 
 fn packed_attention_backend_is_available(q: &Tensor, sdpa_params: &SdpaParams) -> Result<bool> {
     let head_dim = q.dim(3)?;
-    if sdpa_params.sinks.is_some() {
+    let has_softcap = sdpa_params.softcap.is_some();
+    if sdpa_params.sinks.is_some() && !q.device().is_cuda() {
+        // Metal's varlen sinks kernel takes the packed query padded out per sequence
         return Ok(q.dim(0)? > 1 && sinks_backend_is_available(q, head_dim));
     }
     Ok(q.device().is_cuda()
         && crate::utils::using_flash_attn()
         && matches!(q.dtype(), DType::F16 | DType::BF16)
-        && flash_backend_supports_sdpa(
-            head_dim,
-            sdpa_params.softcap.is_some(),
-            sdpa_params.sliding_window.is_some(),
-        ))
+        && if sdpa_params.sinks.is_some() {
+            fattn_supports(head_dim, has_softcap)
+        } else {
+            flash_backend_supports_sdpa(head_dim, has_softcap, sdpa_params.sliding_window.is_some())
+        })
 }
 
 pub struct SdpaParams {
@@ -272,11 +276,33 @@ impl Sdpa {
             candle_core::bail!("packed prefill requires causal varlen attention support");
         }
 
-        // If sinks are present, dispatch to the sinks backend
         if let Some(sinks) = &sdpa_params.sinks {
+            #[cfg(feature = "cuda")]
+            if q.device().is_cuda() && !mask.is_custom() {
+                let (qt, kt, vt) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
+                if let Some(out) = flash_attn(&qt, &kt, &vt, flash_params, sdpa_params)? {
+                    return out.transpose(1, 2);
+                }
+                if flash_params.is_some_and(|params| params.packed) {
+                    candle_core::bail!("no FlashAttention kernel takes this packed sinks prefill");
+                }
+            }
+            // the unfused path needs CausalFlash and the window as an explicit mask; Metal's kernels apply them
+            let fused = q.device().is_metal() && sinks_backend_is_available(q, q.dim(3)?);
+            let causal_mask = match mask {
+                AttentionMask::CausalFlash if q.dim(2)? > 1 && !fused => eager_attention_mask(
+                    q.dim(2)?,
+                    k.dim(2)?,
+                    true,
+                    sdpa_params.sliding_window,
+                    q.dtype(),
+                    q.device(),
+                )?,
+                _ => None,
+            };
             let mask_tensor = match mask {
                 AttentionMask::Custom(t) => Some(t),
-                _ => None,
+                _ => causal_mask.as_ref(),
             };
             return sinks_attn(q, k, v, sinks, mask_tensor, flash_params, sdpa_params);
         }
@@ -677,6 +703,9 @@ mod tests {
 
     const EPS: f32 = 1e-4;
     const CAUSAL_FLASH_TOLERANCE: f32 = 1e-2;
+    // bf16 rounding of an O(1) output, a few ulps
+    #[cfg(feature = "cuda")]
+    const SINKS_BF16_TOLERANCE: f32 = 3e-2;
 
     fn assert_close(lhs: &Tensor, rhs: &Tensor) -> CandleResult<()> {
         let lhs = lhs.flatten_all()?.to_vec1::<f32>()?;
@@ -808,6 +837,114 @@ mod tests {
         // a CUDA model's CausalFlash mask reaches the layers a device map puts on the CPU
         causal_flash_case(&Device::Cpu, None)?;
         causal_flash_case(&Device::Cpu, Some(3))
+    }
+
+    #[test]
+    fn causal_flash_with_sinks_masks_the_unfused_path() -> CandleResult<()> {
+        let (h, kv_h, len, d) = (4, 2, 12, 16);
+        let rand = |heads| Tensor::randn(0f32, 1., (1, heads, len, d), &Device::Cpu);
+        let (q, k, v) = (rand(h)?, rand(kv_h)?, rand(kv_h)?);
+        for window in [None, Some(4)] {
+            let sdpa_params = SdpaParams {
+                n_kv_groups: h / kv_h,
+                softcap: None,
+                softmax_scale: 1. / (d as f32).sqrt(),
+                sliding_window: window,
+                sinks: Some(Tensor::new(&[0.5f32, -1., 2., 0.], &Device::Cpu)?),
+            };
+            let mask = eager_attention_mask(len, len, true, window, DType::F32, &Device::Cpu)?;
+            let expected = Sdpa.run_attention(
+                &q,
+                &k,
+                &v,
+                &AttentionMask::Custom(mask.unwrap()),
+                None,
+                &sdpa_params,
+            )?;
+            let out = Sdpa.run_attention(
+                &q,
+                &k,
+                &v,
+                &AttentionMask::CausalFlash,
+                Some(&FlashParams::empty(true)),
+                &sdpa_params,
+            )?;
+            let diff = (out - expected)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(
+                diff < CAUSAL_FLASH_TOLERANCE,
+                "window {window:?}: max abs diff {diff}"
+            );
+        }
+        Ok(())
+    }
+
+    // gpt-oss's prompt shape: GQA at head dim 64, a sink per head, every other layer windowed
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn sinks_prefill_on_cuda_matches_the_cpu() -> CandleResult<()> {
+        crate::skip_without_cuda!();
+        let dev = Device::new_cuda(0)?;
+        // past one 64-query tile
+        let (h, kv_h, len, d) = (8, 2, 81, 64);
+        // (b, s, heads, d) rows viewed as (b, heads, s, d), as the projections leave them; rounded to bf16 first so
+        // the reference sees the GPU's inputs
+        let rand = |heads| {
+            Tensor::randn(0f32, 1., (1, len, heads, d), &Device::Cpu)?
+                .to_dtype(DType::BF16)?
+                .to_dtype(DType::F32)?
+                .transpose(1, 2)
+        };
+        let (q, k, v) = (rand(h)?, rand(kv_h)?, rand(kv_h)?);
+        for (window, sink) in [(None, 0.5), (Some(8), 0.5), (Some(8), 8.)] {
+            let sdpa_params = |device: &Device| -> CandleResult<SdpaParams> {
+                Ok(SdpaParams {
+                    n_kv_groups: h / kv_h,
+                    softcap: None,
+                    softmax_scale: 1. / (d as f32).sqrt(),
+                    sliding_window: window,
+                    sinks: Some(Tensor::arange(0f32, h as f32, device)?.affine(0.25, sink)?),
+                })
+            };
+            let cpu_mask =
+                eager_attention_mask(len, len, true, window, DType::F32, &Device::Cpu)?.unwrap();
+            let expected = Sdpa.run_attention(
+                &q,
+                &k,
+                &v,
+                &AttentionMask::Custom(cpu_mask),
+                None,
+                &sdpa_params(&Device::Cpu)?,
+            )?;
+            let on_gpu = |t: &Tensor| {
+                t.transpose(1, 2)?
+                    .contiguous()?
+                    .to_device(&dev)?
+                    .to_dtype(DType::BF16)?
+                    .transpose(1, 2)
+            };
+            let out = Sdpa.run_attention(
+                &on_gpu(&q)?,
+                &on_gpu(&k)?,
+                &on_gpu(&v)?,
+                &AttentionMask::CausalFlash,
+                Some(&FlashParams::empty(true)),
+                &sdpa_params(&dev)?,
+            )?;
+            let diff = (out.to_dtype(DType::F32)?.to_device(&Device::Cpu)? - expected)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(
+                diff < SINKS_BF16_TOLERANCE,
+                "window {window:?} sink {sink}: max abs diff {diff}"
+            );
+        }
+        Ok(())
     }
 
     #[cfg(feature = "cuda")]

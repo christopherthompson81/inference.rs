@@ -340,7 +340,6 @@ template <typename T, int D>
 
 // ============================================================================
 // Prefill: flash_attn_sinks_kernel
-// Port of CUDA flash_attn_sinks.cu to Metal.
 // Tiled flash attention with online softmax and per-head sinks.
 // ============================================================================
 

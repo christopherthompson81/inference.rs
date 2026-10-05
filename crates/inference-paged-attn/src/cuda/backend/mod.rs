@@ -1,7 +1,6 @@
 mod cache;
 mod context_attention_mla;
 mod fa3;
-mod flash_attn_sinks;
 mod flashinfer;
 mod gather_kv;
 mod mla;
@@ -19,7 +18,6 @@ pub use fa3::{
     Fa3PagedMetadataLayout, USE_FA3_FP8_PAGED, fa3_fp8_decode, fa3_prepare_decode_metadata,
     fa3_prepare_paged_metadata,
 };
-pub use flash_attn_sinks::{flash_attn_sinks, flash_attn_sinks_varlen};
 pub use flashinfer::{
     gather_kv_cache_flashinfer, is_flashinfer_cache, reshape_and_cache_flashinfer,
 };

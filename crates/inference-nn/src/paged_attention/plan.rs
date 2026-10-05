@@ -96,7 +96,7 @@ impl PrefixPrefillPlan {
     }
 }
 
-// Image prefix ranges (bidirectional spans inside causal attention), sinks and padded rows gather.
+// Image prefix ranges (bidirectional spans inside causal attention) and padded rows gather.
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn fattn_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
     input.device_is_cuda
@@ -104,7 +104,6 @@ pub fn fattn_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
         && matches!(input.dtype, DType::F16 | DType::BF16)
         && matches!(input.cache_dtype, DType::F16 | DType::BF16 | DType::F8E4M3)
         && !input.has_alibi
-        && !input.has_sinks
         && !input.has_custom_mask
         && input.causality_known
         && !input.has_noncausal_mm_context
@@ -656,7 +655,6 @@ pub struct DecodePlanInput {
     pub attention_backend: AttentionBackendKind,
     pub head_size: usize,
     pub has_alibi: bool,
-    pub has_sinks: bool,
     pub has_sliding_window: bool,
 }
 
@@ -694,7 +692,6 @@ impl DecodePlan {
                 flashinfer::decode_plan(FlashInferDecodePlanInput {
                     head_size: input.head_size,
                     has_alibi: input.has_alibi,
-                    has_sinks: input.has_sinks,
                 })
                 .map(Self::FlashInfer)
             }
@@ -1180,7 +1177,11 @@ mod tests {
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap()
                 .bytes,
-            739_889_152
+            if fattn_reads_cache(256) {
+                paged_output_workspace(256)
+            } else {
+                739_889_152
+            }
         );
     }
 
@@ -1247,7 +1248,6 @@ mod tests {
             attention_backend: AttentionBackendKind::Standard,
             head_size: 128,
             has_alibi: false,
-            has_sinks: false,
             has_sliding_window: true,
         })
         .unwrap();
@@ -1261,7 +1261,6 @@ mod tests {
             attention_backend: AttentionBackendKind::Standard,
             head_size: 128,
             has_alibi: false,
-            has_sinks: false,
             has_sliding_window: false,
         })
         .unwrap();

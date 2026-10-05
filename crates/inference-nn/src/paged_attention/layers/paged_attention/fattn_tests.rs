@@ -27,6 +27,9 @@ const BF16_TOLERANCE: f32 = 1.6e-2;
 const BF16_GATHER_TOLERANCE: f32 = 4e-2;
 const FP8_SCALES: KvCacheScales = KvCacheScales { k: 0.5, v: 0.25 };
 const PREFILL_BLOCK_SIZE: usize = 16;
+// Per-head sink logits around the scores' scale, so dropping them moves the output.
+const SINK_BASE: f32 = -1.;
+const SINK_STEP: f32 = 0.5;
 
 struct Case {
     head_dim: usize,
@@ -41,6 +44,7 @@ struct Case {
     model_window: Option<usize>,
     layer_window: Option<usize>,
     softcap: Option<f32>,
+    sinks: bool,
     // fattn refuses the call, so the layer gathers (its output keeps a query axis: rank 4 against fattn's 3)
     gather: bool,
 }
@@ -112,12 +116,16 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
     };
     let (k_cache, v_cache) = (cache()?, cache()?);
     let query = Tensor::randn(0f32, 1., (b, n_head, q, d), &dev)?.to_dtype(q_dtype)?;
+    let sinks = c.sinks.then(|| sink_logits(n_head));
     let sdpa = SdpaParams {
         n_kv_groups: n_head / n_head_kv,
         softcap: c.softcap,
         softmax_scale: 1. / f32::from(u16::try_from(d).unwrap()).sqrt(),
         sliding_window: c.layer_window,
-        sinks: None,
+        sinks: sinks
+            .as_ref()
+            .map(|s| Tensor::new(s.as_slice(), &dev)?.to_dtype(q_dtype))
+            .transpose()?,
     };
     let scales = fp8.then_some(Fp8AttentionScales {
         q: 1.,
@@ -167,6 +175,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
             causal: true,
             window: c.layer_window,
             softcap: c.softcap,
+            sinks: sinks.as_deref(),
             heads: c.heads,
         },
         &packed,
@@ -210,6 +219,7 @@ fn decode_matches_a_reference() -> Result<()> {
                 model_window: None,
                 layer_window: None,
                 softcap: None,
+                sinks: false,
                 gather: false,
             })?;
         }
@@ -231,6 +241,7 @@ fn sliding_window_decode_matches_a_reference() -> Result<()> {
                 model_window: Some(100),
                 layer_window,
                 softcap,
+                sinks: false,
                 gather: false,
             })?;
         }
@@ -250,6 +261,7 @@ fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
         model_window: None,
         layer_window: None,
         softcap: Some(30.),
+        sinks: false,
         gather: true,
     })
 }
@@ -268,6 +280,7 @@ fn decode_with_any_gqa_group() -> Result<()> {
             model_window: None,
             layer_window: None,
             softcap: None,
+            sinks: false,
             gather: false,
         })?;
     }
@@ -287,6 +300,7 @@ fn gather_decode_refuses_graph_capture() -> Result<()> {
             model_window: None,
             layer_window: None,
             softcap: Some(30.),
+            sinks: false,
             gather: true,
         },
         true,
@@ -305,6 +319,7 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
         model_window: None,
         layer_window: None,
         softcap: None,
+        sinks: false,
         gather: false,
     })
 }
@@ -321,6 +336,7 @@ fn f32_caches_fall_back_to_the_gather() -> Result<()> {
         model_window: None,
         layer_window: None,
         softcap: None,
+        sinks: false,
         gather: true,
     })
 }
@@ -333,6 +349,7 @@ struct PrefillCase {
     query_lens: &'static [usize],
     causal: bool,
     window: Option<usize>,
+    sinks: bool,
 }
 
 // The shape of a reference attention: each sequence's queries are the last of its rows.
@@ -346,6 +363,13 @@ struct Reference<'a> {
     causal: bool,
     window: Option<usize>,
     softcap: Option<f32>,
+    sinks: Option<&'a [f32]>,
+}
+
+fn sink_logits(n_head: usize) -> Vec<f32> {
+    std::iter::successors(Some(SINK_BASE), |sink| Some(sink + SINK_STEP))
+        .take(n_head)
+        .collect()
 }
 
 // Each sequence's queries against its rows gathered from the cache by hand, one head at a time in f32; the packed
@@ -392,7 +416,15 @@ fn attention_reference(
                 if let Some(cap) = c.softcap {
                     att = ((att / f64::from(cap))?.tanh()? * f64::from(cap))?;
                 }
-                candle_nn::ops::softmax_last_dim(&(att + &mask)?)?.matmul(&v)
+                let att = (att + &mask)?;
+                let Some(sinks) = c.sinks else {
+                    return candle_nn::ops::softmax_last_dim(&att)?.matmul(&v);
+                };
+                // a sink is one more logit in the softmax that carries no value
+                let sink = Tensor::full(sinks[h], (q_len, 1), &Device::Cpu)?;
+                candle_nn::ops::softmax_last_dim(&Tensor::cat(&[&att, &sink], 1)?)?
+                    .narrow(1, 0, kv_len)?
+                    .matmul(&v)
             })
             .collect::<Result<Vec<_>>>()?;
         outs.push(Tensor::stack(&heads, 0)?);
@@ -459,12 +491,16 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
     } else {
         packed.clone()
     };
+    let sinks = c.sinks.then(|| sink_logits(N_HEAD));
     let sdpa = SdpaParams {
         n_kv_groups: N_HEAD / N_HEAD_KV,
         softcap: None,
         softmax_scale: 1. / f32::from(u16::try_from(d).unwrap()).sqrt(),
         sliding_window: c.window,
-        sinks: None,
+        sinks: sinks
+            .as_ref()
+            .map(|s| Tensor::new(s.as_slice(), &dev)?.to_dtype(q_dtype))
+            .transpose()?,
     };
     let scales = if fp8 {
         FP8_SCALES
@@ -526,6 +562,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             causal: c.causal,
             window: c.window,
             softcap: None,
+            sinks: sinks.as_deref(),
             heads: (N_HEAD, N_HEAD_KV),
         },
         &packed,
@@ -562,6 +599,7 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
             query_lens: &[8, 8, 8],
             causal: true,
             window: None,
+            sinks: false,
         })?;
         // packed: sequences of their own lengths in one row
         check_prefill(PrefillCase {
@@ -571,6 +609,7 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
             query_lens: &[5, 17, 1],
             causal: true,
             window: None,
+            sinks: false,
         })?;
     }
     Ok(())
@@ -585,6 +624,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         query_lens: &[20, 9],
         causal: true,
         window: Some(24),
+        sinks: false,
     })?;
     // a bidirectional prompt chunk sees every row of its sequence, and a window bounds only its left
     check_prefill(PrefillCase {
@@ -594,6 +634,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         query_lens: &[16, 12],
         causal: false,
         window: None,
+        sinks: false,
     })?;
     check_prefill(PrefillCase {
         head_dim: 128,
@@ -602,5 +643,51 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         query_lens: &[16, 12],
         causal: false,
         window: Some(20),
+        sinks: false,
     })
+}
+
+#[test]
+fn decode_with_sinks_matches_a_reference() -> Result<()> {
+    // gpt-oss: head dim 64, sinks on every layer, a window on every other one
+    for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
+        // the last, a window shorter than a block, as the tiny gpt-oss checkpoint has
+        for (model_window, layer_window) in [
+            (None, None),
+            (Some(100), Some(100)),
+            (Some(100), None),
+            (Some(8), Some(8)),
+        ] {
+            check(Case {
+                head_dim: 64,
+                heads: (N_HEAD, N_HEAD_KV),
+                block_size: 32,
+                cache_dtype,
+                full_lens: &[1, 37, 300, 101],
+                query_len: 1,
+                model_window,
+                layer_window,
+                softcap: None,
+                sinks: true,
+                gather: false,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn prefix_prefill_with_sinks_matches_a_reference() -> Result<()> {
+    for (query_lens, window) in [(&[8, 8][..], None), (&[20, 9][..], Some(24))] {
+        check_prefill(PrefillCase {
+            head_dim: 64,
+            cache_dtype: DType::BF16,
+            kv_lens: &[90, 33],
+            query_lens,
+            causal: true,
+            window,
+            sinks: true,
+        })?;
+    }
+    Ok(())
 }

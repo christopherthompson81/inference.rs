@@ -48,7 +48,7 @@ const LLAMA4_IMAGE_TOKENS: [&str; 6] = [
 const LLAMA4_VOCAB: usize = VOCAB + LLAMA4_IMAGE_TOKENS.len();
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const LOGPROB_TOLERANCE: f32 = 0.5;
-// A gap the bf16 drift above could close.
+// A gap the rounding drift above could close.
 const TIE_MARGIN: f32 = LOGPROB_TOLERANCE;
 // Decode steps matched across the prompts: several windows and chunk edges.
 const MIN_AGREED: usize = 3 * WINDOW;
@@ -132,12 +132,13 @@ fn tiny_gpt_oss() -> anyhow::Result<tempfile::TempDir> {
         "sliding_window": WINDOW,
         "layer_types": layer_types,
         "num_local_experts": GPT_OSS_EXPERTS,
-        "num_experts_per_tok": 1,
+        // every expert per token, so a rounding change cannot flip the routing
+        "num_experts_per_tok": GPT_OSS_EXPERTS,
         "attention_bias": true,
         "tie_word_embeddings": false
     });
     let cfg: gpt_oss::Config = serde_json::from_value(config.clone())?;
-    // Reported absent so the experts load as split bf16 projections rather than packed MXFP4 blocks.
+    // Reported absent so the experts load as split dense projections rather than packed MXFP4 blocks.
     let packed = (0..GPT_OSS_LAYERS)
         .map(|layer| format!("model.layers.{layer}.mlp.experts.gate_up_proj_blocks"))
         .collect::<Vec<_>>();
@@ -204,7 +205,7 @@ fn tiny_llama4() -> anyhow::Result<tempfile::TempDir> {
             "use_qk_norm": true,
             "interleave_moe_layer_step": LLAMA4_MOE_STEP,
             "num_local_experts": LLAMA4_EXPERTS,
-            "num_experts_per_tok": 1,
+            "num_experts_per_tok": LLAMA4_EXPERTS,
             "attention_chunk_size": WINDOW,
             // Every fourth layer is the global NoPE one; a small floor scale makes its temperature tuning act.
             "floor_scale": 4.0,
@@ -253,6 +254,8 @@ async fn trace(model: &Model, prompt: &str) -> anyhow::Result<Vec<Step>> {
     let request = RequestBuilder::new()
         .add_message(TextMessageRole::User, prompt)
         .set_sampler_max_len(MAX_LEN)
+        // random weights may pick the end token, and every step past it still checks attention
+        .set_sampler_ignore_eos(true)
         .set_sampler_topk(1)
         .return_logprobs(true)
         .set_sampler_topn_logprobs(2);
@@ -285,7 +288,8 @@ fn paged_cache() -> inference::PagedCacheSpec {
 }
 
 async fn gpt_oss(dir: &Path, gpu: bool) -> anyhow::Result<Model> {
-    let builder = TextModelBuilder::new(dir.to_string_lossy()).with_dtype(ModelDType::BF16);
+    // f16 rounds finer than bf16, so another kernel's rounding flips fewer of the random weights' near ties
+    let builder = TextModelBuilder::new(dir.to_string_lossy()).with_dtype(ModelDType::F16);
     let builder = if gpu {
         builder.with_paged_attn(paged_cache())
     } else {
@@ -295,6 +299,7 @@ async fn gpt_oss(dir: &Path, gpu: bool) -> anyhow::Result<Model> {
 }
 
 async fn llama4(dir: &Path, gpu: bool) -> anyhow::Result<Model> {
+    // its random weights overflow f16
     let builder = MultimodalModelBuilder::new(dir.to_string_lossy()).with_dtype(ModelDType::BF16);
     let builder = if gpu {
         builder.with_paged_attn(paged_cache())
@@ -312,7 +317,7 @@ async fn traces(model: &Model) -> anyhow::Result<Vec<Vec<Step>>> {
     Ok(traces)
 }
 
-// Random weights leave near ties that bf16 rounding may flip, so a trace need only match up to one, where the GPU
+// Random weights leave near ties that rounding may flip, so a trace need only match up to one, where the GPU
 // must take the CPU's runner-up.
 fn ensure_close(gpu: &[Vec<Step>], cpu: &[Vec<Step>]) -> anyhow::Result<()> {
     let mut agreed = 0;

@@ -487,14 +487,13 @@ impl FlashInferDecodePlan {
 pub struct FlashInferDecodePlanInput {
     pub head_size: usize,
     pub has_alibi: bool,
-    pub has_sinks: bool,
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn decode_plan(input: FlashInferDecodePlanInput) -> Result<FlashInferDecodePlan> {
     // Decode can fall back for size limits, but unsupported attention features are hard errors.
-    if input.has_alibi || input.has_sinks {
-        candle_core::bail!("HND-layout decode does not support alibi/sinks");
+    if input.has_alibi {
+        candle_core::bail!("HND-layout decode does not support alibi");
     }
     if input.head_size > FLASHINFER_DECODE_MAX_HEAD_SIZE {
         candle_core::bail!(
