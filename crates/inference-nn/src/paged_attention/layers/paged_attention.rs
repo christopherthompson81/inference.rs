@@ -1228,23 +1228,6 @@ impl PagedAttention {
                 )?;
                 return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
             }
-            #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-            PrefixPrefillPlan::FlashAttentionPaged => {
-                let output = self.run_flash_attention_paged_prefill(
-                    ctx,
-                    tensors.query,
-                    key_cache.as_ref().unwrap(),
-                    value_cache.as_ref().unwrap(),
-                    block_tables,
-                    &query_lens,
-                    &kv_lens,
-                    &cu_kv,
-                    block_size,
-                    prefix_causal,
-                    mm_prefix_ranges,
-                )?;
-                return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
-            }
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             PrefixPrefillPlan::FattnPaged => {}
             PrefixPrefillPlan::GatherSdpa => {}
@@ -1266,7 +1249,7 @@ impl PagedAttention {
             tensors.query.dtype(),
         )?;
         let max_kv = kv_lens.iter().copied().max().unwrap_or(0);
-        // Pure-causal prefix prefills run flash varlen over the gathered KV: fa2 aligns causal
+        // Pure-causal prefix prefills run flash varlen over the gathered KV: the kernels align causal
         // bottom-right when kv_len > q_len, so no O(q*kv) mask or score materialization is needed.
         let pure_causal_varlen = prefix_causal
             && causality_known
@@ -1552,64 +1535,6 @@ impl PagedAttention {
                 ctx.dims.head_size,
             ))?
             .transpose(1, 2)
-    }
-
-    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-    #[allow(clippy::too_many_arguments)]
-    fn run_flash_attention_paged_prefill(
-        &self,
-        ctx: &PagedForwardCtx<'_>,
-        query: &Tensor,
-        key_cache: &Tensor,
-        value_cache: &Tensor,
-        block_tables: &Tensor,
-        query_lens: &[usize],
-        kv_lens: &[usize],
-        cu_kv: &Tensor,
-        block_size: usize,
-        causal: bool,
-        mm_prefix_ranges: Option<&Tensor>,
-    ) -> Result<Tensor> {
-        let device = query.device();
-        let cu_q = if let Some(fp) = ctx.flash_params {
-            if !fp.cumulative_seqlens_q.is_empty() {
-                resolve_tensor_for_device(&fp.cumulative_seqlens_q, device, "cumulative_seqlens_q")?
-            } else {
-                cumulative_seqlens_from_lengths(query_lens, device)?
-            }
-        } else {
-            cumulative_seqlens_from_lengths(query_lens, device)?
-        };
-        let q_flat =
-            query
-                .transpose(1, 2)?
-                .reshape(((), ctx.dims.attention_heads, ctx.dims.head_size))?;
-        let k_paged = key_cache.transpose(1, 2)?;
-        let v_paged = value_cache.transpose(1, 2)?;
-        let window_size_right = causal.then_some(0);
-        let out = inference_flash_attn::flash_attn_varlen_paged_windowed(
-            &q_flat,
-            &k_paged,
-            &v_paged,
-            &cu_q,
-            cu_kv,
-            block_tables,
-            mm_prefix_ranges,
-            query_lens.iter().copied().max().unwrap_or(0),
-            kv_lens.iter().copied().max().unwrap_or(0),
-            ctx.sdpa_params.softmax_scale,
-            sliding_window_left(ctx.sdpa_params.sliding_window),
-            window_size_right,
-            block_size,
-            ctx.sdpa_params.softcap,
-        )?;
-        out.reshape((
-            ctx.dims.batch_size,
-            ctx.dims.seq_len,
-            ctx.dims.attention_heads,
-            ctx.dims.head_size,
-        ))?
-        .transpose(1, 2)
     }
 
     fn try_regular_prompt(
@@ -2013,9 +1938,8 @@ impl PagedAttention {
                 }
             }),
             causal,
-            window_left: causal
-                .then(|| sliding_window_left(ctx.sdpa_params.sliding_window))
-                .flatten(),
+            // a non-causal chunk's window bounds the left only, as the gather's masks do
+            window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
             ..Default::default()
         };
         let q = query.transpose(1, 2)?;
@@ -3026,7 +2950,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+#[cfg(all(test, feature = "cuda", target_family = "unix"))]
 mod mixed_cached_prefix_tests {
     use super::*;
     use std::ops::Range;

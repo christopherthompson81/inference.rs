@@ -72,7 +72,7 @@ The same compatibility lanes are used by the [Docker images](/guides/deploy/dock
 
 | Feature | Requirement |
 |---|---|
-| `flash-attn` (v2) | compute capability 8.0+ |
+| Flash attention (fattn, built with `cuda`) | compute capability 7.5+; older GPUs run attention eagerly |
 | `flash-attn-v3` | Hopper (9.0) |
 | FP8 matmul | compute capability 8.9+ |
 | cuTile acceleration | Ampere/Ada (8.x) and Blackwell+ (10.x/12.x) with CUDA >= 13.2; Hopper (9.0) with CUDA >= 13.3 |

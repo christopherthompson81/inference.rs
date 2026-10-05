@@ -13,13 +13,6 @@ For unlisted issues, file an issue on [GitHub](https://github.com/christophertho
 
 Installer-managed binaries are exposed at `~/.local/bin/inference`, backed by `~/.inference-rs/inference`. Open a new shell or run `source "$HOME/.inference-rs/env"`. Manual Cargo installs use `~/.cargo/bin/inference` and may require `source "$HOME/.cargo/env"`.
 
-### Build fails with `flash-attn` feature enabled
-
-Flash attention requires compute capability 8.0+ (see [hardware support](/reference/hardware-support/)). On older GPUs, drop `flash-attn` and rebuild:
-
-- `cuda nccl` on Linux with NCCL installed.
-- `cuda` otherwise.
-
 ### `inference login` rejects the token
 
 The token must start with `hf_`. The validation happens in `inference login` before saving.

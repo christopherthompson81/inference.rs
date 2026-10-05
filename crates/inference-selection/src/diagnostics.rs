@@ -44,7 +44,7 @@ pub struct DeviceInfo {
     /// CUDA compute capability (major, minor) - None for non-CUDA devices
     #[serde(skip_serializing_if = "Option::is_none")]
     pub compute_capability: Option<(u32, u32)>,
-    /// Whether this GPU supports Flash Attention v2 (compute capability >= 8.0)
+    /// Whether this GPU runs the flash attention kernels (fattn's mma path: compute capability >= 7.5)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flash_attn_compatible: Option<bool>,
     /// Whether this GPU supports Flash Attention v3 (compute capability == 9.0, Hopper only)
@@ -55,13 +55,16 @@ pub struct DeviceInfo {
     pub unified_memory: Option<bool>,
 }
 
+// fattn (inference-fattn) runs causal, packed and paged attention on Turing's mma or newer
+#[cfg(feature = "cuda")]
+const FLASH_ATTN_MIN_COMPUTE: (u32, u32) = (7, 5);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildInfo {
     pub version: String,
     pub cuda: bool,
     pub metal: bool,
     pub cudnn: bool,
-    pub flash_attn: bool,
     pub flash_attn_v3: bool,
     pub cutile: bool,
     pub accelerate: bool,
@@ -145,7 +148,6 @@ fn build_info() -> BuildInfo {
         cuda: cfg!(feature = "cuda"),
         metal: cfg!(feature = "metal"),
         cudnn: cfg!(feature = "cudnn"),
-        flash_attn: cfg!(feature = "flash-attn"),
         flash_attn_v3: cfg!(feature = "flash-attn-v3"),
         cutile: cfg!(feature = "cutile"),
         accelerate: cfg!(feature = "accelerate"),
@@ -184,10 +186,7 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
 
             // Get compute capability
             let compute_cap = get_cuda_compute_capability(ord);
-            let flash_attn_v2_ok = compute_cap.map(|(major, _minor)| {
-                // Flash Attention v2 requires compute capability >= 8.0 (Ampere+)
-                major >= 8
-            });
+            let flash_attn_ok = compute_cap.map(|cc| cc >= FLASH_ATTN_MIN_COMPUTE);
             let flash_attn_v3_ok = compute_cap.map(|(major, minor)| {
                 // Flash Attention v3 requires compute capability == 9.0 (Hopper only)
                 major == 9 && minor == 0
@@ -200,7 +199,7 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
                 total_memory_bytes: total,
                 available_memory_bytes: avail,
                 compute_capability: compute_cap,
-                flash_attn_compatible: flash_attn_v2_ok,
+                flash_attn_compatible: flash_attn_ok,
                 flash_attn_v3_compatible: flash_attn_v3_ok,
                 unified_memory: Some(inference_nn::utils::normal::is_integrated_gpu(&dev)),
             });
@@ -658,16 +657,20 @@ pub fn run_doctor() -> DoctorReport {
         });
     }
 
-    // CUDA compute capability + Flash Attention v2/v3 check
+    // CUDA compute capability + flash attention / FA3 check
     #[cfg(feature = "cuda")]
     {
         for dev in system.devices.iter().filter(|d| d.kind == "cuda") {
             if let (Some(ord), Some((major, minor))) = (dev.ordinal, dev.compute_capability) {
-                let fa_v2_ok = dev.flash_attn_compatible.unwrap_or(false);
+                let fa_ok = dev.flash_attn_compatible.unwrap_or(false);
                 let fa_v3_ok = dev.flash_attn_v3_compatible.unwrap_or(false);
 
                 // Build status strings with emojis
-                let fa_v2_str = if fa_v2_ok { "✅" } else { "❌" };
+                let fa_str = if fa_ok {
+                    "✅"
+                } else {
+                    "❌ (requires Turing/Compute 7.5, attention runs eagerly)"
+                };
                 let fa_v3_str = if fa_v3_ok {
                     "✅"
                 } else {
@@ -678,26 +681,11 @@ pub fn run_doctor() -> DoctorReport {
                     name: format!("cuda_{}_compute", ord),
                     status: DoctorStatus::Ok,
                     message: format!(
-                        "GPU {}: compute {}.{} - Flash Attn v2 {}, v3 {}",
-                        ord, major, minor, fa_v2_str, fa_v3_str
+                        "GPU {}: compute {}.{} - Flash Attn {}, v3 {}",
+                        ord, major, minor, fa_str, fa_v3_str
                     ),
                     suggestion: None,
                 });
-
-                // Warn if hardware supports flash attn v2 but binary doesn't have it
-                if fa_v2_ok && !system.build.flash_attn {
-                    checks.push(DoctorCheck {
-                        name: format!("cuda_{}_flash_attn_v2_missing", ord),
-                        status: DoctorStatus::Warn,
-                        message: format!(
-                            "GPU {} supports Flash Attention v2 but binary compiled without it.",
-                            ord
-                        ),
-                        suggestion: Some(
-                            "Reinstall with: cargo install --features flash-attn".to_string(),
-                        ),
-                    });
-                }
 
                 // Warn if hardware supports flash attn v3 but binary doesn't have it
                 if fa_v3_ok && !system.build.flash_attn_v3 {

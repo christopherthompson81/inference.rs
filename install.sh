@@ -341,13 +341,10 @@ build_features() {
                 warn "NCCL not found - skipping nccl. Install NCCL or set INFERENCE_RS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
             fi
 
-            # Add flash attention based on compute capability
+            # Flash attention (fattn) comes with cuda; Hopper adds FA3
             if [ "$cuda_cc" = "90" ]; then
-                features="$features flash-attn-v3 flash-attn"
-                info "Hopper GPU detected - enabling flash-attn-v3 and flash-attn"
-            elif [ "$cuda_cc" -ge 80 ] 2>/dev/null; then
-                features="$features flash-attn"
-                info "Ampere+ GPU detected - enabling flash-attn"
+                features="$features flash-attn-v3"
+                info "Hopper GPU detected - enabling flash-attn-v3"
             fi
             
             cuda_ver_code=$(detect_cuda_version_code)

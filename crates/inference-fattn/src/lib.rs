@@ -27,8 +27,8 @@ pub struct FattnOptions {
     /// at least as many keys as queries (a sequence with no visible key comes out NaN). Excludes `mask`. Runs on the
     /// mma kernel, except a single query with no window, which needs no mask at all.
     pub causal: bool,
-    /// With `causal`, each query also sees only the `window_left` keys before it (FA2's `window_size_left`); tiles
-    /// wholly before the window are still computed.
+    /// Each query sees only the `window_left` keys before it (FA2's `window_size_left`), and with `causal` none
+    /// after; tiles wholly before the window are still computed. Excludes `mask`.
     pub window_left: Option<usize>,
 }
 

@@ -137,9 +137,6 @@ pub fn run_doctor(json: bool) -> Result<()> {
     if system.build.cudnn {
         features.push("cudnn");
     }
-    if system.build.flash_attn {
-        features.push("flash-attn");
-    }
     if system.build.flash_attn_v3 {
         features.push("flash-attn-v3");
     }

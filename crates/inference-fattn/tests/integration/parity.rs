@@ -393,9 +393,16 @@ fn rejects_mismatched_operands() -> Result<()> {
 
 #[test]
 fn implicit_sliding_window() -> Result<()> {
-    // the kernel's causal mask with window_left against the reference over the same window as a tensor
+    // the kernel's implicit mask with window_left against the reference over the same window as a tensor
     let Some(dev) = cuda() else { return Ok(()) };
-    for (seq_q, seq_kv, window) in [(64usize, 300usize, 40usize), (1, 512, 100), (200, 200, 7)] {
+    // the non-causal rows bound only the left side: a draft block at the end of its keys sees all of itself
+    let runs = [
+        (64usize, 300usize, 40usize, true),
+        (1, 512, 100, true),
+        (200, 200, 7, true),
+        (16, 300, 40, false),
+    ];
+    for (seq_q, seq_kv, window, causal) in runs {
         let c = case(128, 2, seq_q, seq_kv);
         let q =
             Tensor::randn(0f32, 1., (BATCH, seq_q, N_HEAD, 128), &dev)?.to_dtype(DType::BF16)?;
@@ -406,7 +413,7 @@ fn implicit_sliding_window() -> Result<()> {
             .flat_map(|i| {
                 (0..seq_kv).map(move |j| {
                     let qp = i + offset;
-                    if j <= qp && qp - j <= window {
+                    if (!causal || j <= qp) && (j > qp || qp - j <= window) {
                         0.
                     } else {
                         f32::NEG_INFINITY
@@ -418,7 +425,7 @@ fn implicit_sliding_window() -> Result<()> {
         let scale = 1. / (128f32).sqrt();
         let opts = FattnOptions {
             scale,
-            causal: true,
+            causal,
             window_left: Some(window),
             ..Default::default()
         };
@@ -439,7 +446,7 @@ fn implicit_sliding_window() -> Result<()> {
 }
 
 #[test]
-fn rejects_a_mask_with_causal_and_a_window_without() -> Result<()> {
+fn rejects_a_mask_with_causal_or_a_window() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let t = |s: usize, h: usize| Tensor::zeros((1, s, h, 64), DType::BF16, &dev);
     let both = FattnOptions {
@@ -449,12 +456,13 @@ fn rejects_a_mask_with_causal_and_a_window_without() -> Result<()> {
         ..Default::default()
     };
     assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &both).is_err());
-    let window_only = FattnOptions {
+    let window_and_mask = FattnOptions {
         scale: 1.,
         window_left: Some(4),
+        mask: Some(causal_mask(8, 8, &dev)?),
         ..Default::default()
     };
-    assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &window_only).is_err());
+    assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &window_and_mask).is_err());
     // causal needs the queries to be the last positions of the keys
     let causal = FattnOptions {
         scale: 1.,

@@ -12,7 +12,6 @@ license.workspace = true
 candle-core.workspace = true
 float8.workspace = true
 half = { workspace = true }
-inference-flash-attn = { workspace = true, optional = true }
 
 [build-dependencies]
 cudaforge = { workspace = true, optional = true }
@@ -24,5 +23,3 @@ candle-nn.workspace = true
 [features]
 default = []
 cuda = ["dep:cudaforge", "candle-core/cuda"]
-# The FA2 comparison in tests/integration/bench.rs; a plain dev-dependency would switch CUDA on for the CPU suite.
-bench-fa2 = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda"]

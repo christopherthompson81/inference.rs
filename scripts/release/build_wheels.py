@@ -3,7 +3,7 @@
 
 Usage:
     python scripts/release/build_wheels.py                     # release build, accelerator picked for this machine
-    python scripts/release/build_wheels.py --accelerator cuda --features flash-attn
+    python scripts/release/build_wheels.py --accelerator cuda --features nccl
     python scripts/release/build_wheels.py --library target/bundle/libinference_ffi.so    # package a built library
 
 The wheel is as portable as its library: a Linux CPU wheel needs the newest glibc the build host's library links

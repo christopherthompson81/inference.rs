@@ -26,10 +26,10 @@ The CLI binary is in the `inference-cli` crate:
 
 ```bash
 # Release build in-place
-cargo build --release --locked --features "cuda nccl flash-attn" -p inference-cli
+cargo build --release --locked --features "cuda nccl" -p inference-cli
 
 # Or install globally from the checkout
-cargo install --path crates/inference-cli --locked --features "cuda nccl flash-attn"
+cargo install --path crates/inference-cli --locked --features "cuda nccl"
 ```
 
 The flags above target CUDA. On macOS use `--features metal`; on CPU omit `--features` entirely. See the [cargo features reference](/reference/cargo-features/) for the full list.
@@ -46,8 +46,8 @@ Common per-platform flag strings:
 |---|---|
 | CPU | (none) |
 | macOS / Metal | `metal` |
-| CUDA | `cuda flash-attn` |
-| CUDA multi-GPU | `cuda flash-attn nccl` |
+| CUDA | `cuda` |
+| CUDA multi-GPU | `cuda nccl` |
 
 The full flag list, per-hardware recommendations, and per-flag effects live in the [cargo features reference](/reference/cargo-features/). Add `nccl` on Linux when NCCL is installed and you want CUDA multi-GPU tensor parallelism.
 
@@ -68,7 +68,7 @@ In the quantization crate, some tests run only with a specific backend feature e
 The Python package is pure Python over `libinference_ffi`. `python scripts/release/build_wheels.py [--accelerator cpu|cuda|metal] [--features ...]` builds the library with the `bundle` profile and packages it into `target/wheels/`. For development, build the library with the features you want and install the package in place:
 
 ```bash
-cargo build --release -p inference-ffi --features "cuda nccl flash-attn"
+cargo build --release -p inference-ffi --features "cuda nccl"
 pip install -e bindings/python
 ```
 
@@ -79,7 +79,7 @@ The package finds the library in the checkout's `target/release` (or `target/deb
 To ship `libinference_ffi` inside another project, build it with the `bundle` profile and only the model families you need:
 
 ```bash
-RUSTFLAGS="" cargo build --profile bundle -p inference-ffi --no-default-features --features "cuda flash-attn code-execution models-qwen"
+RUSTFLAGS="" cargo build --profile bundle -p inference-ffi --no-default-features --features "cuda code-execution models-qwen"
 ```
 
 The `bundle` profile is `release` plus fat LTO, one codegen unit and stripping: a smaller library for about three times the build time, with the same throughput. `RUSTFLAGS=""` overrides the checkout's `target-cpu=native`, so the library runs on any CPU of its arch. The library lands in `target/bundle/`; to load it from the in-place Python or C# packages, point `INFERENCE_NATIVE_DIR` there. `build_wheels.py` uses this profile. Its only link-time CUDA dependency is `libcudart` (plus the driver on sm_90 builds, for the DeepGEMM provider). At runtime a text model also loads the driver, cuBLAS and cuBLASLt. cuRAND is needed only for random draws on the GPU (the diffusion models), and cuDNN only with the opt-in `cudnn` feature.

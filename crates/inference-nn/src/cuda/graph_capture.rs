@@ -939,7 +939,7 @@ impl CudaGraphPinnedBuffer {
         Ok(())
     }
 
-    #[cfg(all(feature = "flash-attn", target_family = "unix"))]
+    #[cfg(target_family = "unix")]
     fn copy_from_f32_slice(
         &mut self,
         src: &[f32],
@@ -984,7 +984,7 @@ impl CudaGraphPinnedBuffer {
         Ok(())
     }
 
-    #[cfg(all(feature = "flash-attn", target_family = "unix"))]
+    #[cfg(target_family = "unix")]
     fn copy_from_i64_slice(
         &mut self,
         src: &[i64],
@@ -1201,7 +1201,7 @@ impl CudaGraphHostStaging {
         buffer.copy_from_u32_slice(src, dst, &stream)
     }
 
-    #[cfg(all(feature = "flash-attn", target_family = "unix"))]
+    #[cfg(target_family = "unix")]
     pub fn copy_from_f32_slice(
         &mut self,
         name: &'static str,
@@ -1220,7 +1220,7 @@ impl CudaGraphHostStaging {
         buffer.copy_from_f32_slice(src, dst, &stream)
     }
 
-    #[cfg(all(feature = "flash-attn", target_family = "unix"))]
+    #[cfg(target_family = "unix")]
     pub fn copy_from_i64_slice(
         &mut self,
         name: &'static str,

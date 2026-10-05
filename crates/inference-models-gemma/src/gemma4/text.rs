@@ -2233,7 +2233,7 @@ impl TextModel {
                     Some(&flash_params),
                 )
             } else {
-                // Keep full-attention layers on flash-attn when their head dim is
+                // Keep full-attention layers on flash attention when their head dim is
                 // supported. PagedAttention still needs a non-None prompt mask
                 // (CausalFlash is enough) to route prompt chunks through SDPA
                 // before writing to the paged cache.

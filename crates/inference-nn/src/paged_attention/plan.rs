@@ -4,8 +4,6 @@ use super::{
     ModelConfigLike, attention_backend::AttentionBackendKind,
     config::PrefixPrefillAttentionFeatures,
 };
-#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-use crate::attention::flash_backend_supports_sdpa;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::flashinfer::{self, FlashInferDecodePlan, FlashInferDecodePlanInput};
 
@@ -44,8 +42,6 @@ pub enum PrefixPrefillPlan {
     // fattn over the paged cache in place, dense or packed queries
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     FattnPaged,
-    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-    FlashAttentionPaged,
     GatherSdpa,
 }
 
@@ -54,7 +50,7 @@ impl PrefixPrefillPlan {
         Self::select(input, true)
     }
 
-    /// The plan when fattn refused the call at run time: FA2's paged kernel where built, else the gather.
+    /// The plan when fattn refused the call at run time: FA3's fp8 kernel where it applies, else the gather.
     pub fn choose_without_fattn(input: PrefixPrefillPlanInput) -> Self {
         Self::select(input, false)
     }
@@ -62,7 +58,7 @@ impl PrefixPrefillPlan {
     fn select(input: PrefixPrefillPlanInput, fattn: bool) -> Self {
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         let _ = fattn;
-        #[cfg(not(all(feature = "cuda", feature = "flash-attn", target_family = "unix")))]
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         let _ = (
             input.device_is_cuda,
             input.dtype,
@@ -96,31 +92,11 @@ impl PrefixPrefillPlan {
             return Self::FattnPaged;
         }
 
-        #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-        if input.device_is_cuda
-            && matches!(input.dtype, DType::F16 | DType::BF16)
-            && input.cache_dtype == input.dtype
-            && !input.has_alibi
-            && !input.has_sinks
-            && !input.has_custom_mask
-            && input.causality_known
-            && input.query_layout_is_dense
-            && paged_flash_attention_supports(
-                input.head_size,
-                input.block_size,
-                input.has_softcap,
-                input.has_sliding_window,
-            )
-            && matches!(input.attention_backend, AttentionBackendKind::FlashInfer)
-        {
-            return Self::FlashAttentionPaged;
-        }
-
         Self::GatherSdpa
     }
 }
 
-// Image prefix ranges (bidirectional spans inside causal attention), sinks and padded rows are left to the other plans.
+// Image prefix ranges (bidirectional spans inside causal attention), sinks and padded rows gather.
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn fattn_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
     input.device_is_cuda
@@ -132,7 +108,6 @@ pub fn fattn_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
         && !input.has_custom_mask
         && input.causality_known
         && !input.has_noncausal_mm_context
-        && (input.is_causal || !input.has_sliding_window)
         && input.block_size.is_power_of_two()
         && matches!(input.attention_backend, AttentionBackendKind::FlashInfer)
         && crate::attention::fattn_supports(input.head_size, input.has_softcap)
@@ -677,17 +652,6 @@ fn fa3_group_size_is_supported(q_heads: usize, kv_heads: usize) -> bool {
         && matches!(q_heads / kv_heads, 1 | 2 | 3 | 4 | 6 | 8 | 16)
 }
 
-#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-fn paged_flash_attention_supports(
-    head_size: usize,
-    block_size: usize,
-    has_softcap: bool,
-    has_sliding_window: bool,
-) -> bool {
-    flash_backend_supports_sdpa(head_size, has_softcap, has_sliding_window)
-        && block_size.is_multiple_of(32)
-}
-
 pub struct DecodePlanInput {
     pub attention_backend: AttentionBackendKind,
     pub head_size: usize,
@@ -917,11 +881,14 @@ mod tests {
             query_layout_is_dense: false,
             ..input
         }));
-        // fattn's windows are causal
-        assert!(!fattn_paged_prefill_supported(PrefixPrefillPlanInput {
-            is_causal: false,
-            ..input
-        }));
+        // a non-causal window bounds the left only, which fattn takes
+        assert_eq!(
+            fattn_paged_prefill_supported(PrefixPrefillPlanInput {
+                is_causal: false,
+                ..input
+            }),
+            fattn_reads_cache(128)
+        );
         assert!(!matches!(
             PrefixPrefillPlan::choose_without_fattn(input),
             PrefixPrefillPlan::FattnPaged
@@ -1190,7 +1157,7 @@ mod tests {
         let model = workspace_model(Some(PrefixPrefillAttentionFeatures::default()));
         let query_lens = [129, 129];
         let context_lens = [1_000, 8_000];
-        // Too long for FA3 on every build; the gather is packed varlen with flash-attn and padded without it.
+        // Too long for FA3 on every build; the gather is packed varlen with a flash backend and padded without one.
         assert_eq!(
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap()
@@ -1234,7 +1201,7 @@ mod tests {
             );
             assert_eq!(workspace.gather_workspace_bytes, 0);
         } else {
-            // Without FA3 the largest layer's gather is the whole workspace (packed with flash-attn, padded without).
+            // Without FA3 the largest layer's gather is the whole workspace (packed with a flash backend, padded without).
             let gather = if crate::utils::using_flash_attn() {
                 38_961_152
             } else {

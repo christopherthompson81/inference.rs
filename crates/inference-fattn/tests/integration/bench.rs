@@ -1,4 +1,4 @@
-//! fattn vs Dao FA2 at model attention shapes: `--features bench-fa2 --run-ignored only -E 'test(/bench::/)'`.
+//! fattn at model attention shapes: `--features cuda --run-ignored only -E 'test(/bench::/)'` (one test thread).
 
 use std::time::Instant;
 
@@ -70,7 +70,7 @@ fn time(dev: &Device, f: impl Fn() -> candle_core::Result<Tensor>) -> Result<f64
 
 #[test]
 #[ignore]
-fn fattn_vs_fa2() -> Result<()> {
+fn prefill_and_decode() -> Result<()> {
     let dev = Device::new_cuda(0)?;
     let filter = std::env::var(FILTER_ENV).unwrap_or_default();
     let dtype = if std::env::var_os(F16_ENV).is_some() {
@@ -102,13 +102,7 @@ fn fattn_vs_fa2() -> Result<()> {
                 ..Default::default()
             };
             let fattn_us = time(&dev, || flash_attn(&q, &k, &v, &opts))?;
-            let fa2_us = time(&dev, || {
-                inference_flash_attn::flash_attn(&q, &k, &v, scale, seq_q > 1)
-            })?;
-            println!(
-                "{label}: fattn {fattn_us:9.1} us  fa2 {fa2_us:9.1} us  ratio {:.2}",
-                fattn_us / fa2_us
-            );
+            println!("{label}: fattn {fattn_us:9.1} us");
         }
     }
     Ok(())

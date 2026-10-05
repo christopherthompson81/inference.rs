@@ -55,7 +55,7 @@ The default features build for CPU. For GPU acceleration, enable the matching fe
 
 ```toml
 # NVIDIA GPU (CUDA)
-inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["cuda", "flash-attn"] }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["cuda"] }
 
 # Apple Silicon (Metal)
 inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["metal"] }

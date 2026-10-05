@@ -9,14 +9,13 @@ No images are published for this repository; build one from a checkout. `docker/
 ```bash
 docker build -t inference:cuda -f docker/Dockerfile.cuda-13.0-ubi9 \
   --build-arg CUDA_COMPUTE_CAP=89 \
-  --build-arg WITH_FEATURES=cuda,flash-attn .
+  --build-arg WITH_FEATURES=cuda .
 ```
 
 - `CUDA_COMPUTE_CAP` is the GPU's compute capability without the dot (`80` A100, `86` RTX 30, `89` RTX 40/L4, `90`
   H100, `100` B200, `120` RTX 50, `121` DGX Spark); the kernels are built for that one capability. See
   [hardware support](/reference/hardware-support/).
 - `WITH_FEATURES` takes [cargo features](/reference/cargo-features/); the default is `cuda`.
-- Building with `flash-attn` is slow the first time; later builds use the layer cache.
 - For CPU-only use, run the `inference` binary natively ([quickstart](/quickstart/)); there is no CPU Dockerfile.
 
 Run it with the NVIDIA Container Toolkit ([NVIDIA's install guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)):

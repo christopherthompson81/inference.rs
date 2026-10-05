@@ -18,7 +18,7 @@ inference.rs is a blazing-fast LLM inference engine written in Rust. It supports
 cargo build --release
 
 # With CUDA support (Linux)
-cargo build --release --features "cuda flash-attn"
+cargo build --release --features "cuda"
 
 # With Metal support (macOS)
 cargo build --release --features metal
@@ -106,7 +106,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-code-exec/` - The Python code-execution tool the agent layer runs
 - `crates/inference-sandbox/` - OS-level sandboxing for the subprocesses tools spawn
 - `crates/inference-macros/` - Proc macros for defining tools
-- `crates/inference-flash-attn/` - Flash attention kernels
+- `crates/inference-fattn/` - Flash attention kernels (llama.cpp's fattn): prefill, packed, paged and fp8 attention for every CUDA build
 - `crates/inference-metal-compile/` - Build-time Metal shader compilation for the kernel crates
 - `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
 - `bindings/python/` - the Python SDK: a pure-Python ctypes package over the C ABI (`inference_rs`); its coverage test enforces the same, and `scripts/release/build_wheels.py` builds wheels that bundle the library. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
@@ -195,7 +195,7 @@ Avoid returning TODOs.
 
 ### Vision/Audio Model Pitfalls
 
-6. **Vision encoder attention must be bidirectional (non-causal)**:  `Sdpa.run_attention` with `flash_params: None` defaults to `causal = seq_len > 1` on the CUDA flash-attn path, which silently breaks vision/audio encoders. Always pass `FlashParams { causal: false, cumulative_seqlens_q: HashMap::new(), cumulative_seqlens_k: HashMap::new(), max_q: 0, max_k: 0 }` with `Some(&flash_params)` for any encoder that needs bidirectional attention. The empty `cumulative_seqlens` cause the flash backend to use the non-varlen kernel path, avoiding any tensor allocation in the forward pass.
+6. **Vision encoder attention must be bidirectional (non-causal)**:  `Sdpa.run_attention` with `flash_params: None` defaults to `causal = seq_len > 1` on the CUDA flash path, which silently breaks vision/audio encoders. Always pass `FlashParams { causal: false, cumulative_seqlens_q: HashMap::new(), cumulative_seqlens_k: HashMap::new(), max_q: 0, max_k: 0 }` with `Some(&flash_params)` for any encoder that needs bidirectional attention. The empty `cumulative_seqlens` cause the flash backend to use the non-varlen kernel path, avoiding any tensor allocation in the forward pass.
 
 7. **`torch.bucketize(right=True)` requires `Ok(i) => i + 1`**: Rust's `binary_search_by` returns `Ok(i)` at the found position (bisect_left semantics). For `right=True` (bisect_right), you must use `Ok(i) => i + 1` to insert after equal elements. `Err(i) => i` is correct for both.
 

@@ -68,7 +68,6 @@ pub const ATTENTION_CHUNK_SIZE: usize = 1024;
 pub const FLASH_ATTN_NATIVE_MAX_GQA_GROUP: usize = 8;
 
 #[cfg(any(
-    feature = "flash-attn",
     feature = "flash-attn-v3",
     all(feature = "cuda", target_family = "unix")
 ))]
@@ -363,7 +362,7 @@ impl Sdpa {
                 );
             }
 
-            // flash-attn expects (b_sz, seq_len, nheads, head_dim)
+            // the flash kernels take (b_sz, seq_len, nheads, head_dim)
             let q = q.transpose(1, 2)?;
             let k = k.transpose(1, 2)?;
             let v = v.transpose(1, 2)?;
@@ -820,7 +819,6 @@ mod tests {
     }
 
     #[cfg(any(
-        feature = "flash-attn",
         feature = "flash-attn-v3",
         all(feature = "cuda", target_family = "unix")
     ))]

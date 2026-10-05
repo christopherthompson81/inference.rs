@@ -627,7 +627,7 @@ impl TextModel {
             || (is_non_causal_media_chunk && self.image_token_index.is_some()))
             && !use_paged_mm_prefix_path
         {
-            // Build real masks (not flash-attn dummies) with bidirectional regions for image tokens
+            // Build real masks (not flash dummies) with bidirectional regions for image tokens
             let image_token_index = self.image_token_index.unwrap();
             let causal_mask = CausalMasker.make_causal_mask(
                 input_ids,
@@ -692,7 +692,7 @@ impl TextModel {
 
             (attention_mask, sliding_attention_mask, Some(&bidir_flash))
         } else {
-            // Standard path: use CausalMasker (returns dummy (1,1) when flash-attn on CUDA)
+            // Standard path: use CausalMasker (returns dummy (1,1) with flash attention on CUDA)
             let attention_mask = CausalMasker.make_causal_mask(
                 input_ids,
                 &mask_cache,

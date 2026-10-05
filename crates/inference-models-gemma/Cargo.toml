@@ -39,4 +39,3 @@ tempfile.workspace = true
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda", "inference-quant/cuda", "inference-nn/cuda"]
 metal = ["candle-core/metal", "candle-nn/metal", "inference-quant/metal", "inference-nn/metal"]
-flash-attn = ["cuda", "inference-nn/flash-attn"]

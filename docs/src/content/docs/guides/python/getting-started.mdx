@@ -39,7 +39,7 @@ python scripts/release/build_wheels.py --accelerator cuda   # NVIDIA
 pip install target/wheels/<the wheel it printed>
 ```
 
-The wheel bundles a release `libinference_ffi` built for that accelerator (`--features` adds more [cargo features](/reference/cargo-features/), e.g. `flash-attn` or `nccl`); see [hardware support](/reference/hardware-support/) for what each backend covers. It is as portable as that library:
+The wheel bundles a release `libinference_ffi` built for that accelerator (`--features` adds more [cargo features](/reference/cargo-features/), e.g. `nccl` or `cutile`); see [hardware support](/reference/hardware-support/) for what each backend covers. It is as portable as that library:
 
 - A Linux CPU wheel is tagged `manylinux_2_N` for the newest glibc its library needs, so a wheel built on a recent distribution only installs on one at least as new.
 - A CUDA wheel is tagged plain `linux` with a `+cuMAJOR.smNN` local version: it needs the CUDA runtime of that major version on the library path and a GPU of that compute capability (set `CUDA_COMPUTE_CAP` to build for another).
