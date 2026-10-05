@@ -23,6 +23,8 @@ const MAX_DEVICES: usize = 16;
 const MLA_HEAD_DIM: usize = 576;
 // fattn.cu runs these head dims only with the GQA optimisation, which needs a mask (ggml_cuda_get_best_fattn_kernel)
 const GQA_ONLY_HEAD_DIMS: [usize; 4] = [192, 320, 512, 576];
+// Head dims paged calls run at: the mma kernel's, less 40/72 (no mma instance), 192/320 (V narrower than K) and 576
+const PAGED_HEAD_DIMS: [usize; 7] = [64, 80, 96, 112, 128, 256, 512];
 // ggml_cuda_get_max_cpy_bytes: f32 Q rows load in 16-byte chunks, and gqa_opt_applies wants 16-byte Q strides
 const Q_LOAD_ALIGN: usize = 16;
 // the kernels load K/V rows in place in chunks of this many bytes; only bf16 K/V for the tile kernel is copied first
@@ -771,6 +773,15 @@ pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Re
             },
         )?
         .to_dtype(q.dtype())
+}
+
+/// Whether paged calls run at this head dim and GQA shape on this machine: what a paged KV layout can rely on fattn for.
+pub fn paged_shape_supported(head_dim: usize, q_heads: usize, kv_heads: usize) -> bool {
+    mma_available()
+        && kv_heads > 0
+        && q_heads.is_multiple_of(kv_heads)
+        && PAGED_HEAD_DIMS.contains(&head_dim)
+        && (!GQA_ONLY_HEAD_DIMS.contains(&head_dim) || q_heads > kv_heads)
 }
 
 /// Whether every visible CUDA device runs fattn's mma kernel, which causal, packed and paged calls need.

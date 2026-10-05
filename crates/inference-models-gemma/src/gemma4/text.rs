@@ -1381,18 +1381,14 @@ fn gemma4_attention_backend_for_layer(
     config: &Gemma4ModelConfigLike,
     layer_idx: usize,
 ) -> AttentionBackendKind {
-    if !cfg!(feature = "cuda") || !crate::perf_flags::flashinfer_decode_enabled() {
-        return AttentionBackendKind::Standard;
-    }
-    let q_heads = config.num_attn_heads();
-    let kv_heads = config.num_kv_heads_for_layer(layer_idx);
-    let head_dim = config.k_head_dim_for_layer(layer_idx);
-    if kv_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
-        return AttentionBackendKind::Standard;
-    }
-    if config.v_head_dim_for_layer(layer_idx) == head_dim
-        && matches!(head_dim, 64 | 128 | 256 | 512)
-    {
+    let spec = crate::paged_attention::attention_backend::AttentionLayerSpec {
+        q_heads: config.num_attn_heads(),
+        kv_heads: config.num_kv_heads_for_layer(layer_idx),
+        k_head_dim: config.k_head_dim_for_layer(layer_idx),
+        v_head_dim: config.v_head_dim_for_layer(layer_idx),
+    };
+    use crate::paged_attention::attention_backend::AttentionBackend;
+    if crate::flashinfer::FlashInferAttentionBackend.supports_layer(spec) {
         AttentionBackendKind::FlashInfer
     } else {
         AttentionBackendKind::Standard

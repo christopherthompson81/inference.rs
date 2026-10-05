@@ -124,7 +124,7 @@ impl Fa3DecodeScheduleKey {
             && self.total_q().is_some()
             && self.q_heads > 0
             && self.kv_heads > 0
-            && self.q_heads.is_multiple_of(self.kv_heads)
+            && fa3_group_size_supported(self.q_heads, self.kv_heads)
             && self.head_dim == FA3_DECODE_HEAD_DIM
             && self.page_size > 0
             && (FA3_PAGED_MIN_SPLITS..=FA3_DECODE_NUM_SPLITS).contains(&self.num_splits)
@@ -145,7 +145,7 @@ pub fn fa3_prefill_num_splits(
         || q_heads == 0
         || kv_heads == 0
         || num_sm == 0
-        || !supports_flashinfer_group_size(q_heads, kv_heads)
+        || !fa3_group_size_supported(q_heads, kv_heads)
     {
         return None;
     }
@@ -513,20 +513,27 @@ impl AttentionBackend for FlashInferAttentionBackend {
     }
 
     fn supports_layer(&self, spec: AttentionLayerSpec) -> bool {
-        if !cfg!(feature = "cuda") || !crate::perf_flags::flashinfer_decode_enabled() {
+        if !crate::perf_flags::flashinfer_decode_enabled() || spec.k_head_dim != spec.v_head_dim {
             return false;
         }
-        spec.k_head_dim == spec.v_head_dim
-            && matches!(spec.k_head_dim, 64 | 128 | 256 | 512)
-            && supports_flashinfer_group_size(spec.q_heads, spec.kv_heads)
+        // decode on the layout is fattn's; where it cannot run, decode would gather, slower than the Standard kernels
+        #[cfg(feature = "cuda")]
+        {
+            inference_fattn::paged_shape_supported(spec.k_head_dim, spec.q_heads, spec.kv_heads)
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            false
+        }
     }
 }
 
-fn supports_flashinfer_group_size(q_heads: usize, kv_heads: usize) -> bool {
+// The GQA groups FA3's paged decode and prefill splits have run with (the layout admitted no others until fattn)
+#[cfg(any(test, all(feature = "cuda", target_family = "unix")))]
+fn fa3_group_size_supported(q_heads: usize, kv_heads: usize) -> bool {
     if kv_heads == 0 || !q_heads.is_multiple_of(kv_heads) {
         return false;
     }
-    // Must match DISPATCH_GQA_GROUP_SIZE in FlashInfer's utils.cuh.
     matches!(q_heads / kv_heads, 1..=8 | 16)
 }
 
@@ -621,7 +628,7 @@ fn metadata_tensor<'a>(
 
 #[cfg(test)]
 mod tests {
-    use super::supports_flashinfer_group_size;
+    use super::fa3_group_size_supported;
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     use super::{
         FA3_DECODE_MAX_QUERY_LEN, FA3_DECODE_NUM_SPLITS, Fa3DecodeScheduleKey, Fa3DecodeView,
@@ -632,16 +639,16 @@ mod tests {
     use candle_core::DeviceLocation;
 
     #[test]
-    fn flashinfer_group_size_matches_kernel_instantiations() {
+    fn fa3_group_sizes_are_the_ones_it_ran_with() {
         for group_size in [1, 2, 3, 4, 5, 6, 7, 8, 16] {
-            assert!(supports_flashinfer_group_size(group_size * 2, 2));
+            assert!(fa3_group_size_supported(group_size * 2, 2));
         }
 
         for group_size in [0, 9, 10, 11, 12, 13, 14, 15, 17] {
-            assert!(!supports_flashinfer_group_size(group_size * 2, 2));
+            assert!(!fa3_group_size_supported(group_size * 2, 2));
         }
-        assert!(!supports_flashinfer_group_size(14, 0));
-        assert!(!supports_flashinfer_group_size(15, 2));
+        assert!(!fa3_group_size_supported(14, 0));
+        assert!(!fa3_group_size_supported(15, 2));
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
