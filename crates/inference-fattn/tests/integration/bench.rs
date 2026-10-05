@@ -186,3 +186,57 @@ fn paged_vs_dense() -> Result<()> {
     }
     Ok(())
 }
+
+// (batch, seq_q, seq_kv) for fp8 against bf16 K/V
+const FP8_RUNS: [(usize, usize, usize); 5] = [
+    (1, 1, 4096),
+    (1, 1, 16384),
+    (8, 1, 16384),
+    (1, 256, 4096),
+    (1, 1024, 4096),
+];
+
+#[test]
+#[ignore]
+fn fp8_vs_bf16() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let filter = std::env::var(FILTER_ENV).unwrap_or_default();
+    for shape in SHAPES {
+        for (batch, seq_q, seq_kv) in FP8_RUNS {
+            let label = format!("{:<24} b {batch} q {seq_q:>5} kv {seq_kv:>5}", shape.name);
+            if !label.contains(&filter) {
+                continue;
+            }
+            let rand = |s: usize, h: usize| {
+                Tensor::randn(0f32, 1., (batch, s, h, shape.head_dim), &dev)?.to_dtype(DType::BF16)
+            };
+            let q = rand(seq_q, shape.n_head)?;
+            let (k, v) = (
+                rand(seq_kv, shape.n_head_kv)?,
+                rand(seq_kv, shape.n_head_kv)?,
+            );
+            let fp8 = |t: &Tensor| {
+                t.to_device(&Device::Cpu)?
+                    .to_dtype(DType::F8E4M3)?
+                    .to_device(&dev)
+            };
+            let (k8, v8) = (fp8(&k)?, fp8(&v)?);
+            let opts = FattnOptions {
+                scale: 1. / (shape.head_dim as f32).sqrt(),
+                mask: Some(causal_mask(seq_q, seq_kv, &dev)?),
+                ..Default::default()
+            };
+            let fp8_opts = FattnOptions {
+                kv_scales: Some(Default::default()),
+                ..opts.clone()
+            };
+            let fp8_us = time(&dev, || flash_attn(&q, &k8, &v8, &fp8_opts))?;
+            let bf16_us = time(&dev, || flash_attn(&q, &k, &v, &opts))?;
+            println!(
+                "{label}: fp8 {fp8_us:9.1} us  bf16 {bf16_us:9.1} us  ratio {:.2}",
+                fp8_us / bf16_us
+            );
+        }
+    }
+    Ok(())
+}

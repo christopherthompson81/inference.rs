@@ -2743,6 +2743,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "cudaforge",
+ "float8",
  "half",
  "inference-flash-attn",
 ]

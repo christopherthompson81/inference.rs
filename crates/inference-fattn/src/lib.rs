@@ -19,6 +19,21 @@ pub struct FattnOptions {
     pub mask: Option<candle_core::Tensor>,
     /// Per-head f32 attention sinks `(n_head,)`: an extra logit that takes softmax mass but contributes no value.
     pub sinks: Option<candle_core::Tensor>,
+    /// Dequantization scales of fp8 e4m3 K and V (`x * scale`); `None` is 1.0.
+    pub kv_scales: Option<KvScales>,
+}
+
+/// Per-tensor scales of an fp8 K/V cache, in (0, 146]: dequantized values must stay inside f16's range.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct KvScales {
+    pub k: f32,
+    pub v: f32,
+}
+
+impl Default for KvScales {
+    fn default() -> Self {
+        Self { k: 1., v: 1. }
+    }
 }
 
 /// A paged K/V cache read in place: `(num_blocks, n_head_kv, block_size, head_dim)` blocks, as FlashInfer's HND layout.

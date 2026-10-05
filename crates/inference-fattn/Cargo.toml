@@ -10,6 +10,7 @@ license.workspace = true
 
 [dependencies]
 candle-core.workspace = true
+float8.workspace = true
 half = { workspace = true }
 inference-flash-attn = { workspace = true, optional = true }
 

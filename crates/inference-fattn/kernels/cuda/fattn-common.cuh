@@ -18,31 +18,36 @@
 // The macro on the following line shifts it by a factor of 2**3=8, as was needed to fix https://github.com/ggml-org/llama.cpp/issues/18606 .
 #define FATTN_KQ_MAX_OFFSET (3.0f*0.6931f)
 
-// Paged K/V: each sequence's rows live in fixed-size blocks listed by its block table. Null block_table: dense K/V.
-struct fattn_paged_kv {
+// Where K/V live (paged: the blocks a sequence's table lists; dense when null) and whether they are e4m3 times a scale.
+struct fattn_kv_src {
     const int32_t * block_table; // [n_seq, max_blocks]
     const int32_t * seq_lens;    // [n_seq], valid rows per sequence
     int32_t max_blocks;
     int32_t block_size_log2;     // rows per block, a power of two
     int64_t block_stride_K;      // bytes between blocks
     int64_t block_stride_V;
+    int32_t fp8;
+    float   k_scale;
+    float   v_scale;
 };
 
-// entry.cu stores a pointer to the call's fattn_paged_kv in the dst op_params from this int32 slot on
-#define FATTN_OP_PARAMS_PAGED 6
+// entry.cu stores a pointer to the call's fattn_kv_src in the dst op_params from this int32 slot on
+#define FATTN_OP_PARAMS_KV_SRC 6
 
-static inline fattn_paged_kv fattn_get_paged(const ggml_tensor * dst) {
-    const fattn_paged_kv * paged;
-    memcpy(&paged, dst->op_params + FATTN_OP_PARAMS_PAGED, sizeof(paged));
-    return paged ? *paged : fattn_paged_kv{};
+static inline fattn_kv_src fattn_get_kv_src(const ggml_tensor * dst) {
+    const fattn_kv_src * src;
+    memcpy(&src, dst->op_params + FATTN_OP_PARAMS_KV_SRC, sizeof(src));
+    return src ? *src : fattn_kv_src{};
 }
 
-// One sequence's view of the paged rows for K or V, with the block stride in half2.
+// One sequence's view of the rows for K or V: paged when table is set, with the block stride in half2 (4-byte) units.
 struct fattn_kv_rows {
     const int32_t * table;
     int32_t block_size_log2;
     int32_t len;
     int64_t block_stride;
+    bool    fp8;
+    float   scale;
 };
 
 // Row i in half2; rows past the sequence reuse its first row (masked). __ldg lets lookups move above smem stores.
@@ -102,7 +107,7 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33,
-        const bool Q_bf16, const bool dst_bf16, const bool KV_bf16, const fattn_paged_kv paged);
+        const bool Q_bf16, const bool dst_bf16, const bool KV_convert, const fattn_kv_src kv_src);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -1060,12 +1065,16 @@ void launch_fattn(
     GGML_ASSERT(KQV->type == GGML_TYPE_F32 || KQV->type == GGML_TYPE_BF16);
     const bool Q_bf16   = Q->type == GGML_TYPE_BF16;
     const bool dst_bf16 = KQV->type == GGML_TYPE_BF16;
-    // K/V the kernel reads as bf16 itself; only the mma kernel uses the flag, vec has bf16 instances instead
-    const bool KV_bf16  = K->type == GGML_TYPE_BF16 && !need_f16_K;
-    GGML_ASSERT(!KV_bf16 || (V->type == GGML_TYPE_BF16 && !need_f16_V));
-    const fattn_paged_kv paged = fattn_get_paged(KQV);
-    // a paged cache is read in place: no f16 copy of it, and no sparse gather on top
-    GGML_ASSERT(!paged.block_table || ((KV_bf16 || K->type == GGML_TYPE_F16) && !use_sparse));
+    const fattn_kv_src kv_src = fattn_get_kv_src(KQV);
+    // K/V the mma loads convert themselves (bf16, or fp8 via kv_src); vec has bf16 instances and ignores the flag
+    const bool KV_bf16_in_loads = K->type == GGML_TYPE_BF16 && !need_f16_K;
+    GGML_ASSERT(!KV_bf16_in_loads || (V->type == GGML_TYPE_BF16 && !need_f16_V));
+    GGML_ASSERT(!kv_src.fp8 || (!need_f16_K && !need_f16_V));
+    // at 576 V comes out of K's tiles, already scaled by the K scale
+    GGML_ASSERT(!kv_src.fp8 || Q->ne[0] != 576);
+    const bool KV_convert = KV_bf16_in_loads || kv_src.fp8;
+    // a paged or fp8 source is read in place: no f16 copy of it, and no sparse gather on top
+    GGML_ASSERT(!(kv_src.block_table || kv_src.fp8) || ((KV_convert || K->type == GGML_TYPE_F16) && !use_sparse));
 
     GGML_ASSERT(Q->nb[0] == ggml_element_size(Q));
     GGML_ASSERT(K->nb[0] == ggml_element_size(K));
@@ -1319,7 +1328,7 @@ void launch_fattn(
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
         mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
-        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16, KV_bf16, paged
+        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16, KV_convert, kv_src
     );
     CUDA_CHECK(cudaGetLastError());
 
