@@ -8,6 +8,8 @@ use inference_fattn::{FattnOptions, causal_mask, flash_attn};
 
 const WARMUP: usize = 5;
 const ITERS: usize = 50;
+// Runs only the rows whose label contains this, e.g. to profile one shape under nsys
+const FILTER_ENV: &str = "FATTN_BENCH_FILTER";
 
 struct Shape {
     name: &'static str,
@@ -60,8 +62,13 @@ fn time(dev: &Device, f: impl Fn() -> candle_core::Result<Tensor>) -> Result<f64
 #[ignore]
 fn fattn_vs_fa2() -> Result<()> {
     let dev = Device::new_cuda(0)?;
+    let filter = std::env::var(FILTER_ENV).unwrap_or_default();
     for shape in SHAPES {
         for (batch, seq_q, seq_kv) in RUNS {
+            let label = format!("{:<24} b {batch} q {seq_q:>5} kv {seq_kv:>5}", shape.name);
+            if !label.contains(&filter) {
+                continue;
+            }
             let rand = |s: usize, h: usize| -> Result<Tensor> {
                 Ok(
                     Tensor::randn(0f32, 1., (batch, s, h, shape.head_dim), &dev)?
@@ -84,8 +91,7 @@ fn fattn_vs_fa2() -> Result<()> {
                 inference_flash_attn::flash_attn(&q, &k, &v, scale, seq_q > 1)
             })?;
             println!(
-                "{:<24} b {batch} q {seq_q:>5} kv {seq_kv:>5}: fattn {fattn_us:9.1} us  fa2 {fa2_us:9.1} us  ratio {:.2}",
-                shape.name,
+                "{label}: fattn {fattn_us:9.1} us  fa2 {fa2_us:9.1} us  ratio {:.2}",
                 fattn_us / fa2_us
             );
         }

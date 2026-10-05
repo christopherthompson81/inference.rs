@@ -180,3 +180,81 @@ Recorded for wiring later: the pool allocates with `cudaMallocAsync` during call
 restrictions (`cudaGraphExecUpdate`, concurrent instantiation). That needs checking against `cuda_graph.rs` before
 fattn runs inside captured decode graphs.
 
+
+## Run 4 - 2026-10-04 19:07
+
+Question: is the short-prefill gap (Run 3: fattn 1.9-2.7x FA2 at 512) in the kernel or in the wrapper around it?
+
+Command: the bench gained a `FATTN_BENCH_FILTER` env var (substring of the row label), so one row runs under nsys:
+`FATTN_BENCH_FILTER="llama-8b                 b 2 q   512" nsys profile -t cuda --export sqlite <bench binary> --ignored --exact bench::fattn_vs_fa2`,
+then per-kernel averages from `CUPTI_ACTIVITY_KIND_KERNEL`. RTX 3090 (SM86, no perf-counter access, so no ncu).
+
+Per-call breakdown before this run's changes (us, 55 calls averaged):
+
+| row | fattn kernel | stream-k fixup | candle casts (Q to f32, out to bf16) | K/V to f16 | FA2 kernel |
+|---|---|---|---|---|---|
+| Qwen3.5-0.8B 1 x 512 | 54.8 | 35.8 (general) | 22.2 + 10.0 | 7.3 | 50.3 |
+| Llama-8B 1 x 512 | 84.8 | - | 44.5 + 20.7 | 11.3 | 65.3 |
+| Llama-8B 2 x 512 | 120.3 | - | 89.6 + 46.2 | 18.6 | 102.9 |
+| Llama-8B 1 x 2048 | 533.3 | - | 180.1 + 90.9 | 33.2 | 608.1 |
+
+Findings:
+- The wrapper was the bulk of the gap. Candle's dtype casts around the call cost more than the attention at 512
+  (155 us of 302 at 2 x 512), and at 2048 the fattn kernel alone already beats FA2 (533 vs 608 us).
+- The Qwen row's general stream-k fixup (36 us for 164 blocks over 64 output tiles) is upstream behaviour: llama.cpp's
+  own `llama-bench -p 512 -fa 1` on Qwen3.5-0.8B-Q8_0 under nsys shows the same kernel at 60.8 us and
+  `flash_attn_stream_k_fixup_general` at 36.0 us.
+- Dead end, kept for later: raising `max_efficiency_loss_percent` (stream-k rounding, fattn-common.cuh) from 5 to 25
+  rounds 164 blocks down to 128, which takes the uniform fixup. The kernel then runs in 45.6 us and the fixup in
+  14.3 us, so the row goes from 136 to 101 us. 50 and 100 measured the same, and no other bench row moved. That is too
+  narrow a basis for changing upstream's heuristic (Ada and newer always use stream-k), so it was reverted.
+
+Change: native bf16 Q and output.
+- Every fattn kernel (mma, tile, vec) and the combine/fixup kernels take `Q_bf16` / `dst_bf16` runtime flags. Q
+  loads and final stores go through `fattn_load_q*` / `fattn_store_dst*`. Runtime flags rather than template
+  parameters, so the instance count (and the binary) does not double; both are taken once per tile.
+- A bf16 dst cannot hold the unnormalized partial that a stream-k block writes into dst when it joins a tile midway
+  and finishes it (`needs_fixup`), for the fixup to read back. With a bf16 dst that partial goes to an extra f32 slot per block after the fixup data, and both
+  fixup kernels read it from there.
+- The f16 K/V copies now come from the stream-ordered pool instead of space after dst. The output buffer is then
+  exactly the output, so the copy that released the scratch is gone (`inference_fattn_alloc_size` removed).
+- The wrapper passes f32 and bf16 Q straight through when the head dim is contiguous and the offset/strides meet
+  the 16-byte vector loads; otherwise it makes a fresh offset-0 copy (bf16 stays bf16, f16 goes to f32).
+
+Tests: the parity suite (13 tests) passes. New cases are `stream_k_fixups` (batch 1, few tiles) and a
+misaligned-Q case. The old strided-Q case did not test a strided bf16 Q at all: candle's cast made it contiguous,
+so views are now taken after the cast. An nsys run over the suite confirms it reaches every output path:
+`flash_attn_ext_f16` 56 times, uniform fixup 40, general fixup 14, combine 12, vec 8, tile 4.
+
+Bench after (us):
+
+| shape | b x q x kv | fattn | FA2 | ratio | Run 3 ratio |
+|---|---|---|---|---|---|
+| Qwen3.5-0.8B | 1 x 512 x 512 | 100.3 | 53.4 | 1.88 | 2.45 |
+| | 2 x 512 x 512 | 95.3 | 86.5 | 1.10 | 1.86 |
+| | 1 x 2048 x 2048 | 373.5 | 407.7 | 0.92 | 1.27 |
+| | 2 x 2048 x 2048 | 717.4 | 696.4 | 1.03 | 1.47 |
+| | 1 x 8192 x 8192 | 3596.0 | 4551.1 | 0.79 | 0.91 |
+| | decode kv 512 / 4096 / 16384 | 16.3 / 50.8 / 154.9 | 45.8 / 315.2 / 1216.0 | 0.36 / 0.16 / 0.13 | 0.49 / 0.18 / 0.15 |
+| Llama-8B | 1 x 512 x 512 | 102.1 | 77.2 | 1.32 | 2.08 |
+| | 2 x 512 x 512 | 129.1 | 95.6 | 1.35 | 2.74 |
+| | 1 x 2048 x 2048 | 541.8 | 597.6 | 0.91 | 1.38 |
+| | 2 x 2048 x 2048 | 1398.6 | 1162.0 | 1.20 | 1.71 |
+| | 1 x 8192 x 8192 | 7217.7 | 8196.1 | 0.88 | 0.99 |
+| | decode kv 512 / 4096 / 16384 | 36.1 / 87.8 / 303.7 | 48.5 / 331.5 / 1250.7 | 0.74 / 0.27 / 0.24 | 0.91 / 0.28 / 0.26 |
+
+What remains is kernel-side, plus the K/V conversion to f16:
+- Llama 2 x 2048: kernel 1334 vs FA2 1117 us, plus 2 x 31 us converting K/V.
+- Llama 1 x 512: kernel 83 vs 66 us, plus 2 x 5.6 us converting K/V.
+- Qwen 1 x 512: the general fixup above.
+
+Review follow-up:
+- The fallback used `contiguous()`, which keeps a contiguous view at an unaligned offset (and candle skips the stride
+  check on size-1 dims), so such a Q could still reach the 16-byte loads. It now uses `force_contiguous()`. A Q passes
+  through only if its byte strides fit the kernels' i32 `nb0x`.
+- Every parity case now also asserts `supported()`. That caught a bug from Run 3: `supported()` described operands
+  with null pointers, and the entry point treats a null mask as absent, so the GQA optimisation never applied there.
+  At 512 and 576 it answered false for operands `flash_attn` runs. It now describes them at a non-null probe address.
+- More coverage: a contiguous Q at an odd offset; strided and f32 Q on the vec (decode) and tile (hd 72) kernels.
+
+Next: bf16 K/V read straight by the mma kernel (drops `convert_to_f16`), then paged K/V.

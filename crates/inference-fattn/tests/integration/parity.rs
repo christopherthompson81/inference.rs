@@ -12,6 +12,17 @@ const MLA_HEAD_DIM: usize = 576;
 // result is rounded to bf16 on the way out.
 const TOLERANCE: [(DType, f32); 2] = [(DType::F16, 4e-3), (DType::BF16, 1e-2)];
 
+#[derive(Clone, Copy, PartialEq)]
+enum QLayout {
+    Contiguous,
+    // a transposed (non-contiguous) view
+    Transposed,
+    // an odd offset and row stride, which the kernels' vector loads cannot take as is
+    Misaligned,
+    // contiguous, but starting at an odd element
+    OffsetContiguous,
+}
+
 #[derive(Clone, Copy)]
 struct Case {
     batch: usize,
@@ -23,8 +34,7 @@ struct Case {
     causal: bool,
     softcap: f32,
     sinks: bool,
-    // q handed over as a transposed (non-contiguous) view
-    strided_q: bool,
+    q_layout: QLayout,
     f32_q: bool,
 }
 
@@ -39,7 +49,7 @@ fn case(head_dim: usize, n_head_kv: usize, seq_q: usize, seq_kv: usize) -> Case 
         causal: true,
         softcap: 0.,
         sinks: false,
-        strided_q: false,
+        q_layout: QLayout::Contiguous,
         f32_q: false,
     }
 }
@@ -99,18 +109,29 @@ fn check(case: Case) -> Result<()> {
     for (dtype, tolerance) in TOLERANCE {
         let rand =
             |s: usize, h: usize, d: usize| Tensor::randn(0f32, 1., (case.batch, s, h, d), &dev);
-        let q = if case.strided_q {
-            Tensor::randn(
+        let q_dtype = if case.f32_q { DType::F32 } else { dtype };
+        // views are taken after the cast, which would otherwise make q contiguous
+        let q = match case.q_layout {
+            QLayout::Contiguous => rand(case.seq_q, N_HEAD, case.head_dim)?.to_dtype(q_dtype)?,
+            QLayout::Transposed => Tensor::randn(
                 0f32,
                 1.,
                 (case.batch, N_HEAD, case.seq_q, case.head_dim),
                 &dev,
             )?
-            .transpose(1, 2)?
-        } else {
-            rand(case.seq_q, N_HEAD, case.head_dim)?
+            .to_dtype(q_dtype)?
+            .transpose(1, 2)?,
+            QLayout::Misaligned => rand(case.seq_q, N_HEAD, case.head_dim + 1)?
+                .to_dtype(q_dtype)?
+                .narrow(3, 1, case.head_dim)?,
+            QLayout::OffsetContiguous => {
+                let n = case.batch * case.seq_q * N_HEAD * case.head_dim;
+                Tensor::randn(0f32, 1., n + 1, &dev)?
+                    .to_dtype(q_dtype)?
+                    .narrow(0, 1, n)?
+                    .reshape((case.batch, case.seq_q, N_HEAD, case.head_dim))?
+            }
         };
-        let q = q.to_dtype(if case.f32_q { DType::F32 } else { dtype })?;
         let k = rand(case.seq_kv, case.n_head_kv, case.head_dim)?.to_dtype(dtype)?;
         let v = if case.head_dim == MLA_HEAD_DIM {
             k.narrow(3, 0, case.head_dim_v)?
@@ -131,6 +152,7 @@ fn check(case: Case) -> Result<()> {
             mask: mask.clone(),
             sinks: sinks.clone(),
         };
+        assert!(inference_fattn::supported(&q, &k, &v, &opts)?);
         let got = flash_attn(&q, &k, &v, &opts)?;
         assert_eq!(got.dtype(), q.dtype());
         assert_eq!(
@@ -175,6 +197,14 @@ fn decode_vec() -> Result<()> {
             ..case(hd, N_HEAD, 1, 512)
         })?;
     }
+    for (q_layout, f32_q) in [(QLayout::Transposed, false), (QLayout::Contiguous, true)] {
+        check(Case {
+            batch: 1,
+            q_layout,
+            f32_q,
+            ..case(128, N_HEAD, 1, 512)
+        })?;
+    }
     Ok(())
 }
 
@@ -193,6 +223,14 @@ fn prefill_tile() -> Result<()> {
         check(Case {
             causal: false,
             ..case(hd, N_HEAD, 128, 128)
+        })?;
+    }
+    for (q_layout, f32_q) in [(QLayout::Transposed, false), (QLayout::Contiguous, true)] {
+        check(Case {
+            causal: false,
+            q_layout,
+            f32_q,
+            ..case(72, N_HEAD, 128, 128)
         })?;
     }
     Ok(())
@@ -259,10 +297,35 @@ fn sinks() -> Result<()> {
 }
 
 #[test]
-fn strided_and_f32_queries() -> Result<()> {
+fn stream_k_fixups() -> Result<()> {
+    // batch 1 with few output tiles: stream-k splits tiles across blocks and a fixup kernel writes the result
+    for (hd, seq) in [(256, 512), (128, 256), (64, 1024)] {
+        check(Case {
+            batch: 1,
+            ..case(hd, 2, seq, seq)
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn strided_misaligned_and_f32_queries() -> Result<()> {
     check(Case {
-        strided_q: true,
+        q_layout: QLayout::Transposed,
         ..case(128, 2, 64, 256)
+    })?;
+    check(Case {
+        q_layout: QLayout::Misaligned,
+        ..case(128, 2, 64, 256)
+    })?;
+    check(Case {
+        q_layout: QLayout::OffsetContiguous,
+        ..case(128, 2, 64, 256)
+    })?;
+    check(Case {
+        q_layout: QLayout::OffsetContiguous,
+        f32_q: true,
+        ..case(64, N_HEAD, 1, 256)
     })?;
     check(Case {
         f32_q: true,

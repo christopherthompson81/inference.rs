@@ -18,6 +18,31 @@
 // The macro on the following line shifts it by a factor of 2**3=8, as was needed to fix https://github.com/ggml-org/llama.cpp/issues/18606 .
 #define FATTN_KQ_MAX_OFFSET (3.0f*0.6931f)
 
+// Q and dst may be bf16 rather than f32: runtime flags, so the dtype adds no kernel instances. Indices count elements.
+static __device__ __forceinline__ float fattn_load_q(const void * Q, const bool Q_bf16, const int64_t i) {
+    return Q_bf16 ? __bfloat162float(((const nv_bfloat16 *) Q)[i]) : ((const float *) Q)[i];
+}
+
+static __device__ __forceinline__ float2 fattn_load_q2(const void * Q, const bool Q_bf16, const int64_t i2) {
+    return Q_bf16 ? __bfloat1622float2(((const nv_bfloat162 *) Q)[i2]) : ((const float2 *) Q)[i2];
+}
+
+static __device__ __forceinline__ void fattn_store_dst(void * dst, const bool dst_bf16, const int64_t i, const float v) {
+    if (dst_bf16) {
+        ((nv_bfloat16 *) dst)[i] = __float2bfloat16(v);
+    } else {
+        ((float *) dst)[i] = v;
+    }
+}
+
+static __device__ __forceinline__ void fattn_store_dst2(void * dst, const bool dst_bf16, const int64_t i2, const float2 v) {
+    if (dst_bf16) {
+        ((nv_bfloat162 *) dst)[i2] = __float22bfloat162_rn(v);
+    } else {
+        ((float2 *) dst)[i2] = v;
+    }
+}
+
 typedef void (* fattn_kernel_t)(
         const char * __restrict__ Q,
         const char * __restrict__ K,
@@ -39,7 +64,8 @@ typedef void (* fattn_kernel_t)(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33);
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const bool Q_bf16, const bool dst_bf16);
 
 typedef float (*vec_dot_KQ_t)(
     const char * __restrict__ K_c, const void * __restrict__ Q_v, const int * __restrict__ Q_q8 , const void * __restrict__ Q_ds);
@@ -732,10 +758,11 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         const int blocks_per_tile,
         const uint3 fd_iter_j_z_ne12,
         const uint3 fd_iter_j_z,
-        const uint3 fd_iter_j) {
+        const uint3 fd_iter_j,
+        const bool dst_bf16) {
     constexpr int ncols = ncols1*ncols2;
     ggml_cuda_pdl_lc();
-    float        * GGML_CUDA_RESTRICT dst       = dst_ptr;
+    void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
     const float2 * GGML_CUDA_RESTRICT dst_fixup = dst_fixup_ptr;
 
     const int tile_idx = blockIdx.x; // One block per output tile.
@@ -766,11 +793,11 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
         return;
     }
 
-    dst += sequence*ne02*ne01*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
+    const int64_t i_dst = sequence*ne02*ne01*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
 
     ggml_cuda_pdl_sync();
-    // Load the partial result that needs a fixup
-    float dst_val = *dst;
+    // Load the partial result that needs a fixup; a bf16 dst keeps it in f32 after the per-block partials.
+    float dst_val = dst_bf16 ? dst_fixup_data[(nblocks_stream_k + b_last)*ncols*D + jc*D + tid] : ((const float *) dst)[i_dst];
     float max_val;
     float rowsum;
     {
@@ -800,7 +827,7 @@ static __global__ void flash_attn_stream_k_fixup_uniform(
     }
 
     // Write back final result:
-    *dst = dst_val / rowsum;
+    fattn_store_dst(dst, dst_bf16, i_dst, dst_val / rowsum);
 }
 
 // General fixup kernel for the case where the number of blocks per tile is not uniform across tiles
@@ -816,8 +843,9 @@ static __global__ void flash_attn_stream_k_fixup_general(
         const uint3 fd_iter_k_j_z_ne12,
         const uint3 fd_iter_k_j_z,
         const uint3 fd_iter_k_j,
-        const uint3 fd_iter_k) {
-    float        * GGML_CUDA_RESTRICT dst       = dst_ptr;
+        const uint3 fd_iter_k,
+        const bool dst_bf16) {
+    void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
     const float2 * GGML_CUDA_RESTRICT dst_fixup = dst_fixup_ptr;
     constexpr int ncols = ncols1*ncols2;
 
@@ -856,7 +884,7 @@ static __global__ void flash_attn_stream_k_fixup_general(
         return;
     }
 
-    dst += sequence*ne02*ne01*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
+    const int64_t i_dst = sequence*ne02*ne01*D + jt*ne02*(ncols1*D) + zt_Q*D + (j*ne02 + c)*D + tid;
 
     // Load the partial result that needs a fixup:
     float dst_val = 0.0f;
@@ -864,7 +892,7 @@ static __global__ void flash_attn_stream_k_fixup_general(
     float rowsum  = 0.0f;
     ggml_cuda_pdl_sync();
     {
-        dst_val = *dst;
+        dst_val = dst_bf16 ? dst_fixup_data[(gridDim.x + bidx0)*ncols*D + jc*D + tid] : ((const float *) dst)[i_dst];
 
         const float2 tmp = dst_fixup[bidx0*ncols + jc];
         max_val = tmp.x;
@@ -911,7 +939,7 @@ static __global__ void flash_attn_stream_k_fixup_general(
     }
 
     // Write back final result:
-    *dst = dst_val / rowsum;
+    fattn_store_dst(dst, dst_bf16, i_dst, dst_val / rowsum);
 }
 
 template<int D> // D == head size
@@ -920,11 +948,12 @@ static __global__ void flash_attn_combine_results(
         const float  * VKQ_parts_ptr,
         const float2 * VKQ_meta_ptr,
         float * dst_ptr,
-        const int parallel_blocks) {
+        const int parallel_blocks,
+        const bool dst_bf16) {
     ggml_cuda_pdl_lc();
     const float  * GGML_CUDA_RESTRICT VKQ_parts = VKQ_parts_ptr;
     const float2 * GGML_CUDA_RESTRICT VKQ_meta  = VKQ_meta_ptr;
-    float        * GGML_CUDA_RESTRICT dst       = dst_ptr;
+    void         * GGML_CUDA_RESTRICT dst       = dst_ptr;
     // Dimension 0: threadIdx.x
     // Dimension 1: blockIdx.x
     // Dimension 2: blockIdx.y
@@ -942,7 +971,6 @@ static __global__ void flash_attn_combine_results(
 
     VKQ_parts += j_dst_unrolled * parallel_blocks*D;
     VKQ_meta  += j_dst_unrolled * parallel_blocks;
-    dst       += j_dst_unrolled *                 D;
 
     const int tid = threadIdx.x;
     __builtin_assume(tid < D);
@@ -969,7 +997,7 @@ static __global__ void flash_attn_combine_results(
         VKQ_denominator += KQ_max_scale * meta[l].y;
     }
 
-    dst[tid] = VKQ_numerator / VKQ_denominator;
+    fattn_store_dst(dst, dst_bf16, int64_t(j_dst_unrolled)*D + tid, VKQ_numerator / VKQ_denominator);
 }
 
 template <int DV, int ncols1, int ncols2>
@@ -991,8 +1019,10 @@ void launch_fattn(
 
     ggml_tensor * KQV = dst;
 
-    GGML_ASSERT(Q->type == GGML_TYPE_F32);
-    GGML_ASSERT(KQV->type == GGML_TYPE_F32);
+    GGML_ASSERT(Q->type == GGML_TYPE_F32 || Q->type == GGML_TYPE_BF16);
+    GGML_ASSERT(KQV->type == GGML_TYPE_F32 || KQV->type == GGML_TYPE_BF16);
+    const bool Q_bf16   = Q->type == GGML_TYPE_BF16;
+    const bool dst_bf16 = KQV->type == GGML_TYPE_BF16;
 
     GGML_ASSERT(Q->nb[0] == ggml_element_size(Q));
     GGML_ASSERT(K->nb[0] == ggml_element_size(K));
@@ -1006,8 +1036,9 @@ void launch_fattn(
     const int cc  = ggml_cuda_info().devices[id].cc;
     const int nsm = ggml_cuda_info().devices[id].nsm;
 
-    const ggml_cuda_flash_attn_ext_f16_extra_data f16_extra =
-        ggml_cuda_flash_attn_ext_get_f16_extra_data(KQV, need_f16_K, need_f16_V);
+    // The f16 K/V copies come from the stream-ordered pool, not from space after dst, so dst holds only the output.
+    ggml_cuda_pool_alloc<half> K_f16_alloc(pool);
+    ggml_cuda_pool_alloc<half> V_f16_alloc(pool);
 
     ggml_cuda_pool_alloc<int>    KV_max(pool);
     ggml_cuda_pool_alloc<float>  dst_tmp(pool);
@@ -1027,8 +1058,7 @@ void launch_fattn(
         const size_t bs = ggml_blck_size(K->type);
         const size_t ts = ggml_type_size(K->type);
 
-        GGML_ASSERT(f16_extra.K != 0);
-        half * K_f16 = (half *) f16_extra.K;
+        half * K_f16 = K_f16_alloc.alloc(ggml_nelements(K));
         if (ggml_is_contiguously_allocated(K)) {
             to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(K->type);
             to_fp16(K_data, K_f16, ggml_nelements(K), main_stream);
@@ -1061,8 +1091,7 @@ void launch_fattn(
             const size_t bs = ggml_blck_size(V->type);
             const size_t ts = ggml_type_size(V->type);
 
-            GGML_ASSERT(f16_extra.V != 0);
-            half * V_f16 = (half *) f16_extra.V;
+            half * V_f16 = V_f16_alloc.alloc(ggml_nelements(V));
             if (ggml_is_contiguously_allocated(V)) {
                 to_fp16_cuda_t to_fp16 = ggml_get_to_fp16_cuda(V->type);
                 to_fp16(V_data, V_f16, ggml_nelements(V), main_stream);
@@ -1170,7 +1199,8 @@ void launch_fattn(
         }
 
         if (ntiles_dst % blocks_num.x != 0) { // Fixup is only needed if the SMs work on fractional tiles.
-            dst_tmp_meta.alloc((size_t(blocks_num.x) * ncols * (2 + DV/2)));
+            // A bf16 dst cannot hold the unnormalized partial a block finishing a tile it joined midway leaves: f32 slot per block.
+            dst_tmp_meta.alloc((size_t(blocks_num.x) * ncols * (2 + (dst_bf16 ? DV : DV/2))));
         }
     } else {
         // parallel_blocks must not be larger than what the tensor size allows:
@@ -1245,7 +1275,8 @@ void launch_fattn(
         K->ne[0], n_kv, K->ne[2], K->ne[3], nb11, nb12, nb13,
         nb21, nb22, nb23,
         mask ? mask->ne[1] : 0, mask ? mask->ne[2] : 0, mask ? mask->ne[3] : 0,
-        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0
+        mask ? mask->nb[1] : 0, mask ? mask->nb[2] : 0, mask ? mask->nb[3] : 0,
+        Q_bf16, !stream_k && parallel_blocks > 1 ? false : dst_bf16
     );
     CUDA_CHECK(cudaGetLastError());
 
@@ -1266,7 +1297,7 @@ void launch_fattn(
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_uniform<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], K->ne[2], nblocks_sk,
-                 gqa_ratio, bpt, fd0, fd1, fd2);
+                 gqa_ratio, bpt, fd0, fd1, fd2, dst_bf16);
         } else if (ntiles_dst % blocks_num.x != 0) {
             // General fixup for the cases where nblocks_stream_k < ntiles_dst.
             const int total_work = ntiles_KV * ntiles_dst;
@@ -1283,7 +1314,7 @@ void launch_fattn(
             ggml_cuda_kernel_launch(flash_attn_stream_k_fixup_general<DV, ncols1, ncols2>, launch_params,
                 (float *) KQV->data, dst_tmp_meta.ptr,
                  Q->ne[1], Q->ne[2], gqa_ratio, total_work,
-                 fd_k_j_z_ne12, fd_k_j_z, fd_k_j, fd_k);
+                 fd_k_j_z_ne12, fd_k_j_z, fd_k_j, fd_k, dst_bf16);
         }
     } else if (parallel_blocks > 1) {
         const dim3 block_dim_combine(DV, 1, 1);
@@ -1292,7 +1323,7 @@ void launch_fattn(
 
         const ggml_cuda_kernel_launch_params launch_params = ggml_cuda_kernel_launch_params(blocks_num_combine, block_dim_combine, nbytes_shared_combine, main_stream);
         ggml_cuda_kernel_launch(flash_attn_combine_results<DV>, launch_params,
-            dst_tmp.ptr, dst_tmp_meta.ptr, (float *) KQV->data, parallel_blocks);
+            dst_tmp.ptr, dst_tmp_meta.ptr, (float *) KQV->data, parallel_blocks, dst_bf16);
     }
     CUDA_CHECK(cudaGetLastError());
 }

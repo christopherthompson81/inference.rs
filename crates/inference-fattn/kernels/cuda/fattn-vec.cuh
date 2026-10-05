@@ -39,7 +39,8 @@ static __global__ void flash_attn_ext_vec(
                             const int32_t nb11, const int32_t nb12, const int64_t nb13,
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
-                            const int32_t nb31, const int32_t nb32, const int64_t nb33) {
+                            const int32_t nb31, const int32_t nb32, const int64_t nb33,
+        const bool Q_bf16, const bool dst_bf16) {
     ggml_cuda_pdl_lc();
 #ifdef FLASH_ATTN_AVAILABLE
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
@@ -61,7 +62,7 @@ static __global__ void flash_attn_ext_vec(
                   nb11, nb12, nb13,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
-                  nb31, nb32, nb33);
+                  nb31, nb32, nb33, Q_bf16, dst_bf16);
         NO_DEVICE_CODE;
         return;
     }
@@ -213,8 +214,15 @@ static __global__ void flash_attn_ext_vec(
 
                 __align__(16) float2 tmp[cpy_ne] = {{0.0f, 0.0f}};
                 if (ncols == 1 || ic0 + j < int(ne01.z)) {
-                    ggml_cuda_memcpy_1<cpy_nb>(tmp,            &Q_j[i]);
-                    ggml_cuda_memcpy_1<cpy_nb>(tmp + cpy_ne/2, &Q_j[i + cpy_ne/2]);
+                    if (Q_bf16) {
+#pragma unroll
+                        for (int i1 = 0; i1 < cpy_ne; ++i1) {
+                            tmp[i1] = fattn_load_q2(Q_j, Q_bf16, i + i1);
+                        }
+                    } else {
+                        ggml_cuda_memcpy_1<cpy_nb>(tmp,            &Q_j[i]);
+                        ggml_cuda_memcpy_1<cpy_nb>(tmp + cpy_ne/2, &Q_j[i + cpy_ne/2]);
+                    }
                 }
 #pragma unroll
                 for (int i1 = 0; i1 < cpy_ne; ++i1) {
@@ -234,8 +242,15 @@ static __global__ void flash_attn_ext_vec(
             for (int i0 = 0; i0 < D/2; i0 += nthreads_KQ*cpy_ne) {
                 const int i = i0 + (nthreads_KQ == WARP_SIZE ? threadIdx.x : threadIdx.x % nthreads_KQ)*cpy_ne;
                 if (ncols == 1 || ic0 + j < int(ne01.z)) {
-                    ggml_cuda_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ],            &Q_j[i]);
-                    ggml_cuda_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ + cpy_ne/2], &Q_j[i + cpy_ne/2]);
+                    if (Q_bf16) {
+#pragma unroll
+                        for (int i1 = 0; i1 < cpy_ne; ++i1) {
+                            Q_reg[j][i0/nthreads_KQ + i1] = fattn_load_q2(Q_j, Q_bf16, i + i1);
+                        }
+                    } else {
+                        ggml_cuda_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ],            &Q_j[i]);
+                        ggml_cuda_memcpy_1<cpy_nb>(&Q_reg[j][i0/nthreads_KQ + cpy_ne/2], &Q_j[i + cpy_ne/2]);
+                    }
                 }
             }
 #pragma unroll
@@ -498,7 +513,7 @@ static __global__ void flash_attn_ext_vec(
                 if (gridDim.y == 1) {
                     dst_val /= KQ_sum[j_VKQ];
                 }
-                dst[(((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid] = dst_val;
+                fattn_store_dst(dst, dst_bf16, (((sequence*int(ne01.z) + ic0 + j_VKQ)*ne02 + head)*gridDim.y + blockIdx.y)*D + i0 + tid, dst_val);
             }
         }
 
@@ -520,7 +535,7 @@ static __global__ void flash_attn_ext_vec(
               nb11, nb12, nb13,
               nb21, nb22, nb23,
               ne31, ne32, ne33,
-              nb31, nb32, nb33);
+              nb31, nb32, nb33, Q_bf16, dst_bf16);
     NO_DEVICE_CODE;
 #endif // FLASH_ATTN_AVAILABLE
 }
