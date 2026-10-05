@@ -348,3 +348,70 @@ Review follow-up:
   whose offset or strides are not 16-byte aligned, rather than letting them fault.
 - A new test, `long_prefill_converts_bf16_kv_first` (600 and 640 Q rows at head dims 128 and 256), covers the
   convert-first mode beyond `stream_k_fixups`.
+
+## Run 6 - 2026-10-04 20:23
+
+Question: can fattn read a paged K/V cache in place, and at what cost against dense K/V?
+
+Cache layouts in use (survey of `inference-nn/src/paged_attention/`):
+- Standard (vLLM): K is `[blocks, kv_heads, head_dim/x, block_size, x]` and V is `[blocks, kv_heads, head_dim,
+  block_size]`. A token's row is not contiguous there, so fattn's row loads cannot read it.
+- FlashInferHnd: `[blocks, kv_heads, block_size, head_dim]`. Rows are contiguous and each head's block is
+  contiguous. FA2-paged already reads this layout, through a strided NHD view. This is the layout fattn targets.
+- Block size defaults to 32 (`--pa-block-size`). FlashInfer, FA2-paged and FA3 need `% 32`.
+
+Design:
+- `fattn_paged_kv {block_table, seq_lens, max_blocks, block_size_log2, block_stride_K/V}` goes to every kernel by
+  value. entry.cu passes it to the vendored dispatch through `op_params[6..8)`, so no new globals.
+- Kernel selection sends paged calls to the mma kernel only; the vec and tile kernels walk K/V with fixed strides.
+- The mma tile loader resolves row `i` of sequence `s` to `table[s][i >> log2] * block_stride + (i & mask) * row_stride`.
+- Rows past `seq_lens[s]` (the tail of the last block, and the K/V length padded to 256) read the sequence's first
+  row instead. Unused cache slots may hold anything, including NaN, and `0 * NaN` in P.V would poison the output.
+  The mask (`(b, seq_q, paged_kv_len)`, now required) hides those rows.
+- The K/V length is `max_blocks * block_size` rounded up to 256 (`FATTN_KQ_STRIDE`). That lets the GQA-batched kernel
+  and mask-driven tile skipping apply.
+- bf16 caches always convert in the tile loads; a paged cache cannot take an f16 copy of the whole pool.
+- Rust: `flash_attn_paged(q, &PagedKv {k_cache, v_cache, block_table, seq_lens}, opts)`, plus `paged_kv_len` and
+  `paged_causal_mask`. Tables and lengths are u32, and the block size must be a power of two.
+
+Tests (`tests/integration/paged.rs`, 4 tests): f16 and bf16 against the dense reference per sequence. Block tables
+are scattered (an LCG over 48 blocks), lengths are uneven (100/333/37, 50/129, 64/16/200), and every unused cache slot
+holds NaN. Coverage: decode at head dims 64/128/256, a 17-row chunk over a cached prefix, block size 16, no GQA, and
+GQA 2. Sanity check: with the first-row redirect removed, 3 of the 4 tests fail. One more test rejects a missing or
+short mask and a non-power-of-two block size.
+
+Bench (`bench::paged_vs_dense`): the same data, as a block-32 paged cache with interleaved tables and as dense K/V.
+- First version: paged was 1.8-2.8x slower. nsys showed the same kernel and grid as dense, with the main kernel at
+  222 us vs 91 us at Llama kv 16384, so the paged loads were latency bound. Hoisting the row lookup out of the
+  16-byte chunk loop changed nothing.
+- Reading the block table with `__ldg` (read-only cache, so the compiler may move the lookups above the tile's
+  shared-memory stores) and using shift/mask for the block split fixed it:
+
+| row | Qwen3.5-0.8B paged / dense (us) | Llama-8B paged / dense (us) |
+|---|---|---|
+| b 1 q 1 kv 4096 | 25.2 / 25.0 | 34.8 / 34.5 |
+| b 1 q 1 kv 16384 | 58.6 / 58.1 | 93.9 / 93.8 |
+| b 8 q 1 kv 4096 | 98.4 / 96.2 | 195.1 / 192.1 |
+| b 8 q 1 kv 16384 | 348.2 / 347.2 | 752.1 / 734.2 |
+| b 1 q 256 kv 4096 | 184.0 / 182.1 | 303.0 / 295.4 |
+| b 1 q 1024 kv 4096 | 640.3 / 578.7 | 1035.2 / 974.6 |
+
+The 1024 row is the only gap. There dense converts bf16 first and loads with cp.async; paged cannot.
+
+Not wired in yet. Next: FP8 (e4m3) caches with per-layer scales, and varlen (packed) Q with per-sequence Q
+lengths. Both are needed before the paged decode and prefix-prefill paths can move to fattn.
+
+Review follow-up:
+- Untrusted lengths: a `seq_len` beyond the table's span would have read past the sequence's table row. The kernel
+  now clamps it to `max_blocks << log2`. A zero-width table would have divided by zero on the host (stream-k with 0
+  KV tiles) and is now rejected. `seq_lens >= 1` and in-range table entries are documented requirements, since the
+  device-side values cannot be checked on the host.
+- Tile skipping: the mask scan that feeds `KV_max` only runs for batch > 1 or 1024+ Q rows. So a batch-1 call with an
+  over-allocated table iterated the whole span (correct, as every row past the length rereads row 0, but wasted
+  work). Forcing the scan for paged calls cost 3-8 us on exactly-sized batch-1 decode, so it was dropped. Instead the
+  mma kernel ends each sequence at `ceil(len / nbatch_fa)` KV tiles: exact, with no extra kernel. Bench afterwards,
+  paged / dense: 1.00-1.05 on every row.
+- New tests: batch 1 with 20 spare table entries, so whole KV tiles lie past the sequence and stream-k blocks start
+  beyond it; and a 600-row bf16 prefill over 700 rows, which converts in the loads where dense would convert first.
+- Note on the bench's batch-1 decode rows: on Ada and newer, dense would choose the vec kernel there, while paged is
+  always mma. On this Ampere card both take mma.

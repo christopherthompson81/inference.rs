@@ -4,7 +4,9 @@
 mod cuda;
 
 #[cfg(feature = "cuda")]
-pub use cuda::{causal_mask, flash_attn, supported};
+pub use cuda::{
+    causal_mask, flash_attn, flash_attn_paged, paged_causal_mask, paged_kv_len, supported,
+};
 
 /// Options for `flash_attn` beyond the operands.
 #[derive(Debug, Clone, Default)]
@@ -17,4 +19,15 @@ pub struct FattnOptions {
     pub mask: Option<candle_core::Tensor>,
     /// Per-head f32 attention sinks `(n_head,)`: an extra logit that takes softmax mass but contributes no value.
     pub sinks: Option<candle_core::Tensor>,
+}
+
+/// A paged K/V cache read in place: `(num_blocks, n_head_kv, block_size, head_dim)` blocks, as FlashInfer's HND layout.
+#[derive(Debug, Clone, Copy)]
+pub struct PagedKv<'a> {
+    pub k_cache: &'a candle_core::Tensor,
+    pub v_cache: &'a candle_core::Tensor,
+    /// `(batch, max_blocks)` u32: each sequence's blocks in order; entries covering its rows must be `< num_blocks`.
+    pub block_table: &'a candle_core::Tensor,
+    /// `(batch,)` u32: the rows each sequence holds, at least 1 (unused rows read the sequence's first row).
+    pub seq_lens: &'a candle_core::Tensor,
 }

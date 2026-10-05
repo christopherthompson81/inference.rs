@@ -606,6 +606,13 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_NONE;
     }
 
+    // only the mma kernel resolves paged rows; the vec and tile kernels walk K/V with fixed strides
+    if (fattn_get_paged(dst).block_table) {
+        const bool kv_ok = (K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16) && V->type == K->type;
+        return kv_ok && turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72
+            ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;
+    }
+
     // For small batch sizes the vector kernel may be preferable over the kernels optimized for large batch sizes:
     // 192 satisfies % 64 == 0 but has no vec instance (DKQ != DV); force it onto the MMA path.
     const bool can_use_vector_kernel = Q->ne[0] <= 256 && Q->ne[0] % 64 == 0 && Q->ne[0] != 192 && K->ne[1] % FATTN_KQ_STRIDE == 0;

@@ -5,15 +5,15 @@ use candle_core::{D, DType, Device, Tensor};
 use inference_fattn::{FattnOptions, causal_mask, flash_attn};
 
 const BATCH: usize = 2;
-const N_HEAD: usize = 8;
+pub(super) const N_HEAD: usize = 8;
 // MLA's absorbed head dim, where V is the leading 512 dims of K
 const MLA_HEAD_DIM: usize = 576;
 // Max |fattn - reference| / max |reference| per input dtype. The mma path computes in f16 either way, and a bf16
 // result is rounded to bf16 on the way out.
-const TOLERANCE: [(DType, f32); 2] = [(DType::F16, 4e-3), (DType::BF16, 1e-2)];
+pub(super) const TOLERANCE: [(DType, f32); 2] = [(DType::F16, 4e-3), (DType::BF16, 1e-2)];
 
 #[derive(Clone, Copy, PartialEq)]
-enum QLayout {
+pub(super) enum QLayout {
     Contiguous,
     // a transposed (non-contiguous) view
     Transposed,
@@ -24,21 +24,21 @@ enum QLayout {
 }
 
 #[derive(Clone, Copy)]
-struct Case {
-    batch: usize,
-    head_dim: usize,
-    head_dim_v: usize,
-    n_head_kv: usize,
-    seq_q: usize,
-    seq_kv: usize,
-    causal: bool,
-    softcap: f32,
-    sinks: bool,
-    q_layout: QLayout,
-    f32_q: bool,
+pub(super) struct Case {
+    pub(super) batch: usize,
+    pub(super) head_dim: usize,
+    pub(super) head_dim_v: usize,
+    pub(super) n_head_kv: usize,
+    pub(super) seq_q: usize,
+    pub(super) seq_kv: usize,
+    pub(super) causal: bool,
+    pub(super) softcap: f32,
+    pub(super) sinks: bool,
+    pub(super) q_layout: QLayout,
+    pub(super) f32_q: bool,
 }
 
-fn case(head_dim: usize, n_head_kv: usize, seq_q: usize, seq_kv: usize) -> Case {
+pub(super) fn case(head_dim: usize, n_head_kv: usize, seq_q: usize, seq_kv: usize) -> Case {
     Case {
         batch: BATCH,
         head_dim,
@@ -54,7 +54,7 @@ fn case(head_dim: usize, n_head_kv: usize, seq_q: usize, seq_kv: usize) -> Case 
     }
 }
 
-fn cuda() -> Option<Device> {
+pub(super) fn cuda() -> Option<Device> {
     let dev = Device::new_cuda(0).ok();
     if dev.is_none() {
         eprintln!("SKIP: no CUDA device");
@@ -63,7 +63,7 @@ fn cuda() -> Option<Device> {
 }
 
 // Repeat K/V heads for GQA, then softmax(softcap(scale * q k^T) + mask) v, with sinks as extra per-head logits.
-fn reference(
+pub(super) fn reference(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
