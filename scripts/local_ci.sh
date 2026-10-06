@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal]
-# [--models] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]; --models runs the real-checkpoint parity tests on CPU (--cuda
-# keeps one GPU parity check).
+# [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]. Real-checkpoint tests are not run here:
+# scripts/deep_checks.sh runs them on request.
 # --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact; it is
 # skipped when nothing inference-core builds on differs from origin/master.
@@ -21,7 +21,6 @@ lint=0
 tests=0
 cuda=0
 metal=0
-models=0
 slim=0
 docs=0
 docs_all=0
@@ -35,7 +34,6 @@ for arg in "$@"; do
         --tests) tests=1 ;;
         --cuda) cuda=1 ;;
         --metal) metal=1 ;;
-        --models) models=1 ;;
         --slim) slim=1 ;;
         --docs) docs=1 ;;
         --docs-all) docs=1 docs_all=1 ;;
@@ -46,7 +44,7 @@ for arg in "$@"; do
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
-[[ $((lint + tests + cuda + metal + models + slim + docs + bindings + size)) -eq 0 ]] && lint=1 && tests=1
+[[ $((lint + tests + cuda + metal + slim + docs + bindings + size)) -eq 0 ]] && lint=1 && tests=1
 
 # --examples compile-checks the examples (tests only link the smoke set below); --bins checks bins without dev-deps, like CI.
 CLIPPY=(clippy --workspace --bins --tests --examples)
@@ -69,7 +67,7 @@ if [[ $lint -eq 1 ]]; then
     # CI's typos job; skipped with a note where the binary is missing so lint still runs everywhere.
     if command -v typos > /dev/null; then typos --config .typos.toml; else echo "typos not installed: cargo install typos-cli" >&2; fi
 fi
-if [[ $tests -eq 1 || $cuda -eq 1 || $metal -eq 1 || $models -eq 1 ]] && ! cargo nextest --version > /dev/null 2>&1; then
+if [[ $tests -eq 1 || $cuda -eq 1 || $metal -eq 1 ]] && ! cargo nextest --version > /dev/null 2>&1; then
     # nextest runs each test in its own process (CUDA tests stop sharing a context) and schedules nextest.toml groups
     platform=linux; [[ $OSTYPE == darwin* ]] && platform=mac
     echo "cargo-nextest is required: curl -LsSf https://get.nexte.st/latest/$platform | tar zxf - -C ~/.cargo/bin" >&2
@@ -86,7 +84,7 @@ cleanup() {
 trap cleanup EXIT
 if [[ $cuda -eq 1 ]]; then
     cargo "${CLIPPY[@]}" --features cuda -- -D warnings
-    # GPU tests skip themselves without a device; model-backed tests run when their INFERENCE_TEST_* path is set
+    # GPU tests skip themselves without a device
     if [[ $lint -eq 1 || $tests -eq 1 ]]; then
         # The CUDA suite is GPU-bound, so it runs in the background while the CPU lint and tests use the cores.
         cargo nextest run --no-run --features cuda "${TEST_TARGETS[@]}"
@@ -198,9 +196,6 @@ if [[ -n $cuda_pid ]]; then
 fi
 cuda_pid= bindings_pid=
 [[ $failed -eq 0 ]] || exit 1
-if [[ $models -eq 1 ]]; then
-    cargo nextest run --no-fail-fast --profile models "${TEST_TARGETS[@]}"
-fi
 if [[ $size -eq 1 ]]; then
     if [[ $OSTYPE != linux* ]]; then echo "--size measures the Linux CUDA library" >&2; exit 2; fi
     compute_cap=${CUDA_COMPUTE_CAP:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)}
@@ -213,7 +208,7 @@ if [[ $size -eq 1 ]]; then
     scripts/bundle_size.py "${size_args[@]}"
 fi
 # --size builds under target/bundle, which the sweep leaves alone
-if [[ $sweep -eq 1 && $((lint + tests + cuda + metal + models + slim + docs + bindings)) -gt 0 ]]; then
+if [[ $sweep -eq 1 && $((lint + tests + cuda + metal + slim + docs + bindings)) -gt 0 ]]; then
     # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay
     # would under-report, so nothing is deleted unless all of them succeed.
     live=$(mktemp)
@@ -221,7 +216,7 @@ if [[ $sweep -eq 1 && $((lint + tests + cuda + metal + models + slim + docs + bi
     replay() { cargo "$@" --message-format=json >> "$live"; }
     lint_replay() { cargo "${CLIPPY[@]}" "$@" --message-format=json -- -D warnings >> "$live"; }
     if [[ $lint -eq 1 ]]; then lint_replay; fi
-    if [[ $tests -eq 1 || $models -eq 1 ]]; then replay test --no-run "${TEST_TARGETS[@]}"; fi
+    if [[ $tests -eq 1 ]]; then replay test --no-run "${TEST_TARGETS[@]}"; fi
     if [[ $tests -eq 1 ]]; then replay "${SMOKE[@]}"; fi
     if [[ $cuda -eq 1 ]]; then
         lint_replay --features cuda
