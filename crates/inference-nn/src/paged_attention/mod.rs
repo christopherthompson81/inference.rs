@@ -307,7 +307,7 @@ pub enum MemoryGpuConfig {
     ContextSize(usize),
 }
 
-// See `pagedattention.cu` CALL_V1_LAUNCHER_BLOCK_SIZE
+// Metal's paged kernel instantiates these; fattn's paged path needs a power of two
 const SUPPORTED_BLOCK_SIZE: &[usize] = &[8, 16, 32];
 
 // Weight-loading transients freed into the stream-ordered pool are fragmented and cannot back the

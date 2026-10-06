@@ -6,12 +6,14 @@ use std::{collections::HashMap, sync::Once};
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_fattn::{FattnOptions, KvScales as FattnKvScales, Packed, PagedKv};
+#[cfg(not(all(feature = "cuda", target_family = "unix")))]
+use inference_paged_attn::paged_attention;
+use inference_paged_attn::reshape_and_cache;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_paged_attn::{
     DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, KvCacheScales as FlashInferKvCacheScales,
     fa3_fp8_decode, gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
 };
-use inference_paged_attn::{paged_attention, reshape_and_cache};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::attention::{fattn_sinks, sliding_window_left};
@@ -1708,6 +1710,7 @@ impl PagedAttention {
                 dev: &dev,
                 attention_mask: tensors.attention_mask,
             }),
+            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
             DecodePlan::PagedAttention => {
                 self.run_standard_paged_decode(ctx, &query, key_cache_ref, value_cache_ref, &dev)
             }
@@ -1723,6 +1726,9 @@ impl PagedAttention {
         dev: &DeviceLocation,
         attention_mask: &AttentionMask,
     ) -> Result<Tensor> {
+        if ctx.alibi_slopes.is_some() {
+            candle_core::bail!("paged decode over gathered K/V does not apply alibi");
+        }
         // the gather sizes its work from host lengths, which a captured graph would replay stale: failing the capture
         // makes the engine run these steps eagerly
         #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -2083,6 +2089,7 @@ impl PagedAttention {
         self.run_decode_gather_sdpa(ctx, query, key_cache, value_cache, dev, attention_mask)
     }
 
+    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
     fn run_standard_paged_decode(
         &self,
         ctx: &PagedForwardCtx<'_>,
@@ -2223,7 +2230,7 @@ impl PagedAttention {
     }
 
     /// Standard paged attention forward: writes key/value to cache, then
-    /// runs attention (Sdpa for prompt, paged kernel for decode).
+    /// runs attention (Sdpa for prompt, fattn or the gather for decode).
     #[allow(clippy::too_many_arguments)]
     pub fn forward(
         &self,

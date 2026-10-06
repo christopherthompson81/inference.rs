@@ -1205,3 +1205,40 @@ Master CI after the outage: the re-run at #286's merge passed every check but Te
 ids matched and the other values were within ~1e-6. Test passed at #285's merge and failed at #284's (logs
 expired). The goldens come from this machine (i7-10700K, AVX2 only); GitHub's runners vary, and the CPU kernels take
 AVX-512 where it exists. The tolerance is now 1e-3, as the paddleocr and qwen-vl tiny goldens already use.
+
+## Run 19 - 2026-10-05 18:07
+
+Question: with gpt-oss and Llama 4 off the Standard layout, can the vLLM v1/v2 CUDA paged kernels go?
+
+Who still decoded on them: CUDA layers the HND layout does not admit, i.e. pre-Turing GPUs (fattn's paged path is
+mma-only, compute 7.5+), head dims fattn lacks (32, 40, 72, 160, ...), and `INFERENCE_RS_FLASHINFER_DECODE=0`;
+f32 caches already take HND and gather. Asked before deleting, since this costs those cases their fused decode and
+CUDA graphs; answer: delete.
+
+Changes: the six `pagedattention_v{1,2}_{f16,bf16,f32}.cu`, `pagedattention.cuh`, `attention/attention_utils.cuh`,
+the `paged_attention` op and its six FFI entry points, and `tests/paged_attention_cuda_tests.rs` are gone; the cache
+write (`reshape_and_cache`) moved to its own module. On CUDA, Standard-layout decode is now the gather, and
+`DecodePlan::requires_host_context_lengths` says so, which also keeps such models from attempting CUDA graph capture
+up front (`cuda_decode_graph_supported_for_model`) instead of failing it. `DecodePlan::PagedAttention` survives for
+Metal only.
+
+```
+ls -la target/debug/cuda-kernels/inferencepagedattention-*/libinferencepagedattention.so   (dev, sm86 only)
+3285920  before (the six vLLM objects were ~3.3 MB of it)
+ 207240  after
+```
+
+Next: the remaining #270 items (step 1 inventory, step 4 MoE/FP8 GEMM audit, step 5 own the candle crates,
+step 6 build-wide arch list), and gating the eager CSR/tile-plan build on MLA/FA3.
+
+Review follow-up:
+- No CUDA test wrote a Standard cache any more (the deleted vLLM test was the only one). The tiny Llama (head dim 16,
+  outside HND) now decodes on paged CUDA in f32 against the CPU: every step goes through the gather over the
+  `[blocks, heads, d/x, block, x]` cache (traced: 14 gather calls), tokens match, logprobs within 2.7e-3 (the large
+  random weights grow summation-order drift, as the llava fixture notes; TF32 is off by default).
+- The gather ignores alibi slopes; no model passes them, but it now fails instead of decoding without them.
+- Stale comments (the HND admission rule, the block-size list, the decode metadata, the layer docs) and the guide's
+  block-size sentence now describe fattn, the gather and Metal's kernel.
+- Left as follow-ups: `cuda_graph.rs` rounds the graph key's context length to the V2 kernel's 512-token
+  partitions, which only splits graph captures now; and with Standard on CUDA only a gather, putting every CUDA
+  layer on HND (its own gather included) would let the x-vectorized Standard cache and its kernels go.
