@@ -978,3 +978,42 @@ Review: no correctness issue. inference-paged-attn's kernel archive needs libstd
 
 Next: fold `moe_grouped`'s GEMM into the mmq path behind parity tests, and file the sm90 CUTLASS override for
 Hopper verification.
+
+## Run 25 - 2026-10-06 09:53
+
+#270 step 4: fold `moe_grouped`'s GEMM into the grouped mmq path.
+
+Question: the GGUF grouped prefill reached `moe_grouped` (a second grouped GEMM over Q8_1-quantized input, 11 types)
+only when gate and up had different types, when down was outside mmq's list (only Q8_1, which GGUF does not store
+weights in), or when the activation had no fused GLU form. Can grouped mmq cover all three, so one grouped GEMM is left?
+
+Pinned first: four tests run `forward_grouped` against `forward_gather` (the separate indexed-MoE kernels) on a
+64-token BF16 prefill: matching gate/up (Q4_K/Q4_K/Q6_K, Silu, the packed mmq path), mixed gate/up (Q4_K/Q8_0/Q6_K),
+activations with no fused GLU (Sigmoid, QuickGelu) and both at once (Q5_K/Q4_0/Q8_0, QuickGelu). All passed on the
+old code, which ran `moe_grouped` for the last three.
+
+Switch:
+- gate and up of different types each run one `grouped_moe_mmq`, giving rows in flat assignment order, and down
+  reads that pair through `grouped_moe_mmq_from_glu_pair`
+- an activation with no fused GLU (and LoRA, as before) applies `mul_and_act` to the flat rows, runs down as one
+  grouped mmq and reduces with `moe_weighted_reduce_flat_same_dtype`
+- a projection type outside mmq's list returns to the gather path up front; `moe_grouped` bailed on those instead
+
+Deleted: `grouped_moe_gemm_prequantized`, its 11 `launch_moe_grouped_gemm_*` declarations and the tiled GEMM, block
+types and vec_dot copies in `moe_grouped.cu` (1235 -> 161 lines, renamed `moe_dispatch/moe_dispatch.cu`: what is left
+is the expert dispatch tables and the weighted top-k reduce the mmq path reads), plus
+`grouped_from_glu_sorted_pair`, whose sorted-order input only `moe_grouped` produced. The route-order test in
+`grouped_mmq_packed_cuda_tests.rs` now checks the split pair against the packed output instead.
+
+```
+cargo nextest run -p inference-nn -p inference-quant --features cuda -E 'test(grouped)|test(moe)|test(route_order)|test(mmq)' -> 56 pass
+local_ci.sh --size -> file 103.18 MiB (-0.12 against #298's baseline), .nv_fatbin 30.22 MiB (-0.10)
+```
+
+Review: no correctness issue (row order, the merged LoRA branch and the fallback check out), but the first version of
+the new tests could not see a routing error. The test helper's values repeat every 4096 elements, and each expert was
+exactly 32 periods, so all four experts held identical weights and token t matched token t + 16. Each expert and
+token now gets its own scale. Checked by hand: feeding the gather reference the wrong experts (`(id + 1) % 4`) fails
+all four tests (max error ~7200 at a reference scale of ~8000), the correct ids pass. Also from the review: the up-front
+check uses `supports_mmq_weight` (type and column count), so a trellis weight with a column tail falls back instead
+of failing in `grouped`; `moe_dispatch.cu` lost its banners and the always-allocated `sorted_source_ids` null check.

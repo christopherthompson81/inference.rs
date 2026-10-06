@@ -68,7 +68,8 @@ fn should_stage_prequantized_on_cpu(experts_vb: &ShardedVarBuilder) -> bool {
 #[cfg(feature = "cuda")]
 enum GroupedGateUp {
     Packed(Tensor),
-    SortedPair { gate: Tensor, up: Tensor },
+    // each projection's rows in flat assignment order, from gate and up of different GGUF types
+    Pair { gate: Tensor, up: Tensor },
 }
 
 impl StackedExpertWeights {
@@ -427,7 +428,15 @@ mod tests {
     }
 
     fn quant_method(weight: Tensor, device: &Device) -> Result<Arc<dyn QuantMethod>> {
-        let weight = QTensor::quantize_onto(&weight, GgmlDType::Q4_0, device)?;
+        quant_method_as(weight, GgmlDType::Q4_0, device)
+    }
+
+    fn quant_method_as(
+        weight: Tensor,
+        dtype: GgmlDType,
+        device: &Device,
+    ) -> Result<Arc<dyn QuantMethod>> {
+        let weight = QTensor::quantize_onto(&weight, dtype, device)?;
         Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
             q_weight: Arc::new(weight),
             b: None,
@@ -700,6 +709,152 @@ mod tests {
             "grouped prefill {dtype:?} max error {error} at reference scale {scale}"
         );
         Ok(())
+    }
+
+    // grouped prefill against the gather path, which runs the separate indexed-MoE kernels
+    fn run_quantized_grouped_prefill(projections: [GgmlDType; 3], act: Activation) -> Result<()> {
+        const EXPERTS: usize = 4;
+        const HIDDEN: usize = 256;
+        const INTERMEDIATE: usize = 512;
+        const TOKENS: usize = 2 * GROUPED_PREFILL_MIN_TOKENS;
+        const TOPK: usize = 2;
+        const TOLERANCE: f32 = 0.05;
+
+        let device = Device::new_cuda(0)?;
+        let [gate, up, down] = projections;
+        // values() repeats every 4096 elements, which a whole expert spans, so scale each expert and token apart
+        let per_expert = |weight: Tensor| -> Result<Tensor> {
+            let scales = (0..EXPERTS)
+                .map(|expert| {
+                    0.6 + 0.3 * f32::from(u16::try_from(expert).expect("expert index is bounded"))
+                })
+                .collect::<Vec<_>>();
+            weight.broadcast_mul(&Tensor::from_vec(scales, (EXPERTS, 1, 1), &Device::Cpu)?)
+        };
+        let fast = FastExpertsWeights {
+            fused_gate_proj: quant_method_as(
+                per_expert((tensor((EXPERTS, INTERMEDIATE, HIDDEN), 0.1)? * 4.0)?)?,
+                gate,
+                &device,
+            )?,
+            fused_up_proj: quant_method_as(
+                per_expert((tensor((EXPERTS, INTERMEDIATE, HIDDEN), 0.7)? * 4.0)?)?,
+                up,
+                &device,
+            )?,
+            fused_down_proj: quant_method_as(
+                per_expert((tensor((EXPERTS, HIDDEN, INTERMEDIATE), 1.3)? * 4.0)?)?,
+                down,
+                &device,
+            )?,
+            sharded: false,
+        };
+        let token_scales = (0..TOKENS)
+            .map(|token| {
+                0.5 + f32::from(u16::try_from(token).expect("token index is bounded"))
+                    / f32::from(u16::try_from(TOKENS).expect("token count is bounded"))
+            })
+            .collect::<Vec<_>>();
+        let xs = (tensor((1, TOKENS, HIDDEN), 3.1)? * 4.0)?
+            .broadcast_mul(&Tensor::from_vec(
+                token_scales,
+                (1, TOKENS, 1),
+                &Device::Cpu,
+            )?)?
+            .to_dtype(DType::BF16)?
+            .to_device(&device)?;
+        let xs_flat = xs.reshape((TOKENS, HIDDEN))?;
+        let topk_ids = (0..TOKENS)
+            .flat_map(|token| {
+                [
+                    u32::try_from(token % EXPERTS).expect("expert index is bounded"),
+                    u32::try_from((token * 3 + 1) % EXPERTS).expect("expert index is bounded"),
+                ]
+            })
+            .collect::<Vec<_>>();
+        let topk_ids = Tensor::from_vec(topk_ids, (TOKENS, TOPK), &device)?;
+        let topk_weights = (0..TOKENS)
+            .flat_map(|token| {
+                let cycle = u16::try_from(token % 5).expect("cycle is bounded");
+                let first = 0.25 + 0.5 * f32::from(cycle) / 4.0;
+                [first, 1.0 - first]
+            })
+            .collect::<Vec<_>>();
+        let topk_weights = Tensor::from_vec(topk_weights, (TOKENS, TOPK), &device)?;
+        let forward = MoEForward {
+            xs: &xs,
+            xs_flat: &xs_flat,
+            topk_weights: &topk_weights,
+            topk_ids: &topk_ids,
+            original_dtype: DType::BF16,
+            shape: MoEForwardShape {
+                batch_size: 1,
+                seq_len: TOKENS,
+                hidden_dim: HIDDEN,
+                num_tokens: TOKENS,
+                phase: MoEForwardPhase::Prefill,
+            },
+            lora: None,
+        };
+        let config = MoEForwardConfig {
+            num_experts: EXPERTS,
+            num_experts_per_tok: TOPK,
+            act,
+        };
+
+        assert!(matches!(
+            FastExpertsWeights::select_cuda_fast_path(&forward),
+            Some(MoECudaFastPath::GroupedPrefill)
+        ));
+        let actual = fast
+            .forward_grouped(&forward, config)?
+            .expect("these types take the grouped prefill path")
+            .to_dtype(DType::F32)?;
+        let expected = fast
+            .forward_gather(&forward, config)?
+            .to_dtype(DType::F32)?;
+        let error = (&actual - &expected)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        let scale = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+        assert!(
+            error <= TOLERANCE * (1.0 + scale),
+            "grouped prefill {projections:?} {act:?} max error {error} at reference scale {scale}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_prefill_matching_gate_up_matches_gather() -> Result<()> {
+        run_quantized_grouped_prefill(
+            [GgmlDType::Q4K, GgmlDType::Q4K, GgmlDType::Q6K],
+            Activation::Silu,
+        )
+    }
+
+    #[test]
+    fn grouped_prefill_mixed_gate_up_types_matches_gather() -> Result<()> {
+        run_quantized_grouped_prefill(
+            [GgmlDType::Q4K, GgmlDType::Q8_0, GgmlDType::Q6K],
+            Activation::Silu,
+        )
+    }
+
+    #[test]
+    fn grouped_prefill_activation_without_glu_kernel_matches_gather() -> Result<()> {
+        for act in [Activation::Sigmoid, Activation::QuickGelu] {
+            run_quantized_grouped_prefill([GgmlDType::Q4K, GgmlDType::Q4K, GgmlDType::Q6K], act)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_prefill_mixed_types_without_glu_kernel_matches_gather() -> Result<()> {
+        run_quantized_grouped_prefill(
+            [GgmlDType::Q5K, GgmlDType::Q4_0, GgmlDType::Q8_0],
+            Activation::QuickGelu,
+        )
     }
 
     #[test]
@@ -1472,7 +1627,6 @@ impl FastExpertsWeights {
                 dev,
             )?;
 
-        // Use the pre-quantized Q8_0 grouped kernel path
         let gate_qt = match self.fused_gate_proj.get_qtensor() {
             Some(qt) => qt,
             None => return Ok(None),
@@ -1486,13 +1640,19 @@ impl FastExpertsWeights {
             None => return Ok(None),
         };
 
-        let use_mmq_gate_up =
-            gate_qt.dtype() == up_qt.dtype() && inference_quant::supports_mmq(gate_qt.dtype());
-        if forward.lora.is_some() && !use_mmq_gate_up {
+        // a weight grouped mmq cannot read runs the gather path
+        if ![&gate_qt, &up_qt, &down_qt]
+            .iter()
+            .all(|qt| inference_quant::supports_mmq_weight(qt))
+        {
+            return Ok(None);
+        }
+        let packed = gate_qt.dtype() == up_qt.dtype();
+        if forward.lora.is_some() && !packed {
             return Ok(None);
         }
 
-        let gate_up = if use_mmq_gate_up {
+        let gate_up = if packed {
             GroupedGateUp::Packed(inference_quant::grouped_moe_mmq_pair_packed(
                 &gate_qt,
                 &up_qt,
@@ -1506,45 +1666,23 @@ impl FastExpertsWeights {
                 dev,
             )?)
         } else {
-            // Quantize input to Q8_1 ONCE, shared between gate and up.
-            // quantize_input_q8_1 accepts BF16/F16/F32 directly (no conversion needed).
-            let (input_q8, k, k_padded) =
-                inference_quant::quantize_input_q8_1(forward.xs_flat, dev)?;
-
-            // Gate projection using pre-quantized input
-            let gate = inference_quant::grouped_moe_gemm_prequantized(
-                &gate_qt,
-                &input_q8,
-                k,
-                k_padded,
-                &expert_bounds,
-                &sorted_token_ids,
-                None,
-                total_assignments,
-                topk,
-                num_experts,
-                1,
-                dev,
-            )?;
-
-            // Up projection reusing same pre-quantized input
-            let up = inference_quant::grouped_moe_gemm_prequantized(
-                &up_qt,
-                &input_q8,
-                k,
-                k_padded,
-                &expert_bounds,
-                &sorted_token_ids,
-                None,
-                total_assignments,
-                topk,
-                num_experts,
-                1,
-                dev,
-            )?;
-
-            drop(input_q8);
-            GroupedGateUp::SortedPair { gate, up }
+            let project = |qt: &candle_core::quantized::QTensor| {
+                inference_quant::grouped_moe_mmq(
+                    qt,
+                    forward.xs_flat,
+                    &sorted_source_ids,
+                    &sorted_token_ids,
+                    &expert_bounds,
+                    total_assignments,
+                    forward.shape.num_tokens,
+                    num_experts,
+                    dev,
+                )
+            };
+            GroupedGateUp::Pair {
+                gate: project(&gate_qt)?,
+                up: project(&up_qt)?,
+            }
         };
 
         let lora_activated = if let Some(lora) = forward.lora.as_ref() {
@@ -1566,24 +1704,6 @@ impl FastExpertsWeights {
             None
         };
 
-        // Get topk_weights pointer
-        use candle_core::cuda::cudarc::driver::DevicePtr;
-        let tw_f32 = forward
-            .topk_weights
-            .flatten_all()?
-            .to_dtype(DType::F32)?
-            .contiguous()?;
-        let (tw_storage, tw_layout) = tw_f32.storage_and_layout();
-        let tw_cuda = match &*tw_storage {
-            candle_core::Storage::Cuda(c) => c,
-            _ => return Ok(None),
-        };
-        let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
-        let tw_ptr = tw_slice
-            .slice(tw_layout.start_offset()..)
-            .device_ptr(tw_slice.stream())
-            .0 as *const f32;
-
         let glu_activation = match config.act {
             Activation::Silu | Activation::Swish => Some(inference_quant::GluActivationType::Silu),
             Activation::NewGelu | Activation::GeluPytorchTanh => {
@@ -1594,157 +1714,119 @@ impl FastExpertsWeights {
             _ => None,
         };
 
-        let down = if let (true, Some(glu_activation)) = (
-            inference_quant::supports_mmq(down_qt.dtype()),
-            glu_activation,
-        ) {
-            if let (Some(lora), Some(activated)) = (forward.lora.as_ref(), lora_activated.as_ref())
-            {
-                let intermediate = activated.dim(D::Minus1)?;
-                let activated_flat = activated.reshape((total_assignments, intermediate))?;
-                let down_assignments = inference_quant::grouped_moe_mmq(
+        let down = if let (Some(glu_activation), None) = (glu_activation, &lora_activated) {
+            use candle_core::cuda::cudarc::driver::DevicePtr;
+            let tw_f32 = forward
+                .topk_weights
+                .flatten_all()?
+                .to_dtype(DType::F32)?
+                .contiguous()?;
+            let (tw_storage, tw_layout) = tw_f32.storage_and_layout();
+            let tw_cuda = match &*tw_storage {
+                candle_core::Storage::Cuda(c) => c,
+                _ => return Ok(None),
+            };
+            let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
+            let tw_ptr = tw_slice
+                .slice(tw_layout.start_offset()..)
+                .device_ptr(tw_slice.stream())
+                .0 as *const f32;
+            let down_assignments = match &gate_up {
+                GroupedGateUp::Packed(gate_up) => inference_quant::grouped_moe_mmq_from_glu_packed(
                     &down_qt,
-                    &activated_flat,
+                    gate_up,
                     &sorted_token_ids,
                     &sorted_token_ids,
                     &expert_bounds,
                     total_assignments,
                     forward.shape.num_tokens,
                     num_experts,
+                    glu_activation as i32,
                     dev,
-                )?
-                .to_dtype(activated.dtype())?
-                .reshape((
+                )?,
+                GroupedGateUp::Pair { gate, up } => inference_quant::grouped_moe_mmq_from_glu_pair(
+                    &down_qt,
+                    gate,
+                    up,
+                    &sorted_token_ids,
+                    &sorted_token_ids,
+                    &expert_bounds,
+                    total_assignments,
                     forward.shape.num_tokens,
-                    topk,
-                    forward.shape.hidden_dim,
-                ))?;
-                let down = lora.add_delta_owned(
+                    num_experts,
+                    glu_activation as i32,
+                    dev,
+                )?,
+            };
+            if forward.original_dtype == DType::BF16 {
+                unsafe {
+                    inference_quant::moe_weighted_reduce_flat_bf16(
+                        &down_assignments,
+                        tw_ptr,
+                        forward.shape.num_tokens,
+                        topk,
+                        dev,
+                    )?
+                }
+            } else {
+                unsafe {
+                    inference_quant::moe_weighted_reduce_flat(
+                        &down_assignments,
+                        tw_ptr,
+                        forward.shape.num_tokens,
+                        topk,
+                        dev,
+                    )?
+                }
+            }
+        } else {
+            // LoRA's down delta and activations with no fused GLU kernel take the activated rows explicitly
+            let activated = match lora_activated {
+                Some(activated) => activated,
+                None => match &gate_up {
+                    GroupedGateUp::Packed(gate_up) => crate::ops::split_mul_and_act(
+                        gate_up,
+                        gate_up.dim(D::Minus1)? / 2,
+                        config.act,
+                    )?,
+                    GroupedGateUp::Pair { gate, up } => {
+                        crate::ops::mul_and_act(gate, up, config.act)?
+                    }
+                },
+            };
+            let intermediate = activated.dim(D::Minus1)?;
+            let activated_flat = activated.reshape((total_assignments, intermediate))?;
+            let down_assignments = inference_quant::grouped_moe_mmq(
+                &down_qt,
+                &activated_flat,
+                &sorted_token_ids,
+                &sorted_token_ids,
+                &expert_bounds,
+                total_assignments,
+                forward.shape.num_tokens,
+                num_experts,
+                dev,
+            )?
+            .to_dtype(activated.dtype())?
+            .reshape((forward.shape.num_tokens, topk, forward.shape.hidden_dim))?;
+            let down = match forward.lora.as_ref() {
+                Some(lora) => lora.add_delta_owned(
                     LoraExpertProjection::Down,
-                    activated,
+                    &activated,
                     down_assignments,
                     forward.topk_ids,
                     None,
                     LoraExpertInputMode::RoutedRows,
-                )?;
-                inference_quant::moe_weighted_reduce_flat_same_dtype(
-                    &down.reshape((total_assignments, forward.shape.hidden_dim))?,
-                    forward.topk_weights,
-                    forward.shape.num_tokens,
-                    topk,
-                    dev,
-                )?
-            } else {
-                let down_assignments = match &gate_up {
-                    GroupedGateUp::Packed(gate_up) => {
-                        inference_quant::grouped_moe_mmq_from_glu_packed(
-                            &down_qt,
-                            gate_up,
-                            &sorted_token_ids,
-                            &sorted_token_ids,
-                            &expert_bounds,
-                            total_assignments,
-                            forward.shape.num_tokens,
-                            num_experts,
-                            glu_activation as i32,
-                            dev,
-                        )?
-                    }
-                    GroupedGateUp::SortedPair { gate, up } => {
-                        inference_quant::grouped_moe_mmq_from_glu_sorted_pair(
-                            &down_qt,
-                            gate,
-                            up,
-                            &sorted_token_ids,
-                            &expert_bounds,
-                            total_assignments,
-                            forward.shape.num_tokens,
-                            num_experts,
-                            glu_activation as i32,
-                            dev,
-                        )?
-                    }
-                };
-                if forward.original_dtype == DType::BF16 {
-                    unsafe {
-                        inference_quant::moe_weighted_reduce_flat_bf16(
-                            &down_assignments,
-                            tw_ptr,
-                            forward.shape.num_tokens,
-                            topk,
-                            dev,
-                        )?
-                    }
-                } else {
-                    unsafe {
-                        inference_quant::moe_weighted_reduce_flat(
-                            &down_assignments,
-                            tw_ptr,
-                            forward.shape.num_tokens,
-                            topk,
-                            dev,
-                        )?
-                    }
-                }
-            }
-        } else {
-            let (activated, down_input_dim1) = match &lora_activated {
-                Some(activated) => (
-                    activated.reshape((total_assignments, activated.dim(D::Minus1)?))?,
-                    2,
-                ),
-                None => match &gate_up {
-                    GroupedGateUp::Packed(gate_up) => (
-                        crate::ops::split_mul_and_act(
-                            gate_up,
-                            gate_up.dim(D::Minus1)? / 2,
-                            config.act,
-                        )?,
-                        2,
-                    ),
-                    GroupedGateUp::SortedPair { gate, up } => {
-                        (crate::ops::mul_and_act(gate, up, config.act)?, 0)
-                    }
-                },
+                )?,
+                None => down_assignments,
             };
-
-            let (down_input_q8, down_k, down_k_padded) =
-                inference_quant::quantize_input_q8_1(&activated, dev)?;
-
-            let down = inference_quant::grouped_moe_gemm_prequantized(
-                &down_qt,
-                &down_input_q8,
-                down_k,
-                down_k_padded,
-                &expert_bounds,
-                &sorted_token_ids,
-                Some((tw_ptr, 0)),
-                total_assignments,
+            inference_quant::moe_weighted_reduce_flat_same_dtype(
+                &down.reshape((total_assignments, forward.shape.hidden_dim))?,
+                forward.topk_weights,
+                forward.shape.num_tokens,
                 topk,
-                num_experts,
-                down_input_dim1,
                 dev,
-            )?;
-
-            if let (Some(lora), Some(activated)) = (forward.lora.as_ref(), lora_activated.as_ref())
-            {
-                let delta_base = Tensor::zeros(
-                    (forward.shape.num_tokens, topk, forward.shape.hidden_dim),
-                    activated.dtype(),
-                    activated.device(),
-                )?;
-                let delta = lora.add_delta_owned(
-                    LoraExpertProjection::Down,
-                    activated,
-                    delta_base,
-                    forward.topk_ids,
-                    Some(forward.topk_weights),
-                    LoraExpertInputMode::RoutedRows,
-                )?;
-                (down.to_dtype(DType::F32)? + delta.to_dtype(DType::F32)?.sum(D::Minus2)?)?
-            } else {
-                down
-            }
+            )?
         };
 
         if down.dtype() == forward.original_dtype {
