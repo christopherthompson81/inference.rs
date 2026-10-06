@@ -922,7 +922,7 @@ pub fn moe_weighted_reduce_flat_same_dtype(
 /// Quantize input to Q8_1 format, returning the quantized buffer.
 ///
 /// Supports F32, BF16, and F16 inputs directly without dtype conversion.
-pub fn quantize_input_q8_1(xs: &Tensor, dev: &CudaDevice) -> Result<(CudaSlice<u8>, usize, usize)> {
+fn quantize_input_q8_1(xs: &Tensor, dev: &CudaDevice) -> Result<(CudaSlice<u8>, usize, usize)> {
     let xs_contig = xs.contiguous()?;
     let num_rows = xs_contig.dim(0)?;
     let k = xs_contig.dim(1)?;
@@ -1338,89 +1338,6 @@ impl<'a> IndexedMoeLoraDecode<'a> {
             _ => Ok(None),
         }
     }
-}
-
-/// Run grouped MoE GEMM with pre-quantized Q8_1 input.
-///
-/// Avoids re-quantizing the input when the same input is used for multiple projections.
-#[allow(clippy::too_many_arguments)]
-pub fn grouped_moe_gemm_prequantized(
-    qtensor: &QTensor,
-    input_quant: &CudaSlice<u8>,
-    k: usize,
-    k_padded: usize,
-    expert_bounds: &CudaSlice<u32>,
-    sorted_token_ids: &CudaSlice<u32>,
-    topk_weights: Option<(*const f32, usize)>, // (ptr, guard_token) - raw pointer
-    total_assignments: usize,
-    topk: usize,
-    num_experts: usize,
-    input_dim1: usize,
-    dev: &CudaDevice,
-) -> Result<Tensor> {
-    let dtype = qtensor.dtype();
-    let (_, n, k_w) = qtensor.shape().dims3()?;
-    assert!(k == k_w, "K mismatch");
-
-    let has_topk_weights = topk_weights.is_some();
-    let num_tokens = total_assignments / topk;
-    let out_rows = if has_topk_weights {
-        num_tokens
-    } else {
-        total_assignments
-    };
-    let out = dev.alloc_zeros::<f32>(out_rows * n)?;
-
-    let stream = dev.cuda_stream().cu_stream() as *mut std::ffi::c_void;
-    let weight_ptr = qtensor.device_ptr()? as *const std::ffi::c_void;
-
-    let topk_w_ptr = topk_weights.map(|(p, _)| p).unwrap_or(std::ptr::null());
-
-    {
-        let (inputs_ptr, _ig) = slice_ptr(input_quant, 0);
-        let (bounds_ptr, _bg) = slice_ptr(expert_bounds, 0);
-        let (sorted_ptr, _sg) = slice_ptr(sorted_token_ids, 0);
-        let (out_ptr, _og) = slice_ptr(&out, 0);
-
-        unsafe {
-            let launch_fn = match dtype {
-                GgmlDType::Q8_0 => ffi::launch_moe_grouped_gemm_q8_0,
-                GgmlDType::Q4_0 => ffi::launch_moe_grouped_gemm_q4_0,
-                GgmlDType::Q4_1 => ffi::launch_moe_grouped_gemm_q4_1,
-                GgmlDType::Q5_0 => ffi::launch_moe_grouped_gemm_q5_0,
-                GgmlDType::Q5_1 => ffi::launch_moe_grouped_gemm_q5_1,
-                GgmlDType::Q8_1 => ffi::launch_moe_grouped_gemm_q8_1,
-                GgmlDType::Q2K => ffi::launch_moe_grouped_gemm_q2k,
-                GgmlDType::Q3K => ffi::launch_moe_grouped_gemm_q3k,
-                GgmlDType::Q4K => ffi::launch_moe_grouped_gemm_q4k,
-                GgmlDType::Q5K => ffi::launch_moe_grouped_gemm_q5k,
-                GgmlDType::Q6K => ffi::launch_moe_grouped_gemm_q6k,
-                _ => candle_core::bail!("unsupported dtype: {dtype:?}"),
-            };
-
-            launch_fn(
-                weight_ptr,
-                inputs_ptr as *const std::ffi::c_void,
-                bounds_ptr as *const i32,
-                sorted_ptr as *const i32,
-                topk_w_ptr,
-                out_ptr as *mut f32,
-                n as i32,
-                k as i32,
-                k_padded as i32,
-                num_experts as i32,
-                topk as i32,
-                input_dim1 as i32,
-                stream,
-            );
-        }
-    }
-
-    let out_shape: Shape = vec![out_rows, n].into();
-    Ok(Tensor::from((
-        Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
-        out_shape,
-    )))
 }
 
 /// Activation type IDs matching the CUDA kernel's act_type parameter.

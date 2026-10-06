@@ -182,18 +182,15 @@ pub use gguf::cpu::cpu_indexed_moe_forward;
 #[cfg(feature = "cuda")]
 pub use gguf::cuda::{
     ACT_GELU_PYTORCH_TANH, ACT_SILU, IndexedMoeLoraDecode, IndexedMoeLoraWeights,
-    IndexedMoeRouting, grouped_moe_gemm_prequantized, indexed_moe_fused_decode, moe_dispatch_build,
-    moe_weighted_reduce_flat, moe_weighted_reduce_flat_bf16, moe_weighted_reduce_flat_same_dtype,
-    quantize_input_q8_1,
+    IndexedMoeRouting, indexed_moe_fused_decode, moe_dispatch_build, moe_weighted_reduce_flat,
+    moe_weighted_reduce_flat_bf16, moe_weighted_reduce_flat_same_dtype,
 };
-#[cfg(feature = "cuda")]
-#[doc(hidden)]
-pub use gguf::fast_mmq::grouped_from_glu_sorted_pair as grouped_moe_mmq_from_glu_sorted_pair;
 #[cfg(feature = "cuda")]
 pub use gguf::fast_mmq::{
     grouped as grouped_moe_mmq, grouped_from_glu_packed as grouped_moe_mmq_from_glu_packed,
     grouped_from_glu_pair as grouped_moe_mmq_from_glu_pair, grouped_pair as grouped_moe_mmq_pair,
     grouped_pair_packed as grouped_moe_mmq_pair_packed, supports as supports_mmq,
+    supports_weight as supports_mmq_weight,
 };
 pub use gguf::{
     GgufBindingMap, GgufBindingResolver, GgufTensorBackend, GgufTensorBinding, GgufWeightSource,

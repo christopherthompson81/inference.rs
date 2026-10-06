@@ -96,6 +96,15 @@ pub fn supports_shape(dtype: GgufType, cols: usize) -> bool {
     supports(dtype) && (!dtype.is_trellis() || cols.is_multiple_of(256))
 }
 
+/// Whether mmq reads this weight, by its type and its column count.
+pub fn supports_weight(weight: &QTensor) -> bool {
+    weight
+        .shape()
+        .dims()
+        .last()
+        .is_some_and(|&cols| supports_shape(weight.gguf_type(), cols))
+}
+
 // The row stride mmq takes: blocks for ggml's types, bytes for ik's (some of whose rows start with a scale)
 fn mmq_row_stride(dtype: GgufType, k: usize) -> i64 {
     if dtype.is_trellis() || dtype.is_iqk() {
@@ -1106,7 +1115,7 @@ struct GroupedGluRun<'a> {
     gate: &'a Tensor,
     up: &'a Tensor,
     row_stride: usize,
-    ids_src: Option<&'a CudaSlice<u32>>,
+    ids_src: &'a CudaSlice<u32>,
     ids_dst: &'a CudaSlice<u32>,
     expert_bounds: &'a CudaSlice<u32>,
     total_assignments: usize,
@@ -1212,13 +1221,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
     let up_slice = up_cuda.as_cuda_slice::<f32>()?;
     let (gate_ptr, _gate_guard) = slice_ptr(gate_slice, gate_layout.start_offset());
     let (up_ptr, _up_guard) = slice_ptr(up_slice, up_layout.start_offset());
-    let (ids_src_ptr, _ids_src_guard) = match ids_src {
-        Some(ids_src) => {
-            let (ptr, guard) = slice_ptr(ids_src, 0);
-            (ptr, Some(guard))
-        }
-        None => (0, None),
-    };
+    let (ids_src_ptr, _ids_src_guard) = slice_ptr(ids_src, 0);
     let (ids_dst_ptr, _ids_dst_guard) = slice_ptr(ids_dst, 0);
     let (bounds_ptr, _bounds_guard) = slice_ptr(expert_bounds, 0);
     let (out_ptr, _out_guard) = slice_ptr(&out, 0);
@@ -1297,40 +1300,7 @@ pub fn grouped_from_glu_pair(
         gate: &gate,
         up: &up,
         row_stride,
-        ids_src: Some(ids_src),
-        ids_dst,
-        expert_bounds,
-        total_assignments,
-        ncols_max,
-        num_experts,
-        activation,
-        dev,
-    })
-}
-
-#[doc(hidden)]
-#[allow(clippy::too_many_arguments)]
-pub fn grouped_from_glu_sorted_pair(
-    weight: &QTensor,
-    gate: &Tensor,
-    up: &Tensor,
-    ids_dst: &CudaSlice<u32>,
-    expert_bounds: &CudaSlice<u32>,
-    total_assignments: usize,
-    ncols_max: usize,
-    num_experts: usize,
-    activation: i32,
-    dev: &CudaDevice,
-) -> Result<Tensor> {
-    let gate = gate.contiguous()?;
-    let up = up.contiguous()?;
-    let row_stride = gate.dim(1)?;
-    grouped_from_glu(GroupedGluRun {
-        weight,
-        gate: &gate,
-        up: &up,
-        row_stride,
-        ids_src: None,
+        ids_src,
         ids_dst,
         expert_bounds,
         total_assignments,
@@ -1366,7 +1336,7 @@ pub fn grouped_from_glu_packed(
         gate: &gate,
         up: &up,
         row_stride: 2 * k,
-        ids_src: Some(ids_src),
+        ids_src,
         ids_dst,
         expert_bounds,
         total_assignments,

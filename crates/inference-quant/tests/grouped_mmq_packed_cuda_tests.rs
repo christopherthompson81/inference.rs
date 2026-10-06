@@ -6,7 +6,7 @@ use candle_core::{
 };
 use inference_quant::{
     GluActivationType, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
-    grouped_moe_mmq_from_glu_sorted_pair, grouped_moe_mmq_pair_packed, moe_dispatch_build,
+    grouped_moe_mmq_from_glu_pair, grouped_moe_mmq_pair_packed, moe_dispatch_build,
 };
 
 const NUM_EXPERTS: usize = 3;
@@ -59,7 +59,7 @@ fn assert_close(actual: &Tensor, expected: &Tensor) -> Result<()> {
 }
 
 #[test]
-fn packed_gate_up_and_sorted_pair_glu_preserve_route_order() -> Result<()> {
+fn packed_and_split_gate_up_glu_preserve_route_order() -> Result<()> {
     let cuda = Device::new_cuda(0)?;
     let dev = cuda.as_cuda_device()?;
     let xs = patterned((NUM_TOKENS, HIDDEN), 3, 0.7)?.to_device(&cuda)?;
@@ -151,40 +151,6 @@ fn packed_gate_up_and_sorted_pair_glu_preserve_route_order() -> Result<()> {
         .to_scalar::<f32>()?;
     assert!(gate_up_difference > 1e-3);
 
-    let identity = Tensor::from_vec(
-        (0..TOTAL_ASSIGNMENTS as u32).collect::<Vec<_>>(),
-        (TOTAL_ASSIGNMENTS,),
-        &cuda,
-    )?;
-    let (identity_storage, identity_layout) = identity.storage_and_layout();
-    assert_eq!(identity_layout.start_offset(), 0);
-    let Storage::Cuda(identity_cuda) = &*identity_storage else {
-        unreachable!()
-    };
-    let identity_slice = identity_cuda.as_cuda_slice::<u32>()?;
-    let gate_sorted = grouped_moe_mmq(
-        &gate,
-        &xs,
-        &sorted_source_ids,
-        identity_slice,
-        &expert_bounds,
-        TOTAL_ASSIGNMENTS,
-        NUM_TOKENS,
-        NUM_EXPERTS,
-        dev,
-    )?;
-    let up_sorted = grouped_moe_mmq(
-        &up,
-        &xs,
-        &sorted_source_ids,
-        identity_slice,
-        &expert_bounds,
-        TOTAL_ASSIGNMENTS,
-        NUM_TOKENS,
-        NUM_EXPERTS,
-        dev,
-    )?;
-
     let down_from_packed = grouped_moe_mmq_from_glu_packed(
         &down,
         &packed,
@@ -197,10 +163,11 @@ fn packed_gate_up_and_sorted_pair_glu_preserve_route_order() -> Result<()> {
         GluActivationType::Silu as i32,
         dev,
     )?;
-    let down_from_sorted_pair = grouped_moe_mmq_from_glu_sorted_pair(
+    let down_from_pair = grouped_moe_mmq_from_glu_pair(
         &down,
-        &gate_sorted,
-        &up_sorted,
+        &gate_flat,
+        &up_flat,
+        &sorted_token_ids,
         &sorted_token_ids,
         &expert_bounds,
         TOTAL_ASSIGNMENTS,
@@ -209,5 +176,5 @@ fn packed_gate_up_and_sorted_pair_glu_preserve_route_order() -> Result<()> {
         GluActivationType::Silu as i32,
         dev,
     )?;
-    assert_close(&down_from_sorted_pair, &down_from_packed)
+    assert_close(&down_from_pair, &down_from_packed)
 }
