@@ -105,7 +105,7 @@ fn run_cutile_case(
     let ic1 = inference_quant::cutile::cutile_grouped_gemm(
         &xs, &gu, &sids, &eids, &ntpp, None, em, num_valid, topk, false, cfg, dev,
     )?;
-    let ic2 = inference_quant::moe::cuda::act_and_mul(&ic1, inter, act, dev)?;
+    let ic2 = inference_quant::moe::cuda::act_and_mul(&ic1, inter, act)?;
 
     let tw_flat = w_t.flatten_all()?.to_dtype(DType::F32)?.contiguous()?;
     let (tw_storage, _l) = tw_flat.storage_and_layout();

@@ -324,20 +324,15 @@ fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> candle_core:
     let cos = angles.cos()?.to_dtype(DType::BF16)?;
     let sin = angles.sin()?.to_dtype(DType::BF16)?;
 
-    let expected_q = candle_nn::rotary_emb::rope(
+    let (expected_q, expected_k) = inference_quant::rotary::apply_rotary_qk_preselected(
         &candle_nn::ops::rms_norm(&q.contiguous()?, &q_weight, EPS)?,
-        &cos,
-        &sin,
-    )?
-    .transpose(1, 2)?
-    .contiguous()?;
-    let expected_k = candle_nn::rotary_emb::rope(
         &candle_nn::ops::rms_norm(&k.contiguous()?, &k_weight, EPS)?,
         &cos,
         &sin,
-    )?
-    .transpose(1, 2)?
-    .contiguous()?;
+        true,
+    )?;
+    let expected_q = expected_q.transpose(1, 2)?.contiguous()?;
+    let expected_k = expected_k.transpose(1, 2)?.contiguous()?;
     let (actual_q, actual_k) = super::try_cuda_qk_rms_norm_rope(
         &q,
         Some(&k),

@@ -137,6 +137,11 @@ fn bf16_q4k_route_outputs() -> Result<()> {
 }
 
 #[test]
+fn f32_q8_0_route_outputs() -> Result<()> {
+    check_route_outputs(DType::F32, GgmlDType::Q8_0, 256, 512, 0.05)
+}
+
+#[test]
 fn invalid_expert_routes_are_zeroed() -> Result<()> {
     const NUM_EXPERTS: usize = 2;
     const HIDDEN: usize = 64;

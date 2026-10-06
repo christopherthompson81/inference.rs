@@ -1186,3 +1186,36 @@ local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (278
 Left for the Mac: the now-unused public Metal launchers (`call_rotary`, `call_argsort`, `call_sort`,
 `SortScratchCache`, `call_scan`, `call_bitwise_not`, `call_bitwise_xor`) and their shaders, and the Metal bitwise
 test, which lost its xor/not checks without being compiled here.
+
+## Run 32 - 2026-10-06 16:25
+
+#270 step 1, item 4 (second half): the three low-risk duplicates from Run 27, each folded into the copy that stays.
+
+- Q8_1 quantize: indexed_moe.cu carried f32/bf16/f16 quantizers identical to mmvq_gguf.cu's (same 256-thread
+  blocks, padding, warp reductions and half `ds`); the GGUF MoE callers now launch mmvq_gguf's and the copies go.
+- MoE `act_and_mul`: its bf16 gelu-tanh/silu kernels did what `fused_split_glu` does (gate then up per row, same
+  activations); it now calls `fused_split_glu`, which also lifts the bf16-only limit. One numeric change: the
+  activation is rounded to the tensor dtype before the multiply, as the dense GLU path and candle's unfused ops do.
+- DFlash RoPE: the last production users of candle-nn's `rope` (DFlash's fallbacks behind the fused CUDA Q/K
+  norm+rope kernel) move to inference-quant's rotary, so candle-nn's `rotary_emb` and candle-kernels' `rope` kernels
+  are deleted, and the two CUDA tests that used candle's `rope` as their reference use ours.
+
+Found on the way: our CUDA rotary rejected the cache shapes its CPU and Metal paths accept (`[b, s, d/2]` per-batch
+tables, `[s, d/2]` shared over a batch > 1) with "apply-rotary expects rank 2 caches", which the first CI run hit
+through DFlash's per-batch draft tables. The CUDA path now flattens or broadcasts them to one row per token, pinned
+by `preselected_rope_on_cuda_matches_the_cpu_for_every_cache_shape`. Also new:
+`act_and_mul_matches_the_cpu_for_both_activations` (d = 42 for the scalar kernel, 64 for vec4; a first draft used 40,
+which is a multiple of 4 and so never left vec4) and `f32_q8_0_route_outputs` (the f32 quantize path, untested so far).
+
+```
+21 files including this doc, -435 / +186 lines in code
+local_ci.sh --size  -> file 102.51 MiB (-0.07), .text -0.05, .nv_fatbin -0.00
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> fail (rank-3 cache), then pass (2788 + 2406)
+```
+
+Review notes kept: the CUDA rotary rotates in place when the transposed view is already contiguous (one head or
+one token), as `apply_rotary_q`/`apply_rotary_qk` already did, so the new entry point says so. DFlash's non-fused
+fallback now copies twice where candle's `rope` launched once; it only runs when the fused kernels decline. DFlash on
+Metal now runs our Metal rotary with per-batch caches, which goes on the Mac list (#269).
+
+Left: RMSNorm, argsort and FP8-cast consolidation (Run 27's medium-risk rows), each needing parity tests first.

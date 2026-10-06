@@ -2975,7 +2975,7 @@ impl DFlashDraftModel {
     }
 
     fn rope(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-        candle_nn::rotary_emb::rope(&x.contiguous()?, cos, sin)
+        inference_quant::rotary::apply_rotary_q_preselected(x, cos, sin, true)?.contiguous()
     }
 
     /// Projects tap features and appends context keys/values for every entry at once: the fc and
@@ -3442,18 +3442,15 @@ impl DFlashDraftModel {
                 Some((q, Some(k))) => (q, k),
                 Some((_, None)) => unreachable!("DFlash fused Q/K omitted K output"),
                 None => {
-                    let q = candle_nn::rotary_emb::rope(
+                    let (q, k) = inference_quant::rotary::apply_rotary_qk_preselected(
                         &layer.q_norm.forward(&q_input)?,
-                        q_cos,
-                        q_sin,
-                    )?;
-                    let k = candle_nn::rotary_emb::rope(
                         &layer.k_norm.forward(&k_input)?,
                         q_cos,
                         q_sin,
+                        true,
                     )?;
                     match attention_layout {
-                        DraftAttentionLayout::HeadsFirst => (q, k),
+                        DraftAttentionLayout::HeadsFirst => (q.contiguous()?, k.contiguous()?),
                         #[cfg(all(feature = "cuda", target_family = "unix"))]
                         DraftAttentionLayout::TokensFirst => (
                             q.transpose(1, 2)?.contiguous()?,

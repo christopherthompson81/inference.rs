@@ -9,7 +9,7 @@
 >   inference-nn and inference-quant.
 > - Removed as unused by inference.rs: the `attention` and `cpu_flash_attention` modules (inference-nn has its own CPU
 >   flash attention), `kv_cache`, `rnn`, `encoding`, `sequential`, `func` and `sampling` with their re-exports;
->   `rope_i`, `rope_i_slow`, `rope_thd` and `rope_slow` in `src/rotary_emb.rs` (`rope` stays); and the npz, pth, routing, sharded and
+>   `src/rotary_emb.rs` (inference-quant's `rotary` is the one RoPE); and the npz, pth, routing, sharded and
 >   renaming backends in `src/var_builder.rs` (inference-quant has its own sharded loader); `rms_norm_slow` and
 >   `layer_norm_slow` in `src/ops.rs`.
 >

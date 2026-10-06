@@ -126,38 +126,6 @@ macro_rules! declare_mmvq_fused_glu {
 }
 
 unsafe extern "C" {
-    /// Launch Q8_1 quantization kernel
-    /// Quantizes f32 input to Q8_1 format for use with quantized matmul kernels.
-    pub fn launch_quantize_q8_1(
-        x: *const f32,
-        vy: *mut c_void,
-        kx: i32,
-        kx_padded: i32,
-        num_blocks_x: i32,
-        num_rows: i32,
-        stream: *mut c_void,
-    );
-
-    /// Launch Q8_1 quantization kernel with BF16 input (fuses bf16→f32 + quantize)
-    pub fn launch_quantize_q8_1_bf16(
-        x: *const c_void,
-        vy: *mut c_void,
-        kx: i32,
-        kx_padded: i32,
-        num_rows: i32,
-        stream: *mut c_void,
-    );
-
-    /// Launch Q8_1 quantization kernel with F16 input (fuses f16→f32 + quantize)
-    pub fn launch_quantize_q8_1_f16(
-        x: *const c_void,
-        vy: *mut c_void,
-        kx: i32,
-        kx_padded: i32,
-        num_rows: i32,
-        stream: *mut c_void,
-    );
-
     /// Launch indexed MoE forward kernel for Q2_K weights with Q8_1 input
     pub fn launch_indexed_moe_forward_q2k_q8_1(
         all_weights: *const c_void,

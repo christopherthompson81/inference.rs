@@ -291,7 +291,7 @@ pub fn cutlass_fused_moe(
     drop(c1_g);
     let c1_storage = candle_core::CudaStorage::wrap_cuda_slice(c1, dev.clone());
     let c1_tensor = Tensor::from((Storage::Cuda(c1_storage), (num_valid, two_inter)));
-    let act = super::cuda::act_and_mul(&c1_tensor, inter, act, dev)?;
+    let act = super::cuda::act_and_mul(&c1_tensor, inter, act)?;
     let (act_slice, act_off) = bf16_cuda_slice(&act, "act")?;
     let (act_ptr, _act_g) = slice_ptr_on_stream(&act_slice, act_off, &stream);
 

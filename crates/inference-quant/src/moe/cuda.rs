@@ -1,10 +1,11 @@
-//! Plain-CUDA MoE ops (kernels in `kernels/cuda/moe/*.cu`): token alignment, fused GeLU-tanh + multiply, and cross-expert sum.
+//! Plain-CUDA MoE ops (kernels in `kernels/cuda/moe/*.cu`): token alignment and cross-expert sum.
 
 use candle_core::cuda::cudarc::driver::CudaSlice;
 use candle_core::{CudaDevice, DType, Result, Storage, Tensor};
 use half::bf16;
 
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
+use crate::{GluActivationType, fused_split_glu};
 
 mod ffi {
     use candle_core::cuda::cudarc::driver::sys::CUstream;
@@ -21,22 +22,6 @@ mod ffi {
             block_size: i32,
             numel: i32,
             max_num_tokens_padded: i32,
-            stream: CUstream,
-        );
-
-        pub fn launch_gelu_tanh_and_mul_bf16(
-            out: *mut c_void,
-            input: *const c_void,
-            num_tokens: i32,
-            d: i32,
-            stream: CUstream,
-        );
-
-        pub fn launch_silu_and_mul_bf16(
-            out: *mut c_void,
-            input: *const c_void,
-            num_tokens: i32,
-            d: i32,
             stream: CUstream,
         );
 
@@ -203,91 +188,20 @@ pub fn moe_align(
     Ok((sids, eids, ntpp, em))
 }
 
-/// Gated activation kind for the fused act-and-mul kernels.
+/// Gated activation kind for `act_and_mul`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GatedAct {
     GeluTanh,
     Silu,
 }
 
-/// Fused act(gate) * up: input [num_tokens, 2*d] -> [num_tokens, d] bf16.
-pub fn act_and_mul(input: &Tensor, d: usize, act: GatedAct, dev: &CudaDevice) -> Result<Tensor> {
-    match act {
-        GatedAct::GeluTanh => gelu_tanh_and_mul(input, d, dev),
-        GatedAct::Silu => silu_and_mul(input, d, dev),
-    }
-}
-
-/// Fused SiLU(gate) * up: input [num_tokens, 2*d] -> [num_tokens, d] bf16.
-pub fn silu_and_mul(input: &Tensor, d: usize, dev: &CudaDevice) -> Result<Tensor> {
-    let (num_tokens, two_d) = input.dims2()?;
-    if two_d != 2 * d {
-        candle_core::bail!("silu_and_mul expects last dim == 2*d");
-    }
-    if input.dtype() != DType::BF16 {
-        candle_core::bail!("silu_and_mul is bf16-only");
-    }
-
-    let mut out = unsafe { dev.alloc::<bf16>(num_tokens * d)? };
-    let stream = dev.cuda_stream();
-    let cu_stream = stream.cu_stream();
-
-    let (in_storage, in_layout) = input.storage_and_layout();
-    let in_slice = match &*in_storage {
-        Storage::Cuda(c) => c.as_cuda_slice::<bf16>()?,
-        _ => candle_core::bail!("input must be cuda"),
+/// act(gate) * up: input [num_tokens, 2*d] -> [num_tokens, d].
+pub fn act_and_mul(input: &Tensor, d: usize, act: GatedAct) -> Result<Tensor> {
+    let act = match act {
+        GatedAct::GeluTanh => GluActivationType::Gelu,
+        GatedAct::Silu => GluActivationType::Silu,
     };
-    let (in_ptr, _in_guard) = slice_ptr_on_stream(in_slice, in_layout.start_offset(), &stream);
-    let (out_ptr, out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
-    unsafe {
-        ffi::launch_silu_and_mul_bf16(
-            out_ptr as *mut core::ffi::c_void,
-            in_ptr as *const core::ffi::c_void,
-            num_tokens as i32,
-            d as i32,
-            cu_stream,
-        );
-    }
-    drop(out_guard);
-
-    let storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
-    Ok(Tensor::from((Storage::Cuda(storage), (num_tokens, d))))
-}
-
-/// Fused GeLU-tanh(gate) * up: input [num_tokens, 2*d] -> [num_tokens, d] bf16.
-pub fn gelu_tanh_and_mul(input: &Tensor, d: usize, dev: &CudaDevice) -> Result<Tensor> {
-    let (num_tokens, two_d) = input.dims2()?;
-    if two_d != 2 * d {
-        candle_core::bail!("gelu_tanh_and_mul expects last dim == 2*d");
-    }
-    if input.dtype() != DType::BF16 {
-        candle_core::bail!("cutile gelu path is bf16-only");
-    }
-
-    let mut out = unsafe { dev.alloc::<bf16>(num_tokens * d)? };
-    let stream = dev.cuda_stream();
-    let cu_stream = stream.cu_stream();
-
-    let (in_storage, in_layout) = input.storage_and_layout();
-    let in_slice = match &*in_storage {
-        Storage::Cuda(c) => c.as_cuda_slice::<bf16>()?,
-        _ => candle_core::bail!("input must be cuda"),
-    };
-    let (in_ptr, _in_guard) = slice_ptr_on_stream(in_slice, in_layout.start_offset(), &stream);
-    let (out_ptr, out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
-    unsafe {
-        ffi::launch_gelu_tanh_and_mul_bf16(
-            out_ptr as *mut core::ffi::c_void,
-            in_ptr as *const core::ffi::c_void,
-            num_tokens as i32,
-            d as i32,
-            cu_stream,
-        );
-    }
-    drop(out_guard);
-
-    let storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
-    Ok(Tensor::from((Storage::Cuda(storage), (num_tokens, d))))
+    fused_split_glu(input, d, act)
 }
 
 pub fn moe_sum_bf16(
@@ -333,6 +247,50 @@ pub fn moe_sum_bf16(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn act_and_mul_matches_the_cpu_for_both_activations() -> candle_core::Result<()> {
+        use super::{GatedAct, act_and_mul};
+        use candle_core::{DType, Device, Tensor};
+
+        const TOKENS: usize = 3;
+        const GELU_TANH_COEFF: f32 = 0.044_715;
+        let device = Device::new_cuda(0)?;
+        let silu = |x: f32| x / (1.0 + (-x).exp());
+        let gelu_tanh = |x: f32| {
+            let inner = (2.0 / std::f32::consts::PI).sqrt() * (x + GELU_TANH_COEFF * x * x * x);
+            0.5 * x * (1.0 + inner.tanh())
+        };
+        // 42 is not a multiple of 4, so it takes the scalar kernel; 64 the vec4 one
+        for d in [42usize, 64] {
+            let input = Tensor::arange(0f32, (TOKENS * 2 * d) as f32, &Device::Cpu)?
+                .affine(0.011, -1.3)?
+                .sin()?
+                .affine(3.0, 0.0)?
+                .reshape((TOKENS, 2 * d))?
+                .to_dtype(DType::BF16)?;
+            let host = input.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+            for (act, f) in [
+                (GatedAct::Silu, &silu as &dyn Fn(f32) -> f32),
+                (GatedAct::GeluTanh, &gelu_tanh),
+            ] {
+                let got = act_and_mul(&input.to_device(&device)?, d, act)?;
+                assert_eq!(got.dims2()?, (TOKENS, d));
+                let got = got.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+                for (row, out) in host.iter().zip(&got) {
+                    for (i, value) in out.iter().enumerate() {
+                        let expected = f(row[i]) * row[d + i];
+                        assert!(
+                            (value - expected).abs() <= 0.02 * (1.0 + expected.abs()),
+                            "{act:?} d={d} {value} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn test_hunyuan_moe_capacity_mask_cuda() -> candle_core::Result<()> {

@@ -448,10 +448,11 @@ mod tests {
             let normalized =
                 candle_nn::ops::rms_norm(&input.i(layer)?.contiguous()?, &weights.i(layer)?, eps)?;
             expected.push(
-                candle_nn::rotary_emb::rope(
+                inference_quant::rotary::apply_rotary_q_preselected(
                     &normalized.unsqueeze(0)?,
                     &position_cos,
                     &position_sin,
+                    true,
                 )?
                 .squeeze(0)?,
             );

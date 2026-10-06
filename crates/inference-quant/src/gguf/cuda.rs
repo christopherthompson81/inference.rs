@@ -18,7 +18,6 @@ use candle_core::{
 use half::{bf16, f16};
 
 // Constants matching candle's quantized CUDA implementation
-pub const CUDA_QUANTIZE_BLOCK_SIZE: usize = 256;
 pub const MATRIX_ROW_PADDING: usize = 512;
 const CUDA_GRID_YZ_LIMIT: usize = 65_535;
 const MOE_REDUCE_THREADS: usize = 256;
@@ -202,19 +201,16 @@ fn quantize_q8_1(
     dev: &CudaDevice,
 ) -> Result<()> {
     let kx_padded = pad(k, MATRIX_ROW_PADDING);
-    let num_blocks = ceil_div(kx_padded, CUDA_QUANTIZE_BLOCK_SIZE);
-
     let total_rows = ky;
 
     // Get stream pointer
     let cuda_stream = dev.cuda_stream();
     let stream = cuda_stream.cu_stream() as *mut std::ffi::c_void;
 
-    const CHUNK_SIZE: usize = 65535;
     let mut rows_processed = 0;
     while rows_processed < total_rows {
         let remaining_rows = total_rows - rows_processed;
-        let rows_in_chunk = std::cmp::min(CHUNK_SIZE, remaining_rows);
+        let rows_in_chunk = std::cmp::min(CUDA_GRID_YZ_LIMIT, remaining_rows);
 
         let src_start_elem = rows_processed * k;
 
@@ -229,12 +225,11 @@ fn quantize_q8_1(
         let (dst_ptr, _dst_guard) = slice_ptr_mut_on_stream(dst, dst_start_byte, &cuda_stream);
 
         unsafe {
-            ffi::launch_quantize_q8_1(
-                src_ptr as *const f32,
+            ffi::launch_mmvq_gguf_quantize_q8_1_f32(
+                src_ptr as *const std::ffi::c_void,
                 dst_ptr as *mut std::ffi::c_void,
                 k as i32,
                 kx_padded as i32,
-                num_blocks as i32,
                 rows_in_chunk as i32,
                 stream,
             );
@@ -968,7 +963,7 @@ fn quantize_input_q8_1_into(
             let (xs_ptr, _xg) =
                 slice_ptr_on_stream(xs_slice, xs_layout.start_offset(), &cuda_stream);
             unsafe {
-                ffi::launch_quantize_q8_1_bf16(
+                ffi::launch_mmvq_gguf_quantize_q8_1_bf16(
                     xs_ptr as *const std::ffi::c_void,
                     out_ptr as *mut std::ffi::c_void,
                     k as i32,
@@ -982,7 +977,7 @@ fn quantize_input_q8_1_into(
             let (xs_ptr, _xg) =
                 slice_ptr_on_stream(xs_slice, xs_layout.start_offset(), &cuda_stream);
             unsafe {
-                ffi::launch_quantize_q8_1_f16(
+                ffi::launch_mmvq_gguf_quantize_q8_1_f16(
                     xs_ptr as *const std::ffi::c_void,
                     out_ptr as *mut std::ffi::c_void,
                     k as i32,

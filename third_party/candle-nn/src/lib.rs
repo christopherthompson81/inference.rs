@@ -26,7 +26,6 @@ pub mod linear;
 pub mod loss;
 pub mod ops;
 pub mod optim;
-pub mod rotary_emb;
 pub mod var_builder;
 pub mod var_map;
 

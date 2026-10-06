@@ -1081,8 +1081,7 @@ impl CutileExpertsWeights {
             dev,
         )?;
 
-        let ic2 =
-            inference_quant::moe::cuda::act_and_mul(&ic1, inter, gated_act(config.act)?, dev)?;
+        let ic2 = inference_quant::moe::cuda::act_and_mul(&ic1, inter, gated_act(config.act)?)?;
 
         let tw_flat = forward
             .topk_weights
