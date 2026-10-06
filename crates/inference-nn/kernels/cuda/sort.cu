@@ -984,6 +984,95 @@ ASORT_OP(uint8_t, asort_desc_u8, false)
 ASORT_OP(uint32_t, asort_desc_u32, false)
 ASORT_OP(int64_t, asort_desc_i64, false)
 
+// One block per row, indices bitonic-sorted in shared memory; padding slots compare past every real index, so nothing
+// is copied or allocated. Adapted from llama.cpp's ggml-cuda/argsort.cu (MIT) by way of candle-kernels.
+template <typename T, bool ASC>
+__global__ void argsort_rows_kernel(const T *__restrict__ x,
+                                    uint32_t *__restrict__ dst, const int ncols,
+                                    const int ncols_pad) {
+  extern __shared__ int argsort_idx[];
+  const T *x_row = x + static_cast<int64_t>(blockIdx.x) * ncols;
+  for (int col = threadIdx.x; col < ncols_pad; col += blockDim.x) {
+    argsort_idx[col] = col;
+  }
+  __syncthreads();
+  for (int k = 2; k <= ncols_pad; k *= 2) {
+    for (int j = k / 2; j > 0; j /= 2) {
+      for (int col = threadIdx.x; col < ncols_pad; col += blockDim.x) {
+        const int ixj = col ^ j;
+        if (ixj > col) {
+          const int a = argsort_idx[col];
+          const int b = argsort_idx[ixj];
+          const bool swap_pair =
+              (col & k) == 0
+                  ? a >= ncols || (b < ncols && (ASC ? x_row[a] > x_row[b]
+                                                     : x_row[a] < x_row[b]))
+                  : b >= ncols || (a < ncols && (ASC ? x_row[a] < x_row[b]
+                                                     : x_row[a] > x_row[b]));
+          if (swap_pair) {
+            argsort_idx[col] = b;
+            argsort_idx[ixj] = a;
+          }
+        }
+      }
+      __syncthreads();
+    }
+  }
+  uint32_t *dst_row = dst + static_cast<int64_t>(blockIdx.x) * ncols;
+  for (int col = threadIdx.x; col < ncols; col += blockDim.x) {
+    dst_row[col] = argsort_idx[col];
+  }
+}
+
+template <typename T>
+void launch_argsort_rows(const void *x, uint32_t *dst, int nrows, int ncols,
+                         bool asc, cudaStream_t stream) {
+  const int ncols_pad = next_power_of_2(ncols);
+  const int block = std::min(ncols_pad, 1024);
+  const size_t smem = static_cast<size_t>(ncols_pad) * sizeof(int);
+  if (asc) {
+    argsort_rows_kernel<T, true><<<nrows, block, smem, stream>>>(
+        reinterpret_cast<const T *>(x), dst, ncols, ncols_pad);
+  } else {
+    argsort_rows_kernel<T, false><<<nrows, block, smem, stream>>>(
+        reinterpret_cast<const T *>(x), dst, ncols, ncols_pad);
+  }
+}
+
+// dtype: 0 u8, 1 u32, 2 i64, 3 bf16, 4 f16, 5 f32, 6 f64 (ARGSORT_DTYPE_* in topk.rs); nonzero return on a bad code
+extern "C" int argsort_rows(const void *x, void *dst, const int nrows,
+                             const int ncols, const int dtype, const bool asc,
+                             int64_t stream) {
+  uint32_t *out = reinterpret_cast<uint32_t *>(dst);
+  const cudaStream_t custream = (cudaStream_t)stream;
+  switch (dtype) {
+  case 0:
+    launch_argsort_rows<uint8_t>(x, out, nrows, ncols, asc, custream);
+    break;
+  case 1:
+    launch_argsort_rows<uint32_t>(x, out, nrows, ncols, asc, custream);
+    break;
+  case 2:
+    launch_argsort_rows<int64_t>(x, out, nrows, ncols, asc, custream);
+    break;
+  case 3:
+    launch_argsort_rows<__nv_bfloat16>(x, out, nrows, ncols, asc, custream);
+    break;
+  case 4:
+    launch_argsort_rows<__half>(x, out, nrows, ncols, asc, custream);
+    break;
+  case 5:
+    launch_argsort_rows<float>(x, out, nrows, ncols, asc, custream);
+    break;
+  case 6:
+    launch_argsort_rows<double>(x, out, nrows, ncols, asc, custream);
+    break;
+  default:
+    return 1;
+  }
+  return 0;
+}
+
 // ============================================================================
 // Optimized parallel topk kernel for small k (MoE routing)
 //

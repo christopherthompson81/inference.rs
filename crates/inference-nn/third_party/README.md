@@ -12,7 +12,7 @@ maintained in-tree lives in `kernels/`; this table records where it came from.
 | `kernels/cuda/moe_gemm.cu`, `moe_gemm_wmma.cu` | [guoqingbao/attention.rs](https://github.com/guoqingbao/attention.rs) (license unconfirmed) | not recorded | unconfirmed | adapted |
 | `kernels/cuda/moe_utils.h` | vLLM | not recorded | Apache-2.0 | adapted |
 | `kernels/cuda/moe_gemv.cu`, `ssm.cu` | [ggml-org/llama.cpp](https://github.com/ggml-org/llama.cpp) (ssm-scan, mmv approach) | not recorded | MIT | adapted |
-| `kernels/cuda/sort.cu` (bitonic `asort`) | [huggingface/candle](https://github.com/huggingface/candle) `candle-kernels/sort.cu` (llama.cpp argsort lineage) | not recorded | MIT OR Apache-2.0 | adapted; the rmsnorm and top-k parts are original |
+| `kernels/cuda/sort.cu` (bitonic `asort`, `argsort_rows`) | [huggingface/candle](https://github.com/huggingface/candle) `candle-kernels/sort.cu` (llama.cpp argsort lineage) | not recorded | MIT OR Apache-2.0 | adapted; the rmsnorm and top-k parts are original |
 | `kernels/metal/` | ports of this crate's `gdn_*.cu` and `ssm.cu` | n/a | as above | adapted |
 
 Everything else in `kernels/cuda/` (other `gdn_*`, `dflash_*`, `dynamic_conv`, `graph`,

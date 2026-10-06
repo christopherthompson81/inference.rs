@@ -413,6 +413,15 @@ unsafe extern "C" {
         stream: i64,
     );
 
+    pub fn argsort_rows(
+        x: *const c_void,
+        dst: *mut c_void,
+        nrows: i32,
+        ncols: i32,
+        dtype: i32,
+        asc: bool,
+        stream: i64,
+    ) -> i32;
     pub fn asort_asc_f32(
         x: *const c_void,
         dst: *mut c_void,
