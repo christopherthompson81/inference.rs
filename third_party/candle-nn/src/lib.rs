@@ -16,31 +16,19 @@
 //!
 
 pub mod activation;
-pub mod attention;
 pub mod batch_norm;
 pub mod conv;
-pub mod cpu_flash_attention;
 pub mod embedding;
-pub mod encoding;
-pub mod func;
 pub mod group_norm;
 pub mod init;
-pub mod kv_cache;
 pub mod layer_norm;
 pub mod linear;
 pub mod loss;
 pub mod ops;
 pub mod optim;
-pub mod rnn;
 pub mod rotary_emb;
-pub mod sampling;
-pub mod sequential;
 pub mod var_builder;
 pub mod var_map;
-/// Re-export of [`attention::varlen`] for backward compatibility.
-pub mod varlen_attention {
-    pub use crate::attention::varlen::*;
-}
 
 pub use activation::{prelu, Activation, PReLU};
 pub use batch_norm::{batch_norm, BatchNorm, BatchNormConfig};
@@ -50,7 +38,6 @@ pub use conv::{
     ConvTranspose1d, ConvTranspose1dConfig, ConvTranspose2d, ConvTranspose2dConfig,
 };
 pub use embedding::{embedding, Embedding};
-pub use func::{func, func_t, Func, FuncT};
 pub use group_norm::{group_norm, GroupNorm};
 pub use init::Init;
 pub use layer_norm::{
@@ -59,8 +46,6 @@ pub use layer_norm::{
 pub use linear::{linear, linear_b, linear_no_bias, Linear};
 pub use ops::Dropout;
 pub use optim::{AdamW, Optimizer, ParamsAdamW, SGD};
-pub use rnn::{gru, lstm, GRUConfig, LSTMConfig, GRU, LSTM, RNN};
-pub use sequential::{seq, Sequential};
 pub use var_builder::VarBuilder;
 pub use var_map::VarMap;
 

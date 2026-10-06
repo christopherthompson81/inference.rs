@@ -1017,3 +1017,33 @@ token now gets its own scale. Checked by hand: feeding the gather reference the 
 all four tests (max error ~7200 at a reference scale of ~8000), the correct ids pass. Also from the review: the up-front
 check uses `supports_mmq_weight` (type and column count), so a trellis weight with a column tail falls back instead
 of failing in `grouped`; `moe_dispatch.cu` lost its banners and the always-allocated `sorted_source_ids` null check.
+
+## Run 26 - 2026-10-06 10:26
+
+#270 step 5: trim what the vendored candle crates carry and nothing uses.
+
+Question: with candle-core, candle-kernels and candle-nn vendored (#298), how much of them does the workspace never
+reach, and what is safe to delete without touching inference code?
+
+Inventory (grep of `crates/` and `examples/` against each module and its re-exports, nothing run): candle-nn's
+`attention` and `cpu_flash_attention` (2,382 lines; inference-nn has its own CPU flash attention), `kv_cache`
+(1,142), `rnn`, `encoding`, `sequential`, `func`, `sampling`, the `rope_i`/`rope_thd` variants (only `rope` is
+called, from dflash (qwen and inference-nn's CUDA context) and a test) and the npz/pth/routing/sharded/renaming VarBuilder backends; candle-core's
+`streaming`, `test_utils`, `quantized/tokenizer.rs` and `cuda_backend/cutile.rs` (its `cutile` feature is never
+enabled). Kept on purpose: `npy` (`write_npy` serves diffusion debug dumps; its reader shares `Tensor::from_reader`),
+`pickle` (`.pth`/`.bin` loading), `sort`, `conv`, `backprop` (aMoE training), `custom_op`, `mkl`/`accelerate`
+and `cudnn` (public features), and candle-core's CPU k-quants (ISQ and imatrix quantize on the CPU).
+
+Deleted all of the above: 18 files deleted and 12 edited, -6,224 lines, plus candle-kernels' `rope_i`/`rope_thd` CUDA kernels
+(`reduce.cu`) and candle-core's `tokenizers` and `cutile` dependencies. No workspace source changed.
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep -> pass (2797 + 2418 tests)
+local_ci.sh --size -> file 103.16 MiB (-0.03), .nv_fatbin unchanged (the two rope kernels are small)
+```
+
+Review: no references to a removed item under any workspace feature (Metal's `call_rope_i` lives in the unvendored
+candle-metal-kernels and simply goes unused), and nothing loads `rope_i_*`/`rope_thd_*` by name. The tokenizer's
+`#[cfg(not(target_arch = "wasm32"))]` had been left attached to the next item and an empty target-dependency table
+behind; both are gone. The gain is mostly build time and reading surface: these were leaf modules, so the bundle
+barely moves.

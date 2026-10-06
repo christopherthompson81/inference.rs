@@ -17,8 +17,6 @@ pub mod metal;
 pub mod repack;
 #[cfg(target_arch = "x86_64")]
 pub(crate) mod repack_x86;
-#[cfg(not(target_arch = "wasm32"))]
-pub mod tokenizer;
 #[cfg(not(feature = "metal"))]
 mod metal {
     pub use super::dummy_metal::*;
