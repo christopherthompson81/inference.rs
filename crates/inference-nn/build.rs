@@ -99,7 +99,6 @@ fn main() {
 
         let mut builder = cudaforge::KernelBuilder::new()
             .source_glob("kernels/cuda/*.cu")
-            .source_glob("kernels/cuda/gdn_chunked/*.cu")
             .watch(["kernels/cuda"])
             .out_dir(&build_dir)
             .compress_fatbin()

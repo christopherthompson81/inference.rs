@@ -1091,3 +1091,27 @@ defined in `fill.cu`; GDN `causal_conv1d` errors on f32 CUDA input instead of fa
 calls the GEMV takes (batch <= 8); candle's Metal argsort is wrong past 1024 elements.
 
 Next: item 1 first (largest, low risk once the reachability is confirmed by a run), then item 2, then the bugs.
+## Run 28 - 2026-10-06 13:29
+
+#270 step 1, item 1: delete the CUDA GDN chunked prefill kernels.
+
+Reachability, read from the source: key-major prefill sends head dims 64 and 128 to the warp kernel
+(`use_warp_prefill_recurrence`) and anything else to the chunked launcher, whose only instances are BK 64 and 128,
+so it fell through to the scalar kernel; the chunked kernels ran only from the GDN tests. The value-major chunked set
+ran only under `INFERENCE_RS_GDN_PREFILL_KERNEL=legacy-chunked`. Deleted: `gdn_chunked.cuh`, its 9 instance TUs,
+both launchers and FFI entries, the Rust wrappers, the `legacy-chunked` override, and the dead `recurrence_cuda`
+in `gdn/backend.rs` (CUDA always returns earlier through `recurrence_cuda_from_convolved`). Dispatch now sends
+non-64/128 dims straight to the scalar kernel, as they already ended up. Metal's own chunked kernel stays.
+
+```
+cargo nextest run -p inference-nn --features cuda --lib -E 'test(gdn)'   -> 63 pass (the chunked comparisons removed
+                                                                         from 5 tests, scalar/warp/vmajor checks kept)
+local_ci.sh --size  -> file 102.92 MiB (-0.23), .nv_fatbin 30.01 MiB (-0.21)
+nvcc -O3 -gencode arch=compute_86,code=sm_86 -c gdn_chunked/bf16_bk128.cu  -> 1 min 58 s, single-threaded
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2787 + 2411 tests)
+```
+
+The 9.09 MB Run 27 measured is uncompressed SASS; the bundle's compressed fatbin holds near-identical template
+instances for a fraction of that, so the bundle only drops 0.21 MiB. The real gain is build time: about two minutes
+of cicc per instance, about 18 CPU-minutes for the nine on a cold kernel build, and the slowest TUs of inference-nn's
+kernel set. Sizes from Run 27's uncompressed SASS overstate bundle savings for template-heavy families in general.

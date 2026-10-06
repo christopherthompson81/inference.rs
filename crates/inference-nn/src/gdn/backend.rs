@@ -530,14 +530,6 @@ fn recurrence_cuda_from_convolved(
                         slots,
                     )?,
                 )
-            } else if seq_len >= RECURRENCE_CHUNK_THRESHOLD {
-                RecurrenceOutput::BatchHeadMajor(
-                    crate::cuda::gdn::chunked_gated_delta_rule_recurrence_cuda(
-                        inputs,
-                        &mut state_flat,
-                        slots,
-                    )?,
-                )
             } else {
                 RecurrenceOutput::BatchHeadMajor(
                     crate::cuda::gdn::gated_delta_rule_recurrence_cuda(
@@ -553,7 +545,7 @@ fn recurrence_cuda_from_convolved(
     finish_recurrence(output, state_flat, dims, batch_size, seq_len, cache, dtype)
 }
 
-#[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(unused_variables))]
+#[cfg_attr(not(feature = "metal"), allow(unused_variables))]
 #[allow(clippy::too_many_arguments)]
 pub fn apply_recurrence(
     q: &Tensor,
@@ -567,11 +559,6 @@ pub fn apply_recurrence(
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
-    #[cfg(feature = "cuda")]
-    if q.device().is_cuda() {
-        return recurrence_cuda(q, k, v, g, beta, dims, batch_size, seq_len, cache, dtype);
-    }
-
     #[cfg(feature = "metal")]
     if q.device().is_metal() {
         return recurrence_metal(q, k, v, g, beta, dims, batch_size, seq_len, cache, dtype);
@@ -584,61 +571,6 @@ pub fn apply_recurrence(
         );
     }
     gated_delta_rule_recurrence(q, k, v, g, beta, &mut cache.recurrent_state)
-}
-
-#[cfg(feature = "cuda")]
-#[allow(clippy::too_many_arguments)]
-fn recurrence_cuda(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    g: &Tensor,
-    beta: &Tensor,
-    dims: &GdnDims,
-    batch_size: usize,
-    seq_len: usize,
-    cache: &mut GdnLayerCache,
-    dtype: DType,
-) -> Result<Tensor> {
-    let q_bh = prepare_q_for_backend(q, dims, batch_size, seq_len)?;
-    let k_bh = prepare_kv_for_backend(k, dims, batch_size, seq_len, dims.head_k_dim)?;
-    let v_bh = prepare_kv_for_backend(v, dims, batch_size, seq_len, dims.head_v_dim)?;
-    let g_bh = prepare_gate_for_backend(g, dims, batch_size, seq_len)?;
-    let beta_bh = prepare_gate_for_backend(beta, dims, batch_size, seq_len)?;
-    let mut state_flat = prepare_state_for_backend(cache, dims, batch_size)?;
-    let slots = GdnStateSlots::from_option(cache.slots.as_ref());
-    let inputs = RecurrenceInputs {
-        q: &q_bh,
-        k: &k_bh,
-        v: &v_bh,
-        g: &g_bh,
-        beta: &beta_bh,
-    };
-
-    let out_bh = if cache.state_layout == RecurrentStateLayout::GdnValueMajor {
-        crate::cuda::gdn::vmajor_prefill_gated_delta_rule_recurrence_cuda(
-            inputs,
-            &mut state_flat,
-            slots,
-            dtype,
-        )?
-    } else if seq_len >= RECURRENCE_CHUNK_THRESHOLD && use_warp_prefill_recurrence(dims) {
-        crate::cuda::gdn::warp_gated_delta_rule_recurrence_cuda(inputs, &mut state_flat, slots)?
-    } else if seq_len >= RECURRENCE_CHUNK_THRESHOLD {
-        crate::cuda::gdn::chunked_gated_delta_rule_recurrence_cuda(inputs, &mut state_flat, slots)?
-    } else {
-        crate::cuda::gdn::gated_delta_rule_recurrence_cuda(inputs, &mut state_flat, slots)?
-    };
-
-    finish_recurrence(
-        RecurrenceOutput::BatchHeadMajor(out_bh),
-        state_flat,
-        dims,
-        batch_size,
-        seq_len,
-        cache,
-        dtype,
-    )
 }
 
 #[cfg(feature = "metal")]
@@ -699,7 +631,7 @@ fn recurrence_metal(
     )
 }
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(feature = "metal")]
 fn prepare_q_for_backend(
     q: &Tensor,
     dims: &GdnDims,
@@ -712,7 +644,7 @@ fn prepare_q_for_backend(
         .contiguous()
 }
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(feature = "metal")]
 fn prepare_kv_for_backend(
     x: &Tensor,
     dims: &GdnDims,
@@ -727,7 +659,7 @@ fn prepare_kv_for_backend(
         .contiguous()
 }
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(feature = "metal")]
 fn prepare_gate_for_backend(
     x: &Tensor,
     dims: &GdnDims,
