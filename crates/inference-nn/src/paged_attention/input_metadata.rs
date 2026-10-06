@@ -1024,7 +1024,6 @@ impl DecodePagedRows {
                     requirements
                         .context_lens
                         .then_some(paged_maps.context_lens.clone()),
-                    requirements.context_lens.then_some(max_context_len),
                     flashinfer_paged_kv(
                         paged_maps.paged_kv_indptr.clone(),
                         paged_maps.paged_kv_indices.clone(),
@@ -1046,7 +1045,6 @@ impl DecodePagedRows {
                 requirements
                     .context_lens
                     .then_some(full_maps.context_lens.clone()),
-                requirements.context_lens.then_some(full_max_context_len),
                 flashinfer_paged_kv(
                     full_maps.paged_kv_indptr.clone(),
                     full_maps.paged_kv_indices.clone(),
@@ -1109,7 +1107,6 @@ pub struct PagedAttentionMeta {
     pub block_size: usize,
     pub max_paged_context_len: usize,
     pub attention_backend: AttentionBackendKind,
-    pub has_flashinfer_decode_layers: bool,
     pub prefill_attention_heads: usize,
     pub prefill_key_value_heads: usize,
     pub prefill_head_dim: usize,

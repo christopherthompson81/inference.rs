@@ -25,7 +25,6 @@ type HybridStateIndicesSnapshot = (Option<Tensor>, Option<Vec<u32>>);
 struct CudaDecodeGraphCaptureInputs<'a> {
     kv_cache: &'a [(Tensor, Tensor)],
     flash_meta: &'a FlashParams,
-    block_size: usize,
     recurrent_batch_kind: RecurrentBatchKind,
 }
 #[cfg(feature = "cuda")]
@@ -1149,7 +1148,7 @@ impl NormalPipeline {
             );
             return Ok(None);
         };
-        let Some(cache_config) = self.metadata.cache_config.as_ref() else {
+        let Some(_) = self.metadata.cache_config.as_ref() else {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
                 CudaGraphDispatchMode::Skipped,
@@ -1201,12 +1200,7 @@ impl NormalPipeline {
             );
             return Ok(None);
         };
-        let key = CudaDecodeGraphKey::new(
-            &step.input_ids,
-            &step.metadata,
-            cache_config.block_size,
-            recurrent_batch_kind,
-        )?;
+        let key = CudaDecodeGraphKey::new(&step.input_ids, &step.metadata, recurrent_batch_kind)?;
         if let Some(replay) = state.replay(&key, &step, CudaDecodeGraphReplayInput::Host)? {
             return Ok(Some(replay));
         }
@@ -1219,7 +1213,6 @@ impl NormalPipeline {
             CudaDecodeGraphCaptureInputs {
                 kv_cache: kv_cache.as_slice(),
                 flash_meta,
-                block_size: cache_config.block_size,
                 recurrent_batch_kind,
             },
             true,
@@ -1257,7 +1250,7 @@ impl NormalPipeline {
         {
             return Ok(());
         }
-        let (Some(cache_config), Some(cache_engine)) =
+        let (Some(_), Some(cache_engine)) =
             (&self.metadata.cache_config, &self.metadata.cache_engine)
         else {
             return Ok(());
@@ -1302,7 +1295,6 @@ impl NormalPipeline {
             let key = CudaDecodeGraphKey::new(
                 &step.input_ids,
                 &step.metadata,
-                cache_config.block_size,
                 RecurrentBatchKind::Decode,
             )?;
             if state.contains(&key) {
@@ -1315,7 +1307,6 @@ impl NormalPipeline {
                 CudaDecodeGraphCaptureInputs {
                     kv_cache: kv_cache.as_slice(),
                     flash_meta: &inputs.flash_meta,
-                    block_size: cache_config.block_size,
                     recurrent_batch_kind: RecurrentBatchKind::Decode,
                 },
                 false,
@@ -1344,7 +1335,6 @@ impl NormalPipeline {
         let CudaDecodeGraphCaptureInputs {
             kv_cache,
             flash_meta,
-            block_size,
             recurrent_batch_kind,
         } = inputs;
         let graph_event =
@@ -1404,7 +1394,6 @@ impl NormalPipeline {
                     input_ids: &step.input_ids,
                     seqlen_offsets: &step.seqlen_offsets,
                     position_ids: &step.position_ids,
-                    block_size,
                     kv_cache,
                     metadata: &metadata,
                     model_metadata: self.metadata.model_metadata.as_deref(),

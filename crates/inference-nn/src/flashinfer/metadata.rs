@@ -291,14 +291,12 @@ pub fn flashinfer_tile_plan(
 pub fn flashinfer_view(
     block_tables: Option<DeviceTensorMap>,
     context_lens: Option<DeviceTensorMap>,
-    max_context_len: Option<usize>,
     paged_kv: FlashInferPagedKv,
     tile_plan: FlashInferTilePlan,
 ) -> FlashInferPagedAttentionView {
     FlashInferPagedAttentionView {
         block_tables,
         context_lens,
-        max_context_len,
         paged_kv,
         tile_plan,
     }

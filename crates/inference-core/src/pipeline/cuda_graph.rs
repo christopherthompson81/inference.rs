@@ -40,8 +40,6 @@ use crate::pipeline::DecodeGraphPrecaptureCtx;
 use crate::speculative::SpeculativeGraphState;
 pub(crate) use inference_nn::cuda::graph_capture::*;
 
-// Matches the standard CUDA paged-attention V2 partition size.
-const PAGED_ATTENTION_PARTITION_SIZE: usize = 512;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_DEFAULT_CAPACITY: usize = 64;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_MAX_CAPACITY: usize = 96;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_CAPACITY_QUANTUM: usize = 16;
@@ -455,8 +453,6 @@ pub(crate) struct CudaDecodeGraphKey {
     input_shape: Vec<usize>,
     input_dtype: DType,
     recurrent_batch_kind: RecurrentBatchKind,
-    max_context_len: Option<usize>,
-    full_max_context_len: Option<usize>,
     tensors: Vec<CudaGraphTensorKey>,
     decode_rows: Option<DecodePagedRowsGraphKey>,
 }
@@ -476,7 +472,6 @@ pub(crate) struct CudaDecodeGraphCaptureCtx<'a> {
     pub(crate) input_ids: &'a Tensor,
     pub(crate) seqlen_offsets: &'a [usize],
     pub(crate) position_ids: &'a [usize],
-    pub(crate) block_size: usize,
     pub(crate) kv_cache: &'a [(Tensor, Tensor)],
     pub(crate) metadata: &'a PagedAttentionInputMetadata,
     pub(crate) model_metadata: Option<&'a (dyn ModelConfigLike + Send + Sync)>,
@@ -491,7 +486,6 @@ struct CudaDecodeGraphMetadataInput<'a> {
     seqlen_offsets: &'a [usize],
     position_ids: &'a [usize],
     seq_len: usize,
-    block_size: usize,
     kv_cache: &'a [(Tensor, Tensor)],
     model_metadata: Option<&'a (dyn ModelConfigLike + Send + Sync)>,
     activation_dtype: DType,
@@ -536,7 +530,6 @@ impl CudaDecodeGraphKey {
     pub(crate) fn new(
         input_ids: &Tensor,
         metadata: &PagedAttentionInputMetadata,
-        block_size: usize,
         recurrent_batch_kind: RecurrentBatchKind,
     ) -> candle_core::Result<Self> {
         let decode_rows = metadata.decode_rows.as_ref().map(|rows| rows.graph_key());
@@ -571,24 +564,6 @@ impl CudaDecodeGraphKey {
             input_shape: input_ids.dims().to_vec(),
             input_dtype: input_ids.dtype(),
             recurrent_batch_kind,
-            max_context_len: decode_rows
-                .is_none()
-                .then(|| {
-                    graph_context_len(
-                        metadata.max_context_len,
-                        bucket_context_len(metadata.block_tables.as_ref(), block_size),
-                    )
-                })
-                .flatten(),
-            full_max_context_len: decode_rows
-                .is_none()
-                .then(|| {
-                    graph_context_len(
-                        metadata.full_max_context_len,
-                        bucket_context_len(metadata.full_block_tables.as_ref(), block_size),
-                    )
-                })
-                .flatten(),
             tensors,
             decode_rows,
         })
@@ -604,7 +579,6 @@ impl CudaDecodeGraphMetadataBuffers {
             seqlen_offsets,
             position_ids,
             seq_len,
-            block_size,
             kv_cache,
             model_metadata,
             activation_dtype,
@@ -726,7 +700,7 @@ impl CudaDecodeGraphMetadataBuffers {
             buffers.full_paged_kv_chunk_size = buffers.paged_kv_chunk_size.clone();
             buffers.full_paged_kv_block_valid_mask = buffers.paged_kv_block_valid_mask.clone();
         }
-        let metadata = buffers.metadata_from(metadata, block_size);
+        let metadata = buffers.metadata_from(metadata);
         Ok((buffers, metadata))
     }
 
@@ -876,17 +850,11 @@ impl CudaDecodeGraphMetadataBuffers {
     fn flashinfer_metadata_from(
         &self,
         metadata: &PagedAttentionInputMetadata,
-        block_size: usize,
     ) -> Option<FlashInferMetadata> {
         let original = metadata.flashinfer.as_ref()?;
         let logical = FlashInferPagedAttentionView {
             block_tables: option_tensor_map_from_var_map(&self.full_block_tables),
             context_lens: option_tensor_map_from_var_map(&self.full_context_lens),
-            max_context_len: original
-                .views
-                .logical
-                .max_context_len
-                .or_else(|| bucket_context_len_from_vars(&self.full_block_tables, block_size)),
             paged_kv: flashinfer_paged_kv_from_vars(
                 &self.full_paged_kv_indptr,
                 &self.full_paged_kv_indices,
@@ -900,13 +868,10 @@ impl CudaDecodeGraphMetadataBuffers {
                 &self.full_paged_kv_block_valid_mask,
             )?,
         };
-        let sliding = if let Some(view) = original.views.sliding.as_ref() {
+        let sliding = if original.views.sliding.is_some() {
             Some(FlashInferPagedAttentionView {
                 block_tables: option_tensor_map_from_var_map(&self.block_tables),
                 context_lens: option_tensor_map_from_var_map(&self.context_lens),
-                max_context_len: view
-                    .max_context_len
-                    .or_else(|| bucket_context_len_from_vars(&self.block_tables, block_size)),
                 paged_kv: flashinfer_paged_kv_from_vars(
                     &self.paged_kv_indptr,
                     &self.paged_kv_indices,
@@ -934,11 +899,7 @@ impl CudaDecodeGraphMetadataBuffers {
         )
     }
 
-    fn metadata_from(
-        &self,
-        metadata: &PagedAttentionInputMetadata,
-        block_size: usize,
-    ) -> PagedAttentionInputMetadata {
+    fn metadata_from(&self, metadata: &PagedAttentionInputMetadata) -> PagedAttentionInputMetadata {
         PagedAttentionInputMetadata {
             block_tables: option_tensor_map_from_var_map(&self.block_tables),
             context_lens: option_tensor_map_from_var_map(&self.context_lens),
@@ -946,16 +907,10 @@ impl CudaDecodeGraphMetadataBuffers {
             paged_context_lens_cpu: metadata.paged_context_lens_cpu.clone(),
             full_paged_context_lens_cpu: metadata.full_paged_context_lens_cpu.clone(),
             slot_mappings: tensor_map_from_var_map(&self.slot_mappings),
-            max_context_len: graph_context_len(
-                metadata.max_context_len,
-                bucket_context_len_from_vars(&self.block_tables, block_size),
-            ),
+            max_context_len: metadata.max_context_len,
             full_block_tables: option_tensor_map_from_var_map(&self.full_block_tables),
             full_context_lens: option_tensor_map_from_var_map(&self.full_context_lens),
-            full_max_context_len: graph_context_len(
-                metadata.full_max_context_len,
-                bucket_context_len_from_vars(&self.full_block_tables, block_size),
-            ),
+            full_max_context_len: metadata.full_max_context_len,
             is_first_prompt_chunk: metadata.is_first_prompt_chunk,
             is_final_prompt_chunk: metadata.is_final_prompt_chunk,
             needs_logits: metadata.needs_logits,
@@ -967,7 +922,7 @@ impl CudaDecodeGraphMetadataBuffers {
             prefill_attention_heads: metadata.prefill_attention_heads,
             prefill_key_value_heads: metadata.prefill_key_value_heads,
             prefill_head_dim: metadata.prefill_head_dim,
-            flashinfer: self.flashinfer_metadata_from(metadata, block_size),
+            flashinfer: self.flashinfer_metadata_from(metadata),
             rope_positions: Some(tensor_map_from_var_map(&self.rope_positions)),
             num_cached_tokens: metadata.num_cached_tokens.clone(),
             query_lens: metadata.query_lens.clone(),
@@ -1133,12 +1088,6 @@ impl CudaDecodeGraphLaunch {
         let key = CudaDecodeGraphKey::new(
             &continuation.input_ids,
             &continuation.metadata,
-            continuation
-                .metadata
-                .decode_rows
-                .as_ref()
-                .expect("continuation must retain decode rows")
-                .block_size,
             self.key.recurrent_batch_kind,
         )?;
         Ok((key == self.key).then_some(continuation))
@@ -1712,7 +1661,6 @@ where
         input_ids,
         seqlen_offsets,
         position_ids,
-        block_size,
         kv_cache,
         metadata,
         model_metadata,
@@ -1733,7 +1681,6 @@ where
             seqlen_offsets,
             position_ids,
             seq_len,
-            block_size,
             kv_cache,
             model_metadata,
             activation_dtype,
@@ -2010,36 +1957,6 @@ fn flashinfer_tile_plan_from_vars(
         kv_chunk_size: option_tensor_map_from_var_map(kv_chunk_size)?,
         block_valid_mask: option_tensor_map_from_var_map(block_valid_mask)?,
     })
-}
-
-fn bucket_context_len_from_vars(map: &Option<CudaGraphVarMap>, block_size: usize) -> Option<usize> {
-    map.as_ref()
-        .and_then(|map| map.values().next())
-        .and_then(|tensor| tensor.dims().last().copied())
-        .map(|blocks| blocks * block_size)
-}
-
-fn bucket_context_len(
-    map: Option<&HashMap<DeviceLocation, Tensor>>,
-    block_size: usize,
-) -> Option<usize> {
-    map.and_then(|map| map.values().next())
-        .and_then(|tensor| tensor.dims().last().copied())
-        .map(|blocks| blocks * block_size)
-}
-
-fn graph_context_len(actual: Option<usize>, capacity: Option<usize>) -> Option<usize> {
-    match (actual, capacity) {
-        (Some(actual), Some(capacity)) => Some(
-            actual
-                .div_ceil(PAGED_ATTENTION_PARTITION_SIZE)
-                .max(1)
-                .saturating_mul(PAGED_ATTENTION_PARTITION_SIZE)
-                .min(capacity),
-        ),
-        (Some(actual), None) => Some(actual),
-        (None, capacity) => capacity,
-    }
 }
 
 fn var_map_from_tensor_map(
@@ -2338,21 +2255,6 @@ mod tests {
     }
 
     #[test]
-    fn graph_context_len_tracks_paged_attention_partitions() {
-        assert_eq!(graph_context_len(Some(1), Some(2048)), Some(512));
-        assert_eq!(graph_context_len(Some(512), Some(2048)), Some(512));
-        assert_eq!(graph_context_len(Some(513), Some(2048)), Some(1024));
-        assert_eq!(graph_context_len(Some(1537), Some(2048)), Some(2048));
-    }
-
-    #[test]
-    fn graph_context_len_preserves_nonstandard_metadata() {
-        assert_eq!(graph_context_len(Some(513), None), Some(513));
-        assert_eq!(graph_context_len(None, Some(2048)), Some(2048));
-        assert_eq!(graph_context_len(None, None), None);
-    }
-
-    #[test]
     fn decode_row_graph_key_is_independent_of_materialization() {
         let table = vec![1, 2, 3, 4];
         let rows = Arc::new(DecodePagedRows {
@@ -2373,17 +2275,15 @@ mod tests {
         let materialized = rows.build_materialized().unwrap();
         let input_ids = Tensor::zeros((1, 1), DType::U32, &Device::Cpu).unwrap();
         let staged_key =
-            CudaDecodeGraphKey::new(&input_ids, &staged, 32, RecurrentBatchKind::Decode).unwrap();
+            CudaDecodeGraphKey::new(&input_ids, &staged, RecurrentBatchKind::Decode).unwrap();
         let materialized_key =
-            CudaDecodeGraphKey::new(&input_ids, &materialized, 32, RecurrentBatchKind::Decode)
-                .unwrap();
+            CudaDecodeGraphKey::new(&input_ids, &materialized, RecurrentBatchKind::Decode).unwrap();
         assert_eq!(staged_key, materialized_key);
         assert!(staged_key.tensors.is_empty());
         assert!(staged_key.decode_rows.is_some());
         let speculative_key = CudaDecodeGraphKey::new(
             &input_ids,
             &materialized,
-            32,
             RecurrentBatchKind::SpeculativeDecode,
         )
         .unwrap();
@@ -2397,8 +2297,7 @@ mod tests {
         next_bucket_rows.full_context_lens = vec![2049];
         let next_bucket = Arc::new(next_bucket_rows).build_graph_staged().unwrap();
         let next_bucket_key =
-            CudaDecodeGraphKey::new(&input_ids, &next_bucket, 32, RecurrentBatchKind::Decode)
-                .unwrap();
+            CudaDecodeGraphKey::new(&input_ids, &next_bucket, RecurrentBatchKind::Decode).unwrap();
         assert_ne!(staged_key, next_bucket_key);
         assert!(staged_key.has_same_spec_state_shape(&next_bucket_key));
     }
@@ -2433,13 +2332,7 @@ mod tests {
         let inputs =
             Tensor::zeros((rows.slot_mappings.len(), 1), DType::U32, &Device::Cpu).unwrap();
         let metadata = Arc::new(rows).build_graph_staged().unwrap();
-        CudaDecodeGraphKey::new(
-            &inputs,
-            &metadata,
-            DECODE_CONTEXT_TEST_PAGE_SIZE,
-            RecurrentBatchKind::Decode,
-        )
-        .unwrap()
+        CudaDecodeGraphKey::new(&inputs, &metadata, RecurrentBatchKind::Decode).unwrap()
     }
 
     #[test]
@@ -2608,7 +2501,7 @@ mod tests {
         .unwrap();
         let input_ids = Tensor::zeros((1, 1), DType::U32, &Device::Cpu).unwrap();
         let key =
-            CudaDecodeGraphKey::new(&input_ids, &metadata, 32, RecurrentBatchKind::Decode).unwrap();
+            CudaDecodeGraphKey::new(&input_ids, &metadata, RecurrentBatchKind::Decode).unwrap();
         assert!(
             key.tensors
                 .iter()
@@ -2620,7 +2513,6 @@ mod tests {
             seqlen_offsets: &[127],
             position_ids: &[128],
             seq_len: 1,
-            block_size: 32,
             kv_cache: &[],
             model_metadata: None,
             activation_dtype: DType::F32,
@@ -2666,7 +2558,6 @@ mod tests {
             seqlen_offsets: &[97, 97],
             position_ids: &[100, 52],
             seq_len: 3,
-            block_size: 32,
             kv_cache: &[],
             model_metadata: None,
             activation_dtype: DType::F32,
@@ -2709,7 +2600,6 @@ mod tests {
             seqlen_offsets: &[127],
             position_ids: &[128],
             seq_len: 1,
-            block_size: 32,
             kv_cache: &[],
             model_metadata: None,
             activation_dtype: DType::F32,
@@ -3119,7 +3009,7 @@ mod tests {
         })
         .build_materialized()?;
         let initial_ids = Tensor::from_vec(vec![1u32], (1, 1), &device)?;
-        let key = CudaDecodeGraphKey::new(&initial_ids, &metadata, 32, RecurrentBatchKind::Decode)?;
+        let key = CudaDecodeGraphKey::new(&initial_ids, &metadata, RecurrentBatchKind::Decode)?;
         let warmup_logits = initial_ids.to_dtype(DType::F32)?;
         let entry = capture_cuda_decode_graph(
             CudaDecodeGraphCaptureCtx {
@@ -3127,7 +3017,6 @@ mod tests {
                 input_ids: &initial_ids,
                 seqlen_offsets: &[0],
                 position_ids: &[1],
-                block_size: 32,
                 kv_cache: &[],
                 metadata: &metadata,
                 model_metadata: None,

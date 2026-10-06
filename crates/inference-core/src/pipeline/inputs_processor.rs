@@ -686,7 +686,6 @@ pub mod text_models_inputs_processor {
                 Some(flashinfer_view(
                     Some(block_tables_map.clone()),
                     Some(context_lens_map.clone()),
-                    Some(max_context_len),
                     flashinfer_paged_kv(
                         paged_kv_indptr_map.clone(),
                         paged_kv_indices_map.clone(),
@@ -707,7 +706,6 @@ pub mod text_models_inputs_processor {
                 flashinfer_view(
                     Some(full_block_tables_map.clone()),
                     Some(full_context_lens_map.clone()),
-                    full_max_context_len,
                     flashinfer_paged_kv(
                         full_paged_kv_indptr_map.clone(),
                         full_paged_kv_indices_map.clone(),
@@ -725,7 +723,6 @@ pub mod text_models_inputs_processor {
                 flashinfer_view(
                     Some(block_tables_map.clone()),
                     Some(context_lens_map.clone()),
-                    Some(max_context_len),
                     flashinfer_paged_kv(
                         paged_kv_indptr_map.clone(),
                         paged_kv_indices_map.clone(),

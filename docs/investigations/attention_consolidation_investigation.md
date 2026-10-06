@@ -1242,3 +1242,32 @@ Review follow-up:
 - Left as follow-ups: `cuda_graph.rs` rounds the graph key's context length to the V2 kernel's 512-token
   partitions, which only splits graph captures now; and with Standard on CUDA only a gather, putting every CUDA
   layer on HND (its own gather included) would let the x-vectorized Standard cache and its kernels go.
+
+## Run 20 - 2026-10-05 19:26
+
+Question: do the step 3 follow-ups pay? (a) Build eager decode's CSR page lists and tile plan only for models that
+read them (MLA, FA3's fp8 decode); (b) drop the graph key's rounding to the V2 kernel's 512-token partitions.
+
+(a) Negative. A `reads_decode_plans` flag on `DecodePagedRows`, set from the model layout and the FA3 build, skipped
+both plans for Qwen3.5-0.8B. A/B with the two CLI binaries on the same dev kernel libraries,
+`INFERENCE_RS_CUDA_GRAPHS=0 inference bench -m Qwen3.5-0.8B --prompt-len 0 --gen-len 128 --depth {4,4096}`, five
+interleaved rounds:
+
+| depth | before (min) | after (min) |
+|---|---|---|
+| 4 | 5.15 ms (5.15-5.23) | 5.13 ms (5.13-5.21) |
+| 4096 | 5.27 ms (5.27-5.32) | 5.29 ms (5.29-5.32) |
+
+Within noise. Re-reading Run 10, its eager +2% was the padded tables' two extra uploads, which fattn needs, not the
+plans. Reverted; only the never-read `PagedAttentionMeta::has_flashinfer_decode_layers` went.
+
+(b) The rounding (and the key's `max_context_len`/`full_max_context_len`) only mattered to the V2 kernel, which read
+the length as a scalar. The key used it only for metadata without decode rows (speculative verify steps), where it
+split graphs every 512 tokens; no captured kernel reads it now (fattn takes device lengths, the gather refuses
+capture, MLA's plan tensors are keyed by shape). Removed, with `CudaDecodeGraphKey::new`'s `block_size`. The core
+graph tests and the MTP and tiny CUDA integration tests pass.
+
+Review follow-up: confirmed that on CUDA only Metal's (non-CUDA) paged decode reads the metadata's max context
+lengths, and that FA3's fp8 decode sizes `max_seqlen_k` from its page-list capacity, which the key already holds.
+`FlashInferPagedAttentionView::max_context_len` was never read at all, so it went too, with the `block_size`
+plumbing that only computed its fallback (`bucket_context_len_from_vars`, three structs' fields).
