@@ -631,3 +631,58 @@ Still true for builds without flash-attn: the fallback's `repeat_kv` expands K a
 affects non-flash builds, and the default CUDA build includes flash-attn, so it is not worth optimizing now.
 
 Benchmark rule: build the CLI with the full CUDA feature set before comparing against llama.cpp or ik.
+
+## Run 15 - 2026-10-06 11:21
+
+The per-type perplexity checks move out of the test suite into `scripts/gguf_perplexity_parity.sh`.
+
+The three `gguf_iq` suites ran the reference `llama-perplexity` live on every GGUF, so the test suite depended on
+another project's build: `INFERENCE_TEST_IK_LLAMA_PERPLEXITY` pointed at an ik_llama.cpp build in a session's `/tmp`
+scratchpad. Parity verifies an adoption once and keeps us beholden to the reference. The tests that pin our own
+behavior stay in `inference-quant/src/gguf/raw.rs`: dequantization against recorded golden blocks, CUDA
+dequantization against the CPU, and every CUDA kernel against the dequantized weight.
+
+The script scores each `*.gguf` in a directory with the given `llama-perplexity` and with the `perplexity` example
+(`examples/rust/advanced/perplexity`, which gains `--gguf` and a `--llama-cpp-ctx` mode: the window's first 512
+tokens, the 255 after its midpoint each scored given everything before them), and fails past a relative drift
+(default 2%). First run, README.md as the text, raw script output (reference, ours, relative drift):
+
+```
+scripts/gguf_perplexity_parity.sh ~/Programming/llama.cpp/build_cuda/bin/llama-perplexity <iq dir>   (llama.cpp 4617ccc1a)
+qwen35-0.8b-IQ1_M.gguf                       290.4072     293.8728   0.0119
+qwen35-0.8b-IQ1_S.gguf                       838.6610     847.2218   0.0102
+qwen35-0.8b-IQ2_S.gguf                        24.4610      24.3750   0.0035
+qwen35-0.8b-IQ2_XS.gguf                       30.3040      30.6859   0.0126
+qwen35-0.8b-IQ2_XXS.gguf                      61.7414      61.5070   0.0038
+qwen35-0.8b-IQ3_S.gguf                        10.3520      10.3186   0.0032
+qwen35-0.8b-IQ3_XXS.gguf                      13.1343      13.1839   0.0038
+scripts/gguf_perplexity_parity.sh <ik llama-perplexity> <kt dir>                                    (ik_llama.cpp 5f89bfc)
+qwen35-0.8b-IQ1_KT.gguf                      160.4039     161.4553   0.0066
+qwen35-0.8b-IQ2_KT.gguf                       33.3877      33.4552   0.0020
+qwen35-0.8b-IQ3_KT.gguf                       11.6426      11.4872   0.0133
+qwen35-0.8b-IQ4_KT.gguf                        9.7347       9.6281   0.0110
+scripts/gguf_perplexity_parity.sh <ik llama-perplexity> <iqk dir>
+qwen35-0.8b-IQ2_K.gguf                        30.3753      29.8830   0.0162
+qwen35-0.8b-IQ2_KL.gguf                       20.0494      20.0959   0.0023
+qwen35-0.8b-IQ2_KS.gguf                       48.4451      48.7639   0.0066
+qwen35-0.8b-IQ2_KT.gguf                       24.4317      24.3955   0.0015
+qwen35-0.8b-IQ3_K.gguf                        11.5292      11.4955   0.0029
+qwen35-0.8b-IQ3_KS.gguf                       14.1945      14.0738   0.0085
+qwen35-0.8b-IQ4_K.gguf                         9.1275       9.1595   0.0035
+qwen35-0.8b-IQ4_KS.gguf                        9.7813       9.7687   0.0013
+qwen35-0.8b-IQ4_KSS.gguf                      10.3298      10.3954   0.0064
+qwen35-0.8b-IQ5_K.gguf                         9.0040       9.0719   0.0075
+qwen35-0.8b-IQ5_KS.gguf                        9.1197       9.1355   0.0017
+qwen35-0.8b-IQ6_K.gguf                         8.9436       8.9472   0.0004
+```
+
+All 23 within 2% (worst IQ2_K, 1.62%). The reference values match the tables of Runs 6, 8 and 9 exactly. Ours moved
+since Run 12 (IQ1_KT 162.15 -> 161.46, IQ3_KT 11.53 -> 11.49), within the tolerance; the attention consolidation
+(#280-#288) and the grouped mmq prefill (#299) both landed in between.
+
+Review of the first version: the error-row branch was unreachable (under `set -euo pipefail` a failing run aborted
+the script with no row), an empty directory passed, the binary path ignored `CARGO_TARGET_DIR`, and a second
+perplexity example duplicated `advanced/perplexity`. Now a failed run prints `error` and its log tail and the script
+carries on, an empty directory exits 2, the binary path comes from cargo's build output, and the existing example
+gained the `--gguf` / `--llama-cpp-ctx` mode instead (same values). Inside awk's `printf`, `d > t` is an output
+redirection, not a comparison, which lost every row in the very first draft.
