@@ -1,6 +1,6 @@
 //! Main kernel builder implementation
 
-use crate::compute_cap::{ComputeCapability, GpuArch};
+use crate::compute_cap::{arch_key, gencode_args, ComputeCapability, GpuArch};
 use crate::dependency::DependencyManager;
 use crate::error::{Error, Result};
 use crate::hash::{hash_args, hash_paths, BuildCache};
@@ -134,9 +134,17 @@ impl KernelBuilder {
         self
     }
 
-    /// Get the current default compute capability (base number only)
+    /// Get the lowest default compute capability (base number only), the one compile-time minimums must hold for
     pub fn get_compute_cap(&self) -> Option<usize> {
         self.compute_cap.get_default().ok().map(|a| a.base)
+    }
+
+    /// Get every default compute capability (base numbers), lowest first
+    pub fn get_compute_caps(&self) -> Vec<usize> {
+        self.compute_cap
+            .get_defaults()
+            .map(|archs| archs.iter().map(GpuArch::base).collect())
+            .unwrap_or_default()
     }
 
     /// Set compute capability (mutable reference version)
@@ -362,7 +370,7 @@ impl KernelBuilder {
             let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
             // absolute, so worktrees sharing a target dir never share a dir
             file.canonicalize()?.hash(&mut key);
-            self.compute_cap.get_for_file(filename)?.to_nvcc_arch().hash(&mut key);
+            arch_key(&self.compute_cap.get_for_file(filename)?).hash(&mut key);
         }
         let dir = root.join(format!("{name}-{:016x}", key.finish()));
         std::fs::create_dir_all(&dir)?;
@@ -459,7 +467,7 @@ impl KernelBuilder {
         let watch_hash = hash_paths(self.sources.watch_paths());
 
         // Determine which files need compilation
-        let mut compile_jobs: Vec<(PathBuf, PathBuf, GpuArch)> = Vec::new();
+        let mut compile_jobs: Vec<(PathBuf, PathBuf, Vec<GpuArch>)> = Vec::new();
         let mut all_obj_files: Vec<PathBuf> = Vec::new();
 
         for kernel_file in &kernel_files {
@@ -477,7 +485,7 @@ impl KernelBuilder {
                 && !cache.needs_rebuild(
                     kernel_file,
                     &obj_file,
-                    &gpu_arch.to_nvcc_arch(),
+                    &arch_key(&gpu_arch),
                     &args_hash,
                     &watch_hash,
                 )
@@ -523,11 +531,11 @@ impl KernelBuilder {
                     return Ok(());
                 }
 
-                let gencode_arg = gpu_arch.to_gencode_arg();
+                let gencode = gencode_args(gpu_arch);
 
                 let mut command = Command::new(&toolkit.nvcc_path);
                 command
-                    .arg(&gencode_arg)
+                    .args(&gencode)
                     .arg("-c")
                     .arg("-o")
                     .arg(obj_file)
@@ -603,7 +611,7 @@ impl KernelBuilder {
                 cache.update(
                     kernel_file,
                     obj_file,
-                    &gpu_arch.to_nvcc_arch(),
+                    &arch_key(gpu_arch),
                     &args_hash,
                     &watch_hash,
                 )?;
@@ -668,7 +676,11 @@ impl KernelBuilder {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
-            let gpu_arch = self.compute_cap.get_for_file(filename)?;
+            let mut gpu_arch = self.compute_cap.get_for_file(filename)?;
+            // nvcc emits PTX for one arch only; the lowest is the one every listed device can JIT
+            if matches!(kind, ImageKind::Ptx) {
+                gpu_arch.truncate(1);
+            }
 
             let output_file = self
                 .out_dir
@@ -679,7 +691,7 @@ impl KernelBuilder {
                 && !cache.needs_rebuild(
                     kernel_file,
                     &output_file,
-                    &gpu_arch.to_nvcc_arch(),
+                    &arch_key(&gpu_arch),
                     &args_hash,
                     &watch_hash,
                 )
@@ -709,11 +721,11 @@ impl KernelBuilder {
         compile_jobs.par_iter().try_for_each(
             |(kernel_file, output_file, gpu_arch)| -> Result<()> {
                 let _slot = crate::jobserver::acquire();
-                let gencode_arg = gpu_arch.to_gencode_arg();
+                let gencode = gencode_args(gpu_arch);
 
                 let mut command = Command::new(&toolkit.nvcc_path);
                 command
-                    .arg(&gencode_arg)
+                    .args(&gencode)
                     .arg(kind.nvcc_flag())
                     .args(["--default-stream", "per-thread"])
                     .arg("-o")
@@ -780,7 +792,7 @@ impl KernelBuilder {
                 cache.update(
                     kernel_file,
                     &output_file,
-                    &gpu_arch.to_nvcc_arch(),
+                    &arch_key(&gpu_arch),
                     &args_hash,
                     &watch_hash,
                 )?;

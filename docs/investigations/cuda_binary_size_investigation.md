@@ -658,3 +658,93 @@ for compute 8.9 is reported and passes. `scripts/test_bundle_size.py` covers the
 tracking-minimum crossing and the compute-capability spelling.
 
 Next (#258): the build-wide arch list (step 6 of #270 too).
+
+## Run 17 - 2026-10-05 20:01
+
+Question (#258 / #270 step 6): what does a build for a list of GPU architectures (`CUDA_COMPUTE_CAP="80,86,89,90"`)
+take? Inventory only, no code changed.
+
+How the arch is chosen today: cudaforge's `detect_compute_cap` (`third_party/cudaforge/src/compute_cap.rs:217`) reads
+`CUDA_COMPUTE_CAP`, else the first GPU nvidia-smi lists; `GpuArch::parse` (:36) takes exactly one value. Every compile
+job is `(file, obj, GpuArch)` with one `-gencode`, and the incremental cache (`hash.rs:80`) and the dev shared-lib key
+(`builder.rs:365`) are keyed on that one arch. sm_90+ already build arch-specific SASS (`90a`, `120a`, `121f`) with no
+PTX. Compression (`-compress-mode=size`) is per fatbin, so it already suits several archs. Build scripts read the one
+cap with `get_compute_cap().unwrap_or(80)` (quant :191, nn :120, paged-attn :131, candle-kernels :143).
+
+Host-side gates derived from that one cap:
+- cc >= 80 (minimum gates): `has_marlin_kernels`, `has_blockwise_fp8_kernels`, `has_scalar_fp8_kernels`,
+  `has_mxfp4_wmma_kernels`, `has_cutlass_moe_kernels`, paged-attn `has_fp8`, and the whole-compile defines
+  `-DNO_BF16_KERNEL` / `-DENABLE_FP8`. Under a list these follow its minimum, which holds as long as the list
+  starts at 80 (any device that runs the binary is in it).
+- cc == 90 or 121 (exact gates, built as separate `90a`/`121a` libraries): `has_fa3_fp8_paged`,
+  `has_cutlass_fp8_sm90_kernels`, `has_deepgemm_fp8_sm90_provider`, `has_flashinfer_gdn_sm90_kernel`,
+  `has_nvfp4_cutlass_sm121_kernels`. Under a list these mean "in the list", and each needs a runtime check that the
+  running device is that arch. FA3 (major == 9), DeepGEMM and CUTLASS sm90 (`is_sm90`) and NVFP4 ((12,1)) have one.
+  The FlashInfer GDN sm90 kernel does not: `flashinfer_sm90_prefill_supported` (`inference-nn/src/cuda/gdn.rs:2315`)
+  accepts major >= 8, harmless with one arch (an sm90 build cannot load elsewhere), wrong in a mixed fatbin.
+- Toolkit gates (`cuda_ge_13000`, `has_gdn_fp8_producer`, the CUDA version envs) stay compile-time.
+
+Blocker beyond the gates: candle-kernels defines whole kernels under `#if __CUDA_ARCH__ >= 800/890` (`affine.cu`,
+`unary.cu`, `ternary.cu`, `cast.cu`), takes its `*_ENTRIES` lists from one PTX build, and `preload_candle_kernels`
+(`inference-nn/src/cuda/preload.rs`) loads every listed entry, so an sm_80 cubin beside an sm_89 one would fail
+preload on the missing `f8_e4m3` entries. `blockwise_fp8_cutlass_sm90.cu` sits in the main quant lib at the default
+arch and would need a 90a-only filter.
+
+About 15 hand-rolled compute-capability queries exist (`cutile::device_compute_capability`, `fp8_tensor_cores`,
+`is_sm90`, `cutlass_moe_available`, `fast_mmq::get_device_info`, `fattn::mma_available`, `cuda_sm_count` (device 0
+only), `fa3_device_num_sm`, `gdn_cuda_device_properties`, `cuda_supports_fp8`, ...); none checks that the device is
+one of the built archs, so a mismatch surfaces as a CUDA error at the first launch.
+
+Size: `.nv_fatbin` is 30.45 MiB of the 103.44 MiB bundle at sm_86 (Run 16), so roughly 30 MiB per extra arch:
+"80,86,89,90" would be about 120 MiB of GPU code (a ~195 MiB file) plus the sm_90-only libraries, whose size is not
+recorded yet. Candle's kernels for 7 archs were 5.14 MiB (Run 8).
+
+Plan, one PR each:
+1. cudaforge takes a list: every `-gencode` in one nvcc call per file, per-file overrides become "only this arch, if
+   listed", the list hashed into the build cache and lib key, `archs()`/`min_arch()`/`contains()` for build scripts.
+   A single value must produce identical output.
+2. Build scripts: minimum gates follow `min_arch()` (reject lists below 80, or gate those files), exact gates mean
+   "in the list", the sm90 CUTLASS file gets a 90a filter, and the built list is recorded for runtime.
+3. candle-kernels: fatbins straight from `.cu` for the list, entry lists as the union, preload skipping entries a
+   module lacks.
+4. Runtime gating: GDN to major == 9; one cached per-device compute-capability helper in inference-nn replacing the
+   device-0 `cuda_sm_count`; tests that read `USE_FA3_FP8_PAGED` as "this device is SM90".
+5. A startup check that the device's arch was built, the doctor reporting the built list, and the wheel tag, size
+   baseline key, `--size` and Dockerfile taking a list.
+
+Risks: build time grows with the list; arch-specific `a`/`f` SASS and no PTX leave future GPUs uncovered unless a
+final PTX target is added; mixed-GPU hosts meet the device-0 caches and the all-devices `mma_available`.
+
+Decisions (2026-10-05): multi-arch lists start at 8.0 (the 8.0+ compile gates stay valid as the list's minimum;
+Turing and Volta keep single-arch builds), and no PTX is embedded (unlisted GPUs get a clear startup error).
+
+## Run 18 - 2026-10-05 20:30
+
+Step 1 of Run 17's plan: cudaforge takes a list.
+
+`CUDA_COMPUTE_CAP` is now one value or a list ("80,86,90", commas, semicolons or spaces); `parse_arch_list` sorts
+and deduplicates, and `GpuArch::parse` now takes nvidia-smi's dotted form ("8.6", "12.1"), which its comment claimed
+and its `usize` parse rejected. nvidia-smi detection still takes the first GPU: a list is asked for, never inferred
+from a mixed host. Each
+nvcc call passes one `-gencode` per arch (`gencode_args`), and the incremental cache and dev shared-lib keys hash
+`arch_key` (`sm_80,sm_86`), which for one arch is the old `to_nvcc_arch` string. Explicit single-arch builders
+(`compute_cap_arch("90a")`) and per-file overrides stay one arch. `get_compute_cap` returns the lowest listed arch
+(the one compile-time minimums must hold for); `get_compute_caps` returns them all.
+
+```
+cargo build -p inference-nn -p inference-fattn -p inference-quant -p inference-paged-attn --features cuda
+  -> "All library kernels up-to-date" in all four (a single value keys exactly as before)
+CUDA_COMPUTE_CAP="80,86" CARGO_TARGET_DIR=<scratch> cargo build -p inference-layout --features cuda
+cuobjdump --list-elf layout.fatbin
+  -> layout.1.sm_80.cubin, layout.2.sm_86.cubin
+```
+
+Until steps 2 and 3 land a list build is only partly right: the build scripts still gate on the lowest arch (an
+"80,90" build leaves the sm_90 libraries out) and candle-kernels builds the lowest arch only.
+
+Review follow-up: the first cut passed every `-gencode` to `--ptx` too, which nvcc refuses ("Option '--ptx' is not
+allowed when compiling for multiple GPU architectures"), so candle-kernels failed to build with any list; and with
+nvidia-smi taking every GPU, a mixed-GPU dev host would have hit that unasked. PTX now builds for the lowest arch,
+detection keeps the first GPU, and an "80,86" build of inference-layout exits 0 with both cubins. Also: "8." is
+rejected instead of parsing as sm_8, deduplication counts the suffix (121a vs 121f), and a clippy borrow and two
+`manual_strip`s in cudaforge are fixed.
