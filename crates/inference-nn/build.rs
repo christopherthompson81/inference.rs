@@ -117,7 +117,9 @@ fn main() {
             .arg("-fPIC")
             .arg(&header_hash_arg);
 
+        // a minimum holds for the lowest listed arch; the sm_90a library builds when 90 is listed
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+        let sm90_listed = builder.get_compute_caps().contains(&90);
 
         // Check if CUDA_COMPUTE_CAP < 80 and disable bf16 kernels if so.
         // bf16 WMMA operations and certain bf16 intrinsics are only available on sm_80+.
@@ -151,7 +153,7 @@ fn main() {
             .expect("Build inference-nn CUDA kernels failed!");
         println!("cargo:rustc-link-lib=dylib=cudart");
 
-        if compute_cap == 90
+        if sm90_listed
             && target.contains("linux")
             && cuda_version_code.is_some_and(|version| version >= FLASHINFER_GDN_MIN_CUDA)
         {
@@ -199,7 +201,7 @@ fn main() {
                 .expect("Build FlashInfer GDN provider failed!");
             println!("cargo:rustc-link-search={}", out_dir.display());
             println!("cargo:rustc-link-lib=inferenceflashinfergdn");
-        } else if compute_cap == 90
+        } else if sm90_listed
             && target.contains("linux")
             && cuda_version_code.is_none_or(|version| version < FLASHINFER_GDN_MIN_CUDA)
         {

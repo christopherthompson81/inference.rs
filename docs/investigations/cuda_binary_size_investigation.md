@@ -748,3 +748,49 @@ nvidia-smi taking every GPU, a mixed-GPU dev host would have hit that unasked. P
 detection keeps the first GPU, and an "80,86" build of inference-layout exits 0 with both cubins. Also: "8." is
 rejected instead of parsing as sm_8, deduplication counts the suffix (121a vs 121f), and a clippy borrow and two
 `manual_strip`s in cudaforge are fixed.
+
+## Run 19 - 2026-10-05 21:02
+
+Step 2: the build scripts read the list.
+
+- Minimum gates keep the lowest listed arch (`get_compute_cap`): Marlin, scalar and blockwise FP8, MXFP4 WMMA,
+  CUTLASS MoE, paged-attn's `ENABLE_FP8`, and `NO_BF16_KERNEL`.
+- Arch-specific libraries build when their arch is listed (`get_compute_caps`): inference-quant's CUTLASS sm90 and
+  DeepGEMM (90) and NVFP4 CUTLASS (121), inference-nn's FlashInfer GDN (90), paged-attn's FA3 (90). The cuTile
+  build hints hold if any listed arch has cuTile.
+- `blockwise_fp8_cutlass_sm90.cu`, which sits in the main quant library, takes a 90a per-file override, so in a list
+  build it compiles for sm_90a only (with one value 90 the default is already 90a, so its key is unchanged).
+- Runtime: `flashinfer_sm90_prefill_supported` (`inference-nn/src/cuda/gdn.rs`) now requires compute major 9; it
+  accepted major >= 8, harmless with one arch (an sm_90 build loads nowhere else), wrong in a mixed fatbin. The other
+  arch-specific paths already checked the device (FA3 `fa3_device_num_sm`, DeepGEMM and CUTLASS `is_sm90`, NVFP4).
+  The plan tests that read `USE_FA3_FP8_PAGED` feed inputs that claim FA3 support, and the cache-engine test asks the
+  device, so they hold on any device of a list build.
+
+```
+cargo build -p inference-nn -p inference-fattn -p inference-quant -p inference-paged-attn --features cuda
+  -> "All library kernels up-to-date" in all four
+CUDA_COMPUTE_CAP="86,90" CARGO_TARGET_DIR=<scratch> cargo build -p inference-nn -p inference-quant -p inference-paged-attn --features cuda
+  -> exit 0 in 28m 39s (16 cores); libinferencedeepgemm.a, libinferenceflashinfergdn.a and libinferencefa3paged.a built
+cuobjdump --list-elf libinferencequant.so
+  -> 70 sm_86, 71 sm_90a (the CUTLASS sm90 object holds sm_90a alone), 1 sm_52
+```
+
+The one `sm_52` cubin is in the single-arch library too (`target/debug`: 1 sm_52, 70 sm_86), so it predates the
+list; it is nvcc's default arch, probably from a link step that runs without `-gencode`. Worth chasing for size.
+
+Next: step 3, candle-kernels built straight to multi-arch fatbins (its PTX intermediate compiles out the
+`__CUDA_ARCH__ >= 890` kernels for a lower listed arch).
+
+Review follow-up (the build side held: the override matches only `blockwise_fp8_cutlass_sm90.cu`, a single 90 builds
+the same, and nothing uses `-rdc`, so mixing arch sets in one library links fine):
+- Silent wrong output, also in single-arch builds: a device runs the highest built SASS of its major family not above
+  it, so an sm_89 card in an "86,90" build (or under a plain sm_86 build, today) runs sm_86 code in which
+  `blockwise_fp8_mma.cu`'s `__CUDA_ARCH__ >= 890` body is compiled out, while `fp8_tensor_cores` said yes from the
+  device's 8.9 and launched an empty kernel. inference-quant now records the built list
+  (`INFERENCE_RS_CUDA_ARCHS`), `built_kernel_arch(cc)` derives the SASS a device runs, and `fp8_tensor_cores` asks
+  about that arch. (FlashInfer's fp8 MMA in paged-attn traps rather than corrupting.)
+- A list holding 90 turned on a blockwise-FP8 shortcut that took the provider's unshaped activation scheme;
+  TensorCoreGemv (sm_89) advertises one it cannot apply past 32 rows or to F16, so prefill errored instead of
+  dequantizing. It now asks `activation_quantization_scheme_for(x)`, as the next branch does (sm_90 with DeepGEMM
+  skipped had the same fault).
+- The two CUTLASS sm90 tests were gated on the cfg alone and now skip on a device that is not sm_90.

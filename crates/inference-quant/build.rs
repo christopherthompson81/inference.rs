@@ -135,11 +135,11 @@ fn cutile_supported_for_build_cuda(major: usize, minor: usize, compute_cap: usiz
 #[cfg(feature = "cuda")]
 fn nvfp4_cutlass_supported_for_build(
     cuda_version: (usize, usize),
-    compute_cap: usize,
+    sm121_listed: bool,
     cutile: bool,
     target: &str,
 ) -> bool {
-    cuda_version == (13, 3) && compute_cap == 121 && cutile && target.contains("linux")
+    cuda_version == (13, 3) && sm121_listed && cutile && target.contains("linux")
 }
 
 fn main() -> Result<(), String> {
@@ -188,7 +188,16 @@ fn main() -> Result<(), String> {
             .watch(["kernels/cuda"])
             .arg(&header_hash_arg);
 
+        // a minimum holds for the lowest listed arch; an arch-specific library builds when its arch is listed
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
+        let compute_caps = builder.get_compute_caps();
+        let listed = |cap: usize| compute_caps.contains(&cap);
+        let archs = compute_caps
+            .iter()
+            .map(usize::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        println!("cargo:rustc-env=INFERENCE_RS_CUDA_ARCHS={archs}");
         // ======== Handle optional kernel compilation via rustc-cfg flags
         let cc_over_80 = compute_cap >= 80;
         let target = std::env::var("TARGET").unwrap();
@@ -205,11 +214,11 @@ fn main() -> Result<(), String> {
             // WMMA tensor core MXFP4 kernel (FP16/BF16 WMMA requires SM >= 80)
             println!("cargo:rustc-cfg=has_mxfp4_wmma_kernels");
         }
-        let cutlass_fp8_sm90 = compute_cap == 90 && cuda_major >= 12 && !target.contains("msvc");
+        let cutlass_fp8_sm90 = listed(90) && cuda_major >= 12 && !target.contains("msvc");
         if cutlass_fp8_sm90 {
             println!("cargo:rustc-cfg=has_cutlass_fp8_sm90_kernels");
         }
-        let deepgemm_fp8_sm90 = compute_cap == 90
+        let deepgemm_fp8_sm90 = listed(90)
             && (cuda_major > 12 || (cuda_major == 12 && cuda_minor >= 8))
             && target.contains("linux");
         let mut deepgemm_source_hash = deepgemm_generator_hash;
@@ -253,7 +262,10 @@ fn main() -> Result<(), String> {
             excluded_files.push("moe_data.cu");
             excluded_files.push("grouped_mm_*.cu");
         }
-        if !cutlass_fp8_sm90 {
+        if cutlass_fp8_sm90 {
+            // wgmma/TMA: sm_90a SASS only, whatever else the list holds
+            builder = builder.with_compute_override_arch("*_cutlass_sm90.cu", "90a");
+        } else {
             excluded_files.push("*_cutlass_sm90.cu");
         }
         excluded_files.push("nvfp4_cutlass.cu");
@@ -306,7 +318,7 @@ fn main() -> Result<(), String> {
         }
         if nvfp4_cutlass_supported_for_build(
             (cuda_major, cuda_minor),
-            compute_cap,
+            listed(121),
             cfg!(feature = "cutile"),
             &target,
         ) {
@@ -380,7 +392,9 @@ fn main() -> Result<(), String> {
         }
 
         let cuda_ge_132 = major > 13 || (major == 13 && minor >= 2);
-        let cutile_supported = cutile_supported_for_build_cuda(major, minor, compute_cap);
+        let cutile_supported = compute_caps
+            .iter()
+            .any(|&cap| cutile_supported_for_build_cuda(major, minor, cap));
         if std::env::var("CARGO_FEATURE_CUTILE").is_ok() {
             if !cuda_ge_132 {
                 panic!(
@@ -390,7 +404,7 @@ fn main() -> Result<(), String> {
             } else if !cutile_supported {
                 println!(
                     "cargo:warning=the `cutile` feature is enabled, but CUDA {major}.{minor} does \
-                     not support cuTile for sm_{compute_cap}; runtime will use another MoE backend."
+                     not support cuTile for sm {compute_caps:?}; runtime will use another MoE backend."
                 );
             }
         } else if cutile_supported {

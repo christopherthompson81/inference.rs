@@ -61,6 +61,22 @@ static FP8_TENSOR_CORE_SUPPORT: std::sync::LazyLock<
     std::sync::Mutex<std::collections::HashMap<candle_core::cuda::DeviceId, bool>>,
 > = std::sync::LazyLock::new(Default::default);
 
+/// The arch whose SASS a device of compute capability `cc` (86 for 8.6) runs from this build: the highest built one
+/// in its major family not above it, so device code under a higher `__CUDA_ARCH__` guard is absent there.
+#[cfg(feature = "cuda")]
+pub fn built_kernel_arch(cc: usize) -> Option<usize> {
+    kernel_arch_in(env!("INFERENCE_RS_CUDA_ARCHS"), cc)
+}
+
+#[cfg(any(feature = "cuda", test))]
+fn kernel_arch_in(archs: &str, cc: usize) -> Option<usize> {
+    archs
+        .split(',')
+        .filter_map(|arch| arch.parse::<usize>().ok())
+        .filter(|&arch| arch / 10 == cc / 10 && arch <= cc)
+        .max()
+}
+
 pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
     #[cfg(feature = "cuda")]
     if let candle_core::Device::Cuda(dev) = device {
@@ -72,9 +88,14 @@ pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
             let stream = dev.cuda_stream();
             let context = stream.context();
             let attribute = |a| context.attribute(a).unwrap_or(0);
-            attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR) * 10
-                + attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-                >= FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY
+            let cc = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+                * 10
+                + attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
+            // an sm_89 device running sm_86 SASS has the kernels' sm_89 bodies compiled out
+            usize::try_from(cc)
+                .ok()
+                .and_then(built_kernel_arch)
+                .is_some_and(|arch| arch >= FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY as usize)
         });
     }
     let _ = device;
@@ -3986,5 +4007,20 @@ mod tests {
         linear_no_bias(2, 3, &None, vb)?;
         assert_eq!(&*load_devices.lock().unwrap(), &[true, false]);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod kernel_arch_tests {
+    use super::kernel_arch_in;
+
+    #[test]
+    fn a_device_runs_the_highest_built_arch_of_its_family() {
+        assert_eq!(kernel_arch_in("86,90", 89), Some(86));
+        assert_eq!(kernel_arch_in("80,86,89,90", 89), Some(89));
+        assert_eq!(kernel_arch_in("86,90", 90), Some(90));
+        // no SASS in its family: the device runs nothing from this build
+        assert_eq!(kernel_arch_in("86,90", 75), None);
+        assert_eq!(kernel_arch_in("86,90", 120), None);
     }
 }

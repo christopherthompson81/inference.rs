@@ -2608,6 +2608,10 @@ mod tests {
         const N: usize = 256;
 
         let dev = Device::new_cuda(0)?;
+        // a multi-arch build carries these kernels to devices that are not sm_90
+        if !is_sm90(dev.as_cuda_device()?) {
+            return Ok(());
+        }
         let weight_values = (0..N * K)
             .map(|index| ((index * 7 + index / K * 13) % 23) as f32 * 0.03 - 0.33)
             .collect::<Vec<_>>();
@@ -3497,6 +3501,9 @@ mod tests {
         const ROWS: usize = 8;
 
         let dev = Device::new_cuda(0)?;
+        if !is_sm90(dev.as_cuda_device()?) {
+            return Ok(());
+        }
         let weight = Tensor::randn(0f32, 0.25, (N, K), &dev)?.to_dtype(DType::BF16)?;
         let input = Tensor::randn(0f32, 0.25, (ROWS, K), &dev)?.to_dtype(DType::BF16)?;
         let (weight_q, weight_scales) = ops::fp8_blockwise_quantize(&weight, vec![128, 128])?;

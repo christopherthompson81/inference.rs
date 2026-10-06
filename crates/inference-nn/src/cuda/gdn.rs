@@ -15,6 +15,8 @@ pub const GDN_PAD_SLOT: u32 = u32::MAX;
 
 #[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
 const GDN_DECODE_MIN_COMPUTE_MAJOR: i32 = 8;
+#[cfg(has_flashinfer_gdn_sm90_kernel)]
+const FLASHINFER_GDN_COMPUTE_MAJOR: i32 = 9;
 pub const GDN_DECODE_K_DIM: usize = 128;
 pub const GDN_DECODE_V_DIM: usize = 128;
 #[cfg(any(feature = "cuda", test))]
@@ -2312,9 +2314,10 @@ fn flashinfer_sm90_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Res
                 return Ok(false);
             }
         }
+        // the library is sm_90a SASS alone, which a multi-arch build may carry beside other archs
         Ok(
             gdn_cuda_device_properties(device.as_cuda_device()?)?.compute_major
-                >= GDN_DECODE_MIN_COMPUTE_MAJOR,
+                == FLASHINFER_GDN_COMPUTE_MAJOR,
         )
     }
 }

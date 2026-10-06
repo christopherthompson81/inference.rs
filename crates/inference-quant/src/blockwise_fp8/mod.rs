@@ -372,8 +372,9 @@ impl QuantMethod for BlockwiseFP8Linear {
             }
         }
 
+        // the shape-aware check: TensorCoreGemv advertises a scheme it cannot apply past its row limit
         #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
-        if self.activation_quantization_scheme().is_some()
+        if self.activation_quantization_scheme_for(x).is_some()
             && matches!(x.dtype(), DType::F16 | DType::BF16)
         {
             let activation = self.quantize_activation(x)?;
