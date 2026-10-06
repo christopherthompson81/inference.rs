@@ -710,12 +710,6 @@ fn paged_attention_meta(
         attention_backend: model_metadata
             .map(|metadata| metadata.attention_backend_kind())
             .unwrap_or(AttentionBackendKind::Standard),
-        has_flashinfer_decode_layers: model_metadata.is_some_and(|metadata| {
-            (0..metadata.num_layers()).any(|layer_idx| {
-                metadata.attention_backend_kind_for_layer(layer_idx)
-                    == AttentionBackendKind::FlashInfer
-            })
-        }),
         prefill_attention_heads: model_metadata
             .map(|metadata| metadata.num_attn_heads())
             .unwrap_or(1)

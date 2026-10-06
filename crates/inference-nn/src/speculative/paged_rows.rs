@@ -175,14 +175,12 @@ pub fn make_paged_rows_metadata(
             logical: FlashInferPagedAttentionView {
                 block_tables: Some(full_block_tables_map.clone()),
                 context_lens: Some(full_context_lens_map.clone()),
-                max_context_len: Some(context_lens.iter().copied().max().unwrap_or(0)),
                 paged_kv: full_paged_kv,
                 tile_plan: full_tile_plan,
             },
             sliding: Some(FlashInferPagedAttentionView {
                 block_tables: Some(block_tables_map.clone()),
                 context_lens: Some(context_lens_map.clone()),
-                max_context_len: Some(context_lens_windowed.iter().copied().max().unwrap_or(0)),
                 paged_kv,
                 tile_plan,
             }),

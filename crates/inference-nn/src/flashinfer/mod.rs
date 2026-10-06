@@ -446,7 +446,6 @@ pub struct FlashInferPagedAttentionView {
     // One KV view: logical full-context metadata, or a decode-only sliding-window view.
     pub block_tables: Option<DeviceTensorMap>,
     pub context_lens: Option<DeviceTensorMap>,
-    pub max_context_len: Option<usize>,
     pub paged_kv: FlashInferPagedKv,
     pub tile_plan: FlashInferTilePlan,
 }

@@ -23,7 +23,6 @@ struct CudaDecodeGraphCaptureInputs<'a> {
     kv_cache: &'a [(Tensor, Tensor)],
     flash_meta: &'a FlashParams,
     recurrent_batch_kind: RecurrentBatchKind,
-    block_size: usize,
     speculative: bool,
 }
 #[cfg(feature = "cuda")]
@@ -1321,7 +1320,7 @@ impl MultimodalPipeline {
             );
             return Ok(None);
         };
-        let Some(cache_config) = self.metadata.cache_config.as_ref() else {
+        let Some(_) = self.metadata.cache_config.as_ref() else {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
                 CudaGraphDispatchMode::Skipped,
@@ -1374,12 +1373,7 @@ impl MultimodalPipeline {
             );
             return Ok(None);
         };
-        let key = CudaDecodeGraphKey::new(
-            &step.input_ids,
-            &step.metadata,
-            cache_config.block_size,
-            recurrent_batch_kind,
-        )?;
+        let key = CudaDecodeGraphKey::new(&step.input_ids, &step.metadata, recurrent_batch_kind)?;
         if let Some(replay) = state.replay(&key, &step, CudaDecodeGraphReplayInput::Host)? {
             if let Some(spec_state) = replay.spec_state.as_deref()
                 && let Err(err) = self.model.install_speculative_graph_state(spec_state)
@@ -1399,7 +1393,6 @@ impl MultimodalPipeline {
                 kv_cache: kv_cache.as_slice(),
                 flash_meta,
                 recurrent_batch_kind,
-                block_size: cache_config.block_size,
                 speculative,
             },
             true,
@@ -1445,7 +1438,7 @@ impl MultimodalPipeline {
         {
             return Ok(());
         }
-        let (Some(cache_config), Some(cache_engine)) =
+        let (Some(_), Some(cache_engine)) =
             (&self.metadata.cache_config, &self.metadata.cache_engine)
         else {
             return Ok(());
@@ -1549,12 +1542,8 @@ impl MultimodalPipeline {
                 else {
                     continue;
                 };
-                let key = CudaDecodeGraphKey::new(
-                    &step.input_ids,
-                    &step.metadata,
-                    cache_config.block_size,
-                    recurrent_batch_kind,
-                )?;
+                let key =
+                    CudaDecodeGraphKey::new(&step.input_ids, &step.metadata, recurrent_batch_kind)?;
                 if state.contains(&key) {
                     continue;
                 }
@@ -1568,7 +1557,6 @@ impl MultimodalPipeline {
                         kv_cache: kv_cache.as_slice(),
                         flash_meta: &inputs.flash_meta,
                         recurrent_batch_kind,
-                        block_size: cache_config.block_size,
                         speculative,
                     },
                     false,
@@ -1604,7 +1592,6 @@ impl MultimodalPipeline {
             kv_cache,
             flash_meta,
             recurrent_batch_kind,
-            block_size,
             speculative,
         } = inputs;
         if speculative {
@@ -1695,7 +1682,6 @@ impl MultimodalPipeline {
                     input_ids: &step.input_ids,
                     seqlen_offsets: &step.seqlen_offsets,
                     position_ids: &step.position_ids,
-                    block_size,
                     kv_cache,
                     metadata: &metadata,
                     model_metadata: self.metadata.model_metadata.as_deref(),
