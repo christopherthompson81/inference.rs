@@ -18,13 +18,17 @@ Run with: `cargo run --release --example perplexity -p inference-examples`
 
 use std::{fs::read_to_string, path::PathBuf, time::Instant};
 
+use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use inference::{
-    LogitsOutput, ModelBuilder, PromptInput, PromptLogitsRequest, api::operations::TokenizeRequest,
+    GgufModelBuilder, LogitsOutput, Model, ModelBuilder, PromptInput, PromptLogitsRequest,
+    api::operations::TokenizeRequest,
 };
 
 const PROMPT_CHUNKSIZE: usize = 1024;
+// llama-perplexity scores a window's second half, so a window needs a few tokens on each side
+const MIN_LLAMA_CPP_CTX: usize = 4;
 
 /// Calculate perplexity of a model. By default, this uses the Llama 3.1 8B model.
 #[derive(Parser)]
@@ -45,6 +49,15 @@ struct Args {
     /// Generate and utilize an imatrix to enhance GGUF quantizations.
     #[arg(short, long)]
     calibration_file: Option<PathBuf>,
+
+    /// A local GGUF file to score instead of `--model-id`.
+    #[arg(long)]
+    gguf: Option<PathBuf>,
+
+    /// Score like `llama-perplexity -c <N> --chunks 1`: the first N tokens, each in the second half given everything
+    /// before it, printed as `PPL = <value>`.
+    #[arg(long)]
+    llama_cpp_ctx: Option<usize>,
 }
 
 fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
@@ -59,18 +72,33 @@ fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let mut model_builder = ModelBuilder::new(&args.model_id).with_logging();
-    if let Some(isq) = &args.isq {
-        let isq = inference::parse_isq_value(isq, None).map_err(anyhow::Error::msg)?;
-        model_builder = model_builder.with_isq(isq);
-    }
-    if let Some(calibration_file) = &args.calibration_file {
-        model_builder = model_builder.with_calibration_file(calibration_file.clone());
-    }
-
-    let model = model_builder.build().await?;
+    let model = match &args.gguf {
+        Some(gguf) => {
+            let dir = gguf.parent().context("the GGUF path has no directory")?;
+            let name = gguf.file_name().context("the GGUF path has no file name")?;
+            GgufModelBuilder::new(dir.to_string_lossy(), vec![name.to_string_lossy()])
+                .build()
+                .await?
+        }
+        None => {
+            let mut model_builder = ModelBuilder::new(&args.model_id).with_logging();
+            if let Some(isq) = &args.isq {
+                let isq = inference::parse_isq_value(isq, None).map_err(anyhow::Error::msg)?;
+                model_builder = model_builder.with_isq(isq);
+            }
+            if let Some(calibration_file) = &args.calibration_file {
+                model_builder = model_builder.with_calibration_file(calibration_file.clone());
+            }
+            model_builder.build().await?
+        }
+    };
 
     let text = read_to_string(&args.file)?;
+    if let Some(ctx) = args.llama_cpp_ctx {
+        let perplexity = llama_cpp_window(&model, text, ctx).await?;
+        println!("PPL = {perplexity:.4}");
+        return Ok(());
+    }
     let tokens = model.tokenize(tokenize(text, false)).await?.tokens;
     let bos_token = model
         .tokenize(tokenize(" ".to_string(), true))
@@ -120,6 +148,35 @@ async fn main() -> Result<()> {
     );
 
     Ok(())
+}
+
+async fn llama_cpp_window(model: &Model, text: String, ctx: usize) -> Result<f64> {
+    anyhow::ensure!(
+        ctx >= MIN_LLAMA_CPP_CTX,
+        "--llama-cpp-ctx must be at least {MIN_LLAMA_CPP_CTX}"
+    );
+    let tokens = model.tokenize(tokenize(text, true)).await?.tokens;
+    // llama-perplexity refuses texts shorter than two windows
+    anyhow::ensure!(
+        tokens.len() >= 2 * ctx,
+        "the text is shorter than two windows"
+    );
+    let request = PromptLogitsRequest {
+        model: None,
+        prompt: PromptInput::Tokens(tokens[..ctx].to_vec()),
+        output: LogitsOutput::Logprobs,
+    };
+    let scored = model.prompt_logits(request).await?;
+    // index i holds token i's logprob given the tokens before it; the first has none
+    let logprobs = scored.token_logprobs[ctx / 2 + 1..]
+        .iter()
+        .map(|logprob| {
+            logprob
+                .map(f64::from)
+                .context("a scored token has no logprob")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok((-logprobs.iter().sum::<f64>() / logprobs.len() as f64).exp())
 }
 ```
 
