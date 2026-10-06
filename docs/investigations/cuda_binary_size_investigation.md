@@ -1047,3 +1047,47 @@ candle-metal-kernels and simply goes unused), and nothing loads `rope_i_*`/`rope
 `#[cfg(not(target_arch = "wasm32"))]` had been left attached to the next item and an empty target-dependency table
 behind; both are gone. The gain is mostly build time and reading surface: these were leaf modules, so the bundle
 barely moves.
+
+## Run 27 - 2026-10-06 12:48
+
+#270 step 1: inventory of the function families steps 2-4 did not cover (norms, softmax/top-k/sampling, rope,
+activations, dense GEMM/GEMV, (de)quantization, elementwise/index, reductions/sort, conv, GDN/SSM, embedding).
+
+Method: code reading for dispatch and callers; GPU size as sm_86 SASS bytes per kernel (`.text.<kernel>` sections of
+cubins pulled with `cuobjdump -xelf` from `target/debug/cuda-kernels/*/*.o`, the candle fatbins and the layout
+fatbin); host size from `nm -S` on a debug test binary (relative only). Nothing was built or run.
+
+Functions with more than one implementation, by redundant size:
+
+| # | Function | Redundant or dead copy | GPU (sm_86) | Survivor |
+|---|---|---|---|---|
+| 1 | GDN chunked prefill | key-major `gdn_chunked/{f32,f16,bf16}_bk{64,128}` and the vmajor bk128 set | 9.09 MB | warp / vmajor_grouped (what dispatch selects) |
+| 2 | GGUF matmul in candle | `quantized.cu` `mul_mat_vec_*_q8_1`, `mul_mat_q*`, dmmv, `quantize_q8_1` | 1.40 MB | inference-quant mmvq/mmq |
+| 3 | CUDA conv direct | candle `conv1d_*`/`conv2d_*` (im2col is hard-wired on), `max_pool2d` (no model caller) | 200 KB | im2col + cuBLAS |
+| 4 | RMSNorm | candle's kernel beside our strided one and the residual variants | ~77 KB | ours on CUDA, candle on CPU/Metal; fused epilogues stay |
+| 5 | RoPE | candle `rope` (DFlash only), dead `RotaryEmb` op, uninstantiated FlashInfer `pos_enc` | 7 KB (+ host) | inference-quant `rotary.cu` + `attention_prep` |
+| 6 | CUDA argsort | candle bitonic `sort.cu` beside ours (graph-safe padding) | 28 KB vs 16 KB | one copy with our padding |
+| 7 | FP8 casts / activation quantize | candle `cast` f8 vs `scalar_fp8`; three activation quantizers | ~80 KB | one each |
+| 8 | Q8_1 activation quantize | `indexed_moe.cu` copy identical to `mmvq_gguf.cu`'s | ~8 KB | `mmvq_gguf` |
+| 9 | Split GLU | MoE `act_and_mul` vs `fused_split_glu` | 2.7 KB | `fused_split_glu` |
+| 10 | Large top-k variants | `topk_large_f32`, BF16/F16 packed batched, top1 batched (tests only) | ~70 KB | ranked radix + packed F32 |
+
+Single implementations that are size targets rather than duplicates: the MoE router top-k (1.40 MB, 132 template
+instances), the GEMV (696 KB, 96 instances), GDN decode (916 KB), ranked radix select (527 KB), cub
+`DeviceSelect`/`DeviceReduce` behind `nonzero` (~500 KB). Kept as they are on purpose: the purpose-built row gather,
+indexed copy and graph copy kernels (CUDA-graph capture and raw byte types), the three expert-sort mechanisms (one
+per MoE backend), and inference-layout's CPU conv beside candle's (performance).
+
+Dead code (no caller): `gptoss_swiglu_interleaved_*`, `launch_gelu_tanh_and_mul_f16`, `fused_gdn_gating` and
+`recurrence_cuda`, `RotaryEmb`/`apply_rotary`, `Qwen2VLRotaryEmbedding::forward_qk_norm`, `qk_rms_norm_mrope`,
+`SortOp`, `CumSumOp`, `BincountOp`, the cuBLASLt branch in `UnquantLinear::forward_raw` (rank-3 inputs return
+earlier through `forward_cuda_gemm`); Metal `sort`/`scan`/`copy` shaders behind the dead ops, `f8q8.metal`,
+`call_rotary` (to verify on Mac, #269). Host-only duplicates: the packed-range GDN helpers (four copies, one verbatim
+between `qwen3_next.rs` and `qwen3_5/packed_gdn.rs`), identical llava1.5/llava-next vision towers and projectors,
+identical qwen2-vl/qwen2.5-vl vision attention and rotary, near-identical CLIP text towers, the 10 xlora forks.
+
+Bugs found on the way, not yet confirmed by a run: candle's CUDA `const_set`/`copy2d` for I16/I32 are mapped but not
+defined in `fill.cu`; GDN `causal_conv1d` errors on f32 CUDA input instead of falling back; imatrix stats skip
+calls the GEMV takes (batch <= 8); candle's Metal argsort is wrong past 1024 elements.
+
+Next: item 1 first (largest, low risk once the reachability is confirmed by a run), then item 2, then the bugs.
