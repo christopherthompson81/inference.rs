@@ -1089,41 +1089,6 @@ unsafe extern "C" {
     ) -> u64;
     #[cfg(has_flashinfer_gdn_sm90_kernel)]
     pub fn inference_flashinfer_gdn_sm90_launch(params: *const c_void) -> i32;
-    // Chunked GDN recurrence for prefill (processes tokens in BT=64 chunks)
-    pub fn chunked_gated_delta_rule_recurrence(
-        q: *const f32,
-        k: *const f32,
-        v: *const f32,
-        g: *const f32,
-        beta: *const f32,
-        state: *mut c_void,
-        output: *mut f32,
-        bh: i32,
-        seq_len: i32,
-        k_dim: i32,
-        v_dim: i32,
-        slot_indices: *const i32,
-        num_heads: i32,
-        state_dtype: i32,
-        stream: i64,
-    );
-    pub fn vmajor_chunked_gated_delta_rule_recurrence(
-        q: *const f32,
-        k: *const f32,
-        v: *const f32,
-        g: *const f32,
-        beta: *const f32,
-        state: *mut c_void,
-        output: *mut f32,
-        bh: i32,
-        seq_len: i32,
-        k_dim: i32,
-        v_dim: i32,
-        slot_indices: *const i32,
-        num_heads: i32,
-        state_dtype: i32,
-        stream: i64,
-    ) -> i32;
     pub fn causal_conv1d_update(
         x: *const c_void,
         weight: *const c_void,

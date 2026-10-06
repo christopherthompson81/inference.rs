@@ -291,7 +291,6 @@ enum GdnPrefillKernel {
     ValueMajor2,
     ValueMajor4,
     ValueMajor8,
-    LegacyChunked,
 }
 
 #[cfg(any(feature = "cuda", test))]
@@ -354,9 +353,8 @@ fn parse_prefill_kernel(value: &str) -> std::result::Result<Option<GdnPrefillKer
         "vmajor2" => Ok(Some(GdnPrefillKernel::ValueMajor2)),
         "vmajor4" => Ok(Some(GdnPrefillKernel::ValueMajor4)),
         "vmajor8" => Ok(Some(GdnPrefillKernel::ValueMajor8)),
-        "legacy-chunked" => Ok(Some(GdnPrefillKernel::LegacyChunked)),
         other => Err(format!(
-            "invalid GDN prefill kernel '{other}', expected auto, flashinfer-sm90, cutile, vmajor1, vmajor2, vmajor4, vmajor8, or legacy-chunked"
+            "invalid GDN prefill kernel '{other}', expected auto, flashinfer-sm90, cutile, vmajor1, vmajor2, vmajor4, or vmajor8"
         )),
     }
 }
@@ -1243,8 +1241,6 @@ enum RecurrenceKernel {
     ValueMajorWarp2,
     ValueMajorWarp4,
     ValueMajorWarp8,
-    Chunked,
-    ValueMajorChunked,
 }
 
 /// `state` is `[BH, K, V]` or `[BH, V, K]` (gathered), or the matching pooled layout, mutated in place.
@@ -1268,7 +1264,6 @@ fn launch_recurrence(
             | RecurrenceKernel::ValueMajorWarp2
             | RecurrenceKernel::ValueMajorWarp4
             | RecurrenceKernel::ValueMajorWarp8
-            | RecurrenceKernel::ValueMajorChunked
     ) && (k_dim != GDN_DECODE_K_DIM || v_dim != GDN_DECODE_V_DIM)
     {
         candle::bail!("value-major GDN prefill requires K=V=128, got K={k_dim}, V={v_dim}");
@@ -1333,33 +1328,6 @@ fn launch_recurrence(
             }
             return Ok(());
         }
-        if matches!(kernel, RecurrenceKernel::ValueMajorChunked) {
-            let status = unsafe {
-                crate::cuda::ffi::vmajor_chunked_gated_delta_rule_recurrence(
-                    q_ptr,
-                    k_ptr,
-                    v_ptr,
-                    g_ptr,
-                    beta_ptr,
-                    state_ptr,
-                    output_buf.device_ptr(output_buf.stream()).0 as *mut f32,
-                    bh as i32,
-                    seq_len as i32,
-                    k_dim as i32,
-                    v_dim as i32,
-                    slot_ptr,
-                    num_heads as i32,
-                    state_dtype,
-                    stream,
-                )
-            };
-            if status != 0 {
-                candle::bail!(
-                    "vmajor_chunked_gated_delta_rule_recurrence failed with status {status}"
-                );
-            }
-            return Ok(());
-        }
         let launcher = match kernel {
             RecurrenceKernel::Scalar => crate::cuda::ffi::gated_delta_rule_recurrence,
             RecurrenceKernel::Warp => crate::cuda::ffi::warp_gated_delta_rule_recurrence,
@@ -1369,8 +1337,6 @@ fn launch_recurrence(
             RecurrenceKernel::ValueMajorWarp2
             | RecurrenceKernel::ValueMajorWarp4
             | RecurrenceKernel::ValueMajorWarp8 => unreachable!(),
-            RecurrenceKernel::Chunked => crate::cuda::ffi::chunked_gated_delta_rule_recurrence,
-            RecurrenceKernel::ValueMajorChunked => unreachable!(),
         };
         unsafe {
             launcher(
@@ -1409,16 +1375,6 @@ pub fn gated_delta_rule_recurrence_cuda(
     slots: GdnStateSlots<'_>,
 ) -> Result<Tensor> {
     launch_recurrence(RecurrenceKernel::Scalar, inputs, state, slots)
-}
-
-/// Prefill recurrence in 64-token chunks; see `launch_recurrence`.
-#[cfg(feature = "cuda")]
-pub fn chunked_gated_delta_rule_recurrence_cuda(
-    inputs: RecurrenceInputs<'_>,
-    state: &mut Tensor,
-    slots: GdnStateSlots<'_>,
-) -> Result<Tensor> {
-    launch_recurrence(RecurrenceKernel::Chunked, inputs, state, slots)
 }
 
 /// Warp-per-value-column prefill recurrence; see `launch_recurrence`.
@@ -1475,7 +1431,6 @@ fn vmajor_prefill_gated_delta_rule_recurrence_cuda_impl(
         GdnPrefillKernel::FlashInferSm90 | GdnPrefillKernel::Cutile => {
             candle_core::bail!("fused GDN prefill providers require convolved inputs")
         }
-        GdnPrefillKernel::LegacyChunked => RecurrenceKernel::ValueMajorChunked,
     };
     launch_recurrence(recurrence_kernel, inputs, state, slots)
 }
@@ -1502,16 +1457,6 @@ pub fn vmajor_prefill_gated_delta_rule_recurrence_cuda(
     )
 }
 
-/// Runs chunked prefill against value-major K=V=128 state.
-#[cfg(feature = "cuda")]
-pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
-    inputs: RecurrenceInputs<'_>,
-    state: &mut Tensor,
-    slots: GdnStateSlots<'_>,
-) -> Result<Tensor> {
-    launch_recurrence(RecurrenceKernel::ValueMajorChunked, inputs, state, slots)
-}
-
 #[cfg(not(feature = "cuda"))]
 pub fn gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
@@ -1519,15 +1464,6 @@ pub fn gated_delta_rule_recurrence_cuda(
     _slots: GdnStateSlots<'_>,
 ) -> Result<Tensor> {
     candle_core::bail!("gated_delta_rule_recurrence_cuda requires the cuda feature")
-}
-
-#[cfg(not(feature = "cuda"))]
-pub fn chunked_gated_delta_rule_recurrence_cuda(
-    _inputs: RecurrenceInputs<'_>,
-    _state: &mut Tensor,
-    _slots: GdnStateSlots<'_>,
-) -> Result<Tensor> {
-    candle_core::bail!("chunked_gated_delta_rule_recurrence_cuda requires the cuda feature")
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -1556,15 +1492,6 @@ pub fn vmajor_prefill_gated_delta_rule_recurrence_cuda(
     _activation_dtype: DType,
 ) -> Result<Tensor> {
     candle_core::bail!("vmajor_prefill_gated_delta_rule_recurrence_cuda requires the cuda feature")
-}
-
-#[cfg(not(feature = "cuda"))]
-pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
-    _inputs: RecurrenceInputs<'_>,
-    _state: &mut Tensor,
-    _slots: GdnStateSlots<'_>,
-) -> Result<Tensor> {
-    candle_core::bail!("vmajor_chunked_gated_delta_rule_recurrence_cuda requires the cuda feature")
 }
 
 /// CUDA-accelerated causal conv1d (both update and full paths).
@@ -6001,10 +5928,6 @@ mod dispatch_tests {
             parse_prefill_kernel("vmajor8").unwrap(),
             Some(GdnPrefillKernel::ValueMajor8)
         );
-        assert_eq!(
-            parse_prefill_kernel("legacy-chunked").unwrap(),
-            Some(GdnPrefillKernel::LegacyChunked)
-        );
         assert!(parse_prefill_kernel("unknown").is_err());
 
         let policy = sm90_prefill_policy(48, 129);
@@ -6017,7 +5940,6 @@ mod dispatch_tests {
             GdnPrefillKernel::ValueMajor2,
             GdnPrefillKernel::ValueMajor4,
             GdnPrefillKernel::ValueMajor8,
-            GdnPrefillKernel::LegacyChunked,
         ] {
             assert!(prefill_kernel_supported(kernel, policy));
             assert_eq!(select_prefill_kernel(policy, Some(kernel)), Ok(kernel));

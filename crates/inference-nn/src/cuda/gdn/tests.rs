@@ -270,18 +270,6 @@ fn run_case(case: RecurrenceCase, dev: &Device) -> Result<()> {
         &mut state_scalar,
         GdnStateSlots::Gathered,
     )?;
-    let mut state_chunked = tensor3(state.clone(), (case.bh, case.k_dim, case.v_dim), dev)?;
-    let chunked = chunked_gated_delta_rule_recurrence_cuda(
-        RecurrenceInputs {
-            q: &q,
-            k: &k,
-            v: &v,
-            g: &g,
-            beta: &beta,
-        },
-        &mut state_chunked,
-        GdnStateSlots::Gathered,
-    )?;
     let mut state_warp = tensor3(state, (case.bh, case.k_dim, case.v_dim), dev)?;
     let warp = warp_gated_delta_rule_recurrence_cuda(
         RecurrenceInputs {
@@ -297,26 +285,12 @@ fn run_case(case: RecurrenceCase, dev: &Device) -> Result<()> {
 
     let scalar_flat = flat(&scalar)?;
     let scalar_state_flat = flat(&state_scalar)?;
-    let chunked_flat = flat(&chunked)?;
-    let chunked_state_flat = flat(&state_chunked)?;
     let warp_flat = flat(&warp)?;
     let warp_state_flat = flat(&state_warp)?;
 
     let name = format!(
         "bh={},seq={},k={},v={}",
         case.bh, case.seq_len, case.k_dim, case.v_dim
-    );
-    assert_close(
-        &format!("{name} chunked output"),
-        &scalar_flat,
-        &chunked_flat,
-        3.0e-4,
-    );
-    assert_close(
-        &format!("{name} chunked state"),
-        &scalar_state_flat,
-        &chunked_state_flat,
-        3.0e-4,
     );
     assert_close(
         &format!("{name} warp output"),
@@ -451,11 +425,7 @@ fn low_dtype_recurrence_matches_sequential_rounding_cuda() -> Result<()> {
     skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for state_dtype in [DType::BF16, DType::F16] {
-        for kernel in [
-            RecurrenceKernel::Scalar,
-            RecurrenceKernel::Warp,
-            RecurrenceKernel::Chunked,
-        ] {
+        for kernel in [RecurrenceKernel::Scalar, RecurrenceKernel::Warp] {
             run_low_dtype_sequential_recurrence_case(&dev, state_dtype, kernel, 64)?;
         }
         run_low_dtype_sequential_recurrence_case(
@@ -471,12 +441,6 @@ fn low_dtype_recurrence_matches_sequential_rounding_cuda() -> Result<()> {
         ] {
             run_low_dtype_sequential_recurrence_case(&dev, state_dtype, kernel, 128)?;
         }
-        run_low_dtype_sequential_recurrence_case(
-            &dev,
-            state_dtype,
-            RecurrenceKernel::ValueMajorChunked,
-            128,
-        )?;
     }
     Ok(())
 }
@@ -519,9 +483,7 @@ fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> 
         &dev,
     )?;
     let mut key_major_state = initial_state.clone();
-    let value_major_state = initial_state.transpose(2, 3)?.contiguous()?;
-    let mut value_major_warp_state = value_major_state.copy()?;
-    let mut value_major_chunked_state = value_major_state.copy()?;
+    let mut value_major_warp_state = initial_state.transpose(2, 3)?.contiguous()?;
     let slot_indices = Tensor::from_vec(vec![4u32, 1], (BATCH_SIZE,), &dev)?;
     let slots = GdnStateSlots::Pooled(&slot_indices);
     let inputs = RecurrenceInputs {
@@ -539,11 +501,6 @@ fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> 
             &mut value_major_warp_state,
             slots,
         )?;
-        let value_major_chunked = vmajor_chunked_gated_delta_rule_recurrence_cuda(
-            inputs,
-            &mut value_major_chunked_state,
-            slots,
-        )?;
         assert_close(
             &format!("value-major warp prefill output step {step}"),
             &flat(&value_major_warp)?,
@@ -553,18 +510,6 @@ fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> 
         assert_close(
             &format!("value-major warp prefill state step {step}"),
             &flat(&value_major_warp_state.transpose(2, 3)?.contiguous()?)?,
-            &flat(&key_major_state)?,
-            3.0e-4,
-        );
-        assert_close(
-            &format!("value-major chunked prefill output step {step}"),
-            &flat(&value_major_chunked)?,
-            &flat(&reference)?,
-            3.0e-4,
-        );
-        assert_close(
-            &format!("value-major chunked prefill state step {step}"),
-            &flat(&value_major_chunked_state.transpose(2, 3)?.contiguous()?)?,
             &flat(&key_major_state)?,
             3.0e-4,
         );
@@ -3770,11 +3715,7 @@ fn pooled_state_kernels_match_gathered_cuda() -> Result<()> {
         };
         let mut state_gathered = gathered_rec.reshape((bh, k_dim, v_dim))?.copy()?;
         let mut state_pooled = pool_rec.copy()?;
-        for kernel in [
-            RecurrenceKernel::Scalar,
-            RecurrenceKernel::Warp,
-            RecurrenceKernel::Chunked,
-        ] {
+        for kernel in [RecurrenceKernel::Scalar, RecurrenceKernel::Warp] {
             let mut sg = state_gathered.copy()?;
             let mut sp = state_pooled.copy()?;
             let out_g = launch_recurrence(kernel, inputs, &mut sg, GdnStateSlots::Gathered)?;
@@ -4015,7 +3956,6 @@ fn pooled_decomposed_recurrence_padding_rows_are_zero_and_stateless_cuda() -> Re
     for (kernel, label) in [
         (RecurrenceKernel::Scalar, "scalar"),
         (RecurrenceKernel::Warp, "warp"),
-        (RecurrenceKernel::Chunked, "chunked"),
     ] {
         let mut pooled_state = initial.copy()?;
         let mut gathered_state = initial

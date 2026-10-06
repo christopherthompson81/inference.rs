@@ -399,15 +399,3 @@ constexpr int GDN_TRANSITION_APPLY_RECURRENT_EPOCH = 8;
 constexpr int GDN_TRANSITION_APPLY_CONV_STATE = 9;
 
 constexpr int GDN_TRANSITION_APPLY_RECURRENT_STATE = 10;
-
-constexpr int GDN_CHUNKED_BT = 64;
-constexpr int GDN_CHUNKED_BV = 64;
-
-template <typename StateT>
-using GdnChunkedKernel = void (*)(const float *, const float *, const float *,
-                                  const float *, const float *, StateT *,
-                                  float *, int, int, const int32_t *, int);
-
-// Each chunked configuration costs minutes of cicc, so each is explicitly instantiated in its own TU in gdn_chunked/.
-template <typename StateT, int BT, int BK, int BV, bool VALUE_MAJOR>
-GdnChunkedKernel<StateT> gdn_chunked_kernel();

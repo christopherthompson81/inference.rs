@@ -15,5 +15,5 @@ maintained in-tree lives in `kernels/`; this table records where it came from.
 | `kernels/cuda/sort.cu` (bitonic `asort`) | [huggingface/candle](https://github.com/huggingface/candle) `candle-kernels/sort.cu` (llama.cpp argsort lineage) | not recorded | MIT OR Apache-2.0 | adapted; the rmsnorm and top-k parts are original |
 | `kernels/metal/` | ports of this crate's `gdn_*.cu` and `ssm.cu` | n/a | as above | adapted |
 
-Everything else in `kernels/cuda/` (other `gdn_*`, `gdn_chunked/`, `dflash_*`, `dynamic_conv`, `graph`,
+Everything else in `kernels/cuda/` (other `gdn_*`, `dflash_*`, `dynamic_conv`, `graph`,
 `indexed_copy`, `input_packing`, `attention_prep`, `speculative_rejection`) is original to this project.
