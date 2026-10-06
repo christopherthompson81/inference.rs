@@ -14,6 +14,9 @@
 > - `src/moe/`, `src/ffi.rs`, the static `libmoe.a` build, the `cutile` feature and the `indexed_moe_forward` kernels in
 >   `src/quantized.cu` are removed. Only candle-nn's MoE module (removed in the vendored candle-nn) and candle-core's
 >   `indexed_moe_forward` (removed) called them; inference-nn's `moe_gemm_wmma` shared a C name with candle's.
+> - `src/quantized.cu`: the `mul_mat_vec_*`, `mul_mat_q*`, `dequantize_mul_mat_vec_*` and `quantize_q8_1` kernels are
+>   removed with their candle-core launchers; inference-quant runs GGUF matmul. `dequantize_block_*` and `get_rows_*`
+>   stay.
 > - `src/reduce.cu`: the `rope_i` and `rope_thd` kernels are removed with candle-nn's `rope_i`/`rope_thd`; `rope` stays.
 >
 > Everything else is upstream. To re-sync, copy `candle-kernels/` from the new rev and reapply the changes above.

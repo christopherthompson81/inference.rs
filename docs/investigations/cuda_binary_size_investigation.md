@@ -1115,3 +1115,25 @@ The 9.09 MB Run 27 measured is uncompressed SASS; the bundle's compressed fatbin
 instances for a fraction of that, so the bundle only drops 0.21 MiB. The real gain is build time: about two minutes
 of cicc per instance, about 18 CPU-minutes for the nine on a cold kernel build, and the slowest TUs of inference-nn's
 kernel set. Sizes from Run 27's uncompressed SASS overstate bundle savings for template-heavy families in general.
+
+## Run 29 - 2026-10-06 13:44
+
+#270 step 1, item 2: drop candle's GGUF matmul kernels.
+
+`qmatmul_forward` sends every type inference-quant's mmvq/mmq cover to them first, so candle's `QCudaStorage::fwd`
+(matvec via Q8_1 for batches <= 8, MMQ above, dmmv behind the never-set `set_force_dmmv`) only ran for a caller
+using candle's `QMatMul::forward` directly. Its `fwd` now dequantizes (`dequantize_block_*`, kept) and runs cuBLAS;
+the 101 kernels behind the old paths (`mul_mat_vec_*`, `mul_mat_q*`, `dequantize_mul_mat_vec_*`, `quantize_q8_1`)
+and their launchers, constants and candle's own tests for them are gone. `quantized.cu` 4639 -> 3247 lines.
+
+```
+new test candle_qmatmul_on_cuda_matches_the_dequantized_matmul (Q4_K, Q8_0, Q6_K; batch 3 and 40)  -> pass
+cargo nextest run -p inference-quant -p inference-nn --features cuda -E 'test(gguf)|test(preload)|test(qmatmul)|test(embedding)' -> 81 pass
+local_ci.sh --size  -> file 102.83 MiB (-0.32 against the pre-#306 baseline), .rodata 6.06 MiB (-0.30), .nv_fatbin unchanged
+quantized.fatbin (compressed, sm_86)  -> 15.6 KB
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2788 + 2411 tests)
+```
+
+candle's modules ship as compressed fatbins in `.rodata`, so the 1.40 MB of SASS Run 27 counted is ~0.30 MiB in the
+bundle. The preload loads every entry of every candle module onto each device at startup, so the GPU now holds about
+56 KB for this module (dequantize and get_rows, Run 27's figures) instead of about 1.46 MB.
