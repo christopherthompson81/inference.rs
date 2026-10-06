@@ -1,68 +1,83 @@
 use super::*;
 
+/// RMSNorm over the last dim: our kernel on CUDA (4D read through its strides), candle's op on CPU and Metal.
+pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if x.device().is_cuda() {
+        return cuda_rms_norm(x, weight, eps);
+    }
+    candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)
+}
+
 #[cfg(feature = "cuda")]
-pub fn try_cuda_rms_norm_strided_4d(
-    input: &Tensor,
-    weight: &Tensor,
-    eps: f32,
-) -> Result<Option<Tensor>> {
+fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     use candle_core::backend::BackendStorage;
     use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
-    if !input.device().is_cuda() || input.rank() != 4 {
-        return Ok(None);
-    }
     let dtype = input.dtype();
     if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32) || weight.dtype() != dtype {
-        return Ok(None);
+        candle_core::bail!(
+            "cuda rms_norm needs f32/f16/bf16 input and weight, got {dtype:?} and {:?}",
+            weight.dtype()
+        );
     }
     if !weight.device().same_device(input.device()) {
-        return Ok(None);
+        candle_core::bail!("cuda rms_norm weight is on another device");
     }
-
-    let (batch, heads, seq_len, head_dim) = input.dims4()?;
+    if input.rank() == 0 {
+        candle_core::bail!("cuda rms_norm needs at least one dim");
+    }
+    if input.elem_count() == 0 {
+        return input.zeros_like();
+    }
+    // Rank 4 is read through its strides; any other rank as contiguous [rows, dim] rows of a 4D view.
+    let input = if input.rank() == 4 {
+        input.clone()
+    } else {
+        input.contiguous()?
+    };
+    let head_dim = input.dim(D::Minus1)?;
+    let (batch, heads, seq_len) = if input.rank() == 4 {
+        let (batch, heads, seq_len, _) = input.dims4()?;
+        (batch, heads, seq_len)
+    } else {
+        (1, 1, input.elem_count() / head_dim)
+    };
     if weight.dims1()? != head_dim {
         candle_core::bail!(
-            "cuda_rms_norm_strided_4d weight size {} does not match head dim {head_dim}",
+            "cuda rms_norm weight size {} does not match last dim {head_dim}",
             weight.dims1()?
         );
     }
-    if input.elem_count() == 0 {
-        return Ok(None);
-    }
-    for (name, value) in [
-        ("batch", batch),
-        ("heads", heads),
-        ("seq_len", seq_len),
-        ("head_dim", head_dim),
-    ] {
-        if value > i32::MAX as usize {
-            candle_core::bail!("cuda_rms_norm_strided_4d {name} is too large: {value}");
-        }
+    if batch * heads * seq_len > i32::MAX as usize || head_dim > i32::MAX as usize {
+        candle_core::bail!("cuda rms_norm input is too large: {:?}", input.shape());
     }
 
     let (input_storage, input_layout) = input.storage_and_layout();
-    if input_layout.is_contiguous() {
-        return Ok(None);
-    }
-    let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => return Ok(None),
+    let candle_core::Storage::Cuda(input_storage) = &*input_storage else {
+        candle_core::bail!("cuda rms_norm input is not on CUDA");
     };
     let weight = weight.contiguous()?;
     let (weight_storage, weight_layout) = weight.storage_and_layout();
-    let weight_storage = match &*weight_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => return Ok(None),
+    let candle_core::Storage::Cuda(weight_storage) = &*weight_storage else {
+        candle_core::bail!("cuda rms_norm weight is not on CUDA");
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as i64;
     let shape = input.shape().clone();
     let elem_count = input.elem_count();
-    let stride = input_layout.stride();
+    let stride: [usize; 4] = if input.rank() == 4 {
+        input_layout
+            .stride()
+            .try_into()
+            .map_err(candle_core::Error::wrap)?
+    } else {
+        let rows = seq_len * head_dim;
+        [rows, rows, head_dim, 1]
+    };
     let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
     let heads_i32 = i32::try_from(heads).map_err(candle_core::Error::wrap)?;
     let seq_len_i32 = i32::try_from(seq_len).map_err(candle_core::Error::wrap)?;
@@ -71,10 +86,10 @@ pub fn try_cuda_rms_norm_strided_4d(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi_fn:ident) => {{
             let CudaStorageSlice::$variant(src) = &input_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_strided_4d input dtype mismatch");
+                candle_core::bail!("cuda rms_norm input dtype mismatch");
             };
             let CudaStorageSlice::$variant(weight_src) = &weight_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_strided_4d weight dtype mismatch");
+                candle_core::bail!("cuda rms_norm weight dtype mismatch");
             };
             let mut out = unsafe { dev.alloc::<$ty>(elem_count) }?;
             let (src_ptr, src_guard) = src.device_ptr(&stream);
@@ -110,10 +125,10 @@ pub fn try_cuda_rms_norm_strided_4d(
                 slice: CudaStorageSlice::$variant(out),
                 device: dev.clone(),
             };
-            Ok(Some(Tensor::from((
+            Ok(Tensor::from((
                 candle_core::Storage::Cuda(out_storage),
                 shape,
-            ))))
+            )))
         }};
     }
 
@@ -121,7 +136,7 @@ pub fn try_cuda_rms_norm_strided_4d(
         DType::BF16 => launch!(BF16, half::bf16, rms_norm_strided_4d_bf16),
         DType::F16 => launch!(F16, half::f16, rms_norm_strided_4d_f16),
         DType::F32 => launch!(F32, f32, rms_norm_strided_4d_f32),
-        _ => Ok(None),
+        _ => unreachable!("dtype checked above"),
     }
 }
 

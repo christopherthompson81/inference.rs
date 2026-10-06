@@ -1219,3 +1219,57 @@ fallback now copies twice where candle's `rope` launched once; it only runs when
 Metal now runs our Metal rotary with per-batch caches, which goes on the Mac list (#269).
 
 Left: RMSNorm, argsort and FP8-cast consolidation (Run 27's medium-risk rows), each needing parity tests first.
+
+## Run 33 - 2026-10-06 17:21
+
+#270 step 1, RMSNorm (Run 27 row 4, the first medium-risk item): one plain RMSNorm on CUDA. Before, `RmsNorm`
+ran our `rms_norm_strided_4d` kernel only for non-contiguous rank-4 input and candle's `rmsnorm` for everything else,
+and 14 other call sites (qk/qkv norms, residual fallbacks, gemma3n vision, FLUX through `candle_nn::RmsNorm`) went to
+candle's directly. The two kernels do the same math (f32 sum of squares, `rsqrtf(mean + eps)`, times weight, one
+rounding); they differ in block size and reduction order only.
+
+New `inference_nn::ops::rms_norm`: on CUDA our kernel for any rank (rank 4 through its strides, others as contiguous
+rows), elsewhere candle's CPU/Metal op. Every caller moved; candle-nn's CUDA arm and candle-kernels' `rmsnorm`
+kernels deleted. The fused variants (residual, add, residual-then-norm, GDN gated, FP8, Q/K-with-rope) stay.
+
+First A/B (temporary ignored test, both kernels in one binary, bf16, sm86, 2000 iters x 5 rounds, us per call):
+
+```
+shape        ours (scalar)   candle
+1 x 896          3.90        12.11
+1 x 4096         4.52         4.06
+512 x 896       12.28        11.19
+512 x 4096      25.93        22.71
+4096 x 2048    113.62        90.56
+64 x 128         3.70         4.16
+```
+
+Ours was 11-25% slower at batch: one element per load with int64 stride math. Added `rms_norm_rows_vec8_kernel`
+(16-byte loads, the residual kernels' `rms_vec8` helpers) for unit-stride rows whose bases, length and pointers are
+8-element aligned; the scalar kernel keeps the rest. Rerun:
+
+```
+shape        ours (vec8)     candle
+1 x 896          3.88        11.59
+1 x 4096         3.73         4.05
+512 x 896        3.90        11.11
+512 x 4096      12.57        22.57
+4096 x 2048     46.56        91.60
+64 x 128         3.71         4.15
+```
+
+Pinned by `rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout`: dims 36 and 4100 (scalar), 40 and 8200
+(vec8), the larger two looping past one block pass; ranks 1-4; outer-dim permutes, a last-dim-strided 4D view (gemma3n
+vision now passes one without a copy; the old strided path was never tested), an aligned heads narrow, an unaligned
+offset (scalar fallback), narrowed and transposed 3D; f32, bf16, f16. The review found the first draft reached only
+vec8 single passes. The A/B test was not kept: candle's kernel is gone.
+
+Known leftovers: candle-nn's `ops::rms_norm`/`RmsNorm` are still public and now fail on contiguous CUDA input (no
+caller; noted in its README), f64 CUDA RMSNorm is gone, and shapes off the 8-element grid take the slower scalar
+kernel (real hidden sizes are multiples of 8).
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> fail (needless borrows; norm module was
+                                                                       cuda/metal-gated), then pass (2789 + 2406)
+local_ci.sh --size  -> file 102.48 MiB (-0.04)
+```

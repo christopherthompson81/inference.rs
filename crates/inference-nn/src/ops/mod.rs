@@ -72,9 +72,7 @@ pub use topk_sampling::*;
 mod logit_processing;
 #[cfg(any(feature = "cuda", feature = "metal"))]
 pub use logit_processing::*;
-#[cfg(any(feature = "cuda", feature = "metal"))]
 mod norm;
-#[cfg(any(feature = "cuda", feature = "metal"))]
 pub use norm::*;
 #[cfg(feature = "cuda")]
 mod rope;

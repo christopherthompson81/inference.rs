@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 
 use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{LayerNorm, RmsNorm};
+use candle_nn::LayerNorm;
 
 use crate::qlinear::MaybeQuantLinear;
 use inference_quant::ShardedVarBuilder;
 use serde::Deserialize;
 
-use crate::layers::MatMul;
+use crate::layers::{MatMul, RmsNorm};
 
 const MLP_RATIO: f64 = 4.;
 const HIDDEN_SIZE: usize = 3072;
@@ -197,9 +197,9 @@ pub struct QkNorm {
 impl QkNorm {
     fn new(dim: usize, vb: ShardedVarBuilder) -> Result<Self> {
         let query_norm = vb.get(dim, "query_norm.scale")?;
-        let query_norm = RmsNorm::new(query_norm, 1e-6);
+        let query_norm = RmsNorm::from_w(query_norm, 1e-6)?;
         let key_norm = vb.get(dim, "key_norm.scale")?;
-        let key_norm = RmsNorm::new(key_norm, 1e-6);
+        let key_norm = RmsNorm::from_w(key_norm, 1e-6)?;
         Ok(Self {
             query_norm,
             key_norm,
@@ -329,24 +329,8 @@ impl SelfAttention {
         self.qkv = self.qkv.to_device(device)?;
         self.proj = self.proj.to_device(device)?;
         self.norm = QkNorm {
-            query_norm: RmsNorm::new(
-                self.norm
-                    .query_norm
-                    .clone()
-                    .into_inner()
-                    .weight()
-                    .to_device(device)?,
-                1e-6,
-            ),
-            key_norm: RmsNorm::new(
-                self.norm
-                    .key_norm
-                    .clone()
-                    .into_inner()
-                    .weight()
-                    .to_device(device)?,
-                1e-6,
-            ),
+            query_norm: RmsNorm::from_w(self.norm.query_norm.weight().to_device(device)?, 1e-6)?,
+            key_norm: RmsNorm::from_w(self.norm.key_norm.weight().to_device(device)?, 1e-6)?,
         };
         Ok(())
     }
@@ -537,24 +521,8 @@ impl SingleStreamBlock {
         self.linear1 = self.linear1.to_device(device)?;
         self.linear2 = self.linear2.to_device(device)?;
         self.norm = QkNorm {
-            query_norm: RmsNorm::new(
-                self.norm
-                    .query_norm
-                    .clone()
-                    .into_inner()
-                    .weight()
-                    .to_device(device)?,
-                1e-6,
-            ),
-            key_norm: RmsNorm::new(
-                self.norm
-                    .key_norm
-                    .clone()
-                    .into_inner()
-                    .weight()
-                    .to_device(device)?,
-                1e-6,
-            ),
+            query_norm: RmsNorm::from_w(self.norm.query_norm.weight().to_device(device)?, 1e-6)?,
+            key_norm: RmsNorm::from_w(self.norm.key_norm.weight().to_device(device)?, 1e-6)?,
         };
         self.pre_norm = LayerNorm::new_no_bias(self.pre_norm.weight().to_device(device)?, 1e-6);
         self.modulation.lin = self.modulation.lin.to_device(device)?;

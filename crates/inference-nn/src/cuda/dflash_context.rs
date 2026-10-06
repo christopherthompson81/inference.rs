@@ -446,7 +446,7 @@ mod tests {
         let mut expected = Vec::with_capacity(layers);
         for layer in 0..layers {
             let normalized =
-                candle_nn::ops::rms_norm(&input.i(layer)?.contiguous()?, &weights.i(layer)?, eps)?;
+                crate::ops::rms_norm(&input.i(layer)?.contiguous()?, &weights.i(layer)?, eps)?;
             expected.push(
                 inference_quant::rotary::apply_rotary_q_preselected(
                     &normalized.unsqueeze(0)?,

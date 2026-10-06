@@ -147,8 +147,8 @@ impl RMSNormAct2d {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut x = candle_nn::ops::rms_norm(
-            &x.permute((0, 2, 3, 1))?.contiguous()?,
+        let mut x = crate::ops::rms_norm(
+            &x.permute((0, 2, 3, 1))?,
             &self.norm.weight,
             self.norm.eps as f32,
         )?
