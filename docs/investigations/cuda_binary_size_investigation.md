@@ -794,3 +794,40 @@ the same, and nothing uses `-rdc`, so mixing arch sets in one library links fine
   dequantizing. It now asks `activation_quantization_scheme_for(x)`, as the next branch does (sm_90 with DeepGEMM
   skipped had the same fault).
 - The two CUTLASS sm90 tests were gated on the cfg alone and now skip on a device that is not sm_90.
+
+## Run 20 - 2026-10-05 22:40
+
+Step 3: candle-kernels for a list.
+
+candle built its SASS fatbins from PTX compiled once (for the lowest listed arch since #292), so kernels under
+`__CUDA_ARCH__ >= 800/890` guards were compiled out before the SASS step, and an "80,89" build would ship sm_89
+SASS without its fp8 kernels. The fatbins now build straight from the `.cu` sources for every listed arch. A first
+version compiled PTX for the lowest and highest arch just to read entry names; review confirmed the SASS matches but
+that the extra front-end pass cost about 1s per file. The build now reads each fatbin's entries per cubin with
+`cuobjdump -symbols` (an `arch = sm_NN` line opens a cubin, a `STO_ENTRY` symbol is a kernel): every entry any arch
+has goes in `*_ENTRIES`, and one some arch lacks in `*_OPTIONAL_ENTRIES`, with the arch list as `ARCHS`.
+`Module::is_optional` exposes them, and `preload_candle_kernels` skips an optional entry the device's module lacks;
+any other missing entry still fails the preload. With one arch every optional list is empty.
+
+```
+cargo nextest run -p inference-nn --features cuda --lib -E 'test(preload)'                 -> pass (single arch)
+CUDA_COMPUTE_CAP="86,89" CARGO_TARGET_DIR=<scratch> (same)                                     -> pass on the sm_86 card
+  in 2m39s from clean: ARCHS ["86", "89"], 755 entries, 50 optional (indexing 20, unary 24, ternary 5,
+  affine 1: the fp8 kernels), the same set the PTX version found
+local_ci.sh --size                                                                              -> .nv_fatbin and
+  .rodata (where candle's images sit) unchanged against the baseline
+```
+
+The preload test asserted every entry loads, which holds only on the highest listed arch; it now requires all of
+them when the device runs the highest arch's SASS, and every non-optional one otherwise.
+
+Review of the cuobjdump version: no correctness issue. cuobjdump decompresses the fatbins, and on single-arch
+sm_86 its entries match the old PTX `.visible .entry` sets for all 11 modules. Hardening taken from it:
+- only an arch line under a `Fatbin elf code` header opens a cubin (a PTX section has an arch line and no symbols)
+- the build asserts every module carries the same arch list, since `ARCHS` is written once
+- the preload tries a module's required entries first, so an image that fails to load errors on its first entry
+  rather than being swallowed by an optional one
+Rerun "86,89": same 50 optional entries, ARCHS ["86", "89"], preload passes.
+
+Next: step 4, one cached per-device compute-capability helper in place of the device-0 caches (`cuda_sm_count`,
+the all-devices `mma_available`), and step 5, the startup check and tooling.
