@@ -449,7 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn hnd_layout_takes_any_gqa_group_but_only_fattns_head_dims() {
+    fn every_cuda_layer_takes_the_hnd_layout() {
         let config = |num_attn_heads, num_kv_heads, k_head_dim| ModelConfigMetadata {
             max_seq_len: 32_768,
             num_layers: 24,
@@ -461,29 +461,26 @@ mod tests {
             v_head_dim: k_head_dim,
             kv_cache_layout: KvCacheLayout::Standard,
         };
-        #[cfg(feature = "cuda")]
-        let hnd =
-            inference_fattn::mma_available() && crate::perf_flags::flashinfer_decode_enabled();
-        #[cfg(not(feature = "cuda"))]
-        let hnd = false;
-        let fattn = if hnd {
-            AttentionBackendKind::FlashInfer
+        let cuda = cfg!(all(feature = "cuda", target_family = "unix"));
+        let (kind, layout) = if cuda {
+            (
+                AttentionBackendKind::FlashInfer,
+                KvCacheLayout::FlashInferHnd,
+            )
         } else {
-            AttentionBackendKind::Standard
+            (AttentionBackendKind::Standard, KvCacheLayout::Standard)
         };
-        // a group of 9 and an 80-dim head both decode on fattn
-        assert_eq!(config(18, 2, 64).attention_backend_kind(), fattn);
-        assert_eq!(config(18, 2, 80).attention_backend_kind(), fattn);
-        // 512 runs only GQA-batched
-        assert_eq!(config(18, 2, 512).attention_backend_kind(), fattn);
-        assert_eq!(
-            config(2, 2, 512).attention_backend_kind(),
-            AttentionBackendKind::Standard
-        );
-        assert_eq!(
-            config(18, 2, 72).attention_backend_kind(),
-            AttentionBackendKind::Standard
-        );
-        assert_eq!(config(18, 2, 72).kv_cache_layout(), KvCacheLayout::Standard);
+        // fattn decodes the first three; a head dim it lacks (72) and 512 without GQA gather over the same layout
+        for (q_heads, kv_heads, head_dim) in [
+            (18, 2, 64),
+            (18, 2, 80),
+            (18, 2, 512),
+            (2, 2, 512),
+            (18, 2, 72),
+        ] {
+            let config = config(q_heads, kv_heads, head_dim);
+            assert_eq!(config.attention_backend_kind(), kind);
+            assert_eq!(config.kv_cache_layout(), layout);
+        }
     }
 }

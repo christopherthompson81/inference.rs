@@ -164,6 +164,6 @@ Hard affinity is not enabled by default because it can help one CPU/model pair a
 
 ## CUDA defaults worth knowing
 
-On CUDA, two decode fast paths are on by default and need no tuning: the FlashInfer-layout paged cache (decoded by fattn) and CUDA decode graphs. They exist as env-var switches (`INFERENCE_RS_FLASHINFER_DECODE`, `INFERENCE_RS_CUDA_GRAPHS`) only for debugging and benchmarking comparisons; details on the [paged attention page](/guides/perf/paged-attention/).
+On CUDA, two decode fast paths are on by default and need no tuning: the HND-layout paged cache (decoded by fattn) and CUDA decode graphs. Graphs have an env-var switch (`INFERENCE_RS_CUDA_GRAPHS`) only for debugging and benchmarking comparisons; details on the [paged attention page](/guides/perf/paged-attention/).
 
 Quantization is the other big throughput lever, traded against quality: see [quantize a model](/guides/quantization/quantize-a-model/).

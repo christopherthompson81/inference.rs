@@ -1271,3 +1271,34 @@ Review follow-up: confirmed that on CUDA only Metal's (non-CUDA) paged decode re
 lengths, and that FA3's fp8 decode sizes `max_seqlen_k` from its page-list capacity, which the key already holds.
 `FlashInferPagedAttentionView::max_context_len` was never read at all, so it went too, with the `block_size`
 plumbing that only computed its fallback (`bucket_context_len_from_vars`, three structs' fields).
+
+## Run 21 - 2026-10-05 20:05
+
+Question: with the Standard layout on CUDA now only a gather (Run 19), should every CUDA layer take HND?
+
+Yes: HND's write and gather kernels take any head size, so a shape fattn cannot read gathers over HND exactly as it
+did over Standard. `FlashInferAttentionBackend::supports_layer` now admits every CUDA layer with equal K and V head
+dims, and `DecodePlan::requires_host_context_lengths` takes the layer's spec and asks fattn
+(`paged_shape_supported`), so those layers still get host lengths and stay out of CUDA graphs. The
+`INFERENCE_RS_FLASHINFER_DECODE` override (which only forced Standard) is gone, as are the now unused
+`FLASHINFER_DECODE_MAX_HEAD_SIZE` and the HND decode plan's head-size check.
+
+Not done: deleting the Standard-format CUDA cache kernels (`reshape_and_cache`, `gather_kv_cache`). HND's kernels and
+block shapes carry one head size for K and V, and Standard is still what a non-MLA layer with different K and V head
+dims would take. No model has one (MLA, the only case, has its own layout), but dropping it would drop a capability
+for about 50 KB of kernels, so it stays until a reason appears.
+
+Checks: the layout test now expects HND for every shape on CUDA (64, 80, 512 with and without GQA, 72); the plan
+test covers a head dim fattn lacks gathering over HND with host lengths; the tiny Llama (head dim 16) paged CUDA
+decode against the CPU passes through the HND gather, as do the tiny gpt-oss, Llama 4 and Qwen-VL runs.
+
+Review follow-up (no regressions found: HND's write and gather kernels are per-element, so odd head dims and fp8 at
+them are fine, and better than Standard's `head_dim / x` split):
+- `a_head_dim_fattn_lacks_gathers_over_the_hnd_cache`: head dim 72 over HND in bf16, f16 and fp8, through the gather,
+  against the hand reference.
+- The chunk guard moved into the gather itself: a shape fattn cannot read now goes straight to the gather, which
+  would have skipped the HND decode's check (unreachable today, since Llama 4's chunked layers need fattn's dims).
+- Graph gating still keys on shape only, so a call fattn refuses at run time (f32 caches, softcap at other head dims)
+  gathers and fails one capture before graphs turn off, as before; the doc comment now says so.
+- On Windows CUDA, `supports_layer` is now false (it is gated on unix like the HND kernels), where the old rule could
+  pick HND and reach the write path's `unreachable!`.

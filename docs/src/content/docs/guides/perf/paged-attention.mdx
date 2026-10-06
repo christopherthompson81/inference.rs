@@ -103,7 +103,7 @@ Each sequence holds a list of block pointers. On each decoding step, the schedul
 
 Sequences that begin with identical tokens share the blocks holding those tokens. A shared block is reference-counted rather than duplicated. This is the mechanism behind [prefix caching](/guides/perf/throughput-tuning/) when paged attention is on.
 
-MLA (Multi-head Latent Attention)'s latent cache is supported through a dedicated kernel path. On CUDA, other models use the HND cache layout (named for FlashInfer, NVIDIA's attention-kernel library; see [Flash attention vs FlashInfer](#flash-attention-vs-flashinfer) below) wherever fattn can read it, and the Standard layout elsewhere.
+MLA (Multi-head Latent Attention)'s latent cache is supported through a dedicated kernel path. On CUDA, other layers (with equal K and V head dims) use the HND cache layout (named for FlashInfer, NVIDIA's attention-kernel library; see [Flash attention vs FlashInfer](#flash-attention-vs-flashinfer) below); Metal and CPU use the Standard layout.
 
 ## CUDA fast paths
 
@@ -126,20 +126,12 @@ they load them, without gathering a full-precision cache. Scales are immutable f
 previously written entries are never reinterpreted. The default scale is 1.0, matching the common
 vLLM and SGLang serving configuration. FP8 cache is not currently supported for MLA layouts.
 
-To force the Standard layout and its gather (for debugging), disable the HND cache layout:
-
-```bash
-INFERENCE_RS_FLASHINFER_DECODE=0 inference serve --paged-attn on -m <model>
-```
-
 ## Flash attention vs FlashInfer
 
 Paged attention and flash attention compose; both can be on simultaneously. They are not the same backend:
 
 - Flash attention (fattn) is built with the `cuda` feature and runs on compute capability 7.5+; `flash-attn-v3` (Hopper) adds FA3 ahead of it for the standard attention path. See [cargo features](/reference/cargo-features/).
 - The paged decode and prefill kernels are built with the `cuda` feature as part of paged attention; fattn serves those too.
-
-Set `INFERENCE_RS_FLASHINFER_DECODE=0` only when debugging: on CUDA every decode step then gathers.
 
 ## CUDA graphs
 
@@ -158,7 +150,7 @@ They require a CUDA build and a CUDA device, and they apply to decode, not promp
 Graph replay is attempted only when all of these are true:
 
 - The model implementation declares CUDA decode graph support.
-- Paged attention is active, over the HND cache layout (a model on the Standard layout gathers, which a graph cannot replay).
+- Paged attention is active, and fattn decodes every layer (a layer fattn cannot read gathers, which a graph cannot replay).
 - The step is single-token decode (`q_len == 1`), not the initial prompt chunk or a prefix-cache hit.
 - The request is not using a speculative proposer path.
 - The graph key matches the input shape, dtype, cache metadata shapes, and context bucket.

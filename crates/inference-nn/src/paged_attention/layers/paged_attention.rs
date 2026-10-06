@@ -1,6 +1,7 @@
 use crate::attention::FlashKMeta;
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
+use crate::paged_attention::attention_backend::AttentionLayerSpec;
 use std::{collections::HashMap, sync::Once};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
@@ -1689,7 +1690,12 @@ impl PagedAttention {
         }
         match DecodePlan::choose(DecodePlanInput {
             attention_backend,
-            head_size: ctx.dims.head_size,
+            spec: AttentionLayerSpec {
+                q_heads: ctx.dims.attention_heads,
+                kv_heads: ctx.dims.key_value_heads,
+                k_head_dim: ctx.dims.head_size,
+                v_head_dim: ctx.dims.head_size,
+            },
             has_alibi: ctx.alibi_slopes.is_some(),
             has_sliding_window: ctx.sdpa_params.sliding_window.is_some(),
         })? {
@@ -1728,6 +1734,10 @@ impl PagedAttention {
     ) -> Result<Tensor> {
         if ctx.alibi_slopes.is_some() {
             candle_core::bail!("paged decode over gathered K/V does not apply alibi");
+        }
+        // a custom mask carries the chunks; without one the gather would attend past them
+        if ctx.sdpa_params.chunk.is_some() && !attention_mask.is_custom() {
+            candle_core::bail!("chunked decode over the paged cache runs only on fattn");
         }
         // the gather sizes its work from host lengths, which a captured graph would replay stale: failing the capture
         // makes the engine run these steps eagerly
@@ -2074,9 +2084,6 @@ impl PagedAttention {
         }
         if let Some(output) = self.try_run_fattn_decode(call)? {
             return Ok(output);
-        }
-        if call.ctx.sdpa_params.chunk.is_some() {
-            candle_core::bail!("chunked decode over the paged cache runs only on fattn");
         }
         let HndDecodeCall {
             ctx,

@@ -210,7 +210,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
 
 #[test]
 fn decode_matches_a_reference() -> Result<()> {
-    // every head dim the HND layout admits
+    // every head dim fattn decodes over the HND layout
     for head_dim in [64, 80, 96, 112, 128, 256, 512] {
         for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
             check(Case {
@@ -271,6 +271,27 @@ fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
         chunk: None,
         gather: true,
     })
+}
+
+#[test]
+fn a_head_dim_fattn_lacks_gathers_over_the_hnd_cache() -> Result<()> {
+    for cache_dtype in [DType::BF16, DType::F16, DType::F8E4M3] {
+        check(Case {
+            head_dim: 72,
+            heads: (N_HEAD, N_HEAD_KV),
+            block_size: 32,
+            cache_dtype,
+            full_lens: &[1, 37, 90],
+            query_len: 1,
+            model_window: None,
+            layer_window: None,
+            softcap: None,
+            sinks: false,
+            chunk: None,
+            gather: true,
+        })?;
+    }
+    Ok(())
 }
 
 #[test]
