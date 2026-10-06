@@ -916,3 +916,21 @@ Review of the first version found:
 
 Every GPU test's `skip_without_cuda!()` opens device 0, so on a build without the host's arch they all skip as "no
 CUDA device" rather than fail; the new test is the one that checks the refusal.
+
+## Run 23 - 2026-10-06 08:47
+
+Question: where does the stray sm_52 cubin in the kernel libraries (noted during step 2) come from, and does it ship?
+
+```
+cuobjdump -lelf target/bundle/libinference_ffi.so | grep -v sm_86                    -> nothing (149 cubins, all sm_86)
+cuobjdump -lelf target/debug/cuda-kernels/*/lib*.so                                -> one sm_52 cubin in each of the 4
+cuobjdump -elf -symbols (the sm_52 one)                                            -> no code: strtab, symtab,
+  .nv.callgraph and .nv.rel.action only
+```
+
+Finding: it is the device-link stub `nvcc -shared` emits at its default arch (sm_52) in the dev shared-library link
+(cudaforge `build_and_link` on Linux). The bundle and release builds link static archives with `nvcc --lib`, which
+does no device link, so nothing shipped carries it. Nothing in the tree builds relocatable device code, so the link
+now passes `--no-device-link`. Rebuilt from an empty `target/debug/cuda-kernels` (57 s with ccache): 30/39/8/70
+cubins, all sm_86, one fewer each; preload tests pass. A stub at sm_52 would also have been an unlisted arch on a
+multi-arch dev build.
