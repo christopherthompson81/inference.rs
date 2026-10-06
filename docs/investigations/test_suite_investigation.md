@@ -177,3 +177,21 @@ Full CI on this branch: 146 s, CUDA suite 74 s inside it. The long pole is now `
 to 136 s. It ran because the branch touches `scripts/local_ci.sh`, which `slim_needed.py` always counts, and most
 code changes reach a crate inference-core depends on. Next: run the CPU suite in the background after its build, as
 the CUDA suite is, so the slim lint overlaps it (CPU tests ~29 s, slim ~69 s).
+
+## Run 8 - 2026-10-06 12:13
+
+Question: would running the CPU suite in the background after its build (as the CUDA suite is) shorten the full run,
+by letting the slim lint and doctests overlap it?
+
+A/B of `local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`, the #303 script against one that
+backgrounds the CPU suite, run back to back on the same tree:
+
+```
+warm (nothing changed):              old 89 s   new 90 s
+after touching inference-core/lib.rs: old 109 s  new 112 s
+```
+
+Negative: no gain either way, so the change was dropped. With the real-checkpoint tests gone the background CUDA
+suite (about 71 s, starting at ~20 s) is the long pole again, and everything on the CPU side already finishes inside
+it. Run 7's 146 s came from a cold slim lint (the branch touched `local_ci.sh`, so `slim_needed.py` ran it, and its
+first clippy was 30 s); the warm full run after #303 is about 89 s, against about 145 s before.
