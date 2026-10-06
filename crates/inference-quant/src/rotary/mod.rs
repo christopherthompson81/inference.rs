@@ -356,6 +356,19 @@ fn restore_cuda_rope_layout(
         .transpose(1, 2)
 }
 
+// The CUDA kernels read one cache row per token, so per-batch and batch-shared caches are flattened to that.
+#[cfg(feature = "cuda")]
+fn cuda_token_cache(cache: &Tensor, batch: usize, seq_len: usize) -> Result<Tensor> {
+    match *cache.dims() {
+        [b, s, dim] if (b, s) == (batch, seq_len) => cache.reshape((batch * seq_len, dim)),
+        [rows, dim] if rows == seq_len && batch > 1 => cache
+            .unsqueeze(0)?
+            .broadcast_as((batch, seq_len, dim))?
+            .reshape((batch * seq_len, dim)),
+        _ => Ok(cache.clone()),
+    }
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_apply_rotary_q(
     q: &Tensor,
@@ -369,7 +382,9 @@ fn cuda_apply_rotary_q(
     if let Some(positions) = positions {
         apply_rotary_inplace_q_positions(&q_embed, cos, sin, positions, is_neox)?;
     } else {
-        apply_rotary_inplace_q(&q_embed, cos, sin, is_neox)?;
+        let cos = cuda_token_cache(cos, batch, seq_len)?;
+        let sin = cuda_token_cache(sin, batch, seq_len)?;
+        apply_rotary_inplace_q(&q_embed, &cos, &sin, is_neox)?;
     }
     restore_cuda_rope_layout(q_embed, batch, heads, seq_len, head_dim)
 }
@@ -393,7 +408,9 @@ fn cuda_apply_rotary_qk(
     if let Some(positions) = positions {
         apply_rotary_inplace_positions(&q_embed, &k_embed, cos, sin, positions, is_neox)?;
     } else {
-        apply_rotary_inplace(&q_embed, &k_embed, cos, sin, is_neox)?;
+        let cos = cuda_token_cache(cos, batch, seq_len)?;
+        let sin = cuda_token_cache(sin, batch, seq_len)?;
+        apply_rotary_inplace(&q_embed, &k_embed, &cos, &sin, is_neox)?;
     }
     Ok((
         restore_cuda_rope_layout(q_embed, batch, q_heads, seq_len, head_dim)?,
@@ -650,6 +667,16 @@ pub fn apply_rotary_q(
     is_neox: bool,
 ) -> Result<Tensor> {
     apply_rotary_q_inner(q, cos, sin, Some(positions), is_neox)
+}
+
+/// On CUDA this can rotate `q` in place (one head or one token), so callers must not reuse their input.
+pub fn apply_rotary_q_preselected(
+    q: &Tensor,
+    cos: &Tensor,
+    sin: &Tensor,
+    is_neox: bool,
+) -> Result<Tensor> {
+    apply_rotary_q_inner(q, cos, sin, None, is_neox)
 }
 
 fn apply_rotary_q_inner(
@@ -1237,4 +1264,72 @@ pub fn apply_rotary_inplace_q_positions(
     _is_neox: bool,
 ) -> candle_core::Result<()> {
     candle_core::bail!("apply_rotary is only supported for cuda");
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use candle_core::{Device, Result, Tensor};
+
+    const BATCH: usize = 2;
+    const Q_HEADS: usize = 4;
+    const K_HEADS: usize = 2;
+    const SEQ_LEN: usize = 3;
+    const HEAD_DIM: usize = 16;
+
+    fn ramp(shape: &[usize], scale: f64, offset: f64) -> Result<Tensor> {
+        let n: usize = shape.iter().product();
+        Tensor::arange(0f32, n as f32, &Device::Cpu)?
+            .affine(scale, offset)?
+            .sin()?
+            .reshape(shape)
+    }
+
+    fn assert_close(cuda: &Tensor, cpu: &Tensor) -> Result<()> {
+        let cuda = cuda
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let cpu = cpu.flatten_all()?.to_vec1::<f32>()?;
+        for (a, b) in cuda.iter().zip(&cpu) {
+            assert!((a - b).abs() < 1e-5, "{a} vs {b}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn preselected_rope_on_cuda_matches_the_cpu_for_every_cache_shape() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let q = ramp(&[BATCH, Q_HEADS, SEQ_LEN, HEAD_DIM], 0.07, 0.1)?;
+        let k = ramp(&[BATCH, K_HEADS, SEQ_LEN, HEAD_DIM], 0.05, 0.4)?;
+        let caches = [
+            vec![BATCH, SEQ_LEN, HEAD_DIM / 2],
+            vec![BATCH * SEQ_LEN, HEAD_DIM / 2],
+            vec![SEQ_LEN, HEAD_DIM / 2],
+        ];
+        for shape in caches {
+            let angles = ramp(&shape, 0.3, 0.0)?.affine(3.0, 0.0)?;
+            let (cos, sin) = (angles.cos()?, angles.sin()?);
+            let (cuda_cos, cuda_sin) = (cos.to_device(&device)?, sin.to_device(&device)?);
+            for neox in [true, false] {
+                let (cpu_q, cpu_k) = super::apply_rotary_qk_preselected(&q, &k, &cos, &sin, neox)?;
+                let (cuda_q, cuda_k) = super::apply_rotary_qk_preselected(
+                    &q.to_device(&device)?,
+                    &k.to_device(&device)?,
+                    &cuda_cos,
+                    &cuda_sin,
+                    neox,
+                )?;
+                assert_close(&cuda_q, &cpu_q)?;
+                assert_close(&cuda_k, &cpu_k)?;
+                let cuda_q_only = super::apply_rotary_q_preselected(
+                    &q.to_device(&device)?,
+                    &cuda_cos,
+                    &cuda_sin,
+                    neox,
+                )?;
+                assert_close(&cuda_q_only, &cpu_q)?;
+            }
+        }
+        Ok(())
+    }
 }
