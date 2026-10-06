@@ -868,3 +868,51 @@ shared `SM121_COMPUTE_CAP` for the nvfp4 files, an `SM90_COMPUTE_MAJOR` const in
 
 Next: step 5, a startup check that the device's arch was built, the doctor's built-arch report, and the wheel tag,
 size baseline key, `--size` and Dockerfile ARG taking a list.
+
+## Run 22 - 2026-10-06 08:05
+
+Step 5: refuse an unbuilt arch, report the built ones, and let the tooling take a list.
+
+Question: with no PTX shipped, what does a GPU outside the built arch families see, and can every tool name a
+multi-arch build?
+
+Before: the device opened, and the first kernel launch failed with the driver's "no kernel image is available"
+somewhere in model loading. The arch list lived twice: candle-kernels' `ARCHS` (read from the cubins, Run 20) and
+inference-quant's `INFERENCE_RS_CUDA_ARCHS` env (step 2). The doctor read compute capability with
+`nvidia-smi -i=<ordinal>`, whose numbering ignores `CUDA_VISIBLE_DEVICES`.
+
+Now:
+- candle-core holds the one rule, `kernel_arch(cc)` over `kernels::ARCHS`, and `CudaDevice` creation fails (before
+  any cuBLAS setup) when it is `None`. Plain and family SASS (`86`, `121f`) run on later minors of their major;
+  arch-specific SASS (`90a`, `100a`, `120a`, which cudaforge builds for every 9.0+ arch it is not told otherwise
+  about) runs only on its own capability, so a `120` build refuses a 12.1 DGX Spark.
+  inference-quant's env and `built_kernel_arch` are gone; `fp8_tensor_cores` asks candle-core.
+- The doctor lists CUDA devices from the driver count with `device_compute_cap(ordinal)` (no context, no
+  nvidia-smi), opens only those with kernels, marks the rest `kernels_built: false` with an error check and a
+  rebuild suggestion, and prints the build's archs.
+- Wheels: `+cu12.sm80.sm86.sm89` for a list. `bundle_size.py` keys a list sorted and without dots. The Docker and
+  Python docs describe the list; the Dockerfile default stays `80` (no image is published, the docs pass the arg).
+
+```
+cargo nextest run -p inference-nn --features cuda --lib -E 'test(preload)'        -> 3 pass (sm_86 build)
+CUDA_COMPUTE_CAP=89 CARGO_TARGET_DIR=<scratch> (a_device_opens_only...)            -> pass on the sm_86 card:
+  "CUDA device 0 has compute capability 8.6, but this build carries kernels for sm_89 only; rebuild with
+  CUDA_COMPUTE_CAP listing 86"
+inference doctor                                                                  -> "CUDA: build 12.8 for sm_86",
+  JSON build.cuda_archs ["86"], the GPU kernels_built true
+python3 -m unittest discover -s scripts                                           -> pass (list key test added)
+```
+
+Review of the first version found:
+- the rule treated `a` archs like plain ones, the same as step 2's `built_kernel_arch`: a `120a` build would have
+  opened on a 12.1 device and failed at the first launch. Fixed, with `120a`/12.1 and `100a`/10.3 test cases.
+- the doctor's driver count and `device_compute_cap` called cudarc without checking for libcuda, so a CUDA build on
+  a host without a driver panicked in `doctor` and `/v1/system/info`. Both go through candle-core's
+  `device_count()` / `device_compute_cap()` now, which check first.
+- `get_all_similar_devices` stopped at the first device that failed to open, so an unbuilt GPU 0 hid every other
+  GPU. It walks the driver count and skips (with a warning) a device it cannot open.
+- the Python list parsers rejected forms cudaforge takes (`90a`, `sm_90`, `;`, a trailing comma); both follow
+  cudaforge's split now and key by the arch number. candle-kernels' build asserts `ARCHS` is not empty.
+
+Every GPU test's `skip_without_cuda!()` opens device 0, so on a build without the host's arch they all skip as "no
+CUDA device" rather than fail; the new test is the one that checks the refusal.

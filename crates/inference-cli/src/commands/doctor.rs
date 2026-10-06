@@ -101,12 +101,13 @@ pub fn run_doctor(json: bool) -> Result<()> {
         let toolchain = &report.toolchain;
         if system.build.cuda {
             println!(
-                "[INFO] CUDA: build {}, local nvcc {}, driver {} (supports CUDA {})",
+                "[INFO] CUDA: build {} for sm_{}, local nvcc {}, driver {} (supports CUDA {})",
                 system
                     .build
                     .cuda_toolkit_version
                     .as_deref()
                     .unwrap_or(UNKNOWN),
+                system.build.cuda_archs.join(", sm_"),
                 toolchain.nvcc.as_deref().unwrap_or(UNKNOWN),
                 toolchain.nvidia_driver.as_deref().unwrap_or(UNKNOWN),
                 toolchain.driver_cuda.as_deref().unwrap_or(UNKNOWN),
