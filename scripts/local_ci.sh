@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal]
-# [--models] [--slim] [--docs|--docs-all] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda
+# [--models] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]; --models runs the real-checkpoint parity tests on CPU (--cuda
 # keeps one GPU parity check).
 # --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact; it is
@@ -10,6 +10,8 @@
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
 # --docs checks the docs of the crates whose files differ from origin/master (rustdoc is never incremental), not their
 # dependents; --docs-all checks every crate. Neither renders HTML; `cargo doc` does.
+# --size (Linux) builds the CUDA C ABI library as the wheels do and fails when its file or a large section grew past
+# scripts/bundle_size_baseline.json; --size-update rewrites the baseline (commit it with the change that moved it).
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -24,6 +26,8 @@ slim=0
 docs=0
 docs_all=0
 bindings=0
+size=0
+size_update=0
 sweep=0
 for arg in "$@"; do
     case $arg in
@@ -36,11 +40,13 @@ for arg in "$@"; do
         --docs) docs=1 ;;
         --docs-all) docs=1 docs_all=1 ;;
         --bindings) bindings=1 ;;
+        --size) size=1 ;;
+        --size-update) size=1 size_update=1 ;;
         --sweep) sweep=1 ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
-[[ $((lint + tests + cuda + metal + models + slim + docs + bindings)) -eq 0 ]] && lint=1 && tests=1
+[[ $((lint + tests + cuda + metal + models + slim + docs + bindings + size)) -eq 0 ]] && lint=1 && tests=1
 
 # --examples compile-checks the examples (tests only link the smoke set below); --bins checks bins without dev-deps, like CI.
 CLIPPY=(clippy --workspace --bins --tests --examples)
@@ -195,7 +201,19 @@ cuda_pid= bindings_pid=
 if [[ $models -eq 1 ]]; then
     cargo nextest run --no-fail-fast --profile models "${TEST_TARGETS[@]}"
 fi
-if [[ $sweep -eq 1 ]]; then
+if [[ $size -eq 1 ]]; then
+    if [[ $OSTYPE != linux* ]]; then echo "--size measures the Linux CUDA library" >&2; exit 2; fi
+    compute_cap=${CUDA_COMPUTE_CAP:-$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -n 1)}
+    # the toolkit decides which kernels build (cuTile from 13.2), so the baseline holds for one
+    cuda_version=$(nvcc --version | grep -o 'release [0-9.]*' | cut -d' ' -f2)
+    # what the wheels bundle: the default model set, fat LTO, stripped, no host-specific codegen (build_wheels.py)
+    RUSTFLAGS= cargo build --profile bundle -p inference-ffi --features cuda
+    size_args=(target/bundle/libinference_ffi.so "$compute_cap" "$cuda_version")
+    if [[ $size_update -eq 1 ]]; then size_args+=(--update); fi
+    scripts/bundle_size.py "${size_args[@]}"
+fi
+# --size builds under target/bundle, which the sweep leaves alone
+if [[ $sweep -eq 1 && $((lint + tests + cuda + metal + models + slim + docs + bindings)) -gt 0 ]]; then
     # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay
     # would under-report, so nothing is deleted unless all of them succeed.
     live=$(mktemp)

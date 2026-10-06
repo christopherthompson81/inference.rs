@@ -57,6 +57,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-words]
+# ELF's relocation sections (`.rela.dyn`), in the bundle size baseline and report
+"rela" = "rela"
 # IST-DASLab, the Marlin authors' GitHub org
 "IST" = "IST"
 "Ba" = "Ba"

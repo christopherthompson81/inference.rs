@@ -618,3 +618,43 @@ Implication: no shipped-size win. The change still removes a latent ABI mismatch
 two archives, a duplicate set from the build (11 mmq instances compiled for nothing), and a second dispatch path. Lesson for the
 inventory: measure duplicates in the linked artifact, not in the build's objects.
 
+## Run 16 - 2026-10-05 18:38
+
+Question (#258 step 7): can size growth show up in review without a CUDA toolkit in GitHub's CI?
+
+GitHub's runners have no CUDA toolkit, and a fat-LTO CUDA build takes minutes, so the guard is a `local_ci.sh`
+mode rather than a CI job. `--size` (Linux) builds `RUSTFLAGS= cargo build --profile bundle -p inference-ffi
+--features cuda`, which is what `build_wheels.py` ships (default model set, fat LTO, stripped, and no
+`-C target-cpu=native` from `.cargo/config.toml`). It then runs `scripts/bundle_size.py`, which compares `size -A`
+and the file size with `scripts/bundle_size_baseline.json`. The baseline stores every section, and the check compares
+the file and every section of at least 1 MiB on either side. It fails when one grew by more than both 1% and
+256 KiB (a new large section counts from 0), and reports a shrink past the same limits as room to lower the baseline.
+A baseline for another compute capability (`86` and `8.6` alike) or CUDA toolkit is only reported, since the
+toolkit decides which kernels build (cuTile from 13.2). `--size-update` rewrites the baseline, to be committed with
+the change that moved it.
+
+Baseline at master `00501348` (sm_86, CUDA 12.8; first build 3m 11s, a rebuild with nothing changed 0.2 s):
+
+| | MiB |
+|---|---|
+| file | 103.44 |
+| `.text` | 54.39 |
+| `.nv_fatbin` | 30.45 |
+| `.rodata` | 6.39 |
+| `.eh_frame` | 4.30 |
+| `.rela.dyn` | 2.53 |
+| `.gcc_except_table` | 2.42 |
+| `.data.rel.ro` | 1.79 |
+
+The first draft built with this machine's `target-cpu=native`, as `.cargo/config.toml` sets: 104.87 MiB, `.text`
+55.87 MiB, so host-specific codegen costs 1.4 MiB of `.text` here, and the wheels' build and `--size` would have
+forced each other's fat-LTO rebuild through `target/bundle`.
+
+Against Run 13's full-feature artifact (139.0 MiB, `.nv_fatbin` 52.9 MiB): the attention consolidation (#280-#288:
+FA2, FlashInfer's GQA decode, the sinks kernel and vLLM's paged kernels gone) took `.nv_fatbin` from 52.9 to
+30.5 MiB. Run 13 also had `cudnn` and `flash-attn` on, so the totals are not like for like. A deliberate 2 MB
+growth of `.nv_fatbin` against a doctored baseline fails with the section named; the same build against a baseline
+for compute 8.9 is reported and passes. `scripts/test_bundle_size.py` covers the parsing, the limits, the
+tracking-minimum crossing and the compute-capability spelling.
+
+Next (#258): the build-wide arch list (step 6 of #270 too).
