@@ -1785,7 +1785,7 @@ pub(crate) fn cuda_decode_graph_supported_for_model(
         (0..metadata.num_layers()).all(|layer_idx| {
             !DecodePlan::requires_host_context_lengths(
                 metadata.attention_backend_kind_for_layer(layer_idx),
-                metadata.k_head_dim_for_layer(layer_idx),
+                metadata.attention_layer_spec(layer_idx),
             )
         })
     }

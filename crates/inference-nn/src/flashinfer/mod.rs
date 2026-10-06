@@ -420,9 +420,6 @@ pub struct Fa3DecodePrepare<'a> {
     pub buffers: &'a Fa3DecodeBuffers,
 }
 
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-pub const FLASHINFER_DECODE_MAX_HEAD_SIZE: usize = 512;
-
 #[derive(Clone, Debug)]
 pub struct FlashInferPagedKv {
     // CSR-style page table: indptr selects each request's range in flattened page indices.
@@ -472,21 +469,13 @@ pub struct FlashInferDecodePlan;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub struct FlashInferDecodePlanInput {
-    pub head_size: usize,
     pub has_alibi: bool,
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn decode_plan(input: FlashInferDecodePlanInput) -> Result<FlashInferDecodePlan> {
-    // Decode can fall back for size limits, but unsupported attention features are hard errors.
     if input.has_alibi {
         candle_core::bail!("HND-layout decode does not support alibi");
-    }
-    if input.head_size > FLASHINFER_DECODE_MAX_HEAD_SIZE {
-        candle_core::bail!(
-            "HND-layout decode does not support head_size={}",
-            input.head_size
-        );
     }
     Ok(FlashInferDecodePlan)
 }
@@ -498,19 +487,9 @@ impl AttentionBackend for FlashInferAttentionBackend {
         AttentionBackendKind::FlashInfer
     }
 
+    // every CUDA layer of one K/V head dim: fattn decodes the shapes it can read, the gather the rest
     fn supports_layer(&self, spec: AttentionLayerSpec) -> bool {
-        if !crate::perf_flags::flashinfer_decode_enabled() || spec.k_head_dim != spec.v_head_dim {
-            return false;
-        }
-        // decode on the layout is fattn's; a shape it cannot read takes the Standard layout
-        #[cfg(feature = "cuda")]
-        {
-            inference_fattn::paged_shape_supported(spec.k_head_dim, spec.q_heads, spec.kv_heads)
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            false
-        }
+        cfg!(all(feature = "cuda", target_family = "unix")) && spec.k_head_dim == spec.v_head_dim
     }
 }
 

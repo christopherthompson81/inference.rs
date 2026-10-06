@@ -1,10 +1,8 @@
 use std::sync::OnceLock;
 
 const CUDA_GRAPHS_ENV: &str = "INFERENCE_RS_CUDA_GRAPHS";
-const FLASHINFER_DECODE_ENV: &str = "INFERENCE_RS_FLASHINFER_DECODE";
 
 static CUDA_GRAPHS_ENABLED: OnceLock<bool> = OnceLock::new();
-static FLASHINFER_DECODE_ENABLED: OnceLock<bool> = OnceLock::new();
 
 fn env_flag(name: &str, default: bool) -> bool {
     std::env::var(name)
@@ -22,8 +20,4 @@ fn env_flag(name: &str, default: bool) -> bool {
 
 pub fn cuda_graphs_enabled() -> bool {
     *CUDA_GRAPHS_ENABLED.get_or_init(|| env_flag(CUDA_GRAPHS_ENV, true))
-}
-
-pub fn flashinfer_decode_enabled() -> bool {
-    *FLASHINFER_DECODE_ENABLED.get_or_init(|| env_flag(FLASHINFER_DECODE_ENV, true))
 }

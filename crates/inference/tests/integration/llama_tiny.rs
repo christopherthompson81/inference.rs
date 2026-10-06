@@ -190,9 +190,9 @@ async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Resu
     Ok(())
 }
 
-// Head dim 16 is outside the HND layout, so a CUDA build decodes this Standard cache through the gather.
+// fattn reads no head dim 16 cache, so a CUDA build decodes this one through the gather.
 #[tokio::test]
-async fn paged_gpu_decode_over_the_standard_layout_matches_the_cpu() -> anyhow::Result<()> {
+async fn paged_gpu_decode_through_the_gather_matches_the_cpu() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
     }

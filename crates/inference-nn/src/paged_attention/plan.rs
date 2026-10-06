@@ -653,7 +653,7 @@ fn fa3_group_size_is_supported(q_heads: usize, kv_heads: usize) -> bool {
 
 pub struct DecodePlanInput {
     pub attention_backend: AttentionBackendKind,
-    pub head_size: usize,
+    pub spec: crate::paged_attention::attention_backend::AttentionLayerSpec,
     pub has_alibi: bool,
     pub has_sliding_window: bool,
 }
@@ -669,32 +669,36 @@ pub enum DecodePlan {
 }
 
 impl DecodePlan {
+    /// Whether decode gathers, which sizes its work from host lengths: on CUDA, a shape fattn cannot decode. Calls
+    /// fattn refuses at run time (f32 caches, softcap at other head dims) gather too, and fail graph capture once.
     pub fn requires_host_context_lengths(
         attention_backend: AttentionBackendKind,
-        head_size: usize,
+        spec: crate::paged_attention::attention_backend::AttentionLayerSpec,
     ) -> bool {
-        // on CUDA the Standard layout always gathers
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
             matches!(attention_backend, AttentionBackendKind::Standard)
-                || head_size > crate::flashinfer::FLASHINFER_DECODE_MAX_HEAD_SIZE
+                || !inference_fattn::paged_shape_supported(
+                    spec.k_head_dim,
+                    spec.q_heads,
+                    spec.kv_heads,
+                )
         }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         {
-            let _ = head_size;
+            let _ = spec;
             matches!(attention_backend, AttentionBackendKind::FlashInfer)
         }
     }
 
     pub fn choose(input: DecodePlanInput) -> Result<Self> {
-        if Self::requires_host_context_lengths(input.attention_backend, input.head_size) {
+        if Self::requires_host_context_lengths(input.attention_backend, input.spec) {
             return Ok(Self::GatherSdpa);
         }
         match input.attention_backend {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             AttentionBackendKind::FlashInfer => {
                 flashinfer::decode_plan(FlashInferDecodePlanInput {
-                    head_size: input.head_size,
                     has_alibi: input.has_alibi,
                 })
                 .map(Self::FlashInfer)
@@ -714,6 +718,7 @@ impl DecodePlan {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paged_attention::attention_backend::AttentionLayerSpec;
     use crate::paged_attention::{
         HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigMetadata,
     };
@@ -1250,11 +1255,20 @@ mod tests {
         assert_eq!(workspace.gather_workspace_bytes, gather_bytes);
     }
 
+    fn spec(heads: (usize, usize), head_dim: usize) -> AttentionLayerSpec {
+        AttentionLayerSpec {
+            q_heads: heads.0,
+            kv_heads: heads.1,
+            k_head_dim: head_dim,
+            v_head_dim: head_dim,
+        }
+    }
+
     #[test]
     fn standard_sliding_decode_uses_exact_gather_path() {
         let plan = DecodePlan::choose(DecodePlanInput {
             attention_backend: AttentionBackendKind::Standard,
-            head_size: 128,
+            spec: spec((8, 2), 128),
             has_alibi: false,
             has_sliding_window: true,
         })
@@ -1264,22 +1278,35 @@ mod tests {
     }
 
     #[test]
-    fn standard_full_decode_gathers_on_cuda_only() {
-        let plan = DecodePlan::choose(DecodePlanInput {
-            attention_backend: AttentionBackendKind::Standard,
-            head_size: 128,
-            has_alibi: false,
-            has_sliding_window: false,
-        })
-        .unwrap();
-
+    fn decode_gathers_where_fattn_cannot_read_the_cache() {
+        let plan = |kind, spec| {
+            DecodePlan::choose(DecodePlanInput {
+                attention_backend: kind,
+                spec,
+                has_alibi: false,
+                has_sliding_window: false,
+            })
+            .unwrap()
+        };
+        let standard = plan(AttentionBackendKind::Standard, spec((8, 2), 128));
         #[cfg(all(feature = "cuda", target_family = "unix"))]
-        assert!(matches!(plan, DecodePlan::GatherSdpa));
+        {
+            assert!(matches!(standard, DecodePlan::GatherSdpa));
+            let fattn = crate::attention::fattn_supports(128, false);
+            let hnd = plan(AttentionBackendKind::FlashInfer, spec((8, 2), 128));
+            assert_eq!(matches!(hnd, DecodePlan::FlashInfer(_)), fattn);
+            // a head dim fattn lacks gathers over the same layout, and keeps host lengths for it
+            let odd = spec((8, 2), 72);
+            assert!(matches!(
+                plan(AttentionBackendKind::FlashInfer, odd),
+                DecodePlan::GatherSdpa
+            ));
+            assert!(DecodePlan::requires_host_context_lengths(
+                AttentionBackendKind::FlashInfer,
+                odd
+            ));
+        }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
-        assert!(matches!(plan, DecodePlan::PagedAttention));
-        assert_eq!(
-            DecodePlan::requires_host_context_lengths(AttentionBackendKind::Standard, 128),
-            cfg!(all(feature = "cuda", target_family = "unix"))
-        );
+        assert!(matches!(standard, DecodePlan::PagedAttention));
     }
 }
