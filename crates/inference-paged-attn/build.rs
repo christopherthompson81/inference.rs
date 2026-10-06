@@ -129,6 +129,8 @@ fn main() -> Result<()> {
         .arg(&header_hash_arg);
 
     let compute_cap = builder.get_compute_cap().unwrap_or(80);
+    // the sm_90a FA3 library builds when 90 is listed; the runtime takes it only on an sm_90 device
+    let sm90_listed = builder.get_compute_caps().contains(&90);
     // Enable FP8 if compute capability >= 8.0 (Ampere and newer)
     let using_fp8 = if compute_cap >= 80 {
         builder = builder.arg("-DENABLE_FP8");
@@ -156,7 +158,7 @@ fn main() -> Result<()> {
         .build_and_link("inferencepagedattention", prepare_cuda_archive(out_file))
         .expect("Build paged attention lib failed!");
 
-    let using_fa3_fp8_paged = compute_cap == 90;
+    let using_fa3_fp8_paged = sm90_listed;
     if using_fa3_fp8_paged {
         let fa3_header_hash = cuda_header_hash("third_party/flash-attention", &[])?
             .wrapping_mul(0x100000001b3)
