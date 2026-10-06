@@ -162,7 +162,7 @@ pub fn generate_canvas(
         // Entropy-bound acceptance per sequence: take the k lowest-entropy tokens such that
         // sum(entropy_1..k) - max(entropy_1..k) <= bound; ascending sort makes the running
         // max the current element, so no cummax is needed.
-        let (sorted_entropy, sorted_indices) = token_entropy.sort_last_dim(true)?;
+        let (sorted_entropy, sorted_indices) = crate::ops::ArgSortOp::sort(&token_entropy, true)?;
         let cumulative = sorted_entropy.cumsum(D::Minus1)?;
         let sorted_mask = (cumulative - &sorted_entropy)?
             .le(params.entropy_bound)?

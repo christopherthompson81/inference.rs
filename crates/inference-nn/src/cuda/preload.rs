@@ -25,7 +25,7 @@ pub fn preload_candle_kernels(device: &Device) -> Result<usize> {
     Ok(count)
 }
 
-static MODULES: [&kernels::Module; 11] = [
+static MODULES: [&kernels::Module; kernels::ALL_IDS.len()] = [
     &kernels::AFFINE,
     &kernels::BINARY,
     &kernels::CAST,
@@ -34,7 +34,6 @@ static MODULES: [&kernels::Module; 11] = [
     &kernels::INDEXING,
     &kernels::QUANTIZED,
     &kernels::REDUCE,
-    &kernels::SORT,
     &kernels::TERNARY,
     &kernels::UNARY,
 ];

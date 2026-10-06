@@ -173,6 +173,24 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
     })
 }
 
+// Rows up to this many columns sort in one launch from shared memory (4 bytes per padded column, under 48 KiB)
+const ARGSORT_ROWS_MAX_COLS: usize = 8192;
+// `argsort_rows` dtype codes, matched by the switch in sort.cu
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_U8: i32 = 0;
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_U32: i32 = 1;
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_I64: i32 = 2;
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_BF16: i32 = 3;
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_F16: i32 = 4;
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_F32: i32 = 5;
+#[cfg(feature = "cuda")]
+const ARGSORT_DTYPE_F64: i32 = 6;
+
 #[derive(Debug, Clone)]
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 struct ArgSort {
@@ -207,6 +225,14 @@ impl candle_core::CustomOp1 for ArgSort {
 
         let dev = storage.device();
         let elem_count = layout.shape().elem_count();
+        if elem_count == 0 {
+            let dst = unsafe { dev.alloc::<u32>(0) }?;
+            let dst = candle_core::cuda_backend::CudaStorage {
+                slice: CudaStorageSlice::U32(dst),
+                device: dev.clone(),
+            };
+            return Ok((dst, layout.shape().clone()));
+        }
         let ncols = self.last_dim as i32;
         let nrows = elem_count as i32 / ncols;
         let dst = unsafe { dev.alloc::<u32>(elem_count) }?;
@@ -223,10 +249,35 @@ impl candle_core::CustomOp1 for ArgSort {
             CudaStorageSlice::F64(inp) => inp.device_ptr(inp.stream()),
             _ => candle_core::bail!("Unexpected dtype in asort"),
         };
-        let src_ptr = src as *const c_void;
+        let src_offset = layout.start_offset() * storage.dtype().size_in_bytes();
+        let src_ptr = (src as usize + src_offset) as *const c_void;
         let (dst_ptr, dst_guard) = dst.device_ptr(dst.stream());
         let dst_ptr = dst_ptr as *mut c_void;
         let stream = dev.cuda_stream().cu_stream() as i64;
+        if !self.inplace && self.last_dim <= ARGSORT_ROWS_MAX_COLS {
+            let dtype = match storage.dtype() {
+                candle_core::DType::U8 => ARGSORT_DTYPE_U8,
+                candle_core::DType::U32 => ARGSORT_DTYPE_U32,
+                candle_core::DType::I64 => ARGSORT_DTYPE_I64,
+                candle_core::DType::BF16 => ARGSORT_DTYPE_BF16,
+                candle_core::DType::F16 => ARGSORT_DTYPE_F16,
+                candle_core::DType::F32 => ARGSORT_DTYPE_F32,
+                candle_core::DType::F64 => ARGSORT_DTYPE_F64,
+                _ => unreachable!("dtype matched above"),
+            };
+            let status = unsafe {
+                ffi::argsort_rows(src_ptr, dst_ptr, nrows, ncols, dtype, self.asc, stream)
+            };
+            if status != 0 {
+                candle_core::bail!("argsort_rows rejected dtype code {dtype}");
+            }
+            drop(dst_guard);
+            let dst_ret = candle_core::cuda_backend::CudaStorage {
+                slice: CudaStorageSlice::U32(dst),
+                device: dev.clone(),
+            };
+            return Ok((dst_ret, layout.shape().clone()));
+        }
         unsafe {
             if self.asc {
                 match storage.dtype() {
@@ -336,6 +387,11 @@ impl ArgSortOp for Tensor {
             Some(last_dim) => *last_dim,
             None => candle_core::bail!("empty last-dim in arg-sort"),
         };
+        // candle's bf16 gather needs sm_80, so bf16 keeps the in-place sort
+        if last_dim <= ARGSORT_ROWS_MAX_COLS && self.dtype() != DType::BF16 {
+            let indices = self.arg_sort(asc)?;
+            return Ok((self.gather(&indices, D::Minus1)?, indices));
+        }
         let sorted = self.copy()?;
 
         let asort = sorted.apply_op1_no_bwd(&ArgSort {
@@ -365,6 +421,71 @@ mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
     use super::ArgSortOp;
+
+    // Distinct keys (a stride coprime to the length) so the unstable sort has one answer; unsigned dtypes shift up.
+    #[allow(clippy::cast_precision_loss)]
+    fn distinct_rows(rows: usize, cols: usize, dtype: DType) -> Result<Tensor> {
+        const STRIDE: usize = 7919;
+        let values = (0..rows * cols)
+            .map(|i| ((i % cols) * STRIDE % cols + (i / cols) * 3) as f32 - cols as f32 / 2.0)
+            .collect::<Vec<_>>();
+        let keys = Tensor::from_vec(values, (rows, cols), &Device::Cpu)?;
+        let keys = if matches!(dtype, DType::U8 | DType::U32) {
+            keys.affine(1.0, (cols / 2) as f64)?
+        } else {
+            keys
+        };
+        keys.to_dtype(dtype)
+    }
+
+    #[test]
+    fn cuda_sort_matches_the_cpu_on_both_kernels() -> Result<()> {
+        skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        // Up to 8192 columns the shared-memory rows kernel runs (1500 loops past 1024 threads); past it the global one
+        let cases = [
+            (3usize, 5usize, DType::F32),
+            (1500, 4, DType::F32),
+            (8192, 2, DType::F32),
+            (8193, 2, DType::F32),
+            (20_000, 1, DType::F32),
+            (1500, 3, DType::I64),
+            (9000, 1, DType::I64),
+            (300, 2, DType::F64),
+            (9000, 1, DType::F64),
+            (9000, 1, DType::U32),
+            (200, 3, DType::BF16),
+            (200, 3, DType::F16),
+            (200, 2, DType::U8),
+        ];
+        for (cols, rows, dtype) in cases {
+            // one extra leading row, narrowed off, puts the CUDA view at a nonzero offset
+            let keys = distinct_rows(rows + 1, cols, dtype)?;
+            let cpu = keys.narrow(0, 1, rows)?;
+            let cuda = keys.to_device(&device)?.narrow(0, 1, rows)?;
+            for asc in [true, false] {
+                let expected = cpu.arg_sort_last_dim(asc)?.to_vec2::<u32>()?;
+                assert_eq!(
+                    cuda.arg_sort(asc)?.to_vec2::<u32>()?,
+                    expected,
+                    "{cols} {dtype:?} {asc}"
+                );
+                let (values, indices) = cuda.sort(asc)?;
+                assert_eq!(
+                    indices.to_vec2::<u32>()?,
+                    expected,
+                    "sort {cols} {dtype:?} {asc}"
+                );
+                let (expected_values, _) = cpu.sort_last_dim(asc)?;
+                assert_eq!(
+                    values.to_dtype(DType::F64)?.to_vec2::<f64>()?,
+                    expected_values.to_dtype(DType::F64)?.to_vec2::<f64>()?,
+                    "sort values {cols} {dtype:?} {asc}"
+                );
+            }
+        }
+        Ok(())
+    }
 
     // Three columns pad to four, so the padding has to sort past every value in either direction and dtype.
     #[test]

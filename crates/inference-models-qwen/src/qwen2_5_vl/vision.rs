@@ -593,7 +593,7 @@ impl Qwen2_5VLVisionModel {
         }
 
         xs = self.patch_merger.forward(&xs)?;
-        let reverse_indices = window_index.arg_sort_last_dim(true)?;
+        let reverse_indices = crate::ops::ArgSortOp::arg_sort(&window_index, true)?;
         xs.index_select(&reverse_indices, 0)
     }
 

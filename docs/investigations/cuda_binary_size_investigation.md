@@ -1273,3 +1273,40 @@ local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> fail (nee
                                                                        cuda/metal-gated), then pass (2789 + 2406)
 local_ci.sh --size  -> file 102.48 MiB (-0.04)
 ```
+
+## Run 34 - 2026-10-06 17:43
+
+#270 step 1, CUDA argsort (Run 27 row 6): one implementation. Two kernels did the job in different regimes:
+
+- candle-core's `arg_sort_last_dim`/`sort_last_dim` (candle-kernels `sort.cu`, llama.cpp's shared-memory bitonic
+  sort): one block per row, every row in one launch, no allocation, padding compared away in place; limited by shared
+  memory to 8192 columns. Callers on CUDA: Qwen2.5-VL window reverse indices, diffusion_gemma's entropy sort, MoE
+  decode's expert sort.
+- inference-nn's `ArgSortOp` (global-memory bitonic): any length, device-side padding so it captures into CUDA graphs,
+  but a host loop over rows and ~log^2(n) launches per row. Callers: MoE prefill, `topk_unsorted`.
+
+Now `ArgSortOp` is the one entry point: candle's kernel, ported into inference-nn's `sort.cu` as `argsort_rows`,
+runs every row of up to 8192 columns (`sort` gathers the values by the indices), and the global kernel keeps longer
+rows (MoE prefill's flattened expert ids). Every caller moved; candle-core's CUDA arm, `sort.cu` and the `SORT`
+module are deleted (the preload list is now sized from `ALL_IDS`). MoE prefill rows of up to 8192 ids move from
+~91 launches to one.
+
+Found on the way: `ArgSort::cuda_fwd` passed the storage base pointer without the layout's start offset, so a
+contiguous view that did not start at its storage's beginning (a narrow on the leading dim) sorted the wrong
+elements. Fixed; `cuda_sort_matches_the_cpu_on_both_kernels` (both kernels, 3 to 20000 columns including 8192/8193,
+f32/i64/u32/bf16/f16/u8, asc and desc, offset views) fails without the fix.
+
+```
+12 files, -108 / +207
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2790 + 2406) after a clippy cast fix
+local_ci.sh --size  -> file 102.45 MiB (-0.03)
+```
+
+Review follow-ups: `sort` keeps the in-place global path for bf16 (candle's bf16 gather is built for sm_80+ only, so
+the gather path would fail on older GPUs; it also puts the old prefill's in-place bf16 sort under the test); the
+dtype codes are named constants and `argsort_rows` returns nonzero on an unknown one; an empty input returns early
+(the row count divided by a zero last dim before). Tie order inside one expert can differ for MoE prefill rows of up
+to 8192 ids (both kernels are unstable). Candle's decode path would have failed to launch past 8192 ids (64 KiB of
+shared memory); those rows now take the global kernel. Test now also covers i64 and f64 on both kernels.
+
+No Metal change: `ArgSortOp` delegates to candle off CUDA, which is what these callers ran before.

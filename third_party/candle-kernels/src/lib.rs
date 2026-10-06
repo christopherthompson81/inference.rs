@@ -13,12 +13,11 @@ pub enum Id {
     Indexing,
     Quantized,
     Reduce,
-    Sort,
     Ternary,
     Unary,
 }
 
-pub const ALL_IDS: [Id; 11] = [
+pub const ALL_IDS: [Id; 10] = [
     Id::Affine,
     Id::Binary,
     Id::Cast,
@@ -27,7 +26,6 @@ pub const ALL_IDS: [Id; 11] = [
     Id::Indexing,
     Id::Quantized,
     Id::Reduce,
-    Id::Sort,
     Id::Ternary,
     Id::Unary,
 ];
@@ -93,7 +91,6 @@ mdl!(FILL, FILL_ENTRIES, FILL_OPTIONAL_ENTRIES, Fill);
 mdl!(INDEXING, INDEXING_ENTRIES, INDEXING_OPTIONAL_ENTRIES, Indexing);
 mdl!(QUANTIZED, QUANTIZED_ENTRIES, QUANTIZED_OPTIONAL_ENTRIES, Quantized);
 mdl!(REDUCE, REDUCE_ENTRIES, REDUCE_OPTIONAL_ENTRIES, Reduce);
-mdl!(SORT, SORT_ENTRIES, SORT_OPTIONAL_ENTRIES, Sort);
 mdl!(TERNARY, TERNARY_ENTRIES, TERNARY_OPTIONAL_ENTRIES, Ternary);
 mdl!(UNARY, UNARY_ENTRIES, UNARY_OPTIONAL_ENTRIES, Unary);
 

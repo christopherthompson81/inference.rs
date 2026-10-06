@@ -941,12 +941,8 @@ impl FusedExpertsWeights {
             return self.forward_lora(forward, config);
         }
         let is_prefill = forward.shape.phase.is_prefill();
-        let (expert_ids, sorted_token_ids) = if forward.shape.phase.is_prefill() {
-            use crate::ops::ArgSortOp;
-            forward.topk_ids.flatten_all()?.sort(true)?
-        } else {
-            forward.topk_ids.flatten_all()?.sort_last_dim(true)?
-        };
+        let (expert_ids, sorted_token_ids) =
+            crate::ops::ArgSortOp::sort(&forward.topk_ids.flatten_all()?, true)?;
 
         let gate_up = moe::moe_gemm(
             forward.xs_flat,
@@ -983,12 +979,8 @@ impl FusedExpertsWeights {
 
     fn forward_lora(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
         let is_prefill = forward.shape.phase.is_prefill();
-        let (expert_ids, sorted_token_ids) = if is_prefill {
-            use crate::ops::ArgSortOp;
-            forward.topk_ids.flatten_all()?.sort(true)?
-        } else {
-            forward.topk_ids.flatten_all()?.sort_last_dim(true)?
-        };
+        let (expert_ids, sorted_token_ids) =
+            crate::ops::ArgSortOp::sort(&forward.topk_ids.flatten_all()?, true)?;
         let top_k = config.num_experts_per_tok;
         let num_tokens = forward.shape.num_tokens;
         let inter = self.w.w_size_n;
