@@ -49,7 +49,10 @@ cargo clippy --workspace --tests --examples -- -D warnings
 # --size builds the CUDA C ABI library under the bundle profile and fails on growth past scripts/bundle_size_baseline.json;
 # --size-update rewrites the baseline, committed with the change that moved it.
 # --metal is the macOS counterpart of --cuda; the metal-only paths are invisible to a CPU or CUDA lint.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--models] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]
+
+# Deep checks on real checkpoints (reference parity, end-to-end real weights), on request; not part of local_ci.sh
+scripts/deep_checks.sh
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
@@ -181,7 +184,7 @@ Avoid returning TODOs.
 - In dev builds on Linux the always-built CUDA kernel sets are shared libraries under `target/debug/cuda-kernels` (one copy for every variant and test binary, loaded by absolute SONAME), so a dev binary only runs from this checkout. Release builds link static archives.
 - Put build env (CC/CXX/NVCC) and model paths (INFERENCE_TEST_*) in `~/.cargo/config.toml` `[env]`, not on the command line: build scripts track them, and changing one rebuilds the dependency tree.
 - Tests run under cargo-nextest (one process per test; see `.config/nextest.toml` for the GPU group sized by VRAM). It is required for `--features cuda`: plain `cargo test` shares one CUDA context across a binary's tests, so the memory-pool tests interfere. Install: `curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin`, `/mac` on macOS.
-- Real-checkpoint parity tests are integration tests: `--models` runs them (CPU) and `--cuda` keeps one GPU parity check. Engine behavior is tested on tiny random-weight checkpoints built at test time (see `crates/inference/tests/integration/paddleocr_vl_tiny.rs`).
+- Real-checkpoint tests are deep checks, not part of `local_ci.sh`: they form the `deep` nextest profile, which `scripts/deep_checks.sh` runs on request. Parity against another implementation verifies an adoption once (a reference that needs the other project's build goes in a `scripts/*_parity.sh`, like `gguf_perplexity_parity.sh`). Engine behavior is tested on tiny random-weight checkpoints built at test time (see `crates/inference/tests/integration/paddleocr_vl_tiny.rs`).
 - Each crate's integration tests are modules of one binary, `tests/integration/main.rs`, since a binary per file re-monomorphizes and links the whole stack. Add a test file there as a `mod`; nextest selects it by `package(<crate>) & test(/^<module>::/)`.
 - GPU tests use `skip_without_cuda!()` instead of `#[ignore]`, so `--features cuda` runs them wherever a device exists. Keep `#[ignore]` for hardware this suite can't assume (SM90, SM121, cuTile), benchmarks, and tests that write files.
 - A check worth running by hand is a test worth committing.

@@ -143,3 +143,37 @@ the slim lint's six checks, 16 s warm or 52 s cold.
 
 **Implication:** the slim checks' remaining serial time is core's front end run six times. With one target directory,
 only fewer configurations or a faster core front end shorten it.
+
+## Run 7 - 2026-10-06 12:01
+
+Question: full local CI had grown to ~145 s even with nothing changed, and the CUDA suite peaked at ~16 GB of VRAM.
+Which tests drive that, and which of them belong in it?
+
+Phase timeline of `local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep` on master with nothing changed
+(`bash -x` with a timestamped `PS4`): the CUDA suite ran in the background from 22 s to 136 s and was the long pole;
+everything else (CPU clippy and tests, doctests, smoke builds, bindings, docs, the sweep replays) fit inside it. Total
+145 s.
+
+The real-checkpoint tests held most of that: IQ4_XS 27B (21 s, `threads-required = num-test-threads`, ~15 GB),
+real-weight FLUX (20 s, alone, ~18 GB), three Qwen3.5 MTP runs (15-22 s each), and the two PaddleOCR-VL checks the
+CUDA profile kept. They are deep checks (parity with recorded reference outputs, end-to-end runs on real weights),
+not per-change tests, so they move to a `deep` nextest profile that `scripts/deep_checks.sh` runs on request; the
+default and CUDA profiles exclude them, and `local_ci.sh --models` is gone.
+
+CUDA suite after, with a VRAM sampler (`nvidia-smi --query-compute-apps` every 0.3 s, pid mapped to the test name
+through `/proc/<pid>/cmdline`):
+
+```
+nextest --profile cuda: 2787 tests, 58 s wall (was ~114 s)
+peak device memory: 6128 MiB, of which 1574 MiB is the idle desktop
+largest test processes: 564 MiB (engine retention), 526 / 490 MiB (tiny Qwen3.5 MTP), most tiny-model tests 350-400 MiB
+```
+
+So the 16 GB peak was the IQ4_XS and FLUX checks; a CUDA context and its loaded modules account for most of each
+remaining process, and no tiny-model test sizes its caches off free memory (the SDK's default paged KV budget is a
+fixed context, `DEFAULT_PAGED_CONTEXT`).
+
+Full CI on this branch: 146 s, CUDA suite 74 s inside it. The long pole is now `--slim`: six serial clippy runs, 67 s
+to 136 s. It ran because the branch touches `scripts/local_ci.sh`, which `slim_needed.py` always counts, and most
+code changes reach a crate inference-core depends on. Next: run the CPU suite in the background after its build, as
+the CUDA suite is, so the slim lint overlaps it (CPU tests ~29 s, slim ~69 s).

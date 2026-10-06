@@ -10,49 +10,45 @@ gpu-model = { max-threads = 6 }
 # engine sizes its KV budget from whatever is free when it loads. Admit a few at a time so that reading stays sane.
 metal-model = { max-threads = 4 }
 
-# Real-checkpoint parity tests are integration tests: they run on request (`local_ci.sh --models`), not on every cycle.
+# Real-checkpoint tests (parity goldens, end-to-end runs on real weights) are deep checks: `scripts/deep_checks.sh` runs
+# them on request, and neither the default nor the CUDA profile does. Restated per profile: filters do not carry over.
 [profile.default]
-default-filter = 'not ((package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections)))'
-
-[profile.models]
-default-filter = '(package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections))'
-
-# The slowest tests start first so the run ends in a burst instead of a tail of a few long tests.
-[[profile.default.overrides]]
-filter = '(package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections))'
-priority = 100
+default-filter = """
+not (
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|gguf_iq)::/))
+    | (package(inference-ffi) & test(detections))
+    | (package(inference-server-core) & test(/^flux::/))
+)
+"""
 
 # RLIMIT_NPROC counts every thread the concurrently running test processes spawn, so this one runs alone.
 [[profile.default.overrides]]
 filter = 'package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
 threads-required = 'num-test-threads'
 
-# The CUDA suite keeps a greedy parity check and the real-weight ISQ check; the rest, and the CPU layout detection, run on request
-# with --models. Engine behavior runs on the tiny random-weight checkpoint in paddleocr_vl_tiny.
 [profile.cuda]
 default-filter = """
 not (
-    (
-        (package(inference) & test(/^paddleocr_vl::/))
-        & not (test(=paddleocr_vl::greedy_ids_match_transformers) | test(=paddleocr_vl::gpu::isq_q8_0_keeps_ocr_text))
-    )
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|gguf_iq)::/))
     | (package(inference-ffi) & test(detections))
+    | (package(inference-server-core) & test(/^flux::/))
 )
 """
 
-[[profile.cuda.overrides]]
+[profile.deep]
+default-filter = """
+(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|gguf_iq)::/))
+| (package(inference-ffi) & test(detections))
+| (package(inference-server-core) & test(/^flux::/))
+"""
+
+[[profile.deep.overrides]]
 filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp)::/))'
 test-group = 'gpu-model'
 
-# The IQ4_XS 27B takes ~15 GB of VRAM, so it runs alone like FLUX.
-[[profile.cuda.overrides]]
-filter = 'package(inference) & test(/^gguf_iq::/)'
-threads-required = 'num-test-threads'
-priority = 100
-
-# Real-weight FLUX takes ~18 GB of VRAM, so it runs alone, first so the rest of the suite follows it.
-[[profile.cuda.overrides]]
-filter = 'package(inference-server-core) & test(/^flux::/)'
+# The IQ4_XS 27B takes ~15 GB of VRAM and real-weight FLUX ~18 GB, so each runs alone, first.
+[[profile.deep.overrides]]
+filter = '(package(inference) & test(/^gguf_iq::/)) | (package(inference-server-core) & test(/^flux::/))'
 threads-required = 'num-test-threads'
 priority = 100
 
