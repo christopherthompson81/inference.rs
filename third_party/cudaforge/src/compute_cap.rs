@@ -40,20 +40,21 @@ impl GpuArch {
         let s = s.strip_prefix("sm_").unwrap_or(&s);
 
         // Check for suffix (letters at the end) - support 'a' and 'f' suffixes
-        let (num_part, explicit_suffix) = if s.ends_with('f') {
-            (&s[..s.len() - 1], Some("f".to_string()))
-        } else if s.ends_with('a') {
-            (&s[..s.len() - 1], Some("a".to_string()))
+        let (num_part, explicit_suffix) = if let Some(num) = s.strip_suffix('f') {
+            (num, Some("f".to_string()))
+        } else if let Some(num) = s.strip_suffix('a') {
+            (num, Some("a".to_string()))
         } else {
             (s, None)
         };
 
-        let base = num_part.parse::<usize>().map_err(|_| {
-            Error::ComputeCapDetectionFailed(format!("Invalid compute capability: {}", s))
-        })?;
-
-        // Normalize (accept both 80 and 8.0 style)
-        let base = if base < 20 { base * 10 } else { base };
+        // "8.6" and "12.1" as nvidia-smi prints them, or "86" and "121"
+        let base = match num_part.split_once('.') {
+            Some((major, minor)) if !major.is_empty() && minor.len() == 1 => format!("{major}{minor}").parse::<usize>(),
+            Some(_) => "".parse::<usize>(),
+            None => num_part.parse::<usize>().map(|base| if base < 20 { base * 10 } else { base }),
+        }
+        .map_err(|_| Error::ComputeCapDetectionFailed(format!("Invalid compute capability: {}", s)))?;
 
         // If explicit suffix provided, use it; otherwise auto-suffix for >=90
         if explicit_suffix.is_some() {
@@ -123,6 +124,33 @@ impl From<usize> for GpuArch {
     }
 }
 
+/// The `-gencode` arguments for every arch in `archs`: one fat binary carrying SASS for each.
+pub fn gencode_args(archs: &[GpuArch]) -> Vec<String> {
+    archs.iter().map(GpuArch::to_gencode_arg).collect()
+}
+
+/// The archs as one key (`sm_80,sm_90a`); a single arch keys as `to_nvcc_arch` alone.
+pub fn arch_key(archs: &[GpuArch]) -> String {
+    archs.iter().map(GpuArch::to_nvcc_arch).collect::<Vec<_>>().join(",")
+}
+
+/// Parse a list like "80,86,90" (commas, semicolons or spaces), deduplicated and sorted by base.
+pub fn parse_arch_list(s: &str) -> Result<Vec<GpuArch>> {
+    let mut archs = s
+        .split(|c: char| c == ',' || c == ';' || c.is_whitespace())
+        .filter(|part| !part.is_empty())
+        .map(GpuArch::parse)
+        .collect::<Result<Vec<_>>>()?;
+    archs.sort_by(|a, b| (a.base, &a.suffix).cmp(&(b.base, &b.suffix)));
+    archs.dedup();
+    if archs.is_empty() {
+        return Err(Error::ComputeCapDetectionFailed(format!(
+            "No compute capability in {s:?}"
+        )));
+    }
+    Ok(archs)
+}
+
 /// Compute capability configuration
 #[derive(Debug, Clone, Default)]
 pub struct ComputeCapability {
@@ -171,36 +199,32 @@ impl ComputeCapability {
         self
     }
 
-    /// Get GPU arch for a specific file
+    /// Get the GPU archs a specific file compiles for
     ///
     /// Priority:
-    /// 1. Per-file override matching pattern
-    /// 2. Default compute cap
-    /// 3. Auto-detected from nvidia-smi
-    /// 4. CUDA_COMPUTE_CAP environment variable
-    pub fn get_for_file(&self, filename: &str) -> Result<GpuArch> {
-        // Check overrides first
+    /// 1. Per-file override matching pattern (that arch alone)
+    /// 2. Default compute cap (that arch alone)
+    /// 3. Detected: CUDA_COMPUTE_CAP (one value or a list), else every GPU nvidia-smi lists
+    pub fn get_for_file(&self, filename: &str) -> Result<Vec<GpuArch>> {
         for (pattern, arch) in &self.overrides {
             if matches_pattern(filename, pattern) {
-                return Ok(arch.clone());
+                return Ok(vec![arch.clone()]);
             }
         }
-
-        // Use default if set
-        if let Some(arch) = &self.default_cap {
-            return Ok(arch.clone());
-        }
-
-        // Auto-detect
-        detect_compute_cap()
+        self.get_defaults()
     }
 
-    /// Get the default GPU architecture
-    pub fn get_default(&self) -> Result<GpuArch> {
+    /// Get every default GPU architecture, lowest first
+    pub fn get_defaults(&self) -> Result<Vec<GpuArch>> {
         if let Some(arch) = &self.default_cap {
-            return Ok(arch.clone());
+            return Ok(vec![arch.clone()]);
         }
-        detect_compute_cap()
+        detect_compute_caps()
+    }
+
+    /// Get the lowest default GPU architecture, the one every compile-time minimum must hold for
+    pub fn get_default(&self) -> Result<GpuArch> {
+        Ok(self.get_defaults()?.remove(0))
     }
 
     /// Check if any overrides are configured
@@ -209,23 +233,25 @@ impl ComputeCapability {
     }
 }
 
-/// Detect compute capability from system
+/// Detect the lowest compute capability to build for (see [`detect_compute_caps`])
+pub fn detect_compute_cap() -> Result<GpuArch> {
+    Ok(detect_compute_caps()?.remove(0))
+}
+
+/// Detect every compute capability to build for, lowest first
 ///
 /// Priority:
-/// 1. CUDA_COMPUTE_CAP environment variable (supports "90", "90a", "100a")
-/// 2. nvidia-smi query
-pub fn detect_compute_cap() -> Result<GpuArch> {
-    // Check environment variable first
+/// 1. CUDA_COMPUTE_CAP environment variable: one value ("90", "90a", "100a") or a list ("80,86,90")
+/// 2. nvidia-smi query, its first GPU (a list is asked for, never inferred from a mixed host)
+pub fn detect_compute_caps() -> Result<Vec<GpuArch>> {
     if let Ok(cap_str) = std::env::var("CUDA_COMPUTE_CAP") {
-        return GpuArch::parse(&cap_str);
+        return parse_arch_list(&cap_str);
     }
-
-    // Try nvidia-smi
     detect_from_nvidia_smi()
 }
 
 /// Detect compute capability using nvidia-smi
-fn detect_from_nvidia_smi() -> Result<GpuArch> {
+fn detect_from_nvidia_smi() -> Result<Vec<GpuArch>> {
     let output = Command::new("nvidia-smi")
         .args(["--query-gpu=compute_cap", "--format=csv"])
         .output();
@@ -249,18 +275,14 @@ fn detect_from_nvidia_smi() -> Result<GpuArch> {
     }
 }
 
-/// Parse nvidia-smi output for compute capability
-fn parse_nvidia_smi_output(output: &str) -> Result<GpuArch> {
-    let line = output.lines().nth(1).ok_or_else(|| {
-        Error::ComputeCapDetectionFailed("Unexpected nvidia-smi output".to_string())
-    })?;
-
-    let cap = line.trim().parse::<f32>().map_err(|_| {
-        Error::ComputeCapDetectionFailed(format!("Failed to parse compute_cap: {}", line))
-    })?;
-
-    let base = (cap * 10.0) as usize;
-    Ok(GpuArch::auto_suffix(base))
+/// Parse nvidia-smi output for compute capability: the first GPU after the header line
+fn parse_nvidia_smi_output(output: &str) -> Result<Vec<GpuArch>> {
+    let line = output
+        .lines()
+        .skip(1)
+        .find(|line| !line.trim().is_empty())
+        .ok_or_else(|| Error::ComputeCapDetectionFailed("Unexpected nvidia-smi output".to_string()))?;
+    Ok(vec![GpuArch::parse(line)?])
 }
 
 /// Match filename against pattern (simple glob matching)
@@ -349,6 +371,28 @@ mod tests {
         assert_eq!(GpuArch::auto_suffix(100).to_nvcc_arch(), "sm_100a");
         assert_eq!(GpuArch::auto_suffix(120).to_nvcc_arch(), "sm_120a");
         assert_eq!(GpuArch::auto_suffix(121).to_nvcc_arch(), "sm_121f");
+    }
+
+    #[test]
+    fn test_arch_lists() {
+        let archs = parse_arch_list("90, 80;86 80").unwrap();
+        assert_eq!(arch_key(&archs), "sm_80,sm_86,sm_90a");
+        assert_eq!(
+            gencode_args(&archs),
+            [
+                "-gencode=arch=compute_80,code=sm_80",
+                "-gencode=arch=compute_86,code=sm_86",
+                "-gencode=arch=compute_90a,code=sm_90a",
+            ]
+        );
+        // one value keys exactly as before
+        assert_eq!(arch_key(&parse_arch_list("8.6").unwrap()), "sm_86");
+        assert!(parse_arch_list(" , ").is_err());
+        assert_eq!(arch_key(&parse_arch_list("121a,121f,121a").unwrap()), "sm_121a,sm_121f");
+        assert!(GpuArch::parse("8.").is_err());
+        assert_eq!(GpuArch::parse("12.1").unwrap().to_nvcc_arch(), "sm_121f");
+        // a mixed host builds for its first GPU unless CUDA_COMPUTE_CAP lists more
+        assert_eq!(arch_key(&parse_nvidia_smi_output("compute_cap\n8.6\n9.0\n").unwrap()), "sm_86");
     }
 
     #[test]

@@ -94,7 +94,10 @@ mod toolkit;
 
 // Re-export main types
 pub use builder::{KernelBuilder, PtxOutput};
-pub use compute_cap::{detect_compute_cap, get_gpu_arch_string, ComputeCapability, GpuArch};
+pub use compute_cap::{
+    arch_key, detect_compute_cap, detect_compute_caps, gencode_args, get_gpu_arch_string, parse_arch_list,
+    ComputeCapability, GpuArch,
+};
 pub use dependency::{resolve_cutlass_from_cargo_checkouts, DependencyManager, ExternalDependency};
 pub use error::{Error, Result};
 pub use hash::BuildCache;
