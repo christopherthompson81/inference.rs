@@ -6,7 +6,7 @@ maintained in-tree lives in `kernels/`; this table records where it came from.
 | in-tree path | upstream | revision | license | status |
 |---|---|---|---|---|
 | `third_party/flash-attention/hopper/` | FlashAttention-3 from [vllm-project/flash-attention](https://github.com/vllm-project/flash-attention) | `f3e1a4f7` (CUTLASS `62750a2b`) | BSD-3-Clause | trimmed subset; see its README and LICENSE |
-| `kernels/cuda/pagedattention*.cuh`, `kernels/cuda/*pagedattention*.cu`, `kernels/cuda/attention/` | [vllm-project/vllm](https://github.com/vllm-project/vllm) paged attention v1/v2 (FasterTransformer lineage) | not recorded | Apache-2.0 | adapted: per-dtype TUs, `extern "C"` launchers |
+| `kernels/cuda/attention/` (the vector types the fp8 cache kernels use) | [vllm-project/vllm](https://github.com/vllm-project/vllm) paged attention (FasterTransformer lineage) | not recorded | Apache-2.0 | adapted |
 | `kernels/cuda/cuda_compat.h`, `reshape_and_cache*`, `gather_kv_cache*`, `copy_blocks*`, `attention/dtype_fp8.cuh`, `quantization/fp8/nvidia/` | vLLM `cache_kernels.cu` and fp8 `quant_utils` | not recorded | Apache-2.0 | adapted: `extern "C"` launchers |
 | `kernels/cuda/concat_and_cache_mla_kernel.cu`, `gather_mla_cache_kernel.cu` | vLLM MLA cache kernels (unconfirmed: inferred from names) | not recorded | Apache-2.0 | adapted |
 | `kernels/cuda/flashinfer/` | [flashinfer-ai/flashinfer](https://github.com/flashinfer-ai/flashinfer) headers; `fastdiv.cuh` credits Milakov (Apache-2.0), `fp16.h` credits Marat Dukhan and AMD (MIT) | not recorded | Apache-2.0 (MIT for `fp16.h`) | unmodified as far as known |

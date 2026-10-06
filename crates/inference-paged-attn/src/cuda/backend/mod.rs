@@ -4,7 +4,7 @@ mod fa3;
 mod flashinfer;
 mod gather_kv;
 mod mla;
-mod paged_attention;
+mod reshape_cache;
 mod scale_update;
 pub use cache::{copy_blocks, swap_blocks};
 use candle_core::cuda::cudarc::{
@@ -23,7 +23,7 @@ pub use flashinfer::{
 };
 pub use gather_kv::gather_kv_cache;
 pub use mla::{concat_and_cache_mla, flashinfer_mla_decode, gather_mla_cache};
-pub use paged_attention::{paged_attention, reshape_and_cache};
+pub use reshape_cache::reshape_and_cache;
 pub use scale_update::kv_scale_update;
 
 fn cache_input_layout(

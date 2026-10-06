@@ -486,7 +486,7 @@ pub struct PagedDecodeMetadataRequirements {
 }
 
 impl PagedDecodeMetadataRequirements {
-    // the padded tables serve the standard kernel and fattn; the CSR page lists FA3, and the tile plan MLA decode
+    // the padded tables serve fattn and the gather (Metal's paged kernel too); the CSR page lists FA3, the tile plan MLA
     fn conservative() -> Self {
         Self {
             block_tables: true,

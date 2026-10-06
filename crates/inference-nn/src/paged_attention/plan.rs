@@ -663,6 +663,8 @@ pub enum DecodePlan {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     FlashInfer(FlashInferDecodePlan),
     GatherSdpa,
+    // the Standard layout's paged kernel, which only Metal still has
+    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
     PagedAttention,
 }
 
@@ -671,9 +673,11 @@ impl DecodePlan {
         attention_backend: AttentionBackendKind,
         head_size: usize,
     ) -> bool {
+        // on CUDA the Standard layout always gathers
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         {
-            head_size > FlashInferDecodePlan::head_size_limit(attention_backend)
+            matches!(attention_backend, AttentionBackendKind::Standard)
+                || head_size > crate::flashinfer::FLASHINFER_DECODE_MAX_HEAD_SIZE
         }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         {
@@ -697,7 +701,11 @@ impl DecodePlan {
             }
             #[cfg(not(all(feature = "cuda", target_family = "unix")))]
             AttentionBackendKind::FlashInfer => Ok(Self::GatherSdpa),
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            AttentionBackendKind::Standard => Ok(Self::GatherSdpa),
+            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
             AttentionBackendKind::Standard if input.has_sliding_window => Ok(Self::GatherSdpa),
+            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
             AttentionBackendKind::Standard => Ok(Self::PagedAttention),
         }
     }
@@ -1256,7 +1264,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_full_decode_keeps_paged_kernel() {
+    fn standard_full_decode_gathers_on_cuda_only() {
         let plan = DecodePlan::choose(DecodePlanInput {
             attention_backend: AttentionBackendKind::Standard,
             head_size: 128,
@@ -1265,6 +1273,13 @@ mod tests {
         })
         .unwrap();
 
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        assert!(matches!(plan, DecodePlan::GatherSdpa));
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         assert!(matches!(plan, DecodePlan::PagedAttention));
+        assert_eq!(
+            DecodePlan::requires_host_context_lengths(AttentionBackendKind::Standard, 128),
+            cfg!(all(feature = "cuda", target_family = "unix"))
+        );
     }
 }

@@ -421,8 +421,6 @@ pub struct Fa3DecodePrepare<'a> {
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-pub const STANDARD_PAGED_ATTENTION_MAX_HEAD_SIZE: usize = 512;
-#[cfg(all(feature = "cuda", target_family = "unix"))]
 pub const FLASHINFER_DECODE_MAX_HEAD_SIZE: usize = 512;
 
 #[derive(Clone, Debug)]
@@ -474,16 +472,6 @@ pub struct FlashInferMetadata {
 pub struct FlashInferDecodePlan;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-impl FlashInferDecodePlan {
-    pub fn head_size_limit(kind: AttentionBackendKind) -> usize {
-        match kind {
-            AttentionBackendKind::FlashInfer => FLASHINFER_DECODE_MAX_HEAD_SIZE,
-            AttentionBackendKind::Standard => STANDARD_PAGED_ATTENTION_MAX_HEAD_SIZE,
-        }
-    }
-}
-
-#[cfg(all(feature = "cuda", target_family = "unix"))]
 pub struct FlashInferDecodePlanInput {
     pub head_size: usize,
     pub has_alibi: bool,
@@ -515,7 +503,7 @@ impl AttentionBackend for FlashInferAttentionBackend {
         if !crate::perf_flags::flashinfer_decode_enabled() || spec.k_head_dim != spec.v_head_dim {
             return false;
         }
-        // decode on the layout is fattn's; where it cannot run, decode would gather, slower than the Standard kernels
+        // decode on the layout is fattn's; a shape it cannot read takes the Standard layout
         #[cfg(feature = "cuda")]
         {
             inference_fattn::paged_shape_supported(spec.k_head_dim, spec.q_heads, spec.kv_heads)

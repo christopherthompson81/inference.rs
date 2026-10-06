@@ -21,6 +21,8 @@ const ADAPTER_RANK: usize = 2;
 // From tests/fixtures/llama_tiny/config.json; q_proj is hidden x hidden there.
 const TINY_LAYERS: usize = 2;
 const TINY_HIDDEN: usize = 32;
+// f32 on both sides: the GPU's summation order moves logprobs ~1e-6, which these large random weights grow to ~3e-3
+const F32_LOGPROB_TOLERANCE: f32 = 1e-2;
 
 fn cpu_text_builder(dir: &Path) -> TextModelBuilder {
     TextModelBuilder::new(dir.to_string_lossy())
@@ -185,5 +187,28 @@ async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Resu
     assert_eq!(greedy_trace(&lora, None).await?, base_trace);
     let adapted = greedy_trace(&lora, Some(ADAPTER)).await?;
     assert_ne!(adapted, base_trace, "the adapter did not change the decode");
+    Ok(())
+}
+
+// Head dim 16 is outside the HND layout, so a CUDA build decodes this Standard cache through the gather.
+#[tokio::test]
+async fn paged_gpu_decode_over_the_standard_layout_matches_the_cpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_llama_checkpoint()?;
+    let cpu = greedy_trace(&cpu_text_builder(checkpoint.path()).build().await?, None).await?;
+    let gpu = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    let gpu = greedy_trace(&gpu, None).await?;
+    let close = gpu.len() == cpu.len()
+        && gpu
+            .iter()
+            .zip(&cpu)
+            .all(|(g, c)| g.0 == c.0 && (g.1 - c.1).abs() < F32_LOGPROB_TOLERANCE);
+    anyhow::ensure!(close, "GPU decode {gpu:?} differs from CPU {cpu:?}");
     Ok(())
 }
