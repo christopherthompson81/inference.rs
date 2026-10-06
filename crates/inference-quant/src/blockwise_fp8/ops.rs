@@ -11,6 +11,8 @@ use crate::{ActivationQuantizationScheme, ActivationScaleLayout, FusedRmsNormQua
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
 ))]
 use super::ffi;
+#[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
+use std::collections::HashSet;
 #[cfg(all(
     feature = "cuda",
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
@@ -32,6 +34,11 @@ const FP8_ALIGNMENT_BYTES: usize = 16;
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
 ))]
 const CUDA_STREAM_PER_THREAD_HANDLE: usize = 2;
+#[cfg(all(
+    feature = "cuda",
+    any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
+))]
+const SM90_COMPUTE_CAP: usize = 90;
 #[cfg(all(
     feature = "cuda",
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
@@ -1147,36 +1154,8 @@ pub(super) fn fp8_tensor_aligned(tensor: &Tensor) -> bool {
     feature = "cuda",
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
 ))]
-static FP8_SM90_DEVICES: OnceLock<Mutex<HashMap<candle_core::cuda::DeviceId, bool>>> =
-    OnceLock::new();
-
-#[cfg(all(
-    feature = "cuda",
-    any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
-))]
 pub(super) fn is_sm90(dev: &candle_core::CudaDevice) -> bool {
-    use candle_core::cuda::cudarc::driver::{result, sys};
-
-    let devices = FP8_SM90_DEVICES.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(supported) = devices.lock().unwrap().get(&dev.id()).copied() {
-        return supported;
-    }
-    let device = dev.cuda_stream().context().cu_device();
-    let major = unsafe {
-        result::device::get_attribute(
-            device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-        )
-    };
-    let minor = unsafe {
-        result::device::get_attribute(
-            device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-        )
-    };
-    let supported = matches!((major, minor), (Ok(9), Ok(0)));
-    devices.lock().unwrap().insert(dev.id(), supported);
-    supported
+    dev.compute_cap() == SM90_COMPUTE_CAP
 }
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
@@ -1197,13 +1176,11 @@ fn check_cutlass_status(operation: &str, status: i32) -> Result<()> {
 }
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
-static PREPARED_CUTLASS_FP8_DEVICES: OnceLock<Mutex<HashMap<candle_core::cuda::DeviceId, i32>>> =
+static PREPARED_CUTLASS_FP8_DEVICES: OnceLock<Mutex<HashSet<candle_core::cuda::DeviceId>>> =
     OnceLock::new();
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
 pub(super) fn prepare_cutlass_fp8(dev: &candle_core::CudaDevice) -> Result<i32> {
-    use candle_core::cuda::cudarc::driver::{result, sys};
-
     dev.cuda_stream()
         .context()
         .bind_to_thread()
@@ -1213,23 +1190,15 @@ pub(super) fn prepare_cutlass_fp8(dev: &candle_core::CudaDevice) -> Result<i32> 
     if !is_sm90(dev) {
         candle_core::bail!("CUTLASS FP8 provider requires an SM90 device")
     }
-    let prepared = PREPARED_CUTLASS_FP8_DEVICES.get_or_init(|| Mutex::new(HashMap::new()));
+    let sm_count = dev.sm_count() as i32;
+    let prepared = PREPARED_CUTLASS_FP8_DEVICES.get_or_init(Default::default);
     let mut prepared = prepared.lock().unwrap();
-    if let Some(sm_count) = prepared.get(&dev.id()) {
-        return Ok(*sm_count);
+    if prepared.contains(&dev.id()) {
+        return Ok(sm_count);
     }
-    let sm_count = unsafe {
-        result::device::get_attribute(
-            dev.cuda_stream().context().cu_device(),
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-        )
-    }
-    .map_err(|error| {
-        candle_core::Error::msg(format!("CUDA multiprocessor query failed: {error}"))
-    })?;
     let status = unsafe { ffi::inference_cutlass_fp8_blockwise_prepare() };
     check_cutlass_status("CUTLASS FP8 kernel preparation", status)?;
-    prepared.insert(dev.id(), sm_count);
+    prepared.insert(dev.id());
     Ok(sm_count)
 }
 

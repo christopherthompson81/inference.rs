@@ -42,7 +42,6 @@ static MODULES: [&kernels::Module; 11] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
 
     #[test]
     fn every_module_loads_and_preloads_its_entries() -> Result<()> {
@@ -66,15 +65,7 @@ mod tests {
         let Device::Cuda(cuda) = &device else {
             unreachable!()
         };
-        let stream = cuda.cuda_stream();
-        let context = stream.context();
-        let major = context
-            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-            .map_err(candle_core::Error::wrap)?;
-        let minor = context
-            .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-            .map_err(candle_core::Error::wrap)?;
-        let cc = (major * 10 + minor) as usize;
+        let cc = cuda.compute_cap();
         let archs: Vec<usize> = kernels::ARCHS
             .iter()
             .filter_map(|arch| arch.trim_end_matches(['a', 'f']).parse().ok())

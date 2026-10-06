@@ -22,7 +22,7 @@ const MARLIN_WIDE_TILE: usize = 128;
 const MARLIN_K_TILE: usize = 64;
 const MARLIN_MAX_PARALLEL: usize = 16;
 const MARLIN_INPUT_ALIGNMENT: usize = 16;
-const MIN_COMPUTE_CAPABILITY_MAJOR: i32 = 8;
+const MIN_COMPUTE_CAPABILITY_MAJOR: usize = 8;
 const MIN_MEMORY_HEADROOM: usize = 1024 * 1024 * 1024;
 const MEMORY_HEADROOM_DIVISOR: usize = 20;
 const AFFINE_ONLY_MIN_BATCH: usize = 1;
@@ -791,18 +791,7 @@ fn supports_device(device: &Device) -> bool {
     let Device::Cuda(dev) = device else {
         return false;
     };
-    static SUPPORTED: OnceLock<Mutex<HashMap<usize, bool>>> = OnceLock::new();
-    let ordinal = dev.cuda_stream().context().ordinal();
-    let mut supported = SUPPORTED
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap();
-    *supported.entry(ordinal).or_insert_with(|| {
-        dev.cuda_stream()
-            .context()
-            .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-            .is_ok_and(|major| major >= MIN_COMPUTE_CAPABILITY_MAJOR)
-    })
+    dev.compute_major() >= MIN_COMPUTE_CAPABILITY_MAJOR
 }
 
 fn check_status(operation: &str, status: i32) -> Result<()> {

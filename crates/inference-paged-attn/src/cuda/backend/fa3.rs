@@ -636,6 +636,8 @@ mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
     #[cfg(has_fa3_fp8_paged)]
+    const TEST_FA3_COMPUTE_MAJOR: usize = 9;
+    #[cfg(has_fa3_fp8_paged)]
     const TEST_BATCH_SIZE: usize = 2;
     #[cfg(has_fa3_fp8_paged)]
     const TEST_QUERY_LEN: usize = 3;
@@ -979,8 +981,6 @@ mod tests {
     #[cfg(has_fa3_fp8_paged)]
     #[test]
     fn per_sequence_metadata_matches_decode_tail_attention() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-
         if !crate::cuda::USE_FP8 {
             return Ok(());
         }
@@ -990,22 +990,9 @@ mod tests {
         let Device::Cuda(cuda_device) = &device else {
             unreachable!()
         };
-        let stream = cuda_device.cuda_stream();
-        let context = stream.context();
-        let Ok(compute_major) =
-            context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        else {
-            return Ok(());
-        };
-        let Ok(num_sm) =
-            context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-        else {
-            return Ok(());
-        };
-        if compute_major != 9 || num_sm <= 0 {
+        if cuda_device.compute_major() != TEST_FA3_COMPUTE_MAJOR {
             return Ok(());
         }
-
         let total_q = TEST_BATCH_SIZE * TEST_QUERY_LEN;
         let schedule = Fa3DecodeSchedule {
             batch_size: TEST_BATCH_SIZE,
@@ -1018,8 +1005,8 @@ mod tests {
             page_size: TEST_PAGE_SIZE,
             max_seqlen_k: TEST_MAX_SEQUENCE_LEN,
             num_splits: TEST_NUM_SPLITS,
-            num_sm: num_sm as usize,
-            device_id: context.ordinal(),
+            num_sm: cuda_device.sm_count(),
+            device_id: cuda_device.cuda_stream().context().ordinal(),
         };
 
         let cache_tokens = TEST_NUM_PAGES * TEST_PAGE_SIZE;
@@ -1133,8 +1120,6 @@ mod tests {
     #[cfg(has_fa3_fp8_paged)]
     #[test]
     fn direct_fp8_paged_prefill_matches_scalar_causal_gqa() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-
         if !crate::cuda::USE_FP8 {
             return Ok(());
         }
@@ -1144,22 +1129,9 @@ mod tests {
         let Device::Cuda(cuda_device) = &device else {
             unreachable!()
         };
-        let stream = cuda_device.cuda_stream();
-        let context = stream.context();
-        let Ok(compute_major) =
-            context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        else {
-            return Ok(());
-        };
-        let Ok(num_sm) =
-            context.attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-        else {
-            return Ok(());
-        };
-        if compute_major != 9 || num_sm <= 0 {
+        if cuda_device.compute_major() != TEST_FA3_COMPUTE_MAJOR {
             return Ok(());
         }
-
         let total_q = TEST_BATCH_SIZE * TEST_QUERY_LEN;
         let schedule = Fa3DecodeSchedule {
             batch_size: TEST_BATCH_SIZE,
@@ -1172,8 +1144,8 @@ mod tests {
             page_size: TEST_PAGE_SIZE,
             max_seqlen_k: TEST_MAX_SEQUENCE_LEN,
             num_splits: TEST_NUM_SPLITS,
-            num_sm: num_sm as usize,
-            device_id: context.ordinal(),
+            num_sm: cuda_device.sm_count(),
+            device_id: cuda_device.cuda_stream().context().ordinal(),
         };
         let scales = TEST_SCALES;
         assert!(scales.q != 1.0 && scales.k != 1.0 && scales.v != 1.0);

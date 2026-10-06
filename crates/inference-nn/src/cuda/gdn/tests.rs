@@ -4257,8 +4257,8 @@ fn fused_decode_dispatches_zero_padding_without_touching_state_cuda() -> Result<
         RecurrentStateLayout::GdnKeyMajor,
     )?;
 
-    let properties = gdn_cuda_device_properties(dev.as_cuda_device()?)?;
-    if properties.compute_major >= GDN_DECODE_MIN_COMPUTE_MAJOR {
+    let compute_major = dev.as_cuda_device()?.compute_major();
+    if compute_major >= GDN_DECODE_MIN_COMPUTE_MAJOR {
         for kernel in [GdnDecodeKernel::Cooperative, GdnDecodeKernel::Pipelined] {
             run_fused_decode_padding_case(
                 &dev,
@@ -4270,7 +4270,7 @@ fn fused_decode_dispatches_zero_padding_without_touching_state_cuda() -> Result<
             )?;
         }
     }
-    if properties.compute_major >= GDN_DECODE_MIN_COMPUTE_MAJOR {
+    if compute_major >= GDN_DECODE_MIN_COMPUTE_MAJOR {
         for kernel in [GdnDecodeKernel::ValueMajor4, GdnDecodeKernel::ValueMajor32] {
             run_fused_decode_padding_case(
                 &dev,

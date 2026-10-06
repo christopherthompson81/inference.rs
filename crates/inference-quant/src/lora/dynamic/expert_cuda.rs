@@ -38,7 +38,7 @@ const CUTILE_NATIVE_DIRECT_MAX_RANK: usize = 16;
 #[cfg(feature = "cutile")]
 const CUTILE_NATIVE_DIRECT_MIN_ROUTES: usize = 256;
 #[cfg(feature = "cutile")]
-const CUTILE_NATIVE_DIRECT_COMPUTE_MAJOR: i32 = 12;
+const CUTILE_NATIVE_DIRECT_COMPUTE_MAJOR: usize = 12;
 const EXPERT_CUDA_CACHE_CAPACITY: usize = 32;
 const EXPERT_CUDA_WEIGHT_CACHE_CAPACITY: usize = 256;
 
@@ -82,7 +82,7 @@ fn strongly_contracts_features(input_features: usize, output_features: usize) ->
 
 #[cfg(feature = "cutile")]
 fn prefer_native_over_cutile(
-    compute_major: i32,
+    compute_major: usize,
     layout: RoutedLoraMetadataLayout,
     dtype: DType,
     shape: NativeDirectShape,
@@ -103,7 +103,7 @@ fn needs_grouped_metadata(
     layout: RoutedLoraMetadataLayout,
     dtype: DType,
     shape: NativeDirectShape,
-    cutile_compute_major: Option<i32>,
+    cutile_compute_major: Option<usize>,
 ) -> bool {
     #[cfg(feature = "cutile")]
     {
@@ -624,7 +624,7 @@ fn with_prepared_resource<T>(
     let hidden = site.spec().hidden_size();
     let intermediate = site.spec().local_intermediate_size();
     #[cfg(feature = "cutile")]
-    let cutile_compute_major = Some(crate::cutile::device_compute_capability(device).0);
+    let cutile_compute_major = Some(device.compute_major());
     #[cfg(not(feature = "cutile"))]
     let cutile_compute_major = None;
     let needs_metadata = [
@@ -898,7 +898,7 @@ fn launch_projection<T: RoutedLoraElement>(
     };
     #[cfg(feature = "cutile")]
     let native_over_cutile = prefer_native_over_cutile(
-        crate::cutile::device_compute_capability(context.device).0,
+        context.device.compute_major(),
         context.metadata_layout,
         run.input.dtype(),
         native_shape,

@@ -11,27 +11,17 @@ use super::config::{KvCacheLayout, ModelConfigLike};
 use crate::flashinfer::{Fa3PrefillWorkspaceRegistration, register_fa3_prefill_caches};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-fn cuda_supports_fp8(device: &Device) -> bool {
-    use candle_core::cuda::cudarc::driver::{result, sys};
+const FP8_CACHE_MIN_COMPUTE_MAJOR: usize = 8;
 
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn cuda_supports_fp8(device: &Device) -> bool {
     if !inference_paged_attn::USE_FP8 {
         return false;
     }
     let Device::Cuda(cuda) = device else {
         return false;
     };
-    let ordinal = cuda.cuda_stream().context().ordinal();
-    #[allow(clippy::cast_possible_truncation)]
-    let Ok(device) = result::device::get(ordinal as i32) else {
-        return false;
-    };
-    unsafe {
-        result::device::get_attribute(
-            device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-        )
-        .is_ok_and(|major| major >= 8)
-    }
+    cuda.compute_major() >= FP8_CACHE_MIN_COMPUTE_MAJOR
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

@@ -54,12 +54,7 @@ use regex::Regex;
 
 // FP8 tensor-core paths (cuBLASLt FP8, the blockwise FP8 MMA GEMV) need sm_89+; older GPUs take the dequantize path.
 #[cfg(feature = "cuda")]
-const FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY: i32 = 89;
-
-#[cfg(feature = "cuda")]
-static FP8_TENSOR_CORE_SUPPORT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashMap<candle_core::cuda::DeviceId, bool>>,
-> = std::sync::LazyLock::new(Default::default);
+const FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY: usize = 89;
 
 /// The arch whose SASS a device of compute capability `cc` (86 for 8.6) runs from this build: the highest built one
 /// in its major family not above it, so device code under a higher `__CUDA_ARCH__` guard is absent there.
@@ -80,23 +75,9 @@ fn kernel_arch_in(archs: &str, cc: usize) -> Option<usize> {
 pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
     #[cfg(feature = "cuda")]
     if let candle_core::Device::Cuda(dev) = device {
-        use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-        let mut cache = FP8_TENSOR_CORE_SUPPORT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        return *cache.entry(dev.id()).or_insert_with(|| {
-            let stream = dev.cuda_stream();
-            let context = stream.context();
-            let attribute = |a| context.attribute(a).unwrap_or(0);
-            let cc = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-                * 10
-                + attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR);
-            // an sm_89 device running sm_86 SASS has the kernels' sm_89 bodies compiled out
-            usize::try_from(cc)
-                .ok()
-                .and_then(built_kernel_arch)
-                .is_some_and(|arch| arch >= FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY as usize)
-        });
+        // an sm_89 device running sm_86 SASS has the kernels' sm_89 bodies compiled out
+        return built_kernel_arch(dev.compute_cap())
+            .is_some_and(|arch| arch >= FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY);
     }
     let _ = device;
     false

@@ -401,27 +401,6 @@ fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
         return *info;
     }
     let cu_device = dev.cuda_stream().context().cu_device();
-    let major = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-        )
-    }
-    .unwrap_or(8);
-    let minor = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-        )
-    }
-    .unwrap_or(0);
-    let nsm = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-        )
-    }
-    .unwrap_or(1);
     let smpbo = unsafe {
         result::device::get_attribute(
             cu_device,
@@ -437,8 +416,9 @@ fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
     }
     .unwrap_or(32);
     let info = DeviceInfo {
-        cc: major * 100 + minor * 10,
-        nsm,
+        // ggml's cc encoding: 100 * major + 10 * minor
+        cc: (dev.compute_cap() * 10) as i32,
+        nsm: dev.sm_count() as i32,
         smpbo: smpbo as i64,
         warp_size,
     };
@@ -447,7 +427,7 @@ fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
 }
 
 fn fixup_workspace_bytes(dev: &CudaDevice) -> usize {
-    get_device_info(dev).nsm as usize * MMQ_X_MAX * MMQ_Y_MAX * std::mem::size_of::<f32>()
+    dev.sm_count() * MMQ_X_MAX * MMQ_Y_MAX * std::mem::size_of::<f32>()
 }
 
 fn workspace_ensure<'a>(

@@ -14,9 +14,9 @@ use crate::kv_cache::RecurrentStateLayout;
 pub const GDN_PAD_SLOT: u32 = u32::MAX;
 
 #[cfg_attr(not(any(feature = "cuda", test)), allow(dead_code))]
-const GDN_DECODE_MIN_COMPUTE_MAJOR: i32 = 8;
+const GDN_DECODE_MIN_COMPUTE_MAJOR: usize = 8;
 #[cfg(has_flashinfer_gdn_sm90_kernel)]
-const FLASHINFER_GDN_COMPUTE_MAJOR: i32 = 9;
+const FLASHINFER_GDN_COMPUTE_MAJOR: usize = 9;
 pub const GDN_DECODE_K_DIM: usize = 128;
 pub const GDN_DECODE_V_DIM: usize = 128;
 #[cfg(any(feature = "cuda", test))]
@@ -297,7 +297,7 @@ enum GdnPrefillKernel {
 #[cfg(any(feature = "cuda", test))]
 #[derive(Clone, Copy)]
 struct GdnPrefillPolicy {
-    compute_major: i32,
+    compute_major: usize,
     multiprocessor_count: usize,
     state_blocks: usize,
     seq_len: usize,
@@ -378,7 +378,7 @@ fn prefill_kernel_override() -> Result<Option<GdnPrefillKernel>> {
 #[cfg(any(feature = "cuda", test))]
 #[derive(Clone, Copy)]
 struct GdnDecodePolicy {
-    compute_major: i32,
+    compute_major: usize,
     multiprocessor_count: usize,
     state_blocks: usize,
     head_k_dim: usize,
@@ -516,53 +516,6 @@ fn decode_kernel_override() -> Result<Option<GdnDecodeKernel>> {
     }
 }
 
-#[cfg(feature = "cuda")]
-#[derive(Clone, Copy)]
-struct GdnCudaDeviceProperties {
-    compute_major: i32,
-    multiprocessor_count: usize,
-}
-
-#[cfg(feature = "cuda")]
-fn gdn_cuda_device_properties(dev: &candle_core::CudaDevice) -> Result<GdnCudaDeviceProperties> {
-    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-    use std::collections::HashMap;
-    use std::sync::{Mutex, OnceLock};
-
-    static CACHE: OnceLock<Mutex<HashMap<i32, GdnCudaDeviceProperties>>> = OnceLock::new();
-    let stream = dev.cuda_stream();
-    let context = stream.context();
-    let device = context.cu_device();
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(properties) = cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&device)
-        .copied()
-    {
-        return Ok(properties);
-    }
-    let compute_major = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .map_err(candle_core::Error::wrap)?;
-    let multiprocessor_count = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-        .map_err(candle_core::Error::wrap)?;
-    let multiprocessor_count = usize::try_from(multiprocessor_count)
-        .ok()
-        .filter(|count| *count > 0)
-        .ok_or_else(|| candle_core::Error::msg("CUDA device reported no multiprocessors"))?;
-    let properties = GdnCudaDeviceProperties {
-        compute_major,
-        multiprocessor_count,
-    };
-    cache
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(device, properties);
-    Ok(properties)
-}
-
 pub fn v_major_state_supported(
     device: &Device,
     input_dtype: DType,
@@ -577,8 +530,7 @@ pub fn v_major_state_supported(
         if !device.is_cuda() {
             return Ok(false);
         }
-        let properties = gdn_cuda_device_properties(device.as_cuda_device()?)?;
-        Ok(properties.compute_major >= GDN_DECODE_MIN_COMPUTE_MAJOR)
+        Ok(device.as_cuda_device()?.compute_major() >= GDN_DECODE_MIN_COMPUTE_MAJOR)
     }
     #[cfg(not(feature = "cuda"))]
     {
@@ -1498,10 +1450,10 @@ fn vmajor_prefill_gated_delta_rule_recurrence_cuda_impl(
 ) -> Result<Tensor> {
     let (state_blocks, seq_len, head_k_dim) = inputs.q.dims3()?;
     let head_v_dim = inputs.v.dim(2)?;
-    let properties = gdn_cuda_device_properties(inputs.q.device().as_cuda_device()?)?;
+    let dev = inputs.q.device().as_cuda_device()?;
     let policy = GdnPrefillPolicy {
-        compute_major: properties.compute_major,
-        multiprocessor_count: properties.multiprocessor_count,
+        compute_major: dev.compute_major(),
+        multiprocessor_count: dev.sm_count(),
         state_blocks,
         seq_len,
         head_k_dim,
@@ -1512,7 +1464,7 @@ fn vmajor_prefill_gated_delta_rule_recurrence_cuda_impl(
     let kernel = select_prefill_kernel(policy, requested).map_err(|kernel| {
         candle_core::Error::msg(format!(
             "GDN prefill kernel {kernel:?} does not support compute {}, BH={state_blocks}, S={seq_len}, K={head_k_dim}, V={head_v_dim}, dtype={activation_dtype:?}",
-            properties.compute_major
+            policy.compute_major
         ))
     })?;
     let recurrence_kernel = match kernel {
@@ -2315,10 +2267,7 @@ fn flashinfer_sm90_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Res
             }
         }
         // the library is sm_90a SASS alone, which a multi-arch build may carry beside other archs
-        Ok(
-            gdn_cuda_device_properties(device.as_cuda_device()?)?.compute_major
-                == FLASHINFER_GDN_COMPUTE_MAJOR,
-        )
+        Ok(device.as_cuda_device()?.compute_major() == FLASHINFER_GDN_COMPUTE_MAJOR)
     }
 }
 
@@ -2381,13 +2330,11 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
     }
 
     let dev = mixed_qkv.device().as_cuda_device()?;
-    let properties = gdn_cuda_device_properties(dev)?;
     let batch_size_i32 = i32::try_from(batch_size).map_err(candle::Error::wrap)?;
     let seq_len_i32 = i32::try_from(seq_len).map_err(candle::Error::wrap)?;
     let num_k_heads_i32 = i32::try_from(num_k_heads).map_err(candle::Error::wrap)?;
     let num_v_heads_i32 = i32::try_from(num_v_heads).map_err(candle::Error::wrap)?;
-    let sm_count_i32 =
-        i32::try_from(properties.multiprocessor_count).map_err(candle::Error::wrap)?;
+    let sm_count_i32 = i32::try_from(dev.sm_count()).map_err(candle::Error::wrap)?;
     let has_slots = if matches!(slots, GdnStateSlots::Pooled(_)) {
         1
     } else {
@@ -2715,7 +2662,6 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
             );
         }
         let dev = mixed_qkv.device().as_cuda_device()?;
-        let device_properties = gdn_cuda_device_properties(dev)?;
 
         let (mixed_s, mixed_l) = mixed_qkv.storage_and_layout();
         let mixed_s = match &*mixed_s {
@@ -2762,8 +2708,8 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 
         let (state_ptr, state_dtype) = cuda_recurrent_state_ptr(state, "state")?;
         let policy = GdnDecodePolicy {
-            compute_major: device_properties.compute_major,
-            multiprocessor_count: device_properties.multiprocessor_count,
+            compute_major: dev.compute_major(),
+            multiprocessor_count: dev.sm_count(),
             state_blocks: batch_size.saturating_mul(num_v_heads),
             head_k_dim,
             head_v_dim,
@@ -4013,9 +3959,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
     if !device.is_cuda() {
         candle::bail!("deferred GDN recurrence requires CUDA");
     }
-    if gdn_cuda_device_properties(device.as_cuda_device()?)?.compute_major
-        < GDN_DECODE_MIN_COMPUTE_MAJOR
-    {
+    if device.as_cuda_device()?.compute_major() < GDN_DECODE_MIN_COMPUTE_MAJOR {
         candle::bail!("deferred GDN recurrence requires compute capability 8.0 or newer");
     }
     let fp8_layout = quantization
@@ -4369,9 +4313,7 @@ fn launch_deferred_state_cuda(
         candle::bail!("deferred GDN materialization storage shapes are incompatible");
     }
     let device = state_pool.device();
-    if !device.is_cuda()
-        || gdn_cuda_device_properties(device.as_cuda_device()?)?.compute_major
-            < GDN_DECODE_MIN_COMPUTE_MAJOR
+    if !device.is_cuda() || device.as_cuda_device()?.compute_major() < GDN_DECODE_MIN_COMPUTE_MAJOR
     {
         candle::bail!("deferred GDN materialization requires compute capability 8.0 or newer");
     }
