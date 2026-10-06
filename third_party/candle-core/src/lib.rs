@@ -81,18 +81,14 @@ pub mod scalar;
 pub mod shape;
 mod sort;
 mod storage;
-pub mod streaming;
 mod strided_index;
 mod tensor;
 mod tensor_cat;
-pub mod test_utils;
 pub mod utils;
 mod variable;
 
 #[cfg(feature = "cudnn")]
 pub use cuda_backend::cudnn;
-#[cfg(feature = "cutile")]
-pub use cuda_backend::cutile;
 
 pub use cpu_backend::{CpuStorage, CpuStorageRef};
 pub use custom_op::{CustomOp1, CustomOp2, CustomOp3, InplaceOp1, InplaceOp2, InplaceOp3};
@@ -105,7 +101,6 @@ pub use layout::Layout;
 pub use nditer::NdIter;
 pub use shape::{Shape, D};
 pub use storage::{Storage, StorageMutRef, StorageRef};
-pub use streaming::{StreamTensor, StreamingBinOp, StreamingModule};
 pub use strided_index::{StridedBlocks, StridedIndex};
 pub use tensor::{Tensor, TensorId};
 pub use variable::Var;

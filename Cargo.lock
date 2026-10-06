@@ -472,7 +472,6 @@ dependencies = [
  "rayon",
  "safetensors",
  "thiserror 2.0.18",
- "tokenizers",
  "yoke",
  "zerocopy",
  "zip 8.6.0",

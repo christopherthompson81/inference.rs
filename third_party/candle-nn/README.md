@@ -7,7 +7,9 @@
 > - `src/moe.rs` and `src/moe/` are removed with `pub mod moe`, the `cutile` feature and the `candle-kernels`
 >   dependency they needed. The MoE kernels they called are gone from candle-kernels; inference.rs runs MoE through
 >   inference-nn and inference-quant.
-> - `src/attention/cpu_flash/standard.rs`: drops `use std::f32;`, which made `f32::NEG_INFINITY` resolve to the module
->   constant that Rust 1.99 deprecates.
+> - Removed as unused by inference.rs: the `attention` and `cpu_flash_attention` modules (inference-nn has its own CPU
+>   flash attention), `kv_cache`, `rnn`, `encoding`, `sequential`, `func` and `sampling` with their re-exports;
+>   `rope_i`, `rope_i_slow`, `rope_thd` and `rope_slow` in `src/rotary_emb.rs` (`rope` stays); and the npz, pth, routing, sharded and
+>   renaming backends in `src/var_builder.rs` (inference-quant has its own sharded loader).
 >
 > Everything else is upstream. To re-sync, copy `candle-nn/src` from the new rev and reapply the changes above.

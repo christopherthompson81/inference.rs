@@ -15,8 +15,6 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 #[cfg(feature = "cudnn")]
 pub mod cudnn;
-#[cfg(feature = "cutile")]
-pub mod cutile;
 mod device;
 mod error;
 mod utils;
