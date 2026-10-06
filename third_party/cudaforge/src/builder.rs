@@ -385,6 +385,8 @@ impl KernelBuilder {
             let mut command = Command::new(&toolkit.nvcc_path);
             command
                 .arg("-shared")
+                // nothing builds relocatable device code, and the device link would add an empty default-arch cubin
+                .arg("--no-device-link")
                 .args(["--cudart", "shared"])
                 .arg("-o")
                 .arg(&tmp)
