@@ -1665,7 +1665,11 @@ pub fn causal_conv1d_cuda(
         DType::BF16 => {
             cuda_fwd::<half::bf16>(x, &weight, &conv_state, kernel_size, is_update, slots, 1)
         }
-        other => candle_core::bail!("causal_conv1d_cuda only supports f16/bf16, got {:?}", other),
+        DType::F32 => cuda_fwd::<f32>(x, &weight, &conv_state, kernel_size, is_update, slots, 2),
+        other => candle_core::bail!(
+            "causal_conv1d_cuda supports f16, bf16 and f32, got {:?}",
+            other
+        ),
     }
 }
 

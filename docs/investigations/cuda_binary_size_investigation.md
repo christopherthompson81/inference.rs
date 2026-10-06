@@ -1137,3 +1137,25 @@ local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (278
 candle's modules ship as compressed fatbins in `.rodata`, so the 1.40 MB of SASS Run 27 counted is ~0.30 MiB in the
 bundle. The preload loads every entry of every candle module onto each device at startup, so the GPU now holds about
 56 KB for this module (dequantize and get_rows, Run 27's figures) instead of about 1.46 MB.
+## Run 30 - 2026-10-06 13:56
+
+#270 step 1, item 3: the four bugs Run 27 found, each confirmed by a test that failed first.
+
+```
+fill_and_copy_run_for_every_integer_dtype (ones + cat on CUDA U8/U32/I16/I32/I64)
+  before: DriverError(CUDA_ERROR_NOT_FOUND, "named symbol not found")
+  fix: const_set_i16/_i32 and copy2d_i16/_i32 in candle-kernels fill.cu, which candle-core's backend mapped but
+  upstream never defined
+causal_conv1d_on_cuda_in_f32_matches_the_cpu (a prefill, then a decode step from its state)
+  before: "causal_conv1d_cuda only supports f16/bf16, got F32" (an F32 GDN model on a GPU)
+  fix: f32 instances of the CUDA conv kernels; both launchers are one template body dispatched on dtype 0/1/2.
+  The generic tensor fallback was not used: it ignores pooled state slots
+imatrix_stats_count_gemv_batches (a batch-1 BF16 UnquantLinear on CUDA, which takes the GEMV)
+  before: stats_snapshot Some((0, 0)), expected Some((1, 1))
+  fix: UnquantLinear::forward_raw records stats before the GEMV returns
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2790 + 2411 tests)
+```
+
+The fourth, candle's Metal `arg_sort_last_dim` returning garbage past 1024 elements (a single-threadgroup bitonic sort;
+AFQ routes around it, MoE decode, qwen2.5-vl window indexing, GPTQ and diffusion_gemma do not), cannot run on Linux
+and is on the Mac list (#269), with the Metal-only dead code from Run 27.

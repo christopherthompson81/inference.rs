@@ -17,6 +17,8 @@
 > - `src/quantized.cu`: the `mul_mat_vec_*`, `mul_mat_q*`, `dequantize_mul_mat_vec_*` and `quantize_q8_1` kernels are
 >   removed with their candle-core launchers; inference-quant runs GGUF matmul. `dequantize_block_*` and `get_rows_*`
 >   stay.
+> - `src/fill.cu`: adds `const_set_i16`/`_i32` and `copy2d_i16`/`_i32`, which candle-core's CUDA backend maps but
+>   upstream never defined, so filling or concatenating an I16/I32 CUDA tensor failed at kernel load.
 > - `src/reduce.cu`: the `rope_i` and `rope_thd` kernels are removed with candle-nn's `rope_i`/`rope_thd`; `rope` stays.
 >
 > Everything else is upstream. To re-sync, copy `candle-kernels/` from the new rev and reapply the changes above.
