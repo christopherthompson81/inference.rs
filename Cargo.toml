@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["third_party/candle-core", "third_party/candle-kernels", "third_party/cudaforge", "third_party/cudarc"]
+exclude = ["third_party/candle-core", "third_party/candle-kernels", "third_party/candle-nn", "third_party/cudaforge", "third_party/cudarc"]
 members = [
     "crates/inference-server-core",
     "crates/inference-api",
@@ -296,7 +296,8 @@ cudaforge = { path = "third_party/cudaforge" }
 # cudarc loading CUDA libraries by soname first; see third_party/cudarc/README.md
 cudarc = { path = "third_party/cudarc" }
 
-# candle-core and candle-kernels shipping compressed SASS instead of PTX; see their READMEs in third_party/
+# candle-core, candle-kernels and candle-nn carry our changes; see their READMEs in third_party/
 [patch."https://github.com/huggingface/candle.git"]
 candle-core = { path = "third_party/candle-core" }
 candle-kernels = { path = "third_party/candle-kernels" }
+candle-nn = { path = "third_party/candle-nn" }

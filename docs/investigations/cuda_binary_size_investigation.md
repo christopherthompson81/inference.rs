@@ -934,3 +934,47 @@ does no device link, so nothing shipped carries it. Nothing in the tree builds r
 now passes `--no-device-link`. Rebuilt from an empty `target/debug/cuda-kernels` (57 s with ccache): 30/39/8/70
 cubins, all sm_86, one fewer each; preload tests pass. A stub at sm_52 would also have been an unlisted arch on a
 multi-arch dev build.
+## Run 24 - 2026-10-06 09:10
+
+#270 step 4: MoE and FP8 GEMM inventory, then the first deletion.
+
+Question: how many implementations of MoE expert GEMM and of FP8 GEMM ship, which configurations reach each, and
+which are dead?
+
+Inventory (read from the dispatch code, nothing run):
+- MoE expert GEMM, 9 implementations. Unquantized BF16 experts with a gated activation try cuTile, then CUTLASS 2.x
+  grouped GEMM (>= 64 tokens, no LoRA), then inference-nn's fused WMMA/GEMV/GEMM, which is also the sole path for F16,
+  non-gated activations and CUTLASS's decode. FP8 experts: cuTile fused W8A8 (per-expert block-128 only) over the
+  CUDA-core indexed MoE, which is the sole path for stacked layouts, TP and builds without cuTile. GGUF experts: the
+  fused decode GEMV (< 32 tokens), grouped mmq prefill, `moe_grouped` (only when gate and up types differ, down is
+  Q8_1, or the activation has no GLU form) and the generic indexed gather (imatrix, LoRA, gpt_oss, Granite, MLA).
+- FP8 GEMM, 7 implementations: the legacy tiled CUDA-core kernel (sm80/86 without cuTile), TensorCoreGemv (sm_89+,
+  <= 32 rows), CUTLASS sm90, DeepGEMM sm90, cuTile W8A8/W8A16, cuBLASLt FP8 (ISQ F8E4M3) and dequant fallbacks.
+- Dead: candle-kernels' static `libmoe.a` (`moe_wmma`, `moe_gguf`, `moe_wmma_gguf`), its `moe_align.cu`
+  (never built: only candle-nn's `cutile` feature asked for it) and candle-core's `QTensor::indexed_moe_forward` with
+  its kernels in candle's `quantized.cu`. Only upstream candle-nn's `moe` module called the archive, and nothing calls
+  that. candle's `moe_gemm_wmma` also shared its C name (different signature) with inference-nn's.
+- Displaced: `BlockwiseFP8Linear` picks the CUTLASS sm90 provider and then always overwrites it with TensorCoreGemv
+  for BF16 dequant, so an sm90 build without DeepGEMM and cuTile runs prefill above 32 rows as dequant + cuBLAS rather
+  than CUTLASS. Needs an sm90 machine to measure.
+
+Deleted: candle-kernels' `src/moe/`, `src/ffi.rs`, the `libmoe.a` build and its `cutile` feature; candle-core's
+`indexed_moe_forward` and the 206 lines of its kernels. candle-nn's `moe` module referenced the FFI, so candle-nn is
+now vendored too (`third_party/candle-nn`, upstream minus `moe`; the start of step 5). Under Rust 1.99 its CPU flash
+attention hit the same `use std::f32;` deprecation candle-core's `erf.rs` did (#261), fixed the same way.
+
+```
+cargo nextest run -p inference-nn -p inference-quant --features cuda --lib -E 'test(preload)|test(gguf)|test(moe)' -> 98 pass
+local_ci.sh --size  -> file 103.30 MiB (-0.14), .nv_fatbin 30.32 MiB (-0.13): the indexed_moe kernels in candle's
+                       quantized module; libmoe.a's members had never been linked in
+local_ci.sh --size-update -> baseline rewritten (built with Rust 1.99, which the earlier baseline predates)
+```
+
+The local toolchain moved to 1.99 (GitHub's stable) on the way, which flagged `AtomicU64::fetch_update` in the
+CUDA-only graph cache; GitHub's clippy builds without CUDA, so it never saw it. The generation counter now uses
+`fetch_add` (`try_update` needs 1.99, past the declared 1.94 MSRV, and a u64 counter cannot overflow).
+
+Review: no correctness issue. inference-paged-attn's kernel archive needs libstdc++ and only linked it with FA3; candle-kernels' `libmoe.a` link had supplied it, so paged-attn now links it itself (its standalone test binary in a non-debug profile would otherwise fail to link). candle-kernels' dead `src/ptx.rs` (it `include_str!`ed PTX files nothing generates) is gone.
+
+Next: fold `moe_grouped`'s GEMM into the mmq path behind parity tests, and file the sm90 CUTLASS override for
+Hopper verification.

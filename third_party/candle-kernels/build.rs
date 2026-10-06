@@ -3,7 +3,6 @@ use std::env;
 use std::io::Write;
 use std::path::PathBuf;
 
-const CUTILE_FEATURE: &str = "CARGO_FEATURE_CUTILE";
 // cuobjdump -symbols: an `arch = sm_86` line opens each cubin, and a kernel entry carries this binding
 const CUBIN_ARCH_PREFIX: &str = "arch = sm_";
 const ENTRY_SYMBOL: &str = "STO_ENTRY";
@@ -22,7 +21,6 @@ fn main() -> Result<()> {
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let fatbins = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
-        .exclude(&["moe_*.cu"]) // Exclude statically compiled kernels from the module build
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
         .arg("-O3")
@@ -53,51 +51,6 @@ fn main() -> Result<()> {
     }
     assert!(!archs.is_empty(), "cuobjdump listed no cubins in the candle fatbins");
     writeln!(images, "pub const ARCHS: &[&str] = &[{}];", quoted(archs.iter()))?;
-
-    let mut moe_sources = vec![
-        "src/moe/moe_gguf.cu",
-        "src/moe/moe_wmma.cu",
-        "src/moe/moe_wmma_gguf.cu",
-    ];
-    if env::var_os(CUTILE_FEATURE).is_some() {
-        moe_sources.push("src/moe/moe_align.cu");
-    }
-
-    let mut moe_builder = KernelBuilder::default()
-        .source_files(moe_sources)
-        .compress_fatbin()
-        .arg("--expt-relaxed-constexpr")
-        .arg("-std=c++17")
-        .arg("-O3");
-
-    // Disable bf16 WMMA kernels on GPUs older than sm_80 (Ampere).
-    // bf16 WMMA fragments require compute capability >= 8.0.
-    let compute_cap = cudaforge::detect_compute_cap()
-        .map(|arch| arch.base())
-        .unwrap_or(80);
-    if compute_cap < 80 {
-        moe_builder = moe_builder.arg("-DNO_BF16_KERNEL");
-    }
-
-    let mut is_target_msvc = false;
-    if let Ok(target) = std::env::var("TARGET") {
-        if target.contains("msvc") {
-            is_target_msvc = true;
-            moe_builder = moe_builder.arg("-D_USE_MATH_DEFINES");
-        }
-    }
-
-    if !is_target_msvc {
-        moe_builder = moe_builder.arg("-Xcompiler").arg("-fPIC");
-    }
-
-    moe_builder.build_lib(out_dir.join("libmoe.a"))?;
-    println!("cargo:rustc-link-search={}", out_dir.display());
-    println!("cargo:rustc-link-lib=moe");
-    println!("cargo:rustc-link-lib=dylib=cudart");
-    if !is_target_msvc {
-        println!("cargo:rustc-link-lib=stdc++");
-    }
     Ok(())
 }
 

@@ -15,6 +15,8 @@
 >   `get_or_load_custom_func`'s PTX.
 > - `src/quantized/`: `fast_mmq.rs` and `fast_mmvq.rs` are removed with their call in `QCudaStorage::fwd`. GGUF matmul
 >   on CUDA goes through inference-quant (`gguf::qmatmul_forward`); what still reaches `QMatMul` here dequantizes.
+> - `src/quantized/`: `QTensor::indexed_moe_forward` and `QMatMul::indexed_moe_forward` are removed with their CUDA
+>   implementation; inference-quant's GGUF MoE paths replace them.
 > - `src/cpu/erf.rs`: drops `use std::f64;`, which made `f64::INFINITY` resolve to the module constants that Rust 1.99
 >   deprecates (a path dependency's lints are not capped like a git dependency's).
 >
