@@ -71,16 +71,22 @@ def default_accelerator() -> str:
 
 
 def compute_capability() -> str | None:
-    """The SM the CUDA kernels build for: the build scripts read CUDA_COMPUTE_CAP, else the first GPU."""
+    """The SMs the kernels build for (`sm80.sm86`): the build scripts read CUDA_COMPUTE_CAP, else the first GPU."""
     if os.environ.get("CUDA_COMPUTE_CAP"):
-        return os.environ["CUDA_COMPUTE_CAP"].replace(".", "")
+        # cudaforge's list: 86, 8.6, sm_90 or 90a, split on commas, semicolons or spaces
+        archs = {
+            int(re.sub(r"\D", "", arch))
+            for arch in re.split(r"[,;\s]+", os.environ["CUDA_COMPUTE_CAP"])
+            if arch
+        }
+        return ".".join(f"sm{arch}" for arch in sorted(archs))
     if not shutil.which("nvidia-smi"):
         return None
     query = ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"]
     lines = subprocess.run(
         query, capture_output=True, text=True, check=False
     ).stdout.split()
-    return lines[0].replace(".", "") if lines else None
+    return f"sm{lines[0].replace('.', '')}" if lines else None
 
 
 def needed_libraries(library: Path) -> list[str] | None:
@@ -103,7 +109,7 @@ def cuda_local_version(data: bytes) -> str:
         sys.exit(
             "set CUDA_COMPUTE_CAP to the compute capability the library was built for"
         )
-    return f"cu{found.group(1).decode()}.sm{sm}"
+    return f"cu{found.group(1).decode()}.{sm}"
 
 
 def platform_tag(library: Path, accelerator: str) -> str:

@@ -42,6 +42,7 @@ static MODULES: [&kernels::Module; 11] = [
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::cuda_backend;
 
     #[test]
     fn every_module_loads_and_preloads_its_entries() -> Result<()> {
@@ -65,17 +66,13 @@ mod tests {
         let Device::Cuda(cuda) = &device else {
             unreachable!()
         };
-        let cc = cuda.compute_cap();
-        let archs: Vec<usize> = kernels::ARCHS
+        let device_arch = cuda_backend::kernel_arch(cuda.compute_cap());
+        let highest = kernels::ARCHS
             .iter()
-            .filter_map(|arch| arch.trim_end_matches(['a', 'f']).parse().ok())
-            .collect();
-        let device_arch = archs
-            .iter()
-            .filter(|&&arch| arch / 10 == cc / 10 && arch <= cc)
+            .filter_map(|arch| arch.trim_end_matches(['a', 'f']).parse::<usize>().ok())
             .max();
         // the build's highest arch keeps every entry; a lower one may lack the optional ones
-        if device_arch == archs.iter().max() {
+        if device_arch == highest {
             assert_eq!(loaded, total);
         } else {
             assert!(
@@ -84,5 +81,34 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    #[test]
+    fn a_device_opens_only_with_kernels_for_its_arch() {
+        let Ok(cc) = cuda_backend::device_compute_cap(0) else {
+            return;
+        };
+        match cuda_backend::kernel_arch(cc) {
+            Some(_) => assert!(Device::new_cuda(0).is_ok()),
+            None => {
+                let error = Device::new_cuda(0).unwrap_err().to_string();
+                assert!(error.contains("CUDA_COMPUTE_CAP"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_device_runs_the_highest_built_arch_of_its_family() {
+        let among = cuda_backend::kernel_arch_among;
+        assert_eq!(among(&["86", "90a"], 89), Some(86));
+        assert_eq!(among(&["80", "86", "89", "90a"], 89), Some(89));
+        assert_eq!(among(&["86", "90a"], 90), Some(90));
+        assert_eq!(among(&["86", "121f"], 121), Some(121));
+        // arch-specific SASS runs only on its own capability: a 120a build has nothing for a 12.1 device
+        assert_eq!(among(&["86", "120a"], 121), None);
+        assert_eq!(among(&["100a"], 103), None);
+        // no SASS in its family: the device runs nothing from this build
+        assert_eq!(among(&["86", "90a"], 75), None);
+        assert_eq!(among(&["86", "90a"], 120), None);
     }
 }

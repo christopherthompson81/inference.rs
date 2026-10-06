@@ -53,11 +53,16 @@ pub struct DeviceInfo {
     /// Whether this device uses unified memory (GPU and CPU share the same physical RAM)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unified_memory: Option<bool>,
+    /// Whether this build carries CUDA kernels for the device's arch; without them the device cannot be used
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kernels_built: Option<bool>,
 }
 
 // fattn (inference-fattn) runs causal, packed and paged attention on Turing's mma or newer
 #[cfg(feature = "cuda")]
 const FLASH_ATTN_MIN_COMPUTE: (u32, u32) = (7, 5);
+#[cfg(feature = "cuda")]
+const FLASH_ATTN_V3_COMPUTE: (u32, u32) = (9, 0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BuildInfo {
@@ -74,6 +79,9 @@ pub struct BuildInfo {
     pub cuda_toolkit_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cuda_toolkit_version_code: Option<u32>,
+    /// The archs the CUDA kernels were built for (`86`, `90a`)
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cuda_archs: Vec<String>,
 }
 
 /// Versions of the local tools the build's backends run against; each is `None` when not installed or not probed.
@@ -156,6 +164,13 @@ fn build_info() -> BuildInfo {
         cuda_toolkit_version: inference_nn::BUILD_CUDA_VERSION.map(str::to_string),
         cuda_toolkit_version_code: inference_nn::BUILD_CUDA_VERSION_CODE
             .and_then(|s| s.parse().ok()),
+        #[cfg(feature = "cuda")]
+        cuda_archs: candle_core::cuda_backend::kernels::ARCHS
+            .iter()
+            .map(|arch| arch.to_string())
+            .collect(),
+        #[cfg(not(feature = "cuda"))]
+        cuda_archs: Vec::new(),
     }
 }
 
@@ -174,36 +189,34 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
         flash_attn_compatible: None,
         flash_attn_v3_compatible: None,
         unified_memory: None,
+        kernels_built: None,
     });
 
     #[cfg(feature = "cuda")]
     {
-        let mut ord = 0;
-        while let Ok(dev) = Device::new_cuda(ord) {
-            let mem = MemoryUsage.query(&dev).ok();
-            let total = mem.map(|m| m.total() as u64);
-            let avail = mem.map(|m| m.available() as u64);
-
-            // Get compute capability
-            let compute_cap = get_cuda_compute_capability(ord);
-            let flash_attn_ok = compute_cap.map(|cc| cc >= FLASH_ATTN_MIN_COMPUTE);
-            let flash_attn_v3_ok = compute_cap.map(|(major, minor)| {
-                // Flash Attention v3 requires compute capability == 9.0 (Hopper only)
-                major == 9 && minor == 0
-            });
-
+        use candle_core::cuda_backend::{device_compute_cap, device_count, kernel_arch};
+        // a device of an unbuilt arch refuses to open, so it is listed from the driver alone
+        for ord in 0..device_count().unwrap_or(0) {
+            let compute_cap = device_compute_cap(ord).ok();
+            let kernels_built = compute_cap.map(|cc| kernel_arch(cc).is_some());
+            let dev = Device::new_cuda(ord).ok();
+            let mem = dev.as_ref().and_then(|dev| MemoryUsage.query(dev).ok());
+            let compute_cap = compute_cap.map(|cc| ((cc / 10) as u32, (cc % 10) as u32));
             devices.push(DeviceInfo {
                 kind: "cuda".to_string(),
                 ordinal: Some(ord),
                 name: None,
-                total_memory_bytes: total,
-                available_memory_bytes: avail,
+                total_memory_bytes: mem.as_ref().map(|m| m.total() as u64),
+                available_memory_bytes: mem.as_ref().map(|m| m.available() as u64),
                 compute_capability: compute_cap,
-                flash_attn_compatible: flash_attn_ok,
-                flash_attn_v3_compatible: flash_attn_v3_ok,
-                unified_memory: Some(inference_nn::utils::normal::is_integrated_gpu(&dev)),
+                flash_attn_compatible: compute_cap.map(|cc| cc >= FLASH_ATTN_MIN_COMPUTE),
+                // FA3 is Hopper only
+                flash_attn_v3_compatible: compute_cap.map(|cc| cc == FLASH_ATTN_V3_COMPUTE),
+                unified_memory: dev
+                    .as_ref()
+                    .map(inference_nn::utils::normal::is_integrated_gpu),
+                kernels_built,
             });
-            ord += 1;
         }
     }
 
@@ -225,43 +238,13 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
                     flash_attn_compatible: Some(true), // Metal always supports flash attention
                     flash_attn_v3_compatible: None,    // Flash Attn v3 is CUDA Hopper only
                     unified_memory: Some(true),        // Apple Silicon always uses unified memory
+                    kernels_built: None,
                 });
             }
         }
     }
 
     devices
-}
-
-/// Get CUDA compute capability for a device ordinal
-#[cfg(feature = "cuda")]
-fn get_cuda_compute_capability(ordinal: usize) -> Option<(u32, u32)> {
-    // Use nvidia-smi to query compute capability
-    let output = std::process::Command::new("nvidia-smi")
-        .args([
-            "--query-gpu=compute_cap",
-            "--format=csv,noheader",
-            &format!("-i={ordinal}"),
-        ])
-        .output()
-        .ok()?;
-
-    if !output.status.success() {
-        return None;
-    }
-
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let cap = stdout.trim();
-
-    // Parse "8.9" format
-    let parts: Vec<&str> = cap.split('.').collect();
-    if parts.len() == 2 {
-        let major = parts[0].parse().ok()?;
-        let minor = parts[1].parse().ok()?;
-        Some((major, minor))
-    } else {
-        None
-    }
 }
 
 /// Detect CPU extensions (AVX, AVX2, AVX-512, FMA)
@@ -661,6 +644,22 @@ pub fn run_doctor() -> DoctorReport {
     #[cfg(feature = "cuda")]
     {
         for dev in system.devices.iter().filter(|d| d.kind == "cuda") {
+            if let (Some(ord), Some((major, minor)), Some(false)) =
+                (dev.ordinal, dev.compute_capability, dev.kernels_built)
+            {
+                checks.push(DoctorCheck {
+                    name: format!("cuda_{ord}_kernels_missing"),
+                    status: DoctorStatus::Error,
+                    message: format!(
+                        "GPU {ord}: compute {major}.{minor} has no kernels in this build (sm_{}).",
+                        system.build.cuda_archs.join(", sm_")
+                    ),
+                    suggestion: Some(format!(
+                        "Rebuild with CUDA_COMPUTE_CAP listing {major}{minor}, or use a build for this GPU."
+                    )),
+                });
+                continue;
+            }
             if let (Some(ord), Some((major, minor))) = (dev.ordinal, dev.compute_capability) {
                 let fa_ok = dev.flash_attn_compatible.unwrap_or(false);
                 let fa_v3_ok = dev.flash_attn_v3_compatible.unwrap_or(false);

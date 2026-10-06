@@ -51,6 +51,7 @@ fn main() -> Result<()> {
         writeln!(images, "pub const {name}_ENTRIES: &[&str] = &[{}];", quoted(every.iter().copied()))?;
         writeln!(images, "pub const {name}_OPTIONAL_ENTRIES: &[&str] = &[{}];", quoted(optional.copied()))?;
     }
+    assert!(!archs.is_empty(), "cuobjdump listed no cubins in the candle fatbins");
     writeln!(images, "pub const ARCHS: &[&str] = &[{}];", quoted(archs.iter()))?;
 
     let mut moe_sources = vec![

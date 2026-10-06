@@ -7,6 +7,7 @@ baseline.
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -70,8 +71,9 @@ def report(baseline: dict[str, int], current: dict[str, int]) -> str:
 
 
 def build_key(compute_cap: str, cuda_version: str) -> dict[str, str]:
-    # the build scripts take CUDA_COMPUTE_CAP as 86 or 8.6
-    return {"compute_cap": compute_cap.replace(".", ""), "cuda": cuda_version}
+    # cudaforge's list: 86, 8.6, sm_90 or 90a, split on commas, semicolons or spaces, in any order
+    archs = {int(re.sub(r"\D", "", arch)) for arch in re.split(r"[,;\s]+", compute_cap) if arch}
+    return {"compute_cap": ",".join(map(str, sorted(archs))), "cuda": cuda_version}
 
 
 def main(argv: list[str]) -> int:

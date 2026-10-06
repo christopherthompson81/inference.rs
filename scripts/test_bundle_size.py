@@ -43,6 +43,11 @@ class BundleSizeTest(unittest.TestCase):
     def test_compute_caps_compare_with_or_without_the_dot(self):
         self.assertEqual(build_key("8.6", "13.0"), build_key("86", "13.0"))
 
+    def test_an_arch_list_keys_the_same_in_any_order(self):
+        self.assertEqual(build_key("9.0,80, 86", "13.0"), build_key("80,86,90", "13.0"))
+        self.assertEqual(build_key("80,86", "13.0")["compute_cap"], "80,86")
+        self.assertEqual(build_key("sm_90a;8.6 80,", "13.0"), build_key("80,86,90", "13.0"))
+
 
 if __name__ == "__main__":
     unittest.main()

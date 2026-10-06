@@ -13,8 +13,11 @@ docker build -t inference:cuda -f docker/Dockerfile.cuda-13.0-ubi9 \
 ```
 
 - `CUDA_COMPUTE_CAP` is the GPU's compute capability without the dot (`80` A100, `86` RTX 30, `89` RTX 40/L4, `90`
-  H100, `100` B200, `120` RTX 50, `121` DGX Spark); the kernels are built for that one capability. See
-  [hardware support](/reference/hardware-support/).
+  H100, `100` B200, `120` RTX 50, `121` DGX Spark), or a comma-separated list of them (`80,86,89,90`) for an image
+  that runs on each; every listed capability adds its own copy of the GPU code. A GPU below 9.0 runs the highest
+  listed capability of its major version not above its own; from 9.0 on the kernels are arch-specific, so list each
+  capability exactly (`121` for DGX Spark, not `120`). A GPU with nothing to run fails at startup naming the list
+  (no PTX is shipped to JIT from). See [hardware support](/reference/hardware-support/).
 - `WITH_FEATURES` takes [cargo features](/reference/cargo-features/); the default is `cuda`.
 - For CPU-only use, run the `inference` binary natively ([quickstart](/quickstart/)); there is no CPU Dockerfile.
 

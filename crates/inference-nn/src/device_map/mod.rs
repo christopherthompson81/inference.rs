@@ -333,26 +333,25 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     match base {
         Device::Cpu => return Ok(vec![Device::Cpu]),
+        #[cfg(feature = "cuda")]
         Device::Cuda(_) => {
-            let mut ord = 0;
             let DeviceLocation::Cuda { gpu_id: base_ord } = base.location() else {
                 candle_core::bail!("location and device do not match");
             };
-            loop {
-                if base_ord == ord {
+            for ord in 0..candle_core::cuda_backend::device_count()? {
+                if ord == base_ord {
                     devices.push(base.clone());
-                    ord += 1;
                     continue;
                 }
-                let dev = Device::new_cuda(ord);
-                if let Ok(dev) = dev {
-                    devices.push(dev);
-                    ord += 1;
-                } else {
-                    break;
+                // a device this build has no kernels for is left out rather than ending the list
+                match Device::new_cuda(ord) {
+                    Ok(dev) => devices.push(dev),
+                    Err(err) => tracing::warn!("Skipping cuda:{ord}: {err}"),
                 }
             }
         }
+        #[cfg(not(feature = "cuda"))]
+        Device::Cuda(_) => devices.push(base.clone()),
         #[cfg(not(feature = "metal"))]
         Device::Metal(_) => {
             candle_core::bail!("Not compiled with metal features, but have a metal device.");

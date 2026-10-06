@@ -40,6 +40,45 @@ impl std::ops::Deref for RngGuard<'_> {
 
 const CUDA_GRAPH_HTOD_CACHE_MAX_BYTES: usize = 4096;
 
+/// The built arch whose SASS a device of compute capability `cc` (86 for 8.6) runs, if any.
+pub fn kernel_arch(cc: usize) -> Option<usize> {
+    kernel_arch_among(kernels::ARCHS, cc)
+}
+
+/// The highest of `archs` a device of compute capability `cc` runs, so code under a higher `__CUDA_ARCH__` is absent.
+pub fn kernel_arch_among(archs: &[&str], cc: usize) -> Option<usize> {
+    archs
+        .iter()
+        .filter_map(|arch| {
+            let number = arch.trim_end_matches(['a', 'f']).parse::<usize>().ok()?;
+            // plain and family (121f) SASS run on later minors of their major; arch-specific (120a) only on its own
+            let runs = if arch.ends_with('a') { number == cc } else { number / 10 == cc / 10 && number <= cc };
+            runs.then_some(number)
+        })
+        .max()
+}
+
+/// The number of CUDA devices the driver shows, or an error when libcuda is missing.
+pub fn device_count() -> Result<usize> {
+    use cudarc::driver::result;
+    require_lib(unsafe { cudarc::driver::sys::is_culib_present() }, "libcuda")?;
+    result::init().w()?;
+    Ok(result::device::get_count().w()? as usize)
+}
+
+/// Compute capability of the device at `ordinal` as `major * 10 + minor`, without creating a context.
+pub fn device_compute_cap(ordinal: usize) -> Result<usize> {
+    use cudarc::driver::{result, sys::CUdevice_attribute};
+    require_lib(unsafe { cudarc::driver::sys::is_culib_present() }, "libcuda")?;
+    result::init().w()?;
+    let device = result::device::get(ordinal as i32).w()?;
+    // SAFETY: device comes from device::get
+    let attribute = |attribute| unsafe { result::device::get_attribute(device, attribute) }.w();
+    let major = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+    let minor = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+    Ok((major * 10 + minor) as usize)
+}
+
 // cudarc panics when it cannot load a library; this turns a host without one into an error instead.
 fn require_lib(present: bool, lib: &str) -> Result<()> {
     if !present {
@@ -439,17 +478,26 @@ impl CudaDevice {
         context: Arc<cudarc::driver::CudaContext>,
         stream: Arc<cudarc::driver::CudaStream>,
     ) -> Result<Self> {
-        require_lib(unsafe { cudarc::cublas::sys::is_culib_present() }, "libcublas")?;
-        let blas = cudarc::cublas::CudaBlas::new(stream.clone()).w()?;
-        let module_store = ModuleStore {
-            mdls: [const { None }; kernels::ALL_IDS.len()],
-        };
         use cudarc::driver::sys::CUdevice_attribute;
         let attribute = |attribute| context.attribute(attribute).w().map(|value| value as usize);
         let major = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
         let minor = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
         let compute_cap = major * 10 + minor;
+        // no PTX ships, so a device outside the built arch families has no kernels to run at all
+        if kernel_arch(compute_cap).is_none() {
+            crate::bail!(
+                "CUDA device {} has compute capability {major}.{minor}, but this build carries kernels for sm_{} only; \
+                 rebuild with CUDA_COMPUTE_CAP listing {compute_cap}",
+                context.ordinal(),
+                kernels::ARCHS.join(", sm_")
+            )
+        }
         let sm_count = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
+        require_lib(unsafe { cudarc::cublas::sys::is_culib_present() }, "libcublas")?;
+        let blas = cudarc::cublas::CudaBlas::new(stream.clone()).w()?;
+        let module_store = ModuleStore {
+            mdls: [const { None }; kernels::ALL_IDS.len()],
+        };
         Ok(Self {
             compute_cap,
             sm_count,
