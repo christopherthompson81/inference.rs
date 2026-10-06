@@ -13,8 +13,9 @@
 >   keeps its sequence). A missing driver, cuBLAS or cuRAND is an error rather than cudarc's panic.
 > - `src/cuda_backend/device.rs`: `get_or_load_custom_image` loads a custom module from a cubin or fatbin, beside
 >   `get_or_load_custom_func`'s PTX.
-> - `src/quantized/`: `fast_mmq.rs` and `fast_mmvq.rs` are removed with their call in `QCudaStorage::fwd`. GGUF matmul
->   on CUDA goes through inference-quant (`gguf::qmatmul_forward`); what still reaches `QMatMul` here dequantizes.
+> - `src/quantized/`: `fast_mmq.rs` and `fast_mmvq.rs` are removed with their call in `QCudaStorage::fwd`, and so are
+>   the matvec, MMQ and dmmv launchers with `quantize_q8_1` and `set_force_dmmv`. GGUF matmul on CUDA goes through
+>   inference-quant (`gguf::qmatmul_forward`); a `QMatMul` call that still lands here dequantizes and runs cuBLAS.
 > - `src/quantized/`: `QTensor::indexed_moe_forward` and `QMatMul::indexed_moe_forward` are removed with their CUDA
 >   implementation; inference-quant's GGUF MoE paths replace them.
 > - Removed as unused by inference.rs: `src/streaming.rs`, `src/test_utils.rs`, `src/quantized/tokenizer.rs` (and the

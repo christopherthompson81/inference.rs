@@ -875,6 +875,43 @@ mod tests {
         Ok(())
     }
 
+    // candle's own QMatMul on CUDA dequantizes, for any caller that skips qmatmul_forward
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn candle_qmatmul_on_cuda_matches_the_dequantized_matmul() -> Result<()> {
+        // a decode batch and a prompt batch, which candle once sent to different kernels
+        const BATCHES: [usize; 2] = [3, 40];
+        const ROWS: usize = 64;
+        const COLS: usize = 512;
+        // both sides multiply the same dequantized weight in f32; only the reduction order differs
+        const RELATIVE_TOLERANCE: f32 = 1e-4;
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let values = (0..ROWS * COLS)
+            .map(|index| ((index % 29) as f32 - 14.0) / 9.0)
+            .collect::<Vec<_>>();
+        let weight = Tensor::from_vec(values, (ROWS, COLS), &device)?;
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q8_0, GgmlDType::Q6K] {
+            let quantized = Arc::new(QTensor::quantize(&weight, dtype)?);
+            let dense = quantized.dequantize(&device)?;
+            let w = QMatMul::QTensor(quantized);
+            for batch in BATCHES {
+                let x = Tensor::randn(0f32, 1., (batch, COLS), &device)?;
+                let want = x.matmul(&dense.t()?)?;
+                let got = candle_core::Module::forward(&w, &x)?;
+                let err = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    err <= RELATIVE_TOLERANCE * scale,
+                    "{dtype:?} batch {batch}: max error {err}, output scale {scale}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn q_sensitive_targets_support_embedding_gather() -> Result<()> {
         for dtype in [GgmlDType::Q6K, GgmlDType::Q8_0] {
