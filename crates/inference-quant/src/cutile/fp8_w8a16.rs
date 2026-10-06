@@ -19,7 +19,7 @@ use super::tune::{
     buckets_from_breakpoints, config, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
-use super::{catch_cutile_panic, context, device_multiprocessor_count, jit_available};
+use super::{catch_cutile_panic, context, jit_available};
 use crate::Fp8WeightScaleLayout;
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -598,7 +598,7 @@ fn launch(operands: &GemmOperands<'_>, cfg: Fp8W8A16Config, compile_only: bool) 
     };
     let tiles = (padded_rows / bm) * (n / BLOCK_SIZE);
     let blocks_per_sm = usize::try_from(cfg.blocks_per_sm).unwrap_or(1).max(1);
-    let tile_blocks = (blocks_per_sm * device_multiprocessor_count(dev)).clamp(1, tiles) as u32;
+    let tile_blocks = (blocks_per_sm * dev.sm_count()).clamp(1, tiles) as u32;
     let generics = vec![
         cfg.bm.to_string(),
         BLOCK_SIZE.to_string(),

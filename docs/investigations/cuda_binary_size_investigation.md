@@ -831,3 +831,40 @@ Rerun "86,89": same 50 optional entries, ARCHS ["86", "89"], preload passes.
 
 Next: step 4, one cached per-device compute-capability helper in place of the device-0 caches (`cuda_sm_count`,
 the all-devices `mma_available`), and step 5, the startup check and tooling.
+
+## Run 21 - 2026-10-05 23:25
+
+Step 4: one per-device compute capability.
+
+Question: with a build carrying several archs, every runtime gate has to ask the device it is about to launch on. How
+many places query the driver for compute capability or SM count, and do any ask the wrong device?
+
+Finding: about 25 sites across inference-quant, inference-nn and inference-paged-attn ran their own
+`CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_*` / `MULTIPROCESSOR_COUNT` queries, nine of them behind their own
+per-device `HashMap` caches, each with its own fallback on a query failure that a live context cannot produce. All
+of them already asked the device in hand. The vendored candle-core `CudaDevice` now reads both once when it is
+created (`compute_cap()` as `major * 10 + minor`, `compute_major()`, `sm_count()`), every site with a device uses
+them, and the caches that held only these values are gone (+179 / -494 lines). Caches that also hold other
+attributes (fast_mmq's shared memory and warp size, nvfp4's L2 size, the CUTLASS FP8 one-time prepare) stay.
+
+Left host-wide on purpose:
+- `inference_fattn::mma_available` asks whether every visible device runs the mma kernel; plan choices made
+  without a device rely on that.
+- `flashinfer::cuda_sm_count` (device 0) sizes the decode split, whose metadata is built once and copied to every
+  device, so one value has to serve all of them. On a mixed host it may size for the wrong card; that costs speed,
+  not correctness.
+- cuBLASLt's `Workspace::new` has only a stream.
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep   -> pass (2792 + 2419 tests)
+local_ci.sh --size                                                    -> 103.41 MiB (-0.03), .nv_fatbin unchanged
+clippy -p inference-quant --all-targets --features cuda,cutile        -> clean (CUDA 13.4, scratch target, deleted)
+```
+
+The sm90/sm121-gated blocks (CUTLASS FP8 `is_sm90`, FlashInfer GDN sm90, FA3 fp8 paged tests, NVFP4 CUTLASS) do not
+compile on this sm_86 host and were checked by reading. Review: no behavior change; ggml's `cc` stays 860-style
+(`compute_cap * 10`), cuTile's `sm_{cc}` targets match, tuple compares map exactly. Its style notes were taken (one
+shared `SM121_COMPUTE_CAP` for the nvfp4 files, an `SM90_COMPUTE_MAJOR` const in gemv).
+
+Next: step 5, a startup check that the device's arch was built, the doctor's built-arch report, and the wheel tag,
+size baseline key, `--size` and Dockerfile ARG taking a list.

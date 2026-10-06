@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Result, Tensor};
 use float8::F8E4M3;
 
-use super::{Nvfp4Layer, Nvfp4LayerParts};
+use super::{Nvfp4Layer, Nvfp4LayerParts, cutlass::SM121_COMPUTE_CAP};
 use crate::{Nvfp4ActivationMode, QuantMethod};
 
 const ROW_COUNTS: [usize; 2] = [33, 3];
@@ -157,7 +157,7 @@ fn random_layer(device: &Device, dtype: DType) -> Result<Nvfp4Layer> {
 #[ignore = "requires an SM121 CUDA device; run CUDA tests with one test thread"]
 fn native_decode_arbitrary_data_matches_cutile_and_sampled_fp64_bounds() -> Result<()> {
     let device = Device::new_cuda(0)?;
-    if crate::cutile::device_compute_capability(device.as_cuda_device()?) != (12, 1) {
+    if device.as_cuda_device()?.compute_cap() != SM121_COMPUTE_CAP {
         return Ok(());
     }
     for dtype in [DType::BF16, DType::F16] {

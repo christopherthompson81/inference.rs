@@ -4,8 +4,8 @@ use std::sync::{Mutex, OnceLock};
 use candle_core::{CudaDevice, DType, Device, DeviceLocation, Result, Storage, Tensor};
 use cutile::cutile_compiler::specialization::DivHint;
 
+use super::jit_available;
 use super::warmup::CutileKernel;
-use super::{device_compute_major, jit_available};
 
 const BLOCK_SIZE: usize = 16;
 const MIN_CUDA_VERSION: u32 = 1303;
@@ -34,7 +34,7 @@ pub struct Nvfp4GemmArgs<'a> {
 }
 
 pub fn nvfp4_supported(dev: &CudaDevice) -> bool {
-    device_compute_major(dev) >= 10
+    dev.compute_major() >= 10
         && super::build_cuda_version_code().is_some_and(|version| version >= MIN_CUDA_VERSION)
         && super::tileiras_capabilities()
             .is_some_and(|capabilities| capabilities.version >= MIN_TILEIRAS_VERSION)

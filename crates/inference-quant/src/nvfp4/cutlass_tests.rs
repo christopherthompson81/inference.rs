@@ -4,7 +4,7 @@ use candle_core::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 use float8::F8E4M3;
 use half::{bf16, f16};
 
-use super::{Nvfp4Layer, Nvfp4LayerParts};
+use super::{Nvfp4Layer, Nvfp4LayerParts, cutlass::SM121_COMPUTE_CAP};
 use crate::{Nvfp4ActivationMode, QuantMethod, QuantizedActivation};
 
 const ROWS: usize = 1024;
@@ -340,7 +340,7 @@ impl Fixture {
 
 fn sm121_device() -> Result<Option<Device>> {
     let device = Device::new_cuda(0)?;
-    let supported = crate::cutile::device_compute_capability(device.as_cuda_device()?) == (12, 1);
+    let supported = device.as_cuda_device()?.compute_cap() == SM121_COMPUTE_CAP;
     Ok(supported.then_some(device))
 }
 

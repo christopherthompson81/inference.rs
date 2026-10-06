@@ -70,55 +70,18 @@ pub(super) fn catch_cutile_panic<T>(
     }
 }
 
-pub fn device_compute_capability(dev: &candle_core::CudaDevice) -> (i32, i32) {
-    use candle_core::cuda::cudarc::driver::{result, sys};
-    let cu_device = dev.cuda_stream().context().cu_device();
-    let major = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-        )
-    }
-    .unwrap_or(0);
-    let minor = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR,
-        )
-    }
-    .unwrap_or(0);
-    (major, minor)
-}
-
-pub fn device_compute_major(dev: &candle_core::CudaDevice) -> i32 {
-    device_compute_capability(dev).0
-}
-
-pub fn device_multiprocessor_count(dev: &candle_core::CudaDevice) -> usize {
-    use candle_core::cuda::cudarc::driver::{result, sys};
-    let cu_device = dev.cuda_stream().context().cu_device();
-    let count = unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-        )
-    }
-    .unwrap_or(1);
-    usize::try_from(count).unwrap_or(1).max(1)
-}
-
 pub fn device_supported(dev: &candle_core::CudaDevice) -> bool {
-    let (major, minor) = device_compute_capability(dev);
     let Some(cuda_code) = build_cuda_version_code() else {
         return false;
     };
 
-    device_supported_for(cuda_code, major, minor)
+    device_supported_for(cuda_code, dev.compute_cap())
 }
 
-fn device_supported_for(cuda_code: u32, major: i32, minor: i32) -> bool {
+fn device_supported_for(cuda_code: u32, compute_cap: usize) -> bool {
+    let major = compute_cap / 10;
     (major == 8 && cuda_code >= 1302)
-        || (major == 9 && minor == 0 && cuda_code >= 1303)
+        || (compute_cap == 90 && cuda_code >= 1303)
         || (major >= 10 && cuda_code >= 1302)
 }
 
@@ -154,10 +117,10 @@ fn tileiras_version_supported(output: &str) -> bool {
 #[derive(Debug)]
 struct TileirasCapabilities {
     version: (u32, u32),
-    targets: Vec<i32>,
+    targets: Vec<usize>,
 }
 
-fn parse_tileiras_targets(output: &str) -> Vec<i32> {
+fn parse_tileiras_targets(output: &str) -> Vec<usize> {
     let mut targets = output
         .split_whitespace()
         .filter_map(|part| part.strip_prefix("=sm_"))
@@ -203,8 +166,7 @@ fn tileiras_capabilities() -> Option<&'static TileirasCapabilities> {
 
 /// Whether `tileiras` can JIT this Tile IR for the active GPU.
 pub fn jit_available(dev: &candle_core::CudaDevice) -> bool {
-    let (major, minor) = device_compute_capability(dev);
-    let target = major * 10 + minor;
+    let target = dev.compute_cap();
     tileiras_capabilities().is_some_and(|capabilities| capabilities.targets.contains(&target))
 }
 
@@ -214,12 +176,12 @@ mod tests {
 
     #[test]
     fn cuda_architecture_gate_matches_tileiras_support() {
-        assert!(!device_supported_for(1301, 8, 0));
-        assert!(device_supported_for(1302, 8, 0));
-        assert!(!device_supported_for(1302, 9, 0));
-        assert!(device_supported_for(1303, 9, 0));
-        assert!(!device_supported_for(1301, 10, 0));
-        assert!(device_supported_for(1302, 10, 0));
+        assert!(!device_supported_for(1301, 80));
+        assert!(device_supported_for(1302, 80));
+        assert!(!device_supported_for(1302, 90));
+        assert!(device_supported_for(1303, 90));
+        assert!(!device_supported_for(1301, 100));
+        assert!(device_supported_for(1302, 100));
     }
 
     #[test]

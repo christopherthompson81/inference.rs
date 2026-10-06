@@ -49,16 +49,7 @@ pub fn cutlass_fused_moe(
 pub fn cutlass_moe_available(dev: &candle_core::CudaDevice) -> bool {
     #[cfg(has_cutlass_moe_kernels)]
     {
-        use candle_core::cuda::cudarc::driver::{result, sys};
-        let cu_device = dev.cuda_stream().context().cu_device();
-        let major = unsafe {
-            result::device::get_attribute(
-                cu_device,
-                sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR,
-            )
-        }
-        .unwrap_or(0);
-        major >= 8
+        dev.compute_major() >= 8
     }
     #[cfg(not(has_cutlass_moe_kernels))]
     {

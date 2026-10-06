@@ -19,14 +19,12 @@ use super::tune::{
     buckets_from_breakpoints, config, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
-use super::{
-    catch_cutile_panic, context, device_compute_capability, device_multiprocessor_count,
-    jit_available,
-};
+use super::{catch_cutile_panic, context, jit_available};
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};
 
 const TILE_SIZE: usize = 128;
+const FP8_MMA_MIN_COMPUTE_CAP: usize = 89;
 const TUNE_KERNEL: &str = "fp8_w8a8";
 const ROW_BREAKPOINTS: [usize; 3] = [16, 64, 256];
 const PREFILL_PROBE_ROWS: usize = 1024;
@@ -383,8 +381,7 @@ pub fn fp8_w8a8_supported(
     activation_dtype: DType,
     scheme: Fp8W8A8Scheme,
 ) -> bool {
-    let (major, minor) = device_compute_capability(dev);
-    let has_native_fp8_mma = major > 8 || (major == 8 && minor >= 9);
+    let has_native_fp8_mma = dev.compute_cap() >= FP8_MMA_MIN_COMPUTE_CAP;
     cfg!(has_blockwise_fp8_kernels)
         && jit_available(dev)
         && has_native_fp8_mma
@@ -650,7 +647,7 @@ fn launch(
     };
     let tiles = (padded_rows / bm) * (n / TILE_SIZE);
     let blocks_per_sm = usize::try_from(cfg.blocks_per_sm).unwrap_or(1).max(1);
-    let tile_blocks = (blocks_per_sm * device_multiprocessor_count(dev)).clamp(1, tiles) as u32;
+    let tile_blocks = (blocks_per_sm * dev.sm_count()).clamp(1, tiles) as u32;
     let generics = vec![
         cfg.bm.to_string(),
         TILE_SIZE.to_string(),

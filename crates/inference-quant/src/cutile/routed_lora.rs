@@ -27,9 +27,7 @@ use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
 use super::tune::{Bucket, Prepared, Space, TuneMode, TuneRequest, config, cutile_error, tune};
 
-use super::{
-    catch_cutile_panic, context, device_compute_capability, device_supported, jit_available,
-};
+use super::{catch_cutile_panic, context, device_supported, jit_available};
 
 pub const CUTILE_ROUTED_LORA_MAX_RANK: usize = 128;
 
@@ -38,6 +36,7 @@ const TARGET_CTA_PER_SM: usize = 2;
 const MAX_N_AXIS_GROUPS: usize = 8;
 const TUNE_KERNEL: &str = "routed_lora";
 const TUNING_CACHE_CAPACITY: usize = 256;
+const CLUSTER2_MIN_COMPUTE_CAP: usize = 120;
 const TUNING_LOCK_SHARDS: usize = 64;
 const I32_INDEXABLE_ELEMENTS: usize = i32::MAX as usize + 1;
 const POINTER_HINT_MAX_BYTES: usize = 16;
@@ -532,8 +531,7 @@ impl CutileRoutedLoraConfig {
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct CutileRoutedLoraDeviceKey {
     pub ordinal: usize,
-    pub compute_major: i32,
-    pub compute_minor: i32,
+    pub compute_cap: usize,
     pub multiprocessors: usize,
 }
 
@@ -772,20 +770,6 @@ fn cached_bucket_config(key: CutileRoutedLoraTuningKey) -> Option<CutileRoutedLo
         .filter(|config| valid_config(key, *config))
 }
 
-fn multiprocessor_count(dev: &CudaDevice) -> usize {
-    use candle_core::cuda::cudarc::driver::{result, sys};
-
-    let cu_device = dev.cuda_stream().context().cu_device();
-    unsafe {
-        result::device::get_attribute(
-            cu_device,
-            sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT,
-        )
-    }
-    .unwrap_or(1)
-    .max(1) as usize
-}
-
 fn tuning_key(
     dev: &CudaDevice,
     metadata: RoutedLoraMetadataLayout,
@@ -793,13 +777,11 @@ fn tuning_key(
     max_rank_stride: usize,
     addresses: KernelAddresses,
 ) -> CutileRoutedLoraTuningKey {
-    let (compute_major, compute_minor) = device_compute_capability(dev);
     CutileRoutedLoraTuningKey {
         device: CutileRoutedLoraDeviceKey {
             ordinal: dev.cuda_stream().context().ordinal(),
-            compute_major,
-            compute_minor,
-            multiprocessors: multiprocessor_count(dev),
+            compute_cap: dev.compute_cap(),
+            multiprocessors: dev.sm_count(),
         },
         shape: CutileRoutedLoraShapeKey {
             top_k: metadata.top_k(),
@@ -883,7 +865,7 @@ fn valid_config(key: CutileRoutedLoraTuningKey, config: CutileRoutedLoraConfig) 
         return false;
     }
     if config.optimization_hint == CutileRoutedLoraOptimizationHint::Cluster2 {
-        key.device.compute_major >= 12 && grid_x.is_multiple_of(2)
+        key.device.compute_cap >= CLUSTER2_MIN_COMPUTE_CAP && grid_x.is_multiple_of(2)
     } else {
         true
     }
@@ -1734,8 +1716,7 @@ mod tests {
         CutileRoutedLoraTuningKey {
             device: CutileRoutedLoraDeviceKey {
                 ordinal: 0,
-                compute_major: 12,
-                compute_minor: 0,
+                compute_cap: 120,
                 multiprocessors: 148,
             },
             shape: CutileRoutedLoraShapeKey {

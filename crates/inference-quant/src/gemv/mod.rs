@@ -25,12 +25,6 @@ use crate::utils::{get_cuda_device, slice_ptr};
 #[cfg(feature = "cuda")]
 use half::{bf16, f16};
 
-#[cfg(feature = "cuda")]
-use std::{
-    collections::HashMap,
-    sync::{LazyLock, Mutex},
-};
-
 /// Maximum batch size supported by the GEMV kernel
 #[cfg(any(feature = "cuda", test))]
 pub const MAX_GEMV_BATCH_SIZE: usize = 8;
@@ -43,9 +37,9 @@ const WIDE_GEMV_MIN_INPUT_DIM: usize = 3_072;
 #[cfg(any(feature = "cuda", test))]
 const WIDE_GEMV_MAX_INPUT_DIM: usize = 8_192;
 #[cfg(any(feature = "cuda", test))]
-const WIDE_GEMV_COMPUTE_MAJOR: i32 = 12;
+const WIDE_GEMV_COMPUTE_CAP: usize = 121;
 #[cfg(any(feature = "cuda", test))]
-const WIDE_GEMV_COMPUTE_MINOR: i32 = 1;
+const SM90_COMPUTE_MAJOR: usize = 9;
 #[cfg(feature = "cuda")]
 const HALF_PAIR_ALIGNMENT_BYTES: u64 = 4;
 #[cfg(any(feature = "cuda", test))]
@@ -56,8 +50,7 @@ const SM90_SPLIT_K_MAX_GEMV_CTA_WAVES: usize = 4;
 #[cfg(any(feature = "cuda", test))]
 #[derive(Clone, Copy)]
 struct GemvDeviceInfo {
-    compute_major: i32,
-    compute_minor: i32,
+    compute_cap: usize,
     multiprocessor_count: usize,
 }
 
@@ -67,18 +60,15 @@ fn should_use_gemv_shape(
     output_dim: usize,
     input_dim: usize,
     is_bf16: bool,
-    device: Option<GemvDeviceInfo>,
+    device: GemvDeviceInfo,
 ) -> bool {
     if batch_size > MAX_GEMV_BATCH_SIZE
         || batch_size.saturating_mul(output_dim) > MAX_GEMV_OUTPUT_ELEMENTS
     {
         return false;
     }
-    let Some(device) = device else {
-        return true;
-    };
     let gemv_cta_waves = output_dim.div_ceil(device.multiprocessor_count);
-    let sm90_split_k = device.compute_major == 9
+    let sm90_split_k = device.compute_cap / 10 == SM90_COMPUTE_MAJOR
         && is_bf16
         && batch_size == MAX_GEMV_BATCH_SIZE
         && batch_size.saturating_mul(input_dim) >= SM90_SPLIT_K_MIN_BATCH_REDUCTION
@@ -92,7 +82,7 @@ fn should_use_wide_gemv_shape(
     output_dim: usize,
     input_dim: usize,
     is_half: bool,
-    device: Option<GemvDeviceInfo>,
+    device: GemvDeviceInfo,
 ) -> bool {
     batch_size == 1
         && is_half
@@ -102,43 +92,15 @@ fn should_use_wide_gemv_shape(
         && output_dim
             .checked_mul(input_dim)
             .is_some_and(|elements| elements <= i32::MAX as usize)
-        && device.is_some_and(|device| {
-            device.compute_major == WIDE_GEMV_COMPUTE_MAJOR
-                && device.compute_minor == WIDE_GEMV_COMPUTE_MINOR
-        })
+        && device.compute_cap == WIDE_GEMV_COMPUTE_CAP
 }
 
 #[cfg(feature = "cuda")]
-static GEMV_DEVICE_INFO: LazyLock<Mutex<HashMap<candle_core::cuda::DeviceId, GemvDeviceInfo>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[cfg(feature = "cuda")]
-fn gemv_device_info(device: &CudaDevice) -> Option<GemvDeviceInfo> {
-    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-
-    if let Some(info) = GEMV_DEVICE_INFO.lock().unwrap().get(&device.id()).copied() {
-        return Some(info);
+fn gemv_device_info(device: &CudaDevice) -> GemvDeviceInfo {
+    GemvDeviceInfo {
+        compute_cap: device.compute_cap(),
+        multiprocessor_count: device.sm_count(),
     }
-    let stream = device.cuda_stream();
-    let context = stream.context();
-    let compute_major = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .ok()?;
-    let compute_minor = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-        .ok()?;
-    let multiprocessor_count = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-        .ok()
-        .and_then(|count| usize::try_from(count).ok())
-        .filter(|&count| count != 0)?;
-    let info = GemvDeviceInfo {
-        compute_major,
-        compute_minor,
-        multiprocessor_count,
-    };
-    GEMV_DEVICE_INFO.lock().unwrap().insert(device.id(), info);
-    Some(info)
 }
 
 /// Check if custom GEMV should be used instead of cuBLAS.
@@ -535,13 +497,17 @@ fn gemv_f32(
 mod policy_tests {
     use super::*;
 
+    const SM86: GemvDeviceInfo = GemvDeviceInfo {
+        compute_cap: 86,
+        multiprocessor_count: 84,
+    };
+
     #[test]
     fn wide_gemv_policy_stays_within_measured_hardware_and_shape_bounds() {
-        let sm121 = Some(GemvDeviceInfo {
-            compute_major: WIDE_GEMV_COMPUTE_MAJOR,
-            compute_minor: WIDE_GEMV_COMPUTE_MINOR,
+        let sm121 = GemvDeviceInfo {
+            compute_cap: WIDE_GEMV_COMPUTE_CAP,
             multiprocessor_count: 48,
-        });
+        };
         for input_dim in [WIDE_GEMV_MIN_INPUT_DIM, WIDE_GEMV_MAX_INPUT_DIM] {
             let largest_output = i32::MAX as usize / input_dim;
             for output_dim in [WIDE_GEMV_MIN_OUTPUT_DIM, largest_output] {
@@ -591,26 +557,18 @@ mod policy_tests {
                 batch, output, input, half, sm121
             ));
         }
-        for (major, minor) in [(9, 0), (10, 0), (12, 0), (12, 2)] {
+        for compute_cap in [86, 90, 100, 120, 122] {
             assert!(!should_use_wide_gemv_shape(
                 1,
                 WIDE_GEMV_MIN_OUTPUT_DIM,
                 WIDE_GEMV_MIN_INPUT_DIM,
                 true,
-                Some(GemvDeviceInfo {
-                    compute_major: major,
-                    compute_minor: minor,
+                GemvDeviceInfo {
+                    compute_cap,
                     multiprocessor_count: 48
-                }),
+                },
             ));
         }
-        assert!(!should_use_wide_gemv_shape(
-            1,
-            WIDE_GEMV_MIN_OUTPUT_DIM,
-            WIDE_GEMV_MIN_INPUT_DIM,
-            true,
-            None
-        ));
     }
 
     #[test]
@@ -618,14 +576,14 @@ mod policy_tests {
         for batch_size in [1, 2, 4, 8] {
             let boundary = MAX_GEMV_OUTPUT_ELEMENTS / batch_size;
             assert!(should_use_gemv_shape(
-                batch_size, boundary, 1024, true, None
+                batch_size, boundary, 1024, true, SM86
             ));
             assert!(!should_use_gemv_shape(
                 batch_size,
                 boundary + 1,
                 1024,
                 true,
-                None
+                SM86
             ));
         }
     }
@@ -633,17 +591,16 @@ mod policy_tests {
     #[test]
     fn gemv_shape_policy_keeps_tiny_projections() {
         for batch_size in [1, 2, 4, 8] {
-            assert!(should_use_gemv_shape(batch_size, 96, 1024, true, None));
+            assert!(should_use_gemv_shape(batch_size, 96, 1024, true, SM86));
         }
     }
 
     #[test]
     fn sm90_long_reduction_uses_split_k_gemm_for_small_cta_grids() {
-        let sm90 = Some(GemvDeviceInfo {
-            compute_major: 9,
-            compute_minor: 0,
+        let sm90 = GemvDeviceInfo {
+            compute_cap: 90,
             multiprocessor_count: 132,
-        });
+        };
         assert!(!should_use_gemv_shape(8, 96, 5120, true, sm90));
         assert!(!should_use_gemv_shape(8, 512, 5120, true, sm90));
         assert!(should_use_gemv_shape(4, 96, 5120, true, sm90));
@@ -654,30 +611,28 @@ mod policy_tests {
             96,
             5120,
             true,
-            Some(GemvDeviceInfo {
-                compute_major: 8,
-                compute_minor: 0,
+            GemvDeviceInfo {
+                compute_cap: 80,
                 multiprocessor_count: 108,
-            })
+            }
         ));
         assert!(should_use_gemv_shape(
             8,
             96,
             5120,
             true,
-            Some(GemvDeviceInfo {
-                compute_major: 9,
-                compute_minor: 0,
+            GemvDeviceInfo {
+                compute_cap: 90,
                 multiprocessor_count: 16,
-            })
+            }
         ));
     }
 
     #[test]
     fn gemv_shape_policy_rejects_large_and_unsupported_batches() {
-        assert!(!should_use_gemv_shape(1, 5_120, 1024, true, None));
-        assert!(!should_use_gemv_shape(8, 248_320, 1024, true, None));
-        assert!(!should_use_gemv_shape(16, 96, 1024, true, None));
+        assert!(!should_use_gemv_shape(1, 5_120, 1024, true, SM86));
+        assert!(!should_use_gemv_shape(8, 248_320, 1024, true, SM86));
+        assert!(!should_use_gemv_shape(16, 96, 1024, true, SM86));
     }
 }
 

@@ -35,6 +35,8 @@ const DECODE_SPLIT_MAX_TOKENS: usize = 2048;
 const DECODE_SPLIT_FALLBACK_SM_COUNT: usize = 64;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 const CUDA_STREAM_PER_THREAD_HANDLE: usize = 2;
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+const FA3_COMPUTE_MAJOR: usize = 9;
 
 #[cfg(feature = "cuda")]
 fn cuda_sm_count() -> usize {
@@ -399,24 +401,10 @@ pub fn make_fa3_decode_state(
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn fa3_device_num_sm(device: &Device) -> Option<usize> {
-    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-
     let Device::Cuda(device) = device else {
         return None;
     };
-    let stream = device.cuda_stream();
-    let context = stream.context();
-    let compute_major = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .ok()?;
-    if compute_major != 9 {
-        return None;
-    }
-    context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)
-        .ok()
-        .and_then(|count| usize::try_from(count).ok())
-        .filter(|count| *count > 0)
+    (device.compute_major() == FA3_COMPUTE_MAJOR).then(|| device.sm_count())
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]

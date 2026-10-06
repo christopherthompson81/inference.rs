@@ -954,7 +954,7 @@ use float8::F8E4M3;
 use half::{bf16, f16};
 
 use super::nvfp4::Nvfp4GemmArgs;
-use super::{catch_cutile_panic, context, device_compute_major, device_multiprocessor_count};
+use super::{catch_cutile_panic, context};
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
 const BLOCK_SIZE: usize = 16;
@@ -973,7 +973,7 @@ const WIDE_MATMUL_MIN_K: usize = 8192;
 const WIDE_MATMUL_MIN_N: usize = 4096;
 const GROUPED_MATMUL_MIN_K: usize = 4096;
 const GROUPED_MATMUL_ROWS: usize = 8;
-const GROUPED_MATMUL_COMPUTE_MAJOR: i32 = 12;
+const GROUPED_MATMUL_COMPUTE_MAJOR: usize = 12;
 const LOAD_LATENCY: usize = 3;
 const BLOCKS_PER_SM: usize = 2;
 const WORKER_HINT_MIN_N: usize = 1024;
@@ -981,7 +981,7 @@ const WORKER_HINT_WARPS: i32 = 16;
 
 #[derive(Clone, Copy)]
 pub(super) struct MatmulDevice {
-    pub(super) compute_major: i32,
+    pub(super) compute_major: usize,
     pub(super) l2_bytes: usize,
 }
 
@@ -996,7 +996,7 @@ fn matmul_device(dev: &CudaDevice) -> MatmulDevice {
         .unwrap()
         .entry(cu_device)
         .or_insert_with(|| MatmulDevice {
-            compute_major: device_compute_major(dev),
+            compute_major: dev.compute_major(),
             l2_bytes: unsafe {
                 result::device::get_attribute(
                     cu_device,
@@ -1090,7 +1090,7 @@ pub(super) fn quantize(
             vec![(k / 2) as i32, 1],
         )
     };
-    let blocks = (BLOCKS_PER_SM * device_multiprocessor_count(dev)) as u32;
+    let blocks = (BLOCKS_PER_SM * dev.sm_count()) as u32;
     let generic = vec![
         QUANT_ROWS.to_string(),
         QUANT_K.to_string(),
@@ -1340,7 +1340,7 @@ fn launch_inner(
             },
         )
     });
-    let blocks = (BLOCKS_PER_SM * device_multiprocessor_count(dev)) as u32;
+    let blocks = (BLOCKS_PER_SM * dev.sm_count()) as u32;
     let generic = vec![
         bm.to_string(),
         bn.to_string(),
@@ -1559,7 +1559,7 @@ pub(super) fn launch_gather(
             vec![1],
         )
     });
-    let blocks = (BLOCKS_PER_SM * device_multiprocessor_count(dev)) as u32;
+    let blocks = (BLOCKS_PER_SM * dev.sm_count()) as u32;
     let a4 = args.activation_global_scale.is_some();
     let generic = vec![
         ROUTED_ROWS.to_string(),

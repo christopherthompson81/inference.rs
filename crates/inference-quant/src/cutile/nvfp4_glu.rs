@@ -351,7 +351,7 @@ use float8::F8E4M3;
 use half::{bf16, f16};
 
 use super::nvfp4::nvfp4_supported;
-use super::{catch_cutile_panic, context, device_compute_capability, device_multiprocessor_count};
+use super::{catch_cutile_panic, context};
 use crate::GluActivationType;
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -359,7 +359,7 @@ const BLOCK_SIZE: usize = 16;
 const QUANT_ROWS: usize = 4;
 const QUANT_K: usize = 256;
 const BLOCKS_PER_SM: usize = 2;
-const TUNED_COMPUTE_CAPABILITY: (i32, i32) = (12, 1);
+const TUNED_COMPUTE_CAPABILITY: usize = 121;
 const TUNED_OCCUPANCY: i32 = 2;
 const MAX_DIMENSION: usize = i32::MAX as usize;
 const WARMUP_ROWS: [usize; 5] = [1, 2, 4, 8, 16];
@@ -472,7 +472,7 @@ pub(crate) fn launch(
     let stream = dev.cuda_stream();
     let ordinal = stream.context().ordinal();
     let cutile_stream = context::stream(dev);
-    let compile_options = if device_compute_capability(dev) == TUNED_COMPUTE_CAPABILITY {
+    let compile_options = if dev.compute_cap() == TUNED_COMPUTE_CAPABILITY {
         CompileOptions::default().occupancy(TUNED_OCCUPANCY)
     } else {
         CompileOptions::default()
@@ -496,7 +496,7 @@ pub(crate) fn launch(
     let mut scales = unsafe { dev.alloc::<F8E4M3>(rows * scale_columns)? };
     let (packed_address, packed_guard) = slice_ptr_mut_on_stream(&mut packed, 0, &stream);
     let (scale_address, scale_guard) = slice_ptr_mut_on_stream(&mut scales, 0, &stream);
-    let blocks = (BLOCKS_PER_SM * device_multiprocessor_count(dev))
+    let blocks = (BLOCKS_PER_SM * dev.sm_count())
         .min(rows.div_ceil(QUANT_ROWS) * columns.div_ceil(QUANT_K)) as u32;
     let generics = vec![
         QUANT_ROWS.to_string(),

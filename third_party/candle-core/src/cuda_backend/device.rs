@@ -84,6 +84,8 @@ pub struct CudaDevice {
     // Created on first use, so a device that never draws random numbers never loads libcurand.
     curand: Arc<Mutex<Option<CudaRng>>>,
     seed_value: Arc<RwLock<u64>>,
+    compute_cap: usize,
+    sm_count: usize,
 }
 
 impl std::fmt::Debug for CudaDevice {
@@ -330,6 +332,19 @@ impl CudaDevice {
         self.id
     }
 
+    /// Compute capability as `major * 10 + minor` (86 for 8.6), queried once when the device is created.
+    pub fn compute_cap(&self) -> usize {
+        self.compute_cap
+    }
+
+    pub fn compute_major(&self) -> usize {
+        self.compute_cap / 10
+    }
+
+    pub fn sm_count(&self) -> usize {
+        self.sm_count
+    }
+
     pub fn get_or_load_custom_func(
         &self,
         fn_name: &str,
@@ -429,7 +444,15 @@ impl CudaDevice {
         let module_store = ModuleStore {
             mdls: [const { None }; kernels::ALL_IDS.len()],
         };
+        use cudarc::driver::sys::CUdevice_attribute;
+        let attribute = |attribute| context.attribute(attribute).w().map(|value| value as usize);
+        let major = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)?;
+        let minor = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)?;
+        let compute_cap = major * 10 + minor;
+        let sm_count = attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT)?;
         Ok(Self {
+            compute_cap,
+            sm_count,
             id: DeviceId::new(),
             context,
             stream,

@@ -9,20 +9,12 @@ const EVEN_OFFSET: usize = 2;
 const CUDA_SEED: u64 = 0x61d2_89a3;
 const RANDOM_STDDEV: f32 = 0.0625;
 const ACCUMULATION_TOLERANCE: f32 = 1e-5;
+const SM121: usize = 121;
 
 fn sm121_device() -> Result<Option<Device>> {
     let device = Device::new_cuda(0)?;
-    let cuda = device.as_cuda_device()?;
-    let stream = cuda.cuda_stream();
-    let major = stream
-        .context()
-        .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .map_err(candle_core::Error::msg)?;
-    let minor = stream
-        .context()
-        .attribute(sys::CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-        .map_err(candle_core::Error::msg)?;
-    Ok((major == 12 && minor == 1).then_some(device))
+    let supported = device.as_cuda_device()?.compute_cap() == SM121;
+    Ok(supported.then_some(device))
 }
 
 fn linear(weight: Tensor, bias: Option<Tensor>) -> Result<UnquantLinear> {

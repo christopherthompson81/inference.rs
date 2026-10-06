@@ -25,6 +25,7 @@ use crate::{
     utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream},
 };
 
+pub(crate) const SM121_COMPUTE_CAP: usize = 121;
 const MIN_ROWS: usize = 1024;
 const DECODE_MIN_ROWS: usize = 2;
 const DECODE_MAX_ROWS: usize = 64;
@@ -296,7 +297,7 @@ impl State {
         if parts.activation != Nvfp4ActivationMode::DynamicBlock
             || parts.weight.rank() != 2
             || !matches!(parts.dtype, DType::BF16 | DType::F16)
-            || crate::cutile::device_compute_capability(device) != (12, 1)
+            || device.compute_cap() != SM121_COMPUTE_CAP
         {
             return Ok(None);
         }
