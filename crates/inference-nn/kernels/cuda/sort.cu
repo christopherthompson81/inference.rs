@@ -650,6 +650,48 @@ __global__ void rms_norm_strided_4d_kernel(
   }
 }
 
+// Unit-stride rows whose bases and length are multiples of 8 elements: 16-byte loads, same math as the strided kernel.
+template <typename T>
+__global__ void rms_norm_rows_vec8_kernel(
+    const T *__restrict__ x, const T *__restrict__ weight, T *__restrict__ dst,
+    const int64_t stride_b, const int64_t stride_h, const int64_t stride_s,
+    const int heads, const int seq_len, const int head_dim, const float eps) {
+  using Vec = rms_vec8<T>;
+  __shared__ float reduce[32];
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const int seq = row % seq_len;
+  const int tmp = row / seq_len;
+  const int head = tmp % heads;
+  const int batch_idx = tmp / heads;
+  const int vec_cols = head_dim / 8;
+  const Vec *__restrict__ x_vec = reinterpret_cast<const Vec *>(
+      x + static_cast<int64_t>(batch_idx) * stride_b +
+      static_cast<int64_t>(head) * stride_h + static_cast<int64_t>(seq) * stride_s);
+  const Vec *__restrict__ weight_vec = reinterpret_cast<const Vec *>(weight);
+  Vec *__restrict__ dst_vec =
+      reinterpret_cast<Vec *>(dst + static_cast<int64_t>(row) * head_dim);
+
+  float sum = 0.0f;
+  for (int col = tid; col < vec_cols; col += blockDim.x) {
+    sum += rms_vec8_sum_squares(x_vec[col]);
+  }
+  const float inv_rms =
+      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
+  for (int col = tid; col < vec_cols; col += blockDim.x) {
+    const Vec x_value = x_vec[col];
+    const Vec weight_value = weight_vec[col];
+    Vec out;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      out.data[i] = rms_residual_from_float<T>(
+          rms_residual_to_float(x_value.data[i]) * inv_rms *
+          rms_residual_to_float(weight_value.data[i]));
+    }
+    dst_vec[col] = out;
+  }
+}
+
 template <typename T>
 void launch_rms_norm_strided_4d(
     const void *x, const void *weight, void *dst, const int64_t stride_b,
@@ -661,12 +703,22 @@ void launch_rms_norm_strided_4d(
   }
 
   const int total_rows = batch * heads * seq_len;
+  const cudaStream_t custream = (cudaStream_t)stream;
+  if (stride_d == 1 && head_dim % 8 == 0 && stride_b % 8 == 0 &&
+      stride_h % 8 == 0 && stride_s % 8 == 0 &&
+      rms_vec8_supported<T>(x, weight, dst, dst, head_dim)) {
+    rms_norm_rows_vec8_kernel<T>
+        <<<total_rows, rms_vec8_block_size(head_dim / 8), 0, custream>>>(
+            reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(weight),
+            reinterpret_cast<T *>(dst), stride_b, stride_h, stride_s, heads,
+            seq_len, head_dim, eps);
+    return;
+  }
+
   int block = 32;
   while (block < head_dim && block < 1024) {
     block <<= 1;
   }
-
-  const cudaStream_t custream = (cudaStream_t)stream;
   rms_norm_strided_4d_kernel<T><<<total_rows, block, 0, custream>>>(
       reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(weight),
       reinterpret_cast<T *>(dst), stride_b, stride_h, stride_s, stride_d, batch,

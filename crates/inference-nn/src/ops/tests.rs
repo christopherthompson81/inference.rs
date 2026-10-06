@@ -260,7 +260,7 @@ fn cuda_add_rms_norm_matches_separate_ops() -> candle_core::Result<()> {
     .to_dtype(DType::BF16)?;
 
     let expected_sum = (&input + &residual)?;
-    let expected_norm = candle_nn::ops::rms_norm(&expected_sum.contiguous()?, &weight, EPS)?;
+    let expected_norm = super::rms_norm(&expected_sum.contiguous()?, &weight, EPS)?;
     let (actual_sum, actual_norm) = super::cuda_add_rms_norm(&input, &residual, &weight, EPS)?;
 
     let expected_sum = expected_sum
@@ -325,8 +325,8 @@ fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> candle_core:
     let sin = angles.sin()?.to_dtype(DType::BF16)?;
 
     let (expected_q, expected_k) = inference_quant::rotary::apply_rotary_qk_preselected(
-        &candle_nn::ops::rms_norm(&q.contiguous()?, &q_weight, EPS)?,
-        &candle_nn::ops::rms_norm(&k.contiguous()?, &k_weight, EPS)?,
+        &super::rms_norm(&q.contiguous()?, &q_weight, EPS)?,
+        &super::rms_norm(&k.contiguous()?, &k_weight, EPS)?,
         &cos,
         &sin,
         true,
@@ -1799,5 +1799,66 @@ fn cuda_cached_top1_marks_nan_distribution() -> candle_core::Result<()> {
     let actual = super::cuda_top1_logits_f32_cached(&logits, &mut workspace)?;
 
     assert!(actual.iter().all(|value| value.is_nan()));
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout() -> candle_core::Result<()> {
+    const EPS: f32 = 1e-6;
+    const BF16_TOLERANCE: f32 = 0.02;
+    const F32_TOLERANCE: f32 = 1e-5;
+    const F16_TOLERANCE: f32 = 0.004;
+
+    let device = Device::new_cuda(0)?;
+    // 36 and 4100 take the scalar kernel, 40 and 8200 the vec8 one; 4100 and 8200 loop past one pass of the block
+    for dim in [36usize, 40, 4100, 8200] {
+        let weight = Tensor::arange(0f32, dim as f32, &Device::Cpu)?.affine(0.001, 0.7)?;
+        let base = Tensor::arange(0f32, (2 * 3 * 5 * dim) as f32, &Device::Cpu)?
+            .affine(0.0007, -1.1)?
+            .sin()?;
+        let inputs = [
+            base.narrow(0, 0, dim)?,
+            base.reshape((30, dim))?,
+            base.reshape((2, 15, dim))?,
+            base.reshape((2, 3, 5, dim))?,
+            base.reshape((2, 5, 3, dim))?.transpose(1, 2)?,
+            base.reshape((2, 15, dim))?.narrow(1, 1, 7)?,
+            base.reshape((2, 15, dim))?.transpose(0, 1)?,
+            base.reshape((2, dim, 3, 5))?.permute((0, 2, 3, 1))?,
+            base.reshape((2, 3, 5, dim))?.narrow(1, 1, 2)?,
+            base.narrow(0, 3, 7 * dim)?.reshape((7, dim))?,
+        ];
+        let dtypes = [
+            (DType::F32, F32_TOLERANCE),
+            (DType::BF16, BF16_TOLERANCE),
+            (DType::F16, F16_TOLERANCE),
+        ];
+        for (dtype, tolerance) in dtypes {
+            let weight = weight.to_dtype(dtype)?;
+            let cuda_weight = weight.to_device(&device)?;
+            for input in &inputs {
+                let input = input.to_dtype(dtype)?;
+                let expected = super::rms_norm(&input, &weight, EPS)?;
+                let actual = super::rms_norm(&input.to_device(&device)?, &cuda_weight, EPS)?;
+                assert_eq!(actual.dims(), input.dims());
+                let expected = expected
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                let actual = actual
+                    .to_dtype(DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                for (a, e) in actual.iter().zip(&expected) {
+                    assert!(
+                        (a - e).abs() <= tolerance * (1.0 + e.abs()),
+                        "{dtype:?} {:?}: {a} vs {e}",
+                        input.dims()
+                    );
+                }
+            }
+        }
+    }
     Ok(())
 }

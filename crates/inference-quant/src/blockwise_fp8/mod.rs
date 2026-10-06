@@ -1803,8 +1803,12 @@ mod tests {
         let (input_b, residual_b) = make_inputs(53)?;
         let make_reference = |input: &Tensor, residual: &Tensor| -> Result<(Tensor, Tensor)> {
             let residual_output = (input + residual)?;
-            let normalized =
-                candle_nn::ops::rms_norm(&residual_output.contiguous()?, &norm_weight, EPSILON)?;
+            let normalized = candle_nn::ops::rms_norm(
+                &residual_output.to_device(&Device::Cpu)?,
+                &norm_weight.to_device(&Device::Cpu)?,
+                EPSILON,
+            )?
+            .to_device(&device)?;
             let output = layer.forward(&normalized)?;
             Ok((residual_output, output))
         };

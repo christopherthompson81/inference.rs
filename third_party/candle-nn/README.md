@@ -11,6 +11,7 @@
 >   flash attention), `kv_cache`, `rnn`, `encoding`, `sequential`, `func` and `sampling` with their re-exports;
 >   `src/rotary_emb.rs` (inference-quant's `rotary` is the one RoPE); and the npz, pth, routing, sharded and
 >   renaming backends in `src/var_builder.rs` (inference-quant has its own sharded loader); `rms_norm_slow` and
->   `layer_norm_slow` in `src/ops.rs`.
+>   `layer_norm_slow` in `src/ops.rs`; the CUDA arm of `ops::rms_norm`, so `ops::rms_norm` and `RmsNorm` fail on contiguous CUDA input (inference-nn's
+  `ops::rms_norm` is the CUDA one, f32/f16/bf16; candle's f64 CUDA kernel is gone).
 >
 > Everything else is upstream. To re-sync, copy `candle-nn/src` from the new rev and reapply the changes above.
