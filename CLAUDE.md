@@ -46,8 +46,10 @@ cargo clippy --workspace --tests --examples -- -D warnings
 # --docs checks the docs of the crates that differ from master (rustdoc is never incremental); --docs-all checks all.
 # Neither renders HTML (`cargo doc` does): rendering merges into target/doc under a lock that serialized the runs.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests.
+# --size builds the CUDA C ABI library under the bundle profile and fails on growth past scripts/bundle_size_baseline.json;
+# --size-update rewrites the baseline, committed with the change that moved it.
 # --metal is the macOS counterpart of --cuda; the metal-only paths are invisible to a CPU or CUDA lint.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--models] [--slim] [--docs|--docs-all] [--bindings]
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--models] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
