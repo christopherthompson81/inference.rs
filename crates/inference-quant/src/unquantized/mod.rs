@@ -134,13 +134,12 @@ impl QuantMethod for UnquantLinear {
         // Batch matrix multiplication
         maybe_init_cublas_lt_wrapper(a.device().clone());
 
-        // Try custom GEMV for single-token decode (batch_size=1)
+        self.stats.process(a)?;
+
         #[cfg(feature = "cuda")]
         if crate::gemv::should_use_gemv(a, &self.w) {
             return crate::gemv::gemv(a, &self.w, self.b.as_ref());
         }
-
-        self.stats.process(a)?;
 
         #[cfg(feature = "cuda")]
         if crate::gemv::should_use_wide_gemv(a, &self.w) {
@@ -694,6 +693,28 @@ mod tests {
         <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(Linear::new(
             weight, bias,
         )))
+    }
+
+    // a decode-sized batch takes the GEMV on CUDA; its activations still count toward the imatrix
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn imatrix_stats_count_gemv_batches() -> Result<()> {
+        const OUT: usize = 64;
+        const IN: usize = 128;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let weight = Tensor::randn(0f32, 1., (OUT, IN), &cuda)?.to_dtype(DType::BF16)?;
+        let input = Tensor::randn(0f32, 1., (1, IN), &cuda)?.to_dtype(DType::BF16)?;
+        assert!(crate::gemv::should_use_gemv(&input, &weight));
+        let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
+            Linear::new(weight, None),
+        ))?;
+        layer.begin_track_stats()?;
+        layer.forward(&input)?;
+        assert_eq!(layer.stats_snapshot(), Some((1, 1)));
+        Ok(())
     }
 
     #[test]

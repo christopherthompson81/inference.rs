@@ -42,7 +42,7 @@ static MODULES: [&kernels::Module; 11] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::cuda_backend;
+    use candle_core::{DType, Tensor, cuda_backend};
 
     #[test]
     fn every_module_loads_and_preloads_its_entries() -> Result<()> {
@@ -95,6 +95,25 @@ mod tests {
                 assert!(error.contains("CUDA_COMPUTE_CAP"), "{error}");
             }
         }
+    }
+
+    // const_set and copy2d back full/ones and cat/slice_set; every dtype the CUDA backend maps needs its kernel
+    #[test]
+    fn fill_and_copy_run_for_every_integer_dtype() -> Result<()> {
+        skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        for dtype in [DType::U8, DType::U32, DType::I16, DType::I32, DType::I64] {
+            let filled = Tensor::ones((2, 3), dtype, &device)?;
+            let joined = Tensor::cat(&[&filled, &filled], 1)?;
+            let expected = Tensor::ones((2, 6), DType::F32, &Device::Cpu)?;
+            let got = joined.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
+            assert_eq!(
+                got.to_vec2::<f32>()?,
+                expected.to_vec2::<f32>()?,
+                "{dtype:?}"
+            );
+        }
+        Ok(())
     }
 
     #[test]

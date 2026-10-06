@@ -1739,6 +1739,79 @@ mod tests {
         )
     }
 
+    // an F32 model on a GPU reaches the conv in f32, which the CUDA kernel does not instantiate
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn causal_conv1d_on_cuda_in_f32_matches_the_cpu() -> CandleResult<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let dims = dims(2, 4, 5, 3);
+        let batch_size = 2;
+        let weight = Tensor::from_vec(
+            patterned(dims.conv_dim * dims.conv_kernel_size, 8, 0.05, -0.01),
+            (dims.conv_dim, 1, dims.conv_kernel_size),
+            &Device::Cpu,
+        )?;
+        let initial_state = Tensor::from_vec(
+            patterned(
+                batch_size * dims.conv_dim * dims.conv_kernel_size,
+                9,
+                0.03,
+                0.0,
+            ),
+            (batch_size, dims.conv_dim, dims.conv_kernel_size),
+            &Device::Cpu,
+        )?;
+        let cache_on = |device: &Device| -> CandleResult<GdnLayerCache> {
+            Ok(GdnLayerCache {
+                conv_state: initial_state.to_device(device)?,
+                recurrent_state: Tensor::zeros(
+                    (
+                        batch_size,
+                        dims.num_v_heads,
+                        dims.head_k_dim,
+                        dims.head_v_dim,
+                    ),
+                    DType::F32,
+                    device,
+                )?,
+                state_layout: RecurrentStateLayout::GdnKeyMajor,
+                slots: None,
+                pending_transitions: None,
+                deferred_state: None,
+            })
+        };
+        // a prefill, then a decode step from the state it leaves
+        for (seq_len, kind) in [
+            (6, RecurrentBatchKind::Prefill),
+            (1, RecurrentBatchKind::Decode),
+        ] {
+            let x = Tensor::from_vec(
+                patterned(batch_size * seq_len * dims.conv_dim, 7, 0.08, 0.01),
+                (batch_size, seq_len, dims.conv_dim),
+                &Device::Cpu,
+            )?;
+            let mut cpu_cache = cache_on(&Device::Cpu)?;
+            let mut cuda_cache = cache_on(&cuda)?;
+            let expected = causal_conv1d(&x, &weight, &dims, &mut cpu_cache, kind)?;
+            let actual = causal_conv1d(
+                &x.to_device(&cuda)?,
+                &weight.to_device(&cuda)?,
+                &dims,
+                &mut cuda_cache,
+                kind,
+            )?;
+            assert_close(&actual.to_device(&Device::Cpu)?, &expected)?;
+            assert_close(
+                &cuda_cache.conv_state.to_device(&Device::Cpu)?,
+                &cpu_cache.conv_state,
+            )?;
+        }
+        Ok(())
+    }
+
     #[test]
     fn causal_conv1d_update_cpu_matches_tensor_path() -> CandleResult<()> {
         let dev = Device::Cpu;
