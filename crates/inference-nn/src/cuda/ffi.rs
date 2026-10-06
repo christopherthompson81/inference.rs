@@ -665,22 +665,6 @@ unsafe extern "C" {
         stream: i64,
     );
 
-    pub fn topk_large_f32(
-        input: *const f32,
-        block_values: *mut f32,
-        block_indices: *mut u32,
-        block_maxes: *mut f32,
-        block_sums: *mut f32,
-        values_out: *mut f32,
-        indices_out: *mut u32,
-        softmax_info_out: *mut f32,
-        ncols: i32,
-        k: i32,
-        chunk_size: i32,
-        nblocks: i32,
-        inv_temperature: f32,
-        stream: i64,
-    );
     pub fn topk_large_f32_packed(
         input: *const f32,
         block_values: *mut f32,
@@ -697,36 +681,6 @@ unsafe extern "C" {
     );
     pub fn topk_large_f32_packed_batched(
         input: *const f32,
-        inv_temperatures: *const f32,
-        block_values: *mut f32,
-        block_indices: *mut u32,
-        block_maxes: *mut f32,
-        block_sums: *mut f32,
-        packed_out: *mut f32,
-        nrows: i32,
-        ncols: i32,
-        k: i32,
-        chunk_size: i32,
-        nblocks: i32,
-        stream: i64,
-    );
-    pub fn topk_large_bf16_packed_batched(
-        input: *const c_void,
-        inv_temperatures: *const f32,
-        block_values: *mut f32,
-        block_indices: *mut u32,
-        block_maxes: *mut f32,
-        block_sums: *mut f32,
-        packed_out: *mut f32,
-        nrows: i32,
-        ncols: i32,
-        k: i32,
-        chunk_size: i32,
-        nblocks: i32,
-        stream: i64,
-    );
-    pub fn topk_large_f16_packed_batched(
-        input: *const c_void,
         inv_temperatures: *const f32,
         block_values: *mut f32,
         block_indices: *mut u32,
@@ -1163,18 +1117,6 @@ unsafe extern "C" {
         gate_stride_2: i64,
         gate_stride_3: i64,
         eps: f32,
-        stream: i64,
-    );
-    pub fn fused_gdn_gating(
-        b: *const c_void,
-        a: *const c_void,
-        a_log: *const f32,
-        dt_bias: *const f32,
-        beta_out: *mut c_void,
-        g_out: *mut c_void,
-        total_elements: i32,
-        num_heads: i32,
-        dtype: i32,
         stream: i64,
     );
     pub fn gdn_prepare_recurrence(

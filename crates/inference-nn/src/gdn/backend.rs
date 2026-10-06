@@ -163,18 +163,6 @@ pub fn compute_beta_g(
     dt_bias: &Tensor,
     dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
-    #[cfg(feature = "cuda")]
-    if b.device().is_cuda() {
-        let b_flat = b.contiguous()?.flatten_all()?;
-        let a_flat = a.contiguous()?.flatten_all()?;
-        let a_log_f32 = a_log.to_dtype(DType::F32)?.contiguous()?;
-        let dt_bias_f32 = dt_bias.to_dtype(DType::F32)?.contiguous()?;
-        let (beta_flat, g_flat) =
-            crate::cuda::gdn::fused_gdn_gating_cuda(&b_flat, &a_flat, &a_log_f32, &dt_bias_f32)?;
-        let shape = b.shape();
-        return Ok((beta_flat.reshape(shape)?, g_flat.reshape(shape)?));
-    }
-
     #[cfg(feature = "metal")]
     if b.device().is_metal() {
         let b_flat = b.contiguous()?.flatten_all()?;

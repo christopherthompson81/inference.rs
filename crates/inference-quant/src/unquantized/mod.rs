@@ -9,7 +9,7 @@ use crate::{
     AfqBits, AfqGroupSize, AfqLayer, FP8Linear, GgufMatMul, ImatrixLayerStats, IsqType,
     QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType, Shard,
     UqffReader, UqffTensor,
-    cublaslt::{CUBLASLT_CONTROLLER, maybe_init_cublas_lt_wrapper},
+    cublaslt::maybe_init_cublas_lt_wrapper,
     generate_isq, generate_isq_imatrix,
     hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer, ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
 };
@@ -19,20 +19,6 @@ pub struct UnquantLinear {
     w: Tensor,
     b: Option<Tensor>,
     stats: ImatrixLayerStats,
-}
-
-fn has_cublaslt_batch_layout(x: &Tensor) -> bool {
-    if x.rank() != 3 {
-        return false;
-    }
-
-    let dims = x.dims();
-    let stride = x.layout().stride();
-    stride[1] == dims[2] && stride[2] == 1
-}
-
-fn supports_cublaslt_batch_matmul(a: &Tensor, w: &Tensor) -> bool {
-    has_cublaslt_batch_layout(a) && has_cublaslt_batch_layout(w)
 }
 
 impl UnquantLinear {
@@ -166,31 +152,7 @@ impl QuantMethod for UnquantLinear {
             let b = b.broadcast_as(Shape::from_dims(&tgt_shape))?;
 
             match a.device().location() {
-                DeviceLocation::Cuda { .. } => {
-                    // Try to use cublaslt, otherwise fallback to gemm
-                    let cublaslt = if supports_cublaslt_batch_matmul(a, &w) {
-                        CUBLASLT_CONTROLLER.get_for_device(a.device())
-                    } else {
-                        None
-                    };
-                    if let Some(cublaslt) = cublaslt {
-                        cublaslt
-                            .batch_matmul(
-                                a,
-                                &w,
-                                Some(&b.t()?.contiguous()?),
-                                None,
-                                Some(1.0),
-                                None,
-                                None,
-                            )?
-                            .t()
-                    } else {
-                        let matmul_result = a.matmul(&w.t()?)?;
-                        matmul_result.broadcast_add(&b)
-                    }
-                }
-                DeviceLocation::Metal { .. } => {
+                DeviceLocation::Cuda { .. } | DeviceLocation::Metal { .. } => {
                     let matmul_result = a.matmul(&w.t()?)?;
                     matmul_result.broadcast_add(&b)
                 }
@@ -215,21 +177,7 @@ impl QuantMethod for UnquantLinear {
             }
         } else {
             match a.device().location() {
-                DeviceLocation::Cuda { .. } => {
-                    let cublaslt = if supports_cublaslt_batch_matmul(a, &w) {
-                        CUBLASLT_CONTROLLER.get_for_device(a.device())
-                    } else {
-                        None
-                    };
-                    if let Some(cublaslt) = cublaslt {
-                        cublaslt
-                            .batch_matmul(a, &w, None, None, None, None, None)?
-                            .t()
-                    } else {
-                        a.matmul(&w.t()?)
-                    }
-                }
-                DeviceLocation::Metal { .. } => a.matmul(&w.t()?),
+                DeviceLocation::Cuda { .. } | DeviceLocation::Metal { .. } => a.matmul(&w.t()?),
                 DeviceLocation::Cpu => {
                     #[cfg(feature = "accelerate")]
                     {
@@ -842,7 +790,7 @@ mod tests {
             Linear::new(weight.clone(), Some(bias.clone())),
         ))?;
 
-        assert!(!has_cublaslt_batch_layout(&input));
+        assert!(!input.is_contiguous());
         let output = layer.forward(&input)?;
         assert_eq!(output.dims(), &[9, 3, 5]);
         let expected = input

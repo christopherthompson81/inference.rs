@@ -1,13 +1,13 @@
 use candle_core::{
     CpuStorage, CustomOp1, CustomOp2, DType, Error, Layout, Result, Shape, Tensor, WithDType,
-    backend::BackendStorage, shape::Dim,
+    backend::BackendStorage,
 };
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
 
 use std::{
     fmt::Display,
-    ops::{BitAnd, BitOr, BitXor, Not, Shl},
+    ops::{BitAnd, BitOr, Shl},
 };
 
 #[cfg(feature = "cuda")]
@@ -18,14 +18,6 @@ use candle_core::cuda::{CudaStorage, cudarc::driver::DevicePtr};
 use float8::F8E4M3;
 #[cfg(feature = "cuda")]
 use std::ffi::c_void;
-
-#[cfg(feature = "metal")]
-use crate::metal_kernels::SortScratchCache; // re‑export for clarity
-#[cfg(feature = "metal")]
-use std::sync::OnceLock;
-
-#[cfg(feature = "metal")]
-static SORT_SCRATCH_CACHE: OnceLock<SortScratchCache> = OnceLock::new();
 
 struct Leftshift(usize);
 
@@ -202,7 +194,6 @@ impl LeftshiftOp for Tensor {
 pub enum BitWiseBinaryOpEnum {
     And,
     Or,
-    Xor,
 }
 
 impl Display for BitWiseBinaryOpEnum {
@@ -210,19 +201,6 @@ impl Display for BitWiseBinaryOpEnum {
         match self {
             BitWiseBinaryOpEnum::And => write!(f, "And"),
             BitWiseBinaryOpEnum::Or => write!(f, "Or"),
-            BitWiseBinaryOpEnum::Xor => write!(f, "Xor"),
-        }
-    }
-}
-
-pub enum BitWiseUnaryOpEnum {
-    Not,
-}
-
-impl Display for BitWiseUnaryOpEnum {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            BitWiseUnaryOpEnum::Not => write!(f, "Not"),
         }
     }
 }
@@ -236,7 +214,7 @@ impl BitWise {
         Self { op }
     }
 
-    fn bitwise<T: WithDType + BitAnd<Output = T> + BitOr<Output = T> + BitXor<Output = T>>(
+    fn bitwise<T: WithDType + BitAnd<Output = T> + BitOr<Output = T>>(
         &self,
         vs1: &[T],
         vs2: &[T],
@@ -246,7 +224,6 @@ impl BitWise {
             .map(|(v1, v2)| match self.op {
                 BitWiseBinaryOpEnum::And => *v1 & *v2,
                 BitWiseBinaryOpEnum::Or => *v1 | *v2,
-                BitWiseBinaryOpEnum::Xor => *v1 ^ *v2,
             })
             .collect()
     }
@@ -473,12 +450,6 @@ impl CustomOp2 for BitWise {
                             d_out_ptr as *mut c_void,
                             u32::try_from(elem_count)?,
                         ),
-                        BitWiseBinaryOpEnum::Xor => ffi::bitwise_xor_u8(
-                            d_in1_ptr,
-                            d_in2_ptr,
-                            d_out_ptr as *mut c_void,
-                            u32::try_from(elem_count)?,
-                        ),
                     }
                 };
                 drop(d_out_guard);
@@ -496,12 +467,6 @@ impl CustomOp2 for BitWise {
                             u32::try_from(elem_count)?,
                         ),
                         BitWiseBinaryOpEnum::Or => ffi::bitwise_or_u32(
-                            d_in1_ptr,
-                            d_in2_ptr,
-                            d_out_ptr as *mut c_void,
-                            u32::try_from(elem_count)?,
-                        ),
-                        BitWiseBinaryOpEnum::Xor => ffi::bitwise_xor_u32(
                             d_in1_ptr,
                             d_in2_ptr,
                             d_out_ptr as *mut c_void,
@@ -529,19 +494,13 @@ impl CustomOp2 for BitWise {
                             d_out_ptr as *mut c_void,
                             u32::try_from(elem_count)?,
                         ),
-                        BitWiseBinaryOpEnum::Xor => ffi::bitwise_xor_i64(
-                            d_in1_ptr,
-                            d_in2_ptr,
-                            d_out_ptr as *mut c_void,
-                            u32::try_from(elem_count)?,
-                        ),
                     }
                 };
                 drop(d_out_guard);
                 CudaStorage::wrap_cuda_slice(d_out, dev)
             }
             DType::I32 => {
-                let d_out = unsafe { dev.alloc::<i64>(elem_count) }?;
+                let d_out = unsafe { dev.alloc::<i32>(elem_count) }?;
                 let (d_out_ptr, d_out_guard) = d_out.device_ptr(d_out.stream());
                 unsafe {
                     match self.op {
@@ -552,12 +511,6 @@ impl CustomOp2 for BitWise {
                             u32::try_from(elem_count)?,
                         ),
                         BitWiseBinaryOpEnum::Or => ffi::bitwise_or_i32(
-                            d_in1_ptr,
-                            d_in2_ptr,
-                            d_out_ptr as *mut c_void,
-                            u32::try_from(elem_count)?,
-                        ),
-                        BitWiseBinaryOpEnum::Xor => ffi::bitwise_xor_i32(
                             d_in1_ptr,
                             d_in2_ptr,
                             d_out_ptr as *mut c_void,
@@ -638,145 +591,6 @@ impl CustomOp2 for BitWise {
                 &output,
             )
             .map_err(candle_core::Error::wrap)?,
-            BitWiseBinaryOpEnum::Xor => crate::metal_kernels::call_bitwise_xor(
-                device.device(),
-                &encoder,
-                crate::metal_kernels::Kernels::global(),
-                s1.dtype(),
-                s1.buffer(),
-                s2.buffer(),
-                l1.start_offset() * s1.dtype().size_in_bytes(),
-                l2.start_offset() * s2.dtype().size_in_bytes(),
-                out_shape.elem_count(),
-                &output,
-            )
-            .map_err(candle_core::Error::wrap)?,
-        }
-
-        let newstorage = candle_core::MetalStorage::new(
-            output,
-            device.clone(),
-            out_shape.elem_count(),
-            s1.dtype(),
-        );
-        Ok((newstorage, out_shape))
-    }
-}
-
-struct BitWiseUnary {
-    pub op: BitWiseUnaryOpEnum,
-}
-
-impl BitWiseUnary {
-    pub fn new(op: BitWiseUnaryOpEnum) -> Self {
-        Self { op }
-    }
-
-    fn bitwise<T: WithDType + Not<Output = T>>(&self, vs1: &[T]) -> Vec<T> {
-        vs1.into_par_iter()
-            .map(|v1| match self.op {
-                BitWiseUnaryOpEnum::Not => !*v1,
-            })
-            .collect()
-    }
-}
-
-impl CustomOp1 for BitWiseUnary {
-    fn name(&self) -> &'static str {
-        "bitwise-unary"
-    }
-
-    fn cpu_fwd(&self, s1: &CpuStorage, l1: &Layout) -> Result<(CpuStorage, Shape)> {
-        if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
-        }
-
-        match s1 {
-            CpuStorage::U8(vs1) => {
-                let vs1 = match l1.contiguous_offsets() {
-                    Some((a, b)) => &vs1[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
-                };
-                let result = self.bitwise(vs1);
-                let result = CpuStorage::U8(result);
-                Ok((result, l1.shape().clone()))
-            }
-            CpuStorage::U32(vs1) => {
-                let vs1 = match l1.contiguous_offsets() {
-                    Some((a, b)) => &vs1[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
-                };
-                let result = self.bitwise(vs1);
-                let result = CpuStorage::U32(result);
-                Ok((result, l1.shape().clone()))
-            }
-            CpuStorage::I64(vs1) => {
-                let vs1 = match l1.contiguous_offsets() {
-                    Some((a, b)) => &vs1[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
-                };
-                let result = self.bitwise(vs1);
-                let result = CpuStorage::I64(result);
-                Ok((result, l1.shape().clone()))
-            }
-            CpuStorage::I16(vs1) => {
-                let vs1 = match l1.contiguous_offsets() {
-                    Some((a, b)) => &vs1[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
-                };
-                let result = self.bitwise(vs1);
-                let result = CpuStorage::I16(result);
-                Ok((result, l1.shape().clone()))
-            }
-            CpuStorage::I32(vs1) => {
-                let vs1 = match l1.contiguous_offsets() {
-                    Some((a, b)) => &vs1[a..b],
-                    None => Err(Error::RequiresContiguous { op: "index-add" }.bt())?,
-                };
-                let result = self.bitwise(vs1);
-                let result = CpuStorage::I32(result);
-                Ok((result, l1.shape().clone()))
-            }
-            _ => Err(Error::UnsupportedDTypeForOp(s1.dtype(), "bitwise")),
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(&self, _s1: &CudaStorage, _l1: &Layout) -> Result<(CudaStorage, Shape)> {
-        candle_core::bail!("bitwise unary operations are not supported on CUDA")
-    }
-
-    #[cfg(feature = "metal")]
-    fn metal_fwd(
-        &self,
-        s1: &candle_core::MetalStorage,
-        l1: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
-        if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
-        }
-
-        let encoder = s1.device().command_encoder()?;
-        encoder.set_label("bitwise-unary-op");
-
-        let device = s1.device();
-
-        let out_shape = l1.shape().clone();
-
-        let output = device.new_buffer(out_shape.elem_count(), s1.dtype(), "bitwise-op")?;
-
-        match self.op {
-            BitWiseUnaryOpEnum::Not => crate::metal_kernels::call_bitwise_not(
-                device.device(),
-                &encoder,
-                crate::metal_kernels::Kernels::global(),
-                s1.dtype(),
-                s1.buffer(),
-                l1.start_offset() * s1.dtype().size_in_bytes(),
-                out_shape.elem_count(),
-                &output,
-            )
-            .map_err(candle_core::Error::wrap)?,
         }
 
         let newstorage = candle_core::MetalStorage::new(
@@ -792,8 +606,6 @@ impl CustomOp1 for BitWiseUnary {
 pub trait BitWiseOp {
     fn bitwise_and(&self, rhs: &Tensor) -> Result<Tensor>;
     fn bitwise_or(&self, rhs: &Tensor) -> Result<Tensor>;
-    fn bitwise_xor(&self, rhs: &Tensor) -> Result<Tensor>;
-    fn bitwise_not(&self) -> Result<Tensor>;
 }
 
 impl BitWiseOp for Tensor {
@@ -803,264 +615,6 @@ impl BitWiseOp for Tensor {
 
     fn bitwise_or(&self, rhs: &Tensor) -> Result<Tensor> {
         self.apply_op2_no_bwd(rhs, &BitWise::new(BitWiseBinaryOpEnum::Or))
-    }
-
-    fn bitwise_xor(&self, rhs: &Tensor) -> Result<Tensor> {
-        self.apply_op2_no_bwd(rhs, &BitWise::new(BitWiseBinaryOpEnum::Xor))
-    }
-
-    fn bitwise_not(&self) -> Result<Tensor> {
-        self.apply_op1_no_bwd(&BitWiseUnary::new(BitWiseUnaryOpEnum::Not))
-    }
-}
-
-/// Configuration for an **argsort** (returns indices) operation.
-#[cfg_attr(not(feature = "metal"), allow(dead_code))]
-struct ArgSort {
-    axis: usize,
-}
-
-/// Configuration for a **sort** (returns re-ordered values) operation.
-#[cfg_attr(not(feature = "metal"), allow(dead_code))]
-struct Sort {
-    axis: usize,
-}
-
-impl CustomOp1 for ArgSort {
-    fn name(&self) -> &'static str {
-        "argsort"
-    }
-
-    // -------- CPU ------------------------------------------------------------
-    fn cpu_fwd(&self, _s1: &CpuStorage, _l1: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("ArgSort is not implemented for the CPU backend");
-    }
-
-    // -------- CUDA -----------------------------------------------------------
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(&self, _s1: &CudaStorage, _l1: &Layout) -> Result<(CudaStorage, Shape)> {
-        candle_core::bail!("ArgSort is not implemented for the CUDA backend");
-    }
-
-    // -------- Metal ----------------------------------------------------------
-    #[cfg(feature = "metal")]
-    fn metal_fwd(
-        &self,
-        s1: &candle_core::MetalStorage,
-        l1: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
-        // Require contiguous input (same as other metal ops in this file)
-        if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
-        }
-
-        // Create a command encoder and label it for easy debugging in Xcode’s GPU frame‑capture
-        let encoder = s1.device().command_encoder()?;
-        encoder.set_label("argsort");
-
-        let device = s1.device();
-        let out_shape = l1.shape().clone();
-        let elem_count = out_shape.elem_count();
-
-        // Output buffer holds the sorted indices -> always `U32`
-        let output = device.new_buffer(elem_count, candle_core::DType::U32, "argsort")?;
-
-        // ------------------------------------------------------------------
-        // Obtain a scratch‑buffer set from the global LRU cache (cap=4)
-        // ------------------------------------------------------------------
-        let cache = SORT_SCRATCH_CACHE.get_or_init(|| SortScratchCache::new(4));
-
-        let dims = l1.dims();
-        let size_sorted_axis = dims[self.axis];
-        let n_rows = l1.shape().elem_count() / size_sorted_axis;
-
-        // Replicate the kernel’s internal block sizing to derive `n_blocks`
-        let tn = 4usize;
-        let mut bn = match size_sorted_axis.div_ceil(tn) {
-            v if v > 256 => 512,
-            v if v > 128 => 256,
-            v if v > 64 => 128,
-            v if v > 32 => 64,
-            _ => 32,
-        };
-        if bn == 512 && s1.dtype().size_in_bytes() > 4 {
-            bn = 256;
-        }
-        let n_per_block = bn * tn;
-        let n_blocks = size_sorted_axis.div_ceil(n_per_block);
-
-        // Borrow the buffers for this launch
-        let scratch = cache.checkout(device, n_rows, size_sorted_axis, s1.dtype(), n_blocks);
-
-        // ------------------------------------------------------------------
-        // Build the unified SortArgs payload
-        // ------------------------------------------------------------------
-        let sort_args = crate::metal_kernels::SortArgs {
-            axis: self.axis,
-            shape: l1.dims(),
-            strides: l1.stride(),
-            out_shape: l1.dims(), // same as input for argsort
-            out_strides: l1.stride(),
-            in_contiguous: l1.is_contiguous(),
-            in_ty: s1.dtype(),
-            out_ty: candle_core::DType::U32,
-            src: s1.buffer(),
-            src_offset: l1.start_offset(), // element offset
-            dst: &output,
-            bn,
-            tn,
-            n_blocks,
-        };
-
-        // Launch the Metal kernel via the new API
-        crate::metal_kernels::call_argsort(
-            device.device(),
-            &encoder, // impl EncoderProvider
-            crate::metal_kernels::Kernels::global(),
-            &sort_args,
-            &scratch,
-        )
-        .map_err(candle_core::Error::wrap)?;
-
-        // Wrap and return as a new MetalStorage
-        let newstorage = candle_core::MetalStorage::new(
-            output,
-            device.clone(),
-            elem_count,
-            candle_core::DType::U32,
-        );
-        Ok((newstorage, out_shape))
-    }
-}
-
-impl CustomOp1 for Sort {
-    fn name(&self) -> &'static str {
-        "sort"
-    }
-
-    // -------- CPU ------------------------------------------------------------
-    fn cpu_fwd(&self, _s1: &CpuStorage, _l1: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("Sort is not implemented for the CPU backend");
-    }
-
-    // -------- CUDA -----------------------------------------------------------
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(&self, _s1: &CudaStorage, _l1: &Layout) -> Result<(CudaStorage, Shape)> {
-        candle_core::bail!("Sort is not implemented for the CUDA backend");
-    }
-
-    // -------- Metal ----------------------------------------------------------
-    #[cfg(feature = "metal")]
-    fn metal_fwd(
-        &self,
-        s1: &candle_core::MetalStorage,
-        l1: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
-        // Require contiguous input (same as other metal ops in this file)
-        if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
-        }
-
-        // Create a command encoder and label it for easy debugging in Xcode’s GPU frame‑capture
-        let encoder = s1.device().command_encoder()?;
-        encoder.set_label("sort");
-
-        let device = s1.device();
-        let out_shape = l1.shape().clone();
-        let elem_count = out_shape.elem_count();
-
-        // Output buffer keeps the same dtype as the input (these are the reordered values)
-        let output = device.new_buffer(elem_count, s1.dtype(), "sort")?;
-
-        // ------------------------------------------------------------------
-        // Obtain a scratch‑buffer set from the global LRU cache (cap=4)
-        // ------------------------------------------------------------------
-        let cache = SORT_SCRATCH_CACHE.get_or_init(|| SortScratchCache::new(4));
-
-        let dims = l1.dims();
-        let size_sorted_axis = dims[self.axis];
-        let n_rows = l1.shape().elem_count() / size_sorted_axis;
-
-        // Replicate the kernel’s internal block sizing to derive `n_blocks`
-        let tn = 4usize;
-        let mut bn = match size_sorted_axis.div_ceil(tn) {
-            v if v > 256 => 512,
-            v if v > 128 => 256,
-            v if v > 64 => 128,
-            v if v > 32 => 64,
-            _ => 32,
-        };
-        if bn == 512 && s1.dtype().size_in_bytes() > 4 {
-            bn = 256;
-        }
-        let n_per_block = bn * tn;
-        let n_blocks = size_sorted_axis.div_ceil(n_per_block);
-
-        // Borrow the buffers for this launch
-        let scratch = cache.checkout(device, n_rows, size_sorted_axis, s1.dtype(), n_blocks);
-
-        // ------------------------------------------------------------------
-        // Build the unified SortArgs payload
-        // ------------------------------------------------------------------
-        let sort_args = crate::metal_kernels::SortArgs {
-            axis: self.axis,
-            shape: l1.dims(),
-            strides: l1.stride(),
-            out_shape: l1.dims(), // same shape for value sort
-            out_strides: l1.stride(),
-            in_contiguous: l1.is_contiguous(),
-            in_ty: s1.dtype(),
-            out_ty: s1.dtype(),
-            src: s1.buffer(),
-            src_offset: l1.start_offset(), // element offset
-            dst: &output,
-            bn,
-            tn,
-            n_blocks,
-        };
-
-        // Launch the Metal kernel via the new API
-        crate::metal_kernels::call_sort(
-            device.device(),
-            &encoder, // impl EncoderProvider
-            crate::metal_kernels::Kernels::global(),
-            &sort_args,
-            &scratch,
-        )
-        .map_err(candle_core::Error::wrap)?;
-
-        // Wrap and return as a new MetalStorage
-        let newstorage =
-            candle_core::MetalStorage::new(output, device.clone(), elem_count, s1.dtype());
-        Ok((newstorage, out_shape))
-    }
-}
-
-/// Extension trait adding `argsort` / `sort` convenience calls on `Tensor`.
-pub trait SortOp {
-    /// Returns the indices that would (ascending) sort the tensor along `axis`.
-    fn fast_argsort_asc<D: Dim>(&self, axis: D) -> Result<Tensor>;
-    /// Returns the tensor's values (ascending) sorted along `axis`.
-    fn fast_sort_asc<D: Dim>(&self, axis: D) -> Result<Tensor>;
-}
-
-impl SortOp for Tensor {
-    fn fast_argsort_asc<D: Dim>(&self, axis: D) -> Result<Tensor> {
-        if self.device().is_cpu() || self.device().is_cuda() {
-            return self.arg_sort_last_dim(true);
-        }
-        self.apply_op1_no_bwd(&ArgSort {
-            axis: axis.to_index(self.shape(), "argsort")?,
-        })
-    }
-
-    fn fast_sort_asc<D: Dim>(&self, axis: D) -> Result<Tensor> {
-        if self.device().is_cpu() || self.device().is_cuda() {
-            return Ok(self.sort_last_dim(true)?.0);
-        }
-        self.apply_op1_no_bwd(&Sort {
-            axis: axis.to_index(self.shape(), "sort")?,
-        })
     }
 }
 
@@ -1384,201 +938,6 @@ impl NonZeroOp for Tensor {
     }
 }
 
-struct CumSum {
-    inclusive: bool,
-    reverse: bool,
-    axis: usize,
-}
-
-impl CustomOp1 for CumSum {
-    fn name(&self) -> &'static str {
-        "cumsum"
-    }
-
-    fn cpu_fwd(&self, s1: &CpuStorage, l1: &Layout) -> Result<(CpuStorage, Shape)> {
-        use std::ops::Add;
-        if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
-        }
-        let dims = l1.dims();
-        let axis = self.axis;
-        let axis_len = dims[axis];
-        let (start, end) = l1
-            .contiguous_offsets()
-            .ok_or(Error::RequiresContiguous { op: "cumsum" })?;
-
-        // helper to execute scan for a slice of T
-        macro_rules! scan_block {
-            ($vt:ident, $ty:ty, $add:ident, $init:expr) => {{
-                let vs: &[$ty] = $vt;
-                let input = &vs[start..end];
-                let count = input.len() / axis_len;
-                let mut result = Vec::<$ty>::with_capacity(input.len());
-                if !self.reverse {
-                    if self.inclusive {
-                        for block in 0..count {
-                            let base = block * axis_len;
-                            let mut sum = input[base];
-                            result.push(sum);
-                            for j in 1..axis_len {
-                                sum = sum.$add(input[base + j]);
-                                result.push(sum);
-                            }
-                        }
-                    } else {
-                        let init: $ty = $init;
-                        for block in 0..count {
-                            let base = block * axis_len;
-                            let mut sum = init;
-                            for j in 0..axis_len {
-                                result.push(sum);
-                                sum = sum.$add(input[base + j]);
-                            }
-                        }
-                    }
-                } else {
-                    if self.inclusive {
-                        for block in 0..count {
-                            let base = block * axis_len;
-                            let mut temp = Vec::<$ty>::with_capacity(axis_len);
-                            let mut sum = input[base + axis_len - 1];
-                            temp.push(sum);
-                            for k in 1..axis_len {
-                                let idx = axis_len - 1 - k;
-                                sum = sum.$add(input[base + idx]);
-                                temp.push(sum);
-                            }
-                            temp.reverse();
-                            result.extend(temp);
-                        }
-                    } else {
-                        let init: $ty = $init;
-                        for block in 0..count {
-                            let base = block * axis_len;
-                            let mut temp = Vec::<$ty>::with_capacity(axis_len);
-                            let mut sum = init;
-                            for k in 0..axis_len {
-                                let idx = axis_len - 1 - k;
-                                temp.push(sum);
-                                sum = sum.$add(input[base + idx]);
-                            }
-                            temp.reverse();
-                            result.extend(temp);
-                        }
-                    }
-                }
-                result
-            }};
-        }
-        match s1 {
-            CpuStorage::U8(vs) => {
-                let result = scan_block!(vs, u8, wrapping_add, 0u8);
-                Ok((CpuStorage::U8(result), l1.shape().clone()))
-            }
-            CpuStorage::I16(vs) => {
-                let result = scan_block!(vs, i16, add, 0i16);
-                Ok((CpuStorage::I16(result), l1.shape().clone()))
-            }
-            CpuStorage::U32(vs) => {
-                let result = scan_block!(vs, u32, wrapping_add, 0u32);
-                Ok((CpuStorage::U32(result), l1.shape().clone()))
-            }
-            CpuStorage::I32(vs) => {
-                let result = scan_block!(vs, i32, add, 0i32);
-                Ok((CpuStorage::I32(result), l1.shape().clone()))
-            }
-            CpuStorage::I64(vs) => {
-                let result = scan_block!(vs, i64, add, 0i64);
-                Ok((CpuStorage::I64(result), l1.shape().clone()))
-            }
-            CpuStorage::F32(vs) => {
-                let result = scan_block!(vs, f32, add, 0.0f32);
-                Ok((CpuStorage::F32(result), l1.shape().clone()))
-            }
-            CpuStorage::F64(vs) => {
-                let result = scan_block!(vs, f64, add, 0.0f64);
-                Ok((CpuStorage::F64(result), l1.shape().clone()))
-            }
-            _ => Err(Error::UnsupportedDTypeForOp(DType::F32, "cumsum")),
-        }
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(&self, _s1: &CudaStorage, _l1: &Layout) -> Result<(CudaStorage, Shape)> {
-        candle_core::bail!("cumulative sum is not supported on CUDA")
-    }
-
-    #[cfg(feature = "metal")]
-    fn metal_fwd(
-        &self,
-        s1: &candle_core::MetalStorage,
-        l1: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
-        use crate::metal_kernels::ScanType;
-
-        let encoder = s1.device().command_encoder()?;
-        encoder.set_label("cumsum");
-
-        let device = s1.device();
-
-        let out_shape = l1.shape().clone();
-
-        let output = device.new_buffer(out_shape.elem_count(), s1.dtype(), "cumsum")?;
-
-        crate::metal_kernels::call_scan(
-            device.device(),
-            &encoder,
-            crate::metal_kernels::Kernels::global(),
-            s1.dtype(),
-            ScanType::Sum,
-            s1.buffer(),
-            l1.start_offset() * s1.dtype().size_in_bytes(),
-            self.axis,
-            l1.dims(),
-            l1.stride(),
-            self.reverse,
-            self.inclusive,
-            &output,
-        )
-        .map_err(candle_core::Error::wrap)?;
-
-        let newstorage = candle_core::MetalStorage::new(
-            output,
-            device.clone(),
-            out_shape.elem_count(),
-            s1.dtype(),
-        );
-        Ok((newstorage, out_shape))
-    }
-}
-
-pub trait CumSumOp {
-    /// inclusive = false, reverse = false
-    fn fast_cumsum<D: Dim>(&self, axis: D) -> Result<Tensor>;
-
-    fn fast_cumsum_config<D: Dim>(&self, axis: D, inclusive: bool, reverse: bool)
-    -> Result<Tensor>;
-}
-
-impl CumSumOp for Tensor {
-    fn fast_cumsum<D: Dim>(&self, axis: D) -> Result<Tensor> {
-        self.fast_cumsum_config(axis, false, false)
-    }
-
-    fn fast_cumsum_config<D: Dim>(
-        &self,
-        axis: D,
-        inclusive: bool,
-        reverse: bool,
-    ) -> Result<Tensor> {
-        self.apply_op1_no_bwd(&CumSum {
-            inclusive,
-            reverse,
-            axis: axis.to_index(self.shape(), "cumsum")?,
-        })
-    }
-}
-
 /// Fused GPT-OSS SwiGLU activation
 /// Formula: output = (clamp(up, -limit, limit) + 1) * gate_clamped * sigmoid(gate_clamped * alpha)
 /// where gate_clamped = min(gate, limit)
@@ -1705,137 +1064,6 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
             )))
         }
         _ => candle_core::bail!("gptoss_swiglu: unsupported dtype {:?}", dtype),
-    }
-}
-
-/// Fused GPT-OSS SwiGLU for interleaved gate/up data.
-///
-/// This handles interleaved gate/up format directly, avoiding 2 tensor copies
-/// from narrow().squeeze().contiguous().
-///
-/// Args:
-///   gate_up: [N, intermediate_size, 2] - interleaved gate/up data
-///   alpha: SwiGLU alpha parameter
-///   limit: SwiGLU limit parameter
-///
-/// Returns: [N, intermediate_size] - activated output
-#[cfg(feature = "cuda")]
-pub fn gptoss_swiglu_interleaved(
-    gate_up: &Tensor,
-    intermediate_size: usize,
-    alpha: f32,
-    limit: f32,
-) -> Result<Tensor> {
-    use half::{bf16, f16};
-    use std::ffi::c_void;
-
-    let gate_up = gate_up.contiguous()?;
-
-    let dims = gate_up.dims();
-    if dims.len() != 3 || dims[2] != 2 {
-        candle_core::bail!(
-            "gptoss_swiglu_interleaved: expected gate_up shape [N, intermediate_size, 2], got {:?}",
-            dims
-        );
-    }
-
-    let n = dims[0]; // num_tokens * topk
-    let device = match gate_up.device() {
-        candle_core::Device::Cuda(dev) => dev,
-        _ => candle_core::bail!("gptoss_swiglu_interleaved requires CUDA device"),
-    };
-
-    let dtype = gate_up.dtype();
-    let n_output_elements = n * intermediate_size;
-
-    let gate_up_storage = gate_up.storage_and_layout().0;
-    let gate_up_cuda = match &*gate_up_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("Expected CUDA storage for gate_up"),
-    };
-
-    let stream = device.cuda_stream().cu_stream();
-
-    match dtype {
-        DType::F16 => {
-            let output = device.alloc_zeros::<f16>(n_output_elements)?;
-            let gate_up_slice = gate_up_cuda.as_cuda_slice::<f16>()?;
-
-            let (gate_up_ptr, _gu_guard) = slice_ptr(gate_up_slice, 0);
-            let (out_ptr, _o_guard) = slice_ptr(&output, 0);
-
-            unsafe {
-                ffi::gptoss_swiglu_interleaved_f16(
-                    gate_up_ptr as *const c_void,
-                    out_ptr as *mut c_void,
-                    n as u32,
-                    intermediate_size as u32,
-                    alpha,
-                    limit,
-                    stream,
-                );
-            }
-
-            drop(_o_guard);
-            let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
-            Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
-                Shape::from(vec![n, intermediate_size]),
-            )))
-        }
-        DType::BF16 => {
-            let output = device.alloc_zeros::<bf16>(n_output_elements)?;
-            let gate_up_slice = gate_up_cuda.as_cuda_slice::<bf16>()?;
-
-            let (gate_up_ptr, _gu_guard) = slice_ptr(gate_up_slice, 0);
-            let (out_ptr, _o_guard) = slice_ptr(&output, 0);
-
-            unsafe {
-                ffi::gptoss_swiglu_interleaved_bf16(
-                    gate_up_ptr as *const c_void,
-                    out_ptr as *mut c_void,
-                    n as u32,
-                    intermediate_size as u32,
-                    alpha,
-                    limit,
-                    stream,
-                );
-            }
-
-            drop(_o_guard);
-            let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
-            Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
-                Shape::from(vec![n, intermediate_size]),
-            )))
-        }
-        DType::F32 => {
-            let output = device.alloc_zeros::<f32>(n_output_elements)?;
-            let gate_up_slice = gate_up_cuda.as_cuda_slice::<f32>()?;
-
-            let (gate_up_ptr, _gu_guard) = slice_ptr(gate_up_slice, 0);
-            let (out_ptr, _o_guard) = slice_ptr(&output, 0);
-
-            unsafe {
-                ffi::gptoss_swiglu_interleaved_f32(
-                    gate_up_ptr as *const c_void,
-                    out_ptr as *mut c_void,
-                    n as u32,
-                    intermediate_size as u32,
-                    alpha,
-                    limit,
-                    stream,
-                );
-            }
-
-            drop(_o_guard);
-            let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
-            Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
-                Shape::from(vec![n, intermediate_size]),
-            )))
-        }
-        _ => candle_core::bail!("gptoss_swiglu_interleaved: unsupported dtype {:?}", dtype),
     }
 }
 
@@ -3933,114 +3161,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cumsum_exclusive_forward_cpu() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a.fast_cumsum(0).unwrap().to_vec1::<i64>().unwrap();
-        assert_eq!(b, [0, 1, 3, 6]);
-    }
-
-    #[test]
-    fn test_cumsum_inclusive_forward_cpu() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a
-            .fast_cumsum_config(0, true, false)
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
-        assert_eq!(b, [1, 3, 6, 10]);
-    }
-
-    #[test]
-    fn test_cumsum_exclusive_reverse_cpu() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a
-            .fast_cumsum_config(0, false, true)
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
-        assert_eq!(b, [9, 7, 4, 0]);
-    }
-
-    #[test]
-    fn test_cumsum_inclusive_reverse_cpu() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a
-            .fast_cumsum_config(0, true, true)
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
-        assert_eq!(b, [10, 9, 7, 4]);
-    }
-
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_cumsum_exclusive_forward_metal() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_metal(0).unwrap();
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a.fast_cumsum(0).unwrap().to_vec1::<i64>().unwrap();
-        assert_eq!(b, [0, 1, 3, 6]);
-    }
-
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_cumsum_inclusive_forward_metal() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_metal(0).unwrap();
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a
-            .fast_cumsum_config(0, true, false)
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
-        assert_eq!(b, [1, 3, 6, 10]);
-    }
-
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_cumsum_exclusive_reverse_metal() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_metal(0).unwrap();
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a
-            .fast_cumsum_config(0, false, true)
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
-        assert_eq!(b, [9, 7, 4, 0]);
-    }
-
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_cumsum_inclusive_reverse_metal() {
-        use crate::utils::ops::CumSumOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_metal(0).unwrap();
-        let a = Tensor::from_vec(vec![1i64, 2, 3, 4], &[4], &device).unwrap();
-        let b = a
-            .fast_cumsum_config(0, true, true)
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
-        assert_eq!(b, [10, 9, 7, 4]);
-    }
-
-    #[test]
     fn test_nonzero_cpu() {
         use crate::utils::ops::NonZeroOp;
         use candle_core::Tensor;
@@ -4109,6 +3229,22 @@ mod tests {
         assert_eq!(c, [[1, 2], [3, -1], [1, -1], [-1, 4], [0, 7]]);
     }
 
+    // every integer dtype the CUDA path takes keeps its dtype through and/or
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn bitwise_and_or_keep_i32_on_cuda() -> candle_core::Result<()> {
+        use crate::utils::ops::BitWiseOp;
+        use candle_core::Tensor;
+        let device = candle_core::Device::new_cuda(0)?;
+        let a = Tensor::from_vec(vec![1i32, 6, -1, 12], (2, 2), &device)?;
+        let b = Tensor::from_vec(vec![3i32, 3, 8, -1], (2, 2), &device)?;
+        let and = a.bitwise_and(&b)?;
+        let or = a.bitwise_or(&b)?;
+        assert_eq!(and.to_vec2::<i32>()?, [[1, 2], [8, 12]]);
+        assert_eq!(or.to_vec2::<i32>()?, [[3, 7], [-1, -1]]);
+        Ok(())
+    }
+
     #[test]
     fn test_bitwise_or_cpu() {
         use crate::utils::ops::BitWiseOp;
@@ -4132,31 +3268,6 @@ mod tests {
         let b = Tensor::from_vec(vec![-1i64, 0, 0, 0, 0, 0, 0, 0, 0, 8], (5, 2), &device).unwrap();
         let c = a.bitwise_or(&b).unwrap().to_vec2::<i64>().unwrap();
         assert_eq!(c, [[-1, 2], [3, -1], [-1, -1], [-1, 4], [5, 15]]);
-    }
-
-    #[test]
-    fn test_bitwise_xor_cpu() {
-        use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
-        let a =
-            Tensor::from_vec(vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7], (5, 2), &device).unwrap();
-        let b = Tensor::from_vec(vec![-1i64, 0, 0, 0, 0, 0, 0, 0, 0, 8], (5, 2), &device).unwrap();
-        let c = a.bitwise_xor(&b).unwrap().to_vec2::<i64>().unwrap();
-        assert_eq!(c, [[-2, 2], [3, -1], [-1, -1], [-1, 4], [5, 15]]);
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn test_bitwise_xor_cuda() {
-        use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_cuda(0).unwrap();
-        let a =
-            Tensor::from_vec(vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7], (5, 2), &device).unwrap();
-        let b = Tensor::from_vec(vec![-1i64, 0, 0, 0, 0, 0, 0, 0, 0, 8], (5, 2), &device).unwrap();
-        let c = a.bitwise_xor(&b).unwrap().to_vec2::<i64>().unwrap();
-        assert_eq!(c, [[-2, 2], [3, -1], [-1, -1], [-1, 4], [5, 15]]);
     }
 
     #[cfg(feature = "metal")]
@@ -4186,14 +3297,6 @@ mod tests {
             .bitwise_or(&rhs_tensor)?
             .to_device(&Device::Cpu)?
             .to_vec1::<u8>()?;
-        let xor = lhs_tensor
-            .bitwise_xor(&rhs_tensor)?
-            .to_device(&Device::Cpu)?
-            .to_vec1::<u8>()?;
-        let not = lhs_tensor
-            .bitwise_not()?
-            .to_device(&Device::Cpu)?
-            .to_vec1::<u8>()?;
         let shifted = lhs_tensor
             .leftshift(TEST_SHIFT)?
             .to_device(&Device::Cpu)?
@@ -4213,14 +3316,6 @@ mod tests {
                 .map(|(lhs, rhs)| lhs | rhs)
                 .collect::<Vec<_>>()
         );
-        assert_eq!(
-            xor,
-            lhs.iter()
-                .zip(&rhs)
-                .map(|(lhs, rhs)| lhs ^ rhs)
-                .collect::<Vec<_>>()
-        );
-        assert_eq!(not, lhs.iter().map(|value| !value).collect::<Vec<_>>());
         assert_eq!(
             shifted,
             lhs.iter()
@@ -4401,74 +3496,6 @@ mod tests {
             .unwrap();
         assert_eq!(c, [[19, 36]]);
     }
-    // ─────────────────────────────── Sort / ArgSort ────────────────────────────────
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_sort_and_argsort_vector_metal() {
-        use crate::utils::ops::SortOp;
-        use candle_core::Tensor;
-
-        let device = candle_core::Device::new_metal(0).unwrap();
-        let a = Tensor::from_vec(vec![3i32, 1, 4, 2], &[4], &device).unwrap();
-
-        // sort (ascending)
-        let sorted = a.fast_sort_asc(0).unwrap().to_vec1::<i32>().unwrap();
-        assert_eq!(sorted, [1, 2, 3, 4]);
-
-        // argsort (ascending indices)
-        let idx = a.fast_argsort_asc(0).unwrap().to_vec1::<u32>().unwrap();
-        assert_eq!(idx, [1, 3, 0, 2]);
-    }
-
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_sort_and_argsort_matrix_axis1_metal() {
-        use crate::utils::ops::SortOp;
-        use candle_core::Tensor;
-
-        let device = candle_core::Device::new_metal(0).unwrap();
-        // 2 × 3 matrix:
-        // [[3, 1, 2],
-        //  [0, 4, 5]]
-        let a = Tensor::from_vec(vec![3i32, 1, 2, 0, 4, 5], &[2, 3], &device).unwrap();
-
-        // Sort along axis=1 (second dimension)
-        let sorted = a.fast_sort_asc(1).unwrap().to_vec2::<i32>().unwrap();
-        assert_eq!(sorted, [[1, 2, 3], [0, 4, 5]]);
-
-        // ArgSort indices along axis=1
-        let idx = a.fast_argsort_asc(1).unwrap().to_vec2::<u32>().unwrap();
-        assert_eq!(idx, [[1, 2, 0], [0, 1, 2]]);
-    }
-
-    // ─────────────────────────────── 2 048-element vector ────────────────────────────────
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_sort_and_argsort_vector_2048_metal() {
-        use crate::utils::ops::SortOp;
-        use candle_core::Tensor;
-
-        const N: usize = 4096;
-
-        let device = candle_core::Device::new_metal(0).expect("Metal device");
-
-        // Create a descending vector [4095, 4094, …, 0]
-        let vals: Vec<i32> = (0..N as i32).rev().collect();
-        let a = Tensor::from_vec(vals.clone(), &[N], &device).unwrap();
-
-        // ---- sort (ascending) ---------------------------------------------------------
-        let sorted = a.fast_sort_asc(0).unwrap().to_vec1::<i32>().unwrap();
-        let expected: Vec<i32> = (0..N as i32).collect();
-        assert_eq!(sorted, expected);
-
-        // ---- argsort (indices that would sort) ---------------------------------------
-        let idx = a.fast_argsort_asc(0).unwrap().to_vec1::<u32>().unwrap();
-        // Because the input is reversed, the correct indices are likewise reversed
-        for (i, &v) in idx.iter().enumerate() {
-            assert_eq!(v as usize, N - 1 - i);
-        }
-    }
-
     #[cfg(feature = "metal")]
     #[test]
     fn test_fused_glu_metal_silu_f32() {

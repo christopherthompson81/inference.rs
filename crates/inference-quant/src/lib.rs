@@ -233,8 +233,6 @@ pub use utils::flash_attn_sinks_metal;
 pub use utils::flash_attn_sinks_varlen_metal;
 #[cfg(feature = "cuda")]
 pub use utils::gptoss_swiglu_fused;
-#[cfg(feature = "cuda")]
-pub use utils::gptoss_swiglu_interleaved;
 pub use utils::isq::{
     RequantizeHandles, apply_immediate_isq, apply_immediate_isq_sharded,
     apply_immediate_isq_with_key, quantize_expert_stack, quantize_expert_stack_with_bias,
@@ -242,7 +240,7 @@ pub use utils::isq::{
 };
 pub use utils::softcap;
 pub use utils::softmax_with_sinks;
-pub use utils::{BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp, log};
+pub use utils::{BitWiseOp, LeftshiftOp, NonZeroOp, log};
 pub use utils::{GluActivationType, fused_glu, fused_split_glu};
 
 use candle_nn::{Conv1d, Conv2d, Linear, Module};

@@ -1243,20 +1243,6 @@ impl Qwen2VLRotaryEmbedding {
         *k = k_out;
         Ok(())
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward_qk_norm(
-        &self,
-        (cos, sin): &(Tensor, Tensor),
-        q: &Tensor,
-        k: &Tensor,
-        q_weight: &Tensor,
-        k_weight: &Tensor,
-        q_eps: f64,
-        k_eps: f64,
-    ) -> Result<(Tensor, Tensor)> {
-        qk_rms_norm_mrope(q, k, q_weight, k_weight, q_eps, k_eps, cos, sin, true)
-    }
 }
 
 /// Qwen3 VL uses **interleaved** MRoPE (not chunked like Qwen2 VL).
@@ -2128,32 +2114,6 @@ pub fn q_rms_norm_rope(
 
     let q = candle_nn::ops::rms_norm(&q.contiguous()?, q_weight, q_eps as f32)?;
     apply_rotary_q(&q, cos_cache, sin_cache, positions, is_gpt_neox)
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn qk_rms_norm_mrope(
-    q: &Tensor,
-    k: &Tensor,
-    q_weight: &Tensor,
-    k_weight: &Tensor,
-    q_eps: f64,
-    k_eps: f64,
-    cos: &Tensor,
-    sin: &Tensor,
-    is_gpt_neox: bool,
-) -> Result<(Tensor, Tensor)> {
-    qk_rms_norm_mrope_layout(
-        q,
-        k,
-        q_weight,
-        k_weight,
-        q_eps,
-        k_eps,
-        cos,
-        sin,
-        is_gpt_neox,
-        false,
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

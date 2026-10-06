@@ -1,7 +1,9 @@
 //! Tensor ops.
 //!
 
-use candle::{CpuStorage, DType, Layout, Module, Result, Shape, Tensor, D};
+#[cfg(feature = "metal")]
+use candle::DType;
+use candle::{CpuStorage, Layout, Module, Result, Shape, Tensor, D};
 use rayon::prelude::*;
 
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
@@ -658,19 +660,6 @@ impl candle::CustomOp2 for RmsNorm {
     }
 }
 
-pub fn rms_norm_slow(x: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
-    let x_dtype = x.dtype();
-    let internal_dtype = match x_dtype {
-        DType::F16 | DType::BF16 => DType::F32,
-        d => d,
-    };
-    let hidden_size = x.dim(D::Minus1)?;
-    let x = x.to_dtype(internal_dtype)?;
-    let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-    let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
-    x_normed.to_dtype(x_dtype)?.broadcast_mul(alpha)
-}
-
 pub fn rms_norm(xs: &Tensor, alpha: &Tensor, eps: f32) -> Result<Tensor> {
     let hidden_size_xs = xs.dim(D::Minus1)?;
     let hidden_size_alpha = alpha.dims1()?;
@@ -907,26 +896,6 @@ impl candle::CustomOp3 for LayerNorm {
         let newstorage = candle::MetalStorage::new(output, device.clone(), elem_count, s1.dtype());
         Ok((newstorage, l1.shape().clone()))
     }
-}
-
-pub fn layer_norm_slow(x: &Tensor, alpha: &Tensor, beta: &Tensor, eps: f32) -> Result<Tensor> {
-    let x_dtype = x.dtype();
-    let internal_dtype = match x_dtype {
-        DType::F16 | DType::BF16 => DType::F32,
-        d => d,
-    };
-    let hidden_size = x.dim(D::Minus1)?;
-    let x = x.to_dtype(internal_dtype)?;
-    let x = {
-        let mean_x = (x.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-        x.broadcast_sub(&mean_x)?
-    };
-    let norm_x = (x.sqr()?.sum_keepdim(D::Minus1)? / hidden_size as f64)?;
-    let x_normed = x.broadcast_div(&(norm_x + eps as f64)?.sqrt()?)?;
-    x_normed
-        .to_dtype(x_dtype)?
-        .broadcast_mul(alpha)?
-        .broadcast_add(beta)
 }
 
 pub fn layer_norm(xs: &Tensor, alpha: &Tensor, beta: &Tensor, eps: f32) -> Result<Tensor> {
