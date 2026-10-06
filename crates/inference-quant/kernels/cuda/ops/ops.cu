@@ -220,15 +220,6 @@ __global__ void bitwise_or__kernel(const T *d_in1, const T *d_in2, T *d_out,
 }
 
 template <typename T>
-__global__ void bitwise_xor__kernel(const T *d_in1, const T *d_in2, T *d_out,
-                                    const uint32_t N) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx < N) {
-    d_out[idx] = d_in1[idx] ^ d_in2[idx];
-  }
-}
-
-template <typename T>
 void bitwise_and(const T *d_in1, const T *d_in2, T *d_out, int N) {
   int nthreads = next_power_of_2(N);
   if (nthreads > 1024) {
@@ -250,17 +241,6 @@ void bitwise_or(const T *d_in1, const T *d_in2, T *d_out, int N) {
   CUDA_CHECK(cudaGetLastError());
 }
 
-template <typename T>
-void bitwise_xor(const T *d_in1, const T *d_in2, T *d_out, int N) {
-  int nthreads = next_power_of_2(N);
-  if (nthreads > 1024) {
-    nthreads = 1024;
-  }
-  const int nblocks = (N + nthreads - 1) / nthreads;
-  bitwise_xor__kernel<<<nblocks, nthreads>>>(d_in1, d_in2, d_out, N);
-  CUDA_CHECK(cudaGetLastError());
-}
-
 #define BITWISE_OP(TYPENAME, RUST_NAME)                                        \
   extern "C" void bitwise_and_##RUST_NAME(const TYPENAME *d_in1,               \
                                           const TYPENAME *d_in2,               \
@@ -271,11 +251,6 @@ void bitwise_xor(const T *d_in1, const T *d_in2, T *d_out, int N) {
                                          const TYPENAME *d_in2,                \
                                          TYPENAME *d_out, uint32_t N) {        \
     bitwise_or(d_in1, d_in2, d_out, N);                                        \
-  }                                                                            \
-  extern "C" void bitwise_xor_##RUST_NAME(const TYPENAME *d_in1,               \
-                                          const TYPENAME *d_in2,               \
-                                          TYPENAME *d_out, uint32_t N) {       \
-    bitwise_xor(d_in1, d_in2, d_out, N);                                       \
   }
 
 BITWISE_OP(uint8_t, u8)
@@ -467,85 +442,6 @@ extern "C" void gptoss_swiglu_f32(const float *gate, const float *up,
     gptoss_swiglu_kernel<<<nblocks, nthreads, 0, stream>>>(gate, up, output, N,
                                                            alpha, limit);
   }
-  CUDA_CHECK(cudaGetLastError());
-}
-
-// ============================================================================
-// Fused GPT-OSS SwiGLU kernel for INTERLEAVED gate/up data
-//
-// This kernel handles interleaved gate/up format: [..., intermediate_size, 2]
-// where gate = data[..., :, 0] and up = data[..., :, 1]
-//
-// Avoids 2 tensor copies from narrow().squeeze().contiguous()
-// ============================================================================
-
-template <typename T>
-__global__ void gptoss_swiglu_interleaved_kernel(
-    const T *__restrict__ gate_up, // [N, intermediate_size, 2] interleaved
-    T *__restrict__ output,        // [N, intermediate_size]
-    const uint32_t N,              // num_tokens * topk
-    const uint32_t intermediate_size, const float alpha, const float limit) {
-  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  const uint32_t total_elements = N * intermediate_size;
-  if (idx >= total_elements)
-    return;
-
-  // Decode position
-  const int n = idx / intermediate_size;
-  const int i = idx % intermediate_size;
-
-  // Read interleaved values: gate at offset 0, up at offset 1
-  const int base_idx = (n * intermediate_size + i) * 2;
-  float g = (float)gate_up[base_idx];     // gate
-  float u = (float)gate_up[base_idx + 1]; // up
-
-  // Clamp gate (max only) and up (both min and max)
-  float gate_clamped = fminf(g, limit);
-  float up_clamped = fmaxf(fminf(u, limit), -limit);
-
-  // glu = gate_clamped * sigmoid(gate_clamped * alpha)
-  float glu = gate_clamped * fast_sigmoid(gate_clamped * alpha);
-
-  // output = (up_clamped + 1) * glu
-  float result = (up_clamped + 1.0f) * glu;
-
-  output[idx] = (T)result;
-}
-
-extern "C" void gptoss_swiglu_interleaved_f16(const __half *gate_up,
-                                              __half *output, uint32_t N,
-                                              uint32_t intermediate_size,
-                                              float alpha, float limit,
-                                              cudaStream_t stream) {
-  const uint32_t total = N * intermediate_size;
-  const int nthreads = 256;
-  const int nblocks = (total + nthreads - 1) / nthreads;
-  gptoss_swiglu_interleaved_kernel<<<nblocks, nthreads, 0, stream>>>(
-      gate_up, output, N, intermediate_size, alpha, limit);
-  CUDA_CHECK(cudaGetLastError());
-}
-
-extern "C" void gptoss_swiglu_interleaved_bf16(
-    const __nv_bfloat16 *gate_up, __nv_bfloat16 *output, uint32_t N,
-    uint32_t intermediate_size, float alpha, float limit, cudaStream_t stream) {
-  const uint32_t total = N * intermediate_size;
-  const int nthreads = 256;
-  const int nblocks = (total + nthreads - 1) / nthreads;
-  gptoss_swiglu_interleaved_kernel<<<nblocks, nthreads, 0, stream>>>(
-      gate_up, output, N, intermediate_size, alpha, limit);
-  CUDA_CHECK(cudaGetLastError());
-}
-
-extern "C" void gptoss_swiglu_interleaved_f32(const float *gate_up,
-                                              float *output, uint32_t N,
-                                              uint32_t intermediate_size,
-                                              float alpha, float limit,
-                                              cudaStream_t stream) {
-  const uint32_t total = N * intermediate_size;
-  const int nthreads = 256;
-  const int nblocks = (total + nthreads - 1) / nthreads;
-  gptoss_swiglu_interleaved_kernel<<<nblocks, nthreads, 0, stream>>>(
-      gate_up, output, N, intermediate_size, alpha, limit);
   CUDA_CHECK(cudaGetLastError());
 }
 

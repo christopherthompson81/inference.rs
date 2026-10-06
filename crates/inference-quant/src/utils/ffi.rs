@@ -142,30 +142,6 @@ unsafe extern "C" {
         d_out: *mut c_void,
         N: u32,
     );
-    pub(crate) fn bitwise_xor_u8(
-        d_in1: *const c_void,
-        d_in2: *const c_void,
-        d_out: *mut c_void,
-        N: u32,
-    );
-    pub(crate) fn bitwise_xor_u32(
-        d_in1: *const c_void,
-        d_in2: *const c_void,
-        d_out: *mut c_void,
-        N: u32,
-    );
-    pub(crate) fn bitwise_xor_i64(
-        d_in1: *const c_void,
-        d_in2: *const c_void,
-        d_out: *mut c_void,
-        N: u32,
-    );
-    pub(crate) fn bitwise_xor_i32(
-        d_in1: *const c_void,
-        d_in2: *const c_void,
-        d_out: *mut c_void,
-        N: u32,
-    );
 
     pub(crate) fn leftshift_u8(d_in1: *const c_void, d_out: *mut c_void, N: u32, k: i32);
     pub(crate) fn leftshift_i32(d_in1: *const c_void, d_out: *mut c_void, N: u32, k: i32);
@@ -194,35 +170,6 @@ unsafe extern "C" {
         up: *const c_void,
         output: *mut c_void,
         N: u32,
-        alpha: f32,
-        limit: f32,
-        stream: CUstream,
-    );
-
-    // Fused GPT-OSS SwiGLU for interleaved gate/up data
-    pub fn gptoss_swiglu_interleaved_f16(
-        gate_up: *const c_void,
-        output: *mut c_void,
-        N: u32,
-        intermediate_size: u32,
-        alpha: f32,
-        limit: f32,
-        stream: CUstream,
-    );
-    pub fn gptoss_swiglu_interleaved_bf16(
-        gate_up: *const c_void,
-        output: *mut c_void,
-        N: u32,
-        intermediate_size: u32,
-        alpha: f32,
-        limit: f32,
-        stream: CUstream,
-    );
-    pub fn gptoss_swiglu_interleaved_f32(
-        gate_up: *const c_void,
-        output: *mut c_void,
-        N: u32,
-        intermediate_size: u32,
         alpha: f32,
         limit: f32,
         stream: CUstream,

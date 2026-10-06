@@ -1,205 +1,46 @@
 #[cfg(feature = "cuda")]
 mod ffi;
 
-use candle_core::{
-    CpuStorage, CustomOp3, Layout, Result, Shape, Storage, Tensor, WithDType,
-    backend::BackendStorage,
-};
+use candle_core::{CpuStorage, Layout, Result, Storage, Tensor, WithDType};
+#[cfg(feature = "metal")]
+use candle_core::{Shape, backend::BackendStorage};
 use rayon::prelude::*;
 
-#[derive(Debug, Clone, Copy)]
-struct RotaryEmb {
-    is_neox: bool,
-}
-
-impl RotaryEmb {
-    fn cache_dims(&self, l_src: &Layout, l_cos: &Layout, l_sin: &Layout) -> Result<(usize, usize)> {
-        let (batch, _, seq_len, head_dim) = l_src.shape().dims4()?;
-        let (cos_rows, rot_dim) = match l_cos.shape().dims() {
-            [rows, dim] => (*rows, *dim),
-            [cos_batch, cos_seq, dim] if *cos_batch == batch && *cos_seq == seq_len => {
-                (batch * seq_len, *dim)
-            }
-            _ => candle_core::bail!("invalid RoPE cos shape {:?}", l_cos.shape()),
-        };
-        let (sin_rows, sin_dim) = match l_sin.shape().dims() {
-            [rows, dim] => (*rows, *dim),
-            [sin_batch, sin_seq, dim] if *sin_batch == batch && *sin_seq == seq_len => {
-                (batch * seq_len, *dim)
-            }
-            _ => candle_core::bail!("invalid RoPE sin shape {:?}", l_sin.shape()),
-        };
-        if (cos_rows, rot_dim) != (sin_rows, sin_dim) {
-            candle_core::bail!(
-                "RoPE cos/sin shape mismatch {:?} {:?}",
-                l_cos.shape(),
-                l_sin.shape()
-            );
+fn cache_dims(l_src: &Layout, l_cos: &Layout, l_sin: &Layout) -> Result<(usize, usize)> {
+    let (batch, _, seq_len, head_dim) = l_src.shape().dims4()?;
+    let (cos_rows, rot_dim) = match l_cos.shape().dims() {
+        [rows, dim] => (*rows, *dim),
+        [cos_batch, cos_seq, dim] if *cos_batch == batch && *cos_seq == seq_len => {
+            (batch * seq_len, *dim)
         }
-        if cos_rows != seq_len && cos_rows != batch * seq_len {
-            candle_core::bail!(
-                "RoPE cache rows {cos_rows} are incompatible with batch {batch} and seq {seq_len}"
-            );
+        _ => candle_core::bail!("invalid RoPE cos shape {:?}", l_cos.shape()),
+    };
+    let (sin_rows, sin_dim) = match l_sin.shape().dims() {
+        [rows, dim] => (*rows, *dim),
+        [sin_batch, sin_seq, dim] if *sin_batch == batch && *sin_seq == seq_len => {
+            (batch * seq_len, *dim)
         }
-        if rot_dim == 0 || rot_dim * 2 > head_dim {
-            candle_core::bail!(
-                "RoPE rot dim {} is incompatible with head dim {head_dim}",
-                rot_dim * 2
-            );
-        }
-        Ok((cos_rows, rot_dim))
+        _ => candle_core::bail!("invalid RoPE sin shape {:?}", l_sin.shape()),
+    };
+    if (cos_rows, rot_dim) != (sin_rows, sin_dim) {
+        candle_core::bail!(
+            "RoPE cos/sin shape mismatch {:?} {:?}",
+            l_cos.shape(),
+            l_sin.shape()
+        );
     }
-}
-
-impl CustomOp3 for RotaryEmb {
-    fn name(&self) -> &'static str {
-        "inference-rotary"
+    if cos_rows != seq_len && cos_rows != batch * seq_len {
+        candle_core::bail!(
+            "RoPE cache rows {cos_rows} are incompatible with batch {batch} and seq {seq_len}"
+        );
     }
-
-    fn cpu_fwd(
-        &self,
-        s1: &CpuStorage,
-        l1: &Layout,
-        s2: &CpuStorage,
-        l2: &Layout,
-        s3: &CpuStorage,
-        l3: &Layout,
-    ) -> Result<(CpuStorage, Shape)> {
-        fn inner<T>(
-            src: &[T],
-            l_src: &Layout,
-            cos: &[T],
-            l_cos: &Layout,
-            sin: &[T],
-            l_sin: &Layout,
-            is_neox: bool,
-        ) -> Result<(CpuStorage, Shape)>
-        where
-            T: WithDType
-                + Copy
-                + Send
-                + Sync
-                + std::ops::Add<Output = T>
-                + std::ops::Sub<Output = T>
-                + std::ops::Mul<Output = T>,
-        {
-            let src = match l_src.contiguous_offsets() {
-                Some((o1, o2)) => &src[o1..o2],
-                None => candle_core::bail!("RoPE input must be contiguous"),
-            };
-            let cos = match l_cos.contiguous_offsets() {
-                Some((o1, o2)) => &cos[o1..o2],
-                None => candle_core::bail!("RoPE cos must be contiguous"),
-            };
-            let sin = match l_sin.contiguous_offsets() {
-                Some((o1, o2)) => &sin[o1..o2],
-                None => candle_core::bail!("RoPE sin must be contiguous"),
-            };
-            let (batch, heads, seq_len, head_dim) = l_src.shape().dims4()?;
-            let (cache_rows, rot_dim) = RotaryEmb { is_neox }.cache_dims(l_src, l_cos, l_sin)?;
-            let mut dst = src.to_vec();
-            dst.par_chunks_mut(head_dim)
-                .enumerate()
-                .for_each(|(row, dst)| {
-                    let batch_idx = row / (heads * seq_len);
-                    let seq_idx = row % seq_len;
-                    let cache_row = if cache_rows == batch * seq_len {
-                        batch_idx * seq_len + seq_idx
-                    } else {
-                        seq_idx
-                    };
-                    let cache_offset = cache_row * rot_dim;
-                    for pair_idx in 0..rot_dim {
-                        let (x_idx, y_idx) = if is_neox {
-                            (pair_idx, pair_idx + rot_dim)
-                        } else {
-                            (pair_idx * 2, pair_idx * 2 + 1)
-                        };
-                        let x = dst[x_idx];
-                        let y = dst[y_idx];
-                        let cos = cos[cache_offset + pair_idx];
-                        let sin = sin[cache_offset + pair_idx];
-                        dst[x_idx] = x * cos - y * sin;
-                        dst[y_idx] = y * cos + x * sin;
-                    }
-                });
-            Ok((T::to_cpu_storage_owned(dst), l_src.shape().clone()))
-        }
-
-        use CpuStorage::{BF16, F16, F32, F64};
-        match (s1, s2, s3) {
-            (BF16(s1), BF16(s2), BF16(s3)) => inner(s1, l1, s2, l2, s3, l3, self.is_neox),
-            (F16(s1), F16(s2), F16(s3)) => inner(s1, l1, s2, l2, s3, l3, self.is_neox),
-            (F32(s1), F32(s2), F32(s3)) => inner(s1, l1, s2, l2, s3, l3, self.is_neox),
-            (F64(s1), F64(s2), F64(s3)) => inner(s1, l1, s2, l2, s3, l3, self.is_neox),
-            _ => candle_core::bail!(
-                "unsupported RoPE dtype {:?} {:?} {:?}",
-                s1.dtype(),
-                s2.dtype(),
-                s3.dtype()
-            ),
-        }
+    if rot_dim == 0 || rot_dim * 2 > head_dim {
+        candle_core::bail!(
+            "RoPE rot dim {} is incompatible with head dim {head_dim}",
+            rot_dim * 2
+        );
     }
-
-    #[cfg(feature = "metal")]
-    fn metal_fwd(
-        &self,
-        s1: &candle_core::MetalStorage,
-        l1: &Layout,
-        s2: &candle_core::MetalStorage,
-        l2: &Layout,
-        s3: &candle_core::MetalStorage,
-        l3: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
-        let (batch, heads, seq_len, head_dim) = l1.shape().dims4()?;
-        let (cache_rows, rot_dim) = self.cache_dims(l1, l2, l3)?;
-        let dtype = s1.dtype();
-        if s2.dtype() != dtype || s3.dtype() != dtype {
-            candle_core::bail!(
-                "RoPE dtype mismatch {:?} {:?} {:?}",
-                dtype,
-                s2.dtype(),
-                s3.dtype()
-            );
-        }
-        let device = s1.device();
-        let encoder = device.command_encoder()?;
-        encoder.set_label("rotary");
-        let elem_count = l1.shape().elem_count();
-        let output = device.new_buffer(elem_count, dtype, "rotary-output")?;
-
-        crate::metal_kernels::call_rotary(
-            device.device(),
-            &encoder,
-            crate::metal_kernels::Kernels::global(),
-            dtype,
-            s1.buffer(),
-            s2.buffer(),
-            s3.buffer(),
-            l1.start_offset() * dtype.size_in_bytes(),
-            l2.start_offset() * dtype.size_in_bytes(),
-            l3.start_offset() * dtype.size_in_bytes(),
-            batch,
-            heads,
-            seq_len,
-            head_dim,
-            rot_dim,
-            cache_rows,
-            self.is_neox,
-            &output,
-        )
-        .map_err(candle_core::Error::wrap)?;
-
-        let storage = candle_core::MetalStorage::new(output, device.clone(), elem_count, dtype);
-        Ok((storage, l1.shape().clone()))
-    }
-}
-
-pub fn apply_rotary(x: &Tensor, cos: &Tensor, sin: &Tensor, is_neox: bool) -> Result<Tensor> {
-    let x = x.contiguous()?;
-    let cos = cos.contiguous()?;
-    let sin = sin.contiguous()?;
-    x.apply_op3_no_bwd(&cos, &sin, &RotaryEmb { is_neox })
+    Ok((cos_rows, rot_dim))
 }
 
 #[cfg(feature = "metal")]
@@ -334,7 +175,7 @@ where
         let (cache_rows, rot_dim) = if positioned {
             cos_l.shape().dims2()?
         } else {
-            RotaryEmb { is_neox }.cache_dims(src_l, cos_l, sin_l)?
+            cache_dims(src_l, cos_l, sin_l)?
         };
         if positioned && sin_l.shape().dims2()? != (cache_rows, rot_dim) {
             candle_core::bail!(

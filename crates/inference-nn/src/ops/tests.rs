@@ -1182,37 +1182,6 @@ fn cuda_batched_topk_orders_ties_by_lowest_index() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_topk_low_precision_inputs_match_f32() -> candle_core::Result<()> {
-    const ROWS: usize = 3;
-    const VOCAB: usize = 4097;
-    const K: usize = 17;
-
-    let device = Device::new_cuda(0)?;
-    let values = (0..ROWS * VOCAB)
-        .map(|index| (((index * 37) % 257) as f32 - 128.0) / 8.0)
-        .collect::<Vec<_>>();
-    let logits = Tensor::from_vec(values, (ROWS, VOCAB), &device)?;
-    let inverse_temperatures = Tensor::new(&[2.0f32, 0.75, 0.125], &device)?.narrow(0, 1, 2)?;
-
-    for dtype in [DType::BF16, DType::F16] {
-        let low_precision = logits.to_dtype(dtype)?.narrow(0, 1, 2)?;
-        let reference = low_precision.to_dtype(DType::F32)?.contiguous()?;
-        let actual =
-            super::cuda_topk_logits_packed_batched(&low_precision, K, &inverse_temperatures)?;
-        let expected =
-            super::cuda_topk_logits_f32_packed_batched(&reference, K, &inverse_temperatures)?;
-
-        assert_eq!(actual.k, expected.k);
-        assert_eq!(
-            actual.packed.to_vec2::<f32>()?,
-            expected.packed.to_vec2::<f32>()?
-        );
-    }
-    Ok(())
-}
-
-#[cfg(feature = "cuda")]
-#[test]
 fn cuda_batched_topk_workspace_reuses_and_grows() -> candle_core::Result<()> {
     skip_without_cuda!();
     const ROWS: usize = 4;

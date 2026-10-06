@@ -353,15 +353,6 @@ pub struct TopKOutput {
     pub indices: Tensor,
 }
 
-pub struct TopKLogitsOutput {
-    pub values: Tensor,
-    pub indices: Tensor,
-    /// `[softmax_denominator, global_max]` for the full-vocabulary softmax at
-    /// the temperature used for top-k selection.
-    pub softmax_info: Tensor,
-    pub(super) _workspace: Vec<Tensor>,
-}
-
 pub struct TopKLogitsPackedOutput {
     /// Each row is packed as `[values; indices_as_f32; softmax_denominator; global_max]`.
     pub packed: Tensor,

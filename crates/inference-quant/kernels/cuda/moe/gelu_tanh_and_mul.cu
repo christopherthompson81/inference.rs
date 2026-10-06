@@ -2,7 +2,6 @@
 
 #include <cuda_runtime.h>
 #include <cuda_bf16.h>
-#include <cuda_fp16.h>
 #include <cstdint>
 #include <math.h>
 
@@ -24,16 +23,10 @@ template <typename T> __device__ __forceinline__ float to_f32(T x);
 template <> __device__ __forceinline__ float to_f32<__nv_bfloat16>(__nv_bfloat16 x) {
   return __bfloat162float(x);
 }
-template <> __device__ __forceinline__ float to_f32<__half>(__half x) {
-  return __half2float(x);
-}
 
 template <typename T> __device__ __forceinline__ T from_f32(float x);
 template <> __device__ __forceinline__ __nv_bfloat16 from_f32<__nv_bfloat16>(float x) {
   return __float2bfloat16(x);
-}
-template <> __device__ __forceinline__ __half from_f32<__half>(float x) {
-  return __float2half(x);
 }
 
 // ACT: 0 = gelu-tanh, 1 = silu.
@@ -73,16 +66,6 @@ extern "C" void launch_silu_and_mul_bf16(void* out, const void* input,
   act_and_mul_kernel<__nv_bfloat16, 1><<<grid, block, 0, stream>>>(
       reinterpret_cast<__nv_bfloat16*>(out),
       reinterpret_cast<const __nv_bfloat16*>(input), d);
-}
-
-extern "C" void launch_gelu_tanh_and_mul_f16(void* out, const void* input,
-                                             int32_t num_tokens, int32_t d,
-                                             cudaStream_t stream) {
-  if (num_tokens == 0) return;
-  dim3 grid(num_tokens);
-  dim3 block(d < 1024 ? d : 1024);
-  act_and_mul_kernel<__half, 0><<<grid, block, 0, stream>>>(
-      reinterpret_cast<__half*>(out), reinterpret_cast<const __half*>(input), d);
 }
 
 __global__ void moe_sum_bf16_kernel(__nv_bfloat16* __restrict__ out,

@@ -2,166 +2,6 @@ use super::*;
 
 #[cfg(feature = "cuda")]
 #[allow(clippy::cast_possible_truncation)]
-pub fn cuda_topk_logits_f32(
-    input: &Tensor,
-    k: usize,
-    temperature: f64,
-) -> Result<TopKLogitsOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-
-    if temperature <= 0.0 || !temperature.is_finite() {
-        candle_core::bail!("cuda_topk_logits_f32 requires a positive finite temperature");
-    }
-    let input = input.contiguous()?;
-    if input.dtype() != DType::F32 {
-        candle_core::bail!("cuda_topk_logits_f32 requires F32 logits");
-    }
-
-    let ncols = input.elem_count();
-    if ncols == 0 {
-        candle_core::bail!("cuda_topk_logits_f32 got empty logits");
-    }
-    let k = k.min(ncols);
-    if k == 0 || k > CUDA_TOPK_MAX_K {
-        candle_core::bail!(
-            "cuda_topk_logits_f32 k={} must be in [1, {}]",
-            k,
-            CUDA_TOPK_MAX_K
-        );
-    }
-
-    let nblocks = ncols.div_ceil(CUDA_TOPK_CHUNK_SIZE);
-    let stage2_candidates = nblocks * k;
-    if stage2_candidates > CUDA_TOPK_MAX_STAGE2_CANDIDATES {
-        candle_core::bail!(
-            "cuda_topk_logits_f32 workspace too large: {} candidates",
-            stage2_candidates
-        );
-    }
-
-    let (storage, layout) = input.storage_and_layout();
-    let storage = match &*storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_topk_logits_f32 requires CUDA tensor"),
-    };
-    let dev = storage.device();
-    let stream = dev.cuda_stream();
-    let stream_raw = stream.cu_stream() as i64;
-
-    let (src_ptr, _src_guard) = match &storage.slice {
-        CudaStorageSlice::F32(inp) => inp.device_ptr(&stream),
-        _ => candle_core::bail!("cuda_topk_logits_f32 only supports F32"),
-    };
-    let src_ptr = unsafe { (src_ptr as *const f32).add(layout.start_offset()) };
-
-    let workspace_elems = nblocks * k;
-    let mut block_values = unsafe { dev.alloc::<f32>(workspace_elems) }?;
-    let mut block_indices = unsafe { dev.alloc::<u32>(workspace_elems) }?;
-    let mut block_maxes = unsafe { dev.alloc::<f32>(nblocks) }?;
-    let mut block_sums = unsafe { dev.alloc::<f32>(nblocks) }?;
-    let mut values_dst = unsafe { dev.alloc::<f32>(k) }?;
-    let mut indices_dst = unsafe { dev.alloc::<u32>(k) }?;
-    let mut softmax_info_dst = unsafe { dev.alloc::<f32>(2) }?;
-
-    let (block_values_ptr, block_values_guard) = block_values.device_ptr_mut(&stream);
-    let (block_indices_ptr, block_indices_guard) = block_indices.device_ptr_mut(&stream);
-    let (block_maxes_ptr, block_maxes_guard) = block_maxes.device_ptr_mut(&stream);
-    let (block_sums_ptr, block_sums_guard) = block_sums.device_ptr_mut(&stream);
-    let (values_ptr, values_guard) = values_dst.device_ptr_mut(&stream);
-    let (indices_ptr, indices_guard) = indices_dst.device_ptr_mut(&stream);
-    let (softmax_info_ptr, softmax_info_guard) = softmax_info_dst.device_ptr_mut(&stream);
-
-    unsafe {
-        ffi::topk_large_f32(
-            src_ptr,
-            block_values_ptr as *mut f32,
-            block_indices_ptr as *mut u32,
-            block_maxes_ptr as *mut f32,
-            block_sums_ptr as *mut f32,
-            values_ptr as *mut f32,
-            indices_ptr as *mut u32,
-            softmax_info_ptr as *mut f32,
-            ncols as i32,
-            k as i32,
-            CUDA_TOPK_CHUNK_SIZE as i32,
-            nblocks as i32,
-            (1.0 / temperature) as f32,
-            stream_raw,
-        );
-    }
-
-    drop(block_values_guard);
-    drop(block_indices_guard);
-    drop(block_maxes_guard);
-    drop(block_sums_guard);
-    drop(values_guard);
-    drop(indices_guard);
-    drop(softmax_info_guard);
-
-    let values_storage = candle_core::cuda_backend::CudaStorage {
-        slice: CudaStorageSlice::F32(values_dst),
-        device: dev.clone(),
-    };
-    let indices_storage = candle_core::cuda_backend::CudaStorage {
-        slice: CudaStorageSlice::U32(indices_dst),
-        device: dev.clone(),
-    };
-    let softmax_info_storage = candle_core::cuda_backend::CudaStorage {
-        slice: CudaStorageSlice::F32(softmax_info_dst),
-        device: dev.clone(),
-    };
-    let workspace = vec![
-        Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
-                slice: CudaStorageSlice::F32(block_values),
-                device: dev.clone(),
-            }),
-            Shape::from_dims(&[workspace_elems]),
-        )),
-        Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
-                slice: CudaStorageSlice::U32(block_indices),
-                device: dev.clone(),
-            }),
-            Shape::from_dims(&[workspace_elems]),
-        )),
-        Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
-                slice: CudaStorageSlice::F32(block_maxes),
-                device: dev.clone(),
-            }),
-            Shape::from_dims(&[nblocks]),
-        )),
-        Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
-                slice: CudaStorageSlice::F32(block_sums),
-                device: dev.clone(),
-            }),
-            Shape::from_dims(&[nblocks]),
-        )),
-    ];
-
-    Ok(TopKLogitsOutput {
-        values: Tensor::from((
-            candle_core::Storage::Cuda(values_storage),
-            Shape::from_dims(&[k]),
-        )),
-        indices: Tensor::from((
-            candle_core::Storage::Cuda(indices_storage),
-            Shape::from_dims(&[k]),
-        )),
-        softmax_info: Tensor::from((
-            candle_core::Storage::Cuda(softmax_info_storage),
-            Shape::from_dims(&[2]),
-        )),
-        _workspace: workspace,
-    })
-}
-
-#[cfg(feature = "cuda")]
-#[allow(clippy::cast_possible_truncation)]
 pub fn cuda_topk_logits_f32_packed(
     input: &Tensor,
     k: usize,
@@ -495,12 +335,11 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     use candle_core::backend::BackendStorage;
     use candle_core::cuda_backend::CudaStorageSlice;
     use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-    use std::ffi::c_void;
 
     const OP: &str = "cuda_topk_logits_packed_batched";
 
-    if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!("{OP} requires BF16, F16, or F32 logits");
+    if input.dtype() != DType::F32 {
+        candle_core::bail!("{OP} requires F32 logits");
     }
     if inverse_temperatures.dtype() != DType::F32 {
         candle_core::bail!("{OP} requires F32 inverse temperatures");
@@ -603,20 +442,11 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let block_sums = workspace.block_sums.narrow(0, 0, block_elems)?;
     let packed_dst = workspace.packed.narrow(0, 0, packed_elems)?;
 
-    macro_rules! input_ptr {
-        ($slice:expr, $ty:ty) => {{
-            let (ptr, guard) = $slice.device_ptr(&stream);
-            let ptr =
-                unsafe { (ptr as *const $ty).add(input_layout.start_offset()) as *const c_void };
-            (ptr, guard)
-        }};
-    }
-    let (input_ptr, input_guard) = match &input_storage.slice {
-        CudaStorageSlice::F32(slice) => input_ptr!(slice, f32),
-        CudaStorageSlice::BF16(slice) => input_ptr!(slice, half::bf16),
-        CudaStorageSlice::F16(slice) => input_ptr!(slice, half::f16),
-        _ => candle_core::bail!("{OP} logits dtype mismatch"),
+    let CudaStorageSlice::F32(input_slice) = &input_storage.slice else {
+        candle_core::bail!("{OP} logits dtype mismatch");
     };
+    let (input_ptr, input_guard) = input_slice.device_ptr(&stream);
+    let input_ptr = unsafe { (input_ptr as *const f32).add(input_layout.start_offset()) };
     let (temperature_ptr, temperature_guard) = temperature_slice.device_ptr(&stream);
     let (block_values_storage_guard, block_values_layout) = block_values.storage_and_layout();
     let candle_core::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
@@ -670,32 +500,22 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let temperature_ptr =
         unsafe { (temperature_ptr as *const f32).add(temperature_layout.start_offset()) };
 
-    macro_rules! launch {
-        ($kernel:path, $input:expr) => {{
-            unsafe {
-                $kernel(
-                    $input,
-                    temperature_ptr,
-                    block_values_ptr,
-                    block_indices_ptr,
-                    block_maxes_ptr,
-                    block_sums_ptr,
-                    packed_ptr,
-                    nrows_i32,
-                    ncols_i32,
-                    k_i32,
-                    chunk_size_i32,
-                    nblocks_i32,
-                    stream.cu_stream() as i64,
-                );
-            }
-        }};
-    }
-    match input.dtype() {
-        DType::F32 => launch!(ffi::topk_large_f32_packed_batched, input_ptr.cast::<f32>()),
-        DType::BF16 => launch!(ffi::topk_large_bf16_packed_batched, input_ptr),
-        DType::F16 => launch!(ffi::topk_large_f16_packed_batched, input_ptr),
-        _ => unreachable!(),
+    unsafe {
+        ffi::topk_large_f32_packed_batched(
+            input_ptr,
+            temperature_ptr,
+            block_values_ptr,
+            block_indices_ptr,
+            block_maxes_ptr,
+            block_sums_ptr,
+            packed_ptr,
+            nrows_i32,
+            ncols_i32,
+            k_i32,
+            chunk_size_i32,
+            nblocks_i32,
+            stream.cu_stream() as i64,
+        );
     }
 
     drop(input_guard);
@@ -927,9 +747,6 @@ pub fn cuda_topk_logits_f32_packed_batched(
     k: usize,
     inverse_temperatures: &Tensor,
 ) -> Result<TopKLogitsPackedOutput> {
-    if input.dtype() != DType::F32 {
-        candle_core::bail!("cuda_topk_logits_f32_packed_batched requires F32 logits");
-    }
     cuda_topk_logits_packed_batched(input, k, inverse_temperatures)
 }
 

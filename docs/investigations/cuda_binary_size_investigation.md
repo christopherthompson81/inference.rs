@@ -1159,3 +1159,30 @@ local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (279
 The fourth, candle's Metal `arg_sort_last_dim` returning garbage past 1024 elements (a single-threadgroup bitonic sort;
 AFQ routes around it, MoE decode, qwen2.5-vl window indexing, GPTQ and diffusion_gemma do not), cannot run on Linux
 and is on the Mac list (#269), with the Metal-only dead code from Run 27.
+
+
+## Run 31 - 2026-10-06 14:21
+
+#270 step 1, item 4 (first half): the dead code Run 27 listed, each re-checked for callers first (repo-wide grep
+including cfg variants, tests, the ABI and bindings); Metal-gated pieces stay for the Mac (#269).
+
+Deleted: the `RotaryEmb` op and `apply_rotary` (its shape check survives as `cache_dims` for the live CPU path),
+`Qwen2VLRotaryEmbedding::forward_qk_norm` and `qk_rms_norm_mrope`, `SortOp`, `CumSumOp`, `BincountOp`, the
+bitwise xor/not ops (with the xor kernel), the cuBLASLt branches of `UnquantLinear::forward_raw` (rank > 2 CUDA input
+returns earlier through `forward_cuda_gemm`, and the layout helper needs rank 3), the `gptoss_swiglu_interleaved`
+kernels, the f16 `gelu_tanh_and_mul` launcher, `topk_large_f32` and its stage 2, the BF16/F16 `topk_large`
+packed-batched variants (production only reaches the F32 wrapper), `fused_gdn_gating` (its CUDA caller returned
+earlier), and candle-nn's `rms_norm_slow`/`layer_norm_slow`. Tests that existed only for those went with them.
+
+Found on the way and fixed: the CUDA `bitwise_and`/`bitwise_or` I32 arm allocated I64 output, so the result's
+storage did not match its dtype (new `bitwise_and_or_keep_i32_on_cuda`, which failed with "expected: I32, got: I64").
+
+```
+20 files, -2263 / +130 lines (before the bitwise fix)
+local_ci.sh --size  -> file 102.56 MiB (-0.04), .nv_fatbin -0.00: host code and small kernels in compressed fatbins
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2782 + 2406 tests)
+```
+
+Left for the Mac: the now-unused public Metal launchers (`call_rotary`, `call_argsort`, `call_sort`,
+`SortScratchCache`, `call_scan`, `call_bitwise_not`, `call_bitwise_xor`) and their shaders, and the Metal bitwise
+test, which lost its xor/not checks without being compiled here.
