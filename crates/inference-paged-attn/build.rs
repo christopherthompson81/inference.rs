@@ -214,11 +214,14 @@ fn main() -> Result<()> {
     }
 
     println!("cargo:rustc-link-lib=dylib=cudart");
+    // the kernel archive needs the C++ runtime (static guards, iostream) on its own
+    if !std::env::var("TARGET").unwrap_or_default().contains("msvc") {
+        println!("cargo:rustc-link-lib=dylib=stdc++");
+    }
 
     if using_fa3_fp8_paged {
         println!("cargo:rustc-link-search={}", out_dir.display());
         println!("cargo:rustc-link-lib=inferencefa3paged");
-        println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-cfg=has_fa3_fp8_paged");
     }
 

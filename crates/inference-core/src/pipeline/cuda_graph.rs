@@ -1616,11 +1616,7 @@ impl CudaDecodeGraphState {
     }
 
     fn allocate_generation(&mut self) -> u64 {
-        NEXT_CUDA_DECODE_GRAPH_GENERATION
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
-                generation.checked_add(1)
-            })
-            .expect("CUDA decode graph generation overflow")
+        NEXT_CUDA_DECODE_GRAPH_GENERATION.fetch_add(1, Ordering::Relaxed)
     }
 }
 
