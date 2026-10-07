@@ -21,12 +21,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::amoe::AnyMoeBaseModelMixin;
-use crate::kv_cache::{EitherCache, NormalCache};
+use crate::decoder::{CausalLm, LayerMasks};
+use crate::device_map::DeviceMappedMask;
+use crate::kv_cache::EitherCache;
 use crate::layers::CausalMasker;
 use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
-use crate::model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata};
+use crate::model::{
+    IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel,
+};
 use crate::paged_attention::encoder_cache::{CacheModality, EncoderCacheManager};
-use crate::paged_attention::{AttentionImplementation, KvCacheLayout, ModelConfigMetadata};
+use crate::paged_attention::{AttentionImplementation, ModelConfigMetadata};
 
 // One OCR page is a few hundred KB of connector embeds.
 const ENCODER_CACHE_ENTRIES: usize = 32;
@@ -35,19 +39,14 @@ use config::Config;
 use connector::Connector;
 use merge::Merger;
 use rope_index::get_rope_index_batched;
-use text::ErnieTextModel;
 use vision::VisionModel;
 
 pub struct PaddleOcrVlModel {
     vision: VisionModel,
     connector: Connector,
     merger: Merger,
-    text: ErnieTextModel,
+    text: CausalLm,
     cfg: Config,
-    device: Device,
-    max_seq_len: usize,
-    config_meta: ModelConfigMetadata,
-    cache: EitherCache,
     // Preempted seqs re-prefill the whole prompt; keyed by image hash so the tower isn't re-run.
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
     encoder_cache_hits: Arc<AtomicUsize>,
@@ -77,46 +76,26 @@ impl PaddleOcrVlModel {
             vcfg.spatial_merge_size,
             tcfg.hidden_size,
         )?;
-        let merger = Merger::load(
-            vb.pp("model").set_device(real_dev.clone()),
-            tcfg.vocab_size,
-            tcfg.hidden_size,
-            cfg.image_token_id as i64,
-        )?;
-        let device = real_dev;
-        let text = ErnieTextModel::load(
+        // M-RoPE ignores the loader's pairing
+        let is_gptx = true;
+        let text = CausalLm::new(
+            &tcfg.decoder_spec(cfg.max_position_embeddings),
             vb,
-            &tcfg,
-            normal_loading_metadata.mapper,
-            device.clone(),
-            normal_loading_metadata.loading_isq,
+            is_gptx,
+            normal_loading_metadata,
             attention_mechanism,
         )?;
-        // No tensor-parallel sharding, so head counts are unsharded.
-        let config_meta = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: tcfg.num_hidden_layers,
-            hidden_size: tcfg.hidden_size,
-            num_attn_heads: tcfg.num_attention_heads,
-            num_kv_heads: tcfg.num_key_value_heads,
-            sliding_window: None,
-            k_head_dim: tcfg.head_dim,
-            v_head_dim: tcfg.head_dim,
-            kv_cache_layout: KvCacheLayout::Standard,
-        };
+        let merger = Merger::new(
+            text.embed_tokens().clone(),
+            text.embed_dtype(),
+            cfg.image_token_id as i64,
+        );
         Ok(Self {
             vision,
             connector,
             merger,
             text,
             cfg: cfg.clone(),
-            device,
-            max_seq_len: cfg.max_position_embeddings,
-            config_meta,
-            cache: EitherCache::Normal(NormalCache::new(
-                tcfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-            )),
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(ENCODER_CACHE_ENTRIES))),
             encoder_cache_hits: Arc::new(AtomicUsize::new(0)),
             encoder_cache_misses: Arc::new(AtomicUsize::new(0)),
@@ -132,7 +111,6 @@ impl IsqModel for PaddleOcrVlModel {
     // Only the ERNIE LM projections + lm_head are ISQ targets; everything else is residual.
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors = self.text.residual_tensors();
-        tensors.extend(self.merger.residual_tensors());
         tensors.extend(self.connector.residual_tensors());
         tensors.extend(self.vision.residual_tensors());
         tensors
@@ -203,7 +181,7 @@ impl MultimodalModel for PaddleOcrVlModel {
             .downcast()
             .expect("Cannot downcast into `PaddleOcrVlVisionSpecificArgs`");
 
-        let dev = &self.device;
+        let dev = NormalModel::device(&self.text);
         let merge = self.cfg.vision_config().spatial_merge_size;
         let image_token_id = self.cfg.image_token_id as i64;
         let seqlen_offsets = ctx.seqlen_offsets();
@@ -308,35 +286,27 @@ impl MultimodalModel for PaddleOcrVlModel {
             &CausalMaskConfig::default(),
         )?;
         // Keep the mask on later prompt chunks: paged prefix gather reads causality from it, else attends non-causally.
-
-        let mut guard = self.cache.normal();
-        let paged = ctx.paged_metadata();
-        let paged_ref = paged.as_ref().map(|(kv, meta)| (kv.as_slice(), *meta));
-        let logits = self
-            .text
-            .forward(
-                &embeds,
-                &position_ids,
-                &mut guard.0,
-                &mask,
-                paged_ref,
-                Some(ctx.flash_params()),
-            )?
-            .logits;
-        ctx.logits(&logits)
+        let masks = LayerMasks::new(
+            Some(DeviceMappedMask::new(mask, self.text.stack_mapper())?),
+            None,
+            None,
+        );
+        let (cos, sin) = self.text.mrope_tables(&position_ids, embeds.dtype())?;
+        ctx.set_rope_tables(cos, sin);
+        self.text.forward_with_masks(embeds, &masks, ctx)
     }
 
     fn device(&self) -> &Device {
-        &self.device
+        NormalModel::device(&self.text)
     }
     fn cache(&self) -> &EitherCache {
-        &self.cache
+        NormalModel::cache(&self.text)
     }
     fn max_seq_len(&self) -> usize {
-        self.max_seq_len
+        NormalModel::max_seq_len(&self.text)
     }
     fn config(&self) -> &ModelConfigMetadata {
-        &self.config_meta
+        NormalModel::config(&self.text)
     }
     fn encoder_cache_counters(&self) -> Option<(Arc<AtomicUsize>, Arc<AtomicUsize>)> {
         Some((

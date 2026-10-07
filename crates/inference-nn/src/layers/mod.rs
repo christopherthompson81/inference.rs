@@ -1195,7 +1195,10 @@ impl Qwen2VLRotaryEmbedding {
             self.inv_freq
                 .reshape((1, 1, (), 1))?
                 .repeat((3, position_ids.dim(1)?, 1, 1))?;
-        let position_ids_expanded = position_ids.unsqueeze(2)?;
+        // the positions live on the main device, the table on whichever device holds this layer
+        let position_ids_expanded = position_ids
+            .to_device(self.inv_freq.device())?
+            .unsqueeze(2)?;
         let freqs = inv_freq_expanded
             .matmul(&position_ids_expanded.to_dtype(inv_freq_expanded.dtype())?)?
             .transpose(2, 3)?;
@@ -1348,7 +1351,10 @@ impl Qwen3VLRotaryEmbedding {
                 .reshape((1, 1, (), 1))?
                 .repeat((3, position_ids.dim(1)?, 1, 1))?;
         // position_ids: (3, batch, seq_len) -> (3, batch, 1, seq_len)
-        let position_ids_expanded = position_ids.unsqueeze(2)?;
+        // the positions live on the main device, the table on whichever device holds this layer
+        let position_ids_expanded = position_ids
+            .to_device(self.inv_freq.device())?
+            .unsqueeze(2)?;
         // freqs: (3, batch, head_dim/2, 1) @ (3, batch, 1, seq_len) -> (3, batch, head_dim/2, seq_len)
         // -> transpose -> (3, batch, seq_len, head_dim/2)
         let freqs = inv_freq_expanded

@@ -2,9 +2,7 @@
 
 use std::sync::Arc;
 
-use crate::layers::embedding;
-use crate::utils::unvarbuilder::UnVarBuilder;
-use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_quant::QuantMethod;
 use inference_tensor::{DType, Result, Tensor};
 
 pub struct Merger {
@@ -14,17 +12,13 @@ pub struct Merger {
 }
 
 impl Merger {
-    pub fn load(
-        vb: ShardedVarBuilder,
-        vocab: usize,
-        hidden: usize,
-        image_token_id: i64,
-    ) -> Result<Self> {
-        Ok(Self {
-            embed_tokens: embedding(vocab, hidden, vb.pp("embed_tokens"), &None)?,
-            dtype: vb.dtype(),
+    /// Over the language model's own token embedding, so the checkpoint's `model.embed_tokens` loads once.
+    pub fn new(embed_tokens: Arc<dyn QuantMethod>, dtype: DType, image_token_id: i64) -> Self {
+        Self {
+            embed_tokens,
+            dtype,
             image_token_id,
-        })
+        }
     }
 
     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -53,11 +47,5 @@ impl Merger {
         let combined = Tensor::cat(&[&text, image_embeds], 0)?;
         let gather = Tensor::from_vec(gather, s, input_ids.device())?;
         combined.index_select(&gather, 0)
-    }
-
-    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
-        let uvb = UnVarBuilder::new();
-        uvb.pp("model").pp("embed_tokens").add(&self.embed_tokens);
-        uvb.to_safetensors()
     }
 }

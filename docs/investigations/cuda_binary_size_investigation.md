@@ -1942,3 +1942,34 @@ scaled; at most about one BF16 ulp.
 
 Next: #324 step 7d (Voxtral: projection names, adaptive norm), then PaddleOCR-VL (chunked M-RoPE).
 
+## Run 58 - 2026-10-07 14:45
+
+Question: what does #324 step 7d (PaddleOCR-VL's ERNIE text stack onto the shared decoder) recover, and does the
+image path hold? Voxtral, the other step 7d candidate, stays bespoke: its consolidated-format names, replicated
+projections and time-conditioned adaptive norm would add more spec than they remove.
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,336,496  105,293,488     -43,008
+.text                  55,162,786   55,125,410     -37,376
+```
+
+Raw finding: -43 KB from 864 lines of code removed and 78 added. ERNIE needed nothing new: its RMS norm is
+`NormKind::F32Rms` and its rope is Qwen2-VL's chunked M-RoPE (a throwaway test over planes with distinct positions gave
+a max difference of 0). The merger now borrows the LM's token embedding instead of loading `model.embed_tokens` again.
+
+Pins first: F32 and BF16 text prefill on synthesized weights, and absolute greedy ids for one- and two-image requests
+on the tiny checkpoint (CPU eager, GPU paged flash), which before were only compared with each other. First migrated
+run: every image trace moved. Cause: the tiny checkpoint's recorder hands out random weights in request order, and
+the merger now loads the embedding at another point; the fixture is now seeded by tensor name and re-recorded on the
+old code, after which the migrated code matches on CPU and CUDA. The F32 text pin still moved by ~1e-3 on CPU: the old
+stack cast the F16 CPU KV cache (cpu_kv_f16) back to F32 before SDPA, the shared path reads it with the native F16
+kernel as every other decoder does; with INFERENCE_RS_CPU_KV_F32=1 old and new agree to ~1e-6. That pin is re-recorded.
+Review pass: AFQ-packed embeddings now load (the old merger forced no quantization), KV head counts are now divided by
+the TP world size like the attention they describe, and M-RoPE tables follow the table's device (positions on the main
+device crashed a map that put layer 0 elsewhere; this was latent in Qwen2-VL and Qwen3-VL too).
+
+Next: #324 wrap-up (Mllama and Llama 4 would need mixed layer kinds; Gemma 3n, Gemma 4, Qwen3.5, LFM2, Voxtral stay
+bespoke).
+

@@ -62,15 +62,16 @@ fn config() -> Value {
     })
 }
 
+// F32 on CPU stores K/V as F16 where native F16 kernels exist; attention reads them as every decoder does
 #[test]
 fn paddleocr_vl_prefill() -> Result<()> {
     prefill(
         DType::F32,
         0xc6a2_f574_7978_1a94,
         &Snapshot {
-            probes: [1.1266398, -0.47756937, 0.7152879, -0.59420884],
-            sum: -25.586395,
-            l2: 16.525724,
+            probes: [1.12664, -0.47743043, 0.71445084, -0.59401524],
+            sum: -25.572708,
+            l2: 16.525434,
         },
     )
 }
