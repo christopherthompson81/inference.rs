@@ -780,7 +780,6 @@ pub(crate) fn prepare_distributed_mapper(
     let sharded_vb = match weights {
         DistributedWeightSource::Paths(paths) => varbuilder_utils::from_mmaped_safetensors(
             paths.get_weight_filenames().to_vec(),
-            vec![],
             Some(dtype),
             &Device::Cpu,
             vec![],

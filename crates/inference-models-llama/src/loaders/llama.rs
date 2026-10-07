@@ -21,29 +21,6 @@ impl NormalModelLoader for LlamaLoader {
             attention_mechanism,
         )?))
     }
-    fn load_xlora(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        lora_config: &[((String, String), LoraConfig)],
-        xlora_config: Option<XLoraConfig>,
-        xlora_ordering: Ordering,
-        normal_loading_metadata: NormalLoadingMetadata,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::llama::Config::from_json(config)?;
-
-        Ok(Box::new(crate::xlora::llama::XLoraLlama::new(
-            &cfg,
-            vb,
-            lora_config,
-            xlora_config,
-            xlora_ordering,
-            self.is_gptx_for(config, &normal_loading_metadata)?,
-            normal_loading_metadata,
-            preload_adapters,
-        )?))
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = crate::llama::Config::from_json(config)?;
         Ok(Box::new(cfg))

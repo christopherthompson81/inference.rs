@@ -19,7 +19,6 @@ pub use engine::{
 use hf_hub::Cache;
 use inference_nn::matformer;
 use inference_tensor::Device;
-pub use lora::Ordering;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
 pub use pipeline::Pipeline;
@@ -113,7 +112,6 @@ pub(crate) mod sequence_macros;
 pub(crate) mod speculative;
 use inference_protocol::tools;
 mod vision_models;
-mod xlora_models;
 
 pub(crate) use adapter::AdapterLease;
 #[doc(hidden)]

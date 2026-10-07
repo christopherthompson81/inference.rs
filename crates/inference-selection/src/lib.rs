@@ -14,9 +14,7 @@ pub use diagnostics::{
     MemoryInfo, SystemInfo, ToolchainInfo, check_hf_gated_access, collect_system_info,
     parse_nvidia_smi_cuda_version, run_doctor,
 };
-pub use model_loader::{
-    LoaderBuilder, get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index,
-};
+pub use model_loader::{LoaderBuilder, get_auto_device_map_params, get_model_dtype};
 pub use model_selected::{MmprojSelection, ModelSelected, SpeechGenerationSpec};
 pub use resource_plan::{
     PagedKvModelRequest, PagedKvPlan, PagedKvPolicy, RuntimeResourcePlanOptions, plan_paged_kv,

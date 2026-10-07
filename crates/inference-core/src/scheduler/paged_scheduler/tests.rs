@@ -160,7 +160,6 @@ fn test_sequence_with_media_sender_and_group(
         vec![],
         None,
         false,
-        false,
         group,
         0,
         0,

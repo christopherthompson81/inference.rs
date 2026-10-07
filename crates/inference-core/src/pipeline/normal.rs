@@ -40,7 +40,6 @@ struct CudaDecodeGraphForwardInput<'a> {
 #[cfg(feature = "cuda")]
 use crate::attention::FlashParams;
 use crate::gdn::RecurrentBatchKind;
-use crate::lora::Ordering;
 #[cfg(feature = "cuda")]
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{CacheEngine, calculate_cache_config};
@@ -66,10 +65,9 @@ use crate::pipeline::{
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::xlora_models::NonGranularState;
 use crate::{
     DeviceMapSetting, DynamicLoraRuntime, GLOBAL_HF_CACHE, LoraAdapterSpec, LoraRuntimeConfig,
-    PagedAttentionConfig, Pipeline, Topology, TryIntoDType, get_mut_arcmutex,
+    PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
 };
 use anyhow::Result;
 use either::Either;
@@ -86,14 +84,16 @@ use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, RwLock};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace};
+#[cfg(feature = "cuda")]
+use tracing::{info, warn};
+
+const ADJACENT_PARTIAL_ROTARY_LORA: &str = "LoRA adapters are not supported when Q/K use adjacent RoPE pairs over part of each head (MLA or partial rotary); load the original safetensors model or omit the adapter";
 
 pub struct NormalPipeline {
     model: Box<dyn NormalModel + Send + Sync>,
     tokenizer: Arc<Tokenizer>,
-    no_kv_cache: bool,
     chat_template: Arc<ChatTemplate>,
-    non_granular_state: Option<NonGranularState>,
     model_id: String,
     metadata: Arc<GeneralMetadata>,
     #[cfg(feature = "cuda")]
@@ -120,9 +120,7 @@ pub(crate) struct NormalPipelineBuildArgs {
     pub silent: bool,
     pub max_kv_tokens: Option<usize>,
     pub no_kv_cache: bool,
-    pub is_xlora: bool,
     pub kind: ModelKind,
-    pub non_granular_index: Option<usize>,
     pub model_id: String,
     pub loaded_for_uqff_write: bool,
     pub tracked_modules: Vec<inference_quant::TrackedModule>,
@@ -146,9 +144,7 @@ pub(crate) fn build_normal_pipeline(
         silent,
         max_kv_tokens,
         no_kv_cache,
-        is_xlora,
         kind,
-        non_granular_index,
         model_id,
         loaded_for_uqff_write,
         tracked_modules,
@@ -220,22 +216,16 @@ pub(crate) fn build_normal_pipeline(
     Ok(Arc::new(Mutex::new(NormalPipeline {
         model,
         tokenizer: tokenizer.into(),
-        no_kv_cache,
         chat_template: Arc::new(chat_template),
-        non_granular_state: non_granular_index.map(|tgt_non_granular_index| NonGranularState {
-            non_granular_index: Arc::new(Mutex::new(0)),
-            tgt_non_granular_index,
-        }),
         model_id,
         metadata: Arc::new(GeneralMetadata {
             max_seq_len,
             llg_factory: Some(llg_factory),
             no_kv_cache,
-            no_prefix_cache: is_xlora,
+            no_prefix_cache: false,
             num_hidden_layers,
             eos_tok: eos,
             kind,
-            is_xlora,
             activation_dtype: dtype,
             sliding_window,
             cache_config,
@@ -263,11 +253,9 @@ pub(crate) fn build_normal_pipeline(
 fn normal_model_requires_uniform_prompt_batch(
     is_hybrid: bool,
     packed_prefill_available: bool,
-    is_xlora: bool,
     has_speculative_proposer: bool,
 ) -> bool {
     (is_hybrid && !packed_prefill_available)
-        || is_xlora
         || (has_speculative_proposer && !packed_prefill_available)
 }
 
@@ -276,15 +264,12 @@ pub struct NormalLoader {
     inner: Box<dyn NormalModelLoader>,
     model_id: String,
     config: NormalSpecificConfig,
-    xlora_model_id: Option<String>,
     lora_adapters: Option<Vec<LoraAdapterSpec>>,
     lora_runtime_config: Option<LoraRuntimeConfig>,
     kind: ModelKind,
-    xlora_order: Option<Ordering>,
     no_kv_cache: bool,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
-    tgt_non_granular_index: Option<usize>,
     from_uqff: RwLock<Option<Vec<PathBuf>>>,
     jinja_explicit: Option<String>,
     hf_cache_path: Option<PathBuf>,
@@ -331,6 +316,15 @@ pub(crate) fn new_dynamic_lora_registry(
     };
     let registry = match rope_pairing {
         Some(crate::gguf::normal_registry::RopePairing::Adjacent) => {
+            // MLA and partial rotary pair only part of each head, which the per-head row map does not describe
+            let partial_rotary = config.get("qk_rope_head_dim").is_some()
+                || config
+                    .get("partial_rotary_factor")
+                    .and_then(serde_json::Value::as_f64)
+                    .is_some_and(|factor| factor < 1.0);
+            if partial_rotary {
+                anyhow::bail!(ADJACENT_PARTIAL_ROTARY_LORA);
+            }
             registry.with_adjacent_qk_rope(attention_head_dim(&config)?)?
         }
         _ => registry,
@@ -357,15 +351,12 @@ fn attention_head_dim(config: &serde_json::Value) -> Result<usize> {
 pub struct NormalLoaderBuilder {
     model_id: Option<String>,
     config: NormalSpecificConfig,
-    xlora_model_id: Option<String>,
     lora_adapters: Option<Vec<LoraAdapterSpec>>,
     lora_runtime_config: Option<LoraRuntimeConfig>,
     kind: ModelKind,
-    xlora_order: Option<Ordering>,
     no_kv_cache: bool,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
-    tgt_non_granular_index: Option<usize>,
     jinja_explicit: Option<String>,
     hf_cache_path: Option<PathBuf>,
     mtp: bool,
@@ -416,47 +407,6 @@ impl NormalLoaderBuilder {
         self
     }
 
-    fn with_adapter(
-        mut self,
-        xlora_model_id: String,
-        xlora_order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.xlora_model_id = Some(xlora_model_id);
-        self.xlora_order = Some(xlora_order);
-        self.no_kv_cache = no_kv_cache;
-        self.tgt_non_granular_index = tgt_non_granular_index;
-        self.model_id = if let Some(id) = self.model_id {
-            Some(id)
-        } else {
-            info!(
-                "Using adapter base model ID: `{}`",
-                self.xlora_order.as_ref().unwrap().base_model_id
-            );
-            Some(self.xlora_order.as_ref().unwrap().base_model_id.clone())
-        };
-        self
-    }
-
-    pub fn with_xlora(
-        mut self,
-        xlora_model_id: String,
-        xlora_order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.kind = ModelKind::Adapter {
-            adapter: AdapterKind::XLora,
-        };
-        self.with_adapter(
-            xlora_model_id,
-            xlora_order,
-            no_kv_cache,
-            tgt_non_granular_index,
-        )
-    }
-
     pub fn with_lora(
         mut self,
         adapters: Vec<LoraAdapterSpec>,
@@ -494,15 +444,12 @@ impl NormalLoaderBuilder {
             inner: loader,
             model_id: self.model_id.unwrap(),
             config: self.config,
-            xlora_model_id: self.xlora_model_id,
             lora_adapters: self.lora_adapters,
             lora_runtime_config: self.lora_runtime_config,
             kind: self.kind,
-            xlora_order: self.xlora_order,
             no_kv_cache: self.no_kv_cache,
             chat_template: self.chat_template,
             tokenizer_json: self.tokenizer_json,
-            tgt_non_granular_index: self.tgt_non_granular_index,
             jinja_explicit: self.jinja_explicit,
             from_uqff: RwLock::new(None),
             hf_cache_path: self.hf_cache_path,
@@ -523,51 +470,6 @@ impl NormalLoaderBuilder {
     ) -> anyhow::Result<Box<dyn Loader>> {
         self.kind = kind;
         Ok(Box::new(self.build_inner(Some(loader_tp), Some(source))?))
-    }
-}
-
-type LoadedNormalModel = (Box<dyn NormalModel + Send + Sync>, inference_quant::Tracker);
-impl NormalLoader {
-    fn load_xlora(
-        &self,
-        weights: &super::loading::WeightFiles<'_>,
-        config: &str,
-        mapper: Box<dyn DeviceMapper + Send + Sync>,
-        parts: &super::loading::LoadMetadataParts,
-    ) -> Result<LoadedNormalModel> {
-        let super::AdapterPaths::XLora {
-            adapter_configs,
-            xlora_order,
-            xlora_config,
-            ..
-        } = weights.paths.get_adapter_paths()
-        else {
-            unreachable!("X-LoRA loaders require resolved X-LoRA adapter paths")
-        };
-        let adapter_configs = adapter_configs
-            .as_ref()
-            .expect("X-LoRA adapters have configs");
-        let xlora_config = xlora_config
-            .clone()
-            .expect("X-LoRA adapters have an xlora_config.json");
-        let xlora_order = xlora_order
-            .clone()
-            .expect("X-LoRA adapters have an ordering");
-        let device_for_tensor =
-            self.inner
-                .get_device_for_tensor(config, &*mapper, parts.loading_isq)?;
-        let vb = weights.load_xlora(device_for_tensor)?;
-        let tracker = vb.tracker().clone();
-        let model = self.inner.load_xlora(
-            config,
-            vb,
-            adapter_configs,
-            Some(xlora_config),
-            xlora_order,
-            parts.metadata(mapper, None),
-            &None,
-        )?;
-        Ok((model, tracker))
     }
 }
 
@@ -604,12 +506,7 @@ impl Loader for NormalLoader {
                 silent,
                 loading_uqff: self.config.from_uqff.is_some(),
             },
-            crate::pipeline::AdapterPathOptions {
-                xlora_model_id: self.xlora_model_id.as_ref(),
-                lora_adapters: self.lora_adapters.as_deref(),
-                xlora_order: self.xlora_order.as_ref(),
-                xlora_preload: crate::pipeline::XLoraPreload::Skip,
-            },
+            self.lora_adapters.as_deref(),
         );
         if let Some(from_uqff) = self.config.from_uqff.as_ref() {
             let files = super::paths::get_uqff_paths(
@@ -659,8 +556,6 @@ impl Loader for NormalLoader {
             .inner
             .runtime_config(&source_config, self.config.max_model_len)?
             .into_owned();
-        // Runtime LoRA maps Q/K rows itself (see new_dynamic_lora_registry); X-LoRA's model copies cannot.
-        super::loaders::validate_lora_qk_rope_layout(&config, self.xlora_model_id.is_some())?;
 
         if !self.inner.supports_paged_attention(&config)? {
             paged_attn_config = None;
@@ -705,11 +600,6 @@ impl Loader for NormalLoader {
             &mut paged_attn_config,
         )?;
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
-        let load_xlora = |weights: &super::loading::WeightFiles<'_>,
-                          mapper: Box<dyn DeviceMapper + Send + Sync>| {
-            self.load_xlora(weights, &config, mapper, &session.load_parts)
-        };
         let (model, tracker, dynamic_lora) = super::loading::load_model(
             &*self.inner,
             &session,
@@ -738,7 +628,6 @@ impl Loader for NormalLoader {
                     ),
                     _ => None,
                 },
-                xlora: is_xlora.then_some(&load_xlora as &super::loading::XLoraLoad<'_, _>),
             },
         )?;
         let super::loading::LoadSession {
@@ -845,20 +734,6 @@ impl Loader for NormalLoader {
                 }),
         })?;
 
-        let paged_attn_config = if matches!(
-            self.kind,
-            ModelKind::Adapter {
-                adapter: AdapterKind::XLora
-            }
-        ) {
-            warn!(
-                "Adapter parallel_models do not currently support PagedAttention, running without"
-            );
-            None
-        } else {
-            paged_attn_config
-        };
-
         #[cfg(feature = "cuda")]
         super::synchronize_cuda_contexts(&device, pipeline_mapper.as_ref())?;
 
@@ -883,9 +758,7 @@ impl Loader for NormalLoader {
             silent,
             max_kv_tokens,
             no_kv_cache: self.no_kv_cache,
-            is_xlora,
             kind: self.kind.clone(),
-            non_granular_index: self.tgt_non_granular_index,
             model_id: self.model_id.clone(),
             loaded_for_uqff_write: self.config.write_uqff.is_some(),
             tracked_modules,
@@ -968,7 +841,6 @@ impl CacheManagerMixin for NormalPipeline {
     fn set_none_cache(
         &self,
         seqs: &mut [&mut Sequence],
-        reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
@@ -978,9 +850,6 @@ impl CacheManagerMixin for NormalPipeline {
             modify_draft_cache,
             load_preallocated_cache,
         )?;
-        if reset_non_granular {
-            self.reset_non_granular_state()
-        }
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
@@ -997,12 +866,6 @@ impl MetadataMixin for NormalPipeline {
     }
     fn name(&self) -> String {
         self.model_id.clone()
-    }
-    fn reset_non_granular_state(&self) {
-        if let Some(s) = self.non_granular_state.as_ref() {
-            *self.cache().full().get_scalings_cache() = None;
-            *get_mut_arcmutex!(s.non_granular_index) = 0;
-        }
     }
     fn cleanup_cuda_graphs(&self) {
         #[cfg(feature = "cuda")]
@@ -1591,7 +1454,6 @@ impl Pipeline for NormalPipeline {
         normal_model_requires_uniform_prompt_batch(
             self.model.cache().is_hybrid(),
             self.supports_packed_prefill(),
-            self.model.is_xlora(),
             self.model.has_speculative_proposer(),
         )
     }
@@ -1638,7 +1500,6 @@ impl Pipeline for NormalPipeline {
     fn supports_packed_prefill(&self) -> bool {
         self.model.supports_packed_prefill()
             && self.metadata.cache_engine.is_some()
-            && !self.model.is_xlora()
             && (!self.model.has_speculative_proposer()
                 || self.model.supports_speculative_packed_prefill())
             && self.model.device().is_cuda()
@@ -1671,14 +1532,11 @@ impl Pipeline for NormalPipeline {
     ) -> Result<ForwardStepResult, inference_tensor::Error> {
         let ModelInputs {
             input_ids,
-            input_ids_full,
             seqlen_offsets,
-            seqlen_offsets_full,
             context_lens,
             position_ids,
             paged_attn_meta,
             flash_meta,
-            flash_meta_full,
             recurrent_batch_kind,
             adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
@@ -1706,90 +1564,74 @@ impl Pipeline for NormalPipeline {
             }
             (None, None) => None,
         };
-        let logits = match self.model.is_xlora() {
-            false => {
-                #[cfg(feature = "cuda")]
-                let mut cuda_graph_eager_fallback = None;
-                let paged_attn_meta = paged_attn_meta
-                    .as_ref()
-                    .map(|meta| (meta.0.get_kv_cache().clone(), meta.1.clone()));
+        #[cfg(feature = "cuda")]
+        let mut cuda_graph_eager_fallback = None;
+        let paged_attn_meta = paged_attn_meta
+            .as_ref()
+            .map(|meta| (meta.0.get_kv_cache().clone(), meta.1.clone()));
 
-                #[cfg(feature = "cuda")]
-                if lora_execution.is_none() && !return_raw_logits {
-                    match self.try_cuda_decode_graph_forward(CudaDecodeGraphForwardInput {
-                        input_ids: &input_ids,
-                        seqlen_offsets: &seqlen_offsets,
-                        context_lens: &context_lens,
-                        position_ids: &position_ids,
-                        paged_attn_meta: paged_attn_meta.as_ref().map(|(a, b)| (a.clone(), b)),
-                        flash_meta: &flash_meta,
-                        recurrent_batch_kind,
-                    }) {
-                        Ok(Some(replay)) => {
-                            return Ok(ForwardStepResult::cuda_decode(
-                                ForwardInputsResult::CausalGeneration {
-                                    logits: replay.logits,
-                                },
-                                replay.launch,
-                            ));
-                        }
-                        Ok(None) => {}
-                        Err(err) => {
-                            if !self.disable_cuda_decode_graph(&err) {
-                                return Err(err);
-                            }
-                            cuda_graph_eager_fallback = Some(CudaGraphEventGuard::new(
-                                CudaGraphComponent::Target,
-                                CudaGraphEvent::EagerFallback,
-                            ));
-                        }
+        #[cfg(feature = "cuda")]
+        if lora_execution.is_none() && !return_raw_logits {
+            match self.try_cuda_decode_graph_forward(CudaDecodeGraphForwardInput {
+                input_ids: &input_ids,
+                seqlen_offsets: &seqlen_offsets,
+                context_lens: &context_lens,
+                position_ids: &position_ids,
+                paged_attn_meta: paged_attn_meta.as_ref().map(|(a, b)| (a.clone(), b)),
+                flash_meta: &flash_meta,
+                recurrent_batch_kind,
+            }) {
+                Ok(Some(replay)) => {
+                    return Ok(ForwardStepResult::cuda_decode(
+                        ForwardInputsResult::CausalGeneration {
+                            logits: replay.logits,
+                        },
+                        replay.launch,
+                    ));
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    if !self.disable_cuda_decode_graph(&err) {
+                        return Err(err);
                     }
+                    cuda_graph_eager_fallback = Some(CudaGraphEventGuard::new(
+                        CudaGraphComponent::Target,
+                        CudaGraphEvent::EagerFallback,
+                    ));
                 }
-
-                let paged_attn_meta = paged_attn_meta
-                    .map(|(kv_cache, metadata)| {
-                        metadata
-                            .materialize_decode_tensors()
-                            .map(|metadata| (kv_cache, metadata))
-                    })
-                    .transpose()
-                    .map_err(inference_tensor::Error::msg)?;
-
-                let mut ctx = ModelForwardContext::new(
-                    &seqlen_offsets,
-                    &context_lens,
-                    &position_ids,
-                    paged_attn_meta
-                        .as_ref()
-                        .map(|(kv_cache, meta)| (kv_cache.as_slice(), meta)),
-                    &flash_meta,
-                )
-                .with_recurrent_batch_kind(recurrent_batch_kind)
-                .with_recurrent_metadata(self.recurrent_metadata(recurrent_batch_kind));
-                let eager_result = inference_quant::with_lora_execution(lora_execution, || {
-                    self.model.forward(&input_ids, &mut ctx)
-                });
-                #[cfg(feature = "cuda")]
-                if eager_result.is_ok()
-                    && let Some(graph_event) = cuda_graph_eager_fallback.take()
-                {
-                    graph_event.success();
-                }
-                eager_result?
             }
-            true => self.model.xlora_forward(
-                &input_ids,
-                input_ids_full.as_ref().unwrap_or(&input_ids),
-                &seqlen_offsets,
-                seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                self.no_kv_cache,
-                &self.non_granular_state,
-                context_lens,
-                position_ids,
-                &flash_meta,
-                flash_meta_full.as_ref().unwrap_or(&flash_meta),
-            )?,
-        };
+        }
+
+        let paged_attn_meta = paged_attn_meta
+            .map(|(kv_cache, metadata)| {
+                metadata
+                    .materialize_decode_tensors()
+                    .map(|metadata| (kv_cache, metadata))
+            })
+            .transpose()
+            .map_err(inference_tensor::Error::msg)?;
+
+        let mut ctx = ModelForwardContext::new(
+            &seqlen_offsets,
+            &context_lens,
+            &position_ids,
+            paged_attn_meta
+                .as_ref()
+                .map(|(kv_cache, meta)| (kv_cache.as_slice(), meta)),
+            &flash_meta,
+        )
+        .with_recurrent_batch_kind(recurrent_batch_kind)
+        .with_recurrent_metadata(self.recurrent_metadata(recurrent_batch_kind));
+        let eager_result = inference_quant::with_lora_execution(lora_execution, || {
+            self.model.forward(&input_ids, &mut ctx)
+        });
+        #[cfg(feature = "cuda")]
+        if eager_result.is_ok()
+            && let Some(graph_event) = cuda_graph_eager_fallback.take()
+        {
+            graph_event.success();
+        }
+        let logits = eager_result?;
         let output = if return_raw_logits {
             ForwardInputsResult::RawLogits { logits }
         } else {
@@ -2043,26 +1885,23 @@ mod tests {
     #[test]
     fn hybrid_models_require_uniform_prompts_until_packed_prefill_is_proven() {
         assert!(normal_model_requires_uniform_prompt_batch(
-            true, false, false, false
+            true, false, false
         ));
         assert!(!normal_model_requires_uniform_prompt_batch(
-            true, true, false, false
+            true, true, false
         ));
         assert!(!normal_model_requires_uniform_prompt_batch(
-            false, false, false, false
+            false, false, false
         ));
     }
 
     #[test]
-    fn xlora_and_unsupported_speculative_models_remain_uniform() {
+    fn unsupported_speculative_models_remain_uniform() {
         assert!(normal_model_requires_uniform_prompt_batch(
-            true, true, true, false
-        ));
-        assert!(normal_model_requires_uniform_prompt_batch(
-            true, false, false, true
+            true, false, true
         ));
         assert!(!normal_model_requires_uniform_prompt_batch(
-            true, true, false, true
+            true, true, true
         ));
     }
 
@@ -2134,5 +1973,25 @@ mod tests {
             .unwrap();
 
         assert_eq!(site.key().path(), "model.layers.0.self_attn.q_proj");
+    }
+
+    #[test]
+    fn adjacent_rope_lora_refuses_heads_rotated_only_in_part() {
+        let adjacent = Some(crate::gguf::normal_registry::RopePairing::Adjacent);
+        for config in [
+            r#"{"head_dim":16,"qk_rope_head_dim":8}"#,
+            r#"{"head_dim":16,"partial_rotary_factor":0.5}"#,
+        ] {
+            let error = new_dynamic_lora_registry(config, adjacent)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("original safetensors model"), "{error}");
+        }
+        assert!(
+            new_dynamic_lora_registry(r#"{"head_dim":16,"partial_rotary_factor":1.0}"#, adjacent)
+                .is_ok()
+        );
+        assert!(new_dynamic_lora_registry(r#"{"qk_rope_head_dim":8}"#, None).is_ok());
     }
 }

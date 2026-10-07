@@ -196,7 +196,6 @@ pub struct TextOnlyInputs {
 pub struct ProcessInputsCall<'a> {
     pub tokenizer: Option<Arc<Tokenizer>>,
     pub is_prompt: bool,
-    pub is_xlora: bool,
     pub device: &'a Device,
     pub no_kv_cache: bool,
     pub last_n_context_len: Option<(usize, usize)>,
@@ -307,7 +306,6 @@ pub trait MultimodalInputsProcessor: Send + Sync {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,

@@ -12,8 +12,7 @@ use inference_core::{
     reserve_external_mtp_memory_with_runtime,
 };
 use inference_selection::{
-    ModelSelected, PagedKvModelRequest, get_auto_device_map_params, get_model_dtype,
-    get_tgt_non_granular_index, plan_paged_kv,
+    ModelSelected, PagedKvModelRequest, get_auto_device_map_params, get_model_dtype, plan_paged_kv,
 };
 use inference_tensor::Device;
 use tracing::{debug, info, warn};
@@ -173,7 +172,7 @@ pub struct InferenceRsForServerBuilder {
     /// Default model ID to use when none is specified in requests
     default_model_id: Option<String>,
 
-    /// Maximum running sequences at any time. If the `tgt_non_granular_index` flag is set for X-LoRA models, this will be set to 1.
+    /// Maximum running sequences at any time.
     max_seqs: usize,
 
     /// Maximum tokens processed by one paged-attention scheduler step.
@@ -767,16 +766,7 @@ impl InferenceRsForServerBuilder {
         .map(|config| config.with_serving_capacity(self.max_seqs))
         .transpose()?
         .map(|config| config.with_recurrent_prefix_capacity(self.prefix_cache_n));
-        // A non-granular X-LoRA first model runs every model one sequence at a time.
-        let first = self
-            .models
-            .first()
-            .map(|config| &config.model)
-            .or(self.model.as_ref());
-        let max_seqs = match first.and_then(get_tgt_non_granular_index) {
-            Some(_) => 1,
-            None => self.max_seqs,
-        };
+        let max_seqs = self.max_seqs;
         Ok(ModelLoadSettings {
             device,
             token_source: self.token_source.clone(),
@@ -854,19 +844,14 @@ impl InferenceRsForServerBuilder {
     }
 
     /// Build a single-model instance (legacy mode)
-    async fn build_single_model(mut self) -> Result<SharedInferenceRsState> {
+    async fn build_single_model(self) -> Result<SharedInferenceRsState> {
         let mtp_runtime = MtpRuntimeConfig::new(self.prefix_cache_n);
         let add_model_config = self.shared_model_config();
         let limits = self.scheduler_limits();
         let model = self.model.context("Model was None")?;
 
-        let tgt_non_granular_index = get_tgt_non_granular_index(&model);
         let dtype = get_model_dtype(&model)?;
         let auto_device_map_params = get_auto_device_map_params(&model)?;
-
-        if tgt_non_granular_index.is_some() {
-            self.max_seqs = 1;
-        }
 
         let device = if let Some(device) = self.device {
             device
@@ -953,11 +938,7 @@ impl InferenceRsForServerBuilder {
         inference_core::distributed::begin_tensor_parallel_session(self.models.len())?;
 
         let first = &self.models[0].model;
-        let tgt_non_granular_index = get_tgt_non_granular_index(first);
         let first_dtype = get_model_dtype(first)?;
-        if tgt_non_granular_index.is_some() {
-            self.max_seqs = 1;
-        }
         let settings = self.model_load_settings()?;
 
         let mut paged_kv_plan = plan_paged_kv(
@@ -1363,10 +1344,7 @@ impl ModelLoadSettings {
 
     /// Loads one more model for an engine already serving others, sizing its paged cache from the memory left now.
     pub async fn load_additional(&self, model_config: &ModelConfig) -> Result<LoadedModel> {
-        let max_seqs = match get_tgt_non_granular_index(&model_config.model) {
-            Some(_) => 1,
-            None => self.max_seqs,
-        };
+        let max_seqs = self.max_seqs;
         let plan = plan_paged_kv(
             &[PagedKvModelRequest {
                 paged_attn: self.requested_cache,

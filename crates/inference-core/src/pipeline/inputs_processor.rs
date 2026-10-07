@@ -67,7 +67,6 @@ pub trait InputsProcessor {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut Sequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -1269,14 +1268,11 @@ pub mod text_models_inputs_processor {
     #[derive(Clone)]
     pub struct ModelInputs {
         pub input_ids: Tensor,
-        pub input_ids_full: Option<Tensor>,
         pub seqlen_offsets: Vec<usize>,
-        pub seqlen_offsets_full: Option<Vec<usize>>,
         pub context_lens: Vec<(usize, usize)>,
         pub position_ids: Vec<usize>,
         pub paged_attn_meta: Option<PagedAttentionInputMetadata>,
         pub flash_meta: FlashParams,
-        pub flash_meta_full: Option<FlashParams>,
         pub recurrent_batch_kind: RecurrentBatchKind,
         pub adapter_leases: Arc<[Option<AdapterLease>]>,
     }
@@ -1300,7 +1296,6 @@ pub mod text_models_inputs_processor {
             _: Option<Arc<Tokenizer>>,
             input_seqs: &mut [&mut Sequence],
             is_prompt: bool,
-            is_xlora: bool,
             device: &Device,
             no_kv_cache: bool,
             last_n_context_len: Option<(usize, usize)>,
@@ -1311,121 +1306,7 @@ pub mod text_models_inputs_processor {
             mapper: Option<&dyn DeviceMapper>,
         ) -> Result<InputProcessorOutput> {
             let flash_sliding_window = if no_kv_cache { None } else { sliding_window };
-            if is_xlora && !is_prompt {
-                let prompt = get_prompt_input(
-                    input_seqs
-                        .iter()
-                        .map(|seq| seq.get_toks())
-                        .collect::<Vec<_>>(),
-                    input_seqs,
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata.as_mut(),
-                    mapper,
-                    flash_sliding_window,
-                )?;
-                let completion = get_completion_input(
-                    input_seqs
-                        .iter()
-                        .map(|seq| seq.get_toks())
-                        .collect::<Vec<_>>(),
-                    input_seqs,
-                    device,
-                    no_kv_cache,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata.as_mut(),
-                    mapper,
-                    flash_sliding_window,
-                )?;
-                let InnerInputProcessorOutput {
-                    inputs:
-                        InputMetadata {
-                            input: input_ids_full,
-                            positions: seqlen_offsets_full,
-                            context_lens: _,
-                            position_ids,
-                            paged_attn_meta: _,
-                            flash_meta: flash_meta_full,
-                        },
-                    seq_indices,
-                } = prompt;
-                let InnerInputProcessorOutput {
-                    inputs:
-                        InputMetadata {
-                            input: input_ids,
-                            positions: seqlen_offsets,
-                            context_lens,
-                            position_ids: _,
-                            paged_attn_meta,
-                            flash_meta,
-                        },
-                    seq_indices: _,
-                } = completion;
-                let adapter_leases = adapter_leases(input_seqs, &seq_indices);
-                let inputs: Box<dyn Any> = Box::new(ModelInputs {
-                    input_ids,
-                    input_ids_full: Some(input_ids_full),
-                    seqlen_offsets,
-                    seqlen_offsets_full: Some(seqlen_offsets_full),
-                    context_lens,
-                    position_ids,
-                    paged_attn_meta,
-                    flash_meta,
-                    flash_meta_full: Some(flash_meta_full),
-                    recurrent_batch_kind: RecurrentBatchKind::Decode,
-                    adapter_leases,
-                });
-                Ok(InputProcessorOutput {
-                    inputs,
-                    seq_indices,
-                })
-            } else if is_xlora && is_prompt {
-                let metadata = get_prompt_input(
-                    input_seqs
-                        .iter()
-                        .map(|seq| seq.get_toks())
-                        .collect::<Vec<_>>(),
-                    input_seqs,
-                    device,
-                    last_n_context_len,
-                    return_raw_logits,
-                    paged_attn_metadata.as_mut(),
-                    mapper,
-                    flash_sliding_window,
-                )?;
-                let InnerInputProcessorOutput {
-                    inputs:
-                        InputMetadata {
-                            input: input_ids,
-                            positions: seqlen_offsets,
-                            context_lens,
-                            position_ids,
-                            paged_attn_meta,
-                            flash_meta,
-                        },
-                    seq_indices,
-                } = metadata;
-                let adapter_leases = adapter_leases(input_seqs, &seq_indices);
-                let inputs: Box<dyn Any> = Box::new(ModelInputs {
-                    input_ids: input_ids.clone(),
-                    input_ids_full: Some(input_ids),
-                    seqlen_offsets: seqlen_offsets.clone(),
-                    seqlen_offsets_full: Some(seqlen_offsets),
-                    context_lens,
-                    position_ids,
-                    paged_attn_meta,
-                    flash_meta: flash_meta.clone(),
-                    flash_meta_full: Some(flash_meta),
-                    recurrent_batch_kind: RecurrentBatchKind::Prefill,
-                    adapter_leases,
-                });
-                Ok(InputProcessorOutput {
-                    inputs,
-                    seq_indices,
-                })
-            } else if is_prompt {
+            if is_prompt {
                 let metadata = get_prompt_input(
                     input_seqs
                         .iter()
@@ -1454,14 +1335,11 @@ pub mod text_models_inputs_processor {
                 let adapter_leases = adapter_leases(input_seqs, &seq_indices);
                 let inputs: Box<dyn Any> = Box::new(ModelInputs {
                     input_ids,
-                    input_ids_full: None,
                     seqlen_offsets,
-                    seqlen_offsets_full: None,
                     context_lens,
                     position_ids,
                     paged_attn_meta,
                     flash_meta,
-                    flash_meta_full: None,
                     recurrent_batch_kind: RecurrentBatchKind::Prefill,
                     adapter_leases,
                 });
@@ -1503,14 +1381,11 @@ pub mod text_models_inputs_processor {
                 let adapter_leases = adapter_leases(input_seqs, &seq_indices);
                 let inputs: Box<dyn Any> = Box::new(ModelInputs {
                     input_ids,
-                    input_ids_full: None,
                     seqlen_offsets,
-                    seqlen_offsets_full: None,
                     context_lens,
                     position_ids,
                     paged_attn_meta,
                     flash_meta,
-                    flash_meta_full: None,
                     recurrent_batch_kind,
                     adapter_leases,
                 });

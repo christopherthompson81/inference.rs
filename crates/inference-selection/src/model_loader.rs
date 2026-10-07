@@ -1,6 +1,4 @@
-use std::{fs::File, path::PathBuf};
-
-use anyhow::Context;
+use std::path::PathBuf;
 
 use crate::ModelSelected;
 
@@ -9,12 +7,10 @@ use inference_core::{
     EmbeddingSpecificConfig, GGMLLoaderBuilder, GGMLSpecificConfig, GGUF_MULTI_FILE_DELIMITER,
     GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOverrides,
     Loader, LoaderSource, ModelDType, ModelLoaderConfig, MtpConfig, MultimodalLoaderBuilder,
-    MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig, Ordering, SpeechLoader,
-    Topology, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
+    MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig, SpeechLoader, Topology,
+    UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
 };
 
-const ORDERING_REQUIRED: &str = "X-LoRA and legacy LoRA need an ordering file: give `order` (`--xlora-order`, \
-                                 `--legacy-lora-order`)";
 const UNRESOLVED_SOURCE: &str = "the spec's `quant`, empty GGUF filename or projector choice has to be resolved before loading; \
                                  `Engine::load` and `selection::quant::resolve_model_source` do it";
 
@@ -128,24 +124,6 @@ fn resolve_topology(
     }
 }
 
-fn with_gguf_tokenizer(
-    builder: GGUFLoaderBuilder,
-    tokenizer_json: Option<String>,
-) -> GGUFLoaderBuilder {
-    match tokenizer_json {
-        Some(tokenizer_json) => builder.with_tokenizer_json(tokenizer_json),
-        None => builder,
-    }
-}
-
-fn resolve_ordering(inline: &Option<Ordering>, path: &str) -> anyhow::Result<Ordering> {
-    match inline {
-        Some(ordering) => Ok(ordering.clone()),
-        None if path.trim().is_empty() => anyhow::bail!(ORDERING_REQUIRED),
-        None => load_ordering(path),
-    }
-}
-
 fn uqff_paths(from_uqff: Option<String>) -> Option<Vec<PathBuf>> {
     from_uqff.map(|paths| {
         paths
@@ -160,12 +138,6 @@ fn gguf_files(names: &str) -> Vec<String> {
         .split(GGUF_MULTI_FILE_DELIMITER)
         .map(ToOwned::to_owned)
         .collect()
-}
-
-fn load_ordering(path: &str) -> anyhow::Result<Ordering> {
-    let file =
-        File::open(path).with_context(|| format!("Could not load ordering file at {path}"))?;
-    Ok(serde_json::from_reader(file)?)
 }
 
 /// The options every safetensors model kind takes; the per-kind configs are all built from one of these.
@@ -238,47 +210,14 @@ impl SafetensorsOptions {
     }
 }
 
-pub fn get_tgt_non_granular_index(model: &ModelSelected) -> Option<usize> {
-    match model {
-        ModelSelected::Plain { .. }
-        | ModelSelected::Run { .. }
-        | ModelSelected::Lora { .. }
-        | ModelSelected::GGUF { .. }
-        | ModelSelected::LoraGGUF { .. }
-        | ModelSelected::GGML { .. }
-        | ModelSelected::LoraGGML { .. }
-        | ModelSelected::MultimodalPlain { .. }
-        | ModelSelected::DiffusionPlain { .. }
-        | ModelSelected::Speech { .. }
-        | ModelSelected::Embedding { .. } => None,
-        ModelSelected::XLora {
-            tgt_non_granular_index,
-            ..
-        }
-        | ModelSelected::XLoraGGUF {
-            tgt_non_granular_index,
-            ..
-        }
-        | ModelSelected::XLoraGGML {
-            tgt_non_granular_index,
-            ..
-        } => *tgt_non_granular_index,
-    }
-}
-
 pub fn get_model_dtype(model: &ModelSelected) -> anyhow::Result<ModelDType> {
     match model {
         ModelSelected::Plain { dtype, .. }
         | ModelSelected::Lora { dtype, .. }
-        | ModelSelected::XLora { dtype, .. }
         | ModelSelected::MultimodalPlain { dtype, .. }
         | ModelSelected::DiffusionPlain { dtype, .. }
         | ModelSelected::GGML { dtype, .. }
         | ModelSelected::GGUF { dtype, .. }
-        | ModelSelected::XLoraGGUF { dtype, .. }
-        | ModelSelected::XLoraGGML { dtype, .. }
-        | ModelSelected::LoraGGUF { dtype, .. }
-        | ModelSelected::LoraGGML { dtype, .. }
         | ModelSelected::Run { dtype, .. }
         | ModelSelected::Speech { dtype, .. }
         | ModelSelected::Embedding { dtype, .. } => Ok(*dtype),
@@ -292,32 +231,7 @@ pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoD
             max_batch_size,
             ..
         }
-        | ModelSelected::XLora {
-            max_seq_len,
-            max_batch_size,
-            ..
-        }
         | ModelSelected::GGML {
-            max_seq_len,
-            max_batch_size,
-            ..
-        }
-        | ModelSelected::XLoraGGUF {
-            max_seq_len,
-            max_batch_size,
-            ..
-        }
-        | ModelSelected::XLoraGGML {
-            max_seq_len,
-            max_batch_size,
-            ..
-        }
-        | ModelSelected::LoraGGUF {
-            max_seq_len,
-            max_batch_size,
-            ..
-        }
-        | ModelSelected::LoraGGML {
             max_seq_len,
             max_batch_size,
             ..
@@ -426,13 +340,11 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         ModelSelected::Plain { .. }
             | ModelSelected::Run { .. }
             | ModelSelected::Lora { .. }
-            | ModelSelected::XLora { .. }
             | ModelSelected::MultimodalPlain { .. }
     );
     if args.hf_config_overrides.is_some() && !supports_hf_config_overrides {
         anyhow::bail!("HF config overrides are supported only for text and multimodal models");
     }
-    // the legacy X-LoRA / LoRA GGUF pipelines take their length from the model and cannot cap it
     let supports_max_model_len =
         supports_hf_config_overrides || matches!(&args.model, ModelSelected::GGUF { .. });
     if args.max_model_len.is_some() && !supports_max_model_len {
@@ -444,7 +356,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
     }
     let base = SafetensorsOptions::from_args(&args);
     let inline_topology = args.overrides.topology.clone();
-    let inline_ordering = args.overrides.ordering.clone();
     let loader: Box<dyn Loader> = match args.model {
         ModelSelected::Plain {
             model_id,
@@ -602,47 +513,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                 .map(|generation| generation.into_config(arch))
                 .or(args.overrides.speech_cfg),
         }),
-        ModelSelected::XLora {
-            model_id,
-            quant: _,
-            xlora_model_id,
-            order,
-            tokenizer_json,
-            tgt_non_granular_index,
-            arch,
-            dtype: _,
-            topology,
-            write_uqff,
-            from_uqff,
-            max_seq_len: _,
-            max_batch_size: _,
-            hf_cache_path,
-            organization,
-        } => {
-            let options = SafetensorsOptions {
-                topology: resolve_topology(&inline_topology, topology)?,
-                organization: organization.unwrap_or_default(),
-                write_uqff,
-                from_uqff: uqff_paths(from_uqff),
-                hf_cache_path,
-                ..base.clone()
-            };
-            NormalLoaderBuilder::new(
-                options.normal(),
-                args.chat_template,
-                tokenizer_json,
-                model_id,
-                args.no_kv_cache,
-                args.jinja_explicit,
-            )
-            .with_xlora(
-                xlora_model_id,
-                resolve_ordering(&inline_ordering, &order)?,
-                args.no_kv_cache,
-                tgt_non_granular_index,
-            )
-            .build(arch)?
-        }
         ModelSelected::Lora {
             model_id,
             quant: _,
@@ -764,95 +634,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             }
             builder.build()
         }
-        ModelSelected::XLoraGGUF {
-            tok_model_id,
-            quantized_model_id,
-            quantized_filename,
-            xlora_model_id,
-            order,
-            tgt_non_granular_index,
-            topology,
-            tokenizer_json,
-            organization,
-            write_uqff,
-            imatrix,
-            calibration_file,
-            hf_cache_path,
-            matformer_config_path,
-            matformer_slice_name,
-            ..
-        } => {
-            let builder = GGUFLoaderBuilder::new(
-                args.chat_template,
-                tok_model_id,
-                quantized_model_id,
-                gguf_files(&quantized_filename),
-                GGUFSpecificConfig {
-                    topology: resolve_topology(&inline_topology, topology)?,
-                    organization: organization.unwrap_or_default(),
-                    write_uqff,
-                    imatrix,
-                    calibration_file,
-                    hf_cache_path,
-                    matformer_config_path,
-                    matformer_slice_name,
-                    ..Default::default()
-                },
-                args.no_kv_cache,
-                args.jinja_explicit,
-            )
-            .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
-            .with_xlora(
-                xlora_model_id,
-                resolve_ordering(&inline_ordering, &order)?,
-                args.no_kv_cache,
-                tgt_non_granular_index,
-            );
-            with_gguf_tokenizer(builder, tokenizer_json).build()
-        }
-        ModelSelected::LoraGGUF {
-            tok_model_id,
-            quantized_model_id,
-            quantized_filename,
-            adapters_model_id,
-            order,
-            topology,
-            tokenizer_json,
-            organization,
-            write_uqff,
-            imatrix,
-            calibration_file,
-            hf_cache_path,
-            matformer_config_path,
-            matformer_slice_name,
-            ..
-        } => {
-            let builder = GGUFLoaderBuilder::new(
-                args.chat_template,
-                tok_model_id,
-                quantized_model_id,
-                gguf_files(&quantized_filename),
-                GGUFSpecificConfig {
-                    topology: resolve_topology(&inline_topology, topology)?,
-                    organization: organization.unwrap_or_default(),
-                    write_uqff,
-                    imatrix,
-                    calibration_file,
-                    hf_cache_path,
-                    matformer_config_path,
-                    matformer_slice_name,
-                    ..Default::default()
-                },
-                args.no_kv_cache,
-                args.jinja_explicit,
-            )
-            .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
-            .with_lora(
-                adapters_model_id,
-                resolve_ordering(&inline_ordering, &order)?,
-            );
-            with_gguf_tokenizer(builder, tokenizer_json).build()
-        }
         ModelSelected::GGML {
             tok_model_id,
             tokenizer_json,
@@ -873,65 +654,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             quantized_filename,
             args.no_kv_cache,
             args.jinja_explicit,
-        )
-        .build(),
-        ModelSelected::XLoraGGML {
-            tok_model_id,
-            tokenizer_json,
-            quantized_model_id,
-            quantized_filename,
-            xlora_model_id,
-            order,
-            tgt_non_granular_index,
-            gqa,
-            topology,
-            ..
-        } => GGMLLoaderBuilder::new(
-            GGMLSpecificConfig {
-                gqa,
-                topology: resolve_topology(&inline_topology, topology)?,
-            },
-            args.chat_template,
-            tokenizer_json,
-            tok_model_id,
-            quantized_model_id,
-            quantized_filename,
-            args.no_kv_cache,
-            args.jinja_explicit,
-        )
-        .with_xlora(
-            xlora_model_id,
-            resolve_ordering(&inline_ordering, &order)?,
-            args.no_kv_cache,
-            tgt_non_granular_index,
-        )
-        .build(),
-        ModelSelected::LoraGGML {
-            tok_model_id,
-            tokenizer_json,
-            quantized_model_id,
-            quantized_filename,
-            adapters_model_id,
-            order,
-            gqa,
-            topology,
-            ..
-        } => GGMLLoaderBuilder::new(
-            GGMLSpecificConfig {
-                gqa,
-                topology: resolve_topology(&inline_topology, topology)?,
-            },
-            args.chat_template,
-            tokenizer_json,
-            tok_model_id,
-            quantized_model_id,
-            quantized_filename,
-            args.no_kv_cache,
-            args.jinja_explicit,
-        )
-        .with_lora(
-            adapters_model_id,
-            resolve_ordering(&inline_ordering, &order)?,
         )
         .build(),
         ModelSelected::Embedding {
@@ -967,11 +689,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
 mod tests {
     use super::*;
 
-    const XLORA_ORDERING: &str = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/../../configs/orderings/xlora-paper-ordering.json"
-    );
-
     fn selected(json: serde_json::Value) -> ModelSelected {
         serde_json::from_value(json).unwrap()
     }
@@ -986,16 +703,6 @@ mod tests {
         assert_eq!(uqff_paths(None), None);
         let gguf = format!("x-00001.gguf{GGUF_MULTI_FILE_DELIMITER}x-00002.gguf");
         assert_eq!(gguf_files(&gguf), vec!["x-00001.gguf", "x-00002.gguf"]);
-    }
-
-    #[test]
-    fn a_missing_ordering_file_is_an_error_not_a_panic() {
-        let err = load_ordering("/nonexistent/ordering.json").unwrap_err();
-        assert!(
-            err.to_string().contains("/nonexistent/ordering.json"),
-            "{err}"
-        );
-        assert!(load_ordering(XLORA_ORDERING).is_ok());
     }
 
     #[test]
@@ -1079,46 +786,6 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("not supported"), "{err}");
-        // the legacy X-LoRA GGUF pipeline cannot cap its length, so the flag is refused rather than ignored
-        let xlora_gguf = selected(serde_json::json!({"XLoraGGUF": {
-            "quantized_model_id": "q",
-            "quantized_filename": "q.gguf",
-            "xlora_model_id": "x",
-            "order": XLORA_ORDERING,
-            "dtype": "auto",
-            "max_seq_len": 4096,
-            "max_batch_size": 1,
-        }}));
-        let err = LoaderBuilder::new(xlora_gguf)
-            .with_max_model_len(Some(1024))
-            .build()
-            .err()
-            .unwrap();
-        assert!(err.to_string().contains("not supported"), "{err}");
-    }
-
-    #[test]
-    fn inline_ordering_is_used_over_the_order_path() -> anyhow::Result<()> {
-        let xlora_gguf = || {
-            selected(serde_json::json!({"XLoraGGUF": {
-                "quantized_model_id": "q",
-                "quantized_filename": "q.gguf",
-                "xlora_model_id": "x",
-                "order": "",
-                "dtype": "auto",
-                "max_seq_len": 4096,
-                "max_batch_size": 1,
-            }}))
-        };
-        let error = LoaderBuilder::new(xlora_gguf()).build().err().unwrap();
-        assert_eq!(error.to_string(), ORDERING_REQUIRED);
-        LoaderBuilder::new(xlora_gguf())
-            .with_overrides(LoadOverrides {
-                ordering: Some(load_ordering(XLORA_ORDERING)?),
-                ..Default::default()
-            })
-            .build()?;
-        Ok(())
     }
 
     #[test]

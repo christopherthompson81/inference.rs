@@ -10,11 +10,7 @@ use inference_api::{
     sdk::GGUF_MULTI_FILE_DELIMITER,
 };
 
-use crate::{EngineLoadError, Model, error::Result, load::LoadOptions};
-
-const STATIC_WITH_DYNAMIC_LORA: &str = "cannot combine static adapters with runtime LoRA; use `GgufModelBuilder` directly for runtime adapters";
-const STATIC_WITH_MMPROJ: &str =
-    "static adapters do not support multimodal GGUF; use `GgufModelBuilder::with_lora_adapter`";
+use crate::{Model, error::Result, load::LoadOptions};
 
 /// Loads a GGUF model from a repository or local directory; every option has the engine's default until set.
 pub struct GgufModelBuilder {
@@ -179,19 +175,6 @@ impl GgufModelBuilder {
     pub fn with_matformer_slice_name(mut self, name: String) -> Self {
         self.matformer_slice_name = Some(name);
         self
-    }
-
-    // The LoRA and X-LoRA wrappers load fixed adapters, which neither runtime LoRA nor a projector can join.
-    pub(crate) fn check_static_adapters(&self, wrapper: &str) -> Result<()> {
-        let refused =
-            |reason: &str| EngineLoadError::InvalidSpec(format!("`{wrapper}` {reason}")).into();
-        if self.lora_adapters.is_some() {
-            return Err(refused(STATIC_WITH_DYNAMIC_LORA));
-        }
-        if self.mmproj_files.is_some() {
-            return Err(refused(STATIC_WITH_MMPROJ));
-        }
-        Ok(())
     }
 
     pub(crate) fn quantized_filename(&self) -> String {

@@ -1,19 +1,18 @@
 use super::llg::build_llg_factory;
 use super::{
-    AdapterKind, CacheManager, GeneralMetadata, Loader, ModelKind, ModelPaths, QuantizationKind,
-    TokenSource, text_models_inputs_processor::ModelInputs,
-};
-use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqPipelineMixin,
     MetadataMixin, ModelCategory, PreProcessingMixin,
 };
+use super::{
+    GeneralMetadata, Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource,
+    text_models_inputs_processor::ModelInputs,
+};
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
-use crate::lora::Ordering;
+#[cfg(feature = "models-llama")]
+use crate::models::quantized_llama::ModelWeights as QLlama;
 use crate::pipeline::ChatTemplate;
-use crate::pipeline::cache_manager::FullCacheManager;
 use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
-use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{Modalities, SupportedModality, get_chat_template};
@@ -22,18 +21,13 @@ use crate::sequence::Sequence;
 use crate::utils::debug::DEBUG;
 use crate::utils::debug::DeviceRepr;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::xlora_models::NonGranularState;
-use crate::{
-    DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, get_mut_arcmutex,
-};
-#[cfg(feature = "models-llama")]
-use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLoraQLlama};
+use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
+use inference_nn::gguf::QuantizedModel;
 use inference_quant::IsqType;
 use inference_tensor::quantized::ggml_file;
-use inference_tensor::{Device, Tensor};
+use inference_tensor::{DType, Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::fs;
@@ -45,10 +39,8 @@ use tracing::{debug, info, trace, warn};
 pub struct GGMLPipeline {
     model: Box<dyn QuantizedModel>,
     tokenizer: Arc<Tokenizer>,
-    no_kv_cache: bool,
     chat_template: Arc<ChatTemplate>,
     model_id: String,
-    non_granular_state: Option<NonGranularState>,
     metadata: Arc<GeneralMetadata>,
     generation_defaults: Option<crate::ModelGenerationDefaults>,
 }
@@ -59,13 +51,10 @@ pub struct GGMLLoader {
     config: GGMLSpecificConfig,
     quantized_model_id: Option<String>,
     quantized_filename: Option<String>,
-    xlora_model_id: Option<String>,
-    xlora_order: Option<Ordering>,
     no_kv_cache: bool,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
     kind: ModelKind,
-    tgt_non_granular_index: Option<usize>,
     jinja_explicit: Option<String>,
 }
 
@@ -83,13 +72,10 @@ pub struct GGMLLoaderBuilder {
     config: GGMLSpecificConfig,
     quantized_model_id: String,
     quantized_filename: String,
-    xlora_model_id: Option<String>,
     kind: ModelKind,
-    xlora_order: Option<Ordering>,
     no_kv_cache: bool,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
-    tgt_non_granular_index: Option<usize>,
     jinja_explicit: Option<String>,
 }
 
@@ -119,113 +105,21 @@ impl GGMLLoaderBuilder {
             quantized_model_id,
             no_kv_cache,
             jinja_explicit,
-            ..Default::default()
         }
-    }
-
-    fn with_adapter(
-        mut self,
-        xlora_model_id: String,
-        xlora_order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.xlora_model_id = Some(xlora_model_id);
-        self.xlora_order = Some(xlora_order);
-        self.no_kv_cache = no_kv_cache;
-        self.tgt_non_granular_index = tgt_non_granular_index;
-        self.model_id = if let Some(id) = self.model_id {
-            Some(id)
-        } else {
-            info!(
-                "Using adapter base model ID: `{}`",
-                self.xlora_order.as_ref().unwrap().base_model_id
-            );
-            Some(self.xlora_order.as_ref().unwrap().base_model_id.clone())
-        };
-        self
-    }
-
-    pub fn with_xlora(
-        mut self,
-        xlora_model_id: String,
-        xlora_order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.kind = (AdapterKind::XLora, QuantizationKind::Ggml).into();
-
-        self.with_adapter(
-            xlora_model_id,
-            xlora_order,
-            no_kv_cache,
-            tgt_non_granular_index,
-        )
-    }
-
-    pub fn with_lora(mut self, lora_model_id: String, lora_order: Ordering) -> Self {
-        self.kind = (AdapterKind::Lora, QuantizationKind::Ggml).into();
-
-        self.with_adapter(lora_model_id, lora_order, false, None)
     }
 
     pub fn build(self) -> Box<dyn Loader> {
         Box::new(GGMLLoader {
             model_id: self.model_id.unwrap(),
             config: self.config,
-            xlora_model_id: self.xlora_model_id,
             kind: self.kind,
-            xlora_order: self.xlora_order,
             no_kv_cache: self.no_kv_cache,
             chat_template: self.chat_template,
             tokenizer_json: self.tokenizer_json,
-            tgt_non_granular_index: self.tgt_non_granular_index,
             quantized_filename: Some(self.quantized_filename),
             quantized_model_id: Some(self.quantized_model_id),
             jinja_explicit: self.jinja_explicit,
         })
-    }
-}
-
-impl GGMLLoader {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        model_id: Option<String>,
-        config: GGMLSpecificConfig,
-        quantized_model_id: Option<String>,
-        quantized_filename: Option<String>,
-        xlora_model_id: Option<String>,
-        kind: ModelKind,
-        xlora_order: Option<Ordering>,
-        no_kv_cache: bool,
-        chat_template: Option<String>,
-        tokenizer_json: Option<String>,
-        tgt_non_granular_index: Option<usize>,
-        jinja_explicit: Option<String>,
-    ) -> Self {
-        let model_id = if let Some(id) = model_id {
-            id
-        } else {
-            info!(
-                "Using adapter base model ID: `{}`",
-                xlora_order.as_ref().unwrap().base_model_id
-            );
-            xlora_order.as_ref().unwrap().base_model_id.clone()
-        };
-        Self {
-            model_id,
-            config,
-            quantized_model_id,
-            quantized_filename,
-            xlora_model_id,
-            xlora_order,
-            no_kv_cache,
-            chat_template,
-            tokenizer_json,
-            kind,
-            tgt_non_granular_index,
-            jinja_explicit,
-        }
     }
 }
 
@@ -303,26 +197,8 @@ impl Loader for GGMLLoader {
             paged_attn_config
         };
 
-        let has_adapter = self.kind.is_adapted();
-        let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
         let internal_dtype = dtype.try_into_dtype(&[device]).unwrap();
-
-        let model_config = {
-            // Base config (quantization only):
-            let quant = ModelConfig::ParamsGGML((model, self.config.gqa, internal_dtype).into());
-
-            // With optional adapter config:
-            let mut adapter = None;
-            if has_adapter {
-                adapter.replace(ModelConfig::Adapter::try_new(
-                    paths, device, silent, is_xlora,
-                )?);
-            }
-
-            ModelConfig::ModelParams::new(quant, adapter)
-        };
-
-        let model = ggml_model(model_config)?;
+        let model = ggml_model(model, self.config.gqa, internal_dtype)?;
 
         let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
         let gen_conf: Option<GenerationConfig> = paths
@@ -350,15 +226,8 @@ impl Loader for GGMLLoader {
         Ok(Arc::new(Mutex::new(GGMLPipeline {
             model,
             tokenizer: tokenizer.into(),
-            no_kv_cache: self.no_kv_cache,
             chat_template: Arc::new(chat_template),
             model_id: self.model_id.clone(),
-            non_granular_state: self.tgt_non_granular_index.map(|tgt_non_granular_index| {
-                NonGranularState {
-                    non_granular_index: Arc::new(Mutex::new(0)),
-                    tgt_non_granular_index,
-                }
-            }),
             metadata: Arc::new(GeneralMetadata {
                 max_seq_len,
                 llg_factory: Some(llg_factory),
@@ -367,7 +236,6 @@ impl Loader for GGMLLoader {
                 num_hidden_layers,
                 eos_tok: eos,
                 kind: self.kind.clone(),
-                is_xlora,
                 activation_dtype: internal_dtype,
                 sliding_window: None,
                 cache_config: None,
@@ -409,12 +277,7 @@ impl Loader for GGMLLoader {
                 silent,
                 loading_uqff: false,
             },
-            crate::pipeline::AdapterPathOptions {
-                xlora_model_id: self.xlora_model_id.as_ref(),
-                lora_adapters: None,
-                xlora_order: self.xlora_order.as_ref(),
-                xlora_preload: crate::pipeline::XLoraPreload::Load,
-            },
+            None,
         );
         self.load_model_from_path(
             &paths?,
@@ -428,10 +291,7 @@ impl Loader for GGMLLoader {
     }
 
     fn get_id(&self) -> String {
-        self.xlora_model_id
-            .as_deref()
-            .unwrap_or(&self.model_id)
-            .to_string()
+        self.model_id.clone()
     }
 
     fn get_kind(&self) -> ModelKind {
@@ -458,29 +318,23 @@ impl IsqPipelineMixin for GGMLPipeline {
 
 impl CacheManagerMixin for GGMLPipeline {
     fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
-        FullCacheManager.clone_in_cache(self as &dyn Pipeline, seqs, false)
+        super::cache_manager::clone_in_cache_by_kind(self, seqs)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
-        FullCacheManager.clone_out_cache(self as &dyn Pipeline, seqs, false)
+        super::cache_manager::clone_out_cache_by_kind(self, seqs)
     }
     fn set_none_cache(
         &self,
         seqs: &mut [&mut Sequence],
-        reset_non_granular: bool,
         modify_draft_cache: bool,
-
         load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
-        FullCacheManager.set_none_cache(
-            self as &dyn Pipeline,
+        super::cache_manager::set_none_cache_by_kind(
+            self,
             seqs,
             modify_draft_cache,
             load_preallocated_cache,
-        )?;
-        if reset_non_granular {
-            self.reset_non_granular_state()
-        }
-        Ok(())
+        )
     }
     fn cache(&self) -> &EitherCache {
         self.model.cache()
@@ -496,12 +350,6 @@ impl MetadataMixin for GGMLPipeline {
     }
     fn name(&self) -> String {
         self.model_id.clone()
-    }
-    fn reset_non_granular_state(&self) {
-        if let Some(s) = self.non_granular_state.as_ref() {
-            *self.cache().full().get_scalings_cache() = None;
-            *get_mut_arcmutex!(s.non_granular_index) = 0;
-        }
     }
     fn get_metadata(&self) -> Arc<GeneralMetadata> {
         self.metadata.clone()
@@ -530,28 +378,17 @@ impl Pipeline for GGMLPipeline {
     ) -> Result<ForwardInputsResult, inference_tensor::Error> {
         let ModelInputs {
             input_ids,
-            input_ids_full,
             seqlen_offsets,
-            seqlen_offsets_full,
             context_lens,
             position_ids: _,    // NOTE(EricLBuehler): ignore, it is for phi3
             paged_attn_meta: _, // NOTE(EricLBuehler): ignore it for ggml
-            flash_meta,         // NOTE(EricLBuehler): ignore it for ggml dequant into f32
-            flash_meta_full,    // NOTE(EricLBuehler): ignore it for ggml dequant into f32
+            flash_meta: _,
             recurrent_batch_kind: _,
             adapter_leases: _adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
-        let logits = self.model.forward_step(QuantizedForwardInputs {
-            input_ids: &input_ids,
-            input_ids_full: input_ids_full.as_ref().unwrap_or(&input_ids),
-            seqlen_offsets: &seqlen_offsets,
-            seqlen_offsets_full: seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-            no_kv_cache: self.no_kv_cache,
-            non_granular_state: &self.non_granular_state,
-            context_lens,
-            flash_params: &flash_meta,
-            flash_params_full: flash_meta_full.as_ref().unwrap_or(&flash_meta),
-        })?;
+        let logits = self
+            .model
+            .forward_step(&input_ids, &seqlen_offsets, context_lens)?;
         if return_raw_logits {
             Ok(ForwardInputsResult::RawLogits { logits })
         } else {
@@ -577,18 +414,16 @@ impl AnyMoePipelineMixin for GGMLPipeline {}
 
 // GGML files carry no architecture; they are all Llama models.
 #[cfg(feature = "models-llama")]
-fn ggml_model(
-    config: ModelConfig::ModelParams<'_, ModelConfig::ParamsGGML>,
-) -> Result<Box<dyn QuantizedModel>> {
-    Ok(match config {
-        ModelConfig::ModelParams::Quantized(_) => Box::new(QLlama::try_from(config)?),
-        ModelConfig::ModelParams::Adapted(_) => Box::new(XLoraQLlama::try_from(config)?),
-    })
+fn ggml_model(ct: ggml_file::Content, gqa: usize, dtype: DType) -> Result<Box<dyn QuantizedModel>> {
+    use inference_nn::gguf::FromGGML;
+    Ok(Box::new(QLlama::from_ggml(ct, gqa, dtype)?))
 }
 
 #[cfg(not(feature = "models-llama"))]
 fn ggml_model(
-    _config: ModelConfig::ModelParams<'_, ModelConfig::ParamsGGML>,
+    _ct: ggml_file::Content,
+    _gqa: usize,
+    _dtype: DType,
 ) -> Result<Box<dyn QuantizedModel>> {
     anyhow::bail!("GGML models are Llama models, which this build leaves out (`models-llama`)")
 }

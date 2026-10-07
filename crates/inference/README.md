@@ -37,7 +37,7 @@ async fn main() -> inference::error::Result<()> {
 | Structured output | `Model::generate_structured` | `examples/rust/advanced/json_schema/` |
 | Tool calling | `Tool`, `ToolChoice` | `examples/rust/advanced/tools/` |
 | Agents (the engine's tool loop) | `with_tool`, `with_max_tool_rounds` | `examples/rust/advanced/agent/` |
-| LoRA / X-LoRA | `LoraModelBuilder`, `XLoraModelBuilder` | `examples/rust/advanced/lora/` |
+| LoRA | `LoraModelBuilder` | `examples/rust/advanced/lora/` |
 | AnyMoE | `AnyMoeModelBuilder` | `examples/rust/advanced/anymoe/` |
 | MCP client | `McpClientConfig` | `examples/rust/advanced/mcp_client/` |
 

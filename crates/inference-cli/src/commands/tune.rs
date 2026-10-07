@@ -186,7 +186,7 @@ fn validate_adapter_options(model_type: &ModelType) -> Result<()> {
         ModelType::Multimodal { adapter, .. } => {
             if adapter.dynamic_lora_enabled() {
                 anyhow::bail!(
-                    "tune does not account for adapter memory or emit adapter configuration; rerun without LoRA or X-LoRA options"
+                    "tune does not account for adapter memory or emit adapter configuration; rerun without LoRA options"
                 );
             }
             Ok(())
@@ -198,9 +198,9 @@ fn validate_adapter_options(model_type: &ModelType) -> Result<()> {
 }
 
 fn reject_configured_adapters(adapter: &AdapterOptions) -> Result<()> {
-    if adapter.dynamic_lora_enabled() || adapter.legacy_lora.is_some() || adapter.xlora.is_some() {
+    if adapter.dynamic_lora_enabled() {
         anyhow::bail!(
-            "tune does not account for adapter memory or emit adapter configuration; rerun without LoRA or X-LoRA options"
+            "tune does not account for adapter memory or emit adapter configuration; rerun without LoRA options"
         );
     }
     Ok(())
@@ -274,13 +274,8 @@ fn model_dtype(model_selected: &ModelSelected) -> Option<&'static str> {
     match model_selected {
         ModelSelected::Plain { dtype, .. }
         | ModelSelected::Lora { dtype, .. }
-        | ModelSelected::XLora { dtype, .. }
         | ModelSelected::GGUF { dtype, .. }
         | ModelSelected::GGML { dtype, .. }
-        | ModelSelected::LoraGGUF { dtype, .. }
-        | ModelSelected::XLoraGGUF { dtype, .. }
-        | ModelSelected::LoraGGML { dtype, .. }
-        | ModelSelected::XLoraGGML { dtype, .. }
         | ModelSelected::MultimodalPlain { dtype, .. }
         | ModelSelected::DiffusionPlain { dtype, .. }
         | ModelSelected::Run { dtype, .. }

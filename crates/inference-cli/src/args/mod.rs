@@ -1470,27 +1470,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_raw_lora_does_not_conflict_with_default_runtime_limits() {
-        let cli = Cli::try_parse_from([
-            "inference",
-            "run",
-            "-m",
-            "org/raw-model",
-            "--format",
-            "gguf",
-            "-f",
-            "model.gguf",
-            "--legacy-lora",
-            "org/legacy-lora",
-            "--legacy-lora-order",
-            "order.json",
-        ]);
-        if let Err(error) = cli {
-            panic!("{error}");
-        }
-    }
-
-    #[test]
     fn explicit_multimodal_accepts_dynamic_lora_options() {
         let cli = Cli::try_parse_from([
             "inference",
@@ -1516,7 +1495,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_multimodal_help_lists_only_dynamic_adapter_options() {
+    fn explicit_multimodal_help_lists_the_lora_options() {
         let help = match Cli::try_parse_from(["inference", "serve", "multimodal", "--help"]) {
             Ok(_) => panic!("expected help output"),
             Err(error) => error.to_string(),
@@ -1524,8 +1503,6 @@ mod tests {
 
         assert!(help.contains("--lora"));
         assert!(help.contains("--enable-lora"));
-        assert!(!help.contains("--legacy-lora"));
-        assert!(!help.contains("--xlora"));
     }
 
     #[test]

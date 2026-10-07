@@ -57,7 +57,7 @@ pub(crate) fn report_pipeline_forward_error<'a>(
             );
             {
                 let p = get_mut_arcmutex!(pipeline);
-                if let Err(reset_err) = p.set_none_cache(seqs, true, true, false) {
+                if let Err(reset_err) = p.set_none_cache(seqs, true, false) {
                     tracing::error!("Failed to reset model cache: {reset_err}");
                 }
             }
@@ -176,10 +176,8 @@ pub(crate) fn report_pipeline_forward_error<'a>(
         }
 
         let p = get_mut_arcmutex!(pipeline);
-        // Also reset non granular state because:
-        // - The sequence is gone
-        // - We should reset the state then, including draft.
-        if let Err(reset_err) = p.set_none_cache(seqs, true, true, false) {
+        // The sequence is gone, so reset the cache, draft included
+        if let Err(reset_err) = p.set_none_cache(seqs, true, false) {
             tracing::error!("Failed to reset model cache: {reset_err}");
         }
         get_mut_arcmutex!(prefix_cacher).evict_all_caches().unwrap();

@@ -120,18 +120,17 @@ are also unsupported. Big-endian GGUF files are not supported.
 | Tokenizer and chat-template discovery | From embedded GGUF metadata or supplied model assets |
 | Multimodal projector discovery | From an unambiguous GGUF repository, or an adjacent projector with the direct local `-f` shorthand |
 | Serving, tool calling, and agents | Same runtime paths as other loads; checkpoint and chat-template support still apply |
-| Dynamic LoRA | Language-model adapters for compatible rotary layouts; adjacent-RoPE layouts are rejected |
+| Dynamic LoRA | Language-model adapters; the architectures below are rejected |
 | Multimodal LoRA | Language-model adapters only; projector, vision, and audio adapters are not supported |
-| Legacy static LoRA | Text GGUF with the `phi3` architecture; not supported with multimodal GGUF |
-| X-LoRA | Text GGUF with the `phi3` architecture; not supported with multimodal GGUF |
 | ISQ requantization | Yes, for compatible weights selected with `-f` |
 | Offline loading | Yes, when every required file is local or cached |
 
-Dynamic LoRA is currently rejected for native GGUF architectures that store Q/K features in
-adjacent rotary order: `llama`, `mistral3`, `deepseek2`, `glm4`, `smollm3`, `granite`,
-`granitemoe`, `granitehybrid`, `llama4`, and `muse-glimmer`. This also covers multimodal models
-routed through those architectures, including Idefics3, Mistral 3/Pixtral, Llama 4, and Muse
-Glimmer. Base-model loading is unaffected.
+Text GGUF models whose converter reordered Q/K rows into adjacent rotary pairs (`llama`,
+`mistral3`, `smollm3`, `granite`, `granitemoe`, `granitehybrid`) accept dynamic LoRA: adapter rows
+are mapped onto that order when the adapter loads. Dynamic LoRA is rejected for `deepseek2` and
+`glm4`, which rotate only part of each head, and for multimodal models routed through
+adjacent-RoPE architectures, including Idefics3, Mistral 3/Pixtral, Llama 4, and Muse Glimmer.
+Base-model loading is unaffected.
 
 GGUF support covers text generation and the multimodal families listed above. GGUF is not a
 loading format for embedding, speech, diffusion, or image-generation pipelines.

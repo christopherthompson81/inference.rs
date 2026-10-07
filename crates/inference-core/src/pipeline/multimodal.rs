@@ -461,12 +461,7 @@ impl Loader for MultimodalLoader {
                 silent,
                 loading_uqff: self.config.from_uqff.is_some(),
             },
-            crate::pipeline::AdapterPathOptions {
-                xlora_model_id: None,
-                lora_adapters: self.lora_adapters.as_deref(),
-                xlora_order: None,
-                xlora_preload: crate::pipeline::XLoraPreload::Skip,
-            },
+            self.lora_adapters.as_deref(),
         );
         if let Some(from_uqff) = self.config.from_uqff.as_ref() {
             let files = super::paths::get_uqff_paths(
@@ -689,7 +684,6 @@ impl Loader for MultimodalLoader {
                     ),
                     _ => None,
                 },
-                xlora: None,
             },
         )?;
         let super::loading::LoadSession {
@@ -915,7 +909,6 @@ impl Loader for MultimodalLoader {
             metadata: Arc::new(GeneralMetadata {
                 max_seq_len,
                 llg_factory: Some(llg_factory),
-                is_xlora: false,
                 num_hidden_layers,
                 eos_tok: eos,
                 kind: self.kind.clone(),
@@ -1023,7 +1016,6 @@ impl CacheManagerMixin for MultimodalPipeline {
     fn set_none_cache(
         &self,
         seqs: &mut [&mut Sequence],
-        reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
@@ -1037,9 +1029,6 @@ impl CacheManagerMixin for MultimodalPipeline {
         self.model
             .reset_model_specific_state_for_sequences(&sequence_ids);
 
-        if reset_non_granular {
-            self.reset_non_granular_state()
-        }
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
@@ -1057,8 +1046,9 @@ impl MetadataMixin for MultimodalPipeline {
     fn name(&self) -> String {
         self.model_id.clone()
     }
-    fn reset_non_granular_state(&self) {
-        self.model.reset_model_specific_state();
+    fn release_sequence_state(&self, sequence_id: usize) {
+        self.model
+            .reset_model_specific_state_for_sequences(&[sequence_id]);
     }
     fn cleanup_cuda_graphs(&self) {
         #[cfg(feature = "cuda")]

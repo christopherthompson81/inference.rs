@@ -210,7 +210,6 @@ impl dyn Pipeline {
             self.tokenizer(),
             seqs,
             ctx.is_prompt,
-            self.get_metadata().is_xlora,
             &self.device(),
             self.get_metadata().no_kv_cache,
             None,
@@ -258,13 +257,7 @@ impl dyn Pipeline {
             CacheInstruction::Nothing => (),
             CacheInstruction::Reset {
                 load_preallocated_cache,
-                reset_non_granular,
-            } => self.set_none_cache(
-                input_seqs,
-                reset_non_granular,
-                false,
-                load_preallocated_cache,
-            )?,
+            } => self.set_none_cache(input_seqs, false, load_preallocated_cache)?,
             _ => unreachable!("Unreachable PRE cache op."),
         }
 
@@ -282,13 +275,7 @@ impl dyn Pipeline {
             CacheInstruction::Nothing => (),
             CacheInstruction::Reset {
                 load_preallocated_cache,
-                reset_non_granular,
-            } => self.set_none_cache(
-                input_seqs,
-                reset_non_granular,
-                false,
-                load_preallocated_cache,
-            )?,
+            } => self.set_none_cache(input_seqs, false, load_preallocated_cache)?,
             _ => unreachable!("Unreachable POST cache op."),
         }
 
@@ -326,7 +313,6 @@ impl dyn Pipeline {
         let chunk_size = if !scheduler_visible_prompt_step
             && is_prompt
             && !ctx.return_raw_logits
-            && !self.get_metadata().is_xlora
             && self.device().is_cuda()
         {
             metadata.prompt_chunk_size

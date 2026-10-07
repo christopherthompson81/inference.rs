@@ -393,7 +393,6 @@ impl Engine {
                 stop_strings.clone(),
                 request.sampling_params.max_len,
                 request.return_logprobs,
-                get_mut_arcmutex!(self.pipeline).get_metadata().is_xlora,
                 group.clone(),
                 response_index,
                 now.as_secs(),

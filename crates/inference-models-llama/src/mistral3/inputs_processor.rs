@@ -229,7 +229,6 @@ impl MultimodalInputsProcessor for Mistral3ImageProcessor {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -239,11 +238,6 @@ impl MultimodalInputsProcessor for Mistral3ImageProcessor {
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> anyhow::Result<InputProcessorOutput> {
-        if is_xlora {
-            return Err(anyhow::Error::msg(
-                "Cannot make inputs for X-LoRA vision model.",
-            ));
-        }
         if no_kv_cache {
             return Err(anyhow::Error::msg("Vision model must have kv cache."));
         }

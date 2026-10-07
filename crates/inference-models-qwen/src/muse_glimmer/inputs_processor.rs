@@ -865,7 +865,6 @@ impl MultimodalInputsProcessor for MuseGlimmerImageProcessor {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -875,9 +874,6 @@ impl MultimodalInputsProcessor for MuseGlimmerImageProcessor {
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> Result<InputProcessorOutput> {
-        if is_xlora {
-            anyhow::bail!("Muse-Glimmer does not support X-LoRA");
-        }
         if no_kv_cache {
             anyhow::bail!("Muse-Glimmer requires the KV cache");
         }

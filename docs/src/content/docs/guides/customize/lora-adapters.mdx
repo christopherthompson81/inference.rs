@@ -1,5 +1,5 @@
 ---
-title: LoRA and X-LoRA adapters
+title: LoRA adapters
 description: Preload, route, and hot-swap multiple LoRA adapters on one base model.
 ---
 
@@ -7,15 +7,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 LoRA (Low-Rank Adaptation) adds fine-tuned weights around a base model without modifying its weights. inference.rs can keep multiple LoRA adapters loaded, select one independently for every request, and replace an adapter alias without interrupting in-flight requests. Dynamic LoRA supports compatible language-model adapters for text and multimodal models, including GGUF. Vision, audio, and projector adapters are not supported.
 
-X-LoRA is a separate adapter mode that mixes several adapters per token rather than selecting one adapter for a request.
-
 If you are upgrading from inference.rs 0.9.0 or older, see [the migration table](#migrating-from-inference-090-and-older).
-
-| Mode | Base model support | Request behavior | Live updates |
-|---|---|---|---|
-| Dynamic LoRA | Compatible text and multimodal language models, including GGUF | Select zero or one adapter per request | Yes |
-| Legacy LoRA | GGML and Phi3 GGUF | One static adapter configuration | No |
-| X-LoRA | Compatible plain and GGML text models, plus Phi3 GGUF | Learned per-token mixture | No |
 
 For GGUF file and projector selection, see [Run GGUF models](/guides/models/run-gguf/). The [GGUF support reference](/reference/gguf-support/) summarizes adapter and multimodal boundaries.
 
@@ -419,7 +411,7 @@ Runtime-loaded aliases do not survive a server restart or model reload; put requ
 | CUDA | Ordinary and routed expert LoRA are supported. |
 | Metal and CPU | Ordinary and routed expert LoRA are supported. |
 | Tensor parallelism | Preloading is supported; live load, replace, and unload are not. |
-| GGUF and GGML | GGUF supports dynamic LoRA for compatible language-model adapters. GGML uses legacy mode. See [GGUF support](/reference/gguf-support/) for legacy and multimodal boundaries. |
+| GGUF and GGML | GGUF supports dynamic LoRA for compatible language-model adapters, including models whose converter reordered the Q/K rows. GGML does not support LoRA. See [GGUF support](/reference/gguf-support/) for the architecture and multimodal boundaries. |
 | Speculative decoding | Dynamic LoRA attachment is not supported. |
 | Unsupported adapter variants | DoRA, aLoRA, QALoRA, BD-LoRA, Arrow, MonteCLoRA, adapter bias, `modules_to_save`, layer replication, non-expert `target_parameters`, weight tying, trainable-token indices, Megatron configuration, and adapters that modify embeddings or the output head. |
 | Base-transforming initializers | Configurations retaining `pissa`, `pissa_niter_*`, `olora`, `corda`, `loftq`, or `lora_ga` in `init_lora_weights` are rejected. Convert the result to an ordinary LoRA adapter for the original base before loading it. |
@@ -448,14 +440,16 @@ Dynamic LoRA replaces the ordinary-LoRA API from inference.rs 0.9.0 and older. T
 | inference.rs 0.9.0 and older | Current API |
 |---|---|
 | Plain/safetensors `--lora "repo-a;repo-b"` | Repeat `--lora alias=repo` and select one alias with `--adapter`, the request `adapter` field, or an adapter model ID. |
-| Raw GGUF/GGML `--lora <source>` | For GGUF, use `--lora alias=source` and select the alias dynamically. For GGML or a compatible static GGUF configuration, use `--legacy-lora <source> --legacy-lora-order <ordering-file.json>`; the [ordering JSON](#legacy-raw-lora) is required. |
+| Raw GGUF/GGML `--lora <source>` | For GGUF, use `--lora alias=source` and select the alias dynamically. GGML does not support LoRA. |
 | Plain/safetensors TOML `lora = "repo"` | Use the structured `adapter.lora` list shown in the [TOML reference](/reference/cli-toml-config/). |
-| Raw GGUF/GGML TOML LoRA fields | For GGUF, use the structured dynamic `lora` entries under `[models.adapter]`. Use `legacy_lora` with `legacy_lora_order` for GGML or a compatible static GGUF configuration. |
+| Raw GGUF/GGML TOML LoRA fields | For GGUF, use the structured dynamic `lora` entries under `[models.adapter]`. |
 | Python `Which.Lora(adapter_model_ids, model_id=...)` | `t.ModelSelectedLora(model_id=..., adapters=[t.LoraAdapterSpec(alias=..., source=...)])`. |
 | Rust `LoraModelBuilder::from_text_model_builder(builder, adapter_ids)` | Start with `LoraModelBuilder::from_text_model_builder(builder)`, then call `with_adapter` or `with_adapter_revision`. |
 | Rust `RequestBuilder::set_adapters(names)` | Use `set_adapter(alias)` for one dynamic adapter. |
 
-There is no direct dynamic-LoRA replacement for composing several ordinary adapters in one request. Use X-LoRA to mix adapters per token, or serve separately merged adapter weights when the intended composition is fixed.
+There is no direct dynamic-LoRA replacement for composing several ordinary adapters in one request. Serve separately merged adapter weights when the intended composition is fixed.
+
+X-LoRA (`--xlora`, `XLoraModelBuilder`, `ModelSelectedXLora*`) and static raw GGUF/GGML LoRA (`--legacy-lora`, `GgufLoraModelBuilder`, `ModelSelectedLoraGGUF`/`LoraGGML`) have been removed, along with their ordering files. Load a GGUF adapter with `--lora alias=source` instead.
 
 ## Migrating from vLLM
 
@@ -509,79 +503,6 @@ Common HTTP lifecycle errors use a stable `error.code`:
 | `adapter_storage_unavailable`, `lora_storage_unavailable`, or `lora_device_load_failed` | Recover storage or device capacity before retrying. |
 
 Python and HTTP reject an `expected_generation` that is not a value returned by load, list, or inference as `invalid_request_body`. Pass generation values exactly as returned.
-
-## Legacy raw LoRA
-
-GGUF supports dynamic LoRA for compatible language-model adapters. Legacy mode remains available
-for GGML and the static GGUF configurations listed in the
-[GGUF support reference](/reference/gguf-support/).
-
-Use the ordering JSON published with the raw adapter when one is available. For a single adapter without a supplied file, the minimum shape is:
-
-```json
-{
-  "base_model_id": "org/base-model",
-  "order": ["adapter"]
-}
-```
-
-`base_model_id` must match the selected base model. Each `order` name must match the name used in that adapter's config and safetensors filenames. Preserve a publisher-provided `layers` mapping when present.
-
-## X-LoRA
-
-X-LoRA mixes multiple adapters per token. It does not support the per-request selection or hot-loading APIs above.
-
-The ordering file defines the adapter order.
-
-<Tabs>
-<TabItem label="CLI">
-
-```bash
-inference run \
-  -m <base-model> \
-  --xlora <xlora-repo> \
-  --xlora-order <ordering-file.json>
-```
-
-`--xlora` and `--xlora-order` must be provided together. They conflict with dynamic LoRA and legacy raw GGUF/GGML LoRA. `--tgt-non-granular-index <n>` controls X-LoRA update granularity.
-
-</TabItem>
-<TabItem label="Python">
-
-```python
-import inference_rs as ir
-from inference_rs import types as t
-
-spec = t.EngineSpec(
-    model=t.ModelSelectedXLora(
-        model_id="<base-model>",
-        xlora_model_id="<xlora-repo>",
-        order="<ordering-file.json>",
-    )
-)
-engine = ir.Engine(spec)
-```
-
-</TabItem>
-<TabItem label="Rust">
-
-```rust
-use std::fs::File;
-use inference::{TextModelBuilder, XLoraModelBuilder};
-
-let model = XLoraModelBuilder::from_text_model_builder(
-    TextModelBuilder::new("<base-model>"),
-    "<xlora-repo>",
-    serde_json::from_reader(File::open("<ordering-file.json>")?)?,
-)
-.build()
-.await?;
-```
-
-</TabItem>
-</Tabs>
-
-Full examples: [xlora-zephyr](/examples/python/xlora-zephyr/) (Python), [xlora](/examples/rust/advanced/xlora/) (Rust).
 
 ## AnyMoE
 

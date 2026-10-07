@@ -241,10 +241,8 @@ pub struct Sequence {
     // Cache
     normal_cache: Vec<Option<KvCache>>,
     normal_draft_cache: Vec<Option<KvCache>>,
-    scaling_cache: Option<Tensor>,
     cache: LayerCaches,
     draft_cache: LayerCaches,
-    xlora_cache: Option<LayerCaches>,
     /// For hybrid models: index into the recurrent state pool
     recurrent_state_idx: Option<usize>,
 
@@ -304,7 +302,6 @@ impl Sequence {
         stop_strings: Vec<String>,
         max_len: Option<usize>,
         return_logprobs: bool,
-        is_xlora: bool,
         group: Arc<Mutex<SequenceGroup>>,
         response_index: usize,
         creation_time: u64,
@@ -347,11 +344,6 @@ impl Sequence {
             normal_draft_cache: vec![None; layers],
             cache: vec![None; layers],
             draft_cache: vec![None; layers],
-            xlora_cache: if is_xlora {
-                Some(vec![None; layers])
-            } else {
-                None
-            },
             recurrent_state_idx: None,
             seq_preallocated_cache,
             responder,
@@ -369,7 +361,6 @@ impl Sequence {
             prompt_tok_per_sec: 0.,
             prompt_timestamp: None,
             group,
-            scaling_cache: None,
             response_index,
             creation_time,
             recognizer,
@@ -451,15 +442,7 @@ impl Sequence {
         if let Some(prefill) = &self.prefill_prompt_toks {
             return prefill.tokens.len();
         }
-        // Use xlora cache first because of non granular
-        if self.xlora_cache.as_ref().is_some_and(|c| c[0].is_some()) {
-            self.xlora_cache.as_ref().unwrap()[0]
-                .as_ref()
-                .unwrap()
-                .0
-                .dims()[2]
-                + 1
-        } else if let Some((_, x)) = &self.cache[0] {
+        if let Some((_, x)) = &self.cache[0] {
             x.dims()[2] + 1
         } else {
             self.tokens.len()
@@ -815,14 +798,6 @@ impl Sequence {
         &mut self.draft_cache
     }
 
-    pub fn xlora_cache(&mut self) -> &mut Vec<Option<(Tensor, Tensor)>> {
-        self.xlora_cache.as_mut().expect("No X-LoRA cache.")
-    }
-
-    pub fn scaling_cache(&mut self) -> &mut Option<Tensor> {
-        &mut self.scaling_cache
-    }
-
     pub fn recurrent_state_idx(&self) -> Option<usize> {
         self.recurrent_state_idx
     }
@@ -859,10 +834,6 @@ impl Sequence {
 
     fn bump_block_hash_revision(&mut self) {
         self.block_hash_revision = self.block_hash_revision.wrapping_add(1);
-    }
-
-    pub fn is_xlora(&self) -> bool {
-        self.xlora_cache.is_some()
     }
 
     pub fn sampler(&self) -> Arc<Sampler> {
@@ -2090,7 +2061,6 @@ mod tests {
             vec![],
             vec![],
             None,
-            false,
             false,
             group,
             0,

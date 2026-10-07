@@ -414,26 +414,14 @@ impl NormalCache {
 #[derive(Debug, Clone)]
 pub struct Cache {
     cache: Arc<Mutex<LayerCaches>>,
-    xlora_cache: Option<Arc<Mutex<LayerCaches>>>,
     draft_cache: Arc<Mutex<LayerCaches>>,
-    scalings_cache: Option<Arc<Mutex<Option<Tensor>>>>,
 }
 
 impl Cache {
-    pub fn new(len: usize, is_xlora: bool) -> Self {
+    pub fn new(len: usize) -> Self {
         Self {
             cache: Arc::new(Mutex::new(vec![None; len])),
-            xlora_cache: if is_xlora {
-                Some(Arc::new(Mutex::new(vec![None; len])))
-            } else {
-                None
-            },
             draft_cache: Arc::new(Mutex::new(vec![None; len])),
-            scalings_cache: if is_xlora {
-                Some(Arc::new(Mutex::new(None)))
-            } else {
-                None
-            },
         }
     }
 
@@ -443,26 +431,6 @@ impl Cache {
 
     pub fn draft_lock(&self) -> MutexGuard<'_, LayerCaches> {
         get_mut_arcmutex!(self.draft_cache)
-    }
-
-    /// # Panics
-    /// If there is no xlora cache
-    pub fn xlora_lock(&self) -> MutexGuard<'_, LayerCaches> {
-        get_mut_arcmutex!(self.xlora_cache.as_ref().expect("No X-LoRA cache."))
-    }
-
-    /// # Panics
-    /// If there is no xlora cache
-    pub fn get_scalings_cache(&self) -> MutexGuard<'_, Option<Tensor>> {
-        get_mut_arcmutex!(
-            self.scalings_cache
-                .as_ref()
-                .expect("No X-LoRA scalings cache.")
-        )
-    }
-
-    pub fn is_xlora(&self) -> bool {
-        self.xlora_cache.is_some()
     }
 
     /// Update the KV cache and return (k,v)

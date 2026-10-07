@@ -311,8 +311,6 @@ pub(crate) fn convert_to_model_selected(
             validate_mmproj_format(format)?;
             adapter.validate().map_err(anyhow::Error::msg)?;
             let has_lora = adapter.dynamic_lora_enabled();
-            let has_legacy_lora = adapter.legacy_lora.is_some();
-            let has_xlora = adapter.xlora.is_some();
 
             // For GGUF/GGML formats, delegate to text model conversion which has proper validation
             match format_type {
@@ -345,7 +343,7 @@ pub(crate) fn convert_to_model_selected(
                 }
                 ModelFormat::Plain => {
                     // An adapter or an explicit text architecture needs the text loader, not auto-detection
-                    if has_lora || has_legacy_lora || has_xlora || model.arch.is_some() {
+                    if has_lora || model.arch.is_some() {
                         return convert_text_model(
                             model,
                             format,
@@ -605,18 +603,13 @@ fn convert_text_model(
     adapter.validate().map_err(anyhow::Error::msg)?;
     let format_type = format_opts.format.unwrap_or(ModelFormat::Plain);
     let has_lora = adapter.dynamic_lora_enabled();
-    let has_legacy_lora = adapter.legacy_lora.is_some();
-    let has_xlora = adapter.xlora.is_some();
-    if format_opts.mmproj.is_some() && (has_legacy_lora || has_xlora) {
-        anyhow::bail!("Multimodal GGUF does not support legacy LoRA or X-LoRA adapters");
-    }
     if format_type != ModelFormat::Plain {
         warn_unused_arch(model, "GGUF and GGML files carry their architecture");
     }
 
-    match (format_type, has_lora, has_legacy_lora, has_xlora) {
+    match (format_type, has_lora) {
         // Plain format
-        (ModelFormat::Plain, false, false, false) => Ok(ModelSelected::Plain {
+        (ModelFormat::Plain, false) => Ok(ModelSelected::Plain {
             quant: quantization.quant.clone(),
             model_id: model.model_id.clone(),
             tokenizer_json: model
@@ -641,7 +634,7 @@ fn convert_text_model(
             matformer_slice_name: matformer.slice_name.clone(),
         }),
 
-        (ModelFormat::Plain, true, false, false) => Ok(ModelSelected::Lora {
+        (ModelFormat::Plain, true) => Ok(ModelSelected::Lora {
             mmproj_selection: gguf_mmproj_selection(format_opts.direct_file_only),
             quant: quantization.quant.clone(),
             model_id: model.model_id.clone(),
@@ -672,35 +665,7 @@ fn convert_text_model(
             matformer_slice_name: matformer.slice_name.clone(),
         }),
 
-        (ModelFormat::Plain, false, false, true) => Ok(ModelSelected::XLora {
-            quant: quantization.quant.clone(),
-            model_id: Some(model.model_id.clone()),
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            xlora_model_id: adapter.xlora.clone().unwrap_or_default(),
-            order: adapter
-                .xlora_order
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            tgt_non_granular_index: adapter.tgt_non_granular_index,
-            arch: model.arch.clone(),
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            write_uqff: None,
-            from_uqff: quantization.from_uqff.clone(),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-            hf_cache_path: device.hf_cache.clone(),
-            organization: quantization.isq_organization,
-        }),
-
-        (ModelFormat::Gguf, dynamic_lora, false, false) => Ok(ModelSelected::GGUF {
+        (ModelFormat::Gguf, dynamic_lora) => Ok(ModelSelected::GGUF {
             quant: quantization.quant.clone(),
             mmproj_selection: gguf_mmproj_selection(format_opts.direct_file_only),
             tok_model_id: format_opts.tok_model_id.clone(),
@@ -735,77 +700,8 @@ fn convert_text_model(
             matformer_slice_name: matformer.slice_name.clone(),
         }),
 
-        (ModelFormat::Gguf, false, true, false) => Ok(ModelSelected::LoraGGUF {
-            quant: quantization.quant.clone(),
-            tok_model_id: format_opts.tok_model_id.clone(),
-            quantized_model_id: model.model_id.clone(),
-            quantized_filename: gguf_filename(
-                format_opts.quantized_file.as_deref(),
-                quantization.quant.as_deref(),
-            )?,
-            adapters_model_id: adapter.legacy_lora.clone().unwrap_or_default(),
-            order: adapter
-                .legacy_lora_order
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-            organization: quantization.isq_organization,
-            write_uqff: None,
-            imatrix: quantization.imatrix.clone(),
-            calibration_file: quantization.calibration_file.clone(),
-            hf_cache_path: device.hf_cache.clone(),
-            matformer_config_path: matformer.config_path.clone(),
-            matformer_slice_name: matformer.slice_name.clone(),
-        }),
-
-        (ModelFormat::Gguf, false, false, true) => Ok(ModelSelected::XLoraGGUF {
-            quant: quantization.quant.clone(),
-            tok_model_id: format_opts.tok_model_id.clone(),
-            quantized_model_id: model.model_id.clone(),
-            quantized_filename: gguf_filename(
-                format_opts.quantized_file.as_deref(),
-                quantization.quant.as_deref(),
-            )?,
-            xlora_model_id: adapter.xlora.clone().unwrap_or_default(),
-            order: adapter
-                .xlora_order
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            tgt_non_granular_index: adapter.tgt_non_granular_index,
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|path| path.to_string_lossy().to_string()),
-            organization: quantization.isq_organization,
-            write_uqff: None,
-            imatrix: quantization.imatrix.clone(),
-            calibration_file: quantization.calibration_file.clone(),
-            hf_cache_path: device.hf_cache.clone(),
-            matformer_config_path: matformer.config_path.clone(),
-            matformer_slice_name: matformer.slice_name.clone(),
-        }),
-
         // GGML format
-        (ModelFormat::Ggml, false, false, false) => Ok(ModelSelected::GGML {
+        (ModelFormat::Ggml, false) => Ok(ModelSelected::GGML {
             tok_model_id: format_opts
                 .tok_model_id
                 .clone()
@@ -829,81 +725,9 @@ fn convert_text_model(
             max_batch_size: device.max_batch_size,
         }),
 
-        (ModelFormat::Ggml, false, true, false) => Ok(ModelSelected::LoraGGML {
-            tok_model_id: Some(
-                format_opts
-                    .tok_model_id
-                    .clone()
-                    .unwrap_or_else(|| model.model_id.clone()),
-            ),
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            quantized_model_id: model.model_id.clone(),
-            quantized_filename: format_opts
-                .quantized_file
-                .clone()
-                .context("GGML model type requires `--quantized-file`/`-f` to be specified")?,
-            adapters_model_id: adapter.legacy_lora.clone().unwrap_or_default(),
-            order: adapter
-                .legacy_lora_order
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            gqa: format_opts.gqa,
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-        }),
-
-        (ModelFormat::Ggml, false, false, true) => Ok(ModelSelected::XLoraGGML {
-            tok_model_id: Some(
-                format_opts
-                    .tok_model_id
-                    .clone()
-                    .unwrap_or_else(|| model.model_id.clone()),
-            ),
-            tokenizer_json: model
-                .tokenizer
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            quantized_model_id: model.model_id.clone(),
-            quantized_filename: format_opts
-                .quantized_file
-                .clone()
-                .context("GGML model type requires `--quantized-file`/`-f` to be specified")?,
-            xlora_model_id: adapter.xlora.clone().unwrap_or_default(),
-            order: adapter
-                .xlora_order
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_default(),
-            tgt_non_granular_index: adapter.tgt_non_granular_index,
-            gqa: format_opts.gqa,
-            dtype: model.dtype,
-            topology: device
-                .topology
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-            max_seq_len: device.max_seq_len,
-            max_batch_size: device.max_batch_size,
-        }),
-
-        (ModelFormat::Plain, false, true, false) => {
-            anyhow::bail!("--legacy-lora is only supported with raw GGUF or GGML models")
+        (ModelFormat::Ggml, true) => {
+            anyhow::bail!("--lora adapters are not supported with raw GGML models")
         }
-        (ModelFormat::Ggml, true, false, false) => {
-            anyhow::bail!(
-                "dynamic --lora adapters are not supported with raw GGML models; use \
-                 --legacy-lora with --legacy-lora-order"
-            )
-        }
-        _ => anyhow::bail!("dynamic LoRA, legacy LoRA, and X-LoRA are mutually exclusive"),
     }
 }
 
@@ -978,10 +802,6 @@ pub(crate) fn extract_hf_config_settings(
 /// The `--quant` rules that are about the flags; what `--quant` picks is resolved when the engine loads.
 pub(crate) fn normalize_quant_flags(model_type: &mut ModelType) -> Result<()> {
     let quant = model_type.quantization().and_then(|q| q.quant.clone());
-    let legacy_lora = matches!(
-        model_type,
-        ModelType::Auto { adapter, .. } | ModelType::Text { adapter, .. } if adapter.legacy_lora.is_some()
-    );
     let Some(format) = model_type.format_mut() else {
         return Ok(());
     };
@@ -997,9 +817,7 @@ pub(crate) fn normalize_quant_flags(model_type: &mut ModelType) -> Result<()> {
             anyhow::bail!("`--quant` cannot select a GGML file; pass one explicitly with `-f`")
         }
         // these only mean something for a quantized file, as `--mmproj` does
-        None if format.tok_model_id.is_some() || legacy_lora => {
-            format.format = Some(ModelFormat::Gguf)
-        }
+        None if format.tok_model_id.is_some() => format.format = Some(ModelFormat::Gguf),
         _ => {}
     }
     Ok(())
@@ -1429,21 +1247,6 @@ mod tests {
                 mmproj_selection: MmprojSelection::Required,
                 ..
             }
-        ));
-    }
-
-    #[test]
-    fn legacy_lora_with_quant_means_gguf() {
-        let mut model_type = auto_with_quant(FormatOptions::default(), "4");
-        let ModelType::Auto { adapter, .. } = &mut model_type else {
-            unreachable!()
-        };
-        adapter.legacy_lora = Some("org/adapters".to_string());
-        adapter.legacy_lora_order = Some(PathBuf::from("order.json"));
-        let model = converted(&mut model_type);
-        assert!(matches!(
-            model,
-            ModelSelected::LoraGGUF { ref quantized_filename, quant: Some(_), .. } if quantized_filename.is_empty()
         ));
     }
 
@@ -1906,54 +1709,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.to_string().contains("raw GGML"));
-    }
-
-    #[test]
-    fn legacy_lora_keeps_legacy_gguf_selection() {
-        let selected = convert_text_model(
-            &test_model(),
-            &FormatOptions {
-                format: Some(ModelFormat::Gguf),
-                quantized_file: Some("model.gguf".to_string()),
-                ..FormatOptions::default()
-            },
-            &AdapterOptions {
-                legacy_lora: Some("org/legacy-lora".to_string()),
-                legacy_lora_order: Some(PathBuf::from("order.json")),
-                ..AdapterOptions::default()
-            },
-            &QuantizationOptions::default(),
-            &DeviceOptions::default(),
-            &MatformerSelection::default(),
-            None,
-        )
-        .unwrap();
-
-        assert!(matches!(selected, ModelSelected::LoraGGUF { .. }));
-    }
-
-    #[test]
-    fn xlora_keeps_legacy_gguf_selection() {
-        let selected = convert_text_model(
-            &test_model(),
-            &FormatOptions {
-                format: Some(ModelFormat::Gguf),
-                quantized_file: Some("model.gguf".to_string()),
-                ..FormatOptions::default()
-            },
-            &AdapterOptions {
-                xlora: Some("org/xlora".to_string()),
-                xlora_order: Some(PathBuf::from("order.json")),
-                ..AdapterOptions::default()
-            },
-            &QuantizationOptions::default(),
-            &DeviceOptions::default(),
-            &MatformerSelection::default(),
-            None,
-        )
-        .unwrap();
-
-        assert!(matches!(selected, ModelSelected::XLoraGGUF { .. }));
     }
 
     #[test]

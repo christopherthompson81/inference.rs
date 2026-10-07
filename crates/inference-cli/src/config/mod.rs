@@ -192,13 +192,6 @@ fn validate_config(config: &CliConfig) -> Result<()> {
             .adapter
             .validate()
             .map_err(|error| anyhow::anyhow!("invalid adapter configuration: {error}"))?;
-        if matches!(model.kind, ModelKind::Multimodal)
-            && (model.adapter.legacy_lora.is_some() || model.adapter.xlora.is_some())
-        {
-            anyhow::bail!(
-                "multimodal models support dynamic language-model LoRA, but not legacy LoRA or X-LoRA"
-            );
-        }
     }
 
     Ok(())
@@ -412,8 +405,8 @@ lora = [
     }
 
     #[test]
-    fn config_rejects_an_xlora_index_without_xlora() {
-        let config: CliConfig = toml::from_str(
+    fn config_rejects_unknown_adapter_keys() {
+        let error = toml::from_str::<CliConfig>(
             r#"
 command = "serve"
 
@@ -421,38 +414,13 @@ command = "serve"
 model_id = "org/model"
 
 [models.adapter]
-tgt_non_granular_index = 1
+xlora = "org/adapters"
 "#,
         )
-        .unwrap();
-
-        let error = validate_config(&config).unwrap_err().to_string();
-        assert!(error.contains("tgt_non_granular_index"), "{error}");
-    }
-
-    #[test]
-    fn multimodal_toml_rejects_legacy_adapter_modes() {
-        let config: CliConfig = toml::from_str(
-            r#"
-command = "serve"
-
-[[models]]
-kind = "multimodal"
-model_id = "org/vision"
-
-[models.adapter]
-legacy_lora = "org/legacy"
-legacy_lora_order = "order.json"
-"#,
-        )
-        .unwrap();
-
-        assert!(
-            validate_config(&config)
-                .unwrap_err()
-                .to_string()
-                .contains("not legacy LoRA or X-LoRA")
-        );
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("unknown field `xlora`"), "{error}");
     }
 
     #[test]

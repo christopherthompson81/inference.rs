@@ -37,8 +37,6 @@ pub struct ResolvedQuant {
 const QUANT_WITH_FROM_UQFF: &str = "`quant` and `from_uqff` both pick the weights; give one";
 const QUANT_WITH_FILENAME: &str =
     "`quant` (`--quant`) and `quantized_filename` (`-f`) both pick the GGUF file; give one";
-const XLORA_QUANT_WITHOUT_BASE: &str =
-    "`quant` on an X-LoRA spec needs `model_id`, the base model to resolve it against";
 const GGUF_WITHOUT_FILE: &str = "a GGUF model needs a file: give `quantized_filename` (`-f`), or `quant` to pick one \
                                  from the repository";
 
@@ -96,12 +94,7 @@ async fn resolve_model_source_inner(
     if let Some(path) = hf_cache_path(&model) {
         inference_core::set_hf_cache_path(path.clone());
     }
-    if matches!(
-        model,
-        ModelSelected::GGUF { .. }
-            | ModelSelected::LoraGGUF { .. }
-            | ModelSelected::XLoraGGUF { .. }
-    ) {
+    if matches!(model, ModelSelected::GGUF { .. }) {
         return resolve_gguf_spec(model, token_source).map(ResolvedModelQuant::unchanged);
     }
     let quant = model
@@ -159,10 +152,7 @@ fn hf_cache_path(model: &ModelSelected) -> Option<&PathBuf> {
         | ModelSelected::Lora { hf_cache_path, .. }
         | ModelSelected::MultimodalPlain { hf_cache_path, .. }
         | ModelSelected::Embedding { hf_cache_path, .. }
-        | ModelSelected::XLora { hf_cache_path, .. }
-        | ModelSelected::GGUF { hf_cache_path, .. }
-        | ModelSelected::LoraGGUF { hf_cache_path, .. }
-        | ModelSelected::XLoraGGUF { hf_cache_path, .. } => hf_cache_path.as_ref(),
+        | ModelSelected::GGUF { hf_cache_path, .. } => hf_cache_path.as_ref(),
         _ => None,
     }
 }
@@ -195,16 +185,6 @@ fn source_of(model: &ModelSelected) -> Result<(&str, bool)> {
             from_uqff,
             ..
         } => Ok((model_id, from_uqff.is_some())),
-        ModelSelected::XLora {
-            model_id,
-            from_uqff,
-            ..
-        } => {
-            let model_id = model_id
-                .as_deref()
-                .ok_or_else(|| anyhow!(XLORA_QUANT_WITHOUT_BASE))?;
-            Ok((model_id, from_uqff.is_some()))
-        }
         _ => unreachable!("`ModelSelected::quant` covers only these kinds and the GGUF ones"),
     }
 }
@@ -243,12 +223,6 @@ fn weights_fields_mut(
             from_uqff,
             ..
         } => (model_id, quant, from_uqff),
-        ModelSelected::XLora {
-            model_id: Some(model_id),
-            quant,
-            from_uqff,
-            ..
-        } => (model_id, quant, from_uqff),
         _ => unreachable!("`source_of` accepted the spec"),
     }
 }
@@ -279,18 +253,6 @@ fn require_gguf_input(model_id: &str, quant: &str, files: Option<&[String]>) -> 
 fn gguf_file_fields_mut(model: &mut ModelSelected) -> (&str, &mut String, &mut Option<String>) {
     match model {
         ModelSelected::GGUF {
-            quantized_model_id,
-            quantized_filename,
-            quant,
-            ..
-        }
-        | ModelSelected::LoraGGUF {
-            quantized_model_id,
-            quantized_filename,
-            quant,
-            ..
-        }
-        | ModelSelected::XLoraGGUF {
             quantized_model_id,
             quantized_filename,
             quant,
@@ -548,41 +510,6 @@ fn into_gguf(model: ModelSelected, quantized_filename: String) -> Result<ModelSe
             ..GgufBase::default()
         }
         .into_spec(),
-        ModelSelected::XLora {
-            model_id,
-            tokenizer_json,
-            xlora_model_id,
-            order,
-            tgt_non_granular_index,
-            dtype,
-            topology,
-            write_uqff,
-            max_seq_len,
-            max_batch_size,
-            hf_cache_path,
-            organization,
-            ..
-        } => ModelSelected::XLoraGGUF {
-            tok_model_id: None,
-            quantized_model_id: model_id.expect("`source_of` checked the base model"),
-            quantized_filename,
-            quant: None,
-            xlora_model_id,
-            order,
-            tgt_non_granular_index,
-            dtype,
-            topology,
-            max_seq_len,
-            max_batch_size,
-            tokenizer_json,
-            organization,
-            write_uqff,
-            imatrix: None,
-            calibration_file: None,
-            hf_cache_path,
-            matformer_config_path: None,
-            matformer_slice_name: None,
-        },
         ModelSelected::Embedding { model_id, .. } => bail!(
             "`quant` picked a GGUF file from `{model_id}`, but embedding models do not load from GGUF"
         ),
@@ -1111,69 +1038,6 @@ mod tests {
             error.to_string().contains("No companion projector"),
             "{error}"
         );
-    }
-
-    #[tokio::test]
-    async fn xlora_quant_becomes_an_xlora_gguf() {
-        let dir = dir_with(&["model-Q4_K_M.gguf", "model-Q8_0.gguf"]);
-        let xlora = |model_id: Option<String>| {
-            spec(
-                "XLora",
-                serde_json::json!({
-                    "model_id": model_id, "quant": "8", "tokenizer_json": null, "xlora_model_id": "org/adapters",
-                    "order": "order.json", "tgt_non_granular_index": null, "arch": null, "topology": null,
-                    "write_uqff": null, "from_uqff": null, "hf_cache_path": null,
-                }),
-            )
-        };
-        let error = resolve(xlora(None), QuantPolicy::Weights)
-            .await
-            .err()
-            .unwrap();
-        assert_eq!(error.to_string(), XLORA_QUANT_WITHOUT_BASE);
-
-        let model = xlora(Some(dir.path().to_string_lossy().into_owned()));
-        let resolved = resolve(model, QuantPolicy::Weights).await.unwrap();
-        let ModelSelected::XLoraGGUF {
-            quantized_filename,
-            quant,
-            xlora_model_id,
-            ..
-        } = &resolved.model
-        else {
-            panic!("expected an X-LoRA GGUF, got {:?}", resolved.model);
-        };
-        assert_eq!(
-            (quantized_filename.as_str(), xlora_model_id.as_str()),
-            ("model-Q8_0.gguf", "org/adapters")
-        );
-        assert!(quant.is_none() && !resolved.model.needs_source_resolution());
-    }
-
-    #[tokio::test]
-    async fn legacy_lora_gguf_quant_picks_its_file() {
-        let dir = dir_with(&["model-Q4_K_M.gguf", "model.safetensors"]);
-        let model = spec(
-            "LoraGGUF",
-            serde_json::json!({
-                "tok_model_id": null, "quantized_model_id": dir.path().to_string_lossy(), "quant": "4",
-                "adapters_model_id": "org/adapters", "order": "order.json", "topology": null,
-                "tokenizer_json": null, "organization": null, "write_uqff": null, "imatrix": null,
-                "calibration_file": null, "hf_cache_path": null,
-            }),
-        );
-        assert!(model.needs_source_resolution());
-        let resolved = resolve(model, QuantPolicy::Weights).await.unwrap();
-        let ModelSelected::LoraGGUF {
-            quantized_filename,
-            quant,
-            ..
-        } = &resolved.model
-        else {
-            unreachable!()
-        };
-        assert_eq!(quantized_filename, "model-Q4_K_M.gguf");
-        assert!(quant.is_none() && !resolved.model.needs_source_resolution());
     }
 
     #[tokio::test]

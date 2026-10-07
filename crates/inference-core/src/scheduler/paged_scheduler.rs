@@ -289,7 +289,6 @@ impl PagedAttentionScheduler {
     fn supports_scheduler_visible_prompt_chunks(&self, seq: &Sequence) -> bool {
         self.scheduler_visible_prompt_chunks
             && !seq.return_raw_logits
-            && !seq.is_xlora()
             && matches!(seq.sequence_stepping_type(), SeqStepType::PromptAndDecode)
             && !seq.has_suffix_only_prefill_toks()
             && !((seq.has_images() || seq.has_audios() || seq.has_videos())

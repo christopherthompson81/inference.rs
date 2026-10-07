@@ -1552,3 +1552,120 @@ local_ci.sh --size-update  -> file -1 KB
 
 Usage scan done: four slices plus the kernel cut (#317-#320 and this), about 2,500 Rust and 2,400 CUDA lines, one
 scan false positive (`Tensor::ceil`) caught by the compiler, two latent bugs found (`ucopy_i16`/`i32`).
+
+## Run 44 - 2026-10-06 22:56
+
+Question (user): with #270 closed, what still separates our bundle from llama.cpp's?
+
+Method as Run 14, but on the full bundle (all model families, sm_86, `--size`'s build): sections from `size -A`;
+GPU code per source object in `target/debug/cuda-kernels/*` (they sum exactly to the bundle's `.nv_fatbin`) and
+in llama.cpp's `build_cuda/ggml/src/ggml-cuda` objects; host code from an unstripped `release-with-debug` build
+(3 min), `nm -S -C` with each symbol credited to the first non-std crate in its path.
+
+```
+                         ours (bundle)   llama.cpp core (ggml + llama)   + common, mtmd, server
+file                     102.1 MiB       44 MiB                          58 MiB
+GPU (.nv_fatbin)          30.0           15.1                            15.1
+host .text                54.0           ~18.4                           ~24.6
+unwind/relocs/rodata      17.5           ~6.3
+```
+
+GPU, by family (MiB): fattn mma 8.68 vs 3.47; fattn tile/vec/other 2.55 vs 2.45; mmq on llama.cpp's types 7.49 vs
+6.18; ik_llama types (mmq 6.49 + mmvq 0.48) 6.97 vs none; mainline mmvq 1.41 vs 0.64; Marlin 1.52 vs none; llama.cpp's
+mmf/mmvf and other 2.39 vs ~0.5 ours. The +15 MiB: ik types +7.0, fattn mma +5.2 (our variants: bf16 Q/out, paged,
+fp8 K/V, varlen, implicit masks, sinks), Marlin +1.5, mainline mmq/mmvq +2.1, less llama.cpp's mmf/other -1.9.
+
+Host (61.1 MiB of function symbols unstripped; the fat-LTO bundle has 54.0): C/C++ in our kernel crates 10.1 MiB
+(launch_fattn 2.7, instantiate_mmq 2.3, stream-k fixups 0.8, CUDA registration 0.3), less than llama.cpp's ggml-cuda
+host code (14.6). The Rust side is the rest, ~51 MiB, where llama.cpp has ~10 MiB of non-ggml C++:
+
+```
+inference-tensor 11.1  (CPU backend dtype x op generics ~6.3: cpu_backend::utils 3.0, cpu_backend 1.9, op 1.4;
+                        tensor 2.3, cuda_backend 1.1, error 0.8)
+drop glue 4.8
+our crates ~14: model families 5.0 (qwen 1.4, llama 1.2, gemma 1.1, other 0.8, phi 0.6), nn 2.5, core 2.0,
+                quant 1.9, api 0.8, protocol 0.5, gguf 0.4, selection 0.3, layout 0.2, agent 0.2
+serde/serde_json/serde_path_to_error 3.9
+templates, tokenizers, grammar, regex: minijinja 0.8, tokenizers 0.7, llguidance 0.6, regex 0.7
+networking/TLS ~1.6 (tokio, rustls, h2, reqwest); media ~1.5 (image, zune_jpeg, rustfft, html5ever); rayon 0.9;
+cudarc 0.35; libloading 0.3; Marlin's Rust 0.4
+```
+
+Non-code sections 17.5 MiB vs ~6.3: `.eh_frame`+`.gcc_except_table` 7.1 MiB are Rust unwind tables (panic=unwind,
+needed for the C ABI's catch_unwind), `.rodata` 6.0, `.rela.dyn` 2.5, `.data.rel.ro` 1.8.
+
+Implication: the ~45 MiB difference to llama.cpp with its server libraries is now about one third GPU and two thirds
+host. GPU: ik_llama types (opt-in feature candidate) and fattn's extra variants. Host: Rust monomorphization (the
+CPU backend's dtype x op matrix, drop glue, serde) and unwind tables, not duplicated implementations. Candidate
+levers, none tried yet: an `ik-quants` feature; trimming fattn variants per need; `opt-level = "s"` for host code
+in the bundle profile (measure decode/prefill cost); narrowing the CPU backend's dtype coverage; panic=abort is not
+an option while the C ABI converts panics to errors.
+
+## Run 45 - 2026-10-06 23:01
+
+Follow-up (user): Run 44 credited ~11 MiB to "our crates" (models, nn, core, quant), but llama.cpp implements model
+families, layers, an engine core and quantization too, so that is not an explanation. Like for like, measured.
+
+Source volume, non-blank non-comment lines, in-file test modules and test files excluded:
+
+```
+                     ours                                   llama.cpp
+model implementations 98,783 (5 crates, ~60 architectures)  38,177 src/models (~150 architectures) + 24,698 mtmd
+per architecture      ~1,650                                ~250 (+ shared graph helpers in llama-graph)
+one architecture      qwen3.rs 615                          models/qwen3.cpp 159
+nn + core + quant     158,351                               src/ other than models 53,429 (quants live in ggml)
+```
+
+Machine code per source line: our model crates 5.0 MiB / 98.8k lines = ~53 B/line; libllama 2.5 MiB / 91.6k lines =
+~28 B/line.
+
+Implication: the model side is ~11x llama.cpp's per architecture, from two factors that multiply:
+1. ~6x more source per architecture. llama.cpp's architectures are graph-builder functions over shared
+   `build_attn`/`build_ffn`/`build_norm` helpers and one loader, so a dense decoder is ~150-250 lines. Ours
+   carry their own layer types (40 `struct Attention` and 40 `struct DecoderLayer` across the model crates), their
+   own weight loading, and the per-model glue for the engine's modes (ISQ, X-LoRA, AnyMoE, speculative, device
+   mapping, paged and non-paged attention). This is the dense-decoder duplication the model consolidation work
+   (#255-#257) already identified as next.
+2. ~2x machine code per source line: Rust's monomorphized generics, inlined `?` error paths, drop glue and
+   unwind tables against C++ calling into ggml.
+
+nn/core/quant carry ~3x llama.cpp's non-model source; part is breadth llama.cpp's libraries do not have (GPTQ/AWQ,
+HQQ, AFQ, FP8, MXFP4/NVFP4, bitsandbytes, ISQ/UQFF, LoRA routing; X-LoRA/AnyMoE; several pipeline kinds), part
+not yet examined for duplication.
+
+Next lever with the biggest expected effect on host size: a shared dense-decoder building block that the ~40 model
+implementations instantiate instead of re-declaring (the llama.cpp `build_*` shape), measured per family as it
+lands.
+
+## Run 46 - 2026-10-07 00:18
+
+Question: what does retiring X-LoRA and the static GGUF/GGML LoRA path recover, now that runtime LoRA covers GGUF
+Llama-family models (Q/K rows remapped at adapter load)?
+
+Removed: the per-model X-LoRA copies (llama, mistral, mixtral, gemma, gemma2, phi2, phi3, starcoder2, quantized llama
+and phi3: 14 files), `inference_nn::xlora` and the legacy LoRA linear layers, every model's `load_xlora` and
+`xlora_forward`, the GGUF adapter pipeline and `model_config.rs`, the X-LoRA KV and scalings caches, the doubled
+`*_full` model inputs, the ordering files, five `ModelSelected` variants, their CLI flags and SDK builders.
+190 files, about 14,500 lines net.
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  107,093,104  105,982,768  -1,110,336 (-1.06 MiB)
+.text                  56,596,130   55,711,714    -884,416
+.eh_frame + _hdr        4,976,996    4,898,436     -78,560
+.gcc_except_table       2,482,449    2,433,457     -48,992
+.rela.dyn               2,650,608    2,598,576     -52,032
+.nv_fatbin             31,463,416   31,463,416           0
+```
+
+Raw finding: -1.06 MiB, all host code; the GPU side is untouched since X-LoRA had no kernels. That is ~140 B of
+machine code per deleted source line, above Run 45's ~53 B/line average for model crates: the X-LoRA copies were
+full monomorphized model stacks with their own unwind tables.
+
+Side findings while deleting: the GGML pipeline called the full-cache manager on its quantized Llama's normal cache
+(a panic on the first request), now routed by cache kind; runtime LoRA on a UQFF written from a GGUF now reads the
+stamped Q/K layout from the config; MLA and partial-rotary adjacent layouts are refused from the config instead of
+by architecture name.
+
+Next: the shared dense-decoder block from Run 45.

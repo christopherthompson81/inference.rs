@@ -31,21 +31,6 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
         input_ids: &Tensor,
         ctx: &mut ModelForwardContext<'_>,
     ) -> inference_tensor::Result<Tensor>;
-    #[allow(clippy::too_many_arguments)]
-    fn xlora_forward(
-        &self,
-        input_ids: &Tensor,
-        input_ids_full: &Tensor,
-        seqlen_offsets: &[usize],
-        seqlen_offsets_full: &[usize],
-        no_kv_cache: bool,
-        non_granular_state: &Option<NonGranularState>,
-        context_lens: Vec<(usize, usize)>,
-        position_ids: Vec<usize>,
-        flash_params: &FlashParams,
-        flash_params_full: &FlashParams,
-    ) -> inference_tensor::Result<Tensor>;
-    fn is_xlora(&self) -> bool;
     fn device(&self) -> &Device;
     fn cache(&self) -> &EitherCache;
     fn max_seq_len(&self) -> usize;
@@ -169,11 +154,6 @@ pub struct DiffusionGenerationParams {
 pub enum RopePairing {
     Adjacent,
     HalfSplit,
-}
-
-pub struct NonGranularState {
-    pub non_granular_index: Arc<tokio::sync::Mutex<usize>>,
-    pub tgt_non_granular_index: usize,
 }
 
 /// Mixin for block-diffusion models. Defaults describe an ordinary autoregressive model;

@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::HashMap,
@@ -1405,26 +1404,6 @@ impl crate::speculative::SpeculativeTargetMixin for Model {}
 impl NormalModel for Model {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
-    }
-
-    fn xlora_forward(
-        &self,
-        _input_ids: &Tensor,
-        _input_ids_full: &Tensor,
-        _seqlen_offsets: &[usize],
-        _seqlen_offsets_full: &[usize],
-        _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::model::NonGranularState>,
-        _context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
-        _flash_params: &FlashParams,
-        _flash_params_full: &FlashParams,
-    ) -> Result<Tensor> {
-        inference_tensor::bail!("LFM2 does not support X-LoRA forward")
-    }
-
-    fn is_xlora(&self) -> bool {
-        false
     }
 
     fn device(&self) -> &Device {

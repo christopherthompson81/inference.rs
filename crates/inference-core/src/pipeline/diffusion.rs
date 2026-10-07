@@ -199,7 +199,6 @@ impl Loader for DiffusionLoader {
                         }
                         from_mmaped_safetensors(
                             vec![path.clone()],
-                            Vec::new(),
                             Some(dtype),
                             dev,
                             vec![None],
@@ -240,7 +239,6 @@ impl Loader for DiffusionLoader {
             metadata: Arc::new(GeneralMetadata {
                 max_seq_len,
                 llg_factory: None,
-                is_xlora: false,
                 no_prefix_cache: false,
                 num_hidden_layers: 1, // read only to size caches
                 eos_tok: vec![],
@@ -257,7 +255,7 @@ impl Loader for DiffusionLoader {
                 },
                 loaded_for_uqff_write: false,
             }),
-            dummy_cache: EitherCache::Full(Cache::new(0, false)),
+            dummy_cache: EitherCache::Full(Cache::new(0)),
         })))
     }
 
@@ -296,7 +294,6 @@ impl CacheManagerMixin for DiffusionPipeline {
     fn set_none_cache(
         &self,
         _seqs: &mut [&mut Sequence],
-        _reset_non_granular: bool,
         _modify_draft_cache: bool,
         _load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
@@ -317,7 +314,6 @@ impl MetadataMixin for DiffusionPipeline {
     fn name(&self) -> String {
         self.model_id.clone()
     }
-    fn reset_non_granular_state(&self) {}
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
         None
     }
