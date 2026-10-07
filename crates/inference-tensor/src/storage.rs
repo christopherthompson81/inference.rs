@@ -1,5 +1,5 @@
 use crate::backend::BackendStorage;
-use crate::custom_op::{all_distinct, InplaceOpN, Src};
+use crate::custom_op::InplaceOpN;
 use crate::op::{self, CmpOp, ReduceOp};
 use crate::scalar::Scalar;
 use crate::{CpuStorage, CudaStorage, DType, Device, Error, Layout, MetalStorage, Result, Shape};
@@ -278,48 +278,29 @@ impl Storage {
     }
 
     /// Applies an custom in-place op for the `self` tensor.
-    ///
-    /// [`Src::Aliased`] use the same underlying storage as `self`, while [`Src::Distinct`] does not.
-    /// If there are aliases present the aliased forward function on `InplaceOpN` is called. Otherwise
-    /// the normal forward function can be used.
     pub(crate) fn inplace_op<const N: usize, C: InplaceOpN<N>>(
         &mut self,
         dst_l: &Layout,
-        srcs: [(Src<'_, Storage>, &Layout); N],
+        srcs: [(&Storage, &Layout); N],
         c: &C,
     ) -> Result<()> {
-        // Aliased sources are `self`. Only distinct needs checking.
         for (s, _) in srcs.iter() {
-            if let Src::Distinct(s) = s {
-                self.same_device(s, c.name())?;
-            }
+            self.same_device(s, c.name())?;
         }
         macro_rules! inplace_dispatch {
-            ($dst:expr, $variant:ident, $fwd:ident, $fwd_aliased:ident) => {{
-                // Extract underlying storage variant on same device
-                let operands: [(Src<'_, _>, &Layout); N] = std::array::from_fn(|i| {
-                    let (s, l) = srcs[i];
-                    let s = match s {
-                        Src::Distinct(Storage::$variant(s)) => Src::Distinct(s),
-                        Src::Aliased(rel) => Src::Aliased(rel),
-                        Src::Distinct(_) => {
-                            unreachable!("same_device above rejects mismatched backends")
-                        }
-                    };
-                    (s, l)
+            ($dst:expr, $variant:ident, $fwd:ident) => {{
+                let operands: [(_, &Layout); N] = std::array::from_fn(|i| match srcs[i] {
+                    (Storage::$variant(s), l) => (s, l),
+                    _ => unreachable!("same_device above rejects mismatched backends"),
                 });
-
-                match all_distinct(&operands) {
-                    Some(distinct) => c.$fwd($dst, dst_l, distinct),
-                    None => c.$fwd_aliased($dst, dst_l, operands),
-                }
+                c.$fwd($dst, dst_l, operands)
             }};
         }
 
         match self {
-            Storage::Cpu(dst) => inplace_dispatch!(dst, Cpu, cpu_fwd, cpu_fwd_aliased),
-            Storage::Cuda(dst) => inplace_dispatch!(dst, Cuda, cuda_fwd, cuda_fwd_aliased),
-            Storage::Metal(dst) => inplace_dispatch!(dst, Metal, metal_fwd, metal_fwd_aliased),
+            Storage::Cpu(dst) => inplace_dispatch!(dst, Cpu, cpu_fwd),
+            Storage::Cuda(dst) => inplace_dispatch!(dst, Cuda, cuda_fwd),
+            Storage::Metal(dst) => inplace_dispatch!(dst, Metal, metal_fwd),
         }
     }
 

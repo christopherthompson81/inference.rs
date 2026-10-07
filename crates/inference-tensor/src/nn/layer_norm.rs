@@ -99,10 +99,6 @@ impl LayerNorm {
     pub fn eps(&self) -> f64 {
         self.eps
     }
-
-    pub fn remove_mean(&self) -> bool {
-        self.remove_mean
-    }
 }
 
 impl Module for LayerNorm {

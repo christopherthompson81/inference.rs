@@ -1,4 +1,3 @@
-use crate::layout::LayoutRelation;
 use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
 use crate::{bail, CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Storage, Tensor};
@@ -278,12 +277,6 @@ pub trait InplaceOp1 {
 pub trait InplaceOpN<const N: usize> {
     fn name(&self) -> &'static str;
 
-    /// Defines the source access pattern of this in-place op.
-    /// Defaults to `None`, which rejects all in-place source aliasing.
-    fn src_access_pattern(&self) -> Option<AccessPattern> {
-        None
-    }
-
     fn cpu_fwd(
         &self,
         dst: &mut CpuStorage,
@@ -292,16 +285,6 @@ pub trait InplaceOpN<const N: usize> {
     ) -> Result<()> {
         let _ = (dst, dst_l, srcs);
         bail!("no cpu implementation for {}", self.name())
-    }
-
-    fn cpu_fwd_aliased(
-        &self,
-        dst: &mut CpuStorage,
-        dst_l: &Layout,
-        srcs: [(Src<'_, CpuStorage>, &Layout); N],
-    ) -> Result<()> {
-        let _ = (dst, dst_l, srcs);
-        bail!("no aliased cpu implementation for {}", self.name())
     }
 
     fn cuda_fwd(
@@ -314,16 +297,6 @@ pub trait InplaceOpN<const N: usize> {
         bail!("no cuda implementation for {}", self.name())
     }
 
-    fn cuda_fwd_aliased(
-        &self,
-        dst: &mut CudaStorage,
-        dst_l: &Layout,
-        srcs: [(Src<'_, CudaStorage>, &Layout); N],
-    ) -> Result<()> {
-        let _ = (dst, dst_l, srcs);
-        bail!("no aliased cpu implementation for {}", self.name())
-    }
-
     fn metal_fwd(
         &self,
         dst: &mut MetalStorage,
@@ -333,87 +306,15 @@ pub trait InplaceOpN<const N: usize> {
         let _ = (dst, dst_l, srcs);
         bail!("no metal implementation for {}", self.name())
     }
-
-    fn metal_fwd_aliased(
-        &self,
-        dst: &mut MetalStorage,
-        dst_l: &Layout,
-        srcs: [(Src<'_, MetalStorage>, &Layout); N],
-    ) -> Result<()> {
-        let _ = (dst, dst_l, srcs);
-        bail!("no aliased metal implementation for {}", self.name())
-    }
-}
-
-#[derive(Debug)]
-pub enum Src<'a, S> {
-    Distinct(&'a S),
-    Aliased(LayoutRelation),
-}
-
-impl<S> Copy for Src<'_, S> {}
-
-impl<S> Clone for Src<'_, S> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-// If all sources are distinct we return the entire array of tensors without the `Src` wrapper.
-pub(crate) fn all_distinct<'a, B, const N: usize>(
-    srcs: &[(Src<'a, B>, &'a Layout); N],
-) -> Option<[(&'a B, &'a Layout); N]> {
-    srcs.iter()
-        .all(|(s, _)| matches!(s, Src::Distinct(_)))
-        .then(|| {
-            std::array::from_fn(|i| match srcs[i] {
-                (Src::Distinct(s), l) => (s, l),
-                _ => unreachable!("checked immediately above"),
-            })
-        })
-}
-
-/// Indicates which indices a kernel reads, relative to the destination indices it writes.
-///
-/// When used with [`crate::LayoutRelation`] we can describe safe access patterns.
-/// For example `Elementwise` is safe to use with both `LayoutRelation::Identical` and `LayoutRelation::Disjoint`,
-/// while `Arbitrary` is only guaranteed to be safe with `LayoutRelation::Disjoint`.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum AccessPattern {
-    /// Reads only source index `i` when writing destination index `i`.
-    Elementwise,
-    /// Reads arbitrary source indices.
-    Arbitrary,
-}
-
-impl AccessPattern {
-    fn supports(self, rel: LayoutRelation) -> bool {
-        matches!(
-            (self, rel),
-            (
-                AccessPattern::Elementwise,
-                LayoutRelation::Identical | LayoutRelation::Disjoint
-            ) | (AccessPattern::Arbitrary, LayoutRelation::Disjoint)
-        )
-    }
 }
 
 macro_rules! forward_op1 {
-    ($fwd:ident, $fwd_aliased:ident, $storage:ty) => {
+    ($fwd:ident, $storage:ty) => {
         fn $fwd(
             &self,
             dst: &mut $storage,
             dl: &Layout,
             _: [(&$storage, &Layout); 0],
-        ) -> Result<()> {
-            InplaceOp1::$fwd(self, dst, dl)
-        }
-
-        fn $fwd_aliased(
-            &self,
-            dst: &mut $storage,
-            dl: &Layout,
-            _: [(Src<'_, $storage>, &Layout); 0],
         ) -> Result<()> {
             InplaceOp1::$fwd(self, dst, dl)
         }
@@ -425,13 +326,13 @@ impl<C: InplaceOp1> InplaceOpN<0> for C {
         InplaceOp1::name(self)
     }
 
-    forward_op1!(cpu_fwd, cpu_fwd_aliased, CpuStorage);
-    forward_op1!(cuda_fwd, cuda_fwd_aliased, CudaStorage);
-    forward_op1!(metal_fwd, metal_fwd_aliased, MetalStorage);
+    forward_op1!(cpu_fwd, CpuStorage);
+    forward_op1!(cuda_fwd, CudaStorage);
+    forward_op1!(metal_fwd, MetalStorage);
 }
 
 macro_rules! forward_op2 {
-    ($fwd:ident, $fwd_aliased:ident, $storage:ty) => {
+    ($fwd:ident, $storage:ty) => {
         fn $fwd(
             &self,
             dst: &mut $storage,
@@ -441,21 +342,6 @@ macro_rules! forward_op2 {
             let [(s, sl)] = srcs;
             InplaceOp2::$fwd(self, dst, dl, s, sl)
         }
-
-        fn $fwd_aliased(
-            &self,
-            dst: &mut $storage,
-            dl: &Layout,
-            srcs: [(Src<'_, $storage>, &Layout); 1],
-        ) -> Result<()> {
-            match srcs {
-                [(Src::Distinct(s), sl)] => InplaceOp2::$fwd(self, dst, dl, s, sl),
-                _ => bail!(
-                    "{}: aliased input requires migrating to InplaceOpN",
-                    self.name()
-                ),
-            }
-        }
     };
 }
 
@@ -464,9 +350,9 @@ impl<C: InplaceOp2> InplaceOpN<1> for C {
         InplaceOp2::name(self)
     }
 
-    forward_op2!(cpu_fwd, cpu_fwd_aliased, CpuStorage);
-    forward_op2!(cuda_fwd, cuda_fwd_aliased, CudaStorage);
-    forward_op2!(metal_fwd, metal_fwd_aliased, MetalStorage);
+    forward_op2!(cpu_fwd, CpuStorage);
+    forward_op2!(cuda_fwd, CudaStorage);
+    forward_op2!(metal_fwd, MetalStorage);
 }
 
 pub trait InplaceOp2 {
@@ -509,7 +395,7 @@ pub trait InplaceOp2 {
 }
 
 macro_rules! forward_op3 {
-    ($fwd:ident, $fwd_aliased:ident, $storage:ty) => {
+    ($fwd:ident, $storage:ty) => {
         fn $fwd(
             &self,
             dst: &mut $storage,
@@ -519,23 +405,6 @@ macro_rules! forward_op3 {
             let [(s1, l1), (s2, l2)] = srcs;
             InplaceOp3::$fwd(self, dst, dl, s1, l1, s2, l2)
         }
-
-        fn $fwd_aliased(
-            &self,
-            dst: &mut $storage,
-            dl: &Layout,
-            srcs: [(Src<'_, $storage>, &Layout); 2],
-        ) -> Result<()> {
-            match srcs {
-                [(Src::Distinct(s1), l1), (Src::Distinct(s2), l2)] => {
-                    InplaceOp3::$fwd(self, dst, dl, s1, l1, s2, l2)
-                }
-                _ => bail!(
-                    "{}: aliased input requires migrating to InplaceOpN",
-                    self.name()
-                ),
-            }
-        }
     };
 }
 
@@ -544,9 +413,9 @@ impl<C: InplaceOp3> InplaceOpN<2> for C {
         InplaceOp3::name(self)
     }
 
-    forward_op3!(cpu_fwd, cpu_fwd_aliased, CpuStorage);
-    forward_op3!(cuda_fwd, cuda_fwd_aliased, CudaStorage);
-    forward_op3!(metal_fwd, metal_fwd_aliased, MetalStorage);
+    forward_op3!(cpu_fwd, CpuStorage);
+    forward_op3!(cuda_fwd, CudaStorage);
+    forward_op3!(metal_fwd, MetalStorage);
 }
 
 pub trait InplaceOp3 {
@@ -598,10 +467,7 @@ pub trait InplaceOp3 {
 }
 
 impl Tensor {
-    /// Applies a custom op in-place for the `self` tensor.
-    ///
-    /// Tensors sharing underlying storage with `self` are classified and passed as [`Src::Aliased`].
-    /// Separate tensors are locked and passed as [`Src::Distinct`].
+    /// Applies a custom op in-place for the `self` tensor; sources must not share its storage.
     fn inplace_op<const N: usize, C: InplaceOpN<N>>(&self, srcs: [&Self; N], c: &C) -> Result<()> {
         let name = c.name();
 
@@ -609,24 +475,10 @@ impl Tensor {
         if self.layout().has_internal_overlap() {
             bail!("{name}: dst has repeated elements (zero-stride). Can not write in-place")
         }
-
-        // Classify srcs wrt dst
-        let access = c.src_access_pattern();
-        let mut rels: [Option<LayoutRelation>; N] = [None; N];
-        for i in 0..N {
-            if !self.same_storage(srcs[i]) {
-                continue;
-            }
-            let rel = Layout::relation(self.layout(), srcs[i].layout());
-            match access {
-                Some(a) if a.supports(rel) => rels[i] = Some(rel),
-                Some(a) => bail!(
-                    "src {i} shares storage with dst ({rel:?}), which is not supported for the access pattern of `{name}` ({a:?})."
-                ),
-                None => bail!(
-                    "src {i} shares storage with dst, and `{name}` does not support aliased operands."
-                ),
-            }
+        if let Some(i) = srcs.iter().position(|src| self.same_storage(src)) {
+            bail!(
+                "src {i} shares storage with dst, and `{name}` does not support aliased operands."
+            )
         }
 
         // Acquire locks in order sorted by `Tensor::storage_key`.
@@ -640,9 +492,6 @@ impl Tensor {
         let mut dst: Option<_> = None;
 
         for &i in order.iter() {
-            if rels[i].is_some() {
-                continue; // Aliased. Read through `dst`
-            }
             let key = srcs[i].storage_key();
             if key > dst_key && dst.is_none() {
                 dst = Some(self.storage_mut());
@@ -657,15 +506,9 @@ impl Tensor {
             None => self.storage_mut(),
         };
 
-        let operands: [(Src<'_, Storage>, &Layout); N] = std::array::from_fn(|i| {
-            let s = match (&guards[i], rels[i]) {
-                (Some(g), None) => Src::Distinct(&**g),
-                (None, Some(rel)) => Src::Aliased(rel),
-                _ => unreachable!(
-                    "Source is either distinct or aliased. Other match patterns should be impossible"
-                ),
-            };
-            (s, srcs[i].layout())
+        let operands: [(&Storage, &Layout); N] = std::array::from_fn(|i| {
+            let guard = guards[i].as_ref().expect("every source was locked above");
+            (&**guard, srcs[i].layout())
         });
 
         dst.inplace_op(self.layout(), operands, c)

@@ -53,21 +53,6 @@ impl VarMap {
         Ok(())
     }
 
-    /// Set a named variable to some value.
-    pub fn set_one<K: AsRef<str>, V: AsRef<Tensor>>(&mut self, name: K, value: V) -> Result<()> {
-        let tensor_data = self.data.lock().unwrap();
-        let name = name.as_ref();
-        match tensor_data.get(name) {
-            None => crate::bail!("cannot find {name} in VarMap"),
-            Some(var) => {
-                if let Err(err) = var.set(value.as_ref()) {
-                    crate::bail!("error setting {name}: {err}",)
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Set some named variables to some values.
     ///
     /// If an error is returned, some of the variables might have already been set to their new

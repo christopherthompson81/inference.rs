@@ -810,32 +810,3 @@ impl PthTensors {
         }
     }
 }
-
-/// Read all the tensors from a PyTorch pth file with a given key.
-///
-/// # Arguments
-/// * `path` - Path to the pth file.
-/// * `key` - Optional key to retrieve `state_dict` from the pth file. Sometimes the pth file
-///   contains multiple objects and the state_dict is the one we are interested in.
-pub fn read_all_with_key<P: AsRef<std::path::Path>>(
-    path: P,
-    key: Option<&str>,
-) -> Result<Vec<(String, Tensor)>> {
-    let pth = PthTensors::new(path, key)?;
-    let tensor_names = pth.tensor_infos.keys();
-    let mut tensors = Vec::with_capacity(tensor_names.len());
-    for name in tensor_names {
-        if let Some(tensor) = pth.get(name)? {
-            tensors.push((name.to_string(), tensor))
-        }
-    }
-    Ok(tensors)
-}
-
-/// Read all the tensors from a PyTorch pth file.
-///
-/// # Arguments
-/// * `path` - Path to the pth file.
-pub fn read_all<P: AsRef<std::path::Path>>(path: P) -> Result<Vec<(String, Tensor)>> {
-    read_all_with_key(path, None)
-}

@@ -11,15 +11,6 @@ use crate::{
 
 pub(super) struct Conv2D<'a>(pub(super) &'a crate::conv::ParamsConv2D);
 
-#[allow(dead_code)]
-enum Conv2dImpl {
-    TiledIm2Col,
-    FullIm2Col,
-    Direct,
-}
-
-const DEFAULT_CONV2D_IMPL: Conv2dImpl = Conv2dImpl::TiledIm2Col;
-
 impl Map2 for Conv2D<'_> {
     const OP: &'static str = "conv2d";
     fn f<T: WithDType + num_traits::Num + Copy + 'static>(
@@ -40,14 +31,7 @@ impl Map2 for Conv2D<'_> {
             // although with large enough input size, tiled will start beating it.
             return conv2d_im2col_gemm(p, inp, inp_l, k, k_l);
         }
-        // TODO other cases
-
-        // No fast path, fallback to default general impl.
-        match DEFAULT_CONV2D_IMPL {
-            Conv2dImpl::TiledIm2Col => conv2d_tiled(p, inp, inp_l, k, k_l),
-            Conv2dImpl::Direct => conv2d_direct(p, inp, inp_l, k, k_l),
-            Conv2dImpl::FullIm2Col => conv2d_im2col_gemm(p, inp, inp_l, k, k_l),
-        }
+        conv2d_tiled(p, inp, inp_l, k, k_l)
     }
 }
 
@@ -265,101 +249,6 @@ fn conv2d_tiled<T: WithDType + num_traits::Num + Copy + 'static>(
             Ok::<(), crate::Error>(())
         })
     })?;
-
-    Ok(dst)
-}
-
-/// General direct convolution impl. Decently fast for small inputs and kernels, but loses to full/tiled gemm.
-fn conv2d_direct<T: WithDType + num_traits::Num + Copy + 'static>(
-    p: &ParamsConv2D,
-    inp: &[T],
-    inp_l: &Layout,
-    k: &[T],
-    k_l: &Layout,
-) -> Result<Vec<T>> {
-    let inp = &inp[inp_l.start_offset()..];
-    let (inp_s0, inp_s1, inp_s2, inp_s3) = crate::shape::dims4(inp_l.stride())?;
-    let k = &k[k_l.start_offset()..];
-    let (k_s0, k_s1, k_s2, k_s3) = crate::shape::dims4(k_l.stride())?;
-    let (out_h, out_w) = (p.out_h(), p.out_w());
-
-    // Output shape: [b_size, c_out, out_h, out_w].
-    let dst = vec![T::zero(); p.b_size * p.c_out * out_h * out_w];
-
-    // Convert NCHW input to NHWC layout for direct convolution.
-    let cont_s0 = p.i_h * p.i_w * p.c_in;
-    let cont_s1 = p.i_w * p.c_in;
-    let cont_s2 = p.c_in;
-    let mut inp_cont = vec![T::zero(); p.b_size * p.c_in * p.i_h * p.i_w];
-    for b_idx in 0..p.b_size {
-        for h_idx in 0..p.i_h {
-            for w_idx in 0..p.i_w {
-                for c_idx in 0..p.c_in {
-                    let src_idx = b_idx * inp_s0 + c_idx * inp_s1 + h_idx * inp_s2 + w_idx * inp_s3;
-                    let dst_idx = b_idx * cont_s0 + h_idx * cont_s1 + w_idx * cont_s2 + c_idx;
-                    inp_cont[dst_idx] = inp[src_idx]
-                }
-            }
-        }
-    }
-    let inp_cont_len = inp_cont.len();
-
-    let k_cache: Vec<Vec<T>> = (0..p.c_out)
-        .map(|dst_c_idx| {
-            (0..p.k_h * p.k_w)
-                .flat_map(|kw_kh| {
-                    let offset_h = kw_kh / p.k_w;
-                    let offset_w = kw_kh % p.k_w;
-                    (0..p.c_in).map(move |c_in_idx| {
-                        k[dst_c_idx * k_s0 + c_in_idx * k_s1 + offset_h * k_s2 + offset_w * k_s3]
-                    })
-                })
-                .collect()
-        })
-        .collect();
-
-    for b_idx in 0..p.b_size {
-        for offset_h in 0..p.k_h {
-            for offset_w in 0..p.k_w {
-                let k_offset = offset_h * p.k_w + offset_w;
-
-                (0..p.c_out).into_par_iter().for_each(|dst_c_idx| {
-                    let k_cont = &k_cache[dst_c_idx][k_offset * p.c_in..(k_offset + 1) * p.c_in];
-                    let base_dst_idx = dst_c_idx * out_w * out_h;
-                    let batch_dst_idx = base_dst_idx + b_idx * p.c_out * out_h * out_w;
-                    let batch_src_idx = b_idx * cont_s0;
-
-                    for dst_h in 0..out_h {
-                        let src_h = p.stride * dst_h + offset_h * p.dilation;
-                        if src_h < p.padding || src_h >= p.i_h + p.padding {
-                            continue;
-                        }
-                        let src_h = src_h - p.padding;
-                        let h_dst_idx = batch_dst_idx + dst_h * out_w;
-                        let h_src_idx = batch_src_idx + src_h * cont_s1;
-
-                        for dst_w in 0..out_w {
-                            let src_w = p.stride * dst_w + offset_w * p.dilation;
-                            if src_w < p.padding || src_w >= p.i_w + p.padding {
-                                continue;
-                            }
-                            let src_w = src_w - p.padding;
-                            let dst_idx = h_dst_idx + dst_w;
-                            let inp_idx_1 = h_src_idx + src_w * cont_s2;
-                            let inp_idx_2 = (inp_idx_1 + p.c_in).min(inp_cont_len);
-                            let inp_cont = &inp_cont[inp_idx_1..inp_idx_2];
-                            let mut d = T::zero();
-                            unsafe {
-                                T::vec_dot(inp_cont.as_ptr(), k_cont.as_ptr(), &mut d, p.c_in);
-                                let ptr = dst.as_ptr().add(dst_idx) as *mut T;
-                                *ptr += d;
-                            }
-                        }
-                    }
-                });
-            }
-        }
-    }
 
     Ok(dst)
 }
