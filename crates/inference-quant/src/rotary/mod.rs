@@ -1,9 +1,9 @@
 #[cfg(feature = "cuda")]
 mod ffi;
 
-use candle_core::{CpuStorage, Layout, Result, Storage, Tensor, WithDType};
+use inference_tensor::{CpuStorage, Layout, Result, Storage, Tensor, WithDType};
 #[cfg(feature = "metal")]
-use candle_core::{Shape, backend::BackendStorage};
+use inference_tensor::{Shape, backend::BackendStorage};
 use rayon::prelude::*;
 
 fn cache_dims(l_src: &Layout, l_cos: &Layout, l_sin: &Layout) -> Result<(usize, usize)> {
@@ -13,29 +13,29 @@ fn cache_dims(l_src: &Layout, l_cos: &Layout, l_sin: &Layout) -> Result<(usize, 
         [cos_batch, cos_seq, dim] if *cos_batch == batch && *cos_seq == seq_len => {
             (batch * seq_len, *dim)
         }
-        _ => candle_core::bail!("invalid RoPE cos shape {:?}", l_cos.shape()),
+        _ => inference_tensor::bail!("invalid RoPE cos shape {:?}", l_cos.shape()),
     };
     let (sin_rows, sin_dim) = match l_sin.shape().dims() {
         [rows, dim] => (*rows, *dim),
         [sin_batch, sin_seq, dim] if *sin_batch == batch && *sin_seq == seq_len => {
             (batch * seq_len, *dim)
         }
-        _ => candle_core::bail!("invalid RoPE sin shape {:?}", l_sin.shape()),
+        _ => inference_tensor::bail!("invalid RoPE sin shape {:?}", l_sin.shape()),
     };
     if (cos_rows, rot_dim) != (sin_rows, sin_dim) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE cos/sin shape mismatch {:?} {:?}",
             l_cos.shape(),
             l_sin.shape()
         );
     }
     if cos_rows != seq_len && cos_rows != batch * seq_len {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE cache rows {cos_rows} are incompatible with batch {batch} and seq {seq_len}"
         );
     }
     if rot_dim == 0 || rot_dim * 2 > head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE rot dim {} is incompatible with head dim {head_dim}",
             rot_dim * 2
         );
@@ -65,7 +65,7 @@ fn rotary_dims(x: &Tensor, cos: &Tensor, sin: &Tensor, positioned: bool) -> Resu
             [cos_batch, cos_seq, dim] if *cos_batch == batch && *cos_seq == seq_len => {
                 (batch * seq_len, *dim)
             }
-            _ => candle_core::bail!("invalid RoPE cos shape {:?}", cos.shape()),
+            _ => inference_tensor::bail!("invalid RoPE cos shape {:?}", cos.shape()),
         }
     };
     let (sin_rows, sin_dim) = if positioned {
@@ -76,23 +76,23 @@ fn rotary_dims(x: &Tensor, cos: &Tensor, sin: &Tensor, positioned: bool) -> Resu
             [sin_batch, sin_seq, dim] if *sin_batch == batch && *sin_seq == seq_len => {
                 (batch * seq_len, *dim)
             }
-            _ => candle_core::bail!("invalid RoPE sin shape {:?}", sin.shape()),
+            _ => inference_tensor::bail!("invalid RoPE sin shape {:?}", sin.shape()),
         }
     };
     if (cache_rows, rot_dim) != (sin_rows, sin_dim) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE cos/sin shape mismatch {:?} {:?}",
             cos.shape(),
             sin.shape()
         );
     }
     if !positioned && cache_rows != seq_len && cache_rows != batch * seq_len {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE cache rows {cache_rows} are incompatible with batch {batch} and seq {seq_len}"
         );
     }
     if rot_dim == 0 || rot_dim * 2 > head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE rot dim {} is incompatible with head dim {head_dim}",
             rot_dim * 2
         );
@@ -111,7 +111,7 @@ fn check_qk_shape(q: &Tensor, k: &Tensor) -> Result<usize> {
     let (batch, _, seq_len, head_dim) = q.dims4()?;
     let (k_batch, k_heads, k_seq_len, k_head_dim) = k.dims4()?;
     if (k_batch, k_seq_len, k_head_dim) != (batch, seq_len, head_dim) {
-        candle_core::bail!("q/k RoPE shape mismatch {:?} {:?}", q.shape(), k.shape());
+        inference_tensor::bail!("q/k RoPE shape mismatch {:?} {:?}", q.shape(), k.shape());
     }
     Ok(k_heads)
 }
@@ -119,7 +119,7 @@ fn check_qk_shape(q: &Tensor, k: &Tensor) -> Result<usize> {
 fn typed_slice<'a, T>(xs: &'a [T], layout: &Layout, name: &'static str) -> Result<&'a [T]> {
     match layout.contiguous_offsets() {
         Some((start, end)) => Ok(&xs[start..end]),
-        None => candle_core::bail!("{name} must be contiguous for RoPE"),
+        None => inference_tensor::bail!("{name} must be contiguous for RoPE"),
     }
 }
 
@@ -130,7 +130,7 @@ fn cpu_positions<'a, G: std::ops::Deref<Target = Storage>>(
         return Ok(None);
     };
     let Storage::Cpu(CpuStorage::U32(positions)) = &**storage else {
-        candle_core::bail!("RoPE positions must be CPU u32");
+        inference_tensor::bail!("RoPE positions must be CPU u32");
     };
     Ok(Some(typed_slice(positions, layout, "positions")?))
 }
@@ -178,14 +178,14 @@ where
             cache_dims(src_l, cos_l, sin_l)?
         };
         if positioned && sin_l.shape().dims2()? != (cache_rows, rot_dim) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "RoPE cos/sin shape mismatch {:?} {:?}",
                 cos_l.shape(),
                 sin_l.shape()
             );
         }
         if rot_dim == 0 || rot_dim * 2 > head_dim {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "RoPE rot dim {} is incompatible with head dim {head_dim}",
                 rot_dim * 2
             );
@@ -195,14 +195,14 @@ where
     if let Some(positions) = positions {
         let expected = batch * seq_len;
         if positions.len() != expected {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "RoPE positions length {} does not match token count {expected}",
                 positions.len()
             );
         }
         for position in positions {
             if *position as usize >= cache_rows {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "RoPE position {} exceeds cache rows {}",
                     position,
                     cache_rows
@@ -239,7 +239,7 @@ where
                 dst[y_idx] = y * cos + x * sin;
             }
         });
-    Tensor::from_vec(dst, src_l.shape().clone(), &candle_core::Device::Cpu)
+    Tensor::from_vec(dst, src_l.shape().clone(), &inference_tensor::Device::Cpu)
 }
 
 fn cpu_apply_rotary_q(
@@ -316,7 +316,7 @@ fn cpu_apply_rotary_q(
             positions,
             is_neox,
         }),
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "unsupported CPU RoPE dtype {:?} {:?} {:?}",
             q.dtype(),
             cos.dtype(),
@@ -334,7 +334,7 @@ fn cpu_apply_rotary_qk(
     is_neox: bool,
 ) -> Result<(Tensor, Tensor)> {
     if q.dtype() != k.dtype() {
-        candle_core::bail!("q/k dtype mismatch {:?} {:?}", q.dtype(), k.dtype());
+        inference_tensor::bail!("q/k dtype mismatch {:?} {:?}", q.dtype(), k.dtype());
     }
     check_qk_shape(q, k)?;
     let (q_out, k_out) = rayon::join(
@@ -401,7 +401,7 @@ fn cuda_apply_rotary_qk(
     let (batch, q_heads, seq_len, head_dim) = q.dims4()?;
     let (k_batch, k_heads, k_seq_len, k_head_dim) = k.dims4()?;
     if (k_batch, k_seq_len, k_head_dim) != (batch, seq_len, head_dim) {
-        candle_core::bail!("q/k RoPE shape mismatch {:?} {:?}", q.shape(), k.shape());
+        inference_tensor::bail!("q/k RoPE shape mismatch {:?} {:?}", q.shape(), k.shape());
     }
     let q_embed = q.transpose(1, 2)?.flatten(0, 1)?;
     let k_embed = k.transpose(1, 2)?.flatten(0, 1)?;
@@ -431,7 +431,7 @@ fn metal_apply_rotary_q(
     positions: Option<&Tensor>,
     is_neox: bool,
 ) -> Result<Tensor> {
-    use candle_core::MetalStorage;
+    use inference_tensor::MetalStorage;
 
     let q = q.contiguous()?;
     let cos = cos.contiguous()?;
@@ -440,8 +440,8 @@ fn metal_apply_rotary_q(
     let dims = rotary_dims(&q, &cos, &sin, positions.is_some())?;
     if let Some(positions) = positions.as_ref() {
         let expected = dims.batch * dims.seq_len;
-        if positions.dtype() != candle_core::DType::U32 || positions.dims1()? != expected {
-            candle_core::bail!("RoPE positions must be u32 with length {expected}");
+        if positions.dtype() != inference_tensor::DType::U32 || positions.dims1()? != expected {
+            inference_tensor::bail!("RoPE positions must be u32 with length {expected}");
         }
     }
 
@@ -450,15 +450,15 @@ fn metal_apply_rotary_q(
     let (sin_s, sin_l) = sin.storage_and_layout();
     let q_s = match &*q_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("q must be a Metal tensor"),
+        _ => inference_tensor::bail!("q must be a Metal tensor"),
     };
     let cos_s = match &*cos_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("cos must be a Metal tensor"),
+        _ => inference_tensor::bail!("cos must be a Metal tensor"),
     };
     let sin_s = match &*sin_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("sin must be a Metal tensor"),
+        _ => inference_tensor::bail!("sin must be a Metal tensor"),
     };
     let device = q_s.device();
     let output = device.new_buffer(q_l.shape().elem_count(), q_s.dtype(), "rotary-q")?;
@@ -469,7 +469,7 @@ fn metal_apply_rotary_q(
         let (positions_s, positions_l) = positions.storage_and_layout();
         let positions_s = match &*positions_s {
             Storage::Metal(storage) => storage,
-            _ => candle_core::bail!("positions must be a Metal tensor"),
+            _ => inference_tensor::bail!("positions must be a Metal tensor"),
         };
         crate::metal_kernels::call_rotary_q_positions(
             device.device(),
@@ -514,7 +514,7 @@ fn metal_apply_rotary_q(
             &output,
         )
     }
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     Ok(metal_tensor(
         Storage::Metal(MetalStorage::new(
@@ -536,7 +536,7 @@ fn metal_apply_rotary_qk(
     positions: Option<&Tensor>,
     is_neox: bool,
 ) -> Result<(Tensor, Tensor)> {
-    use candle_core::MetalStorage;
+    use inference_tensor::MetalStorage;
 
     let q = q.contiguous()?;
     let k = k.contiguous()?;
@@ -547,8 +547,8 @@ fn metal_apply_rotary_qk(
     let k_heads = check_qk_shape(&q, &k)?;
     if let Some(positions) = positions.as_ref() {
         let expected = dims.batch * dims.seq_len;
-        if positions.dtype() != candle_core::DType::U32 || positions.dims1()? != expected {
-            candle_core::bail!("RoPE positions must be u32 with length {expected}");
+        if positions.dtype() != inference_tensor::DType::U32 || positions.dims1()? != expected {
+            inference_tensor::bail!("RoPE positions must be u32 with length {expected}");
         }
     }
 
@@ -558,19 +558,19 @@ fn metal_apply_rotary_qk(
     let (sin_s, sin_l) = sin.storage_and_layout();
     let q_s = match &*q_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("q must be a Metal tensor"),
+        _ => inference_tensor::bail!("q must be a Metal tensor"),
     };
     let k_s = match &*k_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("k must be a Metal tensor"),
+        _ => inference_tensor::bail!("k must be a Metal tensor"),
     };
     let cos_s = match &*cos_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("cos must be a Metal tensor"),
+        _ => inference_tensor::bail!("cos must be a Metal tensor"),
     };
     let sin_s = match &*sin_s {
         Storage::Metal(storage) => storage,
-        _ => candle_core::bail!("sin must be a Metal tensor"),
+        _ => inference_tensor::bail!("sin must be a Metal tensor"),
     };
     let device = q_s.device();
     let q_out = device.new_buffer(q_l.shape().elem_count(), q_s.dtype(), "rotary-q")?;
@@ -582,7 +582,7 @@ fn metal_apply_rotary_qk(
         let (positions_s, positions_l) = positions.storage_and_layout();
         let positions_s = match &*positions_s {
             Storage::Metal(storage) => storage,
-            _ => candle_core::bail!("positions must be a Metal tensor"),
+            _ => inference_tensor::bail!("positions must be a Metal tensor"),
         };
         crate::metal_kernels::call_rotary_qk_positions(
             device.device(),
@@ -635,7 +635,7 @@ fn metal_apply_rotary_qk(
             &k_out,
         )
     }
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     Ok((
         metal_tensor(
@@ -727,7 +727,7 @@ fn apply_rotary_qk_inner(
     is_neox: bool,
 ) -> Result<(Tensor, Tensor)> {
     if q.dtype() != k.dtype() {
-        candle_core::bail!("q/k dtype mismatch {:?} {:?}", q.dtype(), k.dtype());
+        inference_tensor::bail!("q/k dtype mismatch {:?} {:?}", q.dtype(), k.dtype());
     }
     #[cfg(feature = "cuda")]
     if q.device().is_cuda() {
@@ -742,12 +742,12 @@ fn apply_rotary_qk_inner(
 
 #[cfg(feature = "cuda")]
 mod cuda {
-    use candle_core::{
+    use half::{bf16, f16};
+    use inference_tensor::{
         CpuStorage, DType, InplaceOp3, Layout, MetalStorage, Result, Storage, Tensor,
         backend::{BackendDevice, BackendStorage},
         cuda_backend::{CudaDType, CudaStorage, CudaStorageSlice},
     };
-    use half::{bf16, f16};
     use std::ffi::{c_int, c_long};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
@@ -757,7 +757,7 @@ mod cuda {
             DType::F16 => 0,
             DType::BF16 => 1,
             DType::F32 => 2,
-            dtype => candle_core::bail!("dtype {dtype:?} is not supported"),
+            dtype => inference_tensor::bail!("dtype {dtype:?} is not supported"),
         })
     }
 
@@ -774,7 +774,7 @@ mod cuda {
 
     fn launch_rotary<T>(args: RotaryLaunch<'_>) -> Result<()>
     where
-        T: CudaDType + candle_core::cuda_backend::cudarc::driver::DeviceRepr,
+        T: CudaDType + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     {
         let RotaryLaunch {
             query,
@@ -788,39 +788,39 @@ mod cuda {
         } = args;
 
         if cos_cache.dtype() != query.dtype() || sin_cache.dtype() != query.dtype() {
-            candle_core::bail!("apply-rotary expects all tensors to have the same dtype");
+            inference_tensor::bail!("apply-rotary expects all tensors to have the same dtype");
         }
 
         let dev = query.device().clone();
         if !cos_cache.device().same_device(&dev) || !sin_cache.device().same_device(&dev) {
-            candle_core::bail!("apply-rotary tensors must be on the same cuda device");
+            inference_tensor::bail!("apply-rotary tensors must be on the same cuda device");
         }
 
         if query_l.stride().len() != 3 {
-            candle_core::bail!("apply-rotary expects query rank 3 ({query_l:?})")
+            inference_tensor::bail!("apply-rotary expects query rank 3 ({query_l:?})")
         }
         if cos_l.stride().len() != 2 || sin_l.stride().len() != 2 {
-            candle_core::bail!("apply-rotary expects rank 2 caches")
+            inference_tensor::bail!("apply-rotary expects rank 2 caches")
         }
 
         let (num_tokens, num_heads, head_size) = query_l.shape().dims3()?;
         let rot_dim = cos_l.dims()[1];
         if sin_l.shape().dims2()? != (cos_l.dims()[0], rot_dim) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "shape mismatch cos_cache {:?} and sin_cache {:?}",
                 cos_l.shape(),
                 sin_l.shape()
             )
         }
         if positions.is_none() && (num_tokens, rot_dim) != cos_l.shape().dims2()? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "shape mismatch cos_cache {:?}, expected {:?}",
                 cos_l.shape(),
                 (num_tokens, rot_dim)
             )
         }
         if rot_dim == 0 || rot_dim * 2 > head_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "rotary dimension {rot_dim} is incompatible with head size {head_size}"
             )
         }
@@ -836,23 +836,23 @@ mod cuda {
 
         let positions = if let Some((positions, positions_l)) = positions {
             if positions.dtype() != DType::U32 {
-                candle_core::bail!("apply-rotary-positions expects positions to be u32");
+                inference_tensor::bail!("apply-rotary-positions expects positions to be u32");
             }
             if !positions.device().same_device(&dev) {
-                candle_core::bail!("positions must be on the same cuda device as query");
+                inference_tensor::bail!("positions must be on the same cuda device as query");
             }
             if positions_l.stride().len() != 1 {
-                candle_core::bail!("apply-rotary-positions expects rank 1 positions")
+                inference_tensor::bail!("apply-rotary-positions expects rank 1 positions")
             }
             let positions_len = positions_l.shape().dims1()?;
             if positions_len != num_tokens {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "positions length {positions_len} does not match token count {num_tokens}"
                 );
             }
             let positions = match &positions.slice {
                 CudaStorageSlice::U32(positions) => positions,
-                _ => candle_core::bail!("positions dtype mismatch"),
+                _ => inference_tensor::bail!("positions dtype mismatch"),
             };
             let (positions, guard) =
                 slice_ptr_on_stream(positions, positions_l.start_offset(), &stream);
@@ -925,7 +925,7 @@ mod cuda {
             _: &CpuStorage,
             _: &Layout,
         ) -> Result<()> {
-            candle_core::bail!("apply-rotary-inplace is only supported for cuda")
+            inference_tensor::bail!("apply-rotary-inplace is only supported for cuda")
         }
 
         fn cuda_fwd(
@@ -969,7 +969,7 @@ mod cuda {
                     is_neox: self.is_neox,
                 }),
                 dt => {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "apply_rotary is only supported for f32, f16 and bf16 ({dt:?})"
                     )
                 }
@@ -985,7 +985,7 @@ mod cuda {
             _: &MetalStorage,
             _: &Layout,
         ) -> Result<()> {
-            candle_core::bail!("apply-rotary-inplace is only supported for cuda")
+            inference_tensor::bail!("apply-rotary-inplace is only supported for cuda")
         }
     }
 
@@ -1008,7 +1008,7 @@ mod cuda {
             _: &CpuStorage,
             _: &Layout,
         ) -> Result<()> {
-            candle_core::bail!("apply-rotary-positions-inplace is only supported for cuda")
+            inference_tensor::bail!("apply-rotary-positions-inplace is only supported for cuda")
         }
 
         fn cuda_fwd(
@@ -1023,7 +1023,7 @@ mod cuda {
             let (positions_storage, positions_l) = self.positions.storage_and_layout();
             let positions = match &*positions_storage {
                 Storage::Cuda(positions) => positions,
-                _ => candle_core::bail!("positions must be a cuda tensor"),
+                _ => inference_tensor::bail!("positions must be a cuda tensor"),
             };
             match query.dtype() {
                 DType::F16 => launch_rotary::<f16>(RotaryLaunch {
@@ -1057,7 +1057,7 @@ mod cuda {
                     is_neox: self.is_neox,
                 }),
                 dt => {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "apply_rotary is only supported for f32, f16 and bf16 ({dt:?})"
                     )
                 }
@@ -1073,7 +1073,7 @@ mod cuda {
             _: &MetalStorage,
             _: &Layout,
         ) -> Result<()> {
-            candle_core::bail!("apply-rotary-positions-inplace is only supported for cuda")
+            inference_tensor::bail!("apply-rotary-positions-inplace is only supported for cuda")
         }
     }
 
@@ -1089,7 +1089,7 @@ mod cuda {
             || cos_cache.dtype() != dtype
             || sin_cache.dtype() != dtype
         {
-            candle_core::bail!("apply-rotary expects all tensors to have the same dtype");
+            inference_tensor::bail!("apply-rotary expects all tensors to have the same dtype");
         }
         let op = RotaryInplace { is_neox };
         query.inplace_op3(cos_cache, sin_cache, &op)?;
@@ -1113,7 +1113,7 @@ mod cuda {
             || sin_cache.dtype() != dtype
             || positions.dtype() != DType::U32
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "apply-rotary-positions expects q/k/caches to share dtype and positions to be u32"
             );
         }
@@ -1153,7 +1153,9 @@ mod cuda {
                 apply_rotary_(query, Some(key), cos_cache, sin_cache, is_neox)
             }
             dt => {
-                candle_core::bail!("apply_rotary is only supported for f32, f16 and bf16 ({dt:?})")
+                inference_tensor::bail!(
+                    "apply_rotary is only supported for f32, f16 and bf16 ({dt:?})"
+                )
             }
         }
     }
@@ -1169,7 +1171,9 @@ mod cuda {
                 apply_rotary_(query, None, cos_cache, sin_cache, is_neox)
             }
             dt => {
-                candle_core::bail!("apply_rotary is only supported for f32, f16 and bf16 ({dt:?})")
+                inference_tensor::bail!(
+                    "apply_rotary is only supported for f32, f16 and bf16 ({dt:?})"
+                )
             }
         }
     }
@@ -1187,7 +1191,9 @@ mod cuda {
                 apply_rotary_positions_(query, Some(key), cos_cache, sin_cache, positions, is_neox)
             }
             dt => {
-                candle_core::bail!("apply_rotary is only supported for f32, f16 and bf16 ({dt:?})")
+                inference_tensor::bail!(
+                    "apply_rotary is only supported for f32, f16 and bf16 ({dt:?})"
+                )
             }
         }
     }
@@ -1204,7 +1210,9 @@ mod cuda {
                 apply_rotary_positions_(query, None, cos_cache, sin_cache, positions, is_neox)
             }
             dt => {
-                candle_core::bail!("apply_rotary is only supported for f32, f16 and bf16 ({dt:?})")
+                inference_tensor::bail!(
+                    "apply_rotary is only supported for f32, f16 and bf16 ({dt:?})"
+                )
             }
         }
     }
@@ -1224,51 +1232,51 @@ pub use cuda::*;
 /// * `is_neox` - Use neox encoding instead of gpt-j style rotary
 #[cfg(not(feature = "cuda"))]
 pub fn apply_rotary_inplace(
-    _query: &candle_core::Tensor,
-    _key: &candle_core::Tensor,
-    _cos_cache: &candle_core::Tensor,
-    _sin_cache: &candle_core::Tensor,
+    _query: &inference_tensor::Tensor,
+    _key: &inference_tensor::Tensor,
+    _cos_cache: &inference_tensor::Tensor,
+    _sin_cache: &inference_tensor::Tensor,
     _is_neox: bool,
-) -> candle_core::Result<()> {
-    candle_core::bail!("apply_rotary is only supported for cuda");
+) -> inference_tensor::Result<()> {
+    inference_tensor::bail!("apply_rotary is only supported for cuda");
 }
 
 #[cfg(not(feature = "cuda"))]
 pub fn apply_rotary_inplace_q(
-    _query: &candle_core::Tensor,
-    _cos_cache: &candle_core::Tensor,
-    _sin_cache: &candle_core::Tensor,
+    _query: &inference_tensor::Tensor,
+    _cos_cache: &inference_tensor::Tensor,
+    _sin_cache: &inference_tensor::Tensor,
     _is_neox: bool,
-) -> candle_core::Result<()> {
-    candle_core::bail!("apply_rotary is only supported for cuda");
+) -> inference_tensor::Result<()> {
+    inference_tensor::bail!("apply_rotary is only supported for cuda");
 }
 
 #[cfg(not(feature = "cuda"))]
 pub fn apply_rotary_inplace_positions(
-    _query: &candle_core::Tensor,
-    _key: &candle_core::Tensor,
-    _cos_cache: &candle_core::Tensor,
-    _sin_cache: &candle_core::Tensor,
-    _positions: &candle_core::Tensor,
+    _query: &inference_tensor::Tensor,
+    _key: &inference_tensor::Tensor,
+    _cos_cache: &inference_tensor::Tensor,
+    _sin_cache: &inference_tensor::Tensor,
+    _positions: &inference_tensor::Tensor,
     _is_neox: bool,
-) -> candle_core::Result<()> {
-    candle_core::bail!("apply_rotary is only supported for cuda");
+) -> inference_tensor::Result<()> {
+    inference_tensor::bail!("apply_rotary is only supported for cuda");
 }
 
 #[cfg(not(feature = "cuda"))]
 pub fn apply_rotary_inplace_q_positions(
-    _query: &candle_core::Tensor,
-    _cos_cache: &candle_core::Tensor,
-    _sin_cache: &candle_core::Tensor,
-    _positions: &candle_core::Tensor,
+    _query: &inference_tensor::Tensor,
+    _cos_cache: &inference_tensor::Tensor,
+    _sin_cache: &inference_tensor::Tensor,
+    _positions: &inference_tensor::Tensor,
     _is_neox: bool,
-) -> candle_core::Result<()> {
-    candle_core::bail!("apply_rotary is only supported for cuda");
+) -> inference_tensor::Result<()> {
+    inference_tensor::bail!("apply_rotary is only supported for cuda");
 }
 
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
-    use candle_core::{Device, Result, Tensor};
+    use inference_tensor::{Device, Result, Tensor};
 
     const BATCH: usize = 2;
     const Q_HEADS: usize = 4;

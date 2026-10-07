@@ -1,11 +1,11 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::config::{Config, VisionAttentionType, VisionConfig};
 use crate::{
@@ -633,14 +633,14 @@ impl VisionModel {
             .iter()
             .any(|[_, height, width]| height % self.merge_size != 0 || width % self.merge_size != 0)
         {
-            candle_core::bail!("Muse-Glimmer vision grids must be divisible by merge_size");
+            inference_tensor::bail!("Muse-Glimmer vision grids must be divisible by merge_size");
         }
         let expected_patches = grids
             .iter()
             .map(|[frames, height, width]| frames * height * width)
             .sum::<usize>();
         if pixel_values.dim(0)? != expected_patches {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer received {} patches for a grid requiring {expected_patches}",
                 pixel_values.dim(0)?
             );
@@ -741,8 +741,8 @@ impl VisionModel {
 mod tests {
     use std::{io::Write, sync::Arc};
 
-    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
     use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding, GgufWeightSource};
+    use inference_tensor::quantized::{GgmlDType, QTensor, gguf_file};
     use tempfile::NamedTempFile;
 
     use super::*;

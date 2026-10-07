@@ -3,7 +3,7 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
 use crate::paged_attention::PagedAttentionMeta;
@@ -105,7 +105,7 @@ impl SpeculativeTapRouting {
         chunk_ranges: &[(usize, usize)],
     ) -> Result<Self> {
         if target_batch_indices.len() != chunk_ranges.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "speculative tap routing has {} batch indices for {} prompt rows",
                 target_batch_indices.len(),
                 chunk_ranges.len()
@@ -115,12 +115,12 @@ impl SpeculativeTapRouting {
             .iter()
             .map(|&(start, end)| {
                 let rows = end.checked_sub(start).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "speculative prompt range ({start}, {end}) is reversed"
                     ))
                 })?;
                 if rows == 0 {
-                    candle_core::bail!("speculative prompt range ({start}, {end}) is empty");
+                    inference_tensor::bail!("speculative prompt range ({start}, {end}) is empty");
                 }
                 Ok(rows)
             })
@@ -132,12 +132,12 @@ impl SpeculativeTapRouting {
                 .zip(row_counts)
                 .map(|(&batch_idx, rows)| {
                     if batch_idx >= capture_batch {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "speculative tap batch row {batch_idx} exceeds capture batch {capture_batch}"
                         );
                     }
                     if rows > capture_rows {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "speculative prompt has {rows} rows but dense tap capture has {capture_rows}"
                         );
                     }
@@ -150,13 +150,13 @@ impl SpeculativeTapRouting {
                 .collect::<Result<Vec<_>>>()?,
             SpeculativePrefillCaptureLayout::Packed => {
                 if capture_batch != 1 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "packed speculative tap capture has batch {capture_batch}, expected 1"
                     );
                 }
                 for (logical_idx, &batch_idx) in target_batch_indices.iter().enumerate() {
                     if batch_idx != logical_idx {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "packed speculative tap row {logical_idx} maps to target batch {batch_idx}"
                         );
                     }
@@ -170,11 +170,11 @@ impl SpeculativeTapRouting {
                         rows,
                     });
                     row_start = row_start.checked_add(rows).ok_or_else(|| {
-                        candle_core::Error::msg("packed speculative tap row count overflow")
+                        inference_tensor::Error::msg("packed speculative tap row count overflow")
                     })?;
                 }
                 if row_start != capture_rows {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "packed speculative prompts have {row_start} rows but tap capture has {capture_rows}"
                     );
                 }
@@ -194,7 +194,7 @@ impl SpeculativeTapRouting {
     pub fn flat_row_indices(&self) -> Result<Vec<u32>> {
         let total_rows = self.spans.iter().try_fold(0usize, |total, span| {
             total.checked_add(span.rows).ok_or_else(|| {
-                candle_core::Error::msg("speculative tap routing row count overflow")
+                inference_tensor::Error::msg("speculative tap routing row count overflow")
             })
         })?;
         let mut indices = Vec::with_capacity(total_rows);
@@ -203,12 +203,14 @@ impl SpeculativeTapRouting {
                 .capture_batch_idx
                 .checked_mul(self.capture_rows)
                 .and_then(|row| row.checked_add(span.capture_row_start))
-                .ok_or_else(|| candle_core::Error::msg("speculative tap row index overflow"))?;
-            let end = start
-                .checked_add(span.rows)
-                .ok_or_else(|| candle_core::Error::msg("speculative tap row index overflow"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("speculative tap row index overflow")
+                })?;
+            let end = start.checked_add(span.rows).ok_or_else(|| {
+                inference_tensor::Error::msg("speculative tap row index overflow")
+            })?;
             for row in start..end {
-                indices.push(u32::try_from(row).map_err(candle_core::Error::wrap)?);
+                indices.push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
             }
         }
         Ok(indices)
@@ -268,13 +270,15 @@ impl From<Vec<u32>> for SpeculativeTokens {
 impl SpeculativeTokens {
     pub fn from_device(tokens: Tensor) -> Result<Self> {
         if tokens.rank() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "device speculative tokens must have rank 1, got {:?}",
                 tokens.dims()
             );
         }
         Ok(Self::Device(
-            tokens.to_dtype(candle_core::DType::U32)?.contiguous()?,
+            tokens
+                .to_dtype(inference_tensor::DType::U32)?
+                .contiguous()?,
         ))
     }
 
@@ -344,24 +348,24 @@ pub struct SparseSpeculativeProbs {
 impl SparseSpeculativeProbs {
     pub fn new(token_ids: Tensor, probs: Tensor) -> Result<Self> {
         let [positions, candidates] = token_ids.dims() else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse speculative token ids must have shape [positions, candidates], got {:?}",
                 token_ids.dims()
             );
         };
         if probs.dims() != [*positions, *candidates] {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse speculative probability shape {:?} does not match token ids {:?}",
                 probs.dims(),
                 token_ids.dims()
             );
         }
         if *candidates == 0 {
-            candle_core::bail!("sparse speculative probabilities must contain candidates");
+            inference_tensor::bail!("sparse speculative probabilities must contain candidates");
         }
         Ok(Self {
-            token_ids: token_ids.to_dtype(candle_core::DType::U32)?,
-            probs: probs.to_dtype(candle_core::DType::F32)?,
+            token_ids: token_ids.to_dtype(inference_tensor::DType::U32)?,
+            probs: probs.to_dtype(inference_tensor::DType::F32)?,
         })
     }
 
@@ -405,7 +409,7 @@ impl SpeculativeProposal {
     pub fn with_sparse_probs(tokens: Vec<u32>, token_ids: Tensor, probs: Tensor) -> Result<Self> {
         let sparse = SparseSpeculativeProbs::new(token_ids, probs)?;
         if sparse.positions() != tokens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse speculative probabilities have {} positions for {} tokens",
                 sparse.positions(),
                 tokens.len()
@@ -425,7 +429,7 @@ impl SpeculativeProposal {
         let tokens = SpeculativeTokens::from_device(tokens)?;
         let sparse = SparseSpeculativeProbs::new(token_ids, probs)?;
         if sparse.positions() != tokens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse speculative probabilities have {} positions for {} tokens",
                 sparse.positions(),
                 tokens.len()
@@ -471,7 +475,7 @@ pub fn sample_draft_rows(
 ) -> Result<Vec<u32>> {
     let batch = sequences.len();
     if contexts.len() != batch || logits.dim(0)? != batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "draft sampling batch mismatch: logits={}, contexts={}, sequences={batch}",
             logits.dim(0)?,
             contexts.len()
@@ -479,7 +483,7 @@ pub fn sample_draft_rows(
     }
     let mut tokens = Vec::with_capacity(batch);
     for (row, seq) in sequences.iter().enumerate() {
-        let row_logits = logits.get(row)?.to_dtype(candle_core::DType::F32)?;
+        let row_logits = logits.get(row)?.to_dtype(inference_tensor::DType::F32)?;
         let sequence_rng = seq.sampling_rng(rng);
         let sampled = seq.sampler().sample(
             row_logits,
@@ -498,7 +502,7 @@ pub fn sample_draft_rows(
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::{
         SparseSpeculativeProbs, SpeculativePrefillCaptureLayout, SpeculativeProposal,
@@ -617,14 +621,14 @@ mod tests {
         assert!(
             SparseSpeculativeProbs::new(
                 ids,
-                Tensor::zeros((2, 3), candle_core::DType::F32, &Device::Cpu).unwrap(),
+                Tensor::zeros((2, 3), inference_tensor::DType::F32, &Device::Cpu).unwrap(),
             )
             .is_err()
         );
         assert!(
             SparseSpeculativeProbs::new(
-                Tensor::zeros((2, 0), candle_core::DType::U32, &Device::Cpu).unwrap(),
-                Tensor::zeros((2, 0), candle_core::DType::F32, &Device::Cpu).unwrap(),
+                Tensor::zeros((2, 0), inference_tensor::DType::U32, &Device::Cpu).unwrap(),
+                Tensor::zeros((2, 0), inference_tensor::DType::F32, &Device::Cpu).unwrap(),
             )
             .is_err()
         );
@@ -643,7 +647,7 @@ mod tests {
 
     #[test]
     fn device_tokens_require_one_row() {
-        let tensor = Tensor::zeros((1, 3), candle_core::DType::U32, &Device::Cpu).unwrap();
+        let tensor = Tensor::zeros((1, 3), inference_tensor::DType::U32, &Device::Cpu).unwrap();
         assert!(SpeculativeTokens::from_device(tensor).is_err());
     }
 }

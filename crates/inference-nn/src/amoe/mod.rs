@@ -5,9 +5,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use candle_core::{D, DType, Device, Result, Tensor, Var, safetensors};
-use candle_nn::{Linear, ModuleT, VarMap};
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder};
+use inference_tensor::nn::{Linear, ModuleT, VarMap};
+use inference_tensor::{D, DType, Device, Result, Tensor, Var, safetensors};
 use serde::{Deserialize, Serialize};
 
 mod inputs;
@@ -80,7 +80,7 @@ pub trait AnyMoeBaseModelMixin {
         _base: &dyn MlpLayer,
         _vb: ShardedVarBuilder,
     ) -> Result<Box<dyn MlpLayer>> {
-        candle_core::bail!("Model does not support AnyMoE layers");
+        inference_tensor::bail!("Model does not support AnyMoE layers");
     }
     fn create_anymoe_layers(
         &mut self,
@@ -92,7 +92,7 @@ pub trait AnyMoeBaseModelMixin {
         gate_vb: Option<ShardedVarBuilder>,
     ) -> Result<()> {
         if !self.amoe_supported() {
-            candle_core::bail!("Model does not support AnyMoE layers");
+            inference_tensor::bail!("Model does not support AnyMoE layers");
         }
         let experts = build_anymoe_experts(ExpertSources {
             mlps: &self.get_mlps(),
@@ -317,9 +317,9 @@ impl ModuleT for MoeGate {
     fn forward_t(&self, xs: &Tensor, train: bool) -> Result<Tensor> {
         let hidden_states = xs.apply(&self.lin)?;
         if train {
-            candle_nn::ops::softmax(&hidden_states, D::Minus1)
+            inference_tensor::nn::ops::softmax(&hidden_states, D::Minus1)
         } else {
-            candle_nn::ops::softmax_last_dim(&hidden_states)
+            inference_tensor::nn::ops::softmax_last_dim(&hidden_states)
         }
     }
 }
@@ -359,7 +359,7 @@ impl MoeMlp {
 
         let vars = var_map.all_vars();
         if vars.is_empty() && !inference {
-            candle_core::bail!("No vars to train in MoeMlp, perhaps there are no layers?");
+            inference_tensor::bail!("No vars to train in MoeMlp, perhaps there are no layers?");
         }
         Ok(Self {
             experts,

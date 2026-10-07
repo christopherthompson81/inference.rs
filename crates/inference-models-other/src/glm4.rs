@@ -21,11 +21,11 @@ use crate::{
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -232,7 +232,7 @@ impl Attention {
         {
             let positions = ctx
                 .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
             q = self.rotary_emb.apply_rotary_emb_positions(&q, positions)?;
             k = self.rotary_emb.apply_rotary_emb_positions(&k, positions)?;
         }

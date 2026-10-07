@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use super::NormalCache;
 
@@ -113,17 +113,17 @@ impl RotatingCache {
         let accepted_len = keep_len
             .checked_sub(snapshot.current_seq_len)
             .ok_or_else(|| {
-                candle_core::Error::Msg("rotating cache rollback keep_len underflow".into())
+                inference_tensor::Error::Msg("rotating cache rollback keep_len underflow".into())
             })?;
         if accepted_len == 0 {
             return Ok(None);
         }
         let appended = self.last_append_result.as_ref().ok_or_else(|| {
-            candle_core::Error::Msg("missing rotating cache append result".into())
+            inference_tensor::Error::Msg("missing rotating cache append result".into())
         })?;
         let dim0 = appended.dim(0)?;
         if batch_len == 0 || dim0 % batch_len != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "rotating cache batch shape mismatch: dim0={dim0}, batch_len={batch_len}"
             );
         }
@@ -144,17 +144,17 @@ impl RotatingCache {
         let accepted_len = keep_len
             .checked_sub(snapshot.current_seq_len)
             .ok_or_else(|| {
-                candle_core::Error::Msg("rotating cache rollback keep_len underflow".into())
+                inference_tensor::Error::Msg("rotating cache rollback keep_len underflow".into())
             })?;
         if let Some(accepted_append) = accepted_append.as_ref() {
             if accepted_append.dim(snapshot.dim)? != accepted_len {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "rotating cache rollback accepted append length mismatch: got {}, expected {accepted_len}",
                     accepted_append.dim(snapshot.dim)?
                 );
             }
         } else if accepted_len != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "rotating cache rollback missing accepted append for accepted_len={accepted_len}"
             );
         }
@@ -211,9 +211,9 @@ impl RotatingCache {
         self.last_append_result = None;
     }
 
-    pub fn try_set_len(&self, len: usize) -> candle_core::Result<()> {
+    pub fn try_set_len(&self, len: usize) -> inference_tensor::Result<()> {
         if len > self.current_seq_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Sliding KV cache cannot extend via set_len (current {}, requested {})",
                 self.current_seq_len,
                 len,
@@ -222,7 +222,7 @@ impl RotatingCache {
         // Once the retained window has dropped old tokens, rollback would require
         // data that is no longer present.
         if self.current_seq_len > self.max_seq_len && len < self.current_seq_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Sliding KV cache cannot roll back after truncation \
                  (current_seq_len {} > max_seq_len {}, requested len {})",
                 self.current_seq_len,
@@ -231,7 +231,7 @@ impl RotatingCache {
             );
         }
         if self.current_seq_len.saturating_sub(len) > self.max_seq_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Sliding KV cache tried to reset to len {len} while current is {} and max retained is {}",
                 self.current_seq_len,
                 self.max_seq_len
@@ -240,7 +240,7 @@ impl RotatingCache {
         Ok(())
     }
 
-    pub fn set_len(&mut self, len: usize) -> candle_core::Result<()> {
+    pub fn set_len(&mut self, len: usize) -> inference_tensor::Result<()> {
         self.try_set_len(len)?;
         if len < self.current_seq_len {
             self.write_pos -= self.current_seq_len - len;
@@ -344,15 +344,15 @@ impl RotatingCache {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::RotatingCache;
 
-    fn make_src(values: &[f32]) -> candle_core::Result<Tensor> {
+    fn make_src(values: &[f32]) -> inference_tensor::Result<Tensor> {
         Tensor::new(values.to_vec(), &Device::Cpu)?.reshape((1, 1, values.len(), 1))
     }
 
-    fn make_batched_src(rows: &[&[f32]]) -> candle_core::Result<Tensor> {
+    fn make_batched_src(rows: &[&[f32]]) -> inference_tensor::Result<Tensor> {
         let len = rows.first().map(|row| row.len()).unwrap_or(0);
         assert!(rows.iter().all(|row| row.len() == len));
         let values = rows
@@ -363,7 +363,7 @@ mod tests {
     }
 
     #[test]
-    fn retains_last_window_in_order() -> candle_core::Result<()> {
+    fn retains_last_window_in_order() -> inference_tensor::Result<()> {
         let mut cache = RotatingCache::new(2, 4, 4);
 
         let first = cache.append(&make_src(&[0., 1., 2.])?)?;
@@ -389,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_rollback_after_truncation() -> candle_core::Result<()> {
+    fn rejects_rollback_after_truncation() -> inference_tensor::Result<()> {
         let mut cache = RotatingCache::new(2, 4, 4);
         let _ = cache.append(&make_src(&[0., 1., 2., 3., 4.])?)?;
 
@@ -400,7 +400,7 @@ mod tests {
     }
 
     #[test]
-    fn restores_from_snapshot_after_sliding_window_advance() -> candle_core::Result<()> {
+    fn restores_from_snapshot_after_sliding_window_advance() -> inference_tensor::Result<()> {
         let mut cache = RotatingCache::new(2, 4, 4);
         let _ = cache.append(&make_src(&[0., 1., 2., 3., 4.])?)?;
         let snapshot = cache.snapshot()?;
@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn extracts_accepted_append_from_batched_append_row() -> candle_core::Result<()> {
+    fn extracts_accepted_append_from_batched_append_row() -> inference_tensor::Result<()> {
         let mut single = RotatingCache::new(2, 4, 4);
         let _ = single.append(&make_src(&[0., 1., 2.])?)?;
         let snapshot = single.snapshot()?;
@@ -446,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_full_kv_on_large_prefill() -> candle_core::Result<()> {
+    fn returns_full_kv_on_large_prefill() -> inference_tensor::Result<()> {
         // Sliding window = 4, but prefill has 7 tokens
         let mut cache = RotatingCache::new(2, 4, 4);
 
@@ -477,7 +477,7 @@ mod tests {
     }
 
     #[test]
-    fn returns_full_kv_on_prefill_with_retained() -> candle_core::Result<()> {
+    fn returns_full_kv_on_prefill_with_retained() -> inference_tensor::Result<()> {
         // Sliding window = 4, initial small append, then large prefill
         let mut cache = RotatingCache::new(2, 4, 4);
 
@@ -504,7 +504,7 @@ mod tests {
     }
 
     #[test]
-    fn grows_small_initial_capacity_for_large_first_prefill() -> candle_core::Result<()> {
+    fn grows_small_initial_capacity_for_large_first_prefill() -> inference_tensor::Result<()> {
         let mut cache = RotatingCache::new(2, 1024, 512);
         let values = (0_u16..1024).map(f32::from).collect::<Vec<_>>();
 
@@ -516,7 +516,7 @@ mod tests {
     }
 
     #[test]
-    fn compacts_full_window_before_large_append() -> candle_core::Result<()> {
+    fn compacts_full_window_before_large_append() -> inference_tensor::Result<()> {
         let mut cache = RotatingCache::new(2, 1024, 512);
         let first = (0_u16..512).map(f32::from).collect::<Vec<_>>();
         let second = (512_u16..1024).map(f32::from).collect::<Vec<_>>();

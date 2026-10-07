@@ -10,8 +10,8 @@ use std::{
     },
 };
 
-use candle_core::{DType, Result, Tensor};
 use float8::F8E4M3;
+use inference_tensor::{DType, Result, Tensor};
 
 use super::{
     ffi,
@@ -25,7 +25,7 @@ const JIT_SOURCE_HASH: &str = env!("INFERENCE_RS_DEEPGEMM_SOURCE_HASH");
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct PreparedShape {
-    device: candle_core::cuda::DeviceId,
+    device: inference_tensor::cuda::DeviceId,
     n: usize,
     k: usize,
 }
@@ -37,7 +37,7 @@ static PREPARED_SHAPES: OnceLock<Mutex<HashMap<PreparedShape, PreparationSlot>>>
 
 #[derive(Debug)]
 pub(super) struct Prepared {
-    device: candle_core::cuda::DeviceId,
+    device: inference_tensor::cuda::DeviceId,
     n: usize,
     k: usize,
     plans: HashMap<usize, ffi::DeepGemmPrepared>,
@@ -45,7 +45,7 @@ pub(super) struct Prepared {
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
 struct MatmulContext<'a> {
-    dev: &'a candle_core::CudaDevice,
+    dev: &'a inference_tensor::CudaDevice,
     plan: &'a ffi::DeepGemmPrepared,
     m: usize,
     n: usize,
@@ -162,7 +162,9 @@ fn deepgemm_include_dir() -> Result<&'static Path> {
     });
     match result {
         Ok(path) => Ok(path.as_path()),
-        Err(error) => candle_core::bail!("DeepGEMM JIT include bundle is unavailable: {error}"),
+        Err(error) => {
+            inference_tensor::bail!("DeepGEMM JIT include bundle is unavailable: {error}")
+        }
     }
 }
 
@@ -191,7 +193,7 @@ fn check_deepgemm_status(operation: &str, status: i32) -> Result<()> {
         return Ok(());
     }
     let message = deepgemm_status_message(status);
-    candle_core::bail!("{operation} failed: {message} (DeepGEMM status {status})")
+    inference_tensor::bail!("{operation} failed: {message} (DeepGEMM status {status})")
 }
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
@@ -200,7 +202,7 @@ pub(super) fn supported(
     weight_scales: &Tensor,
     weight_block_size: &[usize],
 ) -> bool {
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     if !ffi::HAVE_DEEPGEMM_FP8_SM90_PROVIDER
         || weight_block_size != [FP8_BLOCK_SIZE, FP8_BLOCK_SIZE]
@@ -234,11 +236,11 @@ pub(super) fn supported(
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
 fn deepgemm_plan(m: usize, n: usize, k: usize) -> Result<ffi::DeepGemmPlan> {
     let m = u32::try_from(m)
-        .map_err(|_| candle_core::Error::msg("DeepGEMM M dimension exceeds u32"))?;
+        .map_err(|_| inference_tensor::Error::msg("DeepGEMM M dimension exceeds u32"))?;
     let n = u32::try_from(n)
-        .map_err(|_| candle_core::Error::msg("DeepGEMM N dimension exceeds u32"))?;
+        .map_err(|_| inference_tensor::Error::msg("DeepGEMM N dimension exceeds u32"))?;
     let k = u32::try_from(k)
-        .map_err(|_| candle_core::Error::msg("DeepGEMM K dimension exceeds u32"))?;
+        .map_err(|_| inference_tensor::Error::msg("DeepGEMM K dimension exceeds u32"))?;
     let mut plan = std::mem::MaybeUninit::uninit();
     let status = unsafe { ffi::inference_deepgemm_sm90_plan(m, n, k, plan.as_mut_ptr()) };
     check_deepgemm_status("DeepGEMM shape planning", status)?;
@@ -251,10 +253,10 @@ pub(super) fn prepare(
     weight_scales: &Tensor,
     weight_block_size: &[usize],
 ) -> Result<Arc<Prepared>> {
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     if !supported(weight, weight_scales, weight_block_size) {
-        candle_core::bail!("DeepGEMM does not support this blockwise FP8 weight layout")
+        inference_tensor::bail!("DeepGEMM does not support this blockwise FP8 weight layout")
     }
     let [n, k] = weight.dims() else {
         unreachable!()
@@ -281,7 +283,7 @@ pub(super) fn prepare(
                 .context()
                 .bind_to_thread()
                 .map_err(|error| {
-                    candle_core::Error::msg(format!("CUDA context binding failed: {error}"))
+                    inference_tensor::Error::msg(format!("CUDA context binding failed: {error}"))
                 })?;
             let stream = dev.cuda_stream().cu_stream() as *mut core::ffi::c_void;
             let mut include_dir = None;
@@ -302,7 +304,7 @@ pub(super) fn prepare(
                         include_dir = Some(
                             CString::new(deepgemm_include_dir()?.as_os_str().as_bytes()).map_err(
                                 |_| {
-                                    candle_core::Error::msg(
+                                    inference_tensor::Error::msg(
                                         "DeepGEMM include path contains a null byte",
                                     )
                                 },
@@ -334,7 +336,7 @@ pub(super) fn prepare(
     });
     match preparation {
         Ok(prepared) => Ok(prepared.clone()),
-        Err(error) => Err(candle_core::Error::msg(error.clone())),
+        Err(error) => Err(inference_tensor::Error::msg(error.clone())),
     }
 }
 
@@ -361,14 +363,14 @@ fn serving_bucket(rows: usize) -> Option<usize> {
 
 pub(super) fn activation_scale_shape(rows: usize, features: usize) -> Result<[usize; 2]> {
     if rows == 0 || features == 0 || !features.is_multiple_of(FP8_BLOCK_SIZE) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "DeepGEMM activation shape must be nonzero with K divisible by {FP8_BLOCK_SIZE}"
         )
     }
     let scale_stride_m = rows
         .checked_add(DEEPGEMM_ACTIVATION_SCALE_M_ALIGNMENT - 1)
         .ok_or_else(|| {
-            candle_core::Error::msg("DeepGEMM activation scale shape overflows usize")
+            inference_tensor::Error::msg("DeepGEMM activation scale shape overflows usize")
         })?
         / DEEPGEMM_ACTIVATION_SCALE_M_ALIGNMENT
         * DEEPGEMM_ACTIVATION_SCALE_M_ALIGNMENT;
@@ -381,12 +383,12 @@ fn validate_prequantized_activation_layout(
     activation_scales: &Tensor,
 ) -> Result<(usize, usize, usize)> {
     if activation.dtype() != DType::F8E4M3 {
-        candle_core::bail!("DeepGEMM prequantized activation must be F8E4M3")
+        inference_tensor::bail!("DeepGEMM prequantized activation must be F8E4M3")
     }
     let (m, k) = activation.dims2()?;
     let expected_scale_shape = activation_scale_shape(m, k)?;
     if activation_scales.dtype() != DType::F32 || activation_scales.dims() != expected_scale_shape {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "DeepGEMM activation scales must be contiguous F32 with shape {:?}",
             expected_scale_shape
         )
@@ -396,12 +398,14 @@ fn validate_prequantized_activation_layout(
         || !fp8_tensor_aligned(activation)
         || !fp8_tensor_aligned(activation_scales)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "DeepGEMM prequantized activation and scales must be contiguous and 16-byte aligned"
         )
     }
     if !activation.device().same_device(activation_scales.device()) {
-        candle_core::bail!("DeepGEMM prequantized activation and scales must be on the same device")
+        inference_tensor::bail!(
+            "DeepGEMM prequantized activation and scales must be on the same device"
+        )
     }
     Ok((m, k, expected_scale_shape[1]))
 }
@@ -413,10 +417,10 @@ fn matmul_context<'a>(
     weight: &Tensor,
     weight_scales: &Tensor,
 ) -> Result<MatmulContext<'a>> {
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     if !activation.is_contiguous() || !fp8_tensor_aligned(activation) {
-        candle_core::bail!("DeepGEMM activation must be contiguous and 16-byte aligned")
+        inference_tensor::bail!("DeepGEMM activation must be contiguous and 16-byte aligned")
     }
     let (m, k) = activation.dims2()?;
     let (n, weight_k) = weight.dims2()?;
@@ -432,30 +436,33 @@ fn matmul_context<'a>(
         || !fp8_tensor_aligned(weight_scales)
         || weight_scales.dims() != [n / FP8_BLOCK_SIZE, weight_k / FP8_BLOCK_SIZE]
     {
-        candle_core::bail!("DeepGEMM weight tensors do not match the prepared FP8 layout")
+        inference_tensor::bail!("DeepGEMM weight tensors do not match the prepared FP8 layout")
     }
     if weight_k != k {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "DeepGEMM input K dimension {k} does not match weight K dimension {weight_k}"
         )
     }
     if !activation.device().same_device(weight.device())
         || !weight.device().same_device(weight_scales.device())
     {
-        candle_core::bail!("DeepGEMM operands must be on the same CUDA device")
+        inference_tensor::bail!("DeepGEMM operands must be on the same CUDA device")
     }
     let Device::Cuda(dev) = activation.device() else {
-        candle_core::bail!("DeepGEMM requires CUDA tensors")
+        inference_tensor::bail!("DeepGEMM requires CUDA tensors")
     };
     if prepared.device != dev.id() || prepared.n != n || prepared.k != k {
-        candle_core::bail!("DeepGEMM prepared state does not match the CUDA device or weight shape")
+        inference_tensor::bail!(
+            "DeepGEMM prepared state does not match the CUDA device or weight shape"
+        )
     }
-    let bucket = serving_bucket(m)
-        .ok_or_else(|| candle_core::Error::msg("DeepGEMM row count exceeds prepared capacity"))?;
+    let bucket = serving_bucket(m).ok_or_else(|| {
+        inference_tensor::Error::msg("DeepGEMM row count exceeds prepared capacity")
+    })?;
     let plan = prepared
         .plans
         .get(&bucket)
-        .ok_or_else(|| candle_core::Error::msg("DeepGEMM row bucket was not prepared"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM row bucket was not prepared"))?;
     Ok(MatmulContext { dev, plan, m, n, k })
 }
 
@@ -466,13 +473,13 @@ pub(super) fn matmul(
     weight: &Tensor,
     weight_scales: &Tensor,
 ) -> Result<Tensor> {
-    use candle_core::{CudaStorage, Shape, Storage};
     use half::bf16;
+    use inference_tensor::{CudaStorage, Shape, Storage};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
     if !serving_supported(input) {
-        candle_core::bail!("DeepGEMM serving does not have a prepared BF16 row bucket")
+        inference_tensor::bail!("DeepGEMM serving does not have a prepared BF16 row bucket")
     }
     let input = input.contiguous()?;
     let input = if fp8_tensor_aligned(&input) {
@@ -487,18 +494,18 @@ pub(super) fn matmul(
         .context()
         .bind_to_thread()
         .map_err(|error| {
-            candle_core::Error::msg(format!("CUDA context binding failed: {error}"))
+            inference_tensor::Error::msg(format!("CUDA context binding failed: {error}"))
         })?;
     let stream = dev.cuda_stream();
     let workspace = fp8_workspace(dev, plan.plan.workspace_bytes, "DeepGEMM")?
-        .ok_or_else(|| candle_core::Error::msg("DeepGEMM returned an empty workspace plan"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM returned an empty workspace plan"))?;
     let mut workspace = workspace.lock().unwrap();
     let (workspace_ptr, workspace_guard) =
         slice_ptr_mut_on_stream(&mut workspace.slice, 0, &stream);
 
     let output_len = m
         .checked_mul(n)
-        .ok_or_else(|| candle_core::Error::msg("DeepGEMM output shape overflows usize"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM output shape overflows usize"))?;
     let mut output = unsafe { dev.alloc::<bf16>(output_len)? };
     let (output_ptr, output_guard) = slice_ptr_mut_on_stream(&mut output, 0, &stream);
 
@@ -534,7 +541,7 @@ pub(super) fn matmul(
         ffi::inference_deepgemm_sm90_gemm(
             plan,
             u32::try_from(m)
-                .map_err(|_| candle_core::Error::msg("DeepGEMM M dimension exceeds u32"))?,
+                .map_err(|_| inference_tensor::Error::msg("DeepGEMM M dimension exceeds u32"))?,
             input_ptr as *const core::ffi::c_void,
             weight_ptr as *const core::ffi::c_void,
             scale_ptr as *const f32,
@@ -568,8 +575,8 @@ pub(super) fn matmul_prequantized(
     weight: &Tensor,
     weight_scales: &Tensor,
 ) -> Result<Tensor> {
-    use candle_core::{CudaStorage, Shape, Storage};
     use half::bf16;
+    use inference_tensor::{CudaStorage, Shape, Storage};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -584,13 +591,13 @@ pub(super) fn matmul_prequantized(
         .context()
         .bind_to_thread()
         .map_err(|error| {
-            candle_core::Error::msg(format!("CUDA context binding failed: {error}"))
+            inference_tensor::Error::msg(format!("CUDA context binding failed: {error}"))
         })?;
     let stream = dev.cuda_stream();
 
     let output_len = m
         .checked_mul(n)
-        .ok_or_else(|| candle_core::Error::msg("DeepGEMM output shape overflows usize"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM output shape overflows usize"))?;
     let mut output = unsafe { dev.alloc::<bf16>(output_len)? };
     let (output_ptr, output_guard) = slice_ptr_mut_on_stream(&mut output, 0, &stream);
 
@@ -636,11 +643,11 @@ pub(super) fn matmul_prequantized(
         ffi::inference_deepgemm_sm90_gemm_prequantized(
             plan,
             u32::try_from(m)
-                .map_err(|_| candle_core::Error::msg("DeepGEMM M dimension exceeds u32"))?,
+                .map_err(|_| inference_tensor::Error::msg("DeepGEMM M dimension exceeds u32"))?,
             activation_ptr as *const core::ffi::c_void,
             activation_scale_ptr as *const f32,
             u32::try_from(scale_stride_m).map_err(|_| {
-                candle_core::Error::msg("DeepGEMM activation scale stride exceeds u32")
+                inference_tensor::Error::msg("DeepGEMM activation scale stride exceeds u32")
             })?,
             weight_ptr as *const core::ffi::c_void,
             scale_ptr as *const f32,
@@ -680,7 +687,7 @@ mod tests {
 
     #[test]
     fn prequantized_activation_layout_validation_is_exact() -> Result<()> {
-        use candle_core::Device;
+        use inference_tensor::Device;
 
         let activation = Tensor::zeros((5, 256), DType::F8E4M3, &Device::Cpu)?;
         let scales = Tensor::zeros((2, 8), DType::F32, &Device::Cpu)?;

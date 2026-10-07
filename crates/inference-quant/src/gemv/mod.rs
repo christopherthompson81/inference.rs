@@ -14,7 +14,7 @@
 mod ffi;
 
 #[cfg(feature = "cuda")]
-use candle_core::{
+use inference_tensor::{
     CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor,
     cuda::cudarc::driver::DevicePtrMut,
 };
@@ -114,7 +114,7 @@ fn gemv_device_info(device: &CudaDevice) -> GemvDeviceInfo {
 /// - K dimension is even (required for vectorized loads)
 #[cfg(feature = "cuda")]
 pub fn should_use_gemv(x: &Tensor, w: &Tensor) -> bool {
-    let candle_core::Device::Cuda(device) = x.device() else {
+    let inference_tensor::Device::Cuda(device) = x.device() else {
         return false;
     };
 
@@ -199,7 +199,7 @@ pub(crate) fn should_use_wide_gemv(x: &Tensor, w: &Tensor) -> bool {
     {
         return false;
     }
-    let candle_core::Device::Cuda(device) = x.device() else {
+    let inference_tensor::Device::Cuda(device) = x.device() else {
         return false;
     };
     let Some((&input_dim, batch_dims)) = x.dims().split_last() else {
@@ -245,7 +245,7 @@ pub fn gemv(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         .max(1);
 
     if batch_size > MAX_GEMV_BATCH_SIZE {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GEMV batch size {} exceeds maximum {}",
             batch_size,
             MAX_GEMV_BATCH_SIZE
@@ -255,14 +255,14 @@ pub fn gemv(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
     // Check K dimension
     let x_k = x.dim(x.rank() - 1)?;
     if x_k != k {
-        candle_core::bail!("GEMV dimension mismatch: x has K={} but W has K={}", x_k, k);
+        inference_tensor::bail!("GEMV dimension mismatch: x has K={} but W has K={}", x_k, k);
     }
 
     // Validate bias if present
     if let Some(b) = bias {
         let b_len = b.elem_count();
         if b_len != m {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GEMV bias dimension mismatch: bias has {} elements but M={}",
                 b_len,
                 m
@@ -282,7 +282,7 @@ pub fn gemv(x: &Tensor, w: &Tensor, bias: Option<&Tensor>) -> Result<Tensor> {
         DType::BF16 => gemv_bf16(dev, x, w, bias, batch_size, m, k, &output_shape),
         DType::F16 => gemv_f16(dev, x, w, bias, batch_size, m, k, &output_shape),
         DType::F32 => gemv_f32(dev, x, w, bias, batch_size, m, k, &output_shape),
-        dt => candle_core::bail!("GEMV unsupported dtype: {:?}", dt),
+        dt => inference_tensor::bail!("GEMV unsupported dtype: {:?}", dt),
     }
 }
 
@@ -304,7 +304,7 @@ fn gemv_bf16(
     // Get weight pointer
     let (w_s, w_l) = w.storage_and_layout();
     let Storage::Cuda(w_s) = &*w_s else {
-        candle_core::bail!("Expected CUDA storage for weights");
+        inference_tensor::bail!("Expected CUDA storage for weights");
     };
     let (w_ptr, _w_guard) = slice_ptr(w_s.as_cuda_slice::<bf16>()?, w_l.start_offset());
 
@@ -316,7 +316,7 @@ fn gemv_bf16(
         x_contig.storage_and_layout()
     };
     let Storage::Cuda(x_s) = &*x_s else {
-        candle_core::bail!("Expected CUDA storage for input");
+        inference_tensor::bail!("Expected CUDA storage for input");
     };
     let (x_ptr, _x_guard) = slice_ptr(x_s.as_cuda_slice::<bf16>()?, x_l.start_offset());
 
@@ -327,7 +327,7 @@ fn gemv_bf16(
     let bias_storage = bias.map(|b| b.storage_and_layout());
     let (bias_ptr, has_bias, _bias_guard) = if let Some((ref b_arc, b_l)) = bias_storage {
         let Storage::Cuda(b_s) = &**b_arc else {
-            candle_core::bail!("Expected CUDA storage for bias");
+            inference_tensor::bail!("Expected CUDA storage for bias");
         };
         let (b_ptr, b_guard) = slice_ptr(b_s.as_cuda_slice::<bf16>()?, b_l.start_offset());
         (b_ptr, true, Some(b_guard))
@@ -373,7 +373,7 @@ fn gemv_f16(
 
     let (w_s, w_l) = w.storage_and_layout();
     let Storage::Cuda(w_s) = &*w_s else {
-        candle_core::bail!("Expected CUDA storage for weights");
+        inference_tensor::bail!("Expected CUDA storage for weights");
     };
     let (w_ptr, _w_guard) = slice_ptr(w_s.as_cuda_slice::<f16>()?, w_l.start_offset());
 
@@ -385,7 +385,7 @@ fn gemv_f16(
         x_contig.storage_and_layout()
     };
     let Storage::Cuda(x_s) = &*x_s else {
-        candle_core::bail!("Expected CUDA storage for input");
+        inference_tensor::bail!("Expected CUDA storage for input");
     };
     let (x_ptr, _x_guard) = slice_ptr(x_s.as_cuda_slice::<f16>()?, x_l.start_offset());
 
@@ -395,7 +395,7 @@ fn gemv_f16(
     let bias_storage = bias.map(|b| b.storage_and_layout());
     let (bias_ptr, has_bias, _bias_guard) = if let Some((ref b_arc, b_l)) = bias_storage {
         let Storage::Cuda(b_s) = &**b_arc else {
-            candle_core::bail!("Expected CUDA storage for bias");
+            inference_tensor::bail!("Expected CUDA storage for bias");
         };
         let (b_ptr, b_guard) = slice_ptr(b_s.as_cuda_slice::<f16>()?, b_l.start_offset());
         (b_ptr, true, Some(b_guard))
@@ -441,7 +441,7 @@ fn gemv_f32(
 
     let (w_s, w_l) = w.storage_and_layout();
     let Storage::Cuda(w_s) = &*w_s else {
-        candle_core::bail!("Expected CUDA storage for weights");
+        inference_tensor::bail!("Expected CUDA storage for weights");
     };
     let (w_ptr, _w_guard) = slice_ptr(w_s.as_cuda_slice::<f32>()?, w_l.start_offset());
 
@@ -453,7 +453,7 @@ fn gemv_f32(
         x_contig.storage_and_layout()
     };
     let Storage::Cuda(x_s) = &*x_s else {
-        candle_core::bail!("Expected CUDA storage for input");
+        inference_tensor::bail!("Expected CUDA storage for input");
     };
     let (x_ptr, _x_guard) = slice_ptr(x_s.as_cuda_slice::<f32>()?, x_l.start_offset());
 
@@ -463,7 +463,7 @@ fn gemv_f32(
     let bias_storage = bias.map(|b| b.storage_and_layout());
     let (bias_ptr, has_bias, _bias_guard) = if let Some((ref b_arc, b_l)) = bias_storage {
         let Storage::Cuda(b_s) = &**b_arc else {
-            candle_core::bail!("Expected CUDA storage for bias");
+            inference_tensor::bail!("Expected CUDA storage for bias");
         };
         let (b_ptr, b_guard) = slice_ptr(b_s.as_cuda_slice::<f32>()?, b_l.start_offset());
         (b_ptr, true, Some(b_guard))
@@ -639,7 +639,7 @@ mod policy_tests {
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
-    use candle_core::{Device, cuda::cudarc::driver::sys};
+    use inference_tensor::{Device, cuda::cudarc::driver::sys};
     use std::hint::black_box;
 
     const BENCH_BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16];
@@ -653,8 +653,8 @@ mod tests {
     const GDN_GATE_OUTPUT_DIM: usize = 96;
     const CORRECTNESS_TOLERANCE: f32 = 32.0;
 
-    fn cuda_error(context: &str, error: impl std::fmt::Display) -> candle_core::Error {
-        candle_core::Error::Msg(format!("{context}: {error}"))
+    fn cuda_error(context: &str, error: impl std::fmt::Display) -> inference_tensor::Error {
+        inference_tensor::Error::Msg(format!("{context}: {error}"))
     }
 
     fn benchmark_iterations() -> usize {
@@ -732,7 +732,7 @@ mod tests {
         let captured = captured?;
         let graph = graph
             .map_err(|error| cuda_error("CUDA graph instantiation failed", error))?
-            .ok_or_else(|| candle_core::Error::msg("CUDA graph capture returned no graph"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA graph capture returned no graph"))?;
 
         for _ in 0..BENCH_WARMUP {
             graph

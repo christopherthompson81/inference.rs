@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 #[cfg(feature = "cuda")]
 pub fn moe_gemm(
@@ -10,13 +10,13 @@ pub fn moe_gemm(
     topk: usize,
     is_prefill: bool,
 ) -> Result<Tensor> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
-    use candle_core::DType;
     use half::{bf16, f16};
+    use inference_tensor::DType;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         input: &Tensor,
         weights: &Tensor,
@@ -42,43 +42,43 @@ pub fn moe_gemm(
             DType::F16 => 0,
             DType::BF16 => 1,
             _ => {
-                candle_core::bail!("moe_gemm_wmma only accept f16/bf16 inputs!")
+                inference_tensor::bail!("moe_gemm_wmma only accept f16/bf16 inputs!")
             }
         };
 
         let (input, input_l) = input.storage_and_layout();
         let input = match &*input {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("input must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("input must be a cuda tensor"),
         };
         let input_offset = input_l.start_offset();
 
         let (weights, weights_l) = weights.storage_and_layout();
         let weights = match &*weights {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("weight must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("weight must be a cuda tensor"),
         };
         let weights_offset = weights_l.start_offset();
 
         let (sorted_token_ids, sti_l) = sorted_token_ids.storage_and_layout();
         let sorted_token_ids = match &*sorted_token_ids {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-            _ => candle::bail!("sorted_token_ids must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
+            _ => inference_tensor::bail!("sorted_token_ids must be a cuda tensor"),
         };
         let sti_offset = sti_l.start_offset();
 
         let (experts_ids, ei_l) = experts_ids.storage_and_layout();
         let experts_ids = match &*experts_ids {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-            _ => candle::bail!("experts_ids must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
+            _ => inference_tensor::bail!("experts_ids must be a cuda tensor"),
         };
         let ei_offset = ei_l.start_offset();
 
         let topk_weights_ptr = if let Some(topk_weights) = &topk_weights {
             let (topk_weights, tw_l) = topk_weights.storage_and_layout();
             let topk_weights = match &*topk_weights {
-                candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-                _ => candle::bail!("topk_weights must be a cuda tensor"),
+                inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+                _ => inference_tensor::bail!("topk_weights must be a cuda tensor"),
             };
             let tw_offset = tw_l.start_offset();
 
@@ -116,7 +116,7 @@ pub fn moe_gemm(
             crate::cuda::ffi::moe_gemv
         } else {
             if !size_k.is_multiple_of(MOE_GEMM_K_TILE) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "moe_gemm needs the expert input width ({size_k}) to be a multiple of {MOE_GEMM_K_TILE}"
                 );
             }
@@ -150,8 +150,8 @@ pub fn moe_gemm(
             );
         }
 
-        let output = candle::CudaStorage::wrap_cuda_slice(output, dev.clone());
-        let output = Tensor::from((candle::Storage::Cuda(output), (size_m, size_n)));
+        let output = inference_tensor::CudaStorage::wrap_cuda_slice(output, dev.clone());
+        let output = Tensor::from((inference_tensor::Storage::Cuda(output), (size_m, size_n)));
 
         Ok(output)
     }
@@ -176,7 +176,7 @@ pub fn moe_gemm(
             is_prefill,
         ),
         _ => {
-            candle_core::bail!("moe_gemm only accept f16/bf16 inputs!")
+            inference_tensor::bail!("moe_gemm only accept f16/bf16 inputs!")
         }
     }
 }
@@ -191,5 +191,5 @@ pub fn moe_gemm(
     _: usize,
     _: bool,
 ) -> Result<Tensor> {
-    candle_core::bail!("moe_gemm is not implemented on this platform!")
+    inference_tensor::bail!("moe_gemm is not implemented on this platform!")
 }

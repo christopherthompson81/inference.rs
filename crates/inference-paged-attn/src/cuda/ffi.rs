@@ -1,6 +1,6 @@
 use core::ffi::{c_int, c_long, c_void};
 
-use candle_core::cuda::cudarc::driver::sys::CUstream;
+use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
 #[cfg(has_fa3_fp8_paged)]
 #[repr(C)]

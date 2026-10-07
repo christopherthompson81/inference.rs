@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::{LoraConfig, Shard, ShardedVarBuilder};
 
@@ -107,7 +107,7 @@ fn pair_for_paths(
             continue;
         };
         if found.is_some() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "multiple routed MoE LoRA tensor pairs match `{}`",
                 paths.join("` or `")
             );
@@ -119,7 +119,7 @@ fn pair_for_paths(
 
 fn source_shape<'a>(weights: &'a ShardedVarBuilder, name: &str) -> Result<&'a [usize]> {
     weights.tensor_shape(name).ok_or_else(|| {
-        candle_core::Error::msg(format!(
+        inference_tensor::Error::msg(format!(
             "routed MoE LoRA tensor `{name}` has no shape metadata"
         ))
     })
@@ -127,7 +127,7 @@ fn source_shape<'a>(weights: &'a ShardedVarBuilder, name: &str) -> Result<&'a [u
 
 fn check_shape(shape: &[usize], expected: &[usize], name: &str) -> Result<()> {
     if shape != expected {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "routed MoE LoRA tensor `{name}` has shape {shape:?}, expected {expected:?}"
         );
     }
@@ -137,7 +137,7 @@ fn check_shape(shape: &[usize], expected: &[usize], name: &str) -> Result<()> {
 fn scale_f32(config: &LoraConfig, path: &str) -> Result<f32> {
     let scale = config.scale_for(path)? as f32;
     if !scale.is_finite() {
-        candle_core::bail!("LoRA scale for `{path}` cannot be represented as f32");
+        inference_tensor::bail!("LoRA scale for `{path}` cannot be represented as f32");
     }
     Ok(scale)
 }
@@ -175,18 +175,18 @@ fn per_expert_projection_plan(
             continue;
         };
         if !config.try_targets_path(&path)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "routed MoE LoRA tensors for site `{path}` are not declared by target_modules"
             );
         }
         if config.try_excludes_path(&path)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "routed MoE LoRA tensors for site `{path}` are excluded by exclude_modules"
             );
         }
         let rank = config.try_rank_for(&path)?;
         if rank == 0 {
-            candle_core::bail!("LoRA rank for `{path}` must be nonzero");
+            inference_tensor::bail!("LoRA rank for `{path}` must be nonzero");
         }
         check_shape(source_shape(weights, a_name)?, &[rank, input], a_name)?;
         check_shape(source_shape(weights, b_name)?, &[output, rank], b_name)?;
@@ -223,25 +223,25 @@ fn fused_pair_plan(
         return Ok(None);
     };
     if !config.targets_parameter(spec.projection_path) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "routed MoE LoRA tensors for parameter `{}` are not declared by target_parameters",
             spec.projection_path
         );
     }
     if config.try_excludes_path(spec.projection_path)? {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "routed MoE LoRA tensors for parameter `{}` are excluded by exclude_modules",
             spec.projection_path
         );
     }
     let rank = config.try_rank_for(spec.projection_path)?;
     if rank == 0 {
-        candle_core::bail!("LoRA rank for `{}` must be nonzero", spec.projection_path);
+        inference_tensor::bail!("LoRA rank for `{}` must be nonzero", spec.projection_path);
     }
     let expert_rank = meta
         .num_experts
         .checked_mul(rank)
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA shape overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA shape overflow"))?;
     let a_shape = source_shape(weights, &a_name)?;
     let b_shape = source_shape(weights, &b_name)?;
     let layout = match (a_shape.len(), b_shape.len()) {
@@ -255,7 +255,7 @@ fn fused_pair_plan(
             check_shape(b_shape, &[meta.num_experts, spec.output, rank], &b_name)?;
             FusedTensorLayout::Packed
         }
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "routed MoE LoRA tensor pair `{}` must both be flat rank-2 or packed rank-3 tensors",
             spec.projection_path
         ),
@@ -282,14 +282,14 @@ fn shard_bounds(size: usize, shard: Shard, name: &str) -> Result<(usize, usize)>
             rank, world_size, ..
         } => {
             if rank >= world_size || !size.is_multiple_of(world_size) {
-                candle_core::bail!("invalid routed MoE LoRA shard for `{name}`");
+                inference_tensor::bail!("invalid routed MoE LoRA shard for `{name}`");
             }
             let len = size / world_size;
             Ok((rank * len, len))
         }
         Shard::Offset { offset, len, .. } => {
             if offset.checked_add(len).is_none_or(|end| end > size) {
-                candle_core::bail!("invalid routed MoE LoRA shard for `{name}`");
+                inference_tensor::bail!("invalid routed MoE LoRA shard for `{name}`");
             }
             Ok((offset, len))
         }
@@ -299,8 +299,8 @@ fn shard_bounds(size: usize, shard: Shard, name: &str) -> Result<(usize, usize)>
 fn checked_elements(shape: &[usize]) -> Result<u64> {
     shape.iter().try_fold(1u64, |elements, dim| {
         elements
-            .checked_mul(u64::try_from(*dim).map_err(candle_core::Error::wrap)?)
-            .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))
+            .checked_mul(u64::try_from(*dim).map_err(inference_tensor::Error::wrap)?)
+            .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))
     })
 }
 
@@ -319,23 +319,26 @@ fn packed_projection_bytes(
     };
     let weight_elements = checked_elements(&[meta.num_experts, rank, input])?
         .checked_add(checked_elements(&[meta.num_experts, output, rank])?)
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))?;
     let weight_bytes = weight_elements
         .checked_mul(
             u64::try_from(meta.activation_dtype.size_in_bytes())
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
         )
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))?;
     weight_bytes
         .checked_add(
             u64::try_from(meta.num_experts)
-                .map_err(candle_core::Error::wrap)?
+                .map_err(inference_tensor::Error::wrap)?
                 .checked_mul(
-                    u64::try_from(DType::F32.size_in_bytes()).map_err(candle_core::Error::wrap)?,
+                    u64::try_from(DType::F32.size_in_bytes())
+                        .map_err(inference_tensor::Error::wrap)?,
                 )
-                .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?,
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("routed MoE LoRA tensor size overflow")
+                })?,
         )
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))
 }
 
 fn packed_gate_up_bytes(meta: ExpertSiteMeta<'_>, rank: usize) -> Result<u64> {
@@ -345,25 +348,30 @@ fn packed_gate_up_bytes(meta: ExpertSiteMeta<'_>, rank: usize) -> Result<u64> {
         .checked_add(
             checked_elements(&[meta.num_experts, local_intermediate, rank])?
                 .checked_mul(2)
-                .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?,
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("routed MoE LoRA tensor size overflow")
+                })?,
         )
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))?;
     let weight_bytes = weight_elements
         .checked_mul(
             u64::try_from(meta.activation_dtype.size_in_bytes())
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
         )
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))?;
     weight_bytes
         .checked_add(
             u64::try_from(meta.num_experts)
-                .map_err(candle_core::Error::wrap)?
+                .map_err(inference_tensor::Error::wrap)?
                 .checked_mul(
-                    u64::try_from(DType::F32.size_in_bytes()).map_err(candle_core::Error::wrap)?,
+                    u64::try_from(DType::F32.size_in_bytes())
+                        .map_err(inference_tensor::Error::wrap)?,
                 )
-                .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))?,
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("routed MoE LoRA tensor size overflow")
+                })?,
         )
-        .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA tensor size overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA tensor size overflow"))
 }
 
 pub(super) fn plan_expert_site(
@@ -386,7 +394,7 @@ pub(super) fn plan_expert_site(
             output: meta
                 .intermediate_size
                 .checked_mul(2)
-                .ok_or_else(|| candle_core::Error::msg("routed MoE LoRA shape overflow"))?,
+                .ok_or_else(|| inference_tensor::Error::msg("routed MoE LoRA shape overflow"))?,
         },
     )?;
     let fused_down = fused_pair_plan(
@@ -426,7 +434,7 @@ pub(super) fn plan_expert_site(
                 bytes = bytes
                     .checked_add(packed_projection_bytes(meta, plan.projection, plan.rank)?)
                     .ok_or_else(|| {
-                        candle_core::Error::msg("routed MoE LoRA tensor size overflow")
+                        inference_tensor::Error::msg("routed MoE LoRA tensor size overflow")
                     })?;
                 for pair in plan.pairs.iter().flatten() {
                     consumed.insert(pair.a_name.clone());
@@ -439,7 +447,7 @@ pub(super) fn plan_expert_site(
                 bytes = bytes
                     .checked_add(packed_gate_up_bytes(meta, pair.rank)?)
                     .ok_or_else(|| {
-                        candle_core::Error::msg("routed MoE LoRA tensor size overflow")
+                        inference_tensor::Error::msg("routed MoE LoRA tensor size overflow")
                     })?;
                 consumed.insert(pair.a_name.clone());
                 consumed.insert(pair.b_name.clone());
@@ -452,7 +460,7 @@ pub(super) fn plan_expert_site(
                         pair.rank,
                     )?)
                     .ok_or_else(|| {
-                        candle_core::Error::msg("routed MoE LoRA tensor size overflow")
+                        inference_tensor::Error::msg("routed MoE LoRA tensor size overflow")
                     })?;
                 consumed.insert(pair.a_name.clone());
                 consumed.insert(pair.b_name.clone());
@@ -487,7 +495,7 @@ fn pad_pair_rank(a: Tensor, b: Tensor, rank: usize) -> Result<(Tensor, Tensor)> 
     let (_, input) = a.dims2()?;
     let (output, b_rank) = b.dims2()?;
     if source_rank != b_rank || source_rank > rank {
-        candle_core::bail!("invalid routed MoE LoRA rank while packing expert tensors");
+        inference_tensor::bail!("invalid routed MoE LoRA rank while packing expert tensors");
     }
     let padding = rank - source_rank;
     let a_padding = Tensor::zeros((padding, input), a.dtype(), a.device())?;
@@ -668,10 +676,10 @@ fn split_gate_up_b(
         )),
         GateUpOrder::Interleaved => {
             let gate_indices = (0..intermediate_size)
-                .map(|index| u32::try_from(index * 2).map_err(candle_core::Error::wrap))
+                .map(|index| u32::try_from(index * 2).map_err(inference_tensor::Error::wrap))
                 .collect::<Result<Vec<_>>>()?;
             let up_indices = (0..intermediate_size)
-                .map(|index| u32::try_from(index * 2 + 1).map_err(candle_core::Error::wrap))
+                .map(|index| u32::try_from(index * 2 + 1).map_err(inference_tensor::Error::wrap))
                 .collect::<Result<Vec<_>>>()?;
             let gate_indices = Tensor::from_vec(gate_indices, intermediate_size, meta.device)?;
             let up_indices = Tensor::from_vec(up_indices, intermediate_size, meta.device)?;
@@ -822,7 +830,7 @@ pub(super) fn load_expert_site(
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     use super::*;
     use crate::ShardedSafeTensors;
@@ -848,7 +856,7 @@ mod tests {
         }
     }
 
-    fn tensor(values: Vec<f32>, shape: impl Into<candle_core::Shape>) -> Result<Tensor> {
+    fn tensor(values: Vec<f32>, shape: impl Into<inference_tensor::Shape>) -> Result<Tensor> {
         Tensor::from_vec(values, shape, &Device::Cpu)
     }
 

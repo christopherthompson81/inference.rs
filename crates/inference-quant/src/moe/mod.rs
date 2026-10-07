@@ -7,15 +7,15 @@ pub mod cutlass;
 /// CUTLASS grouped-GEMM MoE forward; errors when the kernels were not compiled in.
 #[allow(clippy::too_many_arguments)]
 pub fn cutlass_fused_moe(
-    xs: &candle_core::Tensor,
-    gate_up: &candle_core::Tensor,
-    down: &candle_core::Tensor,
-    topk_ids: &candle_core::Tensor,
-    topk_weights: &candle_core::Tensor,
+    xs: &inference_tensor::Tensor,
+    gate_up: &inference_tensor::Tensor,
+    down: &inference_tensor::Tensor,
+    topk_ids: &inference_tensor::Tensor,
+    topk_weights: &inference_tensor::Tensor,
     num_experts: usize,
     act: cuda::GatedAct,
-    dev: &candle_core::CudaDevice,
-) -> candle_core::Result<candle_core::Tensor> {
+    dev: &inference_tensor::CudaDevice,
+) -> inference_tensor::Result<inference_tensor::Tensor> {
     #[cfg(has_cutlass_moe_kernels)]
     {
         cutlass::cutlass_fused_moe(
@@ -41,12 +41,14 @@ pub fn cutlass_fused_moe(
             act,
             dev,
         );
-        candle_core::bail!("CUTLASS MoE kernels were not compiled in (requires sm_80+ at build)")
+        inference_tensor::bail!(
+            "CUTLASS MoE kernels were not compiled in (requires sm_80+ at build)"
+        )
     }
 }
 
 /// Whether the CUTLASS grouped-GEMM MoE kernels were compiled in and the device can run them.
-pub fn cutlass_moe_available(dev: &candle_core::CudaDevice) -> bool {
+pub fn cutlass_moe_available(dev: &inference_tensor::CudaDevice) -> bool {
     #[cfg(has_cutlass_moe_kernels)]
     {
         dev.compute_major() >= 8

@@ -7,11 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle_core::Tensor;
 use indicatif::{ProgressBar, ProgressStyle};
 use inference_quant::{
     IsqBits, IsqType, TrackedModule, UqffOutputReport, UqffReport, UqffTensor, parse_isq_value,
 };
+use inference_tensor::Tensor;
 use regex::Regex;
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -1077,7 +1077,7 @@ fn write_uqff_metadata(
         display_parent.join("tokenizer.json").display()
     );
     serde_json::to_writer_pretty(File::create(&tokenizer_out)?, tokenizer)
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
 
     write_uqff_chat_metadata(
         metadata_parent,
@@ -1091,8 +1091,8 @@ fn write_uqff_metadata(
             "Serializing generation config to `{}`.",
             display_parent.join("generation_config.json").display()
         );
-        let cfg = std::fs::read(generation_config).map_err(candle_core::Error::msg)?;
-        std::fs::write(&gen_cfg_out, cfg).map_err(candle_core::Error::msg)?;
+        let cfg = std::fs::read(generation_config).map_err(inference_tensor::Error::msg)?;
+        std::fs::write(&gen_cfg_out, cfg).map_err(inference_tensor::Error::msg)?;
     }
 
     if let Some(processor_config) = processor_filename {
@@ -1100,8 +1100,8 @@ fn write_uqff_metadata(
             "Serializing processor config to `{}`.",
             display_parent.join("processor_config.json").display()
         );
-        let cfg = std::fs::read(processor_config).map_err(candle_core::Error::msg)?;
-        std::fs::write(&processor_out, cfg).map_err(candle_core::Error::msg)?;
+        let cfg = std::fs::read(processor_config).map_err(inference_tensor::Error::msg)?;
+        std::fs::write(&processor_out, cfg).map_err(inference_tensor::Error::msg)?;
     }
 
     if let Some(preprocessor_config) = preprocessor_filename {
@@ -1109,8 +1109,8 @@ fn write_uqff_metadata(
             "Serializing preprocessor config to `{}`.",
             display_parent.join("preprocessor_config.json").display()
         );
-        let cfg = std::fs::read(preprocessor_config).map_err(candle_core::Error::msg)?;
-        std::fs::write(&preprocessor_out, cfg).map_err(candle_core::Error::msg)?;
+        let cfg = std::fs::read(preprocessor_config).map_err(inference_tensor::Error::msg)?;
+        std::fs::write(&preprocessor_out, cfg).map_err(inference_tensor::Error::msg)?;
     }
 
     if let Some(modules) = modules {
@@ -1118,7 +1118,7 @@ fn write_uqff_metadata(
             "Serializing modules manifest to `{}`.",
             display_parent.join("modules.json").display()
         );
-        std::fs::write(&modules_out, modules).map_err(candle_core::Error::msg)?;
+        std::fs::write(&modules_out, modules).map_err(inference_tensor::Error::msg)?;
 
         if let Some(module_paths) = module_paths {
             for module in module_paths {
@@ -1131,26 +1131,27 @@ fn write_uqff_metadata(
                             continue;
                         }
                         let module_dir = metadata_parent.join(path.as_str());
-                        std::fs::create_dir_all(&module_dir).map_err(candle_core::Error::msg)?;
+                        std::fs::create_dir_all(&module_dir)
+                            .map_err(inference_tensor::Error::msg)?;
 
                         match module {
                             EmbeddingModulePaths::Pooling { config, .. } => {
                                 let dest = module_dir.join("config.json");
                                 if config != &dest {
                                     std::fs::copy(config, &dest)
-                                        .map_err(candle_core::Error::msg)?;
+                                        .map_err(inference_tensor::Error::msg)?;
                                 }
                             }
                             EmbeddingModulePaths::Dense { config, model, .. } => {
                                 let dest_cfg = module_dir.join("config.json");
                                 if config != &dest_cfg {
                                     std::fs::copy(config, &dest_cfg)
-                                        .map_err(candle_core::Error::msg)?;
+                                        .map_err(inference_tensor::Error::msg)?;
                                 }
                                 let dest_model = module_dir.join("model.safetensors");
                                 if model != &dest_model {
                                     std::fs::copy(model, &dest_model)
-                                        .map_err(candle_core::Error::msg)?;
+                                        .map_err(inference_tensor::Error::msg)?;
                                 }
                             }
                             EmbeddingModulePaths::Transformer { .. }
@@ -1207,14 +1208,15 @@ fn write_uqff_chat_metadata(
         );
         serde_json::to_writer_pretty(File::create(&tokenizer_cfg_out)?, chat_template)?;
     } else if let Some(template_filename) = template_filename {
-        let template = std::fs::read(template_filename).map_err(candle_core::Error::msg)?;
+        let template = std::fs::read(template_filename).map_err(inference_tensor::Error::msg)?;
 
         if template_filename.extension().map(|e| e.to_str()) == Some(Some("jinja")) {
             info!(
                 "Serializing chat template to `{}`.",
                 display_parent.join("chat_template.jinja").display()
             );
-            std::fs::write(&chat_template_jinja_out, template).map_err(candle_core::Error::msg)?;
+            std::fs::write(&chat_template_jinja_out, template)
+                .map_err(inference_tensor::Error::msg)?;
 
             let sibling_cfg = template_filename
                 .parent()
@@ -1224,14 +1226,15 @@ fn write_uqff_chat_metadata(
                     "Serializing tokenizer config to `{}`.",
                     display_parent.join("tokenizer_config.json").display()
                 );
-                std::fs::copy(&cfg_path, &tokenizer_cfg_out).map_err(candle_core::Error::msg)?;
+                std::fs::copy(&cfg_path, &tokenizer_cfg_out)
+                    .map_err(inference_tensor::Error::msg)?;
             }
         } else {
             info!(
                 "Serializing tokenizer config to `{}`.",
                 display_parent.join("tokenizer_config.json").display()
             );
-            std::fs::write(&tokenizer_cfg_out, template).map_err(candle_core::Error::msg)?;
+            std::fs::write(&tokenizer_cfg_out, template).map_err(inference_tensor::Error::msg)?;
         }
     }
     Ok(())
@@ -1418,7 +1421,7 @@ pub(crate) fn load_imatrix_map(
         return Ok(inference_quant::CollectedImatrixData::load_imatrix(path)?.0);
     }
     info!("Loading GGUF-format imatrix file `{}`.", path.display());
-    let data = candle_core::quantized::imatrix_file::load_imatrix(path)?;
+    let data = inference_tensor::quantized::imatrix_file::load_imatrix(path)?;
     let mut map = std::collections::HashMap::new();
     for module in modules {
         for name in gguf_imatrix_names(&module.key) {
@@ -1435,12 +1438,12 @@ pub(crate) fn load_imatrix_map(
 mod tests {
     use super::*;
     use crate::pipeline::{AdapterPaths, LocalModelPaths, get_chat_template};
-    use candle_core::{DType, Device};
-    use candle_nn::Linear;
     use inference_quant::{
         PendingIsqLayer, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, UnquantLinear,
         pending_isq_channel,
     };
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{DType, Device};
     use std::sync::{Arc, atomic::AtomicUsize};
 
     #[test]

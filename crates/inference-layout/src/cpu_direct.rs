@@ -1,7 +1,7 @@
 // The AVX2 kernels only exist on x86_64; elsewhere `available()` is false and these ops are never built.
 #![cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
 
-use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
+use inference_tensor::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 /// Output channels per register tile.
@@ -30,11 +30,11 @@ pub enum Act {
 }
 
 impl Act {
-    pub fn from_candle(act: Option<candle_nn::Activation>) -> Option<Self> {
+    pub fn from_candle(act: Option<inference_tensor::nn::Activation>) -> Option<Self> {
         match act {
             None => Some(Self::None),
-            Some(candle_nn::Activation::Relu) => Some(Self::Relu),
-            Some(candle_nn::Activation::Silu) => Some(Self::Silu),
+            Some(inference_tensor::nn::Activation::Relu) => Some(Self::Relu),
+            Some(inference_tensor::nn::Activation::Silu) => Some(Self::Silu),
             Some(_) => None,
         }
     }
@@ -127,10 +127,10 @@ fn silu_in_place(xs: &mut [f32]) {
 pub fn pack_weights(w: &Tensor) -> Result<Tensor> {
     let (o, c, k, _) = w.dims4()?;
     if o % OC_T != 0 {
-        candle_core::bail!("direct conv packs {OC_T} output channels at a time, got {o}");
+        inference_tensor::bail!("direct conv packs {OC_T} output channels at a time, got {o}");
     }
     let src = w
-        .to_dtype(candle_core::DType::F32)?
+        .to_dtype(inference_tensor::DType::F32)?
         .flatten_all()?
         .to_vec1::<f32>()?;
     let kk = k * k;
@@ -143,7 +143,11 @@ pub fn pack_weights(w: &Tensor) -> Result<Tensor> {
             }
         }
     }
-    Tensor::from_vec(packed, (o / OC_T, c, kk, OC_T), &candle_core::Device::Cpu)
+    Tensor::from_vec(
+        packed,
+        (o / OC_T, c, kk, OC_T),
+        &inference_tensor::Device::Cpu,
+    )
 }
 
 /// Dense conv with fused bias + activation on `pack_weights` output. Requires `available()`.
@@ -202,7 +206,7 @@ pub(crate) fn f32_slices<'a>(items: [(&'a CpuStorage, &Layout); 3]) -> Result<[&
     let mut out: [&[f32]; 3] = [&[]; 3];
     for (o, (s, l)) in out.iter_mut().zip(items) {
         let CpuStorage::F32(v) = s else {
-            candle_core::bail!("layout CPU kernels are f32 only");
+            inference_tensor::bail!("layout CPU kernels are f32 only");
         };
         *o = &v[l.start_offset()..];
     }
@@ -228,7 +232,7 @@ impl CustomOp3 for DirectConv {
         let (tiles, ci, kk, oct) = lw.shape().dims4()?;
         let k = kk.isqrt();
         if ci != c || k * k != kk || oct != OC_T || !available() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "direct conv: packed weight {:?} does not fit input {:?}",
                 lw.shape(),
                 lx.shape()
@@ -327,7 +331,7 @@ impl CustomOp3 for DirectPointwise {
         let (bn, c, h, w) = lx.shape().dims4()?;
         let (tiles, ci, kk, oct) = lw.shape().dims4()?;
         if ci != c || kk != 1 || oct != OC_T || !available() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "direct pointwise: packed weight {:?} does not fit input {:?}",
                 lw.shape(),
                 lx.shape()
@@ -540,7 +544,7 @@ impl CustomOp3 for DirectDepthwise {
         let (bn, c, h, w) = lx.shape().dims4()?;
         let (cw, one, k, k2) = lw.shape().dims4()?;
         if cw != c || one != 1 || k != k2 || !available() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "direct depthwise: weight {:?} vs input {:?}",
                 lw.shape(),
                 lx.shape()
@@ -612,7 +616,7 @@ unsafe fn depthwise_row(_: *const f32, _: &DwChannel, _: &mut [f32]) {
 mod tests {
     use super::*;
     use crate::test_util::rel_err;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     fn reference(y: Tensor, act: Act) -> Result<Tensor> {
         match act {

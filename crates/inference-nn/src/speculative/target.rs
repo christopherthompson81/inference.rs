@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::kv_cache::PagedAuxiliaryPrefixState;
 
@@ -92,7 +92,7 @@ pub trait SpeculativeTargetMixin {
     ) -> Result<Option<SpeculativeAttachInfo>> {
         match config {
             SpeculativeConfig::Off => Ok(None),
-            _ => candle_core::bail!("This model does not support speculative decoding."),
+            _ => inference_tensor::bail!("This model does not support speculative decoding."),
         }
     }
 
@@ -182,7 +182,7 @@ pub trait SpeculativeTargetMixin {
         _cached_tokens: usize,
         _state: &dyn PagedAuxiliaryPrefixState,
     ) -> Result<()> {
-        candle_core::bail!("This model does not support auxiliary paged prefix state.")
+        inference_tensor::bail!("This model does not support auxiliary paged prefix state.")
     }
 
     fn speculative_plan(&self, _batch_size: usize) -> Option<SpeculativeBatchPlan> {
@@ -266,7 +266,7 @@ macro_rules! delegate_speculative_target {
             fn attach_speculative(
                 &mut self,
                 config: $crate::speculative::SpeculativeConfig,
-            ) -> ::candle_core::Result<Option<$crate::speculative::SpeculativeAttachInfo>> {
+            ) -> ::inference_tensor::Result<Option<$crate::speculative::SpeculativeAttachInfo>> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::attach_speculative(
                     &mut self.$field,
                     config,
@@ -277,7 +277,7 @@ macro_rules! delegate_speculative_target {
                 &mut self,
                 config: $crate::speculative::SpeculativeConfig,
                 runtime: $crate::speculative::MtpRuntimeConfig,
-            ) -> ::candle_core::Result<Option<$crate::speculative::SpeculativeAttachInfo>> {
+            ) -> ::inference_tensor::Result<Option<$crate::speculative::SpeculativeAttachInfo>> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::attach_speculative_with_runtime(
                     &mut self.$field,
                     config,
@@ -310,18 +310,18 @@ macro_rules! delegate_speculative_target {
                         )
             }
 
-            fn reserve_recurrent_speculative_transition_storage(&self) -> ::candle_core::Result<bool> {
+            fn reserve_recurrent_speculative_transition_storage(&self) -> ::inference_tensor::Result<bool> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>
                     ::reserve_recurrent_speculative_transition_storage(&self.$field)
             }
 
-            fn reserve_recurrent_decode_deferred_storage(&self) -> ::candle_core::Result<bool> {
+            fn reserve_recurrent_decode_deferred_storage(&self) -> ::inference_tensor::Result<bool> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::reserve_recurrent_decode_deferred_storage(
                             &self.$field,
                         )
             }
 
-            fn disable_recurrent_decode_deferred_storage(&self) -> ::candle_core::Result<bool> {
+            fn disable_recurrent_decode_deferred_storage(&self) -> ::inference_tensor::Result<bool> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::disable_recurrent_decode_deferred_storage(
                             &self.$field,
                         )
@@ -329,7 +329,7 @@ macro_rules! delegate_speculative_target {
 
             fn recurrent_decode_deferred_state_spec(
                 &self,
-            ) -> ::candle_core::Result<Option<$crate::kv_cache::GdnDeferredStateSpec>> {
+            ) -> ::inference_tensor::Result<Option<$crate::kv_cache::GdnDeferredStateSpec>> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::recurrent_decode_deferred_state_spec(
                     &self.$field,
                 )
@@ -337,12 +337,12 @@ macro_rules! delegate_speculative_target {
 
             fn apply_recurrent_speculative_transitions_for_current_batch(
                 &self,
-            ) -> ::candle_core::Result<bool> {
+            ) -> ::inference_tensor::Result<bool> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>
                     ::apply_recurrent_speculative_transitions_for_current_batch(&self.$field)
             }
 
-            fn flush_recurrent_state_for_current_batch(&self) -> ::candle_core::Result<()> {
+            fn flush_recurrent_state_for_current_batch(&self) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::flush_recurrent_state_for_current_batch(
                             &self.$field,
                         )
@@ -351,7 +351,7 @@ macro_rules! delegate_speculative_target {
             fn flush_recurrent_speculative_transitions(
                 &self,
                 seq_ids: &[usize],
-            ) -> ::candle_core::Result<()> {
+            ) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::flush_recurrent_speculative_transitions(
                             &self.$field, seq_ids,
                         )
@@ -385,7 +385,7 @@ macro_rules! delegate_speculative_target {
                 &mut self,
                 sequence_id: usize,
                 cached_tokens: usize,
-            ) -> ::candle_core::Result<
+            ) -> ::inference_tensor::Result<
                 Option<::std::sync::Arc<dyn $crate::kv_cache::PagedAuxiliaryPrefixState>>,
             > {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::capture_paged_auxiliary_prefix_state(
@@ -400,7 +400,7 @@ macro_rules! delegate_speculative_target {
                 sequence_id: usize,
                 cached_tokens: usize,
                 state: &dyn $crate::kv_cache::PagedAuxiliaryPrefixState,
-            ) -> ::candle_core::Result<()> {
+            ) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::restore_paged_auxiliary_prefix_state(
                             &mut self.$field,
                             sequence_id,
@@ -425,7 +425,7 @@ macro_rules! delegate_speculative_target {
                 )
             }
 
-            fn precapture_speculative_cuda_graphs(&self) -> ::candle_core::Result<()> {
+            fn precapture_speculative_cuda_graphs(&self) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::precapture_speculative_cuda_graphs(
                     &self.$field,
                 )
@@ -445,14 +445,14 @@ macro_rules! delegate_speculative_target {
                 )
             }
 
-            fn speculative_bypass(&mut self, seq_ids: &[usize]) -> ::candle_core::Result<()> {
+            fn speculative_bypass(&mut self, seq_ids: &[usize]) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_bypass(
                     &mut self.$field,
                     seq_ids,
                 )
             }
 
-            fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> ::candle_core::Result<()> {
+            fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::release_speculative_sequences(
                     &mut self.$field,
                     seq_ids,
@@ -462,7 +462,7 @@ macro_rules! delegate_speculative_target {
             fn speculative_propose(
                 &mut self,
                 ctx: $crate::speculative::SpeculativeProposeBatchCtx<'_>,
-            ) -> ::candle_core::Result<Option<$crate::speculative::SpeculativeProposalBatch>> {
+            ) -> ::inference_tensor::Result<Option<$crate::speculative::SpeculativeProposalBatch>> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_propose(
                     &mut self.$field,
                     ctx,
@@ -472,7 +472,7 @@ macro_rules! delegate_speculative_target {
             fn speculative_prepare_propose(
                 &mut self,
                 ctx: $crate::speculative::SpeculativeProposePrepareCtx<'_>,
-            ) -> ::candle_core::Result<Option<Box<dyn $crate::speculative::SpeculativeProposePreparation>>>
+            ) -> ::inference_tensor::Result<Option<Box<dyn $crate::speculative::SpeculativeProposePreparation>>>
             {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_prepare_propose(
                     &mut self.$field,
@@ -483,7 +483,7 @@ macro_rules! delegate_speculative_target {
             fn speculative_target_hiddens(
                 &self,
                 rows: &[(usize, usize)],
-            ) -> ::candle_core::Result<Option<::candle_core::Tensor>> {
+            ) -> ::inference_tensor::Result<Option<::inference_tensor::Tensor>> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_target_hiddens(
                     &self.$field,
                     rows,
@@ -493,7 +493,7 @@ macro_rules! delegate_speculative_target {
             fn speculative_prefill(
                 &mut self,
                 ctx: $crate::speculative::SpeculativePrefillCtx<'_>,
-            ) -> ::candle_core::Result<()> {
+            ) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_prefill(
                     &mut self.$field,
                     ctx,
@@ -503,7 +503,7 @@ macro_rules! delegate_speculative_target {
             fn speculative_commit(
                 &mut self,
                 rows: &[$crate::speculative::SpeculativeCommitRow],
-            ) -> ::candle_core::Result<()> {
+            ) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::speculative_commit(
                     &mut self.$field,
                     rows,
@@ -521,7 +521,7 @@ macro_rules! delegate_speculative_target {
             fn install_speculative_graph_state(
                 &self,
                 state: &dyn $crate::speculative::SpeculativeGraphState,
-            ) -> ::candle_core::Result<()> {
+            ) -> ::inference_tensor::Result<()> {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::install_speculative_graph_state(
                     &self.$field,
                     state,
@@ -551,7 +551,7 @@ mod tests {
         fn flush_recurrent_speculative_transitions(
             &self,
             seq_ids: &[usize],
-        ) -> candle_core::Result<()> {
+        ) -> inference_tensor::Result<()> {
             self.flushed.borrow_mut().push(seq_ids.to_vec());
             Ok(())
         }
@@ -590,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn bypass_and_release_flush_recurrent_transitions() -> candle_core::Result<()> {
+    fn bypass_and_release_flush_recurrent_transitions() -> inference_tensor::Result<()> {
         let flushed = Rc::new(RefCell::new(Vec::new()));
         let mut target = TransitionTarget {
             flushed: Rc::clone(&flushed),

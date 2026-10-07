@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
-use candle_core::cuda_backend::cudarc::driver::{CudaStream, DevicePtr, DevicePtrMut};
-use candle_core::{
+use inference_tensor::cuda_backend::cudarc::driver::{CudaStream, DevicePtr, DevicePtrMut};
+use inference_tensor::{
     CpuStorage, CudaStorage, D, DType, Device, Layout, Result, Shape, Storage, Tensor,
     backend::BackendStorage,
 };
@@ -108,7 +108,7 @@ fn ggml_type(dtype: DType) -> Result<i32> {
         DType::F16 => GGML_TYPE_F16,
         DType::BF16 => GGML_TYPE_BF16,
         DType::F8E4M3 => GGML_TYPE_I8,
-        dt => candle_core::bail!("fattn does not take {dt:?}"),
+        dt => inference_tensor::bail!("fattn does not take {dt:?}"),
     })
 }
 
@@ -118,7 +118,7 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
     let (kb, s_kv, h_kv, kd) = k.dims4()?;
     let (vb, vs, vh, _) = v.dims4()?;
     if kd != d_qk || (kb, s_kv, h_kv) != (vb, vs, vh) || kb != b {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn operands disagree: q {:?} k {:?} v {:?}",
             q.shape(),
             k.shape(),
@@ -126,7 +126,7 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
         );
     }
     if opts.causal && q.dim(1)? > s_kv {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "causal fattn needs seq_q ({}) <= seq_kv ({s_kv})",
             q.dim(1)?
         );
@@ -138,18 +138,18 @@ fn validate(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<(
             && kl.start_offset() == vl.start_offset()
             && kl.stride()[..3] == vl.stride()[..3];
         if !aliases {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fattn at head dim {MLA_HEAD_DIM} needs v to be a view of k's leading dims"
             );
         }
     }
     if h_kv == 0 || h % h_kv != 0 {
-        candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
+        inference_tensor::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
     }
     if let Some(mask) = &opts.mask {
         let (mb, mq, mkv) = mask.dims3()?;
         if (mq, mkv) != (q.dim(1)?, s_kv) || mb == 0 || b % mb != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fattn mask {:?} does not fit q {:?} and k {:?}",
                 mask.shape(),
                 q.shape(),
@@ -223,30 +223,30 @@ fn operand_limit(q: &Tensor, k: &Tensor, v: &Tensor) -> Option<String> {
 fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<()> {
     let h = q.dim(D::Minus2)?;
     if let Some(limit) = operand_limit(q, k, v) {
-        candle_core::bail!("{limit}");
+        inference_tensor::bail!("{limit}");
     }
     let fp8 = k.dtype() == DType::F8E4M3;
     if opts.kv_scales.is_some() && !fp8 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn's kv_scales dequantize fp8 K/V; these are {:?}",
             k.dtype()
         );
     }
     if let Some(limit) = fp8_scale_limit(opts) {
-        candle_core::bail!("{limit}");
+        inference_tensor::bail!("{limit}");
     }
     // at 576 V is read out of K's tiles, which are dequantized with the K scale
     if fp8 && q.dim(D::Minus1)? == MLA_HEAD_DIM {
-        candle_core::bail!("fattn does not take fp8 K/V at head dim {MLA_HEAD_DIM}");
+        inference_tensor::bail!("fattn does not take fp8 K/V at head dim {MLA_HEAD_DIM}");
     }
     if opts.mask.is_some() && opts.causal {
-        candle_core::bail!("fattn takes a mask tensor or causal masking, not both");
+        inference_tensor::bail!("fattn takes a mask tensor or causal masking, not both");
     }
     if opts
         .window_left
         .is_some_and(|w| opts.mask.is_some() || w > i32::MAX as usize)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn's window_left is an implicit mask (no mask tensor) and must fit an i32"
         );
     }
@@ -254,14 +254,14 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
         .chunk
         .is_some_and(|c| opts.mask.is_some() || c == 0 || c > i32::MAX as usize)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn's chunk is an implicit mask (no mask tensor) and must be in 1..=i32::MAX"
         );
     }
     if let Some(mask) = &opts.mask
         && (mask.dtype() != DType::F16 || mask.layout().stride()[2] != 1)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn needs an f16 mask with a contiguous last dim, got {:?}",
             mask.dtype()
         );
@@ -269,7 +269,7 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
     if let Some(sinks) = &opts.sinks
         && (sinks.dtype() != DType::F32 || sinks.dims1()? != h || !sinks.is_contiguous())
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn needs contiguous f32 sinks of length {h}, got {:?}",
             sinks.shape()
         );
@@ -282,7 +282,7 @@ fn bhsd(ptr: u64, dtype: DType, layout: &Layout) -> Result<ffi::Tensor> {
     let (b, s, h, d) = layout.shape().dims4()?;
     let st = layout.stride();
     if st[3] != 1 {
-        candle_core::bail!("fattn needs the head dim contiguous, got strides {st:?}");
+        inference_tensor::bail!("fattn needs the head dim contiguous, got strides {st:?}");
     }
     let es = dtype.size_in_bytes() as i64;
     Ok(ffi::Tensor {
@@ -351,7 +351,7 @@ fn device_ptr<'a>(
                 .device_ptr(stream);
             (p, Box::new(g))
         }
-        dt => candle_core::bail!("fattn does not take {dt:?}"),
+        dt => inference_tensor::bail!("fattn does not take {dt:?}"),
     };
     guards.push(guard);
     Ok(ptr + (layout.start_offset() * storage.dtype().size_in_bytes()) as u64)
@@ -413,7 +413,7 @@ fn packed_descriptor(
     let (_, h, d) = layout.shape().dims3()?;
     let st = layout.stride();
     if st[2] != 1 {
-        candle_core::bail!("fattn needs the head dim contiguous, got strides {st:?}");
+        inference_tensor::bail!("fattn needs the head dim contiguous, got strides {st:?}");
     }
     let es = dtype.size_in_bytes() as i64;
     Ok(ffi::Tensor {
@@ -425,7 +425,7 @@ fn packed_descriptor(
 }
 
 fn held_ptr<'a>(
-    held: &'a Option<(candle_core::StorageRef<'_>, &Layout)>,
+    held: &'a Option<(inference_tensor::StorageRef<'_>, &Layout)>,
     stream: &'a Arc<CudaStream>,
     guards: &mut Guards<'a>,
 ) -> Result<Option<u64>> {
@@ -433,12 +433,12 @@ fn held_ptr<'a>(
         return Ok(None);
     };
     let Storage::Cuda(storage) = &**storage else {
-        candle_core::bail!("fattn operands must be on CUDA")
+        inference_tensor::bail!("fattn operands must be on CUDA")
     };
     device_ptr(storage, layout, stream, guards).map(Some)
 }
 
-fn held(t: Option<&Tensor>) -> Option<(candle_core::StorageRef<'_>, &Layout)> {
+fn held(t: Option<&Tensor>) -> Option<(inference_tensor::StorageRef<'_>, &Layout)> {
     t.map(Tensor::storage_and_layout)
 }
 
@@ -609,7 +609,7 @@ impl Fattn<'_> {
     }
 }
 
-impl candle_core::CustomOp3 for Fattn<'_> {
+impl inference_tensor::CustomOp3 for Fattn<'_> {
     fn name(&self) -> &'static str {
         "fattn"
     }
@@ -623,7 +623,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         _: &CpuStorage,
         _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("fattn is CUDA only")
+        inference_tensor::bail!("fattn is CUDA only")
     }
 
     fn cuda_fwd(
@@ -638,7 +638,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         let dev = q.device();
         let stream = dev.cuda_stream();
         if stream.cu_stream().is_null() {
-            candle_core::bail!("fattn needs a non-default CUDA stream");
+            inference_tensor::bail!("fattn needs a non-default CUDA stream");
         }
         let mask = held(self.opts.mask.as_ref());
         let sinks = held(self.opts.sinks.as_ref());
@@ -663,7 +663,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         let call = self.describe(&addrs, (q.dtype(), q_l), (k.dtype(), k_l), (v.dtype(), v_l))?;
         let mut args = call.args(self.opts, &stream);
         if !unsafe { ffi::inference_fattn_supported(&args) } {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fattn has no kernel for q {:?} k {:?} v {:?}",
                 q_l.shape(),
                 k_l.shape(),
@@ -675,7 +675,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
             args.dst = ptr as *mut _;
             match unsafe { ffi::inference_fattn_forward(args) } {
                 0 => Ok(()),
-                err => candle_core::bail!("fattn launch failed with CUDA error {err}"),
+                err => inference_tensor::bail!("fattn launch failed with CUDA error {err}"),
             }
         };
         let out = match q.dtype() {
@@ -809,7 +809,7 @@ pub fn paged_shape_supported(head_dim: usize, q_heads: usize, kv_heads: usize) -
 pub fn mma_available() -> bool {
     static AVAILABLE: OnceLock<bool> = OnceLock::new();
     *AVAILABLE.get_or_init(|| {
-        use candle_core::cuda_backend::cudarc::driver::{result, sys::CUdevice_attribute};
+        use inference_tensor::cuda_backend::cudarc::driver::{result, sys::CUdevice_attribute};
         let all_turing = || -> std::result::Result<bool, result::DriverError> {
             result::init()?;
             let count = result::device::get_count()?;
@@ -853,7 +853,7 @@ pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Res
 /// Additive f16 causal mask `(1, seq_q, seq_kv)`, with the queries aligned to the end of the keys.
 pub fn causal_mask(seq_q: usize, seq_kv: usize, device: &Device) -> Result<Tensor> {
     let Some(offset) = seq_kv.checked_sub(seq_q) else {
-        candle_core::bail!("a causal mask needs seq_q ({seq_q}) <= seq_kv ({seq_kv})");
+        inference_tensor::bail!("a causal mask needs seq_q ({seq_q}) <= seq_kv ({seq_kv})");
     };
     let mask: Vec<f32> = (0..seq_q)
         .flat_map(|i| {
@@ -885,10 +885,10 @@ fn validate_paged(
     let (nb, h_kv, bs, kd) = kv.k_cache.dims4()?;
     let (vnb, vh, vbs, _) = kv.v_cache.dims4()?;
     if let Some(limit) = paged_limit(q, kv, opts)? {
-        candle_core::bail!("{limit}");
+        inference_tensor::bail!("{limit}");
     }
     if kd != d || (nb, h_kv, bs) != (vnb, vh, vbs) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn paged operands disagree: q {:?} k cache {:?} v cache {:?}",
             q.shape(),
             kv.k_cache.shape(),
@@ -896,7 +896,7 @@ fn validate_paged(
         );
     }
     if kv.block_table.dim(1)? == 0 {
-        candle_core::bail!("paged fattn needs at least one block per sequence");
+        inference_tensor::bail!("paged fattn needs at least one block per sequence");
     }
     let tables_ok = kv.block_table.dtype() == DType::U32
         && kv.block_table.dims2()?.0 == b
@@ -905,7 +905,7 @@ fn validate_paged(
         && kv.seq_lens.dims1()? == b
         && kv.seq_lens.is_contiguous();
     if !tables_ok {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn needs contiguous u32 block tables (batch, max_blocks) and seq lens (batch,), got {:?} and {:?}",
             kv.block_table.shape(),
             kv.seq_lens.shape()
@@ -916,7 +916,7 @@ fn validate_paged(
             || full_lens.dims1()? != b
             || !full_lens.is_contiguous())
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn needs contiguous u32 full lens (batch,), got {:?}",
             full_lens.shape()
         );
@@ -925,10 +925,10 @@ fn validate_paged(
     let n_kv = paged_kv_len(kv)?;
     check_mask(opts, (b, sq, n_kv))?;
     if kv.k_cache.layout().stride()[3] != 1 || kv.v_cache.layout().stride()[3] != 1 {
-        candle_core::bail!("fattn needs the paged caches' head dim contiguous");
+        inference_tensor::bail!("fattn needs the paged caches' head dim contiguous");
     }
     if h_kv == 0 || h % h_kv != 0 {
-        candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
+        inference_tensor::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
     }
     Ok(())
 }
@@ -986,7 +986,7 @@ pub fn varlen_causal_mask(
     device: &Device,
 ) -> Result<Tensor> {
     if q_lens.len() != kv_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} query lengths for {} sequences",
             q_lens.len(),
             kv_lens.len()
@@ -996,7 +996,7 @@ pub fn varlen_causal_mask(
     let mut mask = Vec::with_capacity(q_lens.len() * max_q * n_kv);
     for (&q_len, &kv_len) in q_lens.iter().zip(kv_lens) {
         let Some(offset) = kv_len.checked_sub(q_len) else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "a causal mask needs q_len ({q_len}) <= the sequence's length ({kv_len})"
             );
         };
@@ -1022,20 +1022,20 @@ pub fn varlen_kv_len(max_len: usize) -> usize {
 fn validate_packed(seqs: &Packed, rows: usize, what: &str) -> Result<usize> {
     let cu = seqs.cu_seqlens;
     if cu.dtype() != DType::U32 || cu.rank() != 1 || cu.dim(0)? < 2 || !cu.is_contiguous() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn needs contiguous u32 {what} cu_seqlens (batch + 1,), got {:?}",
             cu.shape()
         );
     }
     if seqs.max_len == 0 || seqs.max_len > rows {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn {what} max_len {} must lie in 1..={rows}",
             seqs.max_len
         );
     }
     // the kernels read cu_seqlens and row indices as i32
     if rows > i32::MAX as usize {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn takes at most {} packed {what} rows, got {rows}",
             i32::MAX
         );
@@ -1047,7 +1047,7 @@ fn check_mask(opts: &FattnOptions, dims: (usize, usize, usize)) -> Result<()> {
     // without one the kernel masks each sequence's unused rows (and causally, if asked) itself
     match &opts.mask {
         Some(mask) if mask.dims3()? != dims => {
-            candle_core::bail!("fattn mask {:?} does not fit {dims:?}", mask.shape())
+            inference_tensor::bail!("fattn mask {:?} does not fit {dims:?}", mask.shape())
         }
         _ => Ok(()),
     }
@@ -1116,7 +1116,7 @@ fn validate_varlen(
     let (vt, vh, _) = v.dims3()?;
     let b = validate_packed(q_seqs, tq, "q")?;
     if validate_packed(kv_seqs, tk, "kv")? != b || kd != d || (vt, vh) != (tk, h_kv) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fattn varlen operands disagree: q {:?} k {:?} v {:?}, q cu {:?} kv cu {:?}",
             q.shape(),
             k.shape(),
@@ -1126,10 +1126,10 @@ fn validate_varlen(
         );
     }
     if d == MLA_HEAD_DIM {
-        candle_core::bail!("fattn varlen does not take head dim {MLA_HEAD_DIM}");
+        inference_tensor::bail!("fattn varlen does not take head dim {MLA_HEAD_DIM}");
     }
     if h_kv == 0 || h % h_kv != 0 {
-        candle_core::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
+        inference_tensor::bail!("fattn needs n_head ({h}) to be a multiple of n_head_kv ({h_kv})");
     }
     check_mask(opts, (b, q_seqs.max_len, varlen_kv_len(kv_seqs.max_len)))?;
     validate_operands(q, k, v, opts)

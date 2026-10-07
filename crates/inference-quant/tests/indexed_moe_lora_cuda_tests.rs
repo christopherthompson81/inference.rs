@@ -1,12 +1,12 @@
 #![cfg(feature = "cuda")]
 
-use candle_core::{
-    DType, Device, Result, Storage, Tensor, quantized::GgmlDType, quantized::QTensor,
-};
 use half::f16;
 use inference_quant::{
     IndexedMoeLoraDecode, IndexedMoeLoraWeights, IndexedMoeRouting,
     moe_weighted_reduce_flat_same_dtype,
+};
+use inference_tensor::{
+    DType, Device, Result, Storage, Tensor, quantized::GgmlDType, quantized::QTensor,
 };
 
 fn values(len: usize, phase: f32) -> Vec<f32> {
@@ -15,7 +15,7 @@ fn values(len: usize, phase: f32) -> Vec<f32> {
         .collect()
 }
 
-fn tensor(shape: impl Into<candle_core::Shape>, phase: f32) -> Result<Tensor> {
+fn tensor(shape: impl Into<inference_tensor::Shape>, phase: f32) -> Result<Tensor> {
     let shape = shape.into();
     Tensor::from_vec(values(shape.elem_count(), phase), shape, &Device::Cpu)
 }

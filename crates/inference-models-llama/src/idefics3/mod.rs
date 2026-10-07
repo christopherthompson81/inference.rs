@@ -9,10 +9,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{D, DType, Device, Result, Tensor};
 pub use config::Idefics3Config;
 use inference_nn::vision::siglip::SiglipVisionTransformer;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use vision::Idefics3Connector;
 
 use crate::attention::AttentionMask;
@@ -213,12 +213,12 @@ impl Idefics3Model {
                                 .unwrap()
                                 .checked_add(*count)
                                 .ok_or_else(|| {
-                                    candle_core::Error::msg("Idefics3 subimage count overflow")
+                                    inference_tensor::Error::msg("Idefics3 subimage count overflow")
                                 })?,
                         );
                     }
                     if offsets.last().copied().unwrap_or_default() != pixel_values.dim(0)? {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Idefics3 has {} encoder images but subimage counts total {}",
                             pixel_values.dim(0)?,
                             offsets.last().copied().unwrap_or_default()
@@ -296,7 +296,7 @@ impl Idefics3Model {
 
             if let Some(layout) = packed_layout {
                 let encoder_outputs = encoder_outputs.ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "packed Idefics3 input requires per-image encoder outputs",
                     )
                 })?;
@@ -384,7 +384,7 @@ impl MultimodalModel for Idefics3Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let Idefics3SpecificArgs {
             pixel_attention_mask,
             image_hashes,

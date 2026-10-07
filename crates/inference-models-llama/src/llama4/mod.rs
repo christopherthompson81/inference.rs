@@ -5,9 +5,9 @@ pub mod text;
 use crate::attention::FlashParams;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{Linear, Module};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use text::TextModel;
 use vision::Llama4VisionModel;
 
@@ -108,7 +108,7 @@ impl Llama4Model {
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         if args.packed_prefill && args.packed_layout.is_none() {
-            candle_core::bail!("packed Llama4 prefill is missing its multimodal layout");
+            inference_tensor::bail!("packed Llama4 prefill is missing its multimodal layout");
         }
         let mut input_embeds = self.language_model.get_input_embeddings(input_ids)?;
 
@@ -126,7 +126,7 @@ impl Llama4Model {
 
             let (image_features, encoder_outputs) = if args.image_hashes.is_empty() {
                 if args.packed_prefill {
-                    candle_core::bail!("packed Llama4 media input has no image hashes");
+                    inference_tensor::bail!("packed Llama4 media input has no image hashes");
                 }
                 let feats = self.vision_model.forward(&pixel_values)?;
                 let flat = feats.reshape(((), feats.dim(D::Minus1)?))?;
@@ -135,7 +135,7 @@ impl Llama4Model {
                 if args.image_hashes.len() != args.tile_counts.len()
                     || args.image_hashes.len() != args.image_token_counts.len()
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Llama4 has {} image hashes, {} tile counts, and {} token counts",
                         args.image_hashes.len(),
                         args.tile_counts.len(),
@@ -146,7 +146,7 @@ impl Llama4Model {
                 offsets.push(0usize);
                 for &count in &args.tile_counts {
                     if count == 0 {
-                        candle_core::bail!("Llama4 image has no tiles");
+                        inference_tensor::bail!("Llama4 image has no tiles");
                     }
                     offsets.push(
                         offsets
@@ -154,11 +154,13 @@ impl Llama4Model {
                             .copied()
                             .unwrap()
                             .checked_add(count)
-                            .ok_or_else(|| candle_core::Error::msg("Llama4 tile count overflow"))?,
+                            .ok_or_else(|| {
+                                inference_tensor::Error::msg("Llama4 tile count overflow")
+                            })?,
                     );
                 }
                 if offsets.last().copied().unwrap_or_default() != pixel_values.dim(0)? {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Llama4 has {} pixel tiles but tile counts total {}",
                         pixel_values.dim(0)?,
                         offsets.last().copied().unwrap_or_default()
@@ -195,7 +197,7 @@ impl Llama4Model {
                     let flat = feats.reshape(((), feats.dim(D::Minus1)?))?;
                     let output = self.multi_modal_projector.forward(&flat)?;
                     if output.dim(0)? != args.image_token_counts[index] {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Llama4 image encoder returned {} rows for {} placeholders",
                             output.dim(0)?,
                             args.image_token_counts[index]
@@ -245,7 +247,7 @@ impl Llama4Model {
                 input_embeds = layout.splice_embeddings(
                     &input_embeds,
                     &encoder_outputs.ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "packed Llama4 input requires per-image encoder outputs",
                         )
                     })?,
@@ -254,7 +256,7 @@ impl Llama4Model {
                 let mut x_flat = input_embeds.flatten_all()?;
                 let src_flat = image_features.flatten_all()?;
                 if src_flat.dim(0)? != indices.dim(0)? {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Llama4 has {} image embedding values but {} placeholder values",
                         src_flat.dim(0)?,
                         indices.dim(0)?
@@ -303,7 +305,7 @@ impl NormalModel for Llama4Model {
         &self,
         input_ids: &Tensor,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         self.forward(
             input_ids,
             None,
@@ -362,7 +364,7 @@ impl MultimodalModel for Llama4Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let args = *model_specific_args
             .downcast()
             .expect("Cannot downcast into `Llama4ModelSpecificArgs`");

@@ -9,8 +9,8 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use crate::{
     attention::AttentionMask,
@@ -54,18 +54,18 @@ impl Qwen3_5MtpHead {
         attention_mechanism: &AttentionImplementation,
     ) -> Result<Self> {
         if !crate::layers::contains_tensor_or_uqff(&vb, MTP_FC_WEIGHT) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "`--mtp` requested but the checkpoint has no built-in MTP head (`{MTP_FC_WEIGHT}`)."
             );
         }
         if cfg.mtp_num_hidden_layers != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 MTP supports exactly one MTP layer, config has {}",
                 cfg.mtp_num_hidden_layers
             );
         }
         if cfg.mtp_use_dedicated_embeddings {
-            candle_core::bail!("Qwen3.5 MTP with dedicated embeddings is not supported");
+            inference_tensor::bail!("Qwen3.5 MTP with dedicated embeddings is not supported");
         }
         let loading_isq = normal_loading_metadata.loading_isq;
         let device = normal_loading_metadata.real_device.clone();
@@ -182,7 +182,7 @@ impl Qwen3_5MtpHead {
         let cos_sin = match positions.rank() {
             2 => rotary_emb.compute_text_cos_sin(positions, xs.dtype())?,
             3 => rotary_emb.compute_cos_sin(positions, xs.dtype())?,
-            rank => candle_core::bail!("unexpected Qwen3.5 MTP position rank {rank}"),
+            rank => inference_tensor::bail!("unexpected Qwen3.5 MTP position rank {rank}"),
         };
         let xs = self.layer.forward_attention(
             &xs,

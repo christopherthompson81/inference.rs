@@ -8,9 +8,9 @@ use std::{
     thread::ThreadId,
 };
 
-use candle_core::cuda::cudarc::driver::{CudaEvent, CudaSlice, CudaStream, DeviceRepr, sys};
-use candle_core::cuda_backend::{CudaDType, DeviceId, WrapErr};
-use candle_core::{
+use inference_tensor::cuda::cudarc::driver::{CudaEvent, CudaSlice, CudaStream, DeviceRepr, sys};
+use inference_tensor::cuda_backend::{CudaDType, DeviceId, WrapErr};
+use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
     quantized::{GgmlDType, QMatMul, QTensor},
 };
@@ -459,7 +459,7 @@ impl PackedAffine {
         reservation: Option<&Reservation>,
     ) -> Result<Self> {
         if !Self::supports(weight, dtype) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed GGUF affine does not support {:?} {:?} {:?} on {:?}",
                 weight.dtype(),
                 weight.shape(),
@@ -486,7 +486,7 @@ impl PackedAffine {
         let context = stream.context();
         if let Some(reservation) = reservation {
             if reservation.plan != plan || reservation.device_id != dev.id() {
-                candle_core::bail!("packed GGUF affine reservation does not match the weight");
+                inference_tensor::bail!("packed GGUF affine reservation does not match the weight");
             }
             stream.wait(&reservation.source_ready).w()?;
         }
@@ -502,7 +502,7 @@ impl PackedAffine {
             .then(|| claim_memory_budget(device_id, required_bytes, free, headroom))
             .flatten();
         if budget_claim == Some(false) {
-            candle_core::bail!("packed GGUF affine memory plan is disabled for this device");
+            inference_tensor::bail!("packed GGUF affine memory plan is disabled for this device");
         }
         let available = if budget_claim == Some(true) {
             free
@@ -511,7 +511,7 @@ impl PackedAffine {
         };
         if required_bytes > available {
             set_memory_budget(device_id, 0);
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed GGUF affine needs {required_bytes} bytes with {free} free and {headroom} reserved"
             );
         }
@@ -603,21 +603,21 @@ impl PackedAffine {
 
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         if !xs.device().same_device(&Device::Cuda(self.dev.clone())) {
-            candle_core::bail!("packed GGUF affine input and weight are on different devices");
+            inference_tensor::bail!("packed GGUF affine input and weight are on different devices");
         }
         if xs.dtype() != self.params.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed GGUF affine parameter dtype {:?} does not match input {:?}",
                 self.params.dtype(),
                 xs.dtype()
             );
         }
         let Some((&k, batch_dims)) = xs.dims().split_last() else {
-            candle_core::bail!("packed GGUF affine input must have at least one dimension");
+            inference_tensor::bail!("packed GGUF affine input must have at least one dimension");
         };
         let m = batch_dims.iter().product::<usize>();
         if m == 0 || k != self.k || i32::try_from(m).is_err() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed GGUF affine shape mismatch: input {:?}, weight [{}, {}]",
                 xs.shape(),
                 self.n,
@@ -632,7 +632,7 @@ impl PackedAffine {
                 .start_offset()
                 .checked_mul(xs.dtype().size_in_bytes())
                 .ok_or_else(|| {
-                    candle_core::Error::Msg("packed GGUF affine input offset overflow".into())
+                    inference_tensor::Error::Msg("packed GGUF affine input offset overflow".into())
                 })?
         };
         let xs = if offset_bytes.is_multiple_of(MARLIN_INPUT_ALIGNMENT) {
@@ -642,7 +642,7 @@ impl PackedAffine {
         };
         let (storage, layout) = xs.storage_and_layout();
         let Storage::Cuda(storage) = &*storage else {
-            candle_core::bail!("packed GGUF affine input must live on CUDA");
+            inference_tensor::bail!("packed GGUF affine input must live on CUDA");
         };
         match &self.params {
             AffineParams::F16 {
@@ -798,7 +798,7 @@ fn check_status(operation: &str, status: i32) -> Result<()> {
     if status == 0 {
         Ok(())
     } else {
-        candle_core::bail!("packed GGUF affine {operation} failed with CUDA status {status}")
+        inference_tensor::bail!("packed GGUF affine {operation} failed with CUDA status {status}")
     }
 }
 
@@ -806,7 +806,7 @@ fn check_status(operation: &str, status: i32) -> Result<()> {
 mod tests {
     use std::sync::{Arc, Barrier};
 
-    use candle_core::{DType, Device, quantized::QTensor};
+    use inference_tensor::{DType, Device, quantized::QTensor};
 
     use super::super::GGUF_AFFINE_MIN_BATCH;
     use super::*;

@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use candle_core::{Device, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::Linear;
+use inference_tensor::{Device, Module, Result, Tensor};
 
 use super::config::TextConfig;
 use crate::{
@@ -189,7 +189,7 @@ impl SparseMoeBlock {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, shared_gate)?,
             None => shared_gate,
         };
-        let shared_gate = candle_nn::ops::sigmoid(&shared_gate)?;
+        let shared_gate = inference_tensor::nn::ops::sigmoid(&shared_gate)?;
         let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
         let shared_out = shared_out.broadcast_mul(&shared_gate)?;
 

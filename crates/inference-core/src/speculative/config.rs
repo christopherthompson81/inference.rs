@@ -3,8 +3,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use candle_core::{DType, Device};
 use hf_hub::{Repo, RepoType, api::sync::ApiRepo};
+use inference_tensor::{DType, Device};
 
 use crate::{
     paged_attention::PagedAttentionConfig,
@@ -18,7 +18,7 @@ use crate::{
 pub use inference_nn::speculative::config::*;
 
 /// The assistant checkpoint directory, downloading a hub id's config and weights first.
-pub fn resolve_mtp_path(config: &MtpConfig) -> candle_core::Result<PathBuf> {
+pub fn resolve_mtp_path(config: &MtpConfig) -> inference_tensor::Result<PathBuf> {
     let Some(model) = &config.model else {
         return config.resolve_path();
     };
@@ -33,7 +33,7 @@ pub fn resolve_mtp_path(config: &MtpConfig) -> candle_core::Result<PathBuf> {
 /// Swap an MTP assistant hub id for its local snapshot, so model code only ever sees a directory.
 pub fn resolve_speculative_model(
     config: SpeculativeConfig,
-) -> candle_core::Result<SpeculativeConfig> {
+) -> inference_tensor::Result<SpeculativeConfig> {
     match config {
         SpeculativeConfig::Mtp(mut mtp) if mtp.model.is_some() => {
             mtp.model = Some(resolve_mtp_path(&mtp)?.to_string_lossy().into_owned());
@@ -47,23 +47,23 @@ pub fn resolve_speculative_model(
 pub fn external_weight_size_in_bytes(
     config: &MtpConfig,
     target_dtype: DType,
-) -> candle_core::Result<usize> {
+) -> inference_tensor::Result<usize> {
     if config.is_builtin() {
         return Ok(0);
     }
     let path = resolve_mtp_path(config)?;
     let mut weight_paths = fs::read_dir(&path)
         .map_err(|err| {
-            candle_core::Error::msg(format!("failed to list {}: {err}", path.display()))
+            inference_tensor::Error::msg(format!("failed to list {}: {err}", path.display()))
         })?
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
         .collect::<Vec<_>>();
     weight_paths.sort();
     crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
-        .map_err(candle_core::Error::msg)?
+        .map_err(inference_tensor::Error::msg)?
         .ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "MTP model directory {} has no safetensors weights",
                 path.display()
             ))
@@ -155,8 +155,8 @@ pub fn reserve_external_mtp_memory_with_runtime(
     ))
 }
 
-fn build_hf_api(id: &str, revision: &str) -> candle_core::Result<ApiRepo> {
-    let api = build_api(&TokenSource::CacheToken, true).map_err(candle_core::Error::msg)?;
+fn build_hf_api(id: &str, revision: &str) -> inference_tensor::Result<ApiRepo> {
+    let api = build_api(&TokenSource::CacheToken, true).map_err(inference_tensor::Error::msg)?;
     Ok(api.repo(Repo::with_revision(
         id.to_string(),
         RepoType::Model,
@@ -164,14 +164,15 @@ fn build_hf_api(id: &str, revision: &str) -> candle_core::Result<ApiRepo> {
     )))
 }
 
-fn resolve_hf_mtp_path(id: &str) -> candle_core::Result<PathBuf> {
+fn resolve_hf_mtp_path(id: &str) -> inference_tensor::Result<PathBuf> {
     let revision = "main";
     let api = build_hf_api(id, revision)?;
     let model_id = Path::new(id);
 
     let config_path =
-        get_file(&api, model_id, "config.json", revision).map_err(candle_core::Error::msg)?;
-    let files = list_repo_files(&api, model_id, true, revision).map_err(candle_core::Error::msg)?;
+        get_file(&api, model_id, "config.json", revision).map_err(inference_tensor::Error::msg)?;
+    let files =
+        list_repo_files(&api, model_id, true, revision).map_err(inference_tensor::Error::msg)?;
     let mut weight_files = files
         .iter()
         .filter(|file| file.ends_with(".safetensors"))
@@ -179,17 +180,17 @@ fn resolve_hf_mtp_path(id: &str) -> candle_core::Result<PathBuf> {
         .collect::<Vec<_>>();
     weight_files.sort();
     if weight_files.is_empty() {
-        candle_core::bail!("MTP model `{id}` does not contain safetensors weights");
+        inference_tensor::bail!("MTP model `{id}` does not contain safetensors weights");
     }
     for file in weight_files {
-        get_file(&api, model_id, &file, revision).map_err(candle_core::Error::msg)?;
+        get_file(&api, model_id, &file, revision).map_err(inference_tensor::Error::msg)?;
     }
 
     try_get_file(&api, model_id, "generation_config.json", revision)
-        .map_err(|err| candle_core::Error::Msg(err.to_string()))?;
+        .map_err(|err| inference_tensor::Error::Msg(err.to_string()))?;
 
     config_path.parent().map(Path::to_path_buf).ok_or_else(|| {
-        candle_core::Error::Msg(format!("config path has no parent: {config_path:?}"))
+        inference_tensor::Error::Msg(format!("config path has no parent: {config_path:?}"))
     })
 }
 

@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::DType;
 use inference_nn::loaders::NormalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
     Snapshot, assert_snapshot, forward_normal, load_synthesized, metadata, names_digest,
 };
+use inference_tensor::DType;
 use serde_json::json;
 
 use crate::loaders::Qwen3MoELoader;

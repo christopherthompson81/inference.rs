@@ -3,11 +3,11 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_fattn::{
     FattnOptions, PagedKv, causal_mask, flash_attn, flash_attn_paged, paged_causal_mask,
     paged_kv_len,
 };
+use inference_tensor::{DType, Device, Tensor};
 
 const WARMUP: usize = 5;
 const ITERS: usize = 50;
@@ -55,7 +55,7 @@ const RUNS: [(usize, usize, usize); 13] = [
     (1, 1, 16384),
 ];
 
-fn time(dev: &Device, f: impl Fn() -> candle_core::Result<Tensor>) -> Result<f64> {
+fn time(dev: &Device, f: impl Fn() -> inference_tensor::Result<Tensor>) -> Result<f64> {
     for _ in 0..WARMUP {
         f()?;
     }

@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_nn::attention::AttentionMask;
 use inference_nn::testing::{fill, load_synthesized, names_digest};
 use inference_nn::vision::siglip::{SiglipVisionConfig, SiglipVisionTransformer};
+use inference_tensor::{DType, Device, Tensor};
 
 use crate::layers::Activation;
 

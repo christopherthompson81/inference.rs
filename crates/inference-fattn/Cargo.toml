@@ -9,7 +9,7 @@ repository.workspace = true
 license.workspace = true
 
 [dependencies]
-candle-core.workspace = true
+inference-tensor.workspace = true
 float8.workspace = true
 half = { workspace = true }
 
@@ -18,8 +18,7 @@ cudaforge = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
-candle-nn.workspace = true
 
 [features]
 default = []
-cuda = ["dep:cudaforge", "candle-core/cuda"]
+cuda = ["dep:cudaforge", "inference-tensor/cuda"]

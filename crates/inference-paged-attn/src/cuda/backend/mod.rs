@@ -7,11 +7,6 @@ mod mla;
 mod reshape_cache;
 mod scale_update;
 pub use cache::{copy_blocks, swap_blocks};
-use candle_core::cuda::cudarc::{
-    self,
-    driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr},
-};
-use candle_core::{Layout, Result};
 pub use context_attention_mla::context_attention_fwd_mla;
 pub use fa3::{
     FA3_DECODE_MAX_QUERY_LEN, Fa3DecodeMetadata, Fa3DecodeParams, Fa3DecodeSchedule,
@@ -22,6 +17,11 @@ pub use flashinfer::{
     gather_kv_cache_flashinfer, is_flashinfer_cache, reshape_and_cache_flashinfer,
 };
 pub use gather_kv::gather_kv_cache;
+use inference_tensor::cuda::cudarc::{
+    self,
+    driver::{CudaSlice, CudaStream, DevicePtr, DeviceRepr},
+};
+use inference_tensor::{Layout, Result};
 pub use mla::{concat_and_cache_mla, flashinfer_mla_decode, gather_mla_cache};
 pub use reshape_cache::reshape_and_cache;
 pub use scale_update::kv_scale_update;
@@ -38,7 +38,7 @@ fn cache_input_layout(
         [batch, seq_len, num_heads, head_size] => {
             let num_tokens = batch
                 .checked_mul(seq_len)
-                .ok_or_else(|| candle_core::Error::msg("cache input token count overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("cache input token count overflow"))?;
             let row_stride = if seq_len == 1 {
                 layout.stride()[0]
             } else {
@@ -46,17 +46,19 @@ fn cache_input_layout(
             };
             if batch > 1 && seq_len > 1 && layout.stride()[0] != seq_len.saturating_mul(row_stride)
             {
-                candle_core::bail!("{op} cannot flatten {name} batch/sequence strides: {layout:?}");
+                inference_tensor::bail!(
+                    "{op} cannot flatten {name} batch/sequence strides: {layout:?}"
+                );
             }
             (num_tokens, num_heads, head_size, row_stride)
         }
-        _ => candle_core::bail!("{op} expects rank-3 or rank-4 {name} input, got {layout:?}"),
+        _ => inference_tensor::bail!("{op} expects rank-3 or rank-4 {name} input, got {layout:?}"),
     };
     if layout.stride()[layout.stride().len() - 1] != 1
         || layout.stride()[layout.stride().len() - 2] != head_size
         || row_stride < num_heads.saturating_mul(head_size)
     {
-        candle_core::bail!("{op} expects dense {name} heads, got {layout:?}");
+        inference_tensor::bail!("{op} expects dense {name} heads, got {layout:?}");
     }
     Ok((num_tokens, num_heads, head_size, row_stride))
 }

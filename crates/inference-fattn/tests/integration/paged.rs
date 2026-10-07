@@ -1,11 +1,11 @@
 //! Paged fattn against the dense reference per sequence, over shuffled block tables with NaN in every unused slot.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_fattn::{
     FattnOptions, KvScales, PagedKv, causal_mask, flash_attn_paged, paged_causal_mask,
     paged_kv_len, supported_paged,
 };
+use inference_tensor::{DType, Device, Tensor};
 
 use crate::fp8::{FP8_SCALES, FP8_TOLERANCE, store};
 use crate::parity::{Case, N_HEAD, QLayout, TOLERANCE, case, cuda, reference};

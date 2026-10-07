@@ -5,12 +5,12 @@ use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::attention_backend::{AttentionBackend, AttentionLayerSpec};
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder, linear_no_bias,
 };
+use inference_tensor::nn::Module;
+use inference_tensor::{DType, Device, Result, Tensor};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
@@ -46,7 +46,7 @@ fn causal_mask_values(
         || key_width == 0
         || chunk_size.is_some_and(|size| size == 0)
     {
-        candle_core::bail!("Llama4 attention has invalid mask dimensions");
+        inference_tensor::bail!("Llama4 attention has invalid mask dimensions");
     }
 
     let mut values = Vec::with_capacity(rows.len() * query_width * key_width);
@@ -56,18 +56,18 @@ fn causal_mask_values(
             || row.key_len == 0
             || row.key_len > key_width
         {
-            candle_core::bail!("Llama4 attention has invalid mask row lengths");
+            inference_tensor::bail!("Llama4 attention has invalid mask row lengths");
         }
         let query_end = row
             .query_start
             .checked_add(row.query_len)
-            .ok_or_else(|| candle_core::Error::msg("Llama4 query position overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Llama4 query position overflow"))?;
         let key_end = row
             .key_start
             .checked_add(row.key_len)
-            .ok_or_else(|| candle_core::Error::msg("Llama4 key position overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Llama4 key position overflow"))?;
         if row.query_start < row.key_start || query_end > key_end {
-            candle_core::bail!("Llama4 attention has inconsistent mask positions");
+            inference_tensor::bail!("Llama4 attention has inconsistent mask positions");
         }
 
         for query_idx in 0..query_width {
@@ -107,12 +107,12 @@ fn fixed_chunk_mask_layout(
     metadata: Option<&PagedAttentionInputMetadata>,
 ) -> Result<(Vec<FixedChunkMaskRow>, usize)> {
     if batch_size == 0 || query_width == 0 {
-        candle_core::bail!("Llama4 fixed-chunk attention has an empty query");
+        inference_tensor::bail!("Llama4 fixed-chunk attention has an empty query");
     }
 
     let Some(metadata) = metadata else {
         if seqlen_offsets.len() != batch_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Llama4 fixed-chunk attention has {} offsets for batch size {batch_size}",
                 seqlen_offsets.len()
             );
@@ -122,7 +122,7 @@ fn fixed_chunk_mask_layout(
             .map(|&query_start| {
                 let key_len = query_start
                     .checked_add(query_width)
-                    .ok_or_else(|| candle_core::Error::msg("Llama4 key length overflow"))?;
+                    .ok_or_else(|| inference_tensor::Error::msg("Llama4 key length overflow"))?;
                 Ok(FixedChunkMaskRow {
                     query_start,
                     query_len: query_width,
@@ -135,16 +135,15 @@ fn fixed_chunk_mask_layout(
         return Ok((rows, key_width));
     };
 
-    let selected_lens = metadata
-        .paged_context_lens_cpu
-        .as_deref()
-        .ok_or_else(|| candle_core::Error::msg("Llama4 attention is missing paged KV lengths"))?;
+    let selected_lens = metadata.paged_context_lens_cpu.as_deref().ok_or_else(|| {
+        inference_tensor::Error::msg("Llama4 attention is missing paged KV lengths")
+    })?;
     let full_lens = metadata
         .full_paged_context_lens_cpu
         .as_deref()
         .unwrap_or(selected_lens);
     if selected_lens.len() != full_lens.len() {
-        candle_core::bail!("Llama4 attention has inconsistent paged KV lengths");
+        inference_tensor::bail!("Llama4 attention has inconsistent paged KV lengths");
     }
 
     let rows = if let Some(query_lens) = metadata.query_lens.as_deref() {
@@ -152,7 +151,7 @@ fn fixed_chunk_mask_layout(
             || selected_lens.len() != batch_size
             || query_lens.iter().any(|&len| len == 0 || len > query_width)
         {
-            candle_core::bail!("Llama4 attention has invalid prompt row lengths");
+            inference_tensor::bail!("Llama4 attention has invalid prompt row lengths");
         }
         query_lens
             .iter()
@@ -160,10 +159,10 @@ fn fixed_chunk_mask_layout(
             .zip(full_lens)
             .map(|((&query_len, &key_len), &full_len)| {
                 let query_start = full_len.checked_sub(query_len).ok_or_else(|| {
-                    candle_core::Error::msg("Llama4 query starts before its KV context")
+                    inference_tensor::Error::msg("Llama4 query starts before its KV context")
                 })?;
                 let key_start = full_len.checked_sub(key_len).ok_or_else(|| {
-                    candle_core::Error::msg("Llama4 paged KV window exceeds its full context")
+                    inference_tensor::Error::msg("Llama4 paged KV window exceeds its full context")
                 })?;
                 Ok(FixedChunkMaskRow {
                     query_start,
@@ -176,9 +175,9 @@ fn fixed_chunk_mask_layout(
     } else {
         let query_rows = batch_size
             .checked_mul(query_width)
-            .ok_or_else(|| candle_core::Error::msg("Llama4 query row count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Llama4 query row count overflow"))?;
         if selected_lens.len() != query_rows {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Llama4 decode has {} KV rows for {query_rows} query rows",
                 selected_lens.len()
             );
@@ -188,10 +187,10 @@ fn fixed_chunk_mask_layout(
             .zip(full_lens)
             .map(|(&key_len, &full_len)| {
                 let query_start = full_len.checked_sub(1).ok_or_else(|| {
-                    candle_core::Error::msg("Llama4 decode has an empty KV context")
+                    inference_tensor::Error::msg("Llama4 decode has an empty KV context")
                 })?;
                 let key_start = full_len.checked_sub(key_len).ok_or_else(|| {
-                    candle_core::Error::msg("Llama4 paged KV window exceeds its full context")
+                    inference_tensor::Error::msg("Llama4 paged KV window exceeds its full context")
                 })?;
                 Ok(FixedChunkMaskRow {
                     query_start,
@@ -244,7 +243,7 @@ fn fixed_chunk_attention_mask(
 
 fn chunked_flash_segment_lens(query_lens: &[usize], chunk_size: usize) -> Result<Vec<usize>> {
     if chunk_size == 0 || query_lens.is_empty() || query_lens.contains(&0) {
-        candle_core::bail!("Llama4 packed chunked attention has invalid sequence lengths");
+        inference_tensor::bail!("Llama4 packed chunked attention has invalid sequence lengths");
     }
     let mut segments = Vec::new();
     for &query_len in query_lens {
@@ -267,13 +266,13 @@ fn chunked_flash_params(
     let mut cumulative = Vec::with_capacity(segment_lens.len() + 1);
     cumulative.push(0u32);
     for &segment in &segment_lens {
-        let segment = u32::try_from(segment).map_err(candle_core::Error::wrap)?;
+        let segment = u32::try_from(segment).map_err(inference_tensor::Error::wrap)?;
         let next = cumulative
             .last()
             .copied()
             .unwrap_or(0)
             .checked_add(segment)
-            .ok_or_else(|| candle_core::Error::msg("Llama4 packed token count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Llama4 packed token count overflow"))?;
         cumulative.push(next);
     }
     let mut cumulative_seqlens_q = HashMap::new();
@@ -284,7 +283,7 @@ fn chunked_flash_params(
         cumulative_seqlens_k.insert(device.location(), tensor);
     }
     let max_segment = u32::try_from(segment_lens.iter().copied().max().unwrap_or(0))
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
     Ok(FlashParams {
         max_q: max_segment,
         cumulative_seqlens_q,
@@ -479,7 +478,7 @@ impl CausalSelfAttention {
         if self.use_rope {
             let rope_positions = ctx
                 .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
             (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         }
 
@@ -959,7 +958,7 @@ impl TextModel {
         let cache = &mut self.kv_cache.normal().0;
         let position_ids = ctx
             .text_positions(input_ids.device(), input_ids.dim(1)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
             .clone();
         let mask_cache = ctx.mask_cache(cache);
 
@@ -994,10 +993,12 @@ impl TextModel {
         let chunk_masks = self.builds_chunk_masks || padded_prompt_chunk;
         let chunked_flash_params = if chunk_masks && ctx.flash_params().packed {
             if ctx.seqlen_offsets().iter().any(|&offset| offset != 0) {
-                candle_core::bail!("Llama4 packed chunked attention does not support cached keys");
+                inference_tensor::bail!(
+                    "Llama4 packed chunked attention does not support cached keys"
+                );
             }
             if !ctx.is_first_prompt_chunk() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Llama4 packed chunked attention requires the first prompt chunk"
                 );
             }
@@ -1005,13 +1006,13 @@ impl TextModel {
                 .paged_input_metadata()
                 .and_then(|metadata| metadata.query_lens.as_deref())
                 .ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "Llama4 packed chunked attention is missing logical query lengths",
                     )
                 })?;
             let expected_tokens = query_lens.iter().sum::<usize>();
             if expected_tokens != input_ids.dim(1)? {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Llama4 packed chunked attention has {expected_tokens} logical tokens but {} physical tokens",
                     input_ids.dim(1)?
                 );

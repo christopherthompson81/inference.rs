@@ -2,10 +2,6 @@
 mod cuda_bench {
     use std::{env, sync::Arc, time::Instant};
 
-    use candle_core::{
-        DType, Device, Result, Storage, Tensor,
-        cuda::cudarc::driver::{DevicePtr, DevicePtrMut, sys},
-    };
     use half::bf16;
     #[cfg(feature = "cutile")]
     use inference_quant::cutile::{
@@ -20,6 +16,10 @@ mod cuda_bench {
         RoutedLoraDirectLaunch, RoutedLoraGroupedLaunch, RoutedLoraInputMode,
         RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, Shard, add_expert_delta_reference,
         launch_routed_lora_direct, launch_routed_lora_grouped, with_lora_execution,
+    };
+    use inference_tensor::{
+        DType, Device, Result, Storage, Tensor,
+        cuda::cudarc::driver::{DevicePtr, DevicePtrMut, sys},
     };
 
     const NUM_EXPERTS: usize = 128;
@@ -171,7 +171,7 @@ mod cuda_bench {
             let start_event = stream
                 .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
                 .map_err(|error| {
-                    candle_core::Error::Msg(format!("CUDA start event failed: {error}"))
+                    inference_tensor::Error::Msg(format!("CUDA start event failed: {error}"))
                 })?;
             let wall_start = Instant::now();
             for _ in 0..launches {
@@ -180,14 +180,16 @@ mod cuda_bench {
             let end_event = stream
                 .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
                 .map_err(|error| {
-                    candle_core::Error::Msg(format!("CUDA end event failed: {error}"))
+                    inference_tensor::Error::Msg(format!("CUDA end event failed: {error}"))
                 })?;
             end_event.synchronize().map_err(|error| {
-                candle_core::Error::Msg(format!("CUDA end event synchronization failed: {error}"))
+                inference_tensor::Error::Msg(format!(
+                    "CUDA end event synchronization failed: {error}"
+                ))
             })?;
             let wall_micros = wall_start.elapsed().as_secs_f64() * 1e6;
             let gpu_micros = start_event.elapsed_ms(&end_event).map_err(|error| {
-                candle_core::Error::Msg(format!("CUDA event timing failed: {error}"))
+                inference_tensor::Error::Msg(format!("CUDA event timing failed: {error}"))
             })? as f64
                 * 1e3;
             gpu_samples.push(gpu_micros / launches as f64);
@@ -425,7 +427,7 @@ mod cuda_bench {
                         } {
                             CutileRoutedLoraStatus::Launched => Ok(()),
                             CutileRoutedLoraStatus::Unsupported(reason) => {
-                                candle_core::bail!(
+                                inference_tensor::bail!(
                                     "cuTile no-sort routed LoRA became unsupported: {reason:?}"
                                 )
                             }
@@ -526,7 +528,7 @@ mod cuda_bench {
                         {
                             CutileRoutedLoraStatus::Launched => Ok(()),
                             CutileRoutedLoraStatus::Unsupported(reason) => {
-                                candle_core::bail!(
+                                inference_tensor::bail!(
                                     "cuTile routed LoRA became unsupported: {reason:?}"
                                 )
                             }
@@ -716,9 +718,9 @@ mod cuda_bench {
                 );
             }
             let shaped = base.reshape((case.num_tokens, TOP_K, MOE_INTERMEDIATE_SIZE * 2))?;
-            let gate_base = shaped.narrow(candle_core::D::Minus1, 0, MOE_INTERMEDIATE_SIZE)?;
+            let gate_base = shaped.narrow(inference_tensor::D::Minus1, 0, MOE_INTERMEDIATE_SIZE)?;
             let up_base = shaped.narrow(
-                candle_core::D::Minus1,
+                inference_tensor::D::Minus1,
                 MOE_INTERMEDIATE_SIZE,
                 MOE_INTERMEDIATE_SIZE,
             )?;
@@ -854,12 +856,14 @@ mod cuda_bench {
                 .split(',')
                 .map(|rank| {
                     rank.trim().parse::<usize>().map_err(|error| {
-                        candle_core::Error::Msg(format!("invalid benchmark rank {rank:?}: {error}"))
+                        inference_tensor::Error::Msg(format!(
+                            "invalid benchmark rank {rank:?}: {error}"
+                        ))
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
             if ranks.is_empty() || ranks.contains(&0) {
-                candle_core::bail!("benchmark ranks must be nonzero");
+                inference_tensor::bail!("benchmark ranks must be nonzero");
             }
             return Ok(ranks);
         }
@@ -988,7 +992,9 @@ mod cuda_bench {
                     .any(|selected| selected == case.name)
             });
             if cases.is_empty() && !(profile == "full" && case_is_selected(GENERIC_FALLBACK_CASE)) {
-                candle_core::bail!("INFERENCE_RS_LORA_BENCH_CASES selected no benchmark cases");
+                inference_tensor::bail!(
+                    "INFERENCE_RS_LORA_BENCH_CASES selected no benchmark cases"
+                );
             }
         }
         Ok(cases)
@@ -999,7 +1005,7 @@ mod cuda_bench {
         let profile =
             env::var("INFERENCE_RS_LORA_BENCH_PROFILE").unwrap_or_else(|_| "standard".to_string());
         if !matches!(profile.as_str(), "quick" | "standard" | "full") {
-            candle_core::bail!("benchmark profile must be quick, standard, or full");
+            inference_tensor::bail!("benchmark profile must be quick, standard, or full");
         }
         let ranks = benchmark_ranks(&profile)?;
         let cases = benchmark_cases(&profile)?;
@@ -1039,7 +1045,7 @@ mod cuda_bench {
 }
 
 #[cfg(feature = "cuda")]
-fn main() -> candle_core::Result<()> {
+fn main() -> inference_tensor::Result<()> {
     cuda_bench::main()
 }
 

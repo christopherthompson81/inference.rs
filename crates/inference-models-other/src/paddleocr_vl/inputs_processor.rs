@@ -3,8 +3,8 @@
 use std::{any::Any, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
 use image::DynamicImage;
+use inference_tensor::{Device, Tensor};
 use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
@@ -374,9 +374,9 @@ impl ImagePreProcessor for PaddleOcrVlImageProcessor {
         _config: &PreProcessorConfig,
         device: &Device,
         (_, _): (usize, usize),
-    ) -> candle_core::Result<PreprocessedImages> {
+    ) -> inference_tensor::Result<PreprocessedImages> {
         if images.is_empty() {
-            candle_core::bail!("PaddleOCR-VL needs at least one image.");
+            inference_tensor::bail!("PaddleOCR-VL needs at least one image.");
         }
         let mut patches = Vec::with_capacity(images.len());
         let mut grid = Vec::with_capacity(images.len() * 3);

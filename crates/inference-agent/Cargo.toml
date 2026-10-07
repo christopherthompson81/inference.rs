@@ -19,7 +19,7 @@ inference-mcp.workspace = true
 
 anyhow.workspace = true
 bm25.workspace = true
-candle-core.workspace = true
+inference-tensor.workspace = true
 either.workspace = true
 futures.workspace = true
 html2text.workspace = true

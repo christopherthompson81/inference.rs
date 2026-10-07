@@ -2,7 +2,7 @@
 
 use crate::attention::backends::cpu;
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 /// Attention mask passed to [`Sdpa::run_attention`].
 ///
@@ -209,7 +209,7 @@ fn run_flash_attn_cpu_for_dtype(
         DType::F32 => cpu::run_flash_attn_cpu::<f32>(q, k, v, mask, sdpa_params),
         DType::F16 => cpu::run_flash_attn_cpu::<half::f16>(q, k, v, mask, sdpa_params),
         DType::BF16 => cpu::run_flash_attn_cpu::<half::bf16>(q, k, v, mask, sdpa_params),
-        other => candle_core::bail!("Unsupported dtype for CPU flash attn: {other:?}"),
+        other => inference_tensor::bail!("Unsupported dtype for CPU flash attn: {other:?}"),
     }?;
     if res.dtype() != out_dtype {
         res.to_dtype(out_dtype)
@@ -275,7 +275,7 @@ impl Sdpa {
                 || !flash_params.is_some_and(|params| params.causal)
                 || !packed_attention_backend_is_available(q, sdpa_params)?)
         {
-            candle_core::bail!("packed prefill requires causal varlen attention support");
+            inference_tensor::bail!("packed prefill requires causal varlen attention support");
         }
 
         // chunks run on fattn alone; a custom mask carries them itself
@@ -287,7 +287,7 @@ impl Sdpa {
                     return out.transpose(1, 2);
                 }
             }
-            candle_core::bail!("chunked attention without a mask runs only on fattn");
+            inference_tensor::bail!("chunked attention without a mask runs only on fattn");
         }
 
         if let Some(sinks) = &sdpa_params.sinks {
@@ -298,7 +298,9 @@ impl Sdpa {
                     return out.transpose(1, 2);
                 }
                 if flash_params.is_some_and(|params| params.packed) {
-                    candle_core::bail!("no FlashAttention kernel takes this packed sinks prefill");
+                    inference_tensor::bail!(
+                        "no FlashAttention kernel takes this packed sinks prefill"
+                    );
                 }
             }
             // the unfused path needs CausalFlash and the window as an explicit mask; Metal's kernels apply them
@@ -377,7 +379,7 @@ impl Sdpa {
                 )
             {
                 if flash_params.is_some_and(|params| params.packed) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "packed prefill requires FlashAttention support for head_dim={head_dim} \
                          with softcap={}, sliding_window={}",
                         sdpa_params.softcap.is_some(),
@@ -436,7 +438,7 @@ impl Sdpa {
                 return out.transpose(1, 2);
             }
             if flash_params.is_some_and(|params| params.packed) {
-                candle_core::bail!("no FlashAttention kernel takes this packed prefill");
+                inference_tensor::bail!("no FlashAttention kernel takes this packed prefill");
             }
             let (q, k, v) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
             let causal = matches!(mask, AttentionMask::CausalFlash) || do_causal;
@@ -574,7 +576,7 @@ impl Sdpa {
             // the per-query position, skipping the upper triangle of Q*K^T
             // entirely (roughly halves matmul cost for prefill).
             let do_causal = seq_len > 1 && causal;
-            return candle_nn::ops::sdpa(
+            return inference_tensor::nn::ops::sdpa(
                 q,
                 k,
                 v,
@@ -634,7 +636,7 @@ impl Sdpa {
                                 Some(mask.broadcast_as(tgt_shape)?.flatten(0, 1)?)
                             }
                             Some(_) => {
-                                candle_core::bail!("cublaslt attn mask: rank must be 3 or 4")
+                                inference_tensor::bail!("cublaslt attn mask: rank must be 3 or 4")
                             }
                             None => None,
                         };
@@ -675,7 +677,8 @@ impl Sdpa {
                                 prefix_len,
                             )?;
                         }
-                        attention_scores = candle_nn::ops::softmax_last_dim(&attention_scores)?;
+                        attention_scores =
+                            inference_tensor::nn::ops::softmax_last_dim(&attention_scores)?;
                         if attention_scores.dtype() != scores_dtype {
                             attention_scores = attention_scores.to_dtype(scores_dtype)?;
                         }
@@ -703,7 +706,7 @@ impl Sdpa {
             }
             #[cfg(not(feature = "cuda"))]
             {
-                candle_core::bail!("`cuda` feature is not enabled")
+                inference_tensor::bail!("`cuda` feature is not enabled")
             }
         } else {
             naive_sdpa(q, &k, &v, mask, sdpa_params)
@@ -714,7 +717,7 @@ impl Sdpa {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{D, Result as CandleResult};
+    use inference_tensor::{D, Result as CandleResult};
 
     const EPS: f32 = 1e-4;
     const CAUSAL_FLASH_TOLERANCE: f32 = 1e-2;
@@ -796,7 +799,7 @@ mod tests {
             &sdpa_params,
         )?;
         let logits = q.matmul(&k.transpose(2, 3)?)?.broadcast_add(&mask)?;
-        let expected = candle_nn::ops::softmax(&logits, D::Minus1)?.matmul(&v)?;
+        let expected = inference_tensor::nn::ops::softmax(&logits, D::Minus1)?.matmul(&v)?;
 
         assert_eq!(out.shape().dims(), &[b, h, q_len, d]);
         assert_close(&out, &expected)
@@ -813,7 +816,7 @@ mod tests {
             eager_attention_mask(q.dim(2)?, k.dim(2)?, true, window, DType::F32, q.device())?
                 .unwrap();
         let logits = q.matmul(&k.transpose(2, 3)?)?.broadcast_add(&mask)?;
-        candle_nn::ops::softmax(&logits, D::Minus1)?.matmul(v)
+        inference_tensor::nn::ops::softmax(&logits, D::Minus1)?.matmul(v)
     }
 
     fn causal_flash_case(device: &Device, window: Option<usize>) -> CandleResult<()> {

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use candle_core::Device;
+use inference_tensor::Device;
 
 use crate::{
     MemoryUsage,
@@ -212,7 +212,7 @@ fn maintain_device(
     maintained: &mut MaintainedDevice,
     point: MaintenancePoint,
     transient_bytes: usize,
-) -> candle_core::Result<MaintenanceOutcome> {
+) -> inference_tensor::Result<MaintenanceOutcome> {
     let Some(mut snapshot) = MemoryUsage.query_cuda_allocator(&maintained.device)? else {
         return Ok(maintenance_failure_outcome());
     };
@@ -389,7 +389,7 @@ impl PressureThresholds {
     }
 }
 
-fn synchronize_context(device: &Device) -> candle_core::Result<()> {
+fn synchronize_context(device: &Device) -> inference_tensor::Result<()> {
     MemoryUsage.synchronize_cuda_context(device)?;
     Ok(())
 }

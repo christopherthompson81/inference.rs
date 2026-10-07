@@ -167,7 +167,7 @@ pub enum SchedulerOutput<'a> {
 }
 
 type PrefixAdmissionCommit =
-    Box<dyn FnOnce(&mut Sequence) -> candle_core::Result<()> + Send + 'static>;
+    Box<dyn FnOnce(&mut Sequence) -> inference_tensor::Result<()> + Send + 'static>;
 
 #[must_use = "prefix validation must be committed after KV admission"]
 pub struct PagedPrefixCacheValidation {
@@ -185,7 +185,7 @@ impl PagedPrefixCacheValidation {
 
     pub fn staged<F>(valid_tokens: usize, commit: F) -> Self
     where
-        F: FnOnce(&mut Sequence) -> candle_core::Result<()> + Send + 'static,
+        F: FnOnce(&mut Sequence) -> inference_tensor::Result<()> + Send + 'static,
     {
         Self {
             valid_tokens,
@@ -197,7 +197,7 @@ impl PagedPrefixCacheValidation {
         self.valid_tokens
     }
 
-    pub fn commit(mut self, seq: &mut Sequence) -> candle_core::Result<()> {
+    pub fn commit(mut self, seq: &mut Sequence) -> inference_tensor::Result<()> {
         if let Some(commit) = self.commit.take() {
             commit(seq)?;
         }
@@ -212,13 +212,13 @@ pub trait PagedPrefixCacheValidator {
         block_hashes: &[BlockHash],
         cached_tokens: usize,
         block_size: usize,
-    ) -> candle_core::Result<PagedPrefixCacheValidation>;
+    ) -> inference_tensor::Result<PagedPrefixCacheValidation>;
 
     fn release_recurrent_state(
         &mut self,
         _sequence_id: usize,
         _slot_idx: usize,
-    ) -> candle_core::Result<bool> {
+    ) -> inference_tensor::Result<bool> {
         Ok(false)
     }
 }

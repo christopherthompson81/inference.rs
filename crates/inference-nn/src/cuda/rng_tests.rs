@@ -1,4 +1,4 @@
-use candle_core::{Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 
 const SEED: u64 = 7;
 

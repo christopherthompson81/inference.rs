@@ -1,4 +1,4 @@
-use candle_core::{DType, Result, Storage, Tensor, backend::BackendStorage};
+use inference_tensor::{DType, Result, Storage, Tensor, backend::BackendStorage};
 
 use crate::metal::kernels::{self, PagedAttentionDType};
 
@@ -8,33 +8,35 @@ struct KvScaleUpdate {
     v_scales: Tensor,
 }
 
-impl candle_core::InplaceOp2 for KvScaleUpdate {
+impl inference_tensor::InplaceOp2 for KvScaleUpdate {
     fn name(&self) -> &'static str {
         "kvscale-update"
     }
 
     fn cpu_fwd(
         &self,
-        _: &mut candle_core::CpuStorage,
-        _: &candle_core::Layout,
-        _: &candle_core::CpuStorage,
-        _: &candle_core::Layout,
+        _: &mut inference_tensor::CpuStorage,
+        _: &inference_tensor::Layout,
+        _: &inference_tensor::CpuStorage,
+        _: &inference_tensor::Layout,
     ) -> Result<()> {
-        candle_core::bail!("kvscale-update is not implemented on CPU!")
+        inference_tensor::bail!("kvscale-update is not implemented on CPU!")
     }
 
     fn metal_fwd(
         &self,
-        k: &mut candle_core::MetalStorage,
-        k_layout: &candle_core::Layout,
-        v: &candle_core::MetalStorage,
-        _: &candle_core::Layout,
+        k: &mut inference_tensor::MetalStorage,
+        k_layout: &inference_tensor::Layout,
+        v: &inference_tensor::MetalStorage,
+        _: &inference_tensor::Layout,
     ) -> Result<()> {
         let ty = match k.dtype() {
             DType::F16 => PagedAttentionDType::F16,
             DType::BF16 => PagedAttentionDType::BF16,
             DType::F32 => PagedAttentionDType::F32,
-            dtype => candle_core::bail!("dtype {dtype:?} is not supported for kv_scale_update"),
+            dtype => {
+                inference_tensor::bail!("dtype {dtype:?} is not supported for kv_scale_update")
+            }
         };
 
         let dev = k.device();
@@ -43,13 +45,13 @@ impl candle_core::InplaceOp2 for KvScaleUpdate {
         let (k_scales_storage, _) = self.k_scales.storage_and_layout();
         let k_scales = match &*k_scales_storage {
             Storage::Metal(m) => m,
-            _ => candle_core::bail!("k_scales must be a metal tensor"),
+            _ => inference_tensor::bail!("k_scales must be a metal tensor"),
         };
 
         let (v_scales_storage, _) = self.v_scales.storage_and_layout();
         let v_scales = match &*v_scales_storage {
             Storage::Metal(m) => m,
-            _ => candle_core::bail!("v_scales must be a metal tensor"),
+            _ => inference_tensor::bail!("v_scales must be a metal tensor"),
         };
 
         let encoder = dev.command_encoder()?;
@@ -68,7 +70,7 @@ impl candle_core::InplaceOp2 for KvScaleUpdate {
             v_scales.buffer(),
             elem_count as i64,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         Ok(())
     }

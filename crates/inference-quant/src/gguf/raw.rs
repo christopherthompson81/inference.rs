@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Shape, Tensor};
-use candle_nn::Linear;
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Device, Result, Shape, Tensor};
 
 use super::kernel::GgufType;
 use crate::{IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde};
@@ -29,9 +29,9 @@ enum RawStorage {
     Cpu(Arc<Vec<u8>>),
     #[cfg(feature = "cuda")]
     Cuda {
-        blocks: Arc<candle_core::cuda_backend::cudarc::driver::CudaSlice<u8>>,
+        blocks: Arc<inference_tensor::cuda_backend::cudarc::driver::CudaSlice<u8>>,
         len: usize,
-        device: candle_core::CudaDevice,
+        device: inference_tensor::CudaDevice,
     },
 }
 
@@ -46,17 +46,17 @@ pub struct RawGgufTensor {
 impl RawGgufTensor {
     pub fn new(ty: GgufType, dims: &[usize], bytes: Vec<u8>, device: &Device) -> Result<Self> {
         let &[rows, cols] = dims else {
-            candle_core::bail!("{ty:?} weights must be rank 2, got {dims:?}");
+            inference_tensor::bail!("{ty:?} weights must be rank 2, got {dims:?}");
         };
         let Some(row_bytes) = ty.row_bytes(cols) else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{ty:?} rows of {cols} elements are not whole {}-element blocks",
                 ty.block_size()
             );
         };
         let expected = rows * row_bytes;
         if bytes.len() != expected {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{ty:?} [{rows}, {cols}] takes {expected} bytes, got {}",
                 bytes.len()
             );
@@ -115,7 +115,9 @@ impl RawGgufTensor {
                     device: device.clone(),
                 }
             }
-            other => candle_core::bail!("{:?} weights are not supported on {other:?}", self.ty),
+            other => {
+                inference_tensor::bail!("{:?} weights are not supported on {other:?}", self.ty)
+            }
         };
         Ok(Self {
             ty: self.ty,
@@ -138,7 +140,7 @@ impl RawGgufTensor {
             RawStorage::Cpu(bytes) => {
                 let ids = flat.to_vec1::<u32>()?;
                 if let Some(id) = ids.iter().find(|&&id| id as usize >= rows) {
-                    candle_core::bail!("embedding id {id} is out of range for {rows} rows");
+                    inference_tensor::bail!("embedding id {id} is out of range for {rows} rows");
                 }
                 let rows = ids
                     .into_iter()
@@ -163,14 +165,14 @@ impl RawGgufTensor {
     // The rows selected by `ids`, copied on the GPU into a weight of their own
     #[cfg(feature = "cuda")]
     fn gather_cuda(&self, ids: &Tensor, row_bytes: usize) -> Result<Self> {
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
         let RawStorage::Cuda { blocks, device, .. } = &self.storage else {
-            candle_core::bail!("{:?} gather needs the weight on CUDA", self.ty);
+            inference_tensor::bail!("{:?} gather needs the weight on CUDA", self.ty);
         };
         let ids = ids.to_device(&Device::Cuda(device.clone()))?.contiguous()?;
         let (ids_storage, ids_layout) = ids.storage_and_layout();
-        let candle_core::Storage::Cuda(ids_cuda) = &*ids_storage else {
-            candle_core::bail!("embedding ids must live on CUDA");
+        let inference_tensor::Storage::Cuda(ids_cuda) = &*ids_storage else {
+            inference_tensor::bail!("embedding ids must live on CUDA");
         };
         let n = ids.elem_count();
         let len = n * row_bytes;
@@ -230,14 +232,14 @@ impl super::kernel::KernelWeight for RawGgufTensor {
 
     fn kernel_ptr<'a>(
         &'a self,
-        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+        stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
     ) -> Result<(
         *const u8,
-        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+        inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
     )> {
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
         let RawStorage::Cuda { blocks, .. } = &self.storage else {
-            candle_core::bail!("{:?} kernels need the weight on CUDA", self.ty);
+            inference_tensor::bail!("{:?} kernels need the weight on CUDA", self.ty);
         };
         let (ptr, guard) = blocks.device_ptr(stream);
         Ok((ptr as *const u8, guard))
@@ -248,10 +250,10 @@ impl super::kernel::KernelWeight for RawGgufTensor {
 pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f32>> {
     if ty.is_trellis() || ty.is_iqk() {
         let row_bytes = ty.row_bytes(cols).ok_or_else(|| {
-            candle_core::Error::Msg(format!("{ty:?} rows cannot hold {cols} elements"))
+            inference_tensor::Error::Msg(format!("{ty:?} rows cannot hold {cols} elements"))
         })?;
         if !bytes.len().is_multiple_of(row_bytes) {
-            candle_core::bail!("{ty:?} data of {} bytes is not whole rows", bytes.len());
+            inference_tensor::bail!("{ty:?} data of {} bytes is not whole rows", bytes.len());
         }
         let mut out = vec![0f32; bytes.len() / row_bytes * cols];
         for (row, values) in bytes
@@ -268,7 +270,7 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
     }
     let (block, size) = (ty.block_size(), ty.type_size());
     if !bytes.len().is_multiple_of(size) {
-        candle_core::bail!("{ty:?} data of {} bytes is not whole blocks", bytes.len());
+        inference_tensor::bail!("{ty:?} data of {} bytes is not whole blocks", bytes.len());
     }
     let mut out = vec![0f32; bytes.len() / size * block];
     for (block_bytes, values) in bytes.chunks_exact(size).zip(out.chunks_exact_mut(block)) {
@@ -282,7 +284,7 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
             GgufType::Iq3S => super::iq_dequant::iq3_s(block_bytes, values),
             GgufType::Iq1S => super::iq_dequant::iq1_s(block_bytes, values),
             GgufType::Iq1M => super::iq_dequant::iq1_m(block_bytes, values),
-            other => candle_core::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
+            other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
         }
     }
     Ok(out)
@@ -368,7 +370,7 @@ impl GgufRawMatMul {
                     DType::F16
                 };
                 let w = super::fast_mmvq::dequantize(&self.w, compute)?;
-                candle_nn::Module::forward(&Linear::new(w, None), &a.to_dtype(compute)?)?
+                inference_tensor::nn::Module::forward(&Linear::new(w, None), &a.to_dtype(compute)?)?
                     .to_dtype(a.dtype())?
             }
         };
@@ -378,7 +380,7 @@ impl GgufRawMatMul {
 
 impl QuantMethod for GgufRawMatMul {
     fn new(_method: QuantMethodConfig) -> Result<Self> {
-        candle_core::bail!("raw GGUF layers are built by the GGUF weight source")
+        inference_tensor::bail!("raw GGUF layers are built by the GGUF weight source")
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
@@ -395,7 +397,7 @@ impl QuantMethod for GgufRawMatMul {
             return self.add_bias(out);
         }
         let w = self.w.dequantize(a.device())?.to_dtype(a.dtype())?;
-        let out = candle_nn::Module::forward(&Linear::new(w, None), a)?;
+        let out = inference_tensor::nn::Module::forward(&Linear::new(w, None), a)?;
         self.add_bias(out)
     }
 
@@ -676,9 +678,10 @@ mod tests {
     #[test]
     fn dequantization_matches_the_references() -> Result<()> {
         let mut goldens: Vec<Golden> =
-            serde_json::from_str(GOLDENS).map_err(candle_core::Error::wrap)?;
+            serde_json::from_str(GOLDENS).map_err(inference_tensor::Error::wrap)?;
         goldens.extend(
-            serde_json::from_str::<Vec<Golden>>(IK_GOLDENS).map_err(candle_core::Error::wrap)?,
+            serde_json::from_str::<Vec<Golden>>(IK_GOLDENS)
+                .map_err(inference_tensor::Error::wrap)?,
         );
         assert!(!goldens.is_empty());
         for golden in goldens {

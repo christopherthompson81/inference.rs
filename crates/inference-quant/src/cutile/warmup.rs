@@ -1,6 +1,6 @@
 //! cuTile JIT warmup driver for registered inference kernels.
 
-use candle_core::{CudaDevice, Device, DeviceLocation, Result};
+use inference_tensor::{CudaDevice, Device, DeviceLocation, Result};
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 

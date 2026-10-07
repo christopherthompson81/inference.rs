@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use candle_core::{Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{Result, Tensor};
 
 /// Temporal adapter that performs 4x downsampling via reshape + MLP.
 ///

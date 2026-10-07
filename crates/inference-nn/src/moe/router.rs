@@ -1,5 +1,5 @@
-use candle_core::{D, DType, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{D, DType, Result, Tensor};
 
 use crate::ops::{
     MoeRouterScoreFunction, MoeRouterSelectedWeight, MoeRouterTopKConfig, TopKLastDimOp,
@@ -122,15 +122,15 @@ impl GroupedRouter {
         }
         let n = logits.dim(0)?;
         let scores = match cfg.scoring {
-            RouterScoring::Softmax => candle_nn::ops::softmax_last_dim(logits)?,
-            RouterScoring::Sigmoid => candle_nn::ops::sigmoid(logits)?,
+            RouterScoring::Softmax => inference_tensor::nn::ops::softmax_last_dim(logits)?,
+            RouterScoring::Sigmoid => inference_tensor::nn::ops::sigmoid(logits)?,
         };
 
         let (mut topk_weight, topk_idx) = match cfg.method {
             RouterMethod::Greedy => unreachable!(),
             RouterMethod::NoAuxTc => {
                 let Some(e_score_correction_bias) = &self.e_score_correction_bias else {
-                    candle_core::bail!("Expected e_score_correction_bias")
+                    inference_tensor::bail!("Expected e_score_correction_bias")
                 };
                 let scores_for_choice = scores
                     .reshape((n, ()))?

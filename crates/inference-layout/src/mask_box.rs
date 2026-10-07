@@ -1,4 +1,4 @@
-use candle_core::{CpuStorage, CustomOp1, D, DType, Layout, Result, Shape, Tensor};
+use inference_tensor::{CpuStorage, CustomOp1, D, DType, Layout, Result, Shape, Tensor};
 
 /// Min-reduction fill for pixels outside the mask in the tensor-op fallback.
 const MASK_MIN_FILL: f64 = 1e9;
@@ -77,7 +77,7 @@ impl CustomOp1 for MaskToBox {
     fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
         let (b, q, n) = l.shape().dims3()?;
         let CpuStorage::F32(m) = s else {
-            candle_core::bail!("mask_to_box CPU path is f32 only");
+            inference_tensor::bail!("mask_to_box CPU path is f32 only");
         };
         let m = &m[l.start_offset()..];
         let mut out = vec![0f32; b * q * 4];
@@ -98,17 +98,17 @@ impl CustomOp1 for MaskToBox {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        s: &candle_core::CudaStorage,
+        s: &inference_tensor::CudaStorage,
         l: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
-        use candle_core::cuda_backend::{
+    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
+        use inference_tensor::cuda_backend::{
             CudaStorageSlice, WrapErr,
             cudarc::driver::{LaunchConfig, PushKernelArg},
         };
 
         let (b, q, n) = l.shape().dims3()?;
         if n != self.h * self.w {
-            candle_core::bail!("mask_to_box: {n} pixels for a {}x{} grid", self.h, self.w);
+            inference_tensor::bail!("mask_to_box: {n} pixels for a {}x{} grid", self.h, self.w);
         }
         let dev = &s.device;
         let m = s.as_cuda_slice::<f32>()?.slice(l.start_offset()..);
@@ -131,7 +131,7 @@ impl CustomOp1 for MaskToBox {
         };
         unsafe { builder.launch(cfg) }.w()?;
         Ok((
-            candle_core::CudaStorage {
+            inference_tensor::CudaStorage {
                 slice: CudaStorageSlice::F32(out),
                 device: dev.clone(),
             },
@@ -143,7 +143,7 @@ impl CustomOp1 for MaskToBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     #[test]
     fn boxes_match_reference_formula() -> Result<()> {

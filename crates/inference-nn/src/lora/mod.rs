@@ -2,9 +2,9 @@
 
 use std::{collections::HashSet, fmt::Debug, sync::Arc};
 
-use candle_core::{D, IndexOp, Result, Tensor, quantized::QTensor};
-use candle_nn::{Linear, Module};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{D, IndexOp, Result, Tensor, quantized::QTensor};
 use loralinear::LoraLinear;
 pub use qloralinear::QLoraLinear;
 use serde::Deserialize;
@@ -167,7 +167,7 @@ pub fn linear(
             .as_ref()
             .is_some_and(|target_modules| &cfg.target_modules != *target_modules)
         {
-            candle_core::bail!("Expected all target modules to be the same.");
+            inference_tensor::bail!("Expected all target modules to be the same.");
         }
     }
 
@@ -219,7 +219,7 @@ pub fn linear_no_bias(
             .as_ref()
             .is_some_and(|target_modules| &cfg.target_modules != *target_modules)
         {
-            candle_core::bail!("Expected all target modules to be the same.");
+            inference_tensor::bail!("Expected all target modules to be the same.");
         }
     }
 

@@ -19,13 +19,13 @@ use crate::utils::{
 };
 use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, TryIntoDType};
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use image::{DynamicImage, RgbImage};
 use inference_models_diffusion::gguf;
 use inference_quant::IsqType;
 use inference_quant::log::once_log_info;
+use inference_tensor::{DType, Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::sync::Arc;
@@ -171,9 +171,9 @@ impl Loader for DiffusionLoader {
         let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
             let payload: WorkerTransferData = serde_json::from_str(&payload)?;
             let WorkerTransferData::Init { worker_rank, .. } = payload;
-            vec![candle_core::Device::new_cuda(worker_rank + 1)?]
+            vec![inference_tensor::Device::new_cuda(worker_rank + 1)?]
         } else if use_nccl || use_ring() {
-            vec![candle_core::Device::new_cuda(0)?]
+            vec![inference_tensor::Device::new_cuda(0)?]
         } else {
             device_map::get_all_similar_devices(device)?
         };
@@ -210,7 +210,7 @@ impl Loader for DiffusionLoader {
                         )
                         .map(|vb| (vb, None))
                     })
-                    .collect::<candle_core::Result<Vec<_>>>()?
+                    .collect::<inference_tensor::Result<Vec<_>>>()?
                     .into_iter()
                     .unzip();
 
@@ -289,7 +289,7 @@ impl IsqPipelineMixin for DiffusionPipeline {
 }
 
 impl CacheManagerMixin for DiffusionPipeline {
-    fn clone_in_cache(&self, _seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, _seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn clone_out_cache(&self, _seqs: &mut [&mut Sequence]) {}
@@ -299,7 +299,7 @@ impl CacheManagerMixin for DiffusionPipeline {
         _reset_non_granular: bool,
         _modify_draft_cache: bool,
         _load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
@@ -331,7 +331,7 @@ impl Pipeline for DiffusionPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> candle_core::Result<ForwardInputsResult> {
+    ) -> inference_tensor::Result<ForwardInputsResult> {
         assert!(!return_raw_logits);
 
         let ModelInputs { prompts, params } = *inputs.downcast().expect("Downcast failed.");
@@ -341,12 +341,12 @@ impl Pipeline for DiffusionPipeline {
         for b_img in img.chunk(img.dim(0)?, 0)? {
             let flattened = b_img.squeeze(0)?.permute((1, 2, 0))?.flatten_all()?;
             if c != 3 {
-                candle_core::bail!("Expected 3 channels in image output");
+                inference_tensor::bail!("Expected 3 channels in image output");
             }
             #[allow(clippy::cast_possible_truncation)]
             images.push(DynamicImage::ImageRgb8(
                 RgbImage::from_raw(w as u32, h as u32, flattened.to_vec1::<u8>()?).ok_or(
-                    candle_core::Error::Msg("RgbImage has invalid capacity.".to_string()),
+                    inference_tensor::Error::Msg("RgbImage has invalid capacity.".to_string()),
                 )?,
             ));
         }
@@ -359,8 +359,8 @@ impl Pipeline for DiffusionPipeline {
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _srng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
-        Box::pin(std::future::ready(Err(candle_core::Error::Msg(
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
+        Box::pin(std::future::ready(Err(inference_tensor::Error::Msg(
             "`sample_causal_gen` is incompatible with `DiffusionPipeline`".to_string(),
         )
         .bt())))

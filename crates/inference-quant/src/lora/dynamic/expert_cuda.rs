@@ -5,7 +5,8 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use candle_core::{
+use half::{bf16, f16};
+use inference_tensor::{
     CpuStorage, CudaDevice, CudaStorage, DType, DeviceLocation, InplaceOp1, Layout, Result,
     Storage, Tensor, WithDType,
     cuda::{
@@ -13,7 +14,6 @@ use candle_core::{
         cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr},
     },
 };
-use half::{bf16, f16};
 
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -258,7 +258,7 @@ impl fmt::Debug for ExpertCudaCache {
 
 fn tensor_ptr(
     tensor: &Tensor,
-    stream: &candle_core::cuda::cudarc::driver::CudaStream,
+    stream: &inference_tensor::cuda::cudarc::driver::CudaStream,
 ) -> Result<Option<u64>> {
     if !tensor.is_contiguous() {
         return Ok(None);
@@ -281,7 +281,7 @@ fn tensor_ptr(
 fn descriptor(
     weights: &LoraExpertProjectionWeights,
     dtype: DType,
-    stream: &candle_core::cuda::cudarc::driver::CudaStream,
+    stream: &inference_tensor::cuda::cudarc::driver::CudaStream,
 ) -> Result<Option<RoutedLoraAdapterWeight>> {
     if !supported_cuda_rank(weights.rank())
         || weights.a().dtype() != dtype
@@ -302,7 +302,7 @@ fn descriptor(
     let Some(scales) = tensor_ptr(weights.scales(), stream)? else {
         return Ok(None);
     };
-    let rank = u32::try_from(weights.rank()).map_err(candle_core::Error::wrap)?;
+    let rank = u32::try_from(weights.rank()).map_err(inference_tensor::Error::wrap)?;
     Ok(Some(RoutedLoraAdapterWeight {
         a,
         b,
@@ -318,7 +318,7 @@ fn projection_descriptors(
     adapters: &PreparedExpertAdapters,
     projection: LoraExpertProjection,
     dtype: DType,
-    stream: &candle_core::cuda::cudarc::driver::CudaStream,
+    stream: &inference_tensor::cuda::cudarc::driver::CudaStream,
 ) -> Result<Option<Vec<RoutedLoraAdapterWeight>>> {
     let mut descriptors = Vec::with_capacity(adapters.slots.len());
     for (_, adapter) in &adapters.slots {
@@ -795,11 +795,11 @@ fn launch_projection<T: RoutedLoraElement>(
     )?;
     let (input_storage, input_layout) = run.input.storage_and_layout();
     let Storage::Cuda(input_storage) = &*input_storage else {
-        candle_core::bail!("routed LoRA input storage is not CUDA");
+        inference_tensor::bail!("routed LoRA input storage is not CUDA");
     };
     let input_slice = input_storage.as_cuda_slice::<T>()?;
     if !output_layout.is_contiguous() {
-        candle_core::bail!("routed LoRA output storage is not contiguous");
+        inference_tensor::bail!("routed LoRA output storage is not contiguous");
     }
     let output = output_storage.as_cuda_slice_mut::<T>()?;
 
@@ -817,7 +817,7 @@ fn launch_projection<T: RoutedLoraElement>(
     };
     let (topk_storage, topk_layout) = context.configured.topk_ids.storage_and_layout();
     let Storage::Cuda(topk_storage) = &*topk_storage else {
-        candle_core::bail!("normalized routed LoRA topk IDs are not CUDA");
+        inference_tensor::bail!("normalized routed LoRA topk IDs are not CUDA");
     };
     let topk_slice = topk_storage.as_cuda_slice::<u32>()?;
     let (topk_ptr, _topk_guard) =
@@ -826,7 +826,7 @@ fn launch_projection<T: RoutedLoraElement>(
     let (routed_weights_ptr, _routed_weights_guard) = match &routed_storage {
         Some((storage, layout)) => {
             let Storage::Cuda(storage) = &**storage else {
-                candle_core::bail!("validated routed LoRA weights are not CUDA");
+                inference_tensor::bail!("validated routed LoRA weights are not CUDA");
             };
             let (pointer, guard) = slice_ptr_on_stream(
                 storage.as_cuda_slice::<f32>()?,
@@ -843,7 +843,7 @@ fn launch_projection<T: RoutedLoraElement>(
         .iter()
         .map(Weak::upgrade)
         .collect::<Option<Vec<_>>>()
-        .ok_or_else(|| candle_core::Error::msg("routed LoRA adapter expired before launch"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("routed LoRA adapter expired before launch"))?;
     let mut weight_storage = Vec::new();
     for adapter in &adapters {
         for slice in run.weight_slice_offset..run.weight_slice_offset + run.num_slices {
@@ -851,7 +851,7 @@ fn launch_projection<T: RoutedLoraElement>(
                 0 => LoraExpertProjection::Gate,
                 1 => LoraExpertProjection::Up,
                 2 => LoraExpertProjection::Down,
-                _ => candle_core::bail!("invalid routed LoRA descriptor slice"),
+                _ => inference_tensor::bail!("invalid routed LoRA descriptor slice"),
             };
             if let Some(weights) = adapter.projection(projection) {
                 weight_storage.push((weights.a().storage_and_layout(), weights.a().dtype()));
@@ -866,7 +866,7 @@ fn launch_projection<T: RoutedLoraElement>(
     let mut _weight_guards = Vec::with_capacity(weight_storage.len());
     for ((storage, layout), dtype) in &weight_storage {
         let Storage::Cuda(storage) = &**storage else {
-            candle_core::bail!("routed LoRA adapter weights are not CUDA");
+            inference_tensor::bail!("routed LoRA adapter weights are not CUDA");
         };
         let (_, guard) = match dtype {
             DType::F32 => slice_ptr_on_stream(
@@ -884,7 +884,7 @@ fn launch_projection<T: RoutedLoraElement>(
                 layout.start_offset(),
                 &stream,
             ),
-            dtype => candle_core::bail!("invalid routed LoRA weight dtype {dtype:?}"),
+            dtype => inference_tensor::bail!("invalid routed LoRA weight dtype {dtype:?}"),
         };
         _weight_guards.push(guard);
     }
@@ -1025,7 +1025,7 @@ impl InplaceOp1 for RoutedLoraInplace<'_> {
     }
 
     fn cpu_fwd(&self, _storage: &mut CpuStorage, _layout: &Layout) -> Result<()> {
-        candle_core::bail!("routed LoRA in-place accumulation requires CUDA storage")
+        inference_tensor::bail!("routed LoRA in-place accumulation requires CUDA storage")
     }
 
     fn cuda_fwd(&self, storage: &mut CudaStorage, layout: &Layout) -> Result<()> {
@@ -1034,7 +1034,7 @@ impl InplaceOp1 for RoutedLoraInplace<'_> {
             DType::F32 => launch_projection::<f32>(&mut context, self.run, storage, layout),
             DType::F16 => launch_projection::<f16>(&mut context, self.run, storage, layout),
             DType::BF16 => launch_projection::<bf16>(&mut context, self.run, storage, layout),
-            dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
+            dtype => inference_tensor::bail!("routed LoRA CUDA does not support {dtype:?}"),
         }
     }
 }
@@ -1154,7 +1154,7 @@ pub(super) fn try_add_delta(
                     base_output,
                     routed_weights: *routed_weights,
                     input_mode: routed_input_mode(*input_mode),
-                    input_features: input.dim(candle_core::D::Minus1)?,
+                    input_features: input.dim(inference_tensor::D::Minus1)?,
                     output_features,
                     output_row_stride: output_features,
                     output_slice_stride: 0,
@@ -1180,7 +1180,7 @@ pub(super) fn try_add_delta(
                 base_output,
                 routed_weights: *routed_weights,
                 input_mode: routed_input_mode(*input_mode),
-                input_features: input.dim(candle_core::D::Minus1)?,
+                input_features: input.dim(inference_tensor::D::Minus1)?,
                 output_features,
                 output_row_stride: output_features,
                 output_slice_stride: 0,
@@ -1207,14 +1207,14 @@ fn gate_up_for_kernel(
         LoraGateUpOrder::Interleaved => {
             let gate_up = gate_up.reshape((num_tokens, top_k, intermediate, 2))?;
             let gate = gate_up
-                .narrow(candle_core::D::Minus1, 0, 1)?
-                .squeeze(candle_core::D::Minus1)?
+                .narrow(inference_tensor::D::Minus1, 0, 1)?
+                .squeeze(inference_tensor::D::Minus1)?
                 .contiguous()?;
             let up = gate_up
-                .narrow(candle_core::D::Minus1, 1, 1)?
-                .squeeze(candle_core::D::Minus1)?
+                .narrow(inference_tensor::D::Minus1, 1, 1)?
+                .squeeze(inference_tensor::D::Minus1)?
                 .contiguous()?;
-            Tensor::cat(&[&gate, &up], candle_core::D::Minus1)
+            Tensor::cat(&[&gate, &up], inference_tensor::D::Minus1)
         }
     }
 }
@@ -1229,10 +1229,10 @@ fn split_kernel_gate_up(
     let gate_up = gate_up.reshape((num_tokens, top_k, intermediate * 2))?;
     Ok((
         gate_up
-            .narrow(candle_core::D::Minus1, 0, intermediate)?
+            .narrow(inference_tensor::D::Minus1, 0, intermediate)?
             .contiguous()?,
         gate_up
-            .narrow(candle_core::D::Minus1, intermediate, intermediate)?
+            .narrow(inference_tensor::D::Minus1, intermediate, intermediate)?
             .contiguous()?,
     ))
 }

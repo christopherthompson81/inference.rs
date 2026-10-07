@@ -2,8 +2,8 @@
 
 use std::{any::Any, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView, Rgba, RgbaImage, imageops};
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -67,9 +67,9 @@ type UnifiedMediaPreprocessOutput = (Tensor, Tensor, Vec<(u32, u32)>);
 fn unified_patch_positions(ph: usize, pw: usize, capacity: usize) -> Result<Vec<i64>> {
     let num_patches = ph
         .checked_mul(pw)
-        .ok_or_else(|| candle_core::Error::msg("Gemma4 unified patch count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("Gemma4 unified patch count overflow"))?;
     if num_patches > capacity {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma4 unified media produced {num_patches} patches, exceeding max {capacity}."
         );
     }
@@ -113,7 +113,7 @@ impl Gemma4ImageProcessor {
     /// case handling for extreme aspect ratios.
     fn compute_resize_dims(&self, orig_h: usize, orig_w: usize) -> Result<(usize, usize)> {
         if orig_h == 0 || orig_w == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma4 image resize: input dimensions must be non-zero, got {orig_h}x{orig_w}"
             );
         }
@@ -132,7 +132,7 @@ impl Gemma4ImageProcessor {
         let mut new_w = (ideal_w / grid_unit as f64).floor() as usize * grid_unit;
 
         if new_h == 0 && new_w == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma4 image resize: both dimensions round to 0 for input {orig_h}x{orig_w}"
             );
         }
@@ -148,7 +148,7 @@ impl Gemma4ImageProcessor {
         }
 
         if new_h * new_w > target_px {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma4 image resize: {new_h}x{new_w} = {} pixels exceeds patch budget of {target_px} \
                  for input {orig_h}x{orig_w}",
                 new_h * new_w
@@ -249,7 +249,7 @@ impl Gemma4ImageProcessor {
         target_sizes: Option<&[(usize, usize)]>,
     ) -> Result<UnifiedMediaPreprocessOutput> {
         if target_sizes.is_some_and(|sizes| sizes.len() != images.len()) {
-            candle_core::bail!("Gemma4 unified media size count does not match input count");
+            inference_tensor::bail!("Gemma4 unified media size count does not match input count");
         }
         let do_rescale = config.do_rescale.unwrap_or(true);
         let rescale_factor = config.rescale_factor.unwrap_or(1.0 / 255.0);
@@ -378,7 +378,7 @@ impl Gemma4ImageProcessor {
     /// Compute resize dimensions for a video frame (uses smaller patch budget).
     fn compute_video_resize_dims(&self, orig_h: usize, orig_w: usize) -> Result<(usize, usize)> {
         if orig_h == 0 || orig_w == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma4 video resize: input dimensions must be non-zero, got {orig_h}x{orig_w}"
             );
         }
@@ -397,7 +397,7 @@ impl Gemma4ImageProcessor {
         let mut new_w = (ideal_w / grid_unit as f64).floor() as usize * grid_unit;
 
         if new_h == 0 && new_w == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma4 video resize: both dimensions round to 0 for input {orig_h}x{orig_w}"
             );
         }
@@ -413,7 +413,7 @@ impl Gemma4ImageProcessor {
         }
 
         if new_h * new_w > target_px {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma4 video resize: {new_h}x{new_w} = {} pixels exceeds patch budget of {target_px} \
                  for input {orig_h}x{orig_w}",
                 new_h * new_w
@@ -454,7 +454,7 @@ fn cached_tokens_for_ranges(prefix_len: usize, ranges: &[(usize, usize)]) -> Vec
 
 fn cat_padded_audio(mels: &[Tensor], masks: &[Tensor]) -> Result<(Tensor, Tensor)> {
     if mels.len() != masks.len() || mels.is_empty() {
-        candle_core::bail!("Gemma 4 audio tensor and mask counts must match");
+        inference_tensor::bail!("Gemma 4 audio tensor and mask counts must match");
     }
     let max_frames = mels
         .iter()
@@ -469,7 +469,7 @@ fn cat_padded_audio(mels: &[Tensor], masks: &[Tensor]) -> Result<(Tensor, Tensor
         let (batch, frames, _) = mel.dims3()?;
         let (mask_batch, mask_frames) = mask.dims2()?;
         if batch != 1 || mask_batch != 1 || frames != mask_frames {
-            candle_core::bail!("Gemma 4 audio tensor and mask shapes are inconsistent");
+            inference_tensor::bail!("Gemma 4 audio tensor and mask shapes are inconsistent");
         }
         let padding = max_frames - frames;
         padded_mels.push(mel.pad_with_zeros(1, 0, padding)?);
@@ -488,7 +488,7 @@ fn cat_padded_audio(mels: &[Tensor], masks: &[Tensor]) -> Result<(Tensor, Tensor
 
 fn cat_padded_spatial(tensors: &[Tensor]) -> Result<Tensor> {
     if tensors.is_empty() {
-        candle_core::bail!("Gemma 4 spatial tensor batch cannot be empty");
+        inference_tensor::bail!("Gemma 4 spatial tensor batch cannot be empty");
     }
     let shapes = tensors
         .iter()
@@ -499,7 +499,7 @@ fn cat_padded_spatial(tensors: &[Tensor]) -> Result<Tensor> {
     let mut padded = Vec::with_capacity(tensors.len());
     for (tensor, &(batch, _, height, width)) in tensors.iter().zip(&shapes) {
         if batch != 1 {
-            candle_core::bail!("Gemma 4 spatial media items must have batch size 1");
+            inference_tensor::bail!("Gemma 4 spatial media items must have batch size 1");
         }
         padded.push(
             tensor
@@ -516,7 +516,7 @@ fn uncached_video_frame_mask(
     frame_count: usize,
 ) -> Result<Vec<bool>> {
     if ranges.len() != frame_count || cached_tokens.len() != frame_count {
-        candle_core::bail!("Gemma 4 video frame metadata length mismatch");
+        inference_tensor::bail!("Gemma 4 video frame metadata length mismatch");
     }
     Ok(ranges
         .iter()
@@ -650,14 +650,13 @@ fn gemma4_layout_items_from_features(
         .enumerate()
         .map(|(item_index, feature)| {
             if feature.hashes.len() != 1 || feature.item_range.len() != 1 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Gemma 4 packed prefill requires one encoder item per placeholder span"
                 );
             }
-            let placeholder_end = feature
-                .offset
-                .checked_add(feature.length)
-                .ok_or_else(|| candle_core::Error::msg("Gemma 4 placeholder range overflow"))?;
+            let placeholder_end = feature.offset.checked_add(feature.length).ok_or_else(|| {
+                inference_tensor::Error::msg("Gemma 4 placeholder range overflow")
+            })?;
             let placeholder = feature.offset..placeholder_end;
             MultimodalItemLayout::new(
                 MultimodalEncoderKey {
@@ -682,14 +681,14 @@ fn gemma4_packed_layout(
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("Gemma 4 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Gemma 4 packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
         .zip(query_lens)
         .map(|(seq, &query_len)| {
             if query_len != seq.get_toks().len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Gemma 4 packed multimodal prefill requires the complete uncached prompt"
                 );
             }
@@ -1822,8 +1821,8 @@ mod tests {
     fn spatial_batches_pad_across_sequence_boundaries() {
         let device = Device::Cpu;
         let tensors = vec![
-            Tensor::zeros((1, 3, 2, 4), candle_core::DType::F32, &device).unwrap(),
-            Tensor::zeros((1, 3, 4, 2), candle_core::DType::F32, &device).unwrap(),
+            Tensor::zeros((1, 3, 2, 4), inference_tensor::DType::F32, &device).unwrap(),
+            Tensor::zeros((1, 3, 4, 2), inference_tensor::DType::F32, &device).unwrap(),
         ];
 
         assert_eq!(cat_padded_spatial(&tensors).unwrap().dims(), &[2, 3, 4, 4]);

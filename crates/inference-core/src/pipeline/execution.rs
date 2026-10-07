@@ -7,7 +7,7 @@ use std::time::Instant;
 use std::sync::Arc;
 
 #[cfg(feature = "cuda")]
-use candle_core::cuda_backend::cudarc::driver::CudaStream;
+use inference_tensor::cuda_backend::cudarc::driver::CudaStream;
 #[cfg(feature = "cuda")]
 use rand_isaac::Isaac64Rng;
 
@@ -125,11 +125,11 @@ impl CudaDecodeTail {
         }
     }
 
-    fn causal_logits(&self) -> candle_core::Result<&candle_core::Tensor> {
+    fn causal_logits(&self) -> inference_tensor::Result<&inference_tensor::Tensor> {
         let result = self.result.as_ref().expect("CUDA decode tail was consumed");
         match &result.output {
             ForwardInputsResult::CausalGeneration { logits } => Ok(logits),
-            _ => candle_core::bail!("CUDA decode tail does not contain causal logits"),
+            _ => inference_tensor::bail!("CUDA decode tail does not contain causal logits"),
         }
     }
 
@@ -146,21 +146,21 @@ impl CudaDecodeTail {
         self.result.take().expect("CUDA decode tail was consumed")
     }
 
-    pub(crate) fn batch_size(&self) -> candle_core::Result<usize> {
+    pub(crate) fn batch_size(&self) -> inference_tensor::Result<usize> {
         self.causal_logits()?.dim(0)
     }
 
-    pub(crate) fn synchronize(&mut self) -> candle_core::Result<()> {
+    pub(crate) fn synchronize(&mut self) -> inference_tensor::Result<()> {
         if self.pending {
             self.stream
                 .synchronize()
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             self.pending = false;
         }
         Ok(())
     }
 
-    pub(crate) fn drain(mut self) -> candle_core::Result<()> {
+    pub(crate) fn drain(mut self) -> inference_tensor::Result<()> {
         self.synchronize()
     }
 }
@@ -222,9 +222,12 @@ pub(crate) struct CudaStepPending {
 
 #[cfg(feature = "cuda")]
 impl CudaStepPending {
-    pub(crate) fn finish(mut self, token_ids: Vec<u32>) -> candle_core::Result<CudaStepCompletion> {
+    pub(crate) fn finish(
+        mut self,
+        token_ids: Vec<u32>,
+    ) -> inference_tensor::Result<CudaStepCompletion> {
         if token_ids.len() != self.batch_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA step completion has {} tokens for a batch of {}",
                 token_ids.len(),
                 self.batch_size
@@ -256,7 +259,7 @@ impl CudaStepCompletion {
         self.tail.is_some()
     }
 
-    pub(crate) fn synchronize_tail(&mut self) -> candle_core::Result<()> {
+    pub(crate) fn synchronize_tail(&mut self) -> inference_tensor::Result<()> {
         if let Some(tail) = self.tail.as_mut() {
             tail.synchronize()?;
         }
@@ -270,7 +273,7 @@ impl CudaStepCompletion {
         commit_rows: &[bool],
         prefix_cacher: &mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
-    ) -> candle_core::Result<StepCompletion> {
+    ) -> inference_tensor::Result<StepCompletion> {
         sampling::finish_cuda_token_batch(
             pipeline,
             seqs,
@@ -300,7 +303,7 @@ pub(crate) fn submit_forward_lookahead<P: Pipeline + ?Sized>(
     result: ForwardStepResult,
     duration: Duration,
     rng: &Arc<std::sync::Mutex<Isaac64Rng>>,
-) -> candle_core::Result<Result<CudaStepSubmission, ForwardStepResult>> {
+) -> inference_tensor::Result<Result<CudaStepSubmission, ForwardStepResult>> {
     let started = Instant::now();
     let ForwardInputsResult::CausalGeneration { logits } = &result.output else {
         return Ok(Err(result));
@@ -347,7 +350,7 @@ pub(crate) fn submit_decode_tail<P: Pipeline + ?Sized>(
     duration: Duration,
     lookahead: StepLookahead,
     rng: &Arc<std::sync::Mutex<Isaac64Rng>>,
-) -> candle_core::Result<CudaTailSubmission> {
+) -> inference_tensor::Result<CudaTailSubmission> {
     let started = Instant::now();
     if tail.batch_size()? != seqs.len() || !sampling::can_submit_cuda_token_batch_seqs(seqs) {
         return Ok(CudaTailSubmission::Unsupported(tail));

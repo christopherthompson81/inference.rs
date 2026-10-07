@@ -7,8 +7,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{Context, DType, Device, IndexOp, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{Context, DType, Device, IndexOp, Result, Tensor};
 use text::Qwen2VLTextModel;
 use vision::Qwen2VLVisionModel;
 
@@ -137,13 +137,13 @@ pub fn compute_rope_index(
                 .map_or(valid.len(), |offset| media_start + offset);
             let grid = if media_token == image_token_id {
                 let grid = image_grids.get(image_index).ok_or_else(|| {
-                    candle_core::Error::msg("missing image grid for Qwen placeholder")
+                    inference_tensor::Error::msg("missing image grid for Qwen placeholder")
                 })?;
                 image_index += 1;
                 grid
             } else {
                 let grid = video_grids.get(video_index).ok_or_else(|| {
-                    candle_core::Error::msg("missing video grid for Qwen placeholder")
+                    inference_tensor::Error::msg("missing video grid for Qwen placeholder")
                 })?;
                 video_index += 1;
                 grid
@@ -152,7 +152,7 @@ pub fn compute_rope_index(
                 || grid[1] % spatial_merge_size as u32 != 0
                 || grid[2] % spatial_merge_size as u32 != 0
             {
-                candle_core::bail!("invalid Qwen multimodal grid");
+                inference_tensor::bail!("invalid Qwen multimodal grid");
             }
             let (grid_t, grid_h, grid_w) = (
                 grid[0] as usize,
@@ -161,7 +161,7 @@ pub fn compute_rope_index(
             );
             let media_len = grid_t * grid_h * grid_w;
             if media_end - media_start != media_len {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Qwen placeholder length {} does not match grid output {}",
                     media_end - media_start,
                     media_len
@@ -183,7 +183,7 @@ pub fn compute_rope_index(
         }
 
         if positions.len() != valid.len() {
-            candle_core::bail!("Qwen MRoPE position count mismatch");
+            inference_tensor::bail!("Qwen MRoPE position count mismatch");
         }
         let max_position = positions
             .iter()
@@ -199,7 +199,7 @@ pub fn compute_rope_index(
         }
     }
     if image_index != image_grids.len() || video_index != video_grids.len() {
-        candle_core::bail!("Qwen grid count does not match placeholder count");
+        inference_tensor::bail!("Qwen grid count does not match placeholder count");
     }
     Ok((
         Tensor::from_vec(data, (3, batch, seq_len), input_ids.device())?,
@@ -224,7 +224,7 @@ pub fn insert_current_visual_outputs(
     outputs: Vec<Tensor>,
 ) -> Result<()> {
     if hashes.len() != outputs.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen has {} current {kind:?} outputs but {} hashes",
             outputs.len(),
             hashes.len()
@@ -283,7 +283,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
     ) -> Result<Vec<Tensor>> {
         let grids = grid_thw.to_vec2::<u32>()?;
         if grids.len() != hashes.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen visual grid count {} does not match hash count {}",
                 grids.len(),
                 hashes.len()
@@ -349,7 +349,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
         outputs
             .into_iter()
             .map(|output| {
-                output.ok_or_else(|| candle_core::Error::msg("missing Qwen visual output"))
+                output.ok_or_else(|| inference_tensor::Error::msg("missing Qwen visual output"))
             })
             .collect()
     }

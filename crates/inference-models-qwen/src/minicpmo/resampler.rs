@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{LayerNorm, Linear};
 use inference_quant::{MatMul, ShardedVarBuilder};
+use inference_tensor::nn::{LayerNorm, Linear};
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     layers::masker::masked_fill,
@@ -325,7 +325,7 @@ impl MultiheadAttention {
                 }
                 None => att,
             };
-            att = candle_nn::ops::softmax_last_dim(&att)?;
+            att = inference_tensor::nn::ops::softmax_last_dim(&att)?;
             MatMul.matmul(&att, &v)?
         };
 

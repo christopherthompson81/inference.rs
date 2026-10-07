@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use candle_core::{DType, Device, Tensor, quantized::ggml_file};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{DType, Device, Tensor, quantized::ggml_file};
 
 use super::Content;
 use crate::{
@@ -18,7 +18,7 @@ pub trait FromGGML {
         ct: ggml_file::Content,
         gqa: usize,
         dtype: DType,
-    ) -> Result<Self, candle_core::Error>
+    ) -> Result<Self, inference_tensor::Error>
     where
         Self: Sized;
 }
@@ -35,7 +35,7 @@ pub trait FromAdapterGGML {
         xlora_config: Option<XLoraConfig>,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
         dtype: DType,
-    ) -> Result<Self, candle_core::Error>
+    ) -> Result<Self, inference_tensor::Error>
     where
         Self: Sized;
 }
@@ -45,7 +45,7 @@ pub trait FromAdapterGGUF {
     #[allow(clippy::too_many_arguments)]
     fn from_gguf<R: std::io::Seek + std::io::Read>(
         ct: Content<'_, R>,
-        device: &candle_core::Device,
+        device: &inference_tensor::Device,
         lora_config: &[((String, String), LoraConfig)],
         vb: &ShardedVarBuilder,
         ordering: &Ordering,
@@ -53,7 +53,7 @@ pub trait FromAdapterGGUF {
         mapper: Box<dyn DeviceMapper + Send + Sync>,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
         dtype: DType,
-    ) -> Result<Self, candle_core::Error>
+    ) -> Result<Self, inference_tensor::Error>
     where
         Self: Sized;
 }
@@ -73,7 +73,7 @@ pub struct QuantizedForwardInputs<'a> {
 
 /// A quantized model loaded straight from a GGML or GGUF file, as its pipeline drives it.
 pub trait QuantizedModel: Send + Sync {
-    fn forward_step(&self, inputs: QuantizedForwardInputs<'_>) -> candle_core::Result<Tensor>;
+    fn forward_step(&self, inputs: QuantizedForwardInputs<'_>) -> inference_tensor::Result<Tensor>;
     fn cache(&self) -> &EitherCache;
     fn device(&self) -> &Device;
     fn max_seq_len(&self) -> usize;

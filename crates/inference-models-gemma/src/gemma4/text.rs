@@ -11,12 +11,12 @@ use std::{
     },
 };
 
-use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantMethodConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder, UnquantLinear, softcap,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -77,7 +77,7 @@ fn kv_shared_layer_index(cfg: &Gemma4TextConfig, layer_idx: usize) -> Result<Opt
         .rposition(|ty| ty == attention_type)
         .map(Some)
         .ok_or_else(|| {
-            candle_core::Error::Msg(format!(
+            inference_tensor::Error::Msg(format!(
                 "Gemma4 layer {layer_idx} is configured to share KV without a prior `{attention_type}` donor layer."
             ))
         })
@@ -92,7 +92,9 @@ fn select_paged_mm_prefix_path(
     has_range_metadata: bool,
 ) -> Result<bool> {
     if requires_noncausal && packed && !has_range_metadata {
-        candle_core::bail!("packed Gemma 4 multimodal prefill is missing noncausal range metadata");
+        inference_tensor::bail!(
+            "packed Gemma 4 multimodal prefill is missing noncausal range metadata"
+        );
     }
     Ok(requires_noncausal && is_paged && is_cuda && flash_attn && has_range_metadata)
 }
@@ -210,7 +212,7 @@ impl ProportionalRotaryEmbedding {
 struct Gemma4Router {
     norm: RmsNorm,
     scale: Tensor,
-    proj: candle_nn::Linear,
+    proj: inference_tensor::nn::Linear,
     proj_lora: Option<Arc<inference_quant::LoraSiteHandle>>,
     top_k: usize,
 }
@@ -226,7 +228,7 @@ impl Gemma4Router {
         let scale = vb.get(hidden_size, "scale")?;
         let proj_vb = vb.pp("proj");
         let proj_w = proj_vb.get((num_experts, hidden_size), "weight")?;
-        let proj = candle_nn::Linear::new(proj_w.to_dtype(vb.dtype())?, None);
+        let proj = inference_tensor::nn::Linear::new(proj_w.to_dtype(vb.dtype())?, None);
         let proj_lora = inference_quant::register_dynamic_lora_site(
             &proj_vb,
             inference_quant::LoraLinearSpec::replicated(hidden_size, num_experts),
@@ -420,7 +422,7 @@ impl Attention {
             )?;
             let v_dev = mapper
                 .device_for(layer_idx, false)
-                .unwrap_or(&candle_core::Device::Cpu);
+                .unwrap_or(&inference_tensor::Device::Cpu);
             let v_norm_weight = Tensor::ones(head_dim, vb.dtype(), v_dev)?;
             let v_norm_rms = RmsNorm::from_w(v_norm_weight, cfg.rms_norm_eps)?;
             (
@@ -2042,7 +2044,7 @@ impl TextModel {
                         &query_selection.num_cached_tokens,
                         &query_selection.query_lens,
                     )
-                    .map_err(|err| candle_core::Error::Msg(err.to_string()))?,
+                    .map_err(|err| inference_tensor::Error::Msg(err.to_string()))?,
             )
         } else {
             None
@@ -2336,7 +2338,7 @@ impl TextModel {
                     .expect("missing active fast prefill plan");
                 if let Some(metadata) = plan.paged_metadata.as_ref() {
                     crate::model::metadata_rope_positions(metadata, xs.device())
-                        .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+                        .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
                         .clone()
                 } else {
                     ctx.text_positions_from_offsets(
@@ -2347,7 +2349,7 @@ impl TextModel {
                 }
             } else {
                 ctx.text_positions(xs.device(), xs.dim(1)?)?
-                    .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+                    .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
                     .clone()
             };
             let (layer_attention_mask, layer_sliding_attention_mask) = if reduced_to_logits {
@@ -2437,7 +2439,9 @@ impl TextModel {
         } else {
             is_image
         };
-        let is_vision_vec: Vec<u32> = is_vision.to_dtype(candle_core::DType::U32)?.to_vec1()?;
+        let is_vision_vec: Vec<u32> = is_vision
+            .to_dtype(inference_tensor::DType::U32)?
+            .to_vec1()?;
         let mut group_ids = vec![-1i64; seq_len];
         let mut current_group: i64 = -1;
         for i in 0..seq_len {
@@ -2468,7 +2472,7 @@ impl TextModel {
 
         let override_mask = Tensor::from_vec(override_vals, (seq_len, total_len), device)?;
         let zero = Tensor::zeros((seq_len, total_len), dtype, device)?;
-        let override_bool = override_mask.to_dtype(candle_core::DType::U8)?;
+        let override_bool = override_mask.to_dtype(inference_tensor::DType::U8)?;
         override_bool.where_cond(&zero, causal_mask)
     }
 
@@ -2516,7 +2520,7 @@ impl TextModel {
         if ctx.is_paged() {
             for (i, layer) in self.layers.iter().enumerate() {
                 let ((key_cache, value_cache), metadata) = ctx.paged_layer(i).ok_or_else(|| {
-                    candle_core::Error::Msg("missing paged layer cache for canvas".to_string())
+                    inference_tensor::Error::Msg("missing paged layer cache for canvas".to_string())
                 })?;
                 let paged = layer
                     .self_attn
@@ -2537,7 +2541,7 @@ impl TextModel {
             let cache = &self.cache.normal().0;
             for kv in cache.iter() {
                 let (Some(k), Some(v)) = (kv.k()?, kv.v()?) else {
-                    candle_core::bail!("empty KV cache during canvas generation");
+                    inference_tensor::bail!("empty KV cache during canvas generation");
                 };
                 let (k, v) = if k.dim(2)? > kv_len && !kv.is_rotating() {
                     (k.narrow(2, 0, kv_len)?, v.narrow(2, 0, kv_len)?)
@@ -2648,7 +2652,7 @@ impl MultimodalModel for TextModel {
         _pixel_values: Option<Tensor>,
         _model_specific_args: Box<dyn std::any::Any>,
         _ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         unreachable!()
     }
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn std::any::Any> {
@@ -2688,10 +2692,10 @@ mod tests {
         Gemma4Router, TextModel, gemma4_moe_weight_prefix, is_paged_decode_forward,
         select_paged_mm_prefix_path, sliding_decode_kv_window,
     };
-    use candle_core::{DType, Device, Tensor};
     use inference_quant::{
         QuantMethod, QuantizedWeightSource, Shard, ShardedSafeTensors, ShardedVarBuilder,
     };
+    use inference_tensor::{DType, Device, Tensor};
 
     struct MoePrefixWeightSource(HashSet<String>);
 
@@ -2705,7 +2709,7 @@ mod tests {
             _key: &str,
             _device: &Device,
             _shard: Shard,
-        ) -> candle_core::Result<Option<Arc<dyn QuantMethod>>> {
+        ) -> inference_tensor::Result<Option<Arc<dyn QuantMethod>>> {
             unreachable!()
         }
 
@@ -2713,19 +2717,23 @@ mod tests {
             &self,
             _name: &str,
             _device: &Device,
-        ) -> candle_core::Result<Option<Tensor>> {
+        ) -> inference_tensor::Result<Option<Tensor>> {
             unreachable!()
         }
 
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
+        fn shard_alignment(&self, _key: &str) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
+        fn pack_factor(&self, _dtype: DType) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor_for(&self, _key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
+        fn pack_factor_for(
+            &self,
+            _key: &str,
+            _dtype: DType,
+        ) -> inference_tensor::Result<Option<usize>> {
             Ok(Some(1))
         }
     }
@@ -2733,7 +2741,7 @@ mod tests {
     fn gemma4_layer_vb(
         residual_moe: bool,
         source_moe: bool,
-    ) -> candle_core::Result<ShardedVarBuilder> {
+    ) -> inference_tensor::Result<ShardedVarBuilder> {
         let prefix = "model.layers.0";
         let tensors = if residual_moe {
             HashMap::from([(
@@ -2754,7 +2762,8 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_moe_prefix_reads_residual_and_weight_source_tensors() -> candle_core::Result<()> {
+    fn gemma4_moe_prefix_reads_residual_and_weight_source_tensors() -> inference_tensor::Result<()>
+    {
         assert_eq!(
             gemma4_moe_weight_prefix(&gemma4_layer_vb(true, false)?),
             "moe"
@@ -2801,7 +2810,7 @@ mod tests {
     }
 
     #[test]
-    fn gemma4_router_registers_its_projection_for_dynamic_lora() -> candle_core::Result<()> {
+    fn gemma4_router_registers_its_projection_for_dynamic_lora() -> inference_tensor::Result<()> {
         let prefix = "model.language_model.layers.0.router";
         let registry = Arc::new(inference_quant::LoraLayerRegistry::new());
         let vb = inference_quant::ShardedSafeTensors::wrap_with_dummy_regexes(

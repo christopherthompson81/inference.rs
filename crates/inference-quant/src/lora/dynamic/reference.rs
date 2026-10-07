@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use super::{LoraExecution, LoraSiteHandle, LoraWeights};
 
@@ -11,14 +11,14 @@ fn validate_weights(
     let (rank, a_input) = weights.a.dims2()?;
     let (b_output, b_rank) = weights.b.dims2()?;
     if a_input != input_features || b_output != output_features || b_rank != rank {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LoRA weight shape mismatch: A={:?}, B={:?}, expected input={input_features}, output={output_features}",
             weights.a.dims(),
             weights.b.dims()
         );
     }
     if weights.a.dtype() != input.dtype() || weights.b.dtype() != input.dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LoRA weights must use input dtype {:?}, got A={:?}, B={:?}",
             input.dtype(),
             weights.a.dtype(),
@@ -28,7 +28,7 @@ fn validate_weights(
     if weights.a.device().location() != input.device().location()
         || weights.b.device().location() != input.device().location()
     {
-        candle_core::bail!("LoRA weights and input must be on the same device");
+        inference_tensor::bail!("LoRA weights and input must be on the same device");
     }
     Ok(())
 }
@@ -52,14 +52,14 @@ pub(super) fn add_delta_reference(
     input: &Tensor,
     base_output: Tensor,
 ) -> Result<Tensor> {
-    let input_features = input.dim(candle_core::D::Minus1)?;
-    let output_features = base_output.dim(candle_core::D::Minus1)?;
+    let input_features = input.dim(inference_tensor::D::Minus1)?;
+    let output_features = base_output.dim(inference_tensor::D::Minus1)?;
     if input_features == 0 || output_features == 0 {
-        candle_core::bail!("LoRA input and output feature dimensions must be nonzero");
+        inference_tensor::bail!("LoRA input and output feature dimensions must be nonzero");
     }
     let rows = input.elem_count() / input_features;
     if execution.row_slots().len() != rows {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LoRA route count {} does not match input row count {rows}",
             execution.row_slots().len()
         );
@@ -67,7 +67,7 @@ pub(super) fn add_delta_reference(
     if input.dims()[..input.rank() - 1] != base_output.dims()[..base_output.rank() - 1]
         || base_output.elem_count() != rows * output_features
     {
-        candle_core::bail!("LoRA base output leading dimensions do not match input");
+        inference_tensor::bail!("LoRA base output leading dimensions do not match input");
     }
 
     let mut active_slots = Vec::new();
@@ -117,7 +117,7 @@ pub(super) fn add_delta_reference(
 mod tests {
     use std::sync::Arc;
 
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::*;
     use crate::{LoraLayerRegistry, LoraLinearSpec, LoraRuntimeId, LoraSiteKey, LoraWeights};

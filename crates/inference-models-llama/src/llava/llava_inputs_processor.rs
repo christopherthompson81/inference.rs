@@ -4,10 +4,10 @@ use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
 
-use candle_core::Result;
-use candle_core::{DType, Device, Tensor};
 use image::GenericImageView;
 use image::Rgb;
+use inference_tensor::Result;
+use inference_tensor::{DType, Device, Tensor};
 use itertools::Itertools;
 use regex_automata::meta::Regex;
 use tokenizers::Tokenizer;
@@ -60,12 +60,12 @@ fn llava_packed_layout(
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("LLaVA packed multimodal metadata length mismatch");
+        inference_tensor::bail!("LLaVA packed multimodal metadata length mismatch");
     }
     let mut requests = Vec::with_capacity(input_seqs.len());
     for (seq, &query_len) in input_seqs.iter().zip(query_lens) {
         if query_len != seq.get_toks().len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LLaVA packed multimodal prefill requires the complete uncached prompt"
             );
         }
@@ -76,7 +76,7 @@ fn llava_packed_layout(
             .filter(|feature| feature.kind == MultimodalKind::Image)
         {
             if feature.item_range.len() != 1 || feature.hashes.len() != 1 {
-                candle_core::bail!("LLaVA image feature must describe exactly one image");
+                inference_tensor::bail!("LLaVA image feature must describe exactly one image");
             }
             let placeholder = feature.offset..feature.end();
             items.push(MultimodalItemLayout::new(
@@ -612,11 +612,11 @@ impl ImagePreProcessor for LLaVAInputProcessor {
         images: Vec<image::DynamicImage>,
         videos: Vec<Vec<image::DynamicImage>>,
         config: &preprocessor_config::PreProcessorConfig,
-        device: &candle_core::Device,
+        device: &inference_tensor::Device,
         (_, _): (usize, usize),
-    ) -> candle_core::Result<image_processor::PreprocessedImages> {
+    ) -> inference_tensor::Result<image_processor::PreprocessedImages> {
         if images.len() > 1 {
-            candle_core::bail!("Can only process one image per batch"); // This is no different from phi3_input_processor
+            inference_tensor::bail!("Can only process one image per batch"); // This is no different from phi3_input_processor
         };
         assert!(videos.is_empty());
         let resized_size = *config.size.as_ref().unwrap().get("shortest_edge").unwrap() as usize;

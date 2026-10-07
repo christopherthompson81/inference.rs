@@ -1,6 +1,6 @@
 use anyhow::Result;
-use candle_core::DType;
-use candle_core::quantized::gguf_file;
+use inference_tensor::DType;
+use inference_tensor::quantized::gguf_file;
 use std::fs;
 
 use crate::Content;

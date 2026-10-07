@@ -2,8 +2,8 @@
 
 use std::{any::Any, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView};
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -54,7 +54,7 @@ fn find_mistral3_image_ranges(
 
 fn cat_padded_mistral3_images(tensors: &[Tensor]) -> Result<Tensor> {
     if tensors.is_empty() {
-        candle_core::bail!("Mistral 3 image tensor batch cannot be empty");
+        inference_tensor::bail!("Mistral 3 image tensor batch cannot be empty");
     }
     let shapes = tensors
         .iter()
@@ -109,7 +109,7 @@ fn mistral3_packed_layout(
     spatial_merge_size: usize,
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() || input_seqs.len() != image_sizes_by_sequence.len() {
-        candle_core::bail!("Mistral 3 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Mistral 3 packed multimodal metadata length mismatch");
     }
     let mut requests = Vec::with_capacity(input_seqs.len());
     for ((seq, &query_len), image_sizes) in input_seqs
@@ -119,13 +119,13 @@ fn mistral3_packed_layout(
     {
         let tokens = seq.get_toks();
         if query_len != tokens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Mistral 3 packed multimodal prefill requires the complete uncached prompt"
             );
         }
         let hashes = seq.image_hashes().unwrap_or_default();
         if hashes.len() != image_sizes.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Mistral 3 sequence has {} image hashes but {} image sizes",
                 hashes.len(),
                 image_sizes.len()
@@ -142,24 +142,26 @@ fn mistral3_packed_layout(
             let height_tokens = height as usize / (patch_size * spatial_merge_size);
             let width_tokens = width as usize / (patch_size * spatial_merge_size);
             let token_count = height_tokens * width_tokens;
-            let end = destination_offset
-                .checked_add(token_count)
-                .ok_or_else(|| candle_core::Error::msg("Mistral 3 image token count overflow"))?;
+            let end = destination_offset.checked_add(token_count).ok_or_else(|| {
+                inference_tensor::Error::msg("Mistral 3 image token count overflow")
+            })?;
             let item_destinations = destinations
                 .get(destination_offset..end)
                 .ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "Mistral 3 image placeholders do not match encoder output size",
                     )
                 })?
                 .to_vec();
             let placeholder_start = *item_destinations.first().ok_or_else(|| {
-                candle_core::Error::msg("Mistral 3 image has no placeholder tokens")
+                inference_tensor::Error::msg("Mistral 3 image has no placeholder tokens")
             })?;
             let placeholder_end = item_destinations
                 .last()
                 .and_then(|position| position.checked_add(1))
-                .ok_or_else(|| candle_core::Error::msg("Mistral 3 placeholder range overflow"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("Mistral 3 placeholder range overflow")
+                })?;
             items.push(MultimodalItemLayout::new(
                 MultimodalEncoderKey {
                     kind: MultimodalKind::Image,
@@ -177,7 +179,7 @@ fn mistral3_packed_layout(
             destination_offset = end;
         }
         if destination_offset != destinations.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Mistral 3 sequence has {} unmatched image placeholder tokens",
                 destinations.len() - destination_offset
             );
@@ -468,10 +470,10 @@ impl Mistral3ImageProcessor {
         patch_size: usize,
     ) -> Result<(usize, usize)> {
         if height == 0 || width == 0 {
-            candle_core::bail!("Mistral 3 image dimensions must be nonzero");
+            inference_tensor::bail!("Mistral 3 image dimensions must be nonzero");
         }
         if max_height == 0 || max_width == 0 || patch_size == 0 {
-            candle_core::bail!("Mistral 3 resize configuration must be nonzero");
+            inference_tensor::bail!("Mistral 3 resize configuration must be nonzero");
         }
         let ratio = (height as f64 / max_height as f64).max(width as f64 / max_width as f64);
         if ratio > 1. {
@@ -483,10 +485,10 @@ impl Mistral3ImageProcessor {
         let num_width_tokens = width.div_ceil(patch_size);
         let height = num_height_tokens
             .checked_mul(patch_size)
-            .ok_or_else(|| candle_core::Error::msg("Mistral 3 resized height overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Mistral 3 resized height overflow"))?;
         let width = num_width_tokens
             .checked_mul(patch_size)
-            .ok_or_else(|| candle_core::Error::msg("Mistral 3 resized width overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Mistral 3 resized width overflow"))?;
         Ok((height, width))
     }
 
@@ -701,7 +703,9 @@ impl ImagePreProcessor for Mistral3ImageProcessor {
         } else if size.contains_key("height") && size.contains_key("width") {
             (size["height"] as usize, size["width"] as usize)
         } else {
-            candle_core::bail!("Size must be a map of `longest_edge` or `height` and `width`.");
+            inference_tensor::bail!(
+                "Size must be a map of `longest_edge` or `height` and `width`."
+            );
         };
 
         for image in images.iter_mut() {
@@ -770,7 +774,7 @@ impl ImagePreProcessor for Mistral3ImageProcessor {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::{
         InputsProcessorValidationError, Mistral3ImageProcessor, cat_padded_mistral3_images,

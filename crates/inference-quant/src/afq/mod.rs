@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Shape, Tensor};
+use inference_tensor::{DType, Device, Result, Shape, Tensor};
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
@@ -25,7 +25,7 @@ pub enum AfqBits {
 }
 
 impl TryFrom<usize> for AfqBits {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: usize) -> Result<Self> {
         match value {
             2 => Ok(Self::Two),
@@ -33,13 +33,13 @@ impl TryFrom<usize> for AfqBits {
             4 => Ok(Self::Four),
             6 => Ok(Self::Six),
             8 => Ok(Self::Eight),
-            x => candle_core::bail!("Invalid AFQ bits {x}."),
+            x => inference_tensor::bail!("Invalid AFQ bits {x}."),
         }
     }
 }
 
 impl TryFrom<u8> for AfqBits {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: u8) -> Result<Self> {
         Self::try_from(value as usize)
     }
@@ -55,19 +55,19 @@ pub enum AfqGroupSize {
 }
 
 impl TryFrom<usize> for AfqGroupSize {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: usize) -> Result<Self> {
         match value {
             32 => Ok(Self::Low),
             64 => Ok(Self::Med),
             128 => Ok(Self::High),
-            x => candle_core::bail!("Invalid AFQ group size {x}."),
+            x => inference_tensor::bail!("Invalid AFQ group size {x}."),
         }
     }
 }
 
 impl TryFrom<u8> for AfqGroupSize {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: u8) -> Result<Self> {
         Self::try_from(value as usize)
     }
@@ -140,7 +140,7 @@ pub struct AfqInner {
 }
 
 impl QuantMethod for AfqLayer {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -176,7 +176,7 @@ impl QuantMethod for AfqLayer {
         }
     }
 
-    fn dequantize_w(&self) -> Result<candle_core::Tensor> {
+    fn dequantize_w(&self) -> Result<inference_tensor::Tensor> {
         ops::afq_dequantize_op(
             &self.w_q,
             &self.scales,
@@ -187,7 +187,7 @@ impl QuantMethod for AfqLayer {
     }
 
     fn begin_track_stats(&self) -> Result<()> {
-        let in_dim = self.scales.dim(candle_core::D::Minus1)? * (self.group_size as usize);
+        let in_dim = self.scales.dim(inference_tensor::D::Minus1)? * (self.group_size as usize);
         // Stacked [E, out, in] expert weights collect per expert via the routed path.
         if self.w_q.dims().len() == 3 {
             self.stats
@@ -210,7 +210,7 @@ impl QuantMethod for AfqLayer {
             self.stats.clear()?;
             imatrix
         } else {
-            candle_core::bail!("`{}` is not tracking stats.", self.name())
+            inference_tensor::bail!("`{}` is not tracking stats.", self.name())
         }
     }
 
@@ -296,7 +296,7 @@ impl QuantMethod for AfqLayer {
         })?))
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         (self.scales.dtype(), self.scales.device().clone())
     }
 
@@ -306,7 +306,7 @@ impl QuantMethod for AfqLayer {
             *last = last.saturating_mul(self.group_size as usize);
         }
         if shape.len() == 3 && request.ty.is_some_and(|ty| !ty.supports_stacked_gather()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Cannot requantize stacked AFQ expert weights to {}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, or omit ISQ.",
                 request.ty.expect("rank-3 rejection requires an ISQ target")
             );
@@ -363,7 +363,7 @@ impl QuantMethod for AfqLayer {
                 Ok(Arc::new(crate::F8Q8Linear::from_weight(&w, b)?))
             }
             _ => Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
-                candle_nn::Linear::new(self.dequantize_w()?, self.bias.clone()),
+                inference_tensor::nn::Linear::new(self.dequantize_w()?, self.bias.clone()),
             ))?)
             .apply_isq(dtype, device, n_quantized, imatrix_weight, guard),
         }
@@ -404,7 +404,7 @@ impl AfqLayer {
             None => (None, None),
             Some((dim, start, len)) if dim == dims.len() - 1 => {
                 if !start.is_multiple_of(group) || !len.is_multiple_of(group) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Sharding the AFQ packed dim requires group alignment: start {start}, len {len}, group {group}."
                     );
                 }
@@ -439,7 +439,7 @@ impl AfqLayer {
         vb: ShardedVarBuilder,
     ) -> Result<Arc<dyn QuantMethod>> {
         let QuantizedConfig::Afq { bits, group_size } = config else {
-            candle_core::bail!("Unexpected quantization config.")
+            inference_tensor::bail!("Unexpected quantization config.")
         };
 
         let w_q = vb.get_with_hints_dtype(
@@ -479,7 +479,7 @@ impl AfqLayer {
         vb: ShardedVarBuilder,
     ) -> Result<Arc<dyn QuantMethod>> {
         let QuantizedConfig::Afq { bits, group_size } = config else {
-            candle_core::bail!("Unexpected quantization config.")
+            inference_tensor::bail!("Unexpected quantization config.")
         };
 
         let w_q = vb.get_with_hints_dtype(
@@ -538,7 +538,9 @@ impl QuantizedSerde for AfqLayer {
             .uqff_type()
             .expect("AFQ layers always have an ISQ type");
         if ty != actual_ty {
-            candle_core::bail!("Cannot serialize AFQ layer as {ty}; actual type is {actual_ty}.");
+            inference_tensor::bail!(
+                "Cannot serialize AFQ layer as {ty}; actual type is {actual_ty}."
+            );
         }
 
         let mut data = vec![

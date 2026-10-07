@@ -1,8 +1,8 @@
 use std::{any::Any, sync::Arc};
 
 use anyhow::{Context, Result};
-use candle_core::Device;
 use indexmap::IndexMap;
+use inference_tensor::Device;
 use tokenizers::Tokenizer;
 
 use crate::paged_attention::PagedAttentionMeta;

@@ -2,12 +2,12 @@
 
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{DType, Device, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod, QuantMethodConfig,
     ShardedSafeTensors, UnquantLinear, maybe_wrap_dynamic_lora, with_lora_execution,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Device, Tensor};
 
 use super::MergedDenseProjection;
 
@@ -228,7 +228,7 @@ fn dflash_sample_selector_reference(
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_add_rms_norm_matches_separate_ops() -> candle_core::Result<()> {
+fn cuda_add_rms_norm_matches_separate_ops() -> inference_tensor::Result<()> {
     const ROWS: usize = 2;
     const COLS: usize = 16;
     const EPS: f32 = 1e-6;
@@ -290,7 +290,7 @@ fn cuda_add_rms_norm_matches_separate_ops() -> candle_core::Result<()> {
 #[cfg(feature = "cuda")]
 #[test]
 #[allow(clippy::cast_precision_loss)]
-fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> candle_core::Result<()> {
+fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;
     const SEQ_LEN: usize = 3;
     const Q_HEADS: usize = 2;
@@ -382,7 +382,7 @@ fn cuda_qk_norm_rope_writes_token_major_from_packed_projection() -> candle_core:
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> candle_core::Result<()> {
+fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;
     const SEQ_LEN: usize = 3;
     const Q_HEADS: usize = 3;
@@ -436,7 +436,7 @@ fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> candle_core::Res
             )?;
             let cos = angles.cos()?.to_dtype(dtype)?;
             let sin = angles.sin()?.to_dtype(dtype)?;
-            let values = |tensor: &Tensor| -> candle_core::Result<Vec<f32>> {
+            let values = |tensor: &Tensor| -> inference_tensor::Result<Vec<f32>> {
                 tensor
                     .to_device(&Device::Cpu)?
                     .to_dtype(DType::F32)?
@@ -447,7 +447,7 @@ fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> candle_core::Res
             let cos_values = values(&cos)?;
             let sin_values = values(&sin)?;
             for is_neox in [false, true] {
-                let reference = |input: &Tensor| -> candle_core::Result<Vec<f32>> {
+                let reference = |input: &Tensor| -> inference_tensor::Result<Vec<f32>> {
                     let input_values = values(input)?;
                     let heads = input.dim(1)?;
                     let mut expected = vec![0f32; input_values.len()];
@@ -604,7 +604,7 @@ fn categorical_reference(logits: &[f32], inverse_temperature: f32, uniform: f32)
 }
 
 #[test]
-fn merged_projection_uses_dynamic_lora_constituents_when_active() -> candle_core::Result<()> {
+fn merged_projection_uses_dynamic_lora_constituents_when_active() -> inference_tensor::Result<()> {
     let registry = Arc::new(LoraLayerRegistry::new());
     let vb = ShardedSafeTensors::wrap(HashMap::<String, Tensor>::new(), DType::F32, Device::Cpu)
         .with_lora_registry(registry.clone());
@@ -654,7 +654,7 @@ fn merged_projection_uses_dynamic_lora_constituents_when_active() -> candle_core
 }
 
 #[test]
-fn merged_projection_keeps_multirow_gate_up_packed() -> candle_core::Result<()> {
+fn merged_projection_keeps_multirow_gate_up_packed() -> inference_tensor::Result<()> {
     let packed_weight = Tensor::new(&[[1f32, 0.], [0., 1.], [1., 1.], [1., -1.]], &Device::Cpu)?;
     let packed = Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
         Linear::new(packed_weight, None),
@@ -676,10 +676,10 @@ fn merged_projection_keeps_multirow_gate_up_packed() -> candle_core::Result<()> 
     assert_eq!(packed_output.dims(), &[2, 4]);
     let actual = super::split_mul_and_act(&packed_output, 2, crate::layers::Activation::Silu)?;
     let gate = packed_output
-        .narrow(candle_core::D::Minus1, 0, 2)?
+        .narrow(inference_tensor::D::Minus1, 0, 2)?
         .contiguous()?;
     let up = packed_output
-        .narrow(candle_core::D::Minus1, 2, 2)?
+        .narrow(inference_tensor::D::Minus1, 2, 2)?
         .contiguous()?;
     let expected = super::mul_and_act(&gate, &up, crate::layers::Activation::Silu)?;
     assert_eq!(actual.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
@@ -689,8 +689,8 @@ fn merged_projection_keeps_multirow_gate_up_packed() -> candle_core::Result<()> 
 #[test]
 fn test_topk() {
     use crate::ops::{TopKLastDimOp, TopKOutput};
-    use candle_core::Tensor;
-    let device = candle_core::Device::Cpu;
+    use inference_tensor::Tensor;
+    let device = inference_tensor::Device::Cpu;
     //  [[1, 3, 5],
     //   [2, 4, 6]]
     let x = Tensor::arange(1f32, 7f32, &device)
@@ -717,9 +717,9 @@ fn test_topk() {
 }
 
 #[test]
-fn test_repeat_interleave() -> candle_core::Result<()> {
+fn test_repeat_interleave() -> inference_tensor::Result<()> {
     use crate::ops::RepeatInterleaveOp;
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     let input = Tensor::new(
         vec![vec![vec![1f32, 2., 3.], vec![4f32, 5., 6.]]],
@@ -739,9 +739,9 @@ fn test_repeat_interleave() -> candle_core::Result<()> {
 }
 
 #[test]
-fn test_repeat_interleave_flat() -> candle_core::Result<()> {
+fn test_repeat_interleave_flat() -> inference_tensor::Result<()> {
     use crate::ops::RepeatInterleaveOp;
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     let input = Tensor::new(vec![1., 2., 3., 4.], &Device::Cpu)?;
 
@@ -756,7 +756,8 @@ fn test_repeat_interleave_flat() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures() -> candle_core::Result<()> {
+fn cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures()
+-> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(
         &[
@@ -787,7 +788,7 @@ fn cuda_batched_topk_matches_cpu_with_offsets_and_mixed_temperatures() -> candle
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_topk_rejects_nan_distribution() -> candle_core::Result<()> {
+fn cuda_batched_topk_rejects_nan_distribution() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, f32::NAN, 3.0, 2.0]], &device)?;
     let inverse_temperatures = Tensor::new(&[1.0f32], &device)?;
@@ -799,7 +800,7 @@ fn cuda_batched_topk_rejects_nan_distribution() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_resident_topk_sampling_matches_filtered_reference() -> candle_core::Result<()> {
+fn cuda_resident_topk_sampling_matches_filtered_reference() -> inference_tensor::Result<()> {
     const BATCH: usize = 4;
     const VOCAB: usize = 2051;
 
@@ -851,7 +852,7 @@ fn cuda_resident_topk_sampling_matches_filtered_reference() -> candle_core::Resu
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> candle_core::Result<()> {
+fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;
 
     let device = Device::new_cuda(0)?;
@@ -938,7 +939,7 @@ fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> candle_core::Res
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_cached_batched_top1_tracks_batch_shape() -> candle_core::Result<()> {
+fn cuda_cached_batched_top1_tracks_batch_shape() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let mut workspace = None;
     let first = Tensor::new(&[[1.0f32, 4.0, 3.0], [8.0, 2.0, 5.0]], &device)?;
@@ -955,7 +956,7 @@ fn cuda_cached_batched_top1_tracks_batch_shape() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_async_top1_device_and_host_tokens_match() -> candle_core::Result<()> {
+fn cuda_async_top1_device_and_host_tokens_match() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, 7.0, 3.0], [9.0, 2.0, 5.0]], &device)?;
     let resident_input = Tensor::zeros((4, 1), DType::U32, &device)?;
@@ -980,7 +981,7 @@ fn cuda_async_top1_device_and_host_tokens_match() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_async_top1_queues_two_submissions_and_reuses_slots() -> candle_core::Result<()> {
+fn cuda_async_top1_queues_two_submissions_and_reuses_slots() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let first = Tensor::new(&[[1.0f32, 4.0, 3.0], [8.0, 2.0, 5.0]], &device)?;
     let second = Tensor::new(&[[6.0f32, 4.0, 3.0], [1.0, 2.0, 9.0]], &device)?;
@@ -1018,7 +1019,8 @@ fn cuda_async_top1_queues_two_submissions_and_reuses_slots() -> candle_core::Res
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_async_top1_releases_resident_target_before_host_completion() -> candle_core::Result<()> {
+fn cuda_async_top1_releases_resident_target_before_host_completion() -> inference_tensor::Result<()>
+{
     let device = Device::new_cuda(0)?;
     let stream = device.as_cuda_device()?.cuda_stream();
     let resident_input = Tensor::zeros((2, 1), DType::U32, &device)?;
@@ -1052,7 +1054,7 @@ fn cuda_async_top1_releases_resident_target_before_host_completion() -> candle_c
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_async_top1_resizes_after_completion() -> candle_core::Result<()> {
+fn cuda_async_top1_resizes_after_completion() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let mut workspace = None;
     let first = Tensor::new(&[[1.0f32, 4.0], [8.0, 2.0]], &device)?;
@@ -1075,7 +1077,7 @@ fn cuda_async_top1_resizes_after_completion() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_async_top1_marks_nan_token_invalid() -> candle_core::Result<()> {
+fn cuda_async_top1_marks_nan_token_invalid() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, f32::NAN, 3.0]], &device)?;
     let mut workspace = None;
@@ -1089,8 +1091,8 @@ fn cuda_async_top1_marks_nan_token_invalid() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values() -> candle_core::Result<()>
-{
+fn cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values()
+-> inference_tensor::Result<()> {
     const BACKING_ROWS: usize = 6;
     const ROWS: usize = 5;
     const VOCAB: usize = 4097;
@@ -1155,7 +1157,7 @@ fn cuda_low_precision_top1_matches_f32_across_ties_and_nonfinite_values() -> can
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_topk_orders_ties_by_lowest_index() -> candle_core::Result<()> {
+fn cuda_batched_topk_orders_ties_by_lowest_index() -> inference_tensor::Result<()> {
     const VOCAB: usize = 4097;
 
     let device = Device::new_cuda(0)?;
@@ -1177,7 +1179,7 @@ fn cuda_batched_topk_orders_ties_by_lowest_index() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_topk_workspace_reuses_and_grows() -> candle_core::Result<()> {
+fn cuda_batched_topk_workspace_reuses_and_grows() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const ROWS: usize = 4;
     const VOCAB: usize = 4097;
@@ -1260,7 +1262,7 @@ fn cuda_batched_topk_workspace_reuses_and_grows() -> candle_core::Result<()> {
         &wrong_temperatures,
         &mut workspace,
     ) {
-        Ok(_) => candle_core::bail!("row temperature shape mismatch must fail"),
+        Ok(_) => inference_tensor::bail!("row temperature shape mismatch must fail"),
         Err(error) => error,
     };
     assert!(
@@ -1273,7 +1275,7 @@ fn cuda_batched_topk_workspace_reuses_and_grows() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_ranked_topk_matches_cpu_across_dtypes_ties_and_offsets() -> candle_core::Result<()> {
+fn cuda_ranked_topk_matches_cpu_across_dtypes_ties_and_offsets() -> inference_tensor::Result<()> {
     const BACKING_ROWS: usize = 4;
     const ROWS: usize = 2;
     const VOCAB: usize = 4097;
@@ -1334,8 +1336,8 @@ fn cuda_ranked_topk_matches_cpu_across_dtypes_ties_and_offsets() -> candle_core:
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_ranked_topk_radix_matches_realistic_vocab_and_cross_chunk_ties() -> candle_core::Result<()>
-{
+fn cuda_ranked_topk_radix_matches_realistic_vocab_and_cross_chunk_ties()
+-> inference_tensor::Result<()> {
     const BACKING_ROWS: usize = 3;
     const ROWS: usize = 2;
     const VOCAB: usize = 248_320;
@@ -1382,7 +1384,7 @@ fn cuda_ranked_topk_radix_matches_realistic_vocab_and_cross_chunk_ties() -> cand
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_ranked_topk_radix_preserves_special_value_contract() -> candle_core::Result<()> {
+fn cuda_ranked_topk_radix_preserves_special_value_contract() -> inference_tensor::Result<()> {
     const VOCAB: usize = 4097;
     const K: usize = 16;
 
@@ -1423,7 +1425,8 @@ fn cuda_ranked_topk_radix_preserves_special_value_contract() -> candle_core::Res
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu() -> candle_core::Result<()> {
+fn cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu() -> inference_tensor::Result<()>
+{
     const VOCAB: usize = 248_320;
 
     let device = Device::new_cuda(0)?;
@@ -1451,7 +1454,7 @@ fn cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu() -> candle_co
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> candle_core::Result<()> {
+fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const BATCH: usize = 2;
     const POSITIONS: usize = 3;
@@ -1512,7 +1515,7 @@ fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> candle_core::
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> candle_core::Result<()> {
+fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const POSITIONS: usize = 2;
     const K: usize = super::CUDA_DFLASH_SELECTOR_MAX_K;
@@ -1548,7 +1551,7 @@ fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> candle_core::Result<
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_dflash_sample_selector_matches_sequential_reference() -> candle_core::Result<()> {
+fn cuda_dflash_sample_selector_matches_sequential_reference() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const BATCH: usize = 2;
     const POSITIONS: usize = 3;
@@ -1637,7 +1640,7 @@ fn cuda_dflash_sample_selector_matches_sequential_reference() -> candle_core::Re
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> candle_core::Result<()> {
+fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> inference_tensor::Result<()> {
     skip_without_cuda!();
     const K: usize = 2;
     const VOCAB: usize = 2;
@@ -1672,7 +1675,7 @@ fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> candle_core::R
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_categorical_matches_reference_across_chunks() -> candle_core::Result<()> {
+fn cuda_batched_categorical_matches_reference_across_chunks() -> inference_tensor::Result<()> {
     const VOCAB: usize = 2051;
 
     let device = Device::new_cuda(0)?;
@@ -1707,7 +1710,7 @@ fn cuda_batched_categorical_matches_reference_across_chunks() -> candle_core::Re
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_categorical_marks_invalid_distribution() -> candle_core::Result<()> {
+fn cuda_batched_categorical_marks_invalid_distribution() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[[1.0f32, f32::NAN, 3.0]], &device)?;
     let inverse_temperatures = Tensor::new(&[1.0f32], &device)?;
@@ -1725,7 +1728,7 @@ fn cuda_batched_categorical_marks_invalid_distribution() -> candle_core::Result<
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_batched_categorical_selects_at_upper_boundary() -> candle_core::Result<()> {
+fn cuda_batched_categorical_selects_at_upper_boundary() -> inference_tensor::Result<()> {
     const VOCAB: usize = 2048;
 
     let device = Device::new_cuda(0)?;
@@ -1747,7 +1750,7 @@ fn cuda_batched_categorical_selects_at_upper_boundary() -> candle_core::Result<(
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_cached_top1_honors_view_offset() -> candle_core::Result<()> {
+fn cuda_cached_top1_honors_view_offset() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(
         &[[90.0f32, 91.0, 92.0, 93.0], [-1.0, 4.0, 0.0, 2.0]],
@@ -1763,7 +1766,7 @@ fn cuda_cached_top1_honors_view_offset() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_top1_uses_first_maximum_across_lanes_and_chunks() -> candle_core::Result<()> {
+fn cuda_top1_uses_first_maximum_across_lanes_and_chunks() -> inference_tensor::Result<()> {
     const VOCAB: usize = 4097;
 
     let device = Device::new_cuda(0)?;
@@ -1792,7 +1795,7 @@ fn cuda_top1_uses_first_maximum_across_lanes_and_chunks() -> candle_core::Result
 
 #[cfg(feature = "cuda")]
 #[test]
-fn cuda_cached_top1_marks_nan_distribution() -> candle_core::Result<()> {
+fn cuda_cached_top1_marks_nan_distribution() -> inference_tensor::Result<()> {
     let device = Device::new_cuda(0)?;
     let logits = Tensor::new(&[1.0f32, f32::NAN, 3.0], &device)?;
     let mut workspace = None;
@@ -1804,7 +1807,7 @@ fn cuda_cached_top1_marks_nan_distribution() -> candle_core::Result<()> {
 
 #[cfg(feature = "cuda")]
 #[test]
-fn rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout() -> candle_core::Result<()> {
+fn rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout() -> inference_tensor::Result<()> {
     const EPS: f32 = 1e-6;
     const BF16_TOLERANCE: f32 = 0.02;
     const F32_TOLERANCE: f32 = 1e-5;

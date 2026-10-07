@@ -1,4 +1,4 @@
-use candle_core::DType;
+use inference_tensor::DType;
 
 #[cfg(feature = "cuda")]
 use super::{LoraExecution, LoraSiteHandle};
@@ -113,15 +113,15 @@ fn adapter_supported(layout: AdapterLayout<'_>, plan: CudaPlan) -> bool {
 }
 
 #[cfg(feature = "cuda")]
-use candle_core::{
+use half::{bf16, f16};
+#[cfg(feature = "cuda")]
+use inference_tensor::{
     CudaDevice, CudaStorage, Result, Shape, Storage, Tensor, WithDType,
     cuda::{
         CudaDType,
         cudarc::driver::{DevicePtrMut, DeviceRepr},
     },
 };
-#[cfg(feature = "cuda")]
-use half::{bf16, f16};
 
 #[cfg(feature = "cuda")]
 use crate::utils::slice_ptr_on_stream;
@@ -147,7 +147,7 @@ struct CudaLaunch {
     rank: i32,
     active_rows: i32,
     scale: f32,
-    stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+    stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
 }
 
 #[cfg(feature = "cuda")]
@@ -218,13 +218,13 @@ fn run_cuda<T: CudaLoraElement>(
 ) -> Result<Tensor> {
     let (input_storage, input_layout) = input.storage_and_layout();
     let Storage::Cuda(input_storage) = &*input_storage else {
-        candle_core::bail!("dynamic LoRA CUDA input storage is not CUDA");
+        inference_tensor::bail!("dynamic LoRA CUDA input storage is not CUDA");
     };
     let input_slice = input_storage.as_cuda_slice::<T>()?;
 
     let (base_storage, base_layout) = base_output.storage_and_layout();
     let Storage::Cuda(base_storage) = &*base_storage else {
-        candle_core::bail!("dynamic LoRA CUDA output storage is not CUDA");
+        inference_tensor::bail!("dynamic LoRA CUDA output storage is not CUDA");
     };
     let base_slice = base_storage.as_cuda_slice::<T>()?;
     let output_len = base_output.elem_count();
@@ -241,21 +241,21 @@ fn run_cuda<T: CudaLoraElement>(
     for adapter in adapters {
         let (a_storage, a_layout) = adapter.weights.a.storage_and_layout();
         let Storage::Cuda(a_storage) = &*a_storage else {
-            candle_core::bail!("dynamic LoRA CUDA A storage is not CUDA");
+            inference_tensor::bail!("dynamic LoRA CUDA A storage is not CUDA");
         };
         let a_slice = a_storage.as_cuda_slice::<T>()?;
         let (a_ptr, _a_guard) = slice_ptr_on_stream(a_slice, a_layout.start_offset(), &stream);
 
         let (b_storage, b_layout) = adapter.weights.b.storage_and_layout();
         let Storage::Cuda(b_storage) = &*b_storage else {
-            candle_core::bail!("dynamic LoRA CUDA B storage is not CUDA");
+            inference_tensor::bail!("dynamic LoRA CUDA B storage is not CUDA");
         };
         let b_slice = b_storage.as_cuda_slice::<T>()?;
         let (b_ptr, _b_guard) = slice_ptr_on_stream(b_slice, b_layout.start_offset(), &stream);
 
         let (rows_storage, rows_layout) = adapter.row_indices.storage_and_layout();
         let Storage::Cuda(rows_storage) = &*rows_storage else {
-            candle_core::bail!("dynamic LoRA CUDA row indices are not CUDA");
+            inference_tensor::bail!("dynamic LoRA CUDA row indices are not CUDA");
         };
         let rows_slice = rows_storage.as_cuda_slice::<u32>()?;
         let (rows_ptr, _rows_guard) =
@@ -282,7 +282,9 @@ fn run_cuda<T: CudaLoraElement>(
         };
         drop(hidden_guard);
         if status != 0 {
-            candle_core::bail!("dynamic LoRA CUDA kernel launch failed with CUDA error {status}");
+            inference_tensor::bail!(
+                "dynamic LoRA CUDA kernel launch failed with CUDA error {status}"
+            );
         }
     }
     drop(output_guard);
@@ -493,13 +495,16 @@ mod tests {
         data: &[f32],
         shape: &[usize],
         dtype: DType,
-        device: &candle_core::Device,
-    ) -> candle_core::Result<Tensor> {
+        device: &inference_tensor::Device,
+    ) -> inference_tensor::Result<Tensor> {
         Tensor::from_vec(data.to_vec(), shape.to_vec(), device)?.to_dtype(dtype)
     }
 
     #[cfg(feature = "cuda")]
-    fn check_cuda_dtype(dtype: DType, device: &candle_core::Device) -> candle_core::Result<()> {
+    fn check_cuda_dtype(
+        dtype: DType,
+        device: &inference_tensor::Device,
+    ) -> inference_tensor::Result<()> {
         use super::super::{
             LoraLayerRegistry, LoraLinearSpec, LoraSiteKey, LoraWeights,
             reference::add_delta_reference,
@@ -570,8 +575,8 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn cuda_prefill_and_decode_match_reference_for_mixed_slots() -> candle_core::Result<()> {
-        let device = candle_core::Device::cuda_if_available(0)?;
+    fn cuda_prefill_and_decode_match_reference_for_mixed_slots() -> inference_tensor::Result<()> {
+        let device = inference_tensor::Device::cuda_if_available(0)?;
         if !device.is_cuda() {
             return Ok(());
         }
@@ -581,10 +586,10 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn cuda_and_fallback_match_at_a_bf16_rounding_boundary() -> candle_core::Result<()> {
+    fn cuda_and_fallback_match_at_a_bf16_rounding_boundary() -> inference_tensor::Result<()> {
         use super::super::{LoraLayerRegistry, LoraLinearSpec, LoraSiteKey, LoraWeights};
 
-        let device = candle_core::Device::cuda_if_available(0)?;
+        let device = inference_tensor::Device::cuda_if_available(0)?;
         if !device.is_cuda() {
             return Ok(());
         }

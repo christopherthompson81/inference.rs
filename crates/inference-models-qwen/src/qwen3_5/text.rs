@@ -10,12 +10,12 @@ use std::{
     },
 };
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ActivationQuantizationScheme, ActivationScaleLayout, ColumnParallelLayer, PackedOutputLayout,
     QuantMethod, QuantizedActivation, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::{
     config::{LayerType, TextConfig},
@@ -275,10 +275,10 @@ impl FullAttention {
         let (b_sz, seq_len, _) = match input {
             AttentionInput::Dense(x) => x.dims3()?,
             AttentionInput::Quantized(activation) => {
-                let [batch, seq_len, width]: [usize; 3] = activation
-                    .source_shape()
-                    .try_into()
-                    .map_err(|_| candle_core::Error::msg("quantized QKV input must have rank 3"))?;
+                let [batch, seq_len, width]: [usize; 3] =
+                    activation.source_shape().try_into().map_err(|_| {
+                        inference_tensor::Error::msg("quantized QKV input must have rank 3")
+                    })?;
                 (batch, seq_len, width)
             }
         };
@@ -287,7 +287,9 @@ impl FullAttention {
                 if let Some(merged_qkv) = &self.merged_qkv {
                     let [q_gate, k, v]: [Tensor; 3] =
                         merged_qkv.forward(x)?.try_into().map_err(|_| {
-                            candle_core::Error::msg("packed QKV returned the wrong output count")
+                            inference_tensor::Error::msg(
+                                "packed QKV returned the wrong output count",
+                            )
                         })?;
                     (q_gate, k, v)
                 } else {
@@ -303,7 +305,7 @@ impl FullAttention {
                     .forward_quantized(activation)?
                     .try_into()
                     .map_err(|_| {
-                        candle_core::Error::msg("packed QKV returned the wrong output count")
+                        inference_tensor::Error::msg("packed QKV returned the wrong output count")
                     })?;
                 (q_gate, k, v)
             }
@@ -369,7 +371,7 @@ impl FullAttention {
                 )?,
                 None => {
                     if matches!(attention_mask, AttentionMask::None) {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "paged attention without cache metadata needs a prompt attention mask"
                         );
                     }
@@ -389,7 +391,9 @@ impl FullAttention {
             },
             None => {
                 let kv_cache = kv_cache.ok_or_else(|| {
-                    candle_core::Error::msg("full attention without paged cache needs a KV cache")
+                    inference_tensor::Error::msg(
+                        "full attention without paged cache needs a KV cache",
+                    )
                 })?;
                 let (cache_k, cache_v) = kv_cache.append(&k, &v)?;
                 Sdpa.run_attention(
@@ -647,7 +651,7 @@ impl DecoderLayer {
     ) -> Result<DecoderLayerOutput> {
         let attn = match &self.layer_impl {
             LayerImpl::FullAttention(attn) => attn,
-            _ => candle_core::bail!("Expected full attention layer"),
+            _ => inference_tensor::bail!("Expected full attention layer"),
         };
         let residual = x;
         let normalized_storage;
@@ -696,7 +700,7 @@ impl DecoderLayer {
         } = context;
         let gdn = match &self.layer_impl {
             LayerImpl::LinearAttention(gdn) => gdn,
-            _ => candle_core::bail!("Expected linear attention layer"),
+            _ => inference_tensor::bail!("Expected linear attention layer"),
         };
         let residual = x;
         let normalized_storage;
@@ -857,7 +861,7 @@ fn narrow_spec_graph_tensor(
 ) -> Result<Tensor> {
     let tensor_batch = tensor.dim(batch_dim)?;
     if tensor_batch != captured_batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "speculative graph {name} has batch {tensor_batch}, expected {captured_batch}"
         );
     }
@@ -871,7 +875,7 @@ fn narrow_spec_graph_tensor(
 fn narrow_spec_capture(capture: &mut SpecCapture, real_batch: usize) -> Result<()> {
     let captured_batch = capture.hidden.dim(0)?;
     if real_batch > captured_batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "speculative graph batch {real_batch} exceeds captured batch {captured_batch}"
         );
     }
@@ -885,7 +889,7 @@ fn narrow_spec_capture(capture: &mut SpecCapture, real_batch: usize) -> Result<(
     let position_batch_dim = match capture.positions.rank() {
         2 => 0,
         3 => 1,
-        rank => candle_core::bail!("unexpected speculative position rank {rank}"),
+        rank => inference_tensor::bail!("unexpected speculative position rank {rank}"),
     };
     capture.positions = narrow_spec_graph_tensor(
         &capture.positions,
@@ -903,7 +907,9 @@ fn narrow_spec_capture(capture: &mut SpecCapture, real_batch: usize) -> Result<(
 fn narrow_gdn_replay_stash(stash: &mut GdnReplayStash, real_batch: usize) -> Result<()> {
     let captured_batch = stash.slots.len();
     if real_batch > captured_batch {
-        candle_core::bail!("GDN replay batch {real_batch} exceeds captured batch {captured_batch}");
+        inference_tensor::bail!(
+            "GDN replay batch {real_batch} exceeds captured batch {captured_batch}"
+        );
     }
     for layer in &mut stash.layers {
         match &mut layer.rollback {
@@ -956,10 +962,10 @@ fn group_gdn_replay_batches(rows: &[(usize, usize)], slots: &[u32]) -> Result<Ve
     let mut grouped = BTreeMap::<usize, Vec<(u32, u32)>>::new();
     for &(batch_idx, keep_rows) in rows {
         let tensor_idx = u32::try_from(batch_idx).map_err(|_| {
-            candle_core::Error::msg(format!("GDN replay batch row {batch_idx} exceeds u32"))
+            inference_tensor::Error::msg(format!("GDN replay batch row {batch_idx} exceeds u32"))
         })?;
         let slot = *slots.get(batch_idx).ok_or_else(|| {
-            candle_core::Error::msg(format!("GDN replay stash has no batch row {batch_idx}"))
+            inference_tensor::Error::msg(format!("GDN replay stash has no batch row {batch_idx}"))
         })?;
         grouped
             .entry(keep_rows)
@@ -979,7 +985,7 @@ fn group_gdn_replay_batches(rows: &[(usize, usize)], slots: &[u32]) -> Result<Ve
 fn refresh_gdn_stash_slots(stash: &mut GdnReplayStash, slots: &[u32]) -> Result<()> {
     let batch_size = stash.slots.len();
     if slots.len() < batch_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GDN graph state has {batch_size} rows, but the live slot table has {}",
             slots.len()
         );
@@ -997,7 +1003,7 @@ fn terminal_gdn_transition_slots(
         .filter(|row| row.terminal)
         .map(|row| {
             slots.get(row.batch_idx).copied().ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "GDN transition stash has no terminal batch row {}",
                     row.batch_idx
                 ))
@@ -1012,7 +1018,7 @@ fn gdn_transition_keep_rows(
     max_rows: usize,
 ) -> Result<Vec<u32>> {
     if rows.len() != batch_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GDN transition commit has {} rows for a {batch_size}-row stash",
             rows.len()
         );
@@ -1020,26 +1026,26 @@ fn gdn_transition_keep_rows(
     let mut keep_rows = vec![None; batch_size];
     for row in rows {
         if row.keep_rows == 0 || row.keep_rows > max_rows {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN transition commit row {} keeps {}, expected 1..={max_rows}",
                 row.batch_idx,
                 row.keep_rows
             );
         }
         let destination = keep_rows.get_mut(row.batch_idx).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "GDN transition stash has no batch row {}",
                 row.batch_idx
             ))
         })?;
         if destination.is_some() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN transition commit contains batch row {} more than once",
                 row.batch_idx
             );
         }
         *destination = Some(u32::try_from(row.keep_rows).map_err(|_| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "GDN transition row count {} exceeds u32",
                 row.keep_rows
             ))
@@ -1050,7 +1056,7 @@ fn gdn_transition_keep_rows(
         .enumerate()
         .map(|(batch_idx, rows)| {
             rows.ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "GDN transition commit is missing batch row {batch_idx}"
                 ))
             })
@@ -1106,7 +1112,7 @@ impl crate::speculative::SpeculativeGraphState for SpecGraphState {
         let mut tensors = tensors.into_iter();
         let mut next = || {
             tensors.next().ok_or_else(|| {
-                candle_core::Error::msg("speculative graph state tensor list is short")
+                inference_tensor::Error::msg("speculative graph state tensor list is short")
             })
         };
         let mut state = self.clone();
@@ -1417,7 +1423,7 @@ impl Qwen3_5TextModel {
 
         let pipeline_cache = Arc::new(Mutex::new(
             HybridCache::new(hybrid_cache_config, vb_m.dtype(), &layer_devices).map_err(|e| {
-                candle_core::Error::Msg(format!("Failed to create hybrid cache: {}", e))
+                inference_tensor::Error::Msg(format!("Failed to create hybrid cache: {}", e))
             })?,
         ));
 
@@ -1488,7 +1494,7 @@ impl Qwen3_5TextModel {
             let (LayerImpl::LinearAttention(gdn), Some(HybridLayerCache::Recurrent(pool))) =
                 (&self.layers[layer_idx].layer_impl, cache.get(layer_idx))
             else {
-                candle_core::bail!("Qwen3.5 GDN layer has no recurrent state pool");
+                inference_tensor::bail!("Qwen3.5 GDN layer has no recurrent state pool");
             };
             if !gdn.speculative_transitions_supported(pool, self.dtype) {
                 return Ok(false);
@@ -1498,7 +1504,7 @@ impl Qwen3_5TextModel {
                 .replace(layer_spec)
                 .is_some_and(|spec| spec != layer_spec)
             {
-                candle_core::bail!("Qwen3.5 GDN transition dimensions diverge across layers");
+                inference_tensor::bail!("Qwen3.5 GDN transition dimensions diverge across layers");
             }
         }
         let Some(spec) = spec else {
@@ -1520,7 +1526,7 @@ impl Qwen3_5TextModel {
             let (LayerImpl::LinearAttention(gdn), Some(HybridLayerCache::Recurrent(pool))) =
                 (&self.layers[layer_idx].layer_impl, cache.get(layer_idx))
             else {
-                candle_core::bail!("Qwen3.5 GDN layer has no recurrent state pool");
+                inference_tensor::bail!("Qwen3.5 GDN layer has no recurrent state pool");
             };
             if !gdn.deferred_decode_supported(pool, self.dtype) {
                 return Ok(None);
@@ -1530,7 +1536,9 @@ impl Qwen3_5TextModel {
                 .replace(layer_spec)
                 .is_some_and(|spec| spec != layer_spec)
             {
-                candle_core::bail!("Qwen3.5 GDN deferred-state dimensions diverge across layers");
+                inference_tensor::bail!(
+                    "Qwen3.5 GDN deferred-state dimensions diverge across layers"
+                );
             }
         }
         Ok(spec)
@@ -1635,7 +1643,7 @@ impl Qwen3_5TextModel {
                 cache
                     .state_indices_for_device(&group.device)
                     .ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "GDN transition batch has no device-local state slots",
                         )
                     })?
@@ -1720,7 +1728,7 @@ impl Qwen3_5TextModel {
                 None => cache
                     .state_indices_for_device(pool.device())
                     .ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "GDN deferred-state flush has no device-local state slots",
                         )
                     })?,
@@ -1744,10 +1752,10 @@ impl Qwen3_5TextModel {
         if cache.uses_recurrent_transition_log()
             && !self.apply_pending_recurrent_transitions_for_current_batch(&cache)?
         {
-            candle_core::bail!("Qwen3.5 pending recurrent transitions cannot be applied");
+            inference_tensor::bail!("Qwen3.5 pending recurrent transitions cannot be applied");
         }
         if cache.uses_gdn_deferred_state() && !self.flush_deferred_recurrent_state(&cache, None)? {
-            candle_core::bail!("Qwen3.5 deferred recurrent state cannot be materialized");
+            inference_tensor::bail!("Qwen3.5 deferred recurrent state cannot be materialized");
         }
         Ok(())
     }
@@ -1762,13 +1770,13 @@ impl Qwen3_5TextModel {
             && !self.apply_pending_recurrent_transitions_with_cache(&cache, &slots)?
             && !slots.is_empty()
         {
-            candle_core::bail!("Qwen3.5 pending recurrent transitions cannot be applied");
+            inference_tensor::bail!("Qwen3.5 pending recurrent transitions cannot be applied");
         }
         if cache.uses_gdn_deferred_state()
             && !self.flush_deferred_recurrent_state(&cache, Some(&slots))?
             && !slots.is_empty()
         {
-            candle_core::bail!("Qwen3.5 deferred recurrent state cannot be materialized");
+            inference_tensor::bail!("Qwen3.5 deferred recurrent state cannot be materialized");
         }
         Ok(())
     }
@@ -1786,7 +1794,7 @@ impl Qwen3_5TextModel {
             .expect("gdn stash poisoned")
             .clone()
         else {
-            candle_core::bail!("no GDN transition stash for speculative commit");
+            inference_tensor::bail!("no GDN transition stash for speculative commit");
         };
         if stash.layers.is_empty()
             || stash
@@ -1807,7 +1815,7 @@ impl Qwen3_5TextModel {
             .collect::<Vec<_>>();
         live_slots.sort_unstable();
         if live_slots.windows(2).any(|slots| slots[0] == slots[1]) {
-            candle_core::bail!("GDN transition batch contains duplicate recurrent slots");
+            inference_tensor::bail!("GDN transition batch contains duplicate recurrent slots");
         }
 
         struct PublishGroup {
@@ -1864,7 +1872,7 @@ impl Qwen3_5TextModel {
                 .iter()
                 .any(|slot| *slot as usize >= group.capacity)
             {
-                candle_core::bail!("GDN transition slot exceeds recurrent capacity");
+                inference_tensor::bail!("GDN transition slot exceeds recurrent capacity");
             }
             let keep_rows = Tensor::from_vec(
                 keep_rows_host.clone(),
@@ -1904,7 +1912,7 @@ impl Qwen3_5TextModel {
         if !terminal_slots.is_empty()
             && !self.apply_pending_recurrent_transitions_with_cache(&cache, &terminal_slots)?
         {
-            candle_core::bail!("Qwen3.5 terminal recurrent transitions cannot be applied");
+            inference_tensor::bail!("Qwen3.5 terminal recurrent transitions cannot be applied");
         }
         Ok(true)
     }
@@ -1919,7 +1927,7 @@ impl Qwen3_5TextModel {
             .expect("gdn stash poisoned")
             .clone()
         else {
-            candle_core::bail!("no GDN replay stash for speculative rollback");
+            inference_tensor::bail!("no GDN replay stash for speculative rollback");
         };
         let transition_layers = stash
             .layers
@@ -1927,10 +1935,12 @@ impl Qwen3_5TextModel {
             .filter(|layer| matches!(layer.rollback, GdnLayerRollback::Transition(_)))
             .count();
         if transition_layers != 0 && transition_layers != stash.layers.len() {
-            candle_core::bail!("GDN speculative stash mixes replay and transition layers");
+            inference_tensor::bail!("GDN speculative stash mixes replay and transition layers");
         }
         if transition_layers == stash.layers.len() && !stash.layers.is_empty() {
-            candle_core::bail!("GDN direct transitions must be published before replay fallback");
+            inference_tensor::bail!(
+                "GDN direct transitions must be published before replay fallback"
+            );
         }
 
         let devices = stash.layers.iter().fold(Vec::new(), |mut devices, layer| {
@@ -1982,10 +1992,10 @@ impl Qwen3_5TextModel {
             let mut keep_rows_host = vec![0u32; stash.slots.len()];
             for &(batch_idx, rows) in rows {
                 let keep_rows = u32::try_from(rows).map_err(|_| {
-                    candle_core::Error::msg(format!("GDN commit row count {rows} exceeds u32"))
+                    inference_tensor::Error::msg(format!("GDN commit row count {rows} exceeds u32"))
                 })?;
                 *keep_rows_host.get_mut(batch_idx).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "GDN replay stash has no batch row {batch_idx}"
                     ))
                 })? = keep_rows;
@@ -2016,18 +2026,18 @@ impl Qwen3_5TextModel {
                 let gdn = match &self.layers[layer.layer_idx].layer_impl {
                     LayerImpl::LinearAttention(gdn) => gdn,
                     LayerImpl::FullAttention(_) => {
-                        candle_core::bail!("GDN replay stash points at a full-attention layer")
+                        inference_tensor::bail!("GDN replay stash points at a full-attention layer")
                     }
                 };
                 let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(layer.layer_idx)
                 else {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "GDN replay stash layer {} has no recurrent state pool",
                         layer.layer_idx
                     );
                 };
                 if pool.state_layout() != layer.state_layout {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "GDN replay state layout mismatch: stash {:?}, pool {:?}",
                         layer.state_layout,
                         pool.state_layout()
@@ -2046,7 +2056,7 @@ impl Qwen3_5TextModel {
                     &indices.slots,
                     pool,
                 )? {
-                    candle_core::bail!("CUDA GDN speculative state commit was unavailable");
+                    inference_tensor::bail!("CUDA GDN speculative state commit was unavailable");
                 }
             }
             return Ok(());
@@ -2089,18 +2099,18 @@ impl Qwen3_5TextModel {
             let gdn = match &self.layers[layer.layer_idx].layer_impl {
                 LayerImpl::LinearAttention(gdn) => gdn,
                 LayerImpl::FullAttention(_) => {
-                    candle_core::bail!("GDN replay stash points at a full-attention layer")
+                    inference_tensor::bail!("GDN replay stash points at a full-attention layer")
                 }
             };
             let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(layer.layer_idx)
             else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GDN replay stash layer {} has no recurrent state pool",
                     layer.layer_idx
                 );
             };
             if pool.state_layout() != layer.state_layout {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GDN replay state layout mismatch: stash {:?}, pool {:?}",
                     layer.state_layout,
                     pool.state_layout()
@@ -2311,7 +2321,7 @@ impl Qwen3_5TextModel {
             .iter()
             .any(|lt| matches!(lt, LayerType::LinearAttention));
         if has_linear_attention && recurrent_metadata.is_none() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Hybrid recurrent metadata is required for linear-attention layers."
             );
         }
@@ -2335,7 +2345,7 @@ impl Qwen3_5TextModel {
                         .compute_text_cos_sin(position_ids, xs.dtype())?,
                     3 => attn.rotary_emb.compute_cos_sin(position_ids, xs.dtype())?,
                     rank => {
-                        candle_core::bail!("unexpected Qwen3.5 position rank {rank}")
+                        inference_tensor::bail!("unexpected Qwen3.5 position rank {rank}")
                     }
                 },
                 _ => unreachable!(),
@@ -2360,7 +2370,7 @@ impl Qwen3_5TextModel {
             if !self.apply_pending_recurrent_transitions_for_current_batch(&hybrid_cache)?
                 && has_slots
             {
-                candle_core::bail!("Qwen3.5 pending recurrent transitions cannot be applied");
+                inference_tensor::bail!("Qwen3.5 pending recurrent transitions cannot be applied");
             }
         }
         let deferred_gdn = query_len == 1
@@ -2375,7 +2385,7 @@ impl Qwen3_5TextModel {
                 .state_indices()
                 .is_some_and(|slots| slots.elem_count() != 0);
             if has_slots && !self.flush_deferred_recurrent_state(&hybrid_cache, None)? {
-                candle_core::bail!("Qwen3.5 deferred recurrent state cannot be materialized");
+                inference_tensor::bail!("Qwen3.5 deferred recurrent state cannot be materialized");
             }
         }
         let checkpoint_gdn = speculative_gdn
@@ -2425,14 +2435,16 @@ impl Qwen3_5TextModel {
                 .filter(|&(_, &v)| v > 0.0)
                 .map(|(i, _)| {
                     u32::try_from(i).map_err(|_| {
-                        candle_core::Error::msg(format!("visual position index {i} exceeds u32"))
+                        inference_tensor::Error::msg(format!(
+                            "visual position index {i} exceeds u32"
+                        ))
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
             if indices.is_empty() {
                 None
             } else {
-                let hidden = xs.dim(candle_core::D::Minus1)?;
+                let hidden = xs.dim(inference_tensor::D::Minus1)?;
                 let n = indices.len();
                 let idx = Tensor::from_vec(indices, (n,), &self.device)?;
                 let idx_expanded = idx.unsqueeze(1)?.repeat((1, hidden))?;
@@ -2459,7 +2471,7 @@ impl Qwen3_5TextModel {
                     LayerType::FullAttention => {
                         let Some(HybridLayerCache::Attention(kv_cache)) = hybrid_cache.get_mut(i)
                         else {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Hybrid cache layer {i} is not attention for a full-attention layer."
                             );
                         };
@@ -2479,13 +2491,13 @@ impl Qwen3_5TextModel {
                         );
                         let indices =
                             hybrid_cache.state_indices_for_layer(i)?.ok_or_else(|| {
-                                candle_core::Error::msg(format!(
+                                inference_tensor::Error::msg(format!(
                                     "Hybrid cache layer {i} is missing recurrent state indices"
                                 ))
                             })?;
                         let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(i)
                         else {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Hybrid cache layer {i} is not recurrent for a linear-attention layer."
                             );
                         };
@@ -2493,7 +2505,7 @@ impl Qwen3_5TextModel {
                             .then_some(())
                             .as_ref()
                             .map(|_| {
-                                candle_core::Result::Ok((
+                                inference_tensor::Result::Ok((
                                     pool.gather_conv_state(&indices)?,
                                     pool.gather_recurrent_state(&indices)?,
                                 ))
@@ -2527,7 +2539,7 @@ impl Qwen3_5TextModel {
                         })?;
                         if let Some(stash) = gdn_stash.as_mut() {
                             let captured = projected_stash.ok_or_else(|| {
-                                candle_core::Error::msg("GDN forward returned no stash")
+                                inference_tensor::Error::msg("GDN forward returned no stash")
                             })?;
                             let rollback = match (captured, stash_states) {
                                 (
@@ -2541,7 +2553,7 @@ impl Qwen3_5TextModel {
                                 (GdnSpeculativeStash::Transition(transition), None) => {
                                     GdnLayerRollback::Transition(transition)
                                 }
-                                _ => candle_core::bail!(
+                                _ => inference_tensor::bail!(
                                     "GDN speculative capture mode does not match cache storage"
                                 ),
                             };
@@ -2613,7 +2625,7 @@ impl Qwen3_5TextModel {
                     let positions = position_ids.to_device(&self.device)?;
                     let positions = match positions.rank() {
                         2 | 3 => positions,
-                        rank => candle_core::bail!("unexpected Qwen3.5 position rank {rank}"),
+                        rank => inference_tensor::bail!("unexpected Qwen3.5 position rank {rank}"),
                     };
                     Some(SpecCapture {
                         hidden: xs.clone(),
@@ -2637,7 +2649,7 @@ impl Qwen3_5TextModel {
                         let positions = positions.permute((1, 2, 0))?.contiguous()?;
                         ctx.logits(&positions)?.permute((2, 0, 1))?.contiguous()?
                     }
-                    rank => candle_core::bail!("unexpected Qwen3.5 position rank {rank}"),
+                    rank => inference_tensor::bail!("unexpected Qwen3.5 position rank {rank}"),
                 };
                 let taps = taps_all
                     .iter()
@@ -2672,7 +2684,7 @@ impl Qwen3_5TextModel {
         let hidden_flat = hidden_states.reshape((total, hidden))?;
 
         if idx.dim(0)? != visual_embeds.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Mismatch between DeepStack visual embeds ({}) and mask positions ({})",
                 visual_embeds.dim(0)?,
                 idx.dim(0)?
@@ -2763,7 +2775,7 @@ impl NormalModel for Qwen3_5TextModel {
         let (batch_size, seq_len) = input_ids.dims2()?;
         let text_positions = ctx
             .text_positions(input_ids.device(), seq_len)?
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 is missing text positions"))?
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 is missing text positions"))?
             .clone();
         let position_ids = text_positions.reshape((batch_size, seq_len))?;
         self.forward_embeds(
@@ -2790,7 +2802,7 @@ impl NormalModel for Qwen3_5TextModel {
         _flash_params: &FlashParams,
         _flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
-        candle_core::bail!("Qwen3.5 does not support X-LoRA forward")
+        inference_tensor::bail!("Qwen3.5 does not support X-LoRA forward")
     }
 
     fn is_xlora(&self) -> bool {
@@ -2831,9 +2843,9 @@ impl AnyMoeBaseModelMixin for Qwen3_5TextModel {}
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Tensor};
     #[cfg(feature = "cuda")]
     use inference_nn::skip_without_cuda;
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::{
         GdnLayerRollback, GdnLayerStash, GdnReplayBatch, GdnReplayStash, SpecCapture,
@@ -3011,7 +3023,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn recurrent_checkpoint_device_gate_rejects_mixed_placement() -> candle_core::Result<()> {
+    fn recurrent_checkpoint_device_gate_rejects_mixed_placement() -> inference_tensor::Result<()> {
         skip_without_cuda!();
         let cuda = Device::new_cuda(0)?;
         assert!(recurrent_checkpoint_devices_supported(

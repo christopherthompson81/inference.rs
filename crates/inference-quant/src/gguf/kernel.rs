@@ -1,6 +1,6 @@
 //! The GGUF weight formats our matmul kernels read, including ones Candle has no `GgmlDType` for.
 
-use candle_core::quantized::GgmlDType;
+use inference_tensor::quantized::GgmlDType;
 
 use super::archive::GgufDType;
 
@@ -186,12 +186,12 @@ impl GgufType {
     }
 
     /// The (elements, bytes) unit rows of `cols` elements are cut into: a block, or a whole row-scaled row.
-    pub fn row_unit(self, cols: usize) -> candle_core::Result<(usize, usize)> {
+    pub fn row_unit(self, cols: usize) -> inference_tensor::Result<(usize, usize)> {
         if !self.has_row_scale() {
             return Ok((self.block_size(), self.type_size()));
         }
         let bytes = self.row_bytes(cols).ok_or_else(|| {
-            candle_core::Error::Msg(format!("{self:?} rows cannot hold {cols} elements"))
+            inference_tensor::Error::Msg(format!("{self:?} rows cannot hold {cols} elements"))
         })?;
         Ok((cols, bytes))
     }
@@ -207,37 +207,37 @@ impl GgufType {
 #[cfg(feature = "cuda")]
 pub trait KernelWeight {
     fn gguf_type(&self) -> GgufType;
-    fn kernel_shape(&self) -> &candle_core::Shape;
-    fn kernel_device(&self) -> candle_core::Device;
+    fn kernel_shape(&self) -> &inference_tensor::Shape;
+    fn kernel_device(&self) -> inference_tensor::Device;
     fn kernel_ptr<'a>(
         &'a self,
-        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
-    ) -> candle_core::Result<(
+        stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
+    ) -> inference_tensor::Result<(
         *const u8,
-        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+        inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
     )>;
 }
 
 #[cfg(feature = "cuda")]
-impl KernelWeight for candle_core::quantized::QTensor {
+impl KernelWeight for inference_tensor::quantized::QTensor {
     fn gguf_type(&self) -> GgufType {
         self.dtype().into()
     }
 
-    fn kernel_shape(&self) -> &candle_core::Shape {
+    fn kernel_shape(&self) -> &inference_tensor::Shape {
         self.shape()
     }
 
-    fn kernel_device(&self) -> candle_core::Device {
+    fn kernel_device(&self) -> inference_tensor::Device {
         self.device()
     }
 
     fn kernel_ptr<'a>(
         &'a self,
-        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
-    ) -> candle_core::Result<(
+        stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
+    ) -> inference_tensor::Result<(
         *const u8,
-        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+        inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
     )> {
         self.device_ptr_with_guard(stream)
     }

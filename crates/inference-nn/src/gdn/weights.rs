@@ -1,7 +1,7 @@
-use candle_core::{DType, Device, Result, Tensor};
 use inference_quant::{
     Comm, LoraLinearSpec, QuantMethod, ReplicatedLayer, RowParallelLayer, Shard, ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Result, Tensor};
 use std::sync::Arc;
 
 use crate::device_map::DeviceMapper;
@@ -27,9 +27,9 @@ fn tiled_v_runtime_to_canonical(dims: &GdnDims, head_dim: usize) -> Result<Vec<u
     let expected_heads = dims
         .num_k_heads
         .checked_mul(dims.v_per_group)
-        .ok_or_else(|| candle_core::Error::msg("GDN value head count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("GDN value head count overflow"))?;
     if dims.num_k_heads == 0 || dims.num_v_heads != expected_heads {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GDN has incompatible tiled head counts: {} key heads, {} value heads, {} values per key",
             dims.num_k_heads,
             dims.num_v_heads,
@@ -39,7 +39,7 @@ fn tiled_v_runtime_to_canonical(dims: &GdnDims, head_dim: usize) -> Result<Vec<u
     let feature_count = dims
         .num_v_heads
         .checked_mul(head_dim)
-        .ok_or_else(|| candle_core::Error::msg("GDN value feature count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("GDN value feature count overflow"))?;
     let mut runtime_to_canonical = Vec::with_capacity(feature_count);
     for runtime_head in 0..dims.num_v_heads {
         let key_head = runtime_head % dims.num_k_heads;
@@ -47,10 +47,10 @@ fn tiled_v_runtime_to_canonical(dims: &GdnDims, head_dim: usize) -> Result<Vec<u
         let canonical_head = key_head
             .checked_mul(dims.v_per_group)
             .and_then(|head| head.checked_add(within_group))
-            .ok_or_else(|| candle_core::Error::msg("GDN value head index overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("GDN value head index overflow"))?;
         let canonical_start = canonical_head
             .checked_mul(head_dim)
-            .ok_or_else(|| candle_core::Error::msg("GDN value feature index overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("GDN value feature index overflow"))?;
         for feature in 0..head_dim {
             runtime_to_canonical.push(canonical_start + feature);
         }
@@ -67,18 +67,18 @@ fn split_gdn_lora_maps(dims: &GdnDims) -> Result<Option<SplitGdnLoraMaps>> {
     let qk_dim = dims
         .key_dim
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::msg("GDN QK feature count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("GDN QK feature count overflow"))?;
     let mut qkv = (0..qk_dim).collect::<Vec<_>>();
     qkv.reserve(value.len());
     for &canonical in value.iter() {
         qkv.push(
             qk_dim
                 .checked_add(canonical)
-                .ok_or_else(|| candle_core::Error::msg("GDN QKV feature index overflow"))?,
+                .ok_or_else(|| inference_tensor::Error::msg("GDN QKV feature index overflow"))?,
         );
     }
     if qkv.len() != dims.conv_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GDN tiled QKV map has length {}, expected {}",
             qkv.len(),
             dims.conv_dim
@@ -96,7 +96,7 @@ fn validate_projection_layout(
     input_projection_kind: GdnInputProjectionKind,
 ) -> Result<()> {
     if layout == GdnVHeadLayout::Tiled && input_projection_kind != GdnInputProjectionKind::Split {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "tiled GDN value-head layout requires split QKV/Z/B/A projections, got {input_projection_kind:?}"
         );
     }

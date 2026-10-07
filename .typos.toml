@@ -3,6 +3,10 @@ extend-exclude = [
     ".git/",
     "calibration_data/",
     "**/third_party/",
+    # adopted from candle; their spelling is paid down separately
+    "crates/inference-tensor/",
+    "crates/inference-tensor-kernels/",
+    "crates/inference-flash-attn-v3/",
     # llama.cpp sources vendored unchanged (see crates/inference-fattn/third_party/README.md)
     "crates/inference-fattn/kernels/cuda/ggml/",
     "crates/inference-fattn/kernels/cuda/instances/",

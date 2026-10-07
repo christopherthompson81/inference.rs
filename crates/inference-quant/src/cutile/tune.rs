@@ -8,7 +8,6 @@
 //! come from cuTile; this module adds the buckets, the coordinate-descent searcher, a correctness
 //! gate against the policy config, and the table kernels read at launch.
 
-use candle_core::{CudaDevice, DType, Result, Tensor};
 use cutile::bench::BenchOptions;
 use cutile::cuda_core::Stream;
 use cutile::error::Error as CutileError;
@@ -16,6 +15,7 @@ use cutile::tune::{
     Autotuner, Config, Objective, ParamValue, Record, RecordEntry, Searcher, Trial, TrialState,
     Workspace, space_hash,
 };
+use inference_tensor::{CudaDevice, DType, Result, Tensor};
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
 use std::path::PathBuf;
@@ -598,11 +598,11 @@ pub(super) fn bench_ms(dev: &CudaDevice, prepared: Prepared) -> Result<f64> {
     let stream = super::context::stream(dev);
     let mut run = burst(prepared.run);
     let measurement = cutile::bench::do_bench(&stream, &bench_options(), |s| run(s))
-        .map_err(|e| candle_core::Error::Msg(format!("cutile bench: {e}")))?;
+        .map_err(|e| inference_tensor::Error::Msg(format!("cutile bench: {e}")))?;
     Ok(f64::from(measurement.median_ms()) / LAUNCHES_PER_REP as f64)
 }
 
-pub(super) fn cutile_error(err: candle_core::Error) -> CutileError {
+pub(super) fn cutile_error(err: inference_tensor::Error) -> CutileError {
     cutile::error::tensor_error(&err.to_string())
 }
 
@@ -702,7 +702,7 @@ fn arch(dev: &CudaDevice) -> String {
 
 /// GPU name and SM count as a file-name-safe slug; records are per device model, not just per arch.
 fn device_slug(dev: &CudaDevice) -> String {
-    use candle_core::cuda::cudarc::driver::result;
+    use inference_tensor::cuda::cudarc::driver::result;
     let cu_device = dev.cuda_stream().context().cu_device();
     let name = result::device::get_name(cu_device).unwrap_or_else(|_| "unknown-gpu".to_string());
     let sms = dev.sm_count();
@@ -975,7 +975,7 @@ mod tests {
 
     #[test]
     fn gate_accepts_reordered_sums_and_rejects_garbage() {
-        let dev = candle_core::Device::Cpu;
+        let dev = inference_tensor::Device::Cpu;
         let reference = Tensor::new(&[1.0f32, -2.0, 4.0], &dev).unwrap();
         let close = Tensor::new(&[1.01f32, -2.0, 4.02], &dev).unwrap();
         let wrong = Tensor::new(&[1.0f32, -2.0, 5.0], &dev).unwrap();

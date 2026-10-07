@@ -3,7 +3,6 @@
 use std::{any::Any, ops::Range, sync::Arc};
 
 use anyhow::Result;
-use candle_core::Device;
 use image::DynamicImage;
 use inference_nn::media_inputs::{
     media::MultimodalData,
@@ -14,6 +13,7 @@ use inference_nn::media_inputs::{
     video::VideoInput,
 };
 use inference_nn::model::BlockDenoisingProgressEmitter;
+use inference_tensor::Device;
 use tokenizers::Tokenizer;
 
 use crate::{

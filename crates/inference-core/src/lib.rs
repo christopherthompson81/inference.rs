@@ -10,7 +10,6 @@
     )),
     allow(dead_code, unused_imports, unused_macros)
 )]
-use candle_core::Device;
 pub use engine::{
     AgentRunner, DEFAULT_MAX_TOOL_ROUNDS, ENGINE_INSTRUCTIONS, Engine, EngineInstruction,
     IntervalLogger, SearchEmbeddingModel, SpeculativeStats, TERMINATE_ALL_NEXT_STEP, agent,
@@ -19,6 +18,7 @@ pub use engine::{
 };
 use hf_hub::Cache;
 use inference_nn::matformer;
+use inference_tensor::Device;
 pub use lora::Ordering;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
@@ -43,8 +43,8 @@ use tracing::{debug, info, warn};
 fn build_engine_runtime() -> Runtime {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .worker_threads(candle_core::utils::get_num_threads())
-        .on_thread_start(candle_core::utils::set_thread_affinity)
+        .worker_threads(inference_tensor::utils::get_num_threads())
+        .on_thread_start(inference_tensor::utils::set_thread_affinity)
         .build()
         .unwrap()
 }
@@ -71,7 +71,7 @@ macro_rules! skip_without_cuda {
         let _cuda_test_guard = crate::CUDA_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if candle_core::Device::new_cuda(0).is_err() {
+        if inference_tensor::Device::new_cuda(0).is_err() {
             eprintln!("SKIP {}: no CUDA device", module_path!());
             return Ok(());
         }

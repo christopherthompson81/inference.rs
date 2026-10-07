@@ -1,6 +1,6 @@
 use super::*;
 use crate::gguf::normal_registry::RopePairing;
-use candle_core::{DType, Device, Tensor};
+use inference_tensor::{DType, Device, Tensor};
 use std::collections::HashMap;
 use std::sync::Arc;
 

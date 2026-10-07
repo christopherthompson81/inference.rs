@@ -3,8 +3,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{DType, Device};
 use inference_quant::{IsqType, QuantizedWeightSource};
+use inference_tensor::{DType, Device};
 use tracing::info;
 
 use crate::{

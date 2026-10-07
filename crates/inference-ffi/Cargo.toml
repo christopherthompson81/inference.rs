@@ -19,7 +19,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 anyhow.workspace = true
-candle-core.workspace = true
+inference-tensor.workspace = true
 image.workspace = true
 inference-api = { workspace = true }
 inference-layout = { path = "../inference-layout" }
@@ -27,7 +27,6 @@ serde_json.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
-candle-nn.workspace = true
 indicatif.workspace = true
 inference-models-other.workspace = true
 inference-nn.workspace = true
@@ -45,10 +44,10 @@ models-llama = ["inference-api/models-llama"]
 models-other = ["inference-api/models-other"]
 models-phi = ["inference-api/models-phi"]
 models-qwen = ["inference-api/models-qwen"]
-cuda = ["candle-core/cuda", "inference-api/cuda", "inference-layout/cuda"]
-metal = ["candle-core/metal", "inference-api/metal", "inference-layout/metal"]
+cuda = ["inference-tensor/cuda", "inference-api/cuda", "inference-layout/cuda"]
+metal = ["inference-tensor/metal", "inference-api/metal", "inference-layout/metal"]
 cutile = ["cuda", "inference-api/cutile"]
-cudnn = ["candle-core/cudnn", "inference-api/cudnn"]
+cudnn = ["inference-tensor/cudnn", "inference-api/cudnn"]
 flash-attn-v3 = ["cuda", "inference-api/flash-attn-v3"]
 accelerate = ["inference-api/accelerate"]
 mkl = ["inference-api/mkl"]

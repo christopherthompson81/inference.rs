@@ -3,9 +3,9 @@ use crate::cuda::ffi::{
     concat_and_cache_mla as ffi_concat_and_cache_mla,
     flashinfer_mla_decode as ffi_flashinfer_mla_decode, gather_mla_cache as ffi_gather_mla_cache,
 };
-use candle_core::backend::BackendStorage;
-use candle_core::cuda_backend::CudaStorageSlice;
-use candle_core::{DType, Result, Storage, Tensor};
+use inference_tensor::backend::BackendStorage;
+use inference_tensor::cuda_backend::CudaStorageSlice;
+use inference_tensor::{DType, Result, Storage, Tensor};
 
 pub fn concat_and_cache_mla(
     ckv: &Tensor,
@@ -16,14 +16,14 @@ pub fn concat_and_cache_mla(
 ) -> Result<()> {
     let dtype = ckv.dtype();
     if k_pe.dtype() != dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "concat_and_cache_mla requires matching dtypes for ckv and k_pe, got {:?} and {:?}",
             dtype,
             k_pe.dtype()
         );
     }
     if ckv_cache.dtype() != dtype || kpe_cache.dtype() != dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "concat_and_cache_mla requires matching cache dtype, got {:?} and {:?}",
             ckv_cache.dtype(),
             kpe_cache.dtype()
@@ -38,54 +38,56 @@ pub fn concat_and_cache_mla(
 
     let ckv_s = match &*ckv_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("ckv must be a cuda tensor"),
+        _ => inference_tensor::bail!("ckv must be a cuda tensor"),
     };
     let kpe_s = match &*kpe_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("k_pe must be a cuda tensor"),
+        _ => inference_tensor::bail!("k_pe must be a cuda tensor"),
     };
     let ckv_cache_s = match &*ckv_cache_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("ckv_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("ckv_cache must be a cuda tensor"),
     };
     let kpe_cache_s = match &*kpe_cache_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("kpe_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("kpe_cache must be a cuda tensor"),
     };
     let slot_s = match &*slot_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("slot_mapping must be a cuda tensor"),
+        _ => inference_tensor::bail!("slot_mapping must be a cuda tensor"),
     };
 
     let (num_tokens, kv_lora_rank) = ckv_l.shape().dims2()?;
     let (num_tokens_kpe, kpe_head_dim) = kpe_l.shape().dims2()?;
     if num_tokens != num_tokens_kpe {
-        candle_core::bail!("ckv and k_pe batch mismatch: {num_tokens} vs {num_tokens_kpe}");
+        inference_tensor::bail!("ckv and k_pe batch mismatch: {num_tokens} vs {num_tokens_kpe}");
     }
 
     let (num_blocks, block_size, cache_kv_lora_rank) = ckv_cache_l.shape().dims3()?;
     let (num_blocks_kpe, block_size_kpe, cache_kpe_head_dim) = kpe_cache_l.shape().dims3()?;
     if num_blocks != num_blocks_kpe || block_size != block_size_kpe {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "ckv_cache and kpe_cache block shape mismatch: {:?} vs {:?}",
             ckv_cache_l.shape(),
             kpe_cache_l.shape()
         );
     }
     if cache_kv_lora_rank != kv_lora_rank {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "ckv_cache last dim mismatch: expected {kv_lora_rank}, got {cache_kv_lora_rank}"
         );
     }
     if cache_kpe_head_dim != kpe_head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "kpe_cache last dim mismatch: expected {kpe_head_dim}, got {cache_kpe_head_dim}"
         );
     }
 
     let slot_len = slot_l.shape().dims1()?;
     if slot_len != num_tokens {
-        candle_core::bail!("slot_mapping length mismatch: expected {num_tokens}, got {slot_len}");
+        inference_tensor::bail!(
+            "slot_mapping length mismatch: expected {num_tokens}, got {slot_len}"
+        );
     }
 
     let dtype_code = match dtype {
@@ -93,7 +95,9 @@ pub fn concat_and_cache_mla(
         DType::BF16 => 1,
         DType::F32 => 2,
         other => {
-            candle_core::bail!("concat_and_cache_mla only supports f16, bf16, f32 (got {other:?})")
+            inference_tensor::bail!(
+                "concat_and_cache_mla only supports f16, bf16, f32 (got {other:?})"
+            )
         }
     };
 
@@ -196,7 +200,7 @@ pub fn concat_and_cache_mla(
             )
         }
         _ => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "concat_and_cache_mla expects matching dtype for ckv/k_pe/caches and i64 slot_mapping"
             )
         }
@@ -240,14 +244,14 @@ pub fn flashinfer_mla_decode(
 ) -> Result<Tensor> {
     let dtype = q_nope.dtype();
     if q_pe.dtype() != dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "flashinfer_mla_decode expects matching q_nope/q_pe dtype, got {:?} and {:?}",
             dtype,
             q_pe.dtype()
         );
     }
     if ckv_cache.dtype() != dtype || kpe_cache.dtype() != dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "flashinfer_mla_decode expects matching cache dtype, got {:?} and {:?}",
             ckv_cache.dtype(),
             kpe_cache.dtype()
@@ -257,10 +261,12 @@ pub fn flashinfer_mla_decode(
     let (batch_size, num_heads, head_dim_ckv) = q_nope.dims3()?;
     let (batch_size_pe, num_heads_pe, head_dim_kpe) = q_pe.dims3()?;
     if batch_size != batch_size_pe || num_heads != num_heads_pe {
-        candle_core::bail!("flashinfer_mla_decode expects matching q_nope/q_pe batch/head dims");
+        inference_tensor::bail!(
+            "flashinfer_mla_decode expects matching q_nope/q_pe batch/head dims"
+        );
     }
     if head_dim_ckv != 512 || head_dim_kpe != 64 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "flashinfer_mla_decode is compiled for head dims 512/64, got {head_dim_ckv}/{head_dim_kpe}"
         );
     }
@@ -268,27 +274,27 @@ pub fn flashinfer_mla_decode(
     let (num_blocks, block_size, cache_head_dim_ckv) = ckv_cache.dims3()?;
     let (num_blocks_kpe, block_size_kpe, cache_head_dim_kpe) = kpe_cache.dims3()?;
     if num_blocks != num_blocks_kpe || block_size != block_size_kpe {
-        candle_core::bail!("ckv_cache and kpe_cache block shape mismatch");
+        inference_tensor::bail!("ckv_cache and kpe_cache block shape mismatch");
     }
     if cache_head_dim_ckv != head_dim_ckv {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "ckv_cache head dim mismatch: expected {head_dim_ckv}, got {cache_head_dim_ckv}"
         );
     }
     if cache_head_dim_kpe != head_dim_kpe {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "kpe_cache head dim mismatch: expected {head_dim_kpe}, got {cache_head_dim_kpe}"
         );
     }
     if paged_kv_indptr.dims1()? != batch_size + 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "paged_kv_indptr length mismatch: expected {}, got {}",
             batch_size + 1,
             paged_kv_indptr.dims1()?
         );
     }
     if paged_kv_last_page_len.dims1()? != batch_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "paged_kv_last_page_len length mismatch: expected {}, got {}",
             batch_size,
             paged_kv_last_page_len.dims1()?
@@ -299,7 +305,7 @@ pub fn flashinfer_mla_decode(
         || o_indptr.dims1()? != batch_size + 1
         || kv_chunk_size.dims1()? != 1
     {
-        candle_core::bail!("flashinfer_mla_decode metadata tensor shapes are invalid");
+        inference_tensor::bail!("flashinfer_mla_decode metadata tensor shapes are invalid");
     }
 
     let dtype_code = match dtype {
@@ -307,7 +313,9 @@ pub fn flashinfer_mla_decode(
         DType::BF16 => 1,
         DType::F32 => 2,
         other => {
-            candle_core::bail!("flashinfer_mla_decode only supports f16, bf16, f32 (got {other:?})")
+            inference_tensor::bail!(
+                "flashinfer_mla_decode only supports f16, bf16, f32 (got {other:?})"
+            )
         }
     };
 
@@ -325,47 +333,47 @@ pub fn flashinfer_mla_decode(
 
     let q_nope_s = match &*q_nope_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("q_nope must be a cuda tensor"),
+        _ => inference_tensor::bail!("q_nope must be a cuda tensor"),
     };
     let q_pe_s = match &*q_pe_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("q_pe must be a cuda tensor"),
+        _ => inference_tensor::bail!("q_pe must be a cuda tensor"),
     };
     let ckv_cache_s = match &*ckv_cache_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("ckv_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("ckv_cache must be a cuda tensor"),
     };
     let kpe_cache_s = match &*kpe_cache_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("kpe_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("kpe_cache must be a cuda tensor"),
     };
     let kv_indptr_s = match &*kv_indptr_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("paged_kv_indptr must be a cuda tensor"),
+        _ => inference_tensor::bail!("paged_kv_indptr must be a cuda tensor"),
     };
     let kv_indices_s = match &*kv_indices_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("paged_kv_indices must be a cuda tensor"),
+        _ => inference_tensor::bail!("paged_kv_indices must be a cuda tensor"),
     };
     let kv_last_s = match &*kv_last_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("paged_kv_last_page_len must be a cuda tensor"),
+        _ => inference_tensor::bail!("paged_kv_last_page_len must be a cuda tensor"),
     };
     let request_indices_s = match &*request_indices_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("request_indices must be a cuda tensor"),
+        _ => inference_tensor::bail!("request_indices must be a cuda tensor"),
     };
     let kv_tile_indices_s = match &*kv_tile_indices_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("kv_tile_indices must be a cuda tensor"),
+        _ => inference_tensor::bail!("kv_tile_indices must be a cuda tensor"),
     };
     let o_indptr_s = match &*o_indptr_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("o_indptr must be a cuda tensor"),
+        _ => inference_tensor::bail!("o_indptr must be a cuda tensor"),
     };
     let kv_chunk_s = match &*kv_chunk_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("kv_chunk_size must be a cuda tensor"),
+        _ => inference_tensor::bail!("kv_chunk_size must be a cuda tensor"),
     };
 
     let output = Tensor::zeros(
@@ -378,7 +386,7 @@ pub fn flashinfer_mla_decode(
         let (output_s, output_l) = output.storage_and_layout();
         let output_s = match &*output_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("output must be a cuda tensor"),
+            _ => inference_tensor::bail!("output must be a cuda tensor"),
         };
 
         let dev = q_nope_s.device();
@@ -600,7 +608,7 @@ pub fn flashinfer_mla_decode(
                 )
             }
             _ => {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "flashinfer_mla_decode expects q/cache dtype to match and indices to be i32"
                 )
             }
@@ -633,7 +641,7 @@ pub fn flashinfer_mla_decode(
             )
         };
         if status != 0 {
-            candle_core::bail!("flashinfer_mla_decode failed with status {status}");
+            inference_tensor::bail!("flashinfer_mla_decode failed with status {status}");
         }
     }
 
@@ -649,7 +657,7 @@ pub fn gather_mla_cache(
 ) -> Result<(Tensor, Tensor)> {
     let dtype = ckv_cache.dtype();
     if kpe_cache.dtype() != dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "gather_mla_cache expects matching cache dtypes, got {:?} and {:?}",
             dtype,
             kpe_cache.dtype()
@@ -659,7 +667,7 @@ pub fn gather_mla_cache(
     let (num_blocks, block_size, kv_lora_rank) = ckv_cache.dims3()?;
     let (num_blocks_kpe, block_size_kpe, kpe_head_dim) = kpe_cache.dims3()?;
     if num_blocks != num_blocks_kpe || block_size != block_size_kpe {
-        candle_core::bail!("ckv_cache and kpe_cache block shape mismatch");
+        inference_tensor::bail!("ckv_cache and kpe_cache block shape mismatch");
     }
 
     let block_table = block_table.contiguous()?;
@@ -670,7 +678,7 @@ pub fn gather_mla_cache(
         || cu_seq_lens.dtype() != DType::I32
         || token_to_seq.dtype() != DType::I32
     {
-        candle_core::bail!("gather_mla_cache expects i32 metadata tensors");
+        inference_tensor::bail!("gather_mla_cache expects i32 metadata tensors");
     }
 
     let num_tokens = token_to_seq.dims1()?;
@@ -688,31 +696,31 @@ pub fn gather_mla_cache(
 
         let ckv_cache_s = match &*ckv_cache_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("ckv_cache must be a cuda tensor"),
+            _ => inference_tensor::bail!("ckv_cache must be a cuda tensor"),
         };
         let kpe_cache_s = match &*kpe_cache_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("kpe_cache must be a cuda tensor"),
+            _ => inference_tensor::bail!("kpe_cache must be a cuda tensor"),
         };
         let block_table_s = match &*block_table_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("block_table must be a cuda tensor"),
+            _ => inference_tensor::bail!("block_table must be a cuda tensor"),
         };
         let cu_seq_lens_s = match &*cu_seq_lens_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("cu_seq_lens must be a cuda tensor"),
+            _ => inference_tensor::bail!("cu_seq_lens must be a cuda tensor"),
         };
         let token_to_seq_s = match &*token_to_seq_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("token_to_seq must be a cuda tensor"),
+            _ => inference_tensor::bail!("token_to_seq must be a cuda tensor"),
         };
         let ckv_out_s = match &*ckv_out_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("ckv_out must be a cuda tensor"),
+            _ => inference_tensor::bail!("ckv_out must be a cuda tensor"),
         };
         let kpe_out_s = match &*kpe_out_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("kpe_out must be a cuda tensor"),
+            _ => inference_tensor::bail!("kpe_out must be a cuda tensor"),
         };
 
         let dtype_code = match dtype {
@@ -720,7 +728,9 @@ pub fn gather_mla_cache(
             DType::BF16 => 1,
             DType::F32 => 2,
             other => {
-                candle_core::bail!("gather_mla_cache only supports f16, bf16, f32 (got {other:?})")
+                inference_tensor::bail!(
+                    "gather_mla_cache only supports f16, bf16, f32 (got {other:?})"
+                )
             }
         };
 
@@ -865,7 +875,7 @@ pub fn gather_mla_cache(
                 )
             }
             _ => {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "gather_mla_cache expects cache dtypes to match and metadata tensors to be i32"
                 )
             }

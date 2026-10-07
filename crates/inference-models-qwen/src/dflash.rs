@@ -11,14 +11,14 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::{
-    Var,
-    cuda_backend::cudarc::driver::{CudaStream, sys},
-};
 use inference_quant::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, ShardedVarBuilder, UnquantLinear,
+};
+use inference_tensor::{D, DType, Device, IndexOp, Module, Result, Tensor};
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+use inference_tensor::{
+    Var,
+    cuda_backend::cudarc::driver::{CudaStream, sys},
 };
 use serde::Deserialize;
 
@@ -266,13 +266,15 @@ impl DFlashConfig {
             return Ok(());
         };
         let parameters = parameters.as_object().ok_or_else(|| {
-            candle_core::Error::msg("DFlash rope_parameters must be a JSON object")
+            inference_tensor::Error::msg("DFlash rope_parameters must be a JSON object")
         })?;
         let rope_type = parameters
             .get("rope_type")
             .map(|value| {
                 value.as_str().ok_or_else(|| {
-                    candle_core::Error::msg("DFlash rope_parameters.rope_type must be a string")
+                    inference_tensor::Error::msg(
+                        "DFlash rope_parameters.rope_type must be a string",
+                    )
                 })
             })
             .transpose()?;
@@ -280,20 +282,20 @@ impl DFlashConfig {
             .get("type")
             .map(|value| {
                 value.as_str().ok_or_else(|| {
-                    candle_core::Error::msg("DFlash rope_parameters.type must be a string")
+                    inference_tensor::Error::msg("DFlash rope_parameters.type must be a string")
                 })
             })
             .transpose()?;
         if let (Some(rope_type), Some(legacy_type)) = (rope_type, legacy_type)
             && rope_type != legacy_type
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash rope_parameters.rope_type `{rope_type}` conflicts with legacy type `{legacy_type}`"
             );
         }
         let rope_type = rope_type.or(legacy_type).unwrap_or("default");
         if rope_type != "default" {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash draft-side RoPE type `{rope_type}` is unsupported; configure RoPE scaling on the target model"
             );
         }
@@ -306,12 +308,12 @@ impl DFlashConfig {
             return Ok(None);
         };
         let max_position_embeddings = self.max_position_embeddings.ok_or_else(|| {
-            candle_core::Error::msg(
+            inference_tensor::Error::msg(
                 "DFlash max_position_embeddings is required when the target uses YaRN",
             )
         })?;
         if max_position_embeddings != target.original_max_position_embeddings {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash native context length {} does not match target YaRN original context length {}",
                 max_position_embeddings,
                 target.original_max_position_embeddings
@@ -334,7 +336,7 @@ impl DFlashConfig {
         self.dflash_config
             .mask_token_id
             .or(self.mask_token_id)
-            .ok_or_else(|| candle_core::Error::msg("DFlash config has no mask_token_id"))
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash config has no mask_token_id"))
     }
 
     pub fn target_layer_ids(&self) -> Result<Vec<usize>> {
@@ -342,7 +344,9 @@ impl DFlashConfig {
             return Ok(ids.clone());
         }
         let Some(num_target_layers) = self.num_target_layers else {
-            candle_core::bail!("DFlash config has neither target_layer_ids nor num_target_layers");
+            inference_tensor::bail!(
+                "DFlash config has neither target_layer_ids nor num_target_layers"
+            );
         };
         let n = self.num_hidden_layers;
         if n == 1 {
@@ -380,14 +384,13 @@ struct DynamicConv {
 
 impl DynamicConv {
     fn load(vb: ShardedVarBuilder, cfg: &DFlashConfig) -> Result<Self> {
-        let kernel_size = cfg
-            .dflash_config
-            .conv_kernel_size
-            .ok_or_else(|| candle_core::Error::msg("DFlash2 config has no conv_kernel_size"))?;
+        let kernel_size = cfg.dflash_config.conv_kernel_size.ok_or_else(|| {
+            inference_tensor::Error::msg("DFlash2 config has no conv_kernel_size")
+        })?;
         let group_size = cfg
             .dflash_config
             .conv_group_size
-            .ok_or_else(|| candle_core::Error::msg("DFlash2 config has no conv_group_size"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash2 config has no conv_group_size"))?;
         let groups = cfg.hidden_size / group_size;
         Ok(Self {
             base_kernel: vb.get((2, kernel_size, cfg.hidden_size), "base_kernel")?,
@@ -446,7 +449,7 @@ impl DynamicConv {
             });
         }
         output
-            .ok_or_else(|| candle_core::Error::msg("empty conv kernel"))?
+            .ok_or_else(|| inference_tensor::Error::msg("empty conv kernel"))?
             .reshape((b, len, h))
     }
 
@@ -489,7 +492,7 @@ fn resolve_dflash_sampling_policy(
         MtpDraftSamplingMethod::Probabilistic => capability
             .map(|()| MtpDraftSamplingMethod::Probabilistic)
             .map_err(|reason| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "probabilistic DFlash drafting is unavailable: {reason}"
                 ))
             }),
@@ -570,11 +573,11 @@ impl CandidateSelector {
         let rank = cfg
             .dflash_config
             .selector_rank
-            .ok_or_else(|| candle_core::Error::msg("DFlash2 config has no selector_rank"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash2 config has no selector_rank"))?;
         let top_k = cfg
             .dflash_config
             .selector_top_k
-            .ok_or_else(|| candle_core::Error::msg("DFlash2 config has no selector_top_k"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash2 config has no selector_top_k"))?;
         Ok(Self {
             predecessor_codebook: vb.get_unchecked("predecessor_codebook")?,
             successor_codebook: vb.get_unchecked("successor_codebook")?,
@@ -631,7 +634,7 @@ impl CandidateSelector {
         let (batch, positions, vocab) = logits.dims3()?;
         let rows = batch * positions;
         self.cuda_capability(logits.device().is_cuda(), logits.dtype(), vocab)
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
         let logits = logits.reshape((rows, vocab))?.contiguous()?;
         let topk = crate::ops::cuda_topk_ranked_packed_batched(&logits, self.top_k)?;
         let projection_dtype = self.hidden_projection.dtype();
@@ -880,17 +883,17 @@ fn select_ctx_kv_rows(k: &Tensor, v: &Tensor, row_indices: &[u32]) -> Result<(Te
 
 fn gather_ctx_taps(taps: &[Tensor], flat_row_indices: Vec<u32>, device: &Device) -> Result<Tensor> {
     let Some(first) = taps.first() else {
-        candle_core::bail!("DFlash context append has no taps");
+        inference_tensor::bail!("DFlash context append has no taps");
     };
     let (source_batch, source_rows, _) = first.dims3()?;
     let source_len = source_batch
         .checked_mul(source_rows)
-        .ok_or_else(|| candle_core::Error::msg("DFlash context tap row count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash context tap row count overflow"))?;
     if flat_row_indices
         .iter()
         .any(|index| usize::try_from(*index).map_or(true, |index| index >= source_len))
     {
-        candle_core::bail!("DFlash context tap row index is out of range");
+        inference_tensor::bail!("DFlash context tap row index is out of range");
     }
     #[cfg(feature = "cuda")]
     if let Some(packed) = crate::cuda::dflash_context::pack_taps(taps, &flat_row_indices)? {
@@ -907,10 +910,10 @@ fn gather_ctx_taps(taps: &[Tensor], flat_row_indices: Vec<u32>, device: &Device)
     for tap in taps {
         let (batch, rows, hidden) = tap.dims3()?;
         if (batch, rows) != (source_batch, source_rows) {
-            candle_core::bail!("DFlash context tap row shapes changed");
+            inference_tensor::bail!("DFlash context tap row shapes changed");
         }
         if !tap.device().same_device(device) {
-            candle_core::bail!("DFlash context taps must be on the draft device");
+            inference_tensor::bail!("DFlash context taps must be on the draft device");
         }
         let tap = if tap.is_contiguous() {
             tap.clone()
@@ -1006,20 +1009,19 @@ impl DFlashGraphHostRows {
             sampling,
         } = input;
         if anchors.is_empty() || anchors.len() != start_positions.len() {
-            candle_core::bail!("DFlash graph inputs must contain matching non-empty rows");
+            inference_tensor::bail!("DFlash graph inputs must contain matching non-empty rows");
         }
         if block == 0 || batch_bucket < anchors.len() {
-            candle_core::bail!("DFlash graph input shape is invalid");
+            inference_tensor::bail!("DFlash graph input shape is invalid");
         }
         if let Some(sampling) = sampling {
-            let expected_uniforms = anchors
-                .len()
-                .checked_mul(block - 1)
-                .ok_or_else(|| candle_core::Error::msg("DFlash sampling input size overflow"))?;
+            let expected_uniforms = anchors.len().checked_mul(block - 1).ok_or_else(|| {
+                inference_tensor::Error::msg("DFlash sampling input size overflow")
+            })?;
             if sampling.inverse_temperatures.len() != anchors.len()
                 || sampling.uniforms.len() != expected_uniforms
             {
-                candle_core::bail!("DFlash sampling inputs do not match the graph rows");
+                inference_tensor::bail!("DFlash sampling inputs do not match the graph rows");
             }
         }
 
@@ -1038,11 +1040,11 @@ impl DFlashGraphHostRows {
             self.token_ids
                 .extend(std::iter::repeat_n(mask_token_id, block - 1));
             for offset in 0..block {
-                let position = start
-                    .checked_add(offset)
-                    .ok_or_else(|| candle_core::Error::msg("DFlash graph position overflow"))?;
+                let position = start.checked_add(offset).ok_or_else(|| {
+                    inference_tensor::Error::msg("DFlash graph position overflow")
+                })?;
                 self.rope_indices
-                    .push(u32::try_from(position).map_err(candle_core::Error::wrap)?);
+                    .push(u32::try_from(position).map_err(inference_tensor::Error::wrap)?);
             }
         }
 
@@ -1188,7 +1190,7 @@ impl<'a> DFlashGraphTemporarySequences<'a> {
                 seq_ids.push(candidate);
             }
             candidate = candidate.checked_sub(1).ok_or_else(|| {
-                candle_core::Error::msg("DFlash graph temporary sequence id space exhausted")
+                inference_tensor::Error::msg("DFlash graph temporary sequence id space exhausted")
             })?;
         }
         Ok(Self { pool, seq_ids })
@@ -1242,7 +1244,9 @@ impl DFlashCudaGraphOutput {
                 candidate_probs: copy_dflash_graph_output_rows(&candidate_probs, real_batch)?,
             }),
             (None, None) => Ok(DFlashProposalBatch::DeviceTokens(tokens)),
-            _ => candle_core::bail!("DFlash selector returned incomplete sparse probabilities"),
+            _ => {
+                inference_tensor::bail!("DFlash selector returned incomplete sparse probabilities")
+            }
         }
     }
 }
@@ -1492,7 +1496,7 @@ impl DFlashCudaGraphBuffers {
                     )
                 }
                 (None, None, None, None) => Ok(()),
-                _ => candle_core::bail!("DFlash graph selector sampling state changed"),
+                _ => inference_tensor::bail!("DFlash graph selector sampling state changed"),
             }
         })
     }
@@ -1587,19 +1591,18 @@ fn release_dflash_cuda_graph_resources<T>(
     let stream = graph.stream().clone();
     let mut release_result = stream
         .synchronize()
-        .map_err(candle_core::Error::wrap)
+        .map_err(inference_tensor::Error::wrap)
         .map_err(|err| err.context("DFlash CUDA graph entry release wait failed"));
     drop(resources);
     if let Err(err) = stream.context().check_err()
         && release_result.is_ok()
     {
-        release_result =
-            Err(candle_core::Error::wrap(err)
-                .context("DFlash CUDA graph entry storage release failed"));
+        release_result = Err(inference_tensor::Error::wrap(err)
+            .context("DFlash CUDA graph entry storage release failed"));
     }
     let storage_result = stream
         .synchronize()
-        .map_err(candle_core::Error::wrap)
+        .map_err(inference_tensor::Error::wrap)
         .map_err(|err| err.context("DFlash CUDA graph entry storage release wait failed"));
     if release_result.is_ok() {
         release_result = storage_result;
@@ -1680,14 +1683,14 @@ impl DFlashCudaGraphState {
         &mut self,
         entry: DFlashCudaGraphEntry,
         operation: &str,
-        failure: candle_core::Error,
+        failure: inference_tensor::Error,
     ) -> Result<()> {
         let key = entry.key;
         let synchronize_result = entry
             .graph
             .stream()
             .synchronize()
-            .map_err(candle_core::Error::wrap);
+            .map_err(inference_tensor::Error::wrap);
         self.failed.insert(key);
         self.warmed.remove(&key);
         record_cuda_graph_resident_entries(CudaGraphComponent::DFlash, self.entries.len());
@@ -1701,7 +1704,7 @@ impl DFlashCudaGraphState {
                 );
                 Ok(())
             }
-            Err(synchronize_err) => Err(candle_core::Error::msg(format!(
+            Err(synchronize_err) => Err(inference_tensor::Error::msg(format!(
                 "DFlash CUDA graph {operation} failed: {failure}; recovery synchronization failed: {synchronize_err}"
             ))),
         }
@@ -1718,7 +1721,7 @@ impl DFlashCudaGraphState {
     ) -> Result<DFlashProposalBatch> {
         let buffers = DFlashCudaGraphBuffers::new(key, rows, attention_batch, model)?;
         let Device::Cuda(cuda_device) = &model.device else {
-            candle_core::bail!("DFlash CUDA graph expected a CUDA device");
+            inference_tensor::bail!("DFlash CUDA graph expected a CUDA device");
         };
         let _htod_cache_guard = cuda_device.enable_cuda_graph_htod_cache();
         model
@@ -1739,7 +1742,7 @@ impl DFlashCudaGraphState {
         let buffers = DFlashCudaGraphBuffers::new(key, &host_rows, attention_batch, model)?;
         model.device.synchronize()?;
         let Device::Cuda(cuda_device) = &model.device else {
-            candle_core::bail!("DFlash CUDA graph expected a CUDA device");
+            inference_tensor::bail!("DFlash CUDA graph expected a CUDA device");
         };
         let stream = cuda_device.cuda_stream();
         let _memory_pool_guard =
@@ -1754,7 +1757,7 @@ impl DFlashCudaGraphState {
                 &stream,
                 restore_event_tracking,
             );
-            return Err(candle_core::Error::msg(err.to_string())
+            return Err(inference_tensor::Error::msg(err.to_string())
                 .context("DFlash CUDA graph begin capture failed"));
         }
 
@@ -1778,7 +1781,7 @@ impl DFlashCudaGraphState {
                             crate::cuda::graph::copy_tensor(&probs, &dst_probs.as_detached_tensor())
                         }
                         (None, None, None, None) => Ok(()),
-                        _ => candle_core::bail!("DFlash graph selector output shape changed"),
+                        _ => inference_tensor::bail!("DFlash graph selector output shape changed"),
                     }
                 })();
                 if let Err(err) = copy_result {
@@ -1807,7 +1810,7 @@ impl DFlashCudaGraphState {
                     &stream,
                     restore_event_tracking,
                 );
-                return Err(candle_core::Error::msg(
+                return Err(inference_tensor::Error::msg(
                     "DFlash CUDA graph capture returned no graph",
                 ));
             }
@@ -2018,7 +2021,7 @@ fn linear_from_weight(
     device: &Device,
 ) -> Result<Arc<dyn QuantMethod>> {
     let layer: Arc<dyn QuantMethod> = Arc::new(UnquantLinear::new(
-        QuantMethodConfig::Unquantized(candle_nn::Linear::new(weight, None)),
+        QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, None)),
     )?);
     match isq {
         Some(ty) => layer.apply_isq(
@@ -2035,9 +2038,11 @@ fn linear_from_weight(
 /// Reads only the drafter's config when it identifies a DFlash checkpoint.
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
     let path = config.resolve_path()?;
-    let raw = fs::read_to_string(path.join("config.json"))
-        .map_err(|e| candle_core::Error::Msg(format!("failed to read MTP model config: {e}")))?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+    let raw = fs::read_to_string(path.join("config.json")).map_err(|e| {
+        inference_tensor::Error::Msg(format!("failed to read MTP model config: {e}"))
+    })?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
     let is_dflash = value
         .get("architectures")
         .and_then(serde_json::Value::as_array)
@@ -2053,7 +2058,7 @@ pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
     }
     serde_json::from_value(value)
         .map(Some)
-        .map_err(candle_core::Error::msg)
+        .map_err(inference_tensor::Error::msg)
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -2063,7 +2068,7 @@ pub fn windowed_kv_checkpoint_capacity(retained_prefixes: usize) -> Result<usize
     }
     retained_prefixes
         .checked_add(1)
-        .ok_or_else(|| candle_core::Error::msg("DFlash prefix checkpoint capacity overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash prefix checkpoint capacity overflow"))
 }
 
 // Whether fattn reads the windowed pool: its head dim on a Turing+ device, and non-causal windows no narrower than a
@@ -2089,8 +2094,9 @@ pub fn windowed_kv_cache_size_in_bytes(
 ) -> Result<usize> {
     let path = config.resolve_path()?;
     let raw = fs::read_to_string(path.join("config.json"))
-        .map_err(|err| candle_core::Error::msg(format!("failed to read MTP config: {err}")))?;
-    let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+        .map_err(|err| inference_tensor::Error::msg(format!("failed to read MTP config: {err}")))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
     let is_dflash = value
         .get("architectures")
         .and_then(serde_json::Value::as_array)
@@ -2104,7 +2110,7 @@ pub fn windowed_kv_cache_size_in_bytes(
     if !is_dflash {
         return Ok(0);
     }
-    let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+    let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
     let layers = (0..cfg.num_hidden_layers)
         .map(|layer| cfg.layer_attention(layer))
         .collect::<Vec<_>>();
@@ -2124,12 +2130,12 @@ pub fn windowed_kv_cache_size_in_bytes(
         .checked_sub(1)
         .and_then(|value| value.checked_add(cfg.block_size()))
         .and_then(|value| value.checked_add(page_size - 1))
-        .ok_or_else(|| candle_core::Error::msg("DFlash windowed KV capacity overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash windowed KV capacity overflow"))?;
     let pages_per_sequence = retained_tokens.div_ceil(page_size);
     let checkpoint_capacity = windowed_kv_checkpoint_capacity(retained_prefixes)?;
     let slot_capacity = live_sequence_capacity
         .checked_add(checkpoint_capacity)
-        .ok_or_else(|| candle_core::Error::msg("DFlash windowed KV slot capacity overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash windowed KV slot capacity overflow"))?;
     let elements = cfg
         .num_hidden_layers
         .checked_mul(slot_capacity)
@@ -2138,10 +2144,10 @@ pub fn windowed_kv_cache_size_in_bytes(
         .and_then(|value| value.checked_mul(page_size))
         .and_then(|value| value.checked_mul(cfg.head_dim()))
         .and_then(|value| value.checked_mul(2))
-        .ok_or_else(|| candle_core::Error::msg("DFlash windowed KV size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash windowed KV size overflow"))?;
     elements
         .checked_mul(DType::BF16.size_in_bytes())
-        .ok_or_else(|| candle_core::Error::msg("DFlash windowed KV byte size overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash windowed KV byte size overflow"))
 }
 
 pub struct DFlashGraphProposalInputs<'a> {
@@ -2181,18 +2187,19 @@ impl DFlashDraftModel {
             dtype,
         } = target;
         let path = config.resolve_path()?;
-        let raw = fs::read_to_string(path.join("config.json"))
-            .map_err(|e| candle_core::Error::Msg(format!("failed to read DFlash config: {e}")))?;
-        let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+        let raw = fs::read_to_string(path.join("config.json")).map_err(|e| {
+            inference_tensor::Error::Msg(format!("failed to read DFlash config: {e}"))
+        })?;
+        let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
         if !cfg.is_dflash() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "`--mtp-model` for this target must be a DFlash draft model; got architectures {:?}",
                 cfg.architectures
             );
         }
         cfg.validate_rope_type()?;
         if cfg.hidden_size != target_hidden_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash hidden size {} does not match target hidden size {target_hidden_size}",
                 cfg.hidden_size
             );
@@ -2201,7 +2208,7 @@ impl DFlashDraftModel {
         if let Some(max) = target_layer_ids.iter().max()
             && *max >= target_num_layers
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash taps target layer {max} but the target has {target_num_layers} layers"
             );
         }
@@ -2228,14 +2235,14 @@ impl DFlashDraftModel {
 
         let mut weight_paths = fs::read_dir(&path)
             .map_err(|e| {
-                candle_core::Error::Msg(format!("failed to list {}: {e}", path.display()))
+                inference_tensor::Error::Msg(format!("failed to list {}: {e}", path.display()))
             })?
             .filter_map(|entry| entry.ok().map(|e| e.path()))
             .filter(|p| p.extension().is_some_and(|ext| ext == "safetensors"))
             .collect::<Vec<_>>();
         weight_paths.sort();
         if weight_paths.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash model directory {} has no safetensors",
                 path.display()
             );
@@ -2258,7 +2265,7 @@ impl DFlashDraftModel {
             Some("none" | "bf16") => None,
             Some(name) => Some(
                 inference_quant::parse_isq_value(name, Some(device))
-                    .map_err(candle_core::Error::Msg)?,
+                    .map_err(inference_tensor::Error::Msg)?,
             ),
             None => config.draft_lm_head_isq,
         };
@@ -2657,12 +2664,12 @@ impl DFlashDraftModel {
                     .expect("dflash windowed pool poisoned");
                 for (seq_id, start_position) in seq_ids.iter().zip(start_positions) {
                     let state = pool.sequence(*seq_id).ok_or_else(|| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "DFlash draft requested for sequence {seq_id} without paged context"
                         ))
                     })?;
                     if state.next_committed_pos != *start_position {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "DFlash draft at position {start_position} but paged context ends at {}",
                             state.next_committed_pos
                         );
@@ -2783,18 +2790,18 @@ impl DFlashDraftModel {
             };
             let mut pool = pool.lock().expect("dflash windowed pool poisoned");
             let state = pool.sequence(sequence_id).ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "DFlash sequence {sequence_id} has no context to checkpoint"
                 ))
             })?;
             if state.next_committed_pos != cached_tokens {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "DFlash sequence {sequence_id} is at position {}, expected checkpoint boundary {cached_tokens}",
                     state.next_committed_pos
                 );
             }
             if !pool.sequence_query_ready(sequence_id) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "DFlash sequence {sequence_id} is not ready at checkpoint boundary {cached_tokens}"
                 );
             }
@@ -2820,15 +2827,19 @@ impl DFlashDraftModel {
             let state = state
                 .as_any()
                 .downcast_ref::<DFlashPagedPrefixState>()
-                .ok_or_else(|| candle_core::Error::msg("invalid DFlash prefix checkpoint type"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("invalid DFlash prefix checkpoint type")
+                })?;
             if state.checkpoint.next_committed_pos() != cached_tokens {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "DFlash prefix checkpoint is at position {}, expected {cached_tokens}",
                     state.checkpoint.next_committed_pos()
                 );
             }
             let pool = self.windowed_pool.as_ref().ok_or_else(|| {
-                candle_core::Error::msg("DFlash windowed KV is unavailable during prefix restore")
+                inference_tensor::Error::msg(
+                    "DFlash windowed KV is unavailable during prefix restore",
+                )
             })?;
             let started = std::time::Instant::now();
             pool.lock()
@@ -2844,7 +2855,7 @@ impl DFlashDraftModel {
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         {
             let _ = (sequence_id, cached_tokens, state);
-            candle_core::bail!("DFlash auxiliary prefix restore requires CUDA")
+            inference_tensor::bail!("DFlash auxiliary prefix restore requires CUDA")
         }
     }
 
@@ -2992,7 +3003,7 @@ impl DFlashDraftModel {
         }
         let prepared = self.prepare_ctx_batch(taps, flat_row_indices, entries)?;
         let row_indices = (0..total)
-            .map(|row| u32::try_from(row).map_err(candle_core::Error::wrap))
+            .map(|row| u32::try_from(row).map_err(inference_tensor::Error::wrap))
             .collect::<Result<Vec<_>>>()?;
         self.commit_prepared_ctx_batch(&prepared, row_indices, entries)
     }
@@ -3007,13 +3018,13 @@ impl DFlashDraftModel {
         let rows = entries.iter().map(|entry| entry.rows).collect::<Vec<_>>();
         let total: usize = rows.iter().sum();
         if total == 0 {
-            candle_core::bail!("DFlash context preparation requires at least one row");
+            inference_tensor::bail!("DFlash context preparation requires at least one row");
         }
         if taps.len() != self.target_layer_ids.len() {
-            candle_core::bail!("DFlash context append tap count changed");
+            inference_tensor::bail!("DFlash context append tap count changed");
         }
         if flat_row_indices.len() != total {
-            candle_core::bail!("DFlash context append row count changed");
+            inference_tensor::bail!("DFlash context append row count changed");
         }
         let packed = gather_ctx_taps(taps, flat_row_indices, &self.device)?;
         let ctx_hidden = self
@@ -3045,7 +3056,8 @@ impl DFlashDraftModel {
                 let mut positions = Vec::with_capacity(total);
                 for entry in entries {
                     for position in entry.start_pos..entry.start_pos + entry.rows {
-                        positions.push(u32::try_from(position).map_err(candle_core::Error::wrap)?);
+                        positions
+                            .push(u32::try_from(position).map_err(inference_tensor::Error::wrap)?);
                     }
                 }
                 let positions = Tensor::from_vec(positions, (total,), &self.device)?;
@@ -3111,7 +3123,7 @@ impl DFlashDraftModel {
                 .iter()
                 .any(|row| usize::try_from(*row).map_or(true, |row| row >= prepared.rows))
         {
-            candle_core::bail!("DFlash prepared context row selection is invalid");
+            inference_tensor::bail!("DFlash prepared context row selection is invalid");
         }
         let (k_all, v_all) = select_ctx_kv_rows(&prepared.k, &prepared.v, &row_indices)?;
         self.append_projected_ctx_batch(entries, &rows, &k_all, &v_all)
@@ -3153,7 +3165,7 @@ impl DFlashDraftModel {
             let entry = match cache.get_mut(&e.seq_id) {
                 Some(entry) => {
                     if entry.next_pos != e.start_pos {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "DFlash context append at position {} but cache expects {}",
                             e.start_pos,
                             entry.next_pos
@@ -3226,7 +3238,7 @@ impl DFlashDraftModel {
         for (write, row_count) in writes.iter().zip(rows) {
             for row in write.retained_input_range() {
                 retained_indices
-                    .push(u32::try_from(offset + row).map_err(candle_core::Error::wrap)?);
+                    .push(u32::try_from(offset + row).map_err(inference_tensor::Error::wrap)?);
             }
             slot_mapping.extend_from_slice(write.slot_mapping());
             offset += *row_count;
@@ -3271,12 +3283,12 @@ impl DFlashDraftModel {
         let mut lens = Vec::with_capacity(b);
         for (seq_id, start_pos) in seq_ids.iter().zip(start_positions.iter()) {
             let entry = cache.get(seq_id).ok_or_else(|| {
-                candle_core::Error::msg(
+                inference_tensor::Error::msg(
                     "DFlash draft requested for a sequence with no context cache",
                 )
             })?;
             if entry.next_pos != *start_pos {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "DFlash draft at position {start_pos} but context ends at {}",
                     entry.next_pos
                 );
@@ -3365,7 +3377,7 @@ impl DFlashDraftModel {
                 let v = repeat_kv(&v, groups)?;
                 let att = (q.matmul(&k.transpose(2, 3)?)? * scale)?;
                 let att = att.broadcast_add(mask)?;
-                let att = candle_nn::ops::softmax_last_dim(&att)?;
+                let att = inference_tensor::nn::ops::softmax_last_dim(&att)?;
                 let out = att.matmul(&v)?;
                 out.transpose(1, 2)?
                     .reshape((b, block, self.num_heads * self.head_dim))
@@ -3530,12 +3542,12 @@ impl DFlashDraftModel {
                 .expect("dflash windowed pool poisoned");
             for (seq_id, start_pos) in seq_ids.iter().zip(start_positions) {
                 let state = pool.sequence(*seq_id).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "DFlash draft requested for sequence {seq_id} without paged context"
                     ))
                 })?;
                 if state.next_committed_pos != *start_pos {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "DFlash draft at position {start_pos} but paged context ends at {}",
                         state.next_committed_pos
                     );
@@ -3731,13 +3743,13 @@ impl DFlashDraftModel {
     ) -> Result<DFlashProposalBatch> {
         let (batch, positions, _) = hidden.dims3()?;
         if anchors.len() != batch {
-            candle_core::bail!("DFlash anchors do not match draft rows");
+            inference_tensor::bail!("DFlash anchors do not match draft rows");
         }
         if let Some(sampling) = sampling
             && (sampling.inverse_temperatures.len() != batch
                 || sampling.uniforms.len() != batch * positions)
         {
-            candle_core::bail!("DFlash selector sampling inputs do not match draft rows");
+            inference_tensor::bail!("DFlash selector sampling inputs do not match draft rows");
         }
         let mut logits = lm_head.forward(hidden)?;
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
@@ -3745,7 +3757,7 @@ impl DFlashDraftModel {
         }
         if let Some(sampling) = sampling {
             let selector = self.selector.as_ref().ok_or_else(|| {
-                candle_core::Error::msg(
+                inference_tensor::Error::msg(
                     "probabilistic DFlash drafting requires a DFlash2 candidate selector",
                 )
             })?;
@@ -3755,7 +3767,7 @@ impl DFlashDraftModel {
                 selector
                     .cuda_capability(logits.device().is_cuda(), logits.dtype(), vocab)
                     .map_err(|reason| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "probabilistic DFlash drafting is unavailable: {reason}"
                         ))
                     })?;
@@ -3786,7 +3798,7 @@ impl DFlashDraftModel {
             #[cfg(not(feature = "cuda"))]
             {
                 let _ = (selector, sampling);
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "probabilistic DFlash drafting is unavailable: this build has no CUDA candidate selector support"
                 );
             }
@@ -3870,8 +3882,8 @@ mod tests {
     use inference_nn::skip_without_cuda;
     use std::{collections::HashSet, sync::Arc};
 
-    use candle_core::{D, Device, Result, Tensor};
     use inference_quant::QuantMethod;
+    use inference_tensor::{D, Device, Result, Tensor};
 
     use super::{
         ADAPT_FULL_DEPTH_MAX_BATCH, DFlashConfig, DFlashGraphHostInput, DFlashSamplingInputs,
@@ -3928,10 +3940,10 @@ mod tests {
     fn selector_cuda_spec(vocab_size: usize, top_k: usize) -> CandidateSelectorCudaSpec {
         CandidateSelectorCudaSpec {
             device_is_cuda: true,
-            logits_dtype: candle_core::DType::BF16,
-            hidden_projection_dtype: candle_core::DType::BF16,
-            predecessor_dtype: candle_core::DType::BF16,
-            successor_dtype: candle_core::DType::BF16,
+            logits_dtype: inference_tensor::DType::BF16,
+            hidden_projection_dtype: inference_tensor::DType::BF16,
+            predecessor_dtype: inference_tensor::DType::BF16,
+            successor_dtype: inference_tensor::DType::BF16,
             top_k,
             vocab_size,
             predecessor_vocab_size: Some(vocab_size),
@@ -4280,7 +4292,7 @@ mod tests {
 
     #[test]
     fn graph_outputs_do_not_alias_reclaimable_buffers() -> Result<()> {
-        use candle_core::Var;
+        use inference_tensor::Var;
 
         let source = Var::from_tensor(&Tensor::from_vec(
             vec![1u32, 2, 3, 4, 5, 6],
@@ -4301,7 +4313,7 @@ mod tests {
     #[test]
     fn graph_release_waits_for_detached_output_copies() -> anyhow::Result<()> {
         skip_without_cuda!();
-        use candle_core::{Var, cuda_backend::cudarc::driver::sys};
+        use inference_tensor::{Var, cuda_backend::cudarc::driver::sys};
 
         use crate::cuda::graph_capture::{
             CudaGraphHandle, CudaGraphHostStaging, disable_event_tracking_for_capture,
@@ -4316,7 +4328,7 @@ mod tests {
             (2, 3),
             &device,
         )?)?;
-        let output = Var::zeros((2, 3), candle_core::DType::F32, &device)?;
+        let output = Var::zeros((2, 3), inference_tensor::DType::F32, &device)?;
         device.synchronize()?;
 
         let restore_event_tracking = disable_event_tracking_for_capture(&stream);
@@ -4471,8 +4483,12 @@ mod tests {
         let frequencies = [1.0f32, 0.5, 0.01];
         let positions_tensor = Tensor::from_vec(positions.to_vec(), (positions.len(),), &device)?;
         let inv_freq = Tensor::from_vec(frequencies.to_vec(), (frequencies.len(),), &device)?;
-        let (cos, sin) =
-            dflash_rope_from_positions(&positions_tensor, &inv_freq, candle_core::DType::F32, 1.0)?;
+        let (cos, sin) = dflash_rope_from_positions(
+            &positions_tensor,
+            &inv_freq,
+            inference_tensor::DType::F32,
+            1.0,
+        )?;
         let cos = cos.to_vec2::<f32>()?;
         let sin = sin.to_vec2::<f32>()?;
 
@@ -4494,7 +4510,7 @@ mod tests {
         let (cos, sin) = dflash_rope_from_positions(
             &positions,
             &inv_freq,
-            candle_core::DType::F32,
+            inference_tensor::DType::F32,
             attention_factor,
         )?;
         let cos = cos.to_vec2::<f32>()?;
@@ -4510,7 +4526,7 @@ mod tests {
     #[test]
     fn graph_rope_replays_mixed_long_positions_on_cuda() -> anyhow::Result<()> {
         skip_without_cuda!();
-        use candle_core::{Var, cuda_backend::cudarc::driver::sys};
+        use inference_tensor::{Var, cuda_backend::cudarc::driver::sys};
 
         use crate::cuda::graph_capture::{
             CudaGraphHandle, disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
@@ -4550,7 +4566,7 @@ mod tests {
         let warmup = dflash_rope_from_positions(
             &positions.as_detached_tensor(),
             &inv_freq,
-            candle_core::DType::BF16,
+            inference_tensor::DType::BF16,
             1.0,
         )?;
         device.synchronize()?;
@@ -4561,7 +4577,7 @@ mod tests {
         let (cos, sin) = dflash_rope_from_positions(
             &positions.as_detached_tensor(),
             &inv_freq,
-            candle_core::DType::BF16,
+            inference_tensor::DType::BF16,
             1.0,
         )?;
         let graph = CudaGraphHandle::end_capture(&stream)?
@@ -4579,8 +4595,12 @@ mod tests {
             positions.set(&Tensor::from_vec(replayed.clone(), BATCH * BLOCK, &device)?)?;
             graph.launch()?;
             stream.synchronize()?;
-            let cos = cos.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>()?;
-            let sin = sin.to_dtype(candle_core::DType::F32)?.to_vec2::<f32>()?;
+            let cos = cos
+                .to_dtype(inference_tensor::DType::F32)?
+                .to_vec2::<f32>()?;
+            let sin = sin
+                .to_dtype(inference_tensor::DType::F32)?
+                .to_vec2::<f32>()?;
             for (row, position) in replayed.into_iter().enumerate() {
                 for (column, frequency) in inv_freq_values.iter().copied().enumerate() {
                     let angle = position as f32 * frequency;

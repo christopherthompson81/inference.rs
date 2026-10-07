@@ -1,5 +1,5 @@
-use candle_core::DType;
 use inference_quant::QuantizedConfig;
+use inference_tensor::DType;
 use serde::{Deserialize, Serialize};
 
 pub const GDN_V_HEAD_LAYOUT_CONFIG_KEY: &str = "_inference_gdn_v_head_layout";

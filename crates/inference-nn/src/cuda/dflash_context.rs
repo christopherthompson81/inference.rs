@@ -1,9 +1,9 @@
 use std::ffi::c_void;
 
-use candle_core::backend::BackendStorage;
-use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
-use candle_core::{DType, Result, Shape, Tensor};
+use inference_tensor::backend::BackendStorage;
+use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
+use inference_tensor::{DType, Result, Shape, Tensor};
 
 const MAX_DFLASH_CONTEXT_TAPS: usize = 64;
 
@@ -124,7 +124,7 @@ pub fn pack_taps(taps: &[Tensor], row_indices: &[u32]) -> Result<Option<Tensor>>
     let (source_batch, source_rows, _) = taps[0].dims3()?;
     let source_len = source_batch
         .checked_mul(source_rows)
-        .ok_or_else(|| candle_core::Error::msg("DFlash context tap row count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash context tap row count overflow"))?;
     if row_indices
         .iter()
         .any(|index| usize::try_from(*index).map_or(true, |index| index >= source_len))
@@ -140,8 +140,8 @@ pub fn pack_taps(taps: &[Tensor], row_indices: &[u32]) -> Result<Option<Tensor>>
         }
         output_width = output_width
             .checked_add(width)
-            .ok_or_else(|| candle_core::Error::msg("DFlash context tap width overflow"))?;
-        widths.push(i32::try_from(width).map_err(candle_core::Error::wrap)?);
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash context tap width overflow"))?;
+        widths.push(i32::try_from(width).map_err(inference_tensor::Error::wrap)?);
     }
 
     let contiguous = contiguous_row_range(row_indices);
@@ -164,7 +164,7 @@ pub fn pack_taps(taps: &[Tensor], row_indices: &[u32]) -> Result<Option<Tensor>>
         .map(Tensor::storage_and_layout)
         .collect::<Vec<_>>();
     let first_storage = match &*storage_layouts[0].0 {
-        candle_core::Storage::Cuda(storage) => storage,
+        inference_tensor::Storage::Cuda(storage) => storage,
         _ => return Ok(None),
     };
     let dev = first_storage.device();
@@ -172,19 +172,19 @@ pub fn pack_taps(taps: &[Tensor], row_indices: &[u32]) -> Result<Option<Tensor>>
     let elements = row_indices
         .len()
         .checked_mul(output_width)
-        .ok_or_else(|| candle_core::Error::msg("DFlash packed tap size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash packed tap size overflow"))?;
     let output_shape = Shape::from_dims(&[row_indices.len(), output_width]);
-    let output_rows = i32::try_from(row_indices.len()).map_err(candle_core::Error::wrap)?;
-    let output_width_i32 = i32::try_from(output_width).map_err(candle_core::Error::wrap)?;
-    let row_start = i32::try_from(row_start).map_err(candle_core::Error::wrap)?;
-    let taps_len = i32::try_from(taps.len()).map_err(candle_core::Error::wrap)?;
+    let output_rows = i32::try_from(row_indices.len()).map_err(inference_tensor::Error::wrap)?;
+    let output_width_i32 = i32::try_from(output_width).map_err(inference_tensor::Error::wrap)?;
+    let row_start = i32::try_from(row_start).map_err(inference_tensor::Error::wrap)?;
+    let taps_len = i32::try_from(taps.len()).map_err(inference_tensor::Error::wrap)?;
 
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi:ident) => {{
             let mut pointers = Vec::with_capacity(taps.len());
             let mut input_guards = Vec::with_capacity(taps.len());
             for (storage, layout) in &storage_layouts {
-                let candle_core::Storage::Cuda(storage) = &**storage else {
+                let inference_tensor::Storage::Cuda(storage) = &**storage else {
                     return Ok(None);
                 };
                 let CudaStorageSlice::$variant(slice) = &storage.slice else {
@@ -200,7 +200,7 @@ pub fn pack_taps(taps: &[Tensor], row_indices: &[u32]) -> Result<Option<Tensor>>
             let indices_storage_layout = indices.as_ref().map(Tensor::storage_and_layout);
             let mut indices_guard = None;
             let indices_pointer = if let Some((storage, layout)) = &indices_storage_layout {
-                let candle_core::Storage::Cuda(storage) = &**storage else {
+                let inference_tensor::Storage::Cuda(storage) = &**storage else {
                     return Ok(None);
                 };
                 let CudaStorageSlice::U32(slice) = &storage.slice else {
@@ -232,14 +232,14 @@ pub fn pack_taps(taps: &[Tensor], row_indices: &[u32]) -> Result<Option<Tensor>>
             drop(indices_guard);
             drop(input_guards);
             if status != 0 {
-                candle_core::bail!("dflash_pack_taps failed with status {status}");
+                inference_tensor::bail!("dflash_pack_taps failed with status {status}");
             }
             let storage = CudaStorage {
                 slice: CudaStorageSlice::$variant(output),
                 device: dev.clone(),
             };
             Ok(Some(Tensor::from((
-                candle_core::Storage::Cuda(storage),
+                inference_tensor::Storage::Cuda(storage),
                 output_shape,
             ))))
         }};
@@ -293,24 +293,24 @@ pub fn context_keys(
         .map(|tensor| tensor.storage_and_layout())
         .collect::<Vec<_>>();
     let input_storage = match &*storage_layouts[0].0 {
-        candle_core::Storage::Cuda(storage) => storage,
+        inference_tensor::Storage::Cuda(storage) => storage,
         _ => return Ok(None),
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let output_shape = input.shape().clone();
-    let layers = i32::try_from(layers).map_err(candle_core::Error::wrap)?;
-    let heads = i32::try_from(heads).map_err(candle_core::Error::wrap)?;
-    let rows = i32::try_from(rows).map_err(candle_core::Error::wrap)?;
-    let head_dim = i32::try_from(head_dim).map_err(candle_core::Error::wrap)?;
-    let rot_dim = i32::try_from(rot_dim).map_err(candle_core::Error::wrap)?;
+    let layers = i32::try_from(layers).map_err(inference_tensor::Error::wrap)?;
+    let heads = i32::try_from(heads).map_err(inference_tensor::Error::wrap)?;
+    let rows = i32::try_from(rows).map_err(inference_tensor::Error::wrap)?;
+    let head_dim = i32::try_from(head_dim).map_err(inference_tensor::Error::wrap)?;
+    let rot_dim = i32::try_from(rot_dim).map_err(inference_tensor::Error::wrap)?;
 
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi:ident) => {{
             let mut pointers = Vec::with_capacity(4);
             let mut guards = Vec::with_capacity(5);
             for (storage, layout) in &storage_layouts[..4] {
-                let candle_core::Storage::Cuda(storage) = &**storage else {
+                let inference_tensor::Storage::Cuda(storage) = &**storage else {
                     return Ok(None);
                 };
                 let CudaStorageSlice::$variant(slice) = &storage.slice else {
@@ -322,7 +322,7 @@ pub fn context_keys(
                 });
                 guards.push(guard);
             }
-            let candle_core::Storage::Cuda(position_storage) = &*storage_layouts[4].0 else {
+            let inference_tensor::Storage::Cuda(position_storage) = &*storage_layouts[4].0 else {
                 return Ok(None);
             };
             let CudaStorageSlice::U32(position_slice) = &position_storage.slice else {
@@ -357,14 +357,14 @@ pub fn context_keys(
             drop(position_guard);
             drop(guards);
             if status != 0 {
-                candle_core::bail!("dflash_context_keys failed with status {status}");
+                inference_tensor::bail!("dflash_context_keys failed with status {status}");
             }
             let storage = CudaStorage {
                 slice: CudaStorageSlice::$variant(output),
                 device: dev.clone(),
             };
             Ok(Some(Tensor::from((
-                candle_core::Storage::Cuda(storage),
+                inference_tensor::Storage::Cuda(storage),
                 output_shape,
             ))))
         }};
@@ -381,7 +381,7 @@ pub fn context_keys(
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 mod tests {
-    use candle_core::{DType, Device, IndexOp, Result, Tensor};
+    use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
     use super::{context_keys, pack_taps};
 

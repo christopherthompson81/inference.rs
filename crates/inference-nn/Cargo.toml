@@ -15,9 +15,8 @@ homepage.workspace = true
 [dependencies]
 akin.workspace = true
 anyhow.workspace = true
-candle-core.workspace = true
-candle-flash-attn-v3 = { workspace = true, optional = true }
-candle-nn.workspace = true
+inference-tensor.workspace = true
+inference-flash-attn-v3 = { workspace = true, optional = true }
 csv.workspace = true
 either.workspace = true
 float8.workspace = true
@@ -62,8 +61,7 @@ cudaforge = { workspace = true, optional = true }
 [features]
 utoipa = ["dep:utoipa"]
 cuda = [
-    "candle-core/cuda",
-    "candle-nn/cuda",
+    "inference-tensor/cuda",
     "dep:cudaforge",
     "inference-quant/cuda",
     "dep:inference-paged-attn",
@@ -73,13 +71,12 @@ cuda = [
 ]
 cutile = ["cuda", "inference-quant/cutile"]
 metal = [
-    "candle-core/metal",
-    "candle-nn/metal",
+    "inference-tensor/metal",
     "inference-quant/metal",
     "dep:candle-metal-kernels",
     "dep:inference-paged-attn",
     "inference-paged-attn/metal",
     "dep:objc2-metal"
 ]
-flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3"]
-accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate"]
+flash-attn-v3 = ["cuda", "dep:inference-flash-attn-v3"]
+accelerate = ["inference-tensor/accelerate", "inference-quant/accelerate"]

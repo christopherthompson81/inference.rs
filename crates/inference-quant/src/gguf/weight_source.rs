@@ -1,7 +1,7 @@
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{DType, Device, Error, Result, Shape, Tensor};
-use candle_nn::{Linear, var_builder::SimpleBackend};
+use inference_tensor::nn::{Linear, var_builder::SimpleBackend};
+use inference_tensor::{DType, Device, Error, Result, Shape, Tensor};
 
 use super::{
     GgufMatMul,
@@ -300,7 +300,7 @@ impl GgufWeightSource {
     ) -> Result<Self> {
         for shard in archive.shards() {
             if shard.endian() == GgufEndian::Big {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "direct GGUF loading does not support big-endian shard `{}`",
                     shard.path().display()
                 );
@@ -311,7 +311,7 @@ impl GgufWeightSource {
         let mut output_dtypes = HashMap::new();
         for native_name in resolver.native_names() {
             if bindings.contains_key(&native_name) {
-                candle_core::bail!("duplicate native GGUF binding `{native_name}`");
+                inference_tensor::bail!("duplicate native GGUF binding `{native_name}`");
             }
             let binding = resolver.resolve(&native_name).ok_or_else(|| {
                 Error::msg(format!(
@@ -396,7 +396,7 @@ impl GgufWeightSource {
     fn raw_tensor(&self, name: &str) -> Result<PackedBinding> {
         let info = self.archive.tensor_info(name)?;
         if self.archive.shards()[info.shard_index()].endian() != GgufEndian::Little {
-            candle_core::bail!("big-endian GGUF tensor loading is not supported");
+            inference_tensor::bail!("big-endian GGUF tensor loading is not supported");
         }
         Ok(PackedBinding {
             dtype: quant_type(info.dtype(), name)?,
@@ -560,7 +560,7 @@ impl GgufWeightSource {
         let info = self.archive.tensor_info(source_name)?;
         let mut dims = info.shape().to_vec();
         if dims.len() < 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "native linear `{key}` resolves to rank-{} GGUF tensor `{source_name}`",
                 dims.len()
             );
@@ -569,7 +569,7 @@ impl GgufWeightSource {
         let weight = if let Some((dim, start, len)) = range {
             let shard_info = &self.archive.shards()[info.shard_index()];
             if shard_info.endian() != GgufEndian::Little {
-                candle_core::bail!("big-endian GGUF tensor loading is not supported");
+                inference_tensor::bail!("big-endian GGUF tensor loading is not supported");
             }
             let dtype = quant_type(info.dtype(), source_name)?;
             let data = self.archive.tensor_data(source_name)?;
@@ -603,7 +603,7 @@ impl GgufWeightSource {
             return Ok(None);
         };
         if packed.dims.len() < 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "native linear `{key}` resolves to rank-{} transformed GGUF tensor",
                 packed.dims.len()
             );
@@ -717,7 +717,7 @@ impl GgufWeightSource {
     ) -> Result<Arc<dyn QuantMethod>> {
         let mut weight = self.materialize_binding(binding, &Device::Cpu)?;
         if weight.rank() < 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "native linear `{key}` resolves to rank-{} transformed GGUF tensor",
                 weight.rank()
             );
@@ -922,12 +922,12 @@ impl QuantizedWeightSource for GgufWeightSource {
 
 fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<PackedBinding> {
     let Some(first) = inputs.first() else {
-        candle_core::bail!("cannot concatenate zero packed GGUF bindings");
+        inference_tensor::bail!("cannot concatenate zero packed GGUF bindings");
     };
     let dtype = first.dtype;
     let mut dims = first.dims.clone();
     if dim >= dims.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cannot concatenate dimension {dim} of rank-{} packed GGUF bindings",
             dims.len()
         );
@@ -941,12 +941,12 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
                 .enumerate()
                 .any(|(index, size)| index != dim && *size != dims[index])
         {
-            candle_core::bail!("cannot concatenate incompatible packed GGUF bindings");
+            inference_tensor::bail!("cannot concatenate incompatible packed GGUF bindings");
         }
     }
 
     if dtype.has_row_scale() && dim == dims.len() - 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{dtype:?} rows start with their scale, so they cannot be concatenated end to end"
         );
     }
@@ -955,7 +955,9 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
         .iter()
         .any(|input| !input.dims[input.dims.len() - 1].is_multiple_of(block))
     {
-        candle_core::bail!("packed GGUF concat inputs must have a block-aligned last dimension");
+        inference_tensor::bail!(
+            "packed GGUF concat inputs must have a block-aligned last dimension"
+        );
     }
     let mut data = Vec::with_capacity(
         inputs
@@ -968,7 +970,7 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
             .iter()
             .any(|input| !input.dims[dim].is_multiple_of(block))
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "concatenating the packed GGUF dimension requires block-aligned inputs"
             );
         }
@@ -1052,7 +1054,7 @@ fn shard_unit(dtype: GgufType) -> usize {
 
 fn packed_byte_len(dims: &[usize], dtype: GgufType) -> Result<usize> {
     let Some(&last) = dims.last() else {
-        candle_core::bail!("packed GGUF tensors cannot be scalar");
+        inference_tensor::bail!("packed GGUF tensors cannot be scalar");
     };
     let row_bytes = dtype.row_bytes(last).ok_or_else(|| {
         Error::msg(format!(
@@ -1091,7 +1093,7 @@ impl SimpleBackend for GgufTensorBackend {
         &self,
         shape: Shape,
         name: &str,
-        _: candle_nn::Init,
+        _: inference_tensor::nn::Init,
         dtype: DType,
         device: &Device,
     ) -> Result<Tensor> {
@@ -1132,7 +1134,7 @@ fn validate_binding_storage(
         GgufTensorBinding::Tensor(name) => {
             let dtype = archive.tensor_info(name)?.dtype();
             if dtype.gguf_type().is_none() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF tensor `{name}` uses dtype {} ({}) for native binding `{native_name}`; \
                      direct GGUF loading currently supports {DIRECT_GGUF_DTYPES}, while \
                      MXFP4 is supported only through its explicit GPT-OSS binding",
@@ -1188,7 +1190,7 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
                 .checked_add(*len)
                 .ok_or_else(|| Error::msg("GGUF binding slice overflow"))?;
             if end > *size {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF binding slice {start}..{end} exceeds dimension {dim} of size {size}"
                 );
             }
@@ -1201,10 +1203,10 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
                 .map(|input| infer_binding_shape(archive, input))
                 .collect::<Result<Vec<_>>>()?;
             let Some(mut shape) = shapes.pop() else {
-                candle_core::bail!("cannot concatenate zero GGUF bindings");
+                inference_tensor::bail!("cannot concatenate zero GGUF bindings");
             };
             if *dim >= shape.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cannot concatenate dimension {dim} of rank-{} GGUF bindings",
                     shape.len()
                 );
@@ -1216,7 +1218,7 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
                         .enumerate()
                         .any(|(index, size)| index != *dim && *size != shape[index])
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "cannot concatenate GGUF binding shapes {shape:?} and {other:?} along dimension {dim}"
                     );
                 }
@@ -1232,13 +1234,13 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
                 .map(|input| infer_binding_shape(archive, input))
                 .collect::<Result<Vec<_>>>()?;
             let Some(first) = shapes.first() else {
-                candle_core::bail!("cannot stack zero GGUF bindings");
+                inference_tensor::bail!("cannot stack zero GGUF bindings");
             };
             if shapes.iter().any(|shape| shape != first) {
-                candle_core::bail!("cannot stack unequal GGUF binding shapes {shapes:?}");
+                inference_tensor::bail!("cannot stack unequal GGUF binding shapes {shapes:?}");
             }
             if *dim > first.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cannot stack at dimension {dim} for rank-{} GGUF bindings",
                     first.len()
                 );
@@ -1253,16 +1255,16 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
                 .map(|input| infer_binding_shape(archive, input))
                 .collect::<Result<Vec<_>>>()?;
             let Some(first) = shapes.first() else {
-                candle_core::bail!("cannot interleave zero GGUF bindings");
+                inference_tensor::bail!("cannot interleave zero GGUF bindings");
             };
             if *dim >= first.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cannot interleave dimension {dim} of rank-{} GGUF bindings",
                     first.len()
                 );
             }
             if shapes.iter().any(|shape| shape != first) {
-                candle_core::bail!("cannot interleave unequal GGUF binding shapes {shapes:?}");
+                inference_tensor::bail!("cannot interleave unequal GGUF binding shapes {shapes:?}");
             }
             let mut shape = first.clone();
             shape[*dim] = shape[*dim]
@@ -1273,7 +1275,7 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
         GgufTensorBinding::Transpose { input, dim1, dim2 } => {
             let mut shape = infer_binding_shape(archive, input)?;
             if *dim1 >= shape.len() || *dim2 >= shape.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cannot transpose dimensions {dim1} and {dim2} of rank-{} GGUF binding",
                     shape.len()
                 );
@@ -1284,7 +1286,7 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
         GgufTensorBinding::Permute { input, dims } => {
             let shape = infer_binding_shape(archive, input)?;
             if dims.len() != shape.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF permutation has {} dimensions for rank-{} binding",
                     dims.len(),
                     shape.len()
@@ -1293,7 +1295,7 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
             let mut seen = vec![false; shape.len()];
             for &dim in dims {
                 if dim >= shape.len() || std::mem::replace(&mut seen[dim], true) {
-                    candle_core::bail!("invalid GGUF binding permutation {dims:?}");
+                    inference_tensor::bail!("invalid GGUF binding permutation {dims:?}");
                 }
             }
             Ok(dims.iter().map(|dim| shape[*dim]).collect())
@@ -1301,7 +1303,7 @@ fn infer_binding_shape(archive: &GgufArchive, binding: &GgufTensorBinding) -> Re
         GgufTensorBinding::Reshape { input, dims } => {
             let shape = infer_binding_shape(archive, input)?;
             if checked_elem_count(&shape)? != checked_elem_count(dims)? {
-                candle_core::bail!("cannot reshape GGUF binding from {shape:?} to {dims:?}");
+                inference_tensor::bail!("cannot reshape GGUF binding from {shape:?} to {dims:?}");
             }
             Ok(dims.clone())
         }
@@ -1327,13 +1329,13 @@ fn infer_mxfp4_component_shape(
 
 fn validate_mxfp4(dtype: u32, shape: &[usize], name: &str) -> Result<()> {
     if dtype != 39 {
-        candle_core::bail!("GGUF tensor `{name}` has dtype {dtype}, expected MXFP4 dtype 39");
+        inference_tensor::bail!("GGUF tensor `{name}` has dtype {dtype}, expected MXFP4 dtype 39");
     }
     let Some(last) = shape.last() else {
-        candle_core::bail!("GGUF MXFP4 tensor `{name}` has no dimensions");
+        inference_tensor::bail!("GGUF MXFP4 tensor `{name}` has no dimensions");
     };
     if !last.is_multiple_of(32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GGUF MXFP4 tensor `{name}` last dimension {last} is not divisible by 32"
         );
     }
@@ -1365,13 +1367,13 @@ fn infer_binding_dtype(
                 .iter()
                 .map(|input| infer_binding_dtype(archive, input, source_dtype));
             let Some(first) = dtypes.next() else {
-                candle_core::bail!("cannot combine zero GGUF bindings");
+                inference_tensor::bail!("cannot combine zero GGUF bindings");
             };
             let first = first?;
             for dtype in dtypes {
                 let dtype = dtype?;
                 if dtype != first {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "cannot combine GGUF bindings with dtypes {first:?} and {dtype:?}"
                     );
                 }
@@ -1383,17 +1385,19 @@ fn infer_binding_dtype(
         | GgufTensorBinding::InverseSoftplus { input } => {
             let dtype = infer_binding_dtype(archive, input, source_dtype)?;
             if dtype == DType::U8 {
-                candle_core::bail!("cannot apply a floating-point transform to a U8 GGUF binding");
+                inference_tensor::bail!(
+                    "cannot apply a floating-point transform to a U8 GGUF binding"
+                );
             }
             Ok(dtype)
         }
         GgufTensorBinding::Cast { input, dtype } => {
             if *dtype == DType::U8 {
-                candle_core::bail!("cannot cast a GGUF binding to U8");
+                inference_tensor::bail!("cannot cast a GGUF binding to U8");
             }
             let input_dtype = infer_binding_dtype(archive, input, source_dtype)?;
             if input_dtype == DType::U8 {
-                candle_core::bail!("cannot cast a U8 GGUF binding");
+                inference_tensor::bail!("cannot cast a U8 GGUF binding");
             }
             Ok(*dtype)
         }
@@ -1412,7 +1416,7 @@ fn checked_elem_count(shape: &[usize]) -> Result<usize> {
 mod tests {
     use std::io::Write;
 
-    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
+    use inference_tensor::quantized::{GgmlDType, QTensor, gguf_file};
     use tempfile::NamedTempFile;
 
     use super::*;

@@ -1,6 +1,6 @@
 use super::*;
-use candle_core::{DType, Device, IndexOp};
 use float8::F8E4M3;
+use inference_tensor::{DType, Device, IndexOp};
 
 #[test]
 fn test_fused_batch_matmul_f8e4m3_nobias() -> Result<()> {

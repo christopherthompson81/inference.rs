@@ -3,11 +3,11 @@
 // Licensed under the Apache License 2.0
 // Copyright © 2023 Apple Inc.
 
-use candle_core::{DType, MetalDevice};
 use candle_metal_kernels::metal::{
     Buffer, ComputeCommandEncoder, ComputePipeline, ConstantValues, Device, Function, Library,
     MetalDeviceType, Value as ConstantValue,
 };
+use inference_tensor::{DType, MetalDevice};
 use objc2_metal::{MTLDevice, MTLSize};
 use std::os::raw::c_void;
 use std::sync::{Arc, RwLock};

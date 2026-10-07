@@ -1,5 +1,5 @@
-use candle_core::{DType, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{DType, Module, Result, Tensor};
 use std::sync::Arc;
 
 use crate::layers::{RmsNorm, ScaledEmbedding, dense_embedding};

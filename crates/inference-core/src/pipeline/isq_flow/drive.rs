@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use candle_core::Device;
 use inference_quant::{QuantMethod, TrackedModule};
+use inference_tensor::Device;
 use tokenizers::Tokenizer;
 use tracing::info;
 
@@ -18,8 +18,8 @@ use super::super::{
 use super::harvest_imatrix;
 
 pub(crate) trait CalibrationDrive {
-    fn calibration_forward(&self, inputs: &InputMetadata) -> candle_core::Result<()>;
-    fn reset_cache(&self) -> candle_core::Result<()> {
+    fn calibration_forward(&self, inputs: &InputMetadata) -> inference_tensor::Result<()>;
+    fn reset_cache(&self) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn sliding_window(&self) -> Option<usize> {
@@ -30,7 +30,7 @@ pub(crate) trait CalibrationDrive {
 pub(crate) struct NormalCalibrationDrive<'a>(pub &'a dyn NormalModel);
 
 impl CalibrationDrive for NormalCalibrationDrive<'_> {
-    fn calibration_forward(&self, inputs: &InputMetadata) -> candle_core::Result<()> {
+    fn calibration_forward(&self, inputs: &InputMetadata) -> inference_tensor::Result<()> {
         let input = inputs.input.to_device(self.0.device())?;
         let mut ctx = ModelForwardContext::new(
             &inputs.positions,
@@ -43,7 +43,7 @@ impl CalibrationDrive for NormalCalibrationDrive<'_> {
         Ok(())
     }
 
-    fn reset_cache(&self) -> candle_core::Result<()> {
+    fn reset_cache(&self) -> inference_tensor::Result<()> {
         reset_either_cache(self.0.cache())
     }
 
@@ -55,7 +55,7 @@ impl CalibrationDrive for NormalCalibrationDrive<'_> {
 pub(crate) struct MultimodalCalibrationDrive<'a>(pub &'a dyn MultimodalModel);
 
 impl CalibrationDrive for MultimodalCalibrationDrive<'_> {
-    fn calibration_forward(&self, inputs: &InputMetadata) -> candle_core::Result<()> {
+    fn calibration_forward(&self, inputs: &InputMetadata) -> inference_tensor::Result<()> {
         let input = inputs.input.to_device(self.0.device())?;
         let mut ctx = ModelForwardContext::new(
             &inputs.positions,
@@ -71,7 +71,7 @@ impl CalibrationDrive for MultimodalCalibrationDrive<'_> {
         Ok(())
     }
 
-    fn reset_cache(&self) -> candle_core::Result<()> {
+    fn reset_cache(&self) -> inference_tensor::Result<()> {
         reset_either_cache(self.0.cache())
     }
 
@@ -83,14 +83,14 @@ impl CalibrationDrive for MultimodalCalibrationDrive<'_> {
 pub(crate) struct EmbeddingCalibrationDrive<'a>(pub &'a dyn EmbeddingModel);
 
 impl CalibrationDrive for EmbeddingCalibrationDrive<'_> {
-    fn calibration_forward(&self, inputs: &InputMetadata) -> candle_core::Result<()> {
+    fn calibration_forward(&self, inputs: &InputMetadata) -> inference_tensor::Result<()> {
         let input = inputs.input.to_device(self.0.device())?;
         self.0.forward(&input, &inputs.flash_meta)?;
         Ok(())
     }
 }
 
-fn reset_either_cache(cache: &EitherCache) -> candle_core::Result<()> {
+fn reset_either_cache(cache: &EitherCache) -> inference_tensor::Result<()> {
     match cache {
         EitherCache::Full(full) => {
             for layer in &mut *full.lock() {

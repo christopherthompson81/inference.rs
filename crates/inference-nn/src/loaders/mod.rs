@@ -30,8 +30,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::Result;
-use candle_core::DType;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::DType;
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::{AutoDeviceMapParams, DeviceMapper};

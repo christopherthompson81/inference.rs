@@ -1,6 +1,6 @@
-use candle_core::{Device, Result, cuda_backend::kernels};
+use inference_tensor::{Device, Result, cuda_backend::kernels};
 
-pub fn preload_candle_kernels(device: &Device) -> Result<usize> {
+pub fn preload_tensor_kernels(device: &Device) -> Result<usize> {
     let Device::Cuda(cuda_device) = device else {
         return Ok(0);
     };
@@ -41,7 +41,7 @@ static MODULES: [&kernels::Module; kernels::ALL_IDS.len()] = [
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Tensor, cuda_backend};
+    use inference_tensor::{DType, Tensor, cuda_backend};
 
     #[test]
     fn every_module_loads_and_preloads_its_entries() -> Result<()> {
@@ -61,7 +61,7 @@ mod tests {
                     .filter(|entry| !module.is_optional(entry))
             })
             .count();
-        let loaded = preload_candle_kernels(&device)?;
+        let loaded = preload_tensor_kernels(&device)?;
         let Device::Cuda(cuda) = &device else {
             unreachable!()
         };

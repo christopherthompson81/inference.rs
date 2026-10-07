@@ -1,8 +1,8 @@
 use std::{fmt::Debug, sync::Arc};
 
 use crate::utils::normal::TryIntoDType;
-use candle_core::{DType, Device, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use super::peer::CudaPeerAccess;
 
@@ -93,7 +93,7 @@ impl DeviceMapper for LayerDeviceMapper {
     fn get_min_dtype(&self, dtype: &dyn TryIntoDType) -> Result<DType> {
         dtype
             .try_into_dtype(&self.mappings.iter().collect::<Vec<_>>())
-            .map_err(candle_core::Error::msg)
+            .map_err(inference_tensor::Error::msg)
     }
     fn num_device_mapping_layers(&self) -> usize {
         self.mappings.len()
@@ -159,7 +159,7 @@ impl DeviceMapper for DummyDeviceMapper {
     fn get_min_dtype(&self, dtype: &dyn TryIntoDType) -> Result<DType> {
         dtype
             .try_into_dtype(&[&self.nm_device])
-            .map_err(candle_core::Error::msg)
+            .map_err(inference_tensor::Error::msg)
     }
     fn num_device_mapping_layers(&self) -> usize {
         1
@@ -235,7 +235,7 @@ impl DeviceMapper for NcclDeviceMapper {
     fn get_min_dtype(&self, dtype: &dyn TryIntoDType) -> Result<DType> {
         dtype
             .try_into_dtype(&[&self.nm_device])
-            .map_err(candle_core::Error::msg)
+            .map_err(inference_tensor::Error::msg)
     }
     fn num_device_mapping_layers(&self) -> usize {
         self.model_layers
@@ -311,7 +311,7 @@ impl DeviceMapper for NcclPipelineParallelMapper {
     fn get_min_dtype(&self, dtype: &dyn TryIntoDType) -> Result<DType> {
         dtype
             .try_into_dtype(&self.mappings.iter().map(|(_, x)| x).collect::<Vec<_>>())
-            .map_err(candle_core::Error::msg)
+            .map_err(inference_tensor::Error::msg)
     }
     fn num_device_mapping_layers(&self) -> usize {
         self.mappings.len()

@@ -2,12 +2,12 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -304,7 +304,7 @@ impl FullAttention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         (q, k) = self.rotary_emb.forward_qk_norm(
             &q,
             &k,
@@ -341,7 +341,7 @@ impl FullAttention {
         )? {
             return Ok(res);
         }
-        let gate = candle_nn::ops::sigmoid(&gate.to_dtype(y.dtype())?)?;
+        let gate = inference_tensor::nn::ops::sigmoid(&gate.to_dtype(y.dtype())?)?;
         y = y.broadcast_mul(&gate)?;
 
         let res = self.o_proj.forward(&y)?;
@@ -473,7 +473,7 @@ impl SparseMoeBlock {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, shared_gate)?,
             None => shared_gate,
         };
-        let shared_gate = candle_nn::ops::sigmoid(&shared_gate)?;
+        let shared_gate = inference_tensor::nn::ops::sigmoid(&shared_gate)?;
         let shared_gate = shared_gate.reshape((b_size, seq_len, 1))?;
         let shared_out = shared_out.broadcast_mul(&shared_gate)?;
 
@@ -513,24 +513,24 @@ fn packed_gdn_segments(
     query_lens: &[usize],
 ) -> Result<Vec<PackedGdnSegment>> {
     if physical_batch != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3-Next packed GDN requires physical batch size 1, got {physical_batch}"
         );
     }
     if query_lens.is_empty() {
-        candle_core::bail!("Qwen3-Next packed GDN requires at least one logical sequence");
+        inference_tensor::bail!("Qwen3-Next packed GDN requires at least one logical sequence");
     }
     let mut offset = 0usize;
     let mut segments = Vec::with_capacity(query_lens.len());
     for (state_index, &query_len) in query_lens.iter().enumerate() {
         if query_len == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3-Next packed GDN logical sequence {state_index} has zero tokens"
             );
         }
         let end = offset
             .checked_add(query_len)
-            .ok_or_else(|| candle_core::Error::msg("Qwen3-Next packed GDN length overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3-Next packed GDN length overflow"))?;
         segments.push(PackedGdnSegment {
             token_range: offset..end,
             state_index,
@@ -538,7 +538,7 @@ fn packed_gdn_segments(
         offset = end;
     }
     if offset != physical_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3-Next packed GDN has {offset} logical tokens but {physical_tokens} physical tokens"
         );
     }
@@ -551,12 +551,12 @@ fn validate_packed_gdn_state_rows(
     recurrent_state_batch: usize,
 ) -> Result<()> {
     if conv_state_batch != logical_batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3-Next packed GDN has {conv_state_batch} convolution state rows but {logical_batch} logical sequences"
         );
     }
     if recurrent_state_batch != logical_batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3-Next packed GDN has {recurrent_state_batch} recurrent state rows but {logical_batch} logical sequences"
         );
     }
@@ -581,7 +581,7 @@ impl DecoderLayer {
     ) -> Result<Tensor> {
         let attn = match &self.layer_impl {
             LayerImpl::FullAttention(attn) => attn,
-            _ => candle_core::bail!("Expected full attention layer"),
+            _ => inference_tensor::bail!("Expected full attention layer"),
         };
         let residual = x;
         let x = self.input_layernorm.forward(x)?;
@@ -602,14 +602,14 @@ impl DecoderLayer {
     ) -> Result<Tensor> {
         let gdn = match &self.layer_impl {
             LayerImpl::LinearAttention(gdn) => gdn,
-            _ => candle_core::bail!("Expected linear attention layer"),
+            _ => inference_tensor::bail!("Expected linear attention layer"),
         };
         let residual = x;
         let x = self.input_layernorm.forward(x)?;
         let gdn_out = if let Some(layout) = packed_layout {
             let query_lens = layout.query_lens();
             if batch_kind != RecurrentBatchKind::Prefill {
-                candle_core::bail!("Qwen3-Next packed GDN cannot run a decode batch");
+                inference_tensor::bail!("Qwen3-Next packed GDN cannot run a decode batch");
             }
             let (physical_batch, physical_tokens, _) = x.dims3()?;
             let (conv_state_batch, _, _) = cache.conv_state.dims3()?;
@@ -621,7 +621,7 @@ impl DecoderLayer {
                 recurrent_state_batch,
             )?;
             if x.dtype() != cache.conv_state.dtype() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Qwen3-Next packed GDN dtype mismatch: tokens are {:?}, convolution state is {:?}",
                     x.dtype(),
                     cache.conv_state.dtype()
@@ -630,7 +630,7 @@ impl DecoderLayer {
             if !x.device().same_device(cache.conv_state.device())
                 || !x.device().same_device(cache.recurrent_state.device())
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Qwen3-Next packed GDN tokens and recurrent states are on different devices"
                 );
             }
@@ -724,7 +724,7 @@ impl Model {
         let dtype = vb_m.dtype();
 
         if !cfg.mlp_only_layers.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3Next `mlp_only_layers` is not implemented yet in inference.rs."
             );
         }
@@ -912,7 +912,7 @@ impl Model {
 
         let pipeline_cache = Arc::new(Mutex::new(
             HybridCache::new(hybrid_cache_config, vb_m.dtype(), &layer_devices).map_err(|e| {
-                candle_core::Error::Msg(format!("Failed to create hybrid cache: {}", e))
+                inference_tensor::Error::Msg(format!("Failed to create hybrid cache: {}", e))
             })?,
         ));
 
@@ -961,7 +961,9 @@ impl Model {
                 .paged_input_metadata()
                 .and_then(|metadata| metadata.query_lens.clone())
                 .ok_or_else(|| {
-                    candle_core::Error::msg("Qwen3-Next packed GDN requires logical query lengths")
+                    inference_tensor::Error::msg(
+                        "Qwen3-Next packed GDN requires logical query lengths",
+                    )
                 })?;
             Some(PackedGdnLayout::new(
                 query_lens,
@@ -971,26 +973,26 @@ impl Model {
             None
         };
         if has_linear_attention && recurrent_metadata.is_none() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Hybrid recurrent metadata is required for linear-attention layers."
             );
         }
         if has_linear_attention && let Some(layout) = packed_layout.as_ref() {
             let query_lens = layout.query_lens();
             if !ctx.is_first_prompt_chunk() {
-                candle_core::bail!("Qwen3-Next packed GDN requires the first prompt chunk");
+                inference_tensor::bail!("Qwen3-Next packed GDN requires the first prompt chunk");
             }
             let recurrent_metadata = recurrent_metadata
                 .as_ref()
                 .expect("checked above: linear-attention layers require recurrent metadata");
             if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
-                candle_core::bail!("Qwen3-Next packed GDN cannot run a decode batch");
+                inference_tensor::bail!("Qwen3-Next packed GDN cannot run a decode batch");
             }
             let (physical_batch, physical_tokens, _) = x.dims3()?;
             packed_gdn_segments(physical_batch, physical_tokens, query_lens)?;
             let index_count = recurrent_metadata.state_indices().dims1()?;
             if index_count != query_lens.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Qwen3-Next packed GDN has {index_count} state indices but {} logical sequences",
                     query_lens.len()
                 );
@@ -998,7 +1000,7 @@ impl Model {
             if let Some(host_indices) = recurrent_metadata.state_indices_host()
                 && host_indices.len() != query_lens.len()
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Qwen3-Next packed GDN has {} host state indices but {} logical sequences",
                     host_indices.len(),
                     query_lens.len()
@@ -1055,7 +1057,7 @@ impl Model {
                     let indices = hybrid_cache
                         .state_indices_for_layer(layer_idx)?
                         .ok_or_else(|| {
-                            candle_core::Error::msg(format!(
+                            inference_tensor::Error::msg(format!(
                                 "Hybrid cache layer {layer_idx} is missing recurrent state indices"
                             ))
                         })?;
@@ -1085,7 +1087,7 @@ impl Model {
                             recurrent_metadata.state_indices_host(),
                         )?;
                     } else {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Hybrid cache layer {layer_idx} is not recurrent for a linear-attention layer."
                         );
                     }
@@ -1180,7 +1182,7 @@ impl NormalModel for Model {
         _flash_params: &FlashParams,
         _flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
-        candle_core::bail!("Qwen3Next does not support X-LoRA forward")
+        inference_tensor::bail!("Qwen3Next does not support X-LoRA forward")
     }
     fn cache(&self) -> &EitherCache {
         &self.kv_cache
@@ -1212,10 +1214,10 @@ mod tests {
         sync::Arc,
     };
 
-    use candle_core::{DType, Device, Result, Tensor};
     use inference_quant::{
         QuantMethod, QuantizedWeightSource, Shard, ShardedSafeTensors, ShardedVarBuilder,
     };
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{
         GdnInputProjectionKind, PackedGdnSegment, gdn_input_projection_kind, packed_gdn_segments,

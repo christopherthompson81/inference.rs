@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor};
-use candle_nn::Module;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::Module;
+use inference_tensor::{Result, Tensor};
 
 use crate::{
     layers::{AvgPool2d, GemmaRmsNorm},
@@ -90,7 +90,7 @@ impl Gemma3MultiModalProjector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
+    use inference_tensor::{DType, Device};
 
     #[test]
     fn input_projection_residual_uses_constructor_key() -> Result<()> {

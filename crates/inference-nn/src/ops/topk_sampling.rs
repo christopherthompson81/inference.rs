@@ -5,7 +5,7 @@ pub struct CudaTopKSamplingWorkspace {
     capacity_rows: usize,
     capacity_k: usize,
     vocab: usize,
-    location: candle_core::DeviceLocation,
+    location: inference_tensor::DeviceLocation,
     ranked: Option<CudaRankedTopKPackedWorkspace>,
     token_ring: CudaAsyncTokenRing,
     slots: Vec<CudaTopKSamplingSlot>,
@@ -13,8 +13,8 @@ pub struct CudaTopKSamplingWorkspace {
 
 #[cfg(feature = "cuda")]
 struct CudaTopKSamplingSlot {
-    params: candle_core::cuda_backend::cudarc::driver::CudaSlice<f32>,
-    params_host: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<f32>,
+    params: inference_tensor::cuda_backend::cudarc::driver::CudaSlice<f32>,
+    params_host: inference_tensor::cuda_backend::cudarc::driver::PinnedHostSlice<f32>,
 }
 
 #[cfg(feature = "cuda")]
@@ -47,19 +47,19 @@ impl<'a> CudaTopKSamplingCompletion<'a> {
 
 #[cfg(feature = "cuda")]
 fn new_cuda_topk_sampling_slot(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     capacity_rows: usize,
 ) -> Result<CudaTopKSamplingSlot> {
     let stream = dev.cuda_stream();
     let context = stream.context();
     let param_elems = capacity_rows
         .checked_mul(CUDA_TOPK_SAMPLING_PARAM_WIDTH)
-        .ok_or_else(|| candle_core::Error::msg("CUDA top-k sampling parameter overflow"))?;
-    let mut params_host =
-        unsafe { context.alloc_pinned::<f32>(param_elems) }.map_err(candle_core::Error::wrap)?;
+        .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k sampling parameter overflow"))?;
+    let mut params_host = unsafe { context.alloc_pinned::<f32>(param_elems) }
+        .map_err(inference_tensor::Error::wrap)?;
     params_host
         .as_mut_slice()
-        .map_err(candle_core::Error::wrap)?
+        .map_err(inference_tensor::Error::wrap)?
         .fill(0.0);
 
     Ok(CudaTopKSamplingSlot {
@@ -70,19 +70,19 @@ fn new_cuda_topk_sampling_slot(
 
 #[cfg(feature = "cuda")]
 fn new_cuda_topk_sampling_workspace(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     rows: usize,
     vocab: usize,
     k: usize,
 ) -> Result<CudaTopKSamplingWorkspace> {
-    use candle_core::backend::BackendDevice;
+    use inference_tensor::backend::BackendDevice;
 
     let capacity_rows = rows
         .checked_next_power_of_two()
-        .ok_or_else(|| candle_core::Error::msg("CUDA top-k sampling row capacity overflow"))?;
-    let capacity_k = k
-        .checked_next_power_of_two()
-        .ok_or_else(|| candle_core::Error::msg("CUDA top-k sampling width capacity overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k sampling row capacity overflow"))?;
+    let capacity_k = k.checked_next_power_of_two().ok_or_else(|| {
+        inference_tensor::Error::msg("CUDA top-k sampling width capacity overflow")
+    })?;
     let mut slots = Vec::with_capacity(CUDA_ASYNC_TOKEN_RING_SLOTS);
     for _ in 0..CUDA_ASYNC_TOKEN_RING_SLOTS {
         slots.push(new_cuda_topk_sampling_slot(dev, capacity_rows)?);
@@ -106,21 +106,21 @@ fn validate_cuda_topk_sampling_params(
     op: &'static str,
 ) -> Result<usize> {
     if params.len() != rows {
-        candle_core::bail!("{op} expected {rows} sampling parameter rows");
+        inference_tensor::bail!("{op} expected {rows} sampling parameter rows");
     }
     let mut max_k = 0usize;
     for params in params {
         if !params.inverse_temperature.is_finite() || params.inverse_temperature <= 0.0 {
-            candle_core::bail!("{op} requires positive finite inverse temperatures");
+            inference_tensor::bail!("{op} requires positive finite inverse temperatures");
         }
         if params.top_k == 0 || params.top_k > CUDA_TOPK_MAX_K {
-            candle_core::bail!("{op} top-k must be in [1, {CUDA_TOPK_MAX_K}]");
+            inference_tensor::bail!("{op} top-k must be in [1, {CUDA_TOPK_MAX_K}]");
         }
         if !params.top_p.is_finite() || !params.min_p.is_finite() {
-            candle_core::bail!("{op} requires finite top-p and min-p values");
+            inference_tensor::bail!("{op} requires finite top-p and min-p values");
         }
         if !(0.0..1.0).contains(&params.uniform) {
-            candle_core::bail!("{op} requires uniforms in [0, 1)");
+            inference_tensor::bail!("{op} requires uniforms in [0, 1)");
         }
         max_k = max_k.max(params.top_k.min(vocab));
     }
@@ -129,17 +129,17 @@ fn validate_cuda_topk_sampling_params(
 
 #[cfg(feature = "cuda")]
 fn copy_cuda_topk_sampling_params(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     slot: &mut CudaTopKSamplingSlot,
     params: &[CudaTopKSamplingParams],
 ) -> Result<()> {
     let host = slot
         .params_host
         .as_mut_slice()
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
     for (row, params) in params.iter().enumerate() {
         let start = row * CUDA_TOPK_SAMPLING_PARAM_WIDTH;
-        let top_k = u16::try_from(params.top_k).map_err(candle_core::Error::wrap)?;
+        let top_k = u16::try_from(params.top_k).map_err(inference_tensor::Error::wrap)?;
         host[start] = params.inverse_temperature;
         host[start + 1] = f32::from(top_k);
         host[start + 2] = params.top_p;
@@ -158,27 +158,27 @@ fn cuda_topk_sampling_submit_inner(
     cache: &mut Option<CudaTopKSamplingWorkspace>,
     op: &'static str,
 ) -> Result<CudaTopKSamplingSubmission> {
-    use candle_core::backend::{BackendDevice, BackendStorage};
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::backend::{BackendDevice, BackendStorage};
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!("{op} requires BF16, F16, or F32 logits");
+        inference_tensor::bail!("{op} requires BF16, F16, or F32 logits");
     }
     if !input.is_contiguous() {
-        return Err(candle_core::Error::RequiresContiguous { op });
+        return Err(inference_tensor::Error::RequiresContiguous { op });
     }
     let [rows, vocab] = input.dims() else {
-        candle_core::bail!("{op} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{op} requires logits with shape [batch, vocab]");
     };
     if *rows == 0 || *vocab == 0 {
-        candle_core::bail!("{op} requires non-empty logits");
+        inference_tensor::bail!("{op} requires non-empty logits");
     }
     let max_k = validate_cuda_topk_sampling_params(params, *rows, *vocab, op)?;
     let (storage, _) = input.storage_and_layout();
     let storage = match &*storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{op} requires CUDA logits"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{op} requires CUDA logits"),
     };
     let dev = storage.device();
     let needs_alloc = cache.as_ref().is_none_or(|workspace| {
@@ -192,7 +192,7 @@ fn cuda_topk_sampling_submit_inner(
             .as_ref()
             .is_some_and(|workspace| workspace.token_ring.has_pending())
         {
-            candle_core::bail!("{op} cannot resize while submissions are pending");
+            inference_tensor::bail!("{op} cannot resize while submissions are pending");
         }
         *cache = Some(new_cuda_topk_sampling_workspace(dev, *rows, *vocab, max_k)?);
     }
@@ -212,14 +212,14 @@ fn cuda_topk_sampling_submit_inner(
         copy_cuda_topk_sampling_params(dev, slot, params)?;
 
         let (packed_storage, packed_layout) = ranked.packed.storage_and_layout();
-        let candle_core::Storage::Cuda(packed_storage) = &*packed_storage else {
+        let inference_tensor::Storage::Cuda(packed_storage) = &*packed_storage else {
             unreachable!("ranked top-k output is CUDA")
         };
         let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
             unreachable!("ranked top-k output is F32")
         };
         let (token_storage, token_layout) = reservation.device_tokens.storage_and_layout();
-        let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+        let inference_tensor::Storage::Cuda(token_storage) = &*token_storage else {
             unreachable!("reserved token destination is CUDA")
         };
         let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
@@ -236,8 +236,8 @@ fn cuda_topk_sampling_submit_inner(
                 packed_ptr,
                 params_ptr,
                 tokens_ptr,
-                i32::try_from(*rows).map_err(candle_core::Error::wrap)?,
-                i32::try_from(ranked.k).map_err(candle_core::Error::wrap)?,
+                i32::try_from(*rows).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(ranked.k).map_err(inference_tensor::Error::wrap)?,
                 stream.cu_stream() as i64,
             );
         }
@@ -296,7 +296,7 @@ pub fn cuda_topk_sampling_submit_batched_into(
 pub fn cuda_topk_sampling_device_tokens_wait_on(
     workspace: &mut CudaTopKSamplingWorkspace,
     submission: &CudaTopKSamplingSubmission,
-    consumer_stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    consumer_stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
 ) -> Result<()> {
     workspace.token_ring.wait_on(
         &submission.token,
@@ -309,7 +309,7 @@ pub fn cuda_topk_sampling_device_tokens_wait_on(
 pub fn cuda_topk_sampling_device_tokens_release_after(
     workspace: &mut CudaTopKSamplingWorkspace,
     submission: &CudaTopKSamplingSubmission,
-    consumer_stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    consumer_stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
 ) -> Result<()> {
     workspace.token_ring.release_after(
         &submission.token,
@@ -327,7 +327,7 @@ pub fn cuda_topk_sampling_submission_complete<'a>(
         .token_ring
         .complete(&submission.token, "cuda_topk_sampling_submission_complete")?;
     if token_ids.contains(&CUDA_TOP1_INVALID_TOKEN) {
-        candle_core::bail!("invalid CUDA top-k sampling output");
+        inference_tensor::bail!("invalid CUDA top-k sampling output");
     }
     Ok(CudaTopKSamplingCompletion { token_ids })
 }

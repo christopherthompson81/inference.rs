@@ -5,7 +5,7 @@ pub use paged_attention::PagedAttention;
 
 #[cfg(not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")))]
 pub mod paged_attention {
-    use candle_core::{Device, Result, Tensor};
+    use inference_tensor::{Device, Result, Tensor};
 
     use crate::attention::{AttentionMask, FlashParams, SdpaParams};
     use crate::paged_attention::Fp8AttentionScales;
@@ -22,7 +22,7 @@ pub mod paged_attention {
             _device: &Device,
             _alibi_slopes: Option<Vec<f32>>,
         ) -> Result<Self> {
-            candle_core::bail!("Paged attention requires the CUDA or Metal feature flags.");
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
         pub fn new_with_fp8_attention_scales(
@@ -31,7 +31,7 @@ pub mod paged_attention {
             _alibi_slopes: Option<Vec<f32>>,
             _fp8_attention_scales: Option<Fp8AttentionScales>,
         ) -> Result<Self> {
-            candle_core::bail!("Paged attention requires the CUDA or Metal feature flags.");
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
         pub fn fp8_attention_scales(&self) -> Fp8AttentionScales {
@@ -55,7 +55,7 @@ pub mod paged_attention {
             _sdpa_params: &SdpaParams,
             _flash_params: Option<&FlashParams>,
         ) -> Result<Tensor> {
-            candle_core::bail!("Paged attention requires the CUDA or Metal feature flags.");
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
         pub fn gather_canvas_kv(
@@ -65,9 +65,9 @@ pub mod paged_attention {
             _input_metadata: &PagedAttentionInputMetadata,
             _seq_idx: usize,
             _kv_len: usize,
-            _dtype: candle_core::DType,
+            _dtype: inference_tensor::DType,
         ) -> Result<(Tensor, Tensor)> {
-            candle_core::bail!("Paged attention requires the CUDA or Metal feature flags.");
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -81,7 +81,7 @@ pub mod paged_attention {
             _sdpa_params: &SdpaParams,
             _flash_params: Option<&FlashParams>,
         ) -> Result<Tensor> {
-            candle_core::bail!("Paged attention requires the CUDA or Metal feature flags.");
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
     }
 }

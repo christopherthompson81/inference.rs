@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use candle_core::{Device, Error, Result, Tensor};
+use inference_tensor::{Device, Error, Result, Tensor};
 
 use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand_isaac::Isaac64Rng;
@@ -268,7 +268,7 @@ impl DrySamplingParamsInner {
 /// ```rust
 /// use std::{sync::Arc, ops::Mul};
 /// use inference_nn::sampler::CustomLogitsProcessor;
-/// use candle_core::{Result, Tensor};
+/// use inference_tensor::{Result, Tensor};
 ///
 /// struct ThresholdLogitsProcessor;
 /// impl CustomLogitsProcessor for ThresholdLogitsProcessor {
@@ -344,7 +344,7 @@ impl CudaTop1BatchSubmission {
 
     pub fn wait_on(
         &self,
-        stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
         let mut cache = self.cache.lock().unwrap();
         crate::ops::cuda_top1_device_tokens_wait_on(
@@ -360,7 +360,7 @@ impl CudaTop1BatchSubmission {
 
     pub fn release_after(
         &self,
-        stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
         let mut cache = self.cache.lock().unwrap();
         crate::ops::cuda_top1_device_tokens_release_after(
@@ -401,7 +401,7 @@ impl CudaTop1BatchSubmission {
         };
         self.submission = None;
         if packed.is_none() && token_ids.contains(&crate::ops::CUDA_TOP1_INVALID_TOKEN) {
-            candle_core::bail!("invalid CUDA top-1 output");
+            inference_tensor::bail!("invalid CUDA top-1 output");
         }
         Ok(CudaTop1BatchCompletion { token_ids, packed })
     }
@@ -441,7 +441,7 @@ impl CudaTopKBatchSubmission {
 
     pub fn wait_on(
         &self,
-        stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
         let mut cache = self.cache.lock().unwrap();
         crate::ops::cuda_topk_sampling_device_tokens_wait_on(
@@ -457,7 +457,7 @@ impl CudaTopKBatchSubmission {
 
     pub fn release_after(
         &self,
-        stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
         let mut cache = self.cache.lock().unwrap();
         crate::ops::cuda_topk_sampling_device_tokens_release_after(
@@ -610,7 +610,7 @@ fn argmax_f32(values: &[f32]) -> Result<u32> {
     let mut best_value = f32::NEG_INFINITY;
     for (index, &value) in values.iter().enumerate() {
         if value.is_nan() || value == f32::INFINITY {
-            candle_core::bail!("argmax received invalid logits");
+            inference_tensor::bail!("argmax received invalid logits");
         }
         if value > best_value {
             best_index = Some(index);
@@ -618,7 +618,7 @@ fn argmax_f32(values: &[f32]) -> Result<u32> {
         }
     }
     if best_value == f32::NEG_INFINITY {
-        candle_core::bail!("argmax received no finite logits");
+        inference_tensor::bail!("argmax received no finite logits");
     }
     Ok(best_index.expect("finite argmax value exists") as u32)
 }
@@ -631,17 +631,17 @@ fn top_p_cutoff(top_p: f32, kept_probs: impl Iterator<Item = f32>) -> f32 {
 #[cfg(all(feature = "cuda", test))]
 fn weighted_index_from_unit_f32(weights: &[f32], unit: f32) -> Result<usize> {
     if weights.is_empty() || !unit.is_finite() || !(0.0..1.0).contains(&unit) {
-        candle_core::bail!("invalid resident sampling weights or uniform");
+        inference_tensor::bail!("invalid resident sampling weights or uniform");
     }
     let mut total = 0.0f32;
     for &weight in weights {
         if !weight.is_finite() || weight < 0.0 {
-            candle_core::bail!("invalid resident sampling weight");
+            inference_tensor::bail!("invalid resident sampling weight");
         }
         total += weight;
     }
     if !total.is_finite() || total <= 0.0 {
-        candle_core::bail!("resident sampling weights have no positive mass");
+        inference_tensor::bail!("resident sampling weights have no positive mass");
     }
 
     let chosen = unit * total;
@@ -853,7 +853,7 @@ impl Sampler {
     ) -> Result<Logprobs> {
         let expected = 2 * packed_k + 2;
         if packed.len() != expected {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid batched CUDA top-k row length {}, expected {expected}",
                 packed.len()
             );
@@ -862,7 +862,7 @@ impl Sampler {
             CudaBatchSamplingKind::Greedy => 1,
             CudaBatchSamplingKind::TopK { k } => k.min(packed_k),
             CudaBatchSamplingKind::Categorical => {
-                candle_core::bail!("categorical plan cannot parse CUDA top-k output")
+                inference_tensor::bail!("categorical plan cannot parse CUDA top-k output")
             }
         };
         let top_values = &packed[..row_k];
@@ -873,7 +873,7 @@ impl Sampler {
         let denom = packed[2 * packed_k];
         let global_max = packed[2 * packed_k + 1];
         if denom <= 0.0 || !denom.is_finite() || !global_max.is_finite() {
-            candle_core::bail!("invalid batched CUDA top-k softmax normalizer");
+            inference_tensor::bail!("invalid batched CUDA top-k softmax normalizer");
         }
 
         let reporting_probs = top_values
@@ -898,7 +898,7 @@ impl Sampler {
     ) -> Result<Logprobs> {
         let expected = 2 * packed_k;
         if packed.len() != expected {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid batched CUDA ranked top-k row length {}, expected {expected}",
                 packed.len()
             );
@@ -907,7 +907,7 @@ impl Sampler {
             CudaBatchSamplingKind::Greedy => 1,
             CudaBatchSamplingKind::TopK { k } => k.min(packed_k),
             CudaBatchSamplingKind::Categorical => {
-                candle_core::bail!("categorical plan cannot parse CUDA ranked top-k output")
+                inference_tensor::bail!("categorical plan cannot parse CUDA ranked top-k output")
             }
         };
         let top_values = &packed[..row_k];
@@ -918,7 +918,7 @@ impl Sampler {
         let scaled_max =
             top_values.first().copied().unwrap_or(f32::NEG_INFINITY) * plan.inverse_temperature;
         if !scaled_max.is_finite() {
-            candle_core::bail!("invalid batched CUDA ranked top-k maximum");
+            inference_tensor::bail!("invalid batched CUDA ranked top-k maximum");
         }
         let mut reporting_probs = top_values
             .iter()
@@ -926,7 +926,7 @@ impl Sampler {
             .collect::<Vec<_>>();
         let denominator = reporting_probs.iter().sum::<f32>();
         if denominator <= 0.0 || !denominator.is_finite() {
-            candle_core::bail!("invalid batched CUDA ranked top-k normalizer");
+            inference_tensor::bail!("invalid batched CUDA ranked top-k normalizer");
         }
         for probability in &mut reporting_probs {
             *probability /= denominator;
@@ -991,7 +991,7 @@ impl Sampler {
     #[cfg(feature = "cuda")]
     pub fn sample_cuda_categorical_row(&self, packed: &[f32]) -> Result<Logprobs> {
         if packed.len() != crate::ops::CUDA_CATEGORICAL_PACKED_WIDTH {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid batched CUDA categorical row length {}, expected {}",
                 packed.len(),
                 crate::ops::CUDA_CATEGORICAL_PACKED_WIDTH
@@ -1000,7 +1000,7 @@ impl Sampler {
         let token = packed[0];
         let logprob = packed[1];
         if !token.is_finite() || token < 0.0 || token.fract() != 0.0 || !logprob.is_finite() {
-            candle_core::bail!("invalid batched CUDA categorical output");
+            inference_tensor::bail!("invalid batched CUDA categorical output");
         }
         let next_token = token as u32;
         Ok(Logprobs {
@@ -1014,7 +1014,7 @@ impl Sampler {
     #[cfg(feature = "cuda")]
     pub fn sample_cuda_top1_row(&self, packed: &[f32]) -> Result<Logprobs> {
         if packed.len() != crate::ops::CUDA_TOP1_PACKED_WIDTH {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid batched CUDA top-1 row length {}, expected {}",
                 packed.len(),
                 crate::ops::CUDA_TOP1_PACKED_WIDTH
@@ -1033,7 +1033,9 @@ impl Sampler {
         self.submit_cuda_top1_batch(logits, true)?
             .complete()?
             .packed
-            .ok_or_else(|| candle_core::Error::Msg("missing CUDA top-1 packed output".to_string()))
+            .ok_or_else(|| {
+                inference_tensor::Error::Msg("missing CUDA top-1 packed output".to_string())
+            })
     }
 
     #[cfg(feature = "cuda")]
@@ -1152,7 +1154,7 @@ impl Sampler {
 
     fn sample_argmax(&self, logits: Tensor, return_logprobs: bool) -> Result<Logprobs> {
         let next_token = argmax_f32(&logits.to_vec1::<f32>()?)?;
-        let probs = candle_nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?;
+        let probs = inference_tensor::nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?;
         let logprob = probs[next_token as usize].ln();
 
         let top_logprobs = if return_logprobs {
@@ -1386,7 +1388,7 @@ impl Sampler {
             return Ok(logits);
         }
         if context.is_empty() {
-            candle_core::bail!("Penalty context is empty, this should not happen.");
+            inference_tensor::bail!("Penalty context is empty, this should not happen.");
         }
 
         let vocab_size = logits.elem_count();
@@ -1470,7 +1472,7 @@ impl Sampler {
         let packed = topk.packed.to_vec1::<f32>()?;
         let k = topk.k;
         if packed.len() != 2 * k + 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid CUDA top-k packed output length {}, expected {}",
                 packed.len(),
                 2 * k + 2
@@ -1486,7 +1488,7 @@ impl Sampler {
         let denom = softmax_info[0];
         let global_max = softmax_info[1];
         if denom <= 0.0 || !denom.is_finite() || !global_max.is_finite() {
-            candle_core::bail!("invalid CUDA top-k softmax normalizer");
+            inference_tensor::bail!("invalid CUDA top-k softmax normalizer");
         }
 
         let inv_temperature = (1.0 / temperature) as f32;
@@ -1569,7 +1571,7 @@ impl Sampler {
             || packed[1] < 0.0
             || packed[1].fract() != 0.0
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid CUDA top-1 output: max_logit={} argmax={}",
                 packed[0],
                 packed[1]
@@ -1639,7 +1641,7 @@ impl Sampler {
         let packed = topk.packed.to_vec1::<f32>()?;
         let k = topk.k;
         if packed.len() != 2 * k + 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid Metal top-k packed output length {}, expected {}",
                 packed.len(),
                 2 * k + 2
@@ -1654,7 +1656,7 @@ impl Sampler {
         let denom = softmax_info[0];
         let global_max = softmax_info[1];
         if denom <= 0.0 || !denom.is_finite() || !global_max.is_finite() {
-            candle_core::bail!("invalid Metal top-k softmax normalizer");
+            inference_tensor::bail!("invalid Metal top-k softmax normalizer");
         }
 
         let inv_temperature = (1.0 / temperature) as f32;
@@ -1767,7 +1769,7 @@ impl Sampler {
             .filter(|prob| prob.is_finite() && *prob > 0.0)
             .sum();
         if sum <= 0.0 {
-            candle_core::bail!("all probabilities are zero in speculative sampling");
+            inference_tensor::bail!("all probabilities are zero in speculative sampling");
         }
         for prob in probs.iter_mut() {
             if prob.is_finite() && *prob > 0.0 {
@@ -1816,10 +1818,10 @@ impl Sampler {
             Some(_) => None,
         };
         let reporting = match self.temperature {
-            None => candle_nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?,
+            None => inference_tensor::nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?,
             Some(temperature) => {
                 let logits = (&logits / temperature)?;
-                candle_nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?
+                inference_tensor::nn::ops::softmax_last_dim(&logits)?.to_vec1::<f32>()?
             }
         };
         let mut sampling = match self.temperature {
@@ -1949,7 +1951,7 @@ impl Sampler {
         prompt_len: usize,
     ) -> Result<Tensor> {
         if context.is_empty() {
-            candle_core::bail!("Penalty context is empty, this should not happen.");
+            inference_tensor::bail!("Penalty context is empty, this should not happen.");
         }
 
         self.apply_dry_penalty(&mut logits, context)?;
@@ -2175,7 +2177,7 @@ impl Sampler {
         let next_token = if sample_speculative {
             match self.temperature {
                 None => self.sample_speculative_top_kp_min_p(
-                    candle_nn::ops::softmax_last_dim(&logits)?,
+                    inference_tensor::nn::ops::softmax_last_dim(&logits)?,
                     return_logprobs,
                     self.top_k,
                     self.top_p as f32,
@@ -2183,7 +2185,7 @@ impl Sampler {
                 )?,
                 Some(temperature) => {
                     let logits = (&logits / temperature)?;
-                    let probs = candle_nn::ops::softmax_last_dim(&logits)?;
+                    let probs = inference_tensor::nn::ops::softmax_last_dim(&logits)?;
 
                     self.sample_speculative_top_kp_min_p(
                         probs,
@@ -2199,7 +2201,7 @@ impl Sampler {
                 None => self.sample_argmax(logits, return_logprobs)?,
                 Some(temperature) => {
                     let logits = (&logits / temperature)?;
-                    let probs = candle_nn::ops::softmax_last_dim(&logits)?;
+                    let probs = inference_tensor::nn::ops::softmax_last_dim(&logits)?;
                     let probs: Vec<f32> = probs.to_vec1()?;
 
                     self.sample_top_kp_min_p(
@@ -2225,7 +2227,7 @@ mod tests {
     #[test]
     fn test_argmax() {
         use super::Sampler;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         use rand::SeedableRng;
         use rand_isaac::Isaac64Rng;
         use std::sync::Arc;
@@ -2285,7 +2287,7 @@ mod tests {
     #[test]
     fn test_gumbel_speculative() {
         use super::Sampler;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         use rand::SeedableRng;
         use rand_isaac::Isaac64Rng;
         use std::sync::Arc;
@@ -2320,7 +2322,7 @@ mod tests {
     #[test]
     fn test_speculative_candidate_probs_use_sampling_filters() {
         use super::Sampler;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let sampler = Sampler::new(
             Some(1.0),
@@ -2361,7 +2363,7 @@ mod tests {
     #[test]
     fn test_min_p_applies_without_top_p() {
         use super::Sampler;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let sampler = Sampler::new(
             Some(1.0),
@@ -2392,7 +2394,7 @@ mod tests {
     #[test]
     fn test_top_logprobs_use_unfiltered_distribution() {
         use super::Sampler;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         use rand::SeedableRng;
         use rand_isaac::Isaac64Rng;
         use std::sync::{Arc, Mutex};
@@ -2432,7 +2434,7 @@ mod tests {
     #[test]
     fn test_logits_bias_suppresses_argmax_token() {
         use super::Sampler;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         use rand::SeedableRng;
         use rand_isaac::Isaac64Rng;
         use std::sync::Arc;
@@ -2580,7 +2582,7 @@ mod tests {
         assert!(biased.cuda_batch_sampling_plan(false).is_none());
         let mut processed = greedy.clone();
         processed.logits_processors.push(std::sync::Arc::new(
-            |logits: &candle_core::Tensor, _context: &[u32]| Ok(logits.clone()),
+            |logits: &inference_tensor::Tensor, _context: &[u32]| Ok(logits.clone()),
         ));
         assert!(processed.cuda_batch_sampling_plan(false).is_none());
 

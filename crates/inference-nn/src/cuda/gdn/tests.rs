@@ -1,5 +1,5 @@
 use super::*;
-use candle_core::{D, Device, IndexOp};
+use inference_tensor::{D, Device, IndexOp};
 
 #[derive(Clone, Copy)]
 struct RecurrenceCase {
@@ -2526,7 +2526,7 @@ fn run_speculative_transition_commit_case(
                 })?
                 .output
                 .into_tensor()?;
-            Ok::<_, candle_core::Error>((convolved, output))
+            Ok::<_, inference_tensor::Error>((convolved, output))
         };
         let (lazy_convolved, lazy_output) = run_lazy()?;
         let (retried_convolved, retried_output) = run_lazy()?;

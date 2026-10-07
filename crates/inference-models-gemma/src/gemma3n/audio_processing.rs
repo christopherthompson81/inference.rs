@@ -1,7 +1,7 @@
 use anyhow::Result;
-use candle_core::{Device, Tensor};
 use inference_audio::AudioInput;
 use inference_audio::fft::{Complex32, plan_forward_f32};
+use inference_tensor::{Device, Tensor};
 use rubato::Resampler;
 
 use crate::media_inputs::preprocessor_config::PreProcessorConfig;
@@ -111,7 +111,7 @@ impl AudioProcessor {
         let mel_tensor = Tensor::from_vec(mel_data, (1, num_frames, self.feature_size), device)?;
 
         // Create mask (all valid for now)
-        let mask = Tensor::zeros((1, num_frames), candle_core::DType::F32, device)?;
+        let mask = Tensor::zeros((1, num_frames), inference_tensor::DType::F32, device)?;
 
         Ok((mel_tensor, mask))
     }

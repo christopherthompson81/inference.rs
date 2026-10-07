@@ -3,7 +3,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use candle_core::{CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor};
 use cutile::core::f8e4m3fn;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
@@ -11,6 +10,7 @@ use cutile::tensor::IntoPartition;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 use float8::F8E4M3;
 use half::bf16;
+use inference_tensor::{CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor};
 
 use super::tune::{
     Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
@@ -277,7 +277,7 @@ fn activation_storage_rows(activation: &Tensor) -> Result<usize> {
     let (_, k) = activation.dims2()?;
     let (storage, layout) = activation.storage_and_layout();
     let Storage::Cuda(cuda) = &*storage else {
-        candle_core::bail!("cuTile FP8 GEMM operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile FP8 GEMM operands must be CUDA tensors")
     };
     Ok((cuda.as_cuda_slice::<F8E4M3>()?.len() - layout.start_offset()) / k)
 }
@@ -300,7 +300,7 @@ fn launch(
         || logical_rows > rows
         || !operands.activation.is_contiguous()
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile FP8 GEMM got unsupported shape rows={logical_rows} padded={rows} n={n} k={k}"
         )
     }
@@ -309,14 +309,14 @@ fn launch(
         || operands.activation_scales.dtype() != DType::F32
         || operands.weight_scales.dtype() != DType::F32
     {
-        candle_core::bail!("cuTile FP8 GEMM needs E4M3 operands with F32 scales")
+        inference_tensor::bail!("cuTile FP8 GEMM needs E4M3 operands with F32 scales")
     }
     if groups_dim != groups || operands.weight_scales.dims2()? != (n / BLOCK_COLS, groups) {
-        candle_core::bail!("cuTile FP8 GEMM scale shapes do not match the operands")
+        inference_tensor::bail!("cuTile FP8 GEMM scale shapes do not match the operands")
     }
     let bm = usize::try_from(cfg.bm).unwrap_or(0);
     if bm == 0 || !FP8_GEMM_BLOCK_ROWS.is_multiple_of(bm) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile FP8 GEMM row tile {} must divide {FP8_GEMM_BLOCK_ROWS}",
             cfg.bm
         )
@@ -344,7 +344,7 @@ fn launch(
         Storage::Cuda(ws_cuda),
     ) = (&*a_storage, &*as_storage, &*w_storage, &*ws_storage)
     else {
-        candle_core::bail!("cuTile FP8 GEMM operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile FP8 GEMM operands must be CUDA tensors")
     };
     let (a_addr, _a_guard) = slice_ptr_on_stream(
         a_cuda.as_cuda_slice::<F8E4M3>()?,
@@ -429,15 +429,15 @@ fn launch(
             .compile_options(cfg.compile_options());
     if compile_only {
         catch_cutile_panic("FP8 GEMM compile", || {
-            launcher
-                .compile_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile fp8 gemm compile: {e:?}")))
+            launcher.compile_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile fp8 gemm compile: {e:?}"))
+            })
         })?;
     } else {
         catch_cutile_panic("FP8 GEMM launch", || unsafe {
             launcher
                 .async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile fp8 gemm launch: {e:?}")))
+                .map_err(|e| inference_tensor::Error::Msg(format!("cutile fp8 gemm launch: {e:?}")))
         })?;
     }
     drop(out_guard);
@@ -468,7 +468,7 @@ impl GemmTuner {
         let sets = self.sets.clone();
         let (_, k) = sets[0].shape()?;
         if let std::collections::hash_map::Entry::Vacant(slot) = self.operands.entry(rows) {
-            let device = candle_core::Device::Cuda(dev.clone());
+            let device = inference_tensor::Device::Cuda(dev.clone());
             let padded = rows.div_ceil(FP8_GEMM_BLOCK_ROWS) * FP8_GEMM_BLOCK_ROWS;
             let x = Tensor::rand(-1f32, 1f32, (rows, k), &device)?.to_dtype(DType::BF16)?;
             slot.insert(quantize_activation_padded(&x, padded)?);
@@ -518,14 +518,15 @@ impl CutileKernel for Fp8GemmKernel {
             };
             let mut tuner = GemmTuner::new(dev, sets);
             let tuned = tune(dev, mode, &request, |rows, candidate| {
-                let cfg = Fp8GemmConfig::from_config(candidate)
-                    .ok_or_else(|| candle_core::Error::Msg("config outside the space".into()))?;
+                let cfg = Fp8GemmConfig::from_config(candidate).ok_or_else(|| {
+                    inference_tensor::Error::Msg("config outside the space".into())
+                })?;
                 tuner.prepare(rows, cfg)
             });
             TUNED.set(shape, &tuned, Fp8GemmConfig::from_config);
         }
         tracing::info!("Warming {} cuTile FP8 GEMM kernels.", shapes.len());
-        let device = candle_core::Device::Cuda(dev.clone());
+        let device = inference_tensor::Device::Cuda(dev.clone());
         for sets in &shapes {
             let (n, k) = sets[0].shape()?;
             for bucket in &buckets {
@@ -552,7 +553,7 @@ impl CutileKernel for Fp8GemmKernel {
 
 #[cfg(all(test, has_blockwise_fp8_kernels))]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{FP8_GEMM_BLOCK_ROWS, Fp8GemmConfig, POLICY, TUNED, cutile_fp8_gemm};
     use crate::blockwise_fp8::{mma, ops};

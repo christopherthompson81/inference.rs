@@ -1,8 +1,8 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
-use candle_core::{DType, Device};
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiRepo};
+use inference_tensor::{DType, Device};
 use serde::{Deserialize, Serialize};
 
 use crate::ModelSelected;

@@ -1,12 +1,11 @@
 use crate::cuda::backend::{cache_input_layout, slice_ptr};
 use crate::cuda::ffi;
-use candle::backend::BackendStorage;
-use candle::cuda_backend::cudarc::driver::DevicePtr;
-use candle::{DType, Result, Storage, Tensor};
-use candle_core as candle;
-use candle_core::cuda::cudarc::driver::DeviceSlice;
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::backend::BackendStorage;
+use inference_tensor::cuda::cudarc::driver::DeviceSlice;
+use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
+use inference_tensor::{DType, Result, Storage, Tensor};
 use std::ffi::c_int;
 
 fn validate_kv_cache_scales(
@@ -22,20 +21,21 @@ fn validate_kv_cache_scales(
                 || k_scale.elem_count() != 1
                 || v_scale.elem_count() != 1
             {
-                candle::bail!("{op} requires scalar f32 K/V scales for an f8e4m3 cache");
+                inference_tensor::bail!("{op} requires scalar f32 K/V scales for an f8e4m3 cache");
             }
         }
         (DType::F8E4M3, _, _) => {
-            candle::bail!("{op} requires explicit K/V scales for an f8e4m3 cache");
+            inference_tensor::bail!("{op} requires explicit K/V scales for an f8e4m3 cache");
         }
         (_, None, None) => {}
-        (_, _, _) => candle::bail!("{op} only accepts K/V scales for an f8e4m3 cache"),
+        (_, _, _) => inference_tensor::bail!("{op} only accepts K/V scales for an f8e4m3 cache"),
     }
     Ok(())
 }
 
 fn update_cache<
-    T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+    T: inference_tensor::cuda_backend::CudaDType
+        + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
 >(
     key: &Tensor,
     value: &Tensor,
@@ -51,7 +51,7 @@ fn update_cache<
         DType::F16 => 0,
         DType::BF16 => 1,
         DType::F32 => 2,
-        dtype => candle::bail!("dtype {dtype:?} is not supported"),
+        dtype => inference_tensor::bail!("dtype {dtype:?} is not supported"),
     };
 
     let cache_dtype = match key_cache.dtype() {
@@ -59,52 +59,52 @@ fn update_cache<
         DType::BF16 => 1,
         DType::F32 => 2,
         DType::F8E4M3 => 3,
-        dtype => candle::bail!("cache dtype {dtype:?} is not supported"),
+        dtype => inference_tensor::bail!("cache dtype {dtype:?} is not supported"),
     };
     validate_kv_cache_scales(key_cache.dtype(), k_scale, v_scale, "reshape_and_cache")?;
 
     let (k, k_l) = key.storage_and_layout();
     let k = match &*k {
         Storage::Cuda(k) => k,
-        _ => candle::bail!("key must be a cuda tensor"),
+        _ => inference_tensor::bail!("key must be a cuda tensor"),
     };
 
     let (v, v_l) = value.storage_and_layout();
     let v = match &*v {
         Storage::Cuda(v) => v,
-        _ => candle::bail!("value must be a cuda tensor"),
+        _ => inference_tensor::bail!("value must be a cuda tensor"),
     };
 
     let (kc, kc_l) = key_cache.storage_and_layout();
     let kc = match &*kc {
         Storage::Cuda(kc) => kc,
-        _ => candle::bail!("key_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("key_cache must be a cuda tensor"),
     };
 
     let (vc, vc_l) = value_cache.storage_and_layout();
     let vc = match &*vc {
         Storage::Cuda(vc) => vc,
-        _ => candle::bail!("value_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("value_cache must be a cuda tensor"),
     };
 
     let (s, s_l) = slot_mapping.storage_and_layout();
     let s = match &*s {
         Storage::Cuda(s) => s,
-        _ => candle::bail!("slot_mapping must be a cuda tensor"),
+        _ => inference_tensor::bail!("slot_mapping must be a cuda tensor"),
     };
 
     let kc_rank = kc_l.stride().len();
     let vc_rank = vc_l.stride().len();
 
     if kc_rank != 5 {
-        candle::bail!(
+        inference_tensor::bail!(
             "paged-attention expects `key_cache` tensor to be of rank 5 \
                 (key_cache: {kc_l:?})"
         )
     }
 
     if vc_rank != 4 {
-        candle::bail!(
+        inference_tensor::bail!(
             "paged-attention expects `value_cache` tensor to be of rank 4 \
                 (value_cache: {vc_l:?})"
         )
@@ -120,7 +120,7 @@ fn update_cache<
     // For FP8 cache, we need to get as u8 slices instead
     let ((kc_ptr, _kc_guard), (vc_ptr, _vc_guard)) = if cache_dtype == 3 {
         if !crate::cuda::USE_FP8 {
-            candle::bail!("FP8 is not supported on this system.");
+            inference_tensor::bail!("FP8 is not supported on this system.");
         }
 
         let kc = kc.as_cuda_slice::<F8E4M3>()?;
@@ -145,13 +145,13 @@ fn update_cache<
 
     let (k_scale_ptr, v_scale_ptr) = if let (Some(k_scale), Some(v_scale)) = (k_scale, v_scale) {
         if !crate::cuda::USE_FP8 {
-            candle::bail!("FP8 is not supported on this system.");
+            inference_tensor::bail!("FP8 is not supported on this system.");
         }
 
         let (ks, ks_l) = k_scale.storage_and_layout();
         let ks = match &*ks {
             Storage::Cuda(ks) => ks,
-            _ => candle::bail!("k_scale must be a cuda tensor"),
+            _ => inference_tensor::bail!("k_scale must be a cuda tensor"),
         };
         let ks = ks.as_cuda_slice::<f32>()?;
         let (ks, _ks_guard) = slice_ptr(ks, ks_l.start_offset());
@@ -159,7 +159,7 @@ fn update_cache<
         let (vs, vs_l) = v_scale.storage_and_layout();
         let vs = match &*vs {
             Storage::Cuda(vs) => vs,
-            _ => candle::bail!("v_scale must be a cuda tensor"),
+            _ => inference_tensor::bail!("v_scale must be a cuda tensor"),
         };
         let vs = vs.as_cuda_slice::<f32>()?;
         let (vs, _vs_guard) = slice_ptr(vs, vs_l.start_offset());
@@ -174,12 +174,12 @@ fn update_cache<
     let (value_tokens, value_heads, value_head_size, value_stride) =
         cache_input_layout(v_l, "value", "paged-attention")?;
     if (num_tokens, num_heads, head_size) != (value_tokens, value_heads, value_head_size) {
-        candle::bail!("shape mismatch k {:?} and v {:?}", k_l.shape(), v_l.shape())
+        inference_tensor::bail!("shape mismatch k {:?} and v {:?}", k_l.shape(), v_l.shape())
     }
 
     let (num_blocks, num_heads_kc, head_size_kc, block_size, x) = kc_l.shape().dims5()?;
     if num_heads_kc != num_heads || head_size_kc != head_size / x {
-        candle::bail!(
+        inference_tensor::bail!(
             "shape mismatch value_cache {:?}, expected {:?}",
             vc_l.shape(),
             (num_blocks, num_heads, head_size / x, block_size, x)
@@ -187,7 +187,7 @@ fn update_cache<
     }
 
     if (num_blocks, num_heads, head_size, block_size) != vc_l.shape().dims4()? {
-        candle::bail!(
+        inference_tensor::bail!(
             "shape mismatch key_cache {:?} and value_cache {:?}",
             kc_l.shape(),
             vc_l.shape()
@@ -195,15 +195,15 @@ fn update_cache<
     }
 
     if (num_tokens) != s_l.shape().dims1()? {
-        candle::bail!(
+        inference_tensor::bail!(
             "shape mismatch slot_mapping {:?}, expected {:?}",
             s_l.shape(),
             (num_tokens)
         )
     }
 
-    let key_stride = c_int::try_from(key_stride).map_err(candle::Error::wrap)?;
-    let value_stride = c_int::try_from(value_stride).map_err(candle::Error::wrap)?;
+    let key_stride = c_int::try_from(key_stride).map_err(inference_tensor::Error::wrap)?;
+    let value_stride = c_int::try_from(value_stride).map_err(inference_tensor::Error::wrap)?;
 
     let (k_ptr, _k_guard) = k.device_ptr(k.stream());
     let (v_ptr, _v_guard) = v.device_ptr(v.stream());
@@ -281,7 +281,9 @@ pub fn reshape_and_cache(
             slot_mapping,
         ),
         dt => {
-            candle::bail!("reshape_and_cache is only supported for f32, f16 and bf16 ({dt:?})")
+            inference_tensor::bail!(
+                "reshape_and_cache is only supported for f32, f16 and bf16 ({dt:?})"
+            )
         }
     }
 }

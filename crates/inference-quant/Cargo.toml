@@ -13,8 +13,7 @@ license = "MIT AND Apache-2.0"
 homepage.workspace = true
 
 [dependencies]
-candle-core.workspace = true
-candle-nn.workspace = true
+inference-tensor.workspace = true
 half.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -44,24 +43,22 @@ inference-metal-compile = { workspace = true, optional = true, features = ["meta
 
 [features]
 cuda = [
-    "candle-core/cuda",
-    "candle-nn/cuda",
+    "inference-tensor/cuda",
     "dep:cudaforge"
 ]
 cutile = [
     "cuda",
     "dep:cutile",
 ]
-nccl = ["cuda", "candle-core/nccl"]
+nccl = ["cuda", "inference-tensor/nccl"]
 metal = [
-    "candle-core/metal",
-    "candle-nn/metal",
+    "inference-tensor/metal",
     "dep:objc2-metal",
     "dep:dispatch2",
     "dep:candle-metal-kernels",
     "dep:inference-metal-compile",
 ]
-accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
+accelerate = ["inference-tensor/accelerate"]
 ring = []
 
 

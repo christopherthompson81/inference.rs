@@ -4,16 +4,16 @@ use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
-/// Phi model.
-/// <https://huggingface.co/microsoft/phi-2>
-/// This corresponds to the model update made with the following commit:
-/// <https://huggingface.co/microsoft/phi-2/commit/cb2f4533604d8b67de604e7df03bfe6f3ca22869>
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::LayerNorm;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::nn::LayerNorm;
+/// Phi model.
+/// <https://huggingface.co/microsoft/phi-2>
+/// This corresponds to the model update made with the following commit:
+/// <https://huggingface.co/microsoft/phi-2/commit/cb2f4533604d8b67de604e7df03bfe6f3ca22869>
+use inference_tensor::{DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use crate::kv_cache::EitherCache;
@@ -282,7 +282,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
 

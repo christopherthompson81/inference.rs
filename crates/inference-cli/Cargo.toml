@@ -23,7 +23,7 @@ mimalloc = { workspace = true }
 inference-api = { workspace = true }
 inference-server-core = { workspace = true }
 inference-webui = { workspace = true }
-candle-core = { workspace = true }
+inference-tensor.workspace = true
 
 clap = { workspace = true }
 clap_complete = "4.5"
@@ -46,7 +46,6 @@ fuzzy-matcher = "0.3"
 
 [dev-dependencies]
 axum = { workspace = true }
-candle-nn.workspace = true
 image.workspace = true
 indicatif.workspace = true
 inference-models-other.workspace = true

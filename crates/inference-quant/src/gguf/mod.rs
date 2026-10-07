@@ -22,11 +22,11 @@ pub use weight_source::{
     GgufBindingMap, GgufBindingResolver, GgufTensorBackend, GgufTensorBinding, GgufWeightSource,
 };
 
-use candle_core::{
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{
     DType, Device, Result, Shape, Tensor,
     quantized::{GgmlDType, QMatMul, QStorage, QTensor, ggml_file::qtensor_from_ggml},
 };
-use candle_nn::{Linear, Module};
 use safetensors::tensor::Dtype;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 use std::sync::OnceLock;
@@ -94,7 +94,7 @@ fn ggml_dtype_from_uqff_code(dtype: u32) -> Result<GgmlDType> {
         14 => Ok(GgmlDType::Q6K),
         15 => Ok(GgmlDType::Q8K),
         30 => Ok(GgmlDType::BF16),
-        _ => candle_core::bail!("unknown dtype for quantized weight tensor {dtype}"),
+        _ => inference_tensor::bail!("unknown dtype for quantized weight tensor {dtype}"),
     }
 }
 
@@ -253,9 +253,9 @@ impl GgufMatMul {
             });
             let qt = match vector {
                 Some(v) if imatrix_capable && v.iter().any(|x| *x != 0.0) => {
-                    candle_core::quantized::QTensor::quantize_imatrix(&slab, v, dtype)?
+                    inference_tensor::quantized::QTensor::quantize_imatrix(&slab, v, dtype)?
                 }
-                _ => candle_core::quantized::QTensor::quantize(&slab, dtype)?,
+                _ => inference_tensor::quantized::QTensor::quantize(&slab, dtype)?,
             };
             bytes.extend_from_slice(&qt.data()?);
         }
@@ -414,7 +414,7 @@ pub fn qmatmul_forward(w: &QMatMul, a: &Tensor) -> Result<Tensor> {
             && weight.device().is_cuda()
             && matches!(weight.dtype(), GgmlDType::Q8_1 | GgmlDType::Q8K)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA {:?} weights require the packed GGUF affine backend with a tile-compatible shape",
                 weight.dtype()
             );
@@ -512,9 +512,9 @@ impl QuantMethod for GgufMatMul {
         }
     }
 
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         match &self.w {
-            candle_core::quantized::QMatMul::QTensor(qt) => Some(qt.clone()),
+            inference_tensor::quantized::QMatMul::QTensor(qt) => Some(qt.clone()),
             _ => None,
         }
     }
@@ -597,14 +597,14 @@ impl QuantMethod for GgufMatMul {
             } => {
                 let (w, dtype) = (w.dequantize(&w.device())?, w.dtype());
                 let w = QMatMul::QTensor(std::sync::Arc::new(
-                    candle_core::quantized::QTensor::quantize(&(w + delta)?, dtype)?,
+                    inference_tensor::quantized::QTensor::quantize(&(w + delta)?, dtype)?,
                 ));
                 Ok(Arc::new(Self::from_parts(w, b.clone(), stats.clone())))
             }
         }
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         match &self.w {
             QMatMul::QTensor(q) => (DType::F32, q.device()),
             QMatMul::Tensor(t) | QMatMul::TensorF16(t) => (t.dtype(), t.device().clone()),
@@ -619,7 +619,7 @@ impl QuantMethod for GgufMatMul {
             }
         };
         if shape.len() == 3 && request.ty.is_some_and(|ty| !ty.supports_stacked_gather()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Cannot quantize stacked GGUF expert weights to {}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, or omit ISQ.",
                 request.ty.expect("rank-3 rejection requires an ISQ target")
             );
@@ -730,7 +730,7 @@ impl QuantMethod for GgufMatMul {
             self.stats.clear()?;
             imatrix
         } else {
-            candle_core::bail!("`{}` is not tracking stats.", self.name())
+            inference_tensor::bail!("`{}` is not tracking stats.", self.name())
         }
     }
 }
@@ -900,7 +900,7 @@ mod tests {
             for batch in BATCHES {
                 let x = Tensor::randn(0f32, 1., (batch, COLS), &device)?;
                 let want = x.matmul(&dense.t()?)?;
-                let got = candle_core::Module::forward(&w, &x)?;
+                let got = inference_tensor::Module::forward(&w, &x)?;
                 let err = (got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
                 let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
                 assert!(
@@ -1171,14 +1171,14 @@ mod tests {
         );
         let mut tensors = crate::uqff_version_tensors();
         tensors.extend(layer.serialize_uqff("experts.gate", IsqType::Q8_0)?);
-        let dir = tempfile::tempdir().map_err(candle_core::Error::wrap)?;
+        let dir = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
         let file = dir.path().join("experts.uqff");
         safetensors::serialize_to_file(
             tensors.iter().map(|tensor| (tensor.name(), tensor)),
             None,
             &file,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         let reader = UqffReader::open(&[file])?;
 
         let output_shard = reader

@@ -5,9 +5,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{D, DType, Device, Result, Tensor};
 use config::Gemma3nConfig;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use text::TextModel;
 
 use crate::kv_cache::EitherCache;
@@ -42,12 +42,12 @@ pub const AUDIO_TOKEN_ID: u32 = 262273; // audio_vocab_offset + 1
 
 fn select_encoder_rows(outputs: &[Tensor], ranges: &[Range<usize>]) -> Result<Tensor> {
     if outputs.len() != ranges.len() || outputs.is_empty() {
-        candle_core::bail!("Gemma 3n encoder output metadata length mismatch");
+        inference_tensor::bail!("Gemma 3n encoder output metadata length mismatch");
     }
     let mut selected = Vec::with_capacity(outputs.len());
     for (output, range) in outputs.iter().zip(ranges) {
         if range.start > range.end || range.end > output.dim(0)? {
-            candle_core::bail!("Gemma 3n encoder source range exceeds its output");
+            inference_tensor::bail!("Gemma 3n encoder source range exceeds its output");
         }
         selected.push(output.narrow(0, range.start, range.len())?);
     }
@@ -71,7 +71,7 @@ fn scatter_soft_embeddings(
         if outputs.is_empty() && ranges.is_empty() {
             return Ok(input_embeds.clone());
         }
-        candle_core::bail!("Gemma 3n has encoder outputs without active placeholder tokens");
+        inference_tensor::bail!("Gemma 3n has encoder outputs without active placeholder tokens");
     }
     let hidden_size = input_embeds.dim(D::Minus1)?;
     let source = select_encoder_rows(outputs, ranges)?
@@ -79,7 +79,7 @@ fn scatter_soft_embeddings(
         .to_dtype(input_embeds.dtype())?
         .reshape(((), hidden_size))?;
     if source.dim(0)? != token_count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3n has {token_count} active placeholder tokens but {} encoder rows",
             source.dim(0)?
         );
@@ -209,7 +209,7 @@ impl Gemma3nModel {
     ) -> Result<Vec<Tensor>> {
         let count = pixel_values.dim(0)?;
         if image_hashes.len() != count {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma 3n has {count} image inputs but {} image hashes",
                 image_hashes.len()
             );
@@ -227,7 +227,7 @@ impl Gemma3nModel {
             };
             if let Some(cached) = cached {
                 if cached.len() != 1 {
-                    candle_core::bail!("Gemma 3n cached image output cardinality is invalid");
+                    inference_tensor::bail!("Gemma 3n cached image output cardinality is invalid");
                 }
                 outputs.push(cached[0].clone());
                 continue;
@@ -301,7 +301,7 @@ impl Gemma3nModel {
     ) -> Result<Vec<Tensor>> {
         let count = audio_mel.dim(0)?;
         if audio_mel_mask.dim(0)? != count || audio_hashes.len() != count {
-            candle_core::bail!("Gemma 3n active audio metadata length mismatch");
+            inference_tensor::bail!("Gemma 3n active audio metadata length mismatch");
         }
         let mut outputs = Vec::with_capacity(count);
         for (index, &hash) in audio_hashes.iter().enumerate() {
@@ -316,7 +316,7 @@ impl Gemma3nModel {
             };
             if let Some(cached) = cached {
                 if cached.len() != 1 {
-                    candle_core::bail!("Gemma 3n cached audio output cardinality is invalid");
+                    inference_tensor::bail!("Gemma 3n cached audio output cardinality is invalid");
                 }
                 outputs.push(cached[0].clone());
                 continue;
@@ -374,14 +374,14 @@ impl Gemma3nModel {
         if let Some(pixel_values) = pixel_values {
             let outputs = self.encode_images(&pixel_values, image_hashes, input_embeds.dtype())?;
             if outputs.len() != image_source_ranges.len() {
-                candle_core::bail!("Gemma 3n active image metadata length mismatch");
+                inference_tensor::bail!("Gemma 3n active image metadata length mismatch");
             }
             if packed_layout.is_some() {
                 for ((&hash, output), source) in
                     image_hashes.iter().zip(outputs).zip(image_source_ranges)
                 {
                     if source.start != 0 || source.end != output.dim(0)? {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Gemma 3n packed image prefill requires complete encoder outputs"
                         );
                     }
@@ -403,7 +403,7 @@ impl Gemma3nModel {
                 )?;
             }
         } else if !image_hashes.is_empty() || !image_source_ranges.is_empty() {
-            candle_core::bail!("Gemma 3n image inputs are incomplete");
+            inference_tensor::bail!("Gemma 3n image inputs are incomplete");
         }
 
         match (audio_mel, audio_mel_mask) {
@@ -415,14 +415,14 @@ impl Gemma3nModel {
                     input_embeds.dtype(),
                 )?;
                 if outputs.len() != audio_source_ranges.len() {
-                    candle_core::bail!("Gemma 3n active audio metadata length mismatch");
+                    inference_tensor::bail!("Gemma 3n active audio metadata length mismatch");
                 }
                 if packed_layout.is_some() {
                     for ((&hash, output), source) in
                         audio_hashes.iter().zip(outputs).zip(audio_source_ranges)
                     {
                         if source.start != 0 || source.end != output.dim(0)? {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Gemma 3n packed audio prefill requires complete encoder outputs"
                             );
                         }
@@ -445,7 +445,7 @@ impl Gemma3nModel {
                 }
             }
             (None, None) if audio_hashes.is_empty() && audio_source_ranges.is_empty() => {}
-            _ => candle_core::bail!("Gemma 3n audio inputs are incomplete"),
+            _ => inference_tensor::bail!("Gemma 3n audio inputs are incomplete"),
         }
 
         if let Some(layout) = packed_layout {
@@ -544,7 +544,7 @@ impl MultimodalModel for Gemma3nModel {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let args = model_specific_args
             .downcast::<Gemma3nSpecificArgs>()
             .expect("Downcast to Gemma3nSpecificArgs failed");

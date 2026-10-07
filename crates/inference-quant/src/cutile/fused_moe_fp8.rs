@@ -2,8 +2,6 @@
 //! activation scales, the full expert forward around it, and its JIT warmup.
 #![allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 
-use candle_core::cuda::cudarc::driver::CudaSlice;
-use candle_core::{CudaDevice, DType, Device, Result, Storage, Tensor};
 use cutile::core::f8e4m3fn;
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
@@ -11,6 +9,8 @@ use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tile_kernel::TileKernel;
 use float8::F8E4M3;
 use half::bf16;
+use inference_tensor::cuda::cudarc::driver::CudaSlice;
+use inference_tensor::{CudaDevice, DType, Device, Result, Storage, Tensor};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -485,7 +485,7 @@ impl CutileFp8MoeWeights {
             || !inter.is_multiple_of(FP8_MOE_GROUP)
             || top_k == 0
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuTile FP8 MoE needs [E, 2I, H] and [E, H, I] experts with H and I multiples of {FP8_MOE_GROUP}"
             )
         }
@@ -494,17 +494,17 @@ impl CutileFp8MoeWeights {
             || gate_up_scales.dtype() != DType::F32
             || down_scales.dtype() != DType::F32
         {
-            candle_core::bail!("cuTile FP8 MoE needs E4M3 experts with F32 scales")
+            inference_tensor::bail!("cuTile FP8 MoE needs E4M3 experts with F32 scales")
         }
         let groups = |n: usize, k: usize| (num_experts, n / FP8_MOE_GROUP, k / FP8_MOE_GROUP);
         if gate_up_scales.dims3()? != groups(two_inter, hidden)
             || down_scales.dims3()? != groups(hidden, inter)
         {
-            candle_core::bail!("cuTile FP8 MoE scale shapes do not match the experts")
+            inference_tensor::bail!("cuTile FP8 MoE scale shapes do not match the experts")
         }
         for tensor in [&gate_up, &gate_up_scales, &down, &down_scales] {
             if !tensor.is_contiguous() {
-                candle_core::bail!("cuTile FP8 MoE needs contiguous experts and scales")
+                inference_tensor::bail!("cuTile FP8 MoE needs contiguous experts and scales")
             }
         }
         Ok(Self {
@@ -772,7 +772,9 @@ impl Fp8Tuner {
 }
 
 /// Routing tensors as contiguous device slices starting at offset zero, as the kernels expect.
-fn routing_slice<T: candle_core::cuda::cudarc::driver::DeviceRepr + candle_core::WithDType>(
+fn routing_slice<
+    T: inference_tensor::cuda::cudarc::driver::DeviceRepr + inference_tensor::WithDType,
+>(
     tensor: &Tensor,
 ) -> Result<Tensor> {
     let tensor = tensor.to_dtype(T::DTYPE)?.flatten_all()?.contiguous()?;
@@ -795,19 +797,19 @@ pub fn cutile_fused_moe_fp8(
 ) -> Result<Tensor> {
     let (num_tokens, hidden) = x.dims2()?;
     if hidden != weights.hidden() || x.dtype() != DType::BF16 {
-        candle_core::bail!("cuTile FP8 MoE input must be BF16 [tokens, hidden]")
+        inference_tensor::bail!("cuTile FP8 MoE input must be BF16 [tokens, hidden]")
     }
     let top_k = weights.top_k;
     let inter = weights.inter();
     let num_valid = num_tokens * top_k;
     if topk_ids.dims2()? != (num_tokens, top_k) || topk_weights.dims2()? != (num_tokens, top_k) {
-        candle_core::bail!("cuTile FP8 MoE routing shapes do not match the input")
+        inference_tensor::bail!("cuTile FP8 MoE routing shapes do not match the input")
     }
     let cfg = fp8_config(num_tokens, weights.shape_key());
     let topk_ids = routing_slice::<u32>(topk_ids)?;
     let (ids_storage, _) = topk_ids.storage_and_layout();
     let Storage::Cuda(ids_cuda) = &*ids_storage else {
-        candle_core::bail!("cuTile FP8 MoE routing tensors must be CUDA tensors")
+        inference_tensor::bail!("cuTile FP8 MoE routing tensors must be CUDA tensors")
     };
     let (sids, eids, ntpp, em) = moe_align(
         ids_cuda.as_cuda_slice::<u32>()?,
@@ -820,7 +822,7 @@ pub fn cutile_fused_moe_fp8(
     let topk_weights = routing_slice::<f32>(topk_weights)?;
     let (tw_storage, _) = topk_weights.storage_and_layout();
     let Storage::Cuda(tw_cuda) = &*tw_storage else {
-        candle_core::bail!("cuTile FP8 MoE routing tensors must be CUDA tensors")
+        inference_tensor::bail!("cuTile FP8 MoE routing tensors must be CUDA tensors")
     };
     let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
 
@@ -889,7 +891,7 @@ fn grouped_gemm_fp8(
     let (a_rows, a_k) = a.dims2()?;
     let (scale_groups, scale_stride) = a_scales.dims2()?;
     if a.dtype() != DType::F8E4M3 || b.dtype() != DType::F8E4M3 {
-        candle_core::bail!("cuTile FP8 MoE GEMM needs E4M3 operands")
+        inference_tensor::bail!("cuTile FP8 MoE GEMM needs E4M3 operands")
     }
     if a_k != k_size
         || !k_size.is_multiple_of(FP8_MOE_GROUP)
@@ -899,7 +901,7 @@ fn grouped_gemm_fp8(
         || cfg.bk as usize != FP8_MOE_GROUP
         || !a.is_contiguous()
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile FP8 MoE GEMM got unsupported shapes rows={a_rows} k={k_size} n={n_size}"
         )
     }
@@ -916,11 +918,13 @@ fn grouped_gemm_fp8(
         Storage::Cuda(bs_cuda),
     ) = (&*a_storage, &*as_storage, &*b_storage, &*bs_storage)
     else {
-        candle_core::bail!("cuTile FP8 MoE GEMM operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile FP8 MoE GEMM operands must be CUDA tensors")
     };
     let a_slice = a_cuda.as_cuda_slice::<F8E4M3>()?;
     if a_layout.start_offset() + scale_stride * k_size > a_slice.len() {
-        candle_core::bail!("cuTile FP8 MoE GEMM activation storage is short of its padded rows")
+        inference_tensor::bail!(
+            "cuTile FP8 MoE GEMM activation storage is short of its padded rows"
+        )
     }
     let (a_addr, _a_guard) = slice_ptr_on_stream(a_slice, a_layout.start_offset(), &stream);
     let (as_addr, _as_guard) = slice_ptr_on_stream(
@@ -956,7 +960,7 @@ fn grouped_gemm_fp8(
     };
     let splits = cfg.split_k.max(1) as usize;
     if !(k_size / cfg.bk as usize).is_multiple_of(splits) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile FP8 MoE split_k {splits} does not divide K={k_size} in {} groups",
             cfg.bk
         )
@@ -1018,21 +1022,21 @@ fn grouped_gemm_fp8(
     if compile_only {
         catch_cutile_panic("fused FP8 MoE kernel compile", || {
             launcher.compile_on(&cutile_stream).map_err(|e| {
-                candle_core::Error::Msg(format!("cutile fused_moe_fp8 compile: {e:?}"))
+                inference_tensor::Error::Msg(format!("cutile fused_moe_fp8 compile: {e:?}"))
             })
         })?;
     } else {
         catch_cutile_panic("fused FP8 MoE kernel execute", || unsafe {
-            launcher
-                .async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile fused_moe_fp8 launch: {e:?}")))
+            launcher.async_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile fused_moe_fp8 launch: {e:?}"))
+            })
         })?;
     }
     drop((out_guard, tw_guard, partial_guard));
     if let Some(partial) = &partial {
         reduce_split_k(partial, &mut out, splits as i32, numel, dev, compile_only)?;
     }
-    let storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
+    let storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     Ok(Tensor::from((
         Storage::Cuda(storage),
         (num_valid_tokens, n_size),
@@ -1145,8 +1149,9 @@ impl CutileKernel for FusedMoeFp8Kernel {
             };
             let mut tuner = Fp8Tuner::new(dev, sets);
             let tuned = tune(dev, mode, &request, |m, config| {
-                let cfg = MoeTileConfig::from_config(config)
-                    .ok_or_else(|| candle_core::Error::Msg("config outside the space".into()))?;
+                let cfg = MoeTileConfig::from_config(config).ok_or_else(|| {
+                    inference_tensor::Error::Msg("config outside the space".into())
+                })?;
                 tuner.prepare(m, cfg)
             });
             TUNED.set(key, &tuned, MoeTileConfig::from_config);
@@ -1179,7 +1184,7 @@ impl CutileKernel for FusedMoeFp8Kernel {
 
 #[cfg(all(test, has_blockwise_fp8_kernels))]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{Bucket, MoeTileConfig};
     use super::{CutileFp8MoeWeights, FP8_MOE_GROUP, cutile_fused_moe_fp8};

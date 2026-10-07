@@ -5,7 +5,7 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use candle_core::{Error, Result};
+use inference_tensor::{Error, Result};
 use tokio::sync::{mpsc, oneshot};
 
 #[cfg(feature = "cuda")]

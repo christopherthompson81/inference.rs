@@ -1,6 +1,6 @@
 #![cfg(all(feature = "cuda", has_cutlass_moe_kernels))]
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 fn gelu_tanh(x: f32) -> f32 {
     0.5 * x * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())

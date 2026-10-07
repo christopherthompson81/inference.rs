@@ -230,9 +230,9 @@ impl CudaDecodeBatchLease {
     fn new(
         rows: Vec<Arc<std::sync::Mutex<Sequence>>>,
         tail: CudaDecodeTail,
-    ) -> candle_core::Result<Self> {
+    ) -> inference_tensor::Result<Self> {
         if tail.batch_size()? != rows.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA decode tail has {} rows for a leased batch of {}",
                 tail.batch_size()?,
                 rows.len()
@@ -349,7 +349,7 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
         block_hashes: &[BlockHash],
         cached_tokens: usize,
         block_size: usize,
-    ) -> candle_core::Result<PagedPrefixCacheValidation> {
+    ) -> inference_tensor::Result<PagedPrefixCacheValidation> {
         let Some(slot_idx) = seq.recurrent_state_idx() else {
             return Ok(PagedPrefixCacheValidation::staged(0, |_| {
                 record_paged_recurrent_prefix_validation("miss", "missing_slot");
@@ -475,7 +475,7 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
         &mut self,
         sequence_id: usize,
         slot_idx: usize,
-    ) -> candle_core::Result<bool> {
+    ) -> inference_tensor::Result<bool> {
         let mut pipeline = get_mut_arcmutex!(self.pipeline);
         pipeline.release_speculative_sequences(&[sequence_id])?;
 
@@ -888,7 +888,7 @@ impl Engine {
         &self,
         worker: &CudaDecodeCompletionWorker,
         submission: CudaStepSubmission,
-    ) -> candle_core::Result<CudaStepCompletion> {
+    ) -> inference_tensor::Result<CudaStepCompletion> {
         let (current, pending) = submission.into_parts();
         let completion = worker.submit(current).await?;
         pending.finish(completion.await?)
@@ -903,7 +903,7 @@ impl Engine {
     }
 
     #[cfg(feature = "cuda")]
-    fn drain_cuda_decode_batch(&self, lease: CudaDecodeBatchLease) -> candle_core::Result<()> {
+    fn drain_cuda_decode_batch(&self, lease: CudaDecodeBatchLease) -> inference_tensor::Result<()> {
         let CudaDecodeBatchLease { rows, tail, .. } = lease;
         tail.drain()?;
         self.account_cuda_decode_rows(&rows);
@@ -959,7 +959,7 @@ impl Engine {
         worker: &CudaDecodeCompletionWorker,
         allow_lookahead: bool,
         rng: &Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> candle_core::Result<Option<CudaDecodeBatchLease>> {
+    ) -> inference_tensor::Result<Option<CudaDecodeBatchLease>> {
         let CudaDecodeBatchLease {
             rows,
             sequence_ids,
@@ -1005,7 +1005,7 @@ impl Engine {
                 CudaTailSubmission::Submitted(submission) => submission,
                 CudaTailSubmission::Unsupported(mut unsupported) => {
                     unsupported.synchronize()?;
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "leased CUDA decode batch no longer supports resident completion"
                     );
                 }
@@ -1391,7 +1391,7 @@ impl Engine {
             if device.is_cuda()
                 && unique_devices
                     .iter()
-                    .all(|existing: &candle_core::Device| !existing.same_device(&device))
+                    .all(|existing: &inference_tensor::Device| !existing.same_device(&device))
             {
                 unique_devices.push(device);
             }

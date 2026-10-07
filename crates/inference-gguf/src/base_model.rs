@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Result, bail};
-use candle_core::quantized::gguf_file::Value;
+use inference_tensor::quantized::gguf_file::Value;
 
 const BASE_MODEL_COUNT: &str = "general.base_model.count";
 const BASE_MODEL_PREFIX: &str = "general.base_model.";

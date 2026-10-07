@@ -14,9 +14,9 @@ pub fn try_cuda_qk_rms_norm_rope(
     is_neox: bool,
     output_layout: QkRopeOutputLayout,
 ) -> Result<Option<(Tensor, Option<Tensor>)>> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if !q.device().is_cuda() {
@@ -50,17 +50,17 @@ pub fn try_cuda_qk_rms_norm_rope(
     let (k_heads, k_elem_count) = if let Some(k) = k {
         let (k_batch, k_heads, k_seq_len, k_head_dim) = k.dims4()?;
         if (k_batch, k_seq_len, k_head_dim) != (batch, seq_len, head_dim) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "q/k shape mismatch for fused qk norm rope: {:?} vs {:?}",
                 q.shape(),
                 k.shape()
             );
         }
         let Some(k_weight) = k_weight else {
-            candle_core::bail!("missing k norm weight for fused qk norm rope");
+            inference_tensor::bail!("missing k norm weight for fused qk norm rope");
         };
         if k_weight.dims1()? != head_dim {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "k norm weight size {} does not match head dim {head_dim}",
                 k_weight.dims1()?
             );
@@ -71,7 +71,7 @@ pub fn try_cuda_qk_rms_norm_rope(
     };
 
     if q_weight.dims1()? != head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "q norm weight size {} does not match head dim {head_dim}",
             q_weight.dims1()?
         );
@@ -79,7 +79,7 @@ pub fn try_cuda_qk_rms_norm_rope(
 
     let (cos_rows, rot_dim) = cos.dims2()?;
     if sin.dims2()? != (cos_rows, rot_dim) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cos/sin shape mismatch for fused qk norm rope: {:?} vs {:?}",
             cos.shape(),
             sin.shape()
@@ -94,7 +94,7 @@ pub fn try_cuda_qk_rms_norm_rope(
     } else if cos_rows == batch * seq_len {
         seq_len
     } else {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cos/sin rows {cos_rows} do not match seq_len {seq_len} or batch*seq_len {}",
             batch * seq_len
         );
@@ -110,16 +110,17 @@ pub fn try_cuda_qk_rms_norm_rope(
         ("cos_batch_stride", cos_batch_stride),
     ] {
         if value > i32::MAX as usize {
-            candle_core::bail!("fused qk norm rope {name} is too large: {value}");
+            inference_tensor::bail!("fused qk norm rope {name} is too large: {value}");
         }
     }
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let q_heads_i32 = i32::try_from(q_heads).map_err(candle_core::Error::wrap)?;
-    let k_heads_i32 = i32::try_from(k_heads).map_err(candle_core::Error::wrap)?;
-    let seq_len_i32 = i32::try_from(seq_len).map_err(candle_core::Error::wrap)?;
-    let head_dim_i32 = i32::try_from(head_dim).map_err(candle_core::Error::wrap)?;
-    let rot_dim_i32 = i32::try_from(rot_dim).map_err(candle_core::Error::wrap)?;
-    let cos_batch_stride_i32 = i32::try_from(cos_batch_stride).map_err(candle_core::Error::wrap)?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let q_heads_i32 = i32::try_from(q_heads).map_err(inference_tensor::Error::wrap)?;
+    let k_heads_i32 = i32::try_from(k_heads).map_err(inference_tensor::Error::wrap)?;
+    let seq_len_i32 = i32::try_from(seq_len).map_err(inference_tensor::Error::wrap)?;
+    let head_dim_i32 = i32::try_from(head_dim).map_err(inference_tensor::Error::wrap)?;
+    let rot_dim_i32 = i32::try_from(rot_dim).map_err(inference_tensor::Error::wrap)?;
+    let cos_batch_stride_i32 =
+        i32::try_from(cos_batch_stride).map_err(inference_tensor::Error::wrap)?;
 
     let cos = cos.contiguous()?;
     let sin = sin.contiguous()?;
@@ -128,24 +129,24 @@ pub fn try_cuda_qk_rms_norm_rope(
 
     let (q_storage, q_layout) = q.storage_and_layout();
     let q_storage = match &*q_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let k_storage_and_layout = k.map(Tensor::storage_and_layout);
     let (q_weight_storage, q_weight_layout) = q_weight.storage_and_layout();
     let q_weight_storage = match &*q_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let k_weight_storage_and_layout = k_weight.as_ref().map(Tensor::storage_and_layout);
     let (cos_storage, cos_layout) = cos.storage_and_layout();
     let cos_storage = match &*cos_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (sin_storage, sin_layout) = sin.storage_and_layout();
     let sin_storage = match &*sin_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
 
@@ -171,16 +172,16 @@ pub fn try_cuda_qk_rms_norm_rope(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $dtype_id:expr) => {{
             let CudaStorageSlice::$variant(q_src) = &q_storage.slice else {
-                candle_core::bail!("fused qk norm rope q dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope q dtype mismatch");
             };
             let CudaStorageSlice::$variant(q_weight_src) = &q_weight_storage.slice else {
-                candle_core::bail!("fused qk norm rope q weight dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope q weight dtype mismatch");
             };
             let CudaStorageSlice::$variant(cos_src) = &cos_storage.slice else {
-                candle_core::bail!("fused qk norm rope cos dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope cos dtype mismatch");
             };
             let CudaStorageSlice::$variant(sin_src) = &sin_storage.slice else {
-                candle_core::bail!("fused qk norm rope sin dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope sin dtype mismatch");
             };
 
             let mut q_out_buf = unsafe { dev.alloc::<$ty>(q_elem_count) }?;
@@ -203,11 +204,11 @@ pub fn try_cuda_qk_rms_norm_rope(
             let mut k_guard = None;
             let k_ptr = if let Some((k_storage, k_layout)) = &k_storage_and_layout {
                 let k_storage = match &**k_storage {
-                    candle_core::Storage::Cuda(s) => s,
+                    inference_tensor::Storage::Cuda(s) => s,
                     _ => return Ok(None),
                 };
                 let CudaStorageSlice::$variant(k_src) = &k_storage.slice else {
-                    candle_core::bail!("fused qk norm rope k dtype mismatch");
+                    inference_tensor::bail!("fused qk norm rope k dtype mismatch");
                 };
                 let (ptr, guard) = k_src.device_ptr(&stream);
                 k_guard = Some(guard);
@@ -220,11 +221,11 @@ pub fn try_cuda_qk_rms_norm_rope(
             let k_weight_ptr =
                 if let Some((k_weight_storage, k_weight_layout)) = &k_weight_storage_and_layout {
                     let k_weight_storage = match &**k_weight_storage {
-                        candle_core::Storage::Cuda(s) => s,
+                        inference_tensor::Storage::Cuda(s) => s,
                         _ => return Ok(None),
                     };
                     let CudaStorageSlice::$variant(k_weight_src) = &k_weight_storage.slice else {
-                        candle_core::bail!("fused qk norm rope k weight dtype mismatch");
+                        inference_tensor::bail!("fused qk norm rope k weight dtype mismatch");
                     };
                     let (ptr, guard) = k_weight_src.device_ptr(&stream);
                     k_weight_guard = Some(guard);
@@ -290,7 +291,7 @@ pub fn try_cuda_qk_rms_norm_rope(
                 slice: CudaStorageSlice::$variant(q_out_buf),
                 device: dev.clone(),
             };
-            let q_tensor = Tensor::from((candle_core::Storage::Cuda(q_storage), q_shape));
+            let q_tensor = Tensor::from((inference_tensor::Storage::Cuda(q_storage), q_shape));
 
             let k_tensor = if let Some(k_out_buf) = k_out_buf {
                 let k_storage = CudaStorage {
@@ -298,7 +299,7 @@ pub fn try_cuda_qk_rms_norm_rope(
                     device: dev.clone(),
                 };
                 Some(Tensor::from((
-                    candle_core::Storage::Cuda(k_storage),
+                    inference_tensor::Storage::Cuda(k_storage),
                     k_shape,
                 )))
             } else {
@@ -322,9 +323,9 @@ pub fn try_cuda_rope_sincos_positions(
     inv_freq: &Tensor,
     dtype: DType,
 ) -> Result<Option<(Tensor, Tensor)>> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if !positions.device().is_cuda()
@@ -341,29 +342,29 @@ pub fn try_cuda_rope_sincos_positions(
     if rows == 0 || width == 0 {
         return Ok(None);
     }
-    let rows_i32 = i32::try_from(rows).map_err(candle_core::Error::wrap)?;
-    let width_i32 = i32::try_from(width).map_err(candle_core::Error::wrap)?;
+    let rows_i32 = i32::try_from(rows).map_err(inference_tensor::Error::wrap)?;
+    let width_i32 = i32::try_from(width).map_err(inference_tensor::Error::wrap)?;
     let elements = rows
         .checked_mul(width)
-        .ok_or_else(|| candle_core::Error::msg("RoPE sincos output size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("RoPE sincos output size overflow"))?;
 
     let positions = positions.contiguous()?;
     let inv_freq = inv_freq.contiguous()?;
     let (positions_storage, positions_layout) = positions.storage_and_layout();
     let positions_storage = match &*positions_storage {
-        candle_core::Storage::Cuda(storage) => storage,
+        inference_tensor::Storage::Cuda(storage) => storage,
         _ => return Ok(None),
     };
     let (inv_freq_storage, inv_freq_layout) = inv_freq.storage_and_layout();
     let inv_freq_storage = match &*inv_freq_storage {
-        candle_core::Storage::Cuda(storage) => storage,
+        inference_tensor::Storage::Cuda(storage) => storage,
         _ => return Ok(None),
     };
     let CudaStorageSlice::U32(positions_src) = &positions_storage.slice else {
-        candle_core::bail!("RoPE sincos positions dtype mismatch");
+        inference_tensor::bail!("RoPE sincos positions dtype mismatch");
     };
     let CudaStorageSlice::F32(inv_freq_src) = &inv_freq_storage.slice else {
-        candle_core::bail!("RoPE sincos inverse frequency dtype mismatch");
+        inference_tensor::bail!("RoPE sincos inverse frequency dtype mismatch");
     };
 
     let dev = positions_storage.device();
@@ -406,11 +407,11 @@ pub fn try_cuda_rope_sincos_positions(
                 device: dev.clone(),
             };
             let cos = Tensor::from((
-                candle_core::Storage::Cuda(cos_storage),
+                inference_tensor::Storage::Cuda(cos_storage),
                 output_shape.clone(),
             ));
             let sin = Tensor::from((
-                candle_core::Storage::Cuda(sin_storage),
+                inference_tensor::Storage::Cuda(sin_storage),
                 output_shape.clone(),
             ));
             Ok(Some((cos, sin)))
@@ -442,9 +443,9 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
     positions: &Tensor,
     is_neox: bool,
 ) -> Result<Option<(Tensor, Option<Tensor>)>> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if !q.device().is_cuda() {
@@ -475,7 +476,7 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
     let (batch, q_heads, seq_len, head_dim) = q.dims4()?;
     let expected_positions = batch * seq_len;
     if positions.dims1()? != expected_positions {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "positions length {} does not match token count {expected_positions}",
             positions.dims1()?
         );
@@ -484,17 +485,17 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
     let (k_heads, k_elem_count) = if let Some(k) = k {
         let (k_batch, k_heads, k_seq_len, k_head_dim) = k.dims4()?;
         if (k_batch, k_seq_len, k_head_dim) != (batch, seq_len, head_dim) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "q/k shape mismatch for fused qk norm rope positions: {:?} vs {:?}",
                 q.shape(),
                 k.shape()
             );
         }
         let Some(k_weight) = k_weight else {
-            candle_core::bail!("missing k norm weight for fused qk norm rope positions");
+            inference_tensor::bail!("missing k norm weight for fused qk norm rope positions");
         };
         if k_weight.dims1()? != head_dim {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "k norm weight size {} does not match head dim {head_dim}",
                 k_weight.dims1()?
             );
@@ -505,7 +506,7 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
     };
 
     if q_weight.dims1()? != head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "q norm weight size {} does not match head dim {head_dim}",
             q_weight.dims1()?
         );
@@ -513,7 +514,7 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
 
     let (cos_rows, rot_dim) = cos.dims2()?;
     if sin.dims2()? != (cos_rows, rot_dim) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cos/sin shape mismatch for fused qk norm rope positions: {:?} vs {:?}",
             cos.shape(),
             sin.shape()
@@ -531,15 +532,15 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
         ("rot_dim", rot_dim),
     ] {
         if value > i32::MAX as usize {
-            candle_core::bail!("fused qk norm rope positions {name} is too large: {value}");
+            inference_tensor::bail!("fused qk norm rope positions {name} is too large: {value}");
         }
     }
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let q_heads_i32 = i32::try_from(q_heads).map_err(candle_core::Error::wrap)?;
-    let k_heads_i32 = i32::try_from(k_heads).map_err(candle_core::Error::wrap)?;
-    let seq_len_i32 = i32::try_from(seq_len).map_err(candle_core::Error::wrap)?;
-    let head_dim_i32 = i32::try_from(head_dim).map_err(candle_core::Error::wrap)?;
-    let rot_dim_i32 = i32::try_from(rot_dim).map_err(candle_core::Error::wrap)?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let q_heads_i32 = i32::try_from(q_heads).map_err(inference_tensor::Error::wrap)?;
+    let k_heads_i32 = i32::try_from(k_heads).map_err(inference_tensor::Error::wrap)?;
+    let seq_len_i32 = i32::try_from(seq_len).map_err(inference_tensor::Error::wrap)?;
+    let head_dim_i32 = i32::try_from(head_dim).map_err(inference_tensor::Error::wrap)?;
+    let rot_dim_i32 = i32::try_from(rot_dim).map_err(inference_tensor::Error::wrap)?;
 
     let cos = cos.contiguous()?;
     let sin = sin.contiguous()?;
@@ -549,29 +550,29 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
 
     let (q_storage, q_layout) = q.storage_and_layout();
     let q_storage = match &*q_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let k_storage_and_layout = k.map(Tensor::storage_and_layout);
     let (q_weight_storage, q_weight_layout) = q_weight.storage_and_layout();
     let q_weight_storage = match &*q_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let k_weight_storage_and_layout = k_weight.as_ref().map(Tensor::storage_and_layout);
     let (cos_storage, cos_layout) = cos.storage_and_layout();
     let cos_storage = match &*cos_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (sin_storage, sin_layout) = sin.storage_and_layout();
     let sin_storage = match &*sin_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (positions_storage, positions_layout) = positions.storage_and_layout();
     let positions_storage = match &*positions_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
 
@@ -599,19 +600,19 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $dtype_id:expr) => {{
             let CudaStorageSlice::$variant(q_src) = &q_storage.slice else {
-                candle_core::bail!("fused qk norm rope positions q dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope positions q dtype mismatch");
             };
             let CudaStorageSlice::$variant(q_weight_src) = &q_weight_storage.slice else {
-                candle_core::bail!("fused qk norm rope positions q weight dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope positions q weight dtype mismatch");
             };
             let CudaStorageSlice::$variant(cos_src) = &cos_storage.slice else {
-                candle_core::bail!("fused qk norm rope positions cos dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope positions cos dtype mismatch");
             };
             let CudaStorageSlice::$variant(sin_src) = &sin_storage.slice else {
-                candle_core::bail!("fused qk norm rope positions sin dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope positions sin dtype mismatch");
             };
             let CudaStorageSlice::U32(positions_src) = &positions_storage.slice else {
-                candle_core::bail!("fused qk norm rope positions dtype mismatch");
+                inference_tensor::bail!("fused qk norm rope positions dtype mismatch");
             };
 
             let mut q_out_buf = unsafe { dev.alloc::<$ty>(q_elem_count) }?;
@@ -637,11 +638,11 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
             let mut k_guard = None;
             let k_ptr = if let Some((k_storage, k_layout)) = &k_storage_and_layout {
                 let k_storage = match &**k_storage {
-                    candle_core::Storage::Cuda(s) => s,
+                    inference_tensor::Storage::Cuda(s) => s,
                     _ => return Ok(None),
                 };
                 let CudaStorageSlice::$variant(k_src) = &k_storage.slice else {
-                    candle_core::bail!("fused qk norm rope positions k dtype mismatch");
+                    inference_tensor::bail!("fused qk norm rope positions k dtype mismatch");
                 };
                 let (ptr, guard) = k_src.device_ptr(&stream);
                 k_guard = Some(guard);
@@ -651,21 +652,22 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
             };
 
             let mut k_weight_guard = None;
-            let k_weight_ptr =
-                if let Some((k_weight_storage, k_weight_layout)) = &k_weight_storage_and_layout {
-                    let k_weight_storage = match &**k_weight_storage {
-                        candle_core::Storage::Cuda(s) => s,
-                        _ => return Ok(None),
-                    };
-                    let CudaStorageSlice::$variant(k_weight_src) = &k_weight_storage.slice else {
-                        candle_core::bail!("fused qk norm rope positions k weight dtype mismatch");
-                    };
-                    let (ptr, guard) = k_weight_src.device_ptr(&stream);
-                    k_weight_guard = Some(guard);
-                    unsafe { (ptr as *const $ty).add(k_weight_layout.start_offset()) }
-                } else {
-                    q_weight_ptr
+            let k_weight_ptr = if let Some((k_weight_storage, k_weight_layout)) =
+                &k_weight_storage_and_layout
+            {
+                let k_weight_storage = match &**k_weight_storage {
+                    inference_tensor::Storage::Cuda(s) => s,
+                    _ => return Ok(None),
                 };
+                let CudaStorageSlice::$variant(k_weight_src) = &k_weight_storage.slice else {
+                    inference_tensor::bail!("fused qk norm rope positions k weight dtype mismatch");
+                };
+                let (ptr, guard) = k_weight_src.device_ptr(&stream);
+                k_weight_guard = Some(guard);
+                unsafe { (ptr as *const $ty).add(k_weight_layout.start_offset()) }
+            } else {
+                q_weight_ptr
+            };
 
             let (q_out_ptr, q_out_guard) = q_out_buf.device_ptr_mut(&stream);
             let mut k_out_guard = None;
@@ -725,7 +727,7 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
                 slice: CudaStorageSlice::$variant(q_out_buf),
                 device: dev.clone(),
             };
-            let q_tensor = Tensor::from((candle_core::Storage::Cuda(q_storage), q_shape));
+            let q_tensor = Tensor::from((inference_tensor::Storage::Cuda(q_storage), q_shape));
 
             let k_tensor = if let Some(k_out_buf) = k_out_buf {
                 let k_storage = CudaStorage {
@@ -733,7 +735,7 @@ pub fn try_cuda_qk_rms_norm_rope_positions(
                     device: dev.clone(),
                 };
                 Some(Tensor::from((
-                    candle_core::Storage::Cuda(k_storage),
+                    inference_tensor::Storage::Cuda(k_storage),
                     k_shape,
                 )))
             } else {
@@ -777,9 +779,9 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
     positions: &Tensor,
     is_neox: bool,
 ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if !q.device().is_cuda() {
@@ -818,7 +820,7 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
     if (k_batch, k_seq_len, k_head_dim) != (batch, seq_len, head_dim)
         || (v_batch, v_heads, v_seq_len, v_head_dim) != (batch, k_heads, seq_len, head_dim)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "q/k/v shape mismatch for fused qkv norm rope positions: {:?}, {:?}, {:?}",
             q.shape(),
             k.shape(),
@@ -827,7 +829,7 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
     }
     let expected_positions = batch * seq_len;
     if positions.dims1()? != expected_positions {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "positions length {} does not match token count {expected_positions}",
             positions.dims1()?
         );
@@ -836,12 +838,12 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
         || k_weight.dims1()? != head_dim
         || v_weight.dims1()? != head_dim
     {
-        candle_core::bail!("qkv norm weight size does not match head dim {head_dim}");
+        inference_tensor::bail!("qkv norm weight size does not match head dim {head_dim}");
     }
 
     let (cos_rows, rot_dim) = cos.dims2()?;
     if sin.dims2()? != (cos_rows, rot_dim) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cos/sin shape mismatch for fused qkv norm rope positions: {:?} vs {:?}",
             cos.shape(),
             sin.shape()
@@ -859,15 +861,15 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
         ("rot_dim", rot_dim),
     ] {
         if value > i32::MAX as usize {
-            candle_core::bail!("fused qkv norm rope positions {name} is too large: {value}");
+            inference_tensor::bail!("fused qkv norm rope positions {name} is too large: {value}");
         }
     }
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let q_heads_i32 = i32::try_from(q_heads).map_err(candle_core::Error::wrap)?;
-    let k_heads_i32 = i32::try_from(k_heads).map_err(candle_core::Error::wrap)?;
-    let seq_len_i32 = i32::try_from(seq_len).map_err(candle_core::Error::wrap)?;
-    let head_dim_i32 = i32::try_from(head_dim).map_err(candle_core::Error::wrap)?;
-    let rot_dim_i32 = i32::try_from(rot_dim).map_err(candle_core::Error::wrap)?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let q_heads_i32 = i32::try_from(q_heads).map_err(inference_tensor::Error::wrap)?;
+    let k_heads_i32 = i32::try_from(k_heads).map_err(inference_tensor::Error::wrap)?;
+    let seq_len_i32 = i32::try_from(seq_len).map_err(inference_tensor::Error::wrap)?;
+    let head_dim_i32 = i32::try_from(head_dim).map_err(inference_tensor::Error::wrap)?;
+    let rot_dim_i32 = i32::try_from(rot_dim).map_err(inference_tensor::Error::wrap)?;
 
     let cos = cos.contiguous()?;
     let sin = sin.contiguous()?;
@@ -878,47 +880,47 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
 
     let (q_storage, q_layout) = q.storage_and_layout();
     let q_storage = match &*q_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (k_storage, k_layout) = k.storage_and_layout();
     let k_storage = match &*k_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (v_storage, v_layout) = v.storage_and_layout();
     let v_storage = match &*v_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (q_weight_storage, q_weight_layout) = q_weight.storage_and_layout();
     let q_weight_storage = match &*q_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (k_weight_storage, k_weight_layout) = k_weight.storage_and_layout();
     let k_weight_storage = match &*k_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (v_weight_storage, v_weight_layout) = v_weight.storage_and_layout();
     let v_weight_storage = match &*v_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (cos_storage, cos_layout) = cos.storage_and_layout();
     let cos_storage = match &*cos_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (sin_storage, sin_layout) = sin.storage_and_layout();
     let sin_storage = match &*sin_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
     let (positions_storage, positions_layout) = positions.storage_and_layout();
     let positions_storage = match &*positions_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
 
@@ -937,31 +939,31 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $dtype_id:expr) => {{
             let CudaStorageSlice::$variant(q_src) = &q_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions q dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions q dtype mismatch");
             };
             let CudaStorageSlice::$variant(k_src) = &k_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions k dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions k dtype mismatch");
             };
             let CudaStorageSlice::$variant(v_src) = &v_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions v dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions v dtype mismatch");
             };
             let CudaStorageSlice::$variant(q_weight_src) = &q_weight_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions q weight dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions q weight dtype mismatch");
             };
             let CudaStorageSlice::$variant(k_weight_src) = &k_weight_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions k weight dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions k weight dtype mismatch");
             };
             let CudaStorageSlice::$variant(v_weight_src) = &v_weight_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions v weight dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions v weight dtype mismatch");
             };
             let CudaStorageSlice::$variant(cos_src) = &cos_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions cos dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions cos dtype mismatch");
             };
             let CudaStorageSlice::$variant(sin_src) = &sin_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions sin dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions sin dtype mismatch");
             };
             let CudaStorageSlice::U32(positions_src) = &positions_storage.slice else {
-                candle_core::bail!("fused qkv norm rope positions dtype mismatch");
+                inference_tensor::bail!("fused qkv norm rope positions dtype mismatch");
             };
 
             let mut q_out_buf = unsafe { dev.alloc::<$ty>(q_elem_count) }?;
@@ -1062,9 +1064,9 @@ pub fn try_cuda_qkv_rms_norm_rope_positions(
                 device: dev.clone(),
             };
             Ok(Some((
-                Tensor::from((candle_core::Storage::Cuda(q_storage), q_shape)),
-                Tensor::from((candle_core::Storage::Cuda(k_storage), kv_shape.clone())),
-                Tensor::from((candle_core::Storage::Cuda(v_storage), kv_shape)),
+                Tensor::from((inference_tensor::Storage::Cuda(q_storage), q_shape)),
+                Tensor::from((inference_tensor::Storage::Cuda(k_storage), kv_shape.clone())),
+                Tensor::from((inference_tensor::Storage::Cuda(v_storage), kv_shape)),
             )))
         }};
     }

@@ -9,16 +9,16 @@ use super::*;
 #[cfg(feature = "cuda")]
 #[allow(clippy::cast_possible_truncation)]
 pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     let input = final_logits_row(input)?;
     let dims = input.dims();
     let ncols = *dims
         .last()
-        .ok_or_else(|| candle_core::Error::Msg("empty dims".to_string()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("empty dims".to_string()))?;
     let nrows = (input.elem_count() / ncols) as i32;
     let ncols_i32 = ncols as i32;
     let k_i32 = k as i32;
@@ -30,8 +30,8 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
 
     let (storage, _layout) = input.storage_and_layout();
     let storage = match &*storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_topk requires CUDA tensor"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_topk requires CUDA tensor"),
     };
     let dev = storage.device();
     let stream = dev.cuda_stream();
@@ -41,7 +41,7 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
         CudaStorageSlice::BF16(inp) => inp.device_ptr(&stream),
         CudaStorageSlice::F16(inp) => inp.device_ptr(&stream),
         CudaStorageSlice::F32(inp) => inp.device_ptr(&stream),
-        _ => candle_core::bail!("cuda_topk only supports BF16/F16/F32"),
+        _ => inference_tensor::bail!("cuda_topk only supports BF16/F16/F32"),
     };
     let src_ptr = src_ptr as *const c_void;
 
@@ -69,21 +69,21 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
             drop(values_guard);
             drop(indices_guard);
 
-            let values_storage = candle_core::cuda_backend::CudaStorage {
+            let values_storage = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::BF16(values_dst),
                 device: dev.clone(),
             };
-            let indices_storage = candle_core::cuda_backend::CudaStorage {
+            let indices_storage = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(indices_dst),
                 device: dev.clone(),
             };
 
             let values_tensor = Tensor::from((
-                candle_core::Storage::Cuda(values_storage),
+                inference_tensor::Storage::Cuda(values_storage),
                 Shape::from_dims(&out_dims),
             ));
             let indices_tensor = Tensor::from((
-                candle_core::Storage::Cuda(indices_storage),
+                inference_tensor::Storage::Cuda(indices_storage),
                 Shape::from_dims(&out_dims),
             ));
             (values_tensor, indices_tensor)
@@ -107,21 +107,21 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
             drop(values_guard);
             drop(indices_guard);
 
-            let values_storage = candle_core::cuda_backend::CudaStorage {
+            let values_storage = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F16(values_dst),
                 device: dev.clone(),
             };
-            let indices_storage = candle_core::cuda_backend::CudaStorage {
+            let indices_storage = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(indices_dst),
                 device: dev.clone(),
             };
 
             let values_tensor = Tensor::from((
-                candle_core::Storage::Cuda(values_storage),
+                inference_tensor::Storage::Cuda(values_storage),
                 Shape::from_dims(&out_dims),
             ));
             let indices_tensor = Tensor::from((
-                candle_core::Storage::Cuda(indices_storage),
+                inference_tensor::Storage::Cuda(indices_storage),
                 Shape::from_dims(&out_dims),
             ));
             (values_tensor, indices_tensor)
@@ -145,26 +145,26 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
             drop(values_guard);
             drop(indices_guard);
 
-            let values_storage = candle_core::cuda_backend::CudaStorage {
+            let values_storage = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(values_dst),
                 device: dev.clone(),
             };
-            let indices_storage = candle_core::cuda_backend::CudaStorage {
+            let indices_storage = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(indices_dst),
                 device: dev.clone(),
             };
 
             let values_tensor = Tensor::from((
-                candle_core::Storage::Cuda(values_storage),
+                inference_tensor::Storage::Cuda(values_storage),
                 Shape::from_dims(&out_dims),
             ));
             let indices_tensor = Tensor::from((
-                candle_core::Storage::Cuda(indices_storage),
+                inference_tensor::Storage::Cuda(indices_storage),
                 Shape::from_dims(&out_dims),
             ));
             (values_tensor, indices_tensor)
         }
-        dt => candle_core::bail!("cuda_topk unsupported dtype: {:?}", dt),
+        dt => inference_tensor::bail!("cuda_topk unsupported dtype: {:?}", dt),
     };
 
     Ok(TopKOutput {
@@ -199,35 +199,35 @@ struct ArgSort {
     inplace: bool,
 }
 
-impl candle_core::CustomOp1 for ArgSort {
+impl inference_tensor::CustomOp1 for ArgSort {
     fn name(&self) -> &'static str {
         "argsort"
     }
 
     fn cpu_fwd(
         &self,
-        _: &candle_core::CpuStorage,
-        _: &candle_core::Layout,
-    ) -> Result<(candle_core::CpuStorage, candle_core::Shape)> {
-        candle_core::bail!("argsort: CPU tensors sort through candle's arg_sort_last_dim")
+        _: &inference_tensor::CpuStorage,
+        _: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::CpuStorage, inference_tensor::Shape)> {
+        inference_tensor::bail!("argsort: CPU tensors sort through candle's arg_sort_last_dim")
     }
 
     #[allow(clippy::cast_possible_truncation)]
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        storage: &candle_core::CudaStorage,
-        layout: &candle_core::Layout,
-    ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::backend::BackendStorage;
-        use candle_core::cuda_backend::CudaStorageSlice;
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        storage: &inference_tensor::CudaStorage,
+        layout: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::CudaStorage, inference_tensor::Shape)> {
+        use inference_tensor::backend::BackendStorage;
+        use inference_tensor::cuda_backend::CudaStorageSlice;
+        use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
         let dev = storage.device();
         let elem_count = layout.shape().elem_count();
         if elem_count == 0 {
             let dst = unsafe { dev.alloc::<u32>(0) }?;
-            let dst = candle_core::cuda_backend::CudaStorage {
+            let dst = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(dst),
                 device: dev.clone(),
             };
@@ -247,7 +247,7 @@ impl candle_core::CustomOp1 for ArgSort {
             CudaStorageSlice::F16(inp) => inp.device_ptr(inp.stream()),
             CudaStorageSlice::F32(inp) => inp.device_ptr(inp.stream()),
             CudaStorageSlice::F64(inp) => inp.device_ptr(inp.stream()),
-            _ => candle_core::bail!("Unexpected dtype in asort"),
+            _ => inference_tensor::bail!("Unexpected dtype in asort"),
         };
         let src_offset = layout.start_offset() * storage.dtype().size_in_bytes();
         let src_ptr = (src as usize + src_offset) as *const c_void;
@@ -256,23 +256,23 @@ impl candle_core::CustomOp1 for ArgSort {
         let stream = dev.cuda_stream().cu_stream() as i64;
         if !self.inplace && self.last_dim <= ARGSORT_ROWS_MAX_COLS {
             let dtype = match storage.dtype() {
-                candle_core::DType::U8 => ARGSORT_DTYPE_U8,
-                candle_core::DType::U32 => ARGSORT_DTYPE_U32,
-                candle_core::DType::I64 => ARGSORT_DTYPE_I64,
-                candle_core::DType::BF16 => ARGSORT_DTYPE_BF16,
-                candle_core::DType::F16 => ARGSORT_DTYPE_F16,
-                candle_core::DType::F32 => ARGSORT_DTYPE_F32,
-                candle_core::DType::F64 => ARGSORT_DTYPE_F64,
+                inference_tensor::DType::U8 => ARGSORT_DTYPE_U8,
+                inference_tensor::DType::U32 => ARGSORT_DTYPE_U32,
+                inference_tensor::DType::I64 => ARGSORT_DTYPE_I64,
+                inference_tensor::DType::BF16 => ARGSORT_DTYPE_BF16,
+                inference_tensor::DType::F16 => ARGSORT_DTYPE_F16,
+                inference_tensor::DType::F32 => ARGSORT_DTYPE_F32,
+                inference_tensor::DType::F64 => ARGSORT_DTYPE_F64,
                 _ => unreachable!("dtype matched above"),
             };
             let status = unsafe {
                 ffi::argsort_rows(src_ptr, dst_ptr, nrows, ncols, dtype, self.asc, stream)
             };
             if status != 0 {
-                candle_core::bail!("argsort_rows rejected dtype code {dtype}");
+                inference_tensor::bail!("argsort_rows rejected dtype code {dtype}");
             }
             drop(dst_guard);
-            let dst_ret = candle_core::cuda_backend::CudaStorage {
+            let dst_ret = inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(dst),
                 device: dev.clone(),
             };
@@ -281,58 +281,58 @@ impl candle_core::CustomOp1 for ArgSort {
         unsafe {
             if self.asc {
                 match storage.dtype() {
-                    candle_core::DType::U8 => {
+                    inference_tensor::DType::U8 => {
                         ffi::asort_asc_u8(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::U32 => {
+                    inference_tensor::DType::U32 => {
                         ffi::asort_asc_u32(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::I64 => {
+                    inference_tensor::DType::I64 => {
                         ffi::asort_asc_i64(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::BF16 => {
+                    inference_tensor::DType::BF16 => {
                         ffi::asort_asc_bf16(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::F16 => {
+                    inference_tensor::DType::F16 => {
                         ffi::asort_asc_f16(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::F32 => {
+                    inference_tensor::DType::F32 => {
                         ffi::asort_asc_f32(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::F64 => {
+                    inference_tensor::DType::F64 => {
                         ffi::asort_asc_f64(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    _ => candle_core::bail!("Unexpected dtype in asort"),
+                    _ => inference_tensor::bail!("Unexpected dtype in asort"),
                 }
             } else {
                 match storage.dtype() {
-                    candle_core::DType::U8 => {
+                    inference_tensor::DType::U8 => {
                         ffi::asort_desc_u8(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::U32 => {
+                    inference_tensor::DType::U32 => {
                         ffi::asort_desc_u32(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::I64 => {
+                    inference_tensor::DType::I64 => {
                         ffi::asort_desc_i64(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::BF16 => {
+                    inference_tensor::DType::BF16 => {
                         ffi::asort_desc_bf16(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::F16 => {
+                    inference_tensor::DType::F16 => {
                         ffi::asort_desc_f16(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::F32 => {
+                    inference_tensor::DType::F32 => {
                         ffi::asort_desc_f32(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    candle_core::DType::F64 => {
+                    inference_tensor::DType::F64 => {
                         ffi::asort_desc_f64(src_ptr, dst_ptr, nrows, ncols, self.inplace, stream)
                     }
-                    _ => candle_core::bail!("Unexpected dtype in asort"),
+                    _ => inference_tensor::bail!("Unexpected dtype in asort"),
                 }
             }
         }
         drop(dst_guard);
-        let dst_ret = candle_core::cuda_backend::CudaStorage {
+        let dst_ret = inference_tensor::cuda_backend::CudaStorage {
             slice: CudaStorageSlice::U32(dst),
             device: dev.clone(),
         };
@@ -356,11 +356,11 @@ impl ArgSortOp for Tensor {
             return self.arg_sort_last_dim(asc);
         }
         if !self.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: "arg_sort" });
+            return Err(inference_tensor::Error::RequiresContiguous { op: "arg_sort" });
         }
         let last_dim = match self.dims().last() {
             Some(last_dim) => *last_dim,
-            None => candle_core::bail!("empty last-dim in arg-sort"),
+            None => inference_tensor::bail!("empty last-dim in arg-sort"),
         };
         // No need for a backward pass for arg sort.
         self.apply_op1_no_bwd(&ArgSort {
@@ -381,11 +381,11 @@ impl ArgSortOp for Tensor {
             return self.sort_last_dim(asc);
         }
         if !self.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: "arg_sort" });
+            return Err(inference_tensor::Error::RequiresContiguous { op: "arg_sort" });
         }
         let last_dim = match self.dims().last() {
             Some(last_dim) => *last_dim,
-            None => candle_core::bail!("empty last-dim in arg-sort"),
+            None => inference_tensor::bail!("empty last-dim in arg-sort"),
         };
         // candle's bf16 gather needs sm_80, so bf16 keeps the in-place sort
         if last_dim <= ARGSORT_ROWS_MAX_COLS && self.dtype() != DType::BF16 {
@@ -418,7 +418,7 @@ pub struct TopKLogitsPackedOutput {
 
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::ArgSortOp;
 

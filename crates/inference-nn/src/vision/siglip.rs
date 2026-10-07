@@ -1,9 +1,9 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::FlashParams;
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, Module};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, Module};
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 use std::{ops::Mul, sync::Arc};
 
 use crate::{

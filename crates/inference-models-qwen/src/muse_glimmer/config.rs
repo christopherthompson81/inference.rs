@@ -125,7 +125,7 @@ pub struct TextConfig {
 }
 
 impl TextConfig {
-    pub fn layer_types(&self) -> candle_core::Result<Vec<TextAttentionType>> {
+    pub fn layer_types(&self) -> inference_tensor::Result<Vec<TextAttentionType>> {
         let layer_types = self.layer_types.clone().unwrap_or_else(|| {
             (0..self.num_hidden_layers)
                 .map(|layer_idx| {
@@ -138,7 +138,7 @@ impl TextConfig {
                 .collect()
         });
         if layer_types.len() != self.num_hidden_layers {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer text layer_types has {} entries for {} layers",
                 layer_types.len(),
                 self.num_hidden_layers
@@ -147,7 +147,7 @@ impl TextConfig {
         Ok(layer_types)
     }
 
-    pub fn layer_rope_theta(&self) -> candle_core::Result<Vec<f64>> {
+    pub fn layer_rope_theta(&self) -> inference_tensor::Result<Vec<f64>> {
         let theta = self.layer_rope_theta.clone().unwrap_or_else(|| {
             (0..self.num_hidden_layers)
                 .map(|layer_idx| {
@@ -160,23 +160,23 @@ impl TextConfig {
                 .collect()
         });
         if theta.len() != self.num_hidden_layers {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer layer_rope_theta has {} entries for {} layers",
                 theta.len(),
                 self.num_hidden_layers
             );
         }
         if theta.iter().any(|theta| !theta.is_finite() || *theta < 0.0) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer layer RoPE theta values must be finite and nonnegative"
             );
         }
         Ok(theta)
     }
 
-    pub fn validate(&self) -> candle_core::Result<()> {
+    pub fn validate(&self) -> inference_tensor::Result<()> {
         if self.num_hidden_layers == 0 || self.hidden_size == 0 || self.head_dim == 0 {
-            candle_core::bail!("Muse-Glimmer text dimensions must be nonzero");
+            inference_tensor::bail!("Muse-Glimmer text dimensions must be nonzero");
         }
         if self.num_attention_heads == 0
             || self.num_key_value_heads == 0
@@ -184,14 +184,16 @@ impl TextConfig {
                 .num_attention_heads
                 .is_multiple_of(self.num_key_value_heads)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer has incompatible attention head counts: {} query and {} KV",
                 self.num_attention_heads,
                 self.num_key_value_heads
             );
         }
         if self.sliding_window == 0 || self.max_position_embeddings == 0 {
-            candle_core::bail!("Muse-Glimmer context and sliding-window sizes must be nonzero");
+            inference_tensor::bail!(
+                "Muse-Glimmer context and sliding-window sizes must be nonzero"
+            );
         }
         for (name, value) in [
             ("rms_norm_eps", self.rms_norm_eps),
@@ -201,7 +203,7 @@ impl TextConfig {
             ("final_logit_softcapping", self.final_logit_softcapping),
         ] {
             if !value.is_finite() || value <= 0.0 {
-                candle_core::bail!("Muse-Glimmer {name} must be finite and positive");
+                inference_tensor::bail!("Muse-Glimmer {name} must be finite and positive");
             }
         }
         self.layer_types()?;
@@ -243,7 +245,7 @@ pub struct VisionConfig {
 }
 
 impl VisionConfig {
-    pub fn layer_types(&self) -> candle_core::Result<Vec<VisionAttentionType>> {
+    pub fn layer_types(&self) -> inference_tensor::Result<Vec<VisionAttentionType>> {
         let layer_types = self.layer_types.clone().unwrap_or_else(|| {
             (0..self.num_hidden_layers)
                 .map(|layer_idx| {
@@ -256,7 +258,7 @@ impl VisionConfig {
                 .collect()
         });
         if layer_types.len() != self.num_hidden_layers {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer vision layer_types has {} entries for {} layers",
                 layer_types.len(),
                 self.num_hidden_layers
@@ -265,16 +267,16 @@ impl VisionConfig {
         Ok(layer_types)
     }
 
-    pub fn validate(&self) -> candle_core::Result<()> {
+    pub fn validate(&self) -> inference_tensor::Result<()> {
         if self.hidden_size == 0
             || self.num_attention_heads == 0
             || !self.hidden_size.is_multiple_of(self.num_attention_heads)
         {
-            candle_core::bail!("Muse-Glimmer vision attention dimensions are incompatible");
+            inference_tensor::bail!("Muse-Glimmer vision attention dimensions are incompatible");
         }
         let head_dim = self.hidden_size / self.num_attention_heads;
         if !head_dim.is_multiple_of(4) {
-            candle_core::bail!("Muse-Glimmer vision head dimension must be divisible by four");
+            inference_tensor::bail!("Muse-Glimmer vision head dimension must be divisible by four");
         }
         if self.num_hidden_layers == 0
             || self.patch_size == 0
@@ -284,17 +286,19 @@ impl VisionConfig {
             || self.pos_emb_width == 0
             || self.max_position_embeddings == 0
         {
-            candle_core::bail!("Muse-Glimmer vision dimensions must be nonzero");
+            inference_tensor::bail!("Muse-Glimmer vision dimensions must be nonzero");
         }
         if self.pos_emb_height != self.pos_emb_width {
-            candle_core::bail!("Muse-Glimmer requires a square learned vision position grid");
+            inference_tensor::bail!("Muse-Glimmer requires a square learned vision position grid");
         }
         if !self.layer_norm_eps.is_finite()
             || self.layer_norm_eps <= 0.0
             || !self.rope_parameters.rope_theta.is_finite()
             || self.rope_parameters.rope_theta <= 0.0
         {
-            candle_core::bail!("Muse-Glimmer vision norm epsilon and RoPE theta must be positive");
+            inference_tensor::bail!(
+                "Muse-Glimmer vision norm epsilon and RoPE theta must be positive"
+            );
         }
         self.layer_types()?;
         Ok(())
@@ -320,16 +324,18 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn validate(&self) -> candle_core::Result<()> {
+    pub fn validate(&self) -> inference_tensor::Result<()> {
         self.text_config.validate()?;
         self.vision_config.validate()?;
         let expected = self
             .vision_config
             .hidden_size
             .checked_mul(self.vision_config.merge_size.pow(2))
-            .ok_or_else(|| candle_core::Error::msg("Muse-Glimmer vision output size overflow"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("Muse-Glimmer vision output size overflow")
+            })?;
         if self.out_hidden_size != expected {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer out_hidden_size {} does not match merged vision size {expected}",
                 self.out_hidden_size
             );
@@ -338,7 +344,7 @@ impl Config {
             || self.image_token_id as usize >= self.text_config.vocab_size
             || self.video_token_id as usize >= self.text_config.vocab_size
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer image and video token ids must be distinct and within the vocabulary"
             );
         }
@@ -351,7 +357,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn released_layer_patterns_match_transformers() -> candle_core::Result<()> {
+    fn released_layer_patterns_match_transformers() -> inference_tensor::Result<()> {
         let config: Config = serde_json::from_str(
             r#"{
                 "text_config": {},

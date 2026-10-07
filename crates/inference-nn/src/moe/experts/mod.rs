@@ -10,11 +10,11 @@ pub use checkpoint::{expert_stack_available, rebuild_expert_projection};
 mod config;
 mod forward;
 
-use candle_core::{Device, Result, Tensor};
 use inference_quant::{
     IsqType, LoraExpertExecution, LoraExpertProjectionNames, LoraExpertSiteHandle,
     LoraExpertSiteSpec, LoraSiteKey, QuantizedConfig, Shard, ShardedVarBuilder, SumAllReduce,
 };
+use inference_tensor::{Device, Result, Tensor};
 use std::sync::Arc;
 
 use crate::layers::Activation;
@@ -89,7 +89,7 @@ fn check_isq_gather_support() -> Result<()> {
             IsqType::HQQ4 | IsqType::HQQ8 | IsqType::F8E4M3 | IsqType::F8Q8
         )
     {
-        candle_core::bail!("ISQ type {ty} is not supported for MoE experts.");
+        inference_tensor::bail!("ISQ type {ty} is not supported for MoE experts.");
     }
     Ok(())
 }
@@ -238,7 +238,7 @@ impl MoEExperts {
             }
             MoEExpertsBackend::Fast => {
                 if experts_are_prequantized(quantization_config, &experts_vb) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Pre-quantized experts are not supported for flat expert trees."
                     );
                 }

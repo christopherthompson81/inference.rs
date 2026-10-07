@@ -4,9 +4,9 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use candle_core::{D, DType, Device, IndexOp, Result, Shape, Tensor, shape::ShapeWithOneHole};
-use candle_nn::Module;
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::Module;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Shape, Tensor, shape::ShapeWithOneHole};
 
 use crate::{
     layers::{AvgPool2d, ReflectionPad2d},
@@ -43,7 +43,7 @@ impl ModuleWithMetadata for QuantMethodWrapper {
     }
 }
 
-impl ModuleWithMetadata for candle_nn::Activation {
+impl ModuleWithMetadata for inference_tensor::nn::Activation {
     fn device(&self) -> Device {
         unreachable!()
     }
@@ -57,10 +57,10 @@ struct BigShapeWithOneHole((usize, usize, usize, usize, usize, ()));
 
 fn hole_size(el_count: usize, prod_d: usize, s: &dyn std::fmt::Debug) -> Result<usize> {
     if prod_d == 0 {
-        candle_core::bail!("cannot reshape tensor of {el_count} elements to {s:?}")
+        inference_tensor::bail!("cannot reshape tensor of {el_count} elements to {s:?}")
     }
     if !el_count.is_multiple_of(prod_d) {
-        candle_core::bail!("cannot reshape tensor with {el_count} elements to {s:?}")
+        inference_tensor::bail!("cannot reshape tensor with {el_count} elements to {s:?}")
     }
     Ok(el_count / prod_d)
 }
@@ -163,7 +163,7 @@ impl ImageEmbedding {
                     Some(base_feat_height_target / 2),
                 ),
                 None => (None, 2_usize, None),
-                _ => candle_core::bail!("Unexpected image_token_compression_cls"),
+                _ => inference_tensor::bail!("Unexpected image_token_compression_cls"),
             };
 
         assert_eq!(use_hd_transform, with_learnable_separator);
@@ -233,7 +233,7 @@ impl ImageEmbedding {
                     }
                     vec![
                         Box::new(QuantMethodWrapper(a)),
-                        Box::new(candle_nn::Activation::Gelu),
+                        Box::new(inference_tensor::nn::Activation::Gelu),
                         Box::new(QuantMethodWrapper(b)),
                     ]
                 }
@@ -265,12 +265,12 @@ impl ImageEmbedding {
                     }
                     vec![
                         Box::new(QuantMethodWrapper(a)),
-                        Box::new(candle_nn::Activation::Gelu),
+                        Box::new(inference_tensor::nn::Activation::Gelu),
                         Box::new(QuantMethodWrapper(b)),
                     ]
                 }
                 _ => {
-                    candle_core::bail!("projection_cls=`{projection_cls}` not implemented.");
+                    inference_tensor::bail!("projection_cls=`{projection_cls}` not implemented.");
                 }
             };
 
@@ -376,7 +376,7 @@ impl ImageEmbedding {
             }
             Ok(img_feature)
         } else {
-            candle_core::bail!("Unsupported image feature type {}", self.type_feature)
+            inference_tensor::bail!("Unsupported image feature type {}", self.type_feature)
         }
     }
 
@@ -393,7 +393,7 @@ impl ImageEmbedding {
             || image_sizes.len() != batch
             || image_hashes.len() != batch
         {
-            candle_core::bail!("Phi4MM packed image metadata length mismatch");
+            inference_tensor::bail!("Phi4MM packed image metadata length mismatch");
         }
 
         let mut token_counts = Vec::with_capacity(batch);
@@ -402,9 +402,9 @@ impl ImageEmbedding {
             let crop_cols = width as usize / self.crop_size;
             let crop_count = crop_rows
                 .checked_mul(crop_cols)
-                .ok_or_else(|| candle_core::Error::msg("Phi4MM image crop count overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("Phi4MM image crop count overflow"))?;
             if crop_count + 1 > image_attention_mask.dim(1)? {
-                candle_core::bail!("Phi4MM image size exceeds its preprocessed crop tensor");
+                inference_tensor::bail!("Phi4MM image size exceeds its preprocessed crop tensor");
             }
             let sub_mask = image_attention_mask.i((item, 1..crop_count + 1, .., ..))?;
             let h_indices = Tensor::arange_step(0, sub_mask.dim(1)? as u32, 2, sub_mask.device())?;
@@ -430,7 +430,9 @@ impl ImageEmbedding {
             token_counts.push(
                 self.num_img_tokens
                     .checked_add(17 + visible + rows)
-                    .ok_or_else(|| candle_core::Error::msg("Phi4MM image token count overflow"))?,
+                    .ok_or_else(|| {
+                        inference_tensor::Error::msg("Phi4MM image token count overflow")
+                    })?,
             );
         }
 
@@ -750,7 +752,7 @@ impl ImageEmbedding {
                                     )?);
                                 }
                                 other => {
-                                    candle_core::bail!("Invalid hd_transform_order=`{other}`");
+                                    inference_tensor::bail!("Invalid hd_transform_order=`{other}`");
                                 }
                             }
 

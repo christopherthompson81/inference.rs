@@ -1,4 +1,4 @@
-use candle_core::{
+use inference_tensor::{
     CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, Tensor,
     backend::BackendStorage,
 };
@@ -25,28 +25,30 @@ impl DynamicConvOp {
         base_layout: &Layout,
     ) -> Result<()> {
         if hidden.dtype() != dynamic.dtype() || hidden.dtype() != base.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "dynamic convolution dtype mismatch: hidden={:?}, dynamic={:?}, base={:?}",
                 hidden.dtype(),
                 dynamic.dtype(),
                 base.dtype()
             );
         }
-        let batch = usize::try_from(self.batch).map_err(candle_core::Error::wrap)?;
+        let batch = usize::try_from(self.batch).map_err(inference_tensor::Error::wrap)?;
         let sequence_length =
-            usize::try_from(self.sequence_length).map_err(candle_core::Error::wrap)?;
-        let hidden_size = usize::try_from(self.hidden_size).map_err(candle_core::Error::wrap)?;
-        let group_size = usize::try_from(self.group_size).map_err(candle_core::Error::wrap)?;
-        let kernel_size = usize::try_from(self.kernel_size).map_err(candle_core::Error::wrap)?;
+            usize::try_from(self.sequence_length).map_err(inference_tensor::Error::wrap)?;
+        let hidden_size =
+            usize::try_from(self.hidden_size).map_err(inference_tensor::Error::wrap)?;
+        let group_size = usize::try_from(self.group_size).map_err(inference_tensor::Error::wrap)?;
+        let kernel_size =
+            usize::try_from(self.kernel_size).map_err(inference_tensor::Error::wrap)?;
         if group_size == 0 || hidden_size % group_size != 0 {
-            candle_core::bail!("dynamic convolution group size must divide hidden size");
+            inference_tensor::bail!("dynamic convolution group size must divide hidden size");
         }
         let groups = hidden_size / group_size;
         if hidden_layout.shape().dims3()? != (batch, sequence_length, hidden_size)
             || dynamic_layout.shape().dims4()? != (batch, sequence_length, kernel_size, groups)
             || base_layout.shape().dims2()? != (kernel_size, hidden_size)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "dynamic convolution shape mismatch: hidden={:?}, dynamic={:?}, base={:?}",
                 hidden_layout.shape(),
                 dynamic_layout.shape(),
@@ -71,7 +73,7 @@ impl CustomOp3 for DynamicConvOp {
         _base: &CpuStorage,
         _base_layout: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("fused dynamic convolution requires CUDA storage")
+        inference_tensor::bail!("fused dynamic convolution requires CUDA storage")
     }
 
     fn cuda_fwd(
@@ -83,7 +85,7 @@ impl CustomOp3 for DynamicConvOp {
         base: &CudaStorage,
         base_layout: &Layout,
     ) -> Result<(CudaStorage, Shape)> {
-        use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+        use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
         self.validate(
             hidden,
@@ -141,7 +143,10 @@ impl CustomOp3 for DynamicConvOp {
                 drop(dynamic_guard);
                 drop(hidden_guard);
                 if status != 0 {
-                    candle_core::bail!(concat!(stringify!($ffi), " failed with status {}"), status);
+                    inference_tensor::bail!(
+                        concat!(stringify!($ffi), " failed with status {}"),
+                        status
+                    );
                 }
                 CudaStorage::wrap_cuda_slice(output, device.clone())
             }};
@@ -151,7 +156,7 @@ impl CustomOp3 for DynamicConvOp {
             DType::BF16 => launch!(half::bf16, dynamic_conv_bf16),
             DType::F16 => launch!(half::f16, dynamic_conv_f16),
             DType::F32 => launch!(f32, dynamic_conv_f32),
-            dtype => candle_core::bail!("dynamic convolution does not support {dtype:?}"),
+            dtype => inference_tensor::bail!("dynamic convolution does not support {dtype:?}"),
         };
         Ok((output, hidden_layout.shape().clone()))
     }
@@ -166,11 +171,11 @@ pub fn dynamic_conv(
 ) -> Result<Tensor> {
     let (batch, sequence_length, hidden_size) = hidden.dims3()?;
     let op = DynamicConvOp {
-        batch: i32::try_from(batch).map_err(candle_core::Error::wrap)?,
-        sequence_length: i32::try_from(sequence_length).map_err(candle_core::Error::wrap)?,
-        hidden_size: i32::try_from(hidden_size).map_err(candle_core::Error::wrap)?,
-        group_size: i32::try_from(group_size).map_err(candle_core::Error::wrap)?,
-        kernel_size: i32::try_from(kernel_size).map_err(candle_core::Error::wrap)?,
+        batch: i32::try_from(batch).map_err(inference_tensor::Error::wrap)?,
+        sequence_length: i32::try_from(sequence_length).map_err(inference_tensor::Error::wrap)?,
+        hidden_size: i32::try_from(hidden_size).map_err(inference_tensor::Error::wrap)?,
+        group_size: i32::try_from(group_size).map_err(inference_tensor::Error::wrap)?,
+        kernel_size: i32::try_from(kernel_size).map_err(inference_tensor::Error::wrap)?,
     };
     let dynamic = dynamic.to_dtype(hidden.dtype())?;
     let base = base.to_dtype(hidden.dtype())?;
@@ -180,7 +185,7 @@ pub fn dynamic_conv(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, IndexOp};
+    use inference_tensor::{Device, IndexOp};
 
     #[test]
     fn matches_reference() -> Result<()> {

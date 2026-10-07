@@ -1,5 +1,5 @@
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use candle_core::{DType, Layout, Result, Storage, Tensor};
+use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
+use inference_tensor::{DType, Layout, Result, Storage, Tensor};
 
 fn launch(
     src: *const core::ffi::c_void,
@@ -9,7 +9,7 @@ fn launch(
 ) -> Result<()> {
     let status = unsafe { crate::cuda::ffi::cuda_graph_copy_bytes(src, dst, n as i64, stream) };
     if status != 0 {
-        candle_core::bail!("cuda_graph_copy_bytes failed with status {status}");
+        inference_tensor::bail!("cuda_graph_copy_bytes failed with status {status}");
     }
     Ok(())
 }
@@ -35,7 +35,7 @@ fn launch_2d(
         )
     };
     if status != 0 {
-        candle_core::bail!("cuda_graph_copy_2d_bytes failed with status {status}");
+        inference_tensor::bail!("cuda_graph_copy_2d_bytes failed with status {status}");
     }
     Ok(())
 }
@@ -71,14 +71,14 @@ fn launch_layout(
     stream: i64,
 ) -> Result<()> {
     if !dst_layout.is_contiguous() {
-        candle_core::bail!("CUDA graph copy expected a contiguous destination tensor");
+        inference_tensor::bail!("CUDA graph copy expected a contiguous destination tensor");
     }
     let n = src_layout.shape().elem_count();
     if src_layout.is_contiguous() {
         return launch(src, dst, n * elem_size, stream);
     }
     let Some((width, height, src_pitch)) = dense_row_geometry(src_layout) else {
-        candle_core::bail!("CUDA graph copy source layout is not dense by row");
+        inference_tensor::bail!("CUDA graph copy source layout is not dense by row");
     };
     launch_2d(
         src,
@@ -115,19 +115,19 @@ pub fn copy_tensor(src: &Tensor, dst: &Tensor) -> Result<()> {
         || src.dtype() != dst.dtype()
         || src.device().location() != dst.device().location()
     {
-        candle_core::bail!("CUDA graph copy expected matching tensors");
+        inference_tensor::bail!("CUDA graph copy expected matching tensors");
     }
     if !src.device().is_cuda() {
-        candle_core::bail!("CUDA graph copy expected CUDA tensors");
+        inference_tensor::bail!("CUDA graph copy expected CUDA tensors");
     }
 
     let (src_storage, src_layout) = src.storage_and_layout();
     let (dst_storage, dst_layout) = dst.storage_and_layout();
     let Storage::Cuda(src_storage) = &*src_storage else {
-        candle_core::bail!("CUDA graph copy expected CUDA source storage");
+        inference_tensor::bail!("CUDA graph copy expected CUDA source storage");
     };
     let Storage::Cuda(dst_storage) = &*dst_storage else {
-        candle_core::bail!("CUDA graph copy expected CUDA destination storage");
+        inference_tensor::bail!("CUDA graph copy expected CUDA destination storage");
     };
 
     let stream = src.device().as_cuda_device()?.cuda_stream().cu_stream() as i64;
@@ -197,7 +197,7 @@ pub fn copy_tensor(src: &Tensor, dst: &Tensor) -> Result<()> {
             f64,
             stream
         )?,
-        dtype => candle_core::bail!("CUDA graph copy unsupported dtype {dtype:?}"),
+        dtype => inference_tensor::bail!("CUDA graph copy unsupported dtype {dtype:?}"),
     }
     Ok(())
 }

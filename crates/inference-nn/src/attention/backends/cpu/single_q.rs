@@ -1,4 +1,4 @@
-use candle_core::{Device, Result, Tensor, WithDType};
+use inference_tensor::{Device, Result, Tensor, WithDType};
 use rayon::prelude::*;
 
 use super::{
@@ -59,7 +59,7 @@ where
     T: ElemOps + Send + Sync,
 {
     let total_rows = ctx.q.dims[0] * meta.h;
-    let pool = candle_core::utils::barrier_pool();
+    let pool = inference_tensor::utils::barrier_pool();
     let out_ptr = out.as_mut_ptr() as usize;
 
     // Rows sharing a kv head stream K/V together so the cache traffic is paid once per group;

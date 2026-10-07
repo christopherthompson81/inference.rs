@@ -2,7 +2,7 @@ use crate::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedConfig, QuantizedSerde,
     ShardedVarBuilder, has_missing_required_tensors, make_dummy_or_error,
 };
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 use std::sync::{Arc, atomic::AtomicUsize};
 
 #[derive(Debug)]
@@ -15,7 +15,7 @@ impl QuantMethod for GptqLayer {
     {
         match method {
             QuantMethodConfig::GptqAwq { .. } => {
-                candle_core::bail!("GPTQ is only supported on CUDA.")
+                inference_tensor::bail!("GPTQ is only supported on CUDA.")
             }
             QuantMethodConfig::Gguf { .. }
             | QuantMethodConfig::Unquantized(_)
@@ -33,11 +33,11 @@ impl QuantMethod for GptqLayer {
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
-        candle_core::bail!("GPTQ is only supported on CUDA.")
+        inference_tensor::bail!("GPTQ is only supported on CUDA.")
     }
 
     fn forward_raw(&self, _a: &Tensor) -> Result<Tensor> {
-        candle_core::bail!("GPTQ is only supported on CUDA.")
+        inference_tensor::bail!("GPTQ is only supported on CUDA.")
     }
 
     fn quantized_act_type(&self) -> Option<DType> {
@@ -45,15 +45,15 @@ impl QuantMethod for GptqLayer {
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("GPTQ is only supported on CUDA.")
+        inference_tensor::bail!("GPTQ is only supported on CUDA.")
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         (DType::F32, Device::Cpu)
     }
 
     fn plan_isq(&self, _request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
-        candle_core::bail!("GPTQ CPU quantization does not support ISQ planning.")
+        inference_tensor::bail!("GPTQ CPU quantization does not support ISQ planning.")
     }
 
     fn apply_isq(
@@ -64,7 +64,7 @@ impl QuantMethod for GptqLayer {
         _imatrix_weight: Option<Vec<f32>>,
         _guard: QuantizeOntoGuard,
     ) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("GPTQ is only supported on CUDA.")
+        inference_tensor::bail!("GPTQ is only supported on CUDA.")
     }
 }
 
@@ -93,7 +93,7 @@ pub fn gptq_linear(
         is_awq,
     } = config
     else {
-        candle_core::bail!("Unexpected quantization config.")
+        inference_tensor::bail!("Unexpected quantization config.")
     };
 
     let is_awq = *is_awq;

@@ -3,8 +3,8 @@ use std::{
     sync::{Arc, atomic::AtomicUsize},
 };
 
-use candle_core::{DType, Device, Result, Tensor, quantized::GgmlDType};
-use candle_nn::Linear;
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Device, Result, Tensor, quantized::GgmlDType};
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
 mod deepgemm;
@@ -241,7 +241,7 @@ impl BlockwiseFP8Linear {
 }
 
 impl QuantMethod for BlockwiseFP8Linear {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -278,7 +278,7 @@ impl QuantMethod for BlockwiseFP8Linear {
             }
         }
     }
-    fn dequantize_w(&self) -> Result<candle_core::Tensor> {
+    fn dequantize_w(&self) -> Result<inference_tensor::Tensor> {
         ops::fp8_blockwise_dequantize(
             &self.weight,
             &self.weight_scale_inv,
@@ -296,19 +296,21 @@ impl QuantMethod for BlockwiseFP8Linear {
             let features = original_shape
                 .last()
                 .copied()
-                .ok_or_else(|| candle_core::Error::msg("FP8 activation cannot be scalar"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("FP8 activation cannot be scalar"))?;
             let rows = original_shape[..original_shape.len() - 1]
                 .iter()
                 .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
-                .ok_or_else(|| candle_core::Error::msg("FP8 activation shape overflows usize"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("FP8 activation shape overflows usize")
+                })?;
             let (output_features, weight_features) = self.weight.dims2()?;
             if features != weight_features {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "FP8 activation K={features} does not match weight K={weight_features}"
                 )
             }
             if !x.device().same_device(self.weight.device()) {
-                candle_core::bail!("FP8 weight and activation must be on the same device")
+                inference_tensor::bail!("FP8 weight and activation must be on the same device")
             }
             if rows == 0 {
                 let mut output_shape = original_shape[..original_shape.len() - 1].to_vec();
@@ -339,15 +341,14 @@ impl QuantMethod for BlockwiseFP8Linear {
         if matches!(x.dtype(), DType::F16 | DType::BF16) {
             if let BlockwiseFp8Provider::DeepGemmSm90(prepared) = &self.provider {
                 let original_shape = x.dims().to_vec();
-                let features = original_shape
-                    .last()
-                    .copied()
-                    .ok_or_else(|| candle_core::Error::msg("FP8 activation cannot be scalar"))?;
+                let features = original_shape.last().copied().ok_or_else(|| {
+                    inference_tensor::Error::msg("FP8 activation cannot be scalar")
+                })?;
                 let rows = original_shape[..original_shape.len() - 1]
                     .iter()
                     .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
                     .ok_or_else(|| {
-                        candle_core::Error::msg("FP8 activation shape overflows usize")
+                        inference_tensor::Error::msg("FP8 activation shape overflows usize")
                     })?;
                 let input = x.reshape((rows, features))?;
                 let result = if deepgemm::serving_supported(&input) {
@@ -399,7 +400,7 @@ impl QuantMethod for BlockwiseFP8Linear {
         // Try to use native FP8 GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
-            if matches!(x.device(), candle_core::Device::Cuda(_))
+            if matches!(x.device(), inference_tensor::Device::Cuda(_))
                 && ffi::HAVE_BLOCKWISE_GEMM_KERNELS
             {
                 // Handle batched inputs by flattening to 2D
@@ -457,7 +458,7 @@ impl QuantMethod for BlockwiseFP8Linear {
         // Try to use native FP8 indexed MoE GEMM kernel on CUDA
         #[cfg(feature = "cuda")]
         {
-            if matches!(x.device(), candle_core::Device::Cuda(_))
+            if matches!(x.device(), inference_tensor::Device::Cuda(_))
                 && ffi::HAVE_BLOCKWISE_GEMM_KERNELS
             {
                 // Use native FP8 indexed MoE GEMM kernel (expects U32 indices)
@@ -607,7 +608,9 @@ impl QuantMethod for BlockwiseFP8Linear {
         #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
         if matches!(self.provider, BlockwiseFp8Provider::TensorCoreGemv) {
             let scheme = self.activation_quantization_scheme_for(x).ok_or_else(|| {
-                candle_core::Error::msg("FP8 tensor-core activation quantization is unavailable")
+                inference_tensor::Error::msg(
+                    "FP8 tensor-core activation quantization is unavailable",
+                )
             })?;
             let source_shape = x.dims().to_vec();
             let features = source_shape[source_shape.len() - 1];
@@ -642,18 +645,20 @@ impl QuantMethod for BlockwiseFP8Linear {
         #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
         {
             let scheme = self.activation_quantization_scheme().ok_or_else(|| {
-                candle_core::Error::msg("blockwise FP8 activation quantization is unavailable")
+                inference_tensor::Error::msg("blockwise FP8 activation quantization is unavailable")
             })?;
             let source_shape = x.dims().to_vec();
             let source_dtype = x.dtype();
             let features = source_shape
                 .last()
                 .copied()
-                .ok_or_else(|| candle_core::Error::msg("FP8 activation cannot be scalar"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("FP8 activation cannot be scalar"))?;
             let rows = source_shape[..source_shape.len() - 1]
                 .iter()
                 .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
-                .ok_or_else(|| candle_core::Error::msg("FP8 activation shape overflows usize"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("FP8 activation shape overflows usize")
+                })?;
             let x = x.reshape((rows, features))?.contiguous()?;
             let (quantized, scales) = ops::fp8_quantize_activation_cutlass(&x)?;
             QuantizedActivation::new(quantized, scales, source_shape, source_dtype, scheme)
@@ -662,7 +667,7 @@ impl QuantMethod for BlockwiseFP8Linear {
         #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]
         {
             let _ = x;
-            candle_core::bail!("blockwise FP8 activation quantization is unavailable")
+            inference_tensor::bail!("blockwise FP8 activation quantization is unavailable")
         }
     }
 
@@ -692,10 +697,10 @@ impl QuantMethod for BlockwiseFP8Linear {
         #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
         {
             let scheme = self.activation_quantization_scheme().ok_or_else(|| {
-                candle_core::Error::msg("blockwise FP8 activation quantization is unavailable")
+                inference_tensor::Error::msg("blockwise FP8 activation quantization is unavailable")
             })?;
             if activation.scheme() != scheme {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "FP8 activation scheme {:?} does not match layer scheme {:?}",
                     activation.scheme(),
                     scheme
@@ -713,18 +718,18 @@ impl QuantMethod for BlockwiseFP8Linear {
                     #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
                     {
                         if row_alignment.get() != deepgemm::DEEPGEMM_ACTIVATION_SCALE_M_ALIGNMENT {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "DeepGEMM activation scales require row alignment {}",
                                 deepgemm::DEEPGEMM_ACTIVATION_SCALE_M_ALIGNMENT
                             )
                         }
                         if activation.source_dtype() != DType::BF16 {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "DeepGEMM prequantized activation requires a BF16 source"
                             )
                         }
                         let BlockwiseFp8Provider::DeepGemmSm90(prepared) = &self.provider else {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "group-major FP8 activation scales require the DeepGEMM provider"
                             )
                         };
@@ -739,7 +744,7 @@ impl QuantMethod for BlockwiseFP8Linear {
                     #[cfg(not(all(feature = "cuda", has_deepgemm_fp8_sm90_provider)))]
                     {
                         let _ = row_alignment;
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "group-major FP8 activation scales require the DeepGEMM provider"
                         )
                     }
@@ -759,7 +764,7 @@ impl QuantMethod for BlockwiseFP8Linear {
         #[cfg(not(all(feature = "cuda", has_cutlass_fp8_sm90_kernels)))]
         {
             let _ = activation;
-            candle_core::bail!("blockwise FP8 prequantized forward is unavailable")
+            inference_tensor::bail!("blockwise FP8 prequantized forward is unavailable")
         }
     }
 
@@ -788,7 +793,7 @@ impl QuantMethod for BlockwiseFP8Linear {
                 .iter()
                 .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
                 .ok_or_else(|| {
-                    candle_core::Error::msg("fused split GLU activation shape overflows usize")
+                    inference_tensor::Error::msg("fused split GLU activation shape overflows usize")
                 })?;
             if packed_features != split_size.saturating_mul(2)
                 || k != split_size
@@ -844,7 +849,7 @@ impl QuantMethod for BlockwiseFP8Linear {
                 .iter()
                 .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
                 .ok_or_else(|| {
-                    candle_core::Error::msg("fused split GLU activation shape overflows usize")
+                    inference_tensor::Error::msg("fused split GLU activation shape overflows usize")
                 })?;
             if !deepgemm::serving_shape_supported(input.dtype(), rows) {
                 return Ok(None);
@@ -883,10 +888,10 @@ impl QuantMethod for BlockwiseFP8Linear {
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("BlockwiseFP8Linear does not support add_delta_w")
+        inference_tensor::bail!("BlockwiseFP8Linear does not support add_delta_w")
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         (DType::F8E4M3, self.weight.device().clone())
     }
 
@@ -924,7 +929,7 @@ impl QuantMethod for BlockwiseFP8Linear {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
                     // TODO just warn?
-                    candle_core::bail!("HQQ does not support imatrix.");
+                    inference_tensor::bail!("HQQ does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -958,7 +963,7 @@ impl QuantMethod for BlockwiseFP8Linear {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
                     // TODO just warn?
-                    candle_core::bail!("AFQ does not support imatrix.");
+                    inference_tensor::bail!("AFQ does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1015,7 +1020,7 @@ impl QuantMethod for BlockwiseFP8Linear {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
                     // TODO just warn?
-                    candle_core::bail!("F8E4M3 does not support imatrix.");
+                    inference_tensor::bail!("F8E4M3 does not support imatrix.");
                 }
 
                 let w = weight.to_device(&device)?;
@@ -1032,7 +1037,7 @@ impl QuantMethod for BlockwiseFP8Linear {
             Some(IsqType::F8Q8) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("F8Q8 does not support imatrix.");
+                    inference_tensor::bail!("F8Q8 does not support imatrix.");
                 }
 
                 let w = weight.to_device(&device)?;
@@ -1046,7 +1051,7 @@ impl QuantMethod for BlockwiseFP8Linear {
             Some(IsqType::MXFP4) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("MXFP4 does not support imatrix.");
+                    inference_tensor::bail!("MXFP4 does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1122,7 +1127,7 @@ pub(crate) fn blockwise_fp8_module_kind(
         ..
     } = config
     else {
-        candle_core::bail!("Unexpected quantization config.")
+        inference_tensor::bail!("Unexpected quantization config.")
     };
 
     let has_weight = vb.contains_tensor("weight");
@@ -1135,7 +1140,7 @@ pub(crate) fn blockwise_fp8_module_kind(
 
     if is_excluded {
         if has_scale {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FP8-excluded module `{}` unexpectedly has `weight_scale_inv`",
                 vb.prefix()
             );
@@ -1149,7 +1154,7 @@ pub(crate) fn blockwise_fp8_module_kind(
 
     if has_weight && !has_scale {
         if !modules_to_not_convert.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FP8 module `{}` has no `weight_scale_inv` and is not listed in `modules_to_not_convert`",
                 vb.prefix()
             );
@@ -1185,17 +1190,17 @@ pub(crate) fn scale_shard_from_weight_shard(
             world_size,
         } => {
             if world_size == 0 || rank >= world_size {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Invalid FP8 weight shard rank {rank} for world size {world_size}"
                 );
             }
             let logical_dim = *weight_shape.get(dim).ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "Cannot shard rank-2 FP8 weight along dimension {dim}"
                 ))
             })?;
             if !logical_dim.is_multiple_of(world_size) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "FP8 weight dimension {logical_dim} is not divisible by world size {world_size}"
                 );
             }
@@ -1206,23 +1211,25 @@ pub(crate) fn scale_shard_from_weight_shard(
     };
 
     let logical_dim = *weight_shape.get(dim).ok_or_else(|| {
-        candle_core::Error::msg(format!(
+        inference_tensor::Error::msg(format!(
             "Cannot shard rank-2 FP8 weight along dimension {dim}"
         ))
     })?;
     let block_size = weight_block_size[dim];
     if block_size == 0 {
-        candle_core::bail!("FP8 weight block size must be nonzero")
+        inference_tensor::bail!("FP8 weight block size must be nonzero")
     }
-    let end = offset
-        .checked_add(len)
-        .ok_or_else(|| candle_core::Error::msg("FP8 weight shard range overflowed".to_string()))?;
+    let end = offset.checked_add(len).ok_or_else(|| {
+        inference_tensor::Error::msg("FP8 weight shard range overflowed".to_string())
+    })?;
     if end > logical_dim {
-        candle_core::bail!("FP8 weight shard {offset}..{end} exceeds dimension size {logical_dim}")
+        inference_tensor::bail!(
+            "FP8 weight shard {offset}..{end} exceeds dimension size {logical_dim}"
+        )
     }
     if !offset.is_multiple_of(block_size) || (end != logical_dim && !end.is_multiple_of(block_size))
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 weight shard {offset}..{end} is not aligned to block size {block_size}"
         )
     }
@@ -1240,7 +1247,7 @@ pub(crate) fn scale_shard_from_weight_shard(
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::*;
     use crate::ShardedSafeTensors;
@@ -1364,18 +1371,18 @@ mod tests {
         has_deepgemm_fp8_sm90_provider
     ))]
     fn copy_cuda_bf16(source: &Tensor, destination: &Tensor) -> Result<()> {
-        use candle_core::{Storage, cuda::cudarc::driver::sys};
         use half::bf16;
+        use inference_tensor::{Storage, cuda::cudarc::driver::sys};
 
         if source.dims() != destination.dims()
             || source.dtype() != DType::BF16
             || destination.dtype() != DType::BF16
             || !source.device().same_device(destination.device())
         {
-            candle_core::bail!("CUDA BF16 test copy requires matching tensors")
+            inference_tensor::bail!("CUDA BF16 test copy requires matching tensors")
         }
         let Device::Cuda(dev) = source.device() else {
-            candle_core::bail!("CUDA BF16 test copy requires CUDA tensors")
+            inference_tensor::bail!("CUDA BF16 test copy requires CUDA tensors")
         };
         let stream = dev.cuda_stream();
         let (source_storage, source_layout) = source.storage_and_layout();
@@ -1406,7 +1413,7 @@ mod tests {
         };
         drop((source_guard, destination_guard));
         if status != sys::cudaError_enum::CUDA_SUCCESS {
-            candle_core::bail!("CUDA BF16 test copy failed: {status:?}")
+            inference_tensor::bail!("CUDA BF16 test copy failed: {status:?}")
         }
         Ok(())
     }
@@ -1432,7 +1439,9 @@ mod tests {
             let reference = layer.forward(&intermediate)?;
             let output = layer
                 .try_forward_fused_split_glu(&input, SPLIT_SIZE, GluActivationType::Silu)?
-                .ok_or_else(|| candle_core::Error::msg("DeepGEMM fused GLU was not selected"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("DeepGEMM fused GLU was not selected")
+                })?;
             dev.synchronize()?;
             assert_eq!(output.dims(), [rows, OUTPUT_FEATURES]);
             assert_deepgemm_fused_glu_close(&format!("rows={rows}"), &reference, &output)?;
@@ -1444,7 +1453,7 @@ mod tests {
         let reference = layer.forward(&intermediate)?;
         let output = layer
             .try_forward_fused_split_glu(&input, SPLIT_SIZE, GluActivationType::Silu)?
-            .ok_or_else(|| candle_core::Error::msg("DeepGEMM fused GLU was not selected"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM fused GLU was not selected"))?;
         dev.synchronize()?;
         assert_eq!(output.dims(), [2, 3, OUTPUT_FEATURES]);
         assert_deepgemm_fused_glu_close("rank=3", &reference, &output)
@@ -1484,10 +1493,12 @@ mod tests {
             Tensor::from_vec(norm_weight_values, FEATURES, &device)?.to_dtype(DType::BF16)?;
         let scheme = layer
             .activation_quantization_scheme_for(&input)
-            .ok_or_else(|| candle_core::Error::msg("DeepGEMM activation scheme is unavailable"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("DeepGEMM activation scheme is unavailable")
+            })?;
         let scale_layout = layer
             .preferred_activation_scale_layout_for(&input)
-            .ok_or_else(|| candle_core::Error::msg("DeepGEMM scale layout is unavailable"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM scale layout is unavailable"))?;
         assert_eq!(
             scale_layout,
             ActivationScaleLayout::GroupMajor {
@@ -1656,7 +1667,7 @@ mod tests {
             )?)?;
             let output = layer
                 .try_forward_fused_split_glu(&input, SPLIT_SIZE, GluActivationType::Silu)?
-                .ok_or_else(|| candle_core::Error::msg("cuTile fused GLU was not selected"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("cuTile fused GLU was not selected"))?;
             assert_eq!(output.dims(), reference.dims());
             assert_close(&format!("shape {shape:?}"), &reference, &output)?;
         }
@@ -1701,10 +1712,12 @@ mod tests {
         );
         let scheme = layer
             .activation_quantization_scheme_for(&input)
-            .ok_or_else(|| candle_core::Error::msg("cuTile activation scheme is unavailable"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("cuTile activation scheme is unavailable")
+            })?;
         let scale_layout = layer
             .preferred_activation_scale_layout_for(&input)
-            .ok_or_else(|| candle_core::Error::msg("cuTile scale layout is unavailable"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("cuTile scale layout is unavailable"))?;
         assert_eq!(
             scale_layout,
             ActivationScaleLayout::GroupMajor {
@@ -1763,8 +1776,8 @@ mod tests {
     #[test]
     #[ignore = "requires an SM90 GPU and runtime nvcc or a prepared cubin cache"]
     fn deepgemm_fused_rms_norm_cuda_graph_replays_sm90() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys;
         use half::bf16;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         const ROWS: usize = 5;
         const FEATURES: usize = 256;
@@ -1803,7 +1816,7 @@ mod tests {
         let (input_b, residual_b) = make_inputs(53)?;
         let make_reference = |input: &Tensor, residual: &Tensor| -> Result<(Tensor, Tensor)> {
             let residual_output = (input + residual)?;
-            let normalized = candle_nn::ops::rms_norm(
+            let normalized = inference_tensor::nn::ops::rms_norm(
                 &residual_output.to_device(&Device::Cpu)?,
                 &norm_weight.to_device(&Device::Cpu)?,
                 EPSILON,
@@ -1823,10 +1836,12 @@ mod tests {
         copy_cuda_bf16(&residual_a, &graph_residual)?;
         let scheme = layer
             .activation_quantization_scheme_for(&graph_input)
-            .ok_or_else(|| candle_core::Error::msg("DeepGEMM activation scheme is unavailable"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("DeepGEMM activation scheme is unavailable")
+            })?;
         let scale_layout = layer
             .preferred_activation_scale_layout_for(&graph_input)
-            .ok_or_else(|| candle_core::Error::msg("DeepGEMM scale layout is unavailable"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM scale layout is unavailable"))?;
         assert_eq!(
             scale_layout,
             ActivationScaleLayout::GroupMajor {
@@ -1856,7 +1871,7 @@ mod tests {
             if restore_event_tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = (|| -> Result<()> {
             let fused = fused_add_rms_norm_quantized(
@@ -1881,8 +1896,8 @@ mod tests {
         }
         captured?;
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("CUDA graph capture returned no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA graph capture returned no graph"))?;
 
         let expected_residual_a = reference_residual_a
             .to_device(&Device::Cpu)?
@@ -1926,10 +1941,10 @@ mod tests {
             copy_cuda_bf16(residual, &graph_residual)?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             stream
                 .synchronize()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
 
             let actual_residual = graph_residual_output
                 .to_device(&Device::Cpu)?
@@ -1969,7 +1984,7 @@ mod tests {
     #[test]
     #[ignore = "requires an SM90 GPU and runtime nvcc or a prepared cubin cache"]
     fn deepgemm_fused_glu_cuda_graph_replays_sm90() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         const ROWS: usize = 16;
         const SPLIT_SIZE: usize = 256;
@@ -1998,7 +2013,7 @@ mod tests {
         )?)?;
         let warmup = layer
             .try_forward_fused_split_glu(&graph_input, SPLIT_SIZE, GluActivationType::Silu)?
-            .ok_or_else(|| candle_core::Error::msg("DeepGEMM fused GLU was not selected"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DeepGEMM fused GLU was not selected"))?;
         drop(warmup);
         dev.synchronize()?;
 
@@ -2012,13 +2027,13 @@ mod tests {
             if restore_event_tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = layer
             .try_forward_fused_split_glu(&graph_input, SPLIT_SIZE, GluActivationType::Silu)
             .and_then(|output| {
                 let output = output.ok_or_else(|| {
-                    candle_core::Error::msg("DeepGEMM fused GLU was not selected")
+                    inference_tensor::Error::msg("DeepGEMM fused GLU was not selected")
                 })?;
                 copy_cuda_bf16(&output, &graph_output)?;
                 drop(output);
@@ -2032,8 +2047,8 @@ mod tests {
         }
         captured?;
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("CUDA graph capture returned no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA graph capture returned no graph"))?;
 
         for replay in 0..REPLAY_COUNT {
             let (source, reference) = if replay == 1 {
@@ -2048,10 +2063,10 @@ mod tests {
             copy_cuda_bf16(source, &graph_input)?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             stream
                 .synchronize()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             assert_deepgemm_fused_glu_close(
                 &format!("graph replay {replay}"),
                 reference,

@@ -1,12 +1,12 @@
 #![allow(unused)]
 
-use candle_core::{D, DType, Result, Shape, Storage, Tensor, backend::BackendStorage};
+use inference_tensor::{D, DType, Result, Shape, Storage, Tensor, backend::BackendStorage};
 
 #[cfg(feature = "metal")]
-use candle_core::MetalStorage;
+use inference_tensor::MetalStorage;
 
 #[cfg(feature = "cuda")]
-use candle_core::{
+use inference_tensor::{
     CudaStorage,
     cuda::{CudaStorageSlice, cudarc::driver::DevicePtr},
 };
@@ -30,11 +30,11 @@ pub(crate) fn afq_quantize_op(
     bits: AfqBits,
 ) -> Result<(Tensor, Tensor, Tensor)> {
     if w.rank() < 2 {
-        candle_core::bail!("AFQ quantize expects weight matrix of at least rank 2");
+        inference_tensor::bail!("AFQ quantize expects weight matrix of at least rank 2");
     }
     if !can_quantize(w, group_size)? {
         let group_size = group_size as usize;
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Last dim of weight matrix ({:?}) must be divisible by group size {group_size}.",
             w.dims()
         );
@@ -47,7 +47,7 @@ pub(crate) fn afq_quantize_op(
     if w.device().is_metal() {
         let w_s = w.storage_and_layout().0;
         let Storage::Metal(w_s) = &*w_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
         let device = w_s.device();
 
@@ -83,7 +83,7 @@ pub(crate) fn afq_quantize_op(
             group_size,
             bits,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         let output = Tensor::from((
             Storage::Metal(MetalStorage::new(
@@ -135,22 +135,22 @@ pub(crate) fn afq_dequantize_op(
     let bits = bits as usize;
 
     if w_q.rank() < 2 || scales.rank() < 2 || biases.rank() < 2 {
-        candle_core::bail!("AFQ dequantize expects all matrices of at least rank 2");
+        inference_tensor::bail!("AFQ dequantize expects all matrices of at least rank 2");
     }
 
     #[cfg(feature = "metal")]
     if w_q.device().is_metal() {
         let wq_s = w_q.storage_and_layout().0;
         let Storage::Metal(wq_s) = &*wq_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
         let s_s = scales.storage_and_layout().0;
         let Storage::Metal(s_s) = &*s_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
         let b_s = biases.storage_and_layout().0;
         let Storage::Metal(b_s) = &*b_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
 
         let device = wq_s.device();
@@ -165,7 +165,7 @@ pub(crate) fn afq_dequantize_op(
         if out_size != scales.dim(D::Minus1)? * group_size
             || out_size != biases.dim(D::Minus1)? * group_size
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Scales and biases do not match the matrix given dequantization parameters."
             );
         }
@@ -196,7 +196,7 @@ pub(crate) fn afq_dequantize_op(
             group_size,
             bits,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         let output = Tensor::from((
             Storage::Metal(MetalStorage::new(
@@ -231,14 +231,14 @@ pub(crate) fn afq_embedding_op(
     let bits = bits as usize;
 
     if w_q.rank() != 2 || scales.rank() != 2 || biases.rank() != 2 {
-        candle_core::bail!("AFQ embedding expects 2D weight, scale, and bias tensors");
+        inference_tensor::bail!("AFQ embedding expects 2D weight, scale, and bias tensors");
     }
 
     let hidden_size = w_q.dim(D::Minus1)? * 32 / bits;
     if hidden_size != scales.dim(D::Minus1)? * group_size
         || hidden_size != biases.dim(D::Minus1)? * group_size
     {
-        candle_core::bail!("Scales and biases do not match the embedding matrix.");
+        inference_tensor::bail!("Scales and biases do not match the embedding matrix.");
     }
 
     let mut out_shape = ids.dims().to_vec();
@@ -252,19 +252,19 @@ pub(crate) fn afq_embedding_op(
             .contiguous()?;
         let wq_s = w_q.storage_and_layout().0;
         let Storage::Metal(wq_s) = &*wq_s else {
-            candle_core::bail!("expected metal AFQ embedding weight")
+            inference_tensor::bail!("expected metal AFQ embedding weight")
         };
         let s_s = scales.storage_and_layout().0;
         let Storage::Metal(s_s) = &*s_s else {
-            candle_core::bail!("expected metal AFQ embedding scales")
+            inference_tensor::bail!("expected metal AFQ embedding scales")
         };
         let b_s = biases.storage_and_layout().0;
         let Storage::Metal(b_s) = &*b_s else {
-            candle_core::bail!("expected metal AFQ embedding biases")
+            inference_tensor::bail!("expected metal AFQ embedding biases")
         };
         let ids_s = ids.storage_and_layout().0;
         let Storage::Metal(ids_s) = &*ids_s else {
-            candle_core::bail!("expected metal AFQ embedding ids")
+            inference_tensor::bail!("expected metal AFQ embedding ids")
         };
 
         let device = wq_s.device();
@@ -295,7 +295,7 @@ pub(crate) fn afq_embedding_op(
             bits,
             group_size,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         return Ok(Tensor::from((
             Storage::Metal(MetalStorage::new(
@@ -317,7 +317,7 @@ pub(crate) fn afq_embedding_op(
         return cpu_backend::afq_embedding_op(ids, w_q, scales, biases, group_size, bits);
     }
 
-    candle_core::bail!("AFQ embedding_forward is only supported on Metal, CUDA, and CPU")
+    inference_tensor::bail!("AFQ embedding_forward is only supported on Metal, CUDA, and CPU")
 }
 
 fn make_dummy_indices(x: &Tensor) -> Result<Tensor> {
@@ -355,13 +355,13 @@ pub(crate) fn afq_mm_op(
 
     let w_outer_dims = {
         if w.dtype() != DType::U32 {
-            candle_core::bail!("AFQ weight matrix must be u32");
+            inference_tensor::bail!("AFQ weight matrix must be u32");
         }
         if scales.dims() != biases.dims() {
-            candle_core::bail!("Scales and biases should have the same shapes");
+            inference_tensor::bail!("Scales and biases should have the same shapes");
         }
         if w.dim(D::Minus1)? * 32 / bits != scales.dim(D::Minus1)? * group_size {
-            candle_core::bail!("Last dims of w and scales must be compatible.");
+            inference_tensor::bail!("Last dims of w and scales must be compatible.");
         }
 
         let x_inner_dims = x.dim(D::Minus1)?;
@@ -379,7 +379,7 @@ pub(crate) fn afq_mm_op(
         };
 
         if w_inner_dims != x_inner_dims {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "w inner dims ({:?}) must match x inner dims ({:?}). transpose={transpose}",
                 w.dims(),
                 x.dims()
@@ -393,19 +393,19 @@ pub(crate) fn afq_mm_op(
     if w.device().is_metal() {
         let x_s = x.storage_and_layout().0;
         let Storage::Metal(x_s) = &*x_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
         let w_s = w.storage_and_layout().0;
         let Storage::Metal(w_s) = &*w_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
         let s_s = scales.storage_and_layout().0;
         let Storage::Metal(s_s) = &*s_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
         let b_s = biases.storage_and_layout().0;
         let Storage::Metal(b_s) = &*b_s else {
-            candle_core::bail!("expected metal")
+            inference_tensor::bail!("expected metal")
         };
 
         let device = w_s.device();
@@ -426,7 +426,7 @@ pub(crate) fn afq_mm_op(
             assert_eq!(lhs_indices.layout().start_offset(), 0);
             assert_eq!(rhs_indices.layout().start_offset(), 0);
             if lhs_indices.dtype() != DType::U32 || rhs_indices.dtype() != DType::U32 {
-                candle_core::bail!("lhs and rhs indices must be u32.")
+                inference_tensor::bail!("lhs and rhs indices must be u32.")
             }
             // Broadcast the indices if applicable.
             {
@@ -440,11 +440,11 @@ pub(crate) fn afq_mm_op(
 
             let li_s = lhs_indices.storage_and_layout().0;
             let Storage::Metal(li_s) = &*li_s else {
-                candle_core::bail!("expected metal")
+                inference_tensor::bail!("expected metal")
             };
             let ri_s = rhs_indices.storage_and_layout().0;
             let Storage::Metal(ri_s) = &*ri_s else {
-                candle_core::bail!("expected metal")
+                inference_tensor::bail!("expected metal")
             };
 
             let mut out_shape = lhs_indices.dims().to_vec();
@@ -482,7 +482,7 @@ pub(crate) fn afq_mm_op(
                 bits,
                 group_size,
             )
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
 
             (output, out_shape)
         } else {
@@ -537,7 +537,7 @@ pub(crate) fn afq_mm_op(
                         bits,
                         group_size,
                     )
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
 
                     let intermediate_tensor = Tensor::from((
                         Storage::Metal(MetalStorage::new(
@@ -583,7 +583,7 @@ pub(crate) fn afq_mm_op(
                 bits,
                 group_size,
             )
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
 
             (output, out_shape)
         };
@@ -640,22 +640,22 @@ pub fn metal_arg_sort_u32_1d(keys: &Tensor) -> Result<Tensor> {
     static KERNELS: OnceLock<candle_metal_kernels::Kernels> = OnceLock::new();
 
     if keys.rank() != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "metal_arg_sort_u32_1d expects rank 1; got {:?}",
             keys.dims()
         );
     }
     if keys.dtype() != DType::U32 {
-        candle_core::bail!("metal_arg_sort_u32_1d expects u32; got {:?}", keys.dtype());
+        inference_tensor::bail!("metal_arg_sort_u32_1d expects u32; got {:?}", keys.dtype());
     }
     if !keys.is_contiguous() {
-        candle_core::bail!("metal_arg_sort_u32_1d expects contiguous input");
+        inference_tensor::bail!("metal_arg_sort_u32_1d expects contiguous input");
     }
 
     let n = keys.dim(0)?;
     let storage = keys.storage_and_layout().0;
     let Storage::Metal(s) = &*storage else {
-        candle_core::bail!("expected metal storage");
+        inference_tensor::bail!("expected metal storage");
     };
     let device = s.device();
     let dst = device.new_buffer(n, DType::U32, "argsort-perm")?;
@@ -679,7 +679,7 @@ pub fn metal_arg_sort_u32_1d(keys: &Tensor) -> Result<Tensor> {
         src,
         &dst,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     Ok(Tensor::from((
         Storage::Metal(MetalStorage::new(dst, device.clone(), n, DType::U32)),
@@ -699,7 +699,7 @@ pub fn metal_moe_weighted_reduce_flat(
     topk: usize,
 ) -> Result<Tensor> {
     if inputs.rank() != 2 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "metal_moe_weighted_reduce_flat: inputs must be rank 2 [M,H], got {:?}",
             inputs.dims()
         );
@@ -707,18 +707,18 @@ pub fn metal_moe_weighted_reduce_flat(
     let total_assignments = inputs.dim(0)?;
     let hidden = inputs.dim(1)?;
     if total_assignments != num_tokens * topk {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "metal_moe_weighted_reduce_flat: input rows {total_assignments} != num_tokens {num_tokens} * topk {topk}"
         );
     }
     if topk_weights.elem_count() != total_assignments {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "metal_moe_weighted_reduce_flat: topk_weights must have {total_assignments} elements, got {}",
             topk_weights.elem_count()
         );
     }
     if !matches!(inputs.dtype(), DType::F32 | DType::F16 | DType::BF16) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "metal_moe_weighted_reduce_flat: unsupported input dtype {:?}",
             inputs.dtype()
         );
@@ -731,11 +731,11 @@ pub fn metal_moe_weighted_reduce_flat(
         .contiguous()?;
     let (in_storage, in_layout) = inputs.storage_and_layout();
     let Storage::Metal(in_s) = &*in_storage else {
-        candle_core::bail!("metal_moe_weighted_reduce_flat: inputs must live on Metal");
+        inference_tensor::bail!("metal_moe_weighted_reduce_flat: inputs must live on Metal");
     };
     let (tw_storage, tw_layout) = topk_weights.storage_and_layout();
     let Storage::Metal(tw_s) = &*tw_storage else {
-        candle_core::bail!("metal_moe_weighted_reduce_flat: topk_weights must live on Metal");
+        inference_tensor::bail!("metal_moe_weighted_reduce_flat: topk_weights must live on Metal");
     };
 
     let device = in_s.device();
@@ -759,7 +759,7 @@ pub fn metal_moe_weighted_reduce_flat(
         hidden,
         topk,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     Ok(Tensor::from((
         Storage::Metal(MetalStorage::new(output, device.clone(), out_elems, dtype)),
@@ -788,25 +788,25 @@ pub fn afq_gather_qmm_rhs_sorted(
     let bits = bits as usize;
 
     if w.dtype() != DType::U32 {
-        candle_core::bail!("AFQ weight matrix must be u32");
+        inference_tensor::bail!("AFQ weight matrix must be u32");
     }
     if scales.dims() != biases.dims() {
-        candle_core::bail!("Scales and biases must share shape");
+        inference_tensor::bail!("Scales and biases must share shape");
     }
     if x_sorted.rank() != 2 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "afq_gather_qmm_rhs_sorted expects x_sorted rank 2 [M,K]; got {:?}",
             x_sorted.dims()
         );
     }
     if w.rank() != 3 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "afq_gather_qmm_rhs_sorted expects w rank 3 [E,N,K] (transpose=true); got {:?}",
             w.dims()
         );
     }
     if sorted_expert_ids.dtype() != DType::U32 || sorted_expert_ids.rank() != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "sorted_expert_ids must be u32 rank-1; got dtype={:?} rank={}",
             sorted_expert_ids.dtype(),
             sorted_expert_ids.rank()
@@ -818,10 +818,10 @@ pub fn afq_gather_qmm_rhs_sorted(
     let n = w.dim(1)?;
     let k_w = w.dim(2)? * 32 / bits;
     if k != k_w {
-        candle_core::bail!("x_sorted K ({k}) must match w K ({k_w})");
+        inference_tensor::bail!("x_sorted K ({k}) must match w K ({k_w})");
     }
     if sorted_expert_ids.dim(0)? != m {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "sorted_expert_ids len ({}) must match M ({m})",
             sorted_expert_ids.dim(0)?
         );
@@ -834,23 +834,23 @@ pub fn afq_gather_qmm_rhs_sorted(
 
     let x_s = x_sorted.storage_and_layout().0;
     let Storage::Metal(x_s) = &*x_s else {
-        candle_core::bail!("expected metal x_sorted")
+        inference_tensor::bail!("expected metal x_sorted")
     };
     let w_s = w.storage_and_layout().0;
     let Storage::Metal(w_s) = &*w_s else {
-        candle_core::bail!("expected metal w")
+        inference_tensor::bail!("expected metal w")
     };
     let s_s = scales.storage_and_layout().0;
     let Storage::Metal(s_s) = &*s_s else {
-        candle_core::bail!("expected metal scales")
+        inference_tensor::bail!("expected metal scales")
     };
     let b_s = biases.storage_and_layout().0;
     let Storage::Metal(b_s) = &*b_s else {
-        candle_core::bail!("expected metal biases")
+        inference_tensor::bail!("expected metal biases")
     };
     let i_s = sorted_expert_ids.storage_and_layout().0;
     let Storage::Metal(i_s) = &*i_s else {
-        candle_core::bail!("expected metal sorted_expert_ids")
+        inference_tensor::bail!("expected metal sorted_expert_ids")
     };
 
     let device = w_s.device();
@@ -877,7 +877,7 @@ pub fn afq_gather_qmm_rhs_sorted(
         bits,
         group_size,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     Ok(Tensor::from((
         Storage::Metal(MetalStorage::new(
@@ -913,24 +913,24 @@ pub fn afq_gather_qmm_rhs_sorted_gate_up(
     let bits = bits as usize;
 
     if x_sorted.rank() != 2 {
-        candle_core::bail!("expects x_sorted rank 2 [M,K]; got {:?}", x_sorted.dims());
+        inference_tensor::bail!("expects x_sorted rank 2 [M,K]; got {:?}", x_sorted.dims());
     }
     for (name, w) in [("w_gate", w_gate), ("w_up", w_up)] {
         if w.dtype() != DType::U32 {
-            candle_core::bail!("{name} must be u32");
+            inference_tensor::bail!("{name} must be u32");
         }
         if w.rank() != 3 {
-            candle_core::bail!("{name} expects rank 3 [E,N,K]; got {:?}", w.dims());
+            inference_tensor::bail!("{name} expects rank 3 [E,N,K]; got {:?}", w.dims());
         }
     }
     if scales_gate.dims() != biases_gate.dims() || scales_up.dims() != biases_up.dims() {
-        candle_core::bail!("Scales/biases shape mismatch");
+        inference_tensor::bail!("Scales/biases shape mismatch");
     }
     if w_gate.dims() != w_up.dims() || scales_gate.dims() != scales_up.dims() {
-        candle_core::bail!("Gate and up weight shapes must match");
+        inference_tensor::bail!("Gate and up weight shapes must match");
     }
     if sorted_expert_ids.dtype() != DType::U32 || sorted_expert_ids.rank() != 1 {
-        candle_core::bail!("sorted_expert_ids must be u32 rank-1");
+        inference_tensor::bail!("sorted_expert_ids must be u32 rank-1");
     }
 
     let m = x_sorted.dim(0)?;
@@ -938,10 +938,10 @@ pub fn afq_gather_qmm_rhs_sorted_gate_up(
     let n = w_gate.dim(1)?;
     let k_w = w_gate.dim(2)? * 32 / bits;
     if k != k_w {
-        candle_core::bail!("x K ({k}) must match w K ({k_w})");
+        inference_tensor::bail!("x K ({k}) must match w K ({k_w})");
     }
     if sorted_expert_ids.dim(0)? != m {
-        candle_core::bail!("sorted_expert_ids len must be M");
+        inference_tensor::bail!("sorted_expert_ids len must be M");
     }
     for t in [
         x_sorted,
@@ -959,7 +959,7 @@ pub fn afq_gather_qmm_rhs_sorted_gate_up(
     let extract = |t: &Tensor, lbl: &str| -> Result<_> {
         let s = t.storage_and_layout().0;
         let Storage::Metal(s) = &*s else {
-            candle_core::bail!("expected metal {lbl}")
+            inference_tensor::bail!("expected metal {lbl}")
         };
         Ok(s.clone())
     };
@@ -1004,7 +1004,7 @@ pub fn afq_gather_qmm_rhs_sorted_gate_up(
         group_size,
         act_idx,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     Ok(Tensor::from((
         Storage::Metal(MetalStorage::new(
@@ -1019,7 +1019,7 @@ pub fn afq_gather_qmm_rhs_sorted_gate_up(
 
 #[cfg(test)]
 mod cpu_tests {
-    use candle_core::{D, DType, Device, Result, Tensor};
+    use inference_tensor::{D, DType, Device, Result, Tensor};
 
     use crate::{
         AfqBits, AfqGroupSize,
@@ -1136,7 +1136,7 @@ mod cpu_tests {
 #[cfg(feature = "metal")]
 #[cfg(test)]
 mod metal_tests {
-    use candle_core::{D, DType, Device, Result, Tensor};
+    use inference_tensor::{D, DType, Device, Result, Tensor};
 
     use crate::{
         AfqBits, AfqGroupSize,
@@ -1534,7 +1534,7 @@ mod metal_tests {
 // ============================================================
 mod cpu_backend {
     use super::*;
-    use candle_core::{D, DType, Device, Result, Tensor};
+    use inference_tensor::{D, DType, Device, Result, Tensor};
 
     /// Simple scalar (reference) quantiser: per‑`group_size` affine.
     pub(crate) fn afq_quantize_op(
@@ -1716,7 +1716,7 @@ mod cpu_backend {
         let hidden = packed_row * 32 / bits;
         let groups_per_row = hidden / group_size;
         if sc.len() != rows * groups_per_row || bs.len() != rows * groups_per_row {
-            candle_core::bail!("Scales and biases do not match the embedding matrix.");
+            inference_tensor::bail!("Scales and biases do not match the embedding matrix.");
         }
 
         let mut out = vec![0f32; ids_vec.len() * hidden];
@@ -1724,7 +1724,7 @@ mod cpu_backend {
         for (out_row, &row_id) in ids_vec.iter().enumerate() {
             let row = row_id as usize;
             if row >= rows {
-                candle_core::bail!("Embedding id {row} is out of range for {rows} rows.");
+                inference_tensor::bail!("Embedding id {row} is out of range for {rows} rows.");
             }
             let row_base = row * packed_row;
             let out_base = out_row * hidden;
@@ -1779,8 +1779,10 @@ mod cpu_backend {
 mod cuda_backend {
     use super::*;
     use crate::afq::ffi;
-    use candle_core::{CudaStorage, D, DType, Result, Tensor, cuda::cudarc::driver::DevicePtr};
     use half::{bf16, f16};
+    use inference_tensor::{
+        CudaStorage, D, DType, Result, Tensor, cuda::cudarc::driver::DevicePtr,
+    };
 
     macro_rules! dispatch_afq_embedding {
         ($postfix:ident, $scalar:ty, $wq:expr, $scales:expr, $biases:expr, $ids:expr, $out:expr, $bits:expr, $group_size:expr, $num_ids:expr, $hidden:expr) => {{
@@ -1921,7 +1923,7 @@ mod cuda_backend {
                         $num_ids as i32,
                         $hidden as i32,
                     ),
-                    _ => candle_core::bail!(
+                    _ => inference_tensor::bail!(
                         "Unsupported bits/group_size combination: {}/{}",
                         $bits,
                         $group_size
@@ -1974,7 +1976,7 @@ mod cuda_backend {
 
                 let (w_s, _) = w.storage_and_layout();
                 let Storage::Cuda(w_s) = &*w_s else {
-                    candle_core::bail!("Expected CUDA storage");
+                    inference_tensor::bail!("Expected CUDA storage");
                 };
                 let (w_ptr, _w_guard) =
                     crate::utils::slice_ptr(w_s.as_cuda_slice::<f16>()?, w.layout().start_offset());
@@ -2056,7 +2058,7 @@ mod cuda_backend {
                             rows as i32,
                             cols as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -2068,19 +2070,19 @@ mod cuda_backend {
                 let w_q_storage = CudaStorage::wrap_cuda_slice(w_q_buf, dev.clone());
                 let w_q = Tensor::from((
                     Storage::Cuda(w_q_storage),
-                    candle_core::Shape::from(w_q_shape),
+                    inference_tensor::Shape::from(w_q_shape),
                 ));
 
                 let scales_storage = CudaStorage::wrap_cuda_slice(scales_buf, dev.clone());
                 let scales = Tensor::from((
                     Storage::Cuda(scales_storage),
-                    candle_core::Shape::from(s_shape.clone()),
+                    inference_tensor::Shape::from(s_shape.clone()),
                 ));
 
                 let biases_storage = CudaStorage::wrap_cuda_slice(biases_buf, dev.clone());
                 let biases = Tensor::from((
                     Storage::Cuda(biases_storage),
-                    candle_core::Shape::from(s_shape),
+                    inference_tensor::Shape::from(s_shape),
                 ));
 
                 Ok((w_q, scales, biases))
@@ -2092,7 +2094,7 @@ mod cuda_backend {
 
                 let (w_s, _) = w.storage_and_layout();
                 let Storage::Cuda(w_s) = &*w_s else {
-                    candle_core::bail!("Expected CUDA storage");
+                    inference_tensor::bail!("Expected CUDA storage");
                 };
                 let (w_ptr, _w_guard) =
                     crate::utils::slice_ptr(w_s.as_cuda_slice::<f32>()?, w.layout().start_offset());
@@ -2174,7 +2176,7 @@ mod cuda_backend {
                             rows as i32,
                             cols as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -2186,19 +2188,19 @@ mod cuda_backend {
                 let w_q_storage = CudaStorage::wrap_cuda_slice(w_q_buf, dev.clone());
                 let w_q = Tensor::from((
                     Storage::Cuda(w_q_storage),
-                    candle_core::Shape::from(w_q_shape),
+                    inference_tensor::Shape::from(w_q_shape),
                 ));
 
                 let scales_storage = CudaStorage::wrap_cuda_slice(scales_buf, dev.clone());
                 let scales = Tensor::from((
                     Storage::Cuda(scales_storage),
-                    candle_core::Shape::from(s_shape.clone()),
+                    inference_tensor::Shape::from(s_shape.clone()),
                 ));
 
                 let biases_storage = CudaStorage::wrap_cuda_slice(biases_buf, dev.clone());
                 let biases = Tensor::from((
                     Storage::Cuda(biases_storage),
-                    candle_core::Shape::from(s_shape),
+                    inference_tensor::Shape::from(s_shape),
                 ));
 
                 Ok((w_q, scales, biases))
@@ -2210,7 +2212,7 @@ mod cuda_backend {
 
                 let (w_s, _) = w.storage_and_layout();
                 let Storage::Cuda(w_s) = &*w_s else {
-                    candle_core::bail!("Expected CUDA storage");
+                    inference_tensor::bail!("Expected CUDA storage");
                 };
                 let (w_ptr, _w_guard) = crate::utils::slice_ptr(
                     w_s.as_cuda_slice::<bf16>()?,
@@ -2294,7 +2296,7 @@ mod cuda_backend {
                             rows as i32,
                             cols as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -2306,24 +2308,26 @@ mod cuda_backend {
                 let w_q_storage = CudaStorage::wrap_cuda_slice(w_q_buf, dev.clone());
                 let w_q = Tensor::from((
                     Storage::Cuda(w_q_storage),
-                    candle_core::Shape::from(w_q_shape),
+                    inference_tensor::Shape::from(w_q_shape),
                 ));
 
                 let scales_storage = CudaStorage::wrap_cuda_slice(scales_buf, dev.clone());
                 let scales = Tensor::from((
                     Storage::Cuda(scales_storage),
-                    candle_core::Shape::from(s_shape.clone()),
+                    inference_tensor::Shape::from(s_shape.clone()),
                 ));
 
                 let biases_storage = CudaStorage::wrap_cuda_slice(biases_buf, dev.clone());
                 let biases = Tensor::from((
                     Storage::Cuda(biases_storage),
-                    candle_core::Shape::from(s_shape),
+                    inference_tensor::Shape::from(s_shape),
                 ));
 
                 Ok((w_q, scales, biases))
             }
-            other => candle_core::bail!("Unsupported dtype for AFQ CUDA quantization: {other:?}"),
+            other => {
+                inference_tensor::bail!("Unsupported dtype for AFQ CUDA quantization: {other:?}")
+            }
         }
     }
 
@@ -2345,7 +2349,7 @@ mod cuda_backend {
         let hidden = packed_row * 32 / bits;
         let groups_per_row = hidden / group_size;
         if scales.dim(D::Minus1)? != groups_per_row || biases.dim(D::Minus1)? != groups_per_row {
-            candle_core::bail!("Scales and biases do not match the embedding matrix.");
+            inference_tensor::bail!("Scales and biases do not match the embedding matrix.");
         }
 
         let num_ids = ids.elem_count();
@@ -2354,19 +2358,19 @@ mod cuda_backend {
 
         let (wq_s, _) = w_q.storage_and_layout();
         let Storage::Cuda(wq_s) = &*wq_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (s_s, _) = scales.storage_and_layout();
         let Storage::Cuda(s_s) = &*s_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (b_s, _) = biases.storage_and_layout();
         let Storage::Cuda(b_s) = &*b_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (ids_s, _) = ids.storage_and_layout();
         let Storage::Cuda(ids_s) = &*ids_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
 
         let (wq_ptr, _wq_guard) =
@@ -2398,7 +2402,7 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 Ok(Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 )))
             }
             DType::F32 => {
@@ -2424,7 +2428,7 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 Ok(Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 )))
             }
             DType::BF16 => {
@@ -2450,10 +2454,10 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 Ok(Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 )))
             }
-            other => candle_core::bail!("Unsupported dtype for AFQ CUDA embedding: {other:?}"),
+            other => inference_tensor::bail!("Unsupported dtype for AFQ CUDA embedding: {other:?}"),
         }
     }
 
@@ -2480,15 +2484,15 @@ mod cuda_backend {
 
         let (wq_s, _) = w_q.storage_and_layout();
         let Storage::Cuda(wq_s) = &*wq_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (s_s, _) = scales.storage_and_layout();
         let Storage::Cuda(s_s) = &*s_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (b_s, _) = biases.storage_and_layout();
         let Storage::Cuda(b_s) = &*b_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
 
         let (wq_ptr, _wq_guard) =
@@ -2629,7 +2633,7 @@ mod cuda_backend {
                             rows as i32,
                             cols as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -2639,7 +2643,7 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 let output = Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 ));
                 Ok(output)
             }
@@ -2777,7 +2781,7 @@ mod cuda_backend {
                             rows as i32,
                             cols as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -2787,7 +2791,7 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 let output = Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 ));
                 Ok(output)
             }
@@ -2925,7 +2929,7 @@ mod cuda_backend {
                             rows as i32,
                             cols as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -2935,11 +2939,13 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 let output = Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 ));
                 Ok(output)
             }
-            other => candle_core::bail!("Unsupported dtype for AFQ CUDA dequantization: {other:?}"),
+            other => {
+                inference_tensor::bail!("Unsupported dtype for AFQ CUDA dequantization: {other:?}")
+            }
         }
     }
 
@@ -2989,7 +2995,7 @@ mod cuda_backend {
         let actual_k = groups_per_row * group_size;
 
         if k != actual_k {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "x inner dim ({k}) does not match w inner dim ({actual_k}) for transposed matmul"
             );
         }
@@ -3002,19 +3008,19 @@ mod cuda_backend {
 
         let (x_s, _) = x.storage_and_layout();
         let Storage::Cuda(x_s) = &*x_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (w_s, _) = w.storage_and_layout();
         let Storage::Cuda(w_s) = &*w_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (s_s, _) = scales.storage_and_layout();
         let Storage::Cuda(s_s) = &*s_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
         let (b_s, _) = biases.storage_and_layout();
         let Storage::Cuda(b_s) = &*b_s else {
-            candle_core::bail!("Expected CUDA storage");
+            inference_tensor::bail!("Expected CUDA storage");
         };
 
         let (wq_ptr, _wq_guard) =
@@ -3188,7 +3194,7 @@ mod cuda_backend {
                             n as i32,
                             k as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -3198,7 +3204,7 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 let output = Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 ));
                 Ok(output)
             }
@@ -3368,7 +3374,7 @@ mod cuda_backend {
                             n as i32,
                             k as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -3378,7 +3384,7 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 let output = Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 ));
                 Ok(output)
             }
@@ -3551,7 +3557,7 @@ mod cuda_backend {
                             n as i32,
                             k as i32,
                         ),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "Unsupported bits/group_size combination: {bits}/{group_size}"
                         ),
                     }
@@ -3561,11 +3567,11 @@ mod cuda_backend {
                 let output_storage = CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
                 let output = Tensor::from((
                     Storage::Cuda(output_storage),
-                    candle_core::Shape::from(out_shape),
+                    inference_tensor::Shape::from(out_shape),
                 ));
                 Ok(output)
             }
-            other => candle_core::bail!("Unsupported dtype for AFQ CUDA matmul: {other:?}"),
+            other => inference_tensor::bail!("Unsupported dtype for AFQ CUDA matmul: {other:?}"),
         }
     }
 }

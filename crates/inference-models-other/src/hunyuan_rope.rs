@@ -1,4 +1,4 @@
-use candle_core::Result;
+use inference_tensor::Result;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,12 +28,12 @@ impl RopeScalingConfig {
             "dynamic" => {
                 let Some(alpha) = self.alpha.filter(|alpha| alpha.is_finite() && *alpha > 0.0)
                 else {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "HunYuan dynamic RoPE scaling without a positive alpha is not implemented"
                     )
                 };
                 if head_dim <= 2 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "HunYuan dynamic-alpha RoPE requires head_dim greater than 2"
                     )
                 }
@@ -41,8 +41,10 @@ impl RopeScalingConfig {
                 let exponent = head_dim / (head_dim - 2.0);
                 Ok(base_theta * alpha.powf(exponent))
             }
-            "linear" => candle_core::bail!("HunYuan linear RoPE scaling is not implemented"),
-            rope_type => candle_core::bail!("Unsupported HunYuan RoPE scaling type {rope_type}"),
+            "linear" => inference_tensor::bail!("HunYuan linear RoPE scaling is not implemented"),
+            rope_type => {
+                inference_tensor::bail!("Unsupported HunYuan RoPE scaling type {rope_type}")
+            }
         }
     }
 }

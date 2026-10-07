@@ -1,6 +1,6 @@
 //! 3D mrope position ids, per transformers `PaddleOCRVLModel.get_rope_index` (Qwen2-VL style, images only).
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 // Grids are pre-merge, one per run of t*(h/m)*(w/m) placeholders; decode adds the returned delta to its position.
 pub fn get_rope_index(

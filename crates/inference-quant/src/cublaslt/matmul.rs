@@ -1,15 +1,15 @@
-use candle_core::DType;
-use candle_core::cuda::CudaDType;
-use candle_core::cuda::cudarc::cublaslt::result::set_matrix_layout_attribute;
-use candle_core::cuda::cudarc::cublaslt::{result, result::CublasError, sys};
-use candle_core::cuda::cudarc::driver::sys::{CUdevice_attribute, CUdeviceptr, CUstream};
-use candle_core::cuda::cudarc::driver::{
-    CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, DriverError,
-};
 use core::ffi::c_int;
 use core::mem;
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::DType;
+use inference_tensor::cuda::CudaDType;
+use inference_tensor::cuda::cudarc::cublaslt::result::set_matrix_layout_attribute;
+use inference_tensor::cuda::cudarc::cublaslt::{result, result::CublasError, sys};
+use inference_tensor::cuda::cudarc::driver::sys::{CUdevice_attribute, CUdeviceptr, CUstream};
+use inference_tensor::cuda::cudarc::driver::{
+    CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, DriverError,
+};
 use std::sync::Arc;
 
 const CUBLASLT_SMALL_WORKSPACE_BYTES: usize = 4_194_304;

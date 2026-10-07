@@ -3,8 +3,8 @@
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), test))]
-use candle_core::D;
-use candle_core::{Device, Result, Tensor};
+use inference_tensor::D;
+use inference_tensor::{Device, Result, Tensor};
 
 use crate::attention::{AttentionMask, SdpaParams};
 
@@ -16,7 +16,7 @@ fn supports_cached_mla_weights(kv_b_proj: &MlaKvBProjection) -> bool {
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::DType;
+use inference_tensor::DType;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::layers::Sdpa;
@@ -32,7 +32,7 @@ const INFERENCE_RS_NO_MLA: &str = "INFERENCE_RS_NO_MLA";
 fn pad_mla_value_for_flash(value: &Tensor, target_head_dim: usize) -> Result<(Tensor, usize)> {
     let value_head_dim = value.dim(D::Minus1)?;
     if value_head_dim > target_head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "MLA value head dim {value_head_dim} exceeds attention head dim {target_head_dim}"
         );
     }
@@ -185,12 +185,12 @@ pub fn mla_decode_forward(
 ) -> Result<Tensor> {
     let ((key_cache, value_cache), input_metadata) = metadata
         .as_ref()
-        .ok_or_else(|| candle_core::Error::msg("paged attention metadata missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged attention metadata missing"))?;
     let device_location = q_nope.device().location();
     let slot_mapping = input_metadata
         .slot_mappings
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("slot mapping missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("slot mapping missing"))?;
     let slot_mapping = if slot_mapping.dims().len() > 1 {
         slot_mapping.flatten(0, slot_mapping.dims().len())?
     } else {
@@ -199,43 +199,43 @@ pub fn mla_decode_forward(
     let flashinfer = input_metadata
         .flashinfer
         .as_ref()
-        .ok_or_else(|| candle_core::Error::msg("FlashInfer metadata missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FlashInfer metadata missing"))?;
     let view = flashinfer.decode_view(sdpa_params.sliding_window);
     let paged_kv_indptr = view
         .paged_kv
         .indptr
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_indptr missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_indptr missing"))?;
     let paged_kv_indices = view
         .paged_kv
         .indices
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_indices missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_indices missing"))?;
     let paged_kv_last_page_len = view
         .paged_kv
         .last_page_len
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_last_page_len missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_last_page_len missing"))?;
     let paged_kv_request_indices = view
         .tile_plan
         .request_indices
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_request_indices missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_request_indices missing"))?;
     let paged_kv_tile_indices = view
         .tile_plan
         .kv_tile_indices
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_tile_indices missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_tile_indices missing"))?;
     let paged_kv_o_indptr = view
         .tile_plan
         .o_indptr
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_o_indptr missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_o_indptr missing"))?;
     let paged_kv_chunk_size = view
         .tile_plan
         .kv_chunk_size
         .get(&device_location)
-        .ok_or_else(|| candle_core::Error::msg("paged_kv_chunk_size missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("paged_kv_chunk_size missing"))?;
 
     let ckv_flat = ckv.contiguous()?.reshape((bs * seq_len, kv_lora_rank))?;
     let k_pe_flat = k_pe
@@ -324,7 +324,7 @@ pub fn mla_decode_forward(
     _bs: usize,
     _seq_len: usize,
 ) -> Result<Tensor> {
-    candle_core::bail!("MLA decode requires CUDA support")
+    inference_tensor::bail!("MLA decode requires CUDA support")
 }
 
 /// MLA cache forward pass for prefill with prefix caching support.
@@ -373,7 +373,9 @@ pub fn mla_cache_forward(
     seq_len: usize,
 ) -> Result<Tensor> {
     if !supports_cached_mla_weights(kv_b_proj) {
-        candle_core::bail!("MLA cache cannot be used with an active dynamic LoRA KV projection");
+        inference_tensor::bail!(
+            "MLA cache cannot be used with an active dynamic LoRA KV projection"
+        );
     }
     let mut key_cache = None;
     let mut value_cache = None;
@@ -387,7 +389,7 @@ pub fn mla_cache_forward(
         let slot_mapping = meta
             .slot_mappings
             .get(&device_location)
-            .ok_or_else(|| candle_core::Error::msg("slot mapping missing"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("slot mapping missing"))?;
         let slot_mapping = if slot_mapping.dims().len() > 1 {
             slot_mapping.flatten(0, slot_mapping.dims().len())?
         } else {
@@ -430,7 +432,7 @@ pub fn mla_cache_forward(
         let slot_mapping = input_metadata
             .slot_mappings
             .get(&device_location)
-            .ok_or_else(|| candle_core::Error::msg("slot mapping missing"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("slot mapping missing"))?;
         let slot_mapping_cpu = slot_mapping.to_device(&Device::Cpu)?;
         let slot_mapping_cpu = if slot_mapping_cpu.dims().len() == 2 {
             slot_mapping_cpu
@@ -451,7 +453,7 @@ pub fn mla_cache_forward(
             .block_tables
             .as_ref()
             .and_then(|m| m.get(&device_location))
-            .ok_or_else(|| candle_core::Error::msg("block tables missing"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("block tables missing"))?;
         let block_tables_cpu = block_tables.to_device(&Device::Cpu)?;
         let (block_rows, block_stride) = block_tables_cpu.dims2()?;
         let block_tables_vec = block_tables_cpu.to_vec2::<u32>()?;
@@ -472,7 +474,7 @@ pub fn mla_cache_forward(
                 offset = offset.saturating_add(*len);
             }
         } else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "unexpected block_tables rows: got {block_rows}, expected {bs} or {expected_rows}"
             );
         }
@@ -663,26 +665,26 @@ pub fn mla_cache_forward(
     _bs: usize,
     _seq_len: usize,
 ) -> Result<Tensor> {
-    candle_core::bail!("MLA cache requires CUDA support")
+    inference_tensor::bail!("MLA cache requires CUDA support")
 }
 
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use candle_core::{D, DType, Device, Tensor};
-    use candle_nn::Linear;
     use inference_quant::{
         LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod,
         QuantMethodConfig, ShardedSafeTensors, UnquantLinear, maybe_wrap_dynamic_lora,
         with_lora_execution,
     };
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{D, DType, Device, Tensor};
 
     use super::{pad_mla_value_for_flash, supports_cached_mla_weights};
     use crate::mla::MlaKvBProjection;
 
     #[test]
-    fn flash_attention_value_padding_preserves_the_output_width() -> candle_core::Result<()> {
+    fn flash_attention_value_padding_preserves_the_output_width() -> inference_tensor::Result<()> {
         let value = Tensor::ones((1, 2, 3, 4), DType::F32, &Device::Cpu)?;
         let (padded, output_head_dim) = pad_mla_value_for_flash(&value, 6)?;
 
@@ -700,7 +702,8 @@ mod tests {
     }
 
     #[test]
-    fn cached_mla_weights_are_disabled_for_a_mixed_dynamic_lora_batch() -> candle_core::Result<()> {
+    fn cached_mla_weights_are_disabled_for_a_mixed_dynamic_lora_batch()
+    -> inference_tensor::Result<()> {
         let registry = Arc::new(LoraLayerRegistry::new());
         let vb =
             ShardedSafeTensors::wrap(HashMap::<String, Tensor>::new(), DType::F32, Device::Cpu)

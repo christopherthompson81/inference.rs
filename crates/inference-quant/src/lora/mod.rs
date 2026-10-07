@@ -6,7 +6,6 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use candle_core::Result;
 pub(crate) use dynamic::maybe_wrap_dynamic_lora_with_key;
 pub use dynamic::{
     DynamicLoraLoadPlan, DynamicLoraWeights, LoraAdapterWeights, LoraExecution, LoraExecutionArena,
@@ -28,6 +27,7 @@ pub use dynamic::{
     RoutedLoraGroupedLaunch, launch_routed_lora_direct, launch_routed_lora_grouped,
 };
 use indexmap::IndexMap;
+use inference_tensor::Result;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 pub use static_lora::linear_no_bias_static_lora;
@@ -166,7 +166,7 @@ fn pattern_key_regex(pattern: &str) -> std::result::Result<Arc<LoraRegex>, Strin
 fn validate_pattern_keys<T>(name: &str, values: &IndexMap<String, T>) -> Result<()> {
     for key in values.keys() {
         pattern_key_regex(key).map_err(|error| {
-            candle_core::Error::msg(format!("invalid LoRA {name} regex `{key}`: {error}"))
+            inference_tensor::Error::msg(format!("invalid LoRA {name} regex `{key}`: {error}"))
         })?;
     }
     Ok(())
@@ -178,7 +178,7 @@ impl LoraTargetModules {
             Self::Pattern(pattern) => target_regex(pattern)
                 .and_then(|regex| regex.try_is_match(path))
                 .map_err(|error| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "failed to match LoRA target regex `{pattern}`: {error}"
                     ))
                 }),
@@ -198,16 +198,18 @@ impl LoraTargetModules {
     fn validate(&self, name: &str, require_nonempty: bool) -> Result<()> {
         match self {
             Self::Pattern(pattern) if require_nonempty && pattern.is_empty() => {
-                candle_core::bail!("LoRA {name} must not be empty");
+                inference_tensor::bail!("LoRA {name} must not be empty");
             }
             Self::Pattern(pattern) => target_regex(pattern).map(|_| ()).map_err(|error| {
-                candle_core::Error::msg(format!("invalid LoRA {name} regex `{pattern}`: {error}"))
+                inference_tensor::Error::msg(format!(
+                    "invalid LoRA {name} regex `{pattern}`: {error}"
+                ))
             }),
             Self::Modules(modules) if require_nonempty && modules.is_empty() => {
-                candle_core::bail!("LoRA {name} must not be empty");
+                inference_tensor::bail!("LoRA {name} must not be empty");
             }
             Self::Modules(modules) if modules.contains("") => {
-                candle_core::bail!("LoRA {name} must not contain an empty module");
+                inference_tensor::bail!("LoRA {name} must not contain an empty module");
             }
             Self::Modules(_) => Ok(()),
         }
@@ -222,10 +224,10 @@ impl LoraConfig {
     ) -> Result<Option<T>> {
         for (key, value) in values {
             let regex = pattern_key_regex(key).map_err(|error| {
-                candle_core::Error::msg(format!("invalid LoRA {name} regex `{key}`: {error}"))
+                inference_tensor::Error::msg(format!("invalid LoRA {name} regex `{key}`: {error}"))
             })?;
             if regex.try_is_match(path).map_err(|error| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "failed to match LoRA {name} regex `{key}`: {error}"
                 ))
             })? {
@@ -257,11 +259,11 @@ impl LoraConfig {
     pub fn scale_for(&self, path: &str) -> Result<f64> {
         let rank = self.try_rank_for(path)?;
         if rank == 0 {
-            candle_core::bail!("LoRA rank for `{path}` must be nonzero");
+            inference_tensor::bail!("LoRA rank for `{path}` must be nonzero");
         }
         let alpha = self.try_alpha_for(path)?;
         if !alpha.is_finite() {
-            candle_core::bail!("LoRA alpha for `{path}` must be finite");
+            inference_tensor::bail!("LoRA alpha for `{path}` must be finite");
         }
         Ok(if self.use_rslora {
             alpha / (rank as f64).sqrt()
@@ -319,33 +321,35 @@ impl LoraConfig {
             .as_deref()
             .is_some_and(|peft_type| !peft_type.eq_ignore_ascii_case("LORA"))
         {
-            candle_core::bail!("dynamic LoRA requires peft_type LORA");
+            inference_tensor::bail!("dynamic LoRA requires peft_type LORA");
         }
         if self.use_dora {
-            candle_core::bail!("dynamic LoRA does not support DoRA adapters");
+            inference_tensor::bail!("dynamic LoRA does not support DoRA adapters");
         }
         if self.lora_bias || self.bias != "none" {
-            candle_core::bail!("dynamic LoRA does not support adapter-specific bias parameters");
+            inference_tensor::bail!(
+                "dynamic LoRA does not support adapter-specific bias parameters"
+            );
         }
         if self
             .modules_to_save
             .as_ref()
             .is_some_and(|modules| !modules.is_empty())
         {
-            candle_core::bail!("dynamic LoRA does not support modules_to_save");
+            inference_tensor::bail!("dynamic LoRA does not support modules_to_save");
         }
         if self.alora_invocation_tokens.is_some() {
-            candle_core::bail!("dynamic LoRA does not support aLoRA alora_invocation_tokens");
+            inference_tensor::bail!("dynamic LoRA does not support aLoRA alora_invocation_tokens");
         }
         if self.use_qalora {
-            candle_core::bail!("dynamic LoRA does not support use_qalora");
+            inference_tensor::bail!("dynamic LoRA does not support use_qalora");
         }
         if self
             .layer_replication
             .as_ref()
             .is_some_and(|layers| !layers.is_empty())
         {
-            candle_core::bail!("dynamic LoRA does not support layer_replication");
+            inference_tensor::bail!("dynamic LoRA does not support layer_replication");
         }
         if let Some(parameters) = &self.target_parameters {
             for parameter in parameters {
@@ -354,7 +358,7 @@ impl LoraConfig {
                     .or_else(|| parameter.strip_suffix(".down_proj"))
                     .is_some_and(|prefix| prefix == "experts" || prefix.ends_with(".experts"));
                 if !supported {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "dynamic LoRA target_parameters only supports routed MoE `*.experts.gate_up_proj` and `*.experts.down_proj`, got `{parameter}`"
                     );
                 }
@@ -369,11 +373,11 @@ impl LoraConfig {
                 .as_ref()
                 .is_some_and(|value| !matches!(value, serde_json::Value::Bool(false)))
             {
-                candle_core::bail!("dynamic LoRA does not support {name}");
+                inference_tensor::bail!("dynamic LoRA does not support {name}");
             }
         }
         if self.ensure_weight_tying {
-            candle_core::bail!("dynamic LoRA does not support ensure_weight_tying");
+            inference_tensor::bail!("dynamic LoRA does not support ensure_weight_tying");
         }
         for (name, config) in [
             ("trainable_token_indices", &self.trainable_token_indices),
@@ -385,7 +389,7 @@ impl LoraConfig {
                 serde_json::Value::Object(values) => !values.is_empty(),
                 _ => true,
             }) {
-                candle_core::bail!("dynamic LoRA does not support {name}");
+                inference_tensor::bail!("dynamic LoRA does not support {name}");
             }
         }
         match &self.init_lora_weights {
@@ -396,15 +400,15 @@ impl LoraConfig {
                     || strategy.starts_with("pissa_niter_")
                     || matches!(strategy.as_str(), "olora" | "corda" | "loftq" | "lora_ga")
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "dynamic LoRA does not support init_lora_weights `{strategy}` because it requires transformed base weights"
                     );
                 }
             }
-            _ => candle_core::bail!("invalid LoRA init_lora_weights value"),
+            _ => inference_tensor::bail!("invalid LoRA init_lora_weights value"),
         }
         if self.rank == 0 {
-            candle_core::bail!("LoRA rank must be nonzero");
+            inference_tensor::bail!("LoRA rank must be nonzero");
         }
         if let Some(target_modules) = &self.target_modules {
             target_modules.validate("target_modules", true)?;
@@ -415,24 +419,24 @@ impl LoraConfig {
                 .as_ref()
                 .is_none_or(|parameters| parameters.is_empty())
         {
-            candle_core::bail!("LoRA target_modules or target_parameters must not be empty");
+            inference_tensor::bail!("LoRA target_modules or target_parameters must not be empty");
         }
         if let Some(exclude_modules) = &self.exclude_modules {
             exclude_modules.validate("exclude_modules", false)?;
         }
         if let Some((path, _)) = self.rank_pattern.iter().find(|(_, rank)| **rank == 0) {
-            candle_core::bail!("LoRA rank for `{path}` must be nonzero");
+            inference_tensor::bail!("LoRA rank for `{path}` must be nonzero");
         }
         validate_pattern_keys("rank_pattern", &self.rank_pattern)?;
         if !self.alpha.is_finite() {
-            candle_core::bail!("LoRA alpha must be finite");
+            inference_tensor::bail!("LoRA alpha must be finite");
         }
         if let Some((path, _)) = self
             .alpha_pattern
             .iter()
             .find(|(_, alpha)| !alpha.is_finite())
         {
-            candle_core::bail!("LoRA alpha for `{path}` must be finite");
+            inference_tensor::bail!("LoRA alpha for `{path}` must be finite");
         }
         validate_pattern_keys("alpha_pattern", &self.alpha_pattern)?;
         Ok(())
@@ -456,7 +460,7 @@ mod tests {
                 "use_rslora": true
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         let path = "model.layers.0.self_attn.q_proj";
         assert_eq!(
@@ -480,7 +484,7 @@ mod tests {
                 "target_modules": "model\\.layers\\.[0-9]+\\.(q|v)_proj"
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         regex.validate_dynamic()?;
         assert!(regex.targets_path("model.layers.12.q_proj"));
         assert!(regex.targets_path("model.layers.3.v_proj"));
@@ -494,7 +498,7 @@ mod tests {
                 "target_modules": "ALL-LINEAR"
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         all_linear.validate_dynamic()?;
         assert!(all_linear.targets_path("model.layers.3.self_attn.q_proj"));
         assert!(all_linear.targets_path("model.layers.3.mlp.down_proj"));
@@ -506,7 +510,7 @@ mod tests {
                 "target_modules": ["q_proj", "layers.0.self_attn.v_proj"]
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         modules.validate_dynamic()?;
         assert!(modules.targets_path("model.layers.0.self_attn.q_proj"));
         assert!(modules.targets_path("model.layers.0.self_attn.v_proj"));
@@ -521,7 +525,7 @@ mod tests {
                 "exclude_modules": "model\\.layers\\.0\\.self_attn\\.k_proj"
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         regex_exclude.validate_dynamic()?;
         assert!(regex_exclude.excludes_path("model.layers.0.self_attn.k_proj"));
         assert!(!regex_exclude.excludes_path("model.layers.1.self_attn.k_proj"));
@@ -534,7 +538,7 @@ mod tests {
                 "exclude_modules": ["k_proj"]
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         list_exclude.validate_dynamic()?;
         assert!(list_exclude.excludes_path("model.layers.0.self_attn.k_proj"));
         assert!(!list_exclude.excludes_path("model.layers.0.self_attn.q_proj"));
@@ -548,7 +552,7 @@ mod tests {
                 "exclude_modules": "all-linear"
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         all_linear_exclude.validate_dynamic()?;
         assert!(!all_linear_exclude.excludes_path("model.layers.0.self_attn.q_proj"));
         assert!(all_linear_exclude.excludes_path("all-linear"));
@@ -564,7 +568,7 @@ mod tests {
             "rank_pattern": {"language_model(?=\\.).*up_proj": 4},
             "alpha_pattern": {"language_model(?=\\.).*up_proj": 12}
         }))
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         config.validate_dynamic()?;
         assert!(config.targets_path("model.language_model.layers.0.mlp.experts.12.up_proj"));
@@ -599,7 +603,7 @@ mod tests {
                 "alpha_pattern": {"self_attn\\.(q|v)_proj": 4}
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         config.validate_dynamic()?;
 
         assert_eq!(config.rank_for("model.layers.0.self_attn.q_proj"), 2);
@@ -685,7 +689,7 @@ mod tests {
                 "megatron_config": {}
             }"#,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         config.validate_dynamic()
     }
@@ -700,7 +704,7 @@ mod tests {
                 "mlp.experts.down_proj"
             ]
         }))
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         config.validate_dynamic()?;
         assert!(config.targets_parameter("model.layers.2.mlp.experts.gate_up_proj"));

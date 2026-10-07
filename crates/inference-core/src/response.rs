@@ -1,6 +1,6 @@
 use std::{error::Error, fmt::Debug, sync::Arc};
 
-use candle_core::Tensor;
+use inference_tensor::Tensor;
 
 pub use inference_protocol::response::*;
 

@@ -5,8 +5,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use candle_core::{DType, Device, IndexOp, Tensor};
 use futures::future::BoxFuture;
+use inference_tensor::{DType, Device, IndexOp, Tensor};
 use rand_isaac::Isaac64Rng;
 
 use super::{
@@ -75,7 +75,7 @@ impl RowOutputs {
         forward_idx: usize,
         result: &ForwardInputsResult,
         seq_indices: Vec<usize>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         for (logit_idx, seq_idx) in seq_indices.into_iter().enumerate() {
             match result {
                 ForwardInputsResult::RawLogits { logits } => {
@@ -96,7 +96,7 @@ impl RowOutputs {
     async fn respond_without_generation(
         &mut self,
         seqs: &mut [&mut Sequence],
-    ) -> candle_core::Result<Option<Duration>> {
+    ) -> inference_tensor::Result<Option<Duration>> {
         let start = Instant::now();
         if self.raw_logits[0][0].is_some() {
             response::send_raw_responses(
@@ -177,7 +177,7 @@ impl dyn Pipeline {
         backend_metadata: CacheBackendMetadata,
         logger: &'a IntervalLogger,
         lookahead: StepLookahead,
-    ) -> BoxFuture<'a, Result<StepSubmission, candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<StepSubmission, inference_tensor::Error>> {
         Box::pin(async move {
             let mut ctx = StepCtx {
                 is_prompt,
@@ -242,7 +242,7 @@ impl dyn Pipeline {
         ctx: &mut StepCtx<'_>,
         pre_op: CacheInstruction,
         post_op: CacheInstruction,
-    ) -> candle_core::Result<StepSubmission> {
+    ) -> inference_tensor::Result<StepSubmission> {
         if !ctx.is_prompt && !ctx.return_raw_logits {
             crate::speculative::driver::clear_staged_speculative_tokens(input_seqs);
         }
@@ -252,7 +252,7 @@ impl dyn Pipeline {
         let InputProcessorOutput {
             inputs,
             seq_indices,
-        } = processed.map_err(candle_core::Error::msg)?;
+        } = processed.map_err(inference_tensor::Error::msg)?;
         match pre_op {
             CacheInstruction::In => self.clone_in_cache(input_seqs)?,
             CacheInstruction::Nothing => (),
@@ -315,7 +315,7 @@ impl dyn Pipeline {
         ctx: &mut StepCtx<'_>,
         mut metadata: PagedAttentionMeta,
         lookahead: StepLookahead,
-    ) -> candle_core::Result<StepSubmission> {
+    ) -> inference_tensor::Result<StepSubmission> {
         let is_prompt = ctx.is_prompt;
         let block_size = metadata.block_size;
         let speculative_metadata = metadata.clone();
@@ -343,7 +343,7 @@ impl dyn Pipeline {
                     self.get_input_processor_config(),
                     Some(&mut metadata),
                 )
-                .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                .map_err(|e| inference_tensor::Error::msg(e.to_string()))?;
             for seq in input_seqs.iter_mut() {
                 seq.clip_prefix_cache_len_for_mm_features(metadata.block_size);
             }
@@ -671,26 +671,26 @@ impl dyn Pipeline {
         &self,
         input_seqs: &[&mut Sequence],
         seq_indices: &[usize],
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let mut hybrid_cache = self.cache().hybrid();
         let sequence_slots = seq_indices
             .iter()
             .map(|&seq_idx| {
                 let seq = input_seqs.get(seq_idx).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "processed sequence index {seq_idx} exceeds batch size {}",
                         input_seqs.len()
                     ))
                 })?;
                 let slot_idx = seq.recurrent_state_idx().ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "sequence {} has no recurrent state slot",
                         seq.id()
                     ))
                 })?;
                 Ok((*seq.id(), slot_idx))
             })
-            .collect::<candle_core::Result<Vec<_>>>()?;
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
         hybrid_cache.install_sequence_state_indices(&sequence_slots)
     }
 
@@ -701,7 +701,7 @@ impl dyn Pipeline {
         step_inputs: Vec<StepInput>,
         cuda_decode_lookahead: bool,
         speculative_metadata: &PagedAttentionMeta,
-    ) -> candle_core::Result<PagedForwards> {
+    ) -> inference_tensor::Result<PagedForwards> {
         let len_inputs = step_inputs.len();
         let mut outputs = RowOutputs::new(input_seqs.len(), len_inputs);
         let mut batched_causal_logits = None;
@@ -718,7 +718,7 @@ impl dyn Pipeline {
             let InputProcessorOutput {
                 inputs,
                 seq_indices,
-            } = processed.map_err(candle_core::Error::msg)?;
+            } = processed.map_err(inference_tensor::Error::msg)?;
 
             let preserve_causal_generation = self.preserves_causal_generation(
                 input_seqs,
@@ -794,7 +794,7 @@ impl dyn Pipeline {
         results: Vec<ForwardInputsResult>,
         ctx: &mut StepCtx<'_>,
         speculative: Option<SpeculativeAttempt<'_>>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         match &results[0] {
             ForwardInputsResult::RawLogits { .. } | ForwardInputsResult::Embeddings { .. } => {
                 unreachable!()

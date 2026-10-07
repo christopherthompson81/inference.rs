@@ -6,8 +6,6 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::Result;
-use candle_core::DType;
-use candle_nn::Conv2dConfig;
 use inference_nn::attention::ATTENTION_CHUNK_SIZE;
 use inference_nn::bias_if;
 use inference_nn::device_map::{AutoDeviceMapParams, DeviceMapper};
@@ -23,6 +21,8 @@ use inference_nn::paged_attention::{
 use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
 use inference_nn::xlora::XLoraConfig;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::DType;
+use inference_tensor::nn::Conv2dConfig;
 use regex::Regex;
 
 use crate::minicpmo::{MiniCpmOConfig, MiniCpmOModel};

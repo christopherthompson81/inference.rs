@@ -148,7 +148,7 @@ pub unsafe extern "C" fn inference_layout_model_load(
             out_model.write(std::ptr::null_mut());
             let dir = arg_str(model_dir, "model_dir")?;
             let backend = backend_from(backend)?;
-            let load_failed = |e: candle_core::Error| {
+            let load_failed = |e: inference_tensor::Error| {
                 Failure::new(INFERENCE_ERR_LOAD_FAILED, format!("{dir}: {e}"))
             };
             let mut detector =

@@ -2,12 +2,12 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder, apply_immediate_isq, should_apply_immediate_isq,
 };
+use inference_tensor::nn::Module;
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -214,7 +214,7 @@ impl GraniteMlp {
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let projected = self.input_linear.forward(x)?;
-        let chunks = projected.chunk(2, candle_core::D::Minus1)?;
+        let chunks = projected.chunk(2, inference_tensor::D::Minus1)?;
         let gated =
             crate::ops::mul_and_act(&chunks[0], &chunks[1], crate::layers::Activation::Silu)?;
         let res = self.output_linear.forward(&gated)?;
@@ -240,9 +240,9 @@ impl MlpLayer for GraniteMlp {
         crate::layers::Activation::Silu
     }
     fn new_added_delta(&self, _deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
-        candle_core::bail!("LoRA adapter not supported for GraniteMlp")
+        inference_tensor::bail!("LoRA adapter not supported for GraniteMlp")
     }
-    fn dtype_device(&self) -> (candle_core::DType, candle_core::Device) {
+    fn dtype_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
         self.input_linear.dtype_and_device()
     }
 }
@@ -307,7 +307,7 @@ impl GraniteTopKGating {
         let selected_experts = topk.indices.to_vec2::<u32>()?;
         let routing_weights = topk
             .values
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(inference_tensor::DType::F32)?
             .to_vec2::<f32>()?;
 
         // Collect (expert_idx, token_idx, gate) tuples
@@ -384,7 +384,7 @@ impl GraniteParallelExperts {
         let all_weights = vb.get((num_experts, output_size, input_size), "weight")?;
         if should_apply_immediate_isq(&vb) {
             let layer = Arc::new(inference_quant::UnquantLinear::new(
-                inference_quant::QuantMethodConfig::Unquantized(candle_nn::Linear::new(
+                inference_quant::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(
                     all_weights,
                     None,
                 )),
@@ -516,7 +516,7 @@ impl GraniteMoE {
         ) {
             input_linear.process_routed_stats(&x_flat, &topk.indices)?;
             let hidden = input_linear.gather_forward(&x_flat.unsqueeze(1)?, &topk.indices)?;
-            let chunks = hidden.chunk(2, candle_core::D::Minus1)?;
+            let chunks = hidden.chunk(2, inference_tensor::D::Minus1)?;
             let hidden =
                 crate::ops::mul_and_act(&chunks[0], &chunks[1], crate::layers::Activation::Silu)?;
             output_linear.process_routed_stats(&hidden, &topk.indices)?;
@@ -538,7 +538,7 @@ impl GraniteMoE {
         let hidden = self.input_linear.forward(&expert_inputs, &expert_size)?;
 
         // Gated activation: silu(first_half) * second_half
-        let chunks = hidden.chunk(2, candle_core::D::Minus1)?;
+        let chunks = hidden.chunk(2, inference_tensor::D::Minus1)?;
         let hidden =
             crate::ops::mul_and_act(&chunks[0], &chunks[1], crate::layers::Activation::Silu)?;
 
@@ -546,8 +546,10 @@ impl GraniteMoE {
         let expert_outputs = expert_outputs.broadcast_mul(&batch_gates.unsqueeze(1)?)?;
 
         // Scatter-add outputs back to token positions
-        let batch_index_vec: Vec<i64> = batch_index.to_dtype(candle_core::DType::I64)?.to_vec1()?;
-        let expert_outputs_f32 = expert_outputs.to_dtype(candle_core::DType::F32)?;
+        let batch_index_vec: Vec<i64> = batch_index
+            .to_dtype(inference_tensor::DType::I64)?
+            .to_vec1()?;
+        let expert_outputs_f32 = expert_outputs.to_dtype(inference_tensor::DType::F32)?;
         let num_outputs = expert_outputs_f32.dim(0)?;
 
         let expert_outputs_vec: Vec<Vec<f32>> = (0..num_outputs)
@@ -600,7 +602,7 @@ impl MambaLayerCache {
         n_heads: usize,
         head_dim: usize,
         d_state: usize,
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         device: &Device,
     ) -> Result<Self> {
         let conv_state = Tensor::zeros((batch_size, conv_dim, d_conv), dtype, device)?;
@@ -651,30 +653,30 @@ fn packed_mamba_query_ranges(
     query_lens: &[usize],
 ) -> Result<Vec<Range<usize>>> {
     if physical_batch != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Granite packed Mamba requires physical batch size 1, got {physical_batch}"
         );
     }
     if query_lens.is_empty() {
-        candle_core::bail!("Granite packed Mamba requires at least one logical sequence");
+        inference_tensor::bail!("Granite packed Mamba requires at least one logical sequence");
     }
 
     let mut offset = 0usize;
     let mut ranges = Vec::with_capacity(query_lens.len());
     for (sequence_index, &query_len) in query_lens.iter().enumerate() {
         if query_len == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Granite packed Mamba logical sequence {sequence_index} has zero tokens"
             );
         }
-        let end = offset
-            .checked_add(query_len)
-            .ok_or_else(|| candle_core::Error::msg("Granite packed Mamba query length overflow"))?;
+        let end = offset.checked_add(query_len).ok_or_else(|| {
+            inference_tensor::Error::msg("Granite packed Mamba query length overflow")
+        })?;
         ranges.push(offset..end);
         offset = end;
     }
     if offset != physical_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Granite packed Mamba has {offset} logical tokens but {physical_tokens} physical tokens"
         );
     }
@@ -683,21 +685,21 @@ fn packed_mamba_query_ranges(
 
 fn packed_mamba_ranges(shape: PackedMambaShape, query_lens: &[usize]) -> Result<Vec<Range<usize>>> {
     if shape.conv_state_batch != query_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Granite packed Mamba has {} convolution state rows but {} logical sequences",
             shape.conv_state_batch,
             query_lens.len()
         );
     }
     if shape.ssm_state_batch != query_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Granite packed Mamba has {} SSM state rows but {} logical sequences",
             shape.ssm_state_batch,
             query_lens.len()
         );
     }
     if shape.conv_dim != shape.expected_conv_dim || shape.conv_width != shape.expected_conv_width {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Granite packed Mamba convolution state shape mismatch: expected ({}, {}), got ({}, {})",
             shape.expected_conv_dim,
             shape.expected_conv_width,
@@ -709,7 +711,7 @@ fn packed_mamba_ranges(shape: PackedMambaShape, query_lens: &[usize]) -> Result<
         || shape.ssm_head_dim != shape.expected_ssm_head_dim
         || shape.ssm_state_width != shape.expected_ssm_state_width
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Granite packed Mamba SSM state shape mismatch: expected ({}, {}, {}), got ({}, {}, {})",
             shape.expected_ssm_heads,
             shape.expected_ssm_head_dim,
@@ -729,7 +731,7 @@ fn softplus(x: &Tensor) -> Result<Tensor> {
 fn create_mamba_cache(
     batch_size: usize,
     cfg: &Config,
-    dtype: candle_core::DType,
+    dtype: inference_tensor::DType,
     device: &Device,
 ) -> Result<MambaLayerCache> {
     let conv_dim = cfg.mamba_conv_dim();
@@ -768,16 +770,19 @@ impl RmsNormGated {
 
     fn forward(&self, hidden_states: &Tensor, gate: Option<&Tensor>) -> Result<Tensor> {
         let dtype = hidden_states.dtype();
-        let mut hidden_states = hidden_states.to_dtype(candle_core::DType::F32)?;
+        let mut hidden_states = hidden_states.to_dtype(inference_tensor::DType::F32)?;
 
         // Apply gating if provided
         if let Some(gate) = gate {
-            let gate = candle_nn::ops::silu(&gate.to_dtype(candle_core::DType::F32)?)?;
+            let gate =
+                inference_tensor::nn::ops::silu(&gate.to_dtype(inference_tensor::DType::F32)?)?;
             hidden_states = hidden_states.broadcast_mul(&gate)?;
         }
 
         // RMS normalization
-        let variance = hidden_states.sqr()?.mean_keepdim(candle_core::D::Minus1)?;
+        let variance = hidden_states
+            .sqr()?
+            .mean_keepdim(inference_tensor::D::Minus1)?;
         let hidden_states = hidden_states.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
 
         // Apply weight and convert back to original dtype
@@ -902,14 +907,14 @@ impl MambaLayer {
     fn projected_parts(&self, x: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         let groups_time_state_size = self.n_groups * self.ssm_state_size;
         let projected = self.in_proj.forward(x)?;
-        let gate = projected.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?;
+        let gate = projected.narrow(inference_tensor::D::Minus1, 0, self.intermediate_size)?;
         let hidden_states_b_c = projected.narrow(
-            candle_core::D::Minus1,
+            inference_tensor::D::Minus1,
             self.intermediate_size,
             self.intermediate_size + 2 * groups_time_state_size,
         )?;
         let dt = projected.narrow(
-            candle_core::D::Minus1,
+            inference_tensor::D::Minus1,
             self.intermediate_size + self.intermediate_size + 2 * groups_time_state_size,
             self.num_heads,
         )?;
@@ -945,7 +950,7 @@ impl MambaLayer {
 
         let y = if matches!(batch_kind, RecurrentBatchKind::Decode) {
             if seq_len != 1 {
-                candle_core::bail!("Mamba decode expects a single-token query.");
+                inference_tensor::bail!("Mamba decode expects a single-token query.");
             }
             self.forward_cached(
                 &hidden_states_b_c.squeeze(1)?,
@@ -1042,30 +1047,34 @@ impl MambaLayer {
         // weight: (conv_dim, 1, kernel_size) -> squeeze to (conv_dim, kernel_size)
         let weight = self.conv1d_weight.squeeze(1)?;
         let mut hidden_states_b_c =
-            (cache.conv_state.clone() * weight.unsqueeze(0)?)?.sum(candle_core::D::Minus1)?;
+            (cache.conv_state.clone() * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
 
         if let Some(ref bias) = self.conv1d_bias {
             hidden_states_b_c = hidden_states_b_c.broadcast_add(bias)?;
         }
-        let hidden_states_b_c = candle_nn::ops::silu(&hidden_states_b_c)?;
+        let hidden_states_b_c = inference_tensor::nn::ops::silu(&hidden_states_b_c)?;
 
         // Split into hidden_states, B, C
         let hidden_states =
-            hidden_states_b_c.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?;
+            hidden_states_b_c.narrow(inference_tensor::D::Minus1, 0, self.intermediate_size)?;
         let b = hidden_states_b_c.narrow(
-            candle_core::D::Minus1,
+            inference_tensor::D::Minus1,
             self.intermediate_size,
             groups_time_state_size,
         )?;
         let c = hidden_states_b_c.narrow(
-            candle_core::D::Minus1,
+            inference_tensor::D::Minus1,
             self.intermediate_size + groups_time_state_size,
             groups_time_state_size,
         )?;
 
         // SSM computation for single token
         // A = -exp(A_log)
-        let a = self.a_log.to_dtype(candle_core::DType::F32)?.exp()?.neg()?;
+        let a = self
+            .a_log
+            .to_dtype(inference_tensor::DType::F32)?
+            .exp()?
+            .neg()?;
 
         // dt with bias and softplus
         let dt_dtype = dt.dtype();
@@ -1075,7 +1084,7 @@ impl MambaLayer {
             .unsqueeze(0)?
             .expand((batch_size, self.num_heads))?;
         let dt = dt.broadcast_add(&dt_bias)?;
-        let dt = softplus(&dt.to_dtype(candle_core::DType::F32)?)?;
+        let dt = softplus(&dt.to_dtype(inference_tensor::DType::F32)?)?;
         // Clamp dt
         let dt = dt.clamp(self.time_step_min, self.time_step_max)?;
 
@@ -1090,19 +1099,19 @@ impl MambaLayer {
             .unsqueeze(1)?
             .unsqueeze(2)?
             .expand((self.num_heads, self.head_dim, self.ssm_state_size))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
 
         // dA = exp(dt * A): (batch, num_heads, head_dim, state_size)
         let da = dt
             .unsqueeze(3)?
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(inference_tensor::DType::F32)?
             .broadcast_mul(&a.unsqueeze(0)?)?
             .exp()?;
 
         // Reshape B: (batch, n_groups * state_size) -> (batch, num_heads, state_size)
         let b = b
             .reshape((batch_size, self.n_groups, self.ssm_state_size))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
         let b = b
             .unsqueeze(2)?
             .expand((
@@ -1114,13 +1123,13 @@ impl MambaLayer {
             .reshape((batch_size, self.num_heads, self.ssm_state_size))?;
 
         // dB = dt * B: (batch, num_heads, head_dim, state_size)
-        let dt_f32 = dt.to_dtype(candle_core::DType::F32)?;
+        let dt_f32 = dt.to_dtype(inference_tensor::DType::F32)?;
         let db = dt_f32.unsqueeze(3)?.broadcast_mul(&b.unsqueeze(2)?)?;
 
         // hidden_states: (batch, intermediate_size) -> (batch, num_heads, head_dim)
         let hidden_states = hidden_states
             .reshape((batch_size, self.num_heads, self.head_dim))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
 
         // dBx = dB * x: (batch, num_heads, head_dim, state_size)
         let dbx = db.broadcast_mul(&hidden_states.unsqueeze(3)?)?;
@@ -1128,7 +1137,7 @@ impl MambaLayer {
         // Update SSM state: state = state * dA + dBx
         let ssm_state = cache
             .ssm_state
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(inference_tensor::DType::F32)?
             .broadcast_mul(&da)?
             .broadcast_add(&dbx)?;
         cache.ssm_state = ssm_state.to_dtype(cache.ssm_state.dtype())?;
@@ -1136,7 +1145,7 @@ impl MambaLayer {
         // Reshape C: (batch, n_groups * state_size) -> (batch, num_heads, state_size)
         let c = c
             .reshape((batch_size, self.n_groups, self.ssm_state_size))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
         let c = c
             .unsqueeze(2)?
             .expand((
@@ -1152,14 +1161,14 @@ impl MambaLayer {
         // C: (batch, num_heads, state_size)
         let y = cache
             .ssm_state
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(inference_tensor::DType::F32)?
             .matmul(&c.unsqueeze(3)?)?
             .squeeze(3)?;
 
         // D skip connection: y = y + x * D
         let d = self
             .d
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(inference_tensor::DType::F32)?
             .unsqueeze(0)?
             .unsqueeze(2)?
             .expand((batch_size, self.num_heads, self.head_dim))?;
@@ -1184,7 +1193,7 @@ impl MambaLayer {
         let hidden_states_b_c_t = hidden_states_b_c.transpose(1, 2)?;
         let state_width = cache.conv_state.dim(2)?;
         if state_width != self.conv_kernel_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Mamba convolution state width is {state_width}, expected {}",
                 self.conv_kernel_size
             );
@@ -1208,7 +1217,7 @@ impl MambaLayer {
         let mut conv_outputs = Vec::with_capacity(seq_len);
         for i in 0..seq_len {
             let window = padded_t.narrow(2, i, self.conv_kernel_size)?;
-            let out = (window * weight.unsqueeze(0)?)?.sum(candle_core::D::Minus1)?;
+            let out = (window * weight.unsqueeze(0)?)?.sum(inference_tensor::D::Minus1)?;
             conv_outputs.push(out);
         }
         let mut hidden_states_b_c = Tensor::stack(&conv_outputs, 1)?; // (batch, seq_len, conv_dim)
@@ -1218,18 +1227,18 @@ impl MambaLayer {
             hidden_states_b_c =
                 hidden_states_b_c.broadcast_add(&bias.unsqueeze(0)?.unsqueeze(0)?)?;
         }
-        let hidden_states_b_c = candle_nn::ops::silu(&hidden_states_b_c)?;
+        let hidden_states_b_c = inference_tensor::nn::ops::silu(&hidden_states_b_c)?;
 
         // Split into hidden_states, B, C
         let hidden_states =
-            hidden_states_b_c.narrow(candle_core::D::Minus1, 0, self.intermediate_size)?;
+            hidden_states_b_c.narrow(inference_tensor::D::Minus1, 0, self.intermediate_size)?;
         let b = hidden_states_b_c.narrow(
-            candle_core::D::Minus1,
+            inference_tensor::D::Minus1,
             self.intermediate_size,
             groups_time_state_size,
         )?;
         let c = hidden_states_b_c.narrow(
-            candle_core::D::Minus1,
+            inference_tensor::D::Minus1,
             self.intermediate_size + groups_time_state_size,
             groups_time_state_size,
         )?;
@@ -1237,16 +1246,20 @@ impl MambaLayer {
         // Reshape for SSM first
         let hidden_states = hidden_states
             .reshape((batch_size, seq_len, self.num_heads, self.head_dim))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
         let b = b
             .reshape((batch_size, seq_len, self.n_groups, self.ssm_state_size))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
         let c = c
             .reshape((batch_size, seq_len, self.n_groups, self.ssm_state_size))?
-            .to_dtype(candle_core::DType::F32)?;
+            .to_dtype(inference_tensor::DType::F32)?;
 
         // SSM computation
-        let a = self.a_log.to_dtype(candle_core::DType::F32)?.exp()?.neg()?;
+        let a = self
+            .a_log
+            .to_dtype(inference_tensor::DType::F32)?
+            .exp()?
+            .neg()?;
 
         // Expand B and C from groups to num_heads
         let b = b
@@ -1282,10 +1295,10 @@ impl MambaLayer {
 
         if use_cuda {
             // CUDA kernel handles dt_bias + softplus + clamp internally
-            let dt_f32 = dt.to_dtype(candle_core::DType::F32)?;
-            let dt_bias_f32 = self.dt_bias.to_dtype(candle_core::DType::F32)?;
-            let d_f32 = self.d.to_dtype(candle_core::DType::F32)?;
-            let mut ssm_state = cache.ssm_state.to_dtype(candle_core::DType::F32)?;
+            let dt_f32 = dt.to_dtype(inference_tensor::DType::F32)?;
+            let dt_bias_f32 = self.dt_bias.to_dtype(inference_tensor::DType::F32)?;
+            let d_f32 = self.d.to_dtype(inference_tensor::DType::F32)?;
+            let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
 
             let y = crate::cuda::ssm::selective_scan_cuda(
                 &hidden_states,
@@ -1304,10 +1317,10 @@ impl MambaLayer {
             y.reshape((batch_size, seq_len, self.intermediate_size))
         } else if use_metal {
             // Metal kernel handles dt_bias + softplus + clamp internally
-            let dt_f32 = dt.to_dtype(candle_core::DType::F32)?;
-            let dt_bias_f32 = self.dt_bias.to_dtype(candle_core::DType::F32)?;
-            let d_f32 = self.d.to_dtype(candle_core::DType::F32)?;
-            let mut ssm_state = cache.ssm_state.to_dtype(candle_core::DType::F32)?;
+            let dt_f32 = dt.to_dtype(inference_tensor::DType::F32)?;
+            let dt_bias_f32 = self.dt_bias.to_dtype(inference_tensor::DType::F32)?;
+            let d_f32 = self.d.to_dtype(inference_tensor::DType::F32)?;
+            let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
 
             let y = crate::metal::ssm::selective_scan_metal(
                 &hidden_states,
@@ -1333,13 +1346,13 @@ impl MambaLayer {
                 .unsqueeze(0)?
                 .unsqueeze(0)?
                 .expand((batch_size, seq_len, self.num_heads))?;
-            let mut ssm_state = cache.ssm_state.to_dtype(candle_core::DType::F32)?;
+            let mut ssm_state = cache.ssm_state.to_dtype(inference_tensor::DType::F32)?;
 
             let dt = dt.broadcast_add(&dt_bias)?;
-            let dt = softplus(&dt.to_dtype(candle_core::DType::F32)?)?;
+            let dt = softplus(&dt.to_dtype(inference_tensor::DType::F32)?)?;
             let dt = dt.clamp(self.time_step_min, self.time_step_max)?;
 
-            let d_coeff = self.d.to_dtype(candle_core::DType::F32)?;
+            let d_coeff = self.d.to_dtype(inference_tensor::DType::F32)?;
 
             let mut outputs = Vec::with_capacity(seq_len);
 
@@ -1560,7 +1573,7 @@ impl CausalSelfAttention {
         (q, k) = if let Some(ref rotary_emb) = self.rotary_emb {
             let positions = ctx
                 .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
             rotary_emb.forward(&q, &k, positions)?
         } else {
             (q, k)
@@ -1771,7 +1784,7 @@ fn granite_ffn_forward(
         (Some(mlp), None) => mlp.forward(xs),
         (None, Some(moe)) => moe.forward(xs),
         (None, None) => {
-            candle_core::bail!("Granite layer has neither dense nor expert FFN weights")
+            inference_tensor::bail!("Granite layer has neither dense nor expert FFN weights")
         }
     }
 }
@@ -1794,10 +1807,10 @@ impl GraniteHybridCache {
         layer_types: &[GraniteLayerType],
         cfg: &Config,
         layer_devices: &[Device],
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
     ) -> Result<Self> {
         if layer_devices.len() != layer_types.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Granite hybrid cache has {} layers but {} layer devices",
                 layer_types.len(),
                 layer_devices.len()
@@ -2078,7 +2091,7 @@ impl GraniteMoeHybrid {
 
         let pipeline_cache = Arc::new(Mutex::new(
             HybridCache::new(hybrid_cache_config, vb_m.dtype(), &layer_devices).map_err(|e| {
-                candle_core::Error::Msg(format!("Failed to create hybrid cache: {}", e))
+                inference_tensor::Error::Msg(format!("Failed to create hybrid cache: {}", e))
             })?,
         ));
 
@@ -2137,7 +2150,7 @@ impl GraniteMoeHybrid {
                 ctx.paged_input_metadata()
                     .and_then(|metadata| metadata.query_lens.clone())
                     .ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "Granite packed prefill requires logical query lengths",
                         )
                     })?,
@@ -2147,16 +2160,18 @@ impl GraniteMoeHybrid {
         };
         if has_mamba_layers && let Some(query_lens) = packed_query_lens.as_deref() {
             let metadata = recurrent_metadata.as_ref().ok_or_else(|| {
-                candle_core::Error::msg("Granite packed Mamba requires hybrid recurrent metadata")
+                inference_tensor::Error::msg(
+                    "Granite packed Mamba requires hybrid recurrent metadata",
+                )
             })?;
             if metadata.batch_kind() != RecurrentBatchKind::Prefill {
-                candle_core::bail!("Granite packed Mamba cannot run a decode batch");
+                inference_tensor::bail!("Granite packed Mamba cannot run a decode batch");
             }
             let (physical_batch, physical_tokens, _) = x.dims3()?;
             packed_mamba_query_ranges(physical_batch, physical_tokens, query_lens)?;
             let index_count = metadata.state_indices().dims1()?;
             if index_count != query_lens.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Granite packed Mamba has {index_count} recurrent state indices but {} logical sequences",
                     query_lens.len()
                 );
@@ -2164,7 +2179,7 @@ impl GraniteMoeHybrid {
             if let Some(host_indices) = metadata.state_indices_host()
                 && host_indices.len() != query_lens.len()
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Granite packed Mamba has {} host state indices but {} logical sequences",
                     host_indices.len(),
                     query_lens.len()
@@ -2218,14 +2233,14 @@ impl GraniteMoeHybrid {
                         let indices = pipeline_cache
                             .state_indices_for_layer(layer_idx)?
                             .ok_or_else(|| {
-                                candle_core::Error::msg(format!(
+                                inference_tensor::Error::msg(format!(
                                     "Hybrid cache layer {layer_idx} is missing recurrent state indices"
                                 ))
                             })?;
                         let Some(HybridLayerCache::Recurrent(pool)) =
                             pipeline_cache.get_mut(layer_idx)
                         else {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Hybrid cache layer {layer_idx} is not recurrent for Granite"
                             );
                         };
@@ -2334,7 +2349,7 @@ impl NormalModel for GraniteMoeHybrid {
         _flash_params: &FlashParams,
         _flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
-        candle_core::bail!("GraniteMoeHybrid does not support X-LoRA forward")
+        inference_tensor::bail!("GraniteMoeHybrid does not support X-LoRA forward")
     }
     fn cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
@@ -2416,11 +2431,11 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                 DecoderLayer::Attention(block) => block
                     .mlp
                     .as_deref()
-                    .ok_or_else(|| candle_core::Error::msg("Granite layer has no shared MLP")),
+                    .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP")),
                 DecoderLayer::Mamba(block) => block
                     .mlp
                     .as_deref()
-                    .ok_or_else(|| candle_core::Error::msg("Granite layer has no shared MLP")),
+                    .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP")),
             }
         }
 
@@ -2481,7 +2496,9 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                         )?));
                     }
                     AnyMoeExpertType::LoraAdapter { .. } => {
-                        candle_core::bail!("LoRA adapters not supported for GraniteMoeHybrid MLP")
+                        inference_tensor::bail!(
+                            "LoRA adapters not supported for GraniteMoeHybrid MLP"
+                        )
                     }
                 }
             }
@@ -2491,7 +2508,7 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
                 DecoderLayer::Attention(block) => block.mlp.as_mut(),
                 DecoderLayer::Mamba(block) => block.mlp.as_mut(),
             }
-            .ok_or_else(|| candle_core::Error::msg("Granite layer has no shared MLP"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Granite layer has no shared MLP"))?;
             let mut experts_all = vec![mlp_box.clone()];
             experts_all.extend(expert);
             let (dtype, device) = mlp_box.dtype_device();
@@ -2540,7 +2557,9 @@ mod tests {
 
     fn unquant_linear(weight: Tensor, bias: Option<Tensor>) -> Result<Arc<dyn QuantMethod>> {
         Ok(Arc::new(inference_quant::UnquantLinear::new(
-            inference_quant::QuantMethodConfig::Unquantized(candle_nn::Linear::new(weight, bias)),
+            inference_quant::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(
+                weight, bias,
+            )),
         )?))
     }
 

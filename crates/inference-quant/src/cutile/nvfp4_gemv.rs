@@ -5,7 +5,6 @@
 
 use std::sync::Arc;
 
-use candle_core::{CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 use cutile::core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
@@ -13,6 +12,7 @@ use cutile::tensor::IntoPartition;
 use cutile::tile_kernel::TileKernel;
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::{CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 
 use super::nvfp4::Nvfp4GemmArgs;
 use super::{catch_cutile_panic, context};
@@ -262,13 +262,15 @@ pub(super) fn launch(
             &[m, k] if m == tokens => (m, k, topk),
             &[m, 1, k] if m == tokens => (m, k, topk),
             &[m, routes, k] if m == tokens && routes == topk => (m * routes, k, 1),
-            dims => candle_core::bail!(
+            dims => inference_tensor::bail!(
                 "cuTile NVFP4 gather activation shape {dims:?} does not match indices {:?}",
                 indices.dims()
             ),
         };
         if indices.dtype() != DType::U32 || !indices.device().same_device(x.device()) {
-            candle_core::bail!("cuTile NVFP4 gather indices must be U32 on the activation device")
+            inference_tensor::bail!(
+                "cuTile NVFP4 gather indices must be U32 on the activation device"
+            )
         }
         (input_rows, tokens * topk, k, stride)
     } else {
@@ -278,7 +280,7 @@ pub(super) fn launch(
     let scale_shape = [experts, n, k / BLOCK_SIZE];
     let global_shape = [experts, n];
     let Device::Cuda(dev) = x.device() else {
-        candle_core::bail!("cuTile NVFP4 GEMV requires CUDA tensors")
+        inference_tensor::bail!("cuTile NVFP4 GEMV requires CUDA tensors")
     };
     let x = x.contiguous()?.reshape((input_rows, k))?;
     let weights = args.weights.contiguous()?;
@@ -314,7 +316,7 @@ pub(super) fn launch(
         &*ag_storage,
     )
     else {
-        candle_core::bail!("cuTile NVFP4 operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile NVFP4 operands must be CUDA tensors")
     };
     let (w_addr, _w_guard) = slice_ptr_on_stream(
         w_cuda.as_cuda_slice::<u8>()?,
@@ -412,7 +414,7 @@ pub(super) fn launch(
                     if compile_only {
                         catch_cutile_panic("NVFP4 compile", || {
                             launcher.compile_on(&cutile_stream).map_err(|error| {
-                                candle_core::Error::Msg(format!(
+                                inference_tensor::Error::Msg(format!(
                                     "cuTile NVFP4 compile failed: {error:?}"
                                 ))
                             })
@@ -420,7 +422,7 @@ pub(super) fn launch(
                     } else {
                         catch_cutile_panic("NVFP4 launch", || unsafe {
                             launcher.async_on(&cutile_stream).map_err(|error| {
-                                candle_core::Error::Msg(format!(
+                                inference_tensor::Error::Msg(format!(
                                     "cuTile NVFP4 launch failed: {error:?}"
                                 ))
                             })

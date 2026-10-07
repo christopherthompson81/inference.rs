@@ -1,0 +1,21 @@
+[package]
+name = "inference-flash-attn-v3"
+version = "0.9.3"
+edition = "2021"
+description = "FlashAttention-3 (Hopper) for inference-tensor, derived from candle-flash-attn-v3."
+repository = "https://github.com/christopherthompson81/inference.rs"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[lib]
+doctest = false
+
+[dependencies]
+inference-tensor = { path = "../inference-tensor", features = ["cuda"] }
+half = { version = "2.3.1", features = ["num-traits"] }
+
+[build-dependencies]
+anyhow = { version = "1", features = ["backtrace"] }
+num_cpus = "1.15.0"
+rayon = "1.7.0"
+cudaforge = "0.1"

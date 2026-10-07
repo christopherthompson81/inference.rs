@@ -1,6 +1,6 @@
 #[cfg(feature = "cuda")]
-use candle_core::DType;
-use candle_core::Result;
+use inference_tensor::DType;
+use inference_tensor::Result;
 
 pub const ROUTED_LORA_BASE_SLOT: u32 = u32::MAX;
 pub const ROUTED_LORA_BLOCK_SIZE: usize = 16;
@@ -30,18 +30,20 @@ fn validate_selected_descriptor_rank(
     num_slices: usize,
     projection_max_rank: usize,
 ) -> Result<()> {
-    let end = weight_slice_offset
-        .checked_add(num_slices)
-        .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor slice range overflow"))?;
+    let end = weight_slice_offset.checked_add(num_slices).ok_or_else(|| {
+        inference_tensor::Error::msg("routed LoRA descriptor slice range overflow")
+    })?;
     let selected_max_rank = max_rank_by_slice
         .get(weight_slice_offset..end)
-        .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor slice range is invalid"))?
+        .ok_or_else(|| {
+            inference_tensor::Error::msg("routed LoRA descriptor slice range is invalid")
+        })?
         .iter()
         .copied()
         .max()
         .unwrap_or(0);
     if selected_max_rank > projection_max_rank {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "routed LoRA projection max rank {projection_max_rank} is smaller than selected descriptor rank {selected_max_rank}"
         );
     }
@@ -179,23 +181,23 @@ impl RoutedLoraMetadataLayout {
         num_adapter_slots: usize,
     ) -> Result<Self> {
         if num_tokens == 0 || top_k == 0 || num_experts == 0 || num_adapter_slots == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "routed LoRA metadata dimensions and adapter capacity must be nonzero"
             );
         }
         let num_routes = num_tokens
             .checked_mul(top_k)
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA route count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("routed LoRA route count overflow"))?;
         let num_pairs = num_experts
             .checked_mul(num_adapter_slots)
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA pair count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("routed LoRA pair count overflow"))?;
         let possible_pairs = num_routes.min(num_pairs);
         let max_blocks = possible_pairs
             .checked_add((num_routes - possible_pairs) / ROUTED_LORA_BLOCK_SIZE)
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA block count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("routed LoRA block count overflow"))?;
         let max_padded_routes = max_blocks
             .checked_mul(ROUTED_LORA_BLOCK_SIZE)
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA padding overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("routed LoRA padding overflow"))?;
         for (name, value) in [
             ("num_tokens", num_tokens),
             ("top_k", top_k),
@@ -207,7 +209,7 @@ impl RoutedLoraMetadataLayout {
             ("max_blocks", max_blocks),
         ] {
             if value > i32::MAX as usize {
-                candle_core::bail!("routed LoRA {name} exceeds the CUDA ABI limit");
+                inference_tensor::bail!("routed LoRA {name} exceeds the CUDA ABI limit");
             }
         }
         Ok(Self {
@@ -263,7 +265,7 @@ impl RoutedLoraMetadataLayout {
         self.num_routes
             .checked_mul(num_slices)
             .and_then(|elements| elements.checked_mul(max_rank))
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA scratch size overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("routed LoRA scratch size overflow"))
     }
 }
 
@@ -294,14 +296,14 @@ impl RoutedLoraProjectionLayout {
             || max_rank == 0
             || max_rank > ROUTED_LORA_MAX_RANK
         {
-            candle_core::bail!("invalid routed LoRA projection dimensions");
+            inference_tensor::bail!("invalid routed LoRA projection dimensions");
         }
         let required_row = output_slice_stride
             .checked_mul(num_slices - 1)
             .and_then(|offset| offset.checked_add(output_features))
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA output stride overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("routed LoRA output stride overflow"))?;
         if output_row_stride < required_row {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "routed LoRA output row stride {output_row_stride} is smaller than {required_row}"
             );
         }
@@ -314,7 +316,7 @@ impl RoutedLoraProjectionLayout {
             ("max_rank", max_rank),
         ] {
             if value > i32::MAX as usize {
-                candle_core::bail!("routed LoRA {name} exceeds the CUDA ABI limit");
+                inference_tensor::bail!("routed LoRA {name} exceeds the CUDA ABI limit");
             }
         }
         Ok(Self {
@@ -387,28 +389,30 @@ impl RoutedLoraAdapterWeight {
             if self.a == 0 && self.b == 0 {
                 return Ok(());
             }
-            candle_core::bail!("disabled routed LoRA descriptors must have null A and B pointers");
+            inference_tensor::bail!(
+                "disabled routed LoRA descriptors must have null A and B pointers"
+            );
         }
         if self.a == 0 || self.b == 0 {
-            candle_core::bail!("active routed LoRA descriptors require A and B pointers");
+            inference_tensor::bail!("active routed LoRA descriptors require A and B pointers");
         }
         if self.rank > self.rank_stride || self.rank as usize > ROUTED_LORA_MAX_RANK {
-            candle_core::bail!("invalid routed LoRA rank or rank stride");
+            inference_tensor::bail!("invalid routed LoRA rank or rank stride");
         }
         if self.scales == 0 && !self.scale.is_finite() {
-            candle_core::bail!("routed LoRA scalar scale must be finite");
+            inference_tensor::bail!("routed LoRA scalar scale must be finite");
         }
         Ok(())
     }
 }
 
 #[cfg(feature = "cuda")]
-unsafe impl candle_core::cuda::cudarc::driver::DeviceRepr for RoutedLoraAdapterWeight {}
+unsafe impl inference_tensor::cuda::cudarc::driver::DeviceRepr for RoutedLoraAdapterWeight {}
 
 #[cfg(feature = "cuda")]
 mod cuda {
     use super::*;
-    use candle_core::{
+    use inference_tensor::{
         CudaDevice,
         cuda::cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut},
     };
@@ -438,7 +442,7 @@ mod cuda {
                 || num_adapter_slots == 0
                 || descriptors.len() != num_slices * num_adapter_slots
             {
-                candle_core::bail!("routed LoRA descriptor table shape mismatch");
+                inference_tensor::bail!("routed LoRA descriptor table shape mismatch");
             }
             for descriptor in descriptors {
                 descriptor.validate()?;
@@ -485,7 +489,7 @@ mod cuda {
 
         pub fn update(&mut self, descriptors: &[RoutedLoraAdapterWeight]) -> Result<()> {
             if descriptors.len() != self.num_slices * self.num_adapter_slots {
-                candle_core::bail!("routed LoRA descriptor table shape mismatch");
+                inference_tensor::bail!("routed LoRA descriptor table shape mismatch");
             }
             for descriptor in descriptors {
                 descriptor.validate()?;
@@ -610,7 +614,7 @@ mod cuda {
                 )
             };
             if scan_workspace_bytes == 0 {
-                candle_core::bail!("failed to size routed LoRA metadata scan workspace");
+                inference_tensor::bail!("failed to size routed LoRA metadata scan workspace");
             }
             Ok(Self {
                 device: device.clone(),
@@ -754,7 +758,7 @@ mod cuda {
                 .checked_add(projection.num_slices())
                 .is_none_or(|end| end > weights.num_slices)
         {
-            candle_core::bail!("routed LoRA launch and weight table shape mismatch");
+            inference_tensor::bail!("routed LoRA launch and weight table shape mismatch");
         }
         weights.validate_projection_rank(
             weight_slice_offset,
@@ -768,7 +772,7 @@ mod cuda {
         if status == 0 {
             Ok(())
         } else {
-            candle_core::bail!("routed LoRA CUDA {operation} failed with CUDA error {status}")
+            inference_tensor::bail!("routed LoRA CUDA {operation} failed with CUDA error {status}")
         }
     }
 
@@ -800,7 +804,7 @@ mod cuda {
                 launch.weight_slice_offset,
             )?;
             if launch.token_adapter_slots == 0 && launch.metadata.num_adapter_slots() != 1 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "null routed LoRA token slots require a single adapter descriptor slot"
                 );
             }
@@ -808,7 +812,7 @@ mod cuda {
                 weights.direct_output_splits(launch.metadata, launch.projection)
             });
             if output_splits == 0 || output_splits > u16::MAX as usize {
-                candle_core::bail!("invalid routed LoRA direct output split count");
+                inference_tensor::bail!("invalid routed LoRA direct output split count");
             }
             let stream = weights.device.cuda_stream();
             let (weight_ptr, _weight_guard) = weights.descriptors.device_ptr(&stream);
@@ -818,7 +822,9 @@ mod cuda {
                 .and_then(|offset| {
                     offset.checked_mul(std::mem::size_of::<RoutedLoraAdapterWeight>())
                 })
-                .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor offset overflow"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("routed LoRA descriptor offset overflow")
+                })?;
             let weight_ptr = weight_ptr + descriptor_offset as u64;
             let args = (
                 launch.input,
@@ -913,7 +919,7 @@ mod cuda {
                     args.19,
                     args.20,
                 ),
-                dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
+                dtype => inference_tensor::bail!("routed LoRA CUDA does not support {dtype:?}"),
             };
             check_status(status, "direct launch")
         }
@@ -944,7 +950,9 @@ mod cuda {
                 .and_then(|offset| {
                     offset.checked_mul(std::mem::size_of::<RoutedLoraAdapterWeight>())
                 })
-                .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor offset overflow"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("routed LoRA descriptor offset overflow")
+                })?;
             let weight_ptr = weight_ptr + descriptor_offset as u64;
             let (sorted_route_ids, _sorted_route_ids_guard) =
                 metadata.sorted_route_ids.device_ptr(&stream);
@@ -1063,7 +1071,7 @@ mod cuda {
                     launch.projection.input_mode() as i32,
                     stream.cu_stream(),
                 ),
-                dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
+                dtype => inference_tensor::bail!("routed LoRA CUDA does not support {dtype:?}"),
             };
             check_status(shrink_status, "grouped shrink")?;
 
@@ -1128,7 +1136,7 @@ mod cuda {
                     launch.projection.max_rank() as i32,
                     stream.cu_stream(),
                 ),
-                dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
+                dtype => inference_tensor::bail!("routed LoRA CUDA does not support {dtype:?}"),
             };
             check_status(expand_status, "grouped expand")
         }

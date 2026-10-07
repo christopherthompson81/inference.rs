@@ -1,8 +1,8 @@
 use std::ffi::CStr;
 
-use candle_core::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 use float8::F8E4M3;
 use half::bf16;
+use inference_tensor::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 
 use super::ffi;
 use crate::{ActivationScaleLayout, utils::slice_ptr};
@@ -40,7 +40,7 @@ fn check_status(operation: &str, status: i32) -> Result<()> {
     let message = unsafe { CStr::from_ptr(ffi::inference_fp8_mma_error_string(status)) }
         .to_string_lossy()
         .into_owned();
-    candle_core::bail!("{operation} failed: {message}")
+    inference_tensor::bail!("{operation} failed: {message}")
 }
 
 struct ScaleStrides {
@@ -72,7 +72,7 @@ fn scale_strides(layout: ActivationScaleLayout, rows: usize, groups: usize) -> S
 fn cuda_device(tensor: &Tensor) -> Result<&CudaDevice> {
     match tensor.device() {
         Device::Cuda(dev) => Ok(dev),
-        _ => candle_core::bail!("FP8 tensor-core kernels require CUDA tensors"),
+        _ => inference_tensor::bail!("FP8 tensor-core kernels require CUDA tensors"),
     }
 }
 
@@ -96,7 +96,9 @@ pub(crate) fn quantize_activation_padded(
 ) -> Result<(Tensor, Tensor)> {
     let (rows, cols) = x.dims2()?;
     if padded_rows < rows {
-        candle_core::bail!("padded row count {padded_rows} is below the {rows} activation rows")
+        inference_tensor::bail!(
+            "padded row count {padded_rows} is below the {rows} activation rows"
+        )
     }
     let strides = ScaleStrides {
         row: 1,
@@ -109,7 +111,7 @@ pub(crate) fn quantize_activation_padded(
 fn quantize_rows(x: &Tensor, alloc_rows: usize, strides: ScaleStrides) -> Result<(Tensor, Tensor)> {
     let (rows, cols) = x.dims2()?;
     if x.dtype() != DType::BF16 || !cols.is_multiple_of(GROUP_SIZE) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 activation quantization needs BF16 rows with a multiple of {GROUP_SIZE} columns"
         )
     }
@@ -165,16 +167,16 @@ pub(super) fn gemv(
     let (rows, k) = activation.dims2()?;
     let (n, weight_k) = weight.dims2()?;
     if weight_k != k || rows == 0 || rows > MMA_GEMV_MAX_ROWS {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 tensor-core GEMV got {rows} rows of K={k} against a {n}x{weight_k} weight"
         )
     }
     if activation.dtype() != DType::F8E4M3 || activation_scales.dtype() != DType::F32 {
-        candle_core::bail!("FP8 tensor-core GEMV needs E4M3 activations with F32 scales")
+        inference_tensor::bail!("FP8 tensor-core GEMV needs E4M3 activations with F32 scales")
     }
     let strides = scale_strides(layout, rows, k / GROUP_SIZE);
     if activation_scales.dims2()? != strides.shape {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 activation scale shape {:?} does not match {:?} for {layout:?}",
             activation_scales.dims(),
             strides.shape
@@ -245,7 +247,7 @@ pub(super) fn gemv(
 mod tests {
     use std::num::NonZeroUsize;
 
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{GROUP_SIZE, gemv, quantize_activation};
     use crate::{ActivationScaleLayout, blockwise_fp8::ops};
@@ -281,7 +283,7 @@ mod tests {
 
     #[test]
     fn tensor_core_gemv_matches_dequantized_reference() -> Result<()> {
-        if candle_core::Device::new_cuda(0).is_err() {
+        if inference_tensor::Device::new_cuda(0).is_err() {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
         }

@@ -18,9 +18,9 @@ pub struct FattnOptions {
     /// `softcap * tanh(x / softcap)` on the scores; 0 disables it.
     pub softcap: f32,
     /// Additive f16 mask `(batch | 1, seq_q, seq_kv)`; `-inf` hides a position. `causal` needs no tensor.
-    pub mask: Option<candle_core::Tensor>,
+    pub mask: Option<inference_tensor::Tensor>,
     /// Per-head f32 attention sinks `(n_head,)`: an extra logit that takes softmax mass but contributes no value.
-    pub sinks: Option<candle_core::Tensor>,
+    pub sinks: Option<inference_tensor::Tensor>,
     /// Dequantization scales of fp8 e4m3 K and V (`x * scale`); `None` is 1.0.
     pub kv_scales: Option<KvScales>,
     /// Causal masking without a mask tensor: each sequence's queries are its last positions, so every sequence needs
@@ -51,15 +51,15 @@ impl Default for KvScales {
 /// A paged K/V cache read in place: `(num_blocks, n_head_kv, block_size, head_dim)` blocks, as FlashInfer's HND layout.
 #[derive(Debug, Clone, Copy)]
 pub struct PagedKv<'a> {
-    pub k_cache: &'a candle_core::Tensor,
-    pub v_cache: &'a candle_core::Tensor,
+    pub k_cache: &'a inference_tensor::Tensor,
+    pub v_cache: &'a inference_tensor::Tensor,
     /// `(batch, max_blocks)` u32: each sequence's blocks in order; entries covering its rows must be `< num_blocks`.
-    pub block_table: &'a candle_core::Tensor,
+    pub block_table: &'a inference_tensor::Tensor,
     /// `(batch,)` u32: the rows each sequence holds, at least 1 (unused rows read the sequence's first row).
-    pub seq_lens: &'a candle_core::Tensor,
+    pub seq_lens: &'a inference_tensor::Tensor,
     /// `(batch,)` u32: each sequence's full length when its table holds only its last `seq_lens` rows (a sliding
     /// window's), so `chunk` sees absolute positions; `None` when the table starts at position 0.
-    pub full_lens: Option<&'a candle_core::Tensor>,
+    pub full_lens: Option<&'a inference_tensor::Tensor>,
 }
 
 /// Sequences packed along dim 0 of a `(total, heads, dim)` tensor.
@@ -67,7 +67,7 @@ pub struct PagedKv<'a> {
 pub struct Packed<'a> {
     /// `(batch + 1,)` u32: sequence `i` holds rows `cu_seqlens[i]..cu_seqlens[i + 1]`, from 0 up to the total. For
     /// K/V every sequence holds at least one row (rows past a sequence's end read its first row).
-    pub cu_seqlens: &'a candle_core::Tensor,
+    pub cu_seqlens: &'a inference_tensor::Tensor,
     /// The longest sequence, at least each sequence's length (it sizes the kernel's grid).
     pub max_len: usize,
 }

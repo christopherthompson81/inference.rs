@@ -2,7 +2,7 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{any::Any, sync::Arc};
 
-use candle_core::Tensor;
+use inference_tensor::Tensor;
 
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3;

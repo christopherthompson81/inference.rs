@@ -1,5 +1,5 @@
-use candle_core::{D, DType, Module, Result, Tensor};
-use candle_nn::{LayerNorm, VarBuilder};
+use inference_tensor::nn::{LayerNorm, VarBuilder};
+use inference_tensor::{D, DType, Module, Result, Tensor};
 
 use super::config::PPDocLayoutV3Config;
 use super::encoder::{Mlp, SelfAttention};
@@ -88,7 +88,7 @@ impl MsDeformAttn {
             .attention_weights
             .forward(query)?
             .reshape((b, q, h, l * p))?;
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?.reshape((b, q, h, l, p))?;
+        let attn = inference_tensor::nn::ops::softmax_last_dim(&attn)?.reshape((b, q, h, l, p))?;
 
         let ref_xy = ref_boxes
             .narrow(D::Minus1, 0, 2)?
@@ -117,7 +117,7 @@ fn sample_ops(
 ) -> Result<Tensor> {
     let (b, s, h, hd) = value.dims4()?;
     let &[_, q, _, l, p, _] = loc.dims() else {
-        candle_core::bail!("sampling locations must be rank 6");
+        inference_tensor::bail!("sampling locations must be rank 6");
     };
     let d = h * hd;
     let value = value
@@ -203,11 +203,19 @@ impl DecoderLayer {
         let eps = cfg.layer_norm_eps;
         Ok(Self {
             self_attn: SelfAttention::new(d, cfg.decoder_attention_heads, vb.pp("self_attn"))?,
-            self_attn_norm: candle_nn::layer_norm(d, eps, vb.pp("self_attn_layer_norm"))?,
+            self_attn_norm: inference_tensor::nn::layer_norm(
+                d,
+                eps,
+                vb.pp("self_attn_layer_norm"),
+            )?,
             encoder_attn: MsDeformAttn::new(cfg, vb.pp("encoder_attn"))?,
-            encoder_attn_norm: candle_nn::layer_norm(d, eps, vb.pp("encoder_attn_layer_norm"))?,
+            encoder_attn_norm: inference_tensor::nn::layer_norm(
+                d,
+                eps,
+                vb.pp("encoder_attn_layer_norm"),
+            )?,
             mlp: Mlp::new(d, cfg.decoder_ffn_dim, cfg.decoder_activation_function, &vb)?,
-            final_norm: candle_nn::layer_norm(d, eps, vb.pp("final_layer_norm"))?,
+            final_norm: inference_tensor::nn::layer_norm(d, eps, vb.pp("final_layer_norm"))?,
         })
     }
 
@@ -239,7 +247,7 @@ pub fn inverse_sigmoid(xs: &Tensor) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     #[test]
     fn fused_sampler_matches_tensor_ops() -> Result<()> {

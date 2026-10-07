@@ -7,7 +7,7 @@ use std::{
 };
 
 use super::{BarrierLike, Id};
-use candle_core::Result;
+use inference_tensor::Result;
 
 /// The Server maintains persistent connections.
 #[derive(Debug)]
@@ -33,7 +33,9 @@ impl Server {
                 connections.push(stream);
             }
             if start.elapsed() > Duration::from_secs(10) {
-                candle_core::bail!("Worker did not connect to head node due to timeout: over 10s");
+                inference_tensor::bail!(
+                    "Worker did not connect to head node due to timeout: over 10s"
+                );
             }
         }
         Ok(Self {
@@ -73,7 +75,7 @@ impl BarrierLike for Server {
             for mut stream in &self.connections {
                 stream.read_exact(&mut ack_buf)?;
                 if &ack_buf != b"a" {
-                    candle_core::bail!("Did not get Ack from worker node");
+                    inference_tensor::bail!("Did not get Ack from worker node");
                 }
             }
         }
@@ -111,7 +113,7 @@ impl Client {
                 });
             }
             if start.elapsed() > Duration::from_secs(10) {
-                candle_core::bail!("Failed to connect to head node due to timeout: over 10s");
+                inference_tensor::bail!("Failed to connect to head node due to timeout: over 10s");
             }
         }
     }
@@ -141,7 +143,7 @@ impl BarrierLike for Client {
             let mut buf = [0u8; 1];
             stream.read_exact(&mut buf)?;
             if &buf != b"g" {
-                candle_core::bail!("Did not receive correct barrier signal from head node");
+                inference_tensor::bail!("Did not receive correct barrier signal from head node");
             }
             // Immediately send back an acknowledgement "Ack".
             stream.write_all(b"a")?;

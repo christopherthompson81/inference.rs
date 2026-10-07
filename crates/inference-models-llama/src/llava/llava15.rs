@@ -28,10 +28,10 @@ use crate::vision::clip::{ClipConfig, ClipVisionTransformer};
 use crate::vision::multimodal_layout::{
     MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
 };
-use candle_core::{DType, Device, IndexOp, Result, Tensor, bail};
-use candle_nn::{Activation, Linear};
 use inference_quant::NonZeroOp;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{Activation, Linear};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor, bail};
 
 pub struct LLaVAVisionSpecificArgs {
     pub image_hashes: Vec<u64>,
@@ -48,25 +48,25 @@ fn splice_llava_image_embeddings(
     let (batch_size, seq_len) = input_ids.dims2()?;
     let num_images = image_features.dim(0)?;
     if image_indexes.len() != num_images {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LLaVA input has {} image markers but {num_images} encoder outputs",
             image_indexes.len()
         );
     }
     if image_features.dim(1)? != num_image_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LLaVA encoder produced {} tokens per image but the prompt reserves {num_image_tokens}",
             image_features.dim(1)?
         );
     }
     for (image_index, coordinates) in image_indexes.iter().enumerate() {
         if coordinates.len() != 2 {
-            candle_core::bail!("LLaVA image marker coordinates must have rank 2");
+            inference_tensor::bail!("LLaVA image marker coordinates must have rank 2");
         }
         let batch_index = coordinates[0] as usize;
         let token_index = coordinates[1] as usize;
         if batch_index >= batch_size || token_index + num_image_tokens > seq_len {
-            candle_core::bail!("LLaVA image placeholder is outside the input batch");
+            inference_tensor::bail!("LLaVA image placeholder is outside the input batch");
         }
         result = result.slice_assign(
             &[
@@ -257,7 +257,7 @@ impl Model {
             .clone(); //[num of images,patch_size*patch_size,hidden_size]
         if let Some(layout) = packed_layout {
             if image_hashes.len() != image_features.dim(0)? {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "packed LLaVA input has {} image hashes but {} encoder outputs",
                     image_hashes.len(),
                     image_features.dim(0)?
@@ -354,7 +354,7 @@ impl MultimodalModel for Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let LLaVAVisionSpecificArgs {
             image_hashes,
             packed_layout,

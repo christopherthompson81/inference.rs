@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::gdn::RecurrentBatchKind;
 
@@ -10,7 +10,7 @@ fn mrope_position_deltas_for_broadcast(
         [b] if *b == batch => mrope_position_deltas.reshape((1, batch, 1)),
         [b, 1] if *b == batch => mrope_position_deltas.reshape((1, batch, 1)),
         [1, b, 1] if *b == batch => Ok(mrope_position_deltas.clone()),
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "MRoPE position deltas shape {:?} is incompatible with batch {batch}",
             mrope_position_deltas.shape()
         ),
@@ -26,7 +26,7 @@ pub fn mrope_position_ids_for_input(
     let (batch, seq_len) = input_ids.dims2()?;
     let (planes, pos_batch, full_len) = position_ids.dims3()?;
     if pos_batch != batch || seqlen_offsets.len() != batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "MRoPE position ids shape {:?} is incompatible with input shape {:?}",
             position_ids.shape(),
             input_ids.shape()
@@ -42,7 +42,7 @@ pub fn mrope_position_ids_for_input(
         for _ in 0..planes {
             for offset in seqlen_offsets {
                 for pos in *offset..*offset + seq_len {
-                    indices.push(u32::try_from(pos).map_err(candle_core::Error::wrap)?);
+                    indices.push(u32::try_from(pos).map_err(inference_tensor::Error::wrap)?);
                 }
             }
         }
@@ -52,10 +52,10 @@ pub fn mrope_position_ids_for_input(
 
     let offsets = seqlen_offsets
         .iter()
-        .map(|offset| i64::try_from(*offset).map_err(candle_core::Error::wrap))
+        .map(|offset| i64::try_from(*offset).map_err(inference_tensor::Error::wrap))
         .collect::<Result<Vec<_>>>()?;
     let offsets = Tensor::from_vec(offsets, (1, batch, 1), input_ids.device())?;
-    let seq_len_i64 = i64::try_from(seq_len).map_err(candle_core::Error::wrap)?;
+    let seq_len_i64 = i64::try_from(seq_len).map_err(inference_tensor::Error::wrap)?;
     let relative =
         Tensor::arange(0i64, seq_len_i64, input_ids.device())?.reshape((1, 1, seq_len))?;
     let position_ids = offsets.broadcast_add(&relative)?.repeat((planes, 1, 1))?;
@@ -68,7 +68,7 @@ pub fn text_mrope_position_ids(input_ids: &Tensor, seqlen_offsets: &[usize]) -> 
     text_position_ids(input_ids, seqlen_offsets).and_then(|positions| {
         let (batch, seq_len) = positions.dims2()?;
         positions
-            .to_dtype(candle_core::DType::I64)?
+            .to_dtype(inference_tensor::DType::I64)?
             .reshape((1, batch, seq_len))?
             .repeat((3, 1, 1))
     })
@@ -77,7 +77,7 @@ pub fn text_mrope_position_ids(input_ids: &Tensor, seqlen_offsets: &[usize]) -> 
 pub fn text_position_ids(input_ids: &Tensor, seqlen_offsets: &[usize]) -> Result<Tensor> {
     let (batch, seq_len) = input_ids.dims2()?;
     if seqlen_offsets.len() != batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "RoPE offsets ({}) do not match batch size {batch}",
             seqlen_offsets.len()
         );
@@ -95,7 +95,7 @@ pub fn text_decode_mrope_position_ids_from_context(
             .map(|positions| {
                 let (batch, seq_len) = positions.dims2()?;
                 positions
-                    .to_dtype(candle_core::DType::I64)?
+                    .to_dtype(inference_tensor::DType::I64)?
                     .reshape((1, batch, seq_len))?
                     .repeat((3, 1, 1))
             })
@@ -120,7 +120,7 @@ pub fn text_decode_position_ids_from_context(
         None => return Ok(None),
     };
     if rope_positions.dim(0)? != batch * seq_len {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "rope positions shape {:?} is incompatible with input shape {:?}",
             rope_positions.shape(),
             input_ids.shape()
@@ -128,7 +128,7 @@ pub fn text_decode_position_ids_from_context(
     }
     Ok(Some(
         rope_positions
-            .to_dtype(candle_core::DType::U32)?
+            .to_dtype(inference_tensor::DType::U32)?
             .reshape((batch, seq_len))?,
     ))
 }
@@ -138,11 +138,15 @@ mod tests {
     use super::*;
     use crate::attention::FlashParams;
     use crate::model::{ForwardCache, ModelForwardContext};
-    use candle_core::IndexOp;
+    use inference_tensor::IndexOp;
 
     #[test]
     fn mrope_position_ends_are_decode_only() -> Result<()> {
-        let input_ids = Tensor::zeros((2, 3), candle_core::DType::U32, &candle_core::Device::Cpu)?;
+        let input_ids = Tensor::zeros(
+            (2, 3),
+            inference_tensor::DType::U32,
+            &inference_tensor::Device::Cpu,
+        )?;
         let offsets = [0, 0];
         let context_lens = [(0, 3), (0, 3)];
         let position_ids = [1, 10];

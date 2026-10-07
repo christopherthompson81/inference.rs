@@ -15,9 +15,9 @@ use config::{MLlamaVisionConfig, VisionActivation};
 use text::MLlamaTextModel;
 use vision::MLlamaVisionModel;
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{Linear, Module};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 use crate::attention::AttentionMask;
 use crate::{
@@ -80,7 +80,7 @@ fn image_cache_keys(
     max_num_images: usize,
 ) -> Result<Vec<(usize, usize, u64)>> {
     if image_hashes.len() != batch_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "image hash batch size {} does not match pixel batch size {batch_size}",
             image_hashes.len()
         );
@@ -89,7 +89,7 @@ fn image_cache_keys(
     let mut keys = Vec::new();
     for (batch_idx, hashes) in image_hashes.iter().enumerate() {
         if hashes.len() > max_num_images {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "image hash count {} exceeds padded image count {max_num_images}",
                 hashes.len()
             );
@@ -272,10 +272,14 @@ impl MLlamaModel {
     ) -> Result<Tensor> {
         let cross_attn_states = if let Some(pixel_values) = pixel_values {
             let Some(aspect_ratio_mask) = aspect_ratio_mask else {
-                candle_core::bail!("`aspect_ratio_mask` must be specified if `pixel_values` is.");
+                inference_tensor::bail!(
+                    "`aspect_ratio_mask` must be specified if `pixel_values` is."
+                );
             };
             let Some(aspect_ratio_ids) = aspect_ratio_ids else {
-                candle_core::bail!("`aspect_ratio_ids` must be specified if `pixel_values` is.");
+                inference_tensor::bail!(
+                    "`aspect_ratio_ids` must be specified if `pixel_values` is."
+                );
             };
 
             if image_hashes.iter().any(|hashes| !hashes.is_empty()) {

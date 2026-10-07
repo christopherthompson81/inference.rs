@@ -5,8 +5,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{Context, Device, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{Context, Device, Result, Tensor};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer},
@@ -93,7 +93,7 @@ impl MuseGlimmerModel {
             offset += count;
         }
         if offset != encoded.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer vision produced {} tokens, expected {offset}",
                 encoded.dim(0)?
             );
@@ -118,7 +118,7 @@ impl MuseGlimmerModel {
             return self.split_outputs(&encoded, &grids);
         }
         if grids.len() != hashes.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer {modality:?} grid count {} does not match hash count {}",
                 grids.len(),
                 hashes.len()
@@ -179,7 +179,9 @@ impl MuseGlimmerModel {
         outputs
             .into_iter()
             .map(|output| {
-                output.ok_or_else(|| candle_core::Error::msg("missing Muse-Glimmer vision output"))
+                output.ok_or_else(|| {
+                    inference_tensor::Error::msg("missing Muse-Glimmer vision output")
+                })
             })
             .collect()
     }
@@ -195,11 +197,13 @@ impl MuseGlimmerModel {
         for (batch, batch_ranges) in ranges.iter().enumerate() {
             for &(start, end) in batch_ranges {
                 if end < start {
-                    candle_core::bail!("Muse-Glimmer {modality} placeholder range is reversed");
+                    inference_tensor::bail!(
+                        "Muse-Glimmer {modality} placeholder range is reversed"
+                    );
                 }
                 let len = end - start;
                 if offset + len > encoded.dim(0)? {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Muse-Glimmer {modality} placeholders require more encoded tokens than available"
                     );
                 }
@@ -211,7 +215,7 @@ impl MuseGlimmerModel {
             }
         }
         if offset != encoded.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Muse-Glimmer has {} unused encoded {modality} tokens",
                 encoded.dim(0)? - offset
             );
@@ -258,7 +262,7 @@ impl MuseGlimmerModel {
 
         if let Some(pixel_values_videos) = pixel_values_videos {
             if self.vision.collapsed_temporal() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "this Muse-Glimmer GGUF projector collapsed temporal patch weights and cannot process video"
                 );
             }
@@ -444,8 +448,8 @@ impl AnyMoeBaseModelMixin for MuseGlimmerModel {
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Tensor};
     use inference_quant::{LoraLayerRegistry, ShardedSafeTensors};
+    use inference_tensor::{DType, Tensor};
 
     use super::*;
 

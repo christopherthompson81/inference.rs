@@ -3,8 +3,8 @@
 use std::{any::Any, ops::Range, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{DType, Device, IndexOp, Tensor};
 use image::DynamicImage;
+use inference_tensor::{DType, Device, IndexOp, Tensor};
 use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
@@ -54,7 +54,7 @@ pub(crate) trait QwenVlSpec: Sync {
         videos: Vec<Vec<DynamicImage>>,
         config: &PreProcessorConfig,
         device: &Device,
-    ) -> candle_core::Result<PreprocessedImages>;
+    ) -> inference_tensor::Result<PreprocessedImages>;
     // Minimum image and video edges the media validation enforces.
     fn media_resize_factors(&self, config: &PreProcessorConfig) -> (Option<usize>, Option<usize>);
     fn spatial_merge_size(&self, config: &PreProcessorConfig) -> Result<usize>;
@@ -213,7 +213,7 @@ fn padded_ids<'a>(
             ids.resize(max_len, 0);
             Tensor::new(ids, device)
         })
-        .collect::<candle_core::Result<Vec<_>>>()?;
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
     Ok(Tensor::stack(&rows, 0)?)
 }
 

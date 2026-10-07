@@ -1,9 +1,9 @@
 use crate::attention::FlashParams;
 use std::f64;
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module};
 use inference_quant::{QuantizedConfig, ShardedVarBuilder};
+use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module};
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
@@ -304,7 +304,7 @@ impl PatchMerger {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let seq_len = xs.dim(0)?;
         if seq_len % self.spatial_merge_unit != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Sequence length {} is not divisible by spatial merge unit {}",
                 seq_len,
                 self.spatial_merge_unit
@@ -410,7 +410,7 @@ impl Qwen3VLVisionModel {
 
         let num_grid_per_side = (cfg.num_position_embeddings as f64).sqrt().round() as usize;
         if num_grid_per_side * num_grid_per_side != cfg.num_position_embeddings {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "num_position_embeddings {} is not a perfect square",
                 cfg.num_position_embeddings
             );

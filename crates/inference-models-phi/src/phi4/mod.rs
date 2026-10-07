@@ -6,9 +6,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
+use inference_tensor::nn::Module;
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use mm_embedding::{InputMode, Phi4MMImageAudioEmbedding, Phi4MMPackedInputs};
 use rope::Phi4MMRotaryEmbedding;
 
@@ -135,7 +135,7 @@ impl Attention {
         let position_ids = ctx.position_ids_vec();
         let positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, positions, &position_ids)?;
 
         let metadata = ctx.paged_layer(layer_idx);

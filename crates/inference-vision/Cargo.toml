@@ -13,5 +13,5 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-candle-core.workspace = true
+inference-tensor.workspace = true
 image.workspace = true

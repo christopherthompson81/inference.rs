@@ -1,9 +1,9 @@
 use crate::attention::AttentionMask;
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::{ColumnParallelLayer, QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::{LayerNorm, Linear, Module};
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     layers::{self, Activation, Conv3dConfig, Conv3dNoBias, MatMul, layer_norm},
@@ -25,7 +25,7 @@ struct PatchEmbed {
 impl PatchEmbed {
     fn new(cfg: &VisionConfig, vb: ShardedVarBuilder) -> Result<Self> {
         if cfg.temporal_patch_size != 2 {
-            candle_core::bail!("Only support temporal patch size of 2");
+            inference_tensor::bail!("Only support temporal patch size of 2");
         }
         Ok(Self {
             proj: Conv3dNoBias::new(
@@ -168,7 +168,7 @@ impl VisionAttention {
                 AttentionMask::Custom(m) => att.broadcast_add(m)?,
                 _ => att,
             };
-            att = candle_nn::ops::softmax_last_dim(&att)?;
+            att = inference_tensor::nn::ops::softmax_last_dim(&att)?;
             MatMul
                 .matmul(&att, &v)?
                 .transpose(0, 1)?

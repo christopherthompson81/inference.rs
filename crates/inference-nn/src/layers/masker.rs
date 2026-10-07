@@ -2,7 +2,7 @@
 
 use std::ops::Add;
 
-use candle_core::{DType, Device, Result, Tensor, WithDType};
+use inference_tensor::{DType, Device, Result, Tensor, WithDType};
 
 use crate::kv_cache::KvCache;
 

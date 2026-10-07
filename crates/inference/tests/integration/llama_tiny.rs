@@ -3,11 +3,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use candle_core::{Device, Tensor};
 use inference::{
     IsqType, LoraModelBuilder, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages,
     TextModelBuilder, UqffTextModelBuilder,
 };
+use inference_tensor::{Device, Tensor};
 
 #[path = "../support/llama_tiny.rs"]
 mod support;
@@ -104,7 +104,7 @@ fn write_q_proj_adapter(dir: &Path) -> anyhow::Result<()> {
             ramp(TINY_HIDDEN, ADAPTER_RANK, 0.5)?,
         );
     }
-    candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
+    inference_tensor::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
     Ok(())
 }
 

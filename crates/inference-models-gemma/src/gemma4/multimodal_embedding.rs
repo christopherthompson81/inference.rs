@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{Module, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{Module, Result, Tensor};
 use std::sync::Arc;
 
 use crate::{layers::RmsNorm, utils::unvarbuilder::UnVarBuilder};

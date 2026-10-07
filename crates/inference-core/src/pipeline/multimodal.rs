@@ -43,7 +43,7 @@ struct SpeculativeGraphTensorMetadata {
     strides: Vec<usize>,
     contiguous: bool,
     dtype: DType,
-    device: candle_core::DeviceLocation,
+    device: inference_tensor::DeviceLocation,
 }
 
 #[cfg(feature = "cuda")]
@@ -70,9 +70,9 @@ fn speculative_graph_tensor_metadata(
 fn validate_speculative_graph_tensor_metadata(
     expected: &[SpeculativeGraphTensorMetadata],
     actual: &[SpeculativeGraphTensorMetadata],
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     if actual.len() != expected.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "speculative graph state changed tensor count between warmup and capture"
         );
     }
@@ -83,7 +83,7 @@ fn validate_speculative_graph_tensor_metadata(
             || actual.dtype != expected.dtype
             || actual.device != expected.device
     }) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "speculative graph state changed tensor metadata between warmup and capture"
         );
     }
@@ -93,7 +93,7 @@ fn validate_speculative_graph_tensor_metadata(
 #[cfg(test)]
 mod speculative_graph_tensor_metadata_tests {
     use super::{SpeculativeGraphTensorMetadata, validate_speculative_graph_tensor_metadata};
-    use candle_core::{DType, DeviceLocation};
+    use inference_tensor::{DType, DeviceLocation};
 
     fn metadata(
         shape: &[usize],
@@ -179,12 +179,12 @@ use crate::{
     LoraRuntimeConfig, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
 };
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor, Var};
 use either::Either;
 use futures::{FutureExt, future::BoxFuture};
 use hf_hub::Cache;
 use inference_protocol::chat_template::{BeginEndUnkPadTok, ChatTemplateValue};
 use inference_quant::IsqType;
+use inference_tensor::{DType, Device, Tensor, Var};
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::fs;
@@ -1014,7 +1014,7 @@ impl IsqPipelineMixin for MultimodalPipeline {
 }
 
 impl CacheManagerMixin for MultimodalPipeline {
-    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         super::cache_manager::clone_in_cache_by_kind(self, seqs)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
@@ -1026,7 +1026,7 @@ impl CacheManagerMixin for MultimodalPipeline {
         reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         super::cache_manager::set_none_cache_by_kind(
             self,
             seqs,
@@ -1134,7 +1134,7 @@ impl MultimodalPipeline {
         input_ids: &Tensor,
         paged_attn_meta: Option<&PagedAttentionInputMetadata>,
         recurrent_batch_kind: RecurrentBatchKind,
-    ) -> candle_core::Result<RecurrentBatchKind> {
+    ) -> inference_tensor::Result<RecurrentBatchKind> {
         if recurrent_batch_kind != RecurrentBatchKind::Decode {
             return Ok(recurrent_batch_kind);
         }
@@ -1181,7 +1181,7 @@ impl MultimodalPipeline {
     fn snapshot_hybrid_recurrent_checkpoints(
         &self,
         batch_kind: RecurrentBatchKind,
-    ) -> candle_core::Result<Option<SeqRecurrentCheckpointSnapshots>> {
+    ) -> inference_tensor::Result<Option<SeqRecurrentCheckpointSnapshots>> {
         if !self.model.cache().is_hybrid() {
             return Ok(None);
         }
@@ -1210,7 +1210,7 @@ impl MultimodalPipeline {
     fn restore_hybrid_recurrent_checkpoints(
         &self,
         snapshots: Option<&[(usize, RecurrentCheckpointStateSnapshot)]>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let Some(snapshots) = snapshots else {
             return Ok(());
         };
@@ -1224,7 +1224,7 @@ impl MultimodalPipeline {
     fn try_cuda_decode_graph_forward(
         &self,
         input: CudaDecodeGraphForwardInput<'_>,
-    ) -> candle_core::Result<Option<CudaDecodeGraphReplay>> {
+    ) -> inference_tensor::Result<Option<CudaDecodeGraphReplay>> {
         let CudaDecodeGraphForwardInput {
             input_ids,
             seqlen_offsets,
@@ -1399,7 +1399,7 @@ impl MultimodalPipeline {
         )?;
         super::synchronize_cuda_contexts(step.input_ids.device(), self.mapper.as_ref()).map_err(
             |err| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "CUDA graph rollback synchronization failed: {err}"
                 ))
             },
@@ -1407,7 +1407,7 @@ impl MultimodalPipeline {
         let replay = state
             .replay(&replay_key, &step, CudaDecodeGraphReplayInput::Host)?
             .ok_or_else(|| {
-                candle_core::Error::msg("newly captured CUDA decode graph was not replayable")
+                inference_tensor::Error::msg("newly captured CUDA decode graph was not replayable")
             })?;
         if let Some(spec_state) = replay.spec_state.as_deref()
             && let Err(err) = self.model.install_speculative_graph_state(spec_state)
@@ -1426,7 +1426,7 @@ impl MultimodalPipeline {
     fn precapture_cuda_decode_graphs_impl(
         &self,
         ctx: &DecodeGraphPrecaptureCtx,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let device = self.device();
         let probe = Tensor::zeros((1, 1), DType::U32, &device)?;
         if !cuda_decode_graphs_enabled()
@@ -1469,7 +1469,9 @@ impl MultimodalPipeline {
             };
             let pad_slot = cache.active_physical_slot(pad_slot)?;
             let pad_slot = u32::try_from(pad_slot).map_err(|_| {
-                candle_core::Error::msg(format!("recurrent graph pad slot {pad_slot} exceeds u32"))
+                inference_tensor::Error::msg(format!(
+                    "recurrent graph pad slot {pad_slot} exceeds u32"
+                ))
             })?;
             Some(pad_slot)
         } else {
@@ -1585,7 +1587,7 @@ impl MultimodalPipeline {
         step: &CudaGraphDecodeStep,
         inputs: CudaDecodeGraphCaptureInputs<'_>,
         rollback_live_state: bool,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let graph_event =
             CudaGraphEventGuard::new(CudaGraphComponent::Target, CudaGraphEvent::Capture);
         let CudaDecodeGraphCaptureInputs {
@@ -1598,13 +1600,13 @@ impl MultimodalPipeline {
             state.prepare_spec_state_admission_for_key(&key);
         }
         let Device::Cuda(cuda_device) = step.input_ids.device() else {
-            candle_core::bail!("CUDA graph decode expected CUDA input ids");
+            inference_tensor::bail!("CUDA graph decode expected CUDA input ids");
         };
         let _htod_cache_guard = cuda_device.enable_cuda_graph_htod_cache();
         let metadata = step
             .metadata
             .materialize_decode_tensors()
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
 
         let uses_recurrent_transition_log = self.model.cache().is_hybrid()
             && self.model.cache().hybrid().uses_recurrent_transition_log();
@@ -1616,7 +1618,7 @@ impl MultimodalPipeline {
                 .model
                 .apply_recurrent_speculative_transitions_for_current_batch()?
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA graph capture could not materialize pending recurrent transitions"
             );
         }
@@ -1630,7 +1632,7 @@ impl MultimodalPipeline {
         let mut warm_spec_metadata = None;
         let mut warm_live_spec_state = None;
         let mut graph_spec_state = None;
-        let capture_attempt: candle_core::Result<_> = (|| {
+        let capture_attempt: inference_tensor::Result<_> = (|| {
             let state_index_buffers = match &step.state_indices {
                 Some(host) => Some(install_hybrid_graph_state_indices(
                     &mut self.model.cache().hybrid(),
@@ -1709,7 +1711,7 @@ impl MultimodalPipeline {
                     if let Some(expected) = warm_spec_metadata.as_deref() {
                         let captured =
                             self.model.take_speculative_graph_state().ok_or_else(|| {
-                                candle_core::Error::msg(
+                                inference_tensor::Error::msg(
                                     "captured forward left no speculative state",
                                 )
                             })?;
@@ -1733,7 +1735,7 @@ impl MultimodalPipeline {
                     state.block_eager_retry();
                     match capture_attempt {
                         Ok(_) => Err(install_err),
-                        Err(capture_err) => Err(candle_core::Error::msg(format!(
+                        Err(capture_err) => Err(inference_tensor::Error::msg(format!(
                             "CUDA graph capture failed: {capture_err}; warm speculative state restoration failed: {install_err}"
                         ))),
                     }
@@ -1776,11 +1778,11 @@ impl MultimodalPipeline {
     fn finish_cuda_graph_capture_attempt<T>(
         &self,
         state: &mut CudaDecodeGraphState,
-        attempt: candle_core::Result<T>,
+        attempt: inference_tensor::Result<T>,
         recurrent_snapshots: Option<&[(usize, RecurrentCheckpointStateSnapshot)]>,
         live_state_indices: Option<&HybridStateIndicesSnapshot>,
         rollback_live_state: bool,
-    ) -> candle_core::Result<T> {
+    ) -> inference_tensor::Result<T> {
         self.restore_hybrid_state_indices(live_state_indices);
         match attempt {
             Ok(value) if !rollback_live_state => Ok(value),
@@ -1788,7 +1790,7 @@ impl MultimodalPipeline {
                 self.restore_hybrid_recurrent_checkpoints(recurrent_snapshots)
                     .map_err(|restore_err| {
                         state.block_eager_retry();
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "CUDA graph captured, but recurrent checkpoint rollback failed: {restore_err}"
                         ))
                     })?;
@@ -1799,7 +1801,7 @@ impl MultimodalPipeline {
                     self.restore_hybrid_recurrent_checkpoints(recurrent_snapshots)
                 {
                     state.block_eager_retry();
-                    return Err(candle_core::Error::msg(format!(
+                    return Err(inference_tensor::Error::msg(format!(
                         "CUDA graph capture failed: {capture_err}; recurrent checkpoint rollback failed: {restore_err}"
                     )));
                 }
@@ -1808,7 +1810,7 @@ impl MultimodalPipeline {
         }
     }
 
-    fn disable_cuda_decode_graph(&self, err: &candle_core::Error) -> bool {
+    fn disable_cuda_decode_graph(&self, err: &inference_tensor::Error) -> bool {
         let mut state = self
             .cuda_decode_graph
             .lock()
@@ -1879,7 +1881,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> candle_core::Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
+    ) -> inference_tensor::Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
         self.model
             .capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
     }
@@ -1889,7 +1891,7 @@ impl Pipeline for MultimodalPipeline {
         sequence_id: usize,
         cached_tokens: usize,
         state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         self.model
             .restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)
     }
@@ -1902,7 +1904,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> candle_core::Result<ForwardInputsResult> {
+    ) -> inference_tensor::Result<ForwardInputsResult> {
         Ok(self.forward_step(inputs, return_raw_logits)?.output)
     }
 
@@ -1910,7 +1912,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> candle_core::Result<ForwardStepResult> {
+    ) -> inference_tensor::Result<ForwardStepResult> {
         let ModelInputs {
             input_ids,
             seqlen_offsets,
@@ -1935,13 +1937,13 @@ impl Pipeline for MultimodalPipeline {
             (Some(engine), Some(meta)) => Some((engine.get_kv_cache().clone(), meta)),
             (Some(_), None) => {
                 // This can happen if Rust-side user code is wrong
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Forward step expected a PagedAttention input metadata. This was not provided, please ensure that the scheduler config is correctly configured for PagedAttention."
                 )
             }
             (None, Some(_)) => {
                 // This should never happen but we handle it anyway
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Forward step got a PagedAttention input metadata but there is no cache engine. Please raise an issue."
                 )
             }
@@ -2002,7 +2004,7 @@ impl Pipeline for MultimodalPipeline {
                     .map(|metadata| (kv_cache, metadata))
             })
             .transpose()
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
         let mut ctx = ModelForwardContext::new(
             &seqlen_offsets,
             &context_lens,
@@ -2028,7 +2030,9 @@ impl Pipeline for MultimodalPipeline {
         if self.model.is_block_diffusion() && !return_raw_logits {
             return Ok(ForwardStepResult::eager(
                 ForwardInputsResult::BlockGeneration {
-                    token_blocks: logits.to_dtype(candle_core::DType::U32)?.to_vec2::<u32>()?,
+                    token_blocks: logits
+                        .to_dtype(inference_tensor::DType::U32)?
+                        .to_vec2::<u32>()?,
                     denoise_time: self.model.take_block_denoise_time().unwrap_or_default(),
                 },
             ));
@@ -2045,7 +2049,7 @@ impl Pipeline for MultimodalPipeline {
     fn replay_cuda_decode_one_token(
         &mut self,
         launch: CudaDecodeGraphLaunch,
-    ) -> candle_core::Result<Option<ForwardStepResult>> {
+    ) -> inference_tensor::Result<Option<ForwardStepResult>> {
         let replay = {
             let mut state = self
                 .cuda_decode_graph
@@ -2082,7 +2086,7 @@ impl Pipeline for MultimodalPipeline {
     fn attach_speculative(
         &mut self,
         config: crate::speculative::SpeculativeConfig,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         self.attach_speculative_with_runtime(
             config,
             crate::speculative::MtpRuntimeConfig::default(),
@@ -2093,14 +2097,14 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         config: crate::speculative::SpeculativeConfig,
         runtime: crate::speculative::MtpRuntimeConfig,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         if self.dynamic_lora.is_some() {
-            candle_core::bail!("dynamic LoRA does not support speculative decoding");
+            inference_tensor::bail!("dynamic LoRA does not support speculative decoding");
         }
         if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
             && self.get_metadata().cache_engine.is_none()
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP speculative decoding currently requires PagedAttention for this pipeline."
             );
         }
@@ -2118,14 +2122,14 @@ impl Pipeline for MultimodalPipeline {
         Ok(())
     }
 
-    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> candle_core::Result<()> {
+    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> inference_tensor::Result<()> {
         self.model.release_speculative_sequences(seq_ids)
     }
 
     fn flush_recurrent_speculative_transitions(
         &self,
         seq_ids: &[usize],
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         self.model.flush_recurrent_speculative_transitions(seq_ids)
     }
 
@@ -2134,7 +2138,7 @@ impl Pipeline for MultimodalPipeline {
         seqs: &[&mut Sequence],
         chunk: &crate::pipeline::SpeculativePromptChunk,
         metadata: &crate::paged_attention::PagedAttentionMeta,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         if !self.model.has_speculative_proposer() {
             return Ok(());
         }
@@ -2191,7 +2195,7 @@ impl Pipeline for MultimodalPipeline {
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         metadata: Option<crate::paged_attention::PagedAttentionMeta>,
         logger: &'a crate::IntervalLogger,
-    ) -> BoxFuture<'a, candle_core::Result<bool>> {
+    ) -> BoxFuture<'a, inference_tensor::Result<bool>> {
         Box::pin(async move {
             if !self.model.has_speculative_proposer() {
                 crate::speculative::driver::clear_staged_speculative_tokens(seqs);
@@ -2234,7 +2238,7 @@ impl Pipeline for MultimodalPipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<bool, inference_tensor::Error>> {
         if self.model.has_speculative_proposer() {
             return Box::pin(std::future::ready(Ok(false)));
         }
@@ -2259,7 +2263,7 @@ impl Pipeline for MultimodalPipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
         sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
     }
 
@@ -2270,7 +2274,7 @@ impl Pipeline for MultimodalPipeline {
         denoise_times: Vec<std::time::Duration>,
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
         crate::pipeline::sampling::finalize_block_gen(
             self,
             input_seqs,
@@ -2305,7 +2309,10 @@ impl Pipeline for MultimodalPipeline {
 }
 
 impl AnyMoePipelineMixin for MultimodalPipeline {
-    fn amoe_finish_training(&mut self, gate_model_id: Option<String>) -> candle_core::Result<()> {
+    fn amoe_finish_training(
+        &mut self,
+        gate_model_id: Option<String>,
+    ) -> inference_tensor::Result<()> {
         self.model.finish_training(gate_model_id)
     }
     fn amoe_layer_vars(&self) -> Vec<Vec<Var>> {
@@ -2324,14 +2331,14 @@ impl AnyMoePipelineMixin for MultimodalPipeline {
         revision: Option<String>,
         match_regex: &str,
         config: crate::amoe::AnyMoeConfig,
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         dev: &Device,
         (prefix, mlp): (String, String),
         layers: Vec<usize>,
         expert_type: AnyMoeExpertType,
         silent: bool,
         gate_model_id: Option<String>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let (vbs, gate_vb) = super::amoe::load_anymoe_weights(super::amoe::AnyMoeWeightSources {
             model_ids,
             token,

@@ -1,5 +1,5 @@
 use super::*;
-use candle_core::Device;
+use inference_tensor::Device;
 
 /// `MultimodalLoader` for an Gemma 3n model.
 pub struct Gemma3nLoader;

@@ -3,11 +3,11 @@
 use super::hunyuan_rope::{RopeScalingConfig, effective_rope_theta};
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -209,7 +209,7 @@ impl Config {
             if let PerLayerValue::Array(values) = value
                 && values.len() != self.num_hidden_layers
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "HunYuanMoEV1 {name} has {} entries for {} layers",
                     values.len(),
                     self.num_hidden_layers
@@ -223,7 +223,7 @@ impl Config {
             if let PerLayerValue::Array(values) = value
                 && values.windows(2).any(|pair| pair[0] != pair[1])
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "HunYuanMoEV1 official implementation requires uniform {name} across layers"
                 )
             }
@@ -231,14 +231,14 @@ impl Config {
         for layer in 0..self.num_hidden_layers {
             let top_k = self.moe_topk.get(layer);
             if top_k == 0 || top_k > self.num_experts {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "HunYuanMoEV1 layer {layer} has invalid moe_topk={top_k} for {} experts",
                     self.num_experts
                 )
             }
             let moe_intermediate_size = self.moe_intermediate_size.get(layer);
             if moe_intermediate_size != 0 && moe_intermediate_size != self.intermediate_size {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "HunYuanMoEV1 layer {layer} has moe_intermediate_size={moe_intermediate_size}, but the official implementation uses intermediate_size={}",
                     self.intermediate_size
                 )
@@ -249,7 +249,7 @@ impl Config {
             && !self.moe_router_enable_expert_bias
             && (!self.norm_topk_prob || self.routed_scaling_factor != 1.0)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "HunYuanMoEV1 official softmax routing requires norm_topk_prob=true and routed_scaling_factor=1"
             )
         }
@@ -398,7 +398,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let (q, k) = match (&self.q_norm, &self.k_norm) {
             (Some(q_norm), Some(k_norm)) => (q_norm.forward(&q)?, k_norm.forward(&k)?),
@@ -500,7 +500,7 @@ fn hunyuan_moe_apply_capacity_mask_cpu(
         || ids.iter().any(|row| row.len() != top_k)
         || weights.iter().any(|row| row.len() != top_k)
     {
-        candle_core::bail!("HunYuan MoE capacity mask got invalid routing configuration")
+        inference_tensor::bail!("HunYuan MoE capacity mask got invalid routing configuration")
     }
 
     let capacity = top_k.max(top_k * ids.len() / num_experts);
@@ -509,7 +509,7 @@ fn hunyuan_moe_apply_capacity_mask_cpu(
         for token in 0..ids.len() {
             let expert = ids[token][priority] as usize;
             if expert >= num_experts {
-                candle_core::bail!("HunYuan MoE router selected invalid expert {expert}")
+                inference_tensor::bail!("HunYuan MoE router selected invalid expert {expert}")
             }
             if counts[expert] < capacity {
                 counts[expert] += 1;
@@ -596,7 +596,7 @@ impl MoeBlock {
             let shared_intermediate_size = intermediate_size
                 .checked_mul(num_shared_expert)
                 .ok_or_else(|| {
-                    candle_core::Error::msg("shared expert intermediate size overflow")
+                    inference_tensor::Error::msg("shared expert intermediate size overflow")
                 })?;
             Some(SparseMlp::new(
                 hidden_size,
@@ -851,22 +851,22 @@ impl Model {
     ) -> Result<Self> {
         cfg.validate()?;
         if cfg.use_cla {
-            candle_core::bail!("HunYuanMoEV1 CLA is not implemented")
+            inference_tensor::bail!("HunYuanMoEV1 CLA is not implemented")
         }
         if cfg.attention_bias {
-            candle_core::bail!("HunYuanMoEV1 attention_bias=true is not implemented")
+            inference_tensor::bail!("HunYuanMoEV1 attention_bias=true is not implemented")
         }
         if cfg.mlp_bias {
-            candle_core::bail!("HunYuanMoEV1 mlp_bias=true is not implemented")
+            inference_tensor::bail!("HunYuanMoEV1 mlp_bias=true is not implemented")
         }
         if cfg.pretraining_tp != 1 {
-            candle_core::bail!("HunYuanMoEV1 pretraining_tp>1 is not implemented")
+            inference_tensor::bail!("HunYuanMoEV1 pretraining_tp>1 is not implemented")
         }
         if cfg.add_classification_head {
-            candle_core::bail!("HunYuanMoEV1 classification head is not implemented")
+            inference_tensor::bail!("HunYuanMoEV1 classification head is not implemented")
         }
         if cfg.moe_layer_num_skipped != 0 {
-            candle_core::bail!("HunYuanMoEV1 skipped MoE layers are not implemented")
+            inference_tensor::bail!("HunYuanMoEV1 skipped MoE layers are not implemented")
         }
         let rope_theta = cfg.effective_rope_theta()? as f32;
         if let Some(quant_cfg) = &cfg.quantization_config {
@@ -1123,7 +1123,7 @@ impl AnyMoeBaseModelMixin for Model {
         _expert_type: AnyMoeExpertType,
         _gate_vb: Option<ShardedVarBuilder>,
     ) -> Result<()> {
-        candle_core::bail!("AnyMoe is not supported for HunYuanMoEV1 mixed MLP MoE")
+        inference_tensor::bail!("AnyMoe is not supported for HunYuanMoEV1 mixed MLP MoE")
     }
     fn amoe_supported(&self) -> bool {
         false

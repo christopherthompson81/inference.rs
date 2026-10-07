@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use candle_core::{DType, Tensor};
 pub use inference_core::CustomLogitsProcessor;
+use inference_tensor::{DType, Tensor};
 
 use crate::registry::{Registered, Registry};
 
@@ -16,7 +16,7 @@ pub fn in_place(
             .to_dtype(DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
-        edit(&mut values, context).map_err(candle_core::Error::msg)?;
+        edit(&mut values, context).map_err(inference_tensor::Error::msg)?;
         Tensor::from_vec(values, logits.shape(), logits.device())?.to_dtype(logits.dtype())
     })
 }
@@ -32,11 +32,12 @@ pub type LogitsProcessors = Registry<Arc<dyn CustomLogitsProcessor>>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Tensor;
+    use inference_tensor::Tensor;
 
     #[test]
-    fn an_in_place_edit_reaches_the_logits_and_its_failure_the_caller() -> candle_core::Result<()> {
-        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0], &candle_core::Device::Cpu)?;
+    fn an_in_place_edit_reaches_the_logits_and_its_failure_the_caller()
+    -> inference_tensor::Result<()> {
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0], &inference_tensor::Device::Cpu)?;
         let banned = in_place(|logits, context| {
             logits[context[0] as usize] = f32::NEG_INFINITY;
             Ok(())

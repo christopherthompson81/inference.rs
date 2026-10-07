@@ -1,6 +1,6 @@
-use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, WithDType};
+use inference_tensor::{CpuStorage, CustomOp3, Layout, Result, Shape, WithDType};
 #[cfg(feature = "metal")]
-use candle_core::{DType, backend::BackendStorage};
+use inference_tensor::{DType, backend::BackendStorage};
 
 /*
  8 bit
@@ -35,10 +35,10 @@ impl CustomOp3 for Dequant8Bit {
         l_z: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         let CpuStorage::U8(w_slice) = w else {
-            candle_core::bail!("Weight must be u8, HQQ dequant 8-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 8-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
         match (s, z) {
             (CpuStorage::F32(s_slice), CpuStorage::F32(z_slice)) => Ok((
@@ -53,24 +53,24 @@ impl CustomOp3 for Dequant8Bit {
                 CpuStorage::BF16(self.dequantize(w_slice, s_slice, z_slice)),
                 Shape::from_dims(&[self.h, self.w]),
             )),
-            (_, _) => candle_core::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
+            (_, _) => inference_tensor::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
         }
     }
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        w: &candle_core::MetalStorage,
+        w: &inference_tensor::MetalStorage,
         l_w: &Layout,
-        s: &candle_core::MetalStorage,
+        s: &inference_tensor::MetalStorage,
         l_s: &Layout,
-        z: &candle_core::MetalStorage,
+        z: &inference_tensor::MetalStorage,
         l_z: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         if w.dtype() != DType::U8 {
-            candle_core::bail!("Weight must be u8, HQQ dequant 8-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 8-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
 
         let encoder = w.device().command_encoder()?;
@@ -94,9 +94,9 @@ impl CustomOp3 for Dequant8Bit {
             self.w as u32,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -144,10 +144,10 @@ impl CustomOp3 for Dequant4Bit {
         const PACK_FACTOR: usize = 2;
 
         let CpuStorage::U8(w_slice) = w else {
-            candle_core::bail!("Weight must be u8, HQQ dequant 4-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 4-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
         match (s, z) {
             (CpuStorage::F32(s_slice), CpuStorage::F32(z_slice)) => Ok((
@@ -162,26 +162,26 @@ impl CustomOp3 for Dequant4Bit {
                 CpuStorage::BF16(self.dequantize(w_slice, s_slice, z_slice)),
                 Shape::from_dims(&[PACK_FACTOR * self.h, self.w]),
             )),
-            (_, _) => candle_core::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
+            (_, _) => inference_tensor::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
         }
     }
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        w: &candle_core::MetalStorage,
+        w: &inference_tensor::MetalStorage,
         l_w: &Layout,
-        s: &candle_core::MetalStorage,
+        s: &inference_tensor::MetalStorage,
         l_s: &Layout,
-        z: &candle_core::MetalStorage,
+        z: &inference_tensor::MetalStorage,
         l_z: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         const PACK_FACTOR: usize = 2;
 
         if w.dtype() != DType::U8 {
-            candle_core::bail!("Weight must be u8, HQQ dequant 4-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 4-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
 
         let encoder = w.device().command_encoder()?;
@@ -205,9 +205,9 @@ impl CustomOp3 for Dequant4Bit {
             self.w as u32,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -257,10 +257,10 @@ impl CustomOp3 for Dequant2Bit {
         const PACK_FACTOR: usize = 4;
 
         let CpuStorage::U8(w_slice) = w else {
-            candle_core::bail!("Weight must be u8, HQQ dequant 2-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 2-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
         match (s, z) {
             (CpuStorage::F32(s_slice), CpuStorage::F32(z_slice)) => Ok((
@@ -275,26 +275,26 @@ impl CustomOp3 for Dequant2Bit {
                 CpuStorage::BF16(self.dequantize(w_slice, s_slice, z_slice)),
                 Shape::from_dims(&[PACK_FACTOR * self.h, self.w]),
             )),
-            (_, _) => candle_core::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
+            (_, _) => inference_tensor::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
         }
     }
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        w: &candle_core::MetalStorage,
+        w: &inference_tensor::MetalStorage,
         l_w: &Layout,
-        s: &candle_core::MetalStorage,
+        s: &inference_tensor::MetalStorage,
         l_s: &Layout,
-        z: &candle_core::MetalStorage,
+        z: &inference_tensor::MetalStorage,
         l_z: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         const PACK_FACTOR: usize = 4;
 
         if w.dtype() != DType::U8 {
-            candle_core::bail!("Weight must be u8, HQQ dequant 2-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 2-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
 
         let encoder = w.device().command_encoder()?;
@@ -318,9 +318,9 @@ impl CustomOp3 for Dequant2Bit {
             self.w as u32,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -374,10 +374,10 @@ impl CustomOp3 for Dequant1Bit {
         const PACK_FACTOR: usize = 8;
 
         let CpuStorage::U8(w_slice) = w else {
-            candle_core::bail!("Weight must be u8, HQQ dequant 1-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 1-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
         match (s, z) {
             (CpuStorage::F32(s_slice), CpuStorage::F32(z_slice)) => Ok((
@@ -392,26 +392,26 @@ impl CustomOp3 for Dequant1Bit {
                 CpuStorage::BF16(self.dequantize(w_slice, s_slice, z_slice)),
                 Shape::from_dims(&[PACK_FACTOR * self.h, self.w]),
             )),
-            (_, _) => candle_core::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
+            (_, _) => inference_tensor::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
         }
     }
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        w: &candle_core::MetalStorage,
+        w: &inference_tensor::MetalStorage,
         l_w: &Layout,
-        s: &candle_core::MetalStorage,
+        s: &inference_tensor::MetalStorage,
         l_s: &Layout,
-        z: &candle_core::MetalStorage,
+        z: &inference_tensor::MetalStorage,
         l_z: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         const PACK_FACTOR: usize = 8;
 
         if w.dtype() != DType::U8 {
-            candle_core::bail!("Weight must be u8, HQQ dequant 1-bit");
+            inference_tensor::bail!("Weight must be u8, HQQ dequant 1-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
 
         let encoder = w.device().command_encoder()?;
@@ -435,9 +435,9 @@ impl CustomOp3 for Dequant1Bit {
             self.w as u32,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -493,10 +493,10 @@ impl CustomOp3 for Dequant3Bit {
         const PACK_FACTOR: usize = 10;
 
         let CpuStorage::I32(w_slice) = w else {
-            candle_core::bail!("Weight must be i32, HQQ dequant 3-bit");
+            inference_tensor::bail!("Weight must be i32, HQQ dequant 3-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
         match (s, z) {
             (CpuStorage::F32(s_slice), CpuStorage::F32(z_slice)) => Ok((
@@ -511,26 +511,26 @@ impl CustomOp3 for Dequant3Bit {
                 CpuStorage::BF16(self.dequantize(w_slice, s_slice, z_slice)),
                 Shape::from_dims(&[PACK_FACTOR * self.h, self.w]),
             )),
-            (_, _) => candle_core::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
+            (_, _) => inference_tensor::bail!("Dtype mismatch, expected one of f32, f16, bf16"),
         }
     }
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        w: &candle_core::MetalStorage,
+        w: &inference_tensor::MetalStorage,
         l_w: &Layout,
-        s: &candle_core::MetalStorage,
+        s: &inference_tensor::MetalStorage,
         l_s: &Layout,
-        z: &candle_core::MetalStorage,
+        z: &inference_tensor::MetalStorage,
         l_z: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         const PACK_FACTOR: usize = 10;
 
         if w.dtype() != DType::I32 {
-            candle_core::bail!("Weight must be i32, HQQ dequant 3-bit");
+            inference_tensor::bail!("Weight must be i32, HQQ dequant 3-bit");
         };
         if !(l_w.is_contiguous() && l_s.is_contiguous() && l_z.is_contiguous()) {
-            candle_core::bail!("All inputs must be contiguous");
+            inference_tensor::bail!("All inputs must be contiguous");
         }
 
         let encoder = w.device().command_encoder()?;
@@ -554,9 +554,9 @@ impl CustomOp3 for Dequant3Bit {
             self.w as u32,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),

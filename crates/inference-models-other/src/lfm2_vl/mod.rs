@@ -4,9 +4,9 @@ pub mod config;
 pub mod inputs_processor;
 pub mod vision;
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::nn::{LayerNorm, Linear, Module};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use vision::VisionModel;
 
 use crate::{
@@ -57,7 +57,7 @@ impl MultiModalProjector {
     fn pixel_unshuffle(&self, xs: &Tensor) -> Result<Tensor> {
         let (batch, height, width, channels) = xs.dims4()?;
         if height % self.factor != 0 || width % self.factor != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LFM2-VL projector expected image features divisible by {}, got ({height}, {width})",
                 self.factor
             );
@@ -191,10 +191,12 @@ impl Lfm2VlModel {
         let mut input_embeds = self.language_model.embed(input_ids)?;
         if let Some(pixel_values) = pixel_values {
             let pixel_attention_mask = pixel_attention_mask.ok_or_else(|| {
-                candle_core::Error::msg("LFM2-VL requires pixel_attention_mask with pixel_values")
+                inference_tensor::Error::msg(
+                    "LFM2-VL requires pixel_attention_mask with pixel_values",
+                )
             })?;
             let spatial_shapes = spatial_shapes.ok_or_else(|| {
-                candle_core::Error::msg("LFM2-VL requires spatial_shapes with pixel_values")
+                inference_tensor::Error::msg("LFM2-VL requires spatial_shapes with pixel_values")
             })?;
             let image_features = self
                 .get_image_features(&pixel_values, &pixel_attention_mask, &spatial_shapes)?
@@ -208,7 +210,7 @@ impl Lfm2VlModel {
                 .to_dtype(DType::U32)?;
             let indices = special_image_mask.flatten_all()?.nonzero()?.squeeze(1)?;
             if indices.dim(0)? != image_features.elem_count() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LFM2-VL image features and image tokens do not match, tokens: {}, features: {}",
                     indices.dim(0)? / input_embeds.dim(D::Minus1)?,
                     image_features.dim(0)?

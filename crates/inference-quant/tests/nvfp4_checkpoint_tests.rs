@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
-use candle_core::{DType, Device, Result, Tensor};
 use float8::F8E4M3;
 use inference_quant::{
     CheckpointLinearSpec, Nvfp4ActivationMode, Nvfp4Layer, Nvfp4LayerParts, Nvfp4LinearSpec,
     QuantMethod, QuantizedConfig, Shard, ShardedSafeTensors, linear_no_bias,
 };
+use inference_tensor::{DType, Device, Result, Tensor};
 use serde_json::json;
 
 const INPUT_DIM: usize = 32;
@@ -59,13 +59,13 @@ impl Format {
                 })
             }
         };
-        serde_json::from_value(value).map_err(candle_core::Error::msg)
+        serde_json::from_value(value).map_err(inference_tensor::Error::msg)
     }
 
     fn spec(self, a4: bool) -> Result<Nvfp4LinearSpec> {
         match self.config(a4)?.resolve_checkpoint(PREFIX)? {
             Some(CheckpointLinearSpec::Nvfp4(spec)) => Ok(spec),
-            _ => candle_core::bail!("expected NVFP4 configuration"),
+            _ => inference_tensor::bail!("expected NVFP4 configuration"),
         }
     }
 
@@ -350,15 +350,15 @@ struct ProjectionFixture {
 fn real_checkpoint_projections_match_external_references() -> Result<()> {
     let directory = std::env::var("INFERENCE_RS_NVFP4_FIXTURE_DIR")
         .map(std::path::PathBuf::from)
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     for (stem, format, a4) in [
         ("modelopt-qwen3.6-expert-down", Format::ModelOpt, false),
         ("ct-moe-expert0-down", Format::CompressedTensors, true),
     ] {
         let manifest: ProjectionFixture =
             serde_json::from_slice(&std::fs::read(directory.join(format!("{stem}.json")))?)
-                .map_err(candle_core::Error::msg)?;
-        let tensors = candle_core::safetensors::load(
+                .map_err(inference_tensor::Error::msg)?;
+        let tensors = inference_tensor::safetensors::load(
             directory.join(format!("{stem}.safetensors")),
             &Device::Cpu,
         )?;
@@ -915,7 +915,7 @@ fn packed_nvfp4_keeps_exclusions_and_output_layout_fallbacks() -> Result<()> {
         "quant_method": "modelopt", "quant_algo": "W4A16_NVFP4", "group_size": 16,
         "exclude_modules": ["second"]
     }))
-    .map_err(candle_core::Error::msg)?;
+    .map_err(inference_tensor::Error::msg)?;
     assert!(
         ColumnParallelLayer::new_packed(
             INPUT_DIM,

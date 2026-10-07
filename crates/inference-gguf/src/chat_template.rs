@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::quantized::gguf_file::Value;
+use inference_tensor::quantized::gguf_file::Value;
 use tracing::info;
 
 use crate::metadata::ContentMetadata;

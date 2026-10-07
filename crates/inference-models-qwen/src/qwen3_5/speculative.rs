@@ -8,7 +8,7 @@
 use crate::attention::FlashParams;
 use std::sync::{Arc, atomic::Ordering};
 
-use candle_core::{IndexOp, Result, Tensor};
+use inference_tensor::{IndexOp, Result, Tensor};
 use rand::Rng;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -83,7 +83,7 @@ fn dflash_speculative_batch(batch: DFlashProposalBatch) -> Result<SpeculativePro
         } => {
             let batch = tokens.dim(0)?;
             if candidate_ids.dim(0)? != batch || candidate_probs.dim(0)? != batch {
-                candle_core::bail!("DFlash sparse proposal batch does not match token rows");
+                inference_tensor::bail!("DFlash sparse proposal batch does not match token rows");
             }
             (0..batch)
                 .map(|row| {
@@ -123,10 +123,10 @@ fn resolve_dflash_n_predict(
     let max_drafts = block_size
         .checked_sub(1)
         .filter(|max_drafts| *max_drafts > 0)
-        .ok_or_else(|| candle_core::Error::msg("DFlash block size must be at least 2"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("DFlash block size must be at least 2"))?;
     let configured = requested.unwrap_or(max_drafts.min(crate::dflash::DEFAULT_MAX_DRAFTS));
     if configured == 0 || configured > max_drafts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "requested {configured} draft tokens but this DFlash drafter's block size is {block_size} (max {max_drafts} drafts)"
         );
     }
@@ -134,10 +134,10 @@ fn resolve_dflash_n_predict(
         return Ok(configured);
     }
     let reserved = checkpoint_lanes.checked_sub(1).ok_or_else(|| {
-        candle_core::Error::msg("recurrent checkpoint lane count must be nonzero")
+        inference_tensor::Error::msg("recurrent checkpoint lane count must be nonzero")
     })?;
     if reserved > max_drafts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "reserved {checkpoint_lanes} recurrent checkpoint lanes but this DFlash drafter's block size is {block_size} (max {} lanes)",
             max_drafts + 1
         );
@@ -145,7 +145,7 @@ fn resolve_dflash_n_predict(
     if let Some(requested) = requested
         && requested != reserved
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "requested {requested} draft tokens require {} recurrent checkpoint lanes, but {checkpoint_lanes} lanes were reserved",
             requested + 1
         );
@@ -161,7 +161,7 @@ impl Qwen3_5TextModel {
     fn mtp_head(&self) -> Result<&Qwen3_5MtpHead> {
         self.mtp
             .as_ref()
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 MTP head is not loaded"))
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 MTP head is not loaded"))
     }
 
     /// Runs the drafter over `rows` (all sequences flattened, `[1, rows]`) and returns the normed
@@ -218,7 +218,7 @@ impl Qwen3_5TextModel {
         let device = head.device();
         let (batch, seq_len, _) = capture.hidden.dims3()?;
         if batch != ctx.chunk_ranges.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP prefill capture has {batch} rows for {} sequences",
                 ctx.chunk_ranges.len()
             );
@@ -368,7 +368,7 @@ impl Qwen3_5TextModel {
             .lock()
             .expect("dflash poisoned")
             .clone()
-            .ok_or_else(|| candle_core::Error::msg("DFlash prepare without a drafter"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash prepare without a drafter"))?;
         if ctx.seq_ids.is_empty() {
             return Ok(None);
         }
@@ -400,10 +400,10 @@ impl Qwen3_5TextModel {
             }
             let flat_start = batch_idx
                 .checked_mul(source_rows)
-                .ok_or_else(|| candle_core::Error::msg("DFlash tap row index overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("DFlash tap row index overflow"))?;
             let offset = flat_row_indices.len();
             for row in flat_start..flat_start + count {
-                flat_row_indices.push(u32::try_from(row).map_err(candle_core::Error::wrap)?);
+                flat_row_indices.push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
             }
             appends.push(CtxAppend {
                 seq_id: *seq_id,
@@ -431,7 +431,7 @@ impl Qwen3_5TextModel {
             .lock()
             .expect("dflash poisoned")
             .clone()
-            .ok_or_else(|| candle_core::Error::msg("DFlash propose without a drafter"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash propose without a drafter"))?;
         let max_n = self.mtp_n_predict();
         let batch = ctx.seq_ids.len();
         if batch == 0 || max_n == 0 {
@@ -442,7 +442,7 @@ impl Qwen3_5TextModel {
             return Ok(None);
         }
         if n_predict > max_n {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "DFlash proposal length {n_predict} exceeds configured maximum {max_n}"
             );
         }
@@ -511,13 +511,15 @@ impl Qwen3_5TextModel {
                     let flat_start = batch_idx
                         .checked_mul(source_rows)
                         .and_then(|row| row.checked_add(start_row))
-                        .ok_or_else(|| candle_core::Error::msg("DFlash tap row index overflow"))?;
-                    let flat_end = flat_start
-                        .checked_add(needed)
-                        .ok_or_else(|| candle_core::Error::msg("DFlash tap row index overflow"))?;
+                        .ok_or_else(|| {
+                            inference_tensor::Error::msg("DFlash tap row index overflow")
+                        })?;
+                    let flat_end = flat_start.checked_add(needed).ok_or_else(|| {
+                        inference_tensor::Error::msg("DFlash tap row index overflow")
+                    })?;
                     for row in flat_start..flat_end {
                         flat_row_indices
-                            .push(u32::try_from(row).map_err(candle_core::Error::wrap)?);
+                            .push(u32::try_from(row).map_err(inference_tensor::Error::wrap)?);
                     }
                     appends.push(CtxAppend {
                         seq_id: *seq_id,
@@ -620,7 +622,7 @@ impl Qwen3_5TextModel {
             .lock()
             .expect("dflash poisoned")
             .clone()
-            .ok_or_else(|| candle_core::Error::msg("DFlash prefill without a drafter"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("DFlash prefill without a drafter"))?;
         let Some(capture) = self.last_full_capture() else {
             return Ok(());
         };
@@ -665,12 +667,12 @@ impl Qwen3_5TextModel {
             return Ok(None);
         }
         if n_predict == 0 || n_predict > max_n {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP proposal length {n_predict} is outside the configured range 1..={max_n}"
             );
         }
         if ctx.target_rows.len() != batch || ctx.base_lens.len() != batch {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP batch shape mismatch: sequences={batch}, target_rows={}, base_lens={}",
                 ctx.target_rows.len(),
                 ctx.base_lens.len()
@@ -682,7 +684,7 @@ impl Qwen3_5TextModel {
         } = ctx.cache;
         let kv_cache = kv_cache
             .get(head.kv_layer_idx())
-            .ok_or_else(|| candle_core::Error::msg("paged cache has no MTP layer"))?
+            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
             .clone();
         let Some(capture) = self.last_spec_capture() else {
             return Ok(None);
@@ -715,7 +717,7 @@ impl Qwen3_5TextModel {
             let base_len = ctx.base_lens[i];
             let toks = seq.get_toks();
             if count == 0 || base_len < count || toks.len() <= base_len {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "MTP refresh rows out of range: base_len={base_len}, count={count}, toks={}",
                     toks.len()
                 );
@@ -817,7 +819,7 @@ impl Qwen3_5TextModel {
         } = ctx.cache;
         let kv_cache = kv_cache
             .get(head.kv_layer_idx())
-            .ok_or_else(|| candle_core::Error::msg("paged cache has no MTP layer"))?
+            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
             .clone();
         let Some(capture) = self.last_full_capture() else {
             return Ok(());
@@ -835,7 +837,7 @@ impl Qwen3_5TextModel {
             let toks = ctx.tokens[i];
             let (start, end) = ctx.chunk_ranges[i];
             if end <= start || hidden.dim(1)? < end - start {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "MTP prefill rows out of range: chunk=({start}, {end}), hidden rows={}",
                     hidden.dim(1)?
                 );
@@ -862,7 +864,7 @@ impl Qwen3_5TextModel {
                 continue;
             }
             if toks.len() <= last {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "MTP prefill tokens out of range: chunk=({start}, {end}), toks={}",
                     toks.len()
                 );
@@ -900,16 +902,16 @@ fn capture_view(capture: &SpecCapture) -> Result<CaptureView> {
     let hidden = match capture.hidden.rank() {
         3 => capture.hidden.clone(),
         2 => capture.hidden.unsqueeze(1)?,
-        rank => candle_core::bail!("unexpected MTP hidden rank {rank}"),
+        rank => inference_tensor::bail!("unexpected MTP hidden rank {rank}"),
     };
-    let positions = capture.positions.to_dtype(candle_core::DType::U32)?;
+    let positions = capture.positions.to_dtype(inference_tensor::DType::U32)?;
     let mrope = match positions.rank() {
         3 => positions.to_vec3::<u32>()?,
         2 => {
             let positions = positions.to_vec2::<u32>()?;
             vec![positions.clone(), positions.clone(), positions]
         }
-        rank => candle_core::bail!("unexpected MTP position rank {rank}"),
+        rank => inference_tensor::bail!("unexpected MTP position rank {rank}"),
     };
     Ok(CaptureView { hidden, mrope })
 }
@@ -922,7 +924,7 @@ fn mrope_at(mrope: &[Vec<Vec<u32>>], batch_idx: usize, row: usize) -> Result<[u3
             .and_then(|b| b.get(batch_idx))
             .and_then(|r| r.get(row))
             .ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "MTP position ids missing for batch {batch_idx} row {row}"
                 ))
             })?;
@@ -954,7 +956,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             return self.attach_dflash(config, runtime);
         }
         if self.mtp.is_none() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "The built-in MTP head was not loaded; pass `--mtp` when loading the model."
             );
         }
@@ -965,7 +967,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         };
         let n_predict = config.n_predict.unwrap_or(default_n_predict);
         if n_predict == 0 {
-            candle_core::bail!("MTP n_predict must be at least 1.");
+            inference_tensor::bail!("MTP n_predict must be at least 1.");
         }
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
         self.set_store_spec_hidden(true);
@@ -1094,7 +1096,9 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             .expect("dflash poisoned")
             .as_ref()
             .cloned()
-            .ok_or_else(|| candle_core::Error::msg("DFlash prefix restore without a drafter"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("DFlash prefix restore without a drafter")
+            })?;
         drafter.restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)
     }
 
@@ -1238,7 +1242,7 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             .as_any()
             .downcast_ref::<SpecGraphState>()
             .ok_or_else(|| {
-                candle_core::Error::msg("foreign speculative graph state for Qwen3.5")
+                inference_tensor::Error::msg("foreign speculative graph state for Qwen3.5")
             })?;
         self.install_spec_graph_state(state)
     }
@@ -1250,7 +1254,7 @@ inference_nn::delegate_speculative_target!(Qwen3_5Model, text: Qwen3_5TextModel)
 #[cfg(test)]
 mod tests {
     use super::{SpecCapture, capture_view, resolve_dflash_n_predict};
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     #[test]
     fn text_capture_positions_expand_to_equal_mrope_planes() {

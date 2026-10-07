@@ -1,9 +1,9 @@
 //! Run PP-DocLayoutV3 on images and print detections as JSON lines (`{"image": ..., "detections": [...]}`).
 
 use anyhow::Result;
-use candle_core::Device;
 use clap::Parser;
 use inference_layout::pp_doclayout_v3::{DEFAULT_THRESHOLD, PPDocLayoutV3Detector};
+use inference_tensor::Device;
 
 #[derive(Parser)]
 struct Args {
@@ -46,7 +46,7 @@ fn main() -> Result<()> {
         images
             .iter()
             .map(|im| det.detect(im, args.threshold))
-            .collect::<candle_core::Result<Vec<_>>>()?
+            .collect::<inference_tensor::Result<Vec<_>>>()?
     };
     eprintln!("{} images in {:?}", images.len(), t0.elapsed());
 

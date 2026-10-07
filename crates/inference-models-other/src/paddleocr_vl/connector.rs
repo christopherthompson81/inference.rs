@@ -2,9 +2,9 @@
 
 use crate::layers::{layer_norm, linear};
 use crate::utils::unvarbuilder::UnVarBuilder;
-use candle_core::{Result, Tensor};
-use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{LayerNorm, Linear, Module};
+use inference_tensor::{Result, Tensor};
 
 pub struct Connector {
     pre_norm: LayerNorm,

@@ -1,8 +1,8 @@
 use std::{any::Any, sync::Arc};
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use inference_tensor::{Device, Tensor};
 use inference_vision::{ApplyTransforms, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -1084,17 +1084,17 @@ impl ImagePreProcessor for MuseGlimmerImageProcessor {
         _config: &PreProcessorConfig,
         device: &Device,
         _size: (usize, usize),
-    ) -> candle_core::Result<PreprocessedImages> {
+    ) -> inference_tensor::Result<PreprocessedImages> {
         if !images.is_empty() {
             self.preprocess_images(images, device)
-                .map_err(candle_core::Error::msg)
+                .map_err(inference_tensor::Error::msg)
         } else {
             let videos = videos
                 .into_iter()
                 .map(|frames| VideoInput::from_frames(frames, 24.0, None))
                 .collect();
             self.preprocess_videos(videos, device)
-                .map_err(candle_core::Error::msg)
+                .map_err(inference_tensor::Error::msg)
         }
     }
 }
@@ -1104,8 +1104,8 @@ mod tests {
     use super::*;
     use crate::media_inputs::media::MultimodalData;
     use crate::paged_attention::block_hash::MultiModalFeature;
-    use candle_core::DType;
     use inference_audio::AudioInput;
+    use inference_tensor::DType;
     use std::ops::Range;
 
     fn settings() -> MuseGlimmerProcessorSettings {

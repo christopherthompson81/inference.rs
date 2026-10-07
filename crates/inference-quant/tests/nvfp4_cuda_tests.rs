@@ -1,8 +1,8 @@
 #![cfg(all(feature = "cuda", feature = "cutile"))]
 
-use candle_core::{DType, Device, Result, Tensor};
 use float8::F8E4M3;
 use inference_quant::cutile::{Nvfp4GemmArgs, cutile_nvfp4, cutile_nvfp4_gather};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 const BLOCK_SIZE: usize = 16;
 const FP4_VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
@@ -284,10 +284,10 @@ fn nvfp4_prefill_preserves_partial_tiles_and_groups() -> Result<()> {
 
 #[test]
 fn nvfp4_medium_decode_warmup_supports_offset_views_and_graph_replay() -> Result<()> {
-    use candle_core::cuda::cudarc::driver::sys;
     use inference_quant::cutile::{
         cutile_nvfp4_prequantized, cutile_nvfp4_quantize, register_nvfp4_shape, warmup_moe_kernels,
     };
+    use inference_tensor::cuda::cudarc::driver::sys;
 
     let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
     let device = Device::new_cuda(0)?;
@@ -349,7 +349,7 @@ fn nvfp4_medium_decode_warmup_supports_offset_views_and_graph_replay() -> Result
             if tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = MEDIUM_GRAPH_ROWS
             .into_iter()
@@ -369,8 +369,10 @@ fn nvfp4_medium_decode_warmup_supports_offset_views_and_graph_replay() -> Result
         }
         let outputs = captured?;
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("NVFP4 medium capture produced no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("NVFP4 medium capture produced no graph")
+            })?;
         assert_eq!(cutile::tile_kernel::jit_compile_count(), warmed_count);
         let tolerance = if dtype == DType::BF16 {
             BF16_TOLERANCE
@@ -381,7 +383,7 @@ fn nvfp4_medium_decode_warmup_supports_offset_views_and_graph_replay() -> Result
             x.slice_set(if alternate_input { &alternate } else { &source }, 0, 0)?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             device.synchronize()?;
             let sign = if alternate_input { -1.0 } else { 1.0 };
             for (rows, ordinary, shared) in &outputs {
@@ -417,8 +419,8 @@ fn nvfp4_medium_decode_warmup_supports_offset_views_and_graph_replay() -> Result
 
 #[test]
 fn nvfp4_grouped_prefill_warmup_supports_graph_replay() -> Result<()> {
-    use candle_core::cuda::cudarc::driver::sys;
     use inference_quant::cutile::{register_nvfp4_shape, warmup_moe_kernels};
+    use inference_tensor::cuda::cudarc::driver::sys;
 
     let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
     let device = Device::new_cuda(0)?;
@@ -457,7 +459,7 @@ fn nvfp4_grouped_prefill_warmup_supports_graph_replay() -> Result<()> {
         if tracking {
             unsafe { stream.context().enable_event_tracking() };
         }
-        return Err(candle_core::Error::msg(error.to_string()));
+        return Err(inference_tensor::Error::msg(error.to_string()));
     }
     let captured = cutile_nvfp4(&x, args);
     let graph = stream.end_capture(
@@ -468,14 +470,14 @@ fn nvfp4_grouped_prefill_warmup_supports_graph_replay() -> Result<()> {
     }
     let output = captured?;
     let graph = graph
-        .map_err(|error| candle_core::Error::msg(error.to_string()))?
-        .ok_or_else(|| candle_core::Error::msg("NVFP4 grouped capture produced no graph"))?;
+        .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+        .ok_or_else(|| inference_tensor::Error::msg("NVFP4 grouped capture produced no graph"))?;
     let expected = fixture.reference_columns(true, ACTIVATION_GLOBAL, &PREFILL_COLUMNS);
     for alternate_input in [false, true, false] {
         x.slice_set(if alternate_input { &alternate } else { &source }, 0, 0)?;
         graph
             .launch()
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         device.synchronize()?;
         let actual = output
             .to_dtype(DType::F32)?
@@ -681,10 +683,10 @@ fn nvfp4_gather_matches_selected_experts() -> Result<()> {
 #[test]
 fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
     let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
-    use candle_core::cuda::cudarc::driver::sys;
     use inference_quant::cutile::{
         register_nvfp4_routing, register_nvfp4_shape, warmup_moe_kernels,
     };
+    use inference_tensor::cuda::cudarc::driver::sys;
 
     let device = Device::new_cuda(0)?;
     let stream = device.as_cuda_device()?.cuda_stream();
@@ -756,7 +758,7 @@ fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
             if tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = (|| -> Result<_> {
             Ok((
@@ -773,8 +775,8 @@ fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
         }
         let (decode, prefill, gathered) = captured?;
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("NVFP4 capture produced no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| inference_tensor::Error::msg("NVFP4 capture produced no graph"))?;
         let reference = fixture.reference(a4, ACTIVATION_GLOBAL);
         for alternate_input in [false, true, false] {
             x.slice_set(if alternate_input { &alternate } else { &source }, 0, 0)?;
@@ -789,7 +791,7 @@ fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
             )?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             device.synchronize()?;
             let sign = if alternate_input { -1.0 } else { 1.0 };
             for (output, rows) in [(&decode, 1), (&prefill, GRAPH_ROWS)] {
@@ -849,9 +851,9 @@ fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
 
 #[test]
 fn nvfp4_merged_views_and_shared_activation_support_graph_replay() -> Result<()> {
-    use candle_core::cuda::cudarc::driver::sys;
     use inference_quant::cutile::warmup_moe_kernels;
     use inference_quant::{ColumnParallelLayer, Comm, Id, QuantizedConfig, ShardedSafeTensors};
+    use inference_tensor::cuda::cudarc::driver::sys;
     use std::{collections::HashMap, sync::Arc};
 
     let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
@@ -907,7 +909,7 @@ fn nvfp4_merged_views_and_shared_activation_support_graph_replay() -> Result<()>
             }
             let config = Some(serde_json::from_value::<QuantizedConfig>(serde_json::json!({
                 "quant_method": "modelopt", "quant_algo": if a4 { "NVFP4" } else { "W4A16_NVFP4" }, "group_size": BLOCK_SIZE,
-            })).map_err(candle_core::Error::msg)?);
+            })).map_err(inference_tensor::Error::msg)?);
             let group = ColumnParallelLayer::new_packed(
                 MERGED_K,
                 &[MERGED_FIRST_N, MERGED_SECOND_N],
@@ -933,7 +935,7 @@ fn nvfp4_merged_views_and_shared_activation_support_graph_replay() -> Result<()>
                 if tracking {
                     unsafe { stream.context().enable_event_tracking() };
                 }
-                return Err(candle_core::Error::msg(error.to_string()));
+                return Err(inference_tensor::Error::msg(error.to_string()));
             }
             let captured = (|| -> Result<_> {
                 let packed = group.packed.forward(&x)?;
@@ -964,9 +966,9 @@ fn nvfp4_merged_views_and_shared_activation_support_graph_replay() -> Result<()>
             }
             let (packed, decode, separate) = captured?;
             let graph = graph
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
                 .ok_or_else(|| {
-                    candle_core::Error::msg("NVFP4 merged graph capture returned no graph")
+                    inference_tensor::Error::msg("NVFP4 merged graph capture returned no graph")
                 })?;
             let reference = fixture.reference(a4, ACTIVATION_GLOBAL);
             let tolerance = if dtype == DType::BF16 {
@@ -978,7 +980,7 @@ fn nvfp4_merged_views_and_shared_activation_support_graph_replay() -> Result<()>
                 x.slice_set(if alternate_input { &alternate } else { &source }, 0, 0)?;
                 graph
                     .launch()
-                    .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                    .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
                 device.synchronize()?;
                 let sign = if alternate_input { -1.0 } else { 1.0 };
                 for (output, start, columns, rows) in [

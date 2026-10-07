@@ -25,12 +25,12 @@ use crate::{
 };
 use anyhow::Context;
 use anyhow::Result;
-use candle_core::{Device, Tensor};
-use candle_nn::{Linear, Module};
 use futures::future::BoxFuture;
 use hf_hub::Cache;
 use inference_quant::IsqType;
 use inference_quant::safetensors::MmapedSafetensors;
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::path::PathBuf;
@@ -459,7 +459,7 @@ impl IsqPipelineMixin for EmbeddingPipeline {
 }
 
 impl CacheManagerMixin for EmbeddingPipeline {
-    fn clone_in_cache(&self, _seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, _seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn clone_out_cache(&self, _seqs: &mut [&mut Sequence]) {}
@@ -469,7 +469,7 @@ impl CacheManagerMixin for EmbeddingPipeline {
         _reset_non_granular: bool,
         _modify_draft_cache: bool,
         _load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
@@ -501,7 +501,7 @@ impl Pipeline for EmbeddingPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         _return_raw_logits: bool,
-    ) -> candle_core::Result<ForwardInputsResult> {
+    ) -> inference_tensor::Result<ForwardInputsResult> {
         let ModelInputs {
             input_ids,
             flash_meta,
@@ -521,7 +521,7 @@ impl Pipeline for EmbeddingPipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
         sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
     }
     fn category(&self) -> ModelCategory {

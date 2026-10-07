@@ -1,8 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{D, DType, Module, Result, Tensor, bail};
-use candle_nn::{Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, ModuleT};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::{Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, ModuleT};
+use inference_tensor::{D, DType, Module, Result, Tensor, bail};
 use std::sync::Arc;
 
 use crate::{
@@ -805,8 +805,9 @@ impl Gemma3nAudioAttention {
 
         // For the actual attention computation after logits are computed, we can still optimize
         // by using the fused softmax and matmul operations
-        let probabilities = candle_nn::ops::softmax_last_dim(&logits.to_dtype(DType::F32)?)?
-            .to_dtype(value_blocks.dtype())?;
+        let probabilities =
+            inference_tensor::nn::ops::softmax_last_dim(&logits.to_dtype(DType::F32)?)?
+                .to_dtype(value_blocks.dtype())?;
 
         // Compute context vectors
         let (b_dim, n_dim, u_dim, w_dim, c_dim) = match probabilities.dims() {
@@ -1132,7 +1133,7 @@ impl Gemma3nAudioConformerFeedForward {
         let residual = x;
         let x = self.pre_layer_norm.forward(x)?;
         let x = self.ffw_layer_1.forward(&x)?;
-        let x = candle_nn::ops::silu(&x)?;
+        let x = inference_tensor::nn::ops::silu(&x)?;
         let x = self.ffw_layer_2.forward(&x)?;
         let x = self.post_layer_norm.forward(&x)?;
 
@@ -1210,7 +1211,8 @@ impl Gemma3nAudioConformerLightConv1d {
         let audio_encodings = self.linear_start.forward(&audio_encodings)?;
         // Implement GLU manually: split tensor in half and apply gating
         let chunks = audio_encodings.chunk(2, D::Minus1)?;
-        let audio_encodings = chunks[0].broadcast_mul(&candle_nn::ops::sigmoid(&chunks[1])?)?;
+        let audio_encodings =
+            chunks[0].broadcast_mul(&inference_tensor::nn::ops::sigmoid(&chunks[1])?)?;
 
         // Permute for Conv1d: [B, T, D] -> [B, D, T]
         let audio_encodings_transposed = audio_encodings.transpose(D::Minus1, D::Minus2)?;
@@ -1229,7 +1231,7 @@ impl Gemma3nAudioConformerLightConv1d {
         let audio_encodings = audio_encodings_conv.transpose(D::Minus2, D::Minus1)?;
 
         let audio_encodings = self.conv_norm.forward(&audio_encodings)?;
-        let audio_encodings = candle_nn::ops::silu(&audio_encodings)?;
+        let audio_encodings = inference_tensor::nn::ops::silu(&audio_encodings)?;
         let audio_encodings = self.linear_end.forward(&audio_encodings)?;
 
         audio_encodings_residual.broadcast_add(&audio_encodings)

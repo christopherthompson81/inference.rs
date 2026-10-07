@@ -4,7 +4,7 @@ use std::{any::Any, sync::Arc};
 
 use crate::paged_attention::PagedAttentionMeta;
 use anyhow::Result;
-use candle_core::Device;
+use inference_tensor::Device;
 use tokenizers::Tokenizer;
 
 use crate::{device_map::DeviceMapper, sequence::Sequence};
@@ -87,7 +87,7 @@ pub mod text_models_inputs_processor {
     use std::{any::Any, collections::HashMap, fmt::Debug, sync::Arc};
 
     use anyhow::Result;
-    use candle_core::{Device, Tensor, WithDType};
+    use inference_tensor::{Device, Tensor, WithDType};
     use tokenizers::Tokenizer;
 
     use crate::{
@@ -858,9 +858,9 @@ pub mod text_models_inputs_processor {
         let staged_device_rows = staged_device_rows
             .iter()
             .map(|tokens| tokens.to_device(device)?.to_dtype(T::DTYPE))
-            .collect::<candle_core::Result<Vec<_>>>()?;
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
         #[cfg(feature = "cuda")]
-        if T::DTYPE == candle_core::DType::U32 && device.is_cuda() {
+        if T::DTYPE == inference_tensor::DType::U32 && device.is_cuda() {
             return crate::cuda::input_packing::pack_completion_input(&host, &staged_device_rows)
                 .map_err(anyhow::Error::msg);
         }
@@ -1068,7 +1068,7 @@ pub mod text_models_inputs_processor {
                     }
                     crate::speculative::SpeculativeTokens::Device(tokens) => Ok(tokens.clone()),
                 })
-                .collect::<candle_core::Result<Vec<_>>>()?
+                .collect::<inference_tensor::Result<Vec<_>>>()?
         } else {
             Vec::new()
         };

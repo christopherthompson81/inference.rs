@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::Linear;
+use inference_tensor::{Result, Tensor};
 
 use crate::layers;
 

@@ -1,5 +1,5 @@
-use candle_core::{Device, Result, Tensor};
 use image::RgbImage;
+use inference_tensor::{Device, Result, Tensor};
 use rayon::prelude::*;
 
 /// torch / cv2 bicubic coefficient (PIL and the `image` crate use -0.5).

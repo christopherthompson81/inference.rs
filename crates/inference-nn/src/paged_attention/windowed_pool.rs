@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
 use super::SUPPORTED_BLOCK_SIZE;
 
@@ -76,21 +76,23 @@ impl WindowedKvPoolConfig {
         head_dim: usize,
     ) -> Result<Self> {
         if live_sequence_capacity == 0 {
-            candle_core::bail!("windowed KV pool live sequence capacity must be nonzero");
+            inference_tensor::bail!("windowed KV pool live sequence capacity must be nonzero");
         }
         if layer_windows.is_empty() {
-            candle_core::bail!("windowed KV pool requires at least one layer");
+            inference_tensor::bail!("windowed KV pool requires at least one layer");
         }
         if max_query_len == 0 {
-            candle_core::bail!("windowed KV pool maximum query length must be nonzero");
+            inference_tensor::bail!("windowed KV pool maximum query length must be nonzero");
         }
         if !SUPPORTED_BLOCK_SIZE.contains(&page_size) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV pool page size must be in {SUPPORTED_BLOCK_SIZE:?}, got {page_size}"
             );
         }
         if num_kv_heads == 0 || head_dim == 0 {
-            candle_core::bail!("windowed KV pool head count and head dimension must be nonzero");
+            inference_tensor::bail!(
+                "windowed KV pool head count and head dimension must be nonzero"
+            );
         }
 
         let layer_windows = layer_windows
@@ -98,11 +100,15 @@ impl WindowedKvPoolConfig {
             .enumerate()
             .map(|(layer, window)| match window {
                 Some(0) => {
-                    candle_core::bail!("windowed KV pool layer {layer} has a zero attention window")
+                    inference_tensor::bail!(
+                        "windowed KV pool layer {layer} has a zero attention window"
+                    )
                 }
                 Some(window) => Ok(window),
                 None => {
-                    candle_core::bail!("windowed KV pool cannot store full-attention layer {layer}")
+                    inference_tensor::bail!(
+                        "windowed KV pool cannot store full-attention layer {layer}"
+                    )
                 }
             })
             .collect::<Result<Vec<_>>>()?;
@@ -111,36 +117,41 @@ impl WindowedKvPoolConfig {
             .checked_sub(1)
             .and_then(|value| value.checked_add(max_query_len))
             .and_then(|value| value.checked_add(page_size - 1))
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool token capacity overflow"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("windowed KV pool token capacity overflow")
+            })?;
         let pages_per_sequence = retained_tokens.div_ceil(page_size);
         let slot_capacity = live_sequence_capacity
             .checked_add(checkpoint_capacity)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool slot capacity overflow"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("windowed KV pool slot capacity overflow")
+            })?;
         let physical_blocks = slot_capacity
             .checked_mul(pages_per_sequence)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool block count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV pool block count overflow"))?;
         let total_slots = physical_blocks
             .checked_mul(page_size)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool slot count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV pool slot count overflow"))?;
         u32::try_from(physical_blocks).map_err(|_| {
-            candle_core::Error::msg("windowed KV pool block count exceeds u32::MAX")
+            inference_tensor::Error::msg("windowed KV pool block count exceeds u32::MAX")
         })?;
-        i64::try_from(total_slots)
-            .map_err(|_| candle_core::Error::msg("windowed KV pool slot count exceeds i64::MAX"))?;
+        i64::try_from(total_slots).map_err(|_| {
+            inference_tensor::Error::msg("windowed KV pool slot count exceeds i64::MAX")
+        })?;
         let elements_per_slot = layer_windows
             .len()
             .checked_mul(pages_per_sequence)
             .and_then(|value| value.checked_mul(num_kv_heads))
             .and_then(|value| value.checked_mul(page_size))
             .and_then(|value| value.checked_mul(head_dim))
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool tensor size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV pool tensor size overflow"))?;
         let bytes_per_slot = elements_per_slot
             .checked_mul(DType::BF16.size_in_bytes())
             .and_then(|value| value.checked_mul(KV_CACHE_TENSOR_COUNT))
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool byte size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV pool byte size overflow"))?;
         bytes_per_slot
             .checked_mul(slot_capacity)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool byte size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV pool byte size overflow"))?;
 
         Ok(Self {
             live_sequence_capacity,
@@ -266,11 +277,11 @@ impl WindowedKvCheckpointSlots {
 
     fn reserve(&mut self) -> Result<(usize, u64)> {
         let generation = self.next_generation;
-        let next_generation = generation
-            .checked_add(1)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV checkpoint generation overflow"))?;
+        let next_generation = generation.checked_add(1).ok_or_else(|| {
+            inference_tensor::Error::msg("windowed KV checkpoint generation overflow")
+        })?;
         let pool_slot = self.free_slots.pop().ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "windowed KV checkpoint capacity {} exhausted",
                 self.active_generations.len()
             ))
@@ -595,24 +606,24 @@ impl WindowedKvPool {
     ) -> Result<Self> {
         let expected_shape = config.cache_shape();
         if key_cache.dims() != expected_shape || value_cache.dims() != expected_shape {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV pool cache shape mismatch: expected {expected_shape:?}, got key={:?}, value={:?}",
                 key_cache.dims(),
                 value_cache.dims()
             );
         }
         if key_cache.dtype() != DType::BF16 || value_cache.dtype() != DType::BF16 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV pool caches must be BF16, got key={:?}, value={:?}",
                 key_cache.dtype(),
                 value_cache.dtype()
             );
         }
         if !key_cache.device().same_device(value_cache.device()) {
-            candle_core::bail!("windowed KV pool K/V caches must be on the same device");
+            inference_tensor::bail!("windowed KV pool K/V caches must be on the same device");
         }
         if !key_cache.is_contiguous() || !value_cache.is_contiguous() {
-            candle_core::bail!("windowed KV pool K/V caches must be contiguous");
+            inference_tensor::bail!("windowed KV pool K/V caches must be contiguous");
         }
 
         let free_slots = (0..config.live_sequence_capacity()).rev().collect();
@@ -681,7 +692,7 @@ impl WindowedKvPool {
     ) -> Result<WindowedKvSequenceState> {
         if let Some(state) = self.sequence(seq_id) {
             if state.next_committed_pos != next_committed_pos {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "windowed KV sequence {seq_id} is at position {}, expected {next_committed_pos}",
                     state.next_committed_pos
                 );
@@ -718,10 +729,10 @@ impl WindowedKvPool {
 
     pub fn snapshot_sequence(&mut self, seq_id: usize) -> Result<WindowedKvCheckpoint> {
         let state = self.sequences.get(&seq_id).copied().ok_or_else(|| {
-            candle_core::Error::msg(format!("windowed KV sequence {seq_id} is not acquired"))
+            inference_tensor::Error::msg(format!("windowed KV sequence {seq_id} is not acquired"))
         })?;
         if state.origin_pos < state.valid_start_pos {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV sequence {seq_id} is not query-ready and cannot be checkpointed"
             );
         }
@@ -758,10 +769,10 @@ impl WindowedKvPool {
         checkpoint: &WindowedKvCheckpoint,
     ) -> Result<WindowedKvSequenceState> {
         if self.sequences.contains_key(&seq_id) {
-            candle_core::bail!("windowed KV sequence {seq_id} is already acquired");
+            inference_tensor::bail!("windowed KV sequence {seq_id} is already acquired");
         }
         if !Arc::ptr_eq(&self.checkpoint_slots, &checkpoint.inner.slots) {
-            candle_core::bail!("windowed KV checkpoint belongs to a different pool");
+            inference_tensor::bail!("windowed KV checkpoint belongs to a different pool");
         }
         if !self
             .checkpoint_slots
@@ -769,7 +780,7 @@ impl WindowedKvPool {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .contains(checkpoint.inner.pool_slot, checkpoint.inner.generation)
         {
-            candle_core::bail!("windowed KV checkpoint is stale");
+            inference_tensor::bail!("windowed KV checkpoint is stale");
         }
 
         let (pool_slot, generation) = self.reserve_live_slot()?;
@@ -794,9 +805,9 @@ impl WindowedKvPool {
         let generation = self.next_generation;
         let next_generation = generation
             .checked_add(1)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV pool generation overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV pool generation overflow"))?;
         let pool_slot = self.free_slots.pop().ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "windowed KV pool capacity {} exhausted",
                 self.config.sequence_capacity()
             ))
@@ -829,7 +840,7 @@ impl WindowedKvPool {
 
     fn copy_pool_slot(&mut self, source_slot: usize, destination_slot: usize) -> Result<()> {
         if source_slot == destination_slot {
-            candle_core::bail!("windowed KV pool source and destination slots alias");
+            inference_tensor::bail!("windowed KV pool source and destination slots alias");
         }
 
         #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -875,7 +886,7 @@ impl WindowedKvPool {
 
     pub fn layer_cache(&self, layer: usize) -> Result<(Tensor, Tensor)> {
         if layer >= self.config.num_layers() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV pool layer index {layer} exceeds {} layers",
                 self.config.num_layers()
             );
@@ -889,15 +900,15 @@ impl WindowedKvPool {
         input_token_count: usize,
     ) -> Result<WindowedKvContextWrite> {
         if input_token_count == 0 {
-            candle_core::bail!("windowed KV context write must contain at least one token");
+            inference_tensor::bail!("windowed KV context write must contain at least one token");
         }
         let state = self.sequences.get(&seq_id).ok_or_else(|| {
-            candle_core::Error::msg(format!("windowed KV sequence {seq_id} is not acquired"))
+            inference_tensor::Error::msg(format!("windowed KV sequence {seq_id} is not acquired"))
         })?;
         let next_committed_pos = state
             .next_committed_pos
             .checked_add(input_token_count)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV context position overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV context position overflow"))?;
         let origin_pos = self.config.origin_for(next_committed_pos);
         let retained_start = state.next_committed_pos.max(origin_pos);
         let retained_input_offset = retained_start - state.next_committed_pos;
@@ -919,7 +930,7 @@ impl WindowedKvPool {
 
     pub fn commit_context(&mut self, write: &WindowedKvContextWrite) -> Result<()> {
         let state = self.sequences.get_mut(&write.seq_id).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "windowed KV sequence {} was released before context commit",
                 write.seq_id
             ))
@@ -928,7 +939,7 @@ impl WindowedKvPool {
             || state.generation != write.generation
             || state.next_committed_pos != write.expected_next_committed_pos
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV context write for sequence {} is stale",
                 write.seq_id
             );
@@ -964,7 +975,7 @@ impl WindowedKvPool {
     ) -> Result<WindowedKvBatch> {
         let mut rows = self.scratch_rows(queries)?;
         if batch_bucket < rows.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV graph bucket {batch_bucket} is smaller than batch {}",
                 rows.len()
             );
@@ -985,13 +996,13 @@ impl WindowedKvPool {
 
     fn scratch_rows(&self, queries: &[WindowedKvQuery]) -> Result<Vec<WindowedKvBatchRow>> {
         if queries.is_empty() {
-            candle_core::bail!("windowed KV scratch batch must contain at least one sequence");
+            inference_tensor::bail!("windowed KV scratch batch must contain at least one sequence");
         }
         let mut seen = HashSet::with_capacity(queries.len());
         let mut rows = Vec::with_capacity(queries.len());
         for query in queries {
             if !seen.insert(query.seq_id) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "windowed KV scratch batch contains sequence {} more than once",
                     query.seq_id
                 );
@@ -1010,7 +1021,9 @@ impl WindowedKvPool {
             .iter()
             .any(|row| row.block_table.len() > block_table_width)
         {
-            candle_core::bail!("windowed KV block table exceeds fixed width {block_table_width}");
+            inference_tensor::bail!(
+                "windowed KV block table exceeds fixed width {block_table_width}"
+            );
         }
         let mut block_tables = Vec::with_capacity(rows.len() * block_table_width);
         let mut slot_mapping = Vec::new();
@@ -1058,20 +1071,20 @@ impl WindowedKvPool {
 
     fn scratch_row(&self, query: WindowedKvQuery) -> Result<WindowedKvBatchRow> {
         if query.query_len == 0 || query.query_len > self.config.max_query_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV scratch query length must be in 1..={}, got {}",
                 self.config.max_query_len,
                 query.query_len
             );
         }
         let state = self.sequences.get(&query.seq_id).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "windowed KV sequence {} is not acquired",
                 query.seq_id
             ))
         })?;
         if state.origin_pos < state.valid_start_pos {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "windowed KV sequence {} is initialized from position {}, but its query context starts at {}",
                 query.seq_id,
                 state.valid_start_pos,
@@ -1081,21 +1094,21 @@ impl WindowedKvPool {
         let end_pos = state
             .next_committed_pos
             .checked_add(query.query_len)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV scratch position overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV scratch position overflow"))?;
         let first_page = state.origin_pos / self.config.page_size;
         let last_page = end_pos
             .checked_sub(1)
-            .ok_or_else(|| candle_core::Error::msg("windowed KV scratch range is empty"))?
+            .ok_or_else(|| inference_tensor::Error::msg("windowed KV scratch range is empty"))?
             / self.config.page_size;
         let block_table = (first_page..=last_page)
             .map(|logical_page| {
                 u32::try_from(self.config.physical_block(state.pool_slot, logical_page)).map_err(
-                    |_| candle_core::Error::msg("windowed KV block index exceeds u32::MAX"),
+                    |_| inference_tensor::Error::msg("windowed KV block index exceeds u32::MAX"),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
         if block_table.len() > self.config.pages_per_sequence {
-            candle_core::bail!("windowed KV scratch range exceeds its sequence page ring");
+            inference_tensor::bail!("windowed KV scratch range exceeds its sequence page ring");
         }
         let slot_mapping = (state.next_committed_pos..end_pos)
             .map(|pos| self.config.physical_slot(state.pool_slot, pos))
@@ -1123,11 +1136,11 @@ impl Drop for WindowedKvPool {
 fn push_cumulative_len(values: &mut Vec<u32>, len: usize, name: &str) -> Result<()> {
     let previous = values.last().copied().unwrap_or(0);
     let len = u32::try_from(len)
-        .map_err(|_| candle_core::Error::msg(format!("{name} exceeds u32::MAX")))?;
+        .map_err(|_| inference_tensor::Error::msg(format!("{name} exceeds u32::MAX")))?;
     values.push(
         previous
             .checked_add(len)
-            .ok_or_else(|| candle_core::Error::msg(format!("{name} overflow")))?,
+            .ok_or_else(|| inference_tensor::Error::msg(format!("{name} overflow")))?,
     );
     Ok(())
 }

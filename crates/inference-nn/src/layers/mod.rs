@@ -5,20 +5,20 @@ pub mod utils;
 
 use std::{f32::consts::PI, ops::Mul, str::FromStr, sync::Arc};
 
-use candle_core::{
-    Context, D, DType, Device, IndexOp, Result, Tensor,
-    quantized::{QMatMul, QTensor},
-};
-use candle_nn::{
-    BatchNorm, BatchNormConfig, Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, Embedding, GroupNorm,
-    LayerNorm, LayerNormConfig, Linear, Module,
-};
 use float8::F8E4M3;
 use half::{bf16, f16};
 use inference_quant::{
     ActivationQuantizationScheme, ActivationScaleLayout, ColumnParallelLayer, Convolution,
     QuantMethod, QuantMethodConfig, QuantizedActivation, QuantizedConfig, ReplicatedLayer,
     RowParallelLayer, ShardedVarBuilder, UnquantLinear, should_apply_immediate_isq,
+};
+use inference_tensor::nn::{
+    BatchNorm, BatchNormConfig, Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, Embedding, GroupNorm,
+    LayerNorm, LayerNormConfig, Linear, Module,
+};
+use inference_tensor::{
+    Context, D, DType, Device, IndexOp, Result, Tensor,
+    quantized::{QMatMul, QTensor},
 };
 use serde::{Deserialize, Serialize};
 
@@ -137,7 +137,7 @@ pub fn batch_norm<C: Into<BatchNormConfig>>(
 ) -> Result<BatchNorm> {
     let config = config.into();
     if config.eps < 0. {
-        candle_core::bail!("batch-norm eps cannot be negative {}", config.eps)
+        inference_tensor::bail!("batch-norm eps cannot be negative {}", config.eps)
     }
     let running_mean = vb.get(num_features, "running_mean")?;
     let running_var = vb.get(num_features, "running_var")?;
@@ -639,14 +639,14 @@ pub enum ScaledRopeType {
 }
 
 impl FromStr for ScaledRopeType {
-    type Err = candle_core::Error;
+    type Err = inference_tensor::Error;
     fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
         match s {
             "su" | "longrope" => Ok(Self::Su),
             "yarn" => Ok(Self::Yarn),
             "linear" => Ok(Self::Linear),
             "dynamic" => Ok(Self::Dynamic),
-            _ => Err(candle_core::Error::Msg(
+            _ => Err(inference_tensor::Error::Msg(
                 "Expected either `su` or `yarn` scaled RoPE type.".to_string(),
             )),
         }
@@ -695,7 +695,7 @@ impl PhiRotaryEmbedding {
         let dim = (cfg.head_dim as f64 * cfg.partial_rotary_factor.unwrap_or(1.)) as usize;
         let factor_len = dim / 2;
         if short_factor.elem_count() != factor_len || long_factor.elem_count() != factor_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LongRoPE factor lengths must both be {factor_len}, got {} and {}",
                 short_factor.elem_count(),
                 long_factor.elem_count()
@@ -750,7 +750,7 @@ impl PhiRotaryEmbedding {
                     (1.0 + scale.ln() / (cfg.original_max_position_embeddings as f64).ln()).sqrt()
                 }
                 ScaledRopeType::Yarn => 0.1 * scale.ln() + 1.0,
-                _ => candle_core::bail!("Expected either `su` or `yarn` RoPE"),
+                _ => inference_tensor::bail!("Expected either `su` or `yarn` RoPE"),
             }
         };
 
@@ -837,20 +837,20 @@ impl PhiRotaryEmbedding {
         let dim = (cfg.head_dim as f64 * cfg.partial_rotary_factor.unwrap_or(1.)) as usize;
 
         if !matches!(scaling_type, ScaledRopeType::Su) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Scaled Phi3 RoPE (non-classic scaled, with mscales) must have type `su`/`longrope`."
             );
         }
 
         if short_factor.len() != dim / 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Misaligned length {}, expected {} for `su`/`longrope` short rescale factors",
                 short_factor.len(),
                 dim / 2
             );
         }
         if long_factor.len() != dim / 2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Misaligned length {}, expected {} for `su`/`longrope` long rescale factors",
                 long_factor.len(),
                 dim / 2
@@ -925,7 +925,9 @@ impl PhiRotaryEmbedding {
                 );
             }
             (None, None) => {}
-            _ => candle_core::bail!("GGUF LongRoPE requires both short and long factor tensors"),
+            _ => {
+                inference_tensor::bail!("GGUF LongRoPE requires both short and long factor tensors")
+            }
         }
         match &cfg.rope_scaling {
             Some(PhiRopeScalingConfig::Classic {
@@ -1273,7 +1275,7 @@ impl Qwen3VLRotaryEmbedding {
         device: &Device,
     ) -> Result<Vec<(Tensor, usize)>> {
         if mrope_section.len() != 3 {
-            candle_core::bail!("Qwen3 MRoPE requires three sections");
+            inference_tensor::bail!("Qwen3 MRoPE requires three sections");
         }
         let half_dim = head_dim / 2;
         let mut interleave_indices = Vec::new();
@@ -1609,7 +1611,7 @@ impl DeepSeekV2RotaryEmbedding {
             Some(DeepSeekV2RopeScaling::LinearOrDynamic {
                 scaling_type: _,
                 factor: _,
-            }) => candle_core::bail!("linear and dynamic rope are not implemented yet!"),
+            }) => inference_tensor::bail!("linear and dynamic rope are not implemented yet!"),
             Some(DeepSeekV2RopeScaling::Yarn {
                 original_max_position_embeddings,
                 beta_fast,
@@ -1868,23 +1870,23 @@ pub fn yarn_inv_freq_and_attention_factor(
     device: &Device,
 ) -> Result<(Tensor, f32)> {
     if !cfg.base.is_finite() || cfg.base <= 0.0 {
-        candle_core::bail!("YaRN base must be finite and positive");
+        inference_tensor::bail!("YaRN base must be finite and positive");
     }
     if cfg.head_dim == 0 || !cfg.head_dim.is_multiple_of(2) {
-        candle_core::bail!("YaRN head dimension must be positive and even");
+        inference_tensor::bail!("YaRN head dimension must be positive and even");
     }
     if !cfg.factor.is_finite() || cfg.factor <= 0.0 {
-        candle_core::bail!("YaRN factor must be finite and positive");
+        inference_tensor::bail!("YaRN factor must be finite and positive");
     }
     if cfg.original_max_position_embeddings == 0 {
-        candle_core::bail!("YaRN original context length must be positive");
+        inference_tensor::bail!("YaRN original context length must be positive");
     }
     if !cfg.beta_fast.is_finite()
         || cfg.beta_fast <= 0.0
         || !cfg.beta_slow.is_finite()
         || cfg.beta_slow <= 0.0
     {
-        candle_core::bail!("YaRN beta values must be finite and positive");
+        inference_tensor::bail!("YaRN beta values must be finite and positive");
     }
 
     let freq_extra = (0..cfg.head_dim)
@@ -1915,7 +1917,7 @@ pub fn yarn_inv_freq_and_attention_factor(
             / DeepSeekV2RotaryEmbedding::yarn_get_mscale(cfg.factor, cfg.mscale_all_dim)
     });
     if !attention_factor.is_finite() || attention_factor <= 0.0 {
-        candle_core::bail!("YaRN attention factor must be finite and positive");
+        inference_tensor::bail!("YaRN attention factor must be finite and positive");
     }
     Ok((inv_freq, attention_factor))
 }
@@ -1981,7 +1983,7 @@ fn flatten_mrope_cache(
         [cache_rows, _] if *cache_rows == seq_len || *cache_rows == batch * seq_len => {
             Ok(cache.clone())
         }
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "MRoPE {name} shape {:?} is incompatible with q shape {:?}",
             cache.shape(),
             q.shape()
@@ -2468,39 +2470,43 @@ impl Module for Activation {
             Self::Relu2 => xs.relu()?.sqr(),
             Self::Relu6 => xs.clamp(0f32, 6f32),
             Self::Silu => xs.silu(),
-            Self::Sigmoid => candle_nn::ops::sigmoid(xs),
-            Self::HardSigmoid => candle_nn::ops::hard_sigmoid(xs),
-            Self::Swiglu => candle_nn::ops::swiglu(xs),
-            Self::Swish => xs * candle_nn::ops::sigmoid(xs)?,
-            Self::HardSwish => xs * candle_nn::ops::hard_sigmoid(xs)?,
+            Self::Sigmoid => inference_tensor::nn::ops::sigmoid(xs),
+            Self::HardSigmoid => inference_tensor::nn::ops::hard_sigmoid(xs),
+            Self::Swiglu => inference_tensor::nn::ops::swiglu(xs),
+            Self::Swish => xs * inference_tensor::nn::ops::sigmoid(xs)?,
+            Self::HardSwish => xs * inference_tensor::nn::ops::hard_sigmoid(xs)?,
             &Self::Elu(alpha) => xs.elu(alpha),
-            &Self::LeakyRelu(negative_slope) => candle_nn::ops::leaky_relu(xs, negative_slope),
+            &Self::LeakyRelu(negative_slope) => {
+                inference_tensor::nn::ops::leaky_relu(xs, negative_slope)
+            }
             Self::GeluPytorchTanh => xs.gelu(),
-            Self::QuickGelu => xs * candle_nn::ops::sigmoid(&(xs * 1.702f64)?),
+            Self::QuickGelu => xs * inference_tensor::nn::ops::sigmoid(&(xs * 1.702f64)?),
         }
     }
 }
 
-impl TryInto<candle_nn::Activation> for Activation {
-    type Error = candle_core::Error;
+impl TryInto<inference_tensor::nn::Activation> for Activation {
+    type Error = inference_tensor::Error;
 
-    fn try_into(self) -> Result<candle_nn::Activation> {
+    fn try_into(self) -> Result<inference_tensor::nn::Activation> {
         match self {
-            Self::Gelu => Ok(candle_nn::Activation::Gelu),
-            Self::Relu => Ok(candle_nn::Activation::Relu),
-            Self::Silu => Ok(candle_nn::Activation::Silu),
-            Self::NewGelu => Ok(candle_nn::Activation::NewGelu),
-            Self::Relu2 => Ok(candle_nn::Activation::Relu2),
-            Self::Relu6 => Ok(candle_nn::Activation::Relu6),
-            Self::Sigmoid => Ok(candle_nn::Activation::Sigmoid),
-            Self::HardSigmoid => Ok(candle_nn::Activation::HardSigmoid),
-            Self::Swiglu => Ok(candle_nn::Activation::Swiglu),
-            Self::Swish => Ok(candle_nn::Activation::Swish),
-            Self::HardSwish => Ok(candle_nn::Activation::HardSwish),
-            Self::Elu(x) => Ok(candle_nn::Activation::Elu(x)),
-            Self::LeakyRelu(x) => Ok(candle_nn::Activation::LeakyRelu(x)),
-            Self::GeluPytorchTanh => Ok(candle_nn::Activation::GeluPytorchTanh),
-            Self::QuickGelu => candle_core::bail!("No mapping to candle_nn for QuickGelu"),
+            Self::Gelu => Ok(inference_tensor::nn::Activation::Gelu),
+            Self::Relu => Ok(inference_tensor::nn::Activation::Relu),
+            Self::Silu => Ok(inference_tensor::nn::Activation::Silu),
+            Self::NewGelu => Ok(inference_tensor::nn::Activation::NewGelu),
+            Self::Relu2 => Ok(inference_tensor::nn::Activation::Relu2),
+            Self::Relu6 => Ok(inference_tensor::nn::Activation::Relu6),
+            Self::Sigmoid => Ok(inference_tensor::nn::Activation::Sigmoid),
+            Self::HardSigmoid => Ok(inference_tensor::nn::Activation::HardSigmoid),
+            Self::Swiglu => Ok(inference_tensor::nn::Activation::Swiglu),
+            Self::Swish => Ok(inference_tensor::nn::Activation::Swish),
+            Self::HardSwish => Ok(inference_tensor::nn::Activation::HardSwish),
+            Self::Elu(x) => Ok(inference_tensor::nn::Activation::Elu(x)),
+            Self::LeakyRelu(x) => Ok(inference_tensor::nn::Activation::LeakyRelu(x)),
+            Self::GeluPytorchTanh => Ok(inference_tensor::nn::Activation::GeluPytorchTanh),
+            Self::QuickGelu => {
+                inference_tensor::bail!("No mapping to inference_tensor::nn for QuickGelu")
+            }
         }
     }
 }
@@ -2631,7 +2637,7 @@ impl TensorInfExtend for Tensor {
             DType::F64 => Ok(sum.to_scalar::<f64>()? == 0.),
             DType::F8E4M3 => Ok(sum.to_scalar::<F8E4M3>()? == F8E4M3::ZERO),
             DType::F4 | DType::F6E3M2 | DType::F6E2M3 | DType::F8E8M0 | _ => {
-                candle_core::bail!("dtype {:?} is not supported with .any", self.dtype())
+                inference_tensor::bail!("dtype {:?} is not supported with .any", self.dtype())
             }
         }
     }
@@ -2650,7 +2656,7 @@ pub fn clamp_for_f16(xs: &Tensor) -> Result<Tensor> {
         DType::F64 => f64::MAX as f32 - 1000.,
         DType::F8E4M3 => F8E4M3::MAX.to_f32() - 1000.,
         DType::F4 | DType::F6E3M2 | DType::F6E2M3 | DType::F8E8M0 | _ => {
-            candle_core::bail!("dtype {:?} is not supported with clamp_for_f16", xs.dtype())
+            inference_tensor::bail!("dtype {:?} is not supported with clamp_for_f16", xs.dtype())
         }
     };
     if xs.is_inf()?.any()? {
@@ -2707,7 +2713,7 @@ impl GetFloatInfo for DType {
                 dtype: DType::F8E4M3,
             },
             other => {
-                candle_core::bail!("Expected a float type for `GetFloatInfo`, got {other:?}");
+                inference_tensor::bail!("Expected a float type for `GetFloatInfo`, got {other:?}");
             }
         };
         Ok(finfo)
@@ -3160,7 +3166,7 @@ mod tests {
         Activation, Qwen3VLRotaryEmbedding, YarnRopeConfig, contains_tensor_or_weight_source_with,
         use_legacy_tied_uqff_head, yarn_inv_freq_and_attention_factor,
     };
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
     use std::collections::HashSet;
 
     #[test]
@@ -3219,7 +3225,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen_mrope_yarn_factor_one_matches_default() -> candle_core::Result<()> {
+    fn qwen_mrope_yarn_factor_one_matches_default() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let sections = vec![1, 1, 2];
         let default = Qwen3VLRotaryEmbedding::new(10_000.0, 8, &device, sections.clone())?;
@@ -3263,7 +3269,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen_text_rope_matches_repeated_mrope() -> candle_core::Result<()> {
+    fn qwen_text_rope_matches_repeated_mrope() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let rope = Qwen3VLRotaryEmbedding::new_yarn(
             &YarnRopeConfig {
@@ -3309,7 +3315,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn qwen_cuda_text_rope_matches_repeated_mrope() -> candle_core::Result<()> {
+    fn qwen_cuda_text_rope_matches_repeated_mrope() -> inference_tensor::Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let rope = Qwen3VLRotaryEmbedding::new_yarn(
@@ -3371,7 +3377,7 @@ mod tests {
     }
 
     #[test]
-    fn yarn_uses_hf_default_attention_factor() -> candle_core::Result<()> {
+    fn yarn_uses_hf_default_attention_factor() -> inference_tensor::Result<()> {
         let (_, attention_factor) = yarn_inv_freq_and_attention_factor(
             &YarnRopeConfig {
                 base: 10_000.0,

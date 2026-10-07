@@ -12,12 +12,12 @@ use crate::{
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
 };
+use inference_nn::utils::progress::IterWithProgress;
+use inference_quant::{QuantMethod, ShardedVarBuilder};
 /// Mixtral Model
 /// https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
 /// https://mistral.ai/news/mixtral-of-experts/
-use candle_core::{DType, Device, Module, Result, Tensor};
-use inference_nn::utils::progress::IterWithProgress;
-use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use std::{collections::HashMap, sync::Arc};
 use tracing::info;
 
@@ -181,7 +181,7 @@ impl Attention {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
@@ -664,7 +664,9 @@ impl XLoraModel {
         )?;
         if xlora_config.is_some() && lm_head.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
         Ok(Self {
             embed_tokens,

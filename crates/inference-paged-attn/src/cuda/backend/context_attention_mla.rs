@@ -1,13 +1,13 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use super::mla::gather_mla_cache;
 
-/// Softmax over the last dimension (no candle-nn dependency).
+/// Softmax over the last dimension.
 fn softmax_last_dim(t: &Tensor) -> Result<Tensor> {
-    let max = t.max_keepdim(candle_core::D::Minus1)?;
+    let max = t.max_keepdim(inference_tensor::D::Minus1)?;
     let shifted = t.broadcast_sub(&max)?;
     let exp = shifted.exp()?;
-    let sum = exp.sum_keepdim(candle_core::D::Minus1)?;
+    let sum = exp.sum_keepdim(inference_tensor::D::Minus1)?;
     exp.broadcast_div(&sum)
 }
 
@@ -19,7 +19,7 @@ fn build_causal_mask(
     q_len: usize,
     total_kv: usize,
     ctx_len: usize,
-    device: &candle_core::Device,
+    device: &inference_tensor::Device,
 ) -> Result<Tensor> {
     let mut mask_data = vec![0.0f32; q_len * total_kv];
     let neg_inf = f32::NEG_INFINITY;
@@ -40,11 +40,11 @@ fn gather_cached_mla(
     kpe_cache: &Tensor,
     block_tables: &Tensor,
     ctx_lens: &[i32],
-    device: &candle_core::Device,
+    device: &inference_tensor::Device,
 ) -> Result<(Tensor, Tensor)> {
     let total_ctx: i32 = ctx_lens.iter().sum();
     if total_ctx == 0 {
-        candle_core::bail!("gather_cached_mla called with 0 total context tokens");
+        inference_tensor::bail!("gather_cached_mla called with 0 total context tokens");
     }
 
     if device.is_cuda() {
@@ -71,7 +71,7 @@ fn gather_cached_mla(
         let flat_kpe = kpe_cache.reshape((num_blocks * block_size, kpe_head_dim))?;
 
         // Read block tables to CPU
-        let bt_2d = block_tables.to_dtype(candle_core::DType::I64)?;
+        let bt_2d = block_tables.to_dtype(inference_tensor::DType::I64)?;
         let bt_data: Vec<Vec<i64>> = (0..ctx_lens.len())
             .map(|i| bt_2d.get(i).unwrap().to_vec1::<i64>().unwrap_or_default())
             .collect();
@@ -238,7 +238,7 @@ pub fn context_attention_fwd_mla(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device};
+    use inference_tensor::{DType, Device};
 
     #[test]
     fn test_context_attention_fwd_mla_no_context() {

@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::hqq::optimize::OptResults;
 
@@ -9,7 +9,7 @@ impl HqqLayer {
     pub fn quantize(input: &Tensor, device: &Device, cfg: HqqConfig) -> Result<Self> {
         let group_size: usize = cfg.group_size.into();
         if !input.elem_count().is_multiple_of(group_size) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "`group_size` should be divisible by the tensor number of elements, which are {}, got a group size of {group_size}.",
                 input.elem_count()
             );
@@ -89,11 +89,11 @@ impl HqqLayer {
 
 #[cfg(test)]
 mod test {
-    use candle_core::{Device, Result, Tensor};
+    use inference_tensor::{Device, Result, Tensor};
 
     #[test]
     fn test_quantize_hqq() -> Result<()> {
-        use candle_core::DType;
+        use inference_tensor::DType;
 
         use crate::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
 

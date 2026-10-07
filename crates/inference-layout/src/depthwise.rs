@@ -1,4 +1,4 @@
-use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
+use inference_tensor::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 /// `(b, c, h, w)` x `(c, 1, k, k)` depthwise conv plus per-channel bias, zero padded.
@@ -33,14 +33,14 @@ impl DepthwiseConv {
         let (b, c, h, w) = lx.shape().dims4()?;
         let (cw, one, k, k2) = lw.shape().dims4()?;
         if cw != c || one != 1 || k != k2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "depthwise weight {:?} does not match input {:?}",
                 lw.shape(),
                 lx.shape()
             );
         }
         if !lx.is_contiguous() || !lw.is_contiguous() {
-            candle_core::bail!("depthwise conv expects contiguous input and weight");
+            inference_tensor::bail!("depthwise conv expects contiguous input and weight");
         }
         let ho = (h + 2 * self.padding - k) / self.stride + 1;
         let wo = (w + 2 * self.padding - k) / self.stride + 1;
@@ -106,14 +106,14 @@ impl CustomOp3 for DepthwiseConv {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        sx: &candle_core::CudaStorage,
+        sx: &inference_tensor::CudaStorage,
         lx: &Layout,
-        sw: &candle_core::CudaStorage,
+        sw: &inference_tensor::CudaStorage,
         lw: &Layout,
-        sb: &candle_core::CudaStorage,
+        sb: &inference_tensor::CudaStorage,
         lb: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
-        use candle_core::cuda_backend::{
+    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
+        use inference_tensor::cuda_backend::{
             CudaStorageSlice, WrapErr,
             cudarc::driver::{LaunchConfig, PushKernelArg},
         };
@@ -143,7 +143,7 @@ impl CustomOp3 for DepthwiseConv {
         }
         unsafe { builder.launch(LaunchConfig::for_num_elems(n as u32)) }.w()?;
         Ok((
-            candle_core::CudaStorage {
+            inference_tensor::CudaStorage {
                 slice: CudaStorageSlice::F32(out),
                 device: dev.clone(),
             },

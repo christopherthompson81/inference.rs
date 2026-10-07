@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{Device, Result, Tensor};
 use image::DynamicImage;
+use inference_tensor::{Device, Result, Tensor};
 
 use super::preprocessor_config::PreProcessorConfig;
 

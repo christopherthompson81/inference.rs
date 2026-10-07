@@ -1,12 +1,12 @@
 //! Second pass of a split-K grouped GEMM: sums the f32 partial slices into the bf16 output.
 
-use candle_core::cuda::cudarc::driver::CudaSlice;
-use candle_core::{CudaDevice, Result};
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tile_kernel::TileKernel;
 use half::bf16;
+use inference_tensor::cuda::cudarc::driver::CudaSlice;
+use inference_tensor::{CudaDevice, Result};
 
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -95,13 +95,13 @@ pub(super) fn reduce_split_k(
         catch_cutile_panic("split-K reduce compile", || {
             launcher
                 .compile_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile split_k compile: {e:?}")))
+                .map_err(|e| inference_tensor::Error::Msg(format!("cutile split_k compile: {e:?}")))
         })?;
     } else {
         catch_cutile_panic("split-K reduce execute", || unsafe {
             launcher
                 .async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile split_k launch: {e:?}")))
+                .map_err(|e| inference_tensor::Error::Msg(format!("cutile split_k launch: {e:?}")))
         })?;
     }
     drop(out_guard);

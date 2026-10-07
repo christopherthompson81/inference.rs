@@ -2,12 +2,12 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::nn::Module;
+use inference_tensor::{DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -124,7 +124,7 @@ impl CausalSelfAttention {
         if let Some(rotary_emb) = &self.rotary_emb {
             let rope_positions = ctx
                 .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
             (q, k) = rotary_emb.forward(&q, &k, rope_positions)?;
         }
         let metadata = ctx.paged_layer(layer_idx);

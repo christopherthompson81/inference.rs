@@ -6,8 +6,8 @@ use std::{
 };
 
 use anyhow::Result;
-use candle_core::{DType, Device};
 use inference_quant::{QuantizedWeightSource, UqffReader};
+use inference_tensor::{DType, Device};
 use tracing::{info, warn};
 
 use crate::{

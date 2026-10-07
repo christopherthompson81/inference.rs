@@ -40,7 +40,7 @@ fn hub_file_fetcher() -> Result<RepoFileFetcher> {
             return hf::offline_cache_repo(model_id, revision)
                 .get(file)
                 .ok_or_else(|| {
-                    candle_core::Error::msg(hf::offline_missing_file_error(
+                    inference_tensor::Error::msg(hf::offline_missing_file_error(
                         model_id, file, revision,
                     ))
                 });
@@ -51,7 +51,7 @@ fn hub_file_fetcher() -> Result<RepoFileFetcher> {
             revision.to_string(),
         ))
         .get(file)
-        .map_err(candle_core::Error::msg)
+        .map_err(inference_tensor::Error::msg)
     }))
 }
 

@@ -2,8 +2,8 @@ use crate::utils::varbuilder_utils::{
     DeviceForLoadTensor, from_mmaped_safetensors, load_preload_adapters,
 };
 use anyhow::Result;
-use candle_core::{DType, quantized::ggml_file};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{DType, quantized::ggml_file};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
 use crate::{
@@ -23,7 +23,7 @@ pub struct FileGGML {
 
 #[derive(derive_more::From)]
 pub struct Device<'a> {
-    device: &'a candle_core::Device,
+    device: &'a inference_tensor::Device,
     pub mapper: Box<dyn DeviceMapper + Send + Sync>,
 }
 
@@ -42,7 +42,7 @@ impl<'a> Adapter<'a> {
     // NOTE: Due to reference usage persisting in returned struct, additional lifetime annotations were required.
     pub fn try_new<'b: 'a>(
         paths: &'b dyn ModelPaths,
-        device: &'b candle_core::Device,
+        device: &'b inference_tensor::Device,
         silent: bool,
         is_xlora: bool,
     ) -> Result<Self> {
@@ -62,7 +62,7 @@ impl<'a> Adapter<'a> {
         let ordering = xlora_order.as_ref().unwrap();
         let preload_adapters = load_preload_adapters(
             lora_preload_adapter_info,
-            candle_core::DType::F32,
+            inference_tensor::DType::F32,
             device,
             silent,
         )?;
@@ -83,7 +83,7 @@ impl<'a> Adapter<'a> {
                 .iter()
                 .map(|(_, x)| (*x).to_owned())
                 .collect::<Vec<_>>(),
-            Some(candle_core::DType::F32),
+            Some(inference_tensor::DType::F32),
             device,
             vec![None],
             silent,
@@ -168,7 +168,7 @@ pub use inference_nn::gguf::{FromAdapterGGML, FromAdapterGGUF, FromGGML};
 
 // NOTE: Below is a workaround to proxy params to the existing API methods `get_gguf()` / `get_gmml()` traits covered above.
 impl Config<ParamsGGML, NoAdapter> {
-    pub fn try_into_model<T: FromGGML>(self) -> Result<T, candle_core::Error> {
+    pub fn try_into_model<T: FromGGML>(self) -> Result<T, inference_tensor::Error> {
         // Destructure props:
         let ParamsGGML(FileGGML { ct, gqa, dtype }) = self.quant;
 
@@ -178,7 +178,7 @@ impl Config<ParamsGGML, NoAdapter> {
 }
 
 impl Config<ParamsGGML, Adapter<'_>> {
-    pub fn try_into_model<T: FromAdapterGGML>(self) -> Result<T, candle_core::Error> {
+    pub fn try_into_model<T: FromAdapterGGML>(self) -> Result<T, inference_tensor::Error> {
         // Destructure props:
         let ParamsGGML(FileGGML { ct, gqa, dtype }) = self.quant;
 
@@ -205,7 +205,7 @@ impl Config<ParamsGGML, Adapter<'_>> {
 }
 
 impl<R: std::io::Seek + std::io::Read> Config<ParamsGGUF<'_, R>, Adapter<'_>> {
-    pub fn try_into_model<T: FromAdapterGGUF>(self) -> Result<T, candle_core::Error> {
+    pub fn try_into_model<T: FromAdapterGGUF>(self) -> Result<T, inference_tensor::Error> {
         // Destructure props:
         let ParamsGGUF(ct, Device { device, mapper }, dtype) = self.quant;
 
@@ -239,7 +239,7 @@ use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLora
 
 #[cfg(feature = "models-llama")]
 impl TryFrom<ModelParams<'_, ParamsGGML>> for QLlama {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
 
     fn try_from(params: ModelParams<'_, ParamsGGML>) -> Result<Self, Self::Error> {
         let config = params.expect_quantized("`Config` should be GGML Quantized");
@@ -249,7 +249,7 @@ impl TryFrom<ModelParams<'_, ParamsGGML>> for QLlama {
 
 #[cfg(feature = "models-llama")]
 impl TryFrom<ModelParams<'_, ParamsGGML>> for XLoraQLlama {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
 
     fn try_from(params: ModelParams<'_, ParamsGGML>) -> Result<Self, Self::Error> {
         let config = params.expect_adapted("`Config` should be GGML Quantized with an Adapter");
@@ -262,7 +262,7 @@ macro_rules! adapted_gguf_model {
         impl<R: std::io::Seek + std::io::Read> TryFrom<ModelParams<'_, ParamsGGUF<'_, R>>>
             for $model
         {
-            type Error = candle_core::Error;
+            type Error = inference_tensor::Error;
 
             fn try_from(params: ModelParams<'_, ParamsGGUF<'_, R>>) -> Result<Self, Self::Error> {
                 let config =

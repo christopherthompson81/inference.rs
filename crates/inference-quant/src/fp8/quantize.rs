@@ -1,6 +1,6 @@
-use candle_core::{DType, Result, Tensor};
-use candle_nn::Linear;
 use float8::F8E4M3;
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Result, Tensor};
 
 use super::FP8Linear;
 
@@ -59,7 +59,7 @@ impl FP8Linear {
 #[cfg(test)]
 mod tests {
     #[cfg(not(feature = "metal"))]
-    use candle_core::{
+    use inference_tensor::{
         DType, Device, Result, Tensor,
         quantized::{GgmlDType, QTensor},
     };
@@ -108,7 +108,7 @@ mod tests {
             .collect::<Vec<_>>();
         let weight = Tensor::from_slice(&data, (5, 37), &Device::Cpu)?;
         let linear = FP8Linear::new(QuantMethodConfig::FP8 {
-            lin: candle_nn::Linear::new(weight, None),
+            lin: inference_tensor::nn::Linear::new(weight, None),
             dtype: DType::F8E4M3,
         })?;
         let ids = Tensor::new(&[[4u32, 1], [3, 1]], &Device::Cpu)?;
@@ -132,7 +132,7 @@ mod tests {
         let weight = Tensor::ones((2, 32), DType::F32, &Device::Cpu)?;
         let bias = Tensor::ones(2, DType::F32, &Device::Cpu)?;
         let source = Arc::new(FP8Linear::new(QuantMethodConfig::FP8 {
-            lin: candle_nn::Linear::new(weight, Some(bias)),
+            lin: inference_tensor::nn::Linear::new(weight, Some(bias)),
             dtype: DType::F8E4M3,
         })?) as Arc<dyn QuantMethod>;
         let guard = QuantizeOntoGuard::new();
@@ -241,7 +241,7 @@ mod tests {
 
 #[cfg(all(test, feature = "metal"))]
 mod metal_tests {
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use crate::{QuantMethod, QuantMethodConfig, fp8::FP8Linear};
 
@@ -253,7 +253,7 @@ mod metal_tests {
             .collect::<Vec<_>>();
         let weight = Tensor::from_slice(&data, (5, 37), &device)?;
         let linear = FP8Linear::new(QuantMethodConfig::FP8 {
-            lin: candle_nn::Linear::new(weight, None),
+            lin: inference_tensor::nn::Linear::new(weight, None),
             dtype: DType::F8E4M3,
         })?;
         let ids = Tensor::new(&[[4u32, 1], [3, 1]], &device)?;

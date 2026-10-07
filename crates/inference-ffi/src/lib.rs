@@ -6,7 +6,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use candle_core::Device;
+use inference_tensor::Device;
 
 pub mod callbacks;
 pub mod engine;

@@ -3,7 +3,7 @@
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{Device, DeviceLocation, Tensor, WithDType};
+use inference_tensor::{Device, DeviceLocation, Tensor, WithDType};
 
 use crate::{
     flashinfer::{
@@ -92,7 +92,7 @@ pub fn decode_metadata_tensor(
     tensor: &Tensor,
     device: &Device,
     stage_on_host: bool,
-) -> candle_core::Result<Tensor> {
+) -> inference_tensor::Result<Tensor> {
     if stage_on_host {
         Ok(tensor.clone())
     } else {
@@ -173,7 +173,7 @@ impl PagedAttentionInputMetadata {
 
     /// Create a dummy input metadata, assuming that this will NOT be used for decoding.
     /// This is used for the case of imatrix generation.
-    pub fn dummy(dev: &Device) -> candle_core::Result<Self> {
+    pub fn dummy(dev: &Device) -> inference_tensor::Result<Self> {
         Ok(PagedAttentionInputMetadata {
             block_tables: None,
             context_lens: None,
@@ -553,7 +553,7 @@ impl DecodeViewDeviceMaps {
         host: &DecodeViewHostTensors,
         device: &Device,
         stage_on_host: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let location = device.location();
         if let Some(tensor) = host.block_tables.as_ref() {
             self.block_tables.insert(

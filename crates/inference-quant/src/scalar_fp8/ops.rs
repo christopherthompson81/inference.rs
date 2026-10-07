@@ -1,5 +1,5 @@
-use candle_core::{CpuStorage, CustomOp1, DType, Result, Tensor};
 use float8::F8E4M3;
+use inference_tensor::{CpuStorage, CustomOp1, DType, Result, Tensor};
 
 struct Fp8ToDtype {
     target_dtype: DType,
@@ -12,14 +12,14 @@ impl CustomOp1 for Fp8ToDtype {
 
     fn cpu_fwd(
         &self,
-        input_s: &candle_core::CpuStorage,
-        input_l: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
+        input_s: &inference_tensor::CpuStorage,
+        input_l: &inference_tensor::Layout,
+    ) -> inference_tensor::Result<(inference_tensor::CpuStorage, inference_tensor::Shape)> {
         let CpuStorage::F8E4M3(input) = input_s else {
-            candle_core::bail!("Expected F8E4M3 input!");
+            inference_tensor::bail!("Expected F8E4M3 input!");
         };
         if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
+            inference_tensor::bail!("Expected input to have start offset 0, continuous");
         }
 
         let output = match self.target_dtype {
@@ -44,7 +44,9 @@ impl CustomOp1 for Fp8ToDtype {
                 }
                 CpuStorage::BF16(output)
             }
-            other => candle_core::bail!("Unsupported target dtype for FP8 conversion: {other:?}"),
+            other => {
+                inference_tensor::bail!("Unsupported target dtype for FP8 conversion: {other:?}")
+            }
         };
 
         Ok((output, input_l.shape().clone()))
@@ -53,13 +55,13 @@ impl CustomOp1 for Fp8ToDtype {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        input_s: &candle_core::MetalStorage,
-        input_l: &candle_core::Layout,
-    ) -> Result<(candle_core::MetalStorage, candle_core::Shape)> {
-        use candle_core::backend::BackendStorage;
+        input_s: &inference_tensor::MetalStorage,
+        input_l: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::MetalStorage, inference_tensor::Shape)> {
+        use inference_tensor::backend::BackendStorage;
 
         if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
+            inference_tensor::bail!("Expected input to have start offset 0, continuous");
         }
 
         let device = input_s.device();
@@ -80,10 +82,14 @@ impl CustomOp1 for Fp8ToDtype {
             &output,
             num_elements,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage =
-            candle_core::MetalStorage::new(output, device.clone(), num_elements, self.target_dtype);
+        let newstorage = inference_tensor::MetalStorage::new(
+            output,
+            device.clone(),
+            num_elements,
+            self.target_dtype,
+        );
         Ok((newstorage, out_shape))
     }
 }
@@ -99,11 +105,11 @@ impl CustomOp1 for DtypeToFp8 {
 
     fn cpu_fwd(
         &self,
-        input_s: &candle_core::CpuStorage,
-        input_l: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
+        input_s: &inference_tensor::CpuStorage,
+        input_l: &inference_tensor::Layout,
+    ) -> inference_tensor::Result<(inference_tensor::CpuStorage, inference_tensor::Shape)> {
         if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
+            inference_tensor::bail!("Expected input to have start offset 0, continuous");
         }
 
         let output = match (self.source_dtype, input_s) {
@@ -133,7 +139,7 @@ impl CustomOp1 for DtypeToFp8 {
                 }
                 CpuStorage::F8E4M3(output)
             }
-            _ => candle_core::bail!("Mismatched source dtype and storage type"),
+            _ => inference_tensor::bail!("Mismatched source dtype and storage type"),
         };
 
         Ok((output, input_l.shape().clone()))
@@ -142,13 +148,13 @@ impl CustomOp1 for DtypeToFp8 {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        input_s: &candle_core::MetalStorage,
-        input_l: &candle_core::Layout,
-    ) -> Result<(candle_core::MetalStorage, candle_core::Shape)> {
-        use candle_core::backend::BackendStorage;
+        input_s: &inference_tensor::MetalStorage,
+        input_l: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::MetalStorage, inference_tensor::Shape)> {
+        use inference_tensor::backend::BackendStorage;
 
         if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
+            inference_tensor::bail!("Expected input to have start offset 0, continuous");
         }
 
         let device = input_s.device();
@@ -169,10 +175,14 @@ impl CustomOp1 for DtypeToFp8 {
             &output,
             num_elements,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage =
-            candle_core::MetalStorage::new(output, device.clone(), num_elements, DType::F8E4M3);
+        let newstorage = inference_tensor::MetalStorage::new(
+            output,
+            device.clone(),
+            num_elements,
+            DType::F8E4M3,
+        );
         Ok((newstorage, out_shape))
     }
 }
@@ -180,7 +190,7 @@ impl CustomOp1 for DtypeToFp8 {
 /// Convert an FP8 tensor to another dtype.
 pub(crate) fn fp8_to_dtype(input: &Tensor, target_dtype: DType) -> Result<Tensor> {
     if input.dtype() != DType::F8E4M3 {
-        candle_core::bail!("Input tensor must be F8E4M3, got {:?}", input.dtype());
+        inference_tensor::bail!("Input tensor must be F8E4M3, got {:?}", input.dtype());
     }
     // candle's CUDA cast is the CUDA conversion; the op below covers CPU and Metal
     if input.device().is_cuda() {
@@ -193,7 +203,7 @@ pub(crate) fn fp8_to_dtype(input: &Tensor, target_dtype: DType) -> Result<Tensor
 pub(crate) fn dtype_to_fp8(input: &Tensor) -> Result<Tensor> {
     let source_dtype = input.dtype();
     if !matches!(source_dtype, DType::F32 | DType::F16 | DType::BF16) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Input tensor must be F32, F16, or BF16, got {:?}",
             source_dtype
         );
@@ -206,8 +216,8 @@ pub(crate) fn dtype_to_fp8(input: &Tensor) -> Result<Tensor> {
 
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
-    use candle_core::{DType, Device, IndexOp, Result, Tensor};
     use float8::F8E4M3;
+    use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
     fn bits(t: &Tensor) -> Result<Vec<Vec<u8>>> {
         let rows = t.to_device(&Device::Cpu)?.to_vec2::<F8E4M3>()?;

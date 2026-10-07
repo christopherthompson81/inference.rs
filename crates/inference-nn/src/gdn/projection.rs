@@ -1,9 +1,9 @@
 use super::config::GdnDims;
 use super::packed::PackedGdnLayout;
-use candle_core::{D, Result, Tensor};
 use inference_quant::{
     ActivationQuantizationScheme, ActivationScaleLayout, QuantMethod, QuantizedActivation,
 };
+use inference_tensor::{D, Result, Tensor};
 use std::{ops::Range, sync::Arc};
 
 const RECURRENT_IDENTITY_GATE: f32 = f32::NEG_INFINITY;
@@ -130,7 +130,7 @@ impl GdnInputProjection {
                 let (mixed_qkv, mixed_z) = if let Some(merged_qkv_z) = merged_qkv_z {
                     let [mixed_qkv, mixed_z]: [Tensor; 2] =
                         merged_qkv_z.forward(x)?.try_into().map_err(|_| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "packed GDN QKV/Z returned the wrong output count",
                             )
                         })?;
@@ -141,7 +141,7 @@ impl GdnInputProjection {
                 let (mixed_b, mixed_a) = if let Some(merged_b_a) = merged_b_a {
                     let [mixed_b, mixed_a]: [Tensor; 2] =
                         merged_b_a.forward(x)?.try_into().map_err(|_| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "packed GDN B/A returned the wrong output count",
                             )
                         })?;
@@ -162,7 +162,7 @@ impl GdnInputProjection {
                 let (mixed_qkv, mixed_z) = if let Some(merged_qkv_z) = merged_qkv_z {
                     let [mixed_qkv, mixed_z]: [Tensor; 2] =
                         merged_qkv_z.forward(x)?.try_into().map_err(|_| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "packed GDN QKV/Z returned the wrong output count",
                             )
                         })?;
@@ -211,12 +211,14 @@ impl GdnInputProjection {
                     .forward_quantized(activation)?
                     .try_into()
                     .map_err(|_| {
-                        candle_core::Error::msg("packed GDN QKV/Z returned the wrong output count")
+                        inference_tensor::Error::msg(
+                            "packed GDN QKV/Z returned the wrong output count",
+                        )
                     })?;
                 let (mixed_b, mixed_a) = if let Some(merged_b_a) = merged_b_a {
                     let [mixed_b, mixed_a]: [Tensor; 2] =
                         merged_b_a.forward(x)?.try_into().map_err(|_| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "packed GDN B/A returned the wrong output count",
                             )
                         })?;
@@ -239,7 +241,9 @@ impl GdnInputProjection {
                     .forward_quantized(activation)?
                     .try_into()
                     .map_err(|_| {
-                        candle_core::Error::msg("packed GDN QKV/Z returned the wrong output count")
+                        inference_tensor::Error::msg(
+                            "packed GDN QKV/Z returned the wrong output count",
+                        )
                     })?;
                 GdnProjection::from_split_grouped_ba(
                     mixed_qkv,
@@ -267,7 +271,9 @@ fn shared_qkv_z(
     )? {
         Some(outputs) => {
             let [qkv, z]: [Tensor; 2] = outputs.try_into().map_err(|_| {
-                candle_core::Error::msg("shared GDN projection returned the wrong output count")
+                inference_tensor::Error::msg(
+                    "shared GDN projection returned the wrong output count",
+                )
             })?;
             Ok((qkv, z))
         }
@@ -483,10 +489,10 @@ impl GdnCoreProjection {
 
 fn gather_token_ranges(source: &Tensor, ranges: &[Range<usize>]) -> Result<Tensor> {
     let Some(first) = ranges.first() else {
-        candle_core::bail!("packed GDN projection requires at least one token range");
+        inference_tensor::bail!("packed GDN projection requires at least one token range");
     };
     if first.is_empty() || ranges.iter().any(|range| range.len() != first.len()) {
-        candle_core::bail!("packed GDN projection ranges must have one shared nonzero length");
+        inference_tensor::bail!("packed GDN projection ranges must have one shared nonzero length");
     }
     if ranges.len() == 1 {
         return source.narrow(1, first.start, first.len());
@@ -506,13 +512,13 @@ fn pad_token_ranges(
 ) -> Result<Tensor> {
     let source_dims = source.dims();
     if source_dims.len() < 2 || source_dims[0] != 1 || ranges.is_empty() {
-        candle_core::bail!("packed GDN projection has invalid token dimensions");
+        inference_tensor::bail!("packed GDN projection has invalid token dimensions");
     }
     if ranges
         .iter()
         .any(|range| range.is_empty() || range.end > source_dims[1] || range.len() > padded_len)
     {
-        candle_core::bail!("packed GDN projection has an invalid padded token range");
+        inference_tensor::bail!("packed GDN projection has an invalid padded token range");
     }
 
     let max_padding = ranges
@@ -568,7 +574,7 @@ fn pad_packed_tokens(
         || layout.batch_size() == 0
         || padded_len < layout.max_seq_len()
     {
-        candle_core::bail!("packed GDN projection has invalid token dimensions");
+        inference_tensor::bail!("packed GDN projection has invalid token dimensions");
     }
     if let Some(cu_seqlens) = layout.cu_seqlens(source.device())? {
         let padding_value = match padding {
@@ -596,7 +602,7 @@ fn pad_packed_tokens(
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::*;
     use crate::gdn::config::GdnVHeadLayout;

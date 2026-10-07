@@ -13,8 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-candle-core.workspace = true
-candle-nn.workspace = true
+inference-tensor.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 rand.workspace = true
@@ -23,5 +22,5 @@ serde.workspace = true
 tracing.workspace = true
 
 [features]
-cuda = ["candle-core/cuda", "candle-nn/cuda", "inference-quant/cuda", "inference-nn/cuda"]
-metal = ["candle-core/metal", "candle-nn/metal", "inference-quant/metal", "inference-nn/metal"]
+cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda"]
+metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]

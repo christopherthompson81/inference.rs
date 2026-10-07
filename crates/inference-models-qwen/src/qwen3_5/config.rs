@@ -64,7 +64,7 @@ impl RopeParameters {
     pub fn supported_max_position_embeddings(
         &self,
         declared_max_position_embeddings: usize,
-    ) -> candle_core::Result<usize> {
+    ) -> inference_tensor::Result<usize> {
         if self.rope_type != RopeType::Yarn {
             return Ok(declared_max_position_embeddings);
         }
@@ -74,33 +74,33 @@ impl RopeParameters {
             .expect("validated YaRN original context length") as f64
             * self.factor.expect("validated YaRN factor");
         if supported > usize::MAX as f64 {
-            candle_core::bail!("Qwen3.5 YaRN context length overflows usize");
+            inference_tensor::bail!("Qwen3.5 YaRN context length overflows usize");
         }
         Ok(supported.floor() as usize)
     }
 
-    pub fn validate_scaling(&self, max_position_embeddings: usize) -> candle_core::Result<()> {
+    pub fn validate_scaling(&self, max_position_embeddings: usize) -> inference_tensor::Result<()> {
         if self.rope_type != RopeType::Yarn {
             return Ok(());
         }
         if !self.truncate {
-            candle_core::bail!("Qwen3.5 YaRN truncate=false is not supported");
+            inference_tensor::bail!("Qwen3.5 YaRN truncate=false is not supported");
         }
         let factor = self
             .factor
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 YaRN requires a factor"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 YaRN requires a factor"))?;
         if !factor.is_finite() || factor < 1.0 {
-            candle_core::bail!("Qwen3.5 YaRN factor must be finite and at least 1");
+            inference_tensor::bail!("Qwen3.5 YaRN factor must be finite and at least 1");
         }
         let original = self.original_max_position_embeddings.ok_or_else(|| {
-            candle_core::Error::msg("Qwen3.5 YaRN requires original_max_position_embeddings")
+            inference_tensor::Error::msg("Qwen3.5 YaRN requires original_max_position_embeddings")
         })?;
         if original == 0 {
-            candle_core::bail!("Qwen3.5 YaRN original context length must be positive");
+            inference_tensor::bail!("Qwen3.5 YaRN original context length must be positive");
         }
         let supported = original as f64 * factor;
         if max_position_embeddings as f64 > supported {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 maximum position embeddings {max_position_embeddings} exceed the YaRN limit {supported:.0}"
             );
         }
@@ -109,10 +109,10 @@ impl RopeParameters {
             || !self.beta_slow.is_finite()
             || self.beta_slow <= 0.0
         {
-            candle_core::bail!("Qwen3.5 YaRN beta values must be finite and positive");
+            inference_tensor::bail!("Qwen3.5 YaRN beta values must be finite and positive");
         }
         if self.beta_fast < self.beta_slow {
-            candle_core::bail!("Qwen3.5 YaRN beta_fast must be at least beta_slow");
+            inference_tensor::bail!("Qwen3.5 YaRN beta_fast must be at least beta_slow");
         }
         if self
             .mscale
@@ -121,13 +121,13 @@ impl RopeParameters {
                 .mscale_all_dim
                 .is_some_and(|mscale| !mscale.is_finite() || mscale < 0.0)
         {
-            candle_core::bail!("Qwen3.5 YaRN mscale values must be finite and non-negative");
+            inference_tensor::bail!("Qwen3.5 YaRN mscale values must be finite and non-negative");
         }
         if self
             .attention_factor
             .is_some_and(|factor| !factor.is_finite() || factor <= 0.0)
         {
-            candle_core::bail!("Qwen3.5 YaRN attention factor must be finite and positive");
+            inference_tensor::bail!("Qwen3.5 YaRN attention factor must be finite and positive");
         }
         Ok(())
     }
@@ -136,7 +136,7 @@ impl RopeParameters {
         &self,
         max_position_embeddings: usize,
         head_dim: usize,
-    ) -> candle_core::Result<Option<YarnRopeConfig>> {
+    ) -> inference_tensor::Result<Option<YarnRopeConfig>> {
         self.validate_scaling(max_position_embeddings)?;
         if self.rope_type != RopeType::Yarn {
             return Ok(None);
@@ -168,20 +168,22 @@ impl RopeParameters {
     }
 }
 
-pub fn apply_max_model_len(config: &str, max_model_len: usize) -> candle_core::Result<String> {
+pub fn apply_max_model_len(config: &str, max_model_len: usize) -> inference_tensor::Result<String> {
     if max_model_len == 0 {
-        candle_core::bail!("Qwen3.5 max_model_len must be positive");
+        inference_tensor::bail!("Qwen3.5 max_model_len must be positive");
     }
-    let mut config: serde_json::Value =
-        serde_json::from_str(config).map_err(|err| candle_core::Error::msg(err.to_string()))?;
+    let mut config: serde_json::Value = serde_json::from_str(config)
+        .map_err(|err| inference_tensor::Error::msg(err.to_string()))?;
     let root = config
         .as_object_mut()
-        .ok_or_else(|| candle_core::Error::msg("Qwen3.5 config must be a JSON object"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 config must be a JSON object"))?;
     let text_config = if root.contains_key("text_config") {
         root.get_mut("text_config")
             .expect("checked text_config presence")
             .as_object_mut()
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 text_config must be a JSON object"))?
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("Qwen3.5 text_config must be a JSON object")
+            })?
     } else {
         root
     };
@@ -190,18 +192,20 @@ pub fn apply_max_model_len(config: &str, max_model_len: usize) -> candle_core::R
         .and_then(serde_json::Value::as_u64)
         .and_then(|value| usize::try_from(value).ok())
         .ok_or_else(|| {
-            candle_core::Error::msg("Qwen3.5 max_position_embeddings must be a positive integer")
+            inference_tensor::Error::msg(
+                "Qwen3.5 max_position_embeddings must be a positive integer",
+            )
         })?;
     let rope_parameters: RopeParameters = serde_json::from_value(
         text_config
             .get("rope_parameters")
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 rope_parameters are required"))?
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 rope_parameters are required"))?
             .clone(),
     )
-    .map_err(|err| candle_core::Error::msg(err.to_string()))?;
+    .map_err(|err| inference_tensor::Error::msg(err.to_string()))?;
     let supported = rope_parameters.supported_max_position_embeddings(declared_max)?;
     if max_model_len > supported {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 max_model_len {max_model_len} exceeds the model-supported context length {supported}"
         );
     }
@@ -209,7 +213,7 @@ pub fn apply_max_model_len(config: &str, max_model_len: usize) -> candle_core::R
         "max_position_embeddings".to_string(),
         serde_json::Value::from(max_model_len),
     );
-    serde_json::to_string(&config).map_err(|err| candle_core::Error::msg(err.to_string()))
+    serde_json::to_string(&config).map_err(|err| inference_tensor::Error::msg(err.to_string()))
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -268,26 +272,26 @@ pub struct TextConfig {
 }
 
 impl TextConfig {
-    pub fn validate(&self) -> candle_core::Result<()> {
+    pub fn validate(&self) -> inference_tensor::Result<()> {
         if self.max_position_embeddings == 0 {
-            candle_core::bail!("Qwen3.5 maximum position embeddings must be positive");
+            inference_tensor::bail!("Qwen3.5 maximum position embeddings must be positive");
         }
         if !self.rope_theta().is_finite() || self.rope_theta() <= 0.0 {
-            candle_core::bail!("Qwen3.5 rope theta must be finite and positive");
+            inference_tensor::bail!("Qwen3.5 rope theta must be finite and positive");
         }
         if !self.partial_rotary_factor().is_finite()
             || self.partial_rotary_factor() <= 0.0
             || self.partial_rotary_factor() > 1.0
         {
-            candle_core::bail!("Qwen3.5 partial rotary factor must be in (0, 1]");
+            inference_tensor::bail!("Qwen3.5 partial rotary factor must be in (0, 1]");
         }
         if self.num_hidden_layers == 0 {
-            candle_core::bail!("Qwen3.5 requires at least one hidden layer");
+            inference_tensor::bail!("Qwen3.5 requires at least one hidden layer");
         }
         if self.full_attention_interval == 0
             || self.full_attention_interval > self.num_hidden_layers
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 full_attention_interval {} is invalid for {} layers",
                 self.full_attention_interval,
                 self.num_hidden_layers
@@ -297,7 +301,7 @@ impl TextConfig {
             && (layer_types.len() != self.num_hidden_layers
                 || !layer_types.contains(&LayerType::FullAttention))
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 layer_types must list {} layers with at least one full_attention entry",
                 self.num_hidden_layers
             );
@@ -308,7 +312,7 @@ impl TextConfig {
                 .num_attention_heads
                 .is_multiple_of(self.num_key_value_heads)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 has incompatible attention head counts: {} query and {} KV",
                 self.num_attention_heads,
                 self.num_key_value_heads
@@ -320,7 +324,7 @@ impl TextConfig {
                 .linear_num_value_heads
                 .is_multiple_of(self.linear_num_key_heads)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 has incompatible GDN head counts: {} key and {} value",
                 self.linear_num_key_heads,
                 self.linear_num_value_heads
@@ -330,28 +334,28 @@ impl TextConfig {
             || self.linear_value_head_dim == 0
             || self.linear_conv_kernel_dim == 0
         {
-            candle_core::bail!("Qwen3.5 GDN dimensions must be non-zero");
+            inference_tensor::bail!("Qwen3.5 GDN dimensions must be non-zero");
         }
         let rot_dim = self.rot_dim();
         if rot_dim == 0 || rot_dim > self.head_dim || !rot_dim.is_multiple_of(2) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 rotary dimension {rot_dim} must be positive, even, and no larger than head_dim {}",
                 self.head_dim
             );
         }
         if self.mrope_section().len() != 3 || self.mrope_section().contains(&0) {
-            candle_core::bail!("Qwen3.5 MRoPE requires three non-zero sections");
+            inference_tensor::bail!("Qwen3.5 MRoPE requires three non-zero sections");
         }
         if !self.rope_parameters.mrope_interleaved {
-            candle_core::bail!("Qwen3.5 requires interleaved MRoPE");
+            inference_tensor::bail!("Qwen3.5 requires interleaved MRoPE");
         }
         let section_width = self
             .mrope_section()
             .iter()
             .try_fold(0usize, |sum, section| sum.checked_add(*section))
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 MRoPE section width overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 MRoPE section width overflow"))?;
         if section_width.checked_mul(2) != Some(rot_dim) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 MRoPE sections span {} dimensions, expected {rot_dim}",
                 section_width.saturating_mul(2)
             );
@@ -361,25 +365,25 @@ impl TextConfig {
         Ok(())
     }
 
-    fn validate_feed_forward(&self) -> candle_core::Result<()> {
+    fn validate_feed_forward(&self) -> inference_tensor::Result<()> {
         if !self.is_moe() {
             self.dense_intermediate_size()?;
             return Ok(());
         }
         if self.num_experts_per_tok == 0 || self.num_experts_per_tok > self.num_experts {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 has invalid MoE routing: {} of {} experts",
                 self.num_experts_per_tok,
                 self.num_experts
             );
         }
         if self.moe_intermediate_size == 0 || self.shared_expert_intermediate_size == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 MoE needs nonzero moe_intermediate_size and shared_expert_intermediate_size"
             );
         }
         if !self.mlp_only_layers.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen3.5 MoE `mlp_only_layers` is not implemented yet in inference.rs."
             );
         }
@@ -391,33 +395,33 @@ impl TextConfig {
         self.num_experts > 0
     }
 
-    pub fn dense_intermediate_size(&self) -> candle_core::Result<usize> {
+    pub fn dense_intermediate_size(&self) -> inference_tensor::Result<usize> {
         match self.intermediate_size {
             Some(size) if size > 0 => Ok(size),
-            _ => candle_core::bail!("Qwen3.5 dense MLP needs a positive intermediate_size"),
+            _ => inference_tensor::bail!("Qwen3.5 dense MLP needs a positive intermediate_size"),
         }
     }
 
     /// Rejects a checkpoint whose experts do not match the loader it was given.
-    pub fn check_experts(&self, moe: bool) -> candle_core::Result<()> {
+    pub fn check_experts(&self, moe: bool) -> inference_tensor::Result<()> {
         match (moe, self.is_moe()) {
-            (false, true) => candle_core::bail!(
+            (false, true) => inference_tensor::bail!(
                 "text_config names {} experts: load it as qwen3_5moe",
                 self.num_experts
             ),
             (true, false) => {
-                candle_core::bail!("Qwen3.5 MoE needs nonzero num_experts in text_config")
+                inference_tensor::bail!("Qwen3.5 MoE needs nonzero num_experts in text_config")
             }
             _ => Ok(()),
         }
     }
 
-    fn validate_rope_scaling(&self) -> candle_core::Result<()> {
+    fn validate_rope_scaling(&self) -> inference_tensor::Result<()> {
         self.rope_parameters
             .validate_scaling(self.max_position_embeddings)
     }
 
-    pub fn yarn_rope_config(&self) -> candle_core::Result<Option<YarnRopeConfig>> {
+    pub fn yarn_rope_config(&self) -> inference_tensor::Result<Option<YarnRopeConfig>> {
         self.rope_parameters
             .yarn_rope_config(self.max_position_embeddings, self.rot_dim())
     }

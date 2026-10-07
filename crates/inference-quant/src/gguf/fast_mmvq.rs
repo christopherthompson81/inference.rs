@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::ThreadId;
 
-use candle_core::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtrMut, SyncOnDrop};
-use candle_core::{
+use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtrMut, SyncOnDrop};
+use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, quantized::QTensor,
 };
 
@@ -96,7 +96,7 @@ impl WorkspaceGuard<'_> {
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct WorkspaceKey {
-    device: candle_core::cuda::DeviceId,
+    device: inference_tensor::cuda::DeviceId,
     stream: usize,
     thread: ThreadId,
     capacity: usize,
@@ -399,40 +399,42 @@ fn fused_qkv_launcher(input_ty: DType, dtype: GgufType) -> Option<FusedQkvLaunch
 pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
     let dtype = w.gguf_type();
     if !supports(dtype) {
-        candle_core::bail!("fast_mmvq: unsupported quant dtype {dtype:?}");
+        inference_tensor::bail!("fast_mmvq: unsupported quant dtype {dtype:?}");
     }
     let Device::Cuda(dev) = w.kernel_device() else {
-        candle_core::bail!("fast_mmvq: weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq: weight must live on CUDA");
     };
     if !xs.device().same_device(&w.kernel_device()) {
-        candle_core::bail!("fast_mmvq: input and weight are on different devices");
+        inference_tensor::bail!("fast_mmvq: input and weight are on different devices");
     }
     let (nrows, ncols) = w.kernel_shape().dims2()?;
 
     let Some((&k, batch_dims)) = xs.dims().split_last() else {
-        candle_core::bail!("fast_mmvq: input must have at least one dimension");
+        inference_tensor::bail!("fast_mmvq: input must have at least one dimension");
     };
     let b_size = batch_dims.iter().product::<usize>();
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq: shape mismatch: weight [{nrows}, {ncols}] vs input tail {k}"
         );
     }
     if b_size == 0 || b_size > MMVQ_MAX_BATCH {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq: batch size {b_size} out of supported range 1..={MMVQ_MAX_BATCH}"
         );
     }
     let input_ty = xs.dtype();
     if !matches!(input_ty, DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!("fast_mmvq: input dtype must be BF16, F16, or F32, got {input_ty:?}");
+        inference_tensor::bail!(
+            "fast_mmvq: input dtype must be BF16, F16, or F32, got {input_ty:?}"
+        );
     }
 
     let stream = dev.cuda_stream();
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
     let Storage::Cuda(xs_cuda) = &*xs_storage else {
-        candle_core::bail!("fast_mmvq: input must live on CUDA");
+        inference_tensor::bail!("fast_mmvq: input must live on CUDA");
     };
     let xs_offset = xs_layout.start_offset();
 
@@ -577,54 +579,56 @@ pub fn fused_glu(
 ) -> Result<Tensor> {
     let dtype = gate_w.gguf_type();
     if dtype != up_w.gguf_type() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_glu: gate/up dtype mismatch {:?} vs {:?}",
             dtype,
             up_w.gguf_type()
         );
     }
     let Some(launcher) = fused_glu_launcher(xs.dtype(), dtype) else {
-        candle_core::bail!("fast_mmvq fused_glu: unsupported dtype combination");
+        inference_tensor::bail!("fast_mmvq fused_glu: unsupported dtype combination");
     };
 
     let Device::Cuda(dev) = gate_w.device() else {
-        candle_core::bail!("fast_mmvq fused_glu: gate weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_glu: gate weight must live on CUDA");
     };
     let Device::Cuda(up_dev) = up_w.device() else {
-        candle_core::bail!("fast_mmvq fused_glu: up weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_glu: up weight must live on CUDA");
     };
     if dev.id() != up_dev.id() {
-        candle_core::bail!("fast_mmvq fused_glu: gate/up weights are on different CUDA devices");
+        inference_tensor::bail!(
+            "fast_mmvq fused_glu: gate/up weights are on different CUDA devices"
+        );
     }
     if !xs.device().same_device(&gate_w.device()) {
-        candle_core::bail!("fast_mmvq fused_glu: input and weights are on different devices");
+        inference_tensor::bail!("fast_mmvq fused_glu: input and weights are on different devices");
     }
 
     let (nrows, ncols) = gate_w.shape().dims2()?;
     let (up_nrows, up_ncols) = up_w.shape().dims2()?;
     if (nrows, ncols) != (up_nrows, up_ncols) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_glu: gate/up shape mismatch [{nrows}, {ncols}] vs [{up_nrows}, {up_ncols}]"
         );
     }
 
     let Some((&k, batch_dims)) = xs.dims().split_last() else {
-        candle_core::bail!("fast_mmvq fused_glu: input must have at least one dimension");
+        inference_tensor::bail!("fast_mmvq fused_glu: input must have at least one dimension");
     };
     let b_size = batch_dims.iter().product::<usize>();
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_glu: shape mismatch: weight [{nrows}, {ncols}] vs input tail {k}"
         );
     }
     if b_size == 0 || b_size > MMVQ_MAX_BATCH {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_glu: batch size {b_size} out of supported range 1..={MMVQ_MAX_BATCH}"
         );
     }
     let input_ty = xs.dtype();
     if !matches!(input_ty, DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_glu: input dtype must be BF16, F16, or F32, got {input_ty:?}"
         );
     }
@@ -632,7 +636,7 @@ pub fn fused_glu(
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
     let Storage::Cuda(xs_cuda) = &*xs_storage else {
-        candle_core::bail!("fast_mmvq fused_glu: input must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_glu: input must live on CUDA");
     };
     let xs_offset = xs_layout.start_offset();
 
@@ -787,7 +791,7 @@ pub fn fused_qkv(
 ) -> Result<(Tensor, Tensor, Tensor)> {
     let dtype = q_w.gguf_type();
     if dtype != k_w.gguf_type() || dtype != v_w.gguf_type() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_qkv: q/k/v dtype mismatch {:?}, {:?}, {:?}",
             dtype,
             k_w.gguf_type(),
@@ -795,51 +799,51 @@ pub fn fused_qkv(
         );
     }
     let Some(launcher) = fused_qkv_launcher(xs.dtype(), dtype) else {
-        candle_core::bail!("fast_mmvq fused_qkv: unsupported dtype combination");
+        inference_tensor::bail!("fast_mmvq fused_qkv: unsupported dtype combination");
     };
 
     let Device::Cuda(dev) = q_w.device() else {
-        candle_core::bail!("fast_mmvq fused_qkv: q weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_qkv: q weight must live on CUDA");
     };
     let Device::Cuda(k_dev) = k_w.device() else {
-        candle_core::bail!("fast_mmvq fused_qkv: k weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_qkv: k weight must live on CUDA");
     };
     let Device::Cuda(v_dev) = v_w.device() else {
-        candle_core::bail!("fast_mmvq fused_qkv: v weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_qkv: v weight must live on CUDA");
     };
     if dev.id() != k_dev.id() || dev.id() != v_dev.id() {
-        candle_core::bail!("fast_mmvq fused_qkv: q/k/v weights are on different CUDA devices");
+        inference_tensor::bail!("fast_mmvq fused_qkv: q/k/v weights are on different CUDA devices");
     }
     if !xs.device().same_device(&q_w.device()) {
-        candle_core::bail!("fast_mmvq fused_qkv: input and weights are on different devices");
+        inference_tensor::bail!("fast_mmvq fused_qkv: input and weights are on different devices");
     }
 
     let (q_nrows, ncols) = q_w.shape().dims2()?;
     let (k_nrows, k_ncols) = k_w.shape().dims2()?;
     let (v_nrows, v_ncols) = v_w.shape().dims2()?;
     if ncols != k_ncols || ncols != v_ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_qkv: q/k/v ncols mismatch {ncols}, {k_ncols}, {v_ncols}"
         );
     }
 
     let Some((&k, batch_dims)) = xs.dims().split_last() else {
-        candle_core::bail!("fast_mmvq fused_qkv: input must have at least one dimension");
+        inference_tensor::bail!("fast_mmvq fused_qkv: input must have at least one dimension");
     };
     let b_size = batch_dims.iter().product::<usize>();
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_qkv: shape mismatch: weight ncols {ncols} vs input tail {k}"
         );
     }
     if b_size == 0 || b_size > MMVQ_MAX_BATCH {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_qkv: batch size {b_size} out of supported range 1..={MMVQ_MAX_BATCH}"
         );
     }
     let input_ty = xs.dtype();
     if !matches!(input_ty, DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmvq fused_qkv: input dtype must be BF16, F16, or F32, got {input_ty:?}"
         );
     }
@@ -847,7 +851,7 @@ pub fn fused_qkv(
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
     let Storage::Cuda(xs_cuda) = &*xs_storage else {
-        candle_core::bail!("fast_mmvq fused_qkv: input must live on CUDA");
+        inference_tensor::bail!("fast_mmvq fused_qkv: input must live on CUDA");
     };
     let xs_offset = xs_layout.start_offset();
 
@@ -1133,10 +1137,10 @@ pub fn can_dequantize(ty: GgufType, dtype: DType) -> bool {
 pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tensor> {
     let ty = w.gguf_type();
     let Some(launcher) = dequantize_launcher(ty, dtype) else {
-        candle_core::bail!("no CUDA dequantizer for {ty:?} to {dtype:?}");
+        inference_tensor::bail!("no CUDA dequantizer for {ty:?} to {dtype:?}");
     };
     let Device::Cuda(dev) = w.kernel_device() else {
-        candle_core::bail!("fast_mmvq: weight must live on CUDA");
+        inference_tensor::bail!("fast_mmvq: weight must live on CUDA");
     };
     let shape = w.kernel_shape().clone();
     let elems = shape.elem_count();

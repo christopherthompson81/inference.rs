@@ -1,8 +1,8 @@
 //! fp8 e4m3 K/V against the reference over the values they dequantize to.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_fattn::{FattnOptions, KvScales, causal_mask, flash_attn, supported};
+use inference_tensor::{DType, Device, Tensor};
 
 use crate::parity::{Case, N_HEAD, case, cuda, reference};
 

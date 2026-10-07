@@ -8,7 +8,8 @@ use std::{
 };
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
-use candle_core::{
+use half::{bf16, f16};
+use inference_tensor::{
     Device, Error, Result,
     quantized::{
         GgmlDType, QStorage, QTensor,
@@ -19,7 +20,6 @@ use candle_core::{
         },
     },
 };
-use half::{bf16, f16};
 use memmap2::{Mmap, MmapOptions};
 
 const DEFAULT_ALIGNMENT: usize = 32;
@@ -255,7 +255,7 @@ impl GgufDType {
             14 => GgmlDType::Q6K,
             15 => GgmlDType::Q8K,
             30 => GgmlDType::BF16,
-            raw => candle_core::bail!("GGUF dtype {raw} is not supported by Candle"),
+            raw => inference_tensor::bail!("GGUF dtype {raw} is not supported by Candle"),
         };
         Ok(dtype)
     }
@@ -266,7 +266,7 @@ impl GgufDType {
         };
         let ne0 = shape.last().copied().unwrap_or(1);
         let Some(row_bytes) = self.row_size(ne0) else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF tensor `{name}` has {ne0} elements per row, not a whole row of dtype {} (block size {block_size})",
                 self.0
             );
@@ -441,7 +441,7 @@ impl GgufArchive {
     {
         let mut parsed = parse_shards(paths)?;
         if parsed.is_empty() {
-            candle_core::bail!("at least one GGUF file is required");
+            inference_tensor::bail!("at least one GGUF file is required");
         }
 
         let mut components = Vec::new();
@@ -459,10 +459,10 @@ impl GgufArchive {
                 1
             };
             if count == 0 {
-                candle_core::bail!("GGUF `{SPLIT_COUNT}` must be positive");
+                inference_tensor::bail!("GGUF `{SPLIT_COUNT}` must be positive");
             }
             if count > parsed.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "{} GGUF shards remain, but split metadata declares {count}",
                     parsed.len()
                 );
@@ -475,7 +475,7 @@ impl GgufArchive {
 
     fn from_parsed(mut parsed: Vec<ParsedShard>) -> Result<Self> {
         if parsed.is_empty() {
-            candle_core::bail!("at least one GGUF file is required");
+            inference_tensor::bail!("at least one GGUF file is required");
         }
 
         validate_and_order_splits(&mut parsed)?;
@@ -500,7 +500,7 @@ impl GgufArchive {
                         entry.insert(tensor);
                     }
                     Entry::Occupied(_) => {
-                        candle_core::bail!("GGUF tensor `{name}` is duplicated across shards")
+                        inference_tensor::bail!("GGUF tensor `{name}` is duplicated across shards")
                     }
                 }
             }
@@ -511,7 +511,7 @@ impl GgufArchive {
         if let Some(expected) = declared_total
             && tensors.len() != expected
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF split metadata declares {expected} tensors, but {} were cataloged",
                 tensors.len()
             );
@@ -553,7 +553,7 @@ impl GgufArchive {
                     }
                     Entry::Occupied(entry) => {
                         if !values_equal(entry.get(), value) {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "GGUF component metadata key `{}` conflicts with the main archive or another component",
                                 entry.key()
                             );
@@ -563,7 +563,7 @@ impl GgufArchive {
             }
             for name in component.tensors.keys() {
                 if !tensor_names.insert(name.clone()) {
-                    candle_core::bail!("GGUF tensor `{name}` is duplicated across components");
+                    inference_tensor::bail!("GGUF tensor `{name}` is duplicated across components");
                 }
             }
         }
@@ -639,7 +639,7 @@ impl GgufArchive {
         let data = self.tensor_data(name)?;
         let info = data.info();
         if self.shards[info.shard_index].endian != GgufEndian::Little {
-            candle_core::bail!("big-endian GGUF tensor loading is not supported");
+            inference_tensor::bail!("big-endian GGUF tensor loading is not supported");
         }
         qtensor_from_gguf_data(
             info.dtype.candle_dtype()?,
@@ -663,7 +663,7 @@ pub(super) fn qtensor_from_gguf_data(
     })?;
     let block_size = dtype.block_size();
     if !elem_count.is_multiple_of(block_size) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GGUF tensor has {elem_count} elements, not divisible by {dtype:?} block size {block_size}"
         );
     }
@@ -671,7 +671,7 @@ pub(super) fn qtensor_from_gguf_data(
         .checked_mul(dtype.type_size())
         .ok_or_else(|| Error::msg("GGUF tensor byte length overflow"))?;
     if data.len() != expected {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GGUF {dtype:?} tensor contains {} bytes, expected {expected}",
             data.len()
         );
@@ -733,17 +733,17 @@ impl ParsedShard {
             1 => GgufVersion::V1,
             2 => GgufVersion::V2,
             3 => GgufVersion::V3,
-            version => candle_core::bail!("unsupported GGUF version {version}"),
+            version => inference_tensor::bail!("unsupported GGUF version {version}"),
         };
         let tensor_count = reader.read_length(version)?;
         let metadata_count = reader.read_length(version)?;
         if tensor_count > MAX_ARRAY_ELEMENTS {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF tensor count {tensor_count} exceeds maximum {MAX_ARRAY_ELEMENTS}"
             );
         }
         if metadata_count > MAX_ARRAY_ELEMENTS {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF metadata count {metadata_count} exceeds maximum {MAX_ARRAY_ELEMENTS}"
             );
         }
@@ -755,7 +755,7 @@ impl ParsedShard {
             let value_type = ValueType::from_raw(reader.read_u32()?)?;
             let value = reader.read_value(value_type, version, 0)?;
             if metadata.insert(key.clone(), value).is_some() {
-                candle_core::bail!("GGUF metadata key `{key}` is duplicated");
+                inference_tensor::bail!("GGUF metadata key `{key}` is duplicated");
             }
         }
 
@@ -764,11 +764,11 @@ impl ParsedShard {
         for tensor_index in 0..tensor_count {
             let name = reader.read_string(version)?;
             if names.insert(name.clone(), tensor_index).is_some() {
-                candle_core::bail!("GGUF tensor `{name}` is duplicated");
+                inference_tensor::bail!("GGUF tensor `{name}` is duplicated");
             }
             let n_dims = reader.read_u32()?;
             if n_dims > MAX_TENSOR_DIMS {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF tensor `{name}` has {n_dims} dimensions, maximum is {MAX_TENSOR_DIMS}"
                 );
             }
@@ -811,7 +811,7 @@ impl ParsedShard {
     ) -> Result<(Mmap, GgufShardInfo, Vec<GgufTensorInfo>)> {
         let tensor_data_offset = align_up(self.header_end, alignment)?;
         if !self.tensors.is_empty() && tensor_data_offset > self.mmap.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF tensor data begins at byte {tensor_data_offset}, beyond file length {}",
                 self.mmap.len()
             );
@@ -821,13 +821,13 @@ impl ParsedShard {
         for (index, raw) in self.tensors.iter().enumerate() {
             let offset = usize::try_from(raw.offset).map_err(Error::wrap)?;
             if !offset.is_multiple_of(alignment) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF tensor `{}` offset {offset} is not aligned to {alignment} bytes",
                     raw.name
                 );
             }
             if index == 0 && offset != 0 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "first GGUF tensor `{}` starts at relative offset {offset}, expected 0",
                     raw.name
                 );
@@ -840,7 +840,7 @@ impl ParsedShard {
             if let Some(next_offset) = next_offset
                 && next_offset <= offset
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF tensor `{}` offset {offset} is not before the next tensor offset {next_offset}",
                     raw.name
                 );
@@ -856,7 +856,7 @@ impl ParsedShard {
                 None => self.mmap.len(),
             };
             if absolute_start > available_end || available_end > self.mmap.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF tensor `{}` range begins at {absolute_start} with storage ending at {available_end}, outside file length {}",
                     raw.name,
                     self.mmap.len()
@@ -873,7 +873,7 @@ impl ParsedShard {
                         ))
                     })?;
                     if exact_end > available_end {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "GGUF tensor `{}` needs {exact_len} bytes at byte {absolute_start}, but its storage ends at {available_end}",
                             raw.name
                         );
@@ -888,7 +888,7 @@ impl ParsedShard {
                     if let Some(next_offset) = next_offset
                         && next_offset != expected_next
                     {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "GGUF tensor `{}` is followed by offset {next_offset}, expected {expected_next}",
                             raw.name
                         );
@@ -900,7 +900,7 @@ impl ParsedShard {
                         ))
                     })?;
                     if storage_end > self.mmap.len() {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "padded storage for GGUF tensor `{}` ends at byte {storage_end}, beyond file length {}",
                             raw.name,
                             self.mmap.len()
@@ -1027,7 +1027,7 @@ impl<'a> SliceReader<'a> {
     fn read_string(&mut self, version: GgufVersion) -> Result<String> {
         let len = self.read_length(version)?;
         if len > MAX_STRING_LENGTH {
-            candle_core::bail!("GGUF string length {len} exceeds maximum {MAX_STRING_LENGTH}");
+            inference_tensor::bail!("GGUF string length {len} exceeds maximum {MAX_STRING_LENGTH}");
         }
         let len = usize::try_from(len).map_err(Error::wrap)?;
         let mut bytes = self.read_exact(len)?;
@@ -1044,7 +1044,7 @@ impl<'a> SliceReader<'a> {
         depth: usize,
     ) -> Result<Value> {
         if depth > MAX_VALUE_DEPTH {
-            candle_core::bail!("GGUF value nesting exceeds maximum depth {MAX_VALUE_DEPTH}");
+            inference_tensor::bail!("GGUF value nesting exceeds maximum depth {MAX_VALUE_DEPTH}");
         }
         let value = match value_type {
             ValueType::U8 => Value::U8(self.read_u8()?),
@@ -1060,14 +1060,14 @@ impl<'a> SliceReader<'a> {
             ValueType::Bool => match self.read_u8()? {
                 0 => Value::Bool(false),
                 1 => Value::Bool(true),
-                value => candle_core::bail!("invalid GGUF boolean value {value}"),
+                value => inference_tensor::bail!("invalid GGUF boolean value {value}"),
             },
             ValueType::String => Value::String(self.read_string(version)?),
             ValueType::Array => {
                 let element_type = ValueType::from_raw(self.read_u32()?)?;
                 let len = self.read_length(version)?;
                 if len > MAX_ARRAY_ELEMENTS {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "GGUF array length {len} exceeds maximum {MAX_ARRAY_ELEMENTS}"
                     );
                 }
@@ -1075,7 +1075,7 @@ impl<'a> SliceReader<'a> {
                     .checked_mul(element_type.min_disk_size(version) as u128)
                     .ok_or_else(|| Error::msg("GGUF array minimum size overflow"))?;
                 if minimum > self.remaining() as u128 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "GGUF array of {len} values needs at least {minimum} bytes, only {} remain",
                         self.remaining()
                     );
@@ -1124,7 +1124,7 @@ impl ValueType {
             10 => Self::U64,
             11 => Self::I64,
             12 => Self::F64,
-            raw => candle_core::bail!("unknown GGUF value type {raw}"),
+            raw => inference_tensor::bail!("unknown GGUF value type {raw}"),
         };
         Ok(value_type)
     }
@@ -1148,7 +1148,7 @@ fn parse_magic(data: &[u8]) -> Result<(GgufEndian, usize)> {
     match magic {
         b"GGUF" => Ok((GgufEndian::Little, 4)),
         b"FUGG" => Ok((GgufEndian::Big, 4)),
-        _ => candle_core::bail!("invalid GGUF magic {magic:02x?}"),
+        _ => inference_tensor::bail!("invalid GGUF magic {magic:02x?}"),
     }
 }
 
@@ -1169,7 +1169,7 @@ fn validate_header_minimum(
         .checked_add(tensor_minimum)
         .ok_or_else(|| Error::msg("GGUF header minimum size overflow"))?;
     if minimum > remaining as u128 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GGUF header declares {tensor_count} tensors and {metadata_count} metadata entries needing at least {minimum} bytes, only {remaining} remain"
         );
     }
@@ -1182,7 +1182,7 @@ fn validate_and_order_splits(shards: &mut [ParsedShard]) -> Result<()> {
     });
     if !has_split_metadata {
         if shards.len() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{} GGUF files were supplied without split metadata",
                 shards.len()
             );
@@ -1206,26 +1206,28 @@ fn validate_and_order_splits(shards: &mut [ParsedShard]) -> Result<()> {
             ))
         })?;
         if count == 0 {
-            candle_core::bail!("GGUF `{SPLIT_COUNT}` must be positive");
+            inference_tensor::bail!("GGUF `{SPLIT_COUNT}` must be positive");
         }
         if index >= count {
-            candle_core::bail!("GGUF split index {index} is outside split count {count}");
+            inference_tensor::bail!("GGUF split index {index} is outside split count {count}");
         }
         if let Some(expected) = expected_count {
             if count != expected {
-                candle_core::bail!("GGUF shards disagree on split count: {expected} and {count}");
+                inference_tensor::bail!(
+                    "GGUF shards disagree on split count: {expected} and {count}"
+                );
             }
         } else {
             expected_count = Some(count);
         }
         if indices.insert(index, shard.path.clone()).is_some() {
-            candle_core::bail!("GGUF split index {index} is duplicated");
+            inference_tensor::bail!("GGUF split index {index} is duplicated");
         }
     }
 
     let expected_count = expected_count.unwrap_or(1);
     if shards.len() != expected_count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} GGUF shards were supplied, but split metadata declares {expected_count}",
             shards.len()
         );
@@ -1234,7 +1236,7 @@ fn validate_and_order_splits(shards: &mut [ParsedShard]) -> Result<()> {
     for (expected, shard) in shards.iter().enumerate() {
         let actual = metadata_usize(&shard.metadata, SPLIT_NO)?.unwrap();
         if actual != expected {
-            candle_core::bail!("missing GGUF split index {expected}");
+            inference_tensor::bail!("missing GGUF split index {expected}");
         }
     }
     Ok(())
@@ -1244,13 +1246,13 @@ fn archive_alignment(shards: &[ParsedShard]) -> Result<usize> {
     let primary =
         metadata_usize(&shards[0].metadata, GENERAL_ALIGNMENT)?.unwrap_or(DEFAULT_ALIGNMENT);
     if primary == 0 || !primary.is_power_of_two() {
-        candle_core::bail!("GGUF alignment {primary} is not a nonzero power of two");
+        inference_tensor::bail!("GGUF alignment {primary} is not a nonzero power of two");
     }
     for shard in shards.iter().skip(1) {
         if let Some(alignment) = metadata_usize(&shard.metadata, GENERAL_ALIGNMENT)?
             && alignment != primary
         {
-            candle_core::bail!("GGUF shards disagree on alignment: {primary} and {alignment}");
+            inference_tensor::bail!("GGUF shards disagree on alignment: {primary} and {alignment}");
         }
     }
     Ok(primary)
@@ -1264,7 +1266,7 @@ fn declared_tensor_count(shards: &[ParsedShard]) -> Result<Option<usize>> {
         };
         if let Some(expected) = declared {
             if count != expected {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGUF shards disagree on declared tensor count: {expected} and {count}"
                 );
             }
@@ -1273,7 +1275,7 @@ fn declared_tensor_count(shards: &[ParsedShard]) -> Result<Option<usize>> {
         }
     }
     if shards.len() > 1 && declared.is_none() {
-        candle_core::bail!("split GGUF is missing `{SPLIT_TENSORS_COUNT}`");
+        inference_tensor::bail!("split GGUF is missing `{SPLIT_TENSORS_COUNT}`");
     }
     Ok(declared)
 }
@@ -1293,7 +1295,10 @@ fn merge_metadata(
             }
             Entry::Occupied(entry) => {
                 if !values_equal(entry.get(), &value) {
-                    candle_core::bail!("GGUF shards disagree on metadata key `{}`", entry.key());
+                    inference_tensor::bail!(
+                        "GGUF shards disagree on metadata key `{}`",
+                        entry.key()
+                    );
                 }
             }
         }
@@ -1330,12 +1335,12 @@ fn validate_component_type(component: &GgufArchive) -> Result<()> {
     match component.metadata_value(GENERAL_TYPE) {
         Some(Value::String(value)) if value == MMPROJ_TYPE => Ok(()),
         Some(Value::String(value)) => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF component `{GENERAL_TYPE}` must be `{MMPROJ_TYPE}`, got `{value}`"
             )
         }
-        Some(_) => candle_core::bail!("GGUF component `{GENERAL_TYPE}` must be a string"),
-        None => candle_core::bail!("GGUF component is missing `{GENERAL_TYPE}`"),
+        Some(_) => inference_tensor::bail!("GGUF component `{GENERAL_TYPE}` must be a string"),
+        None => inference_tensor::bail!("GGUF component is missing `{GENERAL_TYPE}`"),
     }
 }
 
@@ -1352,7 +1357,7 @@ fn metadata_usize(metadata: &HashMap<String, Value>, key: &str) -> Result<Option
         Value::I16(value) if *value >= 0 => *value as u64,
         Value::I32(value) if *value >= 0 => *value as u64,
         Value::I64(value) if *value >= 0 => *value as u64,
-        _ => candle_core::bail!("GGUF metadata `{key}` must be a nonnegative integer"),
+        _ => inference_tensor::bail!("GGUF metadata `{key}` must be a nonnegative integer"),
     };
     Ok(Some(usize::try_from(value).map_err(Error::wrap)?))
 }
@@ -1381,7 +1386,7 @@ mod tests {
     use std::{fs, io::Write, sync::Arc};
 
     use byteorder::{LittleEndian, WriteBytesExt};
-    use candle_core::quantized::GgmlDType;
+    use inference_tensor::quantized::GgmlDType;
     use tempfile::NamedTempFile;
 
     use super::*;

@@ -1,4 +1,4 @@
-use candle_core::{Device, Result};
+use inference_tensor::{Device, Result};
 use sysinfo::System;
 #[cfg(feature = "metal")]
 use tracing::warn;
@@ -102,8 +102,8 @@ impl MemoryUsage {
                         allocated: budget.saturating_sub(free),
                     })
                 } else {
-                    use candle_core::cuda::cudarc::driver::result;
-                    use candle_core::cuda_backend::WrapErr;
+                    use inference_tensor::cuda::cudarc::driver::result;
+                    use inference_tensor::cuda_backend::WrapErr;
 
                     dev.cuda_stream().context().bind_to_thread().w()?;
                     let (free, total) = result::mem_get_info().w()?;
@@ -112,7 +112,7 @@ impl MemoryUsage {
             }
             #[cfg(not(feature = "cuda"))]
             Device::Cuda(_) => {
-                candle_core::bail!("Cannot query memory for CUDA device")
+                inference_tensor::bail!("Cannot query memory for CUDA device")
             }
             #[cfg(feature = "metal")]
             Device::Metal(dev) => {
@@ -137,16 +137,16 @@ impl MemoryUsage {
             }
             #[cfg(not(feature = "metal"))]
             Device::Metal(_) => {
-                candle_core::bail!("Cannot query memory for Metal device")
+                inference_tensor::bail!("Cannot query memory for Metal device")
             }
         }
     }
 
     #[cfg(feature = "cuda")]
     pub fn query_cuda_allocator(&self, device: &Device) -> Result<Option<CudaAllocatorSnapshot>> {
-        use candle_core::cuda::cudarc::driver::result;
-        use candle_core::cuda_backend::WrapErr;
-        use candle_core::cuda_backend::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::result;
+        use inference_tensor::cuda_backend::WrapErr;
+        use inference_tensor::cuda_backend::cudarc::driver::sys;
 
         let Device::Cuda(device) = device else {
             return Ok(None);
@@ -203,8 +203,8 @@ impl MemoryUsage {
 
     #[cfg(feature = "cuda")]
     pub fn trim_cuda_memory_pool(&self, device: &Device, min_bytes: usize) -> Result<bool> {
-        use candle_core::cuda_backend::WrapErr;
-        use candle_core::cuda_backend::cudarc::driver::sys;
+        use inference_tensor::cuda_backend::WrapErr;
+        use inference_tensor::cuda_backend::cudarc::driver::sys;
 
         let Device::Cuda(device) = device else {
             return Ok(false);
@@ -236,17 +236,17 @@ impl MemoryUsage {
             .cuda_stream()
             .context()
             .synchronize()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         Ok(true)
     }
 }
 
 #[cfg(feature = "cuda")]
 fn cuda_memory_pool_attribute(
-    pool: candle_core::cuda_backend::cudarc::driver::sys::CUmemoryPool,
-    attribute: candle_core::cuda_backend::cudarc::driver::sys::CUmemPool_attribute,
+    pool: inference_tensor::cuda_backend::cudarc::driver::sys::CUmemoryPool,
+    attribute: inference_tensor::cuda_backend::cudarc::driver::sys::CUmemPool_attribute,
 ) -> Result<u64> {
-    use candle_core::cuda_backend::cudarc::driver::sys;
+    use inference_tensor::cuda_backend::cudarc::driver::sys;
 
     let mut value = 0u64;
     cuda_result(
@@ -264,9 +264,9 @@ fn cuda_memory_pool_attribute(
 
 #[cfg(feature = "cuda")]
 fn query_cuda_graph_memory(
-    device: candle_core::cuda_backend::cudarc::driver::sys::CUdevice,
+    device: inference_tensor::cuda_backend::cudarc::driver::sys::CUdevice,
 ) -> Result<Option<CudaGraphMemoryUsage>> {
-    use candle_core::cuda_backend::cudarc::driver::sys;
+    use inference_tensor::cuda_backend::cudarc::driver::sys;
 
     let Some(used) = cuda_graph_memory_attribute(
         device,
@@ -306,10 +306,10 @@ fn query_cuda_graph_memory(
 
 #[cfg(feature = "cuda")]
 fn cuda_graph_memory_attribute(
-    device: candle_core::cuda_backend::cudarc::driver::sys::CUdevice,
-    attribute: candle_core::cuda_backend::cudarc::driver::sys::CUgraphMem_attribute,
+    device: inference_tensor::cuda_backend::cudarc::driver::sys::CUdevice,
+    attribute: inference_tensor::cuda_backend::cudarc::driver::sys::CUgraphMem_attribute,
 ) -> Result<Option<usize>> {
-    use candle_core::cuda_backend::cudarc::driver::sys;
+    use inference_tensor::cuda_backend::cudarc::driver::sys;
 
     let mut value = 0usize;
     let result = unsafe {
@@ -324,7 +324,7 @@ fn cuda_graph_memory_attribute(
         sys::CUresult::CUDA_ERROR_NOT_SUPPORTED | sys::CUresult::CUDA_ERROR_INVALID_VALUE => {
             Ok(None)
         }
-        _ => Err(candle_core::Error::msg(format!(
+        _ => Err(inference_tensor::Error::msg(format!(
             "CUDA graph memory attribute lookup failed: {result:?}"
         ))),
     }
@@ -332,15 +332,15 @@ fn cuda_graph_memory_attribute(
 
 #[cfg(feature = "cuda")]
 fn cuda_result(
-    result: candle_core::cuda_backend::cudarc::driver::sys::CUresult,
+    result: inference_tensor::cuda_backend::cudarc::driver::sys::CUresult,
     context: &'static str,
 ) -> Result<()> {
-    use candle_core::cuda_backend::cudarc::driver::sys;
+    use inference_tensor::cuda_backend::cudarc::driver::sys;
 
     if result == sys::CUresult::CUDA_SUCCESS {
         Ok(())
     } else {
-        Err(candle_core::Error::msg(format!(
+        Err(inference_tensor::Error::msg(format!(
             "{context} failed: {result:?}"
         )))
     }
@@ -372,7 +372,7 @@ fn metal_sysctl_floor_bytes() -> Result<usize> {
         x if x <= 36 * 1024 => (system_ram_mb * 2) / 3,
         x if x > 36 * 1024 => (system_ram_mb * 3) / 4,
         x => {
-            return Err(candle_core::Error::Msg(format!(
+            return Err(inference_tensor::Error::Msg(format!(
                 "Invalid system ram mb value {x}."
             )));
         }

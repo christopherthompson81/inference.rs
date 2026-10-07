@@ -73,7 +73,7 @@ impl RepeatInterleaveOp for Tensor {
     fn repeat_interleave_flat(&self, repeats: Vec<u32>) -> Result<Tensor> {
         let xs = self.flatten_all()?;
         if repeats.len() != xs.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "repeats ({}) must match flattened self length ({})",
                 repeats.len(),
                 xs.dim(0)?

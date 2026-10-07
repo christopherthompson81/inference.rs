@@ -1,10 +1,10 @@
 #![allow(clippy::cast_possible_truncation)]
 
-use candle_core::{DType, Device, Result, Tensor};
 #[cfg(feature = "cuda")]
 use inference_quant::QuantizedActivation;
 #[cfg(any(feature = "cuda", test))]
 use inference_quant::{ActivationQuantizationScheme, ActivationScaleLayout};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 #[cfg(feature = "cuda")]
 use crate::kv_cache::GDN_PENDING_KEY_BANK_COUNT;
@@ -168,7 +168,7 @@ impl GdnPostOpOutput {
     fn into_tensor(self) -> Result<Tensor> {
         match self {
             Self::Tensor(output) => Ok(output),
-            Self::Quantized(_) => candle_core::bail!("expected a BF16 GDN test output"),
+            Self::Quantized(_) => inference_tensor::bail!("expected a BF16 GDN test output"),
         }
     }
 
@@ -176,7 +176,7 @@ impl GdnPostOpOutput {
     fn as_tensor(&self) -> Result<&Tensor> {
         match self {
             Self::Tensor(output) => Ok(output),
-            Self::Quantized(_) => candle_core::bail!("expected a BF16 GDN test output"),
+            Self::Quantized(_) => inference_tensor::bail!("expected a BF16 GDN test output"),
         }
     }
 }
@@ -369,7 +369,7 @@ fn prefill_kernel_override() -> Result<Option<GdnPrefillKernel>> {
         std::env::var(GDN_PREFILL_KERNEL_ENV).map_or(Ok(None), |value| parse_prefill_kernel(&value))
     }) {
         Ok(kernel) => Ok(*kernel),
-        Err(error) => Err(candle_core::Error::msg(error.clone())),
+        Err(error) => Err(inference_tensor::Error::msg(error.clone())),
     }
 }
 
@@ -510,7 +510,7 @@ fn decode_kernel_override() -> Result<Option<GdnDecodeKernel>> {
         std::env::var(GDN_DECODE_KERNEL_ENV).map_or(Ok(None), |value| parse_decode_kernel(&value))
     }) {
         Ok(kernel) => Ok(*kernel),
-        Err(error) => Err(candle_core::Error::msg(error.clone())),
+        Err(error) => Err(inference_tensor::Error::msg(error.clone())),
     }
 }
 
@@ -539,16 +539,15 @@ pub fn v_major_state_supported(
 
 #[cfg(feature = "cuda")]
 fn cuda_recurrent_state_ptr(tensor: &Tensor, name: &str) -> Result<(*mut core::ffi::c_void, i32)> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     let (storage, layout) = tensor.storage_and_layout();
     let offset = layout.start_offset();
     let (pointer, dtype) = match tensor.dtype() {
         DType::F16 => {
             let storage = match &*storage {
-                candle::Storage::Cuda(storage) => storage.as_cuda_slice::<half::f16>()?,
-                _ => candle::bail!("{name} must be a CUDA tensor"),
+                inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<half::f16>()?,
+                _ => inference_tensor::bail!("{name} must be a CUDA tensor"),
             };
             (
                 storage.slice(offset..).device_ptr(storage.stream()).0,
@@ -557,8 +556,10 @@ fn cuda_recurrent_state_ptr(tensor: &Tensor, name: &str) -> Result<(*mut core::f
         }
         DType::BF16 => {
             let storage = match &*storage {
-                candle::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
-                _ => candle::bail!("{name} must be a CUDA tensor"),
+                inference_tensor::Storage::Cuda(storage) => {
+                    storage.as_cuda_slice::<half::bf16>()?
+                }
+                _ => inference_tensor::bail!("{name} must be a CUDA tensor"),
             };
             (
                 storage.slice(offset..).device_ptr(storage.stream()).0,
@@ -567,34 +568,34 @@ fn cuda_recurrent_state_ptr(tensor: &Tensor, name: &str) -> Result<(*mut core::f
         }
         DType::F32 => {
             let storage = match &*storage {
-                candle::Storage::Cuda(storage) => storage.as_cuda_slice::<f32>()?,
-                _ => candle::bail!("{name} must be a CUDA tensor"),
+                inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<f32>()?,
+                _ => inference_tensor::bail!("{name} must be a CUDA tensor"),
             };
             (
                 storage.slice(offset..).device_ptr(storage.stream()).0,
                 GDN_STATE_DTYPE_F32,
             )
         }
-        dtype => candle::bail!("{name} has unsupported recurrent state dtype {dtype:?}"),
+        dtype => inference_tensor::bail!("{name} has unsupported recurrent state dtype {dtype:?}"),
     };
     Ok((pointer as *mut core::ffi::c_void, dtype))
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_read_ptr_with_guard<'a, T: candle_core::cuda_backend::CudaDType + 'a>(
-    storage: &'a candle_core::Storage,
-    layout: &candle_core::Layout,
-    stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+fn cuda_read_ptr_with_guard<'a, T: inference_tensor::cuda_backend::CudaDType + 'a>(
+    storage: &'a inference_tensor::Storage,
+    layout: &inference_tensor::Layout,
+    stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
     name: &str,
 ) -> Result<(
-    candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr,
-    candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+    inference_tensor::cuda_backend::cudarc::driver::sys::CUdeviceptr,
+    inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
 )> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     let slice = match storage {
-        candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
-        _ => candle_core::bail!("{name} must be CUDA"),
+        inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
+        _ => inference_tensor::bail!("{name} must be CUDA"),
     };
     let (base, guard) = slice.device_ptr(stream);
     let pointer = unsafe { (base as *const T).add(layout.start_offset()) as u64 };
@@ -603,17 +604,17 @@ fn cuda_read_ptr_with_guard<'a, T: candle_core::cuda_backend::CudaDType + 'a>(
 
 #[cfg(feature = "cuda")]
 struct CudaWritePtrOp<'a, T, F> {
-    stream: &'a std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    stream: &'a std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     name: &'static str,
     callback: std::cell::RefCell<Option<F>>,
     marker: std::marker::PhantomData<T>,
 }
 
 #[cfg(feature = "cuda")]
-impl<T, F> candle_core::InplaceOp1 for CudaWritePtrOp<'_, T, F>
+impl<T, F> inference_tensor::InplaceOp1 for CudaWritePtrOp<'_, T, F>
 where
-    T: candle_core::cuda_backend::CudaDType,
-    F: FnOnce(candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr) -> Result<()>,
+    T: inference_tensor::cuda_backend::CudaDType,
+    F: FnOnce(inference_tensor::cuda_backend::cudarc::driver::sys::CUdeviceptr) -> Result<()>,
 {
     fn name(&self) -> &'static str {
         "cuda-write-pointer"
@@ -621,22 +622,22 @@ where
 
     fn cpu_fwd(
         &self,
-        _storage: &mut candle_core::CpuStorage,
-        _layout: &candle_core::Layout,
+        _storage: &mut inference_tensor::CpuStorage,
+        _layout: &inference_tensor::Layout,
     ) -> Result<()> {
-        candle_core::bail!("{} must be CUDA", self.name)
+        inference_tensor::bail!("{} must be CUDA", self.name)
     }
 
     fn cuda_fwd(
         &self,
-        storage: &mut candle_core::CudaStorage,
-        layout: &candle_core::Layout,
+        storage: &mut inference_tensor::CudaStorage,
+        layout: &inference_tensor::Layout,
     ) -> Result<()> {
-        use candle_core::cuda_backend::cudarc::driver::DevicePtrMut;
+        use inference_tensor::cuda_backend::cudarc::driver::DevicePtrMut;
 
         let slice = storage.as_cuda_slice_mut::<T>()?;
         if !std::sync::Arc::ptr_eq(slice.stream().context(), self.stream.context()) {
-            candle_core::bail!("{} belongs to another CUDA context", self.name);
+            inference_tensor::bail!("{} belongs to another CUDA context", self.name);
         }
         let mut view = slice.slice_mut(layout.start_offset()..);
         let (pointer, guard) = view.device_ptr_mut(self.stream);
@@ -654,13 +655,13 @@ where
 #[cfg(feature = "cuda")]
 fn with_cuda_write_ptr<T, F>(
     tensor: &Tensor,
-    stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    stream: &std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     name: &'static str,
     callback: F,
 ) -> Result<()>
 where
-    T: candle_core::cuda_backend::CudaDType,
-    F: FnOnce(candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr) -> Result<()>,
+    T: inference_tensor::cuda_backend::CudaDType,
+    F: FnOnce(inference_tensor::cuda_backend::cudarc::driver::sys::CUdeviceptr) -> Result<()>,
 {
     tensor.inplace_op1(&CudaWritePtrOp::<T, F> {
         stream,
@@ -671,21 +672,21 @@ where
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_inplace_ptr_with_guard<'a, T: candle_core::cuda_backend::CudaDType + 'a>(
-    storage: &'a candle_core::Storage,
-    layout: &candle_core::Layout,
-    stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+fn cuda_inplace_ptr_with_guard<'a, T: inference_tensor::cuda_backend::CudaDType + 'a>(
+    storage: &'a inference_tensor::Storage,
+    layout: &inference_tensor::Layout,
+    stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
     name: &str,
 ) -> Result<(
-    candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr,
-    candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+    inference_tensor::cuda_backend::cudarc::driver::sys::CUdeviceptr,
+    inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
 )> {
     let slice = match storage {
-        candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
-        _ => candle_core::bail!("{name} must be CUDA"),
+        inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
+        _ => inference_tensor::bail!("{name} must be CUDA"),
     };
     if slice.stream().cu_stream() != stream.cu_stream() {
-        candle_core::bail!("{name} must be owned by the GDN launch stream");
+        inference_tensor::bail!("{name} must be owned by the GDN launch stream");
     }
     cuda_read_ptr_with_guard::<T>(storage, layout, stream, name)
 }
@@ -693,14 +694,14 @@ fn cuda_inplace_ptr_with_guard<'a, T: candle_core::cuda_backend::CudaDType + 'a>
 #[cfg(feature = "cuda")]
 fn cuda_recurrent_state_inplace_ptr_with_guard<'a>(
     dtype: DType,
-    storage: &'a candle_core::Storage,
-    layout: &candle_core::Layout,
-    stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+    storage: &'a inference_tensor::Storage,
+    layout: &inference_tensor::Layout,
+    stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
     name: &str,
 ) -> Result<(
-    candle_core::cuda_backend::cudarc::driver::sys::CUdeviceptr,
+    inference_tensor::cuda_backend::cudarc::driver::sys::CUdeviceptr,
     i32,
-    candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+    inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
 )> {
     let (pointer, dtype_code, guard) = match dtype {
         DType::F16 => {
@@ -718,7 +719,7 @@ fn cuda_recurrent_state_inplace_ptr_with_guard<'a>(
                 cuda_inplace_ptr_with_guard::<f32>(storage, layout, stream, name)?;
             (pointer, GDN_STATE_DTYPE_F32, guard)
         }
-        other => candle_core::bail!("{name} has unsupported dtype {other:?}"),
+        other => inference_tensor::bail!("{name} has unsupported dtype {other:?}"),
     };
     Ok((pointer, dtype_code, guard))
 }
@@ -816,24 +817,23 @@ fn validate_gdn_ragged_metadata(
         || !cu_seqlens.is_contiguous()
         || !cu_seqlens.device().same_device(source.device())
     {
-        candle_core::bail!("packed GDN ragged metadata is incompatible");
+        inference_tensor::bail!("packed GDN ragged metadata is incompatible");
     }
     Ok(())
 }
 
 #[cfg(feature = "cuda")]
 pub fn try_gdn_packed_to_padded_cuda(context: GdnPackedToPadded<'_>) -> Result<Option<Tensor>> {
-    use candle::cuda_backend::cudarc::driver::{DevicePtrMut, DeviceRepr};
-    use candle_core as candle;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtrMut, DeviceRepr};
 
-    fn launch<T: candle::cuda_backend::CudaDType + DeviceRepr>(
+    fn launch<T: inference_tensor::cuda_backend::CudaDType + DeviceRepr>(
         context: GdnPackedToPadded<'_>,
         width: usize,
         token_stride: usize,
         output_shape: Vec<usize>,
         dtype_code: i32,
     ) -> Result<Tensor> {
-        use candle::cuda_backend::CudaStorage;
+        use inference_tensor::cuda_backend::CudaStorage;
 
         let GdnPackedToPadded {
             source,
@@ -848,7 +848,9 @@ pub fn try_gdn_packed_to_padded_cuda(context: GdnPackedToPadded<'_>) -> Result<O
         let output_elements = batch_size
             .checked_mul(padded_len)
             .and_then(|elements| elements.checked_mul(width))
-            .ok_or_else(|| candle::Error::msg("packed GDN padded output size overflow"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("packed GDN padded output size overflow")
+            })?;
         let (source_storage, source_layout) = source.storage_and_layout();
         let (source_ptr, source_guard) = cuda_read_ptr_with_guard::<T>(
             &source_storage,
@@ -870,10 +872,10 @@ pub fn try_gdn_packed_to_padded_cuda(context: GdnPackedToPadded<'_>) -> Result<O
                 source_ptr as *const core::ffi::c_void,
                 output_ptr as *mut core::ffi::c_void,
                 seqlens_ptr as *const u32,
-                i32::try_from(batch_size).map_err(candle::Error::wrap)?,
-                i32::try_from(padded_len).map_err(candle::Error::wrap)?,
-                i32::try_from(width).map_err(candle::Error::wrap)?,
-                i64::try_from(token_stride).map_err(candle::Error::wrap)?,
+                i32::try_from(batch_size).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(padded_len).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(width).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(token_stride).map_err(inference_tensor::Error::wrap)?,
                 padding_value,
                 dtype_code,
                 stream.cu_stream() as i64,
@@ -885,8 +887,8 @@ pub fn try_gdn_packed_to_padded_cuda(context: GdnPackedToPadded<'_>) -> Result<O
         drop(seqlens_storage);
         drop(source_storage);
         Ok(Tensor::from((
-            candle::Storage::Cuda(CudaStorage::wrap_cuda_slice(output, dev.clone())),
-            candle::Shape::from_dims(&output_shape),
+            inference_tensor::Storage::Cuda(CudaStorage::wrap_cuda_slice(output, dev.clone())),
+            inference_tensor::Shape::from_dims(&output_shape),
         )))
     }
 
@@ -907,7 +909,7 @@ pub fn try_gdn_packed_to_padded_cuda(context: GdnPackedToPadded<'_>) -> Result<O
     };
     let dims = source.dims();
     if dims[0] != 1 || dims[1] != token_count || padded_len == 0 {
-        candle::bail!("packed GDN source dimensions are incompatible");
+        inference_tensor::bail!("packed GDN source dimensions are incompatible");
     }
     let mut output_shape = dims.to_vec();
     output_shape[0] = batch_size;
@@ -939,16 +941,15 @@ pub fn try_gdn_packed_to_padded_cuda(_context: GdnPackedToPadded<'_>) -> Result<
 
 #[cfg(feature = "cuda")]
 pub fn try_gdn_padded_to_packed_cuda(context: GdnPaddedToPacked<'_>) -> Result<Option<Tensor>> {
-    use candle::cuda_backend::cudarc::driver::{DevicePtrMut, DeviceRepr};
-    use candle_core as candle;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtrMut, DeviceRepr};
 
-    fn launch<T: candle::cuda_backend::CudaDType + DeviceRepr>(
+    fn launch<T: inference_tensor::cuda_backend::CudaDType + DeviceRepr>(
         context: GdnPaddedToPacked<'_>,
         geometry: GdnPaddedToPackedGeometry,
         output_shape: Vec<usize>,
         dtype_code: i32,
     ) -> Result<Tensor> {
-        use candle::cuda_backend::CudaStorage;
+        use inference_tensor::cuda_backend::CudaStorage;
 
         let GdnPaddedToPacked {
             source,
@@ -968,7 +969,7 @@ pub fn try_gdn_padded_to_packed_cuda(context: GdnPaddedToPacked<'_>) -> Result<O
         let stream = dev.cuda_stream();
         let output_elements = token_count
             .checked_mul(width)
-            .ok_or_else(|| candle::Error::msg("packed GDN output size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("packed GDN output size overflow"))?;
         let (source_storage, source_layout) = source.storage_and_layout();
         let (source_ptr, source_guard) = cuda_read_ptr_with_guard::<T>(
             &source_storage,
@@ -990,13 +991,13 @@ pub fn try_gdn_padded_to_packed_cuda(context: GdnPaddedToPacked<'_>) -> Result<O
                 source_ptr as *const core::ffi::c_void,
                 output_ptr as *mut core::ffi::c_void,
                 seqlens_ptr as *const u32,
-                i32::try_from(batch_size).map_err(candle::Error::wrap)?,
-                i32::try_from(padded_len).map_err(candle::Error::wrap)?,
-                i32::try_from(width).map_err(candle::Error::wrap)?,
-                i64::try_from(batch_stride).map_err(candle::Error::wrap)?,
-                i64::try_from(token_stride).map_err(candle::Error::wrap)?,
-                i64::try_from(feature_stride).map_err(candle::Error::wrap)?,
-                i32::try_from(feature_inner_width).map_err(candle::Error::wrap)?,
+                i32::try_from(batch_size).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(padded_len).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(width).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(batch_stride).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(token_stride).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(feature_stride).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(feature_inner_width).map_err(inference_tensor::Error::wrap)?,
                 dtype_code,
                 stream.cu_stream() as i64,
             );
@@ -1007,8 +1008,8 @@ pub fn try_gdn_padded_to_packed_cuda(context: GdnPaddedToPacked<'_>) -> Result<O
         drop(seqlens_storage);
         drop(source_storage);
         Ok(Tensor::from((
-            candle::Storage::Cuda(CudaStorage::wrap_cuda_slice(output, dev.clone())),
-            candle::Shape::from_dims(&output_shape),
+            inference_tensor::Storage::Cuda(CudaStorage::wrap_cuda_slice(output, dev.clone())),
+            inference_tensor::Shape::from_dims(&output_shape),
         )))
     }
 
@@ -1027,7 +1028,7 @@ pub fn try_gdn_padded_to_packed_cuda(context: GdnPaddedToPacked<'_>) -> Result<O
     };
     let dims = source.dims();
     if dims[0] != batch_size || token_count == 0 {
-        candle::bail!("padded GDN source dimensions are incompatible");
+        inference_tensor::bail!("padded GDN source dimensions are incompatible");
     }
     let mut output_shape = dims.to_vec();
     output_shape[0] = 1;
@@ -1049,17 +1050,16 @@ pub fn try_gdn_padded_to_packed_cuda(_context: GdnPaddedToPacked<'_>) -> Result<
 pub fn try_gdn_extract_ragged_conv_state_cuda(
     context: GdnRaggedConvState<'_>,
 ) -> Result<Option<Tensor>> {
-    use candle::cuda_backend::cudarc::driver::{DevicePtrMut, DeviceRepr};
-    use candle_core as candle;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtrMut, DeviceRepr};
 
-    fn launch<T: candle::cuda_backend::CudaDType + DeviceRepr>(
+    fn launch<T: inference_tensor::cuda_backend::CudaDType + DeviceRepr>(
         context: GdnRaggedConvState<'_>,
         input_batch_stride: usize,
         input_token_stride: usize,
         output_elements: usize,
         dtype_code: i32,
     ) -> Result<Tensor> {
-        use candle::cuda_backend::CudaStorage;
+        use inference_tensor::cuda_backend::CudaStorage;
 
         let GdnRaggedConvState {
             padded_input,
@@ -1100,12 +1100,12 @@ pub fn try_gdn_extract_ragged_conv_state_cuda(
                 state_ptr as *const core::ffi::c_void,
                 output_ptr as *mut core::ffi::c_void,
                 seqlens_ptr as *const u32,
-                i32::try_from(batch_size).map_err(candle::Error::wrap)?,
-                i32::try_from(padded_len).map_err(candle::Error::wrap)?,
-                i32::try_from(channels).map_err(candle::Error::wrap)?,
-                i32::try_from(state_width).map_err(candle::Error::wrap)?,
-                i64::try_from(input_batch_stride).map_err(candle::Error::wrap)?,
-                i64::try_from(input_token_stride).map_err(candle::Error::wrap)?,
+                i32::try_from(batch_size).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(padded_len).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(channels).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(state_width).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(input_batch_stride).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(input_token_stride).map_err(inference_tensor::Error::wrap)?,
                 dtype_code,
                 stream.cu_stream() as i64,
             );
@@ -1118,7 +1118,7 @@ pub fn try_gdn_extract_ragged_conv_state_cuda(
         drop(state_storage);
         drop(input_storage);
         Ok(Tensor::from((
-            candle::Storage::Cuda(CudaStorage::wrap_cuda_slice(output, dev.clone())),
+            inference_tensor::Storage::Cuda(CudaStorage::wrap_cuda_slice(output, dev.clone())),
             initial_state.shape().clone(),
         )))
     }
@@ -1149,7 +1149,7 @@ pub fn try_gdn_extract_ragged_conv_state_cuda(
         || !initial_state.device().same_device(padded_input.device())
         || !initial_state.is_contiguous()
     {
-        candle::bail!("ragged GDN convolution state dimensions are incompatible");
+        inference_tensor::bail!("ragged GDN convolution state dimensions are incompatible");
     }
     let output_elements = initial_state.elem_count();
     match padded_input.dtype() {
@@ -1205,15 +1205,15 @@ fn with_slot_indices<T>(
     slots: GdnStateSlots<'_>,
     f: impl FnOnce(*const i32, usize) -> Result<T>,
 ) -> Result<T> {
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
     match slots {
         GdnStateSlots::Gathered => f(std::ptr::null(), 0),
         GdnStateSlots::Pooled(slots) => {
             let batch = slots.dim(0)?;
             let (s, l) = slots.storage_and_layout();
             let s = match &*s {
-                candle_core::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-                _ => candle_core::bail!("slot indices must be a cuda tensor"),
+                inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
+                _ => inference_tensor::bail!("slot indices must be a cuda tensor"),
             };
             let ptr = s.slice(l.start_offset()..).device_ptr(s.stream()).0 as *const i32;
             f(ptr, batch)
@@ -1252,8 +1252,7 @@ fn launch_recurrence(
     state: &mut Tensor,
     slots: GdnStateSlots<'_>,
 ) -> Result<Tensor> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     let RecurrenceInputs { q, k, v, g, beta } = inputs;
     let (bh, seq_len, k_dim) = q.dims3()?;
@@ -1266,7 +1265,9 @@ fn launch_recurrence(
             | RecurrenceKernel::ValueMajorWarp8
     ) && (k_dim != GDN_DECODE_K_DIM || v_dim != GDN_DECODE_V_DIM)
     {
-        candle::bail!("value-major GDN prefill requires K=V=128, got K={k_dim}, V={v_dim}");
+        inference_tensor::bail!(
+            "value-major GDN prefill requires K=V=128, got K={k_dim}, V={v_dim}"
+        );
     }
     let dev = q.device().as_cuda_device()?;
 
@@ -1275,8 +1276,8 @@ fn launch_recurrence(
             let (s, l) = $t.storage_and_layout();
             let offset = l.start_offset();
             let s = match &*s {
-                candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-                _ => candle::bail!(concat!($name, " must be a cuda tensor")),
+                inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+                _ => inference_tensor::bail!(concat!($name, " must be a cuda tensor")),
             };
             let ptr = s.slice(offset..).device_ptr(s.stream()).0 as *mut f32;
             ptr
@@ -1322,7 +1323,7 @@ fn launch_recurrence(
                 )
             };
             if status != 0 {
-                candle::bail!(
+                inference_tensor::bail!(
                     "vmajor_grouped_warp_gated_delta_rule_recurrence failed with status {status}"
                 );
             }
@@ -1360,9 +1361,9 @@ fn launch_recurrence(
         Ok(())
     })?;
 
-    let output_storage = candle::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
+    let output_storage = inference_tensor::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
     Ok(Tensor::from((
-        candle::Storage::Cuda(output_storage),
+        inference_tensor::Storage::Cuda(output_storage),
         (bh, seq_len, v_dim),
     )))
 }
@@ -1418,7 +1419,7 @@ fn vmajor_prefill_gated_delta_rule_recurrence_cuda_impl(
         state_layout: RecurrentStateLayout::GdnValueMajor,
     };
     let kernel = select_prefill_kernel(policy, requested).map_err(|kernel| {
-        candle_core::Error::msg(format!(
+        inference_tensor::Error::msg(format!(
             "GDN prefill kernel {kernel:?} does not support compute {}, BH={state_blocks}, S={seq_len}, K={head_k_dim}, V={head_v_dim}, dtype={activation_dtype:?}",
             policy.compute_major
         ))
@@ -1429,7 +1430,7 @@ fn vmajor_prefill_gated_delta_rule_recurrence_cuda_impl(
         GdnPrefillKernel::ValueMajor4 => RecurrenceKernel::ValueMajorWarp4,
         GdnPrefillKernel::ValueMajor8 => RecurrenceKernel::ValueMajorWarp8,
         GdnPrefillKernel::FlashInferSm90 | GdnPrefillKernel::Cutile => {
-            candle_core::bail!("fused GDN prefill providers require convolved inputs")
+            inference_tensor::bail!("fused GDN prefill providers require convolved inputs")
         }
     };
     launch_recurrence(recurrence_kernel, inputs, state, slots)
@@ -1463,7 +1464,7 @@ pub fn gated_delta_rule_recurrence_cuda(
     _state: &mut Tensor,
     _slots: GdnStateSlots<'_>,
 ) -> Result<Tensor> {
-    candle_core::bail!("gated_delta_rule_recurrence_cuda requires the cuda feature")
+    inference_tensor::bail!("gated_delta_rule_recurrence_cuda requires the cuda feature")
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -1472,7 +1473,7 @@ pub fn warp_gated_delta_rule_recurrence_cuda(
     _state: &mut Tensor,
     _slots: GdnStateSlots<'_>,
 ) -> Result<Tensor> {
-    candle_core::bail!("warp_gated_delta_rule_recurrence_cuda requires the cuda feature")
+    inference_tensor::bail!("warp_gated_delta_rule_recurrence_cuda requires the cuda feature")
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -1481,7 +1482,9 @@ pub fn vmajor_warp_gated_delta_rule_recurrence_cuda(
     _state: &mut Tensor,
     _slots: GdnStateSlots<'_>,
 ) -> Result<Tensor> {
-    candle_core::bail!("vmajor_warp_gated_delta_rule_recurrence_cuda requires the cuda feature")
+    inference_tensor::bail!(
+        "vmajor_warp_gated_delta_rule_recurrence_cuda requires the cuda feature"
+    )
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -1491,7 +1494,9 @@ pub fn vmajor_prefill_gated_delta_rule_recurrence_cuda(
     _slots: GdnStateSlots<'_>,
     _activation_dtype: DType,
 ) -> Result<Tensor> {
-    candle_core::bail!("vmajor_prefill_gated_delta_rule_recurrence_cuda requires the cuda feature")
+    inference_tensor::bail!(
+        "vmajor_prefill_gated_delta_rule_recurrence_cuda requires the cuda feature"
+    )
 }
 
 /// CUDA-accelerated causal conv1d (both update and full paths).
@@ -1509,12 +1514,12 @@ pub fn causal_conv1d_cuda(
     is_update: bool,
     slots: GdnStateSlots<'_>,
 ) -> Result<(Tensor, Tensor)> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         x: &Tensor,
         weight: &Tensor,
@@ -1530,16 +1535,16 @@ pub fn causal_conv1d_cuda(
 
         let (x_s, x_l) = x.storage_and_layout();
         let x_s = match &*x_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("x must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("x must be a cuda tensor"),
         };
         let x_offset = x_l.start_offset();
         let x_stride = x_l.stride();
 
         let (w_s, w_l) = weight.storage_and_layout();
         let w_s = match &*w_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("weight must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("weight must be a cuda tensor"),
         };
         let w_offset = w_l.start_offset();
 
@@ -1555,8 +1560,8 @@ pub fn causal_conv1d_cuda(
             {
                 let (cs_s, cs_l) = conv_state_new.storage_and_layout();
                 let cs_s = match &*cs_s {
-                    candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-                    _ => candle::bail!("conv_state must be a cuda tensor"),
+                    inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+                    _ => inference_tensor::bail!("conv_state must be a cuda tensor"),
                 };
                 let cs_offset = cs_l.start_offset();
 
@@ -1582,9 +1587,10 @@ pub fn causal_conv1d_cuda(
                 })?;
             }
 
-            let output_storage = candle::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
+            let output_storage =
+                inference_tensor::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
             let output = Tensor::from((
-                candle::Storage::Cuda(output_storage),
+                inference_tensor::Storage::Cuda(output_storage),
                 (batch_size, 1usize, conv_dim),
             ));
 
@@ -1599,8 +1605,8 @@ pub fn causal_conv1d_cuda(
             };
             let (cs_s, cs_l) = conv_state.storage_and_layout();
             let cs_s = match &*cs_s {
-                candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-                _ => candle::bail!("conv_state must be a cuda tensor"),
+                inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+                _ => inference_tensor::bail!("conv_state must be a cuda tensor"),
             };
             let cs_offset = cs_l.start_offset();
             let cs_in_ptr = cs_s.slice(cs_offset..).device_ptr(cs_s.stream()).0;
@@ -1632,18 +1638,18 @@ pub fn causal_conv1d_cuda(
                 Ok(())
             })?;
 
-            let output_storage = candle::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
+            let output_storage =
+                inference_tensor::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
             let output = Tensor::from((
-                candle::Storage::Cuda(output_storage),
+                inference_tensor::Storage::Cuda(output_storage),
                 (batch_size, seq_len, conv_dim),
             ));
 
             let new_conv_state = match cs_buf {
                 Some(cs_buf) => Tensor::from((
-                    candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
-                        cs_buf,
-                        dev.clone(),
-                    )),
+                    inference_tensor::Storage::Cuda(
+                        inference_tensor::CudaStorage::wrap_cuda_slice(cs_buf, dev.clone()),
+                    ),
                     (batch_size, conv_dim, kernel_size),
                 )),
                 None => conv_state.clone(),
@@ -1655,7 +1661,7 @@ pub fn causal_conv1d_cuda(
 
     let weight = weight.contiguous()?;
     if matches!(slots, GdnStateSlots::Pooled(_)) && !conv_state.is_contiguous() {
-        candle_core::bail!("pooled conv state must be contiguous");
+        inference_tensor::bail!("pooled conv state must be contiguous");
     }
     let conv_state = conv_state.contiguous()?;
     match x.dtype() {
@@ -1666,7 +1672,7 @@ pub fn causal_conv1d_cuda(
             cuda_fwd::<half::bf16>(x, &weight, &conv_state, kernel_size, is_update, slots, 1)
         }
         DType::F32 => cuda_fwd::<f32>(x, &weight, &conv_state, kernel_size, is_update, slots, 2),
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "causal_conv1d_cuda supports f16, bf16 and f32, got {:?}",
             other
         ),
@@ -1682,7 +1688,7 @@ pub fn causal_conv1d_cuda(
     _is_update: bool,
     _slots: GdnStateSlots<'_>,
 ) -> Result<(Tensor, Tensor)> {
-    candle_core::bail!("causal_conv1d_cuda requires the cuda feature")
+    inference_tensor::bail!("causal_conv1d_cuda requires the cuda feature")
 }
 
 #[cfg(feature = "cuda")]
@@ -1744,12 +1750,12 @@ pub struct PrepareRecurrenceInputs<'a> {
 pub fn prepare_recurrence_inputs_cuda_typed(
     inputs: PrepareRecurrenceInputs<'_>,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         inputs: &PrepareRecurrenceInputs<'_>,
         dtype_code: i32,
@@ -1771,42 +1777,44 @@ pub fn prepare_recurrence_inputs_cuda_typed(
             output_dtype,
         } = *inputs;
         if token_stride < seq_len {
-            candle::bail!("GDN prepare token stride {token_stride} is below seq_len {seq_len}");
+            inference_tensor::bail!(
+                "GDN prepare token stride {token_stride} is below seq_len {seq_len}"
+            );
         }
         let dev = mixed_qkv.device().as_cuda_device()?;
 
         let (mixed_s, mixed_l) = mixed_qkv.storage_and_layout();
         let mixed_s = match &*mixed_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("mixed_qkv must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("mixed_qkv must be a cuda tensor"),
         };
         let mixed_offset = mixed_l.start_offset();
 
         let (b_s, b_l) = b.storage_and_layout();
         let b_s = match &*b_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("b must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("b must be a cuda tensor"),
         };
         let b_offset = b_l.start_offset();
 
         let (a_s, a_l) = a.storage_and_layout();
         let a_s = match &*a_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("a must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("a must be a cuda tensor"),
         };
         let a_offset = a_l.start_offset();
 
         let (alog_s, alog_l) = a_log.storage_and_layout();
         let alog_s = match &*alog_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-            _ => candle::bail!("a_log must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+            _ => inference_tensor::bail!("a_log must be a cuda tensor"),
         };
         let alog_offset = alog_l.start_offset();
 
         let (dtb_s, dtb_l) = dt_bias.storage_and_layout();
         let dtb_s = match &*dtb_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-            _ => candle::bail!("dt_bias must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+            _ => inference_tensor::bail!("dt_bias must be a cuda tensor"),
         };
         let dtb_offset = dtb_l.start_offset();
 
@@ -1826,7 +1834,7 @@ pub fn prepare_recurrence_inputs_cuda_typed(
         let out_bf16 = match output_dtype {
             DType::F32 => false,
             DType::BF16 => true,
-            other => candle::bail!("GDN prepare cannot emit {other:?} projections"),
+            other => inference_tensor::bail!("GDN prepare cannot emit {other:?} projections"),
         };
         let stream = dev.cuda_stream().cu_stream() as i64;
         macro_rules! prepare_with {
@@ -1862,10 +1870,9 @@ pub fn prepare_recurrence_inputs_cuda_typed(
                 }
                 let wrap = |buf, last_dim| {
                     Tensor::from((
-                        candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
-                            buf,
-                            dev.clone(),
-                        )),
+                        inference_tensor::Storage::Cuda(
+                            inference_tensor::CudaStorage::wrap_cuda_slice(buf, dev.clone()),
+                        ),
                         (bh, token_stride, last_dim),
                     ))
                 };
@@ -1882,11 +1889,17 @@ pub fn prepare_recurrence_inputs_cuda_typed(
             prepare_with!(f32)
         };
         let g = Tensor::from((
-            candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(g_buf, dev.clone())),
+            inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+                g_buf,
+                dev.clone(),
+            )),
             (bh, token_stride),
         ));
         let beta = Tensor::from((
-            candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(beta_buf, dev.clone())),
+            inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+                beta_buf,
+                dev.clone(),
+            )),
             (bh, token_stride),
         ));
 
@@ -1896,7 +1909,7 @@ pub fn prepare_recurrence_inputs_cuda_typed(
     match inputs.mixed_qkv.dtype() {
         DType::F16 => cuda_fwd::<half::f16>(&inputs, 0),
         DType::BF16 => cuda_fwd::<half::bf16>(&inputs, 1),
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "prepare_recurrence_inputs_cuda only supports f16/bf16, got {:?}",
             other
         ),
@@ -1919,7 +1932,7 @@ pub fn prepare_recurrence_inputs_cuda(
     _head_v_dim: usize,
     _tiled_v_heads: bool,
 ) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
-    candle_core::bail!("prepare_recurrence_inputs_cuda requires the cuda feature")
+    inference_tensor::bail!("prepare_recurrence_inputs_cuda requires the cuda feature")
 }
 
 #[cfg_attr(
@@ -1981,9 +1994,10 @@ struct FlashInferGdnSm90Launch<'a> {
     dt_bias: &'a Tensor,
     slots: Option<&'a Tensor>,
     output: std::cell::RefCell<
-        Option<candle_core::cuda_backend::cudarc::driver::CudaSlice<half::bf16>>,
+        Option<inference_tensor::cuda_backend::cudarc::driver::CudaSlice<half::bf16>>,
     >,
-    workspace: std::cell::RefCell<Option<candle_core::cuda_backend::cudarc::driver::CudaSlice<u8>>>,
+    workspace:
+        std::cell::RefCell<Option<inference_tensor::cuda_backend::cudarc::driver::CudaSlice<u8>>>,
     workspace_bytes: u64,
     batch_size: i32,
     seq_len: i32,
@@ -1993,37 +2007,37 @@ struct FlashInferGdnSm90Launch<'a> {
 }
 
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
-impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
+impl inference_tensor::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
     fn name(&self) -> &'static str {
         "flashinfer-gdn-sm90-prefill"
     }
 
     fn cpu_fwd(
         &self,
-        _storage: &mut candle_core::CpuStorage,
-        _layout: &candle_core::Layout,
+        _storage: &mut inference_tensor::CpuStorage,
+        _layout: &inference_tensor::Layout,
     ) -> Result<()> {
-        candle_core::bail!("FlashInfer GDN SM90 prefill requires CUDA storage")
+        inference_tensor::bail!("FlashInfer GDN SM90 prefill requires CUDA storage")
     }
 
     fn cuda_fwd(
         &self,
-        state_storage: &mut candle_core::CudaStorage,
-        state_layout: &candle_core::Layout,
+        state_storage: &mut inference_tensor::CudaStorage,
+        state_layout: &inference_tensor::Layout,
     ) -> Result<()> {
-        use candle_core::backend::BackendStorage;
-        use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+        use inference_tensor::backend::BackendStorage;
+        use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
         if !state_layout.is_contiguous() {
-            candle_core::bail!("FlashInfer GDN SM90 prefill requires contiguous state")
+            inference_tensor::bail!("FlashInfer GDN SM90 prefill requires contiguous state")
         }
         let dev = state_storage.device();
         let stream = dev.cuda_stream();
 
         let (mixed_storage, mixed_layout) = self.mixed_qkv.storage_and_layout();
         let mixed_slice = match &*mixed_storage {
-            candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
-            _ => candle_core::bail!("mixed_qkv must be a CUDA tensor"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
+            _ => inference_tensor::bail!("mixed_qkv must be a CUDA tensor"),
         };
         let (mixed_base, mixed_guard) = mixed_slice.device_ptr(&stream);
         let mixed_ptr = unsafe {
@@ -2033,8 +2047,8 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
 
         let (b_storage, b_layout) = self.b.storage_and_layout();
         let b_slice = match &*b_storage {
-            candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
-            _ => candle_core::bail!("b must be a CUDA tensor"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
+            _ => inference_tensor::bail!("b must be a CUDA tensor"),
         };
         let (b_base, b_guard) = b_slice.device_ptr(&stream);
         let b_ptr = unsafe {
@@ -2043,8 +2057,8 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
 
         let (a_storage, a_layout) = self.a.storage_and_layout();
         let a_slice = match &*a_storage {
-            candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
-            _ => candle_core::bail!("a must be a CUDA tensor"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<half::bf16>()?,
+            _ => inference_tensor::bail!("a must be a CUDA tensor"),
         };
         let (a_base, a_guard) = a_slice.device_ptr(&stream);
         let a_ptr = unsafe {
@@ -2053,16 +2067,16 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
 
         let (a_log_storage, a_log_layout) = self.a_log.storage_and_layout();
         let a_log_slice = match &*a_log_storage {
-            candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<f32>()?,
-            _ => candle_core::bail!("a_log must be a CUDA tensor"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<f32>()?,
+            _ => inference_tensor::bail!("a_log must be a CUDA tensor"),
         };
         let (a_log_base, a_log_guard) = a_log_slice.device_ptr(&stream);
         let a_log_ptr = unsafe { (a_log_base as *const f32).add(a_log_layout.start_offset()) };
 
         let (dt_bias_storage, dt_bias_layout) = self.dt_bias.storage_and_layout();
         let dt_bias_slice = match &*dt_bias_storage {
-            candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<f32>()?,
-            _ => candle_core::bail!("dt_bias must be a CUDA tensor"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<f32>()?,
+            _ => inference_tensor::bail!("dt_bias must be a CUDA tensor"),
         };
         let (dt_bias_base, dt_bias_guard) = dt_bias_slice.device_ptr(&stream);
         let dt_bias_ptr =
@@ -2072,8 +2086,8 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
         let mut slots_guard = None;
         let slots_ptr = if let Some((storage, layout)) = &slots_storage_layout {
             let slice = match &**storage {
-                candle_core::Storage::Cuda(storage) => storage.as_cuda_slice::<u32>()?,
-                _ => candle_core::bail!("slot indices must be a CUDA tensor"),
+                inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<u32>()?,
+                _ => inference_tensor::bail!("slot indices must be a CUDA tensor"),
             };
             let (base, guard) = slice.device_ptr(&stream);
             slots_guard = Some(guard);
@@ -2087,14 +2101,14 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
         let state_ptr = unsafe { (state_base as *mut f32).add(state_layout.start_offset()) };
 
         let mut output = self.output.borrow_mut();
-        let output = output
-            .as_mut()
-            .ok_or_else(|| candle_core::Error::msg("FlashInfer GDN output was already consumed"))?;
+        let output = output.as_mut().ok_or_else(|| {
+            inference_tensor::Error::msg("FlashInfer GDN output was already consumed")
+        })?;
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
 
         let mut workspace = self.workspace.borrow_mut();
         let workspace = workspace.as_mut().ok_or_else(|| {
-            candle_core::Error::msg("FlashInfer GDN workspace was already consumed")
+            inference_tensor::Error::msg("FlashInfer GDN workspace was already consumed")
         })?;
         let (workspace_ptr, workspace_guard) = workspace.device_ptr_mut(&stream);
 
@@ -2132,7 +2146,7 @@ impl candle_core::InplaceOp1 for FlashInferGdnSm90Launch<'_> {
         drop(b_guard);
         drop(mixed_guard);
         if status != 0 {
-            candle_core::bail!("FlashInfer GDN SM90 prefill failed with status {status}")
+            inference_tensor::bail!("FlashInfer GDN SM90 prefill failed with status {status}")
         }
         Ok(())
     }
@@ -2204,10 +2218,8 @@ fn flashinfer_sm90_prefill_supported(launch: &FusedPrefillRecurrence<'_>) -> Res
 
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPrefillOutput> {
-    use candle_core as candle;
-
     if !flashinfer_sm90_prefill_supported(&launch)? {
-        candle::bail!(
+        inference_tensor::bail!(
             "FlashInfer GDN SM90 prefill does not support this device, layout, dtype, or shape"
         );
     }
@@ -2230,7 +2242,7 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
     let (input_batch, seq_len, conv_dim) = mixed_qkv.dims3()?;
     let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
     if input_batch != batch_size || conv_dim != expected_conv_dim {
-        candle::bail!(
+        inference_tensor::bail!(
             "FlashInfer GDN input shape {:?} is incompatible with B={batch_size}, K heads={num_k_heads}, V heads={num_v_heads}, K={head_k_dim}, V={head_v_dim}",
             mixed_qkv.dims()
         );
@@ -2240,12 +2252,12 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
         || a_log.dims1()? != num_v_heads
         || dt_bias.dims1()? != num_v_heads
     {
-        candle::bail!("FlashInfer GDN gate tensors have incompatible shapes")
+        inference_tensor::bail!("FlashInfer GDN gate tensors have incompatible shapes")
     }
     match slots {
         GdnStateSlots::Gathered => {
             if state.dims3()? != (batch_size * num_v_heads, head_v_dim, head_k_dim) {
-                candle::bail!("FlashInfer GDN gathered state has an incompatible shape")
+                inference_tensor::bail!("FlashInfer GDN gathered state has an incompatible shape")
             }
         }
         GdnStateSlots::Pooled(slot_indices) => {
@@ -2255,17 +2267,19 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
                 || state_dims.3 != head_k_dim
                 || slot_indices.dims1()? != batch_size
             {
-                candle::bail!("FlashInfer GDN pooled state or slot table has an incompatible shape")
+                inference_tensor::bail!(
+                    "FlashInfer GDN pooled state or slot table has an incompatible shape"
+                )
             }
         }
     }
 
     let dev = mixed_qkv.device().as_cuda_device()?;
-    let batch_size_i32 = i32::try_from(batch_size).map_err(candle::Error::wrap)?;
-    let seq_len_i32 = i32::try_from(seq_len).map_err(candle::Error::wrap)?;
-    let num_k_heads_i32 = i32::try_from(num_k_heads).map_err(candle::Error::wrap)?;
-    let num_v_heads_i32 = i32::try_from(num_v_heads).map_err(candle::Error::wrap)?;
-    let sm_count_i32 = i32::try_from(dev.sm_count()).map_err(candle::Error::wrap)?;
+    let batch_size_i32 = i32::try_from(batch_size).map_err(inference_tensor::Error::wrap)?;
+    let seq_len_i32 = i32::try_from(seq_len).map_err(inference_tensor::Error::wrap)?;
+    let num_k_heads_i32 = i32::try_from(num_k_heads).map_err(inference_tensor::Error::wrap)?;
+    let num_v_heads_i32 = i32::try_from(num_v_heads).map_err(inference_tensor::Error::wrap)?;
+    let sm_count_i32 = i32::try_from(dev.sm_count()).map_err(inference_tensor::Error::wrap)?;
     let has_slots = if matches!(slots, GdnStateSlots::Pooled(_)) {
         1
     } else {
@@ -2282,14 +2296,14 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
         )
     };
     if workspace_bytes == 0 {
-        candle::bail!("FlashInfer GDN SM90 returned an invalid workspace size")
+        inference_tensor::bail!("FlashInfer GDN SM90 returned an invalid workspace size")
     }
-    let workspace_len = usize::try_from(workspace_bytes).map_err(candle::Error::wrap)?;
+    let workspace_len = usize::try_from(workspace_bytes).map_err(inference_tensor::Error::wrap)?;
     let output_elements = batch_size
         .checked_mul(num_v_heads)
         .and_then(|elements| elements.checked_mul(seq_len))
         .and_then(|elements| elements.checked_mul(head_v_dim))
-        .ok_or_else(|| candle::Error::msg("FlashInfer GDN output size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FlashInfer GDN output size overflow"))?;
     let output = unsafe { dev.alloc::<half::bf16>(output_elements) }?;
     let workspace = unsafe { dev.alloc::<u8>(workspace_len) }?;
     let op = FlashInferGdnSm90Launch {
@@ -2315,10 +2329,10 @@ fn flashinfer_sm90_prefill(launch: FusedPrefillRecurrence<'_>) -> Result<FusedPr
     let output = op
         .output
         .into_inner()
-        .ok_or_else(|| candle::Error::msg("FlashInfer GDN output is unavailable"))?;
-    let output_storage = candle::CudaStorage::wrap_cuda_slice(output, dev.clone());
+        .ok_or_else(|| inference_tensor::Error::msg("FlashInfer GDN output is unavailable"))?;
+    let output_storage = inference_tensor::CudaStorage::wrap_cuda_slice(output, dev.clone());
     Ok(FusedPrefillOutput::TokenMajor(Tensor::from((
-        candle::Storage::Cuda(output_storage),
+        inference_tensor::Storage::Cuda(output_storage),
         (batch_size, seq_len, num_v_heads, head_v_dim),
     ))))
 }
@@ -2331,7 +2345,7 @@ pub fn try_fused_vmajor_prefill_recurrence_cuda(
     let flashinfer_supported = flashinfer_sm90_prefill_supported(&launch)?;
     if requested == Some(GdnPrefillKernel::FlashInferSm90) {
         if !flashinfer_supported {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FlashInfer GDN SM90 prefill does not support this device, layout, dtype, or shape"
             );
         }
@@ -2348,7 +2362,7 @@ pub fn try_fused_vmajor_prefill_recurrence_cuda(
         let long_enough = seq_len >= CUTILE_GDN_MIN_SEQ_LEN;
         if requested == Some(GdnPrefillKernel::Cutile) {
             if !cutile_supported {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cuTile GDN prefill does not support this launch: {}",
                     describe_prefill_launch(&launch)
                 );
@@ -2362,7 +2376,7 @@ pub fn try_fused_vmajor_prefill_recurrence_cuda(
     }
     #[cfg(not(feature = "cutile"))]
     if requested == Some(GdnPrefillKernel::Cutile) {
-        candle_core::bail!("cuTile GDN prefill requires the cutile feature");
+        inference_tensor::bail!("cuTile GDN prefill requires the cutile feature");
     }
     Ok(None)
 }
@@ -2489,7 +2503,7 @@ fn flashinfer_sm90_prefill_dispatch(
     #[cfg(not(has_flashinfer_gdn_sm90_kernel))]
     {
         let _ = launch;
-        candle_core::bail!("FlashInfer GDN SM90 prefill was not built for this target")
+        inference_tensor::bail!("FlashInfer GDN SM90 prefill was not built for this target")
     }
 }
 
@@ -2497,7 +2511,7 @@ fn flashinfer_sm90_prefill_dispatch(
 pub fn try_fused_vmajor_prefill_recurrence_cuda(
     _launch: FusedPrefillRecurrence<'_>,
 ) -> Result<Option<FusedPrefillOutput>> {
-    candle_core::bail!("try_fused_vmajor_prefill_recurrence_cuda requires the cuda feature")
+    inference_tensor::bail!("try_fused_vmajor_prefill_recurrence_cuda requires the cuda feature")
 }
 
 #[cfg(feature = "cuda")]
@@ -2560,12 +2574,12 @@ pub fn fused_decode_recurrence_cuda(launch: FusedDecodeRecurrence<'_>) -> Result
 
 #[cfg(feature = "cuda")]
 fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tensor> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         launch: GdnDecodeLaunch<'_>,
         dtype_code: i32,
@@ -2588,7 +2602,7 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
             requested_kernel,
         } = launch;
         if head_k_dim > GDN_DECODE_FALLBACK_MAX_K {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN decode key dimension {head_k_dim} exceeds the CUDA fallback limit {GDN_DECODE_FALLBACK_MAX_K}"
             );
         }
@@ -2596,8 +2610,8 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 
         let (mixed_s, mixed_l) = mixed_qkv.storage_and_layout();
         let mixed_s = match &*mixed_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("mixed_qkv must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("mixed_qkv must be a cuda tensor"),
         };
         let mixed_offset = mixed_l.start_offset();
         let mixed_ptr =
@@ -2605,8 +2619,8 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 
         let (b_s, b_l) = b.storage_and_layout();
         let b_s = match &*b_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("b must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("b must be a cuda tensor"),
         };
         let b_offset = b_l.start_offset();
         let b_stride = b_l.stride();
@@ -2615,8 +2629,8 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 
         let (a_s, a_l) = a.storage_and_layout();
         let a_s = match &*a_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("a must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("a must be a cuda tensor"),
         };
         let a_offset = a_l.start_offset();
         let a_stride = a_l.stride();
@@ -2625,15 +2639,15 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 
         let (alog_s, alog_l) = a_log.storage_and_layout();
         let alog_s = match &*alog_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-            _ => candle::bail!("a_log must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+            _ => inference_tensor::bail!("a_log must be a cuda tensor"),
         };
         let alog_offset = alog_l.start_offset();
 
         let (dtb_s, dtb_l) = dt_bias.storage_and_layout();
         let dtb_s = match &*dtb_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-            _ => candle::bail!("dt_bias must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
+            _ => inference_tensor::bail!("dt_bias must be a cuda tensor"),
         };
         let dtb_offset = dtb_l.start_offset();
 
@@ -2650,7 +2664,7 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
             state_layout,
         };
         let decode_kernel = select_decode_kernel(policy, requested_kernel).map_err(|kernel| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "requested {kernel:?} GDN kernel is unsupported on compute {}, K={}, V={}, layout={:?}, bf16={}, aligned={}",
                 policy.compute_major,
                 policy.head_k_dim,
@@ -2696,7 +2710,7 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
         })?;
 
         Ok(Tensor::from((
-            candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
+            inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
                 output_buf,
                 dev.clone(),
             )),
@@ -2707,7 +2721,7 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
     match launch.mixed_qkv.dtype() {
         DType::F16 => cuda_fwd::<half::f16>(launch, 0),
         DType::BF16 => cuda_fwd::<half::bf16>(launch, 1),
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "fused_decode_recurrence_cuda only supports f16/bf16, got {:?}",
             other
         ),
@@ -2716,7 +2730,7 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 
 #[cfg(not(feature = "cuda"))]
 pub fn fused_decode_recurrence_cuda(_launch: FusedDecodeRecurrence<'_>) -> Result<Tensor> {
-    candle_core::bail!("fused_decode_recurrence_cuda requires the cuda feature")
+    inference_tensor::bail!("fused_decode_recurrence_cuda requires the cuda feature")
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -2743,12 +2757,12 @@ pub struct GdnSpeculativeStateCommit<'a> {
 
 #[cfg(feature = "cuda")]
 pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> Result<()> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         commit: GdnSpeculativeStateCommit<'_>,
         dtype_code: i32,
@@ -2776,55 +2790,65 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
         let (batch_size, seq_len, conv_dim) = mixed_qkv.dims3()?;
         let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
         if conv_dim != expected_conv_dim {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative commit has conv dim {conv_dim}, expected {expected_conv_dim}"
             );
         }
         if head_k_dim == 0 || head_k_dim > GDN_SPEC_COMMIT_MAX_K || !head_k_dim.is_multiple_of(32) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative commit requires a K dimension divisible by 32 and no larger than {GDN_SPEC_COMMIT_MAX_K}, got {head_k_dim}"
             );
         }
         if !head_v_dim.is_multiple_of(4) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative commit requires a V dimension divisible by 4, got {head_v_dim}"
             );
         }
-        let kernel_size = initial_conv_state.dim(candle_core::D::Minus1)?;
+        let kernel_size = initial_conv_state.dim(inference_tensor::D::Minus1)?;
         if keep_rows.dims1()? != batch_size || slot_indices.dims1()? != batch_size {
-            candle::bail!("GDN speculative commit index tensors must match batch size");
+            inference_tensor::bail!("GDN speculative commit index tensors must match batch size");
         }
         if b.dims3()? != (batch_size, seq_len, num_v_heads)
             || a.dims3()? != (batch_size, seq_len, num_v_heads)
         {
-            candle::bail!("GDN speculative commit gate tensors have incompatible shapes");
+            inference_tensor::bail!("GDN speculative commit gate tensors have incompatible shapes");
         }
         if initial_conv_state.dims3()? != (batch_size, conv_dim, kernel_size) {
-            candle::bail!("GDN speculative commit convolution state has an incompatible shape");
+            inference_tensor::bail!(
+                "GDN speculative commit convolution state has an incompatible shape"
+            );
         }
         if convolved_qkv.dims3()? != (batch_size, seq_len, conv_dim) {
-            candle::bail!("GDN speculative commit convolved input has an incompatible shape");
+            inference_tensor::bail!(
+                "GDN speculative commit convolved input has an incompatible shape"
+            );
         }
         if [convolved_qkv, b, a, initial_conv_state, conv_state_pool]
             .iter()
             .any(|tensor| tensor.dtype() != mixed_qkv.dtype())
         {
-            candle::bail!("GDN speculative commit activation tensors must share one dtype");
+            inference_tensor::bail!(
+                "GDN speculative commit activation tensors must share one dtype"
+            );
         }
         let expected_state_elements = batch_size * num_v_heads * head_k_dim * head_v_dim;
         if initial_recurrent_state.elem_count() != expected_state_elements {
-            candle::bail!("GDN speculative commit recurrent state has an incompatible shape");
+            inference_tensor::bail!(
+                "GDN speculative commit recurrent state has an incompatible shape"
+            );
         }
         if !recurrent_state_dtype_supported(initial_recurrent_state.dtype())
             || initial_recurrent_state.dtype() != recurrent_state_pool.dtype()
         {
-            candle::bail!("GDN speculative commit recurrent states must share a supported dtype");
+            inference_tensor::bail!(
+                "GDN speculative commit recurrent states must share a supported dtype"
+            );
         }
         let value_major = match state_layout {
             RecurrentStateLayout::GdnKeyMajor => false,
             RecurrentStateLayout::GdnValueMajor => true,
             RecurrentStateLayout::Opaque => {
-                candle::bail!("GDN speculative commit does not support opaque state")
+                inference_tensor::bail!("GDN speculative commit does not support opaque state")
             }
         };
 
@@ -2837,15 +2861,15 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
         let a_log = a_log.to_dtype(DType::F32)?.contiguous()?;
         let dt_bias = dt_bias.to_dtype(DType::F32)?.contiguous()?;
         if !conv_state_pool.is_contiguous() || !recurrent_state_pool.is_contiguous() {
-            candle::bail!("GDN speculative commit state pools must be contiguous");
+            inference_tensor::bail!("GDN speculative commit state pools must be contiguous");
         }
 
         macro_rules! typed_ptr {
             ($tensor:expr, $ty:ty, $name:literal) => {{
                 let (storage, layout) = $tensor.storage_and_layout();
                 let storage = match &*storage {
-                    candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                    _ => candle::bail!(concat!($name, " must be a CUDA tensor")),
+                    inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
+                    _ => inference_tensor::bail!(concat!($name, " must be a CUDA tensor")),
                 };
                 let pointer = storage
                     .slice(layout.start_offset()..)
@@ -2869,7 +2893,7 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
         let (recurrent_pool_ptr, pool_state_dtype) =
             cuda_recurrent_state_ptr(recurrent_state_pool, "recurrent_state_pool")?;
         if state_dtype != pool_state_dtype {
-            candle::bail!("GDN speculative commit recurrent state dtype mismatch");
+            inference_tensor::bail!("GDN speculative commit recurrent state dtype mismatch");
         }
         let keep_rows_ptr = typed_ptr!(keep_rows, u32, "keep_rows") as *const u32;
         let slot_indices_ptr = typed_ptr!(slot_indices, u32, "slot_indices") as *const u32;
@@ -2910,7 +2934,7 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
     match commit.mixed_qkv.dtype() {
         DType::F16 => cuda_fwd::<half::f16>(commit, 0),
         DType::BF16 => cuda_fwd::<half::bf16>(commit, 1),
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "GDN speculative state commit only supports f16/bf16, got {:?}",
             other
         ),
@@ -2919,7 +2943,7 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
 
 #[cfg(not(feature = "cuda"))]
 pub fn speculative_state_commit_cuda(_commit: GdnSpeculativeStateCommit<'_>) -> Result<()> {
-    candle_core::bail!("speculative_state_commit_cuda requires the cuda feature")
+    inference_tensor::bail!("speculative_state_commit_cuda requires the cuda feature")
 }
 
 pub struct GdnPendingSpeculativeConv<'a> {
@@ -2943,12 +2967,12 @@ pub struct GdnSpeculativeConvCheckpoints<'a> {
 pub fn speculative_conv_checkpoints_cuda(
     context: GdnSpeculativeConvCheckpoints<'_>,
 ) -> Result<Tensor> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         context: GdnSpeculativeConvCheckpoints<'_>,
         dtype_code: i32,
@@ -2965,49 +2989,51 @@ pub fn speculative_conv_checkpoints_cuda(
         let (batch_size, seq_len, conv_dim) = x.dims3()?;
         let (weight_conv_dim, kernel_size) = weight.dims2()?;
         if batch_size == 0 || seq_len == 0 || conv_dim == 0 {
-            candle::bail!("GDN speculative convolution requires non-empty dimensions");
+            inference_tensor::bail!("GDN speculative convolution requires non-empty dimensions");
         }
         if weight_conv_dim != conv_dim {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative convolution weight has {weight_conv_dim} channels, expected {conv_dim}"
             );
         }
         if kernel_size == 0 || kernel_size > GDN_SPEC_CHECKPOINT_MAX_CONV_WIDTH {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative convolution width must be in 1..={GDN_SPEC_CHECKPOINT_MAX_CONV_WIDTH}, got {kernel_size}"
             );
         }
         let (capacity, state_conv_dim, state_width) = state_pool.dims3()?;
         if state_conv_dim != conv_dim || state_width != kernel_size {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative convolution state shape {:?} is incompatible with [{capacity}, {conv_dim}, {kernel_size}]",
                 state_pool.dims()
             );
         }
         if checkpoint_lanes == 0 || (write_checkpoints && seq_len > checkpoint_lanes) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative convolution has query length {seq_len}, checkpoint lane count {checkpoint_lanes}"
             );
         }
         if !capacity.is_multiple_of(checkpoint_lanes) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative convolution capacity {capacity} is not divisible by {checkpoint_lanes} checkpoint lanes"
             );
         }
         if active_slots.dims1()? != batch_size || active_slots.dtype() != DType::U32 {
-            candle::bail!("GDN speculative convolution active slots must be u32 [batch]");
+            inference_tensor::bail!("GDN speculative convolution active slots must be u32 [batch]");
         }
         if weight.dtype() != x.dtype() || state_pool.dtype() != x.dtype() {
-            candle::bail!("GDN speculative convolution tensors must share one dtype");
+            inference_tensor::bail!("GDN speculative convolution tensors must share one dtype");
         }
         if !weight.is_contiguous() || !state_pool.is_contiguous() || !active_slots.is_contiguous() {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative convolution weight, state pool, and slots must be contiguous"
             );
         }
         for tensor in [weight, state_pool, active_slots] {
             if !tensor.device().same_device(x.device()) {
-                candle::bail!("GDN speculative convolution tensors must share one device");
+                inference_tensor::bail!(
+                    "GDN speculative convolution tensors must share one device"
+                );
             }
         }
         let pending = pending
@@ -3027,7 +3053,9 @@ pub fn speculative_conv_checkpoints_cuda(
                     || pending.pending_epochs.dtype() != DType::U32
                     || pending.applied_epochs.dtype() != DType::U32
                 {
-                    candle::bail!("GDN pending convolution transition shape is incompatible");
+                    inference_tensor::bail!(
+                        "GDN pending convolution transition shape is incompatible"
+                    );
                 }
                 for tensor in [
                     pending.conv_input,
@@ -3036,7 +3064,7 @@ pub fn speculative_conv_checkpoints_cuda(
                     pending.applied_epochs,
                 ] {
                     if !tensor.device().same_device(x.device()) || !tensor.is_contiguous() {
-                        candle::bail!(
+                        inference_tensor::bail!(
                             "GDN pending convolution transitions must be contiguous on one device"
                         );
                     }
@@ -3045,7 +3073,7 @@ pub fn speculative_conv_checkpoints_cuda(
             })
             .transpose()?;
         if pending.is_some() && (write_checkpoints || checkpoint_lanes != 1) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN pending convolution transitions require single-lane transition logging"
             );
         }
@@ -3053,24 +3081,24 @@ pub fn speculative_conv_checkpoints_cuda(
         let dev = x.device().as_cuda_device()?;
         let (x_storage, x_layout) = x.storage_and_layout();
         let x_storage = match &*x_storage {
-            candle::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
-            _ => candle::bail!("GDN speculative convolution input must be CUDA"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("GDN speculative convolution input must be CUDA"),
         };
         let x_strides = x_layout.stride();
         let (weight_storage, weight_layout) = weight.storage_and_layout();
         let weight_storage = match &*weight_storage {
-            candle::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
-            _ => candle::bail!("GDN speculative convolution weight must be CUDA"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("GDN speculative convolution weight must be CUDA"),
         };
         let (state_storage, state_layout) = state_pool.storage_and_layout();
         let state_storage = match &*state_storage {
-            candle::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
-            _ => candle::bail!("GDN speculative convolution state must be CUDA"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("GDN speculative convolution state must be CUDA"),
         };
         let (slots_storage, slots_layout) = active_slots.storage_and_layout();
         let slots_storage = match &*slots_storage {
-            candle::Storage::Cuda(storage) => storage.as_cuda_slice::<u32>()?,
-            _ => candle::bail!("GDN speculative convolution slots must be CUDA"),
+            inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<u32>()?,
+            _ => inference_tensor::bail!("GDN speculative convolution slots must be CUDA"),
         };
         let output = unsafe { dev.alloc::<T>(batch_size * seq_len * conv_dim) }?;
         let stream = dev.cuda_stream().cu_stream() as i64;
@@ -3079,8 +3107,8 @@ pub fn speculative_conv_checkpoints_cuda(
             ($tensor:expr, $ty:ty, $name:literal) => {{
                 let (storage, layout) = $tensor.storage_and_layout();
                 let storage = match &*storage {
-                    candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                    _ => candle::bail!(concat!($name, " must be CUDA")),
+                    inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
+                    _ => inference_tensor::bail!(concat!($name, " must be CUDA")),
                 };
                 let pointer = storage
                     .slice(layout.start_offset()..)
@@ -3160,7 +3188,10 @@ pub fn speculative_conv_checkpoints_cuda(
         }
 
         Ok(Tensor::from((
-            candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(output, dev.clone())),
+            inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+                output,
+                dev.clone(),
+            )),
             (batch_size, seq_len, conv_dim),
         )))
     }
@@ -3169,7 +3200,9 @@ pub fn speculative_conv_checkpoints_cuda(
         DType::F16 => cuda_fwd::<half::f16>(context, 0),
         DType::BF16 => cuda_fwd::<half::bf16>(context, 1),
         other => {
-            candle_core::bail!("GDN speculative convolution only supports f16/bf16, got {other:?}")
+            inference_tensor::bail!(
+                "GDN speculative convolution only supports f16/bf16, got {other:?}"
+            )
         }
     }
 }
@@ -3178,7 +3211,7 @@ pub fn speculative_conv_checkpoints_cuda(
 pub fn speculative_conv_checkpoints_cuda(
     _context: GdnSpeculativeConvCheckpoints<'_>,
 ) -> Result<Tensor> {
-    candle_core::bail!("speculative_conv_checkpoints_cuda requires the cuda feature")
+    inference_tensor::bail!("speculative_conv_checkpoints_cuda requires the cuda feature")
 }
 
 pub struct GdnPendingSpeculativeRecurrence<'a> {
@@ -3238,13 +3271,13 @@ pub struct GdnSpeculativeRecurrenceOutput {
 pub fn speculative_recurrence_checkpoints_cuda(
     context: GdnSpeculativeRecurrenceCheckpoints<'_>,
 ) -> Result<GdnSpeculativeRecurrenceOutput> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
     use float8::F8E4M3;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         context: GdnSpeculativeRecurrenceCheckpoints<'_>,
         dtype_code: i32,
@@ -3270,32 +3303,34 @@ pub fn speculative_recurrence_checkpoints_cuda(
         } = context;
         let (batch_size, seq_len, conv_dim) = mixed_qkv.dims3()?;
         if batch_size == 0 || seq_len == 0 || num_k_heads == 0 || num_v_heads == 0 {
-            candle::bail!("GDN speculative recurrence requires non-empty dimensions");
+            inference_tensor::bail!("GDN speculative recurrence requires non-empty dimensions");
         }
         if head_k_dim == 0 || head_k_dim > GDN_SPEC_CHECKPOINT_MAX_K {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative recurrence key width must be in 1..={GDN_SPEC_CHECKPOINT_MAX_K}, got {head_k_dim}"
             );
         }
         if head_v_dim == 0 || !num_v_heads.is_multiple_of(num_k_heads) {
-            candle::bail!("GDN speculative recurrence has incompatible head dimensions");
+            inference_tensor::bail!("GDN speculative recurrence has incompatible head dimensions");
         }
         let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
         if conv_dim != expected_conv_dim {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative recurrence input width is {conv_dim}, expected {expected_conv_dim}"
             );
         }
         if b.dims3()? != (batch_size, seq_len, num_v_heads)
             || a.dims3()? != (batch_size, seq_len, num_v_heads)
         {
-            candle::bail!("GDN speculative recurrence gate tensors have incompatible shapes");
+            inference_tensor::bail!(
+                "GDN speculative recurrence gate tensors have incompatible shapes"
+            );
         }
         let (physical_dim_2, physical_dim_3, value_major) = match state_layout {
             RecurrentStateLayout::GdnKeyMajor => (head_k_dim, head_v_dim, false),
             RecurrentStateLayout::GdnValueMajor => (head_v_dim, head_k_dim, true),
             RecurrentStateLayout::Opaque => {
-                candle::bail!("GDN speculative recurrence does not support opaque state")
+                inference_tensor::bail!("GDN speculative recurrence does not support opaque state")
             }
         };
         let (capacity, state_heads, state_dim_2, state_dim_3) = state_pool.dims4()?;
@@ -3303,40 +3338,44 @@ pub fn speculative_recurrence_checkpoints_cuda(
             || state_dim_2 != physical_dim_2
             || state_dim_3 != physical_dim_3
         {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative recurrence state shape {:?} is incompatible with [{capacity}, {num_v_heads}, {physical_dim_2}, {physical_dim_3}]",
                 state_pool.dims()
             );
         }
         if checkpoint_lanes == 0 || (!record_transitions && seq_len > checkpoint_lanes) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative recurrence has query length {seq_len}, checkpoint lane count {checkpoint_lanes}"
             );
         }
         if !capacity.is_multiple_of(checkpoint_lanes) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN speculative recurrence capacity {capacity} is not divisible by {checkpoint_lanes} checkpoint lanes"
             );
         }
         if active_slots.dims1()? != batch_size || active_slots.dtype() != DType::U32 {
-            candle::bail!("GDN speculative recurrence active slots must be u32 [batch]");
+            inference_tensor::bail!("GDN speculative recurrence active slots must be u32 [batch]");
         }
         if a_log.dims1()? != num_v_heads || dt_bias.dims1()? != num_v_heads {
-            candle::bail!("GDN speculative recurrence parameter tensors must match value heads");
+            inference_tensor::bail!(
+                "GDN speculative recurrence parameter tensors must match value heads"
+            );
         }
         if b.dtype() != mixed_qkv.dtype() || a.dtype() != mixed_qkv.dtype() {
-            candle::bail!("GDN speculative recurrence activations must share one dtype");
+            inference_tensor::bail!("GDN speculative recurrence activations must share one dtype");
         }
         if !recurrent_state_dtype_supported(state_pool.dtype()) {
-            candle::bail!("GDN speculative recurrence state has unsupported dtype");
+            inference_tensor::bail!("GDN speculative recurrence state has unsupported dtype");
         }
         for tensor in [b, a, a_log, dt_bias, state_pool, active_slots] {
             if !tensor.device().same_device(mixed_qkv.device()) {
-                candle::bail!("GDN speculative recurrence tensors must share one device");
+                inference_tensor::bail!("GDN speculative recurrence tensors must share one device");
             }
         }
         if !state_pool.is_contiguous() || !active_slots.is_contiguous() {
-            candle::bail!("GDN speculative recurrence state and slots must be contiguous");
+            inference_tensor::bail!(
+                "GDN speculative recurrence state and slots must be contiguous"
+            );
         }
         let pending = pending
             .map(|pending| {
@@ -3363,7 +3402,9 @@ pub fn speculative_recurrence_checkpoints_cuda(
                     || pending.pending_epochs.dtype() != DType::U32
                     || pending.applied_epochs.dtype() != DType::U32
                 {
-                    candle::bail!("GDN pending recurrence transition shape is incompatible");
+                    inference_tensor::bail!(
+                        "GDN pending recurrence transition shape is incompatible"
+                    );
                 }
                 for tensor in [
                     pending.key_banks,
@@ -3375,7 +3416,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
                     pending.applied_epochs,
                 ] {
                     if !tensor.device().same_device(mixed_qkv.device()) || !tensor.is_contiguous() {
-                        candle::bail!(
+                        inference_tensor::bail!(
                             "GDN pending recurrence transitions must be contiguous on one device"
                         );
                     }
@@ -3386,7 +3427,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
 
         let fused_post_op = post_op.is_some();
         if pending.is_some() && (!record_transitions || !fused_post_op || checkpoint_lanes != 1) {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN pending recurrence transitions require fused single-lane transition logging"
             );
         }
@@ -3397,7 +3438,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
                 || seq_len > GDN_SPEC_FUSED_MAX_TOKENS
                 || !fused_post_op)
         {
-            candle::bail!(
+            inference_tensor::bail!(
                 "GDN transition logging requires fused value-major 128x128 speculative recurrence"
             );
         }
@@ -3408,25 +3449,25 @@ pub fn speculative_recurrence_checkpoints_cuda(
                     || head_v_dim != GDN_DECODE_V_DIM
                     || seq_len > GDN_SPEC_FUSED_MAX_TOKENS
                 {
-                    candle::bail!(
+                    inference_tensor::bail!(
                         "fused GDN speculative normalization requires value-major 128x128 state and at most 8 tokens"
                     );
                 }
                 if post_op.gate.dtype() != mixed_qkv.dtype()
                     || post_op.weight.dtype() != mixed_qkv.dtype()
                 {
-                    candle::bail!("fused GDN speculative normalization tensors must share the activation dtype");
+                    inference_tensor::bail!("fused GDN speculative normalization tensors must share the activation dtype");
                 }
                 if !post_op.gate.device().same_device(mixed_qkv.device())
                     || !post_op.weight.device().same_device(mixed_qkv.device())
                 {
-                    candle::bail!("fused GDN speculative normalization tensors must share one device");
+                    inference_tensor::bail!("fused GDN speculative normalization tensors must share one device");
                 }
                 if post_op.weight.dims() != [head_v_dim] {
-                    candle::bail!("fused GDN speculative normalization weight must match the value head width");
+                    inference_tensor::bail!("fused GDN speculative normalization weight must match the value head width");
                 }
                 if !post_op.eps.is_finite() || post_op.eps < 0.0 {
-                    candle::bail!("fused GDN speculative normalization epsilon must be finite and non-negative");
+                    inference_tensor::bail!("fused GDN speculative normalization epsilon must be finite and non-negative");
                 }
                 let (_storage, layout) = post_op.gate.storage_and_layout();
                 let strides = layout.stride();
@@ -3443,7 +3484,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
                     {
                         [strides[0], strides[1], head_v_dim * strides[2], strides[2]]
                     }
-                    _ => candle::bail!(
+                    _ => inference_tensor::bail!(
                         "fused GDN speculative normalization gate has incompatible shape {:?}",
                         post_op.gate.dims()
                     ),
@@ -3453,17 +3494,17 @@ pub fn speculative_recurrence_checkpoints_cuda(
                     .as_ref()
                     .map(|spec| {
                         if mixed_qkv.dtype() != DType::BF16 {
-                            candle::bail!(
+                            inference_tensor::bail!(
                                 "quantized GDN speculative output requires BF16 activations"
                             );
                         }
                         let layout = spec.layout(num_v_heads, head_v_dim).ok_or_else(|| {
-                            candle::Error::msg(
+                            inference_tensor::Error::msg(
                                 "quantized GDN speculative output has an incompatible contract",
                             )
                         })?;
                         if layout.rows != batch_size * seq_len {
-                            candle::bail!(
+                            inference_tensor::bail!(
                                 "quantized GDN speculative output row count is incompatible"
                             );
                         }
@@ -3497,8 +3538,8 @@ pub fn speculative_recurrence_checkpoints_cuda(
             ($tensor:expr, $ty:ty, $name:literal) => {{
                 let (storage, layout) = $tensor.storage_and_layout();
                 let storage = match &*storage {
-                    candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                    _ => candle::bail!(concat!($name, " must be CUDA")),
+                    inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
+                    _ => inference_tensor::bail!(concat!($name, " must be CUDA")),
                 };
                 let pointer = storage
                     .slice(layout.start_offset()..)
@@ -3676,7 +3717,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
 
         let output = if let (Some(spec), Some(layout)) = (fp8_spec, fp8_layout) {
             let quantized_output = Tensor::from((
-                candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
+                inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
                     quantized_output.expect("FP8 output allocation follows its layout"),
                     dev.clone(),
                 )),
@@ -3688,7 +3729,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
                 ActivationScaleLayout::GroupMajor { .. } => [layout.groups, layout.scale_stride_m],
             };
             let scales = Tensor::from((
-                candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
+                inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
                     output_scales.expect("FP8 scale allocation follows its layout"),
                     dev.clone(),
                 )),
@@ -3703,10 +3744,11 @@ pub fn speculative_recurrence_checkpoints_cuda(
                 spec.scale_layout,
             )?)
         } else {
-            let output_storage = candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
-                output.expect("BF16 output allocation follows the FP8 contract"),
-                dev.clone(),
-            ));
+            let output_storage =
+                inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
+                    output.expect("BF16 output allocation follows the FP8 contract"),
+                    dev.clone(),
+                ));
             GdnPostOpOutput::Tensor(if fused_post_op {
                 Tensor::from((
                     output_storage,
@@ -3722,15 +3764,21 @@ pub fn speculative_recurrence_checkpoints_cuda(
         let transitions = match (transition_key, transition_delta, transition_decay) {
             (Some(key), Some(delta), Some(decay)) => Some(GdnSpeculativeTransitions {
                 key: Tensor::from((
-                    candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(key, dev.clone())),
+                    inference_tensor::Storage::Cuda(
+                        inference_tensor::CudaStorage::wrap_cuda_slice(key, dev.clone()),
+                    ),
                     (batch_size, seq_len, num_k_heads, head_k_dim),
                 )),
                 delta: Tensor::from((
-                    candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(delta, dev.clone())),
+                    inference_tensor::Storage::Cuda(
+                        inference_tensor::CudaStorage::wrap_cuda_slice(delta, dev.clone()),
+                    ),
                     (batch_size, seq_len, num_v_heads, head_v_dim),
                 )),
                 decay: Tensor::from((
-                    candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(decay, dev.clone())),
+                    inference_tensor::Storage::Cuda(
+                        inference_tensor::CudaStorage::wrap_cuda_slice(decay, dev.clone()),
+                    ),
                     (batch_size, seq_len, num_v_heads),
                 )),
             }),
@@ -3747,7 +3795,9 @@ pub fn speculative_recurrence_checkpoints_cuda(
         DType::F16 => cuda_fwd::<half::f16>(context, 0),
         DType::BF16 => cuda_fwd::<half::bf16>(context, 1),
         other => {
-            candle_core::bail!("GDN speculative recurrence only supports f16/bf16, got {other:?}")
+            inference_tensor::bail!(
+                "GDN speculative recurrence only supports f16/bf16, got {other:?}"
+            )
         }
     }
 }
@@ -3756,7 +3806,7 @@ pub fn speculative_recurrence_checkpoints_cuda(
 pub fn speculative_recurrence_checkpoints_cuda(
     _context: GdnSpeculativeRecurrenceCheckpoints<'_>,
 ) -> Result<GdnSpeculativeRecurrenceOutput> {
-    candle_core::bail!("speculative_recurrence_checkpoints_cuda requires the cuda feature")
+    inference_tensor::bail!("speculative_recurrence_checkpoints_cuda requires the cuda feature")
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -3789,9 +3839,8 @@ pub struct GdnDeferredRecurrence<'a> {
 pub fn deferred_recurrence_rmsnorm_gate_cuda(
     context: GdnDeferredRecurrence<'_>,
 ) -> Result<GdnPostOpOutput> {
-    use candle::cuda_backend::cudarc::driver::DevicePtrMut;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtrMut;
 
     let GdnDeferredRecurrence {
         mixed_qkv,
@@ -3818,7 +3867,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
     } = context;
     let (batch_size, seq_len, conv_dim) = mixed_qkv.dims3()?;
     if batch_size == 0 || seq_len != 1 || num_k_heads == 0 || num_v_heads == 0 {
-        candle::bail!("deferred GDN recurrence requires non-empty single-token input");
+        inference_tensor::bail!("deferred GDN recurrence requires non-empty single-token input");
     }
     if mixed_qkv.dtype() != DType::BF16
         || b.dtype() != DType::BF16
@@ -3832,14 +3881,14 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         || deferred_cursor.dtype() != DType::U32
         || active_slots.dtype() != DType::U32
     {
-        candle::bail!("deferred GDN recurrence requires BF16 activations and FP32 state");
+        inference_tensor::bail!("deferred GDN recurrence requires BF16 activations and FP32 state");
     }
     if head_k_dim != GDN_DECODE_K_DIM
         || head_v_dim != GDN_DECODE_V_DIM
         || !num_v_heads.is_multiple_of(num_k_heads)
         || state_layout != RecurrentStateLayout::GdnValueMajor
     {
-        candle::bail!("deferred GDN recurrence requires value-major 128x128 state");
+        inference_tensor::bail!("deferred GDN recurrence requires value-major 128x128 state");
     }
     let expected_conv_dim = 2 * num_k_heads * head_k_dim + num_v_heads * head_v_dim;
     if conv_dim != expected_conv_dim
@@ -3850,7 +3899,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         || norm_weight.dims1()? != head_v_dim
         || active_slots.dims1()? != batch_size
     {
-        candle::bail!("deferred GDN recurrence input shapes are incompatible");
+        inference_tensor::bail!("deferred GDN recurrence input shapes are incompatible");
     }
     let (capacity, state_heads, state_v_dim, state_k_dim) = state_pool.dims4()?;
     if capacity == 0
@@ -3862,7 +3911,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         || deferred_decay.dims() != [capacity, GDN_DEFERRED_STATE_DEPTH, num_v_heads]
         || deferred_cursor.dims() != [capacity]
     {
-        candle::bail!("deferred GDN recurrence storage shapes are incompatible");
+        inference_tensor::bail!("deferred GDN recurrence storage shapes are incompatible");
     }
     let gate_strides = {
         let (_storage, layout) = gate.storage_and_layout();
@@ -3880,27 +3929,27 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
             {
                 [strides[0], head_v_dim * strides[2], strides[2]]
             }
-            _ => candle::bail!("deferred GDN recurrence gate shape is incompatible"),
+            _ => inference_tensor::bail!("deferred GDN recurrence gate shape is incompatible"),
         }
     };
     if !norm_eps.is_finite() || norm_eps < 0.0 {
-        candle::bail!("deferred GDN recurrence epsilon must be finite and non-negative");
+        inference_tensor::bail!("deferred GDN recurrence epsilon must be finite and non-negative");
     }
     let device = mixed_qkv.device();
     if !device.is_cuda() {
-        candle::bail!("deferred GDN recurrence requires CUDA");
+        inference_tensor::bail!("deferred GDN recurrence requires CUDA");
     }
     if device.as_cuda_device()?.compute_major() < GDN_DECODE_MIN_COMPUTE_MAJOR {
-        candle::bail!("deferred GDN recurrence requires compute capability 8.0 or newer");
+        inference_tensor::bail!("deferred GDN recurrence requires compute capability 8.0 or newer");
     }
     let fp8_layout = quantization
         .as_ref()
         .map(|spec| {
             let layout = spec.layout(num_v_heads, head_v_dim).ok_or_else(|| {
-                candle::Error::msg("deferred GDN output has an incompatible FP8 contract")
+                inference_tensor::Error::msg("deferred GDN output has an incompatible FP8 contract")
             })?;
             if layout.rows != batch_size {
-                candle::bail!("deferred GDN FP8 output row count is incompatible")
+                inference_tensor::bail!("deferred GDN FP8 output row count is incompatible")
             }
             Ok(layout)
         })
@@ -3920,7 +3969,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         norm_weight,
     ] {
         if !tensor.device().same_device(device) {
-            candle::bail!("deferred GDN recurrence tensors must share one device");
+            inference_tensor::bail!("deferred GDN recurrence tensors must share one device");
         }
     }
     for tensor in [
@@ -3932,7 +3981,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         deferred_cursor,
     ] {
         if !tensor.is_contiguous() {
-            candle::bail!("deferred GDN recurrence state must be contiguous");
+            inference_tensor::bail!("deferred GDN recurrence state must be contiguous");
         }
     }
 
@@ -4131,7 +4180,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
     drop(mixed_qkv_storage);
     if let (Some(spec), Some(layout)) = (quantization, fp8_layout) {
         let quantized_output = Tensor::from((
-            candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
+            inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
                 quantized_output.expect("FP8 output allocation follows its layout"),
                 dev.clone(),
             )),
@@ -4143,7 +4192,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
             ActivationScaleLayout::GroupMajor { .. } => [layout.groups, layout.scale_stride_m],
         };
         let scales = Tensor::from((
-            candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
+            inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
                 output_scales.expect("FP8 scale allocation follows its layout"),
                 dev.clone(),
             )),
@@ -4161,7 +4210,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
         ));
     }
     Ok(GdnPostOpOutput::Tensor(Tensor::from((
-        candle::Storage::Cuda(candle::CudaStorage::wrap_cuda_slice(
+        inference_tensor::Storage::Cuda(inference_tensor::CudaStorage::wrap_cuda_slice(
             output.expect("BF16 output allocation follows the FP8 contract"),
             dev.clone(),
         )),
@@ -4173,7 +4222,7 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
 pub fn deferred_recurrence_rmsnorm_gate_cuda(
     _context: GdnDeferredRecurrence<'_>,
 ) -> Result<Tensor> {
-    candle_core::bail!("deferred_recurrence_rmsnorm_gate_cuda requires the cuda feature")
+    inference_tensor::bail!("deferred_recurrence_rmsnorm_gate_cuda requires the cuda feature")
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -4195,10 +4244,8 @@ pub struct GdnDeferredStateFlush<'a> {
 #[cfg(feature = "cuda")]
 fn launch_deferred_state_cuda(
     context: GdnDeferredStateFlush<'_>,
-    stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    stream: &std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
 ) -> Result<()> {
-    use candle_core as candle;
-
     let GdnDeferredStateFlush {
         state_pool,
         active_slots,
@@ -4215,7 +4262,7 @@ fn launch_deferred_state_cuda(
     } = context;
     let batch_size = active_slots.dims1()?;
     if batch_size == 0 || active_slots.dtype() != DType::U32 {
-        candle::bail!("deferred GDN materialization requires non-empty u32 active slots");
+        inference_tensor::bail!("deferred GDN materialization requires non-empty u32 active slots");
     }
     if state_pool.dtype() != DType::F32
         || deferred_key.dtype() != DType::F32
@@ -4229,7 +4276,9 @@ fn launch_deferred_state_cuda(
         || !num_v_heads.is_multiple_of(num_k_heads)
         || state_layout != RecurrentStateLayout::GdnValueMajor
     {
-        candle::bail!("deferred GDN materialization requires FP32 value-major 128x128 state");
+        inference_tensor::bail!(
+            "deferred GDN materialization requires FP32 value-major 128x128 state"
+        );
     }
     let (capacity, state_heads, state_v_dim, state_k_dim) = state_pool.dims4()?;
     if capacity == 0
@@ -4241,16 +4290,20 @@ fn launch_deferred_state_cuda(
         || deferred_decay.dims() != [capacity, GDN_DEFERRED_STATE_DEPTH, num_v_heads]
         || deferred_cursor.dims() != [capacity]
     {
-        candle::bail!("deferred GDN materialization storage shapes are incompatible");
+        inference_tensor::bail!("deferred GDN materialization storage shapes are incompatible");
     }
     let device = state_pool.device();
     if !device.is_cuda() || device.as_cuda_device()?.compute_major() < GDN_DECODE_MIN_COMPUTE_MAJOR
     {
-        candle::bail!("deferred GDN materialization requires compute capability 8.0 or newer");
+        inference_tensor::bail!(
+            "deferred GDN materialization requires compute capability 8.0 or newer"
+        );
     }
     let dev = device.as_cuda_device()?;
     if !std::sync::Arc::ptr_eq(dev.cuda_stream().context(), stream.context()) {
-        candle::bail!("deferred GDN materialization stream belongs to another CUDA context");
+        inference_tensor::bail!(
+            "deferred GDN materialization stream belongs to another CUDA context"
+        );
     }
     for tensor in [
         state_pool,
@@ -4261,7 +4314,7 @@ fn launch_deferred_state_cuda(
         deferred_cursor,
     ] {
         if !tensor.device().same_device(device) || !tensor.is_contiguous() {
-            candle::bail!(
+            inference_tensor::bail!(
                 "deferred GDN materialization tensors must be contiguous on one CUDA device"
             );
         }
@@ -4354,7 +4407,7 @@ pub fn flush_deferred_state_cuda(context: GdnDeferredStateFlush<'_>) -> Result<(
 
 #[cfg(not(feature = "cuda"))]
 pub fn flush_deferred_state_cuda(_context: GdnDeferredStateFlush<'_>) -> Result<()> {
-    candle_core::bail!("flush_deferred_state_cuda requires the cuda feature")
+    inference_tensor::bail!("flush_deferred_state_cuda requires the cuda feature")
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -4386,11 +4439,11 @@ pub struct GdnSpeculativeTransitionCommit<'a> {
 pub fn speculative_transition_commit_batched_cuda(
     commit: GdnSpeculativeTransitionCommit<'_>,
 ) -> Result<()> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_commit<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         commit: GdnSpeculativeTransitionCommit<'_>,
         activation_dtype: i32,
@@ -4417,10 +4470,10 @@ pub fn speculative_transition_commit_batched_cuda(
             || keep_rows.dtype() != DType::U32
             || active_slots.dtype() != DType::U32
         {
-            candle::bail!("GDN transition commit indices must be non-empty u32 [batch]");
+            inference_tensor::bail!("GDN transition commit indices must be non-empty u32 [batch]");
         }
         if conv_width == 0 || conv_width > GDN_SPEC_CHECKPOINT_MAX_CONV_WIDTH {
-            candle::bail!("GDN transition commit has unsupported convolution width");
+            inference_tensor::bail!("GDN transition commit has unsupported convolution width");
         }
         if num_k_heads == 0
             || num_v_heads == 0
@@ -4428,13 +4481,13 @@ pub fn speculative_transition_commit_batched_cuda(
             || head_k_dim != GDN_DECODE_K_DIM
             || head_v_dim != GDN_DECODE_V_DIM
         {
-            candle::bail!("GDN transition commit has incompatible head dimensions");
+            inference_tensor::bail!("GDN transition commit has incompatible head dimensions");
         }
         let value_major = match state_layout {
             RecurrentStateLayout::GdnKeyMajor => false,
             RecurrentStateLayout::GdnValueMajor => true,
             RecurrentStateLayout::Opaque => {
-                candle::bail!("GDN transition commit does not support opaque state")
+                inference_tensor::bail!("GDN transition commit does not support opaque state")
             }
         };
         let (first_batch, seq_len, first_conv_dim) = layers[0].conv_input.dims3()?;
@@ -4443,19 +4496,21 @@ pub fn speculative_transition_commit_batched_cuda(
             || seq_len > GDN_SPEC_FUSED_MAX_TOKENS
             || first_conv_dim != conv_dim
         {
-            candle::bail!("GDN transition commit input shape is incompatible with its indices");
+            inference_tensor::bail!(
+                "GDN transition commit input shape is incompatible with its indices"
+            );
         }
         let device = layers[0].conv_input.device();
         if !device.is_cuda()
             || !keep_rows.device().same_device(device)
             || !active_slots.device().same_device(device)
         {
-            candle::bail!("GDN transition commit tensors must share one CUDA device");
+            inference_tensor::bail!("GDN transition commit tensors must share one CUDA device");
         }
         let activation_tensor_dtype = layers[0].conv_input.dtype();
         let recurrent_dtype = layers[0].recurrent_state.dtype();
         if !recurrent_state_dtype_supported(recurrent_dtype) {
-            candle::bail!("GDN transition commit state has unsupported dtype");
+            inference_tensor::bail!("GDN transition commit state has unsupported dtype");
         }
 
         let cuda_stream = device.as_cuda_device()?.cuda_stream();
@@ -4475,7 +4530,7 @@ pub fn speculative_transition_commit_batched_cuda(
                 || layer.conv_state.dims() != [conv_capacity, conv_dim, conv_width]
                 || recurrent_capacity != conv_capacity
             {
-                candle::bail!("GDN transition commit layer shapes are incompatible");
+                inference_tensor::bail!("GDN transition commit layer shapes are incompatible");
             }
             let expected_state_shape = if value_major {
                 [recurrent_capacity, num_v_heads, head_v_dim, head_k_dim]
@@ -4483,7 +4538,9 @@ pub fn speculative_transition_commit_batched_cuda(
                 [recurrent_capacity, num_v_heads, head_k_dim, head_v_dim]
             };
             if layer.recurrent_state.dims() != expected_state_shape {
-                candle::bail!("GDN transition commit recurrent state shape is incompatible");
+                inference_tensor::bail!(
+                    "GDN transition commit recurrent state shape is incompatible"
+                );
             }
             if layer.conv_input.dtype() != activation_tensor_dtype
                 || layer.conv_state.dtype() != activation_tensor_dtype
@@ -4492,7 +4549,7 @@ pub fn speculative_transition_commit_batched_cuda(
                 || layer.decay.dtype() != DType::F32
                 || layer.recurrent_state.dtype() != recurrent_dtype
             {
-                candle::bail!("GDN transition commit layer dtypes are incompatible");
+                inference_tensor::bail!("GDN transition commit layer dtypes are incompatible");
             }
             for tensor in [
                 layer.conv_input,
@@ -4503,7 +4560,7 @@ pub fn speculative_transition_commit_batched_cuda(
                 layer.recurrent_state,
             ] {
                 if !tensor.device().same_device(device) || !tensor.is_contiguous() {
-                    candle::bail!(
+                    inference_tensor::bail!(
                         "GDN transition commit layer tensors must be contiguous on one device"
                     );
                 }
@@ -4513,8 +4570,10 @@ pub fn speculative_transition_commit_batched_cuda(
                 ($tensor:expr, $ty:ty, $name:literal) => {{
                     let (storage, layout) = $tensor.storage_and_layout();
                     let storage = match &*storage {
-                        candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                        _ => candle::bail!(concat!($name, " must be CUDA")),
+                        inference_tensor::Storage::Cuda(storage) => {
+                            storage.as_cuda_slice::<$ty>()?
+                        }
+                        _ => inference_tensor::bail!(concat!($name, " must be CUDA")),
                     };
                     let pointer = storage
                         .slice(layout.start_offset()..)
@@ -4534,7 +4593,7 @@ pub fn speculative_transition_commit_batched_cuda(
                 .replace(state_dtype)
                 .is_some_and(|dtype| dtype != state_dtype)
             {
-                candle::bail!("GDN transition commit recurrent state dtypes diverged");
+                inference_tensor::bail!("GDN transition commit recurrent state dtypes diverged");
             }
             pointer_segments[5].push(state_ptr as u64);
         }
@@ -4549,8 +4608,8 @@ pub fn speculative_transition_commit_batched_cuda(
             ($tensor:expr, $ty:ty, $name:literal) => {{
                 let (storage, layout) = $tensor.storage_and_layout();
                 let storage = match &*storage {
-                    candle::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
-                    _ => candle::bail!(concat!($name, " must be CUDA")),
+                    inference_tensor::Storage::Cuda(storage) => storage.as_cuda_slice::<$ty>()?,
+                    _ => inference_tensor::bail!(concat!($name, " must be CUDA")),
                 };
                 let pointer = storage
                     .slice(layout.start_offset()..)
@@ -4593,7 +4652,7 @@ pub fn speculative_transition_commit_batched_cuda(
     match commit.layers.first().map(|layer| layer.conv_input.dtype()) {
         Some(DType::F16) => cuda_commit::<half::f16>(commit, 0),
         Some(DType::BF16) => cuda_commit::<half::bf16>(commit, 1),
-        Some(other) => candle_core::bail!(
+        Some(other) => inference_tensor::bail!(
             "GDN transition commit only supports f16/bf16 activations, got {other:?}"
         ),
         None => Ok(()),
@@ -4604,7 +4663,7 @@ pub fn speculative_transition_commit_batched_cuda(
 pub fn speculative_transition_commit_batched_cuda(
     _commit: GdnSpeculativeTransitionCommit<'_>,
 ) -> Result<()> {
-    candle_core::bail!("speculative_transition_commit_batched_cuda requires the cuda feature")
+    inference_tensor::bail!("speculative_transition_commit_batched_cuda requires the cuda feature")
 }
 
 pub struct GdnSpeculativeTransitionStageLayer<'a> {
@@ -4635,10 +4694,9 @@ pub struct GdnSpeculativeTransitionStage<'a> {
 pub fn speculative_transition_stage_batched_cuda(
     stage: GdnSpeculativeTransitionStage<'_>,
 ) -> Result<()> {
-    use candle_core as candle;
-
     fn cuda_stage<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         stage: GdnSpeculativeTransitionStage<'_>,
         activation_dtype: i32,
@@ -4662,7 +4720,7 @@ pub fn speculative_transition_stage_batched_cuda(
             || keep_rows.dtype() != DType::U32
             || destination_slots.dtype() != DType::U32
         {
-            candle::bail!("GDN transition stage indices must be non-empty u32 [batch]");
+            inference_tensor::bail!("GDN transition stage indices must be non-empty u32 [batch]");
         }
         if num_k_heads == 0
             || num_v_heads == 0
@@ -4671,7 +4729,7 @@ pub fn speculative_transition_stage_batched_cuda(
             || head_v_dim == 0
             || conv_dim == 0
         {
-            candle::bail!("GDN transition stage has incompatible dimensions");
+            inference_tensor::bail!("GDN transition stage has incompatible dimensions");
         }
         let (first_batch, seq_len, first_conv_dim) = layers[0].conv_input.dims3()?;
         if first_batch != batch_size
@@ -4679,7 +4737,9 @@ pub fn speculative_transition_stage_batched_cuda(
             || seq_len > GDN_SPEC_FUSED_MAX_TOKENS
             || first_conv_dim != conv_dim
         {
-            candle::bail!("GDN transition stage input shape is incompatible with its indices");
+            inference_tensor::bail!(
+                "GDN transition stage input shape is incompatible with its indices"
+            );
         }
         let (destination_capacity, max_rows, destination_conv_dim) =
             layers[0].pending_conv_input.dims3()?;
@@ -4688,7 +4748,7 @@ pub fn speculative_transition_stage_batched_cuda(
             || max_rows > GDN_SPEC_FUSED_MAX_TOKENS
             || destination_conv_dim != conv_dim
         {
-            candle::bail!("GDN transition stage destination shape is incompatible");
+            inference_tensor::bail!("GDN transition stage destination shape is incompatible");
         }
         let device = layers[0].conv_input.device();
         if !device.is_cuda()
@@ -4697,7 +4757,9 @@ pub fn speculative_transition_stage_batched_cuda(
             || !keep_rows.is_contiguous()
             || !destination_slots.is_contiguous()
         {
-            candle::bail!("GDN transition stage tensors must be contiguous on one CUDA device");
+            inference_tensor::bail!(
+                "GDN transition stage tensors must be contiguous on one CUDA device"
+            );
         }
         let activation_tensor_dtype = layers[0].conv_input.dtype();
         for layer in layers {
@@ -4714,7 +4776,7 @@ pub fn speculative_transition_stage_batched_cuda(
                 || layer.pending_keep_rows.dims() != [destination_capacity]
                 || layer.pending_epochs.dims() != [destination_capacity]
             {
-                candle::bail!("GDN transition stage layer shapes are incompatible");
+                inference_tensor::bail!("GDN transition stage layer shapes are incompatible");
             }
             if layer.conv_input.dtype() != activation_tensor_dtype
                 || layer.pending_conv_input.dtype() != activation_tensor_dtype
@@ -4727,7 +4789,7 @@ pub fn speculative_transition_stage_batched_cuda(
                 || layer.pending_keep_rows.dtype() != DType::U32
                 || layer.pending_epochs.dtype() != DType::U32
             {
-                candle::bail!("GDN transition stage layer dtypes are incompatible");
+                inference_tensor::bail!("GDN transition stage layer dtypes are incompatible");
             }
             for tensor in [
                 layer.conv_input,
@@ -4742,7 +4804,7 @@ pub fn speculative_transition_stage_batched_cuda(
                 layer.pending_epochs,
             ] {
                 if !tensor.device().same_device(device) || !tensor.is_contiguous() {
-                    candle::bail!(
+                    inference_tensor::bail!(
                         "GDN transition stage layer tensors must be contiguous on one device"
                     );
                 }
@@ -4866,7 +4928,7 @@ pub fn speculative_transition_stage_batched_cuda(
     match stage.layers.first().map(|layer| layer.conv_input.dtype()) {
         Some(DType::F16) => cuda_stage::<half::f16>(stage, 0),
         Some(DType::BF16) => cuda_stage::<half::bf16>(stage, 1),
-        Some(other) => candle_core::bail!(
+        Some(other) => inference_tensor::bail!(
             "GDN transition stage only supports f16/bf16 activations, got {other:?}"
         ),
         None => Ok(()),
@@ -4877,7 +4939,7 @@ pub fn speculative_transition_stage_batched_cuda(
 pub fn speculative_transition_stage_batched_cuda(
     _stage: GdnSpeculativeTransitionStage<'_>,
 ) -> Result<()> {
-    candle_core::bail!("speculative_transition_stage_batched_cuda requires the cuda feature")
+    inference_tensor::bail!("speculative_transition_stage_batched_cuda requires the cuda feature")
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -4900,8 +4962,6 @@ pub struct GdnPendingTransitionPublish<'a> {
 pub fn pending_transition_publish_batched_cuda(
     publish: GdnPendingTransitionPublish<'_>,
 ) -> Result<()> {
-    use candle_core as candle;
-
     let GdnPendingTransitionPublish {
         layers,
         keep_rows,
@@ -4920,17 +4980,19 @@ pub fn pending_transition_publish_batched_cuda(
         || !keep_rows.is_contiguous()
         || !destination_slots.is_contiguous()
     {
-        candle::bail!("GDN transition publish indices must be non-empty contiguous u32 [batch]");
+        inference_tensor::bail!(
+            "GDN transition publish indices must be non-empty contiguous u32 [batch]"
+        );
     }
     if max_rows == 0 || max_rows > GDN_SPEC_FUSED_MAX_TOKENS || destination_capacity == 0 {
-        candle::bail!("GDN transition publish storage dimensions are incompatible");
+        inference_tensor::bail!("GDN transition publish storage dimensions are incompatible");
     }
     let device = layers[0].pending_keep_rows.device();
     if !device.is_cuda()
         || !keep_rows.device().same_device(device)
         || !destination_slots.device().same_device(device)
     {
-        candle::bail!("GDN transition publish tensors must share one CUDA device");
+        inference_tensor::bail!("GDN transition publish tensors must share one CUDA device");
     }
     for layer in layers {
         for tensor in [
@@ -4943,7 +5005,7 @@ pub fn pending_transition_publish_batched_cuda(
                 || !tensor.device().same_device(device)
                 || !tensor.is_contiguous()
             {
-                candle::bail!("GDN transition publish metadata is incompatible");
+                inference_tensor::bail!("GDN transition publish metadata is incompatible");
             }
         }
     }
@@ -5031,7 +5093,7 @@ pub fn pending_transition_publish_batched_cuda(
 pub fn pending_transition_publish_batched_cuda(
     _publish: GdnPendingTransitionPublish<'_>,
 ) -> Result<()> {
-    candle_core::bail!("pending_transition_publish_batched_cuda requires the cuda feature")
+    inference_tensor::bail!("pending_transition_publish_batched_cuda requires the cuda feature")
 }
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
@@ -5065,10 +5127,9 @@ pub struct GdnPendingTransitionApply<'a> {
 
 #[cfg(feature = "cuda")]
 pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_>) -> Result<()> {
-    use candle_core as candle;
-
     fn cuda_apply<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         apply: GdnPendingTransitionApply<'_>,
         activation_dtype: i32,
@@ -5090,7 +5151,9 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
         }
         let batch_size = active_slots.dims1()?;
         if batch_size == 0 || active_slots.dtype() != DType::U32 || !active_slots.is_contiguous() {
-            candle::bail!("GDN pending transition slots must be non-empty contiguous u32 [batch]");
+            inference_tensor::bail!(
+                "GDN pending transition slots must be non-empty contiguous u32 [batch]"
+            );
         }
         if num_k_heads == 0
             || num_v_heads == 0
@@ -5102,7 +5165,7 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
             || conv_width > GDN_SPEC_CHECKPOINT_MAX_CONV_WIDTH
             || state_layout != RecurrentStateLayout::GdnValueMajor
         {
-            candle::bail!("GDN pending transition apply has incompatible dimensions");
+            inference_tensor::bail!("GDN pending transition apply has incompatible dimensions");
         }
         let (capacity, max_rows, pending_conv_dim) = layers[0].pending_conv_input.dims3()?;
         let conv_blocks = conv_dim.div_ceil(GDN_CHANNEL_BLOCK_SIZE);
@@ -5111,16 +5174,18 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
             || max_rows > GDN_SPEC_FUSED_MAX_TOKENS
             || pending_conv_dim != conv_dim
         {
-            candle::bail!("GDN pending transition apply storage is incompatible");
+            inference_tensor::bail!("GDN pending transition apply storage is incompatible");
         }
         let device = layers[0].pending_conv_input.device();
         if !device.is_cuda() || !active_slots.device().same_device(device) {
-            candle::bail!("GDN pending transition apply tensors must share one CUDA device");
+            inference_tensor::bail!(
+                "GDN pending transition apply tensors must share one CUDA device"
+            );
         }
         let activation_tensor_dtype = layers[0].pending_conv_input.dtype();
         let recurrent_dtype = layers[0].recurrent_state.dtype();
         if !recurrent_state_dtype_supported(recurrent_dtype) {
-            candle::bail!("GDN pending transition apply state has unsupported dtype");
+            inference_tensor::bail!("GDN pending transition apply state has unsupported dtype");
         }
 
         for layer in layers {
@@ -5137,7 +5202,9 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
                 || layer.conv_state.dims() != [capacity, conv_dim, conv_width]
                 || layer.recurrent_state.dims() != [capacity, num_v_heads, head_v_dim, head_k_dim]
             {
-                candle::bail!("GDN pending transition apply layer shapes are incompatible");
+                inference_tensor::bail!(
+                    "GDN pending transition apply layer shapes are incompatible"
+                );
             }
             if layer.pending_conv_input.dtype() != activation_tensor_dtype
                 || layer.conv_state.dtype() != activation_tensor_dtype
@@ -5151,7 +5218,9 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
                 || layer.recurrent_applied_epochs.dtype() != DType::U32
                 || layer.recurrent_state.dtype() != recurrent_dtype
             {
-                candle::bail!("GDN pending transition apply layer dtypes are incompatible");
+                inference_tensor::bail!(
+                    "GDN pending transition apply layer dtypes are incompatible"
+                );
             }
             for tensor in [
                 layer.pending_conv_input,
@@ -5167,7 +5236,7 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
                 layer.recurrent_state,
             ] {
                 if !tensor.device().same_device(device) || !tensor.is_contiguous() {
-                    candle::bail!(
+                    inference_tensor::bail!(
                         "GDN pending transition apply layer tensors must be contiguous on one device"
                     );
                 }
@@ -5240,7 +5309,7 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
                 .replace(state_dtype)
                 .is_some_and(|dtype| dtype != state_dtype)
             {
-                candle::bail!("GDN pending transition apply state dtypes diverged");
+                inference_tensor::bail!("GDN pending transition apply state dtypes diverged");
             }
             pointer_segments[10].push(state_ptr);
             pointer_guards.push(state_guard);
@@ -5306,7 +5375,7 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
     {
         Some(DType::F16) => cuda_apply::<half::f16>(apply, 0),
         Some(DType::BF16) => cuda_apply::<half::bf16>(apply, 1),
-        Some(other) => candle_core::bail!(
+        Some(other) => inference_tensor::bail!(
             "GDN pending transition apply only supports f16/bf16 activations, got {other:?}"
         ),
         None => Ok(()),
@@ -5315,7 +5384,7 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
 
 #[cfg(not(feature = "cuda"))]
 pub fn pending_transition_apply_batched_cuda(_apply: GdnPendingTransitionApply<'_>) -> Result<()> {
-    candle_core::bail!("pending_transition_apply_batched_cuda requires the cuda feature")
+    inference_tensor::bail!("pending_transition_apply_batched_cuda requires the cuda feature")
 }
 
 #[cfg(feature = "cuda")]
@@ -5336,7 +5405,7 @@ fn normalize_gdn_rmsnorm_layout(
         ([d0, d1, d2, d3], [s0, s1, s2, s3]) if *d3 == hidden_dim => {
             Ok(([*d0, *d1, *d2, *d3], [*s0, *s1, *s2, *s3]))
         }
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "gated RMSNorm expects rank 2-4 with a final dimension divisible by {hidden_dim}"
         ),
     }
@@ -5345,12 +5414,12 @@ fn normalize_gdn_rmsnorm_layout(
 /// CUDA RMSNorm with a SiLU gate; packed final dimensions are split by the norm weight width.
 #[cfg(feature = "cuda")]
 pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core as candle;
     use core::ffi::c_void;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     fn cuda_fwd<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         x: &Tensor,
         gate: &Tensor,
@@ -5364,28 +5433,28 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
 
         let (x_s, x_l) = x.storage_and_layout();
         let x_s = match &*x_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("x must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("x must be a cuda tensor"),
         };
         let x_offset = x_l.start_offset();
         let (dims, x_stride) = normalize_gdn_rmsnorm_layout(x.dims(), x_l.stride(), hidden_dim)?;
 
         let (gate_s, gate_l) = gate.storage_and_layout();
         let gate_s = match &*gate_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("gate must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("gate must be a cuda tensor"),
         };
         let gate_offset = gate_l.start_offset();
         let (gate_dims, gate_stride) =
             normalize_gdn_rmsnorm_layout(gate.dims(), gate_l.stride(), hidden_dim)?;
         if gate_dims != dims {
-            candle::bail!("gated RMSNorm inputs have incompatible logical shapes");
+            inference_tensor::bail!("gated RMSNorm inputs have incompatible logical shapes");
         }
 
         let (weight_s, weight_l) = weight.storage_and_layout();
         let weight_s = match &*weight_s {
-            candle::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
-            _ => candle::bail!("weight must be a cuda tensor"),
+            inference_tensor::Storage::Cuda(c) => c.as_cuda_slice::<T>()?,
+            _ => inference_tensor::bail!("weight must be a cuda tensor"),
         };
         let weight_offset = weight_l.start_offset();
 
@@ -5420,9 +5489,10 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
             );
         }
 
-        let output_storage = candle::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
+        let output_storage =
+            inference_tensor::CudaStorage::wrap_cuda_slice(output_buf, dev.clone());
         Ok(Tensor::from((
-            candle::Storage::Cuda(output_storage),
+            inference_tensor::Storage::Cuda(output_storage),
             x.shape().clone(),
         )))
     }
@@ -5430,7 +5500,9 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
     match x.dtype() {
         DType::F16 => cuda_fwd::<half::f16>(x, gate, weight, eps, 0),
         DType::BF16 => cuda_fwd::<half::bf16>(x, gate, weight, eps, 1),
-        other => candle_core::bail!("rmsnorm_gated_cuda only supports f16/bf16, got {:?}", other),
+        other => {
+            inference_tensor::bail!("rmsnorm_gated_cuda only supports f16/bf16, got {:?}", other)
+        }
     }
 }
 
@@ -5444,10 +5516,10 @@ pub fn rmsnorm_gated_quantized_cuda(
     num_v_heads: usize,
     head_v_dim: usize,
 ) -> Result<QuantizedActivation> {
-    use candle::cuda_backend::cudarc::driver::DevicePtr;
-    use candle_core::{self as candle, CudaStorage, Shape, Storage};
     use core::ffi::c_void;
     use float8::F8E4M3;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::{CudaStorage, Shape, Storage};
 
     if x.dtype() != DType::BF16
         || gate.dtype() != DType::BF16
@@ -5458,14 +5530,16 @@ pub fn rmsnorm_gated_quantized_cuda(
         || !eps.is_finite()
         || eps < 0.0
     {
-        candle::bail!("quantized gated RMSNorm requires compatible BF16 CUDA tensors")
+        inference_tensor::bail!("quantized gated RMSNorm requires compatible BF16 CUDA tensors")
     }
     let layout = spec.layout(num_v_heads, head_v_dim).ok_or_else(|| {
-        candle::Error::msg("quantized gated RMSNorm has an incompatible FP8 output contract")
+        inference_tensor::Error::msg(
+            "quantized gated RMSNorm has an incompatible FP8 output contract",
+        )
     })?;
     let weight = weight.contiguous()?;
     if weight.dims1()? != head_v_dim {
-        candle::bail!("quantized gated RMSNorm weight width is incompatible")
+        inference_tensor::bail!("quantized gated RMSNorm weight width is incompatible")
     }
 
     let (x_storage, x_layout) = x.storage_and_layout();
@@ -5477,9 +5551,11 @@ pub fn rmsnorm_gated_quantized_cuda(
     let normalized_rows = dims[0]
         .checked_mul(dims[1])
         .and_then(|rows| rows.checked_mul(dims[2]))
-        .ok_or_else(|| candle::Error::msg("quantized gated RMSNorm row count overflows usize"))?;
+        .ok_or_else(|| {
+            inference_tensor::Error::msg("quantized gated RMSNorm row count overflows usize")
+        })?;
     if normalized_rows != layout.rows.saturating_mul(layout.groups) {
-        candle::bail!("quantized gated RMSNorm logical shape is incompatible")
+        inference_tensor::bail!("quantized gated RMSNorm logical shape is incompatible")
     }
 
     let (gate_storage, gate_layout) = gate.storage_and_layout();
@@ -5490,7 +5566,7 @@ pub fn rmsnorm_gated_quantized_cuda(
     let (gate_dims, gate_stride) =
         normalize_gdn_rmsnorm_layout(gate.dims(), gate_layout.stride(), head_v_dim)?;
     if gate_dims != dims {
-        candle::bail!("quantized gated RMSNorm inputs have incompatible logical shapes")
+        inference_tensor::bail!("quantized gated RMSNorm inputs have incompatible logical shapes")
     }
 
     let (weight_storage, weight_layout) = weight.storage_and_layout();
@@ -5568,7 +5644,7 @@ pub fn rmsnorm_gated_cuda(
     _weight: &Tensor,
     _eps: f64,
 ) -> Result<Tensor> {
-    candle_core::bail!("rmsnorm_gated_cuda requires the cuda feature")
+    inference_tensor::bail!("rmsnorm_gated_cuda requires the cuda feature")
 }
 
 #[cfg(test)]

@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result, bail};
-use candle_core::quantized::gguf_file::Value;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
+use inference_tensor::quantized::gguf_file::Value;
 
 pub(super) const PROJECTOR_TYPE: &str = "clip.projector_type";
 pub(super) const VISION_PROJECTOR_TYPE: &str = "clip.vision.projector_type";

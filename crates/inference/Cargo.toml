@@ -28,8 +28,7 @@ base64.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-candle-core.workspace = true
-candle-nn.workspace = true
+inference-tensor.workspace = true
 indicatif.workspace = true
 inference-models-llama.workspace = true
 inference-models-other.workspace = true

@@ -1,6 +1,6 @@
 use super::*;
-use candle_core::{D, DType, Device, Result as CandleResult, Tensor};
-use candle_nn::ops::softmax;
+use inference_tensor::nn::ops::softmax;
+use inference_tensor::{D, DType, Device, Result as CandleResult, Tensor};
 
 const EPS: f32 = 1e-4;
 

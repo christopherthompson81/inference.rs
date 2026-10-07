@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::model::{IsqModel, ModelForwardContext, NormalModel};
 

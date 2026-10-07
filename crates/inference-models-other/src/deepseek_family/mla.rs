@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::{FamilyAttention, FamilyConfig, LayerCtx};
 use crate::attention::{AttentionMask, SdpaParams};
@@ -226,7 +226,7 @@ impl FamilyAttention for MlaAttention {
                 comm,
                 mapper.set_device(layer_idx, vb.pp("kv_b_proj"), loading_isq),
             )?),
-            _ => candle_core::bail!(
+            _ => inference_tensor::bail!(
                 "{} layer {layer_idx} has incomplete split MLA weights",
                 mla.label
             ),
@@ -310,7 +310,7 @@ impl FamilyAttention for MlaAttention {
 
         let rope_positions = ctx
             .text_positions(q_pe.device(), q_pe.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         (q_pe, k_pe) = self.rotary_emb.forward(&q_pe, &k_pe, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
 

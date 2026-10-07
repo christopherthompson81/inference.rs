@@ -14,8 +14,8 @@ pub mod vision;
 
 use std::any::Any;
 
-use candle_core::{Device, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{Device, Result, Tensor};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -179,7 +179,7 @@ fn window_images(
         end += 1;
     }
     if tokens != window_image_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{window_image_tokens} image tokens in this pass do not line up with whole images after position {offset}"
         );
     }
@@ -363,7 +363,7 @@ mod tests {
     const FULL: &[u32] = &[5, IMG, IMG, IMG, 6, 5, IMG, IMG, 6];
 
     #[test]
-    fn window_images_follow_the_window_offset() -> candle_core::Result<()> {
+    fn window_images_follow_the_window_offset() -> inference_tensor::Result<()> {
         assert_eq!(window_images(FULL, 0, 5, IMG)?, 0..2);
         // prefix hit or later chunk starting after image 0 must embed image 1, not image 0
         assert_eq!(window_images(FULL, 5, 2, IMG)?, 1..2);

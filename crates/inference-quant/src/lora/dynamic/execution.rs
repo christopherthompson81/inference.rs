@@ -8,7 +8,7 @@ use std::{
 #[cfg(feature = "cuda")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use candle_core::{Device, DeviceLocation, Result, Tensor};
+use inference_tensor::{Device, DeviceLocation, Result, Tensor};
 
 use super::{
     DynamicLoraWeights, LoraExpertSiteHandle, LoraExpertWeights, LoraRuntimeId, LoraSiteHandle,
@@ -87,23 +87,23 @@ impl LoraWeights {
         let (rank, _) = a.dims2()?;
         let (_, b_rank) = b.dims2()?;
         if rank == 0 {
-            candle_core::bail!("LoRA rank must be nonzero");
+            inference_tensor::bail!("LoRA rank must be nonzero");
         }
         if rank != b_rank {
-            candle_core::bail!("LoRA A rank {rank} does not match B rank {b_rank}");
+            inference_tensor::bail!("LoRA A rank {rank} does not match B rank {b_rank}");
         }
         if a.dtype() != b.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LoRA A dtype {:?} does not match B dtype {:?}",
                 a.dtype(),
                 b.dtype()
             );
         }
         if a.device().location() != b.device().location() {
-            candle_core::bail!("LoRA A and B must be on the same device");
+            inference_tensor::bail!("LoRA A and B must be on the same device");
         }
         if !scale.is_finite() {
-            candle_core::bail!("LoRA scale must be finite");
+            inference_tensor::bail!("LoRA scale must be finite");
         }
         Ok(Self { a, b, scale })
     }
@@ -134,22 +134,22 @@ impl LoraAdapterWeights {
         let mut by_site = HashMap::with_capacity(weights.linear.len());
         for (site, weights) in weights.linear {
             if site.runtime_id() != runtime_id {
-                candle_core::bail!("LoRA weights belong to a different runtime");
+                inference_tensor::bail!("LoRA weights belong to a different runtime");
             }
             let site_id = site.id()?;
             if by_site.insert(site_id, Arc::new(weights)).is_some() {
-                candle_core::bail!("LoRA weights contain a duplicate site");
+                inference_tensor::bail!("LoRA weights contain a duplicate site");
             }
         }
         let mut experts_by_site = HashMap::with_capacity(weights.experts.len());
         for (site, weights) in weights.experts {
             if site.runtime_id() != runtime_id {
-                candle_core::bail!("expert LoRA weights belong to a different runtime");
+                inference_tensor::bail!("expert LoRA weights belong to a different runtime");
             }
             weights.validate_for_site(&site)?;
             let site_id = site.id()?;
             if experts_by_site.insert(site_id, Arc::new(weights)).is_some() {
-                candle_core::bail!("expert LoRA weights contain a duplicate site");
+                inference_tensor::bail!("expert LoRA weights contain a duplicate site");
             }
         }
         Ok(Self {
@@ -188,14 +188,14 @@ pub struct LoraExecution {
 impl LoraExecution {
     fn site_id(&self, site: &LoraSiteHandle) -> Result<u32> {
         if site.runtime_id() != self.runtime_id {
-            candle_core::bail!("LoRA site and execution belong to different runtimes");
+            inference_tensor::bail!("LoRA site and execution belong to different runtimes");
         }
         site.id()
     }
 
     fn expert_site_id(&self, site: &LoraExpertSiteHandle) -> Result<u32> {
         if site.runtime_id() != self.runtime_id {
-            candle_core::bail!("expert LoRA site and execution belong to different runtimes");
+            inference_tensor::bail!("expert LoRA site and execution belong to different runtimes");
         }
         site.id()
     }
@@ -304,12 +304,12 @@ impl LoraExecution {
         let row_slots = match remap {
             LoraRowRemap::Range { start, end } => {
                 if start > end {
-                    candle_core::bail!("LoRA route row range is reversed");
+                    inference_tensor::bail!("LoRA route row range is reversed");
                 }
                 self.row_slots
                     .get(start..end)
                     .ok_or_else(|| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "LoRA route row range {start}..{end} exceeds {} rows",
                             self.row_slots.len()
                         ))
@@ -318,7 +318,7 @@ impl LoraExecution {
             }
             LoraRowRemap::Repeat { row, rows } => {
                 let slot = self.row_slots.get(row).copied().ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "LoRA route row {row} is outside {} rows",
                         self.row_slots.len()
                     ))
@@ -366,7 +366,7 @@ impl LoraExecution {
         }
         let rows = rows
             .iter()
-            .map(|row| u32::try_from(*row).map_err(candle_core::Error::wrap))
+            .map(|row| u32::try_from(*row).map_err(inference_tensor::Error::wrap))
             .collect::<Result<Vec<_>>>()?;
         let row_count = rows.len();
         let indices = Tensor::from_vec(rows, row_count, device)?;
@@ -391,11 +391,11 @@ impl LoraExecution {
     ) -> Result<()> {
         let site_id = self.site_id(site)?;
         if self.adapters.contains_key(&slot) {
-            candle_core::bail!("LoRA adapter weights were already installed for slot");
+            inference_tensor::bail!("LoRA adapter weights were already installed for slot");
         }
         match self.weights.entry((site_id, slot)) {
             Entry::Occupied(_) => {
-                candle_core::bail!("LoRA weights were already installed for site and slot")
+                inference_tensor::bail!("LoRA weights were already installed for site and slot")
             }
             Entry::Vacant(entry) => {
                 entry.insert(weights);
@@ -414,7 +414,7 @@ impl LoraExecution {
         weights: Arc<LoraAdapterWeights>,
     ) -> Result<()> {
         if weights.runtime_id != self.runtime_id {
-            candle_core::bail!("LoRA adapter weights belong to a different runtime");
+            inference_tensor::bail!("LoRA adapter weights belong to a different runtime");
         }
         if self
             .weights
@@ -425,10 +425,12 @@ impl LoraExecution {
                 .keys()
                 .any(|(_, installed_slot)| *installed_slot == slot)
         {
-            candle_core::bail!("LoRA site weights were already installed for slot");
+            inference_tensor::bail!("LoRA site weights were already installed for slot");
         }
         match self.adapters.entry(slot) {
-            Entry::Occupied(_) => candle_core::bail!("LoRA adapter slot was already installed"),
+            Entry::Occupied(_) => {
+                inference_tensor::bail!("LoRA adapter slot was already installed")
+            }
             Entry::Vacant(entry) => {
                 entry.insert(weights);
                 self.row_remaps
@@ -475,11 +477,13 @@ impl LoraExecution {
         let site_id = self.expert_site_id(site)?;
         weights.validate_for_site(site)?;
         if self.adapters.contains_key(&slot) {
-            candle_core::bail!("LoRA adapter weights were already installed for slot");
+            inference_tensor::bail!("LoRA adapter weights were already installed for slot");
         }
         match self.expert_weights.entry((site_id, slot)) {
             Entry::Occupied(_) => {
-                candle_core::bail!("expert LoRA weights were already installed for site and slot")
+                inference_tensor::bail!(
+                    "expert LoRA weights were already installed for site and slot"
+                )
             }
             Entry::Vacant(entry) => {
                 entry.insert(weights);
@@ -624,7 +628,7 @@ pub fn with_lora_execution_row_range<T>(
     f: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
     if rows.start > rows.end {
-        candle_core::bail!("LoRA route row range is reversed");
+        inference_tensor::bail!("LoRA route row range is reversed");
     }
     with_remapped_lora_execution(
         LoraRowRemap::Range {
@@ -676,8 +680,8 @@ mod tests {
         let site = registry.register(
             crate::LoraSiteKey::new("proj"),
             crate::LoraLinearSpec::replicated(1, 1),
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
         )?;
         registry.finalize()?;
         Ok((registry, site))
@@ -704,8 +708,8 @@ mod tests {
 
     fn scalar_weights(value: f32) -> Result<LoraWeights> {
         LoraWeights::new(
-            Tensor::new(&[[value]], &candle_core::Device::Cpu)?,
-            Tensor::new(&[[value]], &candle_core::Device::Cpu)?,
+            Tensor::new(&[[value]], &inference_tensor::Device::Cpu)?,
+            Tensor::new(&[[value]], &inference_tensor::Device::Cpu)?,
             1.0,
         )
     }
@@ -999,8 +1003,8 @@ mod tests {
         let linear = registry.register(
             crate::LoraSiteKey::new("proj"),
             crate::LoraLinearSpec::replicated(1, 1),
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
         )?;
         let expert = registry.register_expert(
             crate::LoraSiteKey::new("experts"),
@@ -1012,14 +1016,14 @@ mod tests {
                 Shard::default(),
                 Shard::default(),
             )?,
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
         )?;
         registry.finalize()?;
         let expert_projection = LoraExpertProjectionWeights::new(
-            Tensor::new(&[[[2f32]]], &candle_core::Device::Cpu)?,
-            Tensor::new(&[[[3f32]]], &candle_core::Device::Cpu)?,
-            Tensor::new(&[0.5f32], &candle_core::Device::Cpu)?,
+            Tensor::new(&[[[2f32]]], &inference_tensor::Device::Cpu)?,
+            Tensor::new(&[[[3f32]]], &inference_tensor::Device::Cpu)?,
+            Tensor::new(&[0.5f32], &inference_tensor::Device::Cpu)?,
         )?;
         let expert_weights = LoraExpertWeights::new(&expert, Some(expert_projection), None, None)?;
         let adapter = Arc::new(LoraAdapterWeights::new(
@@ -1055,20 +1059,20 @@ mod tests {
         let first = registry.register_expert(
             crate::LoraSiteKey::new("first.experts"),
             spec()?,
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
         )?;
         let second = registry.register_expert(
             crate::LoraSiteKey::new("second.experts"),
             spec()?,
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
         )?;
         registry.finalize()?;
         let projection = LoraExpertProjectionWeights::new(
-            Tensor::new(&[[[1f32]]], &candle_core::Device::Cpu)?,
-            Tensor::new(&[[[1f32]]], &candle_core::Device::Cpu)?,
-            Tensor::new(&[1f32], &candle_core::Device::Cpu)?,
+            Tensor::new(&[[[1f32]]], &inference_tensor::Device::Cpu)?,
+            Tensor::new(&[[[1f32]]], &inference_tensor::Device::Cpu)?,
+            Tensor::new(&[1f32], &inference_tensor::Device::Cpu)?,
         )?;
         let weights = LoraExpertWeights::new(&first, Some(projection), None, None)?;
 

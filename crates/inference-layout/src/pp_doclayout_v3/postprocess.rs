@@ -1,4 +1,4 @@
-use candle_core::{DType, Result, Tensor};
+use inference_tensor::{DType, Result, Tensor};
 use serde::Serialize;
 
 #[derive(Debug, Clone, Serialize)]

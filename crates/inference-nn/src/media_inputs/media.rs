@@ -5,8 +5,8 @@ use std::{
     ops::Range,
 };
 
-use candle_core::Tensor;
 use inference_audio::AudioInput;
+use inference_tensor::Tensor;
 
 use super::video::VideoInput;
 use crate::paged_attention::block_hash::{

@@ -1,7 +1,7 @@
-use candle_core::{D, DType, Device, Result, Tensor};
 #[cfg(feature = "cuda")]
 use inference_quant::QuantizedActivation;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 #[cfg(feature = "cuda")]
 use crate::cuda::gdn::GdnFp8OutputSpec;
@@ -52,7 +52,7 @@ impl RmsNormGated {
         let dtype = x.dtype();
         let x = x.to_dtype(DType::F32)?;
         let gate = gate.reshape(x.shape().clone())?.to_dtype(DType::F32)?;
-        let gate = candle_nn::ops::silu(&gate)?;
+        let gate = inference_tensor::nn::ops::silu(&gate)?;
         let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
         let normed = x.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
         let out = normed

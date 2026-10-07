@@ -1,5 +1,5 @@
-use candle_core::{DType, Result, Tensor};
 use inference_quant::{Comm, QuantMethod, Shard, ShardedVarBuilder};
+use inference_tensor::{DType, Result, Tensor};
 use std::sync::Arc;
 
 use crate::device_map::DeviceMapper;
@@ -88,7 +88,7 @@ fn exact_ragged_conv_state(
         || state_width != expected_width
         || state_width == 0
     {
-        candle_core::bail!("padded GDN convolution state has incompatible dimensions");
+        inference_tensor::bail!("padded GDN convolution state has incompatible dimensions");
     }
 
     if let Some(cu_seqlens) = layout.cu_seqlens(padded_input.device())?
@@ -1086,9 +1086,9 @@ fn shard_out_proj_input(y: Tensor, shard: Option<Shard>) -> Result<Tensor> {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use candle_core::{DType, Device, Tensor};
-    use candle_nn::Linear;
     use inference_quant::{QuantMethod, QuantMethodConfig, Shard, UnquantLinear};
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::super::config::GdnVHeadLayout;
     use super::super::norm::RmsNormGated;
@@ -1140,7 +1140,7 @@ mod tests {
         }
     }
 
-    fn test_weight(rows: usize, cols: usize, phase: usize) -> candle_core::Result<Tensor> {
+    fn test_weight(rows: usize, cols: usize, phase: usize) -> inference_tensor::Result<Tensor> {
         let values = (0..rows * cols)
             .map(|index| (((index + phase) % 11) as f32 - 5.0) * 0.03)
             .collect::<Vec<_>>();
@@ -1151,13 +1151,13 @@ mod tests {
         rows: usize,
         cols: usize,
         phase: usize,
-    ) -> candle_core::Result<Arc<dyn QuantMethod>> {
+    ) -> inference_tensor::Result<Arc<dyn QuantMethod>> {
         Ok(Arc::new(UnquantLinear::new(
             QuantMethodConfig::Unquantized(Linear::new(test_weight(rows, cols, phase)?, None)),
         )?))
     }
 
-    fn packed_test_gdn() -> candle_core::Result<PackedTestGdn> {
+    fn packed_test_gdn() -> inference_tensor::Result<PackedTestGdn> {
         let dims = packed_dims();
         let qkv = test_linear(dims.conv_dim, dims.hidden_size, 0)?;
         let z = test_linear(dims.value_dim, dims.hidden_size, 2)?;
@@ -1195,7 +1195,7 @@ mod tests {
         Ok(PackedTestGdn { gdn, projections })
     }
 
-    fn packed_test_cache(logical_batch: usize) -> candle_core::Result<GdnLayerCache> {
+    fn packed_test_cache(logical_batch: usize) -> inference_tensor::Result<GdnLayerCache> {
         let dims = packed_dims();
         let conv_state = Tensor::from_vec(
             (0..logical_batch * dims.conv_dim * dims.conv_kernel_size)
@@ -1228,7 +1228,7 @@ mod tests {
         x: &Tensor,
         cache: &mut GdnLayerCache,
         query_lens: &[usize],
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let mut offset = 0;
         let mut outputs = Vec::with_capacity(query_lens.len());
         let mut conv_states = Vec::with_capacity(query_lens.len());
@@ -1257,7 +1257,7 @@ mod tests {
         label: &str,
         actual: &Tensor,
         expected: &Tensor,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         assert_eq!(actual.dims(), expected.dims(), "{label} shape");
         let actual = actual.flatten_all()?.to_vec1::<f32>()?;
         let expected = expected.flatten_all()?.to_vec1::<f32>()?;
@@ -1285,7 +1285,7 @@ mod tests {
         label: &str,
         actual: &Tensor,
         expected: &Tensor,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         assert_eq!(actual.dims(), expected.dims(), "{label} shape");
         let actual = actual.flatten_all()?.to_vec1::<f32>()?;
         let expected = expected.flatten_all()?.to_vec1::<f32>()?;
@@ -1301,7 +1301,7 @@ mod tests {
         Ok(())
     }
 
-    fn assert_packed_ragged_equivalence(query_lens: &[usize]) -> candle_core::Result<()> {
+    fn assert_packed_ragged_equivalence(query_lens: &[usize]) -> inference_tensor::Result<()> {
         let PackedTestGdn { gdn, projections } = packed_test_gdn()?;
         let token_count = query_lens.iter().sum::<usize>();
         let x = Tensor::from_vec(
@@ -1340,14 +1340,15 @@ mod tests {
     }
 
     #[test]
-    fn packed_ragged_projects_once_and_matches_per_sequence_forward() -> candle_core::Result<()> {
+    fn packed_ragged_projects_once_and_matches_per_sequence_forward() -> inference_tensor::Result<()>
+    {
         assert_packed_ragged_equivalence(&[2, 3, 2])?;
         assert_packed_ragged_equivalence(&[1, 2, 3])?;
         assert_packed_ragged_equivalence(&[7, 8, 9])
     }
 
     #[test]
-    fn padded_core_preserves_states_across_conv_width_boundaries() -> candle_core::Result<()> {
+    fn padded_core_preserves_states_across_conv_width_boundaries() -> inference_tensor::Result<()> {
         let query_lens = [1, 2, 3];
         let PackedTestGdn { gdn, .. } = packed_test_gdn()?;
         let token_count = query_lens.iter().sum::<usize>();
@@ -1379,7 +1380,7 @@ mod tests {
                     .narrow(0, batch_index, 1)?
                     .narrow(1, 0, query_len)
             })
-            .collect::<candle_core::Result<Vec<_>>>()?;
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
         let output = Tensor::cat(&output_rows, 1)?;
         let actual = gdn.finish_projected_recurrent(output, projected.z)?;
 
@@ -1439,7 +1440,7 @@ mod tests {
     }
 
     #[test]
-    fn index_select_rows_accepts_a_non_contiguous_prefix() -> candle_core::Result<()> {
+    fn index_select_rows_accepts_a_non_contiguous_prefix() -> inference_tensor::Result<()> {
         let source = Tensor::from_vec(
             (0..24).map(|value| value as f32).collect::<Vec<_>>(),
             (3, 4, 2),
@@ -1458,7 +1459,7 @@ mod tests {
     }
 
     #[test]
-    fn gdn_row_parallel_projection_receives_its_activation_shard() -> candle_core::Result<()> {
+    fn gdn_row_parallel_projection_receives_its_activation_shard() -> inference_tensor::Result<()> {
         let input = Tensor::new(&[[[0f32, 1., 2., 3., 4., 5., 6., 7.]]], &Device::Cpu)?;
         let shard = Shard::Simple {
             dim: 2,
@@ -1475,7 +1476,7 @@ mod tests {
     }
 
     #[test]
-    fn gdn_tp_partials_match_the_full_output_projection() -> candle_core::Result<()> {
+    fn gdn_tp_partials_match_the_full_output_projection() -> inference_tensor::Result<()> {
         let input = Tensor::new(&[[[0f32, 1., 2., 3., 4., 5., 6., 7.]]], &Device::Cpu)?;
         let weight = Tensor::new(
             &[

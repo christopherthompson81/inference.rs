@@ -8,10 +8,10 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use image::{DynamicImage, GenericImage, GenericImageView, Rgba, imageops::FilterType};
 use inference_audio::AudioInput;
 use inference_audio::fft::{Complex32, Complex64, plan_forward_f64};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use regex::Regex;
 use rubato::{
@@ -157,7 +157,7 @@ fn phi4_request_layout(
     features: &[MultiModalFeature],
 ) -> Result<RequestMultimodalLayout> {
     if query.start > query.end || query.end > tokens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Phi4MM packed query {query:?} exceeds {} tokens",
             tokens.len()
         );
@@ -169,16 +169,16 @@ fn phi4_request_layout(
 
     for feature in features {
         if feature.hashes.len() != 1 || feature.item_range.len() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Phi4MM packed layout requires one media item and hash per placeholder span"
             );
         }
         let end = feature
             .offset
             .checked_add(feature.length)
-            .ok_or_else(|| candle_core::Error::msg("Phi4MM placeholder range overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Phi4MM placeholder range overflow"))?;
         if end > tokens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Phi4MM {:?} placeholder {}..{end} exceeds {} tokens",
                 feature.kind,
                 feature.offset,
@@ -189,14 +189,14 @@ fn phi4_request_layout(
             MultimodalKind::Image => IMAGE_SPECIAL_TOKEN_ID as u32,
             MultimodalKind::Audio => AUDIO_SPECIAL_TOKEN_ID as u32,
             MultimodalKind::Video => {
-                candle_core::bail!("Phi4MM does not support video layout items")
+                inference_tensor::bail!("Phi4MM does not support video layout items")
             }
         };
         if tokens[feature.offset..end]
             .iter()
             .any(|&token| token != expected_token)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Phi4MM {:?} placeholder contains a non-placeholder token",
                 feature.kind
             );
@@ -235,14 +235,16 @@ fn phi4_packed_layout(
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("Phi4MM packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Phi4MM packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
         .zip(query_lens)
         .map(|(seq, &query_len)| {
             if query_len != seq.get_toks().len() {
-                candle_core::bail!("Phi4MM packed prefill requires the complete uncached prompt");
+                inference_tensor::bail!(
+                    "Phi4MM packed prefill requires the complete uncached prompt"
+                );
             }
             phi4_request_layout(*seq.id(), seq.get_toks(), 0..query_len, seq.mm_features())
         })
@@ -542,10 +544,10 @@ impl Phi4MMInputsProcessor {
         config: &PreProcessorConfig,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
-        let image_pattern =
-            Regex::new(COMPATIBLE_IMAGE_SPECIAL_TOKEN_PATTERN).map_err(candle_core::Error::wrap)?;
-        let audio_pattern =
-            Regex::new(COMPATIBLE_AUDIO_SPECIAL_TOKEN_PATTERN).map_err(candle_core::Error::wrap)?;
+        let image_pattern = Regex::new(COMPATIBLE_IMAGE_SPECIAL_TOKEN_PATTERN)
+            .map_err(inference_tensor::Error::wrap)?;
+        let audio_pattern = Regex::new(COMPATIBLE_AUDIO_SPECIAL_TOKEN_PATTERN)
+            .map_err(inference_tensor::Error::wrap)?;
 
         for seq in input_seqs {
             if seq.multimodal().has_changed_prompt && !seq.mm_features().is_empty() {
@@ -601,13 +603,15 @@ impl Phi4MMInputsProcessor {
                     num_crops: _,
                 } = self.preprocess(images, vec![], config, device, (usize::MAX, usize::MAX))?;
                 let attention_mask = pixel_attention_mask.ok_or_else(|| {
-                    candle_core::Error::msg("Phi4MM image preprocessing omitted its attention mask")
+                    inference_tensor::Error::msg(
+                        "Phi4MM image preprocessing omitted its attention mask",
+                    )
                 })?;
                 let image_sizes = image_sizes_all.ok_or_else(|| {
-                    candle_core::Error::msg("Phi4MM image preprocessing omitted image sizes")
+                    inference_tensor::Error::msg("Phi4MM image preprocessing omitted image sizes")
                 })?;
                 let token_counts = num_img_tokens.ok_or_else(|| {
-                    candle_core::Error::msg("Phi4MM image preprocessing omitted token counts")
+                    inference_tensor::Error::msg("Phi4MM image preprocessing omitted token counts")
                 })?;
                 if pixel_values.dim(0)? != image_hashes.len()
                     || attention_mask.dim(0)? != image_hashes.len()
@@ -637,7 +641,7 @@ impl Phi4MMInputsProcessor {
 
             let mut prompt = tokenizer
                 .decode(seq.get_toks(), false)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             prompt = image_pattern
                 .replace_all(&prompt, IMAGE_SPECIAL_TOKEN)
                 .into_owned();
@@ -646,7 +650,7 @@ impl Phi4MMInputsProcessor {
                 .into_owned();
             let singleton_tokens = tokenizer
                 .encode_fast(prompt, false)
-                .map_err(candle_core::Error::wrap)?
+                .map_err(inference_tensor::Error::wrap)?
                 .get_ids()
                 .to_vec();
             let plan = expand_phi4_placeholders(
@@ -672,7 +676,7 @@ impl Phi4MMInputsProcessor {
 
             let expanded_prompt = tokenizer
                 .decode(&plan.tokens, false)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             seq.set_initial_prompt(expanded_prompt);
             seq.set_toks_and_reallocate(plan.tokens, paged_attn_metadata.as_deref_mut());
             seq.set_mm_features(features);
@@ -739,19 +743,19 @@ impl Phi4MMInputsProcessor {
                     tensor_image_sizes(image_sizes)?,
                 )),
                 (None, None, None) => None,
-                _ => candle_core::bail!("Phi4MM image preprocessing cache is incomplete"),
+                _ => inference_tensor::bail!("Phi4MM image preprocessing cache is incomplete"),
             };
 
             let (pixel_values, attention_mask, sizes, selected_hashes) =
                 if let Some((pixel_values, attention_mask, sizes)) = cached {
                     let available = pixel_values.dim(0)?;
                     if attention_mask.dim(0)? != available || sizes.len() != available {
-                        candle_core::bail!("Phi4MM cached image metadata length mismatch");
+                        inference_tensor::bail!("Phi4MM cached image metadata length mismatch");
                     }
                     let range = if seq.is_chunked_prefill_view() {
                         seq.active_local_multimodal_item_range(MultimodalKind::Image, available)
                             .ok_or_else(|| {
-                                candle_core::Error::msg(
+                                inference_tensor::Error::msg(
                                     "Phi4MM image chunk has no active image item range",
                                 )
                             })?
@@ -761,11 +765,13 @@ impl Phi4MMInputsProcessor {
                     };
                     let active_hashes: Vec<u64> = if seq.is_chunked_prefill_view() {
                         let active_images = seq.take_images().ok_or_else(|| {
-                            candle_core::Error::msg("Phi4MM active image inputs are unavailable")
+                            inference_tensor::Error::msg(
+                                "Phi4MM active image inputs are unavailable",
+                            )
                         })?;
                         let raw_hashes = seq.image_hashes().unwrap_or_default();
                         if active_images.len() != raw_hashes.len() {
-                            candle_core::bail!("Phi4MM active image hash count mismatch");
+                            inference_tensor::bail!("Phi4MM active image hash count mismatch");
                         }
                         active_images
                             .iter()
@@ -775,7 +781,7 @@ impl Phi4MMInputsProcessor {
                     } else {
                         let retained_images = seq.images().unwrap_or_default();
                         if retained_images.len() != available {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Phi4MM cached image count does not match retained images"
                             );
                         }
@@ -791,7 +797,7 @@ impl Phi4MMInputsProcessor {
                             .collect()
                     };
                     if active_hashes.len() != range.len() {
-                        candle_core::bail!("Phi4MM active image hash count mismatch");
+                        inference_tensor::bail!("Phi4MM active image hash count mismatch");
                     }
                     (
                         pixel_values.narrow(0, range.start, range.len())?,
@@ -801,7 +807,7 @@ impl Phi4MMInputsProcessor {
                     )
                 } else {
                     let active_images = seq.take_images().ok_or_else(|| {
-                        candle_core::Error::msg("Phi4MM image inputs are unavailable")
+                        inference_tensor::Error::msg("Phi4MM image inputs are unavailable")
                     })?;
                     let raw_hashes = if seq.is_chunked_prefill_view() {
                         seq.image_hashes().unwrap_or_default()
@@ -813,7 +819,7 @@ impl Phi4MMInputsProcessor {
                         )?
                     };
                     if active_images.len() != raw_hashes.len() {
-                        candle_core::bail!("Phi4MM active image hash count mismatch");
+                        inference_tensor::bail!("Phi4MM active image hash count mismatch");
                     }
                     let active_hashes = active_images
                         .iter()
@@ -846,12 +852,12 @@ impl Phi4MMInputsProcessor {
                     (
                         pixel_values,
                         pixel_attention_mask.ok_or_else(|| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "Phi4MM image preprocessing omitted its attention mask",
                             )
                         })?,
                         image_sizes_all.ok_or_else(|| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "Phi4MM image preprocessing omitted image sizes",
                             )
                         })?,
@@ -864,13 +870,13 @@ impl Phi4MMInputsProcessor {
                 || sizes.len() != item_count
                 || selected_hashes.len() != item_count
             {
-                candle_core::bail!("Phi4MM active image metadata length mismatch");
+                inference_tensor::bail!("Phi4MM active image metadata length mismatch");
             }
             for item in 0..item_count {
                 let image = pixel_values.get(item)?;
                 let mask = attention_mask.get(item)?;
                 if image.dim(0)? != mask.dim(0)? {
-                    candle_core::bail!("Phi4MM image crop and mask counts differ");
+                    inference_tensor::bail!("Phi4MM image crop and mask counts differ");
                 }
                 images.push(image);
                 masks.push(mask);
@@ -925,9 +931,9 @@ impl Phi4MMInputsProcessor {
             if !seq.has_audios() {
                 continue;
             }
-            let audios = seq
-                .take_audios()
-                .ok_or_else(|| candle_core::Error::msg("Phi4MM audio inputs are unavailable"))?;
+            let audios = seq.take_audios().ok_or_else(|| {
+                inference_tensor::Error::msg("Phi4MM audio inputs are unavailable")
+            })?;
             let available = audios.len();
             let retained_hashes = if seq.is_chunked_prefill_view() {
                 seq.audio_hashes().unwrap_or_default()
@@ -950,19 +956,21 @@ impl Phi4MMInputsProcessor {
                 .iter()
                 .any(|feature| feature.kind == MultimodalKind::Image);
             if raw_hashes.len() != audios.len() {
-                candle_core::bail!("Phi4MM active audio hash count mismatch");
+                inference_tensor::bail!("Phi4MM active audio hash count mismatch");
             }
 
             for (audio, &raw_hash) in audios.iter().zip(raw_hashes) {
                 let features = self.extract_audio_features(&audio.to_mono(), audio.sample_rate)?;
                 if features.is_empty() {
-                    candle_core::bail!("Phi4MM audio preprocessing produced no frames");
+                    inference_tensor::bail!("Phi4MM audio preprocessing produced no frames");
                 }
                 if features
                     .iter()
                     .any(|feature| feature.len() != AUDIO_FEATURE_SIZE)
                 {
-                    candle_core::bail!("Phi4MM audio preprocessing produced invalid feature width");
+                    inference_tensor::bail!(
+                        "Phi4MM audio preprocessing produced invalid feature width"
+                    );
                 }
                 let feature_len = features.len();
                 let frames = feature_len * self.audio_feat_stride;
@@ -1031,7 +1039,7 @@ impl Phi4MMInputsProcessor {
         } else if fs > 8000 && fs < 16000 {
             8000
         } else if fs < 8000 {
-            return Err(candle_core::Error::Msg(format!(
+            return Err(inference_tensor::Error::Msg(format!(
                 "Unsupported sample rate: {fs}"
             )));
         } else {
@@ -1060,12 +1068,12 @@ impl Phi4MMInputsProcessor {
                 wav.len(),
                 1, // mono
             )
-            .map_err(|e| candle_core::Error::Msg(format!("Resampler creation failed: {e}")))?;
+            .map_err(|e| inference_tensor::Error::Msg(format!("Resampler creation failed: {e}")))?;
 
             let input = vec![wav.to_vec()];
             let output = resampler
                 .process(&input, None)
-                .map_err(|e| candle_core::Error::Msg(format!("Resampling failed: {e}")))?;
+                .map_err(|e| inference_tensor::Error::Msg(format!("Resampling failed: {e}")))?;
 
             return Ok((output[0].clone(), 16000));
         }
@@ -1088,12 +1096,12 @@ impl Phi4MMInputsProcessor {
             wav.len(),
             1, // mono
         )
-        .map_err(|e| candle_core::Error::Msg(format!("Resampler creation failed: {e}")))?;
+        .map_err(|e| inference_tensor::Error::Msg(format!("Resampler creation failed: {e}")))?;
 
         let input = vec![wav.to_vec()];
         let output = resampler
             .process(&input, None)
-            .map_err(|e| candle_core::Error::Msg(format!("Resampling failed: {e}")))?;
+            .map_err(|e| inference_tensor::Error::Msg(format!("Resampling failed: {e}")))?;
 
         Ok((output[0].clone(), target_fs))
     }
@@ -1102,10 +1110,10 @@ impl Phi4MMInputsProcessor {
         let (n_fft, win_length, hop_length) = match fs {
             8000 => (256, 200, 80),
             16000 => (512, 400, 160),
-            _ => candle_core::bail!("Unsupported sample rate: {fs}"),
+            _ => inference_tensor::bail!("Unsupported sample rate: {fs}"),
         };
         if wav.len() < win_length {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Phi4MM audio has {} samples but needs at least {win_length}",
                 wav.len()
             );
@@ -1154,7 +1162,7 @@ impl Phi4MMInputsProcessor {
                 spectrum.resize(spectrum.len() + bins, Complex32::new(0., 0.));
             }
             if spectrum.len() != AUDIO_MEL_N_FFT / 2 + 1 {
-                candle_core::bail!("Phi4MM audio spectrum has an invalid width");
+                inference_tensor::bail!("Phi4MM audio spectrum has an invalid width");
             }
             let power_spectrum = spectrum
                 .iter()
@@ -1186,7 +1194,7 @@ impl Phi4MMInputsProcessor {
         let fmax = fmax as f64;
         let fmin = 0_f64;
         if !(fmin < fmax && fmax <= sample_rate / 2.) {
-            candle_core::bail!("Phi4MM mel filter frequency range is invalid");
+            inference_tensor::bail!("Phi4MM mel filter frequency range is invalid");
         }
         let hz_to_mel = |frequency: f64| 1127. * (1. + frequency / 700.).ln();
         let bin_to_mel =
@@ -1257,7 +1265,7 @@ impl Phi4MMInputsProcessor {
 
 fn suffix_hashes<'a>(hashes: &'a [u64], count: usize, kind: &str) -> Result<&'a [u64]> {
     if hashes.len() < count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Phi4MM has {} {kind} hashes but {count} retained {kind} inputs",
             hashes.len()
         );
@@ -1304,7 +1312,7 @@ fn tensor_image_sizes(image_sizes: &Tensor) -> Result<Vec<(u32, u32)>> {
     rows.into_iter()
         .map(|row| match row.as_slice() {
             [height, width] => Ok((*height, *width)),
-            _ => candle_core::bail!("Phi4MM cached image size must have two dimensions"),
+            _ => inference_tensor::bail!("Phi4MM cached image size must have two dimensions"),
         })
         .collect()
 }
@@ -1453,7 +1461,7 @@ impl Phi4MMInputsProcessor {
 
         // Guard against extreme aspect ratios resulting in too-small dimensions
         if new_size.1.min(target_height) < 10 || new_size.0.min(target_width) < 10 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Image aspect ratio too extreme; resulting size below minimum threshold",
             );
         }
@@ -1496,7 +1504,7 @@ impl Phi4MMInputsProcessor {
         // Ensure the attention mask is non-empty
         let mask_sum: u32 = attention_mask.sum_all()?.to_scalar::<u32>()?;
         if mask_sum == 0 {
-            candle_core::bail!("dynamic_preprocess produced an attention mask with zero sum",);
+            inference_tensor::bail!("dynamic_preprocess produced an attention mask with zero sum",);
         }
 
         image = image.resize_exact(new_size.0 as u32, new_size.1 as u32, FilterType::Nearest);
@@ -1678,7 +1686,7 @@ impl ImagePreProcessor for Phi4MMInputsProcessor {
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use crate::{
         paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind},
@@ -1722,7 +1730,7 @@ mod tests {
         let layout = PackedMultimodalLayout::new(requests).unwrap();
         let text = Tensor::zeros(
             (1, layout.token_count(), 1),
-            candle_core::DType::F32,
+            inference_tensor::DType::F32,
             &Device::Cpu,
         )
         .unwrap();
@@ -1829,7 +1837,7 @@ mod tests {
 
     #[test]
     fn padded_crop_masks_remain_visible() {
-        let mask = Tensor::zeros((1, 2, 2), candle_core::DType::U32, &Device::Cpu).unwrap();
+        let mask = Tensor::zeros((1, 2, 2), inference_tensor::DType::U32, &Device::Cpu).unwrap();
         let padded = pad_phi4_image_mask(mask, 3)
             .unwrap()
             .to_vec3::<u32>()

@@ -17,12 +17,12 @@ use crate::lora::Ordering;
 use crate::lora::QLoraLinear;
 use crate::lora::get_lora_cfg;
 use crate::utils::progress::{NiceProgressBar, new_multi_progress};
-use candle_core::quantized::QMatMul;
-use candle_core::quantized::QTensor;
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::Embedding;
 use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::Embedding;
+use inference_tensor::quantized::QMatMul;
+use inference_tensor::quantized::QTensor;
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use tracing::info;
 
 use crate::gguf::FromAdapterGGUF;
@@ -188,7 +188,7 @@ impl LayerWeights {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
         let q = self
             .apply_rotary_emb_positions(&q, &positions)?
@@ -285,7 +285,7 @@ impl FromAdapterGGUF for ModelWeights {
             rope_dim,
             rms_eps,
             context_window,
-        } = PropsGGUF::try_from(metadata).or_else(|err| candle_core::bail!("{err}"))?;
+        } = PropsGGUF::try_from(metadata).or_else(|err| inference_tensor::bail!("{err}"))?;
 
         let (cos, sin) = precomput_freqs_cis(rope_dim, 10_000., device, context_window, dtype)?;
 
@@ -407,7 +407,9 @@ impl FromAdapterGGUF for ModelWeights {
         )?;
         if xlora_config.is_some() && output.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
         Ok(Self {
             tok_embeddings: Embedding::new(tok_embeddings, embedding_length),

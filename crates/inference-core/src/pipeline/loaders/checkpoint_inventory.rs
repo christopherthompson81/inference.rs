@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use candle_core::DType;
+use inference_tensor::DType;
 use safetensors::{tensor::Dtype as SafeDtype, tensor::TensorView};
 
 #[derive(Clone, Debug, PartialEq, Eq)]

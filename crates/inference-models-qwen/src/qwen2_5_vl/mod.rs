@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use candle_core::{Result, Tensor};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{Result, Tensor};
 use vision::Qwen2_5VLVisionModel;
 
 use crate::qwen2vl::{QwenVlModel, QwenVlVision};

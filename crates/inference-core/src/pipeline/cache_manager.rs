@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::{
     kv_cache::*,
@@ -668,7 +668,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for HybridCa
                 seq.recurrent_state_idx()
                     .map(|slot_idx| (*seq.id(), slot_idx))
                     .ok_or_else(|| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "hybrid sequence {} has no recurrent state slot",
                             seq.id()
                         ))
@@ -821,7 +821,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for HybridCa
                 seq.recurrent_state_idx()
                     .map(|slot_idx| (*seq.id(), slot_idx))
                     .ok_or_else(|| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "hybrid sequence {} has no recurrent state slot",
                             seq.id()
                         ))

@@ -7,8 +7,8 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use candle_core::{DType, Device, Result, Tensor, pickle::PthTensors};
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, safetensors::MmapedSafetensors};
+use inference_tensor::{DType, Device, Result, Tensor, pickle::PthTensors};
 use regex::Regex;
 
 use crate::lora::LoraConfig;
@@ -46,7 +46,7 @@ impl TensorLoaderBackend for PickleBackend {
     fn load_name(&self, name: &str, device: &Device, _dtype: Option<DType>) -> Result<Tensor> {
         self.0
             .get(name)?
-            .ok_or(candle_core::Error::Msg(format!(
+            .ok_or(inference_tensor::Error::Msg(format!(
                 "Could not load tensor {name}"
             )))?
             .to_device(device)
@@ -240,10 +240,10 @@ trait LoadTensors {
             .expect("Expected to convert")
         {
             "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
-            "pth" | "pt" | "bin" => Box::new(PickleBackend(candle_core::pickle::PthTensors::new(
-                path, None,
-            )?)),
-            other => candle_core::bail!(
+            "pth" | "pt" | "bin" => Box::new(PickleBackend(
+                inference_tensor::pickle::PthTensors::new(path, None)?,
+            )),
+            other => inference_tensor::bail!(
                 "Unexpected extension `{other}`, this should have been handled by `get_model_paths`."
             ),
         };

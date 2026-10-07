@@ -6,9 +6,6 @@ use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
-use candle_core::{
-    CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor, cuda::cudarc::driver::CudaSlice,
-};
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
@@ -16,6 +13,9 @@ use cutile::cutile_compiler::compiler::utils::CompileOptions;
 use cutile::cutile_compiler::specialization::DivHint;
 use cutile::tile_kernel::TileKernel;
 use half::bf16;
+use inference_tensor::{
+    CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor, cuda::cudarc::driver::CudaSlice,
+};
 
 #[cfg(test)]
 use crate::lora::RoutedLoraInputMode;
@@ -629,7 +629,7 @@ impl CutileAutotuneState {
         *self = Self::FallbackSafe;
     }
 
-    fn failure(self, error: candle_core::Error) -> CutileAutotuneFailure {
+    fn failure(self, error: inference_tensor::Error) -> CutileAutotuneFailure {
         CutileAutotuneFailure {
             boundary: self.failure_boundary(),
             error,
@@ -640,7 +640,7 @@ impl CutileAutotuneState {
 #[derive(Debug)]
 struct CutileAutotuneFailure {
     boundary: CutileFailureBoundary,
-    error: candle_core::Error,
+    error: inference_tensor::Error,
 }
 
 type CutileAutotuneResult<T> = std::result::Result<T, CutileAutotuneFailure>;
@@ -954,7 +954,7 @@ pub fn set_cutile_routed_lora_tuned_config(
     config: CutileRoutedLoraConfig,
 ) -> Result<()> {
     if !valid_config(key, config) {
-        candle_core::bail!("invalid cuTile routed LoRA config for tuning key");
+        inference_tensor::bail!("invalid cuTile routed LoRA config for tuning key");
     }
     config_cache().lock().unwrap().insert(key, config);
     clear_fallback_safe_failure(&mut failed_keys().lock().unwrap(), key);
@@ -1053,8 +1053,8 @@ fn compile_options(hint: CutileRoutedLoraOptimizationHint) -> CompileOptions {
     }
 }
 
-fn driver_error(operation: &str, error: impl std::fmt::Debug) -> candle_core::Error {
-    candle_core::Error::Msg(format!("cuTile routed LoRA {operation}: {error:?}"))
+fn driver_error(operation: &str, error: impl std::fmt::Debug) -> inference_tensor::Error {
+    inference_tensor::Error::Msg(format!("cuTile routed LoRA {operation}: {error:?}"))
 }
 
 #[derive(Clone, Copy)]
@@ -1124,9 +1124,11 @@ unsafe fn launch_config(
             .checked_mul(config.n_axis_groups as usize)
             .filter(|value| *value <= i32::MAX as usize)
             .and_then(|value| u32::try_from(value).ok())
-            .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA launch grid overflow"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("cuTile routed LoRA launch grid overflow")
+            })?;
         let grid_y = u32::try_from(launch.projection.num_slices())
-            .map_err(|_| candle_core::Error::msg("cuTile routed LoRA slice grid overflow"))?;
+            .map_err(|_| inference_tensor::Error::msg("cuTile routed LoRA slice grid overflow"))?;
         let generics = vec![
             rank_block(launch.projection.max_rank()).to_string(),
             config.block_k.to_string(),
@@ -1179,7 +1181,7 @@ fn tuning_output_elements(
     layout
         .num_routes()
         .checked_mul(launch.projection.output_row_stride())
-        .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA tuning output overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("cuTile routed LoRA tuning output overflow"))
 }
 
 unsafe fn tuning_scratch(
@@ -1190,13 +1192,13 @@ unsafe fn tuning_scratch(
     let alignment_elements = POINTER_HINT_MAX_BYTES / std::mem::size_of::<bf16>();
     let scratch_elements = tuning_output_elements(layout, launch)?
         .checked_add(alignment_elements)
-        .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA scratch size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("cuTile routed LoRA scratch size overflow"))?;
     let mut scratch = unsafe { dev.alloc::<bf16>(scratch_elements)? };
     let stream = dev.cuda_stream();
     let (scratch_base, scratch_base_guard) = slice_ptr_mut_on_stream(&mut scratch, 0, &stream);
     drop(scratch_base_guard);
     let scratch_offset = scratch_output_offset(scratch_base, launch.output).ok_or_else(|| {
-        candle_core::Error::msg("cuTile routed LoRA could not match output pointer alignment")
+        inference_tensor::Error::msg("cuTile routed LoRA could not match output pointer alignment")
     })?;
     Ok((scratch, scratch_offset))
 }
@@ -1375,7 +1377,7 @@ unsafe fn autotune_config(
         state.mark_scratch_launch();
         let tuned = tune(dev, TuneMode::from_env(), &request, |_, candidate| {
             let config = CutileRoutedLoraConfig::from_config(candidate)
-                .ok_or_else(|| candle_core::Error::msg("config outside the space"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("config outside the space"))?;
             prepare_candidate(dev, layout, addresses, launch, config)
         });
         stream
@@ -1386,7 +1388,7 @@ unsafe fn autotune_config(
             .first()
             .and_then(|t| CutileRoutedLoraConfig::from_config(&t.config))
             .ok_or_else(|| {
-                state.failure(candle_core::Error::msg(
+                state.failure(inference_tensor::Error::msg(
                     "all cuTile routed LoRA autotune candidates failed",
                 ))
             })?;
@@ -1412,7 +1414,7 @@ fn mark_failed(
     key: CutileRoutedLoraTuningKey,
     reason: CutileRoutedLoraUnsupported,
     operation: &str,
-    error: &candle_core::Error,
+    error: &inference_tensor::Error,
     boundary: CutileFailureBoundary,
 ) -> CutileCachedFailure {
     let failure = CutileCachedFailure { reason, boundary };
@@ -1473,7 +1475,7 @@ fn clear_fallback_safe_failure(
 fn failure_result(
     boundary: CutileFailureBoundary,
     reason: CutileRoutedLoraUnsupported,
-    error: candle_core::Error,
+    error: inference_tensor::Error,
 ) -> Result<CutileRoutedLoraStatus> {
     match boundary {
         CutileFailureBoundary::FallbackSafe => Ok(CutileRoutedLoraStatus::Unsupported(reason)),
@@ -1486,7 +1488,7 @@ fn cached_failure_result(failure: CutileCachedFailure) -> Result<CutileRoutedLor
     failure_result(
         failure.boundary,
         failure.reason,
-        candle_core::Error::msg(format!(
+        inference_tensor::Error::msg(format!(
             "cuTile routed LoRA is disabled for this shape after a prior {:?} failure",
             failure.reason
         )),
@@ -1508,10 +1510,10 @@ fn validate_launch_shape(
             .checked_add(launch.projection.num_slices())
             .is_none_or(|end| end > weights.num_slices())
     {
-        candle_core::bail!("cuTile routed LoRA launch and weight table shape mismatch");
+        inference_tensor::bail!("cuTile routed LoRA launch and weight table shape mismatch");
     }
     if launch.input == 0 || launch.output == 0 {
-        candle_core::bail!("cuTile routed LoRA input and output pointers must be non-null");
+        inference_tensor::bail!("cuTile routed LoRA input and output pointers must be non-null");
     }
     if !pointer_aligned_or_null(launch.input, std::mem::align_of::<bf16>())
         || !pointer_aligned_or_null(launch.output, std::mem::align_of::<bf16>())
@@ -1519,7 +1521,7 @@ fn validate_launch_shape(
         || !pointer_aligned_or_null(launch.route_output_rows, std::mem::align_of::<u32>())
         || !pointer_aligned_or_null(launch.route_output_scales, std::mem::align_of::<f32>())
     {
-        candle_core::bail!("cuTile routed LoRA pointer alignment is invalid");
+        inference_tensor::bail!("cuTile routed LoRA pointer alignment is invalid");
     }
     weights.validate_projection_rank(
         launch.weight_slice_offset,
@@ -1602,14 +1604,14 @@ pub unsafe fn try_cutile_routed_lora(
             || metadata.sorted_route_ids().ordinal() != ordinal
             || metadata.block_pair_ids().ordinal() != ordinal
         {
-            candle_core::bail!("cuTile routed LoRA metadata is on a different CUDA device");
+            inference_tensor::bail!("cuTile routed LoRA metadata is on a different CUDA device");
         }
         let stream = dev.cuda_stream();
         let descriptor_offset = launch
             .weight_slice_offset
             .checked_mul(layout.num_adapter_slots())
             .ok_or_else(|| {
-                candle_core::Error::msg("cuTile routed LoRA descriptor offset overflow")
+                inference_tensor::Error::msg("cuTile routed LoRA descriptor offset overflow")
             })?;
         let (descriptor_address, descriptor_guard) =
             slice_ptr_on_stream(weights.descriptors(), descriptor_offset, &stream);
@@ -1654,18 +1656,18 @@ pub unsafe fn try_cutile_routed_lora_no_sort(
             return Ok(CutileRoutedLoraStatus::Unsupported(reason));
         }
         if token_adapter_slots.is_none() && layout.num_adapter_slots() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "null cuTile routed LoRA token slots require one adapter descriptor slot"
             );
         }
         if token_adapter_slots.is_some_and(|slots| slots.len() < layout.num_tokens()) {
-            candle_core::bail!("cuTile routed LoRA token slot buffer is too small");
+            inference_tensor::bail!("cuTile routed LoRA token slot buffer is too small");
         }
         if topk_expert_ids_offset
             .checked_add(layout.num_routes())
             .is_none_or(|end| end > topk_expert_ids.len())
         {
-            candle_core::bail!("cuTile routed LoRA expert ID buffer is too small");
+            inference_tensor::bail!("cuTile routed LoRA expert ID buffer is too small");
         }
 
         let ordinal = dev.cuda_stream().context().ordinal();
@@ -1673,14 +1675,16 @@ pub unsafe fn try_cutile_routed_lora_no_sort(
             || token_adapter_slots.is_some_and(|slots| slots.ordinal() != ordinal)
             || topk_expert_ids.ordinal() != ordinal
         {
-            candle_core::bail!("cuTile routed LoRA no-sort inputs are on a different CUDA device");
+            inference_tensor::bail!(
+                "cuTile routed LoRA no-sort inputs are on a different CUDA device"
+            );
         }
         let stream = dev.cuda_stream();
         let descriptor_offset = launch
             .weight_slice_offset
             .checked_mul(layout.num_adapter_slots())
             .ok_or_else(|| {
-                candle_core::Error::msg("cuTile routed LoRA descriptor offset overflow")
+                inference_tensor::Error::msg("cuTile routed LoRA descriptor offset overflow")
             })?;
         let (descriptor_address, descriptor_guard) =
             slice_ptr_on_stream(weights.descriptors(), descriptor_offset, &stream);
@@ -1762,7 +1766,7 @@ mod tests {
         let safe = failure_result(
             CutileFailureBoundary::FallbackSafe,
             CutileRoutedLoraUnsupported::AutotuneFailed,
-            candle_core::Error::msg("autotune failed"),
+            inference_tensor::Error::msg("autotune failed"),
         );
         assert_eq!(
             safe.unwrap(),
@@ -1776,7 +1780,7 @@ mod tests {
             let attempted = failure_result(
                 boundary,
                 CutileRoutedLoraUnsupported::LaunchFailed,
-                candle_core::Error::msg("launch failed"),
+                inference_tensor::Error::msg("launch failed"),
             );
             assert!(attempted.unwrap_err().to_string().contains("launch failed"));
         }

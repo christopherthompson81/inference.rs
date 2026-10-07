@@ -1,4 +1,4 @@
-use candle_core::Result;
+use inference_tensor::Result;
 
 use crate::{QuantMethod, QuantizeOntoGuard, QuantizedSerde};
 
@@ -47,7 +47,7 @@ impl DummyLayer {
 }
 
 impl QuantMethod for DummyLayer {
-    fn new(_method: crate::QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(_method: crate::QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -55,42 +55,45 @@ impl QuantMethod for DummyLayer {
             info: DummyLayerInfo::unknown(),
         })
     }
-    fn dequantize_w(&self) -> Result<candle_core::Tensor> {
-        candle_core::bail!("{}", self.info.message("dequantization"))
+    fn dequantize_w(&self) -> Result<inference_tensor::Tensor> {
+        inference_tensor::bail!("{}", self.info.message("dequantization"))
     }
     fn add_delta_w(
         &self,
-        _delta: &candle_core::Tensor,
-    ) -> candle_core::Result<std::sync::Arc<dyn QuantMethod>> {
-        candle_core::bail!("{}", self.info.message("LoRA delta application"))
+        _delta: &inference_tensor::Tensor,
+    ) -> inference_tensor::Result<std::sync::Arc<dyn QuantMethod>> {
+        inference_tensor::bail!("{}", self.info.message("LoRA delta application"))
     }
     fn apply_isq(
         self: std::sync::Arc<Self>,
         _dtype: Option<crate::IsqType>,
-        _device: candle_core::Device,
+        _device: inference_tensor::Device,
         _n_quantized: &std::sync::atomic::AtomicUsize,
         _imatrix_weight: Option<Vec<f32>>,
         _guard: QuantizeOntoGuard,
-    ) -> candle_core::Result<std::sync::Arc<dyn QuantMethod>> {
+    ) -> inference_tensor::Result<std::sync::Arc<dyn QuantMethod>> {
         // This is necessary for the immediate ISQ
         Ok(self)
     }
-    fn dtype_and_device(&self) -> (candle_core::DType, candle_core::Device) {
-        (candle_core::DType::F32, candle_core::Device::Cpu)
+    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
+        (inference_tensor::DType::F32, inference_tensor::Device::Cpu)
     }
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
         Ok(crate::plan_weight_isq(
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
             Vec::new(),
             request,
             false,
         ))
     }
-    fn forward_raw(&self, _a: &candle_core::Tensor) -> candle_core::Result<candle_core::Tensor> {
-        candle_core::bail!("{}", self.info.message("forward pass"))
+    fn forward_raw(
+        &self,
+        _a: &inference_tensor::Tensor,
+    ) -> inference_tensor::Result<inference_tensor::Tensor> {
+        inference_tensor::bail!("{}", self.info.message("forward pass"))
     }
-    fn quantized_act_type(&self) -> Option<candle_core::DType> {
+    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
         None
     }
 

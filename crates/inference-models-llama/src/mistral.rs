@@ -3,11 +3,11 @@
 /// Mistral LLM, <https://github.com/mistralai/mistral-src>
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -227,7 +227,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (mut q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         if let Some((scale, floor_scale)) = self.attention_temperature {
             let floor = (rope_positions.to_dtype(DType::F32)? / floor_scale as f64)?.floor()?;
@@ -415,18 +415,18 @@ impl Model {
                             original_max_position_embeddings: rope
                                 .original_max_position_embeddings
                                 .ok_or_else(|| {
-                                    candle_core::Error::msg(
+                                    inference_tensor::Error::msg(
                                         "YARN original context length is required",
                                     )
                                 })?,
                             factor: rope.factor.ok_or_else(|| {
-                                candle_core::Error::msg("YARN factor is required")
+                                inference_tensor::Error::msg("YARN factor is required")
                             })?,
                             beta_fast: rope.beta_fast.ok_or_else(|| {
-                                candle_core::Error::msg("YARN beta_fast is required")
+                                inference_tensor::Error::msg("YARN beta_fast is required")
                             })?,
                             beta_slow: rope.beta_slow.ok_or_else(|| {
-                                candle_core::Error::msg("YARN beta_slow is required")
+                                inference_tensor::Error::msg("YARN beta_slow is required")
                             })?,
                             mscale: rope.mscale.unwrap_or(1.),
                             mscale_all_dim: rope.mscale_all_dim.unwrap_or(0.),

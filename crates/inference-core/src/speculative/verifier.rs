@@ -1,7 +1,7 @@
 use crate::speculative::DraftSequence;
 use std::sync::Arc;
 
-use candle_core::{DType, Result, Tensor};
+use inference_tensor::{DType, Result, Tensor};
 use rand::Rng;
 use rand_isaac::Isaac64Rng;
 
@@ -118,7 +118,7 @@ pub(crate) fn greedy_device_verify_batch(
     let mut selected_indices = Vec::new();
     let mut selected_logits = Vec::new();
     let mut row_counts = Vec::new();
-    let mut common_device: Option<candle_core::Device> = None;
+    let mut common_device: Option<inference_tensor::Device> = None;
     let mut common_dtype = None;
     let mut common_vocab = None;
 
@@ -366,14 +366,14 @@ fn decode_sparse_rejection_row(
     match row.status {
         SPARSE_REJECTION_STATUS_OK => {
             let accepted_drafts =
-                usize::try_from(row.accepted_count).map_err(candle_core::Error::wrap)?;
+                usize::try_from(row.accepted_count).map_err(inference_tensor::Error::wrap)?;
             if row.accepted_count == SPARSE_REJECTION_INVALID_VALUE
                 || row.continuation == SPARSE_REJECTION_INVALID_VALUE
                 || accepted_drafts > candidate.drafts
-                || usize::try_from(row.continuation).map_err(candle_core::Error::wrap)?
+                || usize::try_from(row.continuation).map_err(inference_tensor::Error::wrap)?
                     >= candidate.vocab
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "sparse CUDA verification returned an invalid outcome: accepted={}, continuation={}, drafts={}, vocab={}",
                     row.accepted_count,
                     row.continuation,
@@ -397,17 +397,21 @@ fn decode_sparse_rejection_row(
             ))
         }
         SPARSE_REJECTION_STATUS_INVALID_Q => {
-            candle_core::bail!("sparse CUDA verification rejected invalid proposal probabilities");
+            inference_tensor::bail!(
+                "sparse CUDA verification rejected invalid proposal probabilities"
+            );
         }
         SPARSE_REJECTION_STATUS_INVALID_TARGET => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse CUDA verification rejected invalid target logits or sampling parameters"
             );
         }
         SPARSE_REJECTION_STATUS_INVALID_RNG => {
-            candle_core::bail!("sparse CUDA verification received an invalid random draw");
+            inference_tensor::bail!("sparse CUDA verification received an invalid random draw");
         }
-        status => candle_core::bail!("sparse CUDA verification returned unknown status {status}"),
+        status => {
+            inference_tensor::bail!("sparse CUDA verification returned unknown status {status}")
+        }
     }
 }
 
@@ -420,7 +424,7 @@ fn decode_sparse_rejection_completion(
     if completion.rows.len() != candidates.len()
         || completion.draft_tokens.len() != candidates.len()
     {
-        candle_core::bail!("sparse CUDA verification returned the wrong batch size");
+        inference_tensor::bail!("sparse CUDA verification returned the wrong batch size");
     }
     let mut outputs = std::iter::repeat_with(|| None)
         .take(input_count)
@@ -624,7 +628,7 @@ fn submit_sparse_rejection_group(
         .collect::<Vec<_>>();
     let target_top_k = group
         .iter()
-        .map(|row| u32::try_from(row.plan.top_k).map_err(candle_core::Error::wrap))
+        .map(|row| u32::try_from(row.plan.top_k).map_err(inference_tensor::Error::wrap))
         .collect::<Result<Vec<_>>>()?;
     let top_p = group.iter().map(|row| row.plan.top_p).collect::<Vec<_>>();
     let min_p = group.iter().map(|row| row.plan.min_p).collect::<Vec<_>>();
@@ -863,7 +867,9 @@ pub(crate) async fn finish_verified_step(
         .await;
     }
     if fallback_uniforms.is_some() {
-        candle_core::bail!("sparse CUDA verification cannot fall back under constrained sampling");
+        inference_tensor::bail!(
+            "sparse CUDA verification cannot fall back under constrained sampling"
+        );
     }
 
     let mut accepted = 0usize;
@@ -992,7 +998,7 @@ fn validate_device_verification(
 ) -> Result<()> {
     match verification {
         Some(DeviceVerification::TargetTokens(tokens)) if tokens.len() < proposal_len + 1 => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "speculative CUDA verification returned fewer tokens than required: got {}, need {}",
                 tokens.len(),
                 proposal_len + 1
@@ -1001,7 +1007,7 @@ fn validate_device_verification(
         Some(DeviceVerification::SparseRejection {
             accepted_drafts, ..
         }) if *accepted_drafts > proposal_len => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "speculative CUDA verification accepted {accepted_drafts} of {proposal_len} drafts"
             );
         }
@@ -1010,7 +1016,7 @@ fn validate_device_verification(
                 || uniforms.accept.iter().any(|draw| !valid_uniform(*draw))
                 || !valid_uniform(uniforms.sample) =>
         {
-            candle_core::bail!("sparse CUDA verification returned invalid fallback uniforms");
+            inference_tensor::bail!("sparse CUDA verification returned invalid fallback uniforms");
         }
         _ => {}
     }
@@ -1021,11 +1027,11 @@ fn validate_device_verification(
 fn partition_device_tokens(tokens: Vec<u32>, row_counts: &[usize]) -> Result<Vec<Vec<u32>>> {
     let expected = row_counts.iter().try_fold(0usize, |total, &rows| {
         total.checked_add(rows).ok_or_else(|| {
-            candle_core::Error::Msg("speculative CUDA verify row count overflow".to_string())
+            inference_tensor::Error::Msg("speculative CUDA verify row count overflow".to_string())
         })
     })?;
     if tokens.len() != expected {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "speculative CUDA verification returned {} tokens for {expected} rows",
             tokens.len()
         );
@@ -1124,7 +1130,7 @@ impl PreparedProposalDistribution {
                     prompt_len,
                 )?;
                 if probs.len() != vocab {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "speculative target/candidate vocab mismatch: target={vocab}, candidate={}",
                         probs.len()
                     );
@@ -1133,12 +1139,12 @@ impl PreparedProposalDistribution {
             }
             Self::Sparse { token_ids, probs } => {
                 let token_ids = token_ids.get(row).ok_or_else(|| {
-                    candle_core::Error::Msg(format!(
+                    inference_tensor::Error::Msg(format!(
                         "sparse speculative probability row {row} is out of range"
                     ))
                 })?;
                 let probs = probs.get(row).ok_or_else(|| {
-                    candle_core::Error::Msg(format!(
+                    inference_tensor::Error::Msg(format!(
                         "sparse speculative probability row {row} is out of range"
                     ))
                 })?;
@@ -1152,7 +1158,7 @@ impl PreparedProposalDistribution {
 
 fn validate_sparse_positions(sparse: &SparseSpeculativeProbs, positions: usize) -> Result<()> {
     if sparse.positions() != positions {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "sparse speculative probabilities have {} positions for {positions} tokens",
             sparse.positions()
         );
@@ -1184,7 +1190,7 @@ impl ProposalProbabilityRow {
         match self {
             Self::Dense(probs) => {
                 if probs.len() != target.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "speculative target/candidate vocab mismatch: target={}, candidate={}",
                         target.len(),
                         probs.len()
@@ -1211,7 +1217,7 @@ fn normalize_sparse_row(
     vocab: usize,
 ) -> Result<Vec<(usize, f32)>> {
     if token_ids.len() != probs.len() || token_ids.is_empty() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "invalid sparse speculative probability row {row}: ids={}, probabilities={}",
             token_ids.len(),
             probs.len()
@@ -1221,17 +1227,19 @@ fn normalize_sparse_row(
     let mut sum = 0.0f64;
     for (&token, &prob) in token_ids.iter().zip(probs) {
         if token as usize >= vocab {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse speculative token id {token} at position {row} exceeds vocab {vocab}"
             );
         }
         if !prob.is_finite() || prob < 0.0 {
-            candle_core::bail!("invalid sparse speculative probability {prob} at position {row}");
+            inference_tensor::bail!(
+                "invalid sparse speculative probability {prob} at position {row}"
+            );
         }
         sum += prob as f64;
     }
     if !sum.is_finite() || sum <= 0.0 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "sparse speculative probabilities sum to an invalid value at position {row}"
         );
     }
@@ -1295,7 +1303,7 @@ async fn finish_verified_step_stochastic(
         let p_i = target_probs.sampling.get(draft_idx).copied().unwrap_or(0.0);
         let q_i = candidate_probs.probability(draft_idx);
         if candidate_probs.is_sparse() && q_i <= 0.0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "sparse speculative proposal token {draft} has zero probability at position {idx}"
             );
         }
@@ -1419,17 +1427,21 @@ fn logit_row(logits: &Tensor, row: usize) -> Result<Tensor> {
     match logits.dims() {
         [_, rows, _] => {
             if row >= *rows {
-                candle_core::bail!("speculative logit row {row} is out of range for {rows} rows");
+                inference_tensor::bail!(
+                    "speculative logit row {row} is out of range for {rows} rows"
+                );
             }
             logits.narrow(1, row, 1)
         }
         [rows, _] => {
             if row >= *rows {
-                candle_core::bail!("speculative logit row {row} is out of range for {rows} rows");
+                inference_tensor::bail!(
+                    "speculative logit row {row} is out of range for {rows} rows"
+                );
             }
             logits.narrow(0, row, 1)
         }
-        shape => candle_core::bail!("speculative logits have unsupported shape {shape:?}"),
+        shape => inference_tensor::bail!("speculative logits have unsupported shape {shape:?}"),
     }
 }
 
@@ -1438,7 +1450,9 @@ fn flat_logits(logits: Tensor) -> Result<Tensor> {
         [1, 1, _] => logits.squeeze(0)?.squeeze(0)?.to_dtype(DType::F32),
         [1, _] => logits.squeeze(0)?.to_dtype(DType::F32),
         [_] => logits.to_dtype(DType::F32),
-        dims => candle_core::bail!("speculative logit row must flatten to rank 1, got {dims:?}"),
+        dims => {
+            inference_tensor::bail!("speculative logit row must flatten to rank 1, got {dims:?}")
+        }
     }
 }
 
@@ -1449,7 +1463,7 @@ fn normalize_probs(probs: &mut [f32]) -> Result<()> {
         .filter(|prob| prob.is_finite() && *prob > 0.0)
         .sum();
     if sum <= 0.0 {
-        candle_core::bail!("all probabilities are zero in speculative adjusted distribution");
+        inference_tensor::bail!("all probabilities are zero in speculative adjusted distribution");
     }
     for prob in probs.iter_mut() {
         if prob.is_finite() && *prob > 0.0 {
@@ -1469,13 +1483,13 @@ fn sample_from_probs_with_uniform(
     uniform: f32,
 ) -> Result<Logprobs> {
     if !valid_uniform(uniform) {
-        candle_core::bail!("invalid speculative fallback sampling uniform {uniform}");
+        inference_tensor::bail!("invalid speculative fallback sampling uniform {uniform}");
     }
     let mut total = 0.0f32;
     let mut last_positive = None;
     for (token, probability) in sampling_probs.iter().copied().enumerate() {
         if !probability.is_finite() || probability < 0.0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "invalid speculative fallback sampling probability {probability} at token {token}"
             );
         }
@@ -1485,7 +1499,7 @@ fn sample_from_probs_with_uniform(
         total += probability;
     }
     if !total.is_finite() || total <= 0.0 {
-        candle_core::bail!("all speculative fallback sampling probabilities are zero");
+        inference_tensor::bail!("all speculative fallback sampling probabilities are zero");
     }
     let target = uniform * total;
     let mut cumulative = 0.0f32;
@@ -1599,7 +1613,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn sparse_cuda_fallback_reuses_uniforms_in_input_order() -> candle_core::Result<()> {
+    fn sparse_cuda_fallback_reuses_uniforms_in_input_order() -> inference_tensor::Result<()> {
         use super::{SparseRejectionPendingCandidate, decode_sparse_rejection_completion};
         use crate::cuda::speculative_rejection::{
             SPARSE_REJECTION_INVALID_VALUE, SPARSE_REJECTION_STATUS_NEEDS_CPU,
@@ -1684,10 +1698,10 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn sparse_cuda_eligibility_rejects_invalid_inputs() -> candle_core::Result<()> {
+    fn sparse_cuda_eligibility_rejects_invalid_inputs() -> inference_tensor::Result<()> {
         use super::sparse_distribution_is_cuda_eligible;
         use crate::speculative::SparseSpeculativeProbs;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let cuda = Device::new_cuda(0)?;
         let token_ids = Tensor::from_vec(vec![0u32; 8], (2, 4), &cuda)?;
@@ -1719,10 +1733,10 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn sparse_cuda_eligibility_allows_noncontiguous_inputs() -> candle_core::Result<()> {
+    fn sparse_cuda_eligibility_allows_noncontiguous_inputs() -> inference_tensor::Result<()> {
         use super::sparse_distribution_is_cuda_eligible;
         use crate::speculative::SparseSpeculativeProbs;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let cuda = Device::new_cuda(0)?;
         let token_ids = Tensor::from_vec(vec![0u32; 8], (4, 2), &cuda)?.transpose(0, 1)?;

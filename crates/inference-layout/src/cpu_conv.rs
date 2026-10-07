@@ -1,5 +1,5 @@
-use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use gemm::Parallelism;
+use inference_tensor::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 use crate::cpu_direct::{PhasePlanes, f32_slices};
@@ -42,7 +42,7 @@ impl CustomOp3 for ImplicitConv {
         let (bn, c, h, w) = lx.shape().dims4()?;
         let (o, ci, k, k2) = lw.shape().dims4()?;
         if ci != c || k != k2 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "implicit conv: weight {:?} vs input {:?}",
                 lw.shape(),
                 lx.shape()
@@ -51,7 +51,7 @@ impl CustomOp3 for ImplicitConv {
         let (s, p) = (self.stride, self.padding);
         let ho = (h + 2 * p - k) / s + 1;
         let wo = (w + 2 * p - k) / s + 1;
-        let par = Parallelism::Rayon(candle_core::utils::get_num_threads());
+        let par = Parallelism::Rayon(inference_tensor::utils::get_num_threads());
         let mut out = vec![0f32; bn * o * ho * wo];
         let mut full = Vec::new();
         for bi in 0..bn {
@@ -110,7 +110,7 @@ impl CustomOp3 for ImplicitConv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     #[test]
     fn matches_candle_conv_batched() -> Result<()> {

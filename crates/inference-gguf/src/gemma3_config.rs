@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::{Context, Result, bail};
-use candle_core::quantized::gguf_file::Value as GgufValue;
+use inference_tensor::quantized::gguf_file::Value as GgufValue;
 use serde_json::{Value as JsonValue, json};
 
 use inference_models_gemma::gemma3::config::{Gemma3Config, Gemma3TextConfig};

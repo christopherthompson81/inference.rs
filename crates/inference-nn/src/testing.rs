@@ -4,9 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use candle_core::{DType, Device, Shape, Tensor};
-use candle_nn::var_builder::SimpleBackend;
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, TensorShapes};
+use inference_tensor::nn::var_builder::SimpleBackend;
+use inference_tensor::{DType, Device, Shape, Tensor};
 use serde_json::Value;
 
 use crate::device_map::DummyDeviceMapper;
@@ -94,15 +94,20 @@ impl SimpleBackend for Recording {
         &self,
         s: Shape,
         name: &str,
-        h: candle_nn::Init,
+        h: inference_tensor::nn::Init,
         dtype: DType,
         dev: &Device,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         self.mark(name);
         SimpleBackend::get(self.tensors.as_ref(), s, name, h, dtype, dev)
     }
 
-    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+    fn get_unchecked(
+        &self,
+        name: &str,
+        dtype: DType,
+        dev: &Device,
+    ) -> inference_tensor::Result<Tensor> {
         self.mark(name);
         SimpleBackend::get_unchecked(self.tensors.as_ref(), name, dtype, dev)
     }
@@ -157,28 +162,33 @@ impl SimpleBackend for Synthesizing {
         &self,
         s: Shape,
         name: &str,
-        _: candle_nn::Init,
+        _: inference_tensor::nn::Init,
         dtype: DType,
         dev: &Device,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         self.seen
             .lock()
             .unwrap()
             .insert(name.to_string(), s.elem_count());
         fill(name, s.dims())
-            .map_err(candle_core::Error::msg)?
+            .map_err(inference_tensor::Error::msg)?
             .to_dtype(dtype)?
             .to_device(dev)
     }
 
-    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+    fn get_unchecked(
+        &self,
+        name: &str,
+        dtype: DType,
+        dev: &Device,
+    ) -> inference_tensor::Result<Tensor> {
         let Some(shape) = self.shapes.get(name) else {
-            candle_core::bail!("{name} has no shape to synthesize from")
+            inference_tensor::bail!("{name} has no shape to synthesize from")
         };
         self.get(
             shape.as_slice().into(),
             name,
-            candle_nn::Init::Const(0.),
+            inference_tensor::nn::Init::Const(0.),
             dtype,
             dev,
         )
@@ -253,7 +263,7 @@ pub fn patched(mut base: Value, patch: Value) -> Value {
 }
 
 fn prompt_forward(
-    run: impl FnOnce(&Tensor, &mut ModelForwardContext<'_>) -> candle_core::Result<Tensor>,
+    run: impl FnOnce(&Tensor, &mut ModelForwardContext<'_>) -> inference_tensor::Result<Tensor>,
 ) -> Result<Tensor> {
     let input = Tensor::new(&PROMPT, &Device::Cpu)?.unsqueeze(0)?;
     let offsets = [0];

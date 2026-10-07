@@ -153,7 +153,7 @@ pub type DeepSeekV3 = FamilyModel<MlaAttention>;
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use crate::deepseek_family::add_moe_gate_residual_tensors;
     use crate::utils::unvarbuilder::UnVarBuilder;

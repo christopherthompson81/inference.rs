@@ -1,5 +1,5 @@
-use candle_core::{Result, Tensor};
 use inference_quant::{Shard, ShardedVarBuilder};
+use inference_tensor::{Result, Tensor};
 use std::sync::Arc;
 
 use crate::moe::shard;
@@ -23,7 +23,7 @@ impl<'a> ExpertCheckpoint<'a> {
     ) -> Result<Self> {
         let shape_of = |rel: &str| vb.tensor_shape(rel).map(|s| s.to_vec());
         let layout = ExpertSourceLayout::detect(&shape_of, ExpertProj::Gate).ok_or_else(|| {
-            candle_core::Error::Msg(format!(
+            inference_tensor::Error::Msg(format!(
                 "No known expert checkpoint layout under `{}`.",
                 vb.prefix()
             ))
@@ -46,7 +46,7 @@ impl<'a> ExpertCheckpoint<'a> {
                 ExpertProj::Gate | ExpertProj::Up => {
                     let inter_shard = cfg.moe_intermediate_size / self.world_size;
                     if !cfg.moe_intermediate_size.is_multiple_of(self.world_size) {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Intermediate size {} is not divisible by world size {}.",
                             cfg.moe_intermediate_size,
                             self.world_size
@@ -107,7 +107,7 @@ impl<'a> ExpertCheckpoint<'a> {
             let gate_up = if self.world_size > 1 {
                 let inter_shard = cfg.moe_intermediate_size / self.world_size;
                 if !cfg.moe_intermediate_size.is_multiple_of(self.world_size) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Intermediate size {} is not divisible by world size {}.",
                         cfg.moe_intermediate_size,
                         self.world_size
@@ -190,7 +190,7 @@ impl<'a> ExpertCheckpoint<'a> {
         &self,
         block: usize,
     ) -> Result<Option<(Tensor, Tensor, Tensor, Tensor)>> {
-        use candle_core::DType;
+        use inference_tensor::DType;
         let cfg = self.cfg;
         let ExpertSourceLayout::PerExpert { names, .. } = self.layout else {
             return Ok(None);
@@ -388,7 +388,7 @@ impl ExpertSourceLayout {
                     .map(|i| {
                         source.load(
                             &format!("{prefix}.{i}.{name}.weight"),
-                            &candle_core::Device::Cpu,
+                            &inference_tensor::Device::Cpu,
                             None,
                         )
                     })
@@ -400,7 +400,7 @@ impl ExpertSourceLayout {
                     ExpertProj::Down => format!("{prefix}.down_proj"),
                     _ => format!("{prefix}.gate_up_proj"),
                 };
-                let mut t = source.load(&tensor_name, &candle_core::Device::Cpu, None)?;
+                let mut t = source.load(&tensor_name, &inference_tensor::Device::Cpu, None)?;
                 if *transposed {
                     t = t.transpose(1, 2)?.contiguous()?;
                 }
@@ -434,13 +434,13 @@ impl ExpertSourceLayout {
                     return Ok(None);
                 }
                 if present != *count {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Expert projection `{prefix}.{name}` has bias for {present} of {count} experts."
                     );
                 }
                 let slabs = bias_names
                     .iter()
-                    .map(|name| source.load(name, &candle_core::Device::Cpu, None))
+                    .map(|name| source.load(name, &inference_tensor::Device::Cpu, None))
                     .collect::<Result<Vec<_>>>()?;
                 Tensor::stack(&slabs, 0).map(Some)
             }
@@ -458,14 +458,14 @@ impl ExpertSourceLayout {
                     .filter(|name| shapes.contains_key(*name))
                     .collect::<Vec<_>>();
                 if present.len() > 1 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Expert projection `{prefix}.{projection}` has multiple bias tensors."
                     );
                 }
                 let Some(name) = present.first() else {
                     return Ok(None);
                 };
-                let bias = source.load(name, &candle_core::Device::Cpu, None)?;
+                let bias = source.load(name, &inference_tensor::Device::Cpu, None)?;
                 match proj {
                     ExpertProj::Gate => bias.narrow(1, 0, *inter)?.contiguous().map(Some),
                     ExpertProj::Up => bias.narrow(1, *inter, *inter)?.contiguous().map(Some),
@@ -509,7 +509,7 @@ pub fn rebuild_expert_projection(
     if let Some(bias) = &bias {
         let (experts, output, _) = weight.dims3()?;
         if bias.dims() != [experts, output] {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Expert projection `{key}` bias shape {:?} does not match weight shape {:?}; expected [{experts}, {output}].",
                 bias.dims(),
                 weight.dims()
@@ -522,7 +522,7 @@ pub fn rebuild_expert_projection(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
     use std::collections::HashMap;
 
     const E: usize = 4;
@@ -530,7 +530,7 @@ mod tests {
     const HIDDEN: usize = 12;
 
     fn write_st(path: &std::path::Path, tensors: Vec<(String, Tensor)>) {
-        candle_core::safetensors::save(&tensors.into_iter().collect(), path).unwrap();
+        inference_tensor::safetensors::save(&tensors.into_iter().collect(), path).unwrap();
     }
 
     fn open_source(
@@ -713,12 +713,12 @@ mod tests {
         for expert in 0..E {
             tensors.push((
                 format!("experts.{expert}.w1.weight"),
-                Tensor::zeros((INTER, HIDDEN), candle_core::DType::F32, &Device::Cpu)?,
+                Tensor::zeros((INTER, HIDDEN), inference_tensor::DType::F32, &Device::Cpu)?,
             ));
         }
         tensors.push((
             "experts.0.w1.bias".to_string(),
-            Tensor::zeros(INTER, candle_core::DType::F32, &Device::Cpu)?,
+            Tensor::zeros(INTER, inference_tensor::DType::F32, &Device::Cpu)?,
         ));
         write_st(&file, tensors);
         let (source, shapes) = open_source(&file);
@@ -734,8 +734,8 @@ mod tests {
         unsafe {
             inference_quant::ShardedSafeTensors::sharded(
                 &[path],
-                candle_core::DType::F32,
-                &candle_core::Device::Cpu,
+                inference_tensor::DType::F32,
+                &inference_tensor::Device::Cpu,
                 None,
                 Arc::new(|_| true),
             )
@@ -755,7 +755,7 @@ mod tests {
         let comm = Arc::new(
             inference_quant::Comm::from_device(
                 inference_quant::Id::new(),
-                &candle_core::Device::Cpu,
+                &inference_tensor::Device::Cpu,
                 0,
                 1,
             )
@@ -766,9 +766,14 @@ mod tests {
             0f32,
             1f32,
             (E, 2 * INTER, HIDDEN),
-            &candle_core::Device::Cpu,
+            &inference_tensor::Device::Cpu,
         )?;
-        let down = Tensor::randn(0f32, 1f32, (E, HIDDEN, INTER), &candle_core::Device::Cpu)?;
+        let down = Tensor::randn(
+            0f32,
+            1f32,
+            (E, HIDDEN, INTER),
+            &inference_tensor::Device::Cpu,
+        )?;
 
         // fused, both orientations
         for transposed in [false, true] {

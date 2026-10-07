@@ -4,11 +4,11 @@
     clippy::too_many_arguments
 )]
 use crate::media_inputs::preprocessor_config::PreProcessorConfig;
-use candle_core::{DType, Device, Result, Tensor};
 use image::{
     DynamicImage, GenericImageView, Rgb, RgbImage,
     imageops::{FilterType, overlay},
 };
+use inference_tensor::{DType, Device, Result, Tensor};
 use std::cmp::min;
 
 pub(crate) use super::anyres::{

@@ -1,4 +1,4 @@
-use candle_core::{DType, Result, WithDType};
+use inference_tensor::{DType, Result, WithDType};
 
 pub(crate) fn dtype_to_uqff_code(dtype: DType) -> Result<u32> {
     match dtype {
@@ -16,7 +16,7 @@ pub(crate) fn dtype_to_uqff_code(dtype: DType) -> Result<u32> {
         DType::F6E3M2 => Ok(11),
         DType::F4 => Ok(12),
         DType::F8E8M0 => Ok(13),
-        other => candle_core::bail!("Unsupported dtype for UQFF serialization: {other:?}"),
+        other => inference_tensor::bail!("Unsupported dtype for UQFF serialization: {other:?}"),
     }
 }
 
@@ -36,7 +36,7 @@ pub(crate) fn uqff_code_to_dtype(dtype: u32) -> Result<DType> {
         11 => Ok(DType::F6E3M2),
         12 => Ok(DType::F4),
         13 => Ok(DType::F8E8M0),
-        _ => candle_core::bail!("unknown dtype for quantized tensor {dtype}"),
+        _ => inference_tensor::bail!("unknown dtype for quantized tensor {dtype}"),
     }
 }
 
@@ -54,26 +54,26 @@ mod tests {
     #[test]
     fn dtype_variant_count_unchanged() {
         assert_eq!(
-            std::mem::size_of::<candle_core::DType>(),
+            std::mem::size_of::<inference_tensor::DType>(),
             1,
             "DType repr size changed, check if the discriminant size is the same"
         );
         const EXPECTED_VARIANTS: usize = 14;
         let count = [
-            candle_core::DType::U8,
-            candle_core::DType::U32,
-            candle_core::DType::I16,
-            candle_core::DType::I32,
-            candle_core::DType::I64,
-            candle_core::DType::BF16,
-            candle_core::DType::F16,
-            candle_core::DType::F32,
-            candle_core::DType::F64,
-            candle_core::DType::F8E4M3,
-            candle_core::DType::F6E2M3,
-            candle_core::DType::F6E3M2,
-            candle_core::DType::F4,
-            candle_core::DType::F8E8M0,
+            inference_tensor::DType::U8,
+            inference_tensor::DType::U32,
+            inference_tensor::DType::I16,
+            inference_tensor::DType::I32,
+            inference_tensor::DType::I64,
+            inference_tensor::DType::BF16,
+            inference_tensor::DType::F16,
+            inference_tensor::DType::F32,
+            inference_tensor::DType::F64,
+            inference_tensor::DType::F8E4M3,
+            inference_tensor::DType::F6E2M3,
+            inference_tensor::DType::F6E3M2,
+            inference_tensor::DType::F4,
+            inference_tensor::DType::F8E8M0,
         ]
         .len();
         assert_eq!(

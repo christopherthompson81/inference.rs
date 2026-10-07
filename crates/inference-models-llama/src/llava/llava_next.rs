@@ -6,9 +6,9 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, bail};
-use candle_nn::{Activation, Linear};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::nn::{Activation, Linear};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor, bail};
 
 use crate::amoe::{AnyMoeBaseModelMixin, MlpLayer};
 
@@ -246,19 +246,19 @@ impl Model {
         let images_typed = images.to_dtype(self.dtype)?;
         let n_images = num_image_samples.len();
         if n_images == 0 {
-            candle_core::bail!("LLaVA-Next received image pixels without image metadata");
+            inference_tensor::bail!("LLaVA-Next received image pixels without image metadata");
         }
         if image_sizes.len() != n_images || num_image_tokens.len() != n_images {
-            candle_core::bail!("LLaVA-Next image metadata has inconsistent cardinality");
+            inference_tensor::bail!("LLaVA-Next image metadata has inconsistent cardinality");
         }
         if !image_hashes.is_empty() && image_hashes.len() != n_images {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LLaVA-Next received {} image hashes for {n_images} images",
                 image_hashes.len()
             );
         }
         if image_indexes.len() != n_images {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LLaVA-Next received {} image placeholders for {n_images} images",
                 image_indexes.len()
             );
@@ -266,14 +266,14 @@ impl Model {
         let mut total_samples = 0usize;
         for &sample_count in &num_image_samples {
             if sample_count == 0 {
-                candle_core::bail!("LLaVA-Next image has no preprocessed samples");
+                inference_tensor::bail!("LLaVA-Next image has no preprocessed samples");
             }
             total_samples = total_samples.checked_add(sample_count).ok_or_else(|| {
-                candle_core::Error::Msg("LLaVA-Next image sample count overflow".into())
+                inference_tensor::Error::Msg("LLaVA-Next image sample count overflow".into())
             })?;
         }
         if images_typed.dim(0)? != total_samples {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LLaVA-Next received {} image samples but metadata describes {total_samples}",
                 images_typed.dim(0)?
             );
@@ -298,12 +298,12 @@ impl Model {
                     match guard.get(CacheModality::Image, hash) {
                         Some(cached) => {
                             let cached = cached.first().ok_or_else(|| {
-                                candle_core::Error::Msg(
+                                inference_tensor::Error::Msg(
                                     "cached LLaVA-Next image has no encoder output".into(),
                                 )
                             })?;
                             if cached.dim(0)? != num_image_samples[i] {
-                                candle_core::bail!(
+                                inference_tensor::bail!(
                                     "cached LLaVA-Next image has {} samples but metadata describes {}",
                                     cached.dim(0)?,
                                     num_image_samples[i]
@@ -329,7 +329,7 @@ impl Model {
                 let miss_pixels = Tensor::stack(&miss_samples, 0)?;
                 let miss_encoded = self.encode_images(&miss_pixels)?;
                 if miss_encoded.dim(0)? != miss_samples.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "LLaVA-Next encoder returned {} samples for {} inputs",
                         miss_encoded.dim(0)?,
                         miss_samples.len()
@@ -359,7 +359,7 @@ impl Model {
                 .enumerate()
                 .map(|(index, output)| {
                     output.ok_or_else(|| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "LLaVA-Next image {index} has no encoder output"
                         ))
                     })
@@ -369,7 +369,7 @@ impl Model {
             // Fallback: no hashes, encode all at once.
             let image_features = self.encode_images(&images_typed)?;
             if image_features.dim(0)? != total_samples {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LLaVA-Next encoder returned {} samples for {total_samples} inputs",
                     image_features.dim(0)?
                 );
@@ -391,7 +391,7 @@ impl Model {
                 let height = self.clip_vision_tower.num_patches_per_side();
                 let width = height;
                 if height * width != base_image_feature.dim(0)? {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "LLaVA-Next base image has {} patches but the vision tower expects {}",
                         base_image_feature.dim(0)?,
                         height * width
@@ -430,12 +430,12 @@ impl Model {
             })
             .collect::<Result<Vec<Tensor>>>()?;
         if image_features_vec.len() != num_image_tokens.len() {
-            candle_core::bail!("LLaVA-Next encoder output cardinality is inconsistent");
+            inference_tensor::bail!("LLaVA-Next encoder output cardinality is inconsistent");
         }
         for (output, &token_count) in image_features_vec.iter().zip(&num_image_tokens) {
             let (output_batch, output_rows, _) = output.dims3()?;
             if output_batch != 1 || output_rows != token_count {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LLaVA-Next encoder returned shape {:?} for a {token_count}-token placeholder",
                     output.dims()
                 );
@@ -443,7 +443,7 @@ impl Model {
         }
         if let Some(layout) = packed_layout {
             if image_hashes.len() != image_features_vec.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "packed LLaVA-Next image metadata does not match encoder outputs"
                 );
             }
@@ -494,13 +494,17 @@ impl Model {
     ) -> Result<Tensor> {
         if let Some(ref pixel_values) = pixel_values {
             let num_image_tokens = num_image_tokens.ok_or_else(|| {
-                candle_core::Error::Msg("LLaVA-Next input is missing image token counts".into())
+                inference_tensor::Error::Msg(
+                    "LLaVA-Next input is missing image token counts".into(),
+                )
             })?;
             let num_image_samples = num_image_samples.ok_or_else(|| {
-                candle_core::Error::Msg("LLaVA-Next input is missing image sample counts".into())
+                inference_tensor::Error::Msg(
+                    "LLaVA-Next input is missing image sample counts".into(),
+                )
             })?;
             let image_sizes = image_sizes.ok_or_else(|| {
-                candle_core::Error::Msg("LLaVA-Next input is missing image sizes".into())
+                inference_tensor::Error::Msg("LLaVA-Next input is missing image sizes".into())
             })?;
             let input_embeds = self.prepare_inputs_labels_for_multimodal(
                 input_ids,
@@ -561,7 +565,7 @@ impl MultimodalModel for Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>, // pixel attention mask, or image sizes, or anything else
         ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let LLaVANextVisionSpecificArgs {
             image_sizes,
             num_image_tokens,

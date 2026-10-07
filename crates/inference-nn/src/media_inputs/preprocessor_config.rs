@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use candle_core::Result;
 use image::imageops::FilterType;
+use inference_tensor::Result;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
@@ -135,7 +135,7 @@ impl ToFilter for Option<usize> {
             Some(2) | None => Ok(FilterType::Triangle), // BiLinear
             Some(3) => Ok(FilterType::CatmullRom),      // BiCubic
             Some(4) => Ok(FilterType::Nearest),
-            Some(x) => candle_core::bail!("Filter number {x} not supported"),
+            Some(x) => inference_tensor::bail!("Filter number {x} not supported"),
         }
     }
 }

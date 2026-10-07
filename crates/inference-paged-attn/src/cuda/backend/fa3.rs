@@ -1,6 +1,6 @@
 #[cfg(has_fa3_fp8_paged)]
-use candle_core::DType;
-use candle_core::{Result, Tensor};
+use inference_tensor::DType;
+use inference_tensor::{Result, Tensor};
 
 pub const USE_FA3_FP8_PAGED: bool = cfg!(has_fa3_fp8_paged);
 pub const FA3_DECODE_MAX_QUERY_LEN: usize = 128;
@@ -89,7 +89,7 @@ pub struct Fa3DecodeParams<'a> {
 #[cfg(has_fa3_fp8_paged)]
 fn as_i32(value: usize, name: &str) -> Result<i32> {
     i32::try_from(value)
-        .map_err(|_| candle_core::Error::msg(format!("FA3 {name} does not fit in i32")))
+        .map_err(|_| inference_tensor::Error::msg(format!("FA3 {name} does not fit in i32")))
 }
 
 #[cfg(has_fa3_fp8_paged)]
@@ -114,9 +114,9 @@ pub fn fa3_prepare_paged_metadata(
     use crate::cuda::ffi::{
         Fa3Fp8DecodeScheduleParams, fa3_fp8_decode_prepare, fa3_fp8_paged_materialize_metadata,
     };
-    use candle_core::Storage;
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
+    use inference_tensor::Storage;
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
 
     if schedule.batch_size == 0
         || schedule.query_len == 0
@@ -135,7 +135,7 @@ pub fn fa3_prepare_paged_metadata(
         || !metadata_layout.valid()
         || metadata_layout.source_rows(schedule.batch_size).is_none()
     {
-        candle_core::bail!("invalid FA3 decode schedule: {schedule:?}");
+        inference_tensor::bail!("invalid FA3 decode schedule: {schedule:?}");
     }
 
     let Fa3DecodeMetadata {
@@ -157,16 +157,16 @@ pub fn fa3_prepare_paged_metadata(
         ("scheduler_metadata", scheduler_metadata),
     ] {
         if tensor.dtype() != DType::I32 || !tensor.is_contiguous() {
-            candle_core::bail!("FA3 expects contiguous i32 {name}");
+            inference_tensor::bail!("FA3 expects contiguous i32 {name}");
         }
         if tensor.device().location() != paged_kv_indptr.device().location() {
-            candle_core::bail!("FA3 metadata tensors must be on one CUDA device");
+            inference_tensor::bail!("FA3 metadata tensors must be on one CUDA device");
         }
     }
     let max_pages_per_sequence = page_table.dims2()?.1;
     let source_rows = metadata_layout
         .source_rows(schedule.batch_size)
-        .ok_or_else(|| candle_core::Error::msg("FA3 metadata row count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 metadata row count overflow"))?;
     let scheduler_vectors = 2 + usize::from(schedule.causal);
     let scheduler_len = scheduler_vectors * schedule.batch_size.div_ceil(4) * 4 + 1;
     if paged_kv_indptr.dims1()? != source_rows + 1
@@ -178,7 +178,7 @@ pub fn fa3_prepare_paged_metadata(
         || max_pages_per_sequence == 0
         || schedule.max_seqlen_k > max_pages_per_sequence.saturating_mul(schedule.page_size)
     {
-        candle_core::bail!("FA3 metadata shapes do not match schedule {schedule:?}");
+        inference_tensor::bail!("FA3 metadata shapes do not match schedule {schedule:?}");
     }
 
     let (indptr_storage, indptr_layout) = paged_kv_indptr.storage_and_layout();
@@ -191,31 +191,31 @@ pub fn fa3_prepare_paged_metadata(
 
     let indptr_storage = match &*indptr_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let indices_storage = match &*indices_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let last_storage = match &*last_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let page_table_storage = match &*page_table_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let seqused_storage = match &*seqused_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let cu_q_storage = match &*cu_q_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let scheduler_storage = match &*scheduler_storage {
         Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("FA3 metadata must be on CUDA"),
+        _ => inference_tensor::bail!("FA3 metadata must be on CUDA"),
     };
     let (
         CudaStorageSlice::I32(indptr),
@@ -270,7 +270,7 @@ pub fn fa3_prepare_paged_metadata(
         )
     };
     if status != 0 {
-        candle_core::bail!("FA3 paged metadata materialization failed with status {status}");
+        inference_tensor::bail!("FA3 paged metadata materialization failed with status {status}");
     }
 
     let params = Fa3Fp8DecodeScheduleParams {
@@ -292,7 +292,7 @@ pub fn fa3_prepare_paged_metadata(
     };
     let status = unsafe { fa3_fp8_decode_prepare(&params, stream.cu_stream()) };
     if status != 0 {
-        candle_core::bail!("FA3 scheduler preparation failed with status {status}");
+        inference_tensor::bail!("FA3 scheduler preparation failed with status {status}");
     }
     Ok(())
 }
@@ -302,7 +302,7 @@ pub fn fa3_prepare_decode_metadata(
     _metadata: Fa3DecodeMetadata<'_>,
     _schedule: Fa3DecodeSchedule,
 ) -> Result<()> {
-    candle_core::bail!("FA3 FP8 paged attention was not built for this CUDA target")
+    inference_tensor::bail!("FA3 FP8 paged attention was not built for this CUDA target")
 }
 
 #[cfg(not(has_fa3_fp8_paged))]
@@ -311,7 +311,7 @@ pub fn fa3_prepare_paged_metadata(
     _schedule: Fa3DecodeSchedule,
     _metadata_layout: Fa3PagedMetadataLayout,
 ) -> Result<()> {
-    candle_core::bail!("FA3 FP8 paged attention was not built for this CUDA target")
+    inference_tensor::bail!("FA3 FP8 paged attention was not built for this CUDA target")
 }
 
 #[cfg(has_fa3_fp8_paged)]
@@ -320,9 +320,9 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
     use crate::cuda::ffi::{
         Fa3Fp8DecodeParams, Fa3Fp8DecodeScheduleParams, fa3_bf16_to_e4m3_static, fa3_fp8_decode_run,
     };
-    use candle_core::Storage;
-    use candle_core::backend::BackendStorage;
     use float8::F8E4M3;
+    use inference_tensor::Storage;
+    use inference_tensor::backend::BackendStorage;
 
     let Fa3DecodeParams {
         query,
@@ -343,7 +343,7 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
         softmax_scale,
     } = params;
     if !softmax_scale.is_finite() || softmax_scale <= 0.0 {
-        candle_core::bail!("FA3 softmax scale must be finite and positive");
+        inference_tensor::bail!("FA3 softmax scale must be finite and positive");
     }
     if query.dtype() != DType::BF16
         || quantized_query.dtype() != DType::F8E4M3
@@ -360,7 +360,7 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
         || cu_seqlens_q.dtype() != DType::I32
         || scheduler_metadata.dtype() != DType::I32
     {
-        candle_core::bail!("FA3 decode tensor dtypes do not match the FP8/BF16 contract");
+        inference_tensor::bail!("FA3 decode tensor dtypes do not match the FP8/BF16 contract");
     }
     let (num_pages, kv_heads, page_size, head_dim) = key_cache.dims4()?;
     let (total_q, q_heads, query_head_dim) = query.dims3()?;
@@ -386,7 +386,7 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
         || v_descale.elem_count() != 1
         || schedule.max_seqlen_k > max_pages_per_sequence.saturating_mul(page_size)
     {
-        candle_core::bail!("FA3 decode tensor shapes do not match schedule {schedule:?}");
+        inference_tensor::bail!("FA3 decode tensor shapes do not match schedule {schedule:?}");
     }
     for (name, tensor) in [
         ("query", query),
@@ -405,10 +405,10 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
         ("v_descale", v_descale),
     ] {
         if !tensor.is_contiguous() {
-            candle_core::bail!("FA3 expects contiguous {name}");
+            inference_tensor::bail!("FA3 expects contiguous {name}");
         }
         if tensor.device().location() != query.device().location() {
-            candle_core::bail!("FA3 decode tensors must be on one CUDA device");
+            inference_tensor::bail!("FA3 decode tensors must be on one CUDA device");
         }
     }
     let output = unsafe { Tensor::empty(query.shape().clone(), DType::BF16, query.device())? };
@@ -434,7 +434,7 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
             ($storage:ident, $name:literal) => {
                 match &*$storage {
                     Storage::Cuda(storage) => storage,
-                    _ => candle_core::bail!(concat!("FA3 ", $name, " must be on CUDA")),
+                    _ => inference_tensor::bail!(concat!("FA3 ", $name, " must be on CUDA")),
                 }
             };
         }
@@ -537,14 +537,15 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
                 quantized_ptr as *mut core::ffi::c_void,
                 as_i32(total_q, "query count")?,
                 as_i32(q_heads.saturating_mul(head_dim), "query row width")?,
-                i64::try_from(query_layout.stride()[0]).map_err(candle_core::Error::wrap)?,
-                i64::try_from(quantized_layout.stride()[0]).map_err(candle_core::Error::wrap)?,
+                i64::try_from(query_layout.stride()[0]).map_err(inference_tensor::Error::wrap)?,
+                i64::try_from(quantized_layout.stride()[0])
+                    .map_err(inference_tensor::Error::wrap)?,
                 q_descale_ptr as *const f32,
                 stream.cu_stream(),
             )
         };
         if status != 0 {
-            candle_core::bail!("FA3 query quantization failed with status {status}");
+            inference_tensor::bail!("FA3 query quantization failed with status {status}");
         }
 
         let schedule_params = Fa3Fp8DecodeScheduleParams {
@@ -578,27 +579,27 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
             k_descale: k_descale_ptr as *const f32,
             v_descale: v_descale_ptr as *const f32,
             q_row_stride: i64::try_from(quantized_layout.stride()[0])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             q_head_stride: i64::try_from(quantized_layout.stride()[1])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             k_token_stride: i64::try_from(key_layout.stride()[2])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             k_head_stride: i64::try_from(key_layout.stride()[1])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             k_page_stride: i64::try_from(key_layout.stride()[0])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             v_token_stride: i64::try_from(value_layout.stride()[2])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             v_head_stride: i64::try_from(value_layout.stride()[1])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             v_page_stride: i64::try_from(value_layout.stride()[0])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             out_row_stride: i64::try_from(output_layout.stride()[0])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             out_head_stride: i64::try_from(output_layout.stride()[1])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             page_table_batch_stride: i64::try_from(page_table_layout.stride()[0])
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
             q_descale_batch_stride: 0,
             q_descale_head_stride: 0,
             k_descale_batch_stride: 0,
@@ -612,7 +613,7 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
         };
         let status = unsafe { fa3_fp8_decode_run(&ffi_params, stream.cu_stream()) };
         if status != 0 {
-            candle_core::bail!("FA3 FP8 decode failed with status {status}");
+            inference_tensor::bail!("FA3 FP8 decode failed with status {status}");
         }
     }
     Ok(output)
@@ -620,7 +621,7 @@ pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
 
 #[cfg(not(has_fa3_fp8_paged))]
 pub fn fa3_fp8_decode(_params: Fa3DecodeParams<'_>) -> Result<Tensor> {
-    candle_core::bail!("FA3 FP8 paged attention was not built for this CUDA target")
+    inference_tensor::bail!("FA3 FP8 paged attention was not built for this CUDA target")
 }
 
 #[cfg(test)]
@@ -633,7 +634,7 @@ mod tests {
         fa3_prepare_decode_metadata, fa3_prepare_paged_metadata,
     };
     #[cfg(has_fa3_fp8_paged)]
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     #[cfg(has_fa3_fp8_paged)]
     const TEST_FA3_COMPUTE_MAJOR: usize = 9;

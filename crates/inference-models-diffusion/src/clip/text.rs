@@ -1,10 +1,10 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::AttentionMask;
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn as nn;
-use candle_nn::Module;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn;
+use inference_tensor::nn::Module;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 use serde::Deserialize;
 
 use crate::layers::{self, MatMul};
@@ -43,8 +43,8 @@ pub struct ClipConfig {
 // TODO rewrite to be more similar to https://github.com/huggingface/transformers/blob/f6fa0f0bf0796ac66f201f23bdb8585de1609add/src/transformers/models/clip/modeling_clip.py#L142
 #[derive(Clone, Debug)]
 struct ClipTextEmbeddings {
-    token_embedding: candle_nn::Embedding,
-    position_embedding: candle_nn::Embedding,
+    token_embedding: inference_tensor::nn::Embedding,
+    position_embedding: inference_tensor::nn::Embedding,
     position_ids: Tensor,
 }
 
@@ -84,10 +84,10 @@ impl Module for ClipTextEmbeddings {
 
 #[derive(Clone, Debug)]
 struct ClipAttention {
-    k_proj: candle_nn::Linear,
-    v_proj: candle_nn::Linear,
-    q_proj: candle_nn::Linear,
-    out_proj: candle_nn::Linear,
+    k_proj: inference_tensor::nn::Linear,
+    v_proj: inference_tensor::nn::Linear,
+    q_proj: inference_tensor::nn::Linear,
+    out_proj: inference_tensor::nn::Linear,
     head_dim: usize,
     scale: f64,
     num_attention_heads: usize,
@@ -153,7 +153,7 @@ impl ClipAttention {
                 attn_weights
             };
 
-        let attn_weights = candle_nn::ops::softmax(&attn_weights, D::Minus1)?;
+        let attn_weights = inference_tensor::nn::ops::softmax(&attn_weights, D::Minus1)?;
 
         let attn_output = MatMul
             .matmul(&attn_weights, &value_states)?
@@ -168,8 +168,8 @@ impl ClipAttention {
 
 #[derive(Clone, Debug)]
 struct ClipMlp {
-    fc1: candle_nn::Linear,
-    fc2: candle_nn::Linear,
+    fc1: inference_tensor::nn::Linear,
+    fc2: inference_tensor::nn::Linear,
     activation: Activation,
 }
 
@@ -196,9 +196,9 @@ impl ClipMlp {
 #[derive(Clone, Debug)]
 struct ClipEncoderLayer {
     self_attn: ClipAttention,
-    layer_norm1: candle_nn::LayerNorm,
+    layer_norm1: inference_tensor::nn::LayerNorm,
     mlp: ClipMlp,
-    layer_norm2: candle_nn::LayerNorm,
+    layer_norm2: inference_tensor::nn::LayerNorm,
 }
 
 impl ClipEncoderLayer {
@@ -259,7 +259,7 @@ impl ClipEncoder {
 pub struct ClipTextTransformer {
     embeddings: ClipTextEmbeddings,
     encoder: ClipEncoder,
-    final_layer_norm: candle_nn::LayerNorm,
+    final_layer_norm: inference_tensor::nn::LayerNorm,
 }
 
 impl ClipTextTransformer {

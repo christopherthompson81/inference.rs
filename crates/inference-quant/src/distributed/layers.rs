@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::Linear;
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     ActivationQuantizationScheme, ActivationScaleLayout, AfqLayer, BlockwiseFP8Linear, BnbLinear,
@@ -89,27 +89,27 @@ impl PackedOutputLayout {
         world_size: usize,
     ) -> Result<Self> {
         if groups == 0 || world_size == 0 || segment_sizes.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed output layout requires nonzero groups, world size, and segments"
             );
         }
         if !groups.is_multiple_of(world_size) || segment_sizes.contains(&0) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed output groups {groups} and segments {segment_sizes:?} are incompatible with world size {world_size}"
             );
         }
         let group_width = segment_sizes.iter().try_fold(0usize, |width, &segment| {
             width
                 .checked_add(segment)
-                .ok_or_else(|| candle_core::Error::msg("packed output group width overflow"))
+                .ok_or_else(|| inference_tensor::Error::msg("packed output group width overflow"))
         })?;
         let local_groups = groups / world_size;
-        let local_rows = local_groups
-            .checked_mul(group_width)
-            .ok_or_else(|| candle_core::Error::msg("packed output local row count overflow"))?;
+        let local_rows = local_groups.checked_mul(group_width).ok_or_else(|| {
+            inference_tensor::Error::msg("packed output local row count overflow")
+        })?;
         let total_rows = local_rows
             .checked_mul(world_size)
-            .ok_or_else(|| candle_core::Error::msg("packed output row count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("packed output row count overflow"))?;
         let mut runtime_to_canonical = Vec::with_capacity(total_rows);
         for rank in 0..world_size {
             let rank_start = rank * local_rows;
@@ -133,10 +133,10 @@ impl PackedOutputLayout {
         let mut seen = vec![false; runtime_to_canonical.len()];
         for &canonical in &runtime_to_canonical {
             let Some(slot) = seen.get_mut(canonical) else {
-                candle_core::bail!("packed output row permutation is out of bounds");
+                inference_tensor::bail!("packed output row permutation is out of bounds");
             };
             if std::mem::replace(slot, true) {
-                candle_core::bail!("packed output row permutation contains duplicates");
+                inference_tensor::bail!("packed output row permutation contains duplicates");
             }
         }
         Ok(Self {
@@ -157,7 +157,7 @@ impl PackedOutputLayout {
         shard: Shard,
     ) -> Result<Option<Arc<[usize]>>> {
         if self.runtime_to_canonical.len() != out_dim {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed output layout has {} rows, expected {out_dim}",
                 self.runtime_to_canonical.len()
             );
@@ -169,7 +169,7 @@ impl PackedOutputLayout {
                 world_size,
             } => {
                 if world_size == 0 || rank >= world_size || !out_dim.is_multiple_of(world_size) {
-                    candle_core::bail!("invalid packed output shard");
+                    inference_tensor::bail!("invalid packed output shard");
                 }
                 let len = out_dim / world_size;
                 (rank * len, len)
@@ -179,14 +179,14 @@ impl PackedOutputLayout {
                 offset,
                 len,
             } if offset.checked_add(len).is_some_and(|end| end <= out_dim) => (offset, len),
-            _ => candle_core::bail!("packed output layouts require an output-dimension shard"),
+            _ => inference_tensor::bail!("packed output layouts require an output-dimension shard"),
         };
         let end = start + len;
         let local = self.runtime_to_canonical[start..end]
             .iter()
             .map(|&canonical| {
                 if !(start..end).contains(&canonical) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "packed output layout moves rows across tensor-parallel shard boundaries"
                     );
                 }
@@ -208,7 +208,7 @@ impl PackedOutputLayout {
 fn select_rows(tensor: &Tensor, rows: &[usize]) -> Result<Tensor> {
     let indices = rows
         .iter()
-        .map(|&row| u32::try_from(row).map_err(candle_core::Error::wrap))
+        .map(|&row| u32::try_from(row).map_err(inference_tensor::Error::wrap))
         .collect::<Result<Vec<_>>>()?;
     let len = indices.len();
     tensor.index_select(&Tensor::from_vec(indices, len, tensor.device())?, 0)
@@ -254,7 +254,7 @@ impl QuantMethod for RuntimeOutputLinear {
     where
         Self: Sized,
     {
-        candle_core::bail!("RuntimeOutputLinear requires an existing projection")
+        inference_tensor::bail!("RuntimeOutputLinear requires an existing projection")
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
@@ -269,7 +269,7 @@ impl QuantMethod for RuntimeOutputLinear {
         self.inner.gather_forward_raw(a, indices)
     }
 
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         self.inner.get_qtensor()
     }
 
@@ -445,7 +445,7 @@ fn load_packed_weights(
         || names.len() != shards.len()
         || names.len() != output_layouts.len()
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "packed projection requires matching nonempty output dimensions, names, and shards"
         );
     }
@@ -556,17 +556,17 @@ fn load_packed_weights(
                         .as_slice()
                         .try_into()
                         .map_err(|_| {
-                            candle_core::Error::msg(format!(
+                            inference_tensor::Error::msg(format!(
                                 "expected FP8 weight block size with two dimensions, got {weight_block_size:?}"
                             ))
                         })?;
                     if row_block == 0 || col_block == 0 {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "expected nonzero FP8 weight block dimensions, got {weight_block_size:?}"
                         );
                     }
                     crate::fp8_config::validate_e4m3(fmt.as_deref())
-                        .map_err(candle_core::Error::msg)?;
+                        .map_err(inference_tensor::Error::msg)?;
                     PackedWeightKind::BlockwiseFp8 {
                         block_size: [row_block, col_block],
                         activation_scheme: *activation_scheme,
@@ -662,7 +662,7 @@ fn load_packed_weights(
                     DType::F32,
                 )?;
                 if scale.dim(0)? != local_rows / block_size[0] {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "FP8 projection `{}` has {} local scale rows for {local_rows} weight rows and block size {}",
                         builder.prefix(),
                         scale.dim(0)?,
@@ -757,14 +757,14 @@ fn matformer_narrow(
     context: &str,
 ) -> Result<Tensor> {
     if selected > original {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{context} selected dimension {selected} exceeds original dimension {original}"
         );
     }
     match tensor.dim(dim)? {
         size if size == original => tensor.narrow(dim, 0, selected)?.contiguous(),
         size if size == selected => Ok(tensor),
-        size => candle_core::bail!(
+        size => inference_tensor::bail!(
             "{context} source dimension {dim} has size {size}, expected {original} or {selected}"
         ),
     }
@@ -813,7 +813,7 @@ impl RowParallelLayer {
         let world_size = comm.world_size();
         let shard = shard(1, rank, world_size);
         if lora_spec.row_input_shard() != Some(shard) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "row-parallel layer LoRA spec must use input shard {shard:?}, got {:?}",
                 lora_spec.parallelism()
             );
@@ -862,7 +862,7 @@ impl RowParallelLayer {
                     | QuantizedConfig::Afq { .. }
             ) && comm.world_size() != 1
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GPTQ and BNB and AFQ quantization types to not support tensor parallelism, but got a world size of {}",
                     comm.world_size()
                 );
@@ -940,7 +940,7 @@ impl RowParallelLayer {
         let base_vb = vb.clone();
         if let Some((weight, bias)) = load_weight_source_dense(&base_vb, bias)? {
             if weight.rank() != 2 || weight.dim(0)? != out_dim {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "row-parallel MatFormer source at `{}` has shape {:?}, expected [{out_dim}, {orig_intermediate_size}] or [{out_dim}, {in_dim}]",
                     base_vb.prefix(),
                     weight.dims()
@@ -976,7 +976,7 @@ impl RowParallelLayer {
         };
 
         if config.is_some() {
-            candle_core::bail!("Cannot load a matformer layer with a pre-quantized model.");
+            inference_tensor::bail!("Cannot load a matformer layer with a pre-quantized model.");
         }
 
         let weight = if !vb.contains_tensor("weight") {
@@ -1026,7 +1026,9 @@ impl QuantMethod for RowParallelLayer {
     where
         Self: Sized,
     {
-        candle_core::bail!("RowParallelLayer should not be constructed with `QuantMethod::new`")
+        inference_tensor::bail!(
+            "RowParallelLayer should not be constructed with `QuantMethod::new`"
+        )
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
@@ -1054,7 +1056,7 @@ impl QuantMethod for RowParallelLayer {
         self.weight.dequantize_w()
     }
 
-    fn dtype_and_device(&self) -> (candle_core::DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
         self.weight.dtype_and_device()
     }
 
@@ -1148,7 +1150,7 @@ impl QuantMethod for RowParallelLayer {
         Ok(Some(output))
     }
 
-    fn quantized_act_type(&self) -> Option<candle_core::DType> {
+    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
         self.weight.quantized_act_type()
     }
 
@@ -1172,7 +1174,7 @@ impl QuantMethod for RowParallelLayer {
         self.bias.is_some() || self.weight.has_bias()
     }
 
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         if self.all_reduce.is_noop() {
             self.weight.get_qtensor()
         } else {
@@ -1215,7 +1217,7 @@ impl QuantMethod for RowParallelLayer {
     fn apply_isq(
         self: Arc<Self>,
         dtype: Option<crate::IsqType>,
-        device: candle_core::Device,
+        device: inference_tensor::Device,
         n_quantized: &std::sync::atomic::AtomicUsize,
         imatrix_weight: Option<Vec<f32>>,
         guard: QuantizeOntoGuard,
@@ -1324,7 +1326,7 @@ impl ColumnParallelLayer {
                     | QuantizedConfig::Afq { .. }
             ) && comm.world_size() != 1
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GPTQ/AWQ and BNB and AFQ quantization types to not support tensor parallelism, but got a world size of {}",
                     comm.world_size()
                 );
@@ -1419,7 +1421,7 @@ impl ColumnParallelLayer {
         let base_vb = vb.clone();
         if let Some((weight, bias)) = load_weight_source_dense(&base_vb, bias)? {
             if weight.rank() != 2 || weight.dim(1)? != in_dim {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "column-parallel MatFormer source at `{}` has shape {:?}, expected [{orig_intermediate_size}, {in_dim}] or [{out_dim}, {in_dim}]",
                     base_vb.prefix(),
                     weight.dims()
@@ -1464,7 +1466,7 @@ impl ColumnParallelLayer {
         };
 
         if config.is_some() {
-            candle_core::bail!("Cannot load a matformer layer with a pre-quantized model.");
+            inference_tensor::bail!("Cannot load a matformer layer with a pre-quantized model.");
         }
 
         let weight = if !vb.contains_tensor("weight") {
@@ -1579,13 +1581,15 @@ impl ColumnParallelLayer {
             return Ok(None);
         }
         if output_layouts.len() != names.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed projection output layout count does not match projection count"
             );
         }
         let default_shard = shard(0, comm.rank(), comm.world_size());
         if shards.is_some_and(|shards| shards.len() != names.len()) {
-            candle_core::bail!("packed projection shard count does not match projection count");
+            inference_tensor::bail!(
+                "packed projection shard count does not match projection count"
+            );
         }
         let shards = (0..names.len())
             .map(|i| shards.map_or(default_shard, |shards| shards[i]))
@@ -1700,7 +1704,9 @@ impl QuantMethod for ColumnParallelLayer {
     where
         Self: Sized,
     {
-        candle_core::bail!("ColumnParallelLayer should not be constructed with `QuantMethod::new`")
+        inference_tensor::bail!(
+            "ColumnParallelLayer should not be constructed with `QuantMethod::new`"
+        )
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
@@ -1731,7 +1737,7 @@ impl QuantMethod for ColumnParallelLayer {
         self.weight.dequantize_w()
     }
 
-    fn dtype_and_device(&self) -> (candle_core::DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
         self.weight.dtype_and_device()
     }
 
@@ -1818,7 +1824,7 @@ impl QuantMethod for ColumnParallelLayer {
         Ok(Some(output))
     }
 
-    fn quantized_act_type(&self) -> Option<candle_core::DType> {
+    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
         self.weight.quantized_act_type()
     }
 
@@ -1838,7 +1844,7 @@ impl QuantMethod for ColumnParallelLayer {
         self.bias.is_some() || self.weight.has_bias()
     }
 
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         self.weight.get_qtensor()
     }
 
@@ -1865,7 +1871,7 @@ impl QuantMethod for ColumnParallelLayer {
     fn apply_isq(
         self: Arc<Self>,
         dtype: Option<crate::IsqType>,
-        device: candle_core::Device,
+        device: inference_tensor::Device,
         n_quantized: &std::sync::atomic::AtomicUsize,
         imatrix_weight: Option<Vec<f32>>,
         guard: QuantizeOntoGuard,
@@ -1965,7 +1971,7 @@ impl ReplicatedLayer {
         vb: ShardedVarBuilder,
     ) -> Result<Arc<dyn QuantMethod>> {
         if !lora_spec.is_replicated() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "replicated layer LoRA spec must use replicated parallelism, got {:?}",
                 lora_spec.parallelism()
             );
@@ -2060,7 +2066,7 @@ impl ReplicatedLayer {
             return Ok(None);
         }
         if output_layouts.len() != names.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed projection output layout count does not match projection count"
             );
         }
@@ -2069,7 +2075,7 @@ impl ReplicatedLayer {
             .iter()
             .any(|spec| !spec.is_replicated() || spec.in_features() != in_dim)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed replicated projections must share an input dimension and replicated layout"
             );
         }
@@ -2132,7 +2138,7 @@ impl ReplicatedLayer {
         let base_vb = vb.clone();
         if let Some((mut weight, mut bias_tensor)) = load_weight_source_dense(&base_vb, bias)? {
             if weight.rank() != 2 || weight.dim(1)? != in_dim {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "replicated MatFormer source at `{}` has shape {:?}, expected [{out_dim}, {in_dim}]",
                     base_vb.prefix(),
                     weight.dims()
@@ -2140,7 +2146,7 @@ impl ReplicatedLayer {
             }
             if let Some(kept_layers_indices) = kept_layers_indices {
                 if !out_dim.is_multiple_of(orig_num_hidden_layers) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "replicated MatFormer output dimension {out_dim} is not divisible by {orig_num_hidden_layers} layers"
                     );
                 }
@@ -2153,7 +2159,7 @@ impl ReplicatedLayer {
                         .reshape((selected_out, in_dim))?
                         .contiguous()?,
                     size if size == selected_out => weight,
-                    size => candle_core::bail!(
+                    size => inference_tensor::bail!(
                         "replicated MatFormer source output has size {size}, expected {out_dim} or {selected_out}"
                     ),
                 };
@@ -2166,14 +2172,14 @@ impl ReplicatedLayer {
                                 .reshape(selected_out)?
                                 .contiguous(),
                             size if size == selected_out => Ok(bias),
-                            size => candle_core::bail!(
+                            size => inference_tensor::bail!(
                                 "replicated MatFormer bias has size {size}, expected {out_dim} or {selected_out}"
                             ),
                         }
                     })
                     .transpose()?;
             } else if weight.dim(0)? != out_dim {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "replicated MatFormer source output has size {}, expected {out_dim}",
                     weight.dim(0)?
                 );
@@ -2198,7 +2204,9 @@ impl ReplicatedLayer {
 
         let layer = if let Some(quant_conf) = &config {
             if kept_layers_indices.is_some() {
-                candle_core::bail!("Cannot load a matformer layer with a pre-quantized model.");
+                inference_tensor::bail!(
+                    "Cannot load a matformer layer with a pre-quantized model."
+                );
             }
 
             match quant_conf {
@@ -2270,14 +2278,18 @@ impl QuantMethod for ReplicatedLayer {
     where
         Self: Sized,
     {
-        candle_core::bail!("ReplicatedLayer should not be constructed with `QuantMethod::new`")
+        inference_tensor::bail!("ReplicatedLayer should not be constructed with `QuantMethod::new`")
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         self.0.forward_raw(a)
     }
 
-    fn embedding_forward(&self, ids: &Tensor, output_dtype: candle_core::DType) -> Result<Tensor> {
+    fn embedding_forward(
+        &self,
+        ids: &Tensor,
+        output_dtype: inference_tensor::DType,
+    ) -> Result<Tensor> {
         self.0.embedding_forward(ids, output_dtype)
     }
 
@@ -2293,7 +2305,7 @@ impl QuantMethod for ReplicatedLayer {
         self.0.dequantize_w()
     }
 
-    fn dtype_and_device(&self) -> (candle_core::DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
         self.0.dtype_and_device()
     }
 
@@ -2368,7 +2380,7 @@ impl QuantMethod for ReplicatedLayer {
             .try_forward_fused_split_glu(input, split_size, activation)
     }
 
-    fn quantized_act_type(&self) -> Option<candle_core::DType> {
+    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
         self.0.quantized_act_type()
     }
 
@@ -2388,7 +2400,7 @@ impl QuantMethod for ReplicatedLayer {
         self.0.has_bias()
     }
 
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         self.0.get_qtensor()
     }
 
@@ -2414,7 +2426,7 @@ impl QuantMethod for ReplicatedLayer {
     fn apply_isq(
         self: Arc<Self>,
         dtype: Option<crate::IsqType>,
-        device: candle_core::Device,
+        device: inference_tensor::Device,
         n_quantized: &std::sync::atomic::AtomicUsize,
         imatrix_weight: Option<Vec<f32>>,
         guard: QuantizeOntoGuard,
@@ -2467,10 +2479,10 @@ impl CheckpointExpertLoad<'_> {
             .map(|vb| self.config.resolve_checkpoint(&vb.prefix()))
             .collect::<Result<Vec<_>>>()?;
         let Some(first) = specs.first() else {
-            candle_core::bail!("Checkpoint expert loading requires at least one expert");
+            inference_tensor::bail!("Checkpoint expert loading requires at least one expert");
         };
         if specs.iter().any(|spec| spec != first) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Checkpoint experts at `{}.*.{name}` require the same quantization format and activation scheme within each projection",
                 self.experts_vb.prefix()
             );
@@ -2495,7 +2507,7 @@ impl CheckpointExpertLoad<'_> {
             }
             Some(CheckpointLinearSpec::Fp8(spec)) => {
                 let Fp8WeightScaleLayout::Block(block_size) = spec.weight_scale else {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Checkpoint FP8 experts at `{}.*.{name}` require blockwise weight scales",
                         self.experts_vb.prefix()
                     );
@@ -2503,7 +2515,7 @@ impl CheckpointExpertLoad<'_> {
                 let activation_scheme = match spec.activation {
                     Fp8ActivationMode::None => None,
                     Fp8ActivationMode::DynamicBlock(_) => Some(crate::Fp8ActivationScheme::Dynamic),
-                    _ => candle_core::bail!(
+                    _ => inference_tensor::bail!(
                         "Checkpoint FP8 experts at `{}.*.{name}` do not support {:?} activation quantization",
                         self.experts_vb.prefix(),
                         spec.activation
@@ -2641,12 +2653,12 @@ impl PreQuantizedExperts {
                 };
 
                 let Some(weight_block_size) = weight_block_size else {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Blockwise FP8 for stacked experts requires weight_block_size to be set."
                     )
                 };
                 if weight_block_size.len() != 2 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Expected weight_block_size to have length 2, got {weight_block_size:?}"
                     );
                 }
@@ -2657,7 +2669,7 @@ impl PreQuantizedExperts {
                     (num_experts, hidden_size, moe_intermediate_size * 2),
                     "gate_up_proj",
                     Default::default(),
-                    candle_core::DType::F8E4M3,
+                    inference_tensor::DType::F8E4M3,
                 )?;
                 let gate_up_scale = experts_vb.get_with_hints_dtype(
                     (
@@ -2667,7 +2679,7 @@ impl PreQuantizedExperts {
                     ),
                     "gate_up_proj.weight_scale_inv",
                     Default::default(),
-                    candle_core::DType::F32,
+                    inference_tensor::DType::F32,
                 )?;
 
                 // Load down_proj FP8 tensor and scale
@@ -2676,7 +2688,7 @@ impl PreQuantizedExperts {
                     (num_experts, moe_intermediate_size, hidden_size),
                     "down_proj",
                     Default::default(),
-                    candle_core::DType::F8E4M3,
+                    inference_tensor::DType::F8E4M3,
                 )?;
                 let down_scale = experts_vb.get_with_hints_dtype(
                     (
@@ -2686,7 +2698,7 @@ impl PreQuantizedExperts {
                     ),
                     "down_proj.weight_scale_inv",
                     Default::default(),
-                    candle_core::DType::F32,
+                    inference_tensor::DType::F32,
                 )?;
 
                 // Split gate_up into gate and up
@@ -2742,7 +2754,7 @@ impl PreQuantizedExperts {
 
                 (fused_gate_proj, fused_up_proj, fused_down_proj)
             } else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "FP8 quantization config without scale tensors; load via the unquantized expert path."
                 );
             }
@@ -2797,12 +2809,12 @@ impl PreQuantizedExperts {
             };
 
             let Some(weight_block_size) = weight_block_size else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Blockwise FP8 for per-expert format requires weight_block_size to be set."
                 )
             };
             if weight_block_size.len() != 2 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Expected weight_block_size to have length 2, got {weight_block_size:?}"
                 );
             }
@@ -2822,7 +2834,7 @@ impl PreQuantizedExperts {
                     (moe_intermediate_size, hidden_size),
                     "gate_proj.weight",
                     Default::default(),
-                    candle_core::DType::F8E4M3,
+                    inference_tensor::DType::F8E4M3,
                 )?;
                 let gate_scale = expert_vb.get_with_hints_dtype(
                     (
@@ -2831,14 +2843,14 @@ impl PreQuantizedExperts {
                     ),
                     "gate_proj.weight_scale_inv",
                     Default::default(),
-                    candle_core::DType::F32,
+                    inference_tensor::DType::F32,
                 )?;
 
                 let up_fp8 = expert_vb.get_with_hints_dtype(
                     (moe_intermediate_size, hidden_size),
                     "up_proj.weight",
                     Default::default(),
-                    candle_core::DType::F8E4M3,
+                    inference_tensor::DType::F8E4M3,
                 )?;
                 let up_scale = expert_vb.get_with_hints_dtype(
                     (
@@ -2847,14 +2859,14 @@ impl PreQuantizedExperts {
                     ),
                     "up_proj.weight_scale_inv",
                     Default::default(),
-                    candle_core::DType::F32,
+                    inference_tensor::DType::F32,
                 )?;
 
                 let down_fp8 = expert_vb.get_with_hints_dtype(
                     (hidden_size, moe_intermediate_size),
                     "down_proj.weight",
                     Default::default(),
-                    candle_core::DType::F8E4M3,
+                    inference_tensor::DType::F8E4M3,
                 )?;
                 let down_scale = expert_vb.get_with_hints_dtype(
                     (
@@ -2863,7 +2875,7 @@ impl PreQuantizedExperts {
                     ),
                     "down_proj.weight_scale_inv",
                     Default::default(),
-                    candle_core::DType::F32,
+                    inference_tensor::DType::F32,
                 )?;
 
                 gate_fp8_vec.push(gate_fp8);
@@ -2907,7 +2919,7 @@ impl PreQuantizedExperts {
 
             (fused_gate_proj, fused_up_proj, fused_down_proj)
         } else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "PreQuantizedExperts loads pre-quantized expert formats only (AFQ, blockwise FP8, NVFP4, MXFP4)."
             );
         };
@@ -2922,16 +2934,16 @@ impl PreQuantizedExperts {
 
 fn validate_tp_kv_heads(total_num_kv_heads: usize, tensor_parallel_size: usize) -> Result<()> {
     if total_num_kv_heads == 0 {
-        candle_core::bail!("Total number of KV heads must be greater than 0.");
+        inference_tensor::bail!("Total number of KV heads must be greater than 0.");
     }
     if tensor_parallel_size <= total_num_kv_heads {
         if !total_num_kv_heads.is_multiple_of(tensor_parallel_size) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Total number of KV heads ({total_num_kv_heads}) must be divisible by tensor parallel size ({tensor_parallel_size}) when KV heads are partitioned."
             );
         }
     } else if !tensor_parallel_size.is_multiple_of(total_num_kv_heads) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Tensor parallel size ({tensor_parallel_size}) must be divisible by total number of KV heads ({total_num_kv_heads}) when KV heads are replicated."
         );
     }
@@ -2944,10 +2956,10 @@ pub fn validate_tp_head_layout(
     tensor_parallel_size: usize,
 ) -> Result<()> {
     if total_num_attention_heads == 0 {
-        candle_core::bail!("Total number of attention heads must be greater than 0.");
+        inference_tensor::bail!("Total number of attention heads must be greater than 0.");
     }
     if !total_num_attention_heads.is_multiple_of(tensor_parallel_size) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Total number of attention heads ({total_num_attention_heads}) must be divisible by tensor parallel size ({tensor_parallel_size})."
         );
     }
@@ -3003,7 +3015,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
     use regex::Regex;
 
     use super::{
@@ -3020,8 +3032,8 @@ mod tests {
     };
 
     #[test]
-    fn modelopt_nvfp4_experts_preserve_scales_and_excluded_projections() -> candle_core::Result<()>
-    {
+    fn modelopt_nvfp4_experts_preserve_scales_and_excluded_projections()
+    -> inference_tensor::Result<()> {
         const HIDDEN: usize = 16;
         const INTERMEDIATE: usize = 16;
         const EXPERTS: usize = 2;
@@ -3036,7 +3048,7 @@ mod tests {
                 "model.layers.0.mlp.shared_experts"
             ]
         }))
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
         let mut tensors = HashMap::new();
         for (expert, global_scale) in [2f32, 4.].into_iter().enumerate() {
             for projection in ["gate_proj", "down_proj"] {
@@ -3099,7 +3111,8 @@ mod tests {
     }
 
     #[test]
-    fn compressed_tensors_nvfp4_experts_use_reciprocal_global_scales() -> candle_core::Result<()> {
+    fn compressed_tensors_nvfp4_experts_use_reciprocal_global_scales()
+    -> inference_tensor::Result<()> {
         const HIDDEN: usize = 16;
         const EXPERTS: usize = 2;
 
@@ -3122,7 +3135,7 @@ mod tests {
                 }
             }
         }))
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
         let mut tensors = HashMap::new();
         for (expert, global_scale) in [2f32, 4.].into_iter().enumerate() {
             for projection in ["gate_proj", "up_proj", "down_proj"] {
@@ -3160,8 +3173,8 @@ mod tests {
     }
 
     #[test]
-    fn nvfp4_tensor_parallel_shards_preserve_fused_global_scale_groups() -> candle_core::Result<()>
-    {
+    fn nvfp4_tensor_parallel_shards_preserve_fused_global_scale_groups()
+    -> inference_tensor::Result<()> {
         const INPUT: usize = 32;
         const OUTPUT: usize = 4;
         const WORLD_SIZE: usize = 2;
@@ -3186,7 +3199,7 @@ mod tests {
                     }
                 }
             }))
-            .map_err(candle_core::Error::msg)?,
+            .map_err(inference_tensor::Error::msg)?,
         );
         let tensors = HashMap::from([
             (
@@ -3256,14 +3269,15 @@ mod tests {
     }
 
     #[test]
-    fn checkpoint_experts_reject_mixed_precision_within_projection() -> candle_core::Result<()> {
+    fn checkpoint_experts_reject_mixed_precision_within_projection() -> inference_tensor::Result<()>
+    {
         let config = serde_json::from_value::<QuantizedConfig>(serde_json::json!({
             "quant_method": "modelopt",
             "quant_algo": "W4A16_NVFP4",
             "group_size": 16,
             "exclude_modules": ["model.layers.0.mlp.experts.1.gate_proj"]
         }))
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
         let vb = ShardedSafeTensors::wrap(HashMap::new(), DType::F32, Device::Cpu)
             .pp("model.layers.0.mlp");
         let error = super::PreQuantizedExperts::new(16, 16, 2, &Some(config), vb)
@@ -3287,15 +3301,15 @@ mod tests {
     }
 
     impl QuantMethod for SharedActivationWeight {
-        fn new(_method: QuantMethodConfig) -> candle_core::Result<Self> {
-            candle_core::bail!("test weight cannot be constructed from a quantization config")
+        fn new(_method: QuantMethodConfig) -> inference_tensor::Result<Self> {
+            inference_tensor::bail!("test weight cannot be constructed from a quantization config")
         }
 
-        fn dequantize_w(&self) -> candle_core::Result<Tensor> {
+        fn dequantize_w(&self) -> inference_tensor::Result<Tensor> {
             Ok(self.output.clone())
         }
 
-        fn forward_raw(&self, _a: &Tensor) -> candle_core::Result<Tensor> {
+        fn forward_raw(&self, _a: &Tensor) -> inference_tensor::Result<Tensor> {
             Ok(self.output.clone())
         }
 
@@ -3306,7 +3320,7 @@ mod tests {
             })
         }
 
-        fn quantize_activation(&self, a: &Tensor) -> candle_core::Result<QuantizedActivation> {
+        fn quantize_activation(&self, a: &Tensor) -> inference_tensor::Result<QuantizedActivation> {
             let scheme = self.activation_quantization_scheme().unwrap();
             QuantizedActivation::new(
                 Tensor::zeros(a.dims(), scheme.dtype, a.device())?,
@@ -3322,7 +3336,7 @@ mod tests {
             gate: &Tensor,
             value: &Tensor,
             activation: crate::GluActivationType,
-        ) -> candle_core::Result<Option<QuantizedActivation>> {
+        ) -> inference_tensor::Result<Option<QuantizedActivation>> {
             assert!(
                 !self.active_lora && !self.tracking_stats,
                 "guarded projection reached fused quantization"
@@ -3335,7 +3349,7 @@ mod tests {
             self.quantize_activation(gate).map(Some)
         }
 
-        fn forward_quantized(&self, _a: &QuantizedActivation) -> candle_core::Result<Tensor> {
+        fn forward_quantized(&self, _a: &QuantizedActivation) -> inference_tensor::Result<Tensor> {
             Ok(self.output.clone())
         }
 
@@ -3355,12 +3369,12 @@ mod tests {
             (self.output.dtype(), self.output.device().clone())
         }
 
-        fn plan_isq(&self, _request: &IsqRequest) -> candle_core::Result<IsqPlanParams> {
-            candle_core::bail!("test weight cannot be quantized")
+        fn plan_isq(&self, _request: &IsqRequest) -> inference_tensor::Result<IsqPlanParams> {
+            inference_tensor::bail!("test weight cannot be quantized")
         }
 
-        fn add_delta_w(&self, _delta: &Tensor) -> candle_core::Result<Arc<dyn QuantMethod>> {
-            candle_core::bail!("test weight cannot apply deltas")
+        fn add_delta_w(&self, _delta: &Tensor) -> inference_tensor::Result<Arc<dyn QuantMethod>> {
+            inference_tensor::bail!("test weight cannot apply deltas")
         }
 
         fn apply_isq(
@@ -3370,7 +3384,7 @@ mod tests {
             _n_quantized: &AtomicUsize,
             _imatrix_weight: Option<Vec<f32>>,
             _guard: QuantizeOntoGuard,
-        ) -> candle_core::Result<Arc<dyn QuantMethod>> {
+        ) -> inference_tensor::Result<Arc<dyn QuantMethod>> {
             Ok(self)
         }
     }
@@ -3387,13 +3401,13 @@ mod tests {
             key: &str,
             device: &Device,
             _shard: Shard,
-        ) -> candle_core::Result<Option<std::sync::Arc<dyn QuantMethod>>> {
+        ) -> inference_tensor::Result<Option<std::sync::Arc<dyn QuantMethod>>> {
             if key != "model.embed_tokens" {
                 return Ok(None);
             }
             let weight = Tensor::zeros((64, 32), DType::F32, device)?;
             Ok(Some(std::sync::Arc::new(UnquantLinear::new(
-                QuantMethodConfig::Unquantized(candle_nn::Linear::new(weight, None)),
+                QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, None)),
             )?)))
         }
 
@@ -3401,19 +3415,23 @@ mod tests {
             &self,
             _name: &str,
             _device: &Device,
-        ) -> candle_core::Result<Option<Tensor>> {
+        ) -> inference_tensor::Result<Option<Tensor>> {
             Ok(None)
         }
 
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
+        fn shard_alignment(&self, _key: &str) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
+        fn pack_factor(&self, _dtype: DType) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor_for(&self, _key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
+        fn pack_factor_for(
+            &self,
+            _key: &str,
+            _dtype: DType,
+        ) -> inference_tensor::Result<Option<usize>> {
             Ok(Some(1))
         }
     }
@@ -3430,7 +3448,7 @@ mod tests {
             key: &str,
             device: &Device,
             _shard: Shard,
-        ) -> candle_core::Result<Option<std::sync::Arc<dyn QuantMethod>>> {
+        ) -> inference_tensor::Result<Option<std::sync::Arc<dyn QuantMethod>>> {
             let shape = match key {
                 "row" => (5, 8),
                 "column" => (8, 4),
@@ -3439,7 +3457,7 @@ mod tests {
             };
             let weight = Tensor::zeros(shape, DType::F32, device)?;
             Ok(Some(std::sync::Arc::new(UnquantLinear::new(
-                QuantMethodConfig::Unquantized(candle_nn::Linear::new(weight, None)),
+                QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, None)),
             )?)))
         }
 
@@ -3447,7 +3465,7 @@ mod tests {
             &self,
             name: &str,
             device: &Device,
-        ) -> candle_core::Result<Option<Tensor>> {
+        ) -> inference_tensor::Result<Option<Tensor>> {
             let size = match name {
                 "row.bias" => 5,
                 "column.bias" => 8,
@@ -3457,15 +3475,19 @@ mod tests {
             Tensor::zeros(size, DType::F32, device).map(Some)
         }
 
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
+        fn shard_alignment(&self, _key: &str) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
+        fn pack_factor(&self, _dtype: DType) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor_for(&self, _key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
+        fn pack_factor_for(
+            &self,
+            _key: &str,
+            _dtype: DType,
+        ) -> inference_tensor::Result<Option<usize>> {
             Ok(Some(1))
         }
     }
@@ -3484,18 +3506,18 @@ mod tests {
 
     fn tracked_from_linear() -> crate::TrackedModule {
         let vb = ShardedSafeTensors::wrap(
-            HashMap::<String, candle_core::Tensor>::new(),
-            candle_core::DType::F32,
-            candle_core::Device::Cpu,
+            HashMap::<String, inference_tensor::Tensor>::new(),
+            inference_tensor::DType::F32,
+            inference_tensor::Device::Cpu,
         )
         .pp("model")
         .pp("embed_tokens");
         let tracker = vb.tracker().clone();
-        let linear = candle_nn::Linear::new(
-            candle_core::Tensor::zeros(
+        let linear = inference_tensor::nn::Linear::new(
+            inference_tensor::Tensor::zeros(
                 (64, 256),
-                candle_core::DType::F32,
-                &candle_core::Device::Cpu,
+                inference_tensor::DType::F32,
+                &inference_tensor::Device::Cpu,
             )
             .unwrap(),
             None,
@@ -3507,7 +3529,8 @@ mod tests {
     }
 
     #[test]
-    fn distributed_wrappers_preserve_shared_activation_forwarding() -> candle_core::Result<()> {
+    fn distributed_wrappers_preserve_shared_activation_forwarding() -> inference_tensor::Result<()>
+    {
         let device = Device::Cpu;
         let output = Tensor::from_vec(vec![1f32, 2.], (1, 2), &device)?;
         let weight = Arc::new(SharedActivationWeight {
@@ -3585,7 +3608,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn fused_glu_wrapper_guards_preserve_lora_and_stats_inputs() -> candle_core::Result<()> {
+    fn fused_glu_wrapper_guards_preserve_lora_and_stats_inputs() -> inference_tensor::Result<()> {
         let device = Device::new_cuda(0)?;
         let input = Tensor::zeros((2, 4), DType::BF16, &device)?;
         let output = Tensor::zeros((2, 2), DType::BF16, &device)?;
@@ -3610,7 +3633,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_column_shards_each_projection_before_concatenating() -> candle_core::Result<()> {
+    fn packed_column_shards_each_projection_before_concatenating() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let matrix = |rows: usize, base: f32| {
             Tensor::from_vec(
@@ -3687,7 +3710,7 @@ mod tests {
 
     #[test]
     fn packed_output_layout_stays_within_tp_shards_and_preserves_canonical_weights()
-    -> candle_core::Result<()> {
+    -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let layout = PackedOutputLayout::rank_local_interleaved_to_grouped(4, &[1, 1], 2)?;
         assert_eq!(layout.runtime_to_canonical(), &[0, 2, 1, 3, 4, 6, 5, 7]);
@@ -3756,7 +3779,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_output_layout_permutates_fp8_scale_blocks() -> candle_core::Result<()> {
+    fn packed_output_layout_permutates_fp8_scale_blocks() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let scales = Tensor::new(&[[1f32, 1.], [2., 2.], [3., 3.], [4., 4.]], &device)?;
         let tensors = HashMap::from([
@@ -3809,7 +3832,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_blockwise_fp8_weight_scale_alias_falls_back() -> candle_core::Result<()> {
+    fn packed_blockwise_fp8_weight_scale_alias_falls_back() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let tensors = HashMap::from([
             (
@@ -3847,7 +3870,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_output_layout_falls_back_if_fp8_blocks_are_split() -> candle_core::Result<()> {
+    fn packed_output_layout_falls_back_if_fp8_blocks_are_split() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let tensors = HashMap::from([
             (
@@ -3886,7 +3909,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_projection_missing_weights_falls_back() -> candle_core::Result<()> {
+    fn packed_projection_missing_weights_falls_back() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let vb = ShardedSafeTensors::wrap(HashMap::new(), DType::F32, device.clone());
         let comm = Arc::new(Comm::from_device(Id::new(), &device, 0, 1)?);
@@ -3907,7 +3930,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_blockwise_fp8_preserves_scale_rows_and_outputs() -> candle_core::Result<()> {
+    fn packed_blockwise_fp8_preserves_scale_rows_and_outputs() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let tensors = HashMap::from([
             (
@@ -3973,7 +3996,7 @@ mod tests {
     }
 
     #[test]
-    fn packed_blockwise_fp8_falls_back_on_unaligned_boundary() -> candle_core::Result<()> {
+    fn packed_blockwise_fp8_falls_back_on_unaligned_boundary() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let tensors = HashMap::from([
             (
@@ -4116,7 +4139,7 @@ mod tests {
     }
 
     #[test]
-    fn matformer_factories_transform_weight_source_layers() -> candle_core::Result<()> {
+    fn matformer_factories_transform_weight_source_layers() -> inference_tensor::Result<()> {
         let ty = Some(IsqType::Q8_0);
         let (executor, _) = create_isq_executor(IsqExecutorConfig::new(ty));
         set_immediate_isq_config(
@@ -4178,7 +4201,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_aware_layers_register_exact_feature_maps() -> candle_core::Result<()> {
+    fn spec_aware_layers_register_exact_feature_maps() -> inference_tensor::Result<()> {
         let replicated_registry = std::sync::Arc::new(LoraLayerRegistry::new());
         let replicated_vb = ShardedSafeTensors::wrap(
             HashMap::from([(
@@ -4223,7 +4246,7 @@ mod tests {
     }
 
     #[test]
-    fn spec_aware_layers_reject_wrong_parallelism() -> candle_core::Result<()> {
+    fn spec_aware_layers_reject_wrong_parallelism() -> inference_tensor::Result<()> {
         let vb =
             ShardedSafeTensors::wrap(HashMap::<String, Tensor>::new(), DType::F32, Device::Cpu);
         let row_spec = LoraLinearSpec::row(

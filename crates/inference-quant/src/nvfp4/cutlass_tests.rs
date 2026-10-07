@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
-use candle_core::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 
 use super::{Nvfp4Layer, Nvfp4LayerParts, cutlass::SM121_COMPUTE_CAP};
 use crate::{Nvfp4ActivationMode, QuantMethod, QuantizedActivation};
@@ -452,7 +452,7 @@ fn native_shared_activation_created_inside_graph_replays_fresh_scales() -> Resul
                 if tracking {
                     unsafe { stream.context().enable_event_tracking() };
                 }
-                return Err(candle_core::Error::msg(error));
+                return Err(inference_tensor::Error::msg(error));
             }
             let captured = (|| -> Result<_> {
                 let activation = layer.quantize_activation(&input)?;
@@ -470,8 +470,10 @@ fn native_shared_activation_created_inside_graph_replays_fresh_scales() -> Resul
             }
             let (direct, shared, shared_clone, activation, cloned) = captured?;
             let graph = graph
-                .map_err(candle_core::Error::msg)?
-                .ok_or_else(|| candle_core::Error::msg("native NVFP4 capture produced no graph"))?;
+                .map_err(inference_tensor::Error::msg)?
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("native NVFP4 capture produced no graph")
+                })?;
             assert_eq!(cutile::tile_kernel::jit_compile_count(), compiled);
             for factor in REPLAY_FACTORS {
                 let current = if factor < 0.0 {
@@ -482,7 +484,7 @@ fn native_shared_activation_created_inside_graph_replays_fresh_scales() -> Resul
                     &source
                 };
                 input.slice_set(current, 0, 0)?;
-                graph.launch().map_err(candle_core::Error::msg)?;
+                graph.launch().map_err(inference_tensor::Error::msg)?;
                 device.synchronize()?;
                 for output in [&direct, &shared, &shared_clone] {
                     fixture.check(output, 0, columns, factor, true)?;

@@ -111,6 +111,9 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-code-exec/` - The Python code-execution tool the agent layer runs
 - `crates/inference-sandbox/` - OS-level sandboxing for the subprocesses tools spawn
 - `crates/inference-macros/` - Proc macros for defining tools
+- `crates/inference-tensor/` - The tensor layer every crate builds on (`Tensor`, devices, CPU/CUDA/Metal backends, quantized storage, safetensors/pickle/npy) with neural-net building blocks under `nn`; derived from candle-core and candle-nn, owned here (its README lists what changed)
+- `crates/inference-tensor-kernels/` - The CUDA kernels inference-tensor's backend loads, built into SASS fatbins under the `cuda` feature
+- `crates/inference-flash-attn-v3/` - FlashAttention-3 for Hopper prefill, from candle-flash-attn-v3; excluded from `--workspace` builds (its sm90 CUTLASS instances are heavy), built by inference-nn's `flash-attn-v3` feature
 - `crates/inference-fattn/` - Flash attention kernels (llama.cpp's fattn): prefill, packed, paged and fp8 attention for every CUDA build
 - `crates/inference-metal-compile/` - Build-time Metal shader compilation for the kernel crates
 - `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces

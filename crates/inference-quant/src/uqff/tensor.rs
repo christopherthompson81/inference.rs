@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 
-use candle_core::{DType, Result, Tensor};
 use float8::F8E4M3;
+use inference_tensor::{DType, Result, Tensor};
 use safetensors::tensor::{Dtype, View};
 
 use crate::utils::data_to_bytes;
@@ -30,7 +30,7 @@ impl UqffTensor {
             DType::F32 => data_to_bytes::<f32>(flat.to_vec1()?),
             DType::F64 => data_to_bytes::<f64>(flat.to_vec1()?),
             DType::F8E4M3 => data_to_bytes::<F8E4M3>(flat.to_vec1()?),
-            other => candle_core::bail!("Unsupported UQFF tensor dtype: {other:?}"),
+            other => inference_tensor::bail!("Unsupported UQFF tensor dtype: {other:?}"),
         };
         Ok(Self {
             name: name.into(),
@@ -76,14 +76,14 @@ impl UqffTensor {
 
     pub fn scalar_u8(&self) -> Result<u8> {
         if self.dtype != Dtype::U8 || !self.shape.is_empty() || self.data.len() != 1 {
-            candle_core::bail!("UQFF tensor `{}` is not a u8 scalar.", self.name);
+            inference_tensor::bail!("UQFF tensor `{}` is not a u8 scalar.", self.name);
         }
         Ok(self.data[0])
     }
 
     pub fn scalar_u32(&self) -> Result<u32> {
         if self.dtype != Dtype::U32 || !self.shape.is_empty() || self.data.len() != 4 {
-            candle_core::bail!("UQFF tensor `{}` is not a u32 scalar.", self.name);
+            inference_tensor::bail!("UQFF tensor `{}` is not a u32 scalar.", self.name);
         }
         Ok(u32::from_le_bytes(
             self.data
@@ -95,7 +95,7 @@ impl UqffTensor {
 
     pub fn u32_values(&self) -> Result<Vec<usize>> {
         if self.dtype != Dtype::U32 || !self.data.len().is_multiple_of(4) {
-            candle_core::bail!("UQFF tensor `{}` is not a u32 vector.", self.name);
+            inference_tensor::bail!("UQFF tensor `{}` is not a u32 vector.", self.name);
         }
         Ok(self
             .data
@@ -141,6 +141,6 @@ fn to_safetensors_dtype(dtype: DType) -> Result<Dtype> {
         DType::F32 => Ok(Dtype::F32),
         DType::F64 => Ok(Dtype::F64),
         DType::F8E4M3 => Ok(Dtype::F8_E4M3),
-        other => candle_core::bail!("Unsupported UQFF safetensors dtype: {other:?}"),
+        other => inference_tensor::bail!("Unsupported UQFF safetensors dtype: {other:?}"),
     }
 }

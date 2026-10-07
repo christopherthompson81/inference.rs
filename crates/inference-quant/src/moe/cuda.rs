@@ -1,15 +1,15 @@
 //! Plain-CUDA MoE ops (kernels in `kernels/cuda/moe/*.cu`): token alignment and cross-expert sum.
 
-use candle_core::cuda::cudarc::driver::CudaSlice;
-use candle_core::{CudaDevice, DType, Result, Storage, Tensor};
 use half::bf16;
+use inference_tensor::cuda::cudarc::driver::CudaSlice;
+use inference_tensor::{CudaDevice, DType, Result, Storage, Tensor};
 
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 use crate::{GluActivationType, fused_split_glu};
 
 mod ffi {
-    use candle_core::cuda::cudarc::driver::sys::CUstream;
     use core::ffi::c_void;
+    use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
     unsafe extern "C" {
         pub fn launch_moe_align(
@@ -55,23 +55,23 @@ pub fn hunyuan_moe_apply_capacity_mask(
     top_k: usize,
 ) -> Result<Tensor> {
     if !topk_ids.device().is_cuda() || !topk_weights.device().is_cuda() {
-        candle_core::bail!("hunyuan_moe_apply_capacity_mask requires CUDA tensors");
+        inference_tensor::bail!("hunyuan_moe_apply_capacity_mask requires CUDA tensors");
     }
     if topk_ids.dtype() != DType::U32 {
-        candle_core::bail!("hunyuan_moe_apply_capacity_mask topk_ids must be U32");
+        inference_tensor::bail!("hunyuan_moe_apply_capacity_mask topk_ids must be U32");
     }
     if topk_weights.dtype() != DType::F32 {
-        candle_core::bail!("hunyuan_moe_apply_capacity_mask topk_weights must be F32");
+        inference_tensor::bail!("hunyuan_moe_apply_capacity_mask topk_weights must be F32");
     }
     if top_k == 0 || num_experts == 0 {
-        candle_core::bail!("hunyuan_moe_apply_capacity_mask got empty routing config");
+        inference_tensor::bail!("hunyuan_moe_apply_capacity_mask got empty routing config");
     }
     if topk_ids.shape() != topk_weights.shape() {
-        candle_core::bail!("hunyuan_moe_apply_capacity_mask ids/weights shape mismatch");
+        inference_tensor::bail!("hunyuan_moe_apply_capacity_mask ids/weights shape mismatch");
     }
     let dims = topk_ids.dims();
     if dims.last().copied() != Some(top_k) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "hunyuan_moe_apply_capacity_mask expected last dim top_k={top_k}, got {:?}",
             dims.last()
         );
@@ -89,12 +89,12 @@ pub fn hunyuan_moe_apply_capacity_mask(
     let (ids_storage, ids_layout) = ids.storage_and_layout();
     let ids_slice = match &*ids_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-        _ => candle_core::bail!("hunyuan_moe_apply_capacity_mask requires CUDA ids"),
+        _ => inference_tensor::bail!("hunyuan_moe_apply_capacity_mask requires CUDA ids"),
     };
     let (weights_storage, weights_layout) = weights.storage_and_layout();
     let weights_slice = match &*weights_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("hunyuan_moe_apply_capacity_mask requires CUDA weights"),
+        _ => inference_tensor::bail!("hunyuan_moe_apply_capacity_mask requires CUDA weights"),
     };
 
     let dev = topk_weights.device().as_cuda_device()?;
@@ -120,10 +120,10 @@ pub fn hunyuan_moe_apply_capacity_mask(
     }
     drop(out_guard);
 
-    let storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
+    let storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     Ok(Tensor::from((
         Storage::Cuda(storage),
-        candle_core::Shape::from_dims(topk_weights.dims()),
+        inference_tensor::Shape::from_dims(topk_weights.dims()),
     )))
 }
 
@@ -225,7 +225,7 @@ pub fn moe_sum_bf16(
     let (in_storage, in_layout) = input.storage_and_layout();
     let in_slice = match &*in_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<bf16>()?,
-        _ => candle_core::bail!("input must be cuda"),
+        _ => inference_tensor::bail!("input must be cuda"),
     };
     let (in_ptr, _in_guard) = slice_ptr_on_stream(in_slice, in_layout.start_offset(), &stream);
     let (out_ptr, out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
@@ -241,7 +241,7 @@ pub fn moe_sum_bf16(
     }
     drop(out_guard);
 
-    let storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
+    let storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     Ok(Tensor::from((Storage::Cuda(storage), (num_tokens, hidden))))
 }
 
@@ -249,9 +249,9 @@ pub fn moe_sum_bf16(
 mod tests {
     #[cfg(feature = "cuda")]
     #[test]
-    fn act_and_mul_matches_the_cpu_for_both_activations() -> candle_core::Result<()> {
+    fn act_and_mul_matches_the_cpu_for_both_activations() -> inference_tensor::Result<()> {
         use super::{GatedAct, act_and_mul};
-        use candle_core::{DType, Device, Tensor};
+        use inference_tensor::{DType, Device, Tensor};
 
         const TOKENS: usize = 3;
         const GELU_TANH_COEFF: f32 = 0.044_715;
@@ -293,9 +293,9 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn test_hunyuan_moe_capacity_mask_cuda() -> candle_core::Result<()> {
+    fn test_hunyuan_moe_capacity_mask_cuda() -> inference_tensor::Result<()> {
         use super::hunyuan_moe_apply_capacity_mask;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let device = Device::new_cuda(0)?;
         let ids = Tensor::new(
@@ -340,7 +340,7 @@ mod tests {
             vec![vec![0u32], vec![0u32], vec![0u32], vec![0u32]],
             &device,
         )?;
-        let top1_weights = Tensor::ones((4, 1), candle_core::DType::F32, &device)?;
+        let top1_weights = Tensor::ones((4, 1), inference_tensor::DType::F32, &device)?;
         let top1_masked = hunyuan_moe_apply_capacity_mask(&top1_ids, &top1_weights, 4, 1)?;
         assert_eq!(
             top1_masked.to_device(&Device::Cpu)?.to_vec2::<f32>()?,

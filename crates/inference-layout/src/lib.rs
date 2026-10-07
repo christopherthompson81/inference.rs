@@ -15,13 +15,13 @@ pub use pp_doclayout_v3::{LayoutDetection, PPDocLayoutV3Detector};
 
 /// Whether this crate's custom ops can run on `dev`; everything else takes the generic tensor-op fallbacks.
 /// CUDA needs this crate's own `cuda` feature (candle's alone can be enabled by workspace feature unification).
-fn has_kernels(dev: &candle_core::Device) -> bool {
+fn has_kernels(dev: &inference_tensor::Device) -> bool {
     dev.is_cpu() || (dev.is_cuda() && cfg!(feature = "cuda"))
 }
 
 #[cfg(test)]
 mod test_util {
-    use candle_core::{D, Device, Result, Tensor};
+    use inference_tensor::{D, Device, Result, Tensor};
 
     pub fn max_abs(a: &Tensor, b: &Tensor) -> Result<f32> {
         (a.to_device(&Device::Cpu)? - b.to_device(&Device::Cpu)?)?

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use candle_core::Tensor;
+use inference_tensor::Tensor;
 use serde_json::{Value, json};
 
 use super::Glm4MoeLiteConfig;

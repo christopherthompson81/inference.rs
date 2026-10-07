@@ -1,6 +1,6 @@
 use std::sync::atomic::AtomicBool;
 
-use candle_core::{Device, DeviceLocation};
+use inference_tensor::{Device, DeviceLocation};
 use tracing_subscriber::EnvFilter;
 
 /// `true` if `INFERENCE_RS_DEBUG=1`

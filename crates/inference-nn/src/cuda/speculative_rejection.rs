@@ -2,13 +2,13 @@ use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use candle_core::backend::{BackendDevice, BackendStorage};
-use candle_core::cuda_backend::CudaStorageSlice;
-use candle_core::cuda_backend::cudarc::driver::{
+use inference_tensor::backend::{BackendDevice, BackendStorage};
+use inference_tensor::cuda_backend::CudaStorageSlice;
+use inference_tensor::cuda_backend::cudarc::driver::{
     CudaEvent, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, PinnedHostSlice, ValidAsZeroBits,
     sys,
 };
-use candle_core::{
+use inference_tensor::{
     CpuStorage, CudaStorage, DType, DeviceLocation, InplaceOp1, Layout, Result, Shape, Storage,
     Tensor,
 };
@@ -108,7 +108,7 @@ impl SparseRejectionDeviceTensor {
         rows: &[Tensor],
         dtype: DType,
         row_shape: &[usize],
-        device: &candle_core::Device,
+        device: &inference_tensor::Device,
     ) -> Result<Self> {
         if let Some(rows) = dense_cuda_rows(rows, dtype, row_shape, device)? {
             return Ok(Self::DenseRows(rows));
@@ -116,7 +116,7 @@ impl SparseRejectionDeviceTensor {
         let rows = rows.iter().collect::<Vec<_>>();
         let tensor = match rows.as_slice() {
             [row] => row.unsqueeze(0)?.contiguous()?,
-            [] => candle_core::bail!("{OP} cannot materialize an empty row batch"),
+            [] => inference_tensor::bail!("{OP} cannot materialize an empty row batch"),
             _ => Tensor::stack(&rows, 0)?.contiguous()?,
         };
         Ok(Self::Tensor(tensor))
@@ -140,7 +140,7 @@ impl SparseRejectionDeviceTensor {
         self.anchor().dtype()
     }
 
-    fn device(&self) -> &candle_core::Device {
+    fn device(&self) -> &inference_tensor::Device {
         self.anchor().device()
     }
 
@@ -160,7 +160,7 @@ impl SparseRejectionDeviceTensor {
 
     fn reshape(&self, shape: Shape) -> Result<Self> {
         if shape.elem_count() != self.elem_count() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{OP} cannot reshape {:?} to {:?}",
                 self.dims(),
                 shape.dims()
@@ -187,7 +187,7 @@ fn dense_cuda_rows(
     rows: &[Tensor],
     dtype: DType,
     row_shape: &[usize],
-    device: &candle_core::Device,
+    device: &inference_tensor::Device,
 ) -> Result<Option<DenseCudaRows>> {
     if rows.is_empty() || !device.is_cuda() {
         return Ok(None);
@@ -195,7 +195,7 @@ fn dense_cuda_rows(
     let row_elems = row_shape.iter().try_fold(1usize, |elements, dim| {
         elements
             .checked_mul(*dim)
-            .ok_or_else(|| candle_core::Error::msg("sparse rejection row size overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("sparse rejection row size overflow"))
     })?;
     let mut storage_id = None;
     let mut first_offset = None;
@@ -218,7 +218,7 @@ fn dense_cuda_rows(
         let expected_offset = index
             .checked_mul(row_elems)
             .and_then(|offset| first_row_offset.checked_add(offset))
-            .ok_or_else(|| candle_core::Error::msg("sparse rejection row offset overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("sparse rejection row offset overflow"))?;
         if row_storage_id != first_storage_id || row_offset != expected_offset {
             return Ok(None);
         }
@@ -255,10 +255,14 @@ unsafe impl<T: Send> Send for SparseRejectionPinned<T> {}
 
 impl<T: DeviceRepr + ValidAsZeroBits> SparseRejectionPinned<T> {
     fn new(stream: &Arc<CudaStream>, len: usize) -> Result<Self> {
-        let mut allocation =
-            unsafe { stream.context().alloc_pinned::<T>(len) }.map_err(candle_core::Error::wrap)?;
-        let ptr = NonNull::new(allocation.as_mut_ptr().map_err(candle_core::Error::wrap)?)
-            .ok_or_else(|| candle_core::Error::msg("CUDA returned a null pinned pointer"))?;
+        let mut allocation = unsafe { stream.context().alloc_pinned::<T>(len) }
+            .map_err(inference_tensor::Error::wrap)?;
+        let ptr = NonNull::new(
+            allocation
+                .as_mut_ptr()
+                .map_err(inference_tensor::Error::wrap)?,
+        )
+        .ok_or_else(|| inference_tensor::Error::msg("CUDA returned a null pinned pointer"))?;
         Ok(Self { allocation, ptr })
     }
 
@@ -337,7 +341,7 @@ impl CudaSparseRejectionSubmission {
     fn wait(&self) -> Result<()> {
         self.completion
             .synchronize()
-            .map_err(candle_core::Error::wrap)
+            .map_err(inference_tensor::Error::wrap)
     }
 }
 
@@ -369,7 +373,7 @@ impl SparseRejectionOutput {
             .into_iter()
             .map(|row| {
                 let [accepted_count, continuation, status] = row.as_slice() else {
-                    candle_core::bail!("{OP} produced a malformed outcome row")
+                    inference_tensor::bail!("{OP} produced a malformed outcome row")
                 };
                 Ok(SparseRejectionRow {
                     accepted_count: *accepted_count,
@@ -416,7 +420,7 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
     }
 
     fn cpu_fwd(&self, _storage: &mut CpuStorage, _layout: &Layout) -> Result<()> {
-        candle_core::bail!("{OP} requires CUDA storage")
+        inference_tensor::bail!("{OP} requires CUDA storage")
     }
 
     fn cuda_fwd(&self, storage: &mut CudaStorage, layout: &Layout) -> Result<()> {
@@ -474,7 +478,7 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
 fn validate_input(input: &SparseRejectionDeviceInput<'_>) -> Result<SparseRejectionShape> {
     let target_dims = input.target_logits.dims();
     if target_dims.len() != 3 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected target logits with shape [batch, drafts + 1, vocab], got {target_dims:?}"
         );
     }
@@ -482,20 +486,22 @@ fn validate_input(input: &SparseRejectionDeviceInput<'_>) -> Result<SparseReject
     let rows = target_dims[1];
     let vocab = target_dims[2];
     if batch == 0 || rows < 2 || vocab == 0 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} requires a non-empty batch, at least one draft, and a non-empty vocabulary"
         );
     }
     let drafts = rows - 1;
     let q_dims = input.q_token_ids.dims();
     if q_dims.len() != 3 || q_dims[0] != batch || q_dims[1] != drafts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected q token ids with shape [{batch}, {drafts}, q_width], got {q_dims:?}"
         );
     }
     let q_width = q_dims[2];
     if q_width == 0 || q_width > SPARSE_REJECTION_MAX_Q_WIDTH {
-        candle_core::bail!("{OP} q_width={q_width} must be in [1, {SPARSE_REJECTION_MAX_Q_WIDTH}]");
+        inference_tensor::bail!(
+            "{OP} q_width={q_width} must be in [1, {SPARSE_REJECTION_MAX_Q_WIDTH}]"
+        );
     }
 
     let draft_shape = [batch, drafts];
@@ -503,7 +509,7 @@ fn validate_input(input: &SparseRejectionDeviceInput<'_>) -> Result<SparseReject
     let batch_shape = [batch];
     match input.mode {
         SparseRejectionMode::Categorical if input.target_logits.dtype() != DType::F32 => {
-            candle_core::bail!("{OP} categorical mode requires F32 target logits");
+            inference_tensor::bail!("{OP} categorical mode requires F32 target logits");
         }
         SparseRejectionMode::BoundedTopK { .. }
             if !matches!(
@@ -511,12 +517,14 @@ fn validate_input(input: &SparseRejectionDeviceInput<'_>) -> Result<SparseReject
                 DType::BF16 | DType::F16 | DType::F32
             ) =>
         {
-            candle_core::bail!("{OP} bounded top-k mode requires BF16, F16, or F32 target logits");
+            inference_tensor::bail!(
+                "{OP} bounded top-k mode requires BF16, F16, or F32 target logits"
+            );
         }
         _ => {}
     }
     if !input.target_logits.is_contiguous() {
-        candle_core::bail!("{OP} requires contiguous target logits");
+        inference_tensor::bail!("{OP} requires contiguous target logits");
     }
     let device_specs = [
         (
@@ -540,22 +548,22 @@ fn validate_input(input: &SparseRejectionDeviceInput<'_>) -> Result<SparseReject
     ];
     for (tensor, dtype, shape, name) in device_specs {
         if tensor.dtype() != dtype {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{OP} expected {name} to have dtype {dtype:?}, got {:?}",
                 tensor.dtype()
             );
         }
         if tensor.dims() != shape {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{OP} expected {name} with shape {shape:?}, got {:?}",
                 tensor.dims()
             );
         }
         if !tensor.is_contiguous() {
-            candle_core::bail!("{OP} requires contiguous {name}");
+            inference_tensor::bail!("{OP} requires contiguous {name}");
         }
         if !input.target_logits.device().same_device(tensor.device()) {
-            candle_core::bail!("{OP} requires every tensor on one CUDA device");
+            inference_tensor::bail!("{OP} requires every tensor on one CUDA device");
         }
     }
     let tensor_specs = [
@@ -588,35 +596,35 @@ fn validate_input(input: &SparseRejectionDeviceInput<'_>) -> Result<SparseReject
     ];
     for (tensor, dtype, shape, name) in tensor_specs {
         if tensor.dtype() != dtype {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{OP} expected {name} to have dtype {dtype:?}, got {:?}",
                 tensor.dtype()
             );
         }
         if tensor.dims() != shape {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{OP} expected {name} with shape {shape:?}, got {:?}",
                 tensor.dims()
             );
         }
         if !tensor.is_contiguous() {
-            candle_core::bail!("{OP} requires contiguous {name}");
+            inference_tensor::bail!("{OP} requires contiguous {name}");
         }
         if !input.target_logits.device().same_device(tensor.device()) {
-            candle_core::bail!("{OP} requires every tensor on one CUDA device");
+            inference_tensor::bail!("{OP} requires every tensor on one CUDA device");
         }
     }
     if !input.target_logits.device().is_cuda() {
-        candle_core::bail!("{OP} requires CUDA tensors");
+        inference_tensor::bail!("{OP} requires CUDA tensors");
     }
 
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let drafts_i32 = i32::try_from(drafts).map_err(candle_core::Error::wrap)?;
-    let vocab_i32 = i32::try_from(vocab).map_err(candle_core::Error::wrap)?;
-    let q_width_i32 = i32::try_from(q_width).map_err(candle_core::Error::wrap)?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let drafts_i32 = i32::try_from(drafts).map_err(inference_tensor::Error::wrap)?;
+    let vocab_i32 = i32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
+    let q_width_i32 = i32::try_from(q_width).map_err(inference_tensor::Error::wrap)?;
     batch
         .checked_mul(SPARSE_REJECTION_OUTCOME_WIDTH)
-        .ok_or_else(|| candle_core::Error::msg("sparse rejection outcome size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("sparse rejection outcome size overflow"))?;
 
     Ok(SparseRejectionShape {
         batch,
@@ -636,29 +644,29 @@ fn sparse_rejection_workspace_id() -> u64 {
 
 fn workspace_capacity(required: usize, name: &str) -> Result<usize> {
     required.checked_next_power_of_two().ok_or_else(|| {
-        candle_core::Error::msg(format!("sparse rejection {name} capacity overflow"))
+        inference_tensor::Error::msg(format!("sparse rejection {name} capacity overflow"))
     })
 }
 
 impl CudaSparseRejectionWorkspace {
-    fn new(device: &candle_core::Device, batch: usize, drafts: usize) -> Result<Self> {
+    fn new(device: &inference_tensor::Device, batch: usize, drafts: usize) -> Result<Self> {
         let cuda_device = device.as_cuda_device()?;
         let stream = cuda_device.cuda_stream();
         let capacity_batch = workspace_capacity(batch, "batch")?;
         let capacity_drafts = workspace_capacity(drafts, "draft")?;
-        let draft_elems = capacity_batch
-            .checked_mul(capacity_drafts)
-            .ok_or_else(|| candle_core::Error::msg("sparse rejection draft workspace overflow"))?;
+        let draft_elems = capacity_batch.checked_mul(capacity_drafts).ok_or_else(|| {
+            inference_tensor::Error::msg("sparse rejection draft workspace overflow")
+        })?;
         let outcome_elems = capacity_batch
             .checked_mul(SPARSE_REJECTION_OUTCOME_WIDTH)
             .ok_or_else(|| {
-                candle_core::Error::msg("sparse rejection outcome workspace overflow")
+                inference_tensor::Error::msg("sparse rejection outcome workspace overflow")
             })?;
         let row_elems = capacity_drafts
             .checked_add(1)
             .and_then(|rows| capacity_batch.checked_mul(rows))
             .ok_or_else(|| {
-                candle_core::Error::msg("sparse rejection row temperature workspace overflow")
+                inference_tensor::Error::msg("sparse rejection row temperature workspace overflow")
             })?;
         let event_flags = Some(sys::CUevent_flags::CU_EVENT_BLOCKING_SYNC);
         Ok(Self {
@@ -692,7 +700,7 @@ impl CudaSparseRejectionWorkspace {
                 stream
                     .context()
                     .new_event(event_flags)
-                    .map_err(candle_core::Error::wrap)?,
+                    .map_err(inference_tensor::Error::wrap)?,
             ),
             pending: None,
         })
@@ -725,7 +733,7 @@ impl InplaceOp1 for PinnedU32HtoD<'_> {
     }
 
     fn cpu_fwd(&self, _storage: &mut CpuStorage, _layout: &Layout) -> Result<()> {
-        candle_core::bail!("{} requires CUDA storage", self.name())
+        inference_tensor::bail!("{} requires CUDA storage", self.name())
     }
 
     fn cuda_fwd(&self, storage: &mut CudaStorage, layout: &Layout) -> Result<()> {
@@ -743,7 +751,7 @@ impl InplaceOp1 for PinnedU32HtoD<'_> {
         };
         drop(dst_guard);
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("sparse rejection U32 H2D copy failed"));
         }
         Ok(())
@@ -762,7 +770,7 @@ impl InplaceOp1 for PinnedF32HtoD<'_> {
     }
 
     fn cpu_fwd(&self, _storage: &mut CpuStorage, _layout: &Layout) -> Result<()> {
-        candle_core::bail!("{} requires CUDA storage", self.name())
+        inference_tensor::bail!("{} requires CUDA storage", self.name())
     }
 
     fn cuda_fwd(&self, storage: &mut CudaStorage, layout: &Layout) -> Result<()> {
@@ -780,7 +788,7 @@ impl InplaceOp1 for PinnedF32HtoD<'_> {
         };
         drop(dst_guard);
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("sparse rejection F32 H2D copy failed"));
         }
         Ok(())
@@ -794,13 +802,13 @@ fn enqueue_u32_htod(
     stream: &Arc<CudaStream>,
 ) -> Result<()> {
     if !dst.device().is_cuda() {
-        candle_core::bail!("{OP} workspace destination must be CUDA");
+        inference_tensor::bail!("{OP} workspace destination must be CUDA");
     }
     if dst.dtype() != DType::U32 {
-        candle_core::bail!("{OP} workspace destination must be U32");
+        inference_tensor::bail!("{OP} workspace destination must be U32");
     }
     if !dst.is_contiguous() || len > dst.elem_count() || len > host.allocation.len() {
-        candle_core::bail!("{OP} workspace U32 copy exceeds its capacity");
+        inference_tensor::bail!("{OP} workspace U32 copy exceeds its capacity");
     }
     dst.inplace_op1(&PinnedU32HtoD { host, len, stream })
 }
@@ -812,13 +820,13 @@ fn enqueue_f32_htod(
     stream: &Arc<CudaStream>,
 ) -> Result<()> {
     if !dst.device().is_cuda() {
-        candle_core::bail!("{OP} workspace destination must be CUDA");
+        inference_tensor::bail!("{OP} workspace destination must be CUDA");
     }
     if dst.dtype() != DType::F32 {
-        candle_core::bail!("{OP} workspace destination must be F32");
+        inference_tensor::bail!("{OP} workspace destination must be F32");
     }
     if !dst.is_contiguous() || len > dst.elem_count() || len > host.allocation.len() {
-        candle_core::bail!("{OP} workspace F32 copy exceeds its capacity");
+        inference_tensor::bail!("{OP} workspace F32 copy exceeds its capacity");
     }
     dst.inplace_op1(&PinnedF32HtoD { host, len, stream })
 }
@@ -830,14 +838,14 @@ fn enqueue_u32_dtoh(
     stream: &Arc<CudaStream>,
 ) -> Result<()> {
     let (storage, layout) = src.storage_and_layout();
-    let candle_core::Storage::Cuda(storage) = &*storage else {
-        candle_core::bail!("{OP} workspace source must be CUDA");
+    let inference_tensor::Storage::Cuda(storage) = &*storage else {
+        inference_tensor::bail!("{OP} workspace source must be CUDA");
     };
     let CudaStorageSlice::U32(slice) = &storage.slice else {
-        candle_core::bail!("{OP} workspace source must be U32");
+        inference_tensor::bail!("{OP} workspace source must be U32");
     };
     if !layout.is_contiguous() || len > src.elem_count() || len > host.allocation.len() {
-        candle_core::bail!("{OP} workspace D2H copy exceeds its capacity");
+        inference_tensor::bail!("{OP} workspace D2H copy exceeds its capacity");
     }
     let start = layout.start_offset();
     let slice = slice.slice(start..start + len);
@@ -852,7 +860,7 @@ fn enqueue_u32_dtoh(
     };
     drop(src_guard);
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(candle_core::Error::msg(format!("{result:?}"))
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
             .context("sparse rejection U32 D2H copy failed"));
     }
     Ok(())
@@ -867,13 +875,13 @@ fn enqueue_device_u32_dtoh(
     let anchor = src.anchor();
     let (storage, layout) = anchor.storage_and_layout();
     let Storage::Cuda(storage) = &*storage else {
-        candle_core::bail!("{OP} workspace source must be CUDA");
+        inference_tensor::bail!("{OP} workspace source must be CUDA");
     };
     let CudaStorageSlice::U32(slice) = &storage.slice else {
-        candle_core::bail!("{OP} workspace source must be U32");
+        inference_tensor::bail!("{OP} workspace source must be U32");
     };
     if !src.is_contiguous() || len > src.elem_count() || len > host.allocation.len() {
-        candle_core::bail!("{OP} workspace D2H copy exceeds its capacity");
+        inference_tensor::bail!("{OP} workspace D2H copy exceeds its capacity");
     }
     let start = layout.start_offset();
     let slice = slice.slice(start..start + len);
@@ -888,7 +896,7 @@ fn enqueue_device_u32_dtoh(
     };
     drop(src_guard);
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(candle_core::Error::msg(format!("{result:?}"))
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
             .context("sparse rejection U32 D2H copy failed"));
     }
     Ok(())
@@ -896,7 +904,7 @@ fn enqueue_device_u32_dtoh(
 
 fn validate_host_len(name: &str, actual: usize, expected: usize) -> Result<()> {
     if actual != expected {
-        candle_core::bail!("{OP} expected {expected} {name} values, got {actual}");
+        inference_tensor::bail!("{OP} expected {expected} {name} values, got {actual}");
     }
     Ok(())
 }
@@ -906,20 +914,20 @@ pub fn sparse_rejection_cuda_submit(
     cache: &mut Option<CudaSparseRejectionWorkspace>,
 ) -> Result<CudaSparseRejectionSubmission> {
     let [batch, rows, _] = input.target_logits.dims() else {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected target logits with shape [batch, drafts + 1, vocab], got {:?}",
             input.target_logits.dims()
         );
     };
     if *batch == 0 || *rows < 2 {
-        candle_core::bail!("{OP} requires a non-empty batch and at least one draft");
+        inference_tensor::bail!("{OP} requires a non-empty batch and at least one draft");
     }
     let batch = *batch;
     let rows = *rows;
     let drafts = rows - 1;
     let draft_elems = batch
         .checked_mul(drafts)
-        .ok_or_else(|| candle_core::Error::msg("sparse rejection draft input overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("sparse rejection draft input overflow"))?;
     match input.draft_tokens {
         SparseRejectionDraftInput::Host(tokens) => {
             validate_host_len("draft token", tokens.len(), draft_elems)?;
@@ -931,14 +939,14 @@ pub fn sparse_rejection_cuda_submit(
                 || !tokens.is_contiguous()
                 || !tokens.device().same_device(input.target_logits.device())
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "{OP} device draft tokens must be contiguous CUDA U32 with shape [{batch}, {drafts}] on the target device"
                 );
             }
         }
         SparseRejectionDraftInput::DeviceRows(tokens) => {
             if tokens.len() != batch {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "{OP} expected {batch} device draft token rows, got {}",
                     tokens.len()
                 );
@@ -948,7 +956,7 @@ pub fn sparse_rejection_cuda_submit(
     if let SparseRejectionProposalInput::SparseRows { token_ids, probs } = input.proposal
         && (token_ids.len() != batch || probs.len() != batch)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected {batch} sparse proposal rows, got {} token-id and {} probability rows",
             token_ids.len(),
             probs.len()
@@ -976,7 +984,7 @@ pub fn sparse_rejection_cuda_submit(
             .as_ref()
             .is_some_and(|workspace| workspace.pending.is_some())
         {
-            candle_core::bail!("{OP} cannot resize while a submission is pending");
+            inference_tensor::bail!("{OP} cannot resize while a submission is pending");
         }
         *cache = Some(CudaSparseRejectionWorkspace::new(
             input.target_logits.device(),
@@ -988,7 +996,7 @@ pub fn sparse_rejection_cuda_submit(
         .as_mut()
         .expect("sparse rejection workspace was allocated above");
     if workspace.pending.is_some() {
-        candle_core::bail!("{OP} workspace already has a pending submission");
+        inference_tensor::bail!("{OP} workspace already has a pending submission");
     }
     let generation = workspace.next_generation;
 
@@ -1007,7 +1015,7 @@ pub fn sparse_rejection_cuda_submit(
             .copy_from_slice(input.sample_uniforms);
         let row_elems = if matches!(input.mode, SparseRejectionMode::BoundedTopK { .. }) {
             let row_elems = batch.checked_mul(rows).ok_or_else(|| {
-                candle_core::Error::msg("sparse rejection row temperature input overflow")
+                inference_tensor::Error::msg("sparse rejection row temperature input overflow")
             })?;
             for (row_temperatures, &inverse_temperature) in
                 workspace.row_inverse_temperatures_host.as_mut_slice()[..row_elems]
@@ -1102,16 +1110,16 @@ pub fn sparse_rejection_cuda_submit(
             ),
             SparseRejectionProposalInput::SparseRows { token_ids, probs } => {
                 let Some(first) = token_ids.first() else {
-                    candle_core::bail!("{OP} requires sparse proposal rows");
+                    inference_tensor::bail!("{OP} requires sparse proposal rows");
                 };
                 let [row_drafts, q_width] = first.dims() else {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "{OP} expected sparse proposal rows with shape [drafts, q_width], got {:?}",
                         first.dims()
                     );
                 };
                 if *row_drafts != drafts {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "{OP} expected sparse proposal rows with {drafts} drafts, got {row_drafts}"
                     );
                 }
@@ -1193,7 +1201,7 @@ pub fn sparse_rejection_cuda_submit(
         workspace
             .completion
             .record(&stream)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         Ok(output)
     })();
     let output = match result {
@@ -1226,18 +1234,18 @@ pub fn sparse_rejection_cuda_complete(
 ) -> Result<SparseRejectionCompletion> {
     let workspace = cache
         .as_mut()
-        .ok_or_else(|| candle_core::Error::msg("sparse rejection workspace is missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("sparse rejection workspace is missing"))?;
     if submission.workspace_id != workspace.id {
-        candle_core::bail!("{OP} received a submission from a different workspace");
+        inference_tensor::bail!("{OP} received a submission from a different workspace");
     }
     let Some(pending) = workspace.pending.as_ref() else {
-        candle_core::bail!("{OP} received an inactive submission");
+        inference_tensor::bail!("{OP} received an inactive submission");
     };
     if pending.generation != submission.generation
         || pending.batch != submission.batch
         || pending.drafts != submission.drafts
     {
-        candle_core::bail!("{OP} received a stale submission");
+        inference_tensor::bail!("{OP} received a stale submission");
     }
     let wait_result = submission.wait();
     if let Err(error) = wait_result {
@@ -1304,7 +1312,9 @@ fn sparse_rejection_cuda_device_with_outcomes(
         SparseRejectionMode::Categorical => None,
         SparseRejectionMode::BoundedTopK { max_top_k } => {
             if max_top_k == 0 || max_top_k > CUDA_TOPK_MAX_K {
-                candle_core::bail!("{OP} max_top_k={max_top_k} must be in [1, {CUDA_TOPK_MAX_K}]");
+                inference_tensor::bail!(
+                    "{OP} max_top_k={max_top_k} must be in [1, {CUDA_TOPK_MAX_K}]"
+                );
             }
             let flattened = input
                 .target_logits
@@ -1328,87 +1338,87 @@ fn sparse_rejection_cuda_device_with_outcomes(
 
     let (target_storage, target_layout) = kernel_target.storage_and_layout();
     let target_storage = match &*target_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA target logits"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA target logits"),
     };
     let draft_tokens = input.draft_tokens.anchor();
     let (draft_storage, draft_layout) = draft_tokens.storage_and_layout();
     let draft_storage = match &*draft_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA draft tokens"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA draft tokens"),
     };
     let q_token_ids = input.q_token_ids.anchor();
     let (q_ids_storage, q_ids_layout) = q_token_ids.storage_and_layout();
     let q_ids_storage = match &*q_ids_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA q token ids"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA q token ids"),
     };
     let q_probs = input.q_probs.anchor();
     let (q_probs_storage, q_probs_layout) = q_probs.storage_and_layout();
     let q_probs_storage = match &*q_probs_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA q probabilities"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA q probabilities"),
     };
     let (temperature_storage, temperature_layout) = input.inverse_temperatures.storage_and_layout();
     let temperature_storage = match &*temperature_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA inverse temperatures"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA inverse temperatures"),
     };
     let (top_k_storage, top_k_layout) = input.target_top_k.storage_and_layout();
     let top_k_storage = match &*top_k_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA target top-k"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA target top-k"),
     };
     let (top_p_storage, top_p_layout) = input.top_p.storage_and_layout();
     let top_p_storage = match &*top_p_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA top-p"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA top-p"),
     };
     let (min_p_storage, min_p_layout) = input.min_p.storage_and_layout();
     let min_p_storage = match &*min_p_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA min-p"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA min-p"),
     };
     let (accept_storage, accept_layout) = input.accept_uniforms.storage_and_layout();
     let accept_storage = match &*accept_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA accept uniforms"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA accept uniforms"),
     };
     let (sample_storage, sample_layout) = input.sample_uniforms.storage_and_layout();
     let sample_storage = match &*sample_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA sample uniforms"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA sample uniforms"),
     };
 
     let CudaStorageSlice::F32(target_slice) = &target_storage.slice else {
-        candle_core::bail!("{OP} target storage dtype mismatch");
+        inference_tensor::bail!("{OP} target storage dtype mismatch");
     };
     let CudaStorageSlice::U32(draft_slice) = &draft_storage.slice else {
-        candle_core::bail!("{OP} draft storage dtype mismatch");
+        inference_tensor::bail!("{OP} draft storage dtype mismatch");
     };
     let CudaStorageSlice::U32(q_ids_slice) = &q_ids_storage.slice else {
-        candle_core::bail!("{OP} q token id storage dtype mismatch");
+        inference_tensor::bail!("{OP} q token id storage dtype mismatch");
     };
     let CudaStorageSlice::F32(q_probs_slice) = &q_probs_storage.slice else {
-        candle_core::bail!("{OP} q probability storage dtype mismatch");
+        inference_tensor::bail!("{OP} q probability storage dtype mismatch");
     };
     let CudaStorageSlice::F32(temperature_slice) = &temperature_storage.slice else {
-        candle_core::bail!("{OP} inverse temperature storage dtype mismatch");
+        inference_tensor::bail!("{OP} inverse temperature storage dtype mismatch");
     };
     let CudaStorageSlice::U32(top_k_slice) = &top_k_storage.slice else {
-        candle_core::bail!("{OP} target top-k storage dtype mismatch");
+        inference_tensor::bail!("{OP} target top-k storage dtype mismatch");
     };
     let CudaStorageSlice::F32(top_p_slice) = &top_p_storage.slice else {
-        candle_core::bail!("{OP} top-p storage dtype mismatch");
+        inference_tensor::bail!("{OP} top-p storage dtype mismatch");
     };
     let CudaStorageSlice::F32(min_p_slice) = &min_p_storage.slice else {
-        candle_core::bail!("{OP} min-p storage dtype mismatch");
+        inference_tensor::bail!("{OP} min-p storage dtype mismatch");
     };
     let CudaStorageSlice::F32(accept_slice) = &accept_storage.slice else {
-        candle_core::bail!("{OP} accept uniform storage dtype mismatch");
+        inference_tensor::bail!("{OP} accept uniform storage dtype mismatch");
     };
     let CudaStorageSlice::F32(sample_slice) = &sample_storage.slice else {
-        candle_core::bail!("{OP} sample uniform storage dtype mismatch");
+        inference_tensor::bail!("{OP} sample uniform storage dtype mismatch");
     };
 
     let dev = target_storage.device();
@@ -1442,7 +1452,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
                 || !outcomes.is_contiguous()
                 || !outcomes.device().same_device(input.target_logits.device())
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "{OP} workspace outcomes must be contiguous CUDA U32 with shape [{}, {}]",
                     shape.batch,
                     SPARSE_REJECTION_OUTCOME_WIDTH
@@ -1454,7 +1464,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
             let outcome_elems = shape.batch * SPARSE_REJECTION_OUTCOME_WIDTH;
             let outcomes = unsafe { dev.alloc::<u32>(outcome_elems) }?;
             Tensor::from((
-                candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+                inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                     slice: CudaStorageSlice::U32(outcomes),
                     device: dev.clone(),
                 }),
@@ -1464,7 +1474,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
     };
     let packed_k = packed_target
         .as_ref()
-        .map(|packed| i32::try_from(packed.k).map_err(candle_core::Error::wrap))
+        .map(|packed| i32::try_from(packed.k).map_err(inference_tensor::Error::wrap))
         .transpose()?;
     outcomes.inplace_op1(&SparseRejectionKernelLaunch {
         mode: input.mode,
@@ -1520,7 +1530,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     struct HostCase {
         batch: usize,
@@ -2084,7 +2094,7 @@ mod tests {
         let mut workspace = None;
         let submission = sparse_rejection_cuda_submit(input(), &mut workspace)?;
         let overlap = match sparse_rejection_cuda_submit(input(), &mut workspace) {
-            Ok(_) => candle_core::bail!("overlapping submissions must fail"),
+            Ok(_) => inference_tensor::bail!("overlapping submissions must fail"),
             Err(error) => error,
         };
         assert!(overlap.to_string().contains("pending submission"));
@@ -2200,7 +2210,7 @@ mod tests {
 
         let bf16 = tensors.target_logits.to_dtype(DType::BF16)?.contiguous()?;
         let error = match tensors.run_with_target(&bf16, SparseRejectionMode::Categorical) {
-            Ok(_) => candle_core::bail!("categorical sparse rejection accepted BF16 logits"),
+            Ok(_) => inference_tensor::bail!("categorical sparse rejection accepted BF16 logits"),
             Err(error) => error,
         };
         assert!(

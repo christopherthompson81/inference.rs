@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::{DType, Device, DeviceLocation, Tensor};
+use inference_tensor::{DType, Device, DeviceLocation, Tensor};
 
 use crate::device_map::DeviceMapper;
 

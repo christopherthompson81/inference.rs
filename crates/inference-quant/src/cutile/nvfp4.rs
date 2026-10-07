@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
-use candle_core::{CudaDevice, DType, Device, DeviceLocation, Result, Storage, Tensor};
 use cutile::cutile_compiler::specialization::DivHint;
+use inference_tensor::{CudaDevice, DType, Device, DeviceLocation, Result, Storage, Tensor};
 
 use super::jit_available;
 use super::warmup::CutileKernel;
@@ -55,11 +55,13 @@ pub fn cutile_nvfp4_quantize(x: &Tensor, global_scale: &Tensor) -> Result<(Tenso
         || global_scale.elem_count() != 1
         || !x.device().same_device(global_scale.device())
     {
-        candle_core::bail!("invalid NVFP4 activation quantization shape, dtype, or global scale");
+        inference_tensor::bail!(
+            "invalid NVFP4 activation quantization shape, dtype, or global scale"
+        );
     }
     validate_kernel_dimensions(&[rows, k])?;
     if !nvfp4_supported(x.device().as_cuda_device()?) {
-        candle_core::bail!("NVFP4 quantization requires supported Blackwell CUDA and cuTile");
+        inference_tensor::bail!("NVFP4 quantization requires supported Blackwell CUDA and cuTile");
     }
     super::nvfp4_matmul::quantize(&x.contiguous()?, &global_scale.contiguous()?, false)
 }
@@ -91,7 +93,7 @@ pub fn cutile_nvfp4_prequantized(
             .activation_global_scale
             .is_none_or(|global| global.dtype() != DType::F32 || global.elem_count() != 1)
     {
-        candle_core::bail!("invalid prequantized NVFP4 matmul shape, dtype, or global scale");
+        inference_tensor::bail!("invalid prequantized NVFP4 matmul shape, dtype, or global scale");
     }
     for tensor in [
         scales,
@@ -101,12 +103,12 @@ pub fn cutile_nvfp4_prequantized(
         args.activation_global_scale.unwrap(),
     ] {
         if !tensor.device().same_device(packed.device()) {
-            candle_core::bail!("prequantized NVFP4 operands must be on the same device");
+            inference_tensor::bail!("prequantized NVFP4 operands must be on the same device");
         }
     }
     validate_kernel_dimensions(&[rows, n, k, n * packed_k])?;
     if !nvfp4_supported(packed.device().as_cuda_device()?) {
-        candle_core::bail!("NVFP4 matmul requires supported Blackwell CUDA and cuTile");
+        inference_tensor::bail!("NVFP4 matmul requires supported Blackwell CUDA and cuTile");
     }
     let packed = packed.contiguous()?;
     let scales = crate::utils::contiguous_fp8(scales)?;
@@ -141,7 +143,7 @@ fn validate_kernel_dimensions(dimensions: &[usize]) -> Result<()> {
         .iter()
         .any(|&dimension| dimension > MAX_KERNEL_DIMENSION)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile NVFP4 dimensions and tensor strides must fit signed 32-bit indexing"
         )
     }
@@ -166,13 +168,15 @@ fn launch(
             &[m, k] if m == tokens => k,
             &[m, 1, k] if m == tokens => k,
             &[m, routes, k] if m == tokens && routes == topk => k,
-            dims => candle_core::bail!(
+            dims => inference_tensor::bail!(
                 "cuTile NVFP4 gather activation shape {dims:?} does not match indices {:?}",
                 indices.dims()
             ),
         };
         if indices.dtype() != DType::U32 || !indices.device().same_device(x.device()) {
-            candle_core::bail!("cuTile NVFP4 gather indices must be U32 on the activation device")
+            inference_tensor::bail!(
+                "cuTile NVFP4 gather indices must be U32 on the activation device"
+            )
         }
         (tokens * topk, k)
     } else {
@@ -186,7 +190,7 @@ fn launch(
         || !k.is_multiple_of(BLOCK_SIZE)
         || packed_k * 2 != k
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile NVFP4 got unsupported shape rows={rows} n={n} k={k} packed_k={packed_k}"
         )
     }
@@ -208,7 +212,7 @@ fn launch(
         || args.weight_scales.dims() != scale_shape
         || args.weight_global_scale.dims() != global_shape
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile NVFP4 requires A16 inputs, U8 packed weights, E4M3 block scales, and F32 global scales with matching dimensions"
         )
     }
@@ -216,7 +220,7 @@ fn launch(
         .activation_global_scale
         .is_some_and(|scale| scale.dtype() != DType::F32 || scale.elem_count() != experts)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile NVFP4 activation global scale must contain one F32 value per expert"
         )
     }
@@ -230,14 +234,14 @@ fn launch(
     .flatten()
     {
         if !x.device().same_device(tensor.device()) {
-            candle_core::bail!("cuTile NVFP4 operands must be on the same device")
+            inference_tensor::bail!("cuTile NVFP4 operands must be on the same device")
         }
     }
     let Device::Cuda(dev) = x.device() else {
-        candle_core::bail!("cuTile NVFP4 requires CUDA tensors")
+        inference_tensor::bail!("cuTile NVFP4 requires CUDA tensors")
     };
     if !nvfp4_supported(dev) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile NVFP4 requires Blackwell or newer with CUDA 13.3 and a compatible tileiras"
         )
     }
@@ -303,7 +307,7 @@ static ROUTING: OnceLock<Mutex<Vec<RegisteredRouting>>> = OnceLock::new();
 /// Register routing before loading expert weights so warmup covers the model's top-k.
 pub fn register_nvfp4_routing(device: &Device, experts: usize, topk: usize) -> Result<()> {
     if experts == 0 || topk == 0 || topk > experts {
-        candle_core::bail!("NVFP4 routing requires 1 <= topk <= experts")
+        inference_tensor::bail!("NVFP4 routing requires 1 <= topk <= experts")
     }
     if !device.is_cuda() {
         return Ok(());
@@ -326,11 +330,11 @@ pub fn register_nvfp4_routing(device: &Device, experts: usize, topk: usize) -> R
 
 fn tensor_pointer_hint<T>(tensor: &Tensor) -> Result<DivHint>
 where
-    T: candle_core::cuda::CudaDType + candle_core::cuda::cudarc::driver::DeviceRepr,
+    T: inference_tensor::cuda::CudaDType + inference_tensor::cuda::cudarc::driver::DeviceRepr,
 {
     let (storage, layout) = tensor.storage_and_layout();
     let Storage::Cuda(storage) = &*storage else {
-        candle_core::bail!("NVFP4 warmup registration requires CUDA tensors");
+        inference_tensor::bail!("NVFP4 warmup registration requires CUDA tensors");
     };
     let stream = storage.device.cuda_stream();
     let (pointer, _guard) = crate::utils::slice_ptr_on_stream(

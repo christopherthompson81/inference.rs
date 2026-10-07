@@ -10,7 +10,7 @@ use std::{
     thread::JoinHandle,
 };
 
-use candle_core::{DType, Device, DeviceLocation, Result, quantized::GgmlDType};
+use inference_tensor::{DType, Device, DeviceLocation, Result, quantized::GgmlDType};
 use sysinfo::System;
 
 use crate::{IsqCaptureMode, IsqType};
@@ -187,7 +187,7 @@ impl IsqExecutor {
                 }
                 Err(_) => {
                     let send = Box::new(move |_| {
-                        let _ = tx.send(Err(candle_core::Error::msg("ISQ worker panicked")));
+                        let _ = tx.send(Err(inference_tensor::Error::msg("ISQ worker panicked")));
                     }) as JobSend;
                     (false, send)
                 }

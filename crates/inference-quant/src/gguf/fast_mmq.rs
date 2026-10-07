@@ -5,11 +5,11 @@ use std::collections::HashMap;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::thread::ThreadId;
 
-use candle_core::cuda::cudarc::driver::{
+use inference_tensor::cuda::cudarc::driver::{
     CudaSlice, CudaStream, DevicePtrMut, DeviceRepr, SyncOnDrop,
 };
-use candle_core::cuda_backend::CudaDType;
-use candle_core::{
+use inference_tensor::cuda_backend::CudaDType;
+use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, quantized::QTensor,
 };
 
@@ -368,7 +368,7 @@ struct WorkspaceSlot {
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct WorkspaceKey {
-    device: candle_core::cuda::DeviceId,
+    device: inference_tensor::cuda::DeviceId,
     stream: usize,
     thread: ThreadId,
     capacity: usize,
@@ -398,11 +398,11 @@ struct DeviceInfo {
     warp_size: i32,
 }
 
-static DEVICE_INFO: OnceLock<Mutex<HashMap<candle_core::cuda::DeviceId, DeviceInfo>>> =
+static DEVICE_INFO: OnceLock<Mutex<HashMap<inference_tensor::cuda::DeviceId, DeviceInfo>>> =
     OnceLock::new();
 
 fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
-    use candle_core::cuda::cudarc::driver::{result, sys};
+    use inference_tensor::cuda::cudarc::driver::{result, sys};
     let map = DEVICE_INFO.get_or_init(|| Mutex::new(HashMap::new()));
     let key = dev.id();
     let mut guard = map.lock().unwrap();
@@ -630,57 +630,57 @@ impl DenseGluDownRun<'_> {
 
 fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<Vec<Tensor>> {
     let Some(first) = weights.first() else {
-        candle_core::bail!("fast_mmq shared_lhs: at least one weight is required");
+        inference_tensor::bail!("fast_mmq shared_lhs: at least one weight is required");
     };
     let dtype = first.gguf_type();
     if !supports(dtype) {
-        candle_core::bail!("fast_mmq shared_lhs: unsupported quant dtype {dtype:?}");
+        inference_tensor::bail!("fast_mmq shared_lhs: unsupported quant dtype {dtype:?}");
     }
     let Device::Cuda(dev) = first.kernel_device() else {
-        candle_core::bail!("fast_mmq shared_lhs: weights must live on CUDA");
+        inference_tensor::bail!("fast_mmq shared_lhs: weights must live on CUDA");
     };
     let (_, ncols) = first.kernel_shape().dims2()?;
     for weight in &weights[1..] {
         if weight.gguf_type() != dtype {
-            candle_core::bail!("fast_mmq shared_lhs: weight dtype mismatch");
+            inference_tensor::bail!("fast_mmq shared_lhs: weight dtype mismatch");
         }
         let Device::Cuda(weight_dev) = weight.kernel_device() else {
-            candle_core::bail!("fast_mmq shared_lhs: weights must live on CUDA");
+            inference_tensor::bail!("fast_mmq shared_lhs: weights must live on CUDA");
         };
         if weight_dev.id() != dev.id() {
-            candle_core::bail!("fast_mmq shared_lhs: weights are on different CUDA devices");
+            inference_tensor::bail!("fast_mmq shared_lhs: weights are on different CUDA devices");
         }
         let (_, weight_ncols) = weight.kernel_shape().dims2()?;
         if weight_ncols != ncols {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fast_mmq shared_lhs: weight ncols mismatch {ncols} vs {weight_ncols}"
             );
         }
     }
     if !xs.device().same_device(&first.kernel_device()) {
-        candle_core::bail!("fast_mmq shared_lhs: input and weights are on different devices");
+        inference_tensor::bail!("fast_mmq shared_lhs: input and weights are on different devices");
     }
 
     let Some((&k, batch_dims)) = xs.dims().split_last() else {
-        candle_core::bail!("fast_mmq shared_lhs: input must have at least one dimension");
+        inference_tensor::bail!("fast_mmq shared_lhs: input must have at least one dimension");
     };
     let batch_size = batch_dims.iter().product::<usize>();
     if batch_size == 0 {
-        candle_core::bail!("fast_mmq shared_lhs: batch size must be greater than zero");
+        inference_tensor::bail!("fast_mmq shared_lhs: batch size must be greater than zero");
     }
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq shared_lhs: weight ncols {ncols} does not match input tail {k}"
         );
     }
 
     let qk = qk_for(dtype);
     if k % qk != 0 {
-        candle_core::bail!("fast_mmq shared_lhs: k={k} not divisible by qk={qk}");
+        inference_tensor::bail!("fast_mmq shared_lhs: k={k} not divisible by qk={qk}");
     }
     let input_ty = xs.dtype();
     if !matches!(input_ty, DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq shared_lhs: input dtype must be BF16, F16, or F32, got {input_ty:?}"
         );
     }
@@ -688,7 +688,7 @@ fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<V
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
     let Storage::Cuda(xs_cuda) = &*xs_storage else {
-        candle_core::bail!("fast_mmq shared_lhs: input must live on CUDA");
+        inference_tensor::bail!("fast_mmq shared_lhs: input must live on CUDA");
     };
     let xs_offset = xs_layout.start_offset();
     let type_x = match input_ty {
@@ -745,45 +745,45 @@ fn down_from_glu(
 ) -> Result<Tensor> {
     let dtype = down.gguf_type();
     if !supports(dtype) {
-        candle_core::bail!("fast_mmq down_from_glu: unsupported quant dtype {dtype:?}");
+        inference_tensor::bail!("fast_mmq down_from_glu: unsupported quant dtype {dtype:?}");
     }
     let Device::Cuda(dev) = down.device() else {
-        candle_core::bail!("fast_mmq down_from_glu: weight must live on CUDA");
+        inference_tensor::bail!("fast_mmq down_from_glu: weight must live on CUDA");
     };
     if gate.shape() != up.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq down_from_glu: gate/up shape mismatch {:?} vs {:?}",
             gate.shape(),
             up.shape()
         );
     }
     if gate.dtype() != up.dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq down_from_glu: gate/up dtype mismatch {:?} vs {:?}",
             gate.dtype(),
             up.dtype()
         );
     }
     if !gate.device().same_device(&down.device()) || !up.device().same_device(&down.device()) {
-        candle_core::bail!("fast_mmq down_from_glu: tensors are on different devices");
+        inference_tensor::bail!("fast_mmq down_from_glu: tensors are on different devices");
     }
 
     let Some((&k, batch_dims)) = gate.dims().split_last() else {
-        candle_core::bail!("fast_mmq down_from_glu: input must have at least one dimension");
+        inference_tensor::bail!("fast_mmq down_from_glu: input must have at least one dimension");
     };
     let batch_size = batch_dims.iter().product::<usize>();
     if batch_size == 0 {
-        candle_core::bail!("fast_mmq down_from_glu: batch size must be greater than zero");
+        inference_tensor::bail!("fast_mmq down_from_glu: batch size must be greater than zero");
     }
     let (_, ncols) = down.shape().dims2()?;
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq down_from_glu: weight ncols {ncols} does not match input tail {k}"
         );
     }
     let qk = qk_for(dtype);
     if k % qk != 0 {
-        candle_core::bail!("fast_mmq down_from_glu: k={k} not divisible by qk={qk}");
+        inference_tensor::bail!("fast_mmq down_from_glu: k={k} not divisible by qk={qk}");
     }
 
     let input_ty = gate.dtype();
@@ -791,7 +791,7 @@ fn down_from_glu(
         DType::F32 => 0,
         DType::F16 => 1,
         DType::BF16 => 30,
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "fast_mmq down_from_glu: input dtype must be BF16, F16, or F32, got {other:?}"
         ),
     };
@@ -799,11 +799,11 @@ fn down_from_glu(
     let up = up.contiguous()?;
     let (gate_storage, gate_layout) = gate.storage_and_layout();
     let Storage::Cuda(gate_cuda) = &*gate_storage else {
-        candle_core::bail!("fast_mmq down_from_glu: gate must live on CUDA");
+        inference_tensor::bail!("fast_mmq down_from_glu: gate must live on CUDA");
     };
     let (up_storage, up_layout) = up.storage_and_layout();
     let Storage::Cuda(up_cuda) = &*up_storage else {
-        candle_core::bail!("fast_mmq down_from_glu: up must live on CUDA");
+        inference_tensor::bail!("fast_mmq down_from_glu: up must live on CUDA");
     };
 
     let stream = dev.cuda_stream();
@@ -889,7 +889,7 @@ pub(crate) fn fused_glu(
     activation: GluActivationType,
 ) -> Result<Tensor> {
     if gate_w.shape() != up_w.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq fused_glu: gate/up shape mismatch {:?} vs {:?}",
             gate_w.shape(),
             up_w.shape()
@@ -909,7 +909,7 @@ pub(crate) fn fused_ffn(
     activation: GluActivationType,
 ) -> Result<Tensor> {
     if gate_w.shape() != up_w.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq fused_ffn: gate/up shape mismatch {:?} vs {:?}",
             gate_w.shape(),
             up_w.shape()
@@ -941,30 +941,30 @@ pub fn grouped(
 ) -> Result<Tensor> {
     let dtype = weight.gguf_type();
     if !supports(dtype) {
-        candle_core::bail!("fast_mmq grouped: unsupported quant dtype {dtype:?}");
+        inference_tensor::bail!("fast_mmq grouped: unsupported quant dtype {dtype:?}");
     }
 
     let (_, k) = xs.dims2()?;
 
     let (weight_experts, nrows, ncols) = weight.shape().dims3()?;
     if weight_experts != num_experts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped: expected {num_experts} experts, got {weight_experts}"
         );
     }
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped: shape mismatch: weight cols {ncols} vs input tail {k}"
         );
     }
     let qk = qk_for(dtype);
     if k % qk != 0 {
-        candle_core::bail!("fast_mmq grouped: k={k} not divisible by qk={qk}");
+        inference_tensor::bail!("fast_mmq grouped: k={k} not divisible by qk={qk}");
     }
 
     let input_ty = xs.dtype();
     if !matches!(input_ty, DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped: input dtype must be BF16, F16, or F32, got {input_ty:?}"
         );
     }
@@ -972,7 +972,7 @@ pub fn grouped(
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
     let Storage::Cuda(xs_cuda) = &*xs_storage else {
-        candle_core::bail!("fast_mmq grouped: input must live on CUDA");
+        inference_tensor::bail!("fast_mmq grouped: input must live on CUDA");
     };
     let xs_offset = xs_layout.start_offset();
     let type_x = match input_ty {
@@ -1142,20 +1142,22 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
     } = run;
     let dtype = weight.gguf_type();
     if !supports(dtype) {
-        candle_core::bail!("fast_mmq grouped_from_glu_pair: unsupported quant dtype {dtype:?}");
+        inference_tensor::bail!(
+            "fast_mmq grouped_from_glu_pair: unsupported quant dtype {dtype:?}"
+        );
     }
 
     let (gate_rows, k) = gate.dims2()?;
     let (up_rows, up_k) = up.dims2()?;
     if gate_rows != total_assignments || up_rows != total_assignments || up_k != k {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_from_glu_pair: gate/up shape mismatch {:?} vs {:?}, total_assignments={total_assignments}",
             gate.shape(),
             up.shape()
         );
     }
     if gate.dtype() != DType::F32 || up.dtype() != DType::F32 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_from_glu_pair: gate/up must be F32, got {:?} and {:?}",
             gate.dtype(),
             up.dtype()
@@ -1164,30 +1166,30 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
 
     let (weight_experts, nrows, ncols) = weight.shape().dims3()?;
     if weight_experts != num_experts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_from_glu_pair: expected {num_experts} experts, got {weight_experts}"
         );
     }
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_from_glu_pair: shape mismatch: weight cols {ncols} vs input tail {k}"
         );
     }
     let qk = qk_for(dtype);
     if k % qk != 0 {
-        candle_core::bail!("fast_mmq grouped_from_glu_pair: k={k} not divisible by qk={qk}");
+        inference_tensor::bail!("fast_mmq grouped_from_glu_pair: k={k} not divisible by qk={qk}");
     }
 
     let (gate_storage, gate_layout) = gate.storage_and_layout();
     let Storage::Cuda(gate_cuda) = &*gate_storage else {
-        candle_core::bail!("fast_mmq grouped_from_glu_pair: gate must live on CUDA");
+        inference_tensor::bail!("fast_mmq grouped_from_glu_pair: gate must live on CUDA");
     };
     let (up_storage, up_layout) = up.storage_and_layout();
     let Storage::Cuda(up_cuda) = &*up_storage else {
-        candle_core::bail!("fast_mmq grouped_from_glu_pair: up must live on CUDA");
+        inference_tensor::bail!("fast_mmq grouped_from_glu_pair: up must live on CUDA");
     };
     if gate_layout.stride() != [row_stride, 1] || up_layout.stride() != [row_stride, 1] {
-        candle_core::bail!("fast_mmq grouped_from_glu_pair: invalid gate/up row stride");
+        inference_tensor::bail!("fast_mmq grouped_from_glu_pair: invalid gate/up row stride");
     }
 
     let stream = dev.cuda_stream();
@@ -1327,7 +1329,7 @@ pub fn grouped_from_glu_packed(
     let gate_up = gate_up.contiguous()?;
     let (_, _, k) = weight.shape().dims3()?;
     if gate_up.dims2()? != (total_assignments, 2 * k) {
-        candle_core::bail!("fast_mmq grouped_from_glu_packed: gate/up shape mismatch");
+        inference_tensor::bail!("fast_mmq grouped_from_glu_packed: gate/up shape mismatch");
     }
     let gate = gate_up.narrow(1, 0, k)?;
     let up = gate_up.narrow(1, k, k)?;
@@ -1365,19 +1367,19 @@ pub fn grouped_pair_packed(
 ) -> Result<Tensor> {
     let dtype = gate.gguf_type();
     if dtype != up.gguf_type() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_pair requires matching gate/up dtypes, got {:?} and {:?}",
             dtype,
             up.gguf_type()
         );
     }
     if !supports(dtype) {
-        candle_core::bail!("fast_mmq grouped_pair: unsupported quant dtype {dtype:?}");
+        inference_tensor::bail!("fast_mmq grouped_pair: unsupported quant dtype {dtype:?}");
     }
 
     let (num_tokens, k) = xs.dims2()?;
     if total_assignments != num_tokens * topk {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_pair: total_assignments={total_assignments} does not match num_tokens={num_tokens} * topk={topk}"
         );
     }
@@ -1385,30 +1387,30 @@ pub fn grouped_pair_packed(
     let (gate_experts, nrows, ncols) = gate.shape().dims3()?;
     let (up_experts, up_nrows, up_ncols) = up.shape().dims3()?;
     if gate_experts != num_experts || up_experts != num_experts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_pair: expected {num_experts} experts, got gate={gate_experts} up={up_experts}"
         );
     }
     if nrows != up_nrows || ncols != up_ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_pair: gate/up shape mismatch {:?} vs {:?}",
             gate.shape(),
             up.shape()
         );
     }
     if k != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_pair: shape mismatch: weight cols {ncols} vs input tail {k}"
         );
     }
     let qk = qk_for(dtype);
     if k % qk != 0 {
-        candle_core::bail!("fast_mmq grouped_pair: k={k} not divisible by qk={qk}");
+        inference_tensor::bail!("fast_mmq grouped_pair: k={k} not divisible by qk={qk}");
     }
 
     let input_ty = xs.dtype();
     if !matches!(input_ty, DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fast_mmq grouped_pair: input dtype must be BF16, F16, or F32, got {input_ty:?}"
         );
     }
@@ -1416,7 +1418,7 @@ pub fn grouped_pair_packed(
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
     let Storage::Cuda(xs_cuda) = &*xs_storage else {
-        candle_core::bail!("fast_mmq grouped_pair: input must live on CUDA");
+        inference_tensor::bail!("fast_mmq grouped_pair: input must live on CUDA");
     };
     let xs_offset = xs_layout.start_offset();
     let type_x = match input_ty {
@@ -1598,7 +1600,7 @@ pub fn grouped_pair(
 mod tests {
     use super::*;
     use crate::gguf::fast_mmvq;
-    use candle_core::quantized::GgmlDType;
+    use inference_tensor::quantized::GgmlDType;
 
     const BATCH: usize = 3;
     const ROWS: usize = 4;

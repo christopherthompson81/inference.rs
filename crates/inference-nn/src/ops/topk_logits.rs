@@ -7,25 +7,27 @@ pub fn cuda_topk_logits_f32_packed(
     k: usize,
     temperature: f64,
 ) -> Result<TopKLogitsPackedOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     if temperature <= 0.0 || !temperature.is_finite() {
-        candle_core::bail!("cuda_topk_logits_f32_packed requires a positive finite temperature");
+        inference_tensor::bail!(
+            "cuda_topk_logits_f32_packed requires a positive finite temperature"
+        );
     }
     let input = input.contiguous()?;
     if input.dtype() != DType::F32 {
-        candle_core::bail!("cuda_topk_logits_f32_packed requires F32 logits");
+        inference_tensor::bail!("cuda_topk_logits_f32_packed requires F32 logits");
     }
 
     let ncols = input.elem_count();
     if ncols == 0 {
-        candle_core::bail!("cuda_topk_logits_f32_packed got empty logits");
+        inference_tensor::bail!("cuda_topk_logits_f32_packed got empty logits");
     }
     let k = k.min(ncols);
     if k == 0 || k > CUDA_TOPK_MAX_K {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_topk_logits_f32_packed k={} must be in [1, {}]",
             k,
             CUDA_TOPK_MAX_K
@@ -35,7 +37,7 @@ pub fn cuda_topk_logits_f32_packed(
     let nblocks = ncols.div_ceil(CUDA_TOPK_CHUNK_SIZE);
     let stage2_candidates = nblocks * k;
     if stage2_candidates > CUDA_TOPK_MAX_STAGE2_CANDIDATES {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_topk_logits_f32_packed workspace too large: {} candidates",
             stage2_candidates
         );
@@ -43,8 +45,8 @@ pub fn cuda_topk_logits_f32_packed(
 
     let (storage, layout) = input.storage_and_layout();
     let storage = match &*storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_topk_logits_f32_packed requires CUDA tensor"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_topk_logits_f32_packed requires CUDA tensor"),
     };
     let dev = storage.device();
     let stream = dev.cuda_stream();
@@ -52,7 +54,7 @@ pub fn cuda_topk_logits_f32_packed(
 
     let (src_ptr, src_guard) = match &storage.slice {
         CudaStorageSlice::F32(inp) => inp.device_ptr(&stream),
-        _ => candle_core::bail!("cuda_topk_logits_f32_packed only supports F32"),
+        _ => inference_tensor::bail!("cuda_topk_logits_f32_packed only supports F32"),
     };
     let src_ptr = unsafe { (src_ptr as *const f32).add(layout.start_offset()) };
 
@@ -93,34 +95,34 @@ pub fn cuda_topk_logits_f32_packed(
     drop(block_sums_guard);
     drop(packed_guard);
 
-    let packed_storage = candle_core::cuda_backend::CudaStorage {
+    let packed_storage = inference_tensor::cuda_backend::CudaStorage {
         slice: CudaStorageSlice::F32(packed_dst),
         device: dev.clone(),
     };
     let workspace = vec![
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(block_values),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[workspace_elems]),
         )),
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(block_indices),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[workspace_elems]),
         )),
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(block_maxes),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[nblocks]),
         )),
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(block_sums),
                 device: dev.clone(),
             }),
@@ -130,7 +132,7 @@ pub fn cuda_topk_logits_f32_packed(
 
     Ok(TopKLogitsPackedOutput {
         packed: Tensor::from((
-            candle_core::Storage::Cuda(packed_storage),
+            inference_tensor::Storage::Cuda(packed_storage),
             Shape::from_dims(&[2 * k + 2]),
         )),
         k,
@@ -140,8 +142,8 @@ pub fn cuda_topk_logits_f32_packed(
 
 #[cfg(feature = "cuda")]
 pub struct CudaTopKLogitsPackedWorkspace {
-    location: candle_core::DeviceLocation,
-    stream: Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    location: inference_tensor::DeviceLocation,
+    stream: Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     pub(super) capacity_rows: usize,
     vocab: usize,
     pub(super) capacity_k: usize,
@@ -166,35 +168,35 @@ fn cuda_topk_logits_packed_workspace_id() -> u64 {
 #[cfg(feature = "cuda")]
 impl CudaTopKLogitsPackedWorkspace {
     fn new(
-        dev: &candle_core::CudaDevice,
+        dev: &inference_tensor::CudaDevice,
         rows: usize,
         vocab: usize,
         k: usize,
         nblocks: usize,
     ) -> Result<Self> {
-        use candle_core::backend::BackendDevice;
+        use inference_tensor::backend::BackendDevice;
 
         let capacity_rows = rows
             .checked_next_power_of_two()
-            .ok_or_else(|| candle_core::Error::msg("CUDA top-k row capacity overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k row capacity overflow"))?;
         let capacity_k = k
             .checked_next_power_of_two()
-            .ok_or_else(|| candle_core::Error::msg("CUDA top-k width capacity overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k width capacity overflow"))?;
         let workspace_elems = capacity_rows
             .checked_mul(nblocks)
             .and_then(|elems| elems.checked_mul(capacity_k))
-            .ok_or_else(|| candle_core::Error::msg("CUDA top-k workspace overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k workspace overflow"))?;
         let block_elems = capacity_rows
             .checked_mul(nblocks)
-            .ok_or_else(|| candle_core::Error::msg("CUDA top-k block workspace overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k block workspace overflow"))?;
         let packed_width = capacity_k
             .checked_mul(2)
             .and_then(|width| width.checked_add(2))
-            .ok_or_else(|| candle_core::Error::msg("CUDA top-k packed width overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k packed width overflow"))?;
         let packed_elems = capacity_rows
             .checked_mul(packed_width)
-            .ok_or_else(|| candle_core::Error::msg("CUDA top-k packed workspace overflow"))?;
-        let device = candle_core::Device::Cuda(dev.clone());
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA top-k packed workspace overflow"))?;
+        let device = inference_tensor::Device::Cuda(dev.clone());
         Ok(Self {
             location: dev.location(),
             stream: dev.cuda_stream(),
@@ -214,13 +216,13 @@ impl CudaTopKLogitsPackedWorkspace {
 
     fn can_hold(
         &self,
-        dev: &candle_core::CudaDevice,
+        dev: &inference_tensor::CudaDevice,
         rows: usize,
         vocab: usize,
         k: usize,
         nblocks: usize,
     ) -> bool {
-        use candle_core::backend::BackendDevice;
+        use inference_tensor::backend::BackendDevice;
 
         let stream = dev.cuda_stream();
         self.location == dev.location()
@@ -235,8 +237,8 @@ impl CudaTopKLogitsPackedWorkspace {
 
 #[cfg(feature = "cuda")]
 pub struct CudaRankedTopKPackedWorkspace {
-    location: candle_core::DeviceLocation,
-    stream: Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    location: inference_tensor::DeviceLocation,
+    stream: Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     capacity_rows: usize,
     vocab: usize,
     capacity_k: usize,
@@ -250,36 +252,36 @@ pub struct CudaRankedTopKPackedWorkspace {
 #[cfg(feature = "cuda")]
 impl CudaRankedTopKPackedWorkspace {
     fn new(
-        dev: &candle_core::CudaDevice,
+        dev: &inference_tensor::CudaDevice,
         rows: usize,
         vocab: usize,
         k: usize,
         nblocks: usize,
     ) -> Result<Self> {
-        use candle_core::backend::BackendDevice;
+        use inference_tensor::backend::BackendDevice;
 
-        let capacity_rows = rows
-            .checked_next_power_of_two()
-            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k row capacity overflow"))?;
-        let capacity_k = k
-            .checked_next_power_of_two()
-            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k width capacity overflow"))?;
+        let capacity_rows = rows.checked_next_power_of_two().ok_or_else(|| {
+            inference_tensor::Error::msg("CUDA ranked top-k row capacity overflow")
+        })?;
+        let capacity_k = k.checked_next_power_of_two().ok_or_else(|| {
+            inference_tensor::Error::msg("CUDA ranked top-k width capacity overflow")
+        })?;
         let candidate_elems = capacity_rows
             .checked_mul(nblocks)
             .and_then(|elems| elems.checked_mul(capacity_k))
-            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k workspace overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA ranked top-k workspace overflow"))?;
         let radix_state_elems = capacity_rows
             .checked_mul(unsafe { ffi::topk_large_ranked_state_words_per_row() })
-            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k radix overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA ranked top-k radix overflow"))?;
         let index_elems = capacity_rows
             .checked_mul(nblocks)
             .and_then(|elems| elems.checked_mul(capacity_k))
-            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k index overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA ranked top-k index overflow"))?;
         let packed_elems = capacity_rows
             .checked_mul(capacity_k)
             .and_then(|elems| elems.checked_mul(2))
-            .ok_or_else(|| candle_core::Error::msg("CUDA ranked top-k packed overflow"))?;
-        let device = candle_core::Device::Cuda(dev.clone());
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA ranked top-k packed overflow"))?;
+        let device = inference_tensor::Device::Cuda(dev.clone());
         Ok(Self {
             location: dev.location(),
             stream: dev.cuda_stream(),
@@ -296,13 +298,13 @@ impl CudaRankedTopKPackedWorkspace {
 
     fn can_hold(
         &self,
-        dev: &candle_core::CudaDevice,
+        dev: &inference_tensor::CudaDevice,
         rows: usize,
         vocab: usize,
         k: usize,
         nblocks: usize,
     ) -> bool {
-        use candle_core::backend::BackendDevice;
+        use inference_tensor::backend::BackendDevice;
 
         let stream = dev.cuda_stream();
         self.location == dev.location()
@@ -332,96 +334,98 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     inverse_temperatures: &Tensor,
     cache: &mut Option<CudaTopKLogitsPackedWorkspace>,
 ) -> Result<TopKLogitsPackedOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
     const OP: &str = "cuda_topk_logits_packed_batched";
 
     if input.dtype() != DType::F32 {
-        candle_core::bail!("{OP} requires F32 logits");
+        inference_tensor::bail!("{OP} requires F32 logits");
     }
     if inverse_temperatures.dtype() != DType::F32 {
-        candle_core::bail!("{OP} requires F32 inverse temperatures");
+        inference_tensor::bail!("{OP} requires F32 inverse temperatures");
     }
     if !input.is_contiguous() || !inverse_temperatures.is_contiguous() {
-        return Err(candle_core::Error::RequiresContiguous { op: OP });
+        return Err(inference_tensor::Error::RequiresContiguous { op: OP });
     }
     if !input.device().same_device(inverse_temperatures.device()) {
-        candle_core::bail!("{OP} tensors must be on the same CUDA device");
+        inference_tensor::bail!("{OP} tensors must be on the same CUDA device");
     }
-    let vocab =
-        input.dims().last().copied().ok_or_else(|| {
-            candle_core::Error::Msg(format!("{OP} requires logits with rank >= 1"))
-        })?;
+    let vocab = input.dims().last().copied().ok_or_else(|| {
+        inference_tensor::Error::Msg(format!("{OP} requires logits with rank >= 1"))
+    })?;
     if vocab == 0 {
-        candle_core::bail!("{OP} got an empty vocabulary");
+        inference_tensor::bail!("{OP} got an empty vocabulary");
     }
     let batch = input.elem_count() / vocab;
     if batch == 0 {
-        candle_core::bail!("{OP} got an empty batch");
+        inference_tensor::bail!("{OP} got an empty batch");
     }
     if inverse_temperatures.dims() != [batch] {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected inverse temperatures with shape [{batch}], got {:?}",
             inverse_temperatures.dims()
         );
     }
     let k = k.min(vocab);
     if k == 0 || k > CUDA_TOPK_MAX_K {
-        candle_core::bail!("{OP} k={k} must be in [1, {}]", CUDA_TOPK_MAX_K.min(vocab));
+        inference_tensor::bail!("{OP} k={k} must be in [1, {}]", CUDA_TOPK_MAX_K.min(vocab));
     }
     if vocab > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} vocabulary size {vocab} cannot be represented exactly by packed F32 indices"
         );
     }
     if vocab > i32::MAX as usize {
-        candle_core::bail!("{OP} vocabulary is too large: {vocab}");
+        inference_tensor::bail!("{OP} vocabulary is too large: {vocab}");
     }
     if batch > CUDA_TOPK_MAX_GRID_Y {
-        candle_core::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
+        inference_tensor::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
     }
 
     let nblocks = vocab.div_ceil(CUDA_TOPK_CHUNK_SIZE);
     let candidates_per_row = nblocks
         .checked_mul(k)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} candidate count overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} candidate count overflow")))?;
     if candidates_per_row > CUDA_TOPK_MAX_STAGE2_CANDIDATES {
-        candle_core::bail!("{OP} workspace too large: {candidates_per_row} candidates per row");
+        inference_tensor::bail!(
+            "{OP} workspace too large: {candidates_per_row} candidates per row"
+        );
     }
-    let workspace_elems = batch
-        .checked_mul(candidates_per_row)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} candidate workspace overflow")))?;
+    let workspace_elems = batch.checked_mul(candidates_per_row).ok_or_else(|| {
+        inference_tensor::Error::Msg(format!("{OP} candidate workspace overflow"))
+    })?;
     let block_elems = batch
         .checked_mul(nblocks)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} block workspace overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} block workspace overflow")))?;
     let packed_width = k
         .checked_mul(2)
         .and_then(|width| width.checked_add(2))
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed width overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} packed width overflow")))?;
     let packed_elems = batch
         .checked_mul(packed_width)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed output overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} packed output overflow")))?;
 
-    let nrows_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(vocab).map_err(candle_core::Error::wrap)?;
-    let k_i32 = i32::try_from(k).map_err(candle_core::Error::wrap)?;
-    let chunk_size_i32 = i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(candle_core::Error::wrap)?;
-    let nblocks_i32 = i32::try_from(nblocks).map_err(candle_core::Error::wrap)?;
+    let nrows_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
+    let k_i32 = i32::try_from(k).map_err(inference_tensor::Error::wrap)?;
+    let chunk_size_i32 =
+        i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(inference_tensor::Error::wrap)?;
+    let nblocks_i32 = i32::try_from(nblocks).map_err(inference_tensor::Error::wrap)?;
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA logits"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA logits"),
     };
     let (temperature_storage, temperature_layout) = inverse_temperatures.storage_and_layout();
     let temperature_storage = match &*temperature_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA inverse temperatures"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA inverse temperatures"),
     };
     let CudaStorageSlice::F32(temperature_slice) = &temperature_storage.slice else {
-        candle_core::bail!("{OP} only supports F32 inverse temperatures");
+        inference_tensor::bail!("{OP} only supports F32 inverse temperatures");
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
@@ -443,13 +447,13 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let packed_dst = workspace.packed.narrow(0, 0, packed_elems)?;
 
     let CudaStorageSlice::F32(input_slice) = &input_storage.slice else {
-        candle_core::bail!("{OP} logits dtype mismatch");
+        inference_tensor::bail!("{OP} logits dtype mismatch");
     };
     let (input_ptr, input_guard) = input_slice.device_ptr(&stream);
     let input_ptr = unsafe { (input_ptr as *const f32).add(input_layout.start_offset()) };
     let (temperature_ptr, temperature_guard) = temperature_slice.device_ptr(&stream);
     let (block_values_storage_guard, block_values_layout) = block_values.storage_and_layout();
-    let candle_core::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
+    let inference_tensor::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
         unreachable!("CUDA top-k workspace values are CUDA")
     };
     let CudaStorageSlice::F32(block_values_slice) = &block_values_storage.slice else {
@@ -459,7 +463,8 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let block_values_ptr =
         unsafe { (block_values_ptr as *mut f32).add(block_values_layout.start_offset()) };
     let (block_indices_storage_guard, block_indices_layout) = block_indices.storage_and_layout();
-    let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard else {
+    let inference_tensor::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard
+    else {
         unreachable!("CUDA top-k workspace indices are CUDA")
     };
     let CudaStorageSlice::U32(block_indices_slice) = &block_indices_storage.slice else {
@@ -469,7 +474,7 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let block_indices_ptr =
         unsafe { (block_indices_ptr as *mut u32).add(block_indices_layout.start_offset()) };
     let (block_maxes_storage, block_maxes_layout) = block_maxes.storage_and_layout();
-    let candle_core::Storage::Cuda(block_maxes_storage) = &*block_maxes_storage else {
+    let inference_tensor::Storage::Cuda(block_maxes_storage) = &*block_maxes_storage else {
         unreachable!("CUDA top-k workspace maxima are CUDA")
     };
     let CudaStorageSlice::F32(block_maxes_slice) = &block_maxes_storage.slice else {
@@ -479,7 +484,7 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let block_maxes_ptr =
         unsafe { (block_maxes_ptr as *mut f32).add(block_maxes_layout.start_offset()) };
     let (block_sums_storage, block_sums_layout) = block_sums.storage_and_layout();
-    let candle_core::Storage::Cuda(block_sums_storage) = &*block_sums_storage else {
+    let inference_tensor::Storage::Cuda(block_sums_storage) = &*block_sums_storage else {
         unreachable!("CUDA top-k workspace sums are CUDA")
     };
     let CudaStorageSlice::F32(block_sums_slice) = &block_sums_storage.slice else {
@@ -489,7 +494,7 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     let block_sums_ptr =
         unsafe { (block_sums_ptr as *mut f32).add(block_sums_layout.start_offset()) };
     let (packed_storage_guard, packed_layout) = packed_dst.storage_and_layout();
-    let candle_core::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
+    let inference_tensor::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
         unreachable!("CUDA top-k packed workspace is CUDA")
     };
     let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
@@ -549,77 +554,79 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
     k: usize,
     cache: &mut Option<CudaRankedTopKPackedWorkspace>,
 ) -> Result<RankedTopKPackedOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
     use std::ffi::c_void;
 
     const OP: &str = "cuda_topk_ranked_packed_batched";
 
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!("{OP} requires BF16, F16, or F32 logits");
+        inference_tensor::bail!("{OP} requires BF16, F16, or F32 logits");
     }
     if !input.is_contiguous() {
-        return Err(candle_core::Error::RequiresContiguous { op: OP });
+        return Err(inference_tensor::Error::RequiresContiguous { op: OP });
     }
-    let vocab =
-        input.dims().last().copied().ok_or_else(|| {
-            candle_core::Error::Msg(format!("{OP} requires logits with rank >= 1"))
-        })?;
+    let vocab = input.dims().last().copied().ok_or_else(|| {
+        inference_tensor::Error::Msg(format!("{OP} requires logits with rank >= 1"))
+    })?;
     if vocab == 0 {
-        candle_core::bail!("{OP} got an empty vocabulary");
+        inference_tensor::bail!("{OP} got an empty vocabulary");
     }
     let batch = input.elem_count() / vocab;
     if batch == 0 {
-        candle_core::bail!("{OP} got an empty batch");
+        inference_tensor::bail!("{OP} got an empty batch");
     }
     let k = k.min(vocab);
     if k == 0 || k > CUDA_TOPK_MAX_K {
-        candle_core::bail!("{OP} k={k} must be in [1, {}]", CUDA_TOPK_MAX_K.min(vocab));
+        inference_tensor::bail!("{OP} k={k} must be in [1, {}]", CUDA_TOPK_MAX_K.min(vocab));
     }
     if vocab > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} vocabulary size {vocab} cannot be represented exactly by packed F32 indices"
         );
     }
     if vocab > i32::MAX as usize {
-        candle_core::bail!("{OP} vocabulary is too large: {vocab}");
+        inference_tensor::bail!("{OP} vocabulary is too large: {vocab}");
     }
     if batch > CUDA_TOPK_MAX_GRID_Y {
-        candle_core::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
+        inference_tensor::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
     }
 
     let nblocks = vocab.div_ceil(CUDA_TOPK_CHUNK_SIZE);
     let candidates_per_row = nblocks
         .checked_mul(k)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} candidate count overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} candidate count overflow")))?;
     if candidates_per_row > CUDA_TOPK_MAX_STAGE2_CANDIDATES {
-        candle_core::bail!("{OP} workspace too large: {candidates_per_row} candidates per row");
+        inference_tensor::bail!(
+            "{OP} workspace too large: {candidates_per_row} candidates per row"
+        );
     }
-    let workspace_elems = batch
-        .checked_mul(candidates_per_row)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} candidate workspace overflow")))?;
+    let workspace_elems = batch.checked_mul(candidates_per_row).ok_or_else(|| {
+        inference_tensor::Error::Msg(format!("{OP} candidate workspace overflow"))
+    })?;
     let radix_state_words_per_row = unsafe { ffi::topk_large_ranked_state_words_per_row() };
     let radix_state_elems = batch
         .checked_mul(radix_state_words_per_row)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} radix workspace overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} radix workspace overflow")))?;
     let packed_width = k
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed width overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} packed width overflow")))?;
     let packed_elems = batch
         .checked_mul(packed_width)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed output overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} packed output overflow")))?;
 
-    let nrows_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(vocab).map_err(candle_core::Error::wrap)?;
-    let k_i32 = i32::try_from(k).map_err(candle_core::Error::wrap)?;
-    let chunk_size_i32 = i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(candle_core::Error::wrap)?;
-    let nblocks_i32 = i32::try_from(nblocks).map_err(candle_core::Error::wrap)?;
+    let nrows_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
+    let k_i32 = i32::try_from(k).map_err(inference_tensor::Error::wrap)?;
+    let chunk_size_i32 =
+        i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(inference_tensor::Error::wrap)?;
+    let nblocks_i32 = i32::try_from(nblocks).map_err(inference_tensor::Error::wrap)?;
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA logits"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA logits"),
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
@@ -651,10 +658,10 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
         CudaStorageSlice::F32(slice) => input_ptr!(slice, f32),
         CudaStorageSlice::BF16(slice) => input_ptr!(slice, half::bf16),
         CudaStorageSlice::F16(slice) => input_ptr!(slice, half::f16),
-        _ => candle_core::bail!("{OP} logits dtype mismatch"),
+        _ => inference_tensor::bail!("{OP} logits dtype mismatch"),
     };
     let (block_values_storage_guard, block_values_layout) = block_values.storage_and_layout();
-    let candle_core::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
+    let inference_tensor::Storage::Cuda(block_values_storage) = &*block_values_storage_guard else {
         unreachable!("CUDA ranked top-k workspace values are CUDA")
     };
     let CudaStorageSlice::F32(block_values_slice) = &block_values_storage.slice else {
@@ -664,7 +671,8 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
     let block_values_ptr =
         unsafe { (block_values_ptr as *mut f32).add(block_values_layout.start_offset()) };
     let (block_indices_storage_guard, block_indices_layout) = block_indices.storage_and_layout();
-    let candle_core::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard else {
+    let inference_tensor::Storage::Cuda(block_indices_storage) = &*block_indices_storage_guard
+    else {
         unreachable!("CUDA ranked top-k workspace indices are CUDA")
     };
     let CudaStorageSlice::U32(block_indices_slice) = &block_indices_storage.slice else {
@@ -674,7 +682,7 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
     let block_indices_ptr =
         unsafe { (block_indices_ptr as *mut u32).add(block_indices_layout.start_offset()) };
     let (packed_storage_guard, packed_layout) = packed_dst.storage_and_layout();
-    let candle_core::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
+    let inference_tensor::Storage::Cuda(packed_storage) = &*packed_storage_guard else {
         unreachable!("CUDA ranked top-k packed workspace is CUDA")
     };
     let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
@@ -683,7 +691,7 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
     let packed_ptr = unsafe { (packed_ptr as *mut f32).add(packed_layout.start_offset()) };
     let (radix_storage_guard, radix_layout) = radix_state.storage_and_layout();
-    let candle_core::Storage::Cuda(radix_storage) = &*radix_storage_guard else {
+    let inference_tensor::Storage::Cuda(radix_storage) = &*radix_storage_guard else {
         unreachable!("CUDA ranked top-k radix workspace is CUDA")
     };
     let CudaStorageSlice::U32(radix_slice) = &radix_storage.slice else {
@@ -731,7 +739,7 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
     drop(packed_storage_guard);
     drop(radix_storage_guard);
     if status != 0 {
-        candle_core::bail!("{OP} CUDA launch failed with status {status}");
+        inference_tensor::bail!("{OP} CUDA launch failed with status {status}");
     }
 
     Ok(RankedTopKPackedOutput {
@@ -757,32 +765,32 @@ pub fn metal_topk_logits_packed(
     k: usize,
     temperature: f64,
 ) -> Result<TopKLogitsPackedOutput> {
-    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
+    use inference_tensor::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     const MAX_K: usize = 128;
     const CHUNK_SIZE: usize = 2048;
 
     if temperature <= 0.0 || !temperature.is_finite() {
-        candle_core::bail!("metal_topk_logits_packed requires a positive finite temperature");
+        inference_tensor::bail!("metal_topk_logits_packed requires a positive finite temperature");
     }
     let input = input.contiguous()?;
     if !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
-        candle_core::bail!("metal_topk_logits_packed requires F32/F16/BF16 logits");
+        inference_tensor::bail!("metal_topk_logits_packed requires F32/F16/BF16 logits");
     }
     let dtype = input.dtype();
     let ncols = input.elem_count();
     if ncols == 0 {
-        candle_core::bail!("metal_topk_logits_packed got empty logits");
+        inference_tensor::bail!("metal_topk_logits_packed got empty logits");
     }
     let k = k.min(ncols);
     if k == 0 || k > MAX_K {
-        candle_core::bail!("metal_topk_logits_packed k={k} must be in [1, {MAX_K}]");
+        inference_tensor::bail!("metal_topk_logits_packed k={k} must be in [1, {MAX_K}]");
     }
     let nblocks = ncols.div_ceil(CHUNK_SIZE);
 
     let (input_s, input_l) = input.storage_and_layout();
     let Storage::Metal(input_s) = &*input_s else {
-        candle_core::bail!("metal_topk_logits_packed requires Metal tensor");
+        inference_tensor::bail!("metal_topk_logits_packed requires Metal tensor");
     };
     let device = input_s.device().clone();
 
@@ -814,7 +822,9 @@ pub fn metal_topk_logits_packed(
         CHUNK_SIZE,
         inv_temp,
     )
-    .map_err(|e| candle_core::Error::Msg(format!("metal_topk_logits_packed kernel error: {e}")))?;
+    .map_err(|e| {
+        inference_tensor::Error::Msg(format!("metal_topk_logits_packed kernel error: {e}"))
+    })?;
     let _ = (
         input_offset,
         &block_values_buf,

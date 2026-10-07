@@ -1,5 +1,5 @@
-use candle_core::cuda::cudarc::driver::sys::CUstream;
 use half::{bf16, f16};
+use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
 unsafe extern "C" {
     pub(crate) fn dequantize_blockwise_f32_int8(

@@ -1,6 +1,6 @@
-use candle_core::{Result, Tensor};
-use candle_nn::{Activation, Conv2d, Conv2dConfig, Module};
 use inference_quant::{Convolution, ShardedVarBuilder};
+use inference_tensor::nn::{Activation, Conv2d, Conv2dConfig, Module};
+use inference_tensor::{Result, Tensor};
 use tracing::warn;
 
 use crate::{

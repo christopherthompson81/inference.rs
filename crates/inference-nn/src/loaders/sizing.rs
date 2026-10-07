@@ -1,6 +1,6 @@
 use anyhow::Result;
-use candle_core::DType;
 use inference_quant::{IsqType, QuantizedWeightSource};
+use inference_tensor::DType;
 
 use crate::topology::Topology;
 
@@ -317,8 +317,8 @@ impl DecoderLayerShape {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::Device;
     use inference_quant::QuantizedWeightSource;
+    use inference_tensor::Device;
 
     use super::*;
 
@@ -334,7 +334,8 @@ mod tests {
             _key: &str,
             _device: &Device,
             _shard: inference_quant::Shard,
-        ) -> candle_core::Result<Option<std::sync::Arc<dyn inference_quant::QuantMethod>>> {
+        ) -> inference_tensor::Result<Option<std::sync::Arc<dyn inference_quant::QuantMethod>>>
+        {
             unreachable!()
         }
 
@@ -342,19 +343,23 @@ mod tests {
             &self,
             _name: &str,
             _device: &Device,
-        ) -> candle_core::Result<Option<candle_core::Tensor>> {
+        ) -> inference_tensor::Result<Option<inference_tensor::Tensor>> {
             unreachable!()
         }
 
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
+        fn shard_alignment(&self, _key: &str) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
+        fn pack_factor(&self, _dtype: DType) -> inference_tensor::Result<usize> {
             Ok(self.0)
         }
 
-        fn pack_factor_for(&self, _key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
+        fn pack_factor_for(
+            &self,
+            _key: &str,
+            _dtype: DType,
+        ) -> inference_tensor::Result<Option<usize>> {
             Ok(Some(self.0))
         }
     }

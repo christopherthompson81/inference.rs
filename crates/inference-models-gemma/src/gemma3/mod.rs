@@ -3,9 +3,9 @@
 use crate::attention::AttentionMask;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{Context, D, DType, Device, Result, Tensor};
 use config::Gemma3Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::{Context, D, DType, Device, Result, Tensor};
 use mmproj::Gemma3MultiModalProjector;
 use text::TextModel;
 
@@ -157,7 +157,7 @@ impl Gemma3Model {
 
             if let Some(layout) = packed_layout {
                 if image_features.dim(0)? != image_hashes.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Gemma 3 packed input has {} image outputs but {} image hashes",
                         image_features.dim(0)?,
                         image_hashes.len()
@@ -248,7 +248,7 @@ impl MultimodalModel for Gemma3Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let Gemma3SpecificArgs {
             image_hashes,
             packed_layout,

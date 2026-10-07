@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{Context, DType, Device, Result, Shape, Tensor};
+use inference_tensor::{Context, DType, Device, Result, Shape, Tensor};
 use serde::Deserialize;
 
 use crate::{
@@ -84,7 +84,7 @@ impl BnbLinear {
         if !vb_w.contains_tensor("quant_state.bitsandbytes__nf4")
             && !vb_w.contains_tensor("quant_state.bitsandbytes__fp4")
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "`BnbLinear` expects either `...__nf4` or `...__fp4` tensors, this means the layer is not 4bit."
             );
         }
@@ -113,12 +113,12 @@ impl BnbLinear {
             BnbQuantType::Int8 => None,
         };
         let Some(state) = state else {
-            candle_core::bail!("Only fp8/nf4 quantization is supported for now.")
+            inference_tensor::bail!("Only fp8/nf4 quantization is supported for now.")
         };
 
         let state_str = String::from_utf8(state.to_vec1::<u8>()?)?;
         let state: BnbQuantState =
-            serde_json::from_str(&state_str).map_err(candle_core::Error::msg)?;
+            serde_json::from_str(&state_str).map_err(inference_tensor::Error::msg)?;
 
         let nested = if vb_w.contains_tensor("nested_absmax") {
             // TODO: can `nested_blocksize` be None, default to 64 like bnb?
@@ -179,7 +179,7 @@ impl BnbLinear {
         let out_dtype: DType = params.dtype.into();
 
         if !SUPPORTED_BLOCKSIZE.contains(&params.blocksize) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Blocksize of {} is not supported, {SUPPORTED_BLOCKSIZE:?} are.",
                 params.blocksize
             );
@@ -199,7 +199,7 @@ impl BnbLinear {
 }
 
 impl QuantMethod for BnbLinear {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -249,7 +249,7 @@ impl QuantMethod for BnbLinear {
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("HQQ quantization does not support adding weight delta.")
+        inference_tensor::bail!("HQQ quantization does not support adding weight delta.")
     }
 
     fn dtype_and_device(&self) -> (DType, Device) {
@@ -287,7 +287,7 @@ impl QuantMethod for BnbLinear {
     ) -> Result<Arc<dyn QuantMethod>> {
         let weight = self.dequantize_w()?;
         Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
-            candle_nn::Linear::new(weight, self.bias.clone()),
+            inference_tensor::nn::Linear::new(weight, self.bias.clone()),
         ))?)
         .apply_isq(dtype, device, n_quantized, imatrix_weight, guard)
     }

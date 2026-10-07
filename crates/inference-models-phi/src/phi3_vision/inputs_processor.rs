@@ -2,8 +2,8 @@
 
 use std::{any::Any, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImage, GenericImageView, Rgba, imageops::FilterType};
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use itertools::Itertools;
 use regex_automata::meta::Regex;
@@ -142,7 +142,7 @@ fn phi3_layout_items(features: &[MultiModalFeature]) -> Result<Vec<MultimodalIte
         .filter(|feature| feature.kind == MultimodalKind::Image)
         .map(|feature| {
             if feature.item_range.len() != 1 || feature.hashes.len() != 1 {
-                candle_core::bail!("Phi3 image feature must describe exactly one image");
+                inference_tensor::bail!("Phi3 image feature must describe exactly one image");
             }
             let placeholder = feature.offset..feature.end();
             MultimodalItemLayout::new(
@@ -164,14 +164,14 @@ fn phi3_packed_layout(
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("Phi3 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Phi3 packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
         .zip(query_lens)
         .map(|(seq, &query_len)| {
             if query_len != seq.get_toks().len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Phi3 packed multimodal prefill requires the complete uncached prompt"
                 );
             }
@@ -715,7 +715,7 @@ impl ImagePreProcessor for Phi3InputsProcessor {
             num_img_tokens.push(num_image_tokens);
         }
         if padded_images.len() > 1 {
-            candle_core::bail!("Can only process one image per batch");
+            inference_tensor::bail!("Can only process one image per batch");
         }
         let image_sizes = image_sizes[0];
 
@@ -743,7 +743,7 @@ impl ImagePreProcessor for Phi3InputsProcessor {
 mod tests {
     use std::{collections::HashMap, ops::Range};
 
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::*;
     use crate::paged_attention::block_hash::MultimodalAttentionPolicy;

@@ -1,8 +1,8 @@
 use std::{any::Any, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{Device, IndexOp, Tensor};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use inference_tensor::{Device, IndexOp, Tensor};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
 };
@@ -213,7 +213,7 @@ impl QwenVlSpec for Qwen3VLImageProcessor {
         videos: Vec<Vec<DynamicImage>>,
         config: &PreProcessorConfig,
         device: &Device,
-    ) -> candle_core::Result<PreprocessedImages> {
+    ) -> inference_tensor::Result<PreprocessedImages> {
         self.preprocess(images, videos, config, device, (usize::MAX, usize::MAX))
     }
 
@@ -345,16 +345,16 @@ impl Qwen3VLImageProcessor {
         factor: usize,
         min_pixels: usize,
         max_pixels: usize,
-    ) -> candle_core::Result<(usize, usize)> {
+    ) -> inference_tensor::Result<(usize, usize)> {
         if height < factor || width < factor {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "height:{} or width:{} must be larger than factor:{}",
                 height,
                 width,
                 factor
             );
         } else if (height.max(width) as f64 / height.min(width) as f64) > 200.0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "absolute aspect ratio must be smaller than 200, got {:.2}",
                 height.max(width) as f64 / height.min(width) as f64
             );
@@ -384,7 +384,7 @@ impl Qwen3VLImageProcessor {
         width: usize,
         factor: usize,
         temporal_factor: usize,
-    ) -> candle_core::Result<(usize, usize)> {
+    ) -> inference_tensor::Result<(usize, usize)> {
         let VideoSizing {
             num_frames,
             min_pixels,
@@ -397,7 +397,7 @@ impl Qwen3VLImageProcessor {
             width = (width as f64 * scale) as usize;
         }
         if (height.max(width) as f64 / height.min(width) as f64) > 200.0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "absolute aspect ratio must be smaller than 200, got {:.2}",
                 height.max(width) as f64 / height.min(width) as f64
             );
@@ -433,7 +433,7 @@ impl Qwen3VLImageProcessor {
         device: &Device,
         (mut height, mut width): (u32, u32),
         video: Option<&VideoSizing>,
-    ) -> candle_core::Result<(Tensor, (u32, u32, u32))> {
+    ) -> inference_tensor::Result<(Tensor, (u32, u32, u32))> {
         let mut processed_images = Vec::new();
 
         for mut image in images {
@@ -498,13 +498,13 @@ impl Qwen3VLImageProcessor {
 
         // Validate divisors to prevent division by zero
         if temporal_patch_size == 0 {
-            candle_core::bail!("temporal_patch_size cannot be zero");
+            inference_tensor::bail!("temporal_patch_size cannot be zero");
         }
         if patch_size == 0 {
-            candle_core::bail!("patch_size cannot be zero");
+            inference_tensor::bail!("patch_size cannot be zero");
         }
         if merge_size == 0 {
-            candle_core::bail!("merge_size cannot be zero");
+            inference_tensor::bail!("merge_size cannot be zero");
         }
         let remainder = processed_images.len() % temporal_patch_size;
         if remainder != 0 {
@@ -559,7 +559,7 @@ impl ImagePreProcessor for Qwen3VLImageProcessor {
         config: &PreProcessorConfig,
         device: &Device,
         (_, _): (usize, usize),
-    ) -> candle_core::Result<PreprocessedImages> {
+    ) -> inference_tensor::Result<PreprocessedImages> {
         let mut pixel_values = Vec::new();
         let mut vision_grid_thw = Vec::new();
 
@@ -802,7 +802,7 @@ mod tests {
     }
 
     #[test]
-    fn video_smart_resize_budgets_whole_video() -> candle_core::Result<()> {
+    fn video_smart_resize_budgets_whole_video() -> inference_tensor::Result<()> {
         let processor = Qwen3VLImageProcessor { max_edge: None };
         let sizing = |num_frames| VideoSizing {
             num_frames,

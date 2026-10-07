@@ -60,17 +60,17 @@ fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
 
 pub(super) fn catch_cutile_panic<T>(
     operation: &str,
-    f: impl FnOnce() -> candle_core::Result<T>,
-) -> candle_core::Result<T> {
+    f: impl FnOnce() -> inference_tensor::Result<T>,
+) -> inference_tensor::Result<T> {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
         Ok(result) => result,
         Err(payload) => {
-            candle_core::bail!("cuTile {operation} panicked: {}", panic_message(payload))
+            inference_tensor::bail!("cuTile {operation} panicked: {}", panic_message(payload))
         }
     }
 }
 
-pub fn device_supported(dev: &candle_core::CudaDevice) -> bool {
+pub fn device_supported(dev: &inference_tensor::CudaDevice) -> bool {
     let Some(cuda_code) = build_cuda_version_code() else {
         return false;
     };
@@ -165,7 +165,7 @@ fn tileiras_capabilities() -> Option<&'static TileirasCapabilities> {
 }
 
 /// Whether `tileiras` can JIT this Tile IR for the active GPU.
-pub fn jit_available(dev: &candle_core::CudaDevice) -> bool {
+pub fn jit_available(dev: &inference_tensor::CudaDevice) -> bool {
     let target = dev.compute_cap();
     tileiras_capabilities().is_some_and(|capabilities| capabilities.targets.contains(&target))
 }
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn dependency_panics_become_errors() {
-        let error = super::catch_cutile_panic("test JIT", || -> candle_core::Result<()> {
+        let error = super::catch_cutile_panic("test JIT", || -> inference_tensor::Result<()> {
             panic!("tileiras rejected the target")
         })
         .unwrap_err();

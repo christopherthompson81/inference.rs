@@ -1,4 +1,4 @@
-use candle_core::{D, DType, Device, Result, Tensor};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use serde::Deserialize;
 
 use super::DiffusionGemmaModel;
@@ -155,7 +155,7 @@ pub fn generate_canvas(
             .to_dtype(DType::U32)?;
         let mut new_argmax = scaled.argmax(D::Minus1)?.to_dtype(DType::U32)?;
 
-        let log_probs = candle_nn::ops::log_softmax(&scaled, D::Minus1)?;
+        let log_probs = inference_tensor::nn::ops::log_softmax(&scaled, D::Minus1)?;
         let probs = log_probs.exp()?;
         let token_entropy = (&probs * &log_probs)?.sum(D::Minus1)?.neg()?;
 

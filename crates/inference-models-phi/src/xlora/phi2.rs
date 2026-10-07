@@ -14,15 +14,15 @@ use crate::{
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
 };
+use inference_nn::utils::progress::IterWithProgress;
+use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::LayerNorm;
 /// Phi model.
 /// https://huggingface.co/microsoft/phi-2
 /// There is an alternative implementation of the phi model in mixformers.rs.
 /// This corresponds to the model update made with the following commit:
 /// https://huggingface.co/microsoft/phi-2/commit/cb2f4533604d8b67de604e7df03bfe6f3ca22869
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::LayerNorm;
-use inference_nn::utils::progress::IterWithProgress;
-use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{DType, Device, Result, Tensor};
 use tracing::info;
 
 use crate::{
@@ -271,7 +271,7 @@ impl Attention {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
@@ -506,7 +506,9 @@ impl Model {
         )?;
         if xlora_config.is_some() && lm_head.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
         Ok(Self {
             embed_tokens,

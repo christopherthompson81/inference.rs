@@ -9,9 +9,9 @@ pub mod preprocess;
 use std::path::Path;
 use std::sync::OnceLock;
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::VarBuilder;
 use image::RgbImage;
+use inference_tensor::nn::VarBuilder;
+use inference_tensor::{DType, Device, Result, Tensor};
 use rayon::prelude::*;
 
 pub use config::{LABELS, PPDocLayoutV3Config, PPDocLayoutV3PreprocessorConfig};
@@ -23,8 +23,8 @@ pub const DEFAULT_THRESHOLD: f32 = 0.5;
 const RAYON_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let s = std::fs::read_to_string(path).map_err(candle_core::Error::wrap)?;
-    serde_json::from_str(&s).map_err(candle_core::Error::wrap)
+    let s = std::fs::read_to_string(path).map_err(inference_tensor::Error::wrap)?;
+    serde_json::from_str(&s).map_err(inference_tensor::Error::wrap)
 }
 
 static CPU_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
@@ -104,7 +104,7 @@ impl PPDocLayoutV3Detector {
             let pool = rayon::ThreadPoolBuilder::new()
                 .num_threads(threads.max(1))
                 .build()
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             self.pool = Some(Pool::Owned(pool));
         }
         Ok(self)

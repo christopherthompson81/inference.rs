@@ -2,8 +2,8 @@
 
 use std::{any::Any, ops::Range, sync::Arc};
 
-use candle_core::{Device, IndexOp, Result, Tensor};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use inference_tensor::{Device, IndexOp, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use tokenizers::Tokenizer;
 

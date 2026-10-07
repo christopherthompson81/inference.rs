@@ -25,10 +25,10 @@ pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
 pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
-use candle_core::{DType, Device};
 pub use config::{
     HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
 };
+use inference_tensor::{DType, Device};
 pub use input_metadata::{PagedAttentionInputMetadata, PagedAttentionMeta};
 pub use kv_cache_manager::KVCacheManager;
 pub use layers::PagedAttention;
@@ -313,7 +313,7 @@ const SUPPORTED_BLOCK_SIZE: &[usize] = &[8, 16, 32];
 // Weight-loading transients freed into the stream-ordered pool are fragmented and cannot back the
 // large contiguous KV tensors; return them to the driver before sizing and allocating the cache.
 #[cfg(feature = "cuda")]
-fn trim_cuda_mempool(device: &Device) -> candle_core::Result<()> {
+fn trim_cuda_mempool(device: &Device) -> inference_tensor::Result<()> {
     MemoryUsage.trim_cuda_memory_pool(device, 0)?;
     Ok(())
 }

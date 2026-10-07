@@ -3,11 +3,11 @@
 use crate::attention::FlashParams;
 use std::{ops::Mul, sync::Arc};
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, LayerNormConfig, Module};
 use inference_quant::{
     ColumnParallelLayer, Convolution, QuantMethod, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, LayerNormConfig, Module};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},

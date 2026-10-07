@@ -2,11 +2,11 @@
 //!
 //! This dequantizes the weights and delegates to UnquantLinear's gather_forward.
 
-use candle_core::{
+use inference_tensor::nn::Linear;
+use inference_tensor::{
     Result, Tensor,
     quantized::{QMatMul, QTensor},
 };
-use candle_nn::Linear;
 use std::sync::Arc;
 
 use crate::{QuantMethod, QuantMethodConfig, UnquantLinear};

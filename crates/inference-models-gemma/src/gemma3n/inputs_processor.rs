@@ -2,8 +2,8 @@
 
 use std::{any::Any, collections::HashSet, ops::Range, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::DynamicImage;
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -92,7 +92,7 @@ fn gemma3n_active_items(
     available_items: usize,
 ) -> Result<Vec<Gemma3nActiveItem>> {
     if query.start > query.end {
-        candle_core::bail!("Gemma 3n active query range is reversed");
+        inference_tensor::bail!("Gemma 3n active query range is reversed");
     }
     let features = features
         .iter()
@@ -104,7 +104,7 @@ fn gemma3n_active_items(
         .max()
         .unwrap_or(0);
     if available_items > total_items {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3n has {available_items} retained {kind:?} items but metadata describes {total_items}"
         );
     }
@@ -114,19 +114,21 @@ fn gemma3n_active_items(
 
     for feature in features {
         if feature.hashes.len() != 1 || feature.item_range.len() != 1 {
-            candle_core::bail!("Gemma 3n requires one {kind:?} item and hash per placeholder span");
+            inference_tensor::bail!(
+                "Gemma 3n requires one {kind:?} item and hash per placeholder span"
+            );
         }
         if feature.item_range.start < retained_start {
             continue;
         }
         let local_index = feature.item_range.start - retained_start;
         if local_index >= available_items || !local_indices.insert(local_index) {
-            candle_core::bail!("Gemma 3n {kind:?} item coordinates are invalid");
+            inference_tensor::bail!("Gemma 3n {kind:?} item coordinates are invalid");
         }
         let end = feature
             .offset
             .checked_add(feature.length)
-            .ok_or_else(|| candle_core::Error::msg("Gemma 3n placeholder range overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Gemma 3n placeholder range overflow"))?;
         let overlap_start = feature.offset.max(query.start);
         let overlap_end = end.min(query.end);
         if overlap_start < overlap_end {
@@ -160,7 +162,7 @@ fn gemma3n_request_layout(
     features: &[MultiModalFeature],
 ) -> Result<RequestMultimodalLayout> {
     if query.start > query.end || query.end > tokens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3n packed query {query:?} exceeds {} tokens",
             tokens.len()
         );
@@ -168,7 +170,7 @@ fn gemma3n_request_layout(
     let mut items = Vec::with_capacity(features.len());
     for feature in features {
         if feature.hashes.len() != 1 || feature.item_range.len() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma 3n packed prefill requires one encoder item per placeholder span"
             );
         }
@@ -176,21 +178,21 @@ fn gemma3n_request_layout(
             MultimodalKind::Image => IMAGE_TOKEN_ID,
             MultimodalKind::Audio => AUDIO_TOKEN_ID,
             MultimodalKind::Video => {
-                candle_core::bail!("Gemma 3n does not support video layout items")
+                inference_tensor::bail!("Gemma 3n does not support video layout items")
             }
         };
         let end = feature
             .offset
             .checked_add(feature.length)
-            .ok_or_else(|| candle_core::Error::msg("Gemma 3n placeholder range overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Gemma 3n placeholder range overflow"))?;
         if feature.length == 0 || end > tokens.len() {
-            candle_core::bail!("Gemma 3n placeholder range exceeds the prompt");
+            inference_tensor::bail!("Gemma 3n placeholder range exceeds the prompt");
         }
         if tokens[feature.offset..end]
             .iter()
             .any(|&value| value != token)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma 3n {:?} placeholder contains a non-placeholder token",
                 feature.kind
             );
@@ -219,7 +221,7 @@ fn gemma3n_packed_layout(
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("Gemma 3n packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Gemma 3n packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
@@ -229,7 +231,7 @@ fn gemma3n_packed_layout(
                 || seq.prefix_cache_len() != 0
                 || query_len != seq.get_toks().len()
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Gemma 3n packed multimodal prefill requires the complete uncached prompt"
                 );
             }
@@ -455,7 +457,7 @@ impl Gemma3nImageProcessor {
 
             let mut prompt = tokenizer
                 .decode(seq.get_toks(), false)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             let raw_image_count = prompt.match_indices(IMAGE_TOKEN).count();
             let raw_audio_count = prompt.match_indices(AUDIO_TOKEN).count();
             if raw_image_count != image_count {
@@ -482,7 +484,7 @@ impl Gemma3nImageProcessor {
             }
             let ids = tokenizer
                 .encode_fast(prompt.clone(), false)
-                .map_err(candle_core::Error::wrap)?
+                .map_err(inference_tensor::Error::wrap)?
                 .get_ids()
                 .to_vec();
             let image_ranges = find_image_placeholder_ranges(&ids, IMAGE_TOKEN_ID);
@@ -525,7 +527,7 @@ impl Gemma3nImageProcessor {
     fn active_query(seq: &dyn MediaSequence) -> Result<Range<usize>> {
         if seq.is_chunked_prefill_view() {
             return seq.active_prompt_query_range().ok_or_else(|| {
-                candle_core::Error::msg("Gemma 3n chunk is missing its active query range")
+                inference_tensor::Error::msg("Gemma 3n chunk is missing its active query range")
             });
         }
         let len = seq.get_toks().len();
@@ -583,7 +585,7 @@ impl Gemma3nImageProcessor {
             num_crops: _,
         } = self.preprocess(images, vec![], config, device, (usize::MAX, usize::MAX))?;
         if pixel_values.dim(0)? != hashes.len() || hashes.len() != source_ranges.len() {
-            candle_core::bail!("Gemma 3n active image metadata length mismatch");
+            inference_tensor::bail!("Gemma 3n active image metadata length mismatch");
         }
         Ok(Some(Gemma3nImageBatch {
             pixel_values,
@@ -631,13 +633,13 @@ impl Gemma3nImageProcessor {
         for audio in audios {
             let (mel, mask) = processor
                 .process_audio(&audio, device)
-                .map_err(|error| candle_core::Error::Msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::Msg(error.to_string()))?;
             if mel.dim(0)? != 1
                 || mask.dim(0)? != 1
                 || mel.dim(1)? == 0
                 || mel.dim(1)? != mask.dim(1)?
             {
-                candle_core::bail!("Gemma 3n audio preprocessing returned invalid dimensions");
+                inference_tensor::bail!("Gemma 3n audio preprocessing returned invalid dimensions");
             }
             mels.push(mel);
             masks.push(mask);
@@ -662,7 +664,7 @@ impl Gemma3nImageProcessor {
             }
         }
         if hashes.len() != padded_mels.len() || hashes.len() != source_ranges.len() {
-            candle_core::bail!("Gemma 3n active audio metadata length mismatch");
+            inference_tensor::bail!("Gemma 3n active audio metadata length mismatch");
         }
         Ok(Some(Gemma3nAudioBatch {
             mel: Tensor::cat(&padded_mels, 0)?,
@@ -759,7 +761,7 @@ impl ImagePreProcessor for Gemma3nImageProcessor {
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Device};
+    use inference_tensor::{DType, Device};
 
     use crate::{
         paged_attention::block_hash::MultimodalAttentionPolicy,

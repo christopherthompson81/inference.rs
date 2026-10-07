@@ -4,11 +4,11 @@ use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -61,9 +61,11 @@ impl Config {
         match (self.hidden_act, self.hidden_activation) {
             (None, Some(act)) | (Some(act), None) => Ok(act),
             (Some(_), Some(_)) => {
-                candle_core::bail!("both hidden_act and hidden_activation are set")
+                inference_tensor::bail!("both hidden_act and hidden_activation are set")
             }
-            (None, None) => candle_core::bail!("none of hidden_act and hidden_activation are set"),
+            (None, None) => {
+                inference_tensor::bail!("none of hidden_act and hidden_activation are set")
+            }
         }
     }
 }
@@ -186,7 +188,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
 

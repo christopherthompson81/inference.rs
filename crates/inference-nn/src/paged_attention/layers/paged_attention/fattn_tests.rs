@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use candle_core::cuda_backend::cudarc::driver::sys;
-use candle_core::{DType, Device, Result, Tensor};
 use inference_paged_attn::KvCacheScales;
+use inference_tensor::cuda_backend::cudarc::driver::sys;
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use super::{FattnPrefillCall, PagedAttention, PagedForwardCtx, PagedForwardDims};
 use crate::attention::{AttentionMask, SdpaParams};
@@ -106,7 +106,9 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
         devices: vec![dev.clone()],
         num_kv_heads: n_head_kv,
     });
-    let mut metadata = rows.build_materialized().map_err(candle_core::Error::msg)?;
+    let mut metadata = rows
+        .build_materialized()
+        .map_err(inference_tensor::Error::msg)?;
     metadata.flashinfer = metadata.flashinfer.map(|m| m.track_decode_tile_plan());
 
     let fp8 = c.cache_dtype == DType::F8E4M3;
@@ -141,7 +143,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
         let stream = dev.as_cuda_device()?.cuda_stream();
         stream
             .begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let captured = layer.forward_donor_cache(
             &query,
             &k_cache,
@@ -453,11 +455,11 @@ fn attention_reference(
                 }
                 let att = (att + &mask)?;
                 let Some(sinks) = c.sinks else {
-                    return candle_nn::ops::softmax_last_dim(&att)?.matmul(&v);
+                    return inference_tensor::nn::ops::softmax_last_dim(&att)?.matmul(&v);
                 };
                 // a sink is one more logit in the softmax that carries no value
                 let sink = Tensor::full(sinks[h], (q_len, 1), &Device::Cpu)?;
-                candle_nn::ops::softmax_last_dim(&Tensor::cat(&[&att, &sink], 1)?)?
+                inference_tensor::nn::ops::softmax_last_dim(&Tensor::cat(&[&att, &sink], 1)?)?
                     .narrow(1, 0, kv_len)?
                     .matmul(&v)
             })
