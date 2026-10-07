@@ -840,7 +840,8 @@ impl WebSocketTransport {
             }
         }
 
-        // Connect to WebSocket
+        // wss:// handshakes on the process rustls provider
+        crate::tls::install_provider();
         let (ws_stream, _) = connect_async(request)
             .await
             .map_err(|e| anyhow::anyhow!("WebSocket connection failed: {}", e))?;
@@ -1023,5 +1024,26 @@ impl McpTransport for WebSocketTransport {
                 .map_err(|e| anyhow::anyhow!("Failed to send WebSocket message: {}", e))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // the listener hangs up on accept, so the connect fails; it must get to the handshake, not stop short of TLS
+    #[tokio::test]
+    async fn wss_urls_get_as_far_as_the_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { while listener.accept().await.is_ok() {} });
+        let err = super::WebSocketTransport::new(format!("wss://127.0.0.1:{port}/"), None, None)
+            .await
+            .err()
+            .expect("the listener speaks no TLS");
+        // a dial or handshake failure, not the URL check that refuses wss:// without TLS support
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("IO error") || msg.contains("TLS error"),
+            "{msg}"
+        );
     }
 }

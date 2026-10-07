@@ -2,8 +2,7 @@ use inference_quant::QuantizedConfig;
 use serde::Deserialize;
 
 use crate::deepseek_family::{
-    FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MlaKvLayout, MoeSpec, SharedExpert,
-    mla_softmax_scale,
+    FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MoeSpec, SharedExpert, mla_softmax_scale,
 };
 use crate::{
     layers::{Activation, DeepSeekV2RopeScaling},
@@ -85,7 +84,7 @@ pub struct DeepSeekV3Config {
 }
 
 impl DeepSeekV3Config {
-    fn router_config(&self) -> GroupedRouterConfig {
+    pub(crate) fn router_config(&self) -> GroupedRouterConfig {
         GroupedRouterConfig {
             scoring: match self.scoring_func {
                 ScoringFunc::Softmax => RouterScoring::Softmax,
@@ -142,7 +141,6 @@ impl DeepSeekV3Config {
                 softmax_scale: mla_softmax_scale(self.q_head_dim(), self.rope_scaling.as_ref()),
                 rope_theta: self.rope_theta,
                 rope_scaling: self.rope_scaling.clone(),
-                kv_layout: MlaKvLayout::Paged,
                 label: "DeepSeek",
             },
         }

@@ -252,7 +252,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
         Ok(Box::new(super::qwen2vl::decoder_shape(&cfg).model_config(
             cfg.num_hidden_layers,
             cfg.max_position_embeddings,
-            cfg.sliding_window,
+            cfg.decoder_spec()?.sliding_window(),
         )))
     }
 

@@ -277,7 +277,7 @@ impl DeviceMappedModelLoader for Qwen3VLLoader {
         Ok(Box::new(decoder_shape(&cfg).model_config(
             cfg.num_hidden_layers,
             cfg.max_position_embeddings,
-            cfg.sliding_window,
+            cfg.decoder_spec(false).sliding_window(),
         )))
     }
 

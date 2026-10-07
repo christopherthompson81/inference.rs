@@ -9,6 +9,7 @@ mod weights;
 
 pub use forward::{
     mla_cache_forward, mla_decode_forward, should_use_mla_cache, should_use_mla_decode,
+    uses_mla_paged_cache,
 };
 pub use projection::MlaKvBProjection;
 pub use weights::MlaWeights;

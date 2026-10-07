@@ -30,9 +30,7 @@ pub enum RouterMethod {
 pub enum RouterRenorm {
     /// DeepSeek-V2: renormalise when `top_k > 1 && norm_topk_prob`, and then skip the scale.
     TopkProbSkipsScale { norm_topk_prob: bool },
-    /// GLM4-MoE-Lite: always renormalise, then scale.
-    Always,
-    /// DeepSeek-V3 and GLM4-MoE: renormalise when `norm_topk_prob`, then scale.
+    /// DeepSeek-V3, GLM4-MoE and GLM4-MoE-Lite: renormalise when `norm_topk_prob`, then scale.
     TopkProb { norm_topk_prob: bool },
 }
 
@@ -87,7 +85,6 @@ impl GroupedRouter {
     fn renormalises(&self) -> bool {
         match self.cfg.renorm {
             RouterRenorm::TopkProbSkipsScale { norm_topk_prob } => self.top_k > 1 && norm_topk_prob,
-            RouterRenorm::Always => true,
             RouterRenorm::TopkProb { norm_topk_prob } => norm_topk_prob,
         }
     }

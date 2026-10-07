@@ -224,12 +224,13 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = LLaVAConfig::from_json(config)?.text_config;
+        let config = LLaVAConfig::from_json(config)?;
+        let cfg = &config.text_config;
         Ok(Box::new(
-            super::llava::text_decoder_shape(&cfg).model_config(
+            super::llava::text_decoder_shape(cfg).model_config(
                 cfg.num_hidden_layers,
                 cfg.max_position_embeddings,
-                cfg.sliding_window,
+                config.decoder_spec()?.sliding_window(),
             ),
         ))
     }

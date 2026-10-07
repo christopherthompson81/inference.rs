@@ -1,5 +1,6 @@
 use super::deepseek_family::*;
 use super::*;
+use crate::moe::RouterMethod;
 
 /// `NormalLoader` for a GLM 4 MoE Lite model (GLM-4.7-Flash).
 pub struct GLM4MoeLiteLoader;
@@ -54,7 +55,6 @@ impl GLM4MoeLiteLoader {
                 qk_rope_head_dim: cfg.qk_rope_head_dim,
                 v_head_dim: cfg.v_head_dim,
                 attention_bias: false,
-                packed_q: true,
             },
             moe: Some(MoeSizing {
                 n_routed_experts: cfg.n_routed_experts,
@@ -63,10 +63,9 @@ impl GLM4MoeLiteLoader {
                 moe_layer_freq: Some(cfg.moe_layer_freq),
                 shared_intermediate: (cfg.n_shared_experts > 0)
                     .then_some(cfg.moe_intermediate_size * cfg.n_shared_experts),
-                correction_bias: true,
+                correction_bias: cfg.router_config().method == RouterMethod::NoAuxTc,
             }),
             isq_head,
-            loose_dense_up: false,
         })
     }
 }

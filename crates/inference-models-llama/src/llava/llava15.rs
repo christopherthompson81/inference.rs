@@ -193,15 +193,8 @@ impl Model {
             &clip_config,
         )?;
 
-        let spec = match config.text_config.model_type.as_str() {
-            "llama" => config.to_llama_config().decoder_spec(),
-            "mistral" => config.to_mistral_config().decoder_spec()?,
-            _ => {
-                bail!("Unsupported model type: {}", config.text_config.model_type);
-            }
-        };
         let llm = CausalLm::new(
-            &spec,
+            &config.decoder_spec()?,
             vb.pp("language_model"),
             is_gptx,
             normal_loading_metadata,

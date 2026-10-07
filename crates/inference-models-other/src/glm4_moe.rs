@@ -73,7 +73,7 @@ pub struct Glm4MoeConfig {
 }
 
 impl Glm4MoeConfig {
-    fn router_config(&self) -> GroupedRouterConfig {
+    pub(crate) fn router_config(&self) -> GroupedRouterConfig {
         GroupedRouterConfig {
             scoring: RouterScoring::Sigmoid,
             method: RouterMethod::NoAuxTc,
