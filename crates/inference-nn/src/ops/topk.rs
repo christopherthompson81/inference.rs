@@ -1,10 +1,8 @@
 use super::*;
 
-// ============================================================================
 // Optimized parallel topk for CUDA
 // Uses a dedicated kernel that's much faster than full sort for small k
 // Single kernel call writes both values and indices - no post-processing needed
-// ============================================================================
 
 #[cfg(feature = "cuda")]
 #[allow(clippy::cast_possible_truncation)]

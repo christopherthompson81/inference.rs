@@ -847,7 +847,7 @@ mod ring_ops {
 
     use super::RingConfig;
 
-    // Lazily–initialized pair of TCP streams shared by every ring‑based collective op
+    // Lazily-initialized pair of TCP streams shared by every ring-based collective op
     static LEFT_RIGHT_STREAMS: OnceLock<LeftRight> = OnceLock::new();
 
     fn get_ring_streams(config: &RingConfig) -> LeftRight {
@@ -916,7 +916,7 @@ mod ring_ops {
         ) -> Result<Tensor> {
             let nbytes = x.len() * std::mem::size_of_val(x);
 
-            // --- ping‑pong to overlap latency ---------------------------------------
+            // ping-pong to overlap latency
             // Clone the Arc references
             let right = self.right.clone();
             let left = self.left.clone();
@@ -924,7 +924,7 @@ mod ring_ops {
             // View the local slice as bytes that can be written on the wire.
             let data_bytes = unsafe { std::slice::from_raw_parts(x.as_ptr() as *const u8, nbytes) };
 
-            // Re‑use (or allocate) a receive buffer of identical size.
+            // Re-use (or allocate) a receive buffer of identical size.
             let mut buffers_guard = self.buffers.lock().map_err(|e| {
                 inference_tensor::Error::msg(format!("Failed to lock buffers mutex: {:?}", e))
             })?;
@@ -942,10 +942,10 @@ mod ring_ops {
 
             // For the typical tensor size we see (~ 6 KiB) a single
             // write/read pair is faster than chunking because the extra
-            // system‑call and loop overhead dominates.  Only fall back to the
-            // chunked "ping‑pong" pipeline for larger transfers.
+            // system-call and loop overhead dominates.  Only fall back to the
+            // chunked "ping-pong" pipeline for larger transfers.
             if nbytes <= 8 * 1024 {
-                // --- fast path: one shot ------------------------------------
+                // fast path: one shot
                 right_guard
                     .write_all(data_bytes)
                     .map_err(|e| inference_tensor::Error::msg(format!("write error: {:?}", e)))?;
@@ -954,7 +954,7 @@ mod ring_ops {
                     .read_exact(recv_buf)
                     .map_err(|e| inference_tensor::Error::msg(format!("read error: {:?}", e)))?;
             } else {
-                // --- slow path: chunked ping‑pong ---------------------------
+                // slow path: chunked ping-pong
                 const CHUNK_SIZE: usize = 64 * 1024; // 64 KiB
                 let mut offset = 0;
 
@@ -982,8 +982,7 @@ mod ring_ops {
             drop(left_guard);
             drop(right_guard);
 
-            // -------------------------------------------------------------------------
-            // Interpret the received bytes as a slice of T and add element‑wise into x
+            // Interpret the received bytes as a slice of T and add element-wise into x
             let received: &[T] =
                 unsafe { std::slice::from_raw_parts(recv_buf.as_ptr() as *const T, x.len()) };
 
@@ -1066,7 +1065,7 @@ mod ring_ops {
             let mut send_piece: &[T] = x;
 
             for step in 0..(self.world_size - 1) {
-                // ---------- send to the right ----------
+                // send to the right
                 let bytes =
                     unsafe { std::slice::from_raw_parts(send_piece.as_ptr() as *const u8, nbytes) };
                 {
@@ -1081,7 +1080,7 @@ mod ring_ops {
                     })?;
                 }
 
-                // ---------- receive from the left ----------
+                // receive from the left
                 let mut bg = self.buffers.lock().map_err(|e| {
                     inference_tensor::Error::msg(format!("Failed to lock buffers mutex: {:?}", e))
                 })?;

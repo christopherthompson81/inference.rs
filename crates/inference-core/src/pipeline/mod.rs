@@ -83,7 +83,7 @@ pub use loaders::Qwen2Loader;
 pub use loaders::Starcoder2Loader;
 pub(crate) use loaders::checkpoint_runtime_size;
 pub use loaders::{
-    AdapterKind, AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
+    AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
     DeviceMappedModelLoader, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader,
     EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths,
     EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, Loader,

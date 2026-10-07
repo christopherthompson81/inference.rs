@@ -890,8 +890,8 @@ impl Gemma3nAudioSSCPConvBlock {
 
         // Calculate output frequency dimension after convolution
         let f_in_padded = input_freq_dim + manual_padding.0 + manual_padding.1;
-        // Use ceil-division to exactly match PyTorch’s convolution size formula
-        // out = ⌊(in + 2·pad − kernel) / stride⌋ + 1  -- with manual padding.
+        // Use ceil-division to exactly match PyTorch's convolution size formula
+        // out = floor((in + 2*pad - kernel) / stride) + 1  - with manual padding.
         // Because we materialise the padding ourselves, the equivalent integer
         // expression is ceil((f_in_padded - kernel_w) / stride_w).
         let f_out_conv = (f_in_padded + stride_w - kernel_w) / stride_w;

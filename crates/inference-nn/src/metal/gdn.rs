@@ -99,9 +99,7 @@ fn metal_buffer_and_offset(tensor: &Tensor) -> Result<(Buffer, usize)> {
     }
 }
 
-// ============================================================================
 // Public API: gated_delta_rule_recurrence
-// ============================================================================
 
 /// Gated delta rule recurrence on Metal.
 ///
@@ -205,9 +203,7 @@ pub fn gated_delta_rule_recurrence_metal(
     inference_tensor::bail!("gated_delta_rule_recurrence_metal requires the metal feature")
 }
 
-// ============================================================================
 // Public API: chunked_gated_delta_rule_recurrence (prefill optimization)
-// ============================================================================
 
 /// Chunked gated delta rule recurrence on Metal (prefill optimization).
 ///
@@ -308,9 +304,7 @@ pub fn chunked_gated_delta_rule_recurrence_metal(
     inference_tensor::bail!("chunked_gated_delta_rule_recurrence_metal requires the metal feature")
 }
 
-// ============================================================================
 // Public API: causal_conv1d
-// ============================================================================
 
 /// Causal conv1d on Metal (both update and full paths).
 ///
@@ -488,9 +482,7 @@ pub fn causal_conv1d_metal(
     inference_tensor::bail!("causal_conv1d_metal requires the metal feature")
 }
 
-// ============================================================================
 // Public API: fused_gdn_gating
-// ============================================================================
 
 /// Fused GDN gating on Metal.
 ///

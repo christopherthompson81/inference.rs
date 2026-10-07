@@ -5,9 +5,7 @@
 
 use super::*;
 
-// ============================================================================
 // Softmax with sinks kernel
-// ============================================================================
 
 #[allow(clippy::too_many_arguments)]
 pub fn call_softmax_with_sinks(
@@ -83,9 +81,7 @@ pub fn call_softmax_with_sinks(
     Ok(())
 }
 
-// ============================================================================
 // SDPA with sinks (fused attention) kernels
-// ============================================================================
 
 fn sdpa_with_sinks_dtype_name(ty: DType) -> Result<&'static str, MetalKernelError> {
     match ty {

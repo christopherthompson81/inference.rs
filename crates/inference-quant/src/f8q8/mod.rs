@@ -34,7 +34,7 @@ impl BlockF8Q8 {
     }
 }
 
-// ---- GgmlType-like functions ----
+// GgmlType-like functions
 
 fn to_float(xs: &[BlockF8Q8], ys: &mut [f32]) -> Result<()> {
     let k = ys.len();
@@ -79,7 +79,7 @@ fn from_float(xs: &[f32], ys: &mut [BlockF8Q8]) -> Result<()> {
     Ok(())
 }
 
-// ---- F8Q8Linear ----
+// F8Q8Linear
 
 #[derive(Debug)]
 pub struct F8Q8Linear {

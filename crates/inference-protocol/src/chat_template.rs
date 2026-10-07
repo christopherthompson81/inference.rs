@@ -588,9 +588,9 @@ pub fn apply_chat_template_to(
     // Use the already-resolved template string
     let mut template = normalize_minijinja_compatibility(&resolved_template);
     template = template.replace("[::-1]", "|reverse");
-    // Convert Python‑style descending ranges `range(..., -1, -1)` to a forward
-    // range followed by Jinja’s `|reverse` filter so it works even when
-    // negative‑step ranges aren’t supported.
+    // Convert Python-style descending ranges `range(..., -1, -1)` to a forward
+    // range followed by Jinja's `|reverse` filter so it works even when
+    // negative-step ranges aren't supported.
     let re = Regex::new(r"range\((?P<expr>[^,]+),\s*-1,\s*-1\)").unwrap();
     template = re
         .replace_all(&template, |caps: &regex::Captures| {
@@ -1036,7 +1036,7 @@ mod tests {
         };
         assert_eq!(tool_responses.len(), 1);
         assert_eq!(tool_responses[0]["name"], "get_weather");
-        // Content was valid JSON → parsed into a Value, not a string
+        // Content was valid JSON -> parsed into a Value, not a string
         assert_eq!(tool_responses[0]["response"]["temp"], 72);
     }
 

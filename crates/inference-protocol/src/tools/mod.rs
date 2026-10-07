@@ -65,7 +65,7 @@ where
             f.write_str("an object or a JSON-encoded string containing an object")
         }
 
-        // Case 1 – the good case: already a JSON object
+        // Case 1 - the good case: already a JSON object
         fn visit_map<M>(self, mut m: M) -> std::result::Result<Self::Value, M::Error>
         where
             M: MapAccess<'de>,
@@ -77,7 +77,7 @@ where
             Ok(Value::Object(map))
         }
 
-        // Case 2 – got a *string*; try parsing it as JSON
+        // Case 2 - got a *string*; try parsing it as JSON
         fn visit_str<E>(self, s: &str) -> std::result::Result<Self::Value, E>
         where
             E: de::Error,

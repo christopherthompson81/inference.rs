@@ -89,7 +89,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
-- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). A multimodal model's input processor (a `MultimodalInputsProcessor` over `inference_nn::media_inputs`) lives beside it; its `Processor` (chat template actions) stays in core. `--slim` checks core with each family alone (skipped when nothing core builds on differs from master)
+- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). A multimodal model's input processor (a `MultimodalInputsProcessor` over `inference_nn::media_inputs`) lives beside it; its `Processor` (chat template actions) stays in core. `--slim` checks core with no families and with each family alone (skipped when nothing core builds on differs from master)
 - `crates/inference-models-{speech,diffusion}/` - Speech (Dia) and image generation (FLUX) models, always built; their loaders, `SpeechLoaderType`/`DiffusionLoaderType` and request processors stay in core
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, the loader traits with their sizing and placement helpers (`loaders`), and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - The `inference` binary (run, serve, bench, quantize, uqff, tune, doctor, login, cache, from-config, update, uninstall, completions). A downstream consumer: it depends on inference-api and the server crates, never on core
@@ -204,7 +204,7 @@ Avoid returning TODOs.
 
 ### Vision/Audio Model Pitfalls
 
-6. **Vision encoder attention must be bidirectional (non-causal)**:  `Sdpa.run_attention` with `flash_params: None` defaults to `causal = seq_len > 1` on the CUDA flash path, which silently breaks vision/audio encoders. Always pass `FlashParams { causal: false, cumulative_seqlens_q: HashMap::new(), cumulative_seqlens_k: HashMap::new(), max_q: 0, max_k: 0 }` with `Some(&flash_params)` for any encoder that needs bidirectional attention. The empty `cumulative_seqlens` cause the flash backend to use the non-varlen kernel path, avoiding any tensor allocation in the forward pass.
+6. **Vision encoder attention must be bidirectional (non-causal)**:  `Sdpa.run_attention` with `flash_params: None` defaults to `causal = seq_len > 1` on the CUDA flash path, which silently breaks vision/audio encoders. Always pass `Some(&FlashParams::empty(false))` for any encoder that needs bidirectional attention. Its empty cumulative sequence lengths make the flash backend take the non-varlen kernel path, so the forward pass allocates no tensors.
 
 7. **`torch.bucketize(right=True)` requires `Ok(i) => i + 1`**: Rust's `binary_search_by` returns `Ok(i)` at the found position (bisect_left semantics). For `right=True` (bisect_right), you must use `Ok(i) => i + 1` to insert after equal elements. `Err(i) => i` is correct for both.
 

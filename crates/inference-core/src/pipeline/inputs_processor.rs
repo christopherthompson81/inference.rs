@@ -80,7 +80,7 @@ pub trait InputsProcessor {
     fn get_type(&self) -> InputsProcessorType;
 }
 
-// ========================= Test models input processor
+// Test models input processor
 
 pub mod text_models_inputs_processor {
     use std::{any::Any, collections::HashMap, fmt::Debug, sync::Arc};

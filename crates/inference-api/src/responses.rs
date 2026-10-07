@@ -436,7 +436,7 @@ pub enum IncludeOption {
 /// OpenResponses API create request
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct OpenResponsesCreateRequest {
-    // ===== Core OpenResponses Fields =====
+    // Core OpenResponses Fields
     /// The model to use for this request
     #[serde(default = "default_model")]
     pub model: String,
@@ -480,7 +480,7 @@ pub struct OpenResponsesCreateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub include: Option<Vec<IncludeOption>>,
 
-    // ===== Generation Parameters =====
+    // Generation Parameters
     /// Maximum number of output tokens to generate
     #[serde(
         alias = "max_tokens",
@@ -517,7 +517,7 @@ pub struct OpenResponsesCreateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub top_logprobs: Option<usize>,
 
-    // ===== Tool Calling =====
+    // Tool Calling
     /// Tool definitions available for the model to call
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAiTool>>,
@@ -549,12 +549,12 @@ pub struct OpenResponsesCreateRequest {
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
     pub files: Option<Vec<inference_core::RequestedFile>>,
 
-    // ===== Reasoning =====
+    // Reasoning
     /// Configuration for reasoning/thinking behavior
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningConfig>,
 
-    // ===== Output Format =====
+    // Output Format
     /// Text output configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub text: Option<TextConfig>,
@@ -563,7 +563,7 @@ pub struct OpenResponsesCreateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub truncation: Option<crate::responses_types::enums::TruncationStrategy>,
 
-    // ===== inference.rs Extensions (non-standard) =====
+    // inference.rs Extensions (non-standard)
     /// Stop sequences to end generation
     #[serde(rename = "stop", skip_serializing_if = "Option::is_none")]
     pub stop_seqs: Option<crate::openai::StopTokens>,

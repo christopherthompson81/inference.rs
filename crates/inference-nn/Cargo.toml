@@ -18,7 +18,6 @@ anyhow.workspace = true
 inference-tensor.workspace = true
 inference-flash-attn-v3 = { workspace = true, optional = true }
 csv.workspace = true
-either.workspace = true
 float8.workspace = true
 half.workspace = true
 image.workspace = true

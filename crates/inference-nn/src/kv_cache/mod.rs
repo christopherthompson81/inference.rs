@@ -1,7 +1,6 @@
-use crate::attention::AttentionMask;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use inference_tensor::{D, Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::get_mut_arcmutex;
 
@@ -431,79 +430,6 @@ impl Cache {
 
     pub fn draft_lock(&self) -> MutexGuard<'_, LayerCaches> {
         get_mut_arcmutex!(self.draft_cache)
-    }
-
-    /// Update the KV cache and return (k,v)
-    pub fn update_kv_cache(
-        cache: &mut Option<(Tensor, Tensor)>,
-        k: Tensor,
-        v: Tensor,
-    ) -> Result<(Tensor, Tensor)> {
-        let (k, v) = match &*cache {
-            None => (k, v),
-            Some((k_cache, v_cache)) => {
-                let k = Tensor::cat(&[k_cache, &k], 2)?.contiguous()?;
-                let v = Tensor::cat(&[v_cache, &v], 2)?.contiguous()?;
-                (k, v)
-            }
-        };
-        *cache = Some((k.clone(), v.clone()));
-        Ok((k.contiguous()?, v.contiguous()?))
-    }
-
-    /// Update the KV cache and return (k,v,attn_mask)
-    pub fn update_kv_cache_sliding_window(
-        cache: &mut Option<(Tensor, Tensor)>,
-        k: Tensor,
-        v: Tensor,
-        attention_mask: &AttentionMask,
-        sliding_window: Option<usize>,
-    ) -> Result<(Tensor, Tensor, Option<Tensor>)> {
-        let mask_tensor = match attention_mask {
-            AttentionMask::Custom(t) => Some(t.clone()),
-            _ => None,
-        };
-        let (k, v, attention_mask) = match cache.clone() {
-            None => (k, v, mask_tensor),
-            Some((mut prev_k, mut prev_v)) => {
-                let mut mask = mask_tensor;
-                if let Some(sliding_window) = sliding_window {
-                    let kv_seq_len = prev_k.dim(2)?;
-                    if kv_seq_len > sliding_window {
-                        prev_k = prev_k.narrow(
-                            2,
-                            kv_seq_len - (sliding_window - 1),
-                            sliding_window - 1,
-                        )?;
-                        prev_v = prev_v.narrow(
-                            2,
-                            kv_seq_len - (sliding_window - 1),
-                            sliding_window - 1,
-                        )?;
-                        if let Some(ref mut mask) = mask {
-                            let mask_len = mask.dim(1)?;
-                            *mask = mask.narrow(
-                                1,
-                                mask_len - (sliding_window - 1),
-                                sliding_window - 1,
-                            )?;
-                            *mask = Tensor::cat(
-                                &[&*mask, &mask.narrow(1, mask_len - 1, 1)?.ones_like()?],
-                                D::Minus1,
-                            )?;
-                        }
-                    }
-                }
-                let (k, v) = {
-                    let k = Tensor::cat(&[prev_k, k], 2)?.contiguous()?;
-                    let v = Tensor::cat(&[prev_v, v], 2)?.contiguous()?;
-                    (k, v)
-                };
-                (k, v, mask)
-            }
-        };
-        *cache = Some((k.clone(), v.clone()));
-        Ok((k.contiguous()?, v.contiguous()?, attention_mask))
     }
 }
 

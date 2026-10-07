@@ -39,7 +39,6 @@ futures.workspace = true
 indicatif.workspace = true
 strum.workspace = true
 image.workspace = true
-derive_more = { workspace = true}
 itertools.workspace = true
 csv.workspace = true
 reqwest.workspace = true

@@ -144,7 +144,7 @@ impl EncoderCacheEntry {
 /// `u64` content hash computed for images/audio/video in
 /// `Sequence`.
 ///
-/// The cache is typically stored behind `Arc<Mutex<…>>` on each model struct
+/// The cache is typically stored behind `Arc<Mutex<...>>` on each model struct
 /// and accessed from `forward()` via interior mutability.
 pub struct EncoderCacheManager {
     /// Insertion-ordered map; most-recently-used entries live at the back.
@@ -525,19 +525,17 @@ impl EncoderCacheBatchLookup {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Helper: cache-aware batch encoding for "Pattern A" models whose
 // pixel_values have shape (N, C, H, W) with one image per dim-0 slice.
-// ---------------------------------------------------------------------------
 
 /// Encode a batch of images with per-image caching.
 ///
-/// * `image_hashes` – one content hash per image, length **N**.
-/// * `pixel_values` – stacked pixel tensor of shape `(N, C, H, W)`.
-/// * `cache`        – shared encoder cache (behind `Mutex`).
-/// * `encode_fn`    – called with a `(M, C, H, W)` tensor of **only** the
+/// * `image_hashes` - one content hash per image, length **N**.
+/// * `pixel_values` - stacked pixel tensor of shape `(N, C, H, W)`.
+/// * `cache`        - shared encoder cache (behind `Mutex`).
+/// * `encode_fn`    - called with a `(M, C, H, W)` tensor of **only** the
 ///   cache-miss images.  Must return `Vec<Tensor>` where each element is a
-///   `(M, …)` tensor (the first element is the main embedding; extra elements
+///   `(M, ...)` tensor (the first element is the main embedding; extra elements
 ///   are auxiliary, e.g. deep-stack features).
 ///
 /// Returns `Vec<Tensor>` in the same multi-output layout as `encode_fn`, but
@@ -559,17 +557,17 @@ pub fn cached_encode_images(
         "image_hashes length must match pixel_values dim-0"
     );
 
-    // Phase 1 – probe cache for each image.
+    // Phase 1 - probe cache for each image.
     let mut lookup = EncoderCacheBatchLookup::lookup(modality, image_hashes, cache);
 
-    // Fast path – all cached.
+    // Fast path - all cached.
     if lookup.miss_groups().is_empty() {
         return assemble(lookup.into_optional_outputs(), n_images);
     }
 
-    // Phase 2 – encode only the misses.
+    // Phase 2 - encode only the misses.
     let miss_pixels = if lookup.miss_groups().len() == n_images {
-        // All misses – encode full batch without splitting.
+        // All misses - encode full batch without splitting.
         pixel_values.clone()
     } else {
         let slices: Vec<Tensor> = lookup
@@ -582,7 +580,7 @@ pub fn cached_encode_images(
 
     let encoded = encode_fn(&miss_pixels)?;
 
-    // Phase 3 – store per-image results in cache and fill `hits`.
+    // Phase 3 - store per-image results in cache and fill `hits`.
     {
         let mut guard = cache.lock().expect("encoder cache lock poisoned");
         for batch_idx in 0..lookup.miss_groups().len() {
@@ -641,9 +639,7 @@ mod tests {
         assert_eq!(counter, 3);
     }
 
-    // -----------------------------------------------------------------------
     // EncoderCacheManager unit tests
-    // -----------------------------------------------------------------------
 
     #[test]
     fn test_insert_and_get() {
@@ -905,9 +901,7 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // cached_encode_images tests
-    // -----------------------------------------------------------------------
 
     /// Build a (N, 1) pixel_values tensor for testing.
     fn make_pixels(vals: &[f32]) -> Tensor {

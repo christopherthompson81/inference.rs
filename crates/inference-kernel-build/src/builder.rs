@@ -64,7 +64,7 @@ impl KernelBuilder {
         Self::default()
     }
 
-    // ========== Source Selection ==========
+    // Source Selection
 
     /// Add a directory to search for .cu files (recursive)
     pub fn source_dir<P: AsRef<Path>>(mut self, dir: P) -> Self {
@@ -104,7 +104,7 @@ impl KernelBuilder {
         self
     }
 
-    // ========== Compute Capability ==========
+    // Compute Capability
 
     /// Set the default compute capability (numeric, auto-selects 'a' suffix for sm_90+)
     pub fn compute_cap(mut self, cap: usize) -> Self {
@@ -187,7 +187,7 @@ impl KernelBuilder {
         ))
     }
 
-    // ========== External Dependencies ==========
+    // External Dependencies
 
     /// Add CUTLASS dependency
     pub fn with_cutlass(mut self, commit: Option<&str>) -> Self {
@@ -228,7 +228,7 @@ impl KernelBuilder {
         self
     }
 
-    // ========== Parallel Configuration ==========
+    // Parallel Configuration
 
     /// Set the percentage of available threads to use (0.0 - 1.0)
     pub fn thread_percentage(mut self, percentage: f32) -> Self {
@@ -257,7 +257,7 @@ impl KernelBuilder {
         self
     }
 
-    // ========== Build Configuration ==========
+    // Build Configuration
 
     /// Set the output directory
     pub fn out_dir<P: Into<PathBuf>>(mut self, dir: P) -> Self {
@@ -316,7 +316,7 @@ impl KernelBuilder {
         self
     }
 
-    // ========== Build Methods ==========
+    // Build Methods
 
     /// Build a static library from all kernel sources
     pub fn build_lib<P: Into<PathBuf>>(&self, out_file: P) -> Result<()> {

@@ -63,17 +63,6 @@ pub fn mrope_position_ids_for_input(
     position_ids.broadcast_add(&mrope_position_deltas)
 }
 
-/// Positions `offset..offset+seq_len` per row, repeated on the three MRoPE planes: `[3, batch, seq_len]` i64.
-pub fn text_mrope_position_ids(input_ids: &Tensor, seqlen_offsets: &[usize]) -> Result<Tensor> {
-    text_position_ids(input_ids, seqlen_offsets).and_then(|positions| {
-        let (batch, seq_len) = positions.dims2()?;
-        positions
-            .to_dtype(inference_tensor::DType::I64)?
-            .reshape((1, batch, seq_len))?
-            .repeat((3, 1, 1))
-    })
-}
-
 pub fn text_position_ids(input_ids: &Tensor, seqlen_offsets: &[usize]) -> Result<Tensor> {
     let (batch, seq_len) = input_ids.dims2()?;
     if seqlen_offsets.len() != batch {

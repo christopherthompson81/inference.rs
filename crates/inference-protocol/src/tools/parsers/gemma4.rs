@@ -91,7 +91,7 @@ fn gemma4_required_lark(lark: &str) -> String {
     format!("start: <|tool_call> tool_call_body\ntool_call_body: {body}\n{rest}")
 }
 
-// ── Parsing ────────────────────────────────────────────────────────────────
+// Parsing
 
 /// Parse Gemma 4 tool calls from model output text.
 /// Returns a JSON string of tool calls, or `None` if no complete calls found.

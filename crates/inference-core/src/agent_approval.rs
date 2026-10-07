@@ -50,11 +50,6 @@ impl AgentToolApprovalDecision {
             message: Some(message.into()),
         }
     }
-
-    pub fn with_remember_for_session(mut self, remember_for_session: bool) -> Self {
-        self.remember_for_session = remember_for_session;
-        self
-    }
 }
 
 pub type AgentToolApprovalCallback =

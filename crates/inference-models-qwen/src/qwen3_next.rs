@@ -165,7 +165,7 @@ impl GdnConfig for Config {
     }
 }
 
-// ====================== Full Attention layer ======================
+// Full Attention layer
 
 struct FullAttention {
     q_proj: Arc<dyn QuantMethod>,
@@ -348,7 +348,7 @@ impl FullAttention {
     }
 }
 
-// ====================== MoE ======================
+// MoE
 
 /// Sparse MoE block with shared expert and shared expert gate
 struct SparseMoeBlock {
@@ -481,7 +481,7 @@ impl SparseMoeBlock {
     }
 }
 
-// ====================== Decoder Layer ======================
+// Decoder Layer
 
 enum LayerImpl {
     FullAttention(FullAttention),
@@ -684,7 +684,7 @@ impl DecoderLayer {
     }
 }
 
-// ====================== Top-level Model ======================
+// Top-level Model
 
 pub struct Model {
     embed_tokens: Arc<dyn QuantMethod>,
@@ -1105,7 +1105,7 @@ impl Model {
     }
 }
 
-// ====================== Trait Implementations ======================
+// Trait Implementations
 
 impl IsqModel for Model {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {

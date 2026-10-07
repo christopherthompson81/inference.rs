@@ -2571,7 +2571,6 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "csv",
- "derive_more",
  "dirs",
  "either",
  "futures",
@@ -2629,7 +2628,6 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "clap",
- "either",
  "futures",
  "image",
  "inference",
@@ -2713,7 +2711,6 @@ dependencies = [
 name = "inference-kernel-build"
 version = "0.9.3"
 dependencies = [
- "anyhow",
  "fs2",
  "glob",
  "jobserver",
@@ -2889,7 +2886,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokenizers",
- "tracing",
 ]
 
 [[package]]
@@ -2936,7 +2932,6 @@ dependencies = [
  "anyhow",
  "candle-metal-kernels",
  "csv",
- "either",
  "float8",
  "half",
  "image",

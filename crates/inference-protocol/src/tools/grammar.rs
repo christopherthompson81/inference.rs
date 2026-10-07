@@ -64,7 +64,7 @@ fn json_body_schema(tools: &[Tool], args_key: &str, is_array: bool) -> Value {
             .collect();
         json!({ "anyOf": variants })
     } else {
-        // Original generic schema — unchanged behaviour.
+        // Original generic schema - unchanged behaviour.
         let tool_names: Vec<&str> = tools.iter().map(|t| t.function.name.as_str()).collect();
         json!({
             "type": "object",
@@ -367,7 +367,7 @@ mod tests {
         assert_eq!(schema["type"], "object");
     }
 
-    // ── strict mode tests ─────────────────────────────────────────────
+    // strict mode tests
 
     fn strict_tools() -> Vec<Tool> {
         let params = serde_json::from_value(serde_json::json!({
@@ -405,7 +405,7 @@ mod tests {
         let grm =
             parsers::build_tool_call_grammar("<tool_call>", &sample_tools()).expect("should match");
         let schema = grm.grammars[1].json_schema.as_ref().unwrap();
-        // No anyOf — should use the original enum-based schema.
+        // No anyOf - should use the original enum-based schema.
         assert!(schema.get("anyOf").is_none());
         assert!(schema["properties"]["name"]["enum"].is_array());
     }
@@ -445,7 +445,7 @@ mod tests {
         let text = "<｜tool▁call▁begin｜>function<｜tool▁sep｜>get_weather\n```json\n";
         let grm = parsers::build_tool_call_grammar(text, &strict_tools()).expect("should match");
         let schema = grm.grammars[1].json_schema.as_ref().unwrap();
-        // DeepSeek knows the tool name — should use get_weather's strict schema directly.
+        // DeepSeek knows the tool name - should use get_weather's strict schema directly.
         assert!(schema["properties"]["place"].is_object());
     }
 
@@ -454,7 +454,7 @@ mod tests {
         let text = "<｜tool▁call▁begin｜>function<｜tool▁sep｜>search\n```json\n";
         let grm = parsers::build_tool_call_grammar(text, &strict_tools()).expect("should match");
         let schema = grm.grammars[1].json_schema.as_ref().unwrap();
-        // search is not strict — should use generic object.
+        // search is not strict - should use generic object.
         assert_eq!(schema["type"], "object");
         assert!(schema.get("properties").is_none());
     }

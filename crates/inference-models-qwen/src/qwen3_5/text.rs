@@ -79,7 +79,7 @@ impl GdnConfig for TextConfig {
     }
 }
 
-// ====================== Full Attention layer with MRoPE ======================
+// Full Attention layer with MRoPE
 
 pub(super) struct FullAttention {
     q_proj: Arc<dyn QuantMethod>,
@@ -429,7 +429,7 @@ impl FullAttention {
     }
 }
 
-// ====================== Decoder Layer ======================
+// Decoder Layer
 
 pub(super) enum LayerImpl {
     FullAttention(FullAttention),
@@ -759,7 +759,7 @@ impl DecoderLayer {
     }
 }
 
-// ====================== Text Model ======================
+// Text Model
 
 #[derive(Clone, Copy)]
 enum TextWeightPrefix {

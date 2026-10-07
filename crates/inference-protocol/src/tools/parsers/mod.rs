@@ -83,7 +83,7 @@ pub trait ToolFormatParser: Send + Sync {
     /// activation occurs).
     ///
     /// `text` is the full generated text up to the point of grammar
-    /// activation — parsers like DeepSeek can use it to extract the tool
+    /// activation - parsers like DeepSeek can use it to extract the tool
     /// name from the prefix.
     fn tool_call_grammar(&self, tools: &[Tool], text: &str) -> TopLevelGrammar;
 

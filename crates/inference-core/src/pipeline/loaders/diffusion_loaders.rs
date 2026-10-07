@@ -232,7 +232,7 @@ impl ModelPaths for DiffusionModelPaths {
     }
 }
 
-// ======================== Flux loader
+// Flux loader
 
 /// [`DiffusionLoader`] for a Flux Diffusion model.
 ///

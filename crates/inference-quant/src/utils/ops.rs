@@ -1421,9 +1421,7 @@ pub fn softmax_with_sinks(
     })
 }
 
-// ============================================================================
 // Fused flash attention with sinks (Metal)
-// ============================================================================
 
 #[cfg_attr(not(feature = "metal"), allow(dead_code))]
 struct FlashAttnSinksMetal {
@@ -1601,8 +1599,8 @@ impl CustomOp1 for FlashAttnSinksMetal {
 
 /// Fused flash attention with per-head sinks for Metal devices.
 ///
-/// Uses fused Metal kernels that compute Q·K^T -> softmax_with_sinks -> ×V
-/// without materializing the N×N attention matrix. Per-head sinks contribute
+/// Uses fused Metal kernels that compute Q*K^T -> softmax_with_sinks -> *V
+/// without materializing the NxN attention matrix. Per-head sinks contribute
 /// to the softmax denominator without an associated value contribution.
 ///
 /// Causal masking is applied for prefill (q_len > 1). For decode (q_len == 1),

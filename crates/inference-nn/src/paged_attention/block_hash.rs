@@ -547,7 +547,7 @@ mod tests {
 
         // Previously buggy: offset < prefix_len (would over-count)
         let buggy_count = features.iter().filter(|f| f.offset < prefix_len).count();
-        // img_b offset=6 < 8 → would wrongly count as cached
+        // img_b offset=6 < 8 -> would wrongly count as cached
         assert_eq!(buggy_count, 2);
         assert_ne!(
             fully_cached, buggy_count,

@@ -96,7 +96,7 @@ fn gather_cached_mla(
 ///
 /// Performs attention in the MLA latent space for prefill with cached prefix.
 /// Absorbs `w_uk` into the query to avoid decompressing cached KV:
-///   score = (q_nope @ w_uk) · ckv + q_pe · kpe
+///   score = (q_nope @ w_uk) * ckv + q_pe * kpe
 ///   output = softmax(score) @ ckv   (in latent space, kv_lora_rank dim)
 ///
 /// The caller must then project the output by `w_uv_t` to get the final

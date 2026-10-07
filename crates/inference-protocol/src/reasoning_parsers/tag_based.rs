@@ -21,7 +21,7 @@ pub const THINK_CLOSE_TAG: &str = "</think>";
 pub const CHANNEL_OPEN_TOKEN: &str = "<|channel>";
 pub const CHANNEL_CLOSE_TOKEN: &str = "<channel|>";
 
-/// Channel open delimiter — just the bare token, since `thought\n` is optional
+/// Channel open delimiter - just the bare token, since `thought\n` is optional
 /// per the model's `x-regex`: `<\|channel\>(?:thought\n)?(.+?)<channel\|>`.
 pub const CHANNEL_OPEN_TAG: &str = "<|channel>";
 /// Channel close delimiter (same as `CHANNEL_CLOSE_TOKEN`).
@@ -184,10 +184,10 @@ impl TagReasoningContext {
                         self.buffer = self.buffer[prefix.len()..].to_string();
                         self.pending_strip = false;
                     } else if prefix.starts_with(&self.buffer) {
-                        // Buffer is a prefix of the strip-prefix — wait for more
+                        // Buffer is a prefix of the strip-prefix - wait for more
                         break;
                     } else {
-                        // Buffer doesn't match — no prefix to strip
+                        // Buffer doesn't match - no prefix to strip
                         self.pending_strip = false;
                     }
                 }
@@ -473,7 +473,7 @@ mod tests {
 
     use super::*;
 
-    // === Think Tag Tests ===
+    // Think Tag Tests
 
     #[test]
     fn test_simple_think_block() {
@@ -699,7 +699,7 @@ mod tests {
         assert_eq!(ctx.content(), None);
     }
 
-    // === Gemma Channel Tag Tests ===
+    // Gemma Channel Tag Tests
 
     #[test]
     fn test_simple_channel_block() {

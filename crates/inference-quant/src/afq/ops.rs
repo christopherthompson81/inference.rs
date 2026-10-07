@@ -1529,14 +1529,12 @@ mod metal_tests {
     }
 }
 
-// ============================================================
-//                    Portable CPU back‑end
-// ============================================================
+// Portable CPU back-end
 mod cpu_backend {
     use super::*;
     use inference_tensor::{D, DType, Device, Result, Tensor};
 
-    /// Simple scalar (reference) quantiser: per‑`group_size` affine.
+    /// Simple scalar (reference) quantiser: per-`group_size` affine.
     pub(crate) fn afq_quantize_op(
         w: &Tensor,
         group_size: usize,
@@ -1577,7 +1575,7 @@ mod cpu_backend {
                     let j = g * group_size + i; // position in this row
                     let bit_off = j * bits; // overall bit offset
                     let word_id = bit_off / 32; // u32 index
-                    let shift = bit_off % 32; // intra‑word shift
+                    let shift = bit_off % 32; // intra-word shift
 
                     let q_mask = (1u32 << bits) - 1;
                     let q_val = ((w_vec[base + i] - bias) / scale)
@@ -1627,7 +1625,7 @@ mod cpu_backend {
         Ok((w_q, sc, bs))
     }
 
-    /// Scalar de‑quantiser (inverse of the above).
+    /// Scalar de-quantiser (inverse of the above).
     pub(crate) fn afq_dequantize_op(
         w_q: &Tensor,
         scales: &Tensor,
@@ -1750,7 +1748,7 @@ mod cpu_backend {
         Tensor::from_vec(out, out_shape, &device)?.to_dtype(scales.dtype())
     }
 
-    /// Very simple (and slow) matmul after full de‑quantisation.  Handles 2‑D tensors.
+    /// Very simple (and slow) matmul after full de-quantisation.  Handles 2-D tensors.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn afq_mm_op(
         x: &Tensor,
@@ -1772,9 +1770,7 @@ mod cpu_backend {
     }
 }
 
-// ============================================================
-//                    CUDA backend
-// ============================================================
+// CUDA backend
 #[cfg(feature = "cuda")]
 mod cuda_backend {
     use super::*;
