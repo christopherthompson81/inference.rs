@@ -18,6 +18,8 @@ const PROMPT: &str = "describe";
 // Long enough that a shared prefix runs past the media into whole paged blocks; paged hits never end inside media.
 const LONG_PROMPT: &str = "describe every part of this picture in order, from the top left corner to the bottom right one.";
 const MAX_LEN: usize = 6;
+// Shorter than LONG_PROMPT, so a window that leaked into the mask would cut what the prompt attends to
+const UNUSED_WINDOW: usize = 2;
 // Side lengths that resize to different patch grids, so each image yields its own token count.
 const IMAGE_SIDES: [(u32, u32); 2] = [(56, 56), (84, 56)];
 const VIDEO_FRAMES: usize = 4;
@@ -464,4 +466,28 @@ async fn qwen3_5_moe_builtin_mtp_keeps_greedy_output() -> anyhow::Result<()> {
         return Ok(());
     }
     builtin_mtp_keeps_greedy_output(tiny_qwen3_5_moe_mtp()?).await
+}
+
+// Qwen3-VL's text layers are all full attention, so a window its config names must not reach the mask.
+#[tokio::test]
+async fn qwen3_vl_ignores_a_configured_sliding_window() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_vl()?;
+    let request = || {
+        RequestBuilder::from(
+            MultimodalMessages::new().add_message(TextMessageRole::User, LONG_PROMPT),
+        )
+    };
+    let (expected, _) = trace(&build(checkpoint.path()).await?, request()).await?;
+
+    let config_path = checkpoint.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+    config["text_config"]["sliding_window"] = UNUSED_WINDOW.into();
+    std::fs::write(&config_path, serde_json::to_string(&config)?)?;
+    let (actual, _) = trace(&build(checkpoint.path()).await?, request()).await?;
+    anyhow::ensure!(
+        same_decode(&expected, &actual),
+        "a configured window changed decoding: {actual:?} vs {expected:?}"
+    );
+    Ok(())
 }

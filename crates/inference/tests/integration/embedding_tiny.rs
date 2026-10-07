@@ -13,6 +13,10 @@ const HIDDEN_SIZE: usize = 32;
 const UQFF_EXTENSION: &str = "uqff";
 // The Normalize module scales every embedding to unit length.
 const NORM_TOLERANCE: f32 = 1e-4;
+// Shorter than LONG_PROMPT, so a window that leaked into the mask would cut what each token attends to
+const UNUSED_WINDOW: usize = 2;
+const LONG_PROMPT: &str = "hello there, how are you";
+const EMBEDDING_TOLERANCE: f32 = 1e-5;
 
 fn cpu_embedding_builder(dir: &Path) -> EmbeddingModelBuilder {
     EmbeddingModelBuilder::new(dir.to_string_lossy())
@@ -67,6 +71,58 @@ async fn an_isq_embedder_and_a_reload_of_its_uqff_embed_alike() -> anyhow::Resul
     assert_eq!(
         reloaded.generate_embedding(PROMPT).await?,
         quantized_embedding
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_sliding_window_reaches_the_embedding_only_when_enabled() -> anyhow::Result<()> {
+    let checkpoint = tiny_embedding_checkpoint()?;
+    let expected = cpu_embedding_builder(checkpoint.path())
+        .build()
+        .await?
+        .generate_embedding(LONG_PROMPT)
+        .await?;
+
+    let config_path = checkpoint.path().join("config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&config_path)?)?;
+    assert_eq!(config["use_sliding_window"], false);
+    config["sliding_window"] = UNUSED_WINDOW.into();
+    std::fs::write(&config_path, serde_json::to_string(&config)?)?;
+    let actual = cpu_embedding_builder(checkpoint.path())
+        .build()
+        .await?
+        .generate_embedding(LONG_PROMPT)
+        .await?;
+
+    let max_diff = expected
+        .iter()
+        .zip(&actual)
+        .map(|(e, a)| (e - a).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        max_diff < EMBEDDING_TOLERANCE,
+        "unused window moved the embedding by {max_diff}"
+    );
+
+    // the same window, turned on for every layer, does change it
+    config["use_sliding_window"] = true.into();
+    config["max_window_layers"] = 0.into();
+    std::fs::write(&config_path, serde_json::to_string(&config)?)?;
+    let windowed = cpu_embedding_builder(checkpoint.path())
+        .build()
+        .await?
+        .generate_embedding(LONG_PROMPT)
+        .await?;
+    let max_diff = expected
+        .iter()
+        .zip(&windowed)
+        .map(|(e, a)| (e - a).abs())
+        .fold(0f32, f32::max);
+    assert!(
+        max_diff > EMBEDDING_TOLERANCE,
+        "an applied window left the embedding unchanged"
     );
     Ok(())
 }

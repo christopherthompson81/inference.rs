@@ -572,6 +572,9 @@ impl Model {
         } else {
             embed_tokens.clone()
         };
+        // only layers past max_window_layers slide, and only when use_sliding_window is set
+        let sliding_window =
+            (0..cfg.num_hidden_layers).find_map(|layer_idx| sliding_window!(layer_idx, cfg));
         let cache_types = (0..cfg.num_hidden_layers)
             .map(|layer_idx| {
                 sliding_window!(layer_idx, cfg)
@@ -587,7 +590,7 @@ impl Model {
             norm,
             lm_head,
             dtype,
-            sliding_window: cfg.sliding_window,
+            sliding_window,
             device: normal_loading_metadata.real_device,
             cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: cfg.max_position_embeddings,
@@ -598,7 +601,7 @@ impl Model {
                 num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size())
                     .max(1),
                 num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
-                sliding_window: cfg.sliding_window,
+                sliding_window,
                 k_head_dim: cfg.head_dim(),
                 v_head_dim: cfg.head_dim(),
                 kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
@@ -628,26 +631,36 @@ impl Model {
         let mut xs = input_embeds;
         let cache = &mut self.cache.normal().0;
         let mask_cache = ctx.mask_cache(cache);
-        let attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &mask_cache,
-            xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
-        )?;
-        // PagedAttention prompt chunking
-        let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
-        } else {
-            AttentionMask::None
+        let mask = |sliding_window| -> Result<DeviceMappedMask> {
+            let mask = CausalMasker.make_causal_mask(
+                input_ids,
+                &mask_cache,
+                xs.dtype(),
+                &CausalMaskConfig {
+                    sliding_window,
+                    ..Default::default()
+                },
+            )?;
+            // PagedAttention prompt chunking
+            let mask = if ctx.is_first_prompt_chunk() {
+                mask
+            } else {
+                AttentionMask::None
+            };
+            DeviceMappedMask::new(mask, &*self.mapper)
         };
-        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
+        let full_mask = mask(None)?;
+        let sliding_mask = self
+            .sliding_window
+            .map(|window| mask(Some(window)))
+            .transpose()?;
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?;
-            // dbg!(&i);
+            let layer_mask = match &sliding_mask {
+                Some(sliding) if layer.self_attn.sdpa_params.sliding_window.is_some() => sliding,
+                _ => &full_mask,
+            };
+            xs = layer.forward(&xs, &layer_mask.get(xs.device()), &mut cache[i], ctx, i)?;
         }
         let xs = xs.to_device(&self.device)?;
         let xs = xs.apply(&self.norm)?;

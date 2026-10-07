@@ -229,13 +229,12 @@ impl DeviceMappedModelLoader for LLaVALoader {
     }
 }
 
-// both text stacks (llama and mistral, built with head_dim None) derive the head dim
 pub(super) fn text_decoder_shape(cfg: &crate::llava::config::LLaVATextConfig) -> DecoderLayerShape {
     DecoderLayerShape {
         hidden_size: cfg.hidden_size,
         num_attention_heads: cfg.num_attention_heads,
         num_key_value_heads: cfg.num_key_value_heads,
-        head_dim: cfg.hidden_size / cfg.num_attention_heads,
+        head_dim: cfg.head_dim(),
         qkv_bias: false,
         o_bias: false,
         qk_norm: false,

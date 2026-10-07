@@ -680,14 +680,12 @@ impl Qwen3VLModel {
         ctx: &ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let seqlen_offsets = ctx.seqlen_offsets();
+        // every text layer is full attention, whatever window the config names
         let mut attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
             self.text.dtype,
-            &CausalMaskConfig {
-                sliding_window: self.text.cfg.sliding_window,
-                ..Default::default()
-            },
+            &CausalMaskConfig::default(),
         )?;
         let is_first_chunk = ctx.is_first_prompt_chunk();
         attention_mask = if is_first_chunk {

@@ -42,6 +42,15 @@ pub struct LLaVATextConfig {
     pub sliding_window: Option<usize>,
     pub rope_scaling: Option<Llama3RopeConfig>,
     pub quantization_config: Option<QuantizedConfig>,
+    #[serde(default)]
+    pub head_dim: Option<usize>,
+}
+
+impl LLaVATextConfig {
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
+    }
 }
 
 serde_default_fn!(usize, default_num_hidden_layers, 32);
@@ -79,6 +88,7 @@ impl Config {
             quantization_config: self.text_config.quantization_config.clone(),
             tie_word_embeddings: false,
             hidden_act: Activation::Silu,
+            head_dim: self.text_config.head_dim,
         }
     }
 
@@ -96,7 +106,7 @@ impl Config {
             rope_theta: self.text_config.rope_theta as f64,
             rope_parameters: None,
             sliding_window: self.text_config.sliding_window,
-            head_dim: None,
+            head_dim: self.text_config.head_dim,
             quantization_config: self.text_config.quantization_config.clone(),
             tie_word_embeddings: false,
         }

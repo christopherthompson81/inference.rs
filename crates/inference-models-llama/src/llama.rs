@@ -48,13 +48,20 @@ pub struct Config {
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "word_emb_default")]
     pub tie_word_embeddings: bool,
+    #[serde(default)]
+    pub head_dim: Option<usize>,
 }
 
 impl Config {
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
+    }
+
     pub fn rope_spec(&self) -> Llama3RopeSpec<'_> {
         Llama3RopeSpec {
             rope_theta: self.rope_theta,
-            head_dim: self.hidden_size / self.num_attention_heads,
+            head_dim: self.head_dim(),
             max_position_embeddings: self.max_position_embeddings,
             scaling: self.rope_scaling.as_ref(),
         }
@@ -139,8 +146,8 @@ impl CausalSelfAttention {
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let size_in = cfg.hidden_size;
-        let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
-        let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
+        let size_q = cfg.head_dim() * cfg.num_attention_heads;
+        let size_kv = cfg.head_dim() * cfg.num_key_value_heads;
         let q_proj = ColumnParallelLayer::new(
             size_in,
             size_q,
@@ -149,11 +156,8 @@ impl CausalSelfAttention {
             comm,
             vb.pp("q_proj"),
         )?;
-        let kv_shard = inference_quant::compute_kv_shard(
-            cfg.num_key_value_heads,
-            cfg.hidden_size / cfg.num_attention_heads,
-            comm,
-        )?;
+        let kv_shard =
+            inference_quant::compute_kv_shard(cfg.num_key_value_heads, cfg.head_dim(), comm)?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             size_in,
             size_kv,
@@ -187,7 +191,7 @@ impl CausalSelfAttention {
             o_proj,
             num_attention_heads: cfg.num_attention_heads / comm.world_size(),
             num_key_value_heads: (cfg.num_key_value_heads / comm.world_size()).max(1),
-            head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            head_dim: cfg.head_dim(),
             rotary_emb: rope,
             max_seq_len: cfg.max_position_embeddings,
             paged_attn,
@@ -198,7 +202,7 @@ impl CausalSelfAttention {
                     comm,
                 )?,
                 softcap: None,
-                softmax_scale: 1.0 / ((cfg.hidden_size / cfg.num_attention_heads) as f32).sqrt(),
+                softmax_scale: 1.0 / (cfg.head_dim() as f32).sqrt(),
                 sliding_window: None,
                 sinks: None,
                 chunk: None,
@@ -355,7 +359,7 @@ impl Llama {
             cfg.rms_norm_eps,
             mapper.set_nm_device(vb_m.pp("norm"), false),
         )?;
-        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let head_dim = cfg.head_dim();
         let mut ropes = HashMap::new();
         for i in 0..cfg.num_hidden_layers {
             let device = mapper
@@ -436,8 +440,8 @@ impl Llama {
                     .max(1),
                 num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
                 sliding_window: None,
-                k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-                v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+                k_head_dim: cfg.head_dim(),
+                v_head_dim: cfg.head_dim(),
                 kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
             mapper,
