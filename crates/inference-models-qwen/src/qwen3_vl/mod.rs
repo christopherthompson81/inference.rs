@@ -12,20 +12,22 @@ use std::{
 use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
-use text::Qwen3VLTextModel;
 use vision::Qwen3VLVisionModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
+    decoder::{CausalLm, LayerMasks},
+    device_map::DeviceMappedMask,
     kv_cache::EitherCache,
     layers::CausalMasker,
     layers::masker::PastKvLenCache,
-    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
+    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
         AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheBatchLookup, EncoderCacheManager},
     },
+    utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
@@ -39,7 +41,7 @@ pub mod vision;
 pub use config::Config;
 
 pub struct Qwen3VLModel {
-    text: Qwen3VLTextModel,
+    text: CausalLm,
     vision: Qwen3VLVisionModel,
     spatial_merge_size: usize,
     image_token_id: u32,
@@ -620,7 +622,7 @@ impl Qwen3VLModel {
     pub fn new(
         cfg: &Config,
         vb: ShardedVarBuilder,
-        _is_gptx: bool,
+        is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
@@ -640,10 +642,11 @@ impl Qwen3VLModel {
         if cfg.quantization_config.is_some() {
             text_config.quantization_config = cfg.quantization_config.clone();
         }
-        let text = Qwen3VLTextModel::new(
+        let text = text::text_model(
             &text_config,
             vb.clone(),
             cfg.tie_word_embeddings,
+            is_gptx,
             normal_loading_metadata,
             attention_mechanism,
         )?;
@@ -677,14 +680,14 @@ impl Qwen3VLModel {
         video_hashes: &[u64],
         packed_layout: Option<&PackedMultimodalLayout>,
         prompt_position_ids: Option<&Tensor>,
-        ctx: &ModelForwardContext<'_>,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let seqlen_offsets = ctx.seqlen_offsets();
         // every text layer is full attention, whatever window the config names
         let mut attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.dtype,
+            self.text.embed_dtype(),
             &CausalMaskConfig::default(),
         )?;
         let is_first_chunk = ctx.is_first_prompt_chunk();
@@ -694,7 +697,7 @@ impl Qwen3VLModel {
             AttentionMask::None
         };
 
-        let mut input_embeds = self.text.embed_tokens(input_ids)?;
+        let mut input_embeds = self.text.get_input_embeddings(input_ids)?;
         let (batch_size, seq_len, hidden_dim) = input_embeds.dims3()?;
         let device = input_embeds.device().clone();
 
@@ -733,10 +736,12 @@ impl Qwen3VLModel {
                 None => self.vision.forward(&pixel_values, image_grid_thw_ref)?,
             };
 
-            let image_embeds = image_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
+            let image_embeds = image_embeds
+                .to_device(&device)?
+                .to_dtype(self.text.embed_dtype())?;
             let deepstack_image_embeds = deepstack_image_embeds
                 .into_iter()
-                .map(|t| t.to_device(&device)?.to_dtype(self.text.dtype))
+                .map(|t| t.to_device(&device)?.to_dtype(self.text.embed_dtype()))
                 .collect::<Result<Vec<_>>>()?;
             if packed_layout.is_some() {
                 insert_current_visual_outputs(
@@ -808,10 +813,12 @@ impl Qwen3VLModel {
                 Some(outputs) => concatenate_visual_items(outputs)?,
                 None => self.vision.forward(&pixel_values, video_grid_thw_ref)?,
             };
-            let video_embeds = video_embeds.to_device(&device)?.to_dtype(self.text.dtype)?;
+            let video_embeds = video_embeds
+                .to_device(&device)?
+                .to_dtype(self.text.embed_dtype())?;
             let deepstack_video_embeds = deepstack_video_embeds
                 .into_iter()
-                .map(|t| t.to_device(&device)?.to_dtype(self.text.dtype))
+                .map(|t| t.to_device(&device)?.to_dtype(self.text.embed_dtype()))
                 .collect::<Result<Vec<_>>>()?;
             if packed_layout.is_some() {
                 insert_current_visual_outputs(
@@ -999,15 +1006,29 @@ impl Qwen3VLModel {
                 seqlen_offsets,
             )?
         };
-        let out = self.text.forward_embeds(
-            input_embeds,
-            &attention_mask,
-            &position_ids,
-            ctx,
+        let masks = LayerMasks::new(
+            Some(DeviceMappedMask::new(
+                attention_mask,
+                self.text.stack_mapper(),
+            )?),
+            None,
+            None,
+        );
+        let (cos, sin) = self
+            .text
+            .mrope_tables(&position_ids, input_embeds.dtype())?;
+        ctx.set_rope_tables(cos, sin);
+        let deepstack = |layer_idx: usize, xs: Tensor| match (
             visual_pos_masks.as_ref(),
             deepstack_visual_embeds.as_deref(),
-        )?;
-        Ok(out)
+        ) {
+            (Some(visual_pos_masks), Some(deepstack)) if layer_idx < deepstack.len() => {
+                text::deepstack_process(xs, visual_pos_masks, &deepstack[layer_idx])
+            }
+            _ => Ok(xs),
+        };
+        self.text
+            .forward_hooked(input_embeds, &masks, ctx, &deepstack)
     }
 }
 
@@ -1076,16 +1097,16 @@ impl MultimodalModel for Qwen3VLModel {
         )
     }
     fn cache(&self) -> &EitherCache {
-        &self.text.cache
+        NormalModel::cache(&self.text)
     }
     fn device(&self) -> &Device {
-        &self.text.device
+        NormalModel::device(&self.text)
     }
     fn max_seq_len(&self) -> usize {
-        self.text.max_seq_len
+        NormalModel::max_seq_len(&self.text)
     }
     fn config(&self) -> &ModelConfigMetadata {
-        &self.text.cfg
+        NormalModel::config(&self.text)
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         assert_eq!(input_ids.dims()[0], 1);
@@ -1125,7 +1146,10 @@ impl MultimodalModel for Qwen3VLModel {
 
 impl IsqModel for Qwen3VLModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
-        let mut tensors = self.text.residual_tensors();
+        let uvb = UnVarBuilder::new();
+        let mut tensors = self
+            .text
+            .residual_tensors_m(uvb.pp("model").pp("language_model"));
         tensors.extend(self.vision.residual_tensors());
         tensors
     }

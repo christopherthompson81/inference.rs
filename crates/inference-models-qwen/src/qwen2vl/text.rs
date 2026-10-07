@@ -30,6 +30,7 @@ impl<V> QwenVlConfig<V> {
             rope: RopeKind::MRope {
                 theta: self.rope_theta as f32,
                 sections: self.rope_scaling.mrope_section.clone(),
+                interleaved: false,
             },
             max_position_embeddings: self.max_position_embeddings,
             qkv_bias: true,

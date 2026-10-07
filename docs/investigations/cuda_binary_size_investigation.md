@@ -1901,3 +1901,23 @@ them, but a replay would freeze host-built tables).
 
 Next: #324 step 7b (Qwen3-VL and Qwen3-VL-MoE: interleaved M-RoPE with q/k norm, deepstack injection).
 
+## Run 56 - 2026-10-07 13:37
+
+Question: what does #324 step 7b (Qwen3-VL's text stack, shared by Qwen3-VL and Qwen3-VL-MoE) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,412,720  105,372,016     -40,704
+.text                  55,230,050   55,195,682     -34,368
+```
+
+Raw finding: -41 KB from 749 lines of code removed and 304 added. The decoder grew interleaved M-RoPE (Qwen3-VL's,
+with its RMS q/k norm fused into the rotation), `qk_norm_kind` (the dense checkpoints use F32 layer norms but fused
+RMS q/k norms), and `forward_hooked`, a per-layer callback through which the wrapper adds its deepstack visual
+features; the experts are the shared `SparseMoe`. The text pins (dense and MoE, F32 and BF16) and the image and video
+traces of `qwen_vl_tiny` (whose fixture has a deepstack layer) pass unchanged, CPU and CUDA. Untested here, read
+side by side only: paged attention, tied embeddings, the MLX prefix, multi-device deepstack.
+
+Next: #324 step 7c (Phi-4MM: static-LoRA projections).
+
