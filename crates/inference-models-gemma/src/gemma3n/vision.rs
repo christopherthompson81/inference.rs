@@ -91,7 +91,6 @@ impl Conv2dSame {
             stride,
             dilation,
             groups,
-            cudnn_fwd_algo: None,
         };
 
         let conv = if bias {

@@ -14,7 +14,6 @@ pub struct ParamsConv1D {
     pub(crate) padding: usize,
     pub(crate) stride: usize,
     pub(crate) dilation: usize,
-    pub(crate) cudnn_fwd_algo: Option<CudnnFwdAlgo>,
 }
 
 impl ParamsConv1D {
@@ -55,19 +54,6 @@ impl ParamsConvTranspose1D {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CudnnFwdAlgo {
-    ImplicitGemm,
-    ImplicitPrecompGemm,
-    Gemm,
-    Direct,
-    Fft,
-    FftTiling,
-    Winograd,
-    WinogradNonFused,
-    Count,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamsConv2D {
     pub(crate) b_size: usize,
@@ -80,7 +66,6 @@ pub struct ParamsConv2D {
     pub(crate) padding: usize,
     pub(crate) stride: usize,
     pub(crate) dilation: usize,
-    pub cudnn_fwd_algo: Option<CudnnFwdAlgo>,
 }
 
 impl ParamsConv2D {
@@ -153,19 +138,6 @@ impl Tensor {
         dilation: usize,
         groups: usize,
     ) -> Result<Self> {
-        self.conv1d_with_algo(kernel, padding, stride, dilation, groups, None)
-    }
-
-    /// Applies a 1D convolution over the input tensor.
-    pub fn conv1d_with_algo(
-        &self,
-        kernel: &Self,
-        padding: usize,
-        stride: usize,
-        dilation: usize,
-        groups: usize,
-        cudnn_fwd_algo: Option<CudnnFwdAlgo>,
-    ) -> Result<Self> {
         let (c_out, c_in_k, k_size) = kernel.dims3()?;
         let (b_size, c_in, l_in) = self.dims3()?;
         if c_in != c_in_k * groups {
@@ -188,7 +160,6 @@ impl Tensor {
             padding,
             stride,
             dilation,
-            cudnn_fwd_algo,
         };
         if groups == 1 {
             self.conv1d_single_group(kernel, &params)
@@ -285,7 +256,6 @@ impl Tensor {
         Ok(crate::tensor::from_storage(storage, out_dims, op, false))
     }
 
-    /// Applies a 2D convolution over the input tensor.
     pub fn conv2d(
         &self,
         kernel: &Self,
@@ -293,18 +263,6 @@ impl Tensor {
         stride: usize,
         dilation: usize,
         groups: usize,
-    ) -> Result<Self> {
-        self.conv2d_with_algo(kernel, padding, stride, dilation, groups, None)
-    }
-
-    pub fn conv2d_with_algo(
-        &self,
-        kernel: &Self,
-        padding: usize,
-        stride: usize,
-        dilation: usize,
-        groups: usize,
-        cudnn_fwd_algo: Option<CudnnFwdAlgo>,
     ) -> Result<Self> {
         let (b_size, c_in, i_h, i_w) = self.dims4()?;
         let (c_out, c_in_k, k_h, k_w) = kernel.dims4()?;
@@ -324,7 +282,6 @@ impl Tensor {
             padding,
             stride,
             dilation,
-            cudnn_fwd_algo,
         };
         if groups == 1 {
             self.conv2d_single_group(kernel, &params)

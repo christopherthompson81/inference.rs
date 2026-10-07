@@ -35,9 +35,6 @@ pub(crate) fn launch_conv2d<
     params: &crate::conv::ParamsConv2D,
     dev: &crate::cuda_backend::CudaDevice,
 ) -> crate::Result<()> {
-    use crate::conv::CudnnFwdAlgo as CandleAlgo;
-    use cudarc::cudnn::sys::cudnnConvolutionFwdAlgo_t as A;
-
     let device_id = dev.id();
     let cudnn = CUDNN.with(|cudnn| {
         if let Some(cudnn) = cudnn.borrow().get(&device_id) {
@@ -94,20 +91,7 @@ pub(crate) fn launch_conv2d<
         w: &w,
         y: &y,
     };
-    let alg = match params.cudnn_fwd_algo {
-        None => conv2d.pick_algorithm()?,
-        Some(CandleAlgo::ImplicitGemm) => A::CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-        Some(CandleAlgo::ImplicitPrecompGemm) => {
-            A::CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM
-        }
-        Some(CandleAlgo::Gemm) => A::CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
-        Some(CandleAlgo::Direct) => A::CUDNN_CONVOLUTION_FWD_ALGO_DIRECT,
-        Some(CandleAlgo::Fft) => A::CUDNN_CONVOLUTION_FWD_ALGO_FFT,
-        Some(CandleAlgo::FftTiling) => A::CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING,
-        Some(CandleAlgo::Winograd) => A::CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD,
-        Some(CandleAlgo::WinogradNonFused) => A::CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED,
-        Some(CandleAlgo::Count) => A::CUDNN_CONVOLUTION_FWD_ALGO_COUNT,
-    };
+    let alg = conv2d.pick_algorithm()?;
     let workspace_size = conv2d.get_workspace_size(alg)?;
     let mut workspace = dev.cuda_stream().alloc_zeros::<u8>(workspace_size)?;
     unsafe {
@@ -134,9 +118,6 @@ pub(crate) fn launch_conv1d<
     params: &crate::conv::ParamsConv1D,
     dev: &crate::cuda_backend::CudaDevice,
 ) -> crate::Result<()> {
-    use crate::conv::CudnnFwdAlgo as CandleAlgo;
-    use cudarc::cudnn::sys::cudnnConvolutionFwdAlgo_t as A;
-
     let device_id = dev.id();
     let cudnn = CUDNN.with(|cudnn| {
         if let Some(cudnn) = cudnn.borrow().get(&device_id) {
@@ -195,20 +176,7 @@ pub(crate) fn launch_conv1d<
         w: &w,
         y: &y,
     };
-    let alg = match params.cudnn_fwd_algo {
-        None => conv1d.pick_algorithm()?,
-        Some(CandleAlgo::ImplicitGemm) => A::CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_GEMM,
-        Some(CandleAlgo::ImplicitPrecompGemm) => {
-            A::CUDNN_CONVOLUTION_FWD_ALGO_IMPLICIT_PRECOMP_GEMM
-        }
-        Some(CandleAlgo::Gemm) => A::CUDNN_CONVOLUTION_FWD_ALGO_GEMM,
-        Some(CandleAlgo::Direct) => A::CUDNN_CONVOLUTION_FWD_ALGO_DIRECT,
-        Some(CandleAlgo::Fft) => A::CUDNN_CONVOLUTION_FWD_ALGO_FFT,
-        Some(CandleAlgo::FftTiling) => A::CUDNN_CONVOLUTION_FWD_ALGO_FFT_TILING,
-        Some(CandleAlgo::Winograd) => A::CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD,
-        Some(CandleAlgo::WinogradNonFused) => A::CUDNN_CONVOLUTION_FWD_ALGO_WINOGRAD_NONFUSED,
-        Some(CandleAlgo::Count) => A::CUDNN_CONVOLUTION_FWD_ALGO_COUNT,
-    };
+    let alg = conv1d.pick_algorithm()?;
     let workspace_size = conv1d.get_workspace_size(alg)?;
     let mut workspace = dev.cuda_stream().alloc_zeros::<u8>(workspace_size)?;
     unsafe {

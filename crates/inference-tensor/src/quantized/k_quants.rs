@@ -275,9 +275,6 @@ impl GgmlType for BlockQ4_0 {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q4_0_q8_0(n, xs, ys);
 
-        #[cfg(target_feature = "simd128")]
-        return super::simd128::vec_dot_q4_0_q8_0(n, xs, ys);
-
         Self::vec_dot_unopt(n, xs, ys)
     }
 
@@ -693,9 +690,6 @@ impl GgmlType for BlockQ8_0 {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q8_0_q8_0(n, xs, ys);
 
-        #[cfg(target_feature = "simd128")]
-        return super::simd128::vec_dot_q8_0_q8_0(n, xs, ys);
-
         Self::vec_dot_unopt(n, xs, ys)
     }
 
@@ -830,9 +824,6 @@ impl GgmlType for BlockQ2K {
 
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q2k_q8k(n, xs, ys);
-
-        #[cfg(target_feature = "simd128")]
-        return super::simd128::vec_dot_q2k_q8k(n, xs, ys);
 
         Self::vec_dot_unopt(n, xs, ys)
     }
@@ -1450,9 +1441,6 @@ impl GgmlType for BlockQ4K {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q4k_q8k(n, xs, ys);
 
-        #[cfg(target_feature = "simd128")]
-        return super::simd128::vec_dot_q4k_q8k(n, xs, ys);
-
         Self::vec_dot_unopt(n, xs, ys)
     }
 
@@ -2033,9 +2021,6 @@ impl GgmlType for BlockQ6K {
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q6k_q8k(n, xs, ys);
 
-        #[cfg(target_feature = "simd128")]
-        return super::simd128::vec_dot_q6k_q8k(n, xs, ys);
-
         Self::vec_dot_unopt(n, xs, ys)
     }
 
@@ -2329,9 +2314,6 @@ impl GgmlType for BlockQ8K {
 
         #[cfg(target_feature = "neon")]
         return super::neon::vec_dot_q8k_q8k(n, xs, ys);
-
-        #[cfg(target_feature = "simd128")]
-        return super::simd128::vec_dot_q8k_q8k(n, xs, ys);
 
         Self::vec_dot_unopt(n, xs, ys)
     }

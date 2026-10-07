@@ -391,7 +391,6 @@ impl Gemma4AudioSSCPConvBlock {
                 padding: 0,
                 dilation: 1,
                 groups: 1,
-                cudnn_fwd_algo: None,
             },
             vb.pp("conv"),
         )?;
@@ -941,7 +940,6 @@ impl Gemma4AudioConformerLightConv1d {
                     padding: 0,
                     dilation: 1,
                     groups: cfg.hidden_size,
-                    cudnn_fwd_algo: None,
                 },
                 vb.pp("depthwise_conv1d").set_dtype(DType::F32),
             )?,

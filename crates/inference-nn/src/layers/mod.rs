@@ -2584,7 +2584,6 @@ impl Conv3dNoBias {
             stride: cfg.stride,
             dilation: cfg.dilation,
             groups: cfg.groups,
-            cudnn_fwd_algo: None,
         };
 
         Ok(Self {

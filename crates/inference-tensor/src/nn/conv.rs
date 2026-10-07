@@ -1,5 +1,5 @@
 //! Convolution Layers.
-use crate::{conv::CudnnFwdAlgo, Result, Tensor};
+use crate::{Result, Tensor};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Conv1dConfig {
@@ -7,7 +7,6 @@ pub struct Conv1dConfig {
     pub stride: usize,
     pub dilation: usize,
     pub groups: usize,
-    pub cudnn_fwd_algo: Option<CudnnFwdAlgo>,
 }
 
 impl Default for Conv1dConfig {
@@ -17,7 +16,6 @@ impl Default for Conv1dConfig {
             stride: 1,
             dilation: 1,
             groups: 1,
-            cudnn_fwd_algo: None,
         }
     }
 }
@@ -53,13 +51,12 @@ impl Conv1d {
 
 impl crate::nn::Module for Conv1d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.conv1d_with_algo(
+        let x = x.conv1d(
             &self.weight,
             self.config.padding,
             self.config.stride,
             self.config.dilation,
             self.config.groups,
-            self.config.cudnn_fwd_algo,
         )?;
         match &self.bias {
             None => Ok(x),
@@ -149,7 +146,6 @@ pub struct Conv2dConfig {
     pub stride: usize,
     pub dilation: usize,
     pub groups: usize,
-    pub cudnn_fwd_algo: Option<CudnnFwdAlgo>,
 }
 
 impl Default for Conv2dConfig {
@@ -159,7 +155,6 @@ impl Default for Conv2dConfig {
             stride: 1,
             dilation: 1,
             groups: 1,
-            cudnn_fwd_algo: None,
         }
     }
 }
@@ -195,13 +190,12 @@ impl Conv2d {
 
 impl crate::nn::Module for Conv2d {
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let x = x.conv2d_with_algo(
+        let x = x.conv2d(
             &self.weight,
             self.config.padding,
             self.config.stride,
             self.config.dilation,
             self.config.groups,
-            self.config.cudnn_fwd_algo,
         )?;
         match &self.bias {
             None => Ok(x),

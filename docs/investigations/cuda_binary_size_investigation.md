@@ -1505,3 +1505,20 @@ Left from the scan: the unreachable aliased in-place path (`AccessPattern`, `*_f
 small Device/CudaDevice helpers, the gemm reduced-precision setters, `quantize_imatrix_onto`, BatchNorm and pickle
 leftovers, the CPU direct conv paths behind constants, and two decisions for the user: dropping wasm (simd128) and
 collapsing cuDNN algorithm selection (all 16 call sites pass `None`).
+
+## Run 42 - 2026-10-06 22:19
+
+#270 step 5, usage-scan trims, fourth slice: the two decisions from Run 41, both answered "remove" by the user.
+
+- wasm32 SIMD: `cpu/simd128.rs` and `quantized/simd128.rs` (~700 lines), their cfg arms in `cpu/mod.rs` and
+  `k_quants.rs`, `utils::with_simd128` (and its field in the server's hardware debug line), and gemm's
+  `wasm-simd128-enable` feature. Nothing in the workspace targets wasm.
+- cuDNN algorithm selection: all 16 conv config literals passed `cudnn_fwd_algo: None`, so `CudnnFwdAlgo`, the
+  config and params fields, `conv1d_with_algo`/`conv2d_with_algo` (folded into `conv1d`/`conv2d`) and the
+  algorithm match in `cuda_backend/cudnn.rs` go; cuDNN always picks its own algorithm, as it did. The `cudnn`
+  feature is built by no CI mode, so it was checked by hand (`cargo clippy -p inference-tensor --features cudnn`).
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2828 + 2443)
+local_ci.sh --size-update  -> file -9 KB
+```

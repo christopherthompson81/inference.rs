@@ -222,7 +222,6 @@ impl Dense {
             stride,
             dilation: 1,
             groups: 1,
-            cudnn_fwd_algo: None,
         };
         Ok(Self {
             conv: needs_conv.then(|| Conv2d::new(w, Some(b.clone()), cfg)),
