@@ -10,6 +10,8 @@ use inference_nn::{
 pub mod conformer;
 pub mod loaders;
 pub mod phi2;
+#[cfg(test)]
+mod phi2_tests;
 pub mod phi3;
 pub mod phi3_5_moe;
 pub mod phi3_vision;

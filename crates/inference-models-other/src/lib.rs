@@ -29,6 +29,8 @@ pub mod lfm2_vl;
 pub mod loaders;
 pub mod paddleocr_vl;
 pub mod starcoder2;
+#[cfg(test)]
+mod starcoder2_tests;
 
 inference_nn::json_config!(
     deepseek2::DeepSeekV2Config,
