@@ -22,6 +22,8 @@ pub mod loaders;
 pub mod mistral;
 pub mod mistral3;
 pub mod mixtral;
+#[cfg(test)]
+mod mixtral_tests;
 pub mod mllama;
 pub mod quantized_llama;
 pub mod smollm3;

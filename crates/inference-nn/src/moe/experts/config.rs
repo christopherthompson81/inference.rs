@@ -46,7 +46,7 @@ impl ExpertProj {
 }
 
 /// Per-expert projection tensor names; mixtral-style checkpoints use `w1`/`w3`/`w2`.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ExpertProjNames {
     pub gate: &'static str,
     pub up: &'static str,

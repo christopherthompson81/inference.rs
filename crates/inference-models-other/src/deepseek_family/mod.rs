@@ -322,13 +322,15 @@ pub enum MoeOrMlp {
 }
 
 impl LayerFfn for MoeOrMlp {
-    const MOE_EXPERTS_ONLY_ISQ: bool = true;
-
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Mlp(mlp) => mlp.forward(xs),
             Self::Moe(moe) => moe.forward(xs),
         }
+    }
+
+    fn moe_experts(&self) -> bool {
+        matches!(self, Self::Moe(_))
     }
 
     fn add_residual(&self, uvb: &UnVarBuilder) {

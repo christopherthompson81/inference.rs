@@ -28,6 +28,12 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+mod moe;
+
+pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SparseMoe};
+
+/// A layer's feed-forward, dense or routed, as most checkpoints name it.
+pub const MLP: &str = "mlp";
 const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
@@ -205,6 +211,8 @@ pub struct DecoderSpec {
     /// Multiplies the token embeddings, as Gemma scales them by `sqrt(hidden_size)`.
     pub embed_scale: Option<f64>,
     pub mlp: MlpKind,
+    /// Experts in place of the dense MLP, except on the layers the spec lists as dense.
+    pub moe: Option<MoeSpec>,
     pub lm_head_bias: bool,
     /// The lm_head is stored unquantized even in a quantized checkpoint.
     pub unquantized_lm_head: bool,
@@ -445,15 +453,31 @@ pub trait LayerAttention: Send + Sync {
 
 /// The feed-forward half of a decoder layer.
 pub trait LayerFfn: Send + Sync {
-    /// Whether a MoE-experts-only ISQ applies, quantizing the experts and keeping the rest.
-    const MOE_EXPERTS_ONLY_ISQ: bool = false;
     /// Whether AnyMoE can wrap this feed-forward in experts.
     const AMOE: bool = false;
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor>;
 
-    /// The tensors ISQ leaves alone, under `mlp`.
+    /// The feed-forward's name in the layer.
+    fn name(&self) -> &'static str {
+        MLP
+    }
+
+    /// Whether this layer routes over experts, which a MoE-experts-only ISQ quantizes alone.
+    fn moe_experts(&self) -> bool {
+        false
+    }
+
+    /// The tensors ISQ leaves alone, under [`LayerFfn::name`].
     fn add_residual(&self, _uvb: &UnVarBuilder) {}
+
+    /// The tensors, under [`LayerFfn::name`], that a MoE-experts-only ISQ also leaves alone.
+    fn add_projections(&self, _uvb: &UnVarBuilder) {}
+
+    /// Whether a captured CUDA decode graph replays this layer correctly.
+    fn cuda_decode_graphs(&self) -> bool {
+        true
+    }
 
     /// The dense MLP AnyMoE can wrap in experts, when this is one.
     fn as_mlp(&self) -> Option<&dyn MlpLayer> {
@@ -465,17 +489,57 @@ pub trait LayerFfn: Send + Sync {
     }
 }
 
-impl LayerFfn for Box<dyn MlpLayer> {
+/// A layer's dense MLP or its experts.
+pub enum Ffn {
+    Dense(Box<dyn MlpLayer>),
+    Moe(SparseMoe),
+}
+
+impl LayerFfn for Ffn {
     const AMOE: bool = true;
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        MlpLayer::forward(&**self, xs)
+        match self {
+            Self::Dense(mlp) => mlp.forward(xs),
+            Self::Moe(moe) => moe.forward(xs),
+        }
+    }
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Dense(_) => MLP,
+            Self::Moe(moe) => moe.name(),
+        }
+    }
+    fn moe_experts(&self) -> bool {
+        matches!(self, Self::Moe(_))
+    }
+    fn cuda_decode_graphs(&self) -> bool {
+        match self {
+            Self::Dense(_) => true,
+            Self::Moe(moe) => moe.cuda_decode_graphs(),
+        }
+    }
+    fn add_residual(&self, uvb: &UnVarBuilder) {
+        if let Self::Moe(moe) = self {
+            moe.add_residual(uvb);
+        }
+    }
+    fn add_projections(&self, uvb: &UnVarBuilder) {
+        if let Self::Moe(moe) = self {
+            moe.add_projections(uvb);
+        }
     }
     fn as_mlp(&self) -> Option<&dyn MlpLayer> {
-        Some(&**self)
+        match self {
+            Self::Dense(mlp) => Some(&**mlp),
+            Self::Moe(_) => None,
+        }
     }
     fn as_mlp_mut(&mut self) -> Option<&mut Box<dyn MlpLayer>> {
-        Some(self)
+        match self {
+            Self::Dense(mlp) => Some(mlp),
+            Self::Moe(_) => None,
+        }
     }
 }
 
@@ -515,7 +579,7 @@ impl StackShape<'_> {
     }
 }
 
-/// [`AttentionBlock`] and the MLP a [`DecoderSpec`] describes.
+/// [`AttentionBlock`] and the MLP or experts a [`DecoderSpec`] describes.
 struct StandardLayers<'a> {
     spec: &'a DecoderSpec,
     ropes: HashMap<DeviceLocation, Arc<LayerRope>>,
@@ -524,13 +588,9 @@ struct StandardLayers<'a> {
 
 impl LayerBuilder for StandardLayers<'_> {
     type Attention = AttentionBlock;
-    type Ffn = Box<dyn MlpLayer>;
+    type Ffn = Ffn;
 
-    fn build(
-        &self,
-        load: &LayerLoad<'_>,
-        vb: ShardedVarBuilder,
-    ) -> Result<(AttentionBlock, Box<dyn MlpLayer>)> {
+    fn build(&self, load: &LayerLoad<'_>, vb: ShardedVarBuilder) -> Result<(AttentionBlock, Ffn)> {
         let spec = self.spec;
         let ropes = match &self.local_ropes {
             Some(local) if spec.layer_windows[load.layer_idx].is_some() => local,
@@ -553,6 +613,21 @@ impl LayerBuilder for StandardLayers<'_> {
         let attention =
             AttentionBlock::new(spec, load, place("self_attn"), rotary_emb, paged_attn)?;
         let qc = &spec.quantization_config;
+        if let Some(moe) = spec
+            .moe
+            .as_ref()
+            .filter(|moe| !moe.dense_layers.contains(&load.layer_idx))
+        {
+            let experts = SparseMoe::new(
+                moe,
+                spec.hidden_size,
+                qc,
+                spec.hidden_act,
+                load,
+                place(moe.name),
+            )?;
+            return Ok((attention, Ffn::Moe(experts)));
+        }
         let mlp_kind = match spec.mlp {
             MlpKind::MergedGateUp if qc.as_ref().is_some_and(|qc| !qc.loads_column_shards()) => {
                 MlpKind::FusedGateUp
@@ -561,14 +636,14 @@ impl LayerBuilder for StandardLayers<'_> {
         };
         let mlp: Box<dyn MlpLayer> = match mlp_kind {
             MlpKind::FusedGateUp => Box::new(FusedGateUpMlp::new(
-                place("mlp"),
+                place(MLP),
                 spec.hidden_size,
                 spec.intermediate_size,
                 qc,
                 spec.hidden_act,
             )?),
             MlpKind::Gated => Box::new(Mlp::new(
-                place("mlp"),
+                place(MLP),
                 spec.hidden_size,
                 spec.intermediate_size,
                 &spec.quantization_config,
@@ -576,7 +651,7 @@ impl LayerBuilder for StandardLayers<'_> {
                 load.comm,
             )?),
             MlpKind::MergedGateUp => Box::new(Mlp::new_merged(
-                place("mlp"),
+                place(MLP),
                 spec.hidden_size,
                 spec.intermediate_size,
                 MERGED_GATE_UP_CHUNKS,
@@ -585,7 +660,7 @@ impl LayerBuilder for StandardLayers<'_> {
                 load.comm,
             )?),
             MlpKind::Plain { projections, bias } => Box::new(PlainMlp::new(
-                place("mlp"),
+                place(MLP),
                 &[spec.hidden_size, spec.intermediate_size],
                 projections,
                 bias,
@@ -594,7 +669,7 @@ impl LayerBuilder for StandardLayers<'_> {
                 load.comm,
             )?),
         };
-        Ok((attention, mlp))
+        Ok((attention, Ffn::Dense(mlp)))
     }
 }
 
@@ -1001,7 +1076,7 @@ impl LayerMasks {
 }
 
 /// Embeddings, layers and final norm: the part a causal LM and an embedder share.
-pub struct DecoderStack<A = AttentionBlock, F = Box<dyn MlpLayer>> {
+pub struct DecoderStack<A = AttentionBlock, F = Ffn> {
     pub embed_tokens: Arc<dyn QuantMethod>,
     pub layers: Vec<DecoderLayer<A, F>>,
     norm: Norm,
@@ -1268,16 +1343,18 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 post_ffn.add_residual(&uvb_l.pp(ffn_name));
             }
             layer.self_attn.add_residual(&uvb_l.pp("self_attn"));
-            layer.mlp.add_residual(&uvb_l.pp("mlp"));
+            let uvb_ffn = uvb_l.pp(layer.mlp.name());
+            layer.mlp.add_residual(&uvb_ffn);
             if with_projections {
                 layer.self_attn.add_projections(&uvb_l.pp("self_attn"));
+                layer.mlp.add_projections(&uvb_ffn);
             }
         }
     }
 }
 
 /// A [`DecoderStack`] under `model.` with an `lm_head`, as the engine runs a text model.
-pub struct CausalLm<A = AttentionBlock, F = Box<dyn MlpLayer>> {
+pub struct CausalLm<A = AttentionBlock, F = Ffn> {
     stack: DecoderStack<A, F>,
     lm_head: Arc<dyn QuantMethod>,
     final_logit_softcap: Option<f32>,
@@ -1466,7 +1543,11 @@ impl<A: LayerAttention, F: LayerFfn> IsqModel for CausalLm<A, F> {
         self.residual_uvb(false).to_safetensors()
     }
     fn residual_tensors_moe_experts_only(&self) -> Option<Vec<(String, Tensor)>> {
-        F::MOE_EXPERTS_ONLY_ISQ.then(|| self.residual_uvb(true).to_safetensors())
+        self.stack
+            .layers
+            .iter()
+            .any(|layer| layer.mlp.moe_experts())
+            .then(|| self.residual_uvb(true).to_safetensors())
     }
 }
 
@@ -1499,7 +1580,7 @@ impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
         self.stack
             .layers
             .iter()
-            .all(|layer| layer.self_attn.cuda_decode_graphs())
+            .all(|layer| layer.self_attn.cuda_decode_graphs() && layer.mlp.cuda_decode_graphs())
     }
 }
 
@@ -1570,6 +1651,11 @@ impl<A: LayerAttention, F: LayerFfn> AnyMoeBaseModelMixin for CausalLm<A, F> {
     }
     fn amoe_supported(&self) -> bool {
         F::AMOE
+            && self
+                .stack
+                .layers
+                .iter()
+                .all(|layer| layer.mlp.as_mlp().is_some())
     }
 }
 
