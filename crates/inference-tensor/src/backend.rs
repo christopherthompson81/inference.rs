@@ -67,7 +67,6 @@ pub trait BackendStorage: Sized {
 
     fn avg_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self>;
     fn max_pool2d(&self, _: &Layout, _: (usize, usize), _: (usize, usize)) -> Result<Self>;
-    fn upsample_nearest1d(&self, _: &Layout, _: usize) -> Result<Self>;
     fn upsample_nearest2d(&self, _: &Layout, _: usize, _: usize) -> Result<Self>;
     fn upsample_bilinear2d(
         &self,
