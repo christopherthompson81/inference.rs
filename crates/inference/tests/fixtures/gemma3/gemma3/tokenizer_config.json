@@ -1,0 +1,18 @@
+{
+  "add_bos_token": false,
+  "add_eos_token": false,
+  "bos_token": "<bos>",
+  "eos_token": "<eos>",
+  "pad_token": "<pad>",
+  "unk_token": "<unk>",
+  "additional_special_tokens": [
+    "<start_of_turn>",
+    "<end_of_turn>",
+    "<start_of_image>",
+    "<end_of_image>",
+    "<image_soft_token>"
+  ],
+  "clean_up_tokenization_spaces": false,
+  "model_max_length": 4096,
+  "tokenizer_class": "GemmaTokenizer"
+}

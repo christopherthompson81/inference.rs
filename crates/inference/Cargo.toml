@@ -30,6 +30,7 @@ uuid.workspace = true
 [dev-dependencies]
 inference-tensor.workspace = true
 indicatif.workspace = true
+inference-models-gemma.workspace = true
 inference-models-llama.workspace = true
 inference-models-other.workspace = true
 inference-models-qwen.workspace = true
