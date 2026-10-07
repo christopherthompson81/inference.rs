@@ -9,9 +9,11 @@ use inference::{
 };
 use inference_tensor::{Device, Tensor};
 
+#[path = "../support/decode_graphs.rs"]
+mod decode_graphs;
 #[path = "../support/llama_tiny.rs"]
 mod support;
-use support::tiny_llama_checkpoint;
+use support::{tiny_llama_checkpoint, tiny_llama_checkpoint_with};
 
 const PROMPT: &str = "hello";
 const MAX_LEN: usize = 8;
@@ -211,4 +213,89 @@ async fn paged_gpu_decode_through_the_gather_matches_the_cpu() -> anyhow::Result
             .all(|(g, c)| g.0 == c.0 && (g.1 - c.1).abs() < F32_LOGPROB_TOLERANCE);
     anyhow::ensure!(close, "GPU decode {gpu:?} differs from CPU {cpu:?}");
     Ok(())
+}
+
+// the committed config's 16 decodes through the gather, which a graph cannot capture
+const GRAPH_HEAD_DIM: usize = 64;
+
+// Each prompt's trace, per round of concurrent requests, at a head dim the flash decode kernels serve.
+async fn paged_gpu_rounds() -> anyhow::Result<decode_graphs::Rounds> {
+    let checkpoint = tiny_llama_checkpoint_with(serde_json::json!({ "head_dim": GRAPH_HEAD_DIM }))?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    decode_graphs::rounds(&model, MAX_LEN).await
+}
+
+// Each GRAPH_PROMPTS entry's greedy (token, logprob) per step.
+const GRAPH_TRACES: [&[(u32, f32)]; decode_graphs::GRAPH_PROMPTS.len()] = [
+    &[
+        (121, -1.3651954),
+        (134, -2.2569206),
+        (230, -2.519556),
+        (230, -1.539979),
+        (169, -2.4789698),
+        (134, -2.802221),
+        (121, -1.9325787),
+        (189, -1.9721572),
+    ],
+    &[
+        (13, -2.5397305),
+        (169, -2.925844),
+        (134, -3.2152035),
+        (121, -2.468901),
+        (189, -2.3651981),
+        (8, -2.78733),
+        (121, -1.138626),
+        (189, -2.3949344),
+    ],
+    &[
+        (121, -1.5961162),
+        (189, -2.2986858),
+        (144, -2.1111917),
+        (214, -2.229178),
+        (123, -2.2322695),
+        (5, -1.7348924),
+        (214, -2.205392),
+        (123, -2.4888473),
+    ],
+    &[
+        (17, -2.6776829),
+        (148, -2.6463716),
+        (225, -2.8080559),
+        (225, -2.8393962),
+        (225, -2.7868881),
+        (225, -2.7372813),
+        (225, -2.7477746),
+        (134, -2.7548532),
+    ],
+    &[
+        (121, -2.3032737),
+        (157, -2.968076),
+        (6, -2.433681),
+        (121, -2.014543),
+        (189, -2.6645021),
+        (8, -2.385579),
+        (121, -1.1709063),
+        (189, -2.7256854),
+    ],
+];
+
+// Decode steps replay captured graphs and give the eager output.
+#[tokio::test]
+async fn paged_gpu_decode_replays_cuda_graphs() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    decode_graphs::assert_rounds_replay(paged_gpu_rounds, &GRAPH_TRACES).await
+}
+
+#[tokio::test]
+async fn paged_gpu_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    decode_graphs::assert_rounds_without_graphs(paged_gpu_rounds, &GRAPH_TRACES).await
 }

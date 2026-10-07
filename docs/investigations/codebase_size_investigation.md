@@ -2316,3 +2316,37 @@ input dispatch (41). Unlike ModelSelected this sits in function bodies, so a mer
 ~800-1,000 lines after hooks for the multimodal-only parts.
 
 Next: the normal/multimodal pipeline merge, pinned first.
+
+## Run 73 - 2026-10-07 17:31
+
+Question: before the pipeline merge, which decode-graph behaviors do the two pipelines show on tiny checkpoints, and
+can a test observe them? Command: `cargo nextest run --profile cuda --features cuda --workspace --lib --bins --tests
+-E 'test(/gemma3_tiny::|qwen3_5_text_tiny::|llama_tiny::paged_gpu/)'`, with a `metrics-util` debugging recorder
+reading `inference_cuda_graph_{events,dispatch}_total` per test process.
+
+Raw findings:
+
+- Head dims 16 and 32 decode through the gather path and report `model_unsupported`; graphs need a head dim the flash
+  decode kernels serve (64 here). The Llama and Qwen3.5 text fixtures take `head_dim: 64` for these tests.
+- f32 capture fails (`runtime_disabled` fallback); bf16 captures. Pins run bf16 paged.
+- Llama text, rounds of 1, 3 and 5 concurrent prompts: 18 captures, 21 replays, no failures.
+- Hybrid Qwen3.5 text (attention + recurrent layers): 18 captures, 27 replays. At head dim 64 the fixture first failed
+  to load ("MRoPE sections span 8 dimensions, expected 16"): `mrope_section` must scale with the head dim.
+- Text Qwen3.5 with builtin MTP: every verify step skips graphs with `speculative_conflict` (29 skips, no events);
+  52 drafts. The multimodal pipeline graphs verify steps instead, so the merge must keep this split until it is
+  deliberately changed (the plan's `GraphPolicy{speculative_verify}`).
+- Gemma 3 (multimodal pipeline), image then text: 18 captures and 5 replays on the image request, 15 replays on the
+  text rounds after it. Random weights settle on one token, so these pins mostly guard the path running at all.
+- Graphs off (`INFERENCE_RS_CUDA_GRAPHS=0`): ids identical to graphs on in every case; first-step logprobs within
+  0.03 (bf16, batch composition).
+- Negative result: the Qwen3.5 text fixture was order-seeded, so adding the MTP layer moved every base weight and the
+  MTP traces did not match the plain ones. Switched to name seeding; plain, graph and MTP runs then agree on ids.
+
+Review of the first draft (negative findings kept): pinning only the first step's logprob pinned prefill, which never
+takes a graph, so replay correctness rested on greedy ids alone; batch-1 bf16 logprobs move ~0.015 run to run, so a
+tight tolerance is not available either. The pins now hold every step's logprob at 0.06, also assert no eager
+dispatch, eager fallback or failed capture, and require every dispatch to stop at `disabled` when graphs are off.
+`--stress-count 20` on the graph tests: 20/20 passed.
+
+Implication: PR0a pins the graph behavior; PR0b (UQFF on the multimodal path, `re_isq`, encoder cache, text prefix
+cache, mixed-length packed prefill) follows before any merge code.

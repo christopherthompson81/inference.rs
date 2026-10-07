@@ -20,10 +20,24 @@ const TOKENIZER: &str = concat!(
 
 /// The committed tiny Llama config and templates, a shared tokenizer, and random weights for every loaded tensor.
 pub fn tiny_llama_checkpoint() -> anyhow::Result<tempfile::TempDir> {
-    let mut files = recording::fixture_files(LLAMA)?;
-    files.push(TOKENIZER.into());
-    let cfg: Config =
+    tiny_llama_checkpoint_with(serde_json::json!({}))
+}
+
+/// As [`tiny_llama_checkpoint`], with `patch`'s keys overriding the committed config's.
+pub fn tiny_llama_checkpoint_with(patch: serde_json::Value) -> anyhow::Result<tempfile::TempDir> {
+    let mut config: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(format!("{LLAMA}/config.json"))?)?;
+    for (key, value) in patch.as_object().expect("a config patch is a JSON object") {
+        config[key] = value.clone();
+    }
+    let cfg: Config = serde_json::from_value(config.clone())?;
+    let staging = tempfile::tempdir()?;
+    let config_path = staging.path().join("config.json");
+    std::fs::write(&config_path, serde_json::to_string(&config)?)?;
+    let mut files = recording::fixture_files(LLAMA)?;
+    files.retain(|path| path.file_name().is_some_and(|name| name != "config.json"));
+    files.push(config_path);
+    files.push(TOKENIZER.into());
     let files = files
         .iter()
         .map(|path| path.as_path())

@@ -109,6 +109,8 @@ tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 metrics = "0.24.6"
 # Only the recorder: `/metrics` renders it through our own router, so no listener or push-gateway client.
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
+# Tests read what the engine recorded through its debugging recorder.
+metrics-util = { version = "0.20.4", default-features = false, features = ["debugging"] }
 futures = "0.3"
 clap = { version = "4.5.54", features = ["derive", "wrap_help"] }
 tokio = { version = "1.49.0", features = ["full", "rt-multi-thread"] }
