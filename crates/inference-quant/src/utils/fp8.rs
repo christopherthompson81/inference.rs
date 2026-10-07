@@ -1,11 +1,11 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 pub(crate) fn contiguous_fp8(x: &Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if x.device().is_cuda()
         && matches!(
             x.dtype(),
-            candle_core::DType::F8E4M3 | candle_core::DType::F8E8M0
+            inference_tensor::DType::F8E4M3 | inference_tensor::DType::F8E8M0
         )
         && !x.is_contiguous()
     {
@@ -18,25 +18,25 @@ pub(crate) fn contiguous_fp8(x: &Tensor) -> Result<Tensor> {
 struct CudaFp8Contiguous;
 
 #[cfg(feature = "cuda")]
-impl candle_core::CustomOp1 for CudaFp8Contiguous {
+impl inference_tensor::CustomOp1 for CudaFp8Contiguous {
     fn name(&self) -> &'static str {
         "fp8-contiguous"
     }
 
     fn cpu_fwd(
         &self,
-        _: &candle_core::CpuStorage,
-        _: &candle_core::Layout,
-    ) -> Result<(candle_core::CpuStorage, candle_core::Shape)> {
-        candle_core::bail!("FP8 byte-copy operation requires CUDA")
+        _: &inference_tensor::CpuStorage,
+        _: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::CpuStorage, inference_tensor::Shape)> {
+        inference_tensor::bail!("FP8 byte-copy operation requires CUDA")
     }
 
     fn cuda_fwd(
         &self,
-        storage: &candle_core::CudaStorage,
-        layout: &candle_core::Layout,
-    ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::cuda_backend::{
+        storage: &inference_tensor::CudaStorage,
+        layout: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::CudaStorage, inference_tensor::Shape)> {
+        use inference_tensor::cuda_backend::{
             CudaStorageSlice, SlicePtrOrNull, WrapErr,
             cudarc::driver::{LaunchConfig, PushKernelArg},
             kernels,
@@ -82,10 +82,10 @@ impl candle_core::CustomOp1 for CudaFp8Contiguous {
         let slice = match &storage.slice {
             CudaStorageSlice::F8E4M3(source) => copy!(source, float8::F8E4M3, F8E4M3),
             CudaStorageSlice::F8E8M0(source) => copy!(source, u8, F8E8M0),
-            _ => candle_core::bail!("FP8 byte-copy operation requires an FP8 tensor"),
+            _ => inference_tensor::bail!("FP8 byte-copy operation requires an FP8 tensor"),
         };
         Ok((
-            candle_core::CudaStorage {
+            inference_tensor::CudaStorage {
                 slice,
                 device: dev.clone(),
             },
@@ -97,9 +97,9 @@ impl candle_core::CustomOp1 for CudaFp8Contiguous {
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::contiguous_fp8;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::{CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
     use float8::F8E4M3;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::{CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 
     #[test]
     fn cuda_fp8_contiguous_preserves_strides_offsets_and_bits() -> Result<()> {

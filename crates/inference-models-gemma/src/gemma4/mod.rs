@@ -2,9 +2,9 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{D, DType, Device, Result, Tensor};
 use config::Gemma4Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use text::TextModel;
 
 use crate::kv_cache::EitherCache;
@@ -93,7 +93,7 @@ impl Gemma4VisionPath {
                         .map(|t| t.to_dtype(vision_dtype))
                         .collect::<Result<Vec<_>>>()?,
                     image_position_ids.ok_or_else(|| {
-                        candle_core::Error::Msg(
+                        inference_tensor::Error::Msg(
                             "Gemma4 unified vision requires image position ids.".to_string(),
                         )
                     })?,
@@ -362,7 +362,7 @@ impl Gemma4Model {
 
         if let Some(ref pixel_values) = pixel_values {
             let vision = self.vision.as_ref().ok_or_else(|| {
-                candle_core::Error::Msg(
+                inference_tensor::Error::Msg(
                     "Gemma4 model was loaded without a vision encoder.".to_string(),
                 )
             })?;
@@ -416,7 +416,7 @@ impl Gemma4Model {
                                 Some(
                                     image_position_ids
                                         .ok_or_else(|| {
-                                            candle_core::Error::Msg(
+                                            inference_tensor::Error::Msg(
                                                 "missing Gemma4 unified image position ids."
                                                     .to_string(),
                                             )
@@ -484,7 +484,7 @@ impl Gemma4Model {
                                 .map(|i| {
                                     image_position_ids
                                         .ok_or_else(|| {
-                                            candle_core::Error::Msg(
+                                            inference_tensor::Error::Msg(
                                                 "missing Gemma4 unified image position ids."
                                                     .to_string(),
                                             )
@@ -523,12 +523,12 @@ impl Gemma4Model {
 
             if packed_layout.is_some() {
                 if image_cached_tokens.iter().any(|&tokens| tokens != 0) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Gemma 4 packed image prefill does not support cached encoder tokens"
                     );
                 }
                 let per_image_embeds = per_image_embeds.ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "Gemma 4 packed image prefill requires per-image encoder outputs",
                     )
                 })?;
@@ -649,12 +649,12 @@ impl Gemma4Model {
 
             if packed_layout.is_some() {
                 if audio_cached_tokens.iter().any(|&tokens| tokens != 0) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Gemma 4 packed audio prefill does not support cached encoder tokens"
                     );
                 }
                 let per_audio_embeds = per_audio_embeds.ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "Gemma 4 packed audio prefill requires per-audio encoder outputs",
                     )
                 })?;
@@ -680,7 +680,7 @@ impl Gemma4Model {
         // Video embedding uses the same vision path as images.
         if let Some(vid_pixel_values) = video_pixel_values {
             let vision = self.vision.as_ref().ok_or_else(|| {
-                candle_core::Error::Msg(
+                inference_tensor::Error::Msg(
                     "Gemma4 model was loaded without a vision encoder.".to_string(),
                 )
             })?;
@@ -735,7 +735,7 @@ impl Gemma4Model {
                                 Some(
                                     video_position_ids
                                         .ok_or_else(|| {
-                                            candle_core::Error::Msg(
+                                            inference_tensor::Error::Msg(
                                                 "missing Gemma4 unified video position ids."
                                                     .to_string(),
                                             )
@@ -803,7 +803,7 @@ impl Gemma4Model {
                                 .map(|i| {
                                     video_position_ids
                                         .ok_or_else(|| {
-                                            candle_core::Error::Msg(
+                                            inference_tensor::Error::Msg(
                                                 "missing Gemma4 unified video position ids."
                                                     .to_string(),
                                             )
@@ -842,12 +842,12 @@ impl Gemma4Model {
 
             if packed_layout.is_some() {
                 if video_cached_tokens.iter().any(|&tokens| tokens != 0) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Gemma 4 packed video prefill does not support cached encoder tokens"
                     );
                 }
                 let per_frame_embeds = per_frame_embeds.ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "Gemma 4 packed video prefill requires per-frame encoder outputs",
                     )
                 })?;
@@ -992,7 +992,7 @@ impl MultimodalModel for Gemma4Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let args = model_specific_args
             .downcast::<Gemma4SpecificArgs>()
             .expect("Downcast to Gemma4SpecificArgs failed");
@@ -1077,9 +1077,9 @@ impl SpeculativeGraphState for Gemma4SpecGraphState {
     fn with_tensors(
         &self,
         tensors: Vec<Tensor>,
-    ) -> candle_core::Result<Box<dyn SpeculativeGraphState>> {
+    ) -> inference_tensor::Result<Box<dyn SpeculativeGraphState>> {
         if tensors.len() != usize::from(self.hidden.is_some()) {
-            candle_core::bail!("Gemma 4 speculative graph state expects one hidden tensor");
+            inference_tensor::bail!("Gemma 4 speculative graph state expects one hidden tensor");
         }
         Ok(Box::new(Gemma4SpecGraphState {
             hidden: tensors.into_iter().next(),
@@ -1089,7 +1089,7 @@ impl SpeculativeGraphState for Gemma4SpecGraphState {
     fn for_real_batch(
         &self,
         real_batch: usize,
-    ) -> candle_core::Result<Box<dyn SpeculativeGraphState>> {
+    ) -> inference_tensor::Result<Box<dyn SpeculativeGraphState>> {
         let hidden = self
             .hidden
             .as_ref()
@@ -1097,7 +1097,7 @@ impl SpeculativeGraphState for Gemma4SpecGraphState {
                 3 => {
                     let captured_batch = hidden.dim(0)?;
                     if real_batch > captured_batch {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Gemma 4 speculative batch {real_batch} exceeds captured batch {captured_batch}"
                         );
                     }
@@ -1108,10 +1108,10 @@ impl SpeculativeGraphState for Gemma4SpecGraphState {
                     }
                 }
                 2 if real_batch == 1 => Ok(hidden.clone()),
-                2 => candle_core::bail!(
+                2 => inference_tensor::bail!(
                     "Gemma 4 rank-2 speculative hidden state requires batch 1, got {real_batch}"
                 ),
-                rank => candle_core::bail!(
+                rank => inference_tensor::bail!(
                     "Gemma 4 speculative hidden state has unsupported rank {rank}"
                 ),
             })
@@ -1134,12 +1134,12 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     fn install_speculative_graph_state(
         &self,
         state: &dyn SpeculativeGraphState,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let state = state
             .as_any()
             .downcast_ref::<Gemma4SpecGraphState>()
             .ok_or_else(|| {
-                candle_core::Error::msg("foreign speculative graph state for Gemma 4")
+                inference_tensor::Error::msg("foreign speculative graph state for Gemma 4")
             })?;
         self.language_model.set_spec_hidden(state.hidden.clone());
         Ok(())
@@ -1148,14 +1148,14 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     fn attach_speculative(
         &mut self,
         config: SpeculativeConfig,
-    ) -> candle_core::Result<Option<SpeculativeAttachInfo>> {
+    ) -> inference_tensor::Result<Option<SpeculativeAttachInfo>> {
         let SpeculativeConfig::Mtp(config) = config else {
             *self.mtp.lock().expect("MTP mutex poisoned") = None;
             self.language_model.set_store_spec_hidden(false);
             return Ok(None);
         };
         let Some(assistant) = config.model.clone() else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Gemma 4 has no built-in MTP head; pass an assistant model with `--mtp-model`."
             );
         };
@@ -1187,7 +1187,7 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     fn speculative_propose(
         &mut self,
         ctx: SpeculativeProposeBatchCtx<'_>,
-    ) -> candle_core::Result<Option<SpeculativeProposalBatch>> {
+    ) -> inference_tensor::Result<Option<SpeculativeProposalBatch>> {
         let embedder = |token: &Tensor| self.language_model.embed_tokens(token);
         let mut guard = self.mtp.lock().expect("MTP mutex poisoned");
         let Some(runtime) = guard.as_mut() else {
@@ -1199,9 +1199,9 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
     fn speculative_target_hiddens(
         &self,
         rows: &[(usize, usize)],
-    ) -> candle_core::Result<Option<Tensor>> {
+    ) -> inference_tensor::Result<Option<Tensor>> {
         let hidden = self.language_model.last_spec_hidden().ok_or_else(|| {
-            candle_core::Error::Msg(
+            inference_tensor::Error::Msg(
                 "MTP target hidden state was not captured before proposal.".to_string(),
             )
         })?;
@@ -1213,12 +1213,12 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
                 let mut gathered = Vec::with_capacity(rows.len());
                 for &(batch_idx, row) in rows {
                     if batch_idx >= *batch {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "MTP hidden batch {batch_idx} is out of range for {batch}"
                         );
                     }
                     if row >= *row_count {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "MTP hidden row {row} is out of range for {row_count} rows"
                         );
                     }
@@ -1230,12 +1230,12 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
                 let mut gathered = Vec::with_capacity(rows.len());
                 for &(batch_idx, row) in rows {
                     if batch_idx != 0 {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "MTP hidden batch {batch_idx} is out of range for single-batch hidden state"
                         );
                     }
                     if row >= *row_count {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "MTP hidden row {row} is out of range for {row_count} rows"
                         );
                     }
@@ -1243,7 +1243,7 @@ impl crate::speculative::SpeculativeTargetMixin for Gemma4Model {
                 }
                 Tensor::cat(&gathered, 0).map(Some)
             }
-            shape => candle_core::bail!("MTP hidden state has unsupported shape {shape:?}"),
+            shape => inference_tensor::bail!("MTP hidden state has unsupported shape {shape:?}"),
         }
     }
 }
@@ -1254,8 +1254,8 @@ impl AnyMoeBaseModelMixin for Gemma4Model {}
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use candle_core::{DType, Device, Tensor};
     use inference_quant::{ShardedSafeTensors, UqffReader, UqffTensor, uqff_version_tensors};
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::{Gemma4SpecGraphState, has_clippable_linear_prefix};
     use crate::speculative::SpeculativeGraphState;

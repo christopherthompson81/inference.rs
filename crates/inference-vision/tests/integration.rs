@@ -1,5 +1,5 @@
-use candle_core::Device;
 use image::{ColorType, DynamicImage};
+use inference_tensor::Device;
 use inference_vision::{ApplyTransforms, InterpolateResize, Normalize, ToTensor, Transforms};
 
 #[test]

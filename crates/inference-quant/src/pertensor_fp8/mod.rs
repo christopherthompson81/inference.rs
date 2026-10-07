@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Tensor, quantized::GgmlDType};
-use candle_nn::Linear;
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Device, Result, Tensor, quantized::GgmlDType};
 
 use crate::Fp8WeightScaleLayout;
 use crate::{
@@ -94,10 +94,10 @@ impl PerTensorFP8Linear {
         let weight = self
             .weight
             .as_ref()
-            .ok_or_else(|| candle_core::Error::msg("FP8 weight is not retained"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("FP8 weight is not retained"))?;
         let [n, k] = self.weight_shape;
         if weight.dtype() != DType::F8E4M3 || self.weight_scale_inv.dtype() != DType::F32 {
-            candle_core::bail!("FP8 linear requires E4M3 weights and F32 scales")
+            inference_tensor::bail!("FP8 linear requires E4M3 weights and F32 scales")
         }
         let valid = match self.weight_scale_layout {
             Fp8WeightScaleLayout::Tensor => self.weight_scale_inv.elem_count() == 1,
@@ -109,34 +109,40 @@ impl PerTensorFP8Linear {
             }
         };
         if !valid {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FP8 scale shape {:?} does not match {:?} for weight [{n}, {k}]",
                 self.weight_scale_inv.dims(),
                 self.weight_scale_layout
             )
         }
         if !weight.device().same_device(self.weight_scale_inv.device()) {
-            candle_core::bail!("FP8 weight and scale must be on the same device")
+            inference_tensor::bail!("FP8 weight and scale must be on the same device")
         }
         match self.activation_mode {
             Fp8ActivationMode::None | Fp8ActivationMode::DynamicToken => {
                 if self.activation_scale.is_some() {
-                    candle_core::bail!("dynamic or A16 FP8 linear cannot have an activation scale")
+                    inference_tensor::bail!(
+                        "dynamic or A16 FP8 linear cannot have an activation scale"
+                    )
                 }
             }
             Fp8ActivationMode::StaticTensor => {
                 let scale = self.activation_scale.as_ref().ok_or_else(|| {
-                    candle_core::Error::msg("static FP8 W8A8 requires one activation scale")
+                    inference_tensor::Error::msg("static FP8 W8A8 requires one activation scale")
                 })?;
                 if scale.dtype() != DType::F32 || scale.elem_count() != 1 {
-                    candle_core::bail!("static FP8 W8A8 requires one F32 activation scale")
+                    inference_tensor::bail!("static FP8 W8A8 requires one F32 activation scale")
                 }
                 if !weight.device().same_device(scale.device()) {
-                    candle_core::bail!("FP8 weight and activation scale must be on the same device")
+                    inference_tensor::bail!(
+                        "FP8 weight and activation scale must be on the same device"
+                    )
                 }
             }
             Fp8ActivationMode::DynamicBlock(_) => {
-                candle_core::bail!("retained FP8 linear does not support dynamic-block activations")
+                inference_tensor::bail!(
+                    "retained FP8 linear does not support dynamic-block activations"
+                )
             }
         }
         Ok(())
@@ -190,7 +196,7 @@ impl PerTensorFP8Linear {
         let quantized = self
             .weight
             .as_ref()
-            .ok_or_else(|| candle_core::Error::msg("FP8 weight is not retained"))?
+            .ok_or_else(|| inference_tensor::Error::msg("FP8 weight is not retained"))?
             .force_contiguous()?;
         let [n, k] = self.weight_shape;
         if n == 0 || k == 0 {
@@ -231,7 +237,7 @@ impl PerTensorFP8Linear {
             return Ok(None);
         }
         if !input.device().same_device(&self.device) {
-            candle_core::bail!("FP8 weight and activation must be on the same device")
+            inference_tensor::bail!("FP8 weight and activation must be on the same device")
         }
         let mut shape = input.dims().to_vec();
         *shape.last_mut().unwrap() = n;
@@ -267,7 +273,9 @@ impl PerTensorFP8Linear {
         let rows = source_shape[..source_shape.len() - 1]
             .iter()
             .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
-            .ok_or_else(|| candle_core::Error::msg("FP8 W8A16 activation shape overflows usize"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("FP8 W8A16 activation shape overflows usize")
+            })?;
         let input = input.reshape((rows, k))?;
         let result = crate::cutile::cutile_fp8_w8a16(
             &input,
@@ -339,13 +347,13 @@ fn normalize_weight_scale(
     match layout {
         Fp8WeightScaleLayout::Tensor => {
             if weight_scale.elem_count() != 1 {
-                candle_core::bail!("FP8 tensor scale must contain one element")
+                inference_tensor::bail!("FP8 tensor scale must contain one element")
             }
             weight_scale.reshape(())
         }
         Fp8WeightScaleLayout::Channel => {
             if weight_scale.elem_count() != n {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "FP8 channel scale has {} elements, expected {n}",
                     weight_scale.elem_count()
                 )
@@ -354,11 +362,11 @@ fn normalize_weight_scale(
         }
         Fp8WeightScaleLayout::Block([block_n, block_k]) => {
             if block_n == 0 || block_k == 0 {
-                candle_core::bail!("FP8 block scale dimensions must be nonzero")
+                inference_tensor::bail!("FP8 block scale dimensions must be nonzero")
             }
             let shape = (n.div_ceil(block_n), k.div_ceil(block_k));
             if weight_scale.elem_count() != shape.0 * shape.1 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "FP8 block scale has {} elements, expected {} for shape {:?}",
                     weight_scale.elem_count(),
                     shape.0 * shape.1,
@@ -425,7 +433,7 @@ pub fn fp8_w8a8_linear(args: Fp8W8A8LinearArgs) -> Result<Arc<dyn QuantMethod>> 
 }
 
 impl QuantMethod for PerTensorFP8Linear {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -483,7 +491,7 @@ impl QuantMethod for PerTensorFP8Linear {
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("PerTensorFP8Linear does not support add_delta_w")
+        inference_tensor::bail!("PerTensorFP8Linear does not support add_delta_w")
     }
 
     fn dtype_and_device(&self) -> (DType, Device) {
@@ -517,7 +525,7 @@ impl QuantMethod for PerTensorFP8Linear {
             Some(IsqType::HQQ4 | IsqType::HQQ8) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("HQQ does not support imatrix.");
+                    inference_tensor::bail!("HQQ does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -547,7 +555,7 @@ impl QuantMethod for PerTensorFP8Linear {
             Some(IsqType::AFQ2 | IsqType::AFQ3 | IsqType::AFQ4 | IsqType::AFQ6 | IsqType::AFQ8) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("AFQ does not support imatrix.");
+                    inference_tensor::bail!("AFQ does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -603,7 +611,7 @@ impl QuantMethod for PerTensorFP8Linear {
             Some(IsqType::F8E4M3) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("F8E4M3 does not support imatrix.");
+                    inference_tensor::bail!("F8E4M3 does not support imatrix.");
                 }
 
                 let w = weight.to_device(&device)?;
@@ -620,7 +628,7 @@ impl QuantMethod for PerTensorFP8Linear {
             Some(IsqType::F8Q8) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("F8Q8 does not support imatrix.");
+                    inference_tensor::bail!("F8Q8 does not support imatrix.");
                 }
 
                 let w = weight.to_device(&device)?;
@@ -634,7 +642,7 @@ impl QuantMethod for PerTensorFP8Linear {
             Some(IsqType::MXFP4) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("MXFP4 does not support imatrix.");
+                    inference_tensor::bail!("MXFP4 does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -676,8 +684,8 @@ impl QuantizedSerde for PerTensorFP8Linear {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
     use float8::F8E4M3;
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{Fp8W8A8LinearArgs, PerTensorFP8Linear, fp8_w8a8_linear, fp8_w8a16_linear};
     use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};

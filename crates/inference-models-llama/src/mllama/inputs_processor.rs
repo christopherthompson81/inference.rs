@@ -6,8 +6,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use candle_core::{Context, DType, Device, Result, Tensor};
 use image::{DynamicImage, imageops::FilterType};
+use inference_tensor::{Context, DType, Device, Result, Tensor};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, Rescale, TensorTransforms, ToTensorNoNorm,
     Transforms,
@@ -119,7 +119,7 @@ fn get_cross_attention_token_mask_for_query(
         })
         .collect::<Vec<_>>();
     if masks.len() > num_images {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Mllama prompt contains {} image tokens but only {num_images} images",
             masks.len()
         );
@@ -145,17 +145,17 @@ fn convert_sparse_cross_attention_mask_to_dense(
     max_num_tiles: usize,
     length: usize,
     dev: &Device,
-) -> candle_core::Result<Tensor> {
+) -> inference_tensor::Result<Tensor> {
     let bs = cross_attn_token_mask.len();
     if bs == 0 || num_tiles.len() != bs {
-        candle_core::bail!("Mllama cross-attention mask has inconsistent batch dimensions");
+        inference_tensor::bail!("Mllama cross-attention mask has inconsistent batch dimensions");
     }
     if cross_attn_token_mask
         .iter()
         .zip(&num_tiles)
         .any(|(masks, tiles)| masks.len() != tiles.len())
     {
-        candle_core::bail!("Mllama cross-attention mask has inconsistent image dimensions");
+        inference_tensor::bail!("Mllama cross-attention mask has inconsistent image dimensions");
     }
     let max_num_images = cross_attn_token_mask.iter().map(Vec::len).max().unwrap();
 
@@ -172,7 +172,7 @@ fn convert_sparse_cross_attention_mask_to_dense(
             sample_masks.into_iter().zip(sample_num_tiles).enumerate()
         {
             if start < 0 || mask_num_tiles > max_num_tiles {
-                candle_core::bail!("Mllama cross-attention mask has invalid image metadata");
+                inference_tensor::bail!("Mllama cross-attention mask has invalid image metadata");
             }
             let mut end = end.min(length as i64);
             if end == -1 {
@@ -205,10 +205,10 @@ fn pad_preprocessed_image_inputs(
     aspect_ratio_ids: Tensor,
     aspect_ratio_mask: Tensor,
     max_num_images: usize,
-) -> candle_core::Result<(Tensor, Tensor, Tensor)> {
+) -> inference_tensor::Result<(Tensor, Tensor, Tensor)> {
     let num_images = pixel_values.dim(0)?;
     if num_images > max_num_images {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Mllama cached image count {num_images} exceeds batch capacity {max_num_images}"
         );
     }
@@ -1080,7 +1080,7 @@ mod tests {
         convert_sparse_cross_attention_mask_to_dense, get_cross_attention_token_mask_for_query,
         pad_preprocessed_image_inputs,
     };
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     const IMAGE_TOKEN_ID: u32 = 128_256;
 

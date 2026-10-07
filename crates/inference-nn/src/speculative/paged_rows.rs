@@ -5,7 +5,7 @@
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
@@ -26,7 +26,7 @@ pub fn make_paged_rows_metadata(
     device: &Device,
 ) -> Result<PagedAttentionInputMetadata> {
     if seq_ids.len() != context_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "paged rows metadata batch mismatch: seq_ids={}, context_lens={}",
             seq_ids.len(),
             context_lens.len()
@@ -42,7 +42,9 @@ pub fn make_paged_rows_metadata(
             table_idx
         } else {
             let table = Arc::<[usize]>::from(kv_mgr.get_block_ids(*seq_id).ok_or_else(|| {
-                candle_core::Error::Msg(format!("sequence {seq_id} has no paged attention blocks"))
+                inference_tensor::Error::Msg(format!(
+                    "sequence {seq_id} has no paged attention blocks"
+                ))
             })?);
             let table_idx = tables.len();
             tables.push(table);
@@ -73,7 +75,7 @@ pub fn make_paged_rows_metadata(
             .get(block_pos / paged_meta.block_size)
             .copied()
             .ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "paged rows block table is too small: position={block_pos}, block_size={}, table_len={}",
                     paged_meta.block_size,
                     full_table.len()
@@ -271,7 +273,7 @@ fn paged_kv_tensors<T: BlockTableRows + ?Sized>(
     indptr.push(0i32);
     let mut nnz = 0i32;
     if tables.len() != context_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "paged rows table/context mismatch: tables={}, context_lens={}",
             tables.len(),
             context_lens.len()
@@ -282,14 +284,16 @@ fn paged_kv_tensors<T: BlockTableRows + ?Sized>(
         // FlashInfer derives kv_len from the page count, so blocks reserved past the row's context must not be listed
         let num_blocks = context_len.div_ceil(block_size);
         if num_blocks > table.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "paged rows block table is too small: context_len={context_len}, block_size={block_size}, table_len={}",
                 table.len()
             );
         }
         nnz = nnz
             .checked_add(usize_to_i32(num_blocks, "paged table length")?)
-            .ok_or_else(|| candle_core::Error::Msg("paged table nnz overflowed".to_string()))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::Msg("paged table nnz overflowed".to_string())
+            })?;
         indptr.push(nnz);
         for value in table.iter().take(num_blocks) {
             indices.push(usize_to_i32(*value, "paged block index")?);
@@ -313,12 +317,12 @@ fn paged_kv_tensors<T: BlockTableRows + ?Sized>(
 
 fn usize_to_u32(value: usize, name: &str) -> Result<u32> {
     u32::try_from(value)
-        .map_err(|_| candle_core::Error::Msg(format!("{name} exceeds u32::MAX: {value}")))
+        .map_err(|_| inference_tensor::Error::Msg(format!("{name} exceeds u32::MAX: {value}")))
 }
 
 fn usize_to_i32(value: usize, name: &str) -> Result<i32> {
     i32::try_from(value)
-        .map_err(|_| candle_core::Error::Msg(format!("{name} exceeds i32::MAX: {value}")))
+        .map_err(|_| inference_tensor::Error::Msg(format!("{name} exceeds i32::MAX: {value}")))
 }
 
 #[cfg(test)]

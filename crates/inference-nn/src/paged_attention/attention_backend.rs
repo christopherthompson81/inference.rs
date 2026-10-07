@@ -1,4 +1,4 @@
-use candle_core::Tensor;
+use inference_tensor::Tensor;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AttentionBackendKind {

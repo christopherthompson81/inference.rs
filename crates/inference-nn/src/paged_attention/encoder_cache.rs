@@ -7,8 +7,8 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
-use candle_core::Tensor;
 use indexmap::IndexMap;
+use inference_tensor::Tensor;
 
 /// Modality tag that disambiguates cache keys.
 ///
@@ -116,11 +116,11 @@ impl EncoderCacheEntry {
         }
     }
 
-    fn compact(outputs: Vec<Tensor>) -> candle_core::Result<Self> {
+    fn compact(outputs: Vec<Tensor>) -> inference_tensor::Result<Self> {
         let outputs = outputs
             .into_iter()
             .map(|tensor| tensor.force_contiguous().map(|tensor| tensor.detach()))
-            .collect::<candle_core::Result<Vec<_>>>()?;
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
         Ok(Self::new(outputs))
     }
 
@@ -509,12 +509,12 @@ impl EncoderCacheBatchLookup {
         }
     }
 
-    pub fn into_outputs(self) -> candle_core::Result<Vec<Vec<Tensor>>> {
+    pub fn into_outputs(self) -> inference_tensor::Result<Vec<Vec<Tensor>>> {
         self.outputs
             .into_iter()
             .map(|outputs| {
                 outputs.ok_or_else(|| {
-                    candle_core::Error::msg("encoder cache batch item is missing outputs")
+                    inference_tensor::Error::msg("encoder cache batch item is missing outputs")
                 })
             })
             .collect()
@@ -547,8 +547,8 @@ pub fn cached_encode_images(
     image_hashes: &[u64],
     pixel_values: &Tensor,
     cache: &Mutex<EncoderCacheManager>,
-    encode_fn: impl FnOnce(&Tensor) -> candle_core::Result<Vec<Tensor>>,
-) -> candle_core::Result<Vec<Tensor>> {
+    encode_fn: impl FnOnce(&Tensor) -> inference_tensor::Result<Vec<Tensor>>,
+) -> inference_tensor::Result<Vec<Tensor>> {
     let n_images = image_hashes.len();
     if n_images == 0 {
         return encode_fn(pixel_values);
@@ -576,7 +576,7 @@ pub fn cached_encode_images(
             .miss_groups()
             .iter()
             .map(|group| pixel_values.get(group[0]))
-            .collect::<candle_core::Result<Vec<_>>>()?;
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
         Tensor::stack(&slices, 0)?
     };
 
@@ -589,7 +589,7 @@ pub fn cached_encode_images(
             let per_image: Vec<Tensor> = encoded
                 .iter()
                 .map(|t| t.get(batch_idx))
-                .collect::<candle_core::Result<Vec<_>>>()?;
+                .collect::<inference_tensor::Result<Vec<_>>>()?;
             let first_idx = lookup.miss_groups()[batch_idx][0];
             guard.insert(modality, image_hashes[first_idx], per_image.clone());
             lookup.resolve_miss(batch_idx, per_image);
@@ -600,7 +600,10 @@ pub fn cached_encode_images(
 }
 
 /// Re-stack per-image tensors into full-batch tensors.
-fn assemble(hits: Vec<Option<Vec<Tensor>>>, n_images: usize) -> candle_core::Result<Vec<Tensor>> {
+fn assemble(
+    hits: Vec<Option<Vec<Tensor>>>,
+    n_images: usize,
+) -> inference_tensor::Result<Vec<Tensor>> {
     // Determine how many output tensors per image (e.g. 1 for most, 2 for deepstack).
     let n_outputs = hits[0].as_ref().map(|v| v.len()).unwrap_or(1);
 
@@ -617,7 +620,7 @@ fn assemble(hits: Vec<Option<Vec<Tensor>>>, n_images: usize) -> candle_core::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     fn dummy_tensor(val: f32) -> Tensor {
         Tensor::new(&[val], &Device::Cpu).unwrap()

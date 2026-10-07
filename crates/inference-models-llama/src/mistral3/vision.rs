@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder, linear_b};
+use inference_tensor::{D, DType, Device, IndexOp, Module, Result, Tensor};
 
 use crate::attention::AttentionMask;
 use crate::{
@@ -10,8 +10,8 @@ use crate::{
     utils::unvarbuilder::UnVarBuilder,
 };
 
-fn default_act() -> candle_nn::Activation {
-    candle_nn::Activation::Silu
+fn default_act() -> inference_tensor::nn::Activation {
+    inference_tensor::nn::Activation::Silu
 }
 
 fn default_hidden_size() -> usize {
@@ -65,7 +65,7 @@ pub struct Mistral3VisionConfig {
     #[serde(default = "default_num_attention_heads")]
     pub num_attention_heads: usize,
     #[serde(default = "default_act")]
-    pub hidden_act: candle_nn::Activation,
+    pub hidden_act: inference_tensor::nn::Activation,
 }
 
 impl Mistral3VisionConfig {
@@ -140,7 +140,7 @@ impl Attention {
             AttentionMask::Custom(mask) => attn_weights.broadcast_add(mask)?,
         };
 
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = inference_tensor::nn::ops::softmax_last_dim(&attn_weights)?;
 
         self.o_proj.forward(
             &attn_weights
@@ -156,7 +156,7 @@ struct Mlp {
     gate_proj: Arc<dyn QuantMethod>,
     up_proj: Arc<dyn QuantMethod>,
     down_proj: Arc<dyn QuantMethod>,
-    act_fn: candle_nn::Activation,
+    act_fn: inference_tensor::nn::Activation,
 }
 
 impl Mlp {
@@ -333,7 +333,7 @@ impl RotaryEmbedding {
 
 #[derive(Debug, Clone)]
 pub struct Mistral3VisionModel {
-    patch_conv: candle_nn::Conv2d,
+    patch_conv: inference_tensor::nn::Conv2d,
     ln_pre: RmsNorm,
     transformer: Transformer,
     patch_positional_embedding: RotaryEmbedding,
@@ -348,7 +348,7 @@ impl Mistral3VisionModel {
         vb: ShardedVarBuilder,
         normal_loading_metadata: &NormalLoadingMetadata,
     ) -> Result<Self> {
-        let conv2d_cfg = candle_nn::Conv2dConfig {
+        let conv2d_cfg = inference_tensor::nn::Conv2dConfig {
             stride: cfg.patch_size,
             ..Default::default()
         };

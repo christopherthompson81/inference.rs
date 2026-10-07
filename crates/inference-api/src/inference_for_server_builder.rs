@@ -3,7 +3,6 @@
 use std::{num::NonZeroUsize, sync::Arc};
 
 use anyhow::{Context, Result};
-use candle_core::Device;
 use inference_core::{
     AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
     HfConfigOverrides, InferenceRs, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
@@ -16,6 +15,7 @@ use inference_selection::{
     ModelSelected, PagedKvModelRequest, get_auto_device_map_params, get_model_dtype,
     get_tgt_non_granular_index, plan_paged_kv,
 };
+use inference_tensor::Device;
 use tracing::{debug, info, warn};
 
 use crate::types::{LoadedPipeline, SharedInferenceRsState};
@@ -86,7 +86,7 @@ pub mod defaults {
         DEFAULT_MAX_PREFILL_CHUNK_TOKENS, PagedCacheType,
     };
 
-    pub const DEVICE: Option<candle_core::Device> = None;
+    pub const DEVICE: Option<inference_tensor::Device> = None;
     pub const SEED: Option<u64> = None;
     pub const LOG: Option<String> = None;
     pub const MODEL: Option<inference_selection::ModelSelected> = None;
@@ -844,7 +844,7 @@ impl InferenceRsForServerBuilder {
     ///     .await?;
     /// ```
     pub async fn build(self) -> Result<SharedInferenceRsState> {
-        candle_core::utils::init_global_threadpool();
+        inference_tensor::utils::init_global_threadpool();
         // Determine if we're in single-model or multi-model mode
         if !self.models.is_empty() {
             self.build_multi_model().await
@@ -1065,7 +1065,7 @@ impl InferenceRsForServerBuilder {
 
 // TODO: replace with best device?
 /// Initializes the device to be used for computation, optionally forcing CPU usage and setting a seed.
-fn init_device(force_cpu: bool, seed: Option<u64>) -> Result<candle_core::Device> {
+fn init_device(force_cpu: bool, seed: Option<u64>) -> Result<inference_tensor::Device> {
     #[cfg(feature = "metal")]
     let device = if force_cpu {
         Device::Cpu
@@ -1129,10 +1129,10 @@ fn init_mapper(
 fn inference_instance_info(loader: &dyn Loader) {
     debug!(
         "avx: {}, neon: {}, simd128: {}, f16c: {}",
-        candle_core::utils::with_avx(),
-        candle_core::utils::with_neon(),
-        candle_core::utils::with_simd128(),
-        candle_core::utils::with_f16c()
+        inference_tensor::utils::with_avx(),
+        inference_tensor::utils::with_neon(),
+        inference_tensor::utils::with_simd128(),
+        inference_tensor::utils::with_f16c()
     );
 
     debug!("Sampling method: penalties -> temperature -> topk -> topp -> minp -> multinomial");

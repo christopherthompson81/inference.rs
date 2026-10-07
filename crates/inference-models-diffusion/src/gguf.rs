@@ -2,10 +2,10 @@
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 
-use candle_core::{DType, Device, Result};
 use inference_quant::{
     GgufArchive, GgufBindingMap, GgufTensorBinding, GgufWeightSource, ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Result};
 
 pub const GGUF_EXTENSION: &str = "gguf";
 // GGUFs converted from ComfyUI checkpoints keep its wrapper prefix on every FLUX tensor.

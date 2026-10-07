@@ -2,8 +2,8 @@
 
 #![allow(unused_variables, unused_imports, dead_code)]
 
-use candle_core::{Device, DeviceLocation, Result, Tensor};
-use candle_nn::Activation as CandleActivation;
+use inference_tensor::nn::Activation as CandleActivation;
+use inference_tensor::{Device, DeviceLocation, Result, Tensor};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex, Once};
 
@@ -165,13 +165,13 @@ impl CublasLtWrapper {
             )?;
 
             if Some(CandleActivation::Swiglu) == act {
-                result = candle_nn::ops::swiglu(&result)?;
+                result = inference_tensor::nn::ops::swiglu(&result)?;
             }
             Ok(result)
         }
         #[cfg(not(feature = "cuda"))]
         {
-            candle_core::bail!("`cuda` feature is not enabled")
+            inference_tensor::bail!("`cuda` feature is not enabled")
         }
     }
 
@@ -218,13 +218,13 @@ impl CublasLtWrapper {
             )?;
 
             if Some(CandleActivation::Swiglu) == act {
-                result = candle_nn::ops::swiglu(&result)?;
+                result = inference_tensor::nn::ops::swiglu(&result)?;
             }
             Ok(result)
         }
         #[cfg(not(feature = "cuda"))]
         {
-            candle_core::bail!("`cuda` feature is not enabled")
+            inference_tensor::bail!("`cuda` feature is not enabled")
         }
     }
 }

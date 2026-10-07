@@ -3,7 +3,7 @@ use std::sync::{Arc, OnceLock};
 #[cfg(feature = "cuda")]
 use std::sync::{Mutex, MutexGuard};
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::Shard;
 
@@ -75,12 +75,12 @@ impl LoraExpertSiteSpec {
         down_input_shard: Shard,
     ) -> Result<Self> {
         if num_experts == 0 || hidden_size == 0 || intermediate_size == 0 {
-            candle_core::bail!("expert LoRA dimensions must be nonzero");
+            inference_tensor::bail!("expert LoRA dimensions must be nonzero");
         }
         let gate_up_size = sharded_size(intermediate_size, gate_up_output_shard)?;
         let down_size = sharded_size(intermediate_size, down_input_shard)?;
         if gate_up_size != down_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "expert LoRA gate/up output size {gate_up_size} does not match down input size {down_size}"
             );
         }
@@ -153,13 +153,13 @@ fn sharded_size(size: usize, shard: Shard) -> Result<usize> {
             rank, world_size, ..
         } => {
             if world_size == 0 || rank >= world_size || !size.is_multiple_of(world_size) {
-                candle_core::bail!("invalid expert LoRA shard");
+                inference_tensor::bail!("invalid expert LoRA shard");
             }
             Ok(size / world_size)
         }
         Shard::Offset { offset, len, .. } => {
             if len == 0 || offset.checked_add(len).is_none_or(|end| end > size) {
-                candle_core::bail!("invalid expert LoRA shard");
+                inference_tensor::bail!("invalid expert LoRA shard");
             }
             Ok(len)
         }
@@ -215,16 +215,15 @@ impl LoraExpertSiteHandle {
     }
 
     pub fn id(&self) -> Result<u32> {
-        self.id
-            .get()
-            .copied()
-            .ok_or_else(|| candle_core::Error::msg("LoRA layer registry has not been finalized"))
+        self.id.get().copied().ok_or_else(|| {
+            inference_tensor::Error::msg("LoRA layer registry has not been finalized")
+        })
     }
 
     pub(super) fn assign_id(&self, id: u32) -> Result<()> {
         self.id
             .set(id)
-            .map_err(|_| candle_core::Error::msg("LoRA expert site ID was already assigned"))
+            .map_err(|_| inference_tensor::Error::msg("LoRA expert site ID was already assigned"))
     }
 }
 
@@ -248,20 +247,20 @@ impl LoraExpertProjectionWeights {
         let (experts, rank, _) = a.dims3()?;
         let (b_experts, _, b_rank) = b.dims3()?;
         if experts == 0 || rank == 0 {
-            candle_core::bail!("expert LoRA expert count and rank must be nonzero");
+            inference_tensor::bail!("expert LoRA expert count and rank must be nonzero");
         }
         if b_experts != experts || b_rank != rank {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "expert LoRA A shape {:?} is incompatible with B shape {:?}",
                 a.dims(),
                 b.dims()
             );
         }
         if scales.dims1()? != experts || scales.dtype() != DType::F32 {
-            candle_core::bail!("expert LoRA scales must be F32 with shape [{experts}]");
+            inference_tensor::bail!("expert LoRA scales must be F32 with shape [{experts}]");
         }
         if a.dtype() != b.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "expert LoRA A dtype {:?} does not match B dtype {:?}",
                 a.dtype(),
                 b.dtype()
@@ -269,7 +268,7 @@ impl LoraExpertProjectionWeights {
         }
         let location = a.device().location();
         if b.device().location() != location || scales.device().location() != location {
-            candle_core::bail!("expert LoRA A, B, and scales must be on the same device");
+            inference_tensor::bail!("expert LoRA A, B, and scales must be on the same device");
         }
         if check_finite
             && scales
@@ -278,7 +277,7 @@ impl LoraExpertProjectionWeights {
                 .iter()
                 .any(|scale| !scale.is_finite())
         {
-            candle_core::bail!("expert LoRA scales must be finite");
+            inference_tensor::bail!("expert LoRA scales must be finite");
         }
         Ok(Self {
             a: a.contiguous()?,
@@ -336,7 +335,7 @@ impl LoraExpertWeights {
         down: Option<LoraExpertProjectionWeights>,
     ) -> Result<Self> {
         if gate.is_none() && up.is_none() && down.is_none() {
-            candle_core::bail!("expert LoRA weights must contain at least one projection");
+            inference_tensor::bail!("expert LoRA weights must contain at least one projection");
         }
         for (projection, weights) in [
             (LoraExpertProjection::Gate, gate.as_ref()),
@@ -361,7 +360,7 @@ impl LoraExpertWeights {
 
     pub(crate) fn validate_for_site(&self, site: &LoraExpertSiteHandle) -> Result<()> {
         if self.runtime_id != site.runtime_id() || &self.site_key != site.key() {
-            candle_core::bail!("expert LoRA weights belong to a different site");
+            inference_tensor::bail!("expert LoRA weights belong to a different site");
         }
         for (projection, weights) in [
             (LoraExpertProjection::Gate, self.gate.as_ref()),
@@ -419,7 +418,7 @@ fn validate_projection_weights(
     let expected_a = [spec.num_experts(), weights.rank(), input_features];
     let expected_b = [spec.num_experts(), output_features, weights.rank()];
     if weights.a().dims() != expected_a || weights.b().dims() != expected_b {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA {:?} weights have shapes A={:?}, B={:?}, expected A={expected_a:?}, B={expected_b:?}",
             projection,
             weights.a().dims(),
@@ -427,7 +426,7 @@ fn validate_projection_weights(
         );
     }
     if weights.a().dtype() != site.activation_dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA {:?} weights must use activation dtype {:?}, got {:?}",
             projection,
             site.activation_dtype(),
@@ -435,7 +434,7 @@ fn validate_projection_weights(
         );
     }
     if weights.a().device().location() != site.device().location() {
-        candle_core::bail!("expert LoRA weights and site must be on the same device");
+        inference_tensor::bail!("expert LoRA weights and site must be on the same device");
     }
     Ok(())
 }
@@ -619,7 +618,7 @@ impl LoraExpertExecution {
             None,
             LoraExpertInputMode::TokenRows,
         )?;
-        Tensor::cat(&[&gate, &up], candle_core::D::Minus1)
+        Tensor::cat(&[&gate, &up], inference_tensor::D::Minus1)
     }
 
     fn add_gate_up_delta_inner(
@@ -672,7 +671,7 @@ fn split_gate_up(
     let (num_tokens, top_k) = topk_ids.dims2()?;
     let intermediate = site.spec().local_intermediate_size();
     if gate_up.elem_count() != num_tokens * top_k * intermediate * 2 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA gate/up output must contain [tokens, top_k, 2 * intermediate] elements"
         );
     }
@@ -680,22 +679,22 @@ fn split_gate_up(
     match site.spec().gate_up_order() {
         LoraGateUpOrder::Concatenated => Ok((
             gate_up
-                .narrow(candle_core::D::Minus1, 0, intermediate)?
+                .narrow(inference_tensor::D::Minus1, 0, intermediate)?
                 .contiguous()?,
             gate_up
-                .narrow(candle_core::D::Minus1, intermediate, intermediate)?
+                .narrow(inference_tensor::D::Minus1, intermediate, intermediate)?
                 .contiguous()?,
         )),
         LoraGateUpOrder::Interleaved => {
             let gate_up = gate_up.reshape((num_tokens, top_k, intermediate, 2))?;
             Ok((
                 gate_up
-                    .narrow(candle_core::D::Minus1, 0, 1)?
-                    .squeeze(candle_core::D::Minus1)?
+                    .narrow(inference_tensor::D::Minus1, 0, 1)?
+                    .squeeze(inference_tensor::D::Minus1)?
                     .contiguous()?,
                 gate_up
-                    .narrow(candle_core::D::Minus1, 1, 1)?
-                    .squeeze(candle_core::D::Minus1)?
+                    .narrow(inference_tensor::D::Minus1, 1, 1)?
+                    .squeeze(inference_tensor::D::Minus1)?
                     .contiguous()?,
             ))
         }
@@ -716,48 +715,48 @@ pub fn add_expert_delta_reference(
         input_mode,
     } = delta;
     if execution.runtime_id() != site.runtime_id() {
-        candle_core::bail!("expert LoRA site and execution belong to different runtimes");
+        inference_tensor::bail!("expert LoRA site and execution belong to different runtimes");
     }
     let (num_tokens, top_k) = topk_ids.dims2()?;
-    let output_features = base_output.dim(candle_core::D::Minus1)?;
+    let output_features = base_output.dim(inference_tensor::D::Minus1)?;
     if base_output.dims() != [num_tokens, top_k, output_features] {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA base output must have shape [tokens, top_k, output_features]"
         );
     }
     if execution.row_slots().len() != num_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA route count {} does not match token count {num_tokens}",
             execution.row_slots().len()
         );
     }
     if let Some(routed_weights) = routed_weights {
         if routed_weights.dims2()? != (num_tokens, top_k) {
-            candle_core::bail!("expert LoRA routed weights must have shape [tokens, top_k]");
+            inference_tensor::bail!("expert LoRA routed weights must have shape [tokens, top_k]");
         }
         if routed_weights.device().location() != input.device().location() {
-            candle_core::bail!("expert LoRA routed weights must share the input device");
+            inference_tensor::bail!("expert LoRA routed weights must share the input device");
         }
     }
     let input_features = match input_mode {
         LoraExpertInputMode::TokenRows => {
             let (tokens, features) = input.dims2()?;
             if tokens != num_tokens {
-                candle_core::bail!("expert LoRA token input count does not match routing");
+                inference_tensor::bail!("expert LoRA token input count does not match routing");
             }
             features
         }
         LoraExpertInputMode::RoutedRows => {
             let (tokens, routes, features) = input.dims3()?;
             if tokens != num_tokens || routes != top_k {
-                candle_core::bail!("expert LoRA routed input shape does not match routing");
+                inference_tensor::bail!("expert LoRA routed input shape does not match routing");
             }
             features
         }
     };
     let (expected_input, expected_output) = site.spec().projection_shape(projection);
     if input_features != expected_input || output_features != expected_output {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA {:?} dimensions input={input_features}, output={output_features}, expected input={expected_input}, output={expected_output}",
             projection
         );
@@ -766,14 +765,14 @@ pub fn add_expert_delta_reference(
         || input.device().location() != base_output.device().location()
         || input.device().location() != topk_ids.device().location()
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "expert LoRA inputs, routes, and output must share a device and activation dtype"
         );
     }
     if input.dtype() != site.activation_dtype()
         || input.device().location() != site.device().location()
     {
-        candle_core::bail!("expert LoRA inputs do not match the registered site");
+        inference_tensor::bail!("expert LoRA inputs do not match the registered site");
     }
 
     let topk_ids = if topk_ids.dtype() == DType::U32 {
@@ -842,9 +841,9 @@ fn routed_row_indices(rows: &[usize], top_k: usize, device: &Device) -> Result<T
     for row in rows {
         let start = row
             .checked_mul(top_k)
-            .ok_or_else(|| candle_core::Error::msg("expert LoRA route index overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("expert LoRA route index overflow"))?;
         for route in 0..top_k {
-            indices.push(u32::try_from(start + route).map_err(candle_core::Error::wrap)?);
+            indices.push(u32::try_from(start + route).map_err(inference_tensor::Error::wrap)?);
         }
     }
     Tensor::from_vec(indices, rows.len() * top_k, device)
@@ -852,7 +851,7 @@ fn routed_row_indices(rows: &[usize], top_k: usize, device: &Device) -> Result<T
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::*;
     use crate::{LoraLayerRegistry, LoraSiteKey};

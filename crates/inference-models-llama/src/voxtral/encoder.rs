@@ -4,8 +4,8 @@ use crate::layers::masker::CausalMaskConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{DType, Module, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
@@ -207,8 +207,8 @@ impl EncoderLayer {
 /// - SwiGLU FFN
 /// - RMSNorm
 pub struct VoxtralEncoder {
-    pub(super) conv1: candle_nn::Conv1d,
-    pub(super) conv2: candle_nn::Conv1d,
+    pub(super) conv1: inference_tensor::nn::Conv1d,
+    pub(super) conv2: inference_tensor::nn::Conv1d,
     pub(super) layers: Vec<EncoderLayer>,
     pub(super) norm: RmsNorm,
     cache: Arc<Mutex<NormalCache>>,
@@ -224,7 +224,7 @@ fn encoder_position_ids(batch_size: usize, seq_len: usize) -> Result<Vec<u32>> {
         .flat_map(|_| 0..seq_len)
         .map(u32::try_from)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(candle_core::Error::wrap)
+        .map_err(inference_tensor::Error::wrap)
 }
 
 impl VoxtralEncoder {
@@ -236,24 +236,24 @@ impl VoxtralEncoder {
         // Conv1d weights stored as F32 (CUDA Conv1d does not support BF16).
         // Causal padding: left-pad by (kernel_size - 1) * dilation, padding=0 in Conv1d.
         let vb_c1 = vb.pp("conv_layers").pp("0").pp("conv");
-        let conv1 = candle_nn::Conv1d::new(
+        let conv1 = inference_tensor::nn::Conv1d::new(
             vb_c1
                 .get((cfg.dim, n_mels, 3), "weight")?
                 .to_dtype(DType::F32)?,
             Some(vb_c1.get(cfg.dim, "bias")?.to_dtype(DType::F32)?),
-            candle_nn::Conv1dConfig {
+            inference_tensor::nn::Conv1dConfig {
                 padding: 0,
                 stride: 1,
                 ..Default::default()
             },
         );
         let vb_c2 = vb.pp("conv_layers").pp("1").pp("conv");
-        let conv2 = candle_nn::Conv1d::new(
+        let conv2 = inference_tensor::nn::Conv1d::new(
             vb_c2
                 .get((cfg.dim, cfg.dim, 3), "weight")?
                 .to_dtype(DType::F32)?,
             Some(vb_c2.get(cfg.dim, "bias")?.to_dtype(DType::F32)?),
-            candle_nn::Conv1dConfig {
+            inference_tensor::nn::Conv1dConfig {
                 padding: 0,
                 stride: 2,
                 ..Default::default()
@@ -362,7 +362,7 @@ mod tests {
     use super::encoder_position_ids;
 
     #[test]
-    fn encoder_positions_repeat_per_request() -> candle_core::Result<()> {
+    fn encoder_positions_repeat_per_request() -> inference_tensor::Result<()> {
         assert_eq!(encoder_position_ids(2, 3)?, vec![0, 1, 2, 0, 1, 2]);
         Ok(())
     }

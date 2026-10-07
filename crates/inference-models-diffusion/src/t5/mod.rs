@@ -3,9 +3,9 @@
 // T5 Text Model
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::{Activation, Embedding};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{Activation, Embedding};
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use serde::Deserialize;
 use std::sync::Arc;
 
@@ -45,7 +45,7 @@ fn masked_fill(on_false: &Tensor, mask: &Tensor, on_true: f32) -> Result<Tensor>
 #[derive(Debug, Deserialize, Default, Clone, PartialEq)]
 pub struct ActivationWithOptionalGating {
     pub gated: bool,
-    pub activation: candle_nn::Activation,
+    pub activation: inference_tensor::nn::Activation,
 }
 
 pub fn deserialize_feed_forward_proj_activation<'de, D>(
@@ -57,11 +57,11 @@ where
     match String::deserialize(deserializer)?.as_str() {
         "gated-gelu" => Ok(ActivationWithOptionalGating {
             gated: true,
-            activation: candle_nn::Activation::NewGelu,
+            activation: inference_tensor::nn::Activation::NewGelu,
         }),
         "gated-silu" => Ok(ActivationWithOptionalGating {
             gated: true,
-            activation: candle_nn::Activation::Silu,
+            activation: inference_tensor::nn::Activation::Silu,
         }),
         buf => {
             let activation = serde_plain::from_str(buf).map_err(serde::de::Error::custom)?;
@@ -437,7 +437,7 @@ impl T5Attention {
             },
         };
 
-        let attn_weights = { candle_nn::ops::softmax_last_dim(&scores)? };
+        let attn_weights = { inference_tensor::nn::ops::softmax_last_dim(&scores)? };
         let attn_output = MatMul.matmul(&attn_weights, &v)?;
         let attn_output = attn_output
             .transpose(1, 2)?

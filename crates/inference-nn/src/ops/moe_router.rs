@@ -67,8 +67,8 @@ pub fn moe_router_topk(
     };
     let scores = match config.score_function {
         MoeRouterScoreFunction::Raw => logits.clone(),
-        MoeRouterScoreFunction::Softmax => candle_nn::ops::softmax_last_dim(&logits)?,
-        MoeRouterScoreFunction::Sigmoid => candle_nn::ops::sigmoid(&logits)?,
+        MoeRouterScoreFunction::Softmax => inference_tensor::nn::ops::softmax_last_dim(&logits)?,
+        MoeRouterScoreFunction::Sigmoid => inference_tensor::nn::ops::sigmoid(&logits)?,
     };
     let selection_scores = if let Some(selection_bias) = selection_bias {
         scores.broadcast_add(&selection_bias.to_dtype(DType::F32)?)?
@@ -88,10 +88,10 @@ pub fn moe_router_topk(
     let mut values = match config.selected_weight {
         MoeRouterSelectedWeight::Score => scores.gather(&indices, D::Minus1)?,
         MoeRouterSelectedWeight::Softmax => {
-            candle_nn::ops::softmax_last_dim(selected_logits.as_ref().unwrap())?
+            inference_tensor::nn::ops::softmax_last_dim(selected_logits.as_ref().unwrap())?
         }
         MoeRouterSelectedWeight::Sigmoid => {
-            candle_nn::ops::sigmoid(selected_logits.as_ref().unwrap())?
+            inference_tensor::nn::ops::sigmoid(selected_logits.as_ref().unwrap())?
         }
     };
 
@@ -159,39 +159,39 @@ pub fn cuda_moe_router_topk(
     selection_bias: Option<&Tensor>,
     expert_scale: Option<&Tensor>,
 ) -> Result<TopKOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     let logits = logits.contiguous()?;
     let dims = logits.dims();
     let n_experts = *dims
         .last()
-        .ok_or_else(|| candle_core::Error::Msg("empty dims".to_string()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("empty dims".to_string()))?;
     if config.top_k == 0 || config.top_k > n_experts {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_moe_router_topk top_k={} must be in [1, {}]",
             config.top_k,
             n_experts
         );
     }
     if !cuda_moe_router_topk_supports_experts(n_experts) {
-        candle_core::bail!("cuda_moe_router_topk unsupported expert count {n_experts}");
+        inference_tensor::bail!("cuda_moe_router_topk unsupported expert count {n_experts}");
     }
 
     let selection_bias = selection_bias.map(Tensor::contiguous).transpose()?;
     if let Some(selection_bias) = &selection_bias
         && (selection_bias.dtype() != DType::F32 || selection_bias.elem_count() != n_experts)
     {
-        candle_core::bail!("cuda_moe_router_topk selection_bias must be F32 [n_experts]");
+        inference_tensor::bail!("cuda_moe_router_topk selection_bias must be F32 [n_experts]");
     }
 
     let expert_scale = expert_scale.map(Tensor::contiguous).transpose()?;
     if let Some(expert_scale) = &expert_scale
         && (expert_scale.dtype() != DType::F32 || expert_scale.elem_count() != n_experts)
     {
-        candle_core::bail!("cuda_moe_router_topk expert_scale must be F32 [n_experts]");
+        inference_tensor::bail!("cuda_moe_router_topk expert_scale must be F32 [n_experts]");
     }
     let selection_bias_storage_and_layout = selection_bias.as_ref().map(|t| t.storage_and_layout());
     let expert_scale_storage_and_layout = expert_scale.as_ref().map(|t| t.storage_and_layout());
@@ -203,8 +203,8 @@ pub fn cuda_moe_router_topk(
 
     let (logits_storage, _logits_layout) = logits.storage_and_layout();
     let logits_storage = match &*logits_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_moe_router_topk requires CUDA logits"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_moe_router_topk requires CUDA logits"),
     };
 
     let dev = logits_storage.device();
@@ -224,7 +224,7 @@ pub fn cuda_moe_router_topk(
     macro_rules! launch {
         ($variant:ident, $ffi_fn:ident) => {{
             let CudaStorageSlice::$variant(logits_src) = &logits_storage.slice else {
-                candle_core::bail!("cuda_moe_router_topk logits dtype mismatch");
+                inference_tensor::bail!("cuda_moe_router_topk logits dtype mismatch");
             };
             let (logits_ptr, _logits_guard) = logits_src.device_ptr(&stream);
 
@@ -232,11 +232,13 @@ pub fn cuda_moe_router_topk(
                 &selection_bias_storage_and_layout
             {
                 let storage = match &**storage {
-                    candle_core::Storage::Cuda(s) => s,
-                    _ => candle_core::bail!("cuda_moe_router_topk requires CUDA selection_bias"),
+                    inference_tensor::Storage::Cuda(s) => s,
+                    _ => {
+                        inference_tensor::bail!("cuda_moe_router_topk requires CUDA selection_bias")
+                    }
                 };
                 let CudaStorageSlice::F32(src) = &storage.slice else {
-                    candle_core::bail!("cuda_moe_router_topk selection_bias dtype mismatch");
+                    inference_tensor::bail!("cuda_moe_router_topk selection_bias dtype mismatch");
                 };
                 let (ptr, guard) = src.device_ptr(&stream);
                 (ptr as *const c_void, Some(guard))
@@ -244,20 +246,21 @@ pub fn cuda_moe_router_topk(
                 (std::ptr::null(), None)
             };
 
-            let (expert_scale_ptr, _expert_scale_guard) =
-                if let Some((storage, _layout)) = &expert_scale_storage_and_layout {
-                    let storage = match &**storage {
-                        candle_core::Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("cuda_moe_router_topk requires CUDA expert_scale"),
-                    };
-                    let CudaStorageSlice::F32(src) = &storage.slice else {
-                        candle_core::bail!("cuda_moe_router_topk expert_scale dtype mismatch");
-                    };
-                    let (ptr, guard) = src.device_ptr(&stream);
-                    (ptr as *const c_void, Some(guard))
-                } else {
-                    (std::ptr::null(), None)
+            let (expert_scale_ptr, _expert_scale_guard) = if let Some((storage, _layout)) =
+                &expert_scale_storage_and_layout
+            {
+                let storage = match &**storage {
+                    inference_tensor::Storage::Cuda(s) => s,
+                    _ => inference_tensor::bail!("cuda_moe_router_topk requires CUDA expert_scale"),
                 };
+                let CudaStorageSlice::F32(src) = &storage.slice else {
+                    inference_tensor::bail!("cuda_moe_router_topk expert_scale dtype mismatch");
+                };
+                let (ptr, guard) = src.device_ptr(&stream);
+                (ptr as *const c_void, Some(guard))
+            } else {
+                (std::ptr::null(), None)
+            };
 
             unsafe {
                 ffi::$ffi_fn(
@@ -287,28 +290,28 @@ pub fn cuda_moe_router_topk(
         DType::BF16 => launch!(BF16, moe_router_topk_bf16),
         DType::F16 => launch!(F16, moe_router_topk_f16),
         DType::F32 => launch!(F32, moe_router_topk_f32),
-        dt => candle_core::bail!("cuda_moe_router_topk unsupported dtype: {:?}", dt),
+        dt => inference_tensor::bail!("cuda_moe_router_topk unsupported dtype: {:?}", dt),
     }
 
     drop(weights_guard);
     drop(ids_guard);
 
-    let weights_storage = candle_core::cuda_backend::CudaStorage {
+    let weights_storage = inference_tensor::cuda_backend::CudaStorage {
         slice: CudaStorageSlice::F32(weights_dst),
         device: dev.clone(),
     };
-    let ids_storage = candle_core::cuda_backend::CudaStorage {
+    let ids_storage = inference_tensor::cuda_backend::CudaStorage {
         slice: CudaStorageSlice::U32(ids_dst),
         device: dev.clone(),
     };
 
     Ok(TopKOutput {
         values: Tensor::from((
-            candle_core::Storage::Cuda(weights_storage),
+            inference_tensor::Storage::Cuda(weights_storage),
             Shape::from_dims(&out_dims),
         )),
         indices: Tensor::from((
-            candle_core::Storage::Cuda(ids_storage),
+            inference_tensor::Storage::Cuda(ids_storage),
             Shape::from_dims(&out_dims),
         )),
     })

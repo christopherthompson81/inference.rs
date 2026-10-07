@@ -28,18 +28,21 @@ fn glu_activation_type(act: Activation) -> Option<inference_quant::GluActivation
 }
 
 fn candle_glu_activation_type(
-    act: candle_nn::Activation,
+    act: inference_tensor::nn::Activation,
 ) -> Option<inference_quant::GluActivationType> {
     match act {
-        candle_nn::Activation::Silu | candle_nn::Activation::Swish => {
+        inference_tensor::nn::Activation::Silu | inference_tensor::nn::Activation::Swish => {
             Some(inference_quant::GluActivationType::Silu)
         }
-        candle_nn::Activation::NewGelu | candle_nn::Activation::GeluPytorchTanh => {
+        inference_tensor::nn::Activation::NewGelu
+        | inference_tensor::nn::Activation::GeluPytorchTanh => {
             Some(inference_quant::GluActivationType::Gelu)
         }
-        candle_nn::Activation::Gelu => Some(inference_quant::GluActivationType::GeluErf),
-        candle_nn::Activation::Relu => Some(inference_quant::GluActivationType::Relu),
-        candle_nn::Activation::Sigmoid => Some(inference_quant::GluActivationType::Sigmoid),
+        inference_tensor::nn::Activation::Gelu => Some(inference_quant::GluActivationType::GeluErf),
+        inference_tensor::nn::Activation::Relu => Some(inference_quant::GluActivationType::Relu),
+        inference_tensor::nn::Activation::Sigmoid => {
+            Some(inference_quant::GluActivationType::Sigmoid)
+        }
         _ => None,
     }
 }
@@ -74,7 +77,11 @@ pub fn try_fused_gated_projection(
     inference_quant::try_forward_fused_quantized_glu(gate, value, projection, activation)
 }
 
-pub fn mul_and_candle_act(a: &Tensor, b: &Tensor, act: candle_nn::Activation) -> Result<Tensor> {
+pub fn mul_and_candle_act(
+    a: &Tensor,
+    b: &Tensor,
+    act: inference_tensor::nn::Activation,
+) -> Result<Tensor> {
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
     if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32)
         && a.dtype() == b.dtype()
@@ -119,10 +126,10 @@ pub fn split_mul_and_act_order(
 ) -> Result<Tensor> {
     let last_dim = xs.dim(D::Minus1)?;
     let Some(expected_last_dim) = split_size.checked_mul(2) else {
-        candle_core::bail!("split_mul_and_act split size overflow: {split_size}");
+        inference_tensor::bail!("split_mul_and_act split size overflow: {split_size}");
     };
     if last_dim != expected_last_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "split_mul_and_act expected last dim {expected_last_dim}, got {last_dim}"
         );
     }
@@ -223,7 +230,7 @@ impl MergedDenseProjection {
             .iter()
             .any(|proj| proj.is_dynamic_lora_active())
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed projection cannot use a prequantized activation with active dynamic LoRA"
             )
         }

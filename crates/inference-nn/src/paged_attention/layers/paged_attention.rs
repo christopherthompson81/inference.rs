@@ -4,7 +4,6 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::attention_backend::AttentionLayerSpec;
 use std::{collections::HashMap, sync::Once};
 
-use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_fattn::{FattnOptions, KvScales as FattnKvScales, Packed, PagedKv};
 #[cfg(not(all(feature = "cuda", target_family = "unix")))]
@@ -15,6 +14,7 @@ use inference_paged_attn::{
     DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, KvCacheScales as FlashInferKvCacheScales,
     fa3_fp8_decode, gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
 };
+use inference_tensor::{DType, Device, DeviceLocation, Result, Tensor};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::attention::{fattn_sinks, sliding_window_left};
@@ -119,7 +119,7 @@ impl CacheScales<'_> {
 }
 
 fn resolve_tensor_for_device(
-    tensors: &HashMap<candle_core::DeviceLocation, Tensor>,
+    tensors: &HashMap<inference_tensor::DeviceLocation, Tensor>,
     device: &Device,
     what: &str,
 ) -> Result<Tensor> {
@@ -129,17 +129,18 @@ fn resolve_tensor_for_device(
     if let Some(tensor) = tensors.values().next() {
         return tensor.to_device(device);
     }
-    candle_core::bail!("Missing {what} tensor for {:?}", device.location())
+    inference_tensor::bail!("Missing {what} tensor for {:?}", device.location())
 }
 
 fn checked_sequence_token_count(lengths: &[usize]) -> Result<usize> {
     let total = lengths.iter().try_fold(0usize, |total, &len| {
         total
             .checked_add(len)
-            .ok_or_else(|| candle_core::Error::msg("sequence token count overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("sequence token count overflow"))
     })?;
-    i32::try_from(total)
-        .map_err(|_| candle_core::Error::msg("sequence token count exceeds kernel i32 limit"))?;
+    i32::try_from(total).map_err(|_| {
+        inference_tensor::Error::msg("sequence token count exceeds kernel i32 limit")
+    })?;
     Ok(total)
 }
 
@@ -150,7 +151,7 @@ fn cumulative_seqlens_from_lengths(lengths: &[usize], device: &Device) -> Result
     cumulative.push(0u32);
     for &len in lengths {
         total += len;
-        cumulative.push(u32::try_from(total).map_err(candle_core::Error::wrap)?);
+        cumulative.push(u32::try_from(total).map_err(inference_tensor::Error::wrap)?);
     }
     debug_assert_eq!(total, expected_total);
     Tensor::new(&cumulative[..], &Device::Cpu)?.to_device(device)
@@ -191,11 +192,11 @@ fn cache_input_shape(tensor: &Tensor) -> Result<(usize, usize, usize)> {
         [batch, seq_len, heads, head_size] => Ok((
             batch
                 .checked_mul(seq_len)
-                .ok_or_else(|| candle_core::Error::msg("cache input token count overflow"))?,
+                .ok_or_else(|| inference_tensor::Error::msg("cache input token count overflow"))?,
             heads,
             head_size,
         )),
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "cache input must have shape [tokens, heads, head_size] or [batch, seq_len, heads, head_size], got {:?}",
             tensor.shape()
         ),
@@ -351,24 +352,24 @@ fn validate_varlen_segment_partition(
         || segment_lens.is_empty()
         || segment_lens.contains(&0)
     {
-        candle_core::bail!("packed varlen segments contain an empty sequence");
+        inference_tensor::bail!("packed varlen segments contain an empty sequence");
     }
     let mut segment_index = 0usize;
     for &query_len in query_lens {
         let mut remaining = query_len;
         while remaining > 0 {
             let segment = segment_lens.get(segment_index).copied().ok_or_else(|| {
-                candle_core::Error::msg("packed varlen segments do not cover every query")
+                inference_tensor::Error::msg("packed varlen segments do not cover every query")
             })?;
             if segment > remaining {
-                candle_core::bail!("packed varlen segment crosses a logical query boundary");
+                inference_tensor::bail!("packed varlen segment crosses a logical query boundary");
             }
             remaining -= segment;
             segment_index += 1;
         }
     }
     if segment_index != segment_lens.len() {
-        candle_core::bail!("packed varlen segments contain trailing queries");
+        inference_tensor::bail!("packed varlen segments contain trailing queries");
     }
     Ok(segment_lens.iter().copied().max().unwrap_or(0))
 }
@@ -376,7 +377,7 @@ fn validate_varlen_segment_partition(
 fn decode_query_rows(query: &Tensor, kv_lens: &[usize]) -> Result<usize> {
     let query_rows = query.dim(0)?;
     if query_rows != kv_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "decode gather has {query_rows} query rows for {} KV rows",
             kv_lens.len()
         );
@@ -387,15 +388,15 @@ fn decode_query_rows(query: &Tensor, kv_lens: &[usize]) -> Result<usize> {
 fn pad_packed_query(query: &Tensor, query_lens: &[usize]) -> Result<Tensor> {
     let (batch, heads, total_tokens, head_size) = query.dims4()?;
     if batch != 1 || query_lens.is_empty() || query_lens.contains(&0) {
-        candle_core::bail!("packed sinks query has invalid logical dimensions");
+        inference_tensor::bail!("packed sinks query has invalid logical dimensions");
     }
     let logical_tokens = query_lens.iter().try_fold(0usize, |total, &len| {
         total
             .checked_add(len)
-            .ok_or_else(|| candle_core::Error::msg("packed sinks query length overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("packed sinks query length overflow"))
     })?;
     if logical_tokens != total_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "packed sinks query has {total_tokens} tokens for {logical_tokens} logical tokens"
         );
     }
@@ -427,7 +428,7 @@ fn repack_padded_query(output: &Tensor, query_lens: &[usize]) -> Result<Tensor> 
         || query_lens.contains(&0)
         || query_lens.iter().any(|&len| len > max_query_len)
     {
-        candle_core::bail!("padded sinks output has invalid logical dimensions");
+        inference_tensor::bail!("padded sinks output has invalid logical dimensions");
     }
 
     let mut rows = Vec::with_capacity(query_lens.len());
@@ -770,7 +771,7 @@ impl PagedForwardCtx<'_> {
             .and_then(|lens| lens.get(dev))
         {
             Some(lens) => Ok(Some(lens)),
-            None => candle_core::bail!(
+            None => inference_tensor::bail!(
                 "chunked attention over a window's tables needs the full context lengths"
             ),
         }
@@ -926,7 +927,7 @@ impl PagedAttention {
                     .and_then(|m| m.get(&loc))
             })
             .ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "canvas KV gather requires block tables (full: {:?}, windowed: {:?}, want {:?})",
                     input_metadata
                         .full_block_tables
@@ -945,8 +946,8 @@ impl PagedAttention {
             block_tables.narrow(0, 0, num_seqs)?
         } else {
             let row_idx: Vec<u32> = (0..num_seqs)
-                .map(|i| u32::try_from(i * rows_per_seq).map_err(candle_core::Error::wrap))
-                .collect::<candle_core::Result<_>>()?;
+                .map(|i| u32::try_from(i * rows_per_seq).map_err(inference_tensor::Error::wrap))
+                .collect::<inference_tensor::Result<_>>()?;
             block_tables.index_select(&Tensor::from_vec(row_idx, (num_seqs,), device)?, 0)?
         };
         let kv_lens = vec![kv_len; num_seqs];
@@ -994,7 +995,7 @@ impl PagedAttention {
             (key_value_heads, kv_head_size)
         };
         if kv_head_size != head_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "paged attention query/cache head dim mismatch: query={head_size}, kv={kv_head_size}"
             );
         }
@@ -1048,7 +1049,7 @@ impl PagedAttention {
             mm_prefix_ranges.is_some(),
         ) {
             let view = if ctx.use_full { "full" } else { "sliding" };
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "noncausal multimodal prefix attention is missing {view} cache metadata for {dev:?}"
             );
         }
@@ -1057,7 +1058,7 @@ impl PagedAttention {
         }
 
         let block_tables = block_tables.ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "paged prefix attention is missing block tables for {dev:?}"
             ))
         })?;
@@ -1213,17 +1214,14 @@ impl PagedAttention {
             prefill_plan = PrefixPrefillPlan::choose_without_fattn(prefill_plan_input);
         }
         if ctx.sdpa_params.chunk.is_some() && !tensors.attention_mask.is_custom() {
-            candle_core::bail!("chunked prefill over the paged cache runs only on fattn");
+            inference_tensor::bail!("chunked prefill over the paged cache runs only on fattn");
         }
         if matches!(prefill_plan, PrefixPrefillPlan::GatherSdpa)
             && let Some(limit) = ctx.input_metadata.prefix_gather_workspace_limit
         {
-            let v_head_dim = tensors
-                .value
-                .dims()
-                .last()
-                .copied()
-                .ok_or_else(|| candle_core::Error::msg("value tensor has no head dimension"))?;
+            let v_head_dim = tensors.value.dims().last().copied().ok_or_else(|| {
+                inference_tensor::Error::msg("value tensor has no head dimension")
+            })?;
             let required = gather_prefill_workspace_for_lengths(GatherPrefillWorkspaceRequest {
                 query_lens: &query_lens,
                 kv_lens: &kv_lens,
@@ -1235,7 +1233,7 @@ impl PagedAttention {
                 plan_input: prefill_plan_input,
             })?;
             if required > limit {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "prompt KV gather requires {required} bytes, exceeding its preflight workspace limit of {limit} bytes"
                 );
             }
@@ -1304,11 +1302,11 @@ impl PagedAttention {
             cu_kv_map.insert(device.location(), cu_kv);
             let prefix_flash_params = FlashParams {
                 max_q: u32::try_from(query_lens.iter().copied().max().unwrap_or(0))
-                    .map_err(candle_core::Error::wrap)?,
+                    .map_err(inference_tensor::Error::wrap)?,
                 cumulative_seqlens_q: cu_q_map,
                 logical_k: FlashKMeta {
                     max: u32::try_from(kv_lens.iter().copied().max().unwrap_or(0))
-                        .map_err(candle_core::Error::wrap)?,
+                        .map_err(inference_tensor::Error::wrap)?,
                     cumulative_seqlens: cu_kv_map,
                 },
                 sliding_k: None,
@@ -1421,11 +1419,11 @@ impl PagedAttention {
             cu_kv_map.insert(device.location(), cu_kv);
             let prefix_flash_params = FlashParams {
                 max_q: u32::try_from(query_lens.iter().copied().max().unwrap_or(0))
-                    .map_err(candle_core::Error::wrap)?,
+                    .map_err(inference_tensor::Error::wrap)?,
                 cumulative_seqlens_q: cu_q_map,
                 logical_k: FlashKMeta {
                     max: u32::try_from(kv_lens.iter().copied().max().unwrap_or(0))
-                        .map_err(candle_core::Error::wrap)?,
+                        .map_err(inference_tensor::Error::wrap)?,
                     cumulative_seqlens: cu_kv_map,
                 },
                 sliding_k: None,
@@ -1493,9 +1491,10 @@ impl PagedAttention {
             .input_metadata
             .flashinfer
             .as_ref()
-            .ok_or_else(|| candle_core::Error::msg("FA3 prefill metadata is missing"))?;
-        let num_sm = fa3_device_num_sm(query.device())
-            .ok_or_else(|| candle_core::Error::msg("FA3 prefill requires an SM90 CUDA device"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill metadata is missing"))?;
+        let num_sm = fa3_device_num_sm(query.device()).ok_or_else(|| {
+            inference_tensor::Error::msg("FA3 prefill requires an SM90 CUDA device")
+        })?;
         let (num_pages, kv_heads, page_size, head_dim) = key_cache.dims4()?;
         if num_pages == 0
             || value_cache.dims4()? != key_cache.dims4()?
@@ -1507,7 +1506,7 @@ impl PagedAttention {
                     head_dim,
                 )
         {
-            candle_core::bail!("FA3 prefill cache/query shape invariant failed");
+            inference_tensor::bail!("FA3 prefill cache/query shape invariant failed");
         }
         let key = (Fa3PagedScheduleShape {
             device: query.device().location(),
@@ -1521,7 +1520,7 @@ impl PagedAttention {
             page_size,
         })
         .prefill_schedule_key(num_sm)
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill schedule invariant failed"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill schedule invariant failed"))?;
         let query = query
             .transpose(1, 2)?
             .reshape((
@@ -1586,7 +1585,9 @@ impl PagedAttention {
             && !tensors.query.device().is_cuda()
         {
             let query_lens = ctx.input_metadata.query_lens.as_deref().ok_or_else(|| {
-                candle_core::Error::msg("packed sinks prefill is missing logical query lengths")
+                inference_tensor::Error::msg(
+                    "packed sinks prefill is missing logical query lengths",
+                )
             })?;
             let padded_query = pad_packed_query(tensors.query, query_lens)?;
             let padded_output = Sdpa.run_attention(
@@ -1686,7 +1687,7 @@ impl PagedAttention {
         if ctx.sdpa_params.chunk.is_some()
             && !matches!(attention_backend, AttentionBackendKind::FlashInfer)
         {
-            candle_core::bail!("chunked decode runs only on fattn, over the HND cache layout");
+            inference_tensor::bail!("chunked decode runs only on fattn, over the HND cache layout");
         }
         match DecodePlan::choose(DecodePlanInput {
             attention_backend,
@@ -1733,17 +1734,19 @@ impl PagedAttention {
         attention_mask: &AttentionMask,
     ) -> Result<Tensor> {
         if ctx.alibi_slopes.is_some() {
-            candle_core::bail!("paged decode over gathered K/V does not apply alibi");
+            inference_tensor::bail!("paged decode over gathered K/V does not apply alibi");
         }
         // a custom mask carries the chunks; without one the gather would attend past them
         if ctx.sdpa_params.chunk.is_some() && !attention_mask.is_custom() {
-            candle_core::bail!("chunked decode over the paged cache runs only on fattn");
+            inference_tensor::bail!("chunked decode over the paged cache runs only on fattn");
         }
         // the gather sizes its work from host lengths, which a captured graph would replay stale: failing the capture
         // makes the engine run these steps eagerly
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if crate::cuda::graph_capture::device_is_capturing(query.device()) {
-            candle_core::bail!("paged decode over gathered K/V cannot be captured in a CUDA graph");
+            inference_tensor::bail!(
+                "paged decode over gathered K/V cannot be captured in a CUDA graph"
+            );
         }
         let block_tables = ctx.block_tables(dev).unwrap();
         let kv_lens: Vec<usize> = match ctx.context_lens_cpu() {
@@ -1762,7 +1765,7 @@ impl PagedAttention {
                         .into_iter()
                         .map(|len| len as usize)
                         .collect(),
-                    other => candle_core::bail!("unexpected context_lens dtype {other:?}"),
+                    other => inference_tensor::bail!("unexpected context_lens dtype {other:?}"),
                 }
             }
         };
@@ -1801,7 +1804,7 @@ impl PagedAttention {
                 cumulative_seqlens_q: cu_q_map,
                 logical_k: FlashKMeta {
                     max: u32::try_from(kv_lens.iter().copied().max().unwrap_or(0))
-                        .map_err(candle_core::Error::wrap)?,
+                        .map_err(inference_tensor::Error::wrap)?,
                     cumulative_seqlens: cu_kv_map,
                 },
                 sliding_k: None,
@@ -2170,7 +2173,9 @@ impl PagedAttention {
                 .map(|segment_lens| (params, segment_lens))
         }) {
             let query_lens = input_metadata.query_lens.as_deref().ok_or_else(|| {
-                candle_core::Error::msg("packed varlen segments are missing logical query lengths")
+                inference_tensor::Error::msg(
+                    "packed varlen segments are missing logical query lengths",
+                )
             })?;
             let max_segment = validate_varlen_segment_partition(query_lens, segment_lens)?;
             let token_count = query_lens.iter().sum::<usize>();
@@ -2179,7 +2184,7 @@ impl PagedAttention {
                 .cumulative_seqlens_q
                 .get(&location)
                 .ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "packed varlen segments are missing query offsets for the layer device",
                     )
                 })?;
@@ -2188,7 +2193,7 @@ impl PagedAttention {
                 .cumulative_seqlens
                 .get(&location)
                 .ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "packed varlen segments are missing key offsets for the layer device",
                     )
                 })?;
@@ -2215,7 +2220,9 @@ impl PagedAttention {
                 || cu_q.dims1()? != segment_lens.len() + 1
                 || cu_k.dims1()? != segment_lens.len() + 1
             {
-                candle_core::bail!("packed varlen segment metadata is not safe for direct prefill");
+                inference_tensor::bail!(
+                    "packed varlen segment metadata is not safe for direct prefill"
+                );
             }
         }
 
@@ -2301,7 +2308,7 @@ impl PagedAttention {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::D;
+    use inference_tensor::D;
 
     #[test]
     fn cumulative_seqlens_match_checked_host_token_count() -> Result<()> {

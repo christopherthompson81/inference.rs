@@ -1,0 +1,18 @@
+[package]
+name = "inference-tensor-kernels"
+version.workspace = true
+edition = "2021"
+rust-version.workspace = true
+
+description = "CUDA kernels for inference-tensor, derived from candle-kernels."
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+
+[build-dependencies]
+cudaforge = { workspace = true, optional = true }
+
+[features]
+default = []
+cuda = ["dep:cudaforge"]

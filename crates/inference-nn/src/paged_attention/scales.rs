@@ -1,7 +1,7 @@
 use std::sync::Once;
 
-use candle_core::{DType, Result};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{DType, Result};
 
 const Q_SCALE_NAME: &str = "q_scale";
 const K_SCALE_NAME: &str = "k_scale";
@@ -32,7 +32,9 @@ impl Fp8AttentionScales {
             (V_SCALE_NAME, self.v),
         ] {
             if !value.is_finite() || value <= 0.0 {
-                candle_core::bail!("FP8 attention {name} must be finite and positive, got {value}");
+                inference_tensor::bail!(
+                    "FP8 attention {name} must be finite and positive, got {value}"
+                );
             }
         }
         Ok(self)
@@ -48,7 +50,7 @@ impl Default for Fp8AttentionScales {
 fn load_scalar(vb: &ShardedVarBuilder, name: &str) -> Result<f32> {
     let tensor = vb.get_unchecked(name)?;
     if tensor.elem_count() != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 attention scale `{}.{name}` must be scalar, got shape {:?}",
             vb.prefix(),
             tensor.shape()
@@ -107,7 +109,7 @@ pub fn load_fp8_attention_scales(
                 .validate()?,
             ))
         }
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "FP8 attention scales under `{}` must define k_scale and v_scale together, with optional q_scale, or only deprecated kv_scale",
             attention_vb.prefix()
         ),
@@ -118,8 +120,8 @@ pub fn load_fp8_attention_scales(
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Device, Tensor};
     use inference_quant::ShardedSafeTensors;
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::{Fp8AttentionScales, load_fp8_attention_scales};
 

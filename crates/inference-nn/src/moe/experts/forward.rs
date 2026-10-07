@@ -1,5 +1,5 @@
-use candle_core::{DType, Tensor};
 use inference_quant::LoraExpertExecution;
+use inference_tensor::{DType, Tensor};
 
 use crate::layers::Activation;
 

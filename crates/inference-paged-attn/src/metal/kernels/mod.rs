@@ -1,8 +1,8 @@
-use candle_core::{DType, MetalStorage};
 use candle_metal_kernels::metal::{
     Buffer, ComputeCommandEncoder, ComputePipeline, ConstantValues, Device, Function, Library,
     Value,
 };
+use inference_tensor::{DType, MetalStorage};
 use objc2_metal::{MTLDevice, MTLSize};
 use std::sync::{OnceLock, RwLock};
 use std::{collections::HashMap, ffi::c_void};

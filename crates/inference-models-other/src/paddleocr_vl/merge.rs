@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use crate::layers::embedding;
 use crate::utils::unvarbuilder::UnVarBuilder;
-use candle_core::{DType, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{DType, Result, Tensor};
 
 pub struct Merger {
     embed_tokens: Arc<dyn QuantMethod>,

@@ -1,9 +1,9 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Embedding, LayerNorm, Linear, Module};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::{Embedding, LayerNorm, Linear, Module};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
@@ -67,7 +67,7 @@ impl VisionEmbeddings {
             let height = shape[0] as usize;
             let width = shape[1] as usize;
             if height == 0 || width == 0 || height * width > max_len {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LFM2-VL spatial shape ({height}, {width}) is incompatible with max patches {max_len}"
                 );
             }

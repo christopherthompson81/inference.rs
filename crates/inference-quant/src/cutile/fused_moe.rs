@@ -1,14 +1,14 @@
 //! The fused MoE grouped-GEMM cuTile kernel (bf16), its host-side launch (`cutile_grouped_gemm`), and its JIT warmup.
 #![allow(clippy::too_many_arguments, clippy::missing_safety_doc)]
 
-use candle_core::cuda::cudarc::driver::CudaSlice;
-use candle_core::{CudaDevice, DType, Device, Result, Storage, Tensor};
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tile_kernel::TileKernel;
 use half::bf16;
 use indicatif::{ProgressBar, ProgressStyle};
+use inference_tensor::cuda::cudarc::driver::CudaSlice;
+use inference_tensor::{CudaDevice, DType, Device, Result, Storage, Tensor};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::{Mutex, OnceLock};
@@ -475,11 +475,11 @@ fn cutile_grouped_gemm_inner(
     compile_only: bool,
 ) -> Result<Tensor> {
     if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
-        candle_core::bail!("cutile gemm is bf16-only");
+        inference_tensor::bail!("cutile gemm is bf16-only");
     }
     let (_e, n_size, k_size) = b.dims3()?;
     if a.dim(1)? != k_size {
-        candle_core::bail!("A K and B K mismatch");
+        inference_tensor::bail!("A K and B K mismatch");
     }
 
     let mut out = unsafe { dev.alloc::<bf16>(num_valid_tokens * n_size)? };
@@ -488,12 +488,12 @@ fn cutile_grouped_gemm_inner(
     let (a_storage, a_layout) = a.storage_and_layout();
     let a_slice = match &*a_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<bf16>()?,
-        _ => candle_core::bail!("a must be cuda"),
+        _ => inference_tensor::bail!("a must be cuda"),
     };
     let (b_storage, b_layout) = b.storage_and_layout();
     let b_slice = match &*b_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<bf16>()?,
-        _ => candle_core::bail!("b must be cuda"),
+        _ => inference_tensor::bail!("b must be cuda"),
     };
 
     let (a_addr, _a_guard) = slice_ptr_on_stream(a_slice, a_layout.start_offset(), &stream);
@@ -520,7 +520,7 @@ fn cutile_grouped_gemm_inner(
         && (!k_size.is_multiple_of(cfg.bk as usize)
             || !(k_size / cfg.bk as usize).is_multiple_of(splits))
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile MoE split_k {splits} does not divide K={k_size} in {} tiles",
             cfg.bk
         )
@@ -581,15 +581,15 @@ fn cutile_grouped_gemm_inner(
 
     if compile_only {
         catch_cutile_panic("fused MoE kernel compile", || {
-            launcher
-                .compile_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile fused_moe compile: {e:?}")))
+            launcher.compile_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile fused_moe compile: {e:?}"))
+            })
         })?;
     } else {
         catch_cutile_panic("fused MoE kernel execute", || unsafe {
-            launcher
-                .async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile fused_moe launch: {e:?}")))
+            launcher.async_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile fused_moe launch: {e:?}"))
+            })
         })?;
     }
     drop((out_guard, tw_guard, partial_guard));
@@ -597,7 +597,7 @@ fn cutile_grouped_gemm_inner(
         reduce_split_k(partial, &mut out, splits as i32, numel, dev, compile_only)?;
     }
 
-    let storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
+    let storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     Ok(Tensor::from((
         Storage::Cuda(storage),
         (num_valid_tokens, n_size),
@@ -957,7 +957,7 @@ fn warmup_moe_kernels_uncached(dev: &CudaDevice) -> Result<()> {
         let mut tuner = Bf16Tuner::new(dev, sets);
         let tuned = tune(dev, mode, &request, |m, config| {
             let cfg = MoeTileConfig::from_config(config)
-                .ok_or_else(|| candle_core::Error::Msg("config outside the space".into()))?;
+                .ok_or_else(|| inference_tensor::Error::Msg("config outside the space".into()))?;
             tuner.prepare(m, cfg)
         });
         TUNED.set(key, &tuned, MoeTileConfig::from_config);

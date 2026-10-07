@@ -4,11 +4,11 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Linear, Module};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use super::config::TextConfig;
 use crate::{
@@ -665,7 +665,7 @@ impl Qwen3VLTextModel {
             return Ok(hidden_states);
         }
         if indices.len() != visual_embeds.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Mismatch between DeepStack visual embeds ({}) and mask positions ({})",
                 visual_embeds.dim(0)?,
                 indices.len()

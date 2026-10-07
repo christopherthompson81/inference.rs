@@ -67,13 +67,13 @@ use crate::{
     distributed, get_mut_arcmutex,
 };
 use anyhow::{Context, Result, bail};
-use candle_core::{Device, Tensor};
 use either::Either;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
 use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
+use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::collections::HashMap;
@@ -497,7 +497,7 @@ impl GGUFLoader {
     fn resolve_tokenizer(
         &self,
         paths: &dyn ModelPaths,
-        metadata: &HashMap<String, candle_core::quantized::gguf_file::Value>,
+        metadata: &HashMap<String, inference_tensor::quantized::gguf_file::Value>,
     ) -> Result<ResolvedGgufTokenizer> {
         let (path, fallback) = if let Some(tokenizer_json) = self.tokenizer_json.as_ref() {
             (PathBuf::from(tokenizer_json), TokenizerFallback::Strict)
@@ -586,7 +586,7 @@ impl GGUFLoader {
             paths.get_weight_filenames(),
         )?);
         let architecture = match archive.metadata_value("general.architecture") {
-            Some(candle_core::quantized::gguf_file::Value::String(value)) => value.as_str(),
+            Some(inference_tensor::quantized::gguf_file::Value::String(value)) => value.as_str(),
             Some(value) => {
                 bail!("GGUF `general.architecture` must be a string, got {value:?}")
             }
@@ -622,7 +622,9 @@ impl GGUFLoader {
             .map(String::as_str)
             .collect::<Vec<_>>();
         let metadata_string = |key| match archive.metadata_value(key) {
-            Some(candle_core::quantized::gguf_file::Value::String(value)) => Some(value.as_str()),
+            Some(inference_tensor::quantized::gguf_file::Value::String(value)) => {
+                Some(value.as_str())
+            }
             _ => None,
         };
         if requires_multimodal_projector(architecture) {
@@ -843,7 +845,7 @@ impl GGUFLoader {
         }
         let mut archive = inference_quant::GgufArchive::open(paths.get_weight_filenames())?;
         let architecture = match archive.metadata_value("general.architecture") {
-            Some(candle_core::quantized::gguf_file::Value::String(value)) => value.clone(),
+            Some(inference_tensor::quantized::gguf_file::Value::String(value)) => value.clone(),
             Some(value) => {
                 bail!("GGUF `general.architecture` must be a string, got {value:?}")
             }
@@ -1292,9 +1294,9 @@ impl Loader for GGUFLoader {
         let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
             let payload: WorkerTransferData = serde_json::from_str(&payload)?;
             let WorkerTransferData::Init { worker_rank, .. } = payload;
-            vec![candle_core::Device::new_cuda(worker_rank + 1)?]
+            vec![inference_tensor::Device::new_cuda(worker_rank + 1)?]
         } else if use_nccl {
-            vec![candle_core::Device::new_cuda(0)?]
+            vec![inference_tensor::Device::new_cuda(0)?]
         } else {
             device_map::get_all_similar_devices(device)?
         };
@@ -1446,7 +1448,7 @@ impl IsqPipelineMixin for GGUFPipeline {
 }
 
 impl CacheManagerMixin for GGUFPipeline {
-    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         FullCacheManager.clone_in_cache(self as &dyn Pipeline, seqs, false)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
@@ -1458,7 +1460,7 @@ impl CacheManagerMixin for GGUFPipeline {
         reset_non_granular: bool,
         modify_draft_cache: bool,
         _load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         FullCacheManager.set_none_cache(self as &dyn Pipeline, seqs, modify_draft_cache, false)?;
         if reset_non_granular {
             self.reset_non_granular_state()
@@ -1510,7 +1512,7 @@ impl Pipeline for GGUFPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> Result<ForwardInputsResult, candle_core::Error> {
+    ) -> Result<ForwardInputsResult, inference_tensor::Error> {
         let ModelInputs {
             input_ids,
             input_ids_full,
@@ -1548,7 +1550,7 @@ impl Pipeline for GGUFPipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
         sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
     }
     fn category(&self) -> ModelCategory {

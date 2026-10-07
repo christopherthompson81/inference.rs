@@ -447,57 +447,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 
 [[package]]
-name = "candle-core"
-version = "0.11.0"
-dependencies = [
- "accelerate-src",
- "byteorder",
- "candle-kernels",
- "candle-metal-kernels",
- "cudarc",
- "float8",
- "gemm",
- "half",
- "intel-mkl-src",
- "libc",
- "libm",
- "memmap2",
- "num-traits",
- "num_cpus",
- "objc2-foundation",
- "objc2-metal",
- "parking_lot",
- "rand 0.9.4",
- "rand_distr",
- "rayon",
- "safetensors",
- "thiserror 2.0.18",
- "yoke",
- "zerocopy",
- "zip 8.6.0",
-]
-
-[[package]]
-name = "candle-flash-attn-v3"
-version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f#e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f"
-dependencies = [
- "anyhow",
- "candle-core",
- "cudaforge",
- "half",
- "num_cpus",
- "rayon",
-]
-
-[[package]]
-name = "candle-kernels"
-version = "0.11.0"
-dependencies = [
- "cudaforge",
-]
-
-[[package]]
 name = "candle-metal-kernels"
 version = "0.11.0"
 source = "git+https://github.com/huggingface/candle.git?rev=e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f#e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f"
@@ -510,24 +459,6 @@ dependencies = [
  "once_cell",
  "thiserror 2.0.18",
  "tracing",
-]
-
-[[package]]
-name = "candle-nn"
-version = "0.11.0"
-dependencies = [
- "accelerate-src",
- "candle-core",
- "candle-metal-kernels",
- "half",
- "intel-mkl-src",
- "libc",
- "num-traits",
- "objc2-metal",
- "rayon",
- "safetensors",
- "serde",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -2493,8 +2424,6 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
  "either",
  "futures",
  "image",
@@ -2506,6 +2435,7 @@ dependencies = [
  "inference-models-qwen",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "rand 0.9.4",
  "rand_distr",
  "schemars",
@@ -2523,7 +2453,6 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "bm25",
- "candle-core",
  "either",
  "futures",
  "html2text",
@@ -2532,6 +2461,7 @@ dependencies = [
  "inference-code-exec",
  "inference-core",
  "inference-mcp",
+ "inference-tensor",
  "num-traits",
  "reqwest 0.13.1",
  "scraper",
@@ -2550,8 +2480,6 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
  "chrono",
  "data-url",
  "either",
@@ -2566,6 +2494,7 @@ dependencies = [
  "inference-protocol",
  "inference-quant",
  "inference-selection",
+ "inference-tensor",
  "itertools 0.14.0",
  "rand 0.9.4",
  "rand_distr",
@@ -2598,8 +2527,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
  "clap",
  "clap_complete",
  "comfy-table",
@@ -2614,6 +2541,7 @@ dependencies = [
  "inference-nn",
  "inference-quant",
  "inference-server-core",
+ "inference-tensor",
  "inference-webui",
  "mimalloc",
  "rand 0.9.4",
@@ -2658,8 +2586,6 @@ dependencies = [
  "anyhow",
  "as-any",
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
  "chrono",
  "csv",
  "derive_more",
@@ -2687,6 +2613,7 @@ dependencies = [
  "inference-protocol",
  "inference-quant",
  "inference-sandbox",
+ "inference-tensor",
  "interprocess",
  "itertools 0.14.0",
  "llguidance",
@@ -2738,11 +2665,10 @@ name = "inference-fattn"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "cudaforge",
  "float8",
  "half",
+ "inference-tensor",
 ]
 
 [[package]]
@@ -2751,8 +2677,6 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
  "image",
  "indicatif 0.18.3",
  "inference-api",
@@ -2760,10 +2684,23 @@ dependencies = [
  "inference-models-other",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "rand 0.9.4",
  "rand_distr",
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "inference-flash-attn-v3"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "cudaforge",
+ "half",
+ "inference-tensor",
+ "num_cpus",
+ "rayon",
 ]
 
 [[package]]
@@ -2772,7 +2709,6 @@ version = "0.9.3"
 dependencies = [
  "ahash",
  "anyhow",
- "candle-core",
  "hf-hub",
  "inference-models-gemma",
  "inference-models-llama",
@@ -2781,6 +2717,7 @@ dependencies = [
  "inference-models-qwen",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "rand 0.9.4",
  "serde_json",
  "strum 0.28.0",
@@ -2794,12 +2731,11 @@ name = "inference-layout"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "clap",
  "cudaforge",
  "gemm",
  "image",
+ "inference-tensor",
  "num_cpus",
  "rayon",
  "serde",
@@ -2851,10 +2787,9 @@ name = "inference-models-diffusion"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "serde",
  "serde_json",
  "serde_plain",
@@ -2867,12 +2802,11 @@ name = "inference-models-gemma"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "image",
  "inference-audio",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "inference-vision",
  "itertools 0.14.0",
  "rand 0.9.4",
@@ -2893,13 +2827,12 @@ name = "inference-models-llama"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "image",
  "indicatif 0.18.3",
  "inference-audio",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "inference-vision",
  "itertools 0.14.0",
  "ordered-float",
@@ -2918,12 +2851,11 @@ name = "inference-models-other"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "image",
  "indicatif 0.18.3",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "itertools 0.14.0",
  "rand 0.9.4",
  "rand_distr",
@@ -2941,13 +2873,12 @@ name = "inference-models-phi"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "either",
  "image",
  "inference-audio",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "inference-vision",
  "itertools 0.14.0",
  "regex",
@@ -2965,14 +2896,13 @@ name = "inference-models-qwen"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
  "image",
  "inference-audio",
  "inference-fattn",
  "inference-nn",
  "inference-paged-attn",
  "inference-quant",
+ "inference-tensor",
  "inference-vision",
  "metrics",
  "rand 0.9.4",
@@ -2988,10 +2918,9 @@ dependencies = [
 name = "inference-models-speech"
 version = "0.9.3"
 dependencies = [
- "candle-core",
- "candle-nn",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "rand 0.9.4",
  "rand_isaac",
  "serde",
@@ -3004,10 +2933,7 @@ version = "0.9.3"
 dependencies = [
  "akin",
  "anyhow",
- "candle-core",
- "candle-flash-attn-v3",
  "candle-metal-kernels",
- "candle-nn",
  "csv",
  "cudaforge",
  "either",
@@ -3018,8 +2944,10 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-audio",
  "inference-fattn",
+ "inference-flash-attn-v3",
  "inference-paged-attn",
  "inference-quant",
+ "inference-tensor",
  "itertools 0.14.0",
  "metrics",
  "num-traits",
@@ -3048,13 +2976,13 @@ name = "inference-paged-attn"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
  "candle-metal-kernels",
  "cudaforge",
  "dispatch2",
  "float8",
  "half",
  "inference-metal-compile",
+ "inference-tensor",
  "objc2-metal",
  "thiserror 2.0.18",
 ]
@@ -3093,9 +3021,7 @@ version = "0.9.3"
 dependencies = [
  "bytemuck",
  "byteorder",
- "candle-core",
  "candle-metal-kernels",
- "candle-nn",
  "cudaforge",
  "cutile",
  "dispatch2",
@@ -3106,6 +3032,7 @@ dependencies = [
  "indexmap",
  "indicatif 0.18.3",
  "inference-metal-compile",
+ "inference-tensor",
  "libc",
  "memmap2",
  "objc2-metal",
@@ -3144,13 +3071,13 @@ name = "inference-selection"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "candle-core",
  "candle-metal-kernels",
  "futures",
  "hf-hub",
  "inference-core",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "num-traits",
  "regex",
  "serde",
@@ -3171,8 +3098,6 @@ dependencies = [
  "anyhow",
  "axum",
  "base64 0.22.1",
- "candle-core",
- "candle-nn",
  "futures",
  "http-body",
  "http-body-util",
@@ -3183,6 +3108,7 @@ dependencies = [
  "inference-models-other",
  "inference-nn",
  "inference-quant",
+ "inference-tensor",
  "inference-webui",
  "metrics",
  "metrics-exporter-prometheus",
@@ -3204,11 +3130,50 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-tensor"
+version = "0.9.3"
+dependencies = [
+ "accelerate-src",
+ "byteorder",
+ "candle-metal-kernels",
+ "cudarc",
+ "float8",
+ "gemm",
+ "half",
+ "inference-tensor-kernels",
+ "intel-mkl-src",
+ "libc",
+ "libm",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "objc2-foundation",
+ "objc2-metal",
+ "parking_lot",
+ "rand 0.9.4",
+ "rand_distr",
+ "rayon",
+ "safetensors",
+ "serde",
+ "thiserror 2.0.18",
+ "yoke",
+ "zerocopy",
+ "zip 8.6.0",
+]
+
+[[package]]
+name = "inference-tensor-kernels"
+version = "0.9.3"
+dependencies = [
+ "cudaforge",
+]
+
+[[package]]
 name = "inference-vision"
 version = "0.9.3"
 dependencies = [
- "candle-core",
  "image",
+ "inference-tensor",
 ]
 
 [[package]]

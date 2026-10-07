@@ -1,8 +1,8 @@
 //! fattn against an F32 reference across its kernels (mma, vec, tile), head dims, masks, softcap and sinks.
 
 use anyhow::Result;
-use candle_core::{D, DType, Device, Tensor};
 use inference_fattn::{FattnOptions, causal_mask, flash_attn, supported};
+use inference_tensor::{D, DType, Device, Tensor};
 
 const BATCH: usize = 2;
 pub(super) const N_HEAD: usize = 8;
@@ -95,10 +95,10 @@ pub(super) fn reference(
             let (b, h, sq, _) = att.dims4()?;
             let sink = sinks.reshape((1, h, 1, 1))?.broadcast_as((b, h, sq, 1))?;
             let logits = Tensor::cat(&[&att, &sink.contiguous()?], D::Minus1)?;
-            let probs = candle_nn::ops::softmax(&logits, D::Minus1)?;
+            let probs = inference_tensor::nn::ops::softmax(&logits, D::Minus1)?;
             probs.narrow(D::Minus1, 0, case.seq_kv)?.contiguous()?
         }
-        None => candle_nn::ops::softmax(&att, D::Minus1)?,
+        None => inference_tensor::nn::ops::softmax(&att, D::Minus1)?,
     };
     Ok(att.matmul(&v)?.transpose(1, 2)?)
 }

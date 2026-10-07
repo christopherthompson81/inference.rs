@@ -3,10 +3,10 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder, softcap,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
@@ -384,7 +384,7 @@ impl EmbeddingGemma {
         }
 
         if !matches!(attention_mechanism, AttentionImplementation::Eager) {
-            candle_core::bail!("Expected AttentionImplementation::Eager");
+            inference_tensor::bail!("Expected AttentionImplementation::Eager");
         }
 
         let mapper = normal_loading_metadata.mapper;
@@ -547,7 +547,7 @@ impl EmbeddingModel for EmbeddingGemma {
         &self,
         input_ids: &Tensor,
         flash_params: &FlashParams,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         self.forward_embeds(input_ids, self.embed_tokens(input_ids)?, flash_params)
     }
     fn device(&self) -> &Device {

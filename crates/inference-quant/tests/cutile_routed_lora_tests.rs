@@ -1,7 +1,5 @@
 #![cfg(all(feature = "cuda", feature = "cutile"))]
 
-use candle_core::cuda::cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr};
-use candle_core::{CudaDevice, DType, Device, Result};
 use half::bf16;
 use inference_quant::cutile::{
     CutileRoutedLoraLaunch, CutileRoutedLoraStatus, CutileRoutedLoraUnsupported,
@@ -11,6 +9,8 @@ use inference_quant::{
     RoutedLoraAdapterWeight, RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable,
     RoutedLoraInputMode, RoutedLoraMetadataLayout, RoutedLoraProjectionLayout,
 };
+use inference_tensor::cuda::cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr};
+use inference_tensor::{CudaDevice, DType, Device, Result};
 
 struct HostProjection {
     a: Vec<bf16>,
@@ -69,7 +69,7 @@ fn upload<T: DeviceRepr + Clone + 'static>(dev: &CudaDevice, values: &[T]) -> Re
 fn synchronize(dev: &CudaDevice) -> Result<()> {
     dev.cuda_stream()
         .synchronize()
-        .map_err(|error| candle_core::Error::Msg(format!("CUDA synchronize: {error:?}")))
+        .map_err(|error| inference_tensor::Error::Msg(format!("CUDA synchronize: {error:?}")))
 }
 
 fn address<T: DeviceRepr>(dev: &CudaDevice, slice: &CudaSlice<T>) -> u64 {
@@ -206,7 +206,7 @@ fn launched_or_platform_skip(status: CutileRoutedLoraStatus, context: &str) -> R
             Ok(false)
         }
         CutileRoutedLoraStatus::Unsupported(reason) => {
-            candle_core::bail!("{context} unsupported: {reason:?}")
+            inference_tensor::bail!("{context} unsupported: {reason:?}")
         }
     }
 }
@@ -215,7 +215,7 @@ fn require_launched(status: CutileRoutedLoraStatus, context: &str) -> Result<()>
     match status {
         CutileRoutedLoraStatus::Launched => Ok(()),
         CutileRoutedLoraStatus::Unsupported(reason) => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{context} unsupported after cuTile support was established: {reason:?}"
             )
         }

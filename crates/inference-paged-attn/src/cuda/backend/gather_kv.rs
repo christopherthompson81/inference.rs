@@ -1,9 +1,9 @@
 use crate::cuda::backend::flashinfer::{gather_kv_cache_flashinfer, is_flashinfer_cache};
 use crate::cuda::backend::slice_ptr;
 use crate::cuda::ffi::gather_kv_cache as ffi_gather_kv_cache;
-use candle_core::backend::BackendStorage;
-use candle_core::{DType, Result, Storage, Tensor};
 use float8::F8E4M3;
+use inference_tensor::backend::BackendStorage;
+use inference_tensor::{DType, Result, Storage, Tensor};
 
 use crate::{DEFAULT_FP8_KV_CACHE_SCALES, KvCacheScales};
 
@@ -19,17 +19,19 @@ fn validate_cache_scales(
                 || k_scale.elem_count() != 1
                 || v_scale.elem_count() != 1
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "gather_kv_cache requires scalar f32 K/V scales for an f8e4m3 cache"
                 );
             }
         }
         (DType::F8E4M3, _, _) => {
-            candle_core::bail!("gather_kv_cache requires explicit K/V scales for an f8e4m3 cache")
+            inference_tensor::bail!(
+                "gather_kv_cache requires explicit K/V scales for an f8e4m3 cache"
+            )
         }
         (_, None, None) => {}
         (_, _, _) => {
-            candle_core::bail!("gather_kv_cache only accepts K/V scales for an f8e4m3 cache")
+            inference_tensor::bail!("gather_kv_cache only accepts K/V scales for an f8e4m3 cache")
         }
     }
     Ok(())
@@ -63,7 +65,7 @@ pub fn gather_kv_cache(
 ) -> Result<(Tensor, Tensor)> {
     let cache_dtype = key_cache.dtype();
     if value_cache.dtype() != cache_dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "gather_kv_cache expects matching cache dtypes, got {:?} and {:?}",
             cache_dtype,
             value_cache.dtype()
@@ -86,13 +88,13 @@ pub fn gather_kv_cache(
     let cu_seq_lens = cu_seq_lens.contiguous()?;
 
     if !matches!(block_table.dtype(), DType::I32 | DType::U32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "gather_kv_cache expects i32/u32 block_table (got {:?})",
             block_table.dtype()
         );
     }
     if !matches!(cu_seq_lens.dtype(), DType::I32 | DType::U32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "gather_kv_cache expects i32/u32 cu_seq_lens (got {:?})",
             cu_seq_lens.dtype()
         );
@@ -107,13 +109,13 @@ pub fn gather_kv_cache(
     let head_size = head_size_over_x * x;
 
     let cu_seq_lens_len = cu_seq_lens.dims1()?;
-    let num_seqs = cu_seq_lens_len
-        .checked_sub(1)
-        .ok_or_else(|| candle_core::Error::msg("cu_seq_lens must contain an initial offset"))?;
+    let num_seqs = cu_seq_lens_len.checked_sub(1).ok_or_else(|| {
+        inference_tensor::Error::msg("cu_seq_lens must contain an initial offset")
+    })?;
     let num_tokens_i32 = i32::try_from(num_tokens)
-        .map_err(|_| candle_core::Error::msg("num_tokens exceeds the kernel i32 limit"))?;
+        .map_err(|_| inference_tensor::Error::msg("num_tokens exceeds the kernel i32 limit"))?;
     let num_seqs_i32 = i32::try_from(num_seqs)
-        .map_err(|_| candle_core::Error::msg("num_seqs exceeds the kernel i32 limit"))?;
+        .map_err(|_| inference_tensor::Error::msg("num_seqs exceeds the kernel i32 limit"))?;
 
     if num_tokens == 0 {
         let k_out = Tensor::zeros((0, num_kv_heads, head_size), out_dtype, key_cache.device())?;
@@ -136,7 +138,7 @@ pub fn gather_kv_cache(
         DType::F16 => 0,
         DType::BF16 => 1,
         DType::F32 => 2,
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "gather_kv_cache only supports f16, bf16, f32 output (got {other:?})"
         ),
     };
@@ -145,7 +147,7 @@ pub fn gather_kv_cache(
         DType::BF16 => 1,
         DType::F32 => 2,
         DType::F8E4M3 => 3,
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "gather_kv_cache only supports f16, bf16, f32, f8e4m3 cache (got {other:?})"
         ),
     };
@@ -155,12 +157,12 @@ pub fn gather_kv_cache(
         let (kc_s, kc_l) = key_cache.storage_and_layout();
         let kc_s = match &*kc_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("key_cache must be a cuda tensor"),
+            _ => inference_tensor::bail!("key_cache must be a cuda tensor"),
         };
         let (vc_s, vc_l) = value_cache.storage_and_layout();
         let vc_s = match &*vc_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("value_cache must be a cuda tensor"),
+            _ => inference_tensor::bail!("value_cache must be a cuda tensor"),
         };
 
         // Get cache pointers - handle FP8 vs regular dtype
@@ -189,12 +191,12 @@ pub fn gather_kv_cache(
         let (ko_s, ko_l) = k_out.storage_and_layout();
         let ko_s = match &*ko_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("k_out must be a cuda tensor"),
+            _ => inference_tensor::bail!("k_out must be a cuda tensor"),
         };
         let (vo_s, vo_l) = v_out.storage_and_layout();
         let vo_s = match &*vo_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("v_out must be a cuda tensor"),
+            _ => inference_tensor::bail!("v_out must be a cuda tensor"),
         };
         let (ko_ptr, _ko_guard) = match out_dtype {
             DType::F16 => slice_ptr(ko_s.as_cuda_slice::<half::f16>()?, ko_l.start_offset()),
@@ -213,14 +215,14 @@ pub fn gather_kv_cache(
         let (bt_s, bt_l) = block_table.storage_and_layout();
         let bt_s = match &*bt_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("block_table must be a cuda tensor"),
+            _ => inference_tensor::bail!("block_table must be a cuda tensor"),
         };
         let (bt_ptr, _bt_guard) = slice_ptr(bt_s.as_cuda_slice::<u32>()?, bt_l.start_offset());
 
         let (cu_s, cu_l) = cu_seq_lens.storage_and_layout();
         let cu_s = match &*cu_s {
             Storage::Cuda(s) => s,
-            _ => candle_core::bail!("cu_seq_lens must be a cuda tensor"),
+            _ => inference_tensor::bail!("cu_seq_lens must be a cuda tensor"),
         };
         let (cu_ptr, _cu_guard) = if cu_seq_lens.dtype() == DType::I32 {
             slice_ptr(cu_s.as_cuda_slice::<i32>()?, cu_l.start_offset())
@@ -233,7 +235,7 @@ pub fn gather_kv_cache(
         let (k_scale_ptr, _ks_guard) = if let Some((ref s, l)) = _ks_storage {
             let s = match &**s {
                 Storage::Cuda(s) => s,
-                _ => candle_core::bail!("k_scale must be a cuda tensor"),
+                _ => inference_tensor::bail!("k_scale must be a cuda tensor"),
             };
             let (ptr, guard) = slice_ptr(s.as_cuda_slice::<f32>()?, l.start_offset());
             (ptr as *const f32, Some(guard))
@@ -244,7 +246,7 @@ pub fn gather_kv_cache(
         let (v_scale_ptr, _vs_guard) = if let Some((ref s, l)) = _vs_storage {
             let s = match &**s {
                 Storage::Cuda(s) => s,
-                _ => candle_core::bail!("v_scale must be a cuda tensor"),
+                _ => inference_tensor::bail!("v_scale must be a cuda tensor"),
             };
             let (ptr, guard) = slice_ptr(s.as_cuda_slice::<f32>()?, l.start_offset());
             (ptr as *const f32, Some(guard))

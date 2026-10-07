@@ -4,8 +4,8 @@ use serde_json::Value;
 use std::{cmp::Ordering, sync::Arc};
 
 use crate::QuantMethod;
-use candle_core::{DType, Result as CandleResult, Tensor};
-use candle_nn::Linear;
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Result as CandleResult, Tensor};
 
 const FP8_BITS: u64 = 8;
 const NVFP4_BITS: u64 = 4;
@@ -40,7 +40,7 @@ impl Fp8WeightScaleLayout {
             Self::Channel => vec![out_dim],
             Self::Block([rows, cols]) => {
                 if rows == 0 || cols == 0 {
-                    candle_core::bail!("FP8 block scale dimensions must be positive");
+                    inference_tensor::bail!("FP8 block scale dimensions must be positive");
                 }
                 vec![out_dim.div_ceil(rows), in_dim.div_ceil(cols)]
             }
@@ -54,7 +54,7 @@ impl Fp8WeightScaleLayout {
             Self::Channel => vec![vec![out_dim], vec![out_dim, 1]],
             Self::Block([rows, cols]) => {
                 if rows == 0 || cols == 0 {
-                    candle_core::bail!("FP8 block scale dimensions must be positive");
+                    inference_tensor::bail!("FP8 block scale dimensions must be positive");
                 }
                 let scale_rows = out_dim.div_ceil(rows);
                 let scale_cols = in_dim.div_ceil(cols);
@@ -65,7 +65,7 @@ impl Fp8WeightScaleLayout {
             }
         };
         if !accepted.iter().any(|shape| scale.dims() == shape) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FP8 {:?} weight scale has shape {:?}, expected one of {:?}",
                 self,
                 scale.dims(),
@@ -94,7 +94,7 @@ pub struct Fp8ScaleNames {
 impl Fp8ScaleNames {
     pub fn weight_name(&self, vb: &crate::ShardedVarBuilder) -> CandleResult<&'static str> {
         resolve_scale_name(vb, self.weight, "weight")?.ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "missing FP8 weight scale at prefix `{}`; expected one of {}",
                 vb.prefix(),
                 self.weight.join(", ")
@@ -156,10 +156,12 @@ impl Fp8LinearSpec {
 
     pub fn normalize_activation_scale(&self, scale: Tensor) -> CandleResult<Tensor> {
         if self.activation != Fp8ActivationMode::StaticTensor {
-            candle_core::bail!("FP8 activation scale is only stored for static tensor activation");
+            inference_tensor::bail!(
+                "FP8 activation scale is only stored for static tensor activation"
+            );
         }
         if !scale.dims().is_empty() && scale.dims() != [1] {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FP8 static activation scale has shape {:?}, expected a scalar",
                 scale.dims()
             );
@@ -641,7 +643,7 @@ pub(crate) fn checkpoint_linear_b(
         if matches!(config, crate::QuantizedConfig::Fp8 { .. })
             && resolve_scale_name(&vb, FP8_WEIGHT_SCALE_ALIASES, "weight")?.is_some()
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "FP8-excluded module `{}` unexpectedly has a weight scale",
                 vb.prefix()
             );
@@ -664,7 +666,7 @@ pub(crate) fn checkpoint_linear_b(
             return unquantized_linear_b(in_dim, out_dim, bias, hints, vb);
         }
         None => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "missing FP8 weight scale at prefix `{}`; expected one of {}",
                 vb.prefix(),
                 spec.scale_names.weight.join(", ")
@@ -689,7 +691,7 @@ pub(crate) fn checkpoint_linear_b(
     let weight_scale = spec.weight_scale.normalize(weight_scale, weight_shape)?;
     let activation_scale = if spec.activation == Fp8ActivationMode::StaticTensor {
         let name = spec.scale_names.activation_name(&vb)?.ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "missing FP8 static activation scale at prefix `{}`; expected one of {}",
                 vb.prefix(),
                 spec.scale_names.activation.join(", ")
@@ -726,7 +728,7 @@ pub(crate) fn checkpoint_linear_b(
     match spec.activation {
         Fp8ActivationMode::DynamicBlock(_) => {
             let Fp8WeightScaleLayout::Block(block_size) = spec.weight_scale else {
-                candle_core::bail!("blockwise FP8 activation requires blockwise weights");
+                inference_tensor::bail!("blockwise FP8 activation requires blockwise weights");
             };
             Ok(Arc::new(crate::BlockwiseFP8Linear::new(
                 crate::QuantMethodConfig::BlockwiseFP8 {
@@ -800,7 +802,7 @@ fn scale_shard(
                 .iter()
                 .position(|dim| *dim == weight_shape[0])
                 .ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "FP8 channel scale shape {checkpoint_shape:?} does not contain output dimension {}",
                         weight_shape[0]
                     ))
@@ -816,7 +818,7 @@ fn scale_shard(
             let axes = match checkpoint_shape {
                 [_, _] => [0, 1],
                 [_, 1, _, 1] => [0, 2],
-                _ => candle_core::bail!(
+                _ => inference_tensor::bail!(
                     "unsupported FP8 block scale checkpoint shape {checkpoint_shape:?}; expected rank 2 or ModelOpt rank 4"
                 ),
             };
@@ -838,12 +840,12 @@ fn tensor_scale_shard(
         return Ok(Default::default());
     }
     let expected = fused_partitions.ok_or_else(|| {
-        candle_core::Error::msg(format!(
+        inference_tensor::Error::msg(format!(
             "partitioned FP8 tensor scale {checkpoint_shape:?} requires a recognized fused projection"
         ))
     })?;
     if *partitions != expected {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fused FP8 tensor scale has {partitions} partitions, expected {expected}"
         )
     }
@@ -854,12 +856,12 @@ fn tensor_scale_shard(
             world_size,
         } => {
             if world_size == 0 || rank >= world_size {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "invalid fused FP8 weight shard rank {rank} for world size {world_size}"
                 )
             }
             if world_size % expected != 0 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "fused FP8 tensor scale has {partitions} partitions but weight shard world size is {world_size}"
                 )
             }
@@ -876,18 +878,18 @@ fn tensor_scale_shard(
                 || len != rows
                 || !offset.is_multiple_of(rows)
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "fused FP8 tensor scale partitions do not align with weight shard offset={offset} len={len}"
                 )
             }
             offset / rows
         }
         _ => {
-            candle_core::bail!("fused FP8 tensor scales require an output-sharded projection")
+            inference_tensor::bail!("fused FP8 tensor scales require an output-sharded projection")
         }
     };
     if partition >= *partitions {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fused FP8 tensor scale partition {partition} is outside {partitions} entries"
         )
     }
@@ -1248,7 +1250,7 @@ fn resolve_scale_name(
     match matches.as_slice() {
         [] => Ok(None),
         [name] => Ok(Some(*name)),
-        _ => candle_core::bail!(
+        _ => inference_tensor::bail!(
             "ambiguous FP8 {kind} scales at prefix `{}`: {}",
             vb.prefix(),
             matches.join(", ")
@@ -2133,7 +2135,7 @@ mod tests {
 
     #[test]
     fn scale_layout_normalizes_singleton_checkpoint_dimensions() {
-        let device = candle_core::Device::Cpu;
+        let device = inference_tensor::Device::Cpu;
         let tensor = Tensor::zeros(1, DType::F16, &device).unwrap();
         let tensor = Fp8WeightScaleLayout::Tensor
             .normalize(tensor, [896, 896])
@@ -2232,14 +2234,14 @@ mod tests {
 
     #[test]
     fn duplicate_scale_aliases_are_rejected() {
-        let scale = Tensor::zeros((), DType::F32, &candle_core::Device::Cpu).unwrap();
+        let scale = Tensor::zeros((), DType::F32, &inference_tensor::Device::Cpu).unwrap();
         let vb = crate::ShardedSafeTensors::wrap(
             HashMap::from([
                 ("layer.weight_scale".to_string(), scale.clone()),
                 ("layer.weight_scale_inv".to_string(), scale),
             ]),
             DType::BF16,
-            candle_core::Device::Cpu,
+            inference_tensor::Device::Cpu,
         )
         .pp("layer");
         let config = CheckpointQuantConfig::native(None, None, None, &[]).unwrap();
@@ -2249,7 +2251,7 @@ mod tests {
 
     #[test]
     fn native_missing_scale_falls_back_only_without_an_exclusion_policy() -> CandleResult<()> {
-        let device = candle_core::Device::Cpu;
+        let device = inference_tensor::Device::Cpu;
         let vb = crate::ShardedSafeTensors::wrap(
             HashMap::from([(
                 "layer.weight".to_string(),
@@ -2282,7 +2284,7 @@ mod tests {
 
     #[test]
     fn native_excluded_module_rejects_a_stray_scale() -> CandleResult<()> {
-        let device = candle_core::Device::Cpu;
+        let device = inference_tensor::Device::Cpu;
         let vb = crate::ShardedSafeTensors::wrap(
             HashMap::from([
                 (
@@ -2316,7 +2318,7 @@ mod tests {
 
     #[test]
     fn compressed_tensors_target_requires_a_scale() -> CandleResult<()> {
-        let device = candle_core::Device::Cpu;
+        let device = inference_tensor::Device::Cpu;
         let vb = crate::ShardedSafeTensors::wrap(
             HashMap::from([(
                 "layer.weight".to_string(),
@@ -2349,7 +2351,7 @@ mod tests {
         const N: usize = 8;
         const K: usize = 4;
 
-        let device = candle_core::Device::Cpu;
+        let device = inference_tensor::Device::Cpu;
         let weights = Tensor::from_vec(vec![F8E4M3::from_f32(1.0); N * K], (N, K), &device)?;
         let vb = crate::ShardedSafeTensors::wrap(
             HashMap::from([

@@ -2,8 +2,8 @@
 
 use std::{any::Any, cmp, collections::HashMap, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -115,12 +115,12 @@ fn subimage_counts(rows: &[usize], cols: &[usize]) -> anyhow::Result<Vec<usize>>
 fn max_image_longest_edge(config: &PreProcessorConfig) -> Result<usize> {
     let longest_edge = match &config.max_image_size {
         Some(size) => size.get("longest_edge").copied().ok_or_else(|| {
-            candle_core::Error::msg("Idefics3 max image size is missing `longest_edge`")
+            inference_tensor::Error::msg("Idefics3 max image size is missing `longest_edge`")
         })?,
         None => 364,
     } as usize;
     if longest_edge == 0 {
-        candle_core::bail!("Idefics3 max image size must be non-zero");
+        inference_tensor::bail!("Idefics3 max image size must be non-zero");
     }
     Ok(longest_edge)
 }
@@ -140,16 +140,16 @@ fn grouped_image_ranges(
 ) -> Result<Vec<(usize, usize)>> {
     let ranges = image_token_ranges(tokens, image_token_id);
     if ranges.iter().any(|range| range.len() != image_seq_len) {
-        candle_core::bail!("Idefics3 image placeholder has an unexpected length");
+        inference_tensor::bail!("Idefics3 image placeholder has an unexpected length");
     }
     let mut offset = 0usize;
     let mut grouped = Vec::with_capacity(subimage_counts.len());
     for &count in subimage_counts {
         let end = offset
             .checked_add(count)
-            .ok_or_else(|| candle_core::Error::msg("Idefics3 subimage count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Idefics3 subimage count overflow"))?;
         let item_ranges = ranges.get(offset..end).ok_or_else(|| {
-            candle_core::Error::msg(
+            inference_tensor::Error::msg(
                 "Idefics3 placeholders do not match the number of encoder images",
             )
         })?;
@@ -157,12 +157,12 @@ fn grouped_image_ranges(
             .first()
             .zip(item_ranges.last())
             .map(|(first, last)| (first.start, last.end - first.start))
-            .ok_or_else(|| candle_core::Error::msg("Idefics3 image has no subimages"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Idefics3 image has no subimages"))?;
         grouped.push(range);
         offset = end;
     }
     if offset != ranges.len() {
-        candle_core::bail!("Idefics3 sequence has unmatched image placeholders");
+        inference_tensor::bail!("Idefics3 sequence has unmatched image placeholders");
     }
     Ok(grouped)
 }
@@ -175,19 +175,19 @@ fn idefics3_packed_layout(
     image_seq_len: usize,
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() || input_seqs.len() != subimage_counts.len() {
-        candle_core::bail!("Idefics3 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Idefics3 packed multimodal metadata length mismatch");
     }
     let mut requests = Vec::with_capacity(input_seqs.len());
     for ((seq, &query_len), counts) in input_seqs.iter().zip(query_lens).zip(subimage_counts) {
         let tokens = seq.get_toks();
         if query_len != tokens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Idefics3 packed multimodal prefill requires the complete uncached prompt"
             );
         }
         let hashes = seq.image_hashes().unwrap_or_default();
         if hashes.len() != counts.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Idefics3 sequence has {} image hashes but {} subimage groups",
                 hashes.len(),
                 counts.len()
@@ -202,9 +202,9 @@ fn idefics3_packed_layout(
         {
             let end = range_offset
                 .checked_add(count)
-                .ok_or_else(|| candle_core::Error::msg("Idefics3 subimage count overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("Idefics3 subimage count overflow"))?;
             let item_ranges = ranges.get(range_offset..end).ok_or_else(|| {
-                candle_core::Error::msg(
+                inference_tensor::Error::msg(
                     "Idefics3 placeholders do not match the number of encoder images",
                 )
             })?;
@@ -228,7 +228,7 @@ fn idefics3_packed_layout(
             range_offset = end;
         }
         if range_offset != ranges.len() {
-            candle_core::bail!("Idefics3 sequence has unmatched image placeholders");
+            inference_tensor::bail!("Idefics3 sequence has unmatched image placeholders");
         }
         requests.push(RequestMultimodalLayout {
             sequence_id: *seq.id(),
@@ -801,7 +801,7 @@ fn resize_dimensions(
     } else if let (Some(&height), Some(&width)) = (size.get("height"), size.get("width")) {
         Ok((height as usize, width as usize))
     } else {
-        candle_core::bail!("Size must contain `longest_edge` or both `height` and `width`.");
+        inference_tensor::bail!("Size must contain `longest_edge` or both `height` and `width`.");
     }
 }
 

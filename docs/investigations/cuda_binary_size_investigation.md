@@ -1341,3 +1341,46 @@ granularities, and the fused GLU/RMSNorm quantizers stay fused.
 local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2791 + 2406)
 local_ci.sh --size-update  -> file 107,424,456 -> 107,413,808 bytes (-10.6 KB)
 ```
+
+## Run 36 - 2026-10-06 18:44
+
+#270 step 5, first PR: own the candle crates. User decisions (this session): full rename, rewriting every path;
+candle-nn goes into the tensor crate as `nn` (it was first going to fold into inference-nn, but inference-quant,
+inference-layout and inference-fattn sit below inference-nn and use nearly all of it), with only `loss`/`optim`
+(AnyMoE training in core) moving to inference-nn; lints allowed at crate level, then paid down.
+
+- `third_party/candle-core` -> `crates/inference-tensor`, candle-nn's `src/` -> `crates/inference-tensor/src/nn/`,
+  `third_party/candle-kernels` -> `crates/inference-tensor-kernels` (a `cuda` feature now gates its nvcc build, as in
+  our other kernel crates), all workspace members; the `[patch]` over candle's git rev is gone.
+- candle-flash-attn-v3 (upstream git, Hopper prefill) depended on `candle-core` by name, which the patch used to
+  redirect; after the rename it would have linked upstream candle. Copied in as `crates/inference-flash-attn-v3` and
+  kept in the workspace `exclude` (its ~60 sm90 CUTLASS instances must not build on every `--workspace` run).
+  candle-metal-kernels does not depend on candle-core and stays an upstream git dependency.
+- 540 source files and 22 manifests rewritten (`candle_core` -> `inference_tensor`, `candle_nn` ->
+  `inference_tensor::nn`), then `cargo fmt`, which also formats the adopted crates for the first time.
+
+What being workspace members surfaced: clippy found a manual `div_ceil` in CUDA-gated code (fixed) and the Metal
+paths are now linted by the macOS job for the first time, so inference-tensor carries `#![allow(clippy::all,
+rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]` for now; typos excludes the three crates for now; the
+workspace doctests run candle's doc examples: 45 of 48 passed as they were, the other three used a `test_utils`
+helper trimmed in #301 or got a wrong `crate::` from the rewrite, and were fixed, so doctests stay on. `loss.rs` and
+`optim.rs` had to satisfy inference-nn's cast lints (two casts made checked).
+
+Review follow-ups: FA3's `hkernel/` is Tri Dao et al.'s FlashAttention-3 under BSD-3-Clause, which the crate never
+shipped (upstream candle had the same gap); it now carries the license text and a `third_party/README.md`, as does
+inference-tensor-kernels (crediting dfdx and llama.cpp, whose credit the README merge had dropped). Stale candle
+wording fixed in error messages, the preload log, the crate doc and 24 `use inference_tensor as candle` aliases. The
+`CANDLE_*` environment variables keep their names: renaming them would silently drop users' settings.
+
+Negative/expected: `--features flash-attn-v3` cannot build on this machine, before or after (upstream's build script
+asserts sm90+). `CUDA_COMPUTE_CAP=90 cargo check -p inference-nn --features flash-attn-v3` in a scratch target dir
+(deleted after) passes: 25 min of nvcc for the CUTLASS instances, then the renamed Rust on top.
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2813 + 2428 incl. 48 adopted doctests)
+local_ci.sh --size-update  -> file 107,413,808 -> 107,122,032 bytes (-285 KB; not investigated, likely codegen of
+                              candle-nn now compiled inside the tensor crate)
+```
+
+Next in step 5: cudaforge as a workspace crate, then lint and typos pay-down, then usage-scan trims (the usage check
+found backprop, pickle, npy and cuDNN all in use, so step 5 is structural rather than a size win).

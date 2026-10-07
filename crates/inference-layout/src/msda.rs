@@ -1,4 +1,4 @@
-use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
+use inference_tensor::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 pub const MAX_LEVELS: usize = 4;
@@ -11,7 +11,7 @@ pub fn ms_deform_attn(
     levels: &[(usize, usize)],
 ) -> Result<Tensor> {
     if levels.len() > MAX_LEVELS {
-        candle_core::bail!("ms_deform_attn supports up to {MAX_LEVELS} levels");
+        inference_tensor::bail!("ms_deform_attn supports up to {MAX_LEVELS} levels");
     }
     value.contiguous()?.apply_op3_no_bwd(
         &loc.contiguous()?,
@@ -42,7 +42,7 @@ impl MsDeformAttn {
         let (b, s, h, d) = lv.shape().dims4()?;
         let ld = ll.shape().dims();
         let [lb, q, lh, l, p, two] = ld[..] else {
-            candle_core::bail!("ms_deform_attn: loc must be rank 6, got {ld:?}");
+            inference_tensor::bail!("ms_deform_attn: loc must be rank 6, got {ld:?}");
         };
         if lb != b
             || lh != h
@@ -50,7 +50,7 @@ impl MsDeformAttn {
             || two != 2
             || la.shape().dims() != [b, q, h, l, p]
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "ms_deform_attn: shape mismatch {:?} {:?} {:?}",
                 lv.shape(),
                 ll.shape(),
@@ -58,7 +58,7 @@ impl MsDeformAttn {
             );
         }
         if self.levels.iter().map(|(lh, lw)| lh * lw).sum::<usize>() != s {
-            candle_core::bail!("ms_deform_attn: level shapes do not cover {s} tokens");
+            inference_tensor::bail!("ms_deform_attn: level shapes do not cover {s} tokens");
         }
         Ok(Dims {
             b,
@@ -108,7 +108,7 @@ impl CustomOp3 for MsDeformAttn {
     ) -> Result<(CpuStorage, Shape)> {
         let g = self.dims(lv, ll, la)?;
         let (CpuStorage::F32(v), CpuStorage::F32(loc), CpuStorage::F32(attn)) = (sv, sl, sa) else {
-            candle_core::bail!("ms_deform_attn CPU path is f32 only");
+            inference_tensor::bail!("ms_deform_attn CPU path is f32 only");
         };
         let (v, loc, attn) = (
             &v[lv.start_offset()..],
@@ -145,14 +145,14 @@ impl CustomOp3 for MsDeformAttn {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        sv: &candle_core::CudaStorage,
+        sv: &inference_tensor::CudaStorage,
         lv: &Layout,
-        sl: &candle_core::CudaStorage,
+        sl: &inference_tensor::CudaStorage,
         ll: &Layout,
-        sa: &candle_core::CudaStorage,
+        sa: &inference_tensor::CudaStorage,
         la: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
-        use candle_core::cuda_backend::{
+    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
+        use inference_tensor::cuda_backend::{
             CudaStorageSlice, WrapErr,
             cudarc::driver::{LaunchConfig, PushKernelArg},
         };
@@ -191,7 +191,7 @@ impl CustomOp3 for MsDeformAttn {
         }
         unsafe { builder.launch(LaunchConfig::for_num_elems(n as u32)) }.w()?;
         Ok((
-            candle_core::CudaStorage {
+            inference_tensor::CudaStorage {
                 slice: CudaStorageSlice::F32(out),
                 device: dev.clone(),
             },

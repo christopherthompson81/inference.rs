@@ -3,9 +3,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use candle_core::{
-    CudaDevice, CudaStorage, DType, Device, DeviceLocation, Result, Shape, Storage, Tensor,
-};
 use cutile::core::f8e4m3fn;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
@@ -13,6 +10,9 @@ use cutile::tensor::IntoPartition;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::{
+    CudaDevice, CudaStorage, DType, Device, DeviceLocation, Result, Shape, Storage, Tensor,
+};
 
 use super::tune::{
     Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
@@ -158,13 +158,13 @@ enum OutputDType {
 }
 
 impl TryFrom<DType> for OutputDType {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
 
     fn try_from(dtype: DType) -> Result<Self> {
         match dtype {
             DType::BF16 => Ok(Self::Bf16),
             DType::F16 => Ok(Self::F16),
-            dtype => candle_core::bail!("cuTile W8A8 does not support {dtype:?} output"),
+            dtype => inference_tensor::bail!("cuTile W8A8 does not support {dtype:?} output"),
         }
     }
 }
@@ -182,7 +182,7 @@ impl Fp8W8A8Scheme {
             self.weight_scale,
             Fp8WeightScaleLayout::Tensor | Fp8WeightScaleLayout::Channel
         ) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuTile W8A8 supports tensor or channel weight scales, got {:?}",
                 self.weight_scale
             )
@@ -191,7 +191,7 @@ impl Fp8W8A8Scheme {
             self.activation,
             Fp8ActivationMode::StaticTensor | Fp8ActivationMode::DynamicToken
         ) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuTile W8A8 supports static tensor or dynamic token activations, got {:?}",
                 self.activation
             )
@@ -403,26 +403,28 @@ pub struct CutileFp8W8A8Args<'a> {
 pub fn cutile_fp8_w8a8(activation: &Tensor, args: CutileFp8W8A8Args<'_>) -> Result<Tensor> {
     args.scheme.validate()?;
     if activation.rank() == 0 {
-        candle_core::bail!("cuTile W8A8 activation cannot be scalar")
+        inference_tensor::bail!("cuTile W8A8 activation cannot be scalar")
     }
     if !matches!(activation.dtype(), DType::BF16 | DType::F16) {
-        candle_core::bail!("cuTile W8A8 activation must be BF16 or F16")
+        inference_tensor::bail!("cuTile W8A8 activation must be BF16 or F16")
     }
     let source_shape = activation.dims().to_vec();
     let k = *source_shape.last().unwrap();
     let rows = source_shape[..source_shape.len() - 1]
         .iter()
         .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
-        .ok_or_else(|| candle_core::Error::msg("cuTile W8A8 activation shape overflows usize"))?;
+        .ok_or_else(|| {
+            inference_tensor::Error::msg("cuTile W8A8 activation shape overflows usize")
+        })?;
     let (n, weight_k) = args.weight.dims2()?;
     if weight_k != k {
-        candle_core::bail!("cuTile W8A8 activation K={k} does not match weight K={weight_k}")
+        inference_tensor::bail!("cuTile W8A8 activation K={k} does not match weight K={weight_k}")
     }
     let Device::Cuda(dev) = activation.device() else {
-        candle_core::bail!("cuTile W8A8 activation must be a CUDA tensor")
+        inference_tensor::bail!("cuTile W8A8 activation must be a CUDA tensor")
     };
     if !fp8_w8a8_supported(dev, n, k, activation.dtype(), args.scheme) {
-        candle_core::bail!("cuTile W8A8 does not support rows={rows} n={n} k={k}")
+        inference_tensor::bail!("cuTile W8A8 does not support rows={rows} n={n} k={k}")
     }
     let activation = activation.reshape((rows, k))?.contiguous()?;
     let (quantized, activation_scales) =
@@ -449,16 +451,18 @@ fn quantize_activation(
     match mode {
         Fp8ActivationMode::StaticTensor => {
             let scale = static_scale.ok_or_else(|| {
-                candle_core::Error::msg("cuTile static W8A8 requires an activation scale")
+                inference_tensor::Error::msg("cuTile static W8A8 requires an activation scale")
             })?;
             if scale.elem_count() != 1 {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cuTile static W8A8 activation scale has shape {:?}, expected a scalar",
                     scale.dims()
                 )
             }
             if !activation.device().same_device(scale.device()) {
-                candle_core::bail!("cuTile W8A8 activation and scale must be on the same device")
+                inference_tensor::bail!(
+                    "cuTile W8A8 activation and scale must be on the same device"
+                )
             }
             let scale = scale.reshape(())?.to_dtype(DType::F32)?;
             let quantized =
@@ -467,11 +471,13 @@ fn quantize_activation(
         }
         Fp8ActivationMode::DynamicToken => {
             if static_scale.is_some() {
-                candle_core::bail!("cuTile dynamic W8A8 does not use a stored activation scale")
+                inference_tensor::bail!(
+                    "cuTile dynamic W8A8 does not use a stored activation scale"
+                )
             }
             crate::blockwise_fp8::ops::fp8_quantize_activation_rowwise(activation)
         }
-        mode => candle_core::bail!("cuTile W8A8 does not support {mode:?} activations"),
+        mode => inference_tensor::bail!("cuTile W8A8 does not support {mode:?} activations"),
     }
 }
 
@@ -495,7 +501,7 @@ fn validate_scale_shapes(operands: &GemmOperands<'_>, rows: usize, n: usize) -> 
         Fp8WeightScaleLayout::Block(_) => false,
     };
     if !activation_valid || !weight_valid {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile W8A8 scale shapes activation={:?} weight={:?} do not match rows={rows} n={n}",
             operands.activation_scales.dims(),
             operands.weight_scales.dims()
@@ -523,31 +529,31 @@ fn launch(
         || !n.is_multiple_of(TILE_SIZE)
         || !k.is_multiple_of(TILE_SIZE)
     {
-        candle_core::bail!("cuTile W8A8 got unsupported shape rows={rows} n={n} k={k}")
+        inference_tensor::bail!("cuTile W8A8 got unsupported shape rows={rows} n={n} k={k}")
     }
     if activation.dtype() != DType::F8E4M3
         || weight.dtype() != DType::F8E4M3
         || activation_scales.dtype() != DType::F32
         || weight_scales.dtype() != DType::F32
     {
-        candle_core::bail!("cuTile W8A8 needs E4M3 operands with F32 scales")
+        inference_tensor::bail!("cuTile W8A8 needs E4M3 operands with F32 scales")
     }
     if !activation.device().same_device(weight.device())
         || !activation.device().same_device(activation_scales.device())
         || !activation.device().same_device(weight_scales.device())
     {
-        candle_core::bail!("cuTile W8A8 operands must be on the same device")
+        inference_tensor::bail!("cuTile W8A8 operands must be on the same device")
     }
     let Device::Cuda(dev) = activation.device() else {
-        candle_core::bail!("cuTile W8A8 operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile W8A8 operands must be CUDA tensors")
     };
     validate_scale_shapes(operands, rows, n)?;
     let bm = usize::try_from(cfg.bm).unwrap_or(0);
     if bm == 0 || !TILE_SIZE.is_multiple_of(bm) {
-        candle_core::bail!("cuTile W8A8 row tile {} must divide {TILE_SIZE}", cfg.bm)
+        inference_tensor::bail!("cuTile W8A8 row tile {} must divide {TILE_SIZE}", cfg.bm)
     }
     if cfg.map_m <= 0 || cfg.map_n <= 0 {
-        candle_core::bail!("cuTile W8A8 map dimensions must be positive")
+        inference_tensor::bail!("cuTile W8A8 map dimensions must be positive")
     }
     let padded_rows = rows.div_ceil(bm) * bm;
     let padded_activation;
@@ -584,7 +590,7 @@ fn launch(
         Storage::Cuda(ws_cuda),
     ) = (&*a_storage, &*as_storage, &*w_storage, &*ws_storage)
     else {
-        candle_core::bail!("cuTile W8A8 operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile W8A8 operands must be CUDA tensors")
     };
     let (a_addr, _a_guard) = slice_ptr_on_stream(
         a_cuda.as_cuda_slice::<F8E4M3>()?,
@@ -666,7 +672,7 @@ fn launch(
             if compile_only {
                 catch_cutile_panic("W8A8 compile", || {
                     launcher.compile_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "cuTile {} compile failed: {error:?}",
                             $label
                         ))
@@ -675,7 +681,7 @@ fn launch(
             } else {
                 catch_cutile_panic("W8A8 launch", || unsafe {
                     launcher.async_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "cuTile {} launch failed: {error:?}",
                             $label
                         ))
@@ -769,7 +775,7 @@ impl GemmTuner {
         if let std::collections::hash_map::Entry::Vacant(entry) = self.operands.entry(rows) {
             let device = Device::Cuda(dev.clone());
             let elements = rows.checked_mul(key.k).ok_or_else(|| {
-                candle_core::Error::msg("cuTile W8A8 tuning activation shape overflows usize")
+                inference_tensor::Error::msg("cuTile W8A8 tuning activation shape overflows usize")
             })?;
             let values = (0..elements)
                 .map(|index| F8E4M3::from_f32((index % 15) as f32 - 7.0))
@@ -851,7 +857,7 @@ impl CutileKernel for Fp8W8A8Kernel {
             let mut tuner = GemmTuner::new(dev, sets);
             let tuned = tune(dev, mode, &request, |rows, candidate| {
                 let cfg = CutileFp8W8A8Config::from_config(candidate)
-                    .ok_or_else(|| candle_core::Error::msg("config outside the space"))?;
+                    .ok_or_else(|| inference_tensor::Error::msg("config outside the space"))?;
                 tuner.prepare(rows, cfg)
             });
             TUNED.set(key, &tuned, CutileFp8W8A8Config::from_config);
@@ -907,7 +913,7 @@ impl CutileKernel for Fp8W8A8Kernel {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{
         CutileFp8W8A8Args, Fp8W8A8Scheme, GemmOperands, cutile_fp8_w8a8, quantize_activation,

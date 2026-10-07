@@ -19,8 +19,8 @@ use std::{
 
 use anyhow::Result;
 use as_any::AsAny;
-use candle_core::{DType, Device};
 use inference_quant::{IsqType, QuantizedConfig};
+use inference_tensor::{DType, Device};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
@@ -583,7 +583,7 @@ impl QuantizationConfigShim {
 /// # Example
 /// ```no_run
 /// use inference_core::{Loader, TokenSource, DeviceMapSetting, AutoDeviceMapParams, ModelDType};
-/// use candle_core::Device;
+/// use inference_tensor::Device;
 ///
 /// let loader: Box<dyn Loader> = todo!();
 /// let pipeline = loader.load_model_from_hf(

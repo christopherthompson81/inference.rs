@@ -1,6 +1,6 @@
 use anyhow::{Result, bail};
-use candle_core::{DType, quantized::gguf_file::Value};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
+use inference_tensor::{DType, quantized::gguf_file::Value};
 use std::collections::{BTreeSet, HashMap};
 
 const VISION_PROJECTOR_TYPE: &str = "clip.vision.projector_type";

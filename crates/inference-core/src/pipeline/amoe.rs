@@ -7,14 +7,14 @@ use std::{
 };
 
 use base64::{Engine, engine::general_purpose};
-use candle_core::{DType, Device, Tensor};
-use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use either::Either;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use image::DynamicImage;
 use indexmap::IndexMap;
+use inference_nn::optim::{AdamW, Optimizer, ParamsAdamW};
 use inference_quant::{IsqType, ShardedVarBuilder};
+use inference_tensor::{DType, Device, Tensor};
 use rand::{rng, seq::SliceRandom};
 use rand_isaac::Isaac64Rng;
 use regex_automata::meta::Regex;
@@ -192,7 +192,7 @@ impl CacheManagerMixin for AnyMoePipeline {
     fn cache(&self) -> &EitherCache {
         unreachable!()
     }
-    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         get_mut_arcmutex!(self.target).clone_in_cache(seqs)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
@@ -204,7 +204,7 @@ impl CacheManagerMixin for AnyMoePipeline {
         reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         get_mut_arcmutex!(self.target).set_none_cache(
             seqs,
             reset_non_granular,
@@ -309,14 +309,14 @@ impl Pipeline for AnyMoePipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> Result<ForwardInputsResult, candle_core::Error> {
+    ) -> Result<ForwardInputsResult, inference_tensor::Error> {
         get_mut_arcmutex!(self.target).forward_inputs(inputs, return_raw_logits)
     }
 
     fn attach_speculative(
         &mut self,
         config: crate::SpeculativeConfig,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         get_mut_arcmutex!(self.target).attach_speculative(config)
     }
 
@@ -324,18 +324,18 @@ impl Pipeline for AnyMoePipeline {
         &mut self,
         config: crate::SpeculativeConfig,
         runtime: crate::MtpRuntimeConfig,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         get_mut_arcmutex!(self.target).attach_speculative_with_runtime(config, runtime)
     }
 
-    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> candle_core::Result<()> {
+    fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> inference_tensor::Result<()> {
         get_mut_arcmutex!(self.target).release_speculative_sequences(seq_ids)
     }
 
     fn flush_recurrent_speculative_transitions(
         &self,
         seq_ids: &[usize],
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         get_mut_arcmutex!(self.target).flush_recurrent_speculative_transitions(seq_ids)
     }
 
@@ -357,7 +357,7 @@ impl Pipeline for AnyMoePipeline {
         cached_tokens: usize,
     ) -> Result<
         Option<std::sync::Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>,
-        candle_core::Error,
+        inference_tensor::Error,
     > {
         get_mut_arcmutex!(self.target)
             .capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
@@ -368,7 +368,7 @@ impl Pipeline for AnyMoePipeline {
         sequence_id: usize,
         cached_tokens: usize,
         state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         get_mut_arcmutex!(self.target).restore_paged_auxiliary_prefix_state(
             sequence_id,
             cached_tokens,
@@ -381,7 +381,7 @@ impl Pipeline for AnyMoePipeline {
         seqs: &[&mut Sequence],
         chunk: &crate::pipeline::SpeculativePromptChunk,
         metadata: &crate::paged_attention::PagedAttentionMeta,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         get_mut_arcmutex!(self.target).speculative_prompt_chunk(seqs, chunk, metadata)
     }
 
@@ -395,7 +395,7 @@ impl Pipeline for AnyMoePipeline {
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         metadata: Option<crate::paged_attention::PagedAttentionMeta>,
         logger: &'a crate::IntervalLogger,
-    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<bool, inference_tensor::Error>> {
         Box::pin(async move {
             get_mut_arcmutex!(self.target)
                 .try_sample_speculative_causal_gen(
@@ -419,7 +419,7 @@ impl Pipeline for AnyMoePipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<bool, inference_tensor::Error>> {
         Box::pin(async move {
             get_mut_arcmutex!(self.target)
                 .try_sample_causal_gen_batched(seqs, logits, prefix_cacher, disable_eos_stop, rng)
@@ -434,7 +434,7 @@ impl Pipeline for AnyMoePipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
         Box::pin(async move {
             get_mut_arcmutex!(self.target)
                 .sample_causal_gen(seqs, logits, prefix_cacher, disable_eos_stop, rng)
@@ -458,10 +458,10 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
         revision: Option<String>,
         layers: Vec<usize>,
         silent: bool,
-    ) -> anyhow::Result<Option<AnyMoeTrainingResult>, candle_core::Error> {
+    ) -> anyhow::Result<Option<AnyMoeTrainingResult>, inference_tensor::Error> {
         let mut target = get_mut_arcmutex!(self.target);
         if !target.amoe_supported() {
-            candle_core::bail!("AnyMoE is not supported for this model.");
+            inference_tensor::bail!("AnyMoE is not supported for this model.");
         }
 
         let device = target.device();
@@ -532,7 +532,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                     },
                 )
             })
-            .collect::<candle_core::Result<Vec<_>>>()?;
+            .collect::<inference_tensor::Result<Vec<_>>>()?;
 
         let mut rng = rng();
         let mut samples = inputs.into_inner();
@@ -553,7 +553,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
             Default::default(),
             vec![],
         )
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
 
         let dummy_group = Arc::new(tokio::sync::Mutex::new(SequenceGroup::new(
             1, false, false, None,
@@ -590,7 +590,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                             None,
                             Vec::new(),
                         )
-                        .map_err(candle_core::Error::msg)?;
+                        .map_err(inference_tensor::Error::msg)?;
                     let images = image_urls.as_ref().map(|urls| {
                         urls.iter()
                             .map(|url| -> anyhow::Result<DynamicImage> {
@@ -626,7 +626,9 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                     let images = match images {
                         Some(Ok(x)) => Some(x),
                         Some(Err(e)) => {
-                            return anyhow::Result::Err(candle_core::Error::Msg(e.to_string()));
+                            return anyhow::Result::Err(inference_tensor::Error::Msg(
+                                e.to_string(),
+                            ));
                         }
                         None => None,
                     };
@@ -686,7 +688,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
 
                 let cached = target.amoe_take_cached_gating_outputs();
                 for (layer, (optimizer, output)) in optimizers.iter_mut().zip(cached).enumerate() {
-                    let loss = candle_nn::loss::cross_entropy(
+                    let loss = inference_nn::loss::cross_entropy(
                         &output,
                         &labels.to_device(output.device())?,
                     )?;
@@ -707,26 +709,26 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                 .extension()
                 .is_none_or(|e| e.to_string_lossy() != *"csv")
             {
-                candle_core::bail!("`loss_csv_path` must have an extension `csv`.");
+                inference_tensor::bail!("`loss_csv_path` must have an extension `csv`.");
             }
 
-            let mut writer = csv::Writer::from_path(path).map_err(candle_core::Error::msg)?;
+            let mut writer = csv::Writer::from_path(path).map_err(inference_tensor::Error::msg)?;
 
             let mut header = vec!["Step".to_string()];
             header.extend((0..all_losses[0].len()).map(|i| format!("Gating layer {i}")));
             writer
                 .write_record(&header)
-                .map_err(candle_core::Error::msg)?;
+                .map_err(inference_tensor::Error::msg)?;
 
             for (i, row) in all_losses.into_iter().enumerate() {
                 let mut new_row = vec![format!("Step {i}")];
                 new_row.extend(row.iter().map(|x| format!("{x:.4}")));
                 writer
                     .write_record(&new_row)
-                    .map_err(candle_core::Error::msg)?;
+                    .map_err(inference_tensor::Error::msg)?;
             }
 
-            writer.flush().map_err(candle_core::Error::msg)?;
+            writer.flush().map_err(inference_tensor::Error::msg)?;
         }
 
         Ok(Some(AnyMoeTrainingResult {
@@ -797,8 +799,8 @@ fn repo_safetensors(
     revision: &Option<String>,
     model_id: &str,
     silent: bool,
-) -> candle_core::Result<Vec<PathBuf>> {
-    let api = build_api(token, !silent).map_err(candle_core::Error::msg)?;
+) -> inference_tensor::Result<Vec<PathBuf>> {
+    let api = build_api(token, !silent).map_err(inference_tensor::Error::msg)?;
     let revision = revision.clone().unwrap_or("main".to_string());
     let api = api.repo(Repo::with_revision(
         model_id.to_string(),
@@ -808,7 +810,7 @@ fn repo_safetensors(
     let mut filenames = vec![];
     for rfilename in
         crate::pipeline::hf::list_repo_files(&api, std::path::Path::new(model_id), true, &revision)
-            .map_err(candle_core::Error::msg)?
+            .map_err(inference_tensor::Error::msg)?
             .into_iter()
             .filter(|x| x.ends_with(".safetensors"))
     {
@@ -819,7 +821,7 @@ fn repo_safetensors(
                 &rfilename,
                 &revision,
             )
-            .map_err(candle_core::Error::msg)?,
+            .map_err(inference_tensor::Error::msg)?,
         );
     }
     Ok(filenames)
@@ -828,8 +830,8 @@ fn repo_safetensors(
 /// Expert weights (restricted to the matched MLPs of `layers`) and the optional gate for AnyMoE layer creation.
 pub(crate) fn load_anymoe_weights(
     src: AnyMoeWeightSources<'_>,
-) -> candle_core::Result<(Vec<ShardedVarBuilder>, Option<ShardedVarBuilder>)> {
-    let regex = Regex::new(src.match_regex).map_err(candle_core::Error::msg)?;
+) -> inference_tensor::Result<(Vec<ShardedVarBuilder>, Option<ShardedVarBuilder>)> {
+    let regex = Regex::new(src.match_regex).map_err(inference_tensor::Error::msg)?;
     let mut vbs = Vec::new();
     for model_id in &src.model_ids {
         let filenames = repo_safetensors(src.token, &src.revision, model_id, src.silent)?;

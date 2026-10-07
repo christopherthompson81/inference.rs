@@ -1,5 +1,6 @@
 [workspace]
-exclude = ["third_party/candle-core", "third_party/candle-kernels", "third_party/candle-nn", "third_party/cudaforge", "third_party/cudarc"]
+# FA3 compiles ~60 sm90 CUTLASS instances, so only the `flash-attn-v3` feature builds it, never `--workspace`
+exclude = ["crates/inference-flash-attn-v3", "third_party/cudaforge", "third_party/cudarc"]
 members = [
     "crates/inference-server-core",
     "crates/inference-api",
@@ -22,6 +23,8 @@ members = [
     "crates/inference-paged-attn",
     "crates/inference-metal-compile",
     "crates/inference-fattn",
+    "crates/inference-tensor",
+    "crates/inference-tensor-kernels",
 
     "crates/inference-audio",
     "crates/inference-agent",
@@ -57,6 +60,8 @@ default-members = [
     "crates/inference-paged-attn",
     "crates/inference-metal-compile",
     "crates/inference-fattn",
+    "crates/inference-tensor",
+    "crates/inference-tensor-kernels",
 
     "crates/inference-audio",
     "crates/inference-agent",
@@ -82,17 +87,8 @@ license = "MIT"
 rust-version = "1.94"
 
 [workspace.dependencies]
-# candle-core = { version = "0.11.0" }
-# candle-nn = { version = "0.11.0" }
-# candle-flash-attn-v3 = { version = "0.11.0" }
-# candle-metal-kernels = { version = "0.11.0" }
-# candle-core = { path = "../candle/candle-core", version = "0.11.0" }
-# candle-nn = { path = "../candle/candle-nn", version = "0.11.0" }
-# candle-flash-attn-v3 = { path = "../candle/candle-flash-attn-v3", version = "0.11.0" }
-# candle-metal-kernels = { path = "../candle/candle-metal-kernels", version = "0.11.0" }
-candle-core = { git = "https://github.com/huggingface/candle.git", version = "0.11.0", rev = "e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f" }
-candle-nn = { git = "https://github.com/huggingface/candle.git", version = "0.11.0", rev = "e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f" }
-candle-flash-attn-v3 = { git = "https://github.com/huggingface/candle.git", version = "0.11.0", rev = "e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f" }
+inference-tensor = { path = "crates/inference-tensor" }
+inference-flash-attn-v3 = { path = "crates/inference-flash-attn-v3" }
 candle-metal-kernels = { git = "https://github.com/huggingface/candle.git", version = "0.11.0", rev = "e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f" }
 
 axum = "0.8.8"
@@ -295,9 +291,3 @@ debug = true
 cudaforge = { path = "third_party/cudaforge" }
 # cudarc loading CUDA libraries by soname first; see third_party/cudarc/README.md
 cudarc = { path = "third_party/cudarc" }
-
-# candle-core, candle-kernels and candle-nn carry our changes; see their READMEs in third_party/
-[patch."https://github.com/huggingface/candle.git"]
-candle-core = { path = "third_party/candle-core" }
-candle-kernels = { path = "third_party/candle-kernels" }
-candle-nn = { path = "third_party/candle-nn" }

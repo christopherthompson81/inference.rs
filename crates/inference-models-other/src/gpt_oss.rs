@@ -2,13 +2,13 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, IsqCaptureMode, MXFP4Layer, QuantMethod, QuantMethodConfig,
     QuantizedConfig, ReplicatedLayer, RowParallelLayer, Shard, ShardedVarBuilder, UnquantLinear,
     apply_immediate_isq, get_immediate_isq, immediate_isq_match,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
@@ -127,7 +127,7 @@ fn gptoss_swiglu(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -> Result<T
     let up_clamped = up.clamp(-limit_d, limit_d)?;
 
     let gate_scaled = (&gate_clamped * alpha as f64)?;
-    let sigmoid_val = candle_nn::ops::sigmoid(&gate_scaled)?;
+    let sigmoid_val = inference_tensor::nn::ops::sigmoid(&gate_scaled)?;
     let glu = (&gate_clamped * &sigmoid_val)?;
 
     let up_plus_one = (&up_clamped + 1.0)?;
@@ -269,7 +269,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
         let mut attn_output = AttentionDispatch {
@@ -352,7 +352,7 @@ fn load_gpt_oss_packed_expert_projection(
         && let Some(target) = immediate_isq_match(&projection_vb).and_then(|matched| matched.ty)
         && !MXFP4Layer::supports_stacked_isq(target)
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Cannot requantize raw GPT-OSS MXFP4 expert `{}` to {target}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, MXFP4, or omit ISQ.",
             projection_vb.prefix()
         );
@@ -960,7 +960,7 @@ impl NormalModel for Model {
         _flash_params: &FlashParams,
         _flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
-        candle_core::bail!("GPT-OSS does not support X-LoRA")
+        inference_tensor::bail!("GPT-OSS does not support X-LoRA")
     }
 
     fn cache(&self) -> &EitherCache {
@@ -1001,7 +1001,7 @@ mod tests {
         IsqType, QuantizedSerde, ShardedSafeTensors, UqffReader, UqffTensor, uqff_version_tensors,
     };
 
-    fn test_tensor<S: Into<candle_core::Shape>>(shape: S) -> Result<Tensor> {
+    fn test_tensor<S: Into<inference_tensor::Shape>>(shape: S) -> Result<Tensor> {
         Tensor::zeros(shape, DType::F32, &Device::Cpu)
     }
 
@@ -1135,9 +1135,9 @@ mod tests {
     }
 
     fn quant(weight: Tensor) -> Result<Arc<dyn QuantMethod>> {
-        let weight = candle_core::quantized::QTensor::quantize(
+        let weight = inference_tensor::quantized::QTensor::quantize(
             &weight,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         Ok(Arc::new(inference_quant::GgufMatMul::new(
             QuantMethodConfig::Gguf {

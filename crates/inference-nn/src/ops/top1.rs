@@ -2,53 +2,54 @@ use super::*;
 
 #[cfg(feature = "cuda")]
 pub fn cuda_top1_logits_f32_packed_batched(input: &Tensor) -> Result<Top1LogitsPackedOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     const OP: &str = "cuda_top1_logits_f32_packed_batched";
     if input.dtype() != DType::F32 {
-        candle_core::bail!("{OP} requires F32 logits");
+        inference_tensor::bail!("{OP} requires F32 logits");
     }
     if !input.is_contiguous() {
-        return Err(candle_core::Error::RequiresContiguous { op: OP });
+        return Err(inference_tensor::Error::RequiresContiguous { op: OP });
     }
 
     let [batch, vocab] = input.dims() else {
-        candle_core::bail!("{OP} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{OP} requires logits with shape [batch, vocab]");
     };
     let (batch, vocab) = (*batch, *vocab);
     if batch == 0 || vocab == 0 {
-        candle_core::bail!("{OP} requires a non-empty batch and vocabulary");
+        inference_tensor::bail!("{OP} requires a non-empty batch and vocabulary");
     }
     if vocab > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} vocabulary size {vocab} cannot be represented exactly by packed F32 indices"
         );
     }
     if batch > CUDA_TOPK_MAX_GRID_Y {
-        candle_core::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
+        inference_tensor::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
     }
 
     let nblocks = vocab.div_ceil(CUDA_TOPK_CHUNK_SIZE);
     let workspace_elems = batch
         .checked_mul(nblocks)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} workspace overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} workspace overflow")))?;
     let packed_elems = batch
         .checked_mul(CUDA_TOP1_PACKED_WIDTH)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} output overflow")))?;
-    let nrows_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(vocab).map_err(candle_core::Error::wrap)?;
-    let chunk_size_i32 = i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(candle_core::Error::wrap)?;
-    let nblocks_i32 = i32::try_from(nblocks).map_err(candle_core::Error::wrap)?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} output overflow")))?;
+    let nrows_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
+    let chunk_size_i32 =
+        i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(inference_tensor::Error::wrap)?;
+    let nblocks_i32 = i32::try_from(nblocks).map_err(inference_tensor::Error::wrap)?;
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA logits"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA logits"),
     };
     let CudaStorageSlice::F32(input_slice) = &input_storage.slice else {
-        candle_core::bail!("{OP} only supports F32 logits");
+        inference_tensor::bail!("{OP} only supports F32 logits");
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
@@ -84,28 +85,28 @@ pub fn cuda_top1_logits_f32_packed_batched(input: &Tensor) -> Result<Top1LogitsP
 
     let workspace = vec![
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(block_values),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[batch, nblocks]),
         )),
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::U32(block_indices),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[batch, nblocks]),
         )),
     ];
-    let packed_storage = candle_core::cuda_backend::CudaStorage {
+    let packed_storage = inference_tensor::cuda_backend::CudaStorage {
         slice: CudaStorageSlice::F32(packed_dst),
         device: dev.clone(),
     };
 
     Ok(Top1LogitsPackedOutput {
         packed: Tensor::from((
-            candle_core::Storage::Cuda(packed_storage),
+            inference_tensor::Storage::Cuda(packed_storage),
             Shape::from_dims(&[batch, CUDA_TOP1_PACKED_WIDTH]),
         )),
         _workspace: workspace,
@@ -118,85 +119,86 @@ pub fn cuda_categorical_logits_f32_packed_batched(
     inverse_temperatures: &Tensor,
     uniforms: &Tensor,
 ) -> Result<CategoricalLogitsPackedOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     const OP: &str = "cuda_categorical_logits_f32_packed_batched";
     if input.dtype() != DType::F32
         || inverse_temperatures.dtype() != DType::F32
         || uniforms.dtype() != DType::F32
     {
-        candle_core::bail!("{OP} requires F32 tensors");
+        inference_tensor::bail!("{OP} requires F32 tensors");
     }
     if !input.is_contiguous() || !inverse_temperatures.is_contiguous() || !uniforms.is_contiguous()
     {
-        return Err(candle_core::Error::RequiresContiguous { op: OP });
+        return Err(inference_tensor::Error::RequiresContiguous { op: OP });
     }
     if !input.device().same_device(inverse_temperatures.device())
         || !input.device().same_device(uniforms.device())
     {
-        candle_core::bail!("{OP} tensors must be on the same CUDA device");
+        inference_tensor::bail!("{OP} tensors must be on the same CUDA device");
     }
 
     let [batch, vocab] = input.dims() else {
-        candle_core::bail!("{OP} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{OP} requires logits with shape [batch, vocab]");
     };
     let (batch, vocab) = (*batch, *vocab);
     if batch == 0 || vocab == 0 {
-        candle_core::bail!("{OP} requires a non-empty batch and vocabulary");
+        inference_tensor::bail!("{OP} requires a non-empty batch and vocabulary");
     }
     if inverse_temperatures.dims() != [batch] || uniforms.dims() != [batch] {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected sampling tensors with shape [{batch}], got {:?} and {:?}",
             inverse_temperatures.dims(),
             uniforms.dims()
         );
     }
     if vocab > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} vocabulary size {vocab} cannot be represented exactly by packed F32 indices"
         );
     }
     if batch > CUDA_TOPK_MAX_GRID_Y {
-        candle_core::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
+        inference_tensor::bail!("{OP} batch is too large for a 2D CUDA launch: {batch}");
     }
 
     let nblocks = vocab.div_ceil(CUDA_TOPK_CHUNK_SIZE);
     let workspace_elems = batch
         .checked_mul(nblocks)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} workspace overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} workspace overflow")))?;
     let packed_elems = batch
         .checked_mul(CUDA_CATEGORICAL_PACKED_WIDTH)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} output overflow")))?;
-    let nrows_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(vocab).map_err(candle_core::Error::wrap)?;
-    let chunk_size_i32 = i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(candle_core::Error::wrap)?;
-    let nblocks_i32 = i32::try_from(nblocks).map_err(candle_core::Error::wrap)?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} output overflow")))?;
+    let nrows_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
+    let chunk_size_i32 =
+        i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(inference_tensor::Error::wrap)?;
+    let nblocks_i32 = i32::try_from(nblocks).map_err(inference_tensor::Error::wrap)?;
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA logits"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA logits"),
     };
     let CudaStorageSlice::F32(input_slice) = &input_storage.slice else {
-        candle_core::bail!("{OP} only supports F32 logits");
+        inference_tensor::bail!("{OP} only supports F32 logits");
     };
     let (temperature_storage, temperature_layout) = inverse_temperatures.storage_and_layout();
     let temperature_storage = match &*temperature_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA inverse temperatures"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA inverse temperatures"),
     };
     let CudaStorageSlice::F32(temperature_slice) = &temperature_storage.slice else {
-        candle_core::bail!("{OP} only supports F32 inverse temperatures");
+        inference_tensor::bail!("{OP} only supports F32 inverse temperatures");
     };
     let (uniform_storage, uniform_layout) = uniforms.storage_and_layout();
     let uniform_storage = match &*uniform_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA uniforms"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA uniforms"),
     };
     let CudaStorageSlice::F32(uniform_slice) = &uniform_storage.slice else {
-        candle_core::bail!("{OP} only supports F32 uniforms");
+        inference_tensor::bail!("{OP} only supports F32 uniforms");
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
@@ -240,28 +242,28 @@ pub fn cuda_categorical_logits_f32_packed_batched(
 
     let workspace = vec![
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(block_values),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[batch, nblocks]),
         )),
         Tensor::from((
-            candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+            inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
                 slice: CudaStorageSlice::F32(block_sums),
                 device: dev.clone(),
             }),
             Shape::from_dims(&[batch, nblocks]),
         )),
     ];
-    let packed_storage = candle_core::cuda_backend::CudaStorage {
+    let packed_storage = inference_tensor::cuda_backend::CudaStorage {
         slice: CudaStorageSlice::F32(packed_dst),
         device: dev.clone(),
     };
 
     Ok(CategoricalLogitsPackedOutput {
         packed: Tensor::from((
-            candle_core::Storage::Cuda(packed_storage),
+            inference_tensor::Storage::Cuda(packed_storage),
             Shape::from_dims(&[batch, CUDA_CATEGORICAL_PACKED_WIDTH]),
         )),
         _workspace: workspace,
@@ -273,17 +275,17 @@ pub struct CudaTop1LogitsWorkspace {
     pub(super) capacity_rows: usize,
     ncols: usize,
     nblocks: usize,
-    location: candle_core::DeviceLocation,
+    location: inference_tensor::DeviceLocation,
     pub(super) token_ring: CudaAsyncTokenRing,
     slots: Vec<CudaTop1LogitsSlot>,
 }
 
 #[cfg(feature = "cuda")]
 struct CudaTop1LogitsSlot {
-    block_values: candle_core::cuda_backend::cudarc::driver::CudaSlice<f32>,
-    block_indices: candle_core::cuda_backend::cudarc::driver::CudaSlice<u32>,
-    packed: candle_core::cuda_backend::cudarc::driver::CudaSlice<f32>,
-    packed_host: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<f32>,
+    block_values: inference_tensor::cuda_backend::cudarc::driver::CudaSlice<f32>,
+    block_indices: inference_tensor::cuda_backend::cudarc::driver::CudaSlice<u32>,
+    packed: inference_tensor::cuda_backend::cudarc::driver::CudaSlice<f32>,
+    packed_host: inference_tensor::cuda_backend::cudarc::driver::PinnedHostSlice<f32>,
 }
 
 #[cfg(feature = "cuda")]
@@ -297,11 +299,11 @@ pub(super) struct CudaAsyncTokenRing {
 #[cfg(feature = "cuda")]
 struct CudaAsyncTokenSlot {
     owned_token_ids: Tensor,
-    token_ids_host: candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<u32>,
-    device_ready: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
-    host_complete: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
-    consumer_complete: candle_core::cuda_backend::cudarc::driver::CudaEvent,
-    reuse_ready: candle_core::cuda_backend::cudarc::driver::CudaEvent,
+    token_ids_host: inference_tensor::cuda_backend::cudarc::driver::PinnedHostSlice<u32>,
+    device_ready: std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaEvent>,
+    host_complete: std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaEvent>,
+    consumer_complete: inference_tensor::cuda_backend::cudarc::driver::CudaEvent,
+    reuse_ready: inference_tensor::cuda_backend::cudarc::driver::CudaEvent,
     reuse_pending: bool,
     pending: Option<CudaAsyncTokenPending>,
 }
@@ -310,8 +312,9 @@ struct CudaAsyncTokenSlot {
 struct CudaAsyncTokenPending {
     generation: u64,
     nrows: usize,
-    producer_stream: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
-    consumer_stream: Option<std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>>,
+    producer_stream: std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
+    consumer_stream:
+        Option<std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>>,
     token_ptr: u64,
     token_end_ptr: u64,
     token_released: bool,
@@ -329,28 +332,30 @@ pub(super) struct CudaAsyncTokenReservation {
 #[cfg(feature = "cuda")]
 pub(super) struct CudaAsyncTokenSubmission {
     pub(super) reservation: CudaAsyncTokenReservation,
-    device_ready: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
-    host_complete: std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaEvent>,
+    device_ready: std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaEvent>,
+    host_complete: std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaEvent>,
 }
 
 #[cfg(feature = "cuda")]
 struct CudaPinnedHostPrefix<'a, T> {
-    inner: &'a mut candle_core::cuda_backend::cudarc::driver::PinnedHostSlice<T>,
+    inner: &'a mut inference_tensor::cuda_backend::cudarc::driver::PinnedHostSlice<T>,
     len: usize,
 }
 
 #[cfg(feature = "cuda")]
-impl<T> candle_core::cuda_backend::cudarc::driver::HostSlice<T> for CudaPinnedHostPrefix<'_, T> {
+impl<T> inference_tensor::cuda_backend::cudarc::driver::HostSlice<T>
+    for CudaPinnedHostPrefix<'_, T>
+{
     fn len(&self) -> usize {
         self.len
     }
 
     unsafe fn stream_synced_slice<'a>(
         &'a self,
-        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+        stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
     ) -> (
         &'a [T],
-        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+        inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
     ) {
         let (slice, guard) = unsafe { self.inner.stream_synced_slice(stream) };
         (&slice[..self.len], guard)
@@ -358,10 +363,10 @@ impl<T> candle_core::cuda_backend::cudarc::driver::HostSlice<T> for CudaPinnedHo
 
     unsafe fn stream_synced_mut_slice<'a>(
         &'a mut self,
-        stream: &'a candle_core::cuda_backend::cudarc::driver::CudaStream,
+        stream: &'a inference_tensor::cuda_backend::cudarc::driver::CudaStream,
     ) -> (
         &'a mut [T],
-        candle_core::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
+        inference_tensor::cuda_backend::cudarc::driver::SyncOnDrop<'a>,
     ) {
         let (slice, guard) = unsafe { self.inner.stream_synced_mut_slice(stream) };
         (&mut slice[..self.len], guard)
@@ -377,7 +382,7 @@ impl CudaAsyncTokenSubmission {
     pub(super) fn wait(&self) -> Result<()> {
         self.host_complete
             .synchronize()
-            .map_err(candle_core::Error::wrap)
+            .map_err(inference_tensor::Error::wrap)
     }
 }
 
@@ -437,11 +442,11 @@ pub(super) fn final_logits_row(input: &Tensor) -> Result<Tensor> {
     }
     let vocab = *dims.last().expect("rank checked above");
     if vocab == 0 {
-        candle_core::bail!("logits last dimension is empty");
+        inference_tensor::bail!("logits last dimension is empty");
     }
     let rows = input.elem_count() / vocab;
     if rows == 0 {
-        candle_core::bail!("logits tensor is empty");
+        inference_tensor::bail!("logits tensor is empty");
     }
     input
         .reshape((rows, vocab))?
@@ -460,19 +465,19 @@ fn cuda_async_token_ring_id() -> u64 {
 
 #[cfg(feature = "cuda")]
 fn same_cuda_stream(
-    left: &candle_core::cuda_backend::cudarc::driver::CudaStream,
-    right: &candle_core::cuda_backend::cudarc::driver::CudaStream,
+    left: &inference_tensor::cuda_backend::cudarc::driver::CudaStream,
+    right: &inference_tensor::cuda_backend::cudarc::driver::CudaStream,
 ) -> bool {
     std::sync::Arc::ptr_eq(left.context(), right.context()) && left.cu_stream() == right.cu_stream()
 }
 
 #[cfg(feature = "cuda")]
 fn new_cuda_async_token_slot(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     capacity_rows: usize,
 ) -> Result<CudaAsyncTokenSlot> {
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtrMut, sys};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtrMut, sys};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
 
     let stream = dev.cuda_stream();
     let context = stream.context();
@@ -480,7 +485,7 @@ fn new_cuda_async_token_slot(
     let (_, token_ids_guard) = token_ids.device_ptr_mut(&stream);
     drop(token_ids_guard);
     let owned_token_ids = Tensor::from((
-        candle_core::Storage::Cuda(CudaStorage {
+        inference_tensor::Storage::Cuda(CudaStorage {
             slice: CudaStorageSlice::U32(token_ids),
             device: dev.clone(),
         }),
@@ -490,23 +495,23 @@ fn new_cuda_async_token_slot(
     Ok(CudaAsyncTokenSlot {
         owned_token_ids,
         token_ids_host: unsafe { context.alloc_pinned::<u32>(capacity_rows) }
-            .map_err(candle_core::Error::wrap)?,
+            .map_err(inference_tensor::Error::wrap)?,
         device_ready: std::sync::Arc::new(
             context
                 .new_event(event_flags)
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
         ),
         host_complete: std::sync::Arc::new(
             context
                 .new_event(event_flags)
-                .map_err(candle_core::Error::wrap)?,
+                .map_err(inference_tensor::Error::wrap)?,
         ),
         consumer_complete: context
             .new_event(event_flags)
-            .map_err(candle_core::Error::wrap)?,
+            .map_err(inference_tensor::Error::wrap)?,
         reuse_ready: context
             .new_event(event_flags)
-            .map_err(candle_core::Error::wrap)?,
+            .map_err(inference_tensor::Error::wrap)?,
         reuse_pending: false,
         pending: None,
     })
@@ -514,7 +519,7 @@ fn new_cuda_async_token_slot(
 
 #[cfg(feature = "cuda")]
 pub(super) fn new_cuda_async_token_ring(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     capacity_rows: usize,
 ) -> Result<CudaAsyncTokenRing> {
     let mut slots = Vec::with_capacity(CUDA_ASYNC_TOKEN_RING_SLOTS);
@@ -538,16 +543,16 @@ impl CudaAsyncTokenRing {
     fn validate(&self, submission: &CudaAsyncTokenSubmission, op: &'static str) -> Result<()> {
         let reservation = &submission.reservation;
         if reservation.workspace_id != self.id {
-            candle_core::bail!("{op} received a submission from a different workspace");
+            inference_tensor::bail!("{op} received a submission from a different workspace");
         }
         let slot = self.slots.get(reservation.slot).ok_or_else(|| {
-            candle_core::Error::msg(format!("{op} received an invalid ring slot"))
+            inference_tensor::Error::msg(format!("{op} received an invalid ring slot"))
         })?;
         let Some(pending) = &slot.pending else {
-            candle_core::bail!("{op} received an inactive submission");
+            inference_tensor::bail!("{op} received an inactive submission");
         };
         if pending.generation != reservation.generation {
-            candle_core::bail!("{op} received a stale submission");
+            inference_tensor::bail!("{op} received a stale submission");
         }
         Ok(())
     }
@@ -559,14 +564,14 @@ impl CudaAsyncTokenRing {
         nrows: usize,
         op: &'static str,
     ) -> Result<CudaAsyncTokenReservation> {
-        use candle_core::cuda_backend::CudaStorageSlice;
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        use inference_tensor::cuda_backend::CudaStorageSlice;
+        use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
         let stream = input.device().as_cuda_device()?.cuda_stream();
         let slot_index = (0..CUDA_ASYNC_TOKEN_RING_SLOTS)
             .map(|offset| (self.next_slot + offset) % CUDA_ASYNC_TOKEN_RING_SLOTS)
             .find(|&index| self.slots[index].pending.is_none())
-            .ok_or_else(|| candle_core::Error::msg(format!("{op} submission ring is full")))?;
+            .ok_or_else(|| inference_tensor::Error::msg(format!("{op} submission ring is full")))?;
         self.next_slot = (slot_index + 1) % CUDA_ASYNC_TOKEN_RING_SLOTS;
         let generation = self.next_generation;
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
@@ -583,14 +588,14 @@ impl CudaAsyncTokenRing {
             || !device_tokens.is_contiguous()
             || !device_tokens.device().same_device(input.device())
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "{op} token destination must be contiguous CUDA U32 [capacity, 1] with capacity >= {nrows}"
             );
         }
 
         let (token_ptr, token_end_ptr) = {
             let (token_storage, token_layout) = device_tokens.storage_and_layout();
-            let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+            let inference_tensor::Storage::Cuda(token_storage) = &*token_storage else {
                 unreachable!("token destination device was checked above")
             };
             let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
@@ -610,21 +615,21 @@ impl CudaAsyncTokenRing {
                 continue;
             }
             if !pending.token_released {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "{op} token destination is already leased by another submission"
                 );
             }
             if other.reuse_pending {
                 stream
                     .wait(&other.reuse_ready)
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
             }
         }
         let slot = &mut self.slots[slot_index];
         if slot.reuse_pending {
             stream
                 .wait(&slot.reuse_ready)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             slot.reuse_pending = false;
         }
         slot.pending = Some(CudaAsyncTokenPending {
@@ -661,7 +666,7 @@ impl CudaAsyncTokenRing {
         &mut self,
         reservation: CudaAsyncTokenReservation,
     ) -> Result<CudaAsyncTokenSubmission> {
-        use candle_core::cuda_backend::CudaStorageSlice;
+        use inference_tensor::cuda_backend::CudaStorageSlice;
 
         let launch = (|| {
             let slot = &mut self.slots[reservation.slot];
@@ -674,9 +679,9 @@ impl CudaAsyncTokenRing {
             let dev = reservation.device_tokens.device().as_cuda_device()?;
             slot.device_ready
                 .record(&stream)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             let (token_storage, token_layout) = reservation.device_tokens.storage_and_layout();
-            let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+            let inference_tensor::Storage::Cuda(token_storage) = &*token_storage else {
                 unreachable!("reserved token destination is CUDA")
             };
             let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
@@ -695,7 +700,7 @@ impl CudaAsyncTokenRing {
             dev.memcpy_dtoh(&token_copy, &mut host_prefix)?;
             slot.host_complete
                 .record(&stream)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             Result::<()>::Ok(())
         })();
         if let Err(error) = launch {
@@ -713,7 +718,9 @@ impl CudaAsyncTokenRing {
     pub(super) fn wait_on(
         &mut self,
         submission: &CudaAsyncTokenSubmission,
-        consumer_stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        consumer_stream: &std::sync::Arc<
+            inference_tensor::cuda_backend::cudarc::driver::CudaStream,
+        >,
         op: &'static str,
     ) -> Result<()> {
         self.validate(submission, op)?;
@@ -722,7 +729,7 @@ impl CudaAsyncTokenRing {
         if same_cuda_stream(&pending.producer_stream, consumer_stream) {
             slot.reuse_ready
                 .record(&pending.producer_stream)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             slot.reuse_pending = true;
             pending.token_released = true;
             return Ok(());
@@ -731,11 +738,11 @@ impl CudaAsyncTokenRing {
             if same_cuda_stream(current, consumer_stream) {
                 return Ok(());
             }
-            candle_core::bail!("{op} only supports one cross-stream consumer per submission");
+            inference_tensor::bail!("{op} only supports one cross-stream consumer per submission");
         }
         consumer_stream
             .wait(&submission.device_ready)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         pending.consumer_stream = Some(consumer_stream.clone());
         Ok(())
     }
@@ -743,7 +750,9 @@ impl CudaAsyncTokenRing {
     pub(super) fn release_after(
         &mut self,
         submission: &CudaAsyncTokenSubmission,
-        consumer_stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        consumer_stream: &std::sync::Arc<
+            inference_tensor::cuda_backend::cudarc::driver::CudaStream,
+        >,
         op: &'static str,
     ) -> Result<()> {
         self.validate(submission, op)?;
@@ -753,21 +762,21 @@ impl CudaAsyncTokenRing {
             return Ok(());
         }
         let Some(current) = &pending.consumer_stream else {
-            candle_core::bail!("{op} requires wait_on before release_after");
+            inference_tensor::bail!("{op} requires wait_on before release_after");
         };
         if !same_cuda_stream(current, consumer_stream) {
-            candle_core::bail!("{op} consumer stream does not match wait_on");
+            inference_tensor::bail!("{op} consumer stream does not match wait_on");
         }
         slot.consumer_complete
             .record(consumer_stream)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         pending
             .producer_stream
             .wait(&slot.consumer_complete)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         slot.reuse_ready
             .record(&pending.producer_stream)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         slot.reuse_pending = true;
         pending.consumer_stream = None;
         pending.token_released = true;
@@ -783,17 +792,17 @@ impl CudaAsyncTokenRing {
         let slot = &mut self.slots[submission.reservation.slot];
         let pending = slot.pending.as_ref().expect("submission validated above");
         if pending.consumer_stream.is_some() {
-            candle_core::bail!("{op} requires release_after for the cross-stream consumer");
+            inference_tensor::bail!("{op} requires release_after for the cross-stream consumer");
         }
         slot.host_complete
             .synchronize()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let nrows = pending.nrows;
         slot.pending = None;
         Ok(&slot
             .token_ids_host
             .as_slice()
-            .map_err(candle_core::Error::wrap)?[..nrows])
+            .map_err(inference_tensor::Error::wrap)?[..nrows])
     }
 
     pub(super) fn cancel(
@@ -807,19 +816,19 @@ impl CudaAsyncTokenRing {
         if let Some(consumer_stream) = pending.consumer_stream.take() {
             slot.consumer_complete
                 .record(&consumer_stream)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             pending
                 .producer_stream
                 .wait(&slot.consumer_complete)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             slot.reuse_ready
                 .record(&pending.producer_stream)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             slot.reuse_pending = true;
         }
         slot.host_complete
             .synchronize()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         slot.pending = None;
         Ok(())
     }
@@ -827,7 +836,7 @@ impl CudaAsyncTokenRing {
 
 #[cfg(feature = "cuda")]
 fn new_cuda_top1_slot(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     workspace_elems: usize,
     packed_elems: usize,
 ) -> Result<CudaTop1LogitsSlot> {
@@ -839,25 +848,25 @@ fn new_cuda_top1_slot(
         block_indices: unsafe { dev.alloc::<u32>(workspace_elems) }?,
         packed: unsafe { dev.alloc::<f32>(packed_elems) }?,
         packed_host: unsafe { context.alloc_pinned::<f32>(packed_elems) }
-            .map_err(candle_core::Error::wrap)?,
+            .map_err(inference_tensor::Error::wrap)?,
     })
 }
 
 #[cfg(feature = "cuda")]
 fn new_cuda_top1_workspace(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     nrows: usize,
     ncols: usize,
     nblocks: usize,
 ) -> Result<CudaTop1LogitsWorkspace> {
-    use candle_core::backend::BackendDevice;
+    use inference_tensor::backend::BackendDevice;
 
     let workspace_elems = nrows
         .checked_mul(nblocks)
-        .ok_or_else(|| candle_core::Error::Msg("CUDA top-1 workspace overflow".to_string()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("CUDA top-1 workspace overflow".to_string()))?;
     let packed_elems = nrows
         .checked_mul(CUDA_TOP1_PACKED_WIDTH)
-        .ok_or_else(|| candle_core::Error::Msg("CUDA top-1 output overflow".to_string()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("CUDA top-1 output overflow".to_string()))?;
     let mut slots = Vec::with_capacity(CUDA_ASYNC_TOKEN_RING_SLOTS);
     for _ in 0..CUDA_ASYNC_TOKEN_RING_SLOTS {
         slots.push(new_cuda_top1_slot(dev, workspace_elems, packed_elems)?);
@@ -880,10 +889,9 @@ fn validate_cuda_top1_submission<'a>(
 ) -> Result<&'a CudaTop1LogitsSlot> {
     workspace.token_ring.validate(&submission.token, op)?;
     let slot_index = submission.token.reservation.slot;
-    let slot = workspace
-        .slots
-        .get(slot_index)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{op} received an invalid ring slot")))?;
+    let slot = workspace.slots.get(slot_index).ok_or_else(|| {
+        inference_tensor::Error::Msg(format!("{op} received an invalid ring slot"))
+    })?;
     Ok(slot)
 }
 
@@ -893,9 +901,9 @@ fn cuda_top1_logits_submit_inner(
     cache: &mut Option<CudaTop1LogitsWorkspace>,
     options: CudaTop1SubmitOptions<'_>,
 ) -> Result<CudaTop1Submission> {
-    use candle_core::backend::{BackendDevice, BackendStorage};
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::{BackendDevice, BackendStorage};
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     let CudaTop1SubmitOptions {
@@ -907,27 +915,27 @@ fn cuda_top1_logits_submit_inner(
     } = options;
 
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!("{op} requires BF16, F16, or F32 logits");
+        inference_tensor::bail!("{op} requires BF16, F16, or F32 logits");
     }
     if !input.is_contiguous() {
-        return Err(candle_core::Error::RequiresContiguous { op });
+        return Err(inference_tensor::Error::RequiresContiguous { op });
     }
     if nrows == 0 || ncols == 0 {
-        candle_core::bail!("{op} requires non-empty logits");
+        inference_tensor::bail!("{op} requires non-empty logits");
     }
     if ncols > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{op} vocabulary size {ncols} cannot be represented exactly by packed F32 indices"
         );
     }
     if nrows > CUDA_TOPK_MAX_GRID_Y {
-        candle_core::bail!("{op} batch is too large for a 2D CUDA launch: {nrows}");
+        inference_tensor::bail!("{op} batch is too large for a 2D CUDA launch: {nrows}");
     }
     let expected_elems = nrows
         .checked_mul(ncols)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{op} input size overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{op} input size overflow")))?;
     if input.elem_count() != expected_elems {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{op} expected {nrows} rows of {ncols} logits, got {} elements",
             input.elem_count()
         );
@@ -936,8 +944,8 @@ fn cuda_top1_logits_submit_inner(
     let nblocks = ncols.div_ceil(CUDA_TOPK_CHUNK_SIZE);
     let (storage, layout) = input.storage_and_layout();
     let storage = match &*storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("{op} requires CUDA logits"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("{op} requires CUDA logits"),
     };
     let dev = storage.device();
     let location = dev.location();
@@ -952,7 +960,7 @@ fn cuda_top1_logits_submit_inner(
             .as_ref()
             .is_some_and(|workspace| workspace.token_ring.has_pending())
         {
-            candle_core::bail!("{op} cannot resize while submissions are pending");
+            inference_tensor::bail!("{op} cannot resize while submissions are pending");
         }
         *cache = Some(new_cuda_top1_workspace(dev, nrows, ncols, nblocks)?);
     }
@@ -980,7 +988,7 @@ fn cuda_top1_logits_submit_inner(
     let slot_index = reservation.slot;
     let device_tokens_storage = reservation.device_tokens.clone();
     let (token_storage, token_layout) = device_tokens_storage.storage_and_layout();
-    let candle_core::Storage::Cuda(token_storage) = &*token_storage else {
+    let inference_tensor::Storage::Cuda(token_storage) = &*token_storage else {
         unreachable!("reserved token destination is CUDA")
     };
     let CudaStorageSlice::U32(token_slice) = &token_storage.slice else {
@@ -1000,11 +1008,11 @@ fn cuda_top1_logits_submit_inner(
             (std::ptr::null_mut(), None)
         };
 
-        let nrows_i32 = i32::try_from(nrows).map_err(candle_core::Error::wrap)?;
-        let ncols_i32 = i32::try_from(ncols).map_err(candle_core::Error::wrap)?;
+        let nrows_i32 = i32::try_from(nrows).map_err(inference_tensor::Error::wrap)?;
+        let ncols_i32 = i32::try_from(ncols).map_err(inference_tensor::Error::wrap)?;
         let chunk_size_i32 =
-            i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(candle_core::Error::wrap)?;
-        let nblocks_i32 = i32::try_from(nblocks).map_err(candle_core::Error::wrap)?;
+            i32::try_from(CUDA_TOPK_CHUNK_SIZE).map_err(inference_tensor::Error::wrap)?;
+        let nblocks_i32 = i32::try_from(nblocks).map_err(inference_tensor::Error::wrap)?;
         macro_rules! launch {
             ($single:path, $batched:path, $ptr:expr) => {{
                 unsafe {
@@ -1088,7 +1096,7 @@ pub fn cuda_top1_logits_submit_batched(
 ) -> Result<CudaTop1Submission> {
     const OP: &str = "cuda_top1_logits_submit_batched";
     let [batch, vocab] = input.dims() else {
-        candle_core::bail!("{OP} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{OP} requires logits with shape [batch, vocab]");
     };
     cuda_top1_logits_submit_inner(
         input,
@@ -1110,7 +1118,7 @@ pub fn cuda_top1_logits_submit_batched_packed(
 ) -> Result<CudaTop1Submission> {
     const OP: &str = "cuda_top1_logits_submit_batched_packed";
     let [batch, vocab] = input.dims() else {
-        candle_core::bail!("{OP} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{OP} requires logits with shape [batch, vocab]");
     };
     cuda_top1_logits_submit_inner(
         input,
@@ -1133,7 +1141,7 @@ pub fn cuda_top1_logits_submit_batched_into(
 ) -> Result<CudaTop1Submission> {
     const OP: &str = "cuda_top1_logits_submit_batched_into";
     let [batch, vocab] = input.dims() else {
-        candle_core::bail!("{OP} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{OP} requires logits with shape [batch, vocab]");
     };
     cuda_top1_logits_submit_inner(
         input,
@@ -1152,7 +1160,7 @@ pub fn cuda_top1_logits_submit_batched_into(
 pub fn cuda_top1_device_tokens_wait_on(
     workspace: &mut CudaTop1LogitsWorkspace,
     submission: &CudaTop1Submission,
-    consumer_stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    consumer_stream: &std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
 ) -> Result<()> {
     const OP: &str = "cuda_top1_device_tokens_wait_on";
     validate_cuda_top1_submission(workspace, submission, OP)?;
@@ -1165,7 +1173,7 @@ pub fn cuda_top1_device_tokens_wait_on(
 pub fn cuda_top1_device_tokens_release_after(
     workspace: &mut CudaTop1LogitsWorkspace,
     submission: &CudaTop1Submission,
-    consumer_stream: &std::sync::Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+    consumer_stream: &std::sync::Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
 ) -> Result<()> {
     const OP: &str = "cuda_top1_device_tokens_release_after";
     validate_cuda_top1_submission(workspace, submission, OP)?;
@@ -1189,7 +1197,7 @@ pub fn cuda_top1_submission_complete<'a>(
             &workspace.slots[slot_index]
                 .packed_host
                 .as_slice()
-                .map_err(candle_core::Error::wrap)?[..nrows * CUDA_TOP1_PACKED_WIDTH],
+                .map_err(inference_tensor::Error::wrap)?[..nrows * CUDA_TOP1_PACKED_WIDTH],
         )
     } else {
         None
@@ -1257,7 +1265,7 @@ pub fn cuda_top1_logits_f32_packed_batched_cached(
 ) -> Result<Vec<[f32; CUDA_TOP1_PACKED_WIDTH]>> {
     const OP: &str = "cuda_top1_logits_f32_packed_batched_cached";
     let [batch, vocab] = input.dims() else {
-        candle_core::bail!("{OP} requires logits with shape [batch, vocab]");
+        inference_tensor::bail!("{OP} requires logits with shape [batch, vocab]");
     };
     let (batch, vocab) = (*batch, *vocab);
     let packed = cuda_top1_logits_f32_packed_cached_inner(input, batch, vocab, cache, OP)?;

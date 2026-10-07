@@ -7,7 +7,7 @@ use std::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use candle_core::{Context, D, DType, Device, Result, Tensor};
+use inference_tensor::{Context, D, DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -121,7 +121,9 @@ impl ImatrixLayerStats {
                 .force_contiguous()?
                 .reshape((n * k, in_dim))?,
             3 => x.to_dtype(DType::F32)?.sqr()?.reshape((n * k, in_dim))?,
-            other => candle_core::bail!("process_routed expects rank 2 or 3 input, got {other}"),
+            other => {
+                inference_tensor::bail!("process_routed expects rank 2 or 3 input, got {other}")
+            }
         };
         let ids_flat = ids.flatten_all()?.to_dtype(DType::U32)?;
         *accum = accum.index_add(&ids_flat, &x2, 0)?;
@@ -142,7 +144,7 @@ impl ImatrixLayerStats {
                 row_accum,
             } => {
                 if *row_counts == 0 {
-                    candle_core::bail!("No activations were recorded for this layer.");
+                    inference_tensor::bail!("No activations were recorded for this layer.");
                 }
                 (row_accum / *row_counts as f64)? * *ncalls as f64
             }
@@ -154,7 +156,7 @@ impl ImatrixLayerStats {
             } => {
                 let total = counts.sum_all()?.to_scalar::<f32>()?;
                 if total == 0.0 {
-                    candle_core::bail!("No activations were recorded for this layer.");
+                    inference_tensor::bail!("No activations were recorded for this layer.");
                 }
                 // Per-expert mean square; zero-traffic experts divide to zero, not NaN.
                 let safe_counts = counts.maximum(1.0)?.unsqueeze(1)?;
@@ -179,7 +181,7 @@ impl CollectedImatrixData {
         if let Some(ext) = fname.as_ref().extension()
             && ext != "cimatrix"
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Expected a .cimatrix file to save collected imatrix data to, got {:?}",
                 ext
             );
@@ -212,7 +214,7 @@ impl CollectedImatrixData {
             let mut key = vec![0u8; key_len];
             std::io::Read::read_exact(&mut cursor, &mut key)?;
             let key = String::from_utf8(key)
-                .map_err(|_| candle_core::Error::Msg("Invalid cimatrix key".to_string()))?;
+                .map_err(|_| inference_tensor::Error::Msg("Invalid cimatrix key".to_string()))?;
             let len_data = cursor.read_u64::<LittleEndian>()? as usize;
             let mut data = Vec::with_capacity(len_data);
             for _ in 0..len_data {
@@ -229,7 +231,7 @@ impl CollectedImatrixData {
 mod tests {
     use super::*;
     use crate::{QuantMethod, QuantMethodConfig};
-    use candle_core::quantized::{GgmlDType, QTensor};
+    use inference_tensor::quantized::{GgmlDType, QTensor};
 
     fn manual_imatrix(rows: &[Vec<f32>], ncalls: usize) -> Vec<f32> {
         let in_dim = rows[0].len();
@@ -399,7 +401,7 @@ mod tests {
         // unquantized resident (capture mode / from-source)
         let make = |im: Option<Vec<f32>>| -> Result<Tensor> {
             let unquant = Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
-                candle_nn::Linear::new(stack.clone(), None),
+                inference_tensor::nn::Linear::new(stack.clone(), None),
             ))?) as Arc<dyn QuantMethod>;
             unquant
                 .apply_isq(

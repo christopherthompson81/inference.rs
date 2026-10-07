@@ -1,5 +1,5 @@
-use candle_core::{Device, Module, Result, Tensor};
-use candle_nn::{Activation, LayerNorm, VarBuilder};
+use inference_tensor::nn::{Activation, LayerNorm, VarBuilder};
+use inference_tensor::{Device, Module, Result, Tensor};
 
 use super::config::PPDocLayoutV3Config;
 use crate::layers::{ConvNorm, ConvNormSpec, Linear, RTDETR_CONV, linear};
@@ -44,7 +44,7 @@ impl SelfAttention {
         let v = split(self.v.forward(xs)?)?;
         let scale = (self.head_dim as f64).powf(-0.5);
         let attn = (q.matmul(&k.t()?)? * scale)?;
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
+        let attn = inference_tensor::nn::ops::softmax_last_dim(&attn)?;
         let out = attn.matmul(&v)?.transpose(1, 2)?.reshape((b, n, c))?;
         self.o.forward(&out)
     }
@@ -85,13 +85,17 @@ impl EncoderLayer {
         let h = cfg.encoder_hidden_dim;
         Ok(Self {
             self_attn: SelfAttention::new(h, cfg.encoder_attention_heads, vb.pp("self_attn"))?,
-            self_attn_norm: candle_nn::layer_norm(
+            self_attn_norm: inference_tensor::nn::layer_norm(
                 h,
                 cfg.layer_norm_eps,
                 vb.pp("self_attn_layer_norm"),
             )?,
             mlp: Mlp::new(h, cfg.encoder_ffn_dim, cfg.encoder_activation_function, &vb)?,
-            final_norm: candle_nn::layer_norm(h, cfg.layer_norm_eps, vb.pp("final_layer_norm"))?,
+            final_norm: inference_tensor::nn::layer_norm(
+                h,
+                cfg.layer_norm_eps,
+                vb.pp("final_layer_norm"),
+            )?,
         })
     }
 
@@ -158,7 +162,7 @@ impl CspRepLayer {
         let in_c = out_c * 2;
         let hidden = (out_c as f64 * cfg.hidden_expansion) as usize;
         if hidden != out_c {
-            candle_core::bail!("hidden_expansion != 1.0 (conv3) is not supported");
+            inference_tensor::bail!("hidden_expansion != 1.0 (conv3) is not supported");
         }
         let act = cfg.activation_function;
         let bottlenecks = (0..CSP_BLOCKS)
@@ -223,7 +227,7 @@ impl MaskFeatFpn {
         vb: VarBuilder,
     ) -> Result<Self> {
         if strides.windows(2).any(|w| w[0] > w[1]) {
-            candle_core::bail!("mask feature FPN expects ascending feat_strides");
+            inference_tensor::bail!("mask feature FPN expects ascending feat_strides");
         }
         let base = strides[0];
         let mut scale_heads = Vec::with_capacity(strides.len());
@@ -297,7 +301,7 @@ pub struct HybridEncoder {
     mask_feature_head: MaskFeatFpn,
     mask_lateral: ConvNorm,
     mask_out_conv: ConvNorm,
-    mask_out_proj: candle_nn::Conv2d,
+    mask_out_proj: inference_tensor::nn::Conv2d,
 }
 
 impl HybridEncoder {
@@ -349,7 +353,7 @@ impl HybridEncoder {
             pan_blocks.push(CspRepLayer::new(cfg, vb.pp("pan_blocks").pp(i))?);
         }
         let [feat_c, mask_c] = cfg.mask_feature_channels[..] else {
-            candle_core::bail!("mask_feature_channels must have two entries");
+            inference_tensor::bail!("mask_feature_channels must have two entries");
         };
         let vbo = vb.pp("encoder_mask_output");
         Ok(Self {
@@ -371,7 +375,7 @@ impl HybridEncoder {
             mask_out_conv: ConvNormSpec::new(mask_c, mask_c, 3)
                 .act(Activation::Silu)
                 .load(vbo.pp("base_conv"))?,
-            mask_out_proj: candle_nn::conv2d(
+            mask_out_proj: inference_tensor::nn::conv2d(
                 mask_c,
                 cfg.num_prototypes,
                 1,

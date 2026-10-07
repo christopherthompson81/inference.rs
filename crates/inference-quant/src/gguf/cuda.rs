@@ -8,14 +8,14 @@ use std::sync::{Mutex, OnceLock};
 
 use super::ffi;
 use crate::utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream};
-use candle_core::cuda::cudarc::driver::DeviceRepr;
-use candle_core::cuda_backend::CudaDType;
-use candle_core::{
+use half::{bf16, f16};
+use inference_tensor::cuda::cudarc::driver::DeviceRepr;
+use inference_tensor::cuda_backend::CudaDType;
+use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
     cuda::cudarc::driver::{CudaSlice, DevicePtr},
     quantized::{GgmlDType, QMatMul, QTensor},
 };
-use half::{bf16, f16};
 
 // Constants matching candle's quantized CUDA implementation
 pub const MATRIX_ROW_PADDING: usize = 512;
@@ -32,7 +32,7 @@ struct DispatchWorkspaceSlot {
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
 struct WorkspaceKey {
-    device: candle_core::cuda::DeviceId,
+    device: inference_tensor::cuda::DeviceId,
     stream: usize,
 }
 
@@ -188,7 +188,7 @@ fn check_cuda_launch(status: i32, kernel: &str) -> Result<()> {
     if status == 0 {
         Ok(())
     } else {
-        candle_core::bail!("{kernel} CUDA launch failed with status {status}")
+        inference_tensor::bail!("{kernel} CUDA launch failed with status {status}")
     }
 }
 
@@ -253,7 +253,7 @@ fn q8_1_bytes_checked(num_rows: usize, k_padded: usize) -> Result<usize> {
     num_rows
         .checked_mul(blocks)
         .and_then(|elements| elements.checked_mul(GgmlDType::Q8_1.type_size()))
-        .ok_or_else(|| candle_core::Error::msg("Q8_1 workspace size overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("Q8_1 workspace size overflow"))
 }
 
 /// Perform indexed MoE forward pass with fused Q8_1 input quantization.
@@ -477,7 +477,7 @@ fn indexed_moe_forward_fused_q8_1_input(
                     stream,
                 );
             }
-            _ => candle_core::bail!("unsupported dtype for indexed_moe_forward {w_dtype:?}"),
+            _ => inference_tensor::bail!("unsupported dtype for indexed_moe_forward {w_dtype:?}"),
         }
     }
 
@@ -511,7 +511,7 @@ pub fn qtensor_indexed_moe_forward(qtensor: &QTensor, x: &Tensor, ids: &Tensor) 
 
     // Check supported dtypes
     if !indexed_moe_weight_dtype(dtype) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "The given quantized dtype {:?} is not supported for indexed_moe_forward!",
             dtype
         );
@@ -519,17 +519,17 @@ pub fn qtensor_indexed_moe_forward(qtensor: &QTensor, x: &Tensor, ids: &Tensor) 
 
     // Ensure tensors are on CUDA
     let Device::Cuda(dev) = qtensor.device() else {
-        candle_core::bail!("indexed_moe_forward requires CUDA device for weights");
+        inference_tensor::bail!("indexed_moe_forward requires CUDA device for weights");
     };
 
     let (x_storage, _x_layout) = x.storage_and_layout();
     let Storage::Cuda(_) = &*x_storage else {
-        candle_core::bail!("indexed_moe_forward requires CUDA device for input");
+        inference_tensor::bail!("indexed_moe_forward requires CUDA device for input");
     };
 
     let (ids_storage, _ids_layout) = ids.storage_and_layout();
     let Storage::Cuda(ids_cuda) = &*ids_storage else {
-        candle_core::bail!("indexed_moe_forward requires CUDA device for indices");
+        inference_tensor::bail!("indexed_moe_forward requires CUDA device for indices");
     };
 
     // Get weight device pointer directly (no copy)
@@ -566,7 +566,7 @@ pub fn qmatmul_indexed_moe_forward(qmatmul: &QMatMul, x: &Tensor, ids: &Tensor) 
     match qmatmul {
         QMatMul::QTensor(qtensor) => qtensor_indexed_moe_forward(qtensor, x, ids),
         QMatMul::Tensor(_) | QMatMul::TensorF16(_) => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "indexed_moe_forward is only supported for quantized tensors (QTensor)"
             )
         }
@@ -639,17 +639,17 @@ pub unsafe fn moe_weighted_reduce_flat(
     topk: usize,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
-    let expected_assignments = num_tokens
-        .checked_mul(topk)
-        .ok_or_else(|| candle_core::Error::msg("moe_weighted_reduce_flat: route count overflow"))?;
+    let expected_assignments = num_tokens.checked_mul(topk).ok_or_else(|| {
+        inference_tensor::Error::msg("moe_weighted_reduce_flat: route count overflow")
+    })?;
     let (total_assignments, hidden) = inputs.dims2()?;
     if total_assignments != expected_assignments {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "moe_weighted_reduce_flat: input rows {total_assignments} do not match num_tokens={num_tokens} * topk={topk}"
         );
     }
     if inputs.dtype() != DType::F32 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "moe_weighted_reduce_flat: input dtype must be F32, got {:?}",
             inputs.dtype()
         );
@@ -658,7 +658,7 @@ pub unsafe fn moe_weighted_reduce_flat(
     let inputs = inputs.contiguous()?;
     let (storage, layout) = inputs.storage_and_layout();
     let Storage::Cuda(cuda) = &*storage else {
-        candle_core::bail!("moe_weighted_reduce_flat: input must live on CUDA");
+        inference_tensor::bail!("moe_weighted_reduce_flat: input must live on CUDA");
     };
     let input_slice = cuda.as_cuda_slice::<f32>()?;
     let out = unsafe { dev.alloc::<f32>(num_tokens * hidden)? };
@@ -704,12 +704,12 @@ pub unsafe fn moe_weighted_reduce_flat_bf16(
 ) -> Result<Tensor> {
     let (total_assignments, hidden) = inputs.dims2()?;
     if total_assignments != num_tokens * topk {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "moe_weighted_reduce_flat_bf16: input rows {total_assignments} do not match num_tokens={num_tokens} * topk={topk}"
         );
     }
     if inputs.dtype() != DType::F32 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "moe_weighted_reduce_flat_bf16: input dtype must be F32, got {:?}",
             inputs.dtype()
         );
@@ -718,7 +718,7 @@ pub unsafe fn moe_weighted_reduce_flat_bf16(
     let inputs = inputs.contiguous()?;
     let (storage, layout) = inputs.storage_and_layout();
     let Storage::Cuda(cuda) = &*storage else {
-        candle_core::bail!("moe_weighted_reduce_flat_bf16: input must live on CUDA");
+        inference_tensor::bail!("moe_weighted_reduce_flat_bf16: input must live on CUDA");
     };
     let input_slice = cuda.as_cuda_slice::<f32>()?;
     let out = unsafe { dev.alloc::<half::bf16>(num_tokens * hidden)? };
@@ -781,18 +781,18 @@ unsafe fn moe_weighted_reduce_same_dtype<T: CudaDType + DeviceRepr>(
     } = reduce;
     let expected_assignments = num_tokens
         .checked_mul(topk)
-        .ok_or_else(|| candle_core::Error::msg(format!("{kernel}: route count overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::msg(format!("{kernel}: route count overflow")))?;
     let (total_assignments, hidden) = inputs.dims2()?;
     if total_assignments != expected_assignments {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{kernel}: input rows {total_assignments} do not match num_tokens={num_tokens} * topk={topk}"
         );
     }
     if hidden == 0 {
-        candle_core::bail!("{kernel}: hidden dimension must be nonzero");
+        inference_tensor::bail!("{kernel}: hidden dimension must be nonzero");
     }
     if hidden.div_ceil(MOE_REDUCE_THREADS) > CUDA_GRID_YZ_LIMIT {
-        candle_core::bail!("{kernel}: hidden dimension exceeds the CUDA grid limit");
+        inference_tensor::bail!("{kernel}: hidden dimension exceeds the CUDA grid limit");
     }
     let num_tokens_i32 = i32::try_from(num_tokens)?;
     let hidden_i32 = i32::try_from(hidden)?;
@@ -800,15 +800,15 @@ unsafe fn moe_weighted_reduce_same_dtype<T: CudaDType + DeviceRepr>(
     let inputs = inputs.contiguous()?;
     let (storage, layout) = inputs.storage_and_layout();
     let Storage::Cuda(cuda) = &*storage else {
-        candle_core::bail!("{kernel}: input must live on CUDA");
+        inference_tensor::bail!("{kernel}: input must live on CUDA");
     };
     if cuda.device.id() != dev.id() {
-        candle_core::bail!("{kernel}: input must share a CUDA device");
+        inference_tensor::bail!("{kernel}: input must share a CUDA device");
     }
     let input_slice = cuda.as_cuda_slice::<T>()?;
     let output_len = num_tokens
         .checked_mul(hidden)
-        .ok_or_else(|| candle_core::Error::msg(format!("{kernel}: output size overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::msg(format!("{kernel}: output size overflow")))?;
     let mut out = unsafe { dev.alloc::<T>(output_len)? };
     let cuda_stream = dev.cuda_stream();
     let stream = cuda_stream.cu_stream() as *mut std::ffi::c_void;
@@ -848,23 +848,23 @@ pub fn moe_weighted_reduce_flat_same_dtype(
 ) -> Result<Tensor> {
     let routes = num_tokens
         .checked_mul(topk)
-        .ok_or_else(|| candle_core::Error::msg("typed MoE reduction route count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("typed MoE reduction route count overflow"))?;
     if num_tokens == 0 || topk == 0 {
-        candle_core::bail!("typed MoE reduction dimensions must be nonzero");
+        inference_tensor::bail!("typed MoE reduction dimensions must be nonzero");
     }
     let topk_weights = topk_weights
         .flatten_all()?
         .to_dtype(DType::F32)?
         .contiguous()?;
     if topk_weights.elem_count() != routes {
-        candle_core::bail!("typed MoE reduction weights do not match routing");
+        inference_tensor::bail!("typed MoE reduction weights do not match routing");
     }
     let (weights_storage, weights_layout) = topk_weights.storage_and_layout();
     let Storage::Cuda(weights_cuda) = &*weights_storage else {
-        candle_core::bail!("typed MoE reduction weights must live on CUDA");
+        inference_tensor::bail!("typed MoE reduction weights must live on CUDA");
     };
     if weights_cuda.device.id() != dev.id() {
-        candle_core::bail!("typed MoE reduction weights must share a CUDA device");
+        inference_tensor::bail!("typed MoE reduction weights must share a CUDA device");
     }
     let weights_slice = weights_cuda.as_cuda_slice::<f32>()?;
     match inputs.dtype() {
@@ -910,7 +910,7 @@ pub fn moe_weighted_reduce_flat_same_dtype(
                 "moe_weighted_reduce_flat_bf16_input",
             )
         },
-        dtype => candle_core::bail!("typed MoE reduction does not support {dtype:?}"),
+        dtype => inference_tensor::bail!("typed MoE reduction does not support {dtype:?}"),
     }
 }
 
@@ -941,24 +941,25 @@ fn quantize_input_q8_1_into(
     let k_padded = pad(k, MATRIX_ROW_PADDING);
     let y_size_in_bytes = q8_1_bytes(num_rows, k_padded);
     if input_quant.len() < y_size_in_bytes {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "quantize_input_q8_1_into: output buffer too small: {} < {y_size_in_bytes}",
             input_quant.len()
         );
     }
     // Use fused half->Q8_1 kernels when input is BF16/F16 (avoids separate cast kernel)
-    if xs_contig.dtype() == candle_core::DType::BF16 || xs_contig.dtype() == candle_core::DType::F16
+    if xs_contig.dtype() == inference_tensor::DType::BF16
+        || xs_contig.dtype() == inference_tensor::DType::F16
     {
         let (xs_storage, xs_layout) = xs_contig.storage_and_layout();
         let xs_cuda = match &*xs_storage {
             Storage::Cuda(c) => c,
-            _ => candle_core::bail!("expected CUDA tensor"),
+            _ => inference_tensor::bail!("expected CUDA tensor"),
         };
         assert!(xs_layout.start_offset() == 0);
         let cuda_stream = dev.cuda_stream();
         let stream = cuda_stream.cu_stream() as *mut std::ffi::c_void;
         let (out_ptr, _og) = slice_ptr_mut_on_stream(input_quant, 0, &cuda_stream);
-        if xs_contig.dtype() == candle_core::DType::BF16 {
+        if xs_contig.dtype() == inference_tensor::DType::BF16 {
             let xs_slice = xs_cuda.as_cuda_slice::<half::bf16>()?;
             let (xs_ptr, _xg) =
                 slice_ptr_on_stream(xs_slice, xs_layout.start_offset(), &cuda_stream);
@@ -988,11 +989,11 @@ fn quantize_input_q8_1_into(
             }
         }
     } else {
-        let xs_f32 = xs_contig.to_dtype(candle_core::DType::F32)?;
+        let xs_f32 = xs_contig.to_dtype(inference_tensor::DType::F32)?;
         let (xs_storage, xs_layout) = xs_f32.storage_and_layout();
         let xs_cuda = match &*xs_storage {
             Storage::Cuda(c) => c,
-            _ => candle_core::bail!("expected CUDA tensor"),
+            _ => inference_tensor::bail!("expected CUDA tensor"),
         };
         let xs_slice = xs_cuda.as_cuda_slice::<f32>()?;
         assert!(xs_layout.start_offset() == 0);
@@ -1137,39 +1138,39 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         };
         let (num_experts, intermediate, hidden) = weights.gate.shape().dims3()?;
         if num_experts == 0 || intermediate == 0 || hidden == 0 {
-            candle_core::bail!("indexed MoE LoRA weight dimensions must be nonzero");
+            inference_tensor::bail!("indexed MoE LoRA weight dimensions must be nonzero");
         }
         if num_experts != routing.num_experts {
-            candle_core::bail!("indexed MoE LoRA expert count does not match routing");
+            inference_tensor::bail!("indexed MoE LoRA expert count does not match routing");
         }
         if weights.up.shape().dims3()? != (num_experts, intermediate, hidden)
             || weights.down.shape().dims3()? != (num_experts, hidden, intermediate)
         {
-            candle_core::bail!("indexed MoE LoRA weight geometry does not match");
+            inference_tensor::bail!("indexed MoE LoRA weight geometry does not match");
         }
         for tensor in [weights.gate, weights.up, weights.down] {
             let Device::Cuda(weight_dev) = tensor.device() else {
-                candle_core::bail!("indexed MoE LoRA weights must live on CUDA");
+                inference_tensor::bail!("indexed MoE LoRA weights must live on CUDA");
             };
             if weight_dev.id() != routing.dev.id() {
-                candle_core::bail!("indexed MoE LoRA weights must share a CUDA device");
+                inference_tensor::bail!("indexed MoE LoRA weights must share a CUDA device");
             }
         }
         if routing.batch == 0 || routing.topk == 0 {
-            candle_core::bail!("indexed MoE LoRA routing dimensions must be nonzero");
+            inference_tensor::bail!("indexed MoE LoRA routing dimensions must be nonzero");
         }
         if routing.batch > CUDA_GRID_YZ_LIMIT || routing.topk > CUDA_GRID_YZ_LIMIT {
-            candle_core::bail!("indexed MoE LoRA routing exceeds CUDA grid limits");
+            inference_tensor::bail!("indexed MoE LoRA routing exceeds CUDA grid limits");
         }
         let routes = routing
             .batch
             .checked_mul(routing.topk)
-            .ok_or_else(|| candle_core::Error::msg("indexed MoE LoRA route count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("indexed MoE LoRA route count overflow"))?;
         if routing.topk_ids.len() < routes {
-            candle_core::bail!("indexed MoE LoRA route buffer is too small");
+            inference_tensor::bail!("indexed MoE LoRA route buffer is too small");
         }
         if routing.topk_ids.ordinal() != routing.dev.cuda_stream().context().ordinal() {
-            candle_core::bail!("indexed MoE LoRA routes must share a CUDA device");
+            inference_tensor::bail!("indexed MoE LoRA routes must share a CUDA device");
         }
         for dim in [
             num_experts,
@@ -1184,7 +1185,7 @@ impl<'a> IndexedMoeLoraDecode<'a> {
         i32::try_from(pad(intermediate, MATRIX_ROW_PADDING))?;
         intermediate
             .checked_mul(2)
-            .ok_or_else(|| candle_core::Error::msg("indexed MoE LoRA output size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("indexed MoE LoRA output size overflow"))?;
 
         Ok(Some(Self {
             weights,
@@ -1198,13 +1199,13 @@ impl<'a> IndexedMoeLoraDecode<'a> {
 
     fn validate_input(&self, input: &Tensor, rows: usize, features: usize) -> Result<Tensor> {
         if input.dims2()? != (rows, features) {
-            candle_core::bail!("indexed MoE LoRA input shape does not match weights");
+            inference_tensor::bail!("indexed MoE LoRA input shape does not match weights");
         }
         let Device::Cuda(input_dev) = input.device() else {
-            candle_core::bail!("indexed MoE LoRA input must live on CUDA");
+            inference_tensor::bail!("indexed MoE LoRA input must live on CUDA");
         };
         if input_dev.id() != self.routing.dev.id() {
-            candle_core::bail!("indexed MoE LoRA input must share a CUDA device");
+            inference_tensor::bail!("indexed MoE LoRA input must share a CUDA device");
         }
         input.contiguous()
     }
@@ -1222,7 +1223,7 @@ impl<'a> IndexedMoeLoraDecode<'a> {
             .checked_mul(self.routing.topk)
             .and_then(|routes| routes.checked_mul(self.intermediate))
             .and_then(|elements| elements.checked_mul(2))
-            .ok_or_else(|| candle_core::Error::msg("indexed MoE LoRA output size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("indexed MoE LoRA output size overflow"))?;
         let mut output = unsafe { self.routing.dev.alloc::<T>(output_len)? };
         let cuda_stream = self.routing.dev.cuda_stream();
         let stream = cuda_stream.cu_stream() as *mut std::ffi::c_void;
@@ -1284,7 +1285,7 @@ impl<'a> IndexedMoeLoraDecode<'a> {
 
         let output_len = routes
             .checked_mul(self.hidden)
-            .ok_or_else(|| candle_core::Error::msg("indexed MoE LoRA output size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("indexed MoE LoRA output size overflow"))?;
         let mut output = unsafe { self.routing.dev.alloc::<T>(output_len)? };
         let cuda_stream = self.routing.dev.cuda_stream();
         let stream = cuda_stream.cu_stream() as *mut std::ffi::c_void;
@@ -1435,7 +1436,9 @@ pub unsafe fn indexed_moe_fused_decode(
             GgmlDType::Q4K => ffi::launch_moe_gemv_fused_gate_up_q4k_q8_1,
             GgmlDType::Q5K => ffi::launch_moe_gemv_fused_gate_up_q5k_q8_1,
             GgmlDType::Q6K => ffi::launch_moe_gemv_fused_gate_up_q6k_q8_1,
-            _ => candle_core::bail!("unsupported dtype for fused MoE decode: {gate_up_dtype:?}"),
+            _ => {
+                inference_tensor::bail!("unsupported dtype for fused MoE decode: {gate_up_dtype:?}")
+            }
         };
 
         unsafe {
@@ -1503,7 +1506,7 @@ pub unsafe fn indexed_moe_fused_decode(
             GgmlDType::Q4K => ffi::launch_moe_gemv_down_aggregate_q4k_q8_1,
             GgmlDType::Q5K => ffi::launch_moe_gemv_down_aggregate_q5k_q8_1,
             GgmlDType::Q6K => ffi::launch_moe_gemv_down_aggregate_q6k_q8_1,
-            _ => candle_core::bail!("unsupported dtype for fused MoE decode: {down_dtype:?}"),
+            _ => inference_tensor::bail!("unsupported dtype for fused MoE decode: {down_dtype:?}"),
         };
 
         unsafe {

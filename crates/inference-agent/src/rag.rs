@@ -4,8 +4,8 @@ use std::cmp::Ordering;
 
 use anyhow::{Context, Result};
 use bm25::{Embedder as Bm25Embedder, EmbedderBuilder, Language, Scorer};
-use candle_core::Error as E;
 use inference_core::{SearchEmbedder, SearchResult};
+use inference_tensor::Error as E;
 
 /// Target chunk size in tokens. Smaller chunks give better granularity and
 /// reduce total tokens sent to the embedding model.

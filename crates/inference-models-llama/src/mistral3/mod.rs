@@ -19,10 +19,10 @@ use crate::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
 };
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{Linear, Module};
 pub use config::Mistral3Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use vision::Mistral3VisionModel;
 
 pub mod config;
@@ -266,7 +266,7 @@ impl Mistral3Model {
                             _ => {
                                 per_image.push(Tensor::zeros(
                                     1,
-                                    candle_core::DType::F32,
+                                    inference_tensor::DType::F32,
                                     pixel_values.device(),
                                 )?);
                                 miss_indices.push(i);
@@ -301,7 +301,7 @@ impl Mistral3Model {
 
             if let Some(layout) = packed_layout {
                 let per_image_features = per_image_features.ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "packed Mistral 3 input requires per-image encoder outputs",
                     )
                 })?;
@@ -374,7 +374,7 @@ impl MultimodalModel for Mistral3Model {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let Mistral3SpecificArgs {
             image_sizes,
             image_hashes,

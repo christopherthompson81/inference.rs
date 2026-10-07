@@ -1,7 +1,7 @@
 use std::sync::{Arc, OnceLock};
 
-use candle_core::{DType, Result, Tensor, quantized::GgmlDType};
 use inference_quant::QuantMethod;
+use inference_tensor::{DType, Result, Tensor, quantized::GgmlDType};
 
 use crate::ops::SplitOp;
 
@@ -73,7 +73,7 @@ impl MlaKvBProjection {
             expanded_weights,
         } = self
         else {
-            candle_core::bail!("split MLA key projection is not available");
+            inference_tensor::bail!("split MLA key projection is not available");
         };
         ensure_split_lora_inactive(key, value)?;
         if supports_indexed_cuda_projection(key.as_ref(), query) {
@@ -91,7 +91,7 @@ impl MlaKvBProjection {
             expanded_weights,
         } = self
         else {
-            candle_core::bail!("split MLA value projection is not available");
+            inference_tensor::bail!("split MLA value projection is not available");
         };
         ensure_split_lora_inactive(key, value)?;
         if supports_indexed_cuda_projection(value.as_ref(), value_states) {
@@ -121,7 +121,7 @@ impl MlaKvBProjection {
                         qk_nope_head_dim + v_head_dim,
                     ))?
                     .transpose(1, 2)?;
-                let kv = kv.split(&[qk_nope_head_dim, v_head_dim], candle_core::D::Minus1)?;
+                let kv = kv.split(&[qk_nope_head_dim, v_head_dim], inference_tensor::D::Minus1)?;
                 Ok((kv[0].clone(), kv[1].clone()))
             }
             Self::Split {
@@ -162,7 +162,9 @@ fn ensure_split_lora_inactive(
     value: &Arc<dyn QuantMethod>,
 ) -> Result<()> {
     if key.is_dynamic_lora_active() || value.is_dynamic_lora_active() {
-        candle_core::bail!("split MLA K/V projections do not support active dynamic LoRA adapters");
+        inference_tensor::bail!(
+            "split MLA K/V projections do not support active dynamic LoRA adapters"
+        );
     }
     Ok(())
 }
@@ -175,7 +177,7 @@ fn indexed_head_forward(projection: &dyn QuantMethod, input: &Tensor) -> Result<
             .contiguous()?
             .reshape((batch * seq_len, num_heads, in_dim))?;
     let num_heads_u32 = u32::try_from(num_heads)
-        .map_err(|_| candle_core::Error::msg("MLA head count exceeds u32"))?;
+        .map_err(|_| inference_tensor::Error::msg("MLA head count exceeds u32"))?;
     let head_ids = Tensor::arange(0u32, num_heads_u32, input.device())?
         .unsqueeze(0)?
         .repeat((batch * seq_len, 1))?;
@@ -213,7 +215,7 @@ fn dense_head_forward(input: &Tensor, weight: &Tensor, transpose_weight: bool) -
     let (rows, cols) = weight.dims2()?;
     let (weight, out_dim) = if transpose_weight {
         if cols != in_dim || !rows.is_multiple_of(num_heads) {
-            candle_core::bail!("split MLA value projection has incompatible dimensions");
+            inference_tensor::bail!("split MLA value projection has incompatible dimensions");
         }
         let out_dim = rows / num_heads;
         (
@@ -224,7 +226,7 @@ fn dense_head_forward(input: &Tensor, weight: &Tensor, transpose_weight: bool) -
         )
     } else {
         if rows != num_heads * in_dim {
-            candle_core::bail!("split MLA key projection has incompatible dimensions");
+            inference_tensor::bail!("split MLA key projection has incompatible dimensions");
         }
         (weight.reshape((num_heads, in_dim, cols))?, cols)
     };
@@ -248,7 +250,7 @@ fn expanded_split_weights(
     let (num_heads, kv_lora_rank, qk_nope_head_dim) = key.dims3()?;
     let (value_heads, v_head_dim, value_kv_lora_rank) = value.dims3()?;
     if value_heads != num_heads || value_kv_lora_rank != kv_lora_rank {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "split MLA K/V dimensions are incompatible: K {:?}, V {:?}",
             key.dims(),
             value.dims()
@@ -273,24 +275,24 @@ fn expanded_split_weights(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use candle_core::{DType, Device, Tensor};
-    use candle_nn::Linear;
     use inference_quant::{
         LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod,
         QuantMethodConfig, ShardedSafeTensors, UnquantLinear, maybe_wrap_dynamic_lora,
         with_lora_execution,
     };
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::{MlaKvBProjection, dense_head_forward, supports_indexed_cuda_projection};
 
-    fn layer(weight: Tensor) -> candle_core::Result<Arc<dyn QuantMethod>> {
+    fn layer(weight: Tensor) -> inference_tensor::Result<Arc<dyn QuantMethod>> {
         Ok(Arc::new(UnquantLinear::new(
             QuantMethodConfig::Unquantized(Linear::new(weight, None)),
         )?))
     }
 
     #[test]
-    fn split_projection_matches_per_head_algebra() -> candle_core::Result<()> {
+    fn split_projection_matches_per_head_algebra() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let key = Tensor::new(&[[[1f32, 0.], [0., 1.]], [[1f32, 1.], [1., -1.]]], &device)?;
         let value = Tensor::new(&[[[1f32, 2.], [3., 4.]], [[2f32, 0.], [0., 2.]]], &device)?;
@@ -310,7 +312,7 @@ mod tests {
     }
 
     #[test]
-    fn split_projection_expands_compressed_kv() -> candle_core::Result<()> {
+    fn split_projection_expands_compressed_kv() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let key = Tensor::new(&[[[1f32, 0.], [0., 1.]], [[1f32, 1.], [1., -1.]]], &device)?;
         let value = Tensor::new(&[[[1f32, 2.], [3., 4.]], [[2f32, 0.], [0., 2.]]], &device)?;
@@ -329,7 +331,7 @@ mod tests {
     }
 
     #[test]
-    fn dense_split_projection_fallback_matches_head_algebra() -> candle_core::Result<()> {
+    fn dense_split_projection_fallback_matches_head_algebra() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let query = Tensor::new(&[[[[2f32, 3.]], [[4., 1.]]]], &device)?;
         let key = Tensor::new(&[[1f32, 0.], [0., 1.], [1., 1.], [1., -1.]], &device)?;
@@ -347,7 +349,7 @@ mod tests {
     }
 
     #[test]
-    fn cpu_split_projection_populates_expanded_weight_cache() -> candle_core::Result<()> {
+    fn cpu_split_projection_populates_expanded_weight_cache() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let key = layer(Tensor::new(
             &[[[1f32, 0.], [0., 1.]], [[1f32, 1.], [1., -1.]]],
@@ -376,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn split_projection_rejects_active_dynamic_lora() -> candle_core::Result<()> {
+    fn split_projection_rejects_active_dynamic_lora() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let registry = Arc::new(LoraLayerRegistry::new());
         let vb =

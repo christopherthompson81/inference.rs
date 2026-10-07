@@ -1,7 +1,7 @@
 use crate::layers::{linear, linear_no_bias};
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{Dropout, Linear, Module, ModuleT, activation, ops::softmax_last_dim};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{Dropout, Linear, Module, ModuleT, activation, ops::softmax_last_dim};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 use crate::ops::{TopKLastDimOp, TopKOutput};
 
@@ -37,7 +37,7 @@ impl XLoraClassifier {
         is_quantized: bool,
     ) -> Result<Self> {
         if config.enable_softmax_topk {
-            candle_core::bail!("`enable_softmax_topk` is not implemented");
+            inference_tensor::bail!("`enable_softmax_topk` is not implemented");
         }
 
         let (last, inner): (Linear, Vec<Box<dyn ModuleT + Send + Sync>>) = if config.xlora_depth

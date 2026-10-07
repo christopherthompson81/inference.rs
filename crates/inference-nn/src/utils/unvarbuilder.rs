@@ -3,9 +3,9 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use candle_core::{Tensor, quantized::QMatMul};
-use candle_nn::{Conv2d, Embedding, LayerNorm, Linear};
 use inference_quant::QuantMethod;
+use inference_tensor::nn::{Conv2d, Embedding, LayerNorm, Linear};
+use inference_tensor::{Tensor, quantized::QMatMul};
 use itertools::Itertools;
 
 use crate::layers::{F32RmsNorm, GemmaRmsNorm, QLinear, RmsNorm, ScaledEmbedding};
@@ -78,7 +78,7 @@ impl ToTensors for Conv2d {
     }
 }
 
-impl ToTensors for candle_nn::Conv1d {
+impl ToTensors for inference_tensor::nn::Conv1d {
     fn to_tensors(&self) -> HashMap<String, Tensor> {
         let mut map = HashMap::new();
         map.insert("weight".to_string(), self.weight().clone());

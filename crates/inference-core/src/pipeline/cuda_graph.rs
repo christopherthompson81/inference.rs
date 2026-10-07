@@ -11,8 +11,8 @@ use std::{
     },
 };
 
-use candle_core::cuda_backend::cudarc::driver::{CudaStream, sys};
-use candle_core::{DType, Device, DeviceLocation, Tensor, Var};
+use inference_tensor::cuda_backend::cudarc::driver::{CudaStream, sys};
+use inference_tensor::{DType, Device, DeviceLocation, Tensor, Var};
 
 use crate::gdn::RecurrentBatchKind;
 #[cfg(target_family = "unix")]
@@ -70,7 +70,7 @@ pub(crate) fn cuda_graph_startup_capture_allowed(q_len: usize) -> bool {
 
 pub(crate) fn prepare_fa3_decode_schedules(
     metadata: &PagedAttentionInputMetadata,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     let Some(flashinfer) = metadata.flashinfer.as_ref() else {
         return Ok(());
     };
@@ -119,7 +119,7 @@ impl CudaGraphDecodeStep {
     pub(crate) fn padded(
         inputs: CudaGraphDecodeStepInputs<'_>,
         batch: usize,
-    ) -> candle_core::Result<Option<Self>> {
+    ) -> inference_tensor::Result<Option<Self>> {
         let CudaGraphDecodeStepInputs {
             input_ids,
             seqlen_offsets,
@@ -169,12 +169,12 @@ impl CudaGraphDecodeStep {
         position_ids.resize(batch, position_ids[0]);
         let rows = Arc::new(rows.padded(batch));
         if rows.query_len != q_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA graph decode rows cover {} query tokens but the input has {q_len}",
                 rows.query_len
             );
         }
-        let metadata = rows.build().map_err(candle_core::Error::msg)?;
+        let metadata = rows.build().map_err(inference_tensor::Error::msg)?;
         Ok(Some(Self {
             input_ids,
             seqlen_offsets,
@@ -191,7 +191,7 @@ impl CudaGraphDecodeStep {
     }
 
     /// Drops the pad rows from a `[batch, ...]` or `[batch * q, ...]` output.
-    pub(crate) fn narrow_rows(&self, tensor: &Tensor) -> candle_core::Result<Tensor> {
+    pub(crate) fn narrow_rows(&self, tensor: &Tensor) -> inference_tensor::Result<Tensor> {
         let batch = self.batch();
         if batch == self.real_batch {
             return Ok(tensor.clone());
@@ -200,7 +200,7 @@ impl CudaGraphDecodeStep {
         tensor.narrow(0, 0, rows)
     }
 
-    fn one_token_continuation(&self, input_ids: Tensor) -> candle_core::Result<Option<Self>> {
+    fn one_token_continuation(&self, input_ids: Tensor) -> inference_tensor::Result<Option<Self>> {
         let (batch, q_len) = input_ids.dims2()?;
         let Some(rows) = self.metadata.decode_rows.as_ref() else {
             return Ok(None);
@@ -291,7 +291,9 @@ impl CudaGraphDecodeStep {
             }
             .padded(batch),
         );
-        let metadata = rows.build_graph_staged().map_err(candle_core::Error::msg)?;
+        let metadata = rows
+            .build_graph_staged()
+            .map_err(inference_tensor::Error::msg)?;
         let Some(mut seqlen_offsets) = self.seqlen_offsets[..self.real_batch]
             .iter()
             .map(|offset| offset.checked_add(1))
@@ -339,7 +341,7 @@ impl CudaGraphPrecaptureInputs {
         q_len: usize,
         device: &Device,
         mapper: Option<&dyn DeviceMapper>,
-    ) -> candle_core::Result<Self> {
+    ) -> inference_tensor::Result<Self> {
         let devices = mapper
             .map(|mapper| mapper.get_unique_devices())
             .unwrap_or_else(|| vec![device.clone()]);
@@ -357,8 +359,10 @@ impl CudaGraphPrecaptureInputs {
             devices,
             num_kv_heads: ctx.num_kv_heads,
         });
-        let metadata = rows.build_materialized().map_err(candle_core::Error::msg)?;
-        let q_len_u32 = u32::try_from(q_len).map_err(candle_core::Error::wrap)?;
+        let metadata = rows
+            .build_materialized()
+            .map_err(inference_tensor::Error::msg)?;
+        let q_len_u32 = u32::try_from(q_len).map_err(inference_tensor::Error::wrap)?;
         let flash_meta = if crate::using_flash_attn() {
             make_flash_params(
                 device,
@@ -369,7 +373,7 @@ impl CudaGraphPrecaptureInputs {
                 true,
                 false,
             )
-            .map_err(candle_core::Error::msg)?
+            .map_err(inference_tensor::Error::msg)?
         } else {
             FlashParams::empty(true)
         };
@@ -408,7 +412,7 @@ pub(crate) struct HybridGraphSlots {
 /// The batch's live recurrent slots after reserving graph capacity.
 pub(crate) fn hybrid_graph_slots(
     cache: &mut HybridCache,
-) -> candle_core::Result<Option<HybridGraphSlots>> {
+) -> inference_tensor::Result<Option<HybridGraphSlots>> {
     let Some(real) = cache.state_indices_host().map(<[u32]>::to_vec) else {
         return Ok(None);
     };
@@ -424,7 +428,7 @@ pub(crate) fn hybrid_graph_slots(
 pub(crate) fn install_hybrid_graph_state_indices(
     cache: &mut HybridCache,
     host: &[u32],
-) -> candle_core::Result<CudaGraphVarMap> {
+) -> inference_tensor::Result<CudaGraphVarMap> {
     let mut vars = CudaGraphVarMap::new();
     let mut tensors = Vec::new();
     for device in cache.recurrent_devices() {
@@ -440,7 +444,7 @@ fn copy_state_indices(
     dst: &CudaGraphVarMap,
     host: &[u32],
     host_staging: &mut CudaGraphHostStaging,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     for (location, var) in dst {
         host_staging.copy_from_u32_slice("state_indices", *location, host, var)?;
     }
@@ -531,7 +535,7 @@ impl CudaDecodeGraphKey {
         input_ids: &Tensor,
         metadata: &PagedAttentionInputMetadata,
         recurrent_batch_kind: RecurrentBatchKind,
-    ) -> candle_core::Result<Self> {
+    ) -> inference_tensor::Result<Self> {
         let decode_rows = metadata.decode_rows.as_ref().map(|rows| rows.graph_key());
         let mut tensors = Vec::new();
         if decode_rows.is_none() {
@@ -573,7 +577,7 @@ impl CudaDecodeGraphKey {
 impl CudaDecodeGraphMetadataBuffers {
     fn new(
         input: CudaDecodeGraphMetadataInput<'_>,
-    ) -> candle_core::Result<(Self, PagedAttentionInputMetadata)> {
+    ) -> inference_tensor::Result<(Self, PagedAttentionInputMetadata)> {
         let CudaDecodeGraphMetadataInput {
             metadata,
             seqlen_offsets,
@@ -585,7 +589,7 @@ impl CudaDecodeGraphMetadataBuffers {
         } = input;
         let slot_mappings = var_map_from_tensor_map(&metadata.slot_mappings)?;
         if seqlen_offsets.len() != position_ids.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA graph decode has {} KV offsets but {} position ends",
                 seqlen_offsets.len(),
                 position_ids.len()
@@ -723,7 +727,7 @@ impl CudaDecodeGraphMetadataBuffers {
         position_ids: &[usize],
         seq_len: usize,
         host_staging: &mut CudaGraphHostStaging,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let graph_update = if metadata.has_host_staged_decode_tensors() {
             Some(
                 metadata
@@ -731,7 +735,7 @@ impl CudaDecodeGraphMetadataBuffers {
                     .as_ref()
                     .expect("host-staged decode metadata requires source rows")
                     .build_graph_update(self.requirements)
-                    .map_err(candle_core::Error::msg)?,
+                    .map_err(inference_tensor::Error::msg)?,
             )
         } else {
             None
@@ -940,7 +944,7 @@ pub(crate) struct CudaGraphSpecStateUsage {
 }
 
 impl CudaGraphSpecStateUsage {
-    fn from_state(state: &dyn SpeculativeGraphState) -> candle_core::Result<Self> {
+    fn from_state(state: &dyn SpeculativeGraphState) -> inference_tensor::Result<Self> {
         let mut usage = Self::default();
         for tensor in state.tensors() {
             let location = tensor.device().location();
@@ -956,13 +960,13 @@ impl CudaGraphSpecStateUsage {
                 usage.device_totals.entry(location)
             {
                 let Device::Cuda(device) = tensor.device() else {
-                    candle_core::bail!("CUDA graph speculative state expected CUDA tensors");
+                    inference_tensor::bail!("CUDA graph speculative state expected CUDA tensors");
                 };
                 let (_, total) = device
                     .cuda_stream()
                     .context()
                     .mem_get_info()
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
                 entry.insert(total);
             }
         }
@@ -1081,7 +1085,7 @@ impl CudaDecodeGraphLaunch {
         self.real_batch
     }
 
-    fn one_token_continuation(&self) -> candle_core::Result<Option<CudaGraphDecodeStep>> {
+    fn one_token_continuation(&self) -> inference_tensor::Result<Option<CudaGraphDecodeStep>> {
         let Some(continuation) = self.source.one_token_continuation(self.input_ids.clone())? else {
             return Ok(None);
         };
@@ -1146,7 +1150,7 @@ impl CudaDecodeGraphEntry {
         &self,
         step: &CudaGraphDecodeStep,
         replay_epoch: u64,
-    ) -> candle_core::Result<Option<CudaDecodeGraphLaunch>> {
+    ) -> inference_tensor::Result<Option<CudaDecodeGraphLaunch>> {
         let input_ids = self.input_ids.as_detached_tensor();
         let (batch, q_len) = input_ids.dims2()?;
         if input_ids.dtype() != DType::U32
@@ -1157,7 +1161,7 @@ impl CudaDecodeGraphEntry {
             return Ok(None);
         }
         if step.real_batch > batch {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA graph resident input has batch capacity {batch}, smaller than {} live rows",
                 step.real_batch
             );
@@ -1173,7 +1177,7 @@ impl CudaDecodeGraphEntry {
         }))
     }
 
-    fn release(self) -> (Arc<CudaStream>, candle_core::Result<()>) {
+    fn release(self) -> (Arc<CudaStream>, inference_tensor::Result<()>) {
         let Self {
             generation: _,
             replay_epoch,
@@ -1191,7 +1195,7 @@ impl CudaDecodeGraphEntry {
         let stream = graph.stream().clone();
         let mut release_result = stream
             .synchronize()
-            .map_err(candle_core::Error::wrap)
+            .map_err(inference_tensor::Error::wrap)
             .map_err(|err| err.context("CUDA graph entry release wait failed"));
         drop_cuda_graph_entry_resource(host_staging, &stream, "host staging", &mut release_result);
         drop_cuda_graph_entry_output(
@@ -1223,7 +1227,7 @@ impl CudaDecodeGraphEntry {
         drop_cuda_graph_entry_resource(input_ids, &stream, "input ids", &mut release_result);
         let storage_result = stream
             .synchronize()
-            .map_err(candle_core::Error::wrap)
+            .map_err(inference_tensor::Error::wrap)
             .map_err(|err| err.context("CUDA graph entry storage release failed"));
         if release_result.is_ok() {
             release_result = storage_result;
@@ -1242,7 +1246,7 @@ fn drop_cuda_graph_entry_output<T>(
     stream: &Arc<CudaStream>,
     replay_epoch: u64,
     name: &'static str,
-    release_result: &mut candle_core::Result<()>,
+    release_result: &mut inference_tensor::Result<()>,
 ) {
     drop(output);
     if let Err(err) = stream.context().check_err() {
@@ -1250,7 +1254,7 @@ fn drop_cuda_graph_entry_output<T>(
             return;
         }
         if release_result.is_ok() {
-            *release_result = Err(candle_core::Error::wrap(err)
+            *release_result = Err(inference_tensor::Error::wrap(err)
                 .context(format!("CUDA graph entry {name} release failed")));
         }
     }
@@ -1260,13 +1264,13 @@ fn drop_cuda_graph_entry_resource<T>(
     resource: T,
     stream: &Arc<CudaStream>,
     name: &'static str,
-    release_result: &mut candle_core::Result<()>,
+    release_result: &mut inference_tensor::Result<()>,
 ) {
     drop(resource);
     if let Err(err) = stream.context().check_err()
         && release_result.is_ok()
     {
-        *release_result = Err(candle_core::Error::wrap(err)
+        *release_result = Err(inference_tensor::Error::wrap(err)
             .context(format!("CUDA graph entry {name} release failed")));
     }
 }
@@ -1378,7 +1382,7 @@ impl CudaDecodeGraphState {
         key: &CudaDecodeGraphKey,
         step: &CudaGraphDecodeStep,
         input: CudaDecodeGraphReplayInput<'_>,
-    ) -> candle_core::Result<Option<CudaDecodeGraphReplay>> {
+    ) -> inference_tensor::Result<Option<CudaDecodeGraphReplay>> {
         let Some(pos) = self.entries.iter().position(|entry| entry.key == *key) else {
             return Ok(None);
         };
@@ -1391,7 +1395,7 @@ impl CudaDecodeGraphState {
         }
         let graph_event =
             CudaGraphEventGuard::new(CudaGraphComponent::Target, CudaGraphEvent::Replay);
-        let prelaunch = (|| -> candle_core::Result<_> {
+        let prelaunch = (|| -> inference_tensor::Result<_> {
             match input {
                 CudaDecodeGraphReplayInput::Host => {
                     entry.input_ids.set(&step.input_ids).map_err(|err| {
@@ -1432,7 +1436,7 @@ impl CudaDecodeGraphState {
                     match (state_indices, &step.state_indices) {
                         (Some(dst), Some(host)) => copy_state_indices(dst, host, host_staging),
                         (None, None) => Ok(()),
-                        _ => candle_core::bail!(
+                        _ => inference_tensor::bail!(
                             "hybrid state indices changed optional state during CUDA graph replay"
                         ),
                     }
@@ -1488,7 +1492,7 @@ impl CudaDecodeGraphState {
                 .graph
                 .stream()
                 .synchronize()
-                .map_err(candle_core::Error::wrap)
+                .map_err(inference_tensor::Error::wrap)
                 .map_err(|err| err.context("CUDA graph replay recovery synchronization failed"));
             entry.replay_epoch = replay_epoch;
             replay.launch = None;
@@ -1511,7 +1515,7 @@ impl CudaDecodeGraphState {
                     tracing::warn!(
                         "CUDA decode graph completion recording and recovery synchronization failed: {record_err:?}; {synchronize_err:?}"
                     );
-                    Err(candle_core::Error::msg(format!(
+                    Err(inference_tensor::Error::msg(format!(
                         "{record_err}; CUDA graph state may have advanced and recovery failed: {synchronize_err}"
                     )))
                 }
@@ -1531,7 +1535,7 @@ impl CudaDecodeGraphState {
     pub(crate) fn replay_one_token(
         &mut self,
         launch: CudaDecodeGraphLaunch,
-    ) -> candle_core::Result<Option<CudaDecodeGraphReplay>> {
+    ) -> inference_tensor::Result<Option<CudaDecodeGraphReplay>> {
         let Some(step) = launch.one_token_continuation()? else {
             return Ok(None);
         };
@@ -1545,7 +1549,7 @@ impl CudaDecodeGraphState {
     pub(crate) fn prepare_spec_state_admission(
         &mut self,
         spec_state: &dyn SpeculativeGraphState,
-    ) -> candle_core::Result<CudaGraphSpecStateUsage> {
+    ) -> inference_tensor::Result<CudaGraphSpecStateUsage> {
         let usage = CudaGraphSpecStateUsage::from_state(spec_state)?;
         self.evict_for_spec_state(&usage);
         Ok(usage)
@@ -1648,9 +1652,9 @@ fn release_cuda_graph_entries(entries: Vec<CudaDecodeGraphEntry>) {
 pub(crate) fn capture_cuda_decode_graph<F>(
     ctx: CudaDecodeGraphCaptureCtx<'_>,
     forward: F,
-) -> candle_core::Result<CudaDecodeGraphEntry>
+) -> inference_tensor::Result<CudaDecodeGraphEntry>
 where
-    F: FnOnce(&Tensor, &PagedAttentionInputMetadata) -> candle_core::Result<Tensor>,
+    F: FnOnce(&Tensor, &PagedAttentionInputMetadata) -> inference_tensor::Result<Tensor>,
 {
     let CudaDecodeGraphCaptureCtx {
         key,
@@ -1667,7 +1671,7 @@ where
     } = ctx;
     let materialized_metadata = metadata
         .materialize_decode_tensors()
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     let metadata = &materialized_metadata;
     let (batch, seq_len) = input_ids.dims2()?;
     let input_ids = Var::from_tensor(input_ids)?;
@@ -1683,7 +1687,7 @@ where
         })?;
     let graph_input_ids = input_ids.as_detached_tensor();
     let Device::Cuda(cuda_device) = graph_input_ids.device() else {
-        candle_core::bail!("CUDA graph decode expected CUDA input ids");
+        inference_tensor::bail!("CUDA graph decode expected CUDA input ids");
     };
     graph_input_ids.device().synchronize()?;
     let stream = cuda_device.cuda_stream();
@@ -1694,9 +1698,8 @@ where
     if let Err(err) = stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
     {
         restore_event_tracking_after_capture(&stream, restore_event_tracking);
-        return Err(
-            candle_core::Error::msg(err.to_string()).context("CUDA graph begin capture failed")
-        );
+        return Err(inference_tensor::Error::msg(err.to_string())
+            .context("CUDA graph begin capture failed"));
     }
 
     if let Err(err) = prepare_fa3_decode_schedules(&metadata) {
@@ -1720,7 +1723,7 @@ where
     {
         end_cuda_capture_discard(&stream);
         restore_event_tracking_after_capture(&stream, restore_event_tracking);
-        return Err(candle_core::Error::msg(
+        return Err(inference_tensor::Error::msg(
             "captured CUDA graph logits do not match the contiguous warmup output",
         ));
     }
@@ -1729,7 +1732,7 @@ where
         Ok(Some(graph)) => graph,
         Ok(None) => {
             restore_event_tracking_after_capture(&stream, restore_event_tracking);
-            return Err(candle_core::Error::msg(
+            return Err(inference_tensor::Error::msg(
                 "CUDA graph capture returned no graph",
             ));
         }
@@ -1957,7 +1960,7 @@ fn flashinfer_tile_plan_from_vars(
 
 fn var_map_from_tensor_map(
     map: &HashMap<DeviceLocation, Tensor>,
-) -> candle_core::Result<CudaGraphVarMap> {
+) -> inference_tensor::Result<CudaGraphVarMap> {
     map.iter()
         .map(|(location, tensor)| Ok((*location, Var::from_tensor(tensor)?)))
         .collect()
@@ -1965,14 +1968,14 @@ fn var_map_from_tensor_map(
 
 fn option_var_map_from_tensor_map(
     map: Option<&HashMap<DeviceLocation, Tensor>>,
-) -> candle_core::Result<Option<CudaGraphVarMap>> {
+) -> inference_tensor::Result<Option<CudaGraphVarMap>> {
     map.map(var_map_from_tensor_map).transpose()
 }
 
 fn option_var_map_from_tensor_map_if_distinct(
     map: Option<&HashMap<DeviceLocation, Tensor>>,
     aliases_existing: bool,
-) -> candle_core::Result<Option<CudaGraphVarMap>> {
+) -> inference_tensor::Result<Option<CudaGraphVarMap>> {
     if aliases_existing {
         Ok(None)
     } else {
@@ -1997,14 +2000,14 @@ fn copy_var_map(
     src: &HashMap<DeviceLocation, Tensor>,
     name: &'static str,
     host_staging: &mut CudaGraphHostStaging,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     if dst.len() != src.len() {
-        candle_core::bail!("{name} device count changed during CUDA graph replay");
+        inference_tensor::bail!("{name} device count changed during CUDA graph replay");
     }
     for (location, dst) in dst {
         let src = src
             .get(location)
-            .ok_or_else(|| candle_core::Error::msg(format!("{name} missing {location:?}")))?;
+            .ok_or_else(|| inference_tensor::Error::msg(format!("{name} missing {location:?}")))?;
         if src.device().is_cpu() && dst.device().is_cuda() {
             host_staging.copy_from(name, *location, src, dst)?;
         } else {
@@ -2019,11 +2022,11 @@ fn copy_option_var_map(
     src: Option<&HashMap<DeviceLocation, Tensor>>,
     name: &'static str,
     host_staging: &mut CudaGraphHostStaging,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     match (dst, src) {
         (Some(dst), Some(src)) => copy_var_map(dst, src, name, host_staging),
         (None, None) => Ok(()),
-        _ => candle_core::bail!("{name} changed optional state during CUDA graph replay"),
+        _ => inference_tensor::bail!("{name} changed optional state during CUDA graph replay"),
     }
 }
 
@@ -2040,7 +2043,7 @@ fn copy_flashinfer_tile_plan(
     full: bool,
     vars: FlashInferTilePlanVars<'_>,
     host_staging: &mut CudaGraphHostStaging,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     let view = if full {
         flashinfer_full_view(metadata)
     } else {
@@ -2102,7 +2105,7 @@ fn rope_positions_var_map(
     slot_mappings: &HashMap<DeviceLocation, Tensor>,
     position_ids: &[usize],
     seq_len: usize,
-) -> candle_core::Result<CudaGraphVarMap> {
+) -> inference_tensor::Result<CudaGraphVarMap> {
     slot_mappings
         .iter()
         .map(|(location, tensor)| {
@@ -2117,7 +2120,7 @@ fn copy_rope_positions(
     position_ids: &[usize],
     seq_len: usize,
     host_staging: &mut CudaGraphHostStaging,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     let positions = decode_positions_tensor(position_ids, seq_len, &Device::Cpu)?;
     for (location, dst) in dst {
         if dst.device().is_cuda() {
@@ -3026,7 +3029,7 @@ mod tests {
         let mut state = CudaDecodeGraphState::default();
         state.insert(entry);
 
-        let step = |token: u32| -> candle_core::Result<CudaGraphDecodeStep> {
+        let step = |token: u32| -> inference_tensor::Result<CudaGraphDecodeStep> {
             Ok(CudaGraphDecodeStep {
                 input_ids: Tensor::from_vec(vec![token], (1, 1), &device)?,
                 seqlen_offsets: vec![0],

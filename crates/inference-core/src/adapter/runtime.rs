@@ -6,10 +6,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use candle_core::Tensor;
 use inference_quant::{
     LoraConfig, LoraExecution, LoraExecutionArena, LoraLayerRegistry, ShardedVarBuilder,
 };
+use inference_tensor::Tensor;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -217,9 +217,9 @@ pub enum LoraAdapterError {
         source: serde_json::Error,
     },
     #[error("invalid LoRA adapter tensors: {0}")]
-    Format(#[source] candle_core::Error),
+    Format(#[source] inference_tensor::Error),
     #[error("failed to load LoRA adapter tensors onto model devices: {0}")]
-    Load(#[source] candle_core::Error),
+    Load(#[source] inference_tensor::Error),
     #[error("LoRA adapter blocking task failed: {0}")]
     Task(#[source] tokio::task::JoinError),
 }
@@ -344,7 +344,7 @@ impl DynamicLoraRuntime {
         let loaded = inference_quant::load_dynamic_lora_weights(&self.layers, config, weights)
             .map_err(LoraAdapterError::Load)?;
         if adapter_bytes(&loaded)? != bytes {
-            return Err(LoraAdapterError::Load(candle_core::Error::msg(
+            return Err(LoraAdapterError::Load(inference_tensor::Error::msg(
                 "LoRA preflight size did not match loaded tensors",
             )));
         }
@@ -480,8 +480,8 @@ impl DynamicLoraRuntime {
         let weights = crate::utils::varbuilder_utils::from_mmaped_safetensors(
             vec![snapshot.path().to_path_buf()],
             Vec::new(),
-            Some(candle_core::DType::F32),
-            &candle_core::Device::Cpu,
+            Some(inference_tensor::DType::F32),
+            &inference_tensor::Device::Cpu,
             Vec::new(),
             true,
             None,
@@ -603,7 +603,7 @@ impl DynamicLoraRuntime {
         &self,
         adapter_leases: &[Option<AdapterLease>],
         sequence_length: usize,
-    ) -> candle_core::Result<Arc<LoraExecution>> {
+    ) -> inference_tensor::Result<Arc<LoraExecution>> {
         let sequence_slots = adapter_leases
             .iter()
             .map(|lease| lease.as_ref().map(AdapterLease::slot))
@@ -622,9 +622,9 @@ impl DynamicLoraRuntime {
         &self,
         adapter_leases: &[Option<AdapterLease>],
         sequence_lengths: &[usize],
-    ) -> candle_core::Result<Arc<LoraExecution>> {
+    ) -> inference_tensor::Result<Arc<LoraExecution>> {
         if adapter_leases.len() != sequence_lengths.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "adapter lease count {} does not match logical sequence count {}",
                 adapter_leases.len(),
                 sequence_lengths.len()
@@ -648,7 +648,7 @@ impl DynamicLoraRuntime {
         &self,
         adapter_leases: &[Option<AdapterLease>],
         execution: &mut LoraExecution,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let mut installed = HashSet::new();
         for lease in adapter_leases.iter().flatten() {
             let slot = lease.slot();
@@ -657,7 +657,7 @@ impl DynamicLoraRuntime {
             }
             let resident = lease.resident();
             if resident.runtime_id() != self.layers.runtime_id() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "adapter generation `{}` belongs to a different runtime",
                     lease.generation()
                 );
@@ -781,7 +781,7 @@ fn adapter_bytes(weights: &inference_quant::DynamicLoraWeights) -> Result<u64, L
     fn add_tensor(
         total: u64,
         tensor: &Tensor,
-        counted: &mut HashSet<candle_core::TensorId>,
+        counted: &mut HashSet<inference_tensor::TensorId>,
     ) -> Result<u64, LoraAdapterError> {
         if !counted.insert(tensor.id()) {
             return Ok(total);
@@ -822,13 +822,13 @@ fn adapter_bytes(weights: &inference_quant::DynamicLoraWeights) -> Result<u64, L
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Device, Tensor};
-    use candle_nn::Linear;
     use inference_quant::{
         LoraExpertInputMode, LoraExpertProjection, LoraExpertProjectionNames, LoraExpertSiteSpec,
         LoraLinearSpec, LoraSiteKey, QuantMethod, QuantMethodConfig, Shard, ShardedSafeTensors,
         UnquantLinear, maybe_wrap_dynamic_lora, with_lora_execution,
     };
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::*;
     use crate::AdapterSelection;
@@ -849,7 +849,8 @@ mod tests {
                 Tensor::new(&[[scale], [0.]], &Device::Cpu).unwrap(),
             ),
         ]);
-        candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors")).unwrap();
+        inference_tensor::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))
+            .unwrap();
     }
 
     fn write_expert_adapter(dir: &Path) {
@@ -877,7 +878,8 @@ mod tests {
                 Tensor::new(&[[3f32], [4.]], &Device::Cpu).unwrap(),
             ),
         ]);
-        candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors")).unwrap();
+        inference_tensor::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))
+            .unwrap();
     }
 
     fn write_fused_expert_adapter(dir: &Path) {
@@ -905,7 +907,8 @@ mod tests {
                 Tensor::ones((2, 2), DType::F32, &Device::Cpu).unwrap(),
             ),
         ]);
-        candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors")).unwrap();
+        inference_tensor::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))
+            .unwrap();
     }
 
     fn expert_registry() -> (

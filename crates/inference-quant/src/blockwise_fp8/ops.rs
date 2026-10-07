@@ -1,5 +1,5 @@
-use candle_core::{CpuStorage, CustomOp2, DType, Result, Tensor, WithDType};
 use float8::F8E4M3;
+use inference_tensor::{CpuStorage, CustomOp2, DType, Result, Tensor, WithDType};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 #[cfg(all(feature = "cuda", has_blockwise_fp8_kernels))]
@@ -61,9 +61,9 @@ impl Fp8BlockwiseDequantize {
         &self,
         weight: &[F8E4M3],
         scale: &[f32],
-        weight_l: &candle_core::Layout,
-        scale_l: &candle_core::Layout,
-    ) -> candle_core::Result<Vec<T>> {
+        weight_l: &inference_tensor::Layout,
+        scale_l: &inference_tensor::Layout,
+    ) -> inference_tensor::Result<Vec<T>> {
         let grid_y = weight_l.dim(0)?.div_ceil(self.weight_block_size[0]);
         let grid_x = weight_l.dim(1)?.div_ceil(self.weight_block_size[1]);
 
@@ -117,28 +117,28 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
 
     fn cpu_fwd(
         &self,
-        scale_s: &candle_core::CpuStorage,
-        scale_l: &candle_core::Layout,
-        weight_s: &candle_core::CpuStorage,
-        weight_l: &candle_core::Layout,
-    ) -> candle_core::Result<(candle_core::CpuStorage, candle_core::Shape)> {
-        let candle_core::CpuStorage::F8E4M3(weight) = weight_s else {
-            candle_core::bail!("Expected F8E4M3 weight!");
+        scale_s: &inference_tensor::CpuStorage,
+        scale_l: &inference_tensor::Layout,
+        weight_s: &inference_tensor::CpuStorage,
+        weight_l: &inference_tensor::Layout,
+    ) -> inference_tensor::Result<(inference_tensor::CpuStorage, inference_tensor::Shape)> {
+        let inference_tensor::CpuStorage::F8E4M3(weight) = weight_s else {
+            inference_tensor::bail!("Expected F8E4M3 weight!");
         };
-        let candle_core::CpuStorage::F32(scale) = scale_s else {
-            candle_core::bail!("Expected F8E4M3 weight!");
+        let inference_tensor::CpuStorage::F32(scale) = scale_s else {
+            inference_tensor::bail!("Expected F8E4M3 weight!");
         };
         if !weight_l.is_contiguous() {
-            candle_core::bail!("Expected weight to be continuous");
+            inference_tensor::bail!("Expected weight to be continuous");
         }
         if !scale_l.is_contiguous() {
-            candle_core::bail!("Expected scales to be continuous");
+            inference_tensor::bail!("Expected scales to be continuous");
         }
         if weight_l.dims().len() != 2 {
-            candle_core::bail!("Expected weight to be rank 2");
+            inference_tensor::bail!("Expected weight to be rank 2");
         }
         if scale_l.dims().len() != 2 || self.weight_block_size.len() != 2 {
-            candle_core::bail!("Expected scale to be rank 2");
+            inference_tensor::bail!("Expected scale to be rank 2");
         }
 
         match self.out_ty {
@@ -156,38 +156,40 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
                 CpuStorage::F16(self.dispatch_dequant_blockwise(weight, scale, weight_l, scale_l)?),
                 weight_l.shape().clone(),
             )),
-            other => candle_core::bail!("unexpected out type of fp8 blockwise dequant {other:?}"),
+            other => {
+                inference_tensor::bail!("unexpected out type of fp8 blockwise dequant {other:?}")
+            }
         }
     }
 
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        scale_s: &candle_core::CudaStorage,
-        scale_l: &candle_core::Layout,
-        weight_s: &candle_core::CudaStorage,
-        weight_l: &candle_core::Layout,
-    ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::{CudaStorage, backend::BackendStorage};
+        scale_s: &inference_tensor::CudaStorage,
+        scale_l: &inference_tensor::Layout,
+        weight_s: &inference_tensor::CudaStorage,
+        weight_l: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::CudaStorage, inference_tensor::Shape)> {
         use half::{bf16, f16};
+        use inference_tensor::{CudaStorage, backend::BackendStorage};
 
         use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
         if !ffi::HAVE_BLOCKWISE_DEQUANT_KERNELS {
-            candle_core::bail!("Do not have blockwise FP8 dequant kernels.");
+            inference_tensor::bail!("Do not have blockwise FP8 dequant kernels.");
         }
 
         if !weight_l.is_contiguous() {
-            candle_core::bail!("Expected weight to be continuous");
+            inference_tensor::bail!("Expected weight to be continuous");
         }
         if !scale_l.is_contiguous() {
-            candle_core::bail!("Expected scales to be continuous");
+            inference_tensor::bail!("Expected scales to be continuous");
         }
         if weight_l.dims().len() != 2 {
-            candle_core::bail!("Expected weight to be rank 2");
+            inference_tensor::bail!("Expected weight to be rank 2");
         }
         if scale_l.dims().len() != 2 || self.weight_block_size.len() != 2 {
-            candle_core::bail!("Expected scale to be rank 2");
+            inference_tensor::bail!("Expected scale to be rank 2");
         }
 
         let dev = weight_s.device();
@@ -271,7 +273,9 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
                 drop(output_guard);
                 CudaStorage::wrap_cuda_slice(output, weight_s.device().clone())
             }
-            other => candle_core::bail!("unexpected out type of fp8 blockwise dequant {other:?}"),
+            other => {
+                inference_tensor::bail!("unexpected out type of fp8 blockwise dequant {other:?}")
+            }
         };
 
         Ok((res, weight_l.shape().clone()))
@@ -280,28 +284,28 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        scale_s: &candle_core::MetalStorage,
-        scale_l: &candle_core::Layout,
-        weight_s: &candle_core::MetalStorage,
-        weight_l: &candle_core::Layout,
-    ) -> Result<(candle_core::MetalStorage, candle_core::Shape)> {
-        use candle_core::backend::BackendStorage;
+        scale_s: &inference_tensor::MetalStorage,
+        scale_l: &inference_tensor::Layout,
+        weight_s: &inference_tensor::MetalStorage,
+        weight_l: &inference_tensor::Layout,
+    ) -> Result<(inference_tensor::MetalStorage, inference_tensor::Shape)> {
+        use inference_tensor::backend::BackendStorage;
 
         if weight_l.start_offset() != 0
             || !weight_l.is_contiguous()
             || weight_s.dtype() != DType::F8E4M3
         {
-            candle_core::bail!("Expected f8e4m3 weight to have start offset 0, continuous");
+            inference_tensor::bail!("Expected f8e4m3 weight to have start offset 0, continuous");
         }
         if scale_l.start_offset() != 0 || !scale_l.is_contiguous() || scale_s.dtype() != DType::F32
         {
-            candle_core::bail!("Expected f32 scales to have start offset 0, continuous");
+            inference_tensor::bail!("Expected f32 scales to have start offset 0, continuous");
         }
         if weight_l.dims().len() != 2 {
-            candle_core::bail!("Expected weight to be rank 2");
+            inference_tensor::bail!("Expected weight to be rank 2");
         }
         if scale_l.dims().len() != 2 || self.weight_block_size.len() != 2 {
-            candle_core::bail!("Expected scale to be rank 2");
+            inference_tensor::bail!("Expected scale to be rank 2");
         }
 
         let encoder = weight_s.device().command_encoder()?;
@@ -336,9 +340,9 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
             weight_block_size_y,
             weight_block_size_x,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -380,28 +384,28 @@ pub fn fp8_blockwise_quantize(
     // Let's implement this using the CUDA kernels directly
     #[cfg(feature = "cuda")]
     {
-        use candle_core::{CudaStorage, Device, Storage};
         use half::{bf16, f16};
+        use inference_tensor::{CudaStorage, Device, Storage};
 
         use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
         if !matches!(input.device(), Device::Cuda(_)) {
-            candle_core::bail!("FP8 blockwise quantization only supported on CUDA for now");
+            inference_tensor::bail!("FP8 blockwise quantization only supported on CUDA for now");
         }
 
         if !ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
-            candle_core::bail!("Do not have blockwise FP8 quant kernels.");
+            inference_tensor::bail!("Do not have blockwise FP8 quant kernels.");
         }
 
         let input_l = input.layout();
         if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
+            inference_tensor::bail!("Expected input to have start offset 0, continuous");
         }
         if input.dims().len() != 2 {
-            candle_core::bail!("Expected input to be rank 2");
+            inference_tensor::bail!("Expected input to be rank 2");
         }
         if weight_block_size.len() != 2 {
-            candle_core::bail!("Expected weight_block_size to have length 2");
+            inference_tensor::bail!("Expected weight_block_size to have length 2");
         }
 
         let dev = match input.device() {
@@ -431,7 +435,7 @@ pub fn fp8_blockwise_quantize(
                 let input_storage = input.storage_and_layout().0;
                 let input_s = match &*input_storage {
                     Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
-                    _ => candle_core::bail!("Expected CUDA storage"),
+                    _ => inference_tensor::bail!("Expected CUDA storage"),
                 };
                 let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
                 unsafe {
@@ -453,7 +457,7 @@ pub fn fp8_blockwise_quantize(
                 let input_storage = input.storage_and_layout().0;
                 let input_s = match &*input_storage {
                     Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                    _ => candle_core::bail!("Expected CUDA storage"),
+                    _ => inference_tensor::bail!("Expected CUDA storage"),
                 };
                 let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
                 unsafe {
@@ -475,7 +479,7 @@ pub fn fp8_blockwise_quantize(
                 let input_storage = input.storage_and_layout().0;
                 let input_s = match &*input_storage {
                     Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                    _ => candle_core::bail!("Expected CUDA storage"),
+                    _ => inference_tensor::bail!("Expected CUDA storage"),
                 };
                 let (input_ptr, _input_guard) = slice_ptr(input_s, input_l.start_offset());
                 unsafe {
@@ -493,7 +497,9 @@ pub fn fp8_blockwise_quantize(
                     )
                 };
             }
-            other => candle_core::bail!("unexpected input type for fp8 blockwise quant: {other:?}"),
+            other => {
+                inference_tensor::bail!("unexpected input type for fp8 blockwise quant: {other:?}")
+            }
         }
 
         // Drop guards before moving the buffers
@@ -508,7 +514,7 @@ pub fn fp8_blockwise_quantize(
         let scale_storage = CudaStorage::wrap_cuda_slice(scale_output, dev.clone());
         let scale = Tensor::from((
             Storage::Cuda(scale_storage),
-            candle_core::Shape::from_dims(&[grid_y, grid_x]),
+            inference_tensor::Shape::from_dims(&[grid_y, grid_x]),
         ));
 
         Ok((weight, scale))
@@ -516,34 +522,34 @@ pub fn fp8_blockwise_quantize(
 
     #[cfg(not(feature = "cuda"))]
     {
-        candle_core::bail!("FP8 blockwise quantization requires CUDA feature");
+        inference_tensor::bail!("FP8 blockwise quantization requires CUDA feature");
     }
 }
 
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 pub(crate) fn fp8_quantize_activation_rowwise(input: &Tensor) -> Result<(Tensor, Tensor)> {
-    use candle_core::{CudaStorage, Device, Shape, Storage};
     use half::{bf16, f16};
+    use inference_tensor::{CudaStorage, Device, Shape, Storage};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
     if !super::ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
-        candle_core::bail!("FP8 rowwise activation quantization kernels are unavailable")
+        inference_tensor::bail!("FP8 rowwise activation quantization kernels are unavailable")
     }
     let Device::Cuda(dev) = input.device() else {
-        candle_core::bail!("FP8 rowwise activation quantization requires CUDA")
+        inference_tensor::bail!("FP8 rowwise activation quantization requires CUDA")
     };
     let input = input.contiguous()?;
     let (rows, columns) = input.dims2()?;
     if rows == 0 || columns == 0 {
-        candle_core::bail!("FP8 rowwise activation quantization requires nonzero dimensions")
+        inference_tensor::bail!("FP8 rowwise activation quantization requires nonzero dimensions")
     }
     let rows_i32 = i32::try_from(rows)
-        .map_err(|_| candle_core::Error::msg("FP8 activation row count exceeds i32"))?;
+        .map_err(|_| inference_tensor::Error::msg("FP8 activation row count exceeds i32"))?;
     let columns_i32 = i32::try_from(columns)
-        .map_err(|_| candle_core::Error::msg("FP8 activation column count exceeds i32"))?;
+        .map_err(|_| inference_tensor::Error::msg("FP8 activation column count exceeds i32"))?;
     let row_stride = i32::try_from(input.stride()[0])
-        .map_err(|_| candle_core::Error::msg("FP8 activation row stride exceeds i32"))?;
+        .map_err(|_| inference_tensor::Error::msg("FP8 activation row stride exceeds i32"))?;
     let stream = dev.cuda_stream();
     let mut quantized = unsafe { dev.alloc::<F8E4M3>(rows * columns)? };
     let mut scales = unsafe { dev.alloc::<f32>(rows)? };
@@ -614,12 +620,12 @@ pub(crate) fn fp8_quantize_activation_rowwise(input: &Tensor) -> Result<(Tensor,
             drop(input_guard);
             status
         }
-        dtype => candle_core::bail!(
+        dtype => inference_tensor::bail!(
             "FP8 rowwise activation quantization requires F32, F16, or BF16, got {dtype:?}"
         ),
     };
     if status != 0 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 rowwise activation quantization launch failed with CUDA error {status}"
         )
     }
@@ -637,28 +643,28 @@ pub(crate) fn fp8_quantize_activation_rowwise(input: &Tensor) -> Result<(Tensor,
 
 #[cfg(all(feature = "cuda", feature = "cutile"))]
 pub(crate) fn fp8_quantize_activation_static(input: &Tensor, scale: &Tensor) -> Result<Tensor> {
-    use candle_core::{CudaStorage, Device, Storage};
     use half::{bf16, f16};
+    use inference_tensor::{CudaStorage, Device, Storage};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
     if !super::ffi::HAVE_BLOCKWISE_QUANT_KERNELS {
-        candle_core::bail!("FP8 static activation quantization kernels are unavailable")
+        inference_tensor::bail!("FP8 static activation quantization kernels are unavailable")
     }
     let Device::Cuda(dev) = input.device() else {
-        candle_core::bail!("FP8 static activation quantization requires CUDA")
+        inference_tensor::bail!("FP8 static activation quantization requires CUDA")
     };
     if scale.dtype() != DType::F32 || scale.elem_count() != 1 {
-        candle_core::bail!("FP8 static activation quantization requires one F32 scale")
+        inference_tensor::bail!("FP8 static activation quantization requires one F32 scale")
     }
     if !input.device().same_device(scale.device()) {
-        candle_core::bail!("FP8 static activation and scale must be on the same device")
+        inference_tensor::bail!("FP8 static activation and scale must be on the same device")
     }
     let input = input.contiguous()?;
     let scale = scale.reshape(())?.contiguous()?;
     let elements = input.elem_count();
     if elements == 0 {
-        candle_core::bail!("FP8 static activation quantization requires a nonempty tensor")
+        inference_tensor::bail!("FP8 static activation quantization requires a nonempty tensor")
     }
     let stream = dev.cuda_stream();
     let mut quantized = unsafe { dev.alloc::<F8E4M3>(elements)? };
@@ -730,12 +736,12 @@ pub(crate) fn fp8_quantize_activation_static(input: &Tensor, scale: &Tensor) -> 
             drop(input_guard);
             status
         }
-        dtype => candle_core::bail!(
+        dtype => inference_tensor::bail!(
             "FP8 static activation quantization requires F32, F16, or BF16, got {dtype:?}"
         ),
     };
     if status != 0 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "FP8 static activation quantization launch failed with CUDA error {status}"
         )
     }
@@ -759,17 +765,17 @@ pub fn fp8_blockwise_matmul(
     scales: &Tensor,
     weight_block_size: &[usize],
 ) -> Result<Tensor> {
-    use candle_core::{CudaStorage, Device, Storage};
     use half::{bf16, f16};
+    use inference_tensor::{CudaStorage, Device, Storage};
 
     use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
     if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
-        candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
+        inference_tensor::bail!("Do not have blockwise FP8 GEMM kernels.");
     }
 
     if !matches!(input.device(), Device::Cuda(_)) {
-        candle_core::bail!("FP8 blockwise matmul only supported on CUDA");
+        inference_tensor::bail!("FP8 blockwise matmul only supported on CUDA");
     }
 
     let input = input.contiguous()?;
@@ -782,13 +788,13 @@ pub fn fp8_blockwise_matmul(
     let scales = scales.contiguous()?;
 
     if input.dims().len() != 2 {
-        candle_core::bail!("Expected input to be rank 2, got {:?}", input.dims());
+        inference_tensor::bail!("Expected input to be rank 2, got {:?}", input.dims());
     }
     if weight.dims().len() != 2 {
-        candle_core::bail!("Expected weight to be rank 2, got {:?}", weight.dims());
+        inference_tensor::bail!("Expected weight to be rank 2, got {:?}", weight.dims());
     }
     if weight.dtype() != DType::F8E4M3 {
-        candle_core::bail!("Expected FP8 weight, got {:?}", weight.dtype());
+        inference_tensor::bail!("Expected FP8 weight, got {:?}", weight.dtype());
     }
 
     let m = input.dim(0)? as i32;
@@ -796,7 +802,7 @@ pub fn fp8_blockwise_matmul(
     let n = weight.dim(0)? as i32;
 
     if weight.dim(1)? as i32 != k {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Weight K dimension {} doesn't match input K dimension {}",
             weight.dim(1)?,
             k
@@ -822,11 +828,11 @@ pub fn fp8_blockwise_matmul(
 
     let weight_s = match &*weight_storage {
         Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<F8E4M3>()?,
-        _ => candle_core::bail!("Expected CUDA storage for weight"),
+        _ => inference_tensor::bail!("Expected CUDA storage for weight"),
     };
     let scales_s = match &*scales_storage {
         Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("Expected CUDA storage for scales"),
+        _ => inference_tensor::bail!("Expected CUDA storage for scales"),
     };
 
     let (weight_ptr, _weight_guard) = slice_ptr(weight_s, weight_l.start_offset());
@@ -838,7 +844,7 @@ pub fn fp8_blockwise_matmul(
 
             let input_s = match &*input_storage {
                 Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
+                _ => inference_tensor::bail!("Expected CUDA storage for input"),
             };
 
             {
@@ -865,7 +871,7 @@ pub fn fp8_blockwise_matmul(
             let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
             Ok(Tensor::from((
                 Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[m as usize, n as usize]),
+                inference_tensor::Shape::from_dims(&[m as usize, n as usize]),
             )))
         }
         DType::BF16 => {
@@ -873,7 +879,7 @@ pub fn fp8_blockwise_matmul(
 
             let input_s = match &*input_storage {
                 Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
+                _ => inference_tensor::bail!("Expected CUDA storage for input"),
             };
 
             {
@@ -900,10 +906,10 @@ pub fn fp8_blockwise_matmul(
             let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
             Ok(Tensor::from((
                 Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[m as usize, n as usize]),
+                inference_tensor::Shape::from_dims(&[m as usize, n as usize]),
             )))
         }
-        other => candle_core::bail!("Unsupported input dtype for FP8 matmul: {:?}", other),
+        other => inference_tensor::bail!("Unsupported input dtype for FP8 matmul: {:?}", other),
     }
 }
 
@@ -922,17 +928,17 @@ pub fn fp8_indexed_moe_gemm(
     indices: &Tensor,
     weight_block_size: &[usize],
 ) -> Result<Tensor> {
-    use candle_core::{CudaStorage, Device, Storage};
     use half::{bf16, f16};
+    use inference_tensor::{CudaStorage, Device, Storage};
 
     use crate::{blockwise_fp8::ffi, utils::slice_ptr};
 
     if !ffi::HAVE_BLOCKWISE_GEMM_KERNELS {
-        candle_core::bail!("Do not have blockwise FP8 GEMM kernels.");
+        inference_tensor::bail!("Do not have blockwise FP8 GEMM kernels.");
     }
 
     if !matches!(input.device(), Device::Cuda(_)) {
-        candle_core::bail!("FP8 indexed MoE GEMM only supported on CUDA");
+        inference_tensor::bail!("FP8 indexed MoE GEMM only supported on CUDA");
     }
 
     let input = input.contiguous()?;
@@ -949,13 +955,13 @@ pub fn fp8_indexed_moe_gemm(
         let dims = input.dims2()?;
         (dims.0, false, dims.1)
     } else {
-        candle_core::bail!("Expected input to be rank 2 or 3, got {:?}", input.dims());
+        inference_tensor::bail!("Expected input to be rank 2 or 3, got {:?}", input.dims());
     };
 
     // Get topk from indices
     let (indices_tokens, topk) = indices.dims2()?;
     if indices_tokens != num_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Indices num_tokens {} doesn't match input num_tokens {}",
             indices_tokens,
             num_tokens
@@ -964,11 +970,11 @@ pub fn fp8_indexed_moe_gemm(
 
     // Weights shape: [num_experts, N, K]
     if weights.dims().len() != 3 {
-        candle_core::bail!("Expected weights to be rank 3, got {:?}", weights.dims());
+        inference_tensor::bail!("Expected weights to be rank 3, got {:?}", weights.dims());
     }
     let (num_experts, n, weight_k) = weights.dims3()?;
     if weight_k != k {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Weights K dimension {} doesn't match input K dimension {}",
             weight_k,
             k
@@ -976,7 +982,7 @@ pub fn fp8_indexed_moe_gemm(
     }
 
     if weights.dtype() != DType::F8E4M3 {
-        candle_core::bail!("Expected FP8 weights, got {:?}", weights.dtype());
+        inference_tensor::bail!("Expected FP8 weights, got {:?}", weights.dtype());
     }
 
     let dev = match input.device() {
@@ -1002,15 +1008,15 @@ pub fn fp8_indexed_moe_gemm(
 
     let weights_s = match &*weights_storage {
         Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<F8E4M3>()?,
-        _ => candle_core::bail!("Expected CUDA storage for weights"),
+        _ => inference_tensor::bail!("Expected CUDA storage for weights"),
     };
     let scales_s = match &*scales_storage {
         Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("Expected CUDA storage for scales"),
+        _ => inference_tensor::bail!("Expected CUDA storage for scales"),
     };
     let indices_s = match &*indices_storage {
         Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<u32>()?,
-        _ => candle_core::bail!("Expected CUDA storage for indices"),
+        _ => inference_tensor::bail!("Expected CUDA storage for indices"),
     };
 
     let (weights_ptr, _weights_guard) = slice_ptr(weights_s, weights_l.start_offset());
@@ -1023,7 +1029,7 @@ pub fn fp8_indexed_moe_gemm(
 
             let input_s = match &*input_storage {
                 Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<f16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
+                _ => inference_tensor::bail!("Expected CUDA storage for input"),
             };
 
             {
@@ -1054,7 +1060,7 @@ pub fn fp8_indexed_moe_gemm(
             let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
             Ok(Tensor::from((
                 Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[num_tokens, topk, n]),
+                inference_tensor::Shape::from_dims(&[num_tokens, topk, n]),
             )))
         }
         DType::BF16 => {
@@ -1062,7 +1068,7 @@ pub fn fp8_indexed_moe_gemm(
 
             let input_s = match &*input_storage {
                 Storage::Cuda(cuda_storage) => cuda_storage.as_cuda_slice::<bf16>()?,
-                _ => candle_core::bail!("Expected CUDA storage for input"),
+                _ => inference_tensor::bail!("Expected CUDA storage for input"),
             };
 
             {
@@ -1093,10 +1099,10 @@ pub fn fp8_indexed_moe_gemm(
             let output_storage = CudaStorage::wrap_cuda_slice(output, dev.clone());
             Ok(Tensor::from((
                 Storage::Cuda(output_storage),
-                candle_core::Shape::from_dims(&[num_tokens, topk, n]),
+                inference_tensor::Shape::from_dims(&[num_tokens, topk, n]),
             )))
         }
-        other => candle_core::bail!(
+        other => inference_tensor::bail!(
             "Unsupported input dtype for FP8 indexed MoE GEMM: {:?}",
             other
         ),
@@ -1109,7 +1115,7 @@ pub(crate) fn cutlass_fp8_blockwise_supported(
     weight_scales: &Tensor,
     weight_block_size: &[usize],
 ) -> bool {
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     if !ffi::HAVE_CUTLASS_FP8_SM90_KERNELS
         || weight_block_size != [FP8_BLOCK_SIZE, FP8_BLOCK_SIZE]
@@ -1154,7 +1160,7 @@ pub(super) fn fp8_tensor_aligned(tensor: &Tensor) -> bool {
     feature = "cuda",
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
 ))]
-pub(super) fn is_sm90(dev: &candle_core::CudaDevice) -> bool {
+pub(super) fn is_sm90(dev: &inference_tensor::CudaDevice) -> bool {
     dev.compute_cap() == SM90_COMPUTE_CAP
 }
 
@@ -1172,23 +1178,23 @@ fn check_cutlass_status(operation: &str, status: i32) -> Result<()> {
         }
     };
     let domain = if status < 0 { "CUDA" } else { "CUTLASS" };
-    candle_core::bail!("{operation} failed: {message} ({domain} status {status})")
+    inference_tensor::bail!("{operation} failed: {message} ({domain} status {status})")
 }
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
-static PREPARED_CUTLASS_FP8_DEVICES: OnceLock<Mutex<HashSet<candle_core::cuda::DeviceId>>> =
+static PREPARED_CUTLASS_FP8_DEVICES: OnceLock<Mutex<HashSet<inference_tensor::cuda::DeviceId>>> =
     OnceLock::new();
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
-pub(super) fn prepare_cutlass_fp8(dev: &candle_core::CudaDevice) -> Result<i32> {
+pub(super) fn prepare_cutlass_fp8(dev: &inference_tensor::CudaDevice) -> Result<i32> {
     dev.cuda_stream()
         .context()
         .bind_to_thread()
         .map_err(|error| {
-            candle_core::Error::msg(format!("CUDA context binding failed: {error}"))
+            inference_tensor::Error::msg(format!("CUDA context binding failed: {error}"))
         })?;
     if !is_sm90(dev) {
-        candle_core::bail!("CUTLASS FP8 provider requires an SM90 device")
+        inference_tensor::bail!("CUTLASS FP8 provider requires an SM90 device")
     }
     let sm_count = dev.sm_count() as i32;
     let prepared = PREPARED_CUTLASS_FP8_DEVICES.get_or_init(Default::default);
@@ -1208,7 +1214,7 @@ pub(super) fn prepare_cutlass_fp8(dev: &candle_core::CudaDevice) -> Result<i32> 
 ))]
 #[derive(Eq, Hash, PartialEq)]
 struct Fp8WorkspaceKey {
-    device: candle_core::cuda::DeviceId,
+    device: inference_tensor::cuda::DeviceId,
     stream: usize,
     thread: Option<std::thread::ThreadId>,
     capacity: usize,
@@ -1227,7 +1233,7 @@ fn fp8_workspace_thread(stream: usize) -> Option<std::thread::ThreadId> {
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
 ))]
 pub(super) struct Fp8Workspace {
-    pub(super) slice: candle_core::cuda::cudarc::driver::CudaSlice<u8>,
+    pub(super) slice: inference_tensor::cuda::cudarc::driver::CudaSlice<u8>,
 }
 
 #[cfg(all(
@@ -1285,7 +1291,7 @@ fn cutlass_workspace_size(key: CutlassWorkspaceRequirementsKey) -> Result<usize>
     any(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider)
 ))]
 pub(super) fn fp8_workspace(
-    dev: &candle_core::CudaDevice,
+    dev: &inference_tensor::CudaDevice,
     bytes: usize,
     provider: &str,
 ) -> Result<Option<Arc<Mutex<Fp8Workspace>>>> {
@@ -1293,7 +1299,7 @@ pub(super) fn fp8_workspace(
         return Ok(None);
     }
     let capacity = bytes.checked_next_power_of_two().ok_or_else(|| {
-        candle_core::Error::msg(format!("{provider} FP8 workspace size overflow"))
+        inference_tensor::Error::msg(format!("{provider} FP8 workspace size overflow"))
     })?;
     let stream = dev.cuda_stream();
     let stream_handle = stream.cu_stream() as usize;
@@ -1308,12 +1314,12 @@ pub(super) fn fp8_workspace(
         return Ok(Some(workspace));
     }
     let capture_status = stream.capture_status().map_err(|error| {
-        candle_core::Error::msg(format!("CUDA stream capture status query failed: {error}"))
+        inference_tensor::Error::msg(format!("CUDA stream capture status query failed: {error}"))
     })?;
     if capture_status
-        != candle_core::cuda::cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
+        != inference_tensor::cuda::cudarc::driver::sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{provider} FP8 workspace for this shape must be warmed before CUDA graph capture"
         )
     }
@@ -1330,13 +1336,13 @@ pub(super) fn fp8_workspace(
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
 pub(crate) fn fp8_quantize_activation_cutlass(input: &Tensor) -> Result<(Tensor, Tensor)> {
-    use candle_core::{CudaStorage, Device, Shape, Storage};
     use half::{bf16, f16};
+    use inference_tensor::{CudaStorage, Device, Shape, Storage};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
     let Device::Cuda(dev) = input.device() else {
-        candle_core::bail!("CUTLASS FP8 activation quantization requires CUDA")
+        inference_tensor::bail!("CUTLASS FP8 activation quantization requires CUDA")
     };
     let input = input.contiguous()?;
     let input = if fp8_tensor_aligned(&input) {
@@ -1346,19 +1352,19 @@ pub(crate) fn fp8_quantize_activation_cutlass(input: &Tensor) -> Result<(Tensor,
     };
     let (rows, cols) = input.dims2()?;
     if rows == 0 || cols == 0 || cols % FP8_BLOCK_SIZE != 0 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "CUTLASS FP8 activation shape ({rows}, {cols}) requires nonzero dimensions and K divisible by 128"
         )
     }
     let rows_i32 = i32::try_from(rows)
-        .map_err(|_| candle_core::Error::msg("FP8 activation row count exceeds i32"))?;
+        .map_err(|_| inference_tensor::Error::msg("FP8 activation row count exceeds i32"))?;
     let cols_i32 = i32::try_from(cols)
-        .map_err(|_| candle_core::Error::msg("FP8 activation column count exceeds i32"))?;
+        .map_err(|_| inference_tensor::Error::msg("FP8 activation column count exceeds i32"))?;
     let scale_count = rows
         .checked_mul(cols / FP8_BLOCK_SIZE)
-        .ok_or_else(|| candle_core::Error::msg("FP8 activation scale count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FP8 activation scale count overflow"))?;
     let _ = i32::try_from(scale_count)
-        .map_err(|_| candle_core::Error::msg("FP8 activation scale count exceeds i32"))?;
+        .map_err(|_| inference_tensor::Error::msg("FP8 activation scale count exceeds i32"))?;
     let _ = prepare_cutlass_fp8(dev)?;
 
     let stream = dev.cuda_stream();
@@ -1408,7 +1414,7 @@ pub(crate) fn fp8_quantize_activation_cutlass(input: &Tensor) -> Result<(Tensor,
             drop(input_guard);
             status
         }
-        dtype => candle_core::bail!(
+        dtype => inference_tensor::bail!(
             "CUTLASS FP8 activation quantization requires F16 or BF16, got {dtype:?}"
         ),
     };
@@ -1482,23 +1488,23 @@ fn fused_add_rms_norm_quantized_impl(
     {
         use std::ffi::CStr;
 
-        use candle_core::{CudaStorage, Device, Shape, Storage};
         use half::bf16;
+        use inference_tensor::{CudaStorage, Device, Shape, Storage};
 
         use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
         const GROUP_SIZE: usize = 128;
 
         if scheme.dtype != DType::F8E4M3 || scheme.block_shape != [1, GROUP_SIZE] {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fused RMSNorm FP8 quantization requires an F8E4M3 1x{GROUP_SIZE} scheme"
             )
         }
         let ActivationScaleLayout::GroupMajor { row_alignment } = scale_layout else {
-            candle_core::bail!("fused RMSNorm FP8 quantization requires group-major scales")
+            inference_tensor::bail!("fused RMSNorm FP8 quantization requires group-major scales")
         };
         if !epsilon.is_finite() || epsilon < 0.0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fused RMSNorm FP8 quantization requires a finite nonnegative epsilon"
             )
         }
@@ -1506,10 +1512,10 @@ fn fused_add_rms_norm_quantized_impl(
             || residual.dtype() != DType::BF16
             || weight.dtype() != DType::BF16
         {
-            candle_core::bail!("fused RMSNorm FP8 quantization requires BF16 tensors")
+            inference_tensor::bail!("fused RMSNorm FP8 quantization requires BF16 tensors")
         }
         if input.shape() != residual.shape() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fused RMSNorm FP8 input shape {:?} does not match residual shape {:?}",
                 input.dims(),
                 residual.dims()
@@ -1518,21 +1524,21 @@ fn fused_add_rms_norm_quantized_impl(
         if !input.device().same_device(residual.device())
             || !input.device().same_device(weight.device())
         {
-            candle_core::bail!("fused RMSNorm FP8 tensors must be on the same CUDA device")
+            inference_tensor::bail!("fused RMSNorm FP8 tensors must be on the same CUDA device")
         }
         let Device::Cuda(device) = input.device() else {
-            candle_core::bail!("fused RMSNorm FP8 quantization requires CUDA")
+            inference_tensor::bail!("fused RMSNorm FP8 quantization requires CUDA")
         };
         let Some((&columns, batch_dims)) = input.dims().split_last() else {
-            candle_core::bail!("fused RMSNorm FP8 input cannot be scalar")
+            inference_tensor::bail!("fused RMSNorm FP8 input cannot be scalar")
         };
         if columns == 0 || columns % GROUP_SIZE != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fused RMSNorm FP8 input width must be a nonzero multiple of {GROUP_SIZE}"
             )
         }
         if weight.dims1()? != columns {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fused RMSNorm FP8 weight width {} does not match input width {columns}",
                 weight.dims1()?
             )
@@ -1541,32 +1547,33 @@ fn fused_add_rms_norm_quantized_impl(
             .iter()
             .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
             .ok_or_else(|| {
-                candle_core::Error::msg("fused RMSNorm FP8 row count overflows usize")
+                inference_tensor::Error::msg("fused RMSNorm FP8 row count overflows usize")
             })?;
         if rows == 0 {
-            candle_core::bail!("fused RMSNorm FP8 input cannot be empty")
+            inference_tensor::bail!("fused RMSNorm FP8 input cannot be empty")
         }
         let elements = rows.checked_mul(columns).ok_or_else(|| {
-            candle_core::Error::msg("fused RMSNorm FP8 element count overflows usize")
+            inference_tensor::Error::msg("fused RMSNorm FP8 element count overflows usize")
         })?;
         let alignment = row_alignment.get();
         let scale_stride_m = rows.checked_add(alignment - 1).ok_or_else(|| {
-            candle_core::Error::msg("fused RMSNorm FP8 scale stride overflows usize")
+            inference_tensor::Error::msg("fused RMSNorm FP8 scale stride overflows usize")
         })? / alignment
             * alignment;
         let scale_groups = columns / GROUP_SIZE;
         let scale_elements = scale_groups.checked_mul(scale_stride_m).ok_or_else(|| {
-            candle_core::Error::msg("fused RMSNorm FP8 scale count overflows usize")
+            inference_tensor::Error::msg("fused RMSNorm FP8 scale count overflows usize")
         })?;
         let scale_storage_elements = scale_elements.checked_add(rows).ok_or_else(|| {
-            candle_core::Error::msg("fused RMSNorm FP8 workspace count overflows usize")
+            inference_tensor::Error::msg("fused RMSNorm FP8 workspace count overflows usize")
         })?;
         let rows_i32 = i32::try_from(rows)
-            .map_err(|_| candle_core::Error::msg("fused RMSNorm FP8 row count exceeds i32"))?;
+            .map_err(|_| inference_tensor::Error::msg("fused RMSNorm FP8 row count exceeds i32"))?;
         let columns_i32 = i32::try_from(columns)
-            .map_err(|_| candle_core::Error::msg("fused RMSNorm FP8 width exceeds i32"))?;
-        let scale_stride_i32 = i32::try_from(scale_stride_m)
-            .map_err(|_| candle_core::Error::msg("fused RMSNorm FP8 scale stride exceeds i32"))?;
+            .map_err(|_| inference_tensor::Error::msg("fused RMSNorm FP8 width exceeds i32"))?;
+        let scale_stride_i32 = i32::try_from(scale_stride_m).map_err(|_| {
+            inference_tensor::Error::msg("fused RMSNorm FP8 scale stride exceeds i32")
+        })?;
 
         let source_shape = input.dims().to_vec();
         let input = input.reshape((rows, columns))?.contiguous()?;
@@ -1581,7 +1588,7 @@ fn fused_add_rms_norm_quantized_impl(
         };
         // padded to the scale stride so group-major GEMMs can read whole aligned row blocks
         let quantized_elements = scale_stride_m.checked_mul(columns).ok_or_else(|| {
-            candle_core::Error::msg("fused RMSNorm FP8 quantized size overflows usize")
+            inference_tensor::Error::msg("fused RMSNorm FP8 quantized size overflows usize")
         })?;
         let mut quantized_output = unsafe { device.alloc::<F8E4M3>(quantized_elements)? };
         let mut scales = unsafe { device.alloc::<f32>(scale_storage_elements)? };
@@ -1649,7 +1656,7 @@ fn fused_add_rms_norm_quantized_impl(
                 ))
             }
             .to_string_lossy();
-            candle_core::bail!("fused RMSNorm FP8 quantization failed: {error}")
+            inference_tensor::bail!("fused RMSNorm FP8 quantization failed: {error}")
         }
         drop((
             input_guard,
@@ -1714,7 +1721,7 @@ fn fused_add_rms_norm_quantized_impl(
             scale_layout,
             produce_normalized,
         );
-        candle_core::bail!("fused RMSNorm FP8 quantization is unavailable")
+        inference_tensor::bail!("fused RMSNorm FP8 quantization is unavailable")
     }
 }
 
@@ -1729,7 +1736,7 @@ struct CutlassGemm<'a> {
 
 #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
 fn launch_cutlass_gemm(context: CutlassGemm<'_>, output_ptr: u64) -> Result<()> {
-    use candle_core::{Device, Storage};
+    use inference_tensor::{Device, Storage};
 
     use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
@@ -1739,13 +1746,16 @@ fn launch_cutlass_gemm(context: CutlassGemm<'_>, output_ptr: u64) -> Result<()> 
     let stream = dev.cuda_stream();
     let (m, k) = context.activation.dims2()?;
     let (n, _) = context.weight.dims2()?;
-    let m = i32::try_from(m).map_err(|_| candle_core::Error::msg("CUTLASS FP8 M exceeds i32"))?;
-    let n = i32::try_from(n).map_err(|_| candle_core::Error::msg("CUTLASS FP8 N exceeds i32"))?;
-    let k = i32::try_from(k).map_err(|_| candle_core::Error::msg("CUTLASS FP8 K exceeds i32"))?;
+    let m =
+        i32::try_from(m).map_err(|_| inference_tensor::Error::msg("CUTLASS FP8 M exceeds i32"))?;
+    let n =
+        i32::try_from(n).map_err(|_| inference_tensor::Error::msg("CUTLASS FP8 N exceeds i32"))?;
+    let k =
+        i32::try_from(k).map_err(|_| inference_tensor::Error::msg("CUTLASS FP8 K exceeds i32"))?;
     let output_dtype = match context.output_dtype {
         DType::F16 => CUTLASS_OUTPUT_F16,
         DType::BF16 => CUTLASS_OUTPUT_BF16,
-        dtype => candle_core::bail!("unsupported CUTLASS FP8 output dtype {dtype:?}"),
+        dtype => inference_tensor::bail!("unsupported CUTLASS FP8 output dtype {dtype:?}"),
     };
     let sm_count = prepare_cutlass_fp8(dev)?;
 
@@ -1844,16 +1854,16 @@ pub(crate) fn fp8_blockwise_matmul_cutlass(
     weight_scales: &Tensor,
     output_dtype: DType,
 ) -> Result<Tensor> {
-    use candle_core::{CudaStorage, Device, Shape, Storage};
     use half::{bf16, f16};
+    use inference_tensor::{CudaStorage, Device, Shape, Storage};
 
     use crate::utils::slice_ptr_mut_on_stream;
 
     if activation.dtype() != DType::F8E4M3 || activation_scales.dtype() != DType::F32 {
-        candle_core::bail!("CUTLASS FP8 activation values/scales must be F8E4M3/F32")
+        inference_tensor::bail!("CUTLASS FP8 activation values/scales must be F8E4M3/F32")
     }
     if !cutlass_fp8_blockwise_supported(weight, weight_scales, &[FP8_BLOCK_SIZE, FP8_BLOCK_SIZE]) {
-        candle_core::bail!("CUTLASS blockwise FP8 GEMM does not support this weight layout")
+        inference_tensor::bail!("CUTLASS blockwise FP8 GEMM does not support this weight layout")
     }
     if !activation.is_contiguous()
         || !activation_scales.is_contiguous()
@@ -1862,12 +1872,12 @@ pub(crate) fn fp8_blockwise_matmul_cutlass(
         || !fp8_tensor_aligned(activation)
         || !fp8_tensor_aligned(activation_scales)
     {
-        candle_core::bail!("CUTLASS FP8 operands must be contiguous and on the same device")
+        inference_tensor::bail!("CUTLASS FP8 operands must be contiguous and on the same device")
     }
     let (m, k) = activation.dims2()?;
     let (n, weight_k) = weight.dims2()?;
     if m == 0 || weight_k != k || activation_scales.dims() != [m, k / FP8_BLOCK_SIZE] {
-        candle_core::bail!("CUTLASS FP8 activation, scale, and weight shapes are incompatible")
+        inference_tensor::bail!("CUTLASS FP8 activation, scale, and weight shapes are incompatible")
     }
     let Device::Cuda(dev) = activation.device() else {
         unreachable!()
@@ -1883,7 +1893,7 @@ pub(crate) fn fp8_blockwise_matmul_cutlass(
     let shape = Shape::from_dims(&[m, n]);
     let output_len = m
         .checked_mul(n)
-        .ok_or_else(|| candle_core::Error::msg("CUTLASS FP8 output shape overflows usize"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("CUTLASS FP8 output shape overflows usize"))?;
     match output_dtype {
         DType::F16 => {
             let mut output = unsafe { dev.alloc::<f16>(output_len)? };
@@ -1905,20 +1915,20 @@ pub(crate) fn fp8_blockwise_matmul_cutlass(
                 shape,
             )))
         }
-        dtype => candle_core::bail!("unsupported CUTLASS FP8 output dtype {dtype:?}"),
+        dtype => inference_tensor::bail!("unsupported CUTLASS FP8 output dtype {dtype:?}"),
     }
 }
 
 #[cfg(test)]
 #[allow(clippy::needless_range_loop)]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
     #[cfg_attr(
         not(all(feature = "cuda", has_blockwise_fp8_kernels)),
         allow(unused_imports)
     )]
     use float8::F8E4M3;
     use half::bf16;
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
     use crate::blockwise_fp8::deepgemm;
@@ -2655,7 +2665,7 @@ mod tests {
     #[test]
     #[ignore = "requires an SM90 GPU and runtime nvcc or a prepared cubin cache"]
     fn test_deepgemm_blockwise_fp8_and_cuda_graph() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         const BLOCK_SIZE: usize = 128;
         const K: usize = 256;
@@ -2713,15 +2723,15 @@ mod tests {
         ));
         let live_event = stream
             .record_event(None)
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         stream
             .wait(&live_event)
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         dev.synchronize()?;
         let prepared = deepgemm::prepare(&weight, &weight_scales, &[BLOCK_SIZE, BLOCK_SIZE])?;
         stream
             .wait(&live_event)
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         dev.synchronize()?;
         for rows in [
             1usize, 8, 16, 21, 24, 28, 35, 42, 49, 129, 192, 255, 257, 511, 513, 1023, 1920, 2304,
@@ -2772,12 +2782,12 @@ mod tests {
                 if restore_event_tracking {
                     unsafe { stream.context().enable_event_tracking() };
                 }
-                return Err(candle_core::Error::msg(error.to_string()));
+                return Err(inference_tensor::Error::msg(error.to_string()));
             }
             let captured =
                 deepgemm::matmul(&prepared, &input, &weight, &weight_scales).and_then(|captured| {
                     use crate::utils::slice_ptr_on_stream;
-                    use candle_core::Storage;
+                    use inference_tensor::Storage;
 
                     let status = {
                         let (src_storage, src_layout) = captured.storage_and_layout();
@@ -2811,7 +2821,7 @@ mod tests {
                     };
                     drop(captured);
                     if status != sys::cudaError_enum::CUDA_SUCCESS {
-                        candle_core::bail!("CUDA graph output copy failed: {status:?}")
+                        inference_tensor::bail!("CUDA graph output copy failed: {status:?}")
                     }
                     Ok(())
                 });
@@ -2823,17 +2833,19 @@ mod tests {
             }
             captured?;
             let graph = graph
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?
-                .ok_or_else(|| candle_core::Error::msg("CUDA graph capture returned no graph"))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("CUDA graph capture returned no graph")
+                })?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             stream
                 .synchronize()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             assert_close(rows, &reference, &graph_output.to_dtype(DType::F32)?)?;
         }
         Ok(())
@@ -2918,10 +2930,10 @@ mod tests {
                 .ok()
                 .filter(|value| *value != 0)
                 .ok_or_else(|| {
-                    candle_core::Error::msg(format!("{variable} must be a positive integer"))
+                    inference_tensor::Error::msg(format!("{variable} must be a positive integer"))
                 }),
             Err(std::env::VarError::NotPresent) => Ok(default),
-            Err(error) => Err(candle_core::Error::msg(format!(
+            Err(error) => Err(inference_tensor::Error::msg(format!(
                 "failed to read {variable}: {error}"
             ))),
         }
@@ -2934,7 +2946,7 @@ mod tests {
         iterations: usize,
         mut launch: impl FnMut() -> Result<T>,
     ) -> Result<f64> {
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         for _ in 0..warmup {
             drop(launch()?);
@@ -2945,20 +2957,22 @@ mod tests {
         let start = stream
             .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
             .map_err(|error| {
-                candle_core::Error::msg(format!("CUDA start event failed: {error}"))
+                inference_tensor::Error::msg(format!("CUDA start event failed: {error}"))
             })?;
         for _ in 0..iterations {
             drop(launch()?);
         }
         let end = stream
             .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
-            .map_err(|error| candle_core::Error::msg(format!("CUDA end event failed: {error}")))?;
+            .map_err(|error| {
+                inference_tensor::Error::msg(format!("CUDA end event failed: {error}"))
+            })?;
         end.synchronize().map_err(|error| {
-            candle_core::Error::msg(format!("CUDA event synchronization failed: {error}"))
+            inference_tensor::Error::msg(format!("CUDA event synchronization failed: {error}"))
         })?;
-        let elapsed_ms = start
-            .elapsed_ms(&end)
-            .map_err(|error| candle_core::Error::msg(format!("CUDA timing failed: {error}")))?;
+        let elapsed_ms = start.elapsed_ms(&end).map_err(|error| {
+            inference_tensor::Error::msg(format!("CUDA timing failed: {error}"))
+        })?;
         Ok(f64::from(elapsed_ms) * 1_000.0 / iterations as f64)
     }
 
@@ -2973,11 +2987,11 @@ mod tests {
         samples: usize,
         capture: impl FnOnce() -> Result<T>,
     ) -> Result<Vec<f64>> {
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         dev.synchronize()?;
         let Device::Cuda(cuda_dev) = dev else {
-            candle_core::bail!("CUDA graph timing requires a CUDA device")
+            inference_tensor::bail!("CUDA graph timing requires a CUDA device")
         };
         let stream = cuda_dev.cuda_stream();
         let restore_event_tracking = stream.context().is_event_tracking();
@@ -2990,7 +3004,7 @@ mod tests {
             if restore_event_tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = capture();
         let graph = stream.end_capture(
@@ -3001,40 +3015,40 @@ mod tests {
         }
         let captured = captured?;
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("CUDA graph capture returned no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA graph capture returned no graph"))?;
         for _ in 0..warmup {
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         }
         stream
             .synchronize()
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
 
         let mut timings = Vec::with_capacity(samples);
         for _ in 0..samples {
             let start = stream
                 .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
                 .map_err(|error| {
-                    candle_core::Error::msg(format!("CUDA start event failed: {error}"))
+                    inference_tensor::Error::msg(format!("CUDA start event failed: {error}"))
                 })?;
             for _ in 0..iterations {
                 graph
                     .launch()
-                    .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                    .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             }
             let end = stream
                 .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
                 .map_err(|error| {
-                    candle_core::Error::msg(format!("CUDA end event failed: {error}"))
+                    inference_tensor::Error::msg(format!("CUDA end event failed: {error}"))
                 })?;
             end.synchronize().map_err(|error| {
-                candle_core::Error::msg(format!("CUDA event synchronization failed: {error}"))
+                inference_tensor::Error::msg(format!("CUDA event synchronization failed: {error}"))
             })?;
-            let elapsed_ms = start
-                .elapsed_ms(&end)
-                .map_err(|error| candle_core::Error::msg(format!("CUDA timing failed: {error}")))?;
+            let elapsed_ms = start.elapsed_ms(&end).map_err(|error| {
+                inference_tensor::Error::msg(format!("CUDA timing failed: {error}"))
+            })?;
             timings.push(f64::from(elapsed_ms) * 1_000.0 / iterations as f64);
         }
         drop((captured, graph));
@@ -3463,7 +3477,7 @@ mod tests {
     #[cfg(all(feature = "cuda", has_cutlass_fp8_sm90_kernels))]
     #[test]
     fn test_cutlass_blockwise_fp8_cuda_graph() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         const K: usize = 128;
         const N: usize = 128;
@@ -3502,7 +3516,7 @@ mod tests {
             if restore_event_tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
 
         let captured = ops::fp8_quantize_activation_cutlass(&input).and_then(
@@ -3526,17 +3540,17 @@ mod tests {
         }
         captured?;
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("CUDA graph capture returned no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| inference_tensor::Error::msg("CUDA graph capture returned no graph"))?;
         graph
             .launch()
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         graph
             .launch()
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         stream
             .synchronize()
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
         Ok(())
     }
 }

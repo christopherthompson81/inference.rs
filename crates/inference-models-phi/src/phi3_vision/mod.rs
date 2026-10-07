@@ -6,12 +6,12 @@ pub mod inputs_processor;
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
 use crate::layers::masker::CausalMaskConfig;
 use crate::phi3::DecoderLayer;
-use candle_core::{
-    D, DType, Device, IndexOp, Module, Result, Shape, Tensor, shape::ShapeWithOneHole,
-};
 use either::Either;
 use inference_quant::{
     BitWiseOp, NonZeroOp, QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder,
+};
+use inference_tensor::{
+    D, DType, Device, IndexOp, Module, Result, Shape, Tensor, shape::ShapeWithOneHole,
 };
 use std::{
     any::Any,
@@ -138,7 +138,7 @@ impl ModuleWithMetadata for QuantMethodWrapper {
     }
 }
 
-impl ModuleWithMetadata for candle_nn::Activation {
+impl ModuleWithMetadata for inference_tensor::nn::Activation {
     fn device(&self) -> Device {
         unreachable!()
     }
@@ -152,10 +152,10 @@ struct BigShapeWithOneHole((usize, usize, usize, usize, usize, ()));
 
 fn hole_size(el_count: usize, prod_d: usize, s: &dyn std::fmt::Debug) -> Result<usize> {
     if prod_d == 0 {
-        candle_core::bail!("cannot reshape tensor of {el_count} elements to {s:?}")
+        inference_tensor::bail!("cannot reshape tensor of {el_count} elements to {s:?}")
     }
     if !el_count.is_multiple_of(prod_d) {
-        candle_core::bail!("cannot reshape tensor with {el_count} elements to {s:?}")
+        inference_tensor::bail!("cannot reshape tensor with {el_count} elements to {s:?}")
     }
     Ok(el_count / prod_d)
 }
@@ -222,7 +222,7 @@ impl ImageEmbedding {
     ) -> Result<Self> {
         let hidden_size = config.hidden_size;
         if config.img_processor.name != "clip_vision_model" {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "img_processor=`{}` nor supported.",
                 config.img_processor.name
             );
@@ -302,7 +302,7 @@ impl ImageEmbedding {
                     }
                     vec![
                         Box::new(QuantMethodWrapper(a)),
-                        Box::new(candle_nn::Activation::Gelu),
+                        Box::new(inference_tensor::nn::Activation::Gelu),
                         Box::new(QuantMethodWrapper(b)),
                     ]
                 }
@@ -334,12 +334,12 @@ impl ImageEmbedding {
                     }
                     vec![
                         Box::new(QuantMethodWrapper(a)),
-                        Box::new(candle_nn::Activation::Gelu),
+                        Box::new(inference_tensor::nn::Activation::Gelu),
                         Box::new(QuantMethodWrapper(b)),
                     ]
                 }
                 _ => {
-                    candle_core::bail!("projection_cls=`{projection_cls}` not implemented.");
+                    inference_tensor::bail!("projection_cls=`{projection_cls}` not implemented.");
                 }
             };
 
@@ -379,7 +379,7 @@ impl ImageEmbedding {
         } else if self.type_feature == "cls_patch" {
             Ok(img_feature)
         } else {
-            candle_core::bail!("Unsupported image feature type {}", self.type_feature)
+            inference_tensor::bail!("Unsupported image feature type {}", self.type_feature)
         }
     }
 
@@ -409,26 +409,28 @@ impl ImageEmbedding {
             // input_ids[positions[:, 0], positions[:, 1]]
             if self.use_hd_transform {
                 let image_sizes_ref = image_sizes.as_ref().ok_or_else(|| {
-                    candle_core::Error::Msg("Phi3 HD input is missing image sizes".into())
+                    inference_tensor::Error::Msg("Phi3 HD input is missing image sizes".into())
                 })?;
                 if pixel_values.dims().len() != 5 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Phi3 HD input must have rank 5, got rank {}",
                         pixel_values.dims().len()
                     );
                 }
                 let bs = pixel_values.dim(0)?;
                 if bs == 0 {
-                    candle_core::bail!("Phi3 received an empty image batch");
+                    inference_tensor::bail!("Phi3 received an empty image batch");
                 }
                 if image_sizes_ref.len() != bs {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Phi3 received {} image sizes for {bs} images",
                         image_sizes_ref.len()
                     );
                 }
                 if n_hashes != 0 && n_hashes != bs {
-                    candle_core::bail!("Phi3 received {n_hashes} image hashes for {bs} images");
+                    inference_tensor::bail!(
+                        "Phi3 received {n_hashes} image hashes for {bs} images"
+                    );
                 }
 
                 // Check cache for each image
@@ -440,7 +442,7 @@ impl ImageEmbedding {
                         match guard.get(CacheModality::Image, hash) {
                             Some(cached) => {
                                 let cached = cached.first().ok_or_else(|| {
-                                    candle_core::Error::Msg(
+                                    inference_tensor::Error::Msg(
                                         "cached Phi3 image has no encoder output".into(),
                                     )
                                 })?;
@@ -468,7 +470,7 @@ impl ImageEmbedding {
                     let patch_count = miss_features.dim(1)?;
                     let base_feat_dim = (patch_count as f32).sqrt() as usize;
                     if base_feat_dim != 24 || base_feat_dim * base_feat_dim != patch_count {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Phi3 vision tower returned {patch_count} patches per crop"
                         );
                     }
@@ -491,7 +493,7 @@ impl ImageEmbedding {
                 let mut output_len = Vec::new();
                 for (bs_, &(h, w)) in image_sizes_ref.iter().enumerate() {
                     if h == 0 || w == 0 || h % 336 != 0 || w % 336 != 0 {
-                        candle_core::bail!("Phi3 image size {h}x{w} is not a valid HD grid");
+                        inference_tensor::bail!("Phi3 image size {h}x{w} is not a valid HD grid");
                     }
                     let h = h / 336;
                     let w = w / 336;
@@ -502,7 +504,7 @@ impl ImageEmbedding {
                     if let Some(ref cached_tensor) = per_image_cached[bs_] {
                         let (output_batch, cnt, _) = cached_tensor.dims3()?;
                         if output_batch != 1 || cnt != temp_len {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "cached Phi3 image has shape {:?} but metadata requires one batch and {temp_len} rows",
                                 cached_tensor.dims()
                             );
@@ -513,7 +515,9 @@ impl ImageEmbedding {
                     }
 
                     let img_feats = img_features_per_image[bs_].as_ref().ok_or_else(|| {
-                        candle_core::Error::Msg(format!("Phi3 image {bs_} has no vision features"))
+                        inference_tensor::Error::Msg(format!(
+                            "Phi3 image {bs_} has no vision features"
+                        ))
                     })?;
 
                     // 1 x (24x24) x 1024
@@ -590,12 +594,12 @@ impl ImageEmbedding {
                             1,
                         )?,
                         other => {
-                            candle_core::bail!("Invalid hd_transform_order=`{other}`");
+                            inference_tensor::bail!("Invalid hd_transform_order=`{other}`");
                         }
                     };
 
                     if temp_len != img.dim(1)? {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Phi3 HD transform produced {} rows, expected {temp_len}",
                             img.dim(1)?
                         );
@@ -625,10 +629,12 @@ impl ImageEmbedding {
                 hd_transform = None;
                 let n_imgs = pixel_values.dim(0)?;
                 if n_imgs == 0 {
-                    candle_core::bail!("Phi3 received an empty image batch");
+                    inference_tensor::bail!("Phi3 received an empty image batch");
                 }
                 if n_hashes != 0 && n_hashes != n_imgs {
-                    candle_core::bail!("Phi3 received {n_hashes} image hashes for {n_imgs} images");
+                    inference_tensor::bail!(
+                        "Phi3 received {n_hashes} image hashes for {n_imgs} images"
+                    );
                 }
                 if n_hashes == n_imgs {
                     // Per-image caching for non-HD path
@@ -640,13 +646,13 @@ impl ImageEmbedding {
                             match guard.get(CacheModality::Image, hash) {
                                 Some(cached) => {
                                     let cached = cached.first().ok_or_else(|| {
-                                        candle_core::Error::Msg(
+                                        inference_tensor::Error::Msg(
                                             "cached Phi3 image has no encoder output".into(),
                                         )
                                     })?;
                                     let (rows, _) = cached.dims2()?;
                                     if rows != self.num_img_tokens {
-                                        candle_core::bail!(
+                                        inference_tensor::bail!(
                                             "cached Phi3 image has {} rows but metadata requires {}",
                                             rows,
                                             self.num_img_tokens
@@ -686,7 +692,7 @@ impl ImageEmbedding {
                         .enumerate()
                         .map(|(index, output)| {
                             output.ok_or_else(|| {
-                                candle_core::Error::Msg(format!(
+                                inference_tensor::Error::Msg(format!(
                                     "Phi3 image {index} has no encoder output"
                                 ))
                             })
@@ -712,13 +718,13 @@ impl ImageEmbedding {
                 let image_set_tensor_inner = self.layers.forward(&tt)?;
                 image_set_tensor = Some(Either::Right(image_set_tensor_inner));
             } else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Phi3 image input must have rank 3, 4, or 5, got rank {}",
                     pixel_values.dims().len()
                 );
             }
         } else {
-            candle_core::bail!("Phi3 received image pixels without image placeholders");
+            inference_tensor::bail!("Phi3 received image pixels without image placeholders");
         }
 
         let input_ids = input_ids.clamp(0.0, self.vocab_size as f64)?;
@@ -726,19 +732,19 @@ impl ImageEmbedding {
         let expected_placeholder_rows = match (&hd_transform, &image_set_tensor) {
             (Some(output_lens), Some(Either::Left(outputs))) => {
                 if output_lens.len() != outputs.len() {
-                    candle_core::bail!("Phi3 HD encoder output metadata is inconsistent");
+                    inference_tensor::bail!("Phi3 HD encoder output metadata is inconsistent");
                 }
                 let mut total = 0usize;
                 for (&output_len, output) in output_lens.iter().zip(outputs) {
                     let (output_batch, output_rows, _) = output.dims3()?;
                     if output_batch != 1 || output_rows != output_len {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Phi3 HD encoder returned shape {:?}, expected one batch and {output_len} rows",
                             output.dims()
                         );
                     }
                     total = total.checked_add(output_len).ok_or_else(|| {
-                        candle_core::Error::Msg("Phi3 image token count overflow".into())
+                        inference_tensor::Error::Msg("Phi3 image token count overflow".into())
                     })?;
                 }
                 total
@@ -749,20 +755,20 @@ impl ImageEmbedding {
                 let expected = image_count
                     .checked_mul(self.num_img_tokens)
                     .ok_or_else(|| {
-                        candle_core::Error::Msg("Phi3 image token count overflow".into())
+                        inference_tensor::Error::Msg("Phi3 image token count overflow".into())
                     })?;
                 if output_rows != expected {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Phi3 encoder returned {} rows for {image_count} images",
                         output_rows
                     );
                 }
                 expected
             }
-            _ => candle_core::bail!("Phi3 media has no encoder outputs"),
+            _ => inference_tensor::bail!("Phi3 media has no encoder outputs"),
         };
         if positions.dim(0)? != expected_placeholder_rows {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Phi3 received {} image placeholder tokens but encoder metadata requires {expected_placeholder_rows}",
                 positions.dim(0)?
             );
@@ -771,14 +777,14 @@ impl ImageEmbedding {
             let image_outputs = match (&hd_transform, &image_set_tensor) {
                 (Some(output_lens), Some(Either::Left(outputs))) => {
                     if output_lens.len() != outputs.len() {
-                        candle_core::bail!("Phi3 HD encoder output metadata is inconsistent");
+                        inference_tensor::bail!("Phi3 HD encoder output metadata is inconsistent");
                     }
                     outputs.clone()
                 }
                 (None, Some(Either::Right(outputs))) => {
                     let image_count = pixel_values.dim(0)?;
                     if outputs.dim(0)? != image_count * self.num_img_tokens {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Phi3 encoder returned {} rows for {image_count} images",
                             outputs.dim(0)?
                         );
@@ -790,10 +796,10 @@ impl ImageEmbedding {
                         })
                         .collect::<Result<Vec<_>>>()?
                 }
-                _ => candle_core::bail!("Phi3 packed media has no encoder outputs"),
+                _ => inference_tensor::bail!("Phi3 packed media has no encoder outputs"),
             };
             if image_hashes.len() != image_outputs.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "packed Phi3 input has {} image hashes but {} encoder outputs",
                     image_hashes.len(),
                     image_outputs.len()
@@ -854,7 +860,7 @@ impl ImageEmbedding {
                     idx += cnt;
                 }
             }
-            _ => candle_core::bail!("Phi3 media has no encoder outputs"),
+            _ => inference_tensor::bail!("Phi3 media has no encoder outputs"),
         }
 
         Ok(hidden_states)

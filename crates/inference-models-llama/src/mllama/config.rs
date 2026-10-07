@@ -1,6 +1,6 @@
-use candle_core::{Context, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::QuantizedConfig;
+use inference_tensor::nn::Module;
+use inference_tensor::{Context, Result, Tensor};
 
 use crate::{
     layers::{Llama3RopeConfig, Llama3RopeType},
@@ -21,7 +21,7 @@ pub enum VisionActivation {
 impl Module for VisionActivation {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
-            Self::QuickGelu => xs * candle_nn::ops::sigmoid(&(xs * 1.702f64)?),
+            Self::QuickGelu => xs * inference_tensor::nn::ops::sigmoid(&(xs * 1.702f64)?),
             Self::Gelu => xs.gelu_erf(),
             // https://github.com/huggingface/transformers/blob/12f043eaeaabfef6f6efea411d98e6f6d3c094b7/src/transformers/activations.py#L49-L78
             Self::NewGelu => xs.gelu(),
@@ -93,7 +93,7 @@ pub struct MLlamaTextConfig {
     pub rope_scaling: Option<MLlamaRopeScaling>,
     pub vocab_size: usize,
     pub hidden_size: usize,
-    pub hidden_act: candle_nn::Activation,
+    pub hidden_act: inference_tensor::nn::Activation,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
@@ -131,7 +131,7 @@ impl MLlamaTextConfig {
             Some(MLlamaRopeScaling {
                 rope_type: other, ..
             }) => {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "MLlama doesn't support any other RoPE type than `llama3`, got {other:?}"
                 )
             }

@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use candle_core::Tensor;
+use inference_tensor::Tensor;
 
 use super::{Cache, HybridCache, NormalCache};
 

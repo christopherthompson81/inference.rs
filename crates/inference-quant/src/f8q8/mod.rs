@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, DeviceLocation, Result, Shape, Tensor};
-use candle_nn::{Linear, Module};
 use float8::F8E4M3;
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{DType, Device, DeviceLocation, Result, Shape, Tensor};
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
@@ -39,7 +39,7 @@ impl BlockF8Q8 {
 fn to_float(xs: &[BlockF8Q8], ys: &mut [f32]) -> Result<()> {
     let k = ys.len();
     if !k.is_multiple_of(QK8_0) {
-        candle_core::bail!("dequantize_row_f8q8: {k} is not divisible by {QK8_0}");
+        inference_tensor::bail!("dequantize_row_f8q8: {k} is not divisible by {QK8_0}");
     }
 
     let nb = k / QK8_0;
@@ -57,11 +57,11 @@ fn to_float(xs: &[BlockF8Q8], ys: &mut [f32]) -> Result<()> {
 fn from_float(xs: &[f32], ys: &mut [BlockF8Q8]) -> Result<()> {
     let k = xs.len();
     if !k.is_multiple_of(QK8_0) {
-        candle_core::bail!("{k} is not divisible by {QK8_0}");
+        inference_tensor::bail!("{k} is not divisible by {QK8_0}");
     }
     let nb = k / QK8_0;
     if ys.len() != nb {
-        candle_core::bail!("size mismatch {} {} {}", xs.len(), ys.len(), QK8_0)
+        inference_tensor::bail!("size mismatch {} {} {}", xs.len(), ys.len(), QK8_0)
     }
     for (i, ys) in ys.iter_mut().enumerate() {
         let mut amax = 0f32;
@@ -95,7 +95,7 @@ impl F8Q8Linear {
 
     fn ensure_supported_device(device: &Device) -> Result<()> {
         if !Self::supports_device_location(device.location()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "F8Q8 is CPU-only; choose `fp8` or another ISQ type for {:?}.",
                 device.location()
             );
@@ -141,7 +141,7 @@ impl F8Q8Linear {
         }
         let block_size = std::mem::size_of::<BlockF8Q8>();
         if !raw_data.len().is_multiple_of(block_size) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "F8Q8 raw data length {} is not divisible by block size {block_size}.",
                 raw_data.len()
             );
@@ -235,7 +235,9 @@ impl F8Q8Linear {
         for id in ids {
             let id = id as usize;
             if id >= row_count {
-                candle_core::bail!("embedding index {id} is out of bounds for {row_count} rows");
+                inference_tensor::bail!(
+                    "embedding index {id} is out of bounds for {row_count} rows"
+                );
             }
             let mut offset = id * row_size;
             let end = offset + row_size;
@@ -263,7 +265,7 @@ impl QuantMethod for F8Q8Linear {
         Self: Sized,
     {
         let _ = method;
-        candle_core::bail!("F8Q8Linear should be constructed via from_weight")
+        inference_tensor::bail!("F8Q8Linear should be constructed via from_weight")
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
@@ -327,7 +329,7 @@ impl QuantMethod for F8Q8Linear {
                 Self::ensure_supported_device(&device)?;
                 Ok(self)
             }
-            Some(IsqType::F8Q8) => candle_core::bail!("F8Q8 does not support imatrix."),
+            Some(IsqType::F8Q8) => inference_tensor::bail!("F8Q8 does not support imatrix."),
             Some(other) => {
                 // Dequantize and re-quantize to requested type
                 let w = self.dequantize(DType::F32)?;
@@ -354,7 +356,7 @@ impl QuantizedSerde for F8Q8Linear {
 
     fn serialize_uqff(&self, prefix: &str, ty: IsqType) -> Result<Vec<UqffTensor>> {
         if ty != IsqType::F8Q8 {
-            candle_core::bail!("Cannot serialize F8Q8 layer as {ty}; actual type is F8Q8.");
+            inference_tensor::bail!("Cannot serialize F8Q8 layer as {ty}; actual type is F8Q8.");
         }
 
         let block_bytes = unsafe {

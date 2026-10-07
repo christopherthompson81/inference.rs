@@ -41,7 +41,7 @@ impl PagedPrefixCacheValidator for RecordingPrefixValidator {
         _block_hashes: &[BlockHash],
         cached_tokens: usize,
         _block_size: usize,
-    ) -> candle_core::Result<PagedPrefixCacheValidation> {
+    ) -> inference_tensor::Result<PagedPrefixCacheValidation> {
         self.cached_tokens.push(cached_tokens);
         let sequence_id = *seq.id();
         self.validated_ids.push(sequence_id);
@@ -59,7 +59,7 @@ impl PagedPrefixCacheValidator for RecordingPrefixValidator {
         &mut self,
         sequence_id: usize,
         slot_idx: usize,
-    ) -> candle_core::Result<bool> {
+    ) -> inference_tensor::Result<bool> {
         self.released_slots.push((sequence_id, slot_idx));
         Ok(true)
     }
@@ -77,15 +77,15 @@ impl PagedPrefixCacheValidator for FailingPrefixValidator {
         _block_hashes: &[BlockHash],
         _cached_tokens: usize,
         _block_size: usize,
-    ) -> candle_core::Result<PagedPrefixCacheValidation> {
-        candle_core::bail!("injected recurrent state reset failure")
+    ) -> inference_tensor::Result<PagedPrefixCacheValidation> {
+        inference_tensor::bail!("injected recurrent state reset failure")
     }
 
     fn release_recurrent_state(
         &mut self,
         sequence_id: usize,
         slot_idx: usize,
-    ) -> candle_core::Result<bool> {
+    ) -> inference_tensor::Result<bool> {
         self.released_slots.push((sequence_id, slot_idx));
         Ok(true)
     }
@@ -103,9 +103,9 @@ impl PagedPrefixCacheValidator for FailingCommitPrefixValidator {
         _block_hashes: &[BlockHash],
         cached_tokens: usize,
         _block_size: usize,
-    ) -> candle_core::Result<PagedPrefixCacheValidation> {
+    ) -> inference_tensor::Result<PagedPrefixCacheValidation> {
         Ok(PagedPrefixCacheValidation::staged(cached_tokens, |_| {
-            candle_core::bail!("injected recurrent state commit failure")
+            inference_tensor::bail!("injected recurrent state commit failure")
         }))
     }
 
@@ -113,7 +113,7 @@ impl PagedPrefixCacheValidator for FailingCommitPrefixValidator {
         &mut self,
         sequence_id: usize,
         slot_idx: usize,
-    ) -> candle_core::Result<bool> {
+    ) -> inference_tensor::Result<bool> {
         self.released_slots.push((sequence_id, slot_idx));
         Ok(true)
     }

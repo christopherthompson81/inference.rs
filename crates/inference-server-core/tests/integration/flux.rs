@@ -61,7 +61,7 @@ async fn flux_gguf_generates_images_through_the_engine_and_http() -> anyhow::Res
         return Ok(());
     };
     // Not `skip_without_cuda!`: its lock guard would be held across the awaits below.
-    if candle_core::Device::new_cuda(0).is_err() {
+    if inference_tensor::Device::new_cuda(0).is_err() {
         eprintln!("SKIP: no CUDA device");
         return Ok(());
     }

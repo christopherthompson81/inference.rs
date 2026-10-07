@@ -261,7 +261,7 @@ async fn resolve_uqff_artifacts(
                     async move {
                         read_model_file_range(&model_id, &revision, &file, range, &token_source)
                             .await
-                            .map_err(|e| candle_core::Error::Msg(e.to_string()))
+                            .map_err(|e| inference_tensor::Error::Msg(e.to_string()))
                     }
                 })
             })

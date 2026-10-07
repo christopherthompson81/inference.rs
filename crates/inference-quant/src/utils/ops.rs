@@ -1,4 +1,4 @@
-use candle_core::{
+use inference_tensor::{
     CpuStorage, CustomOp1, CustomOp2, DType, Error, Layout, Result, Shape, Tensor, WithDType,
     backend::BackendStorage,
 };
@@ -13,9 +13,9 @@ use std::{
 #[cfg(feature = "cuda")]
 use crate::utils::{ffi, slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream};
 #[cfg(feature = "cuda")]
-use candle_core::cuda::{CudaStorage, cudarc::driver::DevicePtr};
-#[cfg(feature = "cuda")]
 use float8::F8E4M3;
+#[cfg(feature = "cuda")]
+use inference_tensor::cuda::{CudaStorage, cudarc::driver::DevicePtr};
 #[cfg(feature = "cuda")]
 use std::ffi::c_void;
 
@@ -87,7 +87,7 @@ impl CustomOp1 for Leftshift {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(&self, s1: &CudaStorage, l1: &Layout) -> Result<(CudaStorage, Shape)> {
         if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
+            inference_tensor::bail!("Input tensor s1 must be contiguous");
         }
         let dev = s1.device().clone();
         let (d_in1_ptr, _d_guard, elem_count) = match s1.dtype() {
@@ -142,11 +142,11 @@ impl CustomOp1 for Leftshift {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        s1: &candle_core::MetalStorage,
+        s1: &inference_tensor::MetalStorage,
         l1: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
+            inference_tensor::bail!("Input tensor s1 must be contiguous");
         }
 
         let encoder = s1.device().command_encoder()?;
@@ -169,9 +169,9 @@ impl CustomOp1 for Leftshift {
             out_shape.elem_count(),
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -256,10 +256,10 @@ impl CustomOp2 for BitWise {
             });
         }
         if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
+            inference_tensor::bail!("Input tensor s1 must be contiguous");
         }
         if !l2.is_contiguous() {
-            candle_core::bail!("Input tensor s2 must be contiguous");
+            inference_tensor::bail!("Input tensor s2 must be contiguous");
         }
 
         match s1 {
@@ -360,10 +360,10 @@ impl CustomOp2 for BitWise {
             });
         }
         if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
+            inference_tensor::bail!("Input tensor s1 must be contiguous");
         }
         if !l2.is_contiguous() {
-            candle_core::bail!("Input tensor s2 must be contiguous");
+            inference_tensor::bail!("Input tensor s2 must be contiguous");
         }
 
         let dev = s1.device().clone();
@@ -529,11 +529,11 @@ impl CustomOp2 for BitWise {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        s1: &candle_core::MetalStorage,
+        s1: &inference_tensor::MetalStorage,
         l1: &Layout,
-        s2: &candle_core::MetalStorage,
+        s2: &inference_tensor::MetalStorage,
         l2: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         if l1.shape() != l2.shape() || l1.stride() != l2.stride() {
             return Err(Error::ShapeMismatchBinaryOp {
                 lhs: l1.shape().clone(),
@@ -549,10 +549,10 @@ impl CustomOp2 for BitWise {
             });
         }
         if !l1.is_contiguous() {
-            candle_core::bail!("Input tensor s1 must be contiguous");
+            inference_tensor::bail!("Input tensor s1 must be contiguous");
         }
         if !l2.is_contiguous() {
-            candle_core::bail!("Input tensor s2 must be contiguous");
+            inference_tensor::bail!("Input tensor s2 must be contiguous");
         }
 
         let encoder = s1.device().command_encoder()?;
@@ -577,7 +577,7 @@ impl CustomOp2 for BitWise {
                 out_shape.elem_count(),
                 &output,
             )
-            .map_err(candle_core::Error::wrap)?,
+            .map_err(inference_tensor::Error::wrap)?,
             BitWiseBinaryOpEnum::And => crate::metal_kernels::call_bitwise_and(
                 device.device(),
                 &encoder,
@@ -590,10 +590,10 @@ impl CustomOp2 for BitWise {
                 out_shape.elem_count(),
                 &output,
             )
-            .map_err(candle_core::Error::wrap)?,
+            .map_err(inference_tensor::Error::wrap)?,
         }
 
-        let newstorage = candle_core::MetalStorage::new(
+        let newstorage = inference_tensor::MetalStorage::new(
             output,
             device.clone(),
             out_shape.elem_count(),
@@ -646,22 +646,22 @@ mod cuda_ops_cccl2 {
     use super::*;
 
     pub(super) fn count_nonzero_cuda(
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         d_in: *const c_void,
         n: u32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> u32 {
         unsafe {
             match dtype {
-                candle_core::DType::U8 => ffi::count_nonzero_u8(d_in, n, stream),
-                candle_core::DType::U32 => ffi::count_nonzero_u32(d_in, n, stream),
-                candle_core::DType::I64 => ffi::count_nonzero_i64(d_in, n, stream),
-                candle_core::DType::I16 => ffi::count_nonzero_i16(d_in, n, stream),
-                candle_core::DType::I32 => ffi::count_nonzero_i32(d_in, n, stream),
-                candle_core::DType::BF16 => ffi::count_nonzero_bf16(d_in, n, stream),
-                candle_core::DType::F16 => ffi::count_nonzero_f16(d_in, n, stream),
-                candle_core::DType::F32 => ffi::count_nonzero_f32(d_in, n, stream),
-                candle_core::DType::F64 => ffi::count_nonzero_f64(d_in, n, stream),
+                inference_tensor::DType::U8 => ffi::count_nonzero_u8(d_in, n, stream),
+                inference_tensor::DType::U32 => ffi::count_nonzero_u32(d_in, n, stream),
+                inference_tensor::DType::I64 => ffi::count_nonzero_i64(d_in, n, stream),
+                inference_tensor::DType::I16 => ffi::count_nonzero_i16(d_in, n, stream),
+                inference_tensor::DType::I32 => ffi::count_nonzero_i32(d_in, n, stream),
+                inference_tensor::DType::BF16 => ffi::count_nonzero_bf16(d_in, n, stream),
+                inference_tensor::DType::F16 => ffi::count_nonzero_f16(d_in, n, stream),
+                inference_tensor::DType::F32 => ffi::count_nonzero_f32(d_in, n, stream),
+                inference_tensor::DType::F64 => ffi::count_nonzero_f64(d_in, n, stream),
                 _ => unreachable!(),
             }
         }
@@ -669,42 +669,42 @@ mod cuda_ops_cccl2 {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn nonzero_cuda(
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         d_in: *const c_void,
         n: u32,
         num_nonzero: u32,
         dims: *const c_void,
         num_dims: u32,
         d_out: *mut c_void,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) {
         unsafe {
             match dtype {
-                candle_core::DType::U8 => {
+                inference_tensor::DType::U8 => {
                     ffi::nonzero_u8(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::U32 => {
+                inference_tensor::DType::U32 => {
                     ffi::nonzero_u32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::I64 => {
+                inference_tensor::DType::I64 => {
                     ffi::nonzero_i64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::I32 => {
+                inference_tensor::DType::I32 => {
                     ffi::nonzero_i32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::I16 => {
+                inference_tensor::DType::I16 => {
                     ffi::nonzero_i16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::BF16 => {
+                inference_tensor::DType::BF16 => {
                     ffi::nonzero_bf16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::F16 => {
+                inference_tensor::DType::F16 => {
                     ffi::nonzero_f16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::F32 => {
+                inference_tensor::DType::F32 => {
                     ffi::nonzero_f32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::F64 => {
+                inference_tensor::DType::F64 => {
                     ffi::nonzero_f64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
                 _ => unreachable!(),
@@ -718,22 +718,22 @@ mod cuda_ops_cccl3 {
     use super::*;
 
     pub(super) fn count_nonzero_cuda(
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         d_in: *const c_void,
         n: u32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> u32 {
         unsafe {
             match dtype {
-                candle_core::DType::U8 => ffi::count_nonzero_u8(d_in, n, stream),
-                candle_core::DType::U32 => ffi::count_nonzero_u32(d_in, n, stream),
-                candle_core::DType::I64 => ffi::count_nonzero_i64(d_in, n, stream),
-                candle_core::DType::I16 => ffi::count_nonzero_i16(d_in, n, stream),
-                candle_core::DType::I32 => ffi::count_nonzero_i32(d_in, n, stream),
-                candle_core::DType::BF16 => ffi::count_nonzero_bf16(d_in, n, stream),
-                candle_core::DType::F16 => ffi::count_nonzero_f16(d_in, n, stream),
-                candle_core::DType::F32 => ffi::count_nonzero_f32(d_in, n, stream),
-                candle_core::DType::F64 => ffi::count_nonzero_f64(d_in, n, stream),
+                inference_tensor::DType::U8 => ffi::count_nonzero_u8(d_in, n, stream),
+                inference_tensor::DType::U32 => ffi::count_nonzero_u32(d_in, n, stream),
+                inference_tensor::DType::I64 => ffi::count_nonzero_i64(d_in, n, stream),
+                inference_tensor::DType::I16 => ffi::count_nonzero_i16(d_in, n, stream),
+                inference_tensor::DType::I32 => ffi::count_nonzero_i32(d_in, n, stream),
+                inference_tensor::DType::BF16 => ffi::count_nonzero_bf16(d_in, n, stream),
+                inference_tensor::DType::F16 => ffi::count_nonzero_f16(d_in, n, stream),
+                inference_tensor::DType::F32 => ffi::count_nonzero_f32(d_in, n, stream),
+                inference_tensor::DType::F64 => ffi::count_nonzero_f64(d_in, n, stream),
                 _ => unreachable!(),
             }
         }
@@ -741,42 +741,42 @@ mod cuda_ops_cccl3 {
 
     #[allow(clippy::too_many_arguments)]
     pub(super) fn nonzero_cuda(
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         d_in: *const c_void,
         n: u32,
         num_nonzero: u32,
         dims: *const c_void,
         num_dims: u32,
         d_out: *mut c_void,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) {
         unsafe {
             match dtype {
-                candle_core::DType::U8 => {
+                inference_tensor::DType::U8 => {
                     ffi::nonzero_u8(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::U32 => {
+                inference_tensor::DType::U32 => {
                     ffi::nonzero_u32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::I64 => {
+                inference_tensor::DType::I64 => {
                     ffi::nonzero_i64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::I32 => {
+                inference_tensor::DType::I32 => {
                     ffi::nonzero_i32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::I16 => {
+                inference_tensor::DType::I16 => {
                     ffi::nonzero_i16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::BF16 => {
+                inference_tensor::DType::BF16 => {
                     ffi::nonzero_bf16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::F16 => {
+                inference_tensor::DType::F16 => {
                     ffi::nonzero_f16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::F32 => {
+                inference_tensor::DType::F32 => {
                     ffi::nonzero_f32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
-                candle_core::DType::F64 => {
+                inference_tensor::DType::F64 => {
                     ffi::nonzero_f64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
                 _ => unreachable!(),
@@ -800,15 +800,15 @@ impl CustomOp1 for NonZero {
             return Err(Error::RequiresContiguous { op: "nonzero" });
         }
         let result = match storage {
-            candle_core::CpuStorage::U8(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::U32(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::I16(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::I32(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::I64(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::BF16(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::F16(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::F32(vs) => self.nonzero(vs, layout),
-            candle_core::CpuStorage::F64(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::U8(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::U32(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::I16(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::I32(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::I64(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::BF16(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::F16(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::F32(vs) => self.nonzero(vs, layout),
+            inference_tensor::CpuStorage::F64(vs) => self.nonzero(vs, layout),
             _ => unreachable!(),
         };
         let index_len = layout.dims().len();
@@ -821,55 +821,55 @@ impl CustomOp1 for NonZero {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        storage: &candle_core::CudaStorage,
+        storage: &inference_tensor::CudaStorage,
         layout: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
+    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
         if !layout.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: "nonzero" });
+            return Err(inference_tensor::Error::RequiresContiguous { op: "nonzero" });
         }
         let dev = storage.device().clone();
         let (d_in, _d_in_guard) = match storage.dtype() {
-            candle_core::DType::U8 => {
+            inference_tensor::DType::U8 => {
                 let slice = storage.as_cuda_slice::<u8>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::U32 => {
+            inference_tensor::DType::U32 => {
                 let slice = storage.as_cuda_slice::<u32>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::I32 => {
+            inference_tensor::DType::I32 => {
                 let slice = storage.as_cuda_slice::<i32>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::I16 => {
+            inference_tensor::DType::I16 => {
                 let slice = storage.as_cuda_slice::<i16>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::I64 => {
+            inference_tensor::DType::I64 => {
                 let slice = storage.as_cuda_slice::<i64>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::BF16 => {
+            inference_tensor::DType::BF16 => {
                 let slice = storage.as_cuda_slice::<half::bf16>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::F16 => {
+            inference_tensor::DType::F16 => {
                 let slice = storage.as_cuda_slice::<half::f16>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::F32 => {
+            inference_tensor::DType::F32 => {
                 let slice = storage.as_cuda_slice::<f32>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
             }
-            candle_core::DType::F64 => {
+            inference_tensor::DType::F64 => {
                 let slice = storage.as_cuda_slice::<f64>()?;
                 let (d_in, d_in_guard) = slice_ptr(slice, 0);
                 (d_in as *const std::ffi::c_void, d_in_guard)
@@ -908,7 +908,7 @@ impl CustomOp1 for NonZero {
             );
         }
         let shape = Shape::from_dims(&[num_nonzero as usize, layout.dims().len()]);
-        let dst = candle_core::CudaStorage::wrap_cuda_slice(d_out, dev);
+        let dst = inference_tensor::CudaStorage::wrap_cuda_slice(d_out, dev);
         Ok((dst, shape))
     }
 }
@@ -921,10 +921,10 @@ impl NonZeroOp for Tensor {
     #[cfg(feature = "metal")]
     fn nonzero(&self) -> Result<Tensor> {
         if !self.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: "nonzero" });
+            return Err(inference_tensor::Error::RequiresContiguous { op: "nonzero" });
         }
         let original_device = self.device();
-        self.to_device(&candle_core::Device::Cpu)?
+        self.to_device(&inference_tensor::Device::Cpu)?
             .apply_op1_no_bwd(&NonZero)?
             .to_device(original_device)
     }
@@ -932,7 +932,7 @@ impl NonZeroOp for Tensor {
     #[cfg(not(feature = "metal"))]
     fn nonzero(&self) -> Result<Tensor> {
         if !self.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: "nonzero" });
+            return Err(inference_tensor::Error::RequiresContiguous { op: "nonzero" });
         }
         self.apply_op1_no_bwd(&NonZero)
     }
@@ -949,7 +949,7 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
     let up = up.contiguous()?;
 
     if gate.shape() != up.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "gptoss_swiglu: gate and up must have same shape, got {:?} vs {:?}",
             gate.shape(),
             up.shape()
@@ -957,8 +957,8 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
     }
 
     let device = match gate.device() {
-        candle_core::Device::Cuda(dev) => dev,
-        _ => candle_core::bail!("gptoss_swiglu requires CUDA device"),
+        inference_tensor::Device::Cuda(dev) => dev,
+        _ => inference_tensor::bail!("gptoss_swiglu requires CUDA device"),
     };
 
     let n_elements = gate.elem_count();
@@ -968,12 +968,12 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
     let up_storage = up.storage_and_layout().0;
 
     let gate_cuda = match &*gate_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("Expected CUDA storage for gate"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("Expected CUDA storage for gate"),
     };
     let up_cuda = match &*up_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("Expected CUDA storage for up"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("Expected CUDA storage for up"),
     };
 
     let stream = device.cuda_stream().cu_stream();
@@ -1003,7 +1003,7 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
             drop(_o_guard);
             let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
             Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
+                inference_tensor::Storage::Cuda(out_storage),
                 gate.shape().clone(),
             )))
         }
@@ -1031,7 +1031,7 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
             drop(_o_guard);
             let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
             Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
+                inference_tensor::Storage::Cuda(out_storage),
                 gate.shape().clone(),
             )))
         }
@@ -1059,11 +1059,11 @@ pub fn gptoss_swiglu_fused(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -
             drop(_o_guard);
             let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
             Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
+                inference_tensor::Storage::Cuda(out_storage),
                 gate.shape().clone(),
             )))
         }
-        _ => candle_core::bail!("gptoss_swiglu: unsupported dtype {:?}", dtype),
+        _ => inference_tensor::bail!("gptoss_swiglu: unsupported dtype {:?}", dtype),
     }
 }
 
@@ -1102,8 +1102,8 @@ impl CustomOp1 for SoftmaxWithSinks {
 
         let sinks_data = self.sinks.storage_and_layout();
         let sinks_cpu = match &*sinks_data.0 {
-            candle_core::Storage::Cpu(s) => s,
-            _ => candle_core::bail!("softmax_with_sinks cpu_fwd: sinks must be on CPU"),
+            inference_tensor::Storage::Cpu(s) => s,
+            _ => inference_tensor::bail!("softmax_with_sinks cpu_fwd: sinks must be on CPU"),
         };
         let sinks_offset = sinks_data.1.start_offset();
 
@@ -1216,7 +1216,7 @@ impl CustomOp1 for SoftmaxWithSinks {
 
                 Ok((CpuStorage::BF16(result), out_shape))
             }
-            other => candle_core::bail!("softmax_with_sinks: unsupported dtype {:?}", other),
+            other => inference_tensor::bail!("softmax_with_sinks: unsupported dtype {:?}", other),
         }
     }
 
@@ -1236,8 +1236,8 @@ impl CustomOp1 for SoftmaxWithSinks {
 
         let sinks_data = self.sinks.storage_and_layout();
         let sinks_cuda = match &*sinks_data.0 {
-            candle_core::Storage::Cuda(s) => s,
-            _ => candle_core::bail!("softmax_with_sinks cuda_fwd: sinks must be on CUDA"),
+            inference_tensor::Storage::Cuda(s) => s,
+            _ => inference_tensor::bail!("softmax_with_sinks cuda_fwd: sinks must be on CUDA"),
         };
         let sinks_offset = sinks_data.1.start_offset();
 
@@ -1329,16 +1329,16 @@ impl CustomOp1 for SoftmaxWithSinks {
                 let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
                 Ok((out_storage, out_shape))
             }
-            _ => candle_core::bail!("softmax_with_sinks: unsupported dtype {:?}", dtype),
+            _ => inference_tensor::bail!("softmax_with_sinks: unsupported dtype {:?}", dtype),
         }
     }
 
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        storage: &candle_core::MetalStorage,
+        storage: &inference_tensor::MetalStorage,
         layout: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         let dtype = storage.dtype();
         let n_elements = layout.shape().elem_count();
         let out_shape = layout.shape().clone();
@@ -1352,8 +1352,8 @@ impl CustomOp1 for SoftmaxWithSinks {
 
         let sinks_data = self.sinks.storage_and_layout();
         let sinks_metal = match &*sinks_data.0 {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("softmax_with_sinks metal_fwd: sinks must be on Metal"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!("softmax_with_sinks metal_fwd: sinks must be on Metal"),
         };
         let sinks_offset = sinks_data.1.start_offset() * self.sinks.dtype().size_in_bytes();
 
@@ -1372,9 +1372,10 @@ impl CustomOp1 for SoftmaxWithSinks {
             self.k_len as u32,
             total_rows,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(output, device.clone(), n_elements, dtype);
+        let newstorage =
+            inference_tensor::MetalStorage::new(output, device.clone(), n_elements, dtype);
         Ok((newstorage, out_shape))
     }
 }
@@ -1394,7 +1395,7 @@ pub fn softmax_with_sinks(
 
     let dims = logits.dims();
     if dims.len() != 4 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "softmax_with_sinks: expected logits to have 4 dims [b, h, q, k], got {:?}",
             dims
         );
@@ -1405,7 +1406,7 @@ pub fn softmax_with_sinks(
     let k_len = dims[3];
 
     if sinks.dims() != [num_heads] {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "softmax_with_sinks: expected sinks shape [{}], got {:?}",
             num_heads,
             sinks.dims()
@@ -1439,7 +1440,7 @@ impl CustomOp1 for FlashAttnSinksMetal {
     }
 
     fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "flash_attn_sinks_metal: no CPU support, use softmax_with_sinks fallback"
         )
     }
@@ -1447,9 +1448,9 @@ impl CustomOp1 for FlashAttnSinksMetal {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        q_storage: &candle_core::MetalStorage,
+        q_storage: &inference_tensor::MetalStorage,
         q_layout: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         let dtype = q_storage.dtype();
         let out_shape = q_layout.shape().clone();
         let (batch_size, num_heads, q_len, head_dim) = q_layout.shape().dims4()?;
@@ -1457,23 +1458,23 @@ impl CustomOp1 for FlashAttnSinksMetal {
         // Extract K storage
         let (k_s, k_l) = self.key.storage_and_layout();
         let k_metal = match &*k_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("flash_attn_sinks_metal: key must be a Metal tensor"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!("flash_attn_sinks_metal: key must be a Metal tensor"),
         };
         let (_, num_kv_heads, k_len, _) = k_l.shape().dims4()?;
 
         // Extract V storage
         let (v_s, v_l) = self.value.storage_and_layout();
         let v_metal = match &*v_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("flash_attn_sinks_metal: value must be a Metal tensor"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!("flash_attn_sinks_metal: value must be a Metal tensor"),
         };
 
         // Extract sinks storage
         let (s_s, s_l) = self.sinks.storage_and_layout();
         let sinks_metal = match &*s_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("flash_attn_sinks_metal: sinks must be a Metal tensor"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!("flash_attn_sinks_metal: sinks must be a Metal tensor"),
         };
         let sinks_offset = s_l.start_offset() * self.sinks.dtype().size_in_bytes();
 
@@ -1537,7 +1538,7 @@ impl CustomOp1 for FlashAttnSinksMetal {
                     self.softmax_scale,
                     b,
                 )
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             } else {
                 // Single-pass
                 crate::metal_kernels::call_sdpa_vector_with_sinks(
@@ -1562,7 +1563,7 @@ impl CustomOp1 for FlashAttnSinksMetal {
                     self.softmax_scale,
                     b,
                 )
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             }
         } else {
             // Prefill path: use flash_attn_sinks_kernel
@@ -1589,10 +1590,11 @@ impl CustomOp1 for FlashAttnSinksMetal {
                 head_dim,
                 self.window_size,
             )
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         }
 
-        let newstorage = candle_core::MetalStorage::new(output, device.clone(), elem_count, dtype);
+        let newstorage =
+            inference_tensor::MetalStorage::new(output, device.clone(), elem_count, dtype);
         Ok((newstorage, out_shape))
     }
 }
@@ -1665,15 +1667,15 @@ impl CustomOp1 for FlashAttnSinksVarlenMetal {
     }
 
     fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("flash_attn_sinks_varlen_metal: no CPU support")
+        inference_tensor::bail!("flash_attn_sinks_varlen_metal: no CPU support")
     }
 
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        q_storage: &candle_core::MetalStorage,
+        q_storage: &inference_tensor::MetalStorage,
         q_layout: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         let dtype = q_storage.dtype();
         let out_shape = q_layout.shape().clone();
         let (batch_size, num_heads, max_q_len, head_dim) = q_layout.shape().dims4()?;
@@ -1681,31 +1683,37 @@ impl CustomOp1 for FlashAttnSinksVarlenMetal {
         // Extract K storage [total_kv, num_kv_heads, D]
         let (k_s, k_l) = self.key.storage_and_layout();
         let k_metal = match &*k_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("flash_attn_sinks_varlen_metal: key must be a Metal tensor"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => {
+                inference_tensor::bail!("flash_attn_sinks_varlen_metal: key must be a Metal tensor")
+            }
         };
         let (_, num_kv_heads, _) = k_l.shape().dims3()?;
 
         // Extract V storage
         let (v_s, v_l) = self.value.storage_and_layout();
         let v_metal = match &*v_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("flash_attn_sinks_varlen_metal: value must be a Metal tensor"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!(
+                "flash_attn_sinks_varlen_metal: value must be a Metal tensor"
+            ),
         };
 
         // Extract sinks storage
         let (s_s, s_l) = self.sinks.storage_and_layout();
         let sinks_metal = match &*s_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!("flash_attn_sinks_varlen_metal: sinks must be a Metal tensor"),
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!(
+                "flash_attn_sinks_varlen_metal: sinks must be a Metal tensor"
+            ),
         };
         let sinks_offset = s_l.start_offset() * self.sinks.dtype().size_in_bytes();
 
         // Extract cu_seqlens_q storage
         let (csq_s, csq_l) = self.cu_seqlens_q.storage_and_layout();
         let csq_metal = match &*csq_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!(
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!(
                 "flash_attn_sinks_varlen_metal: cu_seqlens_q must be a Metal tensor"
             ),
         };
@@ -1714,8 +1722,8 @@ impl CustomOp1 for FlashAttnSinksVarlenMetal {
         // Extract cu_seqlens_k storage
         let (csk_s, csk_l) = self.cu_seqlens_k.storage_and_layout();
         let csk_metal = match &*csk_s {
-            candle_core::Storage::Metal(s) => s,
-            _ => candle_core::bail!(
+            inference_tensor::Storage::Metal(s) => s,
+            _ => inference_tensor::bail!(
                 "flash_attn_sinks_varlen_metal: cu_seqlens_k must be a Metal tensor"
             ),
         };
@@ -1760,9 +1768,10 @@ impl CustomOp1 for FlashAttnSinksVarlenMetal {
             head_dim,
             self.window_size,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(output, device.clone(), elem_count, dtype);
+        let newstorage =
+            inference_tensor::MetalStorage::new(output, device.clone(), elem_count, dtype);
         Ok((newstorage, out_shape))
     }
 }
@@ -1851,7 +1860,7 @@ fn cpu_relu(x: f32) -> f32 {
 
 fn cpu_gelu_erf(x: f32) -> f32 {
     // gelu_erf: x * (1 + erf(x / sqrt(2))) / 2
-    x * (1.0 + candle_core::cpu::erf::erf_f32(x * std::f32::consts::FRAC_1_SQRT_2)) / 2.0
+    x * (1.0 + inference_tensor::cpu::erf::erf_f32(x * std::f32::consts::FRAC_1_SQRT_2)) / 2.0
 }
 
 fn cpu_sigmoid(x: f32) -> f32 {
@@ -1932,7 +1941,7 @@ impl CustomOp2 for FusedGlu {
         use half::{bf16, f16};
 
         if !l1.is_contiguous() || !l2.is_contiguous() {
-            candle_core::bail!("fused_glu CPU inputs must be contiguous");
+            inference_tensor::bail!("fused_glu CPU inputs must be contiguous");
         }
 
         let activation = self.0;
@@ -1952,7 +1961,7 @@ impl CustomOp2 for FusedGlu {
                 let a = &a_slice[a_offset..a_offset + len];
                 let b = &b_slice[b_offset..b_offset + len];
                 let out_ptr = result.as_mut_ptr() as usize;
-                candle_core::utils::barrier_pool().execute_chunked(len, |range| {
+                inference_tensor::utils::barrier_pool().execute_chunked(len, |range| {
                     let out = out_ptr as *mut f32;
                     for i in range {
                         let v = apply_cpu_activation(a[i], activation) * b[i];
@@ -1971,7 +1980,7 @@ impl CustomOp2 for FusedGlu {
                 let a = &a_slice[a_offset..a_offset + len];
                 let b = &b_slice[b_offset..b_offset + len];
                 let out_ptr = result.as_mut_ptr() as usize;
-                candle_core::utils::barrier_pool().execute_chunked(len, |range| {
+                inference_tensor::utils::barrier_pool().execute_chunked(len, |range| {
                     let out = out_ptr as *mut f16;
                     for i in range {
                         // unary in f32 -> cast to f16 -> mul, matching candle's two-step behavior
@@ -1993,7 +2002,7 @@ impl CustomOp2 for FusedGlu {
                 let a = &a_slice[a_offset..a_offset + len];
                 let b = &b_slice[b_offset..b_offset + len];
                 let out_ptr = result.as_mut_ptr() as usize;
-                candle_core::utils::barrier_pool().execute_chunked(len, |range| {
+                inference_tensor::utils::barrier_pool().execute_chunked(len, |range| {
                     let out = out_ptr as *mut bf16;
                     for i in range {
                         // unary in f32 -> cast to bf16 -> mul, matching candle's two-step behavior
@@ -2005,7 +2014,7 @@ impl CustomOp2 for FusedGlu {
                 });
                 CpuStorage::BF16(result)
             }
-            other => candle_core::bail!("fused_glu: unsupported dtype {:?}", other),
+            other => inference_tensor::bail!("fused_glu: unsupported dtype {:?}", other),
         };
 
         Ok((result_storage, out_shape))
@@ -2023,17 +2032,19 @@ impl CustomOp2 for FusedGlu {
 
         let activation = self.0;
         let device = s1.device();
-        let a_layout = dense_last_dim_layout(l1)
-            .ok_or_else(|| candle_core::Error::msg("fused_glu CUDA input a is not row-dense"))?;
-        let b_layout = dense_last_dim_layout(l2)
-            .ok_or_else(|| candle_core::Error::msg("fused_glu CUDA input b is not row-dense"))?;
+        let a_layout = dense_last_dim_layout(l1).ok_or_else(|| {
+            inference_tensor::Error::msg("fused_glu CUDA input a is not row-dense")
+        })?;
+        let b_layout = dense_last_dim_layout(l2).ok_or_else(|| {
+            inference_tensor::Error::msg("fused_glu CUDA input b is not row-dense")
+        })?;
         if (a_layout.rows, a_layout.cols) != (b_layout.rows, b_layout.cols) {
-            candle_core::bail!("fused_glu CUDA input layouts have different logical shapes");
+            inference_tensor::bail!("fused_glu CUDA input layouts have different logical shapes");
         }
         let n_elements = a_layout
             .rows
             .checked_mul(a_layout.cols)
-            .ok_or_else(|| candle_core::Error::msg("fused_glu output size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("fused_glu output size overflow"))?;
         let rows = u32::try_from(a_layout.rows)?;
         let cols = u32::try_from(a_layout.cols)?;
         let a_row_stride = u32::try_from(a_layout.row_stride)?;
@@ -2127,18 +2138,18 @@ impl CustomOp2 for FusedGlu {
                 let out_storage = CudaStorage::wrap_cuda_slice(output, device.clone());
                 Ok((out_storage, out_shape))
             }
-            _ => candle_core::bail!("fused_glu: unsupported dtype {:?}", dtype),
+            _ => inference_tensor::bail!("fused_glu: unsupported dtype {:?}", dtype),
         }
     }
 
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        s1: &candle_core::MetalStorage,
+        s1: &inference_tensor::MetalStorage,
         l1: &Layout,
-        s2: &candle_core::MetalStorage,
+        s2: &inference_tensor::MetalStorage,
         l2: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         let activation = self.0;
         let n_elements = l1.shape().elem_count();
         let dtype = s1.dtype();
@@ -2163,9 +2174,10 @@ impl CustomOp2 for FusedGlu {
             activation as i32,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
-        let newstorage = candle_core::MetalStorage::new(output, device.clone(), n_elements, dtype);
+        let newstorage =
+            inference_tensor::MetalStorage::new(output, device.clone(), n_elements, dtype);
         Ok((newstorage, out_shape))
     }
 }
@@ -2178,7 +2190,7 @@ impl CustomOp2 for FusedGlu {
 /// CUDA inputs may have padding between rows as long as their last dimension is dense.
 pub fn fused_glu(a: &Tensor, b: &Tensor, activation: GluActivationType) -> Result<Tensor> {
     if a.shape() != b.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fused_glu: a and b must have same shape, got {:?} vs {:?}",
             a.shape(),
             b.shape()
@@ -2208,8 +2220,8 @@ pub(crate) fn fused_glu_quantized_bf16(
     scale_stride_m: usize,
     activation: GluActivationType,
 ) -> Result<Option<(Tensor, Tensor)>> {
-    use candle_core::{Storage, Storage::Cuda};
     use half::bf16;
+    use inference_tensor::{Storage, Storage::Cuda};
 
     const KERNEL_SCALE_GROUP_SIZE: usize = 128;
 
@@ -2252,17 +2264,17 @@ pub(crate) fn fused_glu_quantized_bf16(
     // padded to the scale stride so group-major GEMMs can read whole aligned row blocks
     let output_elements = scale_stride_m
         .checked_mul(columns)
-        .ok_or_else(|| candle_core::Error::msg("fused GLU FP8 output size overflows usize"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("fused GLU FP8 output size overflows usize"))?;
     let scale_groups = columns / scale_group_size;
     let scale_elements = scale_groups
         .checked_mul(scale_stride_m)
-        .ok_or_else(|| candle_core::Error::msg("fused GLU FP8 scale size overflows usize"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("fused GLU FP8 scale size overflows usize"))?;
     let rows_u32 = u32::try_from(rows)?;
     let columns_u32 = u32::try_from(columns)?;
     let gate_row_stride_u32 = u32::try_from(gate_layout.row_stride)?;
     let value_row_stride_u32 = u32::try_from(value_layout.row_stride)?;
     let scale_stride_u32 = u32::try_from(scale_stride_m)?;
-    let candle_core::Device::Cuda(device) = gate.device() else {
+    let inference_tensor::Device::Cuda(device) = gate.device() else {
         unreachable!()
     };
     let stream = device.cuda_stream();
@@ -2326,19 +2338,19 @@ impl CustomOp1 for FusedSplitGlu {
     }
 
     fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("fused split GLU CUDA op received CPU storage")
+        inference_tensor::bail!("fused split GLU CUDA op received CPU storage")
     }
 
     fn cuda_fwd(&self, storage: &CudaStorage, layout: &Layout) -> Result<(CudaStorage, Shape)> {
         use half::{bf16, f16};
 
         if !layout.is_contiguous() {
-            candle_core::bail!("fused split GLU input must be contiguous");
+            inference_tensor::bail!("fused split GLU input must be contiguous");
         }
         let mut output_dims = layout.dims().to_vec();
-        let last = output_dims
-            .last_mut()
-            .ok_or_else(|| candle_core::Error::msg("fused split GLU input must have a rank"))?;
+        let last = output_dims.last_mut().ok_or_else(|| {
+            inference_tensor::Error::msg("fused split GLU input must have a rank")
+        })?;
         *last = self.split_size;
         let output_shape = Shape::from(output_dims);
         let output_elements = output_shape.elem_count();
@@ -2407,7 +2419,7 @@ impl CustomOp1 for FusedSplitGlu {
                 drop(output_guard);
                 CudaStorage::wrap_cuda_slice(output, device.clone())
             }
-            dtype => candle_core::bail!("fused split GLU does not support {dtype:?}"),
+            dtype => inference_tensor::bail!("fused split GLU does not support {dtype:?}"),
         };
         Ok((output, output_shape))
     }
@@ -2419,13 +2431,13 @@ pub fn fused_split_glu(
     activation: GluActivationType,
 ) -> Result<Tensor> {
     if split_size == 0 {
-        candle_core::bail!("fused split GLU split size must be nonzero");
+        inference_tensor::bail!("fused split GLU split size must be nonzero");
     }
     let expected = split_size
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::msg("fused split GLU split size overflow"))?;
-    if input.dim(candle_core::D::Minus1)? != expected {
-        candle_core::bail!("fused split GLU expected last dimension {expected}");
+        .ok_or_else(|| inference_tensor::Error::msg("fused split GLU split size overflow"))?;
+    if input.dim(inference_tensor::D::Minus1)? != expected {
+        inference_tensor::bail!("fused split GLU expected last dimension {expected}");
     }
 
     #[cfg(feature = "cuda")]
@@ -2436,8 +2448,8 @@ pub fn fused_split_glu(
         });
     }
 
-    let gate = input.narrow(candle_core::D::Minus1, 0, split_size)?;
-    let up = input.narrow(candle_core::D::Minus1, split_size, split_size)?;
+    let gate = input.narrow(inference_tensor::D::Minus1, 0, split_size)?;
+    let up = input.narrow(inference_tensor::D::Minus1, split_size, split_size)?;
     fused_glu(&gate, &up, activation)
 }
 
@@ -2456,29 +2468,31 @@ pub(crate) fn fused_split_glu_quantized_bf16(
     scale_stride_m: usize,
     activation: GluActivationType,
 ) -> Result<(Tensor, Tensor)> {
-    use candle_core::{Storage, Storage::Cuda};
     use half::bf16;
+    use inference_tensor::{Storage, Storage::Cuda};
 
     const KERNEL_SCALE_GROUP_SIZE: usize = 128;
 
     if input.dtype() != DType::BF16 || !input.device().is_cuda() {
-        candle_core::bail!("fused split GLU FP8 quantization requires a CUDA BF16 input");
+        inference_tensor::bail!("fused split GLU FP8 quantization requires a CUDA BF16 input");
     }
     if scale_group_size != KERNEL_SCALE_GROUP_SIZE {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fused split GLU FP8 quantization requires group size {KERNEL_SCALE_GROUP_SIZE}"
         );
     }
     if split_size == 0 || !split_size.is_multiple_of(scale_group_size) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "fused split GLU FP8 quantization requires a nonzero split size divisible by {scale_group_size}"
         );
     }
     let expected = split_size
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::msg("fused split GLU split size overflow"))?;
-    if input.dim(candle_core::D::Minus1)? != expected {
-        candle_core::bail!("fused split GLU FP8 quantization expected last dimension {expected}");
+        .ok_or_else(|| inference_tensor::Error::msg("fused split GLU split size overflow"))?;
+    if input.dim(inference_tensor::D::Minus1)? != expected {
+        inference_tensor::bail!(
+            "fused split GLU FP8 quantization expected last dimension {expected}"
+        );
     }
     const BF16_ELEMENTS_PER_VECTOR: usize = 2;
 
@@ -2490,20 +2504,20 @@ pub(crate) fn fused_split_glu_quantized_bf16(
     };
     let rows = input.elem_count() / expected;
     if rows == 0 || scale_stride_m < rows {
-        candle_core::bail!("fused split GLU FP8 quantization scale stride is too small");
+        inference_tensor::bail!("fused split GLU FP8 quantization scale stride is too small");
     }
     let scale_groups = split_size / scale_group_size;
     // padded to the scale stride so group-major GEMMs can read whole aligned row blocks
     let output_elements = scale_stride_m
         .checked_mul(split_size)
-        .ok_or_else(|| candle_core::Error::msg("fused split GLU FP8 output size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("fused split GLU FP8 output size overflow"))?;
     let scale_elements = scale_groups
         .checked_mul(scale_stride_m)
-        .ok_or_else(|| candle_core::Error::msg("fused split GLU FP8 scale size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("fused split GLU FP8 scale size overflow"))?;
     let rows_u32 = u32::try_from(rows)?;
     let split_size_u32 = u32::try_from(split_size)?;
     let scale_stride_u32 = u32::try_from(scale_stride_m)?;
-    let candle_core::Device::Cuda(device) = input.device() else {
+    let inference_tensor::Device::Cuda(device) = input.device() else {
         unreachable!()
     };
     let stream = device.cuda_stream();
@@ -2560,7 +2574,7 @@ impl CustomOp1 for Softcap {
         let cap = self.0;
 
         let DType::F32 = s1.dtype() else {
-            candle_core::bail!("softcap: unsupported dtype {:?}", s1.dtype());
+            inference_tensor::bail!("softcap: unsupported dtype {:?}", s1.dtype());
         };
         let input = s1.as_slice::<f32>()?;
         let offset = l1.start_offset();
@@ -2603,7 +2617,7 @@ impl CustomOp1 for Softcap {
             DType::F32 => launch!(f32, ffi::softcap_f32),
             DType::F16 => launch!(half::f16, ffi::softcap_f16_to_f32),
             DType::BF16 => launch!(half::bf16, ffi::softcap_bf16_to_f32),
-            dtype => candle_core::bail!("softcap: unsupported dtype {dtype:?}"),
+            dtype => inference_tensor::bail!("softcap: unsupported dtype {dtype:?}"),
         }
 
         drop(_output_guard);
@@ -2616,14 +2630,14 @@ impl CustomOp1 for Softcap {
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
-        s1: &candle_core::MetalStorage,
+        s1: &inference_tensor::MetalStorage,
         l1: &Layout,
-    ) -> Result<(candle_core::MetalStorage, Shape)> {
+    ) -> Result<(inference_tensor::MetalStorage, Shape)> {
         let n_elements = l1.shape().elem_count();
         let out_shape = l1.shape().clone();
         let dtype = s1.dtype();
         let DType::F32 = dtype else {
-            candle_core::bail!("softcap: unsupported dtype {:?}", dtype);
+            inference_tensor::bail!("softcap: unsupported dtype {:?}", dtype);
         };
 
         let device = s1.device();
@@ -2642,10 +2656,10 @@ impl CustomOp1 for Softcap {
             self.0,
             &output,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         Ok((
-            candle_core::MetalStorage::new(output, device.clone(), n_elements, dtype),
+            inference_tensor::MetalStorage::new(output, device.clone(), n_elements, dtype),
             out_shape,
         ))
     }
@@ -2653,7 +2667,7 @@ impl CustomOp1 for Softcap {
 
 pub fn softcap(input: &Tensor, cap: f32) -> Result<Tensor> {
     if !cap.is_finite() || cap <= 0.0 {
-        candle_core::bail!("softcap requires a positive finite cap");
+        inference_tensor::bail!("softcap requires a positive finite cap");
     }
 
     let input = input.contiguous()?;
@@ -2680,7 +2694,7 @@ mod tests {
     #[test]
     fn test_fused_split_glu_cpu_matches_pair() {
         use super::{GluActivationType, fused_glu, fused_split_glu};
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         const ROWS: usize = 3;
         const SPLIT: usize = 7;
@@ -2722,7 +2736,7 @@ mod tests {
     #[test]
     fn test_fused_sigmoid_glu_matches_candle_extremes() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let gate = Tensor::new(
             &[
@@ -2738,7 +2752,7 @@ mod tests {
             &Device::Cpu,
         )
         .unwrap();
-        let expected = candle_nn::ops::sigmoid(&gate)
+        let expected = inference_tensor::nn::ops::sigmoid(&gate)
             .unwrap()
             .broadcast_mul(&up)
             .unwrap()
@@ -2760,7 +2774,7 @@ mod tests {
     #[test]
     fn test_fused_split_glu_cuda_scalar_and_vector_paths() {
         use super::{GluActivationType, fused_glu, fused_split_glu};
-        use candle_core::{DType, Device, Tensor};
+        use inference_tensor::{DType, Device, Tensor};
 
         const ROWS: usize = 3;
 
@@ -2822,8 +2836,8 @@ mod tests {
     #[test]
     fn test_fused_split_glu_fp8_quantization_cuda() {
         use super::{GluActivationType, fused_split_glu, fused_split_glu_quantized_bf16};
-        use candle_core::{DType, Device, Tensor};
         use float8::F8E4M3;
+        use inference_tensor::{DType, Device, Tensor};
 
         const ROWS: usize = 5;
         const SPLIT: usize = 256;
@@ -2917,8 +2931,8 @@ mod tests {
     #[test]
     fn test_fused_glu_fp8_quantization_preserves_bf16_rounding_and_row_strides() {
         use super::{GluActivationType, fused_glu, fused_glu_quantized_bf16};
-        use candle_core::{DType, Device, Tensor};
         use float8::F8E4M3;
+        use inference_tensor::{DType, Device, Tensor};
 
         const ROWS: usize = 5;
         const COLUMNS: usize = 256;
@@ -3018,7 +3032,7 @@ mod tests {
     #[test]
     fn test_fused_sigmoid_glu_cuda_row_strides_and_offsets() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::{DType, Device, Tensor};
+        use inference_tensor::{DType, Device, Tensor};
 
         const ROWS: usize = 3;
         const COLS: usize = 8;
@@ -3050,7 +3064,7 @@ mod tests {
                 assert_ne!(a.layout().start_offset(), 0);
                 assert_ne!(b.layout().start_offset(), 0);
 
-                let expected = candle_nn::ops::sigmoid(&a)
+                let expected = inference_tensor::nn::ops::sigmoid(&a)
                     .unwrap()
                     .broadcast_mul(&b)
                     .unwrap()
@@ -3081,9 +3095,9 @@ mod tests {
     #[test]
     fn test_softcap_cpu_f32() {
         use super::softcap;
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let device = candle_core::Device::Cpu;
+        let device = inference_tensor::Device::Cpu;
         let cap = 30.0;
         let data: Vec<f32> = (-64..64).map(|i| i as f32 * 0.75).collect();
         let expected: Vec<f32> = data.iter().map(|x| (x / cap).tanh() * cap).collect();
@@ -3102,10 +3116,10 @@ mod tests {
     #[test]
     fn test_softcap_cuda_f32() {
         use super::softcap;
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let cpu = candle_core::Device::Cpu;
-        let cuda = candle_core::Device::new_cuda(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let cuda = inference_tensor::Device::new_cuda(0).unwrap();
         let cap = 30.0;
         let data: Vec<f32> = (-128..128).map(|i| i as f32 * 0.5).collect();
         let input = Tensor::from_vec(data, &[4, 64], &cuda).unwrap();
@@ -3133,10 +3147,10 @@ mod tests {
     #[test]
     fn test_softcap_metal_f32() {
         use super::softcap;
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let cpu = candle_core::Device::Cpu;
-        let metal = candle_core::Device::new_metal(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let metal = inference_tensor::Device::new_metal(0).unwrap();
         let cap = 30.0;
         let data: Vec<f32> = (-128..128).map(|i| i as f32 * 0.5).collect();
         let input = Tensor::from_vec(data, &[4, 64], &metal).unwrap();
@@ -3163,8 +3177,8 @@ mod tests {
     #[test]
     fn test_nonzero_cpu() {
         use crate::utils::ops::NonZeroOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::Cpu;
         let a = Tensor::from_vec(
             vec![1f32, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0],
             &[2, 4],
@@ -3179,8 +3193,8 @@ mod tests {
     #[test]
     fn test_nonzero_cuda() {
         use crate::utils::ops::NonZeroOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_cuda(0).unwrap();
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::new_cuda(0).unwrap();
         let a = Tensor::from_vec(
             vec![1f32, 0.0, 2.0, 0.0, 3.0, 0.0, 4.0, 0.0],
             &[2, 4],
@@ -3195,8 +3209,8 @@ mod tests {
     #[test]
     fn test_nonzero_i32_cuda() {
         use crate::utils::ops::NonZeroOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_cuda(0).unwrap();
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::new_cuda(0).unwrap();
         let a = Tensor::from_vec(vec![0i32, 5, 0, 0, -3, 0, 0, 7], &[2, 4], &device).unwrap();
         let b = a.nonzero().unwrap().to_vec2::<u32>().unwrap();
         assert_eq!(b, [[0, 1], [1, 0], [1, 3]]);
@@ -3205,8 +3219,8 @@ mod tests {
     #[test]
     fn test_bitwise_and_cpu() {
         use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::Cpu;
         let a =
             Tensor::from_vec(vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7], (5, 2), &device).unwrap();
         let b =
@@ -3219,8 +3233,8 @@ mod tests {
     #[test]
     fn test_bitwise_and_cuda() {
         use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_cuda(0).unwrap();
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::new_cuda(0).unwrap();
         let a =
             Tensor::from_vec(vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7], (5, 2), &device).unwrap();
         let b =
@@ -3232,10 +3246,10 @@ mod tests {
     // every integer dtype the CUDA path takes keeps its dtype through and/or
     #[cfg(feature = "cuda")]
     #[test]
-    fn bitwise_and_or_keep_i32_on_cuda() -> candle_core::Result<()> {
+    fn bitwise_and_or_keep_i32_on_cuda() -> inference_tensor::Result<()> {
         use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_cuda(0)?;
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::new_cuda(0)?;
         let a = Tensor::from_vec(vec![1i32, 6, -1, 12], (2, 2), &device)?;
         let b = Tensor::from_vec(vec![3i32, 3, 8, -1], (2, 2), &device)?;
         let and = a.bitwise_and(&b)?;
@@ -3248,8 +3262,8 @@ mod tests {
     #[test]
     fn test_bitwise_or_cpu() {
         use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::Cpu;
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::Cpu;
         let a =
             Tensor::from_vec(vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7], (5, 2), &device).unwrap();
         let b = Tensor::from_vec(vec![-1i64, 0, 0, 0, 0, 0, 0, 0, 0, 8], (5, 2), &device).unwrap();
@@ -3261,8 +3275,8 @@ mod tests {
     #[test]
     fn test_bitwise_or_cuda() {
         use crate::utils::ops::BitWiseOp;
-        use candle_core::Tensor;
-        let device = candle_core::Device::new_cuda(0).unwrap();
+        use inference_tensor::Tensor;
+        let device = inference_tensor::Device::new_cuda(0).unwrap();
         let a =
             Tensor::from_vec(vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7], (5, 2), &device).unwrap();
         let b = Tensor::from_vec(vec![-1i64, 0, 0, 0, 0, 0, 0, 0, 0, 8], (5, 2), &device).unwrap();
@@ -3272,9 +3286,9 @@ mod tests {
 
     #[cfg(feature = "metal")]
     #[test]
-    fn test_bitwise_metal_unaligned_length() -> candle_core::Result<()> {
+    fn test_bitwise_metal_unaligned_length() -> inference_tensor::Result<()> {
         use super::{BitWiseOp, LeftshiftOp};
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         const TEST_LENGTH: usize = 2049;
         const TEST_SHIFT: usize = 3;
@@ -3328,7 +3342,7 @@ mod tests {
     #[test]
     fn test_nonzero_and() {
         use crate::utils::ops::{BitWiseOp, NonZeroOp};
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let input1 = Tensor::from_vec(
             vec![1i64, 2, 3, -1, -1, -1, -1, 4, 5, 7],
@@ -3373,7 +3387,7 @@ mod tests {
     #[test]
     fn nonzero_and_cuda() {
         use crate::utils::ops::{BitWiseOp, NonZeroOp};
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
 
         let device = Device::new_cuda(0).unwrap();
         let input1 =
@@ -3410,7 +3424,7 @@ mod tests {
     #[test]
     fn test_bitpack_8bit_cpu() {
         use crate::HqqBits;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         let bits = HqqBits::Eight;
         let device = Device::Cpu;
         let wq = Tensor::from_vec(vec![257_i32, 258, 259, 260, 511, 512], (3, 2), &device).unwrap();
@@ -3425,7 +3439,7 @@ mod tests {
     #[test]
     fn test_bitpack_8bit_cuda() {
         use crate::HqqBits;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         let bits = HqqBits::Eight;
         let device = Device::new_cuda(0).unwrap();
         // Use U8 tensor directly to avoid candle's to_dtype which may not have
@@ -3442,7 +3456,7 @@ mod tests {
     #[test]
     fn test_bitpack_8bit_metal() {
         use crate::HqqBits;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         let bits = HqqBits::Eight;
         let device = Device::new_metal(0).unwrap();
         let wq = Tensor::from_vec(vec![257_i32, 258, 259, 260, 511, 512], (3, 2), &device).unwrap();
@@ -3456,7 +3470,7 @@ mod tests {
     #[test]
     fn test_bitpack_4bit() {
         use crate::HqqBits;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         let bits = HqqBits::Four;
         let device = Device::Cpu;
         let wq = Tensor::from_vec(vec![1_u8, 2, 3, 4, 5, 6], (3, 2), &device).unwrap();
@@ -3471,7 +3485,7 @@ mod tests {
     #[test]
     fn test_bitpack_4bit_cuda() {
         use crate::HqqBits;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         let bits = HqqBits::Four;
         let device = Device::new_cuda(0).unwrap();
         let wq = Tensor::from_vec(vec![1_u8, 2, 3, 4, 5, 6], (3, 2), &device).unwrap();
@@ -3486,7 +3500,7 @@ mod tests {
     #[test]
     fn test_bitpack_4bit_metal() {
         use crate::HqqBits;
-        use candle_core::{Device, Tensor};
+        use inference_tensor::{Device, Tensor};
         let bits = HqqBits::Four;
         let device = Device::new_metal(0).unwrap();
         let wq = Tensor::from_vec(vec![1_u8, 2, 3, 4, 5, 6], (3, 2), &device).unwrap();
@@ -3500,10 +3514,10 @@ mod tests {
     #[test]
     fn test_fused_glu_metal_silu_f32() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let cpu = candle_core::Device::Cpu;
-        let metal = candle_core::Device::new_metal(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let metal = inference_tensor::Device::new_metal(0).unwrap();
 
         let a_data: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) / 64.0).collect();
         let b_data: Vec<f32> = (0..256).map(|i| (i as f32 * 0.7 - 90.0) / 50.0).collect();
@@ -3539,10 +3553,10 @@ mod tests {
     #[test]
     fn test_fused_glu_metal_silu_f16() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::{DType, Tensor};
+        use inference_tensor::{DType, Tensor};
 
-        let cpu = candle_core::Device::Cpu;
-        let metal = candle_core::Device::new_metal(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let metal = inference_tensor::Device::new_metal(0).unwrap();
 
         let a_data: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) / 64.0).collect();
         let b_data: Vec<f32> = (0..256).map(|i| (i as f32 * 0.7 - 90.0) / 50.0).collect();
@@ -3592,10 +3606,10 @@ mod tests {
     #[test]
     fn test_fused_glu_metal_all_activations() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let cpu = candle_core::Device::Cpu;
-        let metal = candle_core::Device::new_metal(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let metal = inference_tensor::Device::new_metal(0).unwrap();
 
         let a_data: Vec<f32> = (0..128).map(|i| (i as f32 - 64.0) / 32.0).collect();
         let b_data: Vec<f32> = (0..128).map(|i| (i as f32 * 0.5 - 32.0) / 20.0).collect();
@@ -3639,9 +3653,9 @@ mod tests {
     #[test]
     fn test_fused_glu_matches_candle_fallback_bf16() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::{DType, Tensor};
+        use inference_tensor::{DType, Tensor};
 
-        let metal = candle_core::Device::new_metal(0).unwrap();
+        let metal = inference_tensor::Device::new_metal(0).unwrap();
 
         // Use realistic-sized data matching model dimensions
         let n = 10240;
@@ -3705,10 +3719,10 @@ mod tests {
     #[test]
     fn test_fused_glu_cuda_silu_f32() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let cpu = candle_core::Device::Cpu;
-        let cuda = candle_core::Device::new_cuda(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let cuda = inference_tensor::Device::new_cuda(0).unwrap();
 
         let a_data: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) / 64.0).collect();
         let b_data: Vec<f32> = (0..256).map(|i| (i as f32 * 0.7 - 90.0) / 50.0).collect();
@@ -3744,10 +3758,10 @@ mod tests {
     #[test]
     fn test_fused_glu_cuda_silu_f16() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::{DType, Tensor};
+        use inference_tensor::{DType, Tensor};
 
-        let cpu = candle_core::Device::Cpu;
-        let cuda = candle_core::Device::new_cuda(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let cuda = inference_tensor::Device::new_cuda(0).unwrap();
 
         let a_data: Vec<f32> = (0..256).map(|i| (i as f32 - 128.0) / 64.0).collect();
         let b_data: Vec<f32> = (0..256).map(|i| (i as f32 * 0.7 - 90.0) / 50.0).collect();
@@ -3797,10 +3811,10 @@ mod tests {
     #[test]
     fn test_fused_glu_cuda_all_activations() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::Tensor;
+        use inference_tensor::Tensor;
 
-        let cpu = candle_core::Device::Cpu;
-        let cuda = candle_core::Device::new_cuda(0).unwrap();
+        let cpu = inference_tensor::Device::Cpu;
+        let cuda = inference_tensor::Device::new_cuda(0).unwrap();
 
         let a_data: Vec<f32> = (0..128).map(|i| (i as f32 - 64.0) / 32.0).collect();
         let b_data: Vec<f32> = (0..128).map(|i| (i as f32 * 0.5 - 32.0) / 20.0).collect();
@@ -3842,9 +3856,9 @@ mod tests {
     #[test]
     fn test_fused_glu_matches_candle_fallback_bf16_cuda() {
         use super::{GluActivationType, fused_glu};
-        use candle_core::{DType, Tensor};
+        use inference_tensor::{DType, Tensor};
 
-        let cuda = candle_core::Device::new_cuda(0).unwrap();
+        let cuda = inference_tensor::Device::new_cuda(0).unwrap();
 
         let n = 10240;
         let a_data: Vec<f32> = (0..n).map(|i| (i as f32 - 5120.0) / 2560.0).collect();
@@ -3906,7 +3920,7 @@ mod tests {
 #[cfg(all(test, feature = "cuda"))]
 mod dense_last_dim_layout_tests {
     use super::dense_last_dim_layout;
-    use candle_core::{Layout, Shape};
+    use inference_tensor::{Layout, Shape};
 
     fn layout(dims: &[usize], stride: &[usize]) -> Option<(usize, usize, usize)> {
         dense_last_dim_layout(&Layout::new(Shape::from(dims), stride.to_vec(), 0))

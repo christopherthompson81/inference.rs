@@ -2,12 +2,12 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -218,7 +218,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         (q, k) = self.rotary_emb.forward_qk_norm(
             &q,
             &k,

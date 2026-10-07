@@ -1,10 +1,10 @@
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     DummyLayer, LoraExpertInputMode, LoraExpertProjection, PreQuantizedExperts, QuantMethod,
     QuantMethodConfig, QuantizedConfig, QuantizedExpertKeys, Shard, ShardedVarBuilder,
     UnquantLinear, apply_immediate_isq_with_key, should_apply_immediate_isq,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use std::sync::Arc;
 
 use crate::cuda::moe;
@@ -192,7 +192,7 @@ impl CutileFp8ExpertsWeights {
         config: MoEForwardConfig,
     ) -> Result<Tensor> {
         if forward.lora.is_some() {
-            candle_core::bail!("dynamic LoRA is not supported on cuTile FP8 experts");
+            inference_tensor::bail!("dynamic LoRA is not supported on cuTile FP8 experts");
         }
         let activation = match config.act {
             Activation::Silu => inference_quant::GluActivationType::Silu,
@@ -200,7 +200,9 @@ impl CutileFp8ExpertsWeights {
                 inference_quant::GluActivationType::Gelu
             }
             other => {
-                candle_core::bail!("activation {other:?} is not supported by cuTile FP8 experts")
+                inference_tensor::bail!(
+                    "activation {other:?} is not supported by cuTile FP8 experts"
+                )
             }
         };
         let dev = forward.xs_flat.device().as_cuda_device()?;
@@ -312,7 +314,7 @@ impl FastExpertsWeights {
             let layer = source
                 .load_linear(key, &load_device, shard)?
                 .ok_or_else(|| {
-                    candle_core::Error::Msg(format!("Missing expert weight `{key}`."))
+                    inference_tensor::Error::Msg(format!("Missing expert weight `{key}`."))
                 })?;
             apply_immediate_isq_with_key(layer, predicate_vb, Some(key.to_string()), Some(shard))
         };
@@ -406,12 +408,12 @@ impl FastExpertsWeights {
 mod tests {
     use super::*;
     use crate::moe::experts::forward::{MoEForwardPhase, MoEForwardShape};
-    use candle_core::quantized::{GgmlDType, QTensor};
     use inference_quant::{
         GgufMatMul, LoraExecution, LoraExpertExecution, LoraExpertProjectionNames,
         LoraExpertProjectionWeights, LoraExpertSiteSpec, LoraExpertWeights, LoraLayerRegistry,
         LoraSiteKey, with_lora_execution,
     };
+    use inference_tensor::quantized::{GgmlDType, QTensor};
 
     fn values(len: usize, phase: f32) -> Vec<f32> {
         (0..len)
@@ -422,7 +424,7 @@ mod tests {
             .collect()
     }
 
-    fn tensor(shape: impl Into<candle_core::Shape>, phase: f32) -> Result<Tensor> {
+    fn tensor(shape: impl Into<inference_tensor::Shape>, phase: f32) -> Result<Tensor> {
         let shape = shape.into();
         Tensor::from_vec(values(shape.elem_count(), phase), shape, &Device::Cpu)
     }
@@ -1030,7 +1032,7 @@ impl CutileExpertsWeights {
         if forward.lora.is_some() {
             return self.forward_lora(forward, config);
         }
-        use candle_core::Storage;
+        use inference_tensor::Storage;
 
         let dev = forward.xs_flat.device().as_cuda_device()?;
         let num_tokens = forward.shape.num_tokens;
@@ -1045,7 +1047,7 @@ impl CutileExpertsWeights {
         let (ti_storage, ti_layout) = ti_flat.storage_and_layout();
         let ti_slice = match &*ti_storage {
             Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-            _ => candle_core::bail!("topk_ids must be a cuda tensor"),
+            _ => inference_tensor::bail!("topk_ids must be a cuda tensor"),
         };
         assert_eq!(ti_layout.start_offset(), 0, "expected contiguous topk_ids");
 
@@ -1083,7 +1085,7 @@ impl CutileExpertsWeights {
         let (tw_storage, tw_layout) = tw_flat.storage_and_layout();
         let tw_slice = match &*tw_storage {
             Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-            _ => candle_core::bail!("topk_weights must be a cuda tensor"),
+            _ => inference_tensor::bail!("topk_weights must be a cuda tensor"),
         };
         assert_eq!(
             tw_layout.start_offset(),
@@ -1110,7 +1112,7 @@ impl CutileExpertsWeights {
     }
 
     fn forward_lora(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
-        use candle_core::Storage;
+        use inference_tensor::Storage;
 
         let dev = forward.xs_flat.device().as_cuda_device()?;
         let num_tokens = forward.shape.num_tokens;
@@ -1124,7 +1126,7 @@ impl CutileExpertsWeights {
         let (ti_storage, ti_layout) = ti_flat.storage_and_layout();
         let ti_slice = match &*ti_storage {
             Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-            _ => candle_core::bail!("topk_ids must be a cuda tensor"),
+            _ => inference_tensor::bail!("topk_ids must be a cuda tensor"),
         };
         assert_eq!(ti_layout.start_offset(), 0, "expected contiguous topk_ids");
         let (sids, eids, ntpp, em) = inference_quant::moe::cuda::moe_align(
@@ -1162,7 +1164,7 @@ impl CutileExpertsWeights {
         let (tw_storage, tw_layout) = tw_flat.storage_and_layout();
         let tw_slice = match &*tw_storage {
             Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-            _ => candle_core::bail!("topk_weights must be a cuda tensor"),
+            _ => inference_tensor::bail!("topk_weights must be a cuda tensor"),
         };
         assert_eq!(
             tw_layout.start_offset(),
@@ -1449,7 +1451,7 @@ impl FastExpertsWeights {
         let dev = forward.xs_flat.device().as_cuda_device()?;
         let topk_ids_flat = forward.topk_ids.flatten_all()?.contiguous()?;
         let (ids_storage, ids_layout) = topk_ids_flat.storage_and_layout();
-        let candle_core::Storage::Cuda(ids_cuda) = &*ids_storage else {
+        let inference_tensor::Storage::Cuda(ids_cuda) = &*ids_storage else {
             return Ok(None);
         };
         if ids_layout.start_offset() != 0 {
@@ -1481,7 +1483,7 @@ impl FastExpertsWeights {
             intermediate,
         ))?;
         let Some(down_base) = decode.down(&down_input_flat)? else {
-            candle_core::bail!("indexed MoE LoRA down projection rejected a supported dtype");
+            inference_tensor::bail!("indexed MoE LoRA down projection rejected a supported dtype");
         };
         let down = lora.add_delta_owned(
             LoraExpertProjection::Down,
@@ -1513,7 +1515,7 @@ impl FastExpertsWeights {
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
-        use candle_core::cuda::cudarc::driver::DevicePtr;
+        use inference_tensor::cuda::cudarc::driver::DevicePtr;
 
         let dev = forward.xs_flat.device().as_cuda_device()?;
 
@@ -1535,7 +1537,7 @@ impl FastExpertsWeights {
         let topk_ids_flat = forward.topk_ids.flatten_all()?.contiguous()?;
         let (ti_storage, ti_layout) = topk_ids_flat.storage_and_layout();
         let ti_cuda = match &*ti_storage {
-            candle_core::Storage::Cuda(c) => c,
+            inference_tensor::Storage::Cuda(c) => c,
             _ => return Ok(None),
         };
         let ti_u32_slice = ti_cuda.as_cuda_slice::<u32>()?;
@@ -1549,7 +1551,7 @@ impl FastExpertsWeights {
             .contiguous()?;
         let (tw_storage, tw_layout) = tw_f32.storage_and_layout();
         let tw_cuda = match &*tw_storage {
-            candle_core::Storage::Cuda(c) => c,
+            inference_tensor::Storage::Cuda(c) => c,
             _ => return Ok(None),
         };
         let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
@@ -1601,7 +1603,7 @@ impl FastExpertsWeights {
         let topk_ids_flat = forward.topk_ids.flatten_all()?.contiguous()?;
         let (ti_storage, ti_layout) = topk_ids_flat.storage_and_layout();
         let ti_cuda = match &*ti_storage {
-            candle_core::Storage::Cuda(c) => c,
+            inference_tensor::Storage::Cuda(c) => c,
             _ => return Ok(None),
         };
         let ti_u32_slice = ti_cuda.as_cuda_slice::<u32>()?;
@@ -1657,7 +1659,7 @@ impl FastExpertsWeights {
                 dev,
             )?)
         } else {
-            let project = |qt: &candle_core::quantized::QTensor| {
+            let project = |qt: &inference_tensor::quantized::QTensor| {
                 inference_quant::grouped_moe_mmq(
                     qt,
                     forward.xs_flat,
@@ -1706,7 +1708,7 @@ impl FastExpertsWeights {
         };
 
         let down = if let (Some(glu_activation), None) = (glu_activation, &lora_activated) {
-            use candle_core::cuda::cudarc::driver::DevicePtr;
+            use inference_tensor::cuda::cudarc::driver::DevicePtr;
             let tw_f32 = forward
                 .topk_weights
                 .flatten_all()?
@@ -1714,7 +1716,7 @@ impl FastExpertsWeights {
                 .contiguous()?;
             let (tw_storage, tw_layout) = tw_f32.storage_and_layout();
             let tw_cuda = match &*tw_storage {
-                candle_core::Storage::Cuda(c) => c,
+                inference_tensor::Storage::Cuda(c) => c,
                 _ => return Ok(None),
             };
             let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
@@ -1831,7 +1833,7 @@ impl FastExpertsWeights {
 #[cfg(test)]
 mod immediate_isq_tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
     use regex::Regex;
     use std::collections::HashMap;
 

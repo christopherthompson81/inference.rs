@@ -3,9 +3,6 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use candle_core::{
-    CudaDevice, CudaStorage, DType, Device, DeviceLocation, Result, Shape, Storage, Tensor,
-};
 use cutile::core::f8e4m3fn;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
@@ -13,6 +10,9 @@ use cutile::tensor::IntoPartition;
 use cutile::tile_kernel::{CompileOptions, TileKernel};
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::{
+    CudaDevice, CudaStorage, DType, Device, DeviceLocation, Result, Shape, Storage, Tensor,
+};
 
 use super::tune::{
     Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
@@ -260,13 +260,13 @@ enum ActivationDType {
 }
 
 impl TryFrom<DType> for ActivationDType {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
 
     fn try_from(dtype: DType) -> Result<Self> {
         match dtype {
             DType::BF16 => Ok(Self::Bf16),
             DType::F16 => Ok(Self::F16),
-            dtype => candle_core::bail!("cuTile W8A16 does not support {dtype:?} activations"),
+            dtype => inference_tensor::bail!("cuTile W8A16 does not support {dtype:?} activations"),
         }
     }
 }
@@ -492,7 +492,7 @@ fn validate_scale_shape(
         Fp8WeightScaleLayout::Block(_) => false,
     };
     if !valid {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuTile W8A16 scale shape {:?} does not match {layout:?} for weight [{n}, {k}]",
             scales.dims()
         )
@@ -513,29 +513,29 @@ fn launch(operands: &GemmOperands<'_>, cfg: Fp8W8A16Config, compile_only: bool) 
         || !n.is_multiple_of(BLOCK_SIZE)
         || !k.is_multiple_of(BLOCK_SIZE)
     {
-        candle_core::bail!("cuTile W8A16 got unsupported shape rows={rows} n={n} k={k}")
+        inference_tensor::bail!("cuTile W8A16 got unsupported shape rows={rows} n={n} k={k}")
     }
     if !matches!(activation.dtype(), DType::BF16 | DType::F16)
         || weight.dtype() != DType::F8E4M3
         || scales.dtype() != DType::F32
     {
-        candle_core::bail!("cuTile W8A16 needs A16 activations, E4M3 weights, and F32 scales")
+        inference_tensor::bail!("cuTile W8A16 needs A16 activations, E4M3 weights, and F32 scales")
     }
     if !activation.device().same_device(weight.device())
         || !activation.device().same_device(scales.device())
     {
-        candle_core::bail!("cuTile W8A16 operands must be on the same device")
+        inference_tensor::bail!("cuTile W8A16 operands must be on the same device")
     }
     let Device::Cuda(dev) = activation.device() else {
-        candle_core::bail!("cuTile W8A16 operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile W8A16 operands must be CUDA tensors")
     };
     validate_scale_shape(&scales, operands.scale_layout, n, k)?;
     let bm = usize::try_from(cfg.bm).unwrap_or(0);
     if bm == 0 || !BLOCK_SIZE.is_multiple_of(bm) {
-        candle_core::bail!("cuTile W8A16 row tile {} must divide {BLOCK_SIZE}", cfg.bm)
+        inference_tensor::bail!("cuTile W8A16 row tile {} must divide {BLOCK_SIZE}", cfg.bm)
     }
     if cfg.map_m <= 0 || cfg.map_n <= 0 {
-        candle_core::bail!("cuTile W8A16 map dimensions must be positive")
+        inference_tensor::bail!("cuTile W8A16 map dimensions must be positive")
     }
     let padded_rows = rows.div_ceil(bm) * bm;
     let padded_activation;
@@ -556,7 +556,7 @@ fn launch(operands: &GemmOperands<'_>, cfg: Fp8W8A16Config, compile_only: bool) 
     let (Storage::Cuda(a_cuda), Storage::Cuda(w_cuda), Storage::Cuda(s_cuda)) =
         (&*a_storage, &*w_storage, &*s_storage)
     else {
-        candle_core::bail!("cuTile W8A16 operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile W8A16 operands must be CUDA tensors")
     };
     let (w_addr, _w_guard) = slice_ptr_on_stream(
         w_cuda.as_cuda_slice::<F8E4M3>()?,
@@ -617,7 +617,7 @@ fn launch(operands: &GemmOperands<'_>, cfg: Fp8W8A16Config, compile_only: bool) 
             if compile_only {
                 catch_cutile_panic("W8A16 compile", || {
                     launcher.compile_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "cuTile {} compile failed: {error:?}",
                             $label
                         ))
@@ -626,7 +626,7 @@ fn launch(operands: &GemmOperands<'_>, cfg: Fp8W8A16Config, compile_only: bool) 
             } else {
                 catch_cutile_panic("W8A16 launch", || unsafe {
                     launcher.async_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "cuTile {} launch failed: {error:?}",
                             $label
                         ))
@@ -774,7 +774,7 @@ impl GemmTuner {
         let sets = self.sets.clone();
         let key = sets[0].key;
         if let std::collections::hash_map::Entry::Vacant(slot) = self.operands.entry(rows) {
-            let device = candle_core::Device::Cuda(dev.clone());
+            let device = inference_tensor::Device::Cuda(dev.clone());
             let activation =
                 Tensor::rand(-1f32, 1f32, (rows, key.k), &device)?.to_dtype(match key.dtype {
                     ActivationDType::Bf16 => DType::BF16,
@@ -832,7 +832,7 @@ impl CutileKernel for Fp8W8A16Kernel {
             let mut tuner = GemmTuner::new(dev, sets);
             let tuned = tune(dev, mode, &request, |rows, candidate| {
                 let cfg = Fp8W8A16Config::from_config(candidate)
-                    .ok_or_else(|| candle_core::Error::msg("config outside the space"))?;
+                    .ok_or_else(|| inference_tensor::Error::msg("config outside the space"))?;
                 tuner.prepare(rows, cfg)
             });
             TUNED.set(key, &tuned, Fp8W8A16Config::from_config);
@@ -878,8 +878,8 @@ impl CutileKernel for Fp8W8A16Kernel {
 mod tests {
     use super::{cutile_fp8_w8a16, validate_scale_shape};
     use crate::Fp8WeightScaleLayout;
-    use candle_core::{DType, Device, Result, Tensor};
     use float8::F8E4M3;
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     type ScaleAt = Box<dyn Fn(usize, usize) -> f32>;
 
@@ -934,9 +934,9 @@ mod tests {
             Fp8WeightScaleLayout::Block(_) => unreachable!(),
         };
         let scale_shape = match scale_layout {
-            Fp8WeightScaleLayout::Tensor => candle_core::Shape::from_dims(&[]),
-            Fp8WeightScaleLayout::Channel => candle_core::Shape::from_dims(&[N]),
-            Fp8WeightScaleLayout::Block(_) => candle_core::Shape::from_dims(&[2, 2]),
+            Fp8WeightScaleLayout::Tensor => inference_tensor::Shape::from_dims(&[]),
+            Fp8WeightScaleLayout::Channel => inference_tensor::Shape::from_dims(&[N]),
+            Fp8WeightScaleLayout::Block(_) => inference_tensor::Shape::from_dims(&[2, 2]),
         };
         let x = Tensor::from_vec(x_values.clone(), (ROWS, K), &device)?.to_dtype(dtype)?;
         let weight = Tensor::from_vec(q_values.clone(), (N, K), &device)?;

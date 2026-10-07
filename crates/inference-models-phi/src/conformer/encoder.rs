@@ -3,9 +3,9 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{D, DType, IndexOp, Result, Tensor};
-use candle_nn::{BatchNorm, Conv1d, Conv1dConfig, LayerNorm, Linear, ModuleT};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::{BatchNorm, Conv1d, Conv1dConfig, LayerNorm, Linear, ModuleT};
+use inference_tensor::{D, DType, IndexOp, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
@@ -686,7 +686,7 @@ fn unfold_tensor(xs_pad: &Tensor, max_seq_len: usize) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     #[test]
     fn test_unfold_tensor() -> Result<()> {

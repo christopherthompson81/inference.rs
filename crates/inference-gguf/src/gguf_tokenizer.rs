@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::atomic::Ordering};
 use crate::metadata::ContentMetadata;
 use ahash::AHashMap;
 use anyhow::Result;
-use candle_core::quantized::gguf_file::Value;
 use inference_nn::utils::debug::DEBUG;
+use inference_tensor::quantized::gguf_file::Value;
 use tokenizers::pre_tokenizers::{
     PreTokenizerWrapper,
     sequence::Sequence,
@@ -204,7 +204,7 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
     };
 
     let md_get = |s: &str| match metadata.metadata.get(s) {
-        None => candle_core::bail!("cannot find {s} in metadata"),
+        None => inference_tensor::bail!("cannot find {s} in metadata"),
         Some(v) => Ok(v),
     };
 
@@ -740,9 +740,9 @@ mod tests {
         validate_external_gguf_tokenizer,
     };
     use anyhow::Result;
-    use candle_core::quantized::gguf_file::Value;
     use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
     use inference_nn::utils::tokenizer::tokenizer_from_file;
+    use inference_tensor::quantized::gguf_file::Value;
     use std::collections::HashMap;
     use tokenizers::Tokenizer;
 

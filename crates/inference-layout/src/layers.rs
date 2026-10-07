@@ -1,5 +1,5 @@
-use candle_core::{Module, Result, Tensor};
-use candle_nn::{Activation, Conv2d, Conv2dConfig, VarBuilder};
+use inference_tensor::nn::{Activation, Conv2d, Conv2dConfig, VarBuilder};
+use inference_tensor::{Module, Result, Tensor};
 
 const BN_EPS: f64 = 1e-5;
 /// Below this many input channels per-tap CPU GEMMs are too thin and im2col + one GEMM wins (stem conv).
@@ -120,7 +120,10 @@ fn activate(xs: Tensor, act: Option<Activation>) -> Result<Tensor> {
 }
 
 /// `Some(act)` when the AVX2 CPU kernels can fuse this activation on this device.
-fn cpu_fused(dev: &candle_core::Device, act: Option<Activation>) -> Option<crate::cpu_direct::Act> {
+fn cpu_fused(
+    dev: &inference_tensor::Device,
+    act: Option<Activation>,
+) -> Option<crate::cpu_direct::Act> {
     if dev.is_cpu() && crate::cpu_direct::available() {
         crate::cpu_direct::Act::from_candle(act)
     } else {
@@ -359,7 +362,7 @@ impl ConvNormSpec {
             || self.padding != (self.kernel - 1) / 2
             || self.stride != one_by_one.stride
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "RepVGG merge needs a same-padded odd k*k conv and an unpadded 1x1 conv with the same stride"
             );
         }
@@ -403,19 +406,19 @@ impl ConvNormSpec {
         } else if self.groups == 1 {
             Conv::Dense(Dense::new(w, b, geom, self.act)?)
         } else {
-            candle_core::bail!("grouped conv with groups={} is not supported", self.groups);
+            inference_tensor::bail!("grouped conv with groups={} is not supported", self.groups);
         };
         Ok(ConvNorm { conv })
     }
 }
 
-/// `candle_nn::Linear` that makes 3-D inputs contiguous first: candle's CPU batched matmul is wrong for batch items
+/// `inference_tensor::nn::Linear` that makes 3-D inputs contiguous first: candle's CPU batched matmul is wrong for batch items
 /// > 0 when the lhs is a transposed view.
 #[derive(Debug, Clone)]
-pub struct Linear(candle_nn::Linear);
+pub struct Linear(inference_tensor::nn::Linear);
 
 pub fn linear(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Linear> {
-    candle_nn::linear(in_dim, out_dim, vb).map(Linear)
+    inference_tensor::nn::linear(in_dim, out_dim, vb).map(Linear)
 }
 
 impl Module for Linear {
@@ -470,7 +473,7 @@ impl Module for MlpHead {
 mod tests {
     use super::*;
     use crate::test_util::{devices, rel_err};
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     // GELU has no fused kernel, so it exercises each variant's unfused path next to the fused ones
     const ACTS: [Option<Activation>; 4] = [

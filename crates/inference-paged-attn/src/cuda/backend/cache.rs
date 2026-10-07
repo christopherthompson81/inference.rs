@@ -2,12 +2,12 @@ use std::{collections::HashMap, iter::zip, mem::size_of, sync::Arc};
 
 use crate::cuda::backend::{slice_ptr, slice_ptr_on_stream};
 use crate::cuda::ffi::{copy_blocks_bf16, copy_blocks_f16, copy_blocks_f32, copy_blocks_u8};
-use candle_core::Result;
-use candle_core::backend::BackendDevice;
-use candle_core::cuda_backend::CudaStorageSlice;
-use candle_core::cuda_backend::cudarc::driver::CudaStream;
-use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
-use candle_core::{Device, Storage, Tensor, cuda_backend::cudarc::driver::CudaSlice};
+use inference_tensor::Result;
+use inference_tensor::backend::BackendDevice;
+use inference_tensor::cuda_backend::CudaStorageSlice;
+use inference_tensor::cuda_backend::cudarc::driver::CudaStream;
+use inference_tensor::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
+use inference_tensor::{Device, Storage, Tensor, cuda_backend::cudarc::driver::CudaSlice};
 
 fn ensure_allocation_stream<T>(
     slice: &CudaSlice<T>,
@@ -16,7 +16,7 @@ fn ensure_allocation_stream<T>(
     cache: &str,
 ) -> Result<()> {
     if !Arc::ptr_eq(slice.stream(), stream) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "copy_blocks {cache} cache layer {layer} was allocated on a different CUDA stream"
         );
     }
@@ -32,10 +32,10 @@ pub fn copy_blocks(
         if value_caches.is_empty() {
             return Ok(());
         }
-        candle_core::bail!("copy_blocks requires the same number of key and value caches");
+        inference_tensor::bail!("copy_blocks requires the same number of key and value caches");
     }
     if key_caches.len() != value_caches.len() {
-        candle_core::bail!("copy_blocks requires the same number of key and value caches");
+        inference_tensor::bail!("copy_blocks requires the same number of key and value caches");
     }
     if block_mapping.values().all(Vec::is_empty) {
         return Ok(());
@@ -43,19 +43,19 @@ pub fn copy_blocks(
 
     let cache_dev = key_caches[0].device();
     let Device::Cuda(dev) = cache_dev else {
-        candle_core::bail!("copy_blocks requires CUDA caches")
+        inference_tensor::bail!("copy_blocks requires CUDA caches")
     };
     let stream = dev.cuda_stream();
     let capture_status = stream
         .capture_status()
-        .map_err(|error| candle_core::Error::Cuda(Box::new(error)))?;
+        .map_err(|error| inference_tensor::Error::Cuda(Box::new(error)))?;
     if capture_status != CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
-        candle_core::bail!("copy_blocks cannot run during CUDA graph capture");
+        inference_tensor::bail!("copy_blocks cannot run during CUDA graph capture");
     }
 
     let dtype = key_caches[0].dtype();
     if key_caches[0].rank() == 0 || value_caches[0].rank() == 0 {
-        candle_core::bail!("copy_blocks caches must have a block dimension");
+        inference_tensor::bail!("copy_blocks caches must have a block dimension");
     }
     let numel_per_block_key = key_caches[0].dims()[1..].iter().product::<usize>();
     let numel_per_block_value = value_caches[0].dims()[1..].iter().product::<usize>();
@@ -70,35 +70,37 @@ pub fn copy_blocks(
         let (Device::Cuda(key_dev), Device::Cuda(value_dev)) =
             (key_cache.device(), value_cache.device())
         else {
-            candle_core::bail!("copy_blocks cache layer {layer} is not on CUDA");
+            inference_tensor::bail!("copy_blocks cache layer {layer} is not on CUDA");
         };
         if !cache_dev.same_device(key_cache.device())
             || !cache_dev.same_device(value_cache.device())
         {
-            candle_core::bail!("copy_blocks cache layer {layer} is on a different CUDA device");
+            inference_tensor::bail!(
+                "copy_blocks cache layer {layer} is on a different CUDA device"
+            );
         }
         if !Arc::ptr_eq(&stream, &key_dev.cuda_stream())
             || !Arc::ptr_eq(&stream, &value_dev.cuda_stream())
         {
-            candle_core::bail!("copy_blocks cache layer {layer} uses a different CUDA stream");
+            inference_tensor::bail!("copy_blocks cache layer {layer} uses a different CUDA stream");
         }
         if key_cache.dtype() != dtype || value_cache.dtype() != dtype {
-            candle_core::bail!("copy_blocks cache layer {layer} has a mismatched dtype");
+            inference_tensor::bail!("copy_blocks cache layer {layer} has a mismatched dtype");
         }
         if key_cache.rank() == 0 || value_cache.rank() == 0 {
-            candle_core::bail!("copy_blocks cache layer {layer} must have a block dimension");
+            inference_tensor::bail!("copy_blocks cache layer {layer} must have a block dimension");
         }
         if !key_cache.is_contiguous() || !value_cache.is_contiguous() {
-            candle_core::bail!("copy_blocks cache layer {layer} must be contiguous");
+            inference_tensor::bail!("copy_blocks cache layer {layer} must be contiguous");
         }
         if key_cache.dims()[1..].iter().product::<usize>() != numel_per_block_key
             || value_cache.dims()[1..].iter().product::<usize>() != numel_per_block_value
         {
-            candle_core::bail!("copy_blocks cache layer {layer} has a mismatched block shape");
+            inference_tensor::bail!("copy_blocks cache layer {layer} has a mismatched block shape");
         }
         for (src_block, dst_blocks) in block_mapping {
             if *src_block >= key_cache.dims()[0] || *src_block >= value_cache.dims()[0] {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "copy_blocks source block {src_block} is out of bounds for cache layer {layer}"
                 );
             }
@@ -106,7 +108,7 @@ pub fn copy_blocks(
                 .iter()
                 .find(|dst| **dst >= key_cache.dims()[0] || **dst >= value_cache.dims()[0])
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "copy_blocks destination block {dst_block} is out of bounds for cache layer {layer}"
                 );
             }
@@ -163,7 +165,7 @@ pub fn copy_blocks(
                     (ptr_key, ptr_value, key_guard, value_guard)
                 }
                 _ => {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "only f32, f16, bf16 and f8e4m3 input data types are supported"
                     );
                 }
@@ -192,7 +194,7 @@ pub fn copy_blocks(
     key_cache_ptrs.extend(block_mapping_vec);
     let device_metadata = stream
         .clone_htod(&key_cache_ptrs)
-        .map_err(|error| candle_core::Error::Cuda(Box::new(error)))?;
+        .map_err(|error| inference_tensor::Error::Cuda(Box::new(error)))?;
     let (metadata_ptr, _metadata_guard) = slice_ptr_on_stream(&device_metadata, 0, &stream);
     let key_cache_ptr = metadata_ptr as *mut core::ffi::c_void;
     let value_cache_ptr =
@@ -203,7 +205,7 @@ pub fn copy_blocks(
     let numel_per_block_value = i32::try_from(numel_per_block_value)?;
 
     match dtype {
-        candle_core::DType::BF16 => unsafe {
+        inference_tensor::DType::BF16 => unsafe {
             copy_blocks_bf16(
                 key_cache_ptr,
                 value_cache_ptr,
@@ -215,7 +217,7 @@ pub fn copy_blocks(
                 stream.cu_stream() as i64,
             );
         },
-        candle_core::DType::F16 => unsafe {
+        inference_tensor::DType::F16 => unsafe {
             copy_blocks_f16(
                 key_cache_ptr,
                 value_cache_ptr,
@@ -227,7 +229,7 @@ pub fn copy_blocks(
                 stream.cu_stream() as i64,
             );
         },
-        candle_core::DType::F32 => unsafe {
+        inference_tensor::DType::F32 => unsafe {
             copy_blocks_f32(
                 key_cache_ptr,
                 value_cache_ptr,
@@ -239,7 +241,7 @@ pub fn copy_blocks(
                 stream.cu_stream() as i64,
             );
         },
-        candle_core::DType::F8E4M3 => unsafe {
+        inference_tensor::DType::F8E4M3 => unsafe {
             copy_blocks_u8(
                 key_cache_ptr,
                 value_cache_ptr,
@@ -270,7 +272,7 @@ pub unsafe fn swap_blocks(
     match (src.device(), dst.device()) {
         (Device::Cuda(src_dev), Device::Cuda(dst_dev)) => {
             if src_dev.location() != dst_dev.location() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Tensors must be on the same device to copy, got locations {:?} (src) and {:?} (dst).",
                     src_dev.location(),
                     dst_dev.location()
@@ -308,7 +310,7 @@ pub unsafe fn swap_blocks(
                     (ptr_src, ptr_dst)
                 }
                 _ => {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "only f32, f16, bf16 and f8e4m3 input data types are supported"
                     )
                 }
@@ -366,7 +368,7 @@ pub unsafe fn swap_blocks(
             }
         }
         (src, dst) => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst)."
             );
         }
@@ -389,13 +391,13 @@ mod tests {
             (6, 4),
             &device,
         )?
-        .to_dtype(candle_core::DType::BF16)?;
+        .to_dtype(inference_tensor::DType::BF16)?;
         let value_base = Tensor::from_vec(
             (100..124).map(|value| value as f32).collect::<Vec<_>>(),
             (6, 4),
             &device,
         )?
-        .to_dtype(candle_core::DType::BF16)?;
+        .to_dtype(inference_tensor::DType::BF16)?;
         let mut key = key_base.narrow(0, 1, 4)?;
         let mut value = value_base.narrow(0, 1, 4)?;
         let mapping = HashMap::from([(0, vec![2]), (1, vec![3])]);
@@ -405,7 +407,7 @@ mod tests {
 
         assert_eq!(
             key_base
-                .to_dtype(candle_core::DType::F32)?
+                .to_dtype(inference_tensor::DType::F32)?
                 .to_vec2::<f32>()?,
             vec![
                 vec![0.0, 1.0, 2.0, 3.0],
@@ -418,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             value_base
-                .to_dtype(candle_core::DType::F32)?
+                .to_dtype(inference_tensor::DType::F32)?
                 .to_vec2::<f32>()?,
             vec![
                 vec![100.0, 101.0, 102.0, 103.0],
@@ -444,14 +446,14 @@ mod tests {
         let alternate_stream = stream
             .context()
             .new_stream()
-            .map_err(|error| candle_core::Error::Cuda(Box::new(error)))?;
+            .map_err(|error| inference_tensor::Error::Cuda(Box::new(error)))?;
         assert!(!Arc::ptr_eq(&stream, &alternate_stream));
         let key_slice = alternate_stream
             .clone_htod(&(0..16).map(|value| value as f32).collect::<Vec<_>>())
-            .map_err(|error| candle_core::Error::Cuda(Box::new(error)))?;
-        let key_storage = candle_core::CudaStorage::wrap_cuda_slice(key_slice, dev.clone());
+            .map_err(|error| inference_tensor::Error::Cuda(Box::new(error)))?;
+        let key_storage = inference_tensor::CudaStorage::wrap_cuda_slice(key_slice, dev.clone());
         let mut key = Tensor::from((Storage::Cuda(key_storage), (4, 4)));
-        let mut value = Tensor::zeros((4, 4), candle_core::DType::F32, &device)?;
+        let mut value = Tensor::zeros((4, 4), inference_tensor::DType::F32, &device)?;
         let mapping = HashMap::from([(0, vec![1])]);
 
         let error = copy_blocks(vec![&mut key], vec![&mut value], &mapping)

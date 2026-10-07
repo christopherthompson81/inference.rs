@@ -2,11 +2,11 @@
 //! past the last sequence and over a paged cache.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_fattn::{
     FattnOptions, KvScales, Packed, PagedKv, flash_attn_paged_varlen, flash_attn_varlen,
     paged_kv_len, varlen_causal_mask, varlen_kv_len,
 };
+use inference_tensor::{DType, Device, Tensor};
 
 use crate::fp8::{FP8_SCALES, FP8_TOLERANCE, store};
 use crate::parity::{Case, N_HEAD, TOLERANCE, case, cuda, reference};

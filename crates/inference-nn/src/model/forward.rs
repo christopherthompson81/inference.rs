@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use candle_core::{Device, DeviceLocation, Tensor};
 use inference_quant::QuantMethod;
+use inference_tensor::{Device, DeviceLocation, Tensor};
 
 use crate::{
     attention::FlashParams,
@@ -146,7 +146,7 @@ impl RecurrentMetadata {
 }
 
 impl PastKvLenCache for ForwardMaskCache<'_> {
-    fn get_past_kv_len(&self) -> candle_core::Result<usize> {
+    fn get_past_kv_len(&self) -> inference_tensor::Result<usize> {
         match self {
             Self::Normal(cache) => Ok(cache
                 .iter()
@@ -303,10 +303,10 @@ impl<'a> ModelForwardContext<'a> {
         &mut self,
         device: &Device,
         seq_len: usize,
-    ) -> candle_core::Result<Option<&Tensor>> {
+    ) -> inference_tensor::Result<Option<&Tensor>> {
         if self.flash_params.packed {
             let positions = self.cache.rope_positions(device).ok_or_else(|| {
-                candle_core::Error::msg("packed prefill is missing RoPE positions")
+                inference_tensor::Error::msg("packed prefill is missing RoPE positions")
             })?;
             return Ok(Some(positions));
         }
@@ -329,7 +329,7 @@ impl<'a> ModelForwardContext<'a> {
         seqlen_offsets: &[usize],
         seq_len: usize,
         device: &Device,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         text_positions_tensor(seqlen_offsets, seq_len, device)
     }
 
@@ -347,7 +347,7 @@ impl<'a> ModelForwardContext<'a> {
 
     /// Runs `head` on the selected rows, or returns a rank-preserving placeholder when the pipeline
     /// discards this forward's logits.
-    pub fn lm_head(&self, head: &dyn QuantMethod, xs: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn lm_head(&self, head: &dyn QuantMethod, xs: &Tensor) -> inference_tensor::Result<Tensor> {
         if self.needs_logits() {
             return head.forward(xs);
         }
@@ -365,14 +365,14 @@ impl<'a> ModelForwardContext<'a> {
         }
     }
 
-    pub fn logits(&self, logits: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn logits(&self, logits: &Tensor) -> inference_tensor::Result<Tensor> {
         let devices = [logits.device().clone()];
         let selection = if self.flash_params.packed {
             let query_lens = self
                 .paged_input_metadata()
                 .and_then(|metadata| metadata.query_lens.as_deref())
                 .ok_or_else(|| {
-                    candle_core::Error::msg("packed prefill requires logical query lengths")
+                    inference_tensor::Error::msg("packed prefill requires logical query lengths")
                 })?;
             LogitsSelection::from_packed_context_lens(
                 logits,
@@ -391,11 +391,11 @@ pub fn text_positions_tensor(
     seqlen_offsets: &[usize],
     seq_len: usize,
     device: &Device,
-) -> candle_core::Result<Tensor> {
+) -> inference_tensor::Result<Tensor> {
     let mut positions = Vec::with_capacity(seqlen_offsets.len() * seq_len);
     for offset in seqlen_offsets {
         for seq_idx in 0..seq_len {
-            positions.push(u32::try_from(offset + seq_idx).map_err(candle_core::Error::wrap)?);
+            positions.push(u32::try_from(offset + seq_idx).map_err(inference_tensor::Error::wrap)?);
         }
     }
     Tensor::from_vec(positions, (seqlen_offsets.len() * seq_len,), device)
@@ -405,16 +405,16 @@ pub fn decode_positions_tensor(
     position_ids: &[usize],
     seq_len: usize,
     device: &Device,
-) -> candle_core::Result<Tensor> {
+) -> inference_tensor::Result<Tensor> {
     let mut positions = Vec::with_capacity(position_ids.len() * seq_len);
     for end in position_ids {
         let start = end.checked_sub(seq_len).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "decode position end {end} is smaller than query length {seq_len}"
             ))
         })?;
         for position in start..*end {
-            positions.push(u32::try_from(position).map_err(candle_core::Error::wrap)?);
+            positions.push(u32::try_from(position).map_err(inference_tensor::Error::wrap)?);
         }
     }
     Tensor::from_vec(positions, (position_ids.len() * seq_len,), device)
@@ -444,28 +444,28 @@ impl LogitsSelection {
         source: &Tensor,
         context_lens: &[(usize, usize)],
         devices: &[Device],
-    ) -> candle_core::Result<Self> {
+    ) -> inference_tensor::Result<Self> {
         let dims = source.dims();
         if dims.len() < 2 {
-            candle_core::bail!("logits selection source must have rank >= 2");
+            inference_tensor::bail!("logits selection source must have rank >= 2");
         }
         let batch = dims[0];
         let seq_len = dims[1];
         if context_lens.len() != batch {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "logits selection batch mismatch: {} spans for batch {batch}",
                 context_lens.len()
             );
         }
         let Some((first_start, first_len)) = context_lens.first().copied() else {
-            candle_core::bail!("logits selection requires at least one span");
+            inference_tensor::bail!("logits selection requires at least one span");
         };
         for (start, len) in context_lens.iter().copied() {
             let end = start
                 .checked_add(len)
-                .ok_or_else(|| candle_core::Error::msg("logits selection span overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("logits selection span overflow"))?;
             if end > seq_len {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "logits selection span ({start}, {len}) exceeds sequence length {seq_len}"
                 );
             }
@@ -484,7 +484,7 @@ impl LogitsSelection {
         }
 
         if context_lens.iter().any(|(_, len)| *len != first_len) {
-            candle_core::bail!("ragged logits selection spans are not supported");
+            inference_tensor::bail!("ragged logits selection spans are not supported");
         }
 
         let mut flat_indices = Vec::with_capacity(batch * first_len);
@@ -494,8 +494,10 @@ impl LogitsSelection {
                 let idx = batch_idx
                     .checked_mul(seq_len)
                     .and_then(|idx| idx.checked_add(pos))
-                    .ok_or_else(|| candle_core::Error::msg("logits selection index overflow"))?;
-                flat_indices.push(u32::try_from(idx).map_err(candle_core::Error::wrap)?);
+                    .ok_or_else(|| {
+                        inference_tensor::Error::msg("logits selection index overflow")
+                    })?;
+                flat_indices.push(u32::try_from(idx).map_err(inference_tensor::Error::wrap)?);
             }
         }
 
@@ -516,10 +518,10 @@ impl LogitsSelection {
         context_lens: &[(usize, usize)],
         query_lens: &[usize],
         devices: &[Device],
-    ) -> candle_core::Result<Self> {
+    ) -> inference_tensor::Result<Self> {
         let (physical_batch, physical_seq_len, _) = source.dims3()?;
         if context_lens.len() != query_lens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed logits selection length mismatch: {} spans for {} queries",
                 context_lens.len(),
                 query_lens.len()
@@ -527,31 +529,32 @@ impl LogitsSelection {
         }
         let total_tokens = query_lens.iter().sum::<usize>();
         if physical_batch * physical_seq_len != total_tokens {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed logits selection token mismatch: source has {} rows, queries have {total_tokens}",
                 physical_batch * physical_seq_len
             );
         }
         let Some((_, output_len)) = context_lens.first().copied() else {
-            candle_core::bail!("packed logits selection requires at least one span");
+            inference_tensor::bail!("packed logits selection requires at least one span");
         };
         if context_lens.iter().any(|(_, len)| *len != output_len) {
-            candle_core::bail!("ragged packed logits selection spans are not supported");
+            inference_tensor::bail!("ragged packed logits selection spans are not supported");
         }
 
         let mut indices = Vec::with_capacity(context_lens.len() * output_len);
         let mut base = 0usize;
         for ((start, len), query_len) in context_lens.iter().copied().zip(query_lens) {
-            let end = start
-                .checked_add(len)
-                .ok_or_else(|| candle_core::Error::msg("packed logits selection span overflow"))?;
+            let end = start.checked_add(len).ok_or_else(|| {
+                inference_tensor::Error::msg("packed logits selection span overflow")
+            })?;
             if end > *query_len {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "packed logits selection span ({start}, {len}) exceeds query length {query_len}"
                 );
             }
             for position in start..end {
-                indices.push(u32::try_from(base + position).map_err(candle_core::Error::wrap)?);
+                indices
+                    .push(u32::try_from(base + position).map_err(inference_tensor::Error::wrap)?);
             }
             base += query_len;
         }
@@ -569,7 +572,7 @@ impl LogitsSelection {
         })
     }
 
-    pub fn select(&self, logits: &Tensor) -> candle_core::Result<Tensor> {
+    pub fn select(&self, logits: &Tensor) -> inference_tensor::Result<Tensor> {
         match self {
             Self::All => Ok(logits.clone()),
             Self::Decode { start, len } => {
@@ -587,13 +590,13 @@ impl LogitsSelection {
             } => {
                 let (logits_batch, seq_len, hidden) = logits.dims3()?;
                 if logits_batch != *batch {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "logits selection batch mismatch: logits batch {logits_batch}, selection batch {batch}"
                     );
                 }
-                let indices = indices
-                    .get(&logits.device().location())
-                    .ok_or_else(|| candle_core::Error::msg("missing logits selection indices"))?;
+                let indices = indices.get(&logits.device().location()).ok_or_else(|| {
+                    inference_tensor::Error::msg("missing logits selection indices")
+                })?;
                 let flat = logits.reshape((logits_batch * seq_len, hidden))?;
                 flat.index_select(indices, 0)?
                     .reshape((*batch, *len, hidden))
@@ -604,9 +607,9 @@ impl LogitsSelection {
                 len,
             } => {
                 let (physical_batch, physical_seq_len, hidden) = logits.dims3()?;
-                let indices = indices
-                    .get(&logits.device().location())
-                    .ok_or_else(|| candle_core::Error::msg("missing logits selection indices"))?;
+                let indices = indices.get(&logits.device().location()).ok_or_else(|| {
+                    inference_tensor::Error::msg("missing logits selection indices")
+                })?;
                 logits
                     .reshape((physical_batch * physical_seq_len, hidden))?
                     .index_select(indices, 0)?
@@ -619,14 +622,14 @@ impl LogitsSelection {
 pub fn extract_logits(
     logits: &Tensor,
     context_lens: Vec<(usize, usize)>,
-) -> candle_core::Result<Tensor> {
+) -> inference_tensor::Result<Tensor> {
     LogitsSelection::from_context_lens(logits, &context_lens, &[logits.device().clone()])?
         .select(logits)
 }
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Result, Tensor};
+    use inference_tensor::{Device, Result, Tensor};
 
     use super::*;
 

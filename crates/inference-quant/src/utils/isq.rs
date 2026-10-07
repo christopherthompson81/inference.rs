@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Tensor, quantized::GgmlDType};
+use inference_tensor::{DType, Device, Result, Tensor, quantized::GgmlDType};
 
 use crate::{
     ImmediateIsqMatch, ImmediateIsqParams, IsqConsumer, IsqRequest, IsqType, PendingIsqLayer,
@@ -155,18 +155,18 @@ pub fn quantize_expert_stack_with_bias(
     if let Some(bias) = &bias
         && bias.dims() != [experts, output]
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Stacked expert bias shape {:?} does not match weight shape {:?}; expected [{experts}, {output}].",
             bias.dims(),
             stack.dims()
         );
     }
     if !ty.supports_stacked_gather() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Cannot quantize stacked expert weights to {ty}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, or omit ISQ."
         );
     }
-    if candle_core::quantized::GgmlDType::try_from(ty).is_ok() {
+    if inference_tensor::quantized::GgmlDType::try_from(ty).is_ok() {
         n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let w = crate::GgufMatMul::quantize_expert_stack(
             &stack,
@@ -181,7 +181,7 @@ pub fn quantize_expert_stack_with_bias(
         return Ok(Arc::new(crate::GgufMatMul::from_qtensor(w, bias)));
     }
     let unquant = Arc::new(crate::UnquantLinear::new(
-        crate::QuantMethodConfig::Unquantized(candle_nn::Linear::new(stack, bias)),
+        crate::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(stack, bias)),
     )?) as Arc<dyn QuantMethod>;
     unquant.apply_isq(Some(ty), device.clone(), n_quantized, imatrix, guard)
 }
@@ -345,14 +345,14 @@ macro_rules! generate_isq {
 
         // Quantize from a CPU copy: byte extraction from a device-resident QTensor races
         // in-flight device work, and quantization is CPU-bound anyway.
-        let cpu_src = $tensor.to_device(&candle_core::Device::Cpu)?;
-        let initial = candle_core::quantized::QTensor::quantize(&cpu_src, dtype)?;
+        let cpu_src = $tensor.to_device(&inference_tensor::Device::Cpu)?;
+        let initial = inference_tensor::quantized::QTensor::quantize(&cpu_src, dtype)?;
         let data = initial.data()?;
 
         let _acquired_quantize_guard = $guard.acquire(&$device);
-        let qstorage = candle_core::quantized::QStorage::from_data(data, &$device, dtype)?;
+        let qstorage = inference_tensor::quantized::QStorage::from_data(data, &$device, dtype)?;
 
-        Arc::new(candle_core::quantized::QTensor::new(
+        Arc::new(inference_tensor::quantized::QTensor::new(
             qstorage,
             $tensor.shape(),
         )?)
@@ -386,22 +386,22 @@ macro_rules! generate_isq_imatrix {
 
         // Quantize from a CPU copy: byte extraction from a device-resident QTensor races
         // in-flight device work, and quantization is CPU-bound anyway.
-        let cpu_src = $tensor.to_device(&candle_core::Device::Cpu)?;
+        let cpu_src = $tensor.to_device(&inference_tensor::Device::Cpu)?;
         // Fallback dtypes (legacy Q, F32) have no imatrix quantizer; quantize plainly.
         let initial = if matches!(
             dtype,
             GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K
         ) {
-            candle_core::quantized::QTensor::quantize_imatrix(&cpu_src, &$imatrix, dtype)?
+            inference_tensor::quantized::QTensor::quantize_imatrix(&cpu_src, &$imatrix, dtype)?
         } else {
-            candle_core::quantized::QTensor::quantize(&cpu_src, dtype)?
+            inference_tensor::quantized::QTensor::quantize(&cpu_src, dtype)?
         };
         let data = initial.data()?;
 
         let _acquired_quantize_guard = $guard.acquire(&$device);
-        let qstorage = candle_core::quantized::QStorage::from_data(data, &$device, dtype)?;
+        let qstorage = inference_tensor::quantized::QStorage::from_data(data, &$device, dtype)?;
 
-        Arc::new(candle_core::quantized::QTensor::new(
+        Arc::new(inference_tensor::quantized::QTensor::new(
             qstorage,
             $tensor.shape(),
         )?)

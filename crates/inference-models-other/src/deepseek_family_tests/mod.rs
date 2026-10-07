@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_nn::loaders::NormalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{DType, Device, Tensor};
 use serde_json::Value;
 
 pub use inference_nn::testing::{

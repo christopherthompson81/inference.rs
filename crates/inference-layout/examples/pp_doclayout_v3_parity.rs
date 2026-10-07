@@ -1,11 +1,11 @@
 //! Compare PP-DocLayoutV3 intermediates against a safetensors dump produced by the HF reference.
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use clap::Parser;
 use inference_layout::pp_doclayout_v3::{
     DEFAULT_THRESHOLD, PPDocLayoutV3Detector, PostprocessArgs, postprocess,
 };
+use inference_tensor::{DType, Device, Tensor};
 
 #[derive(Parser)]
 struct Args {
@@ -58,7 +58,7 @@ fn main() -> Result<()> {
         Device::cuda_if_available(0)?
     };
     let det = PPDocLayoutV3Detector::load(&args.model, &dev)?;
-    let r = candle_core::safetensors::load(&args.reference, &Device::Cpu)?;
+    let r = inference_tensor::safetensors::load(&args.reference, &Device::Cpu)?;
 
     if let Some(img) = &args.image {
         let im = image::open(img)?.to_rgb8();

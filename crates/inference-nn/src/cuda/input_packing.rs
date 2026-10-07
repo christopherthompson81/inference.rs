@@ -1,4 +1,4 @@
-use candle_core::{
+use inference_tensor::{
     CpuStorage, CudaStorage, CustomOp1, DType, Layout, Result, Shape, Storage, Tensor,
     backend::BackendStorage,
 };
@@ -16,27 +16,27 @@ impl CustomOp1 for CompletionInputPackOp {
     }
 
     fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("completion input packing requires CUDA storage")
+        inference_tensor::bail!("completion input packing requires CUDA storage")
     }
 
     fn cuda_fwd(&self, host: &CudaStorage, host_layout: &Layout) -> Result<(CudaStorage, Shape)> {
-        use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+        use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
         if host.dtype() != DType::U32
             || !host_layout.is_contiguous()
             || host_layout.shape().dims2()? != (self.batch, self.host_width)
             || self.staged_rows.len() != self.batch
         {
-            candle_core::bail!("invalid CUDA completion input packing layout")
+            inference_tensor::bail!("invalid CUDA completion input packing layout")
         }
         let row_width = self
             .host_width
             .checked_add(self.staged_width)
-            .ok_or_else(|| candle_core::Error::msg("completion input width overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("completion input width overflow"))?;
         let output_elements = self
             .batch
             .checked_mul(row_width)
-            .ok_or_else(|| candle_core::Error::msg("completion input size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("completion input size overflow"))?;
 
         let device = host.device();
         let stream = device.cuda_stream();
@@ -44,7 +44,7 @@ impl CustomOp1 for CompletionInputPackOp {
         let (host_ptr, host_guard) = host_values.device_ptr(&stream);
         let host_ptr = host_ptr
             .checked_add((host_layout.start_offset() * size_of::<u32>()) as u64)
-            .ok_or_else(|| candle_core::Error::msg("completion host pointer overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("completion host pointer overflow"))?;
 
         let staged_storage = self
             .staged_rows
@@ -55,28 +55,31 @@ impl CustomOp1 for CompletionInputPackOp {
         let mut staged_guards = Vec::with_capacity(self.batch);
         for (storage, layout) in &staged_storage {
             let Storage::Cuda(storage) = &**storage else {
-                candle_core::bail!("completion staged row is not on CUDA")
+                inference_tensor::bail!("completion staged row is not on CUDA")
             };
             if storage.dtype() != DType::U32
                 || !layout.is_contiguous()
                 || layout.shape().dims1()? != self.staged_width
             {
-                candle_core::bail!("invalid CUDA completion staged row layout")
+                inference_tensor::bail!("invalid CUDA completion staged row layout")
             }
             let values = storage.as_cuda_slice::<u32>()?;
             let (ptr, guard) = values.device_ptr(&stream);
             let ptr = ptr
                 .checked_add((layout.start_offset() * size_of::<u32>()) as u64)
-                .ok_or_else(|| candle_core::Error::msg("completion staged pointer overflow"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("completion staged pointer overflow")
+                })?;
             staged_ptrs.push(ptr as *const core::ffi::c_void);
             staged_guards.push(guard);
         }
 
         let mut output = unsafe { device.alloc::<u32>(output_elements)? };
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
-        let batch = i32::try_from(self.batch).map_err(candle_core::Error::wrap)?;
-        let host_width = i32::try_from(self.host_width).map_err(candle_core::Error::wrap)?;
-        let staged_width = i32::try_from(self.staged_width).map_err(candle_core::Error::wrap)?;
+        let batch = i32::try_from(self.batch).map_err(inference_tensor::Error::wrap)?;
+        let host_width = i32::try_from(self.host_width).map_err(inference_tensor::Error::wrap)?;
+        let staged_width =
+            i32::try_from(self.staged_width).map_err(inference_tensor::Error::wrap)?;
         let status = unsafe {
             super::ffi::pack_completion_input_u32(
                 host_ptr as *const core::ffi::c_void,
@@ -92,7 +95,7 @@ impl CustomOp1 for CompletionInputPackOp {
         drop(staged_guards);
         drop(host_guard);
         if status != 0 {
-            candle_core::bail!("pack_completion_input_u32 failed with status {status}")
+            inference_tensor::bail!("pack_completion_input_u32 failed with status {status}")
         }
         Ok((
             CudaStorage::wrap_cuda_slice(output, device.clone()),
@@ -113,11 +116,11 @@ impl CustomOp1 for DecodeInputPadOp {
     }
 
     fn cpu_fwd(&self, _storage: &CpuStorage, _layout: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle_core::bail!("decode input padding requires CUDA storage")
+        inference_tensor::bail!("decode input padding requires CUDA storage")
     }
 
     fn cuda_fwd(&self, input: &CudaStorage, input_layout: &Layout) -> Result<(CudaStorage, Shape)> {
-        use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+        use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
         if input.dtype() != DType::U32
             || !input_layout.is_contiguous()
@@ -125,35 +128,35 @@ impl CustomOp1 for DecodeInputPadOp {
             || self.input_rows == 0
             || self.output_rows < self.input_rows
         {
-            candle_core::bail!("invalid CUDA decode input padding layout")
+            inference_tensor::bail!("invalid CUDA decode input padding layout")
         }
         let output_elements = self
             .output_rows
             .checked_mul(self.width)
-            .ok_or_else(|| candle_core::Error::msg("decode input padding size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("decode input padding size overflow"))?;
         let device = input.device();
         let stream = device.cuda_stream();
         let input_values = input.as_cuda_slice::<u32>()?;
         let (input_ptr, input_guard) = input_values.device_ptr(&stream);
         let input_ptr = input_ptr
             .checked_add((input_layout.start_offset() * size_of::<u32>()) as u64)
-            .ok_or_else(|| candle_core::Error::msg("decode input pointer overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("decode input pointer overflow"))?;
         let mut output = unsafe { device.alloc::<u32>(output_elements)? };
         let (output_ptr, output_guard) = output.device_ptr_mut(&stream);
         let status = unsafe {
             super::ffi::pad_decode_input_u32(
                 input_ptr as *const core::ffi::c_void,
                 output_ptr as *mut core::ffi::c_void,
-                i32::try_from(self.input_rows).map_err(candle_core::Error::wrap)?,
-                i32::try_from(self.output_rows).map_err(candle_core::Error::wrap)?,
-                i32::try_from(self.width).map_err(candle_core::Error::wrap)?,
+                i32::try_from(self.input_rows).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(self.output_rows).map_err(inference_tensor::Error::wrap)?,
+                i32::try_from(self.width).map_err(inference_tensor::Error::wrap)?,
                 stream.cu_stream() as i64,
             )
         };
         drop(output_guard);
         drop(input_guard);
         if status != 0 {
-            candle_core::bail!("pad_decode_input_u32 failed with status {status}")
+            inference_tensor::bail!("pad_decode_input_u32 failed with status {status}")
         }
         Ok((
             CudaStorage::wrap_cuda_slice(output, device.clone()),
@@ -168,10 +171,10 @@ pub fn pack_completion_input(host: &Tensor, staged_rows: &[Tensor]) -> Result<Te
         return Ok(host.clone());
     };
     if !host.device().is_cuda() || host.dtype() != DType::U32 || !host.is_contiguous() {
-        candle_core::bail!("completion input packing requires contiguous CUDA U32 host rows")
+        inference_tensor::bail!("completion input packing requires contiguous CUDA U32 host rows")
     }
     if staged_rows.len() != batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "completion input has {batch} host rows but {} staged rows",
             staged_rows.len()
         )
@@ -187,7 +190,7 @@ pub fn pack_completion_input(host: &Tensor, staged_rows: &[Tensor]) -> Result<Te
             || !row.is_contiguous()
             || !host.device().same_device(row.device())
         {
-            candle_core::bail!("completion input staged rows must be contiguous CUDA U32 rows")
+            inference_tensor::bail!("completion input staged rows must be contiguous CUDA U32 rows")
         }
     }
     host.apply_op1_no_bwd(&CompletionInputPackOp {
@@ -204,7 +207,7 @@ pub fn pad_decode_input(input: &Tensor, output_rows: usize) -> Result<Tensor> {
         return Ok(input.clone());
     }
     if !input.device().is_cuda() || input.dtype() != DType::U32 || !input.is_contiguous() {
-        candle_core::bail!("decode input padding requires a contiguous CUDA U32 tensor")
+        inference_tensor::bail!("decode input padding requires a contiguous CUDA U32 tensor")
     }
     input.apply_op1_no_bwd(&DecodeInputPadOp {
         input_rows,
@@ -216,7 +219,7 @@ pub fn pad_decode_input(input: &Tensor, output_rows: usize) -> Result<Tensor> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, IndexOp};
+    use inference_tensor::{Device, IndexOp};
 
     #[test]
     fn packs_current_and_staged_tokens_in_one_launch() -> Result<()> {

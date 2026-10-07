@@ -2,11 +2,11 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::nn::Module;
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},

@@ -943,7 +943,6 @@ mod kernels {
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use candle_core::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 use cutile::core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
@@ -952,6 +951,7 @@ use cutile::tensor::IntoPartition;
 use cutile::tile_kernel::TileKernel;
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 
 use super::nvfp4::Nvfp4GemmArgs;
 use super::{catch_cutile_panic, context};
@@ -986,7 +986,7 @@ pub(super) struct MatmulDevice {
 }
 
 fn matmul_device(dev: &CudaDevice) -> MatmulDevice {
-    use candle_core::cuda::cudarc::driver::{result, sys};
+    use inference_tensor::cuda::cudarc::driver::{result, sys};
 
     static DEVICES: OnceLock<Mutex<HashMap<i32, MatmulDevice>>> = OnceLock::new();
     let cu_device = dev.cuda_stream().context().cu_device();
@@ -1063,7 +1063,7 @@ pub(super) fn quantize(
     let (x_storage, x_layout) = x.storage_and_layout();
     let (ag_storage, ag_layout) = activation_global.storage_and_layout();
     let (Storage::Cuda(x_cuda), Storage::Cuda(ag_cuda)) = (&*x_storage, &*ag_storage) else {
-        candle_core::bail!("cuTile NVFP4 quantization requires CUDA tensors");
+        inference_tensor::bail!("cuTile NVFP4 quantization requires CUDA tensors");
     };
     let (ag_addr, _ag_guard) = slice_ptr_on_stream(
         ag_cuda.as_cuda_slice::<f32>()?,
@@ -1130,7 +1130,7 @@ pub(super) fn quantize(
             if compile_only {
                 catch_cutile_panic("NVFP4 quantization compile", || {
                     launcher.compile_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "cuTile NVFP4 quantization compile failed: {error:?}"
                         ))
                     })
@@ -1138,7 +1138,7 @@ pub(super) fn quantize(
             } else {
                 catch_cutile_panic("NVFP4 quantization launch", || unsafe {
                     launcher.async_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "cuTile NVFP4 quantization launch failed: {error:?}"
                         ))
                     })
@@ -1149,7 +1149,7 @@ pub(super) fn quantize(
     match x.dtype() {
         DType::BF16 => run!(bf16, kernels::quantize_bf16),
         DType::F16 => run!(f16, kernels::quantize_f16),
-        dtype => candle_core::bail!("cuTile NVFP4 quantization does not support {dtype:?}"),
+        dtype => inference_tensor::bail!("cuTile NVFP4 quantization does not support {dtype:?}"),
     }
     drop(q_guard);
     drop(s_guard);
@@ -1220,7 +1220,7 @@ fn launch_inner(
         Storage::Cuda(ag_cuda),
     ) = (&*w_storage, &*s_storage, &*wg_storage, &*ag_storage)
     else {
-        candle_core::bail!("cuTile NVFP4 matmul operands must be CUDA tensors");
+        inference_tensor::bail!("cuTile NVFP4 matmul operands must be CUDA tensors");
     };
     let (w_addr, _w_guard) = slice_ptr_on_stream(
         w_cuda.as_cuda_slice::<u8>()?,
@@ -1264,7 +1264,7 @@ fn launch_inner(
     let (q_storage, q_layout) = packed.storage_and_layout();
     let (qs_storage, qs_layout) = scales.storage_and_layout();
     let (Storage::Cuda(q_cuda), Storage::Cuda(qs_cuda)) = (&*q_storage, &*qs_storage) else {
-        candle_core::bail!("cuTile NVFP4 activations must be CUDA tensors");
+        inference_tensor::bail!("cuTile NVFP4 activations must be CUDA tensors");
     };
     let (q_addr, _q_guard) = slice_ptr_on_stream(
         q_cuda.as_cuda_slice::<u8>()?,
@@ -1366,7 +1366,7 @@ fn launch_inner(
             } else {
                 let (storage, layout) = input_storage.as_ref().unwrap();
                 let Storage::Cuda(storage) = &**storage else {
-                    candle_core::bail!("cuTile NVFP4 matmul input must be CUDA");
+                    inference_tensor::bail!("cuTile NVFP4 matmul input must be CUDA");
                 };
                 let (address, guard) = slice_ptr_on_stream(storage.as_cuda_slice::<$dtype>()?, layout.start_offset(), &stream);
                 (address, Some(guard))
@@ -1387,11 +1387,11 @@ fn launch_inner(
             let launcher = $kernel(mapped, input, q, qs, w, ws, wg, ag).generics(generic).compile_options(options);
             if compile_only {
                 catch_cutile_panic("NVFP4 matmul compile", || {
-                    launcher.compile_on(&cutile_stream).map_err(|error| candle_core::Error::msg(format!("cuTile NVFP4 matmul compile failed: {error:?}")))
+                    launcher.compile_on(&cutile_stream).map_err(|error| inference_tensor::Error::msg(format!("cuTile NVFP4 matmul compile failed: {error:?}")))
                 })?;
             } else {
                 catch_cutile_panic("NVFP4 matmul launch", || unsafe {
-                    launcher.async_on(&cutile_stream).map_err(|error| candle_core::Error::msg(format!("cuTile NVFP4 matmul launch failed: {error:?}")))
+                    launcher.async_on(&cutile_stream).map_err(|error| inference_tensor::Error::msg(format!("cuTile NVFP4 matmul launch failed: {error:?}")))
                 })?;
             }
             drop(out_guard);
@@ -1401,7 +1401,7 @@ fn launch_inner(
     match dtype {
         DType::BF16 => run!(bf16, kernels::matmul_bf16),
         DType::F16 => run!(f16, kernels::matmul_f16),
-        dtype => candle_core::bail!("cuTile NVFP4 matmul does not support {dtype:?}"),
+        dtype => inference_tensor::bail!("cuTile NVFP4 matmul does not support {dtype:?}"),
     }
 }
 
@@ -1422,7 +1422,7 @@ pub(super) fn launch_gather(
     let x_stride = routes / input_rows;
     let x = x.contiguous()?.reshape((input_rows, k))?;
     let Device::Cuda(dev) = x.device() else {
-        candle_core::bail!("cuTile NVFP4 grouped matmul requires CUDA tensors")
+        inference_tensor::bail!("cuTile NVFP4 grouped matmul requires CUDA tensors")
     };
     let indices = indices.contiguous()?;
     let indices = if indices.layout().start_offset() == 0 {
@@ -1432,7 +1432,7 @@ pub(super) fn launch_gather(
     };
     let (id_storage, _) = indices.storage_and_layout();
     let Storage::Cuda(id_cuda) = &*id_storage else {
-        candle_core::bail!("cuTile NVFP4 grouped indices must be CUDA tensors")
+        inference_tensor::bail!("cuTile NVFP4 grouped indices must be CUDA tensors")
     };
     let alignment = if compile_only {
         let em = crate::moe::cuda::moe_align_em(tokens, topk, experts, ROUTED_ROWS);
@@ -1478,7 +1478,7 @@ pub(super) fn launch_gather(
         &*ag_storage,
     )
     else {
-        candle_core::bail!("cuTile NVFP4 grouped matmul operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile NVFP4 grouped matmul operands must be CUDA tensors")
     };
     let (w_addr, _w_guard) = slice_ptr_on_stream(
         w_cuda.as_cuda_slice::<u8>()?,
@@ -1584,7 +1584,7 @@ pub(super) fn launch_gather(
             if compile_only {
                 catch_cutile_panic("NVFP4 grouped compile", || {
                     launcher.compile_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "cuTile NVFP4 grouped compile failed: {error:?}"
                         ))
                     })
@@ -1592,7 +1592,7 @@ pub(super) fn launch_gather(
             } else {
                 catch_cutile_panic("NVFP4 grouped launch", || unsafe {
                     launcher.async_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "cuTile NVFP4 grouped launch failed: {error:?}"
                         ))
                     })
@@ -1736,7 +1736,9 @@ pub(super) fn launch_gather(
             kernels::routed_matmul_f16
         )),
         dtype => {
-            candle_core::bail!("cuTile NVFP4 grouped matmul does not support {dtype:?} activations")
+            inference_tensor::bail!(
+                "cuTile NVFP4 grouped matmul does not support {dtype:?} activations"
+            )
         }
     }
 }

@@ -3,9 +3,9 @@
 use std::{any::Any, ops::Range, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{Device, Tensor, WithDType};
 use image::DynamicImage;
 use inference_audio::AudioInput;
+use inference_tensor::{Device, Tensor, WithDType};
 use tokenizers::Tokenizer;
 
 use super::{media::MultimodalData, video::VideoInput};

@@ -1,9 +1,9 @@
 //! Scoring a prompt: the log-probability of each of its tokens, and on request the raw logits behind them.
 
-use candle_core::{DType, Tensor};
 use inference_core::{
     InferenceRs, ModelCategory, NormalRequest, Request, RequestMessage, Response, SamplingParams,
 };
+use inference_tensor::{DType, Tensor};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -157,14 +157,16 @@ fn scored(
     chunks: Vec<Tensor>,
     tokens: Vec<u32>,
     output: LogitsOutput,
-) -> candle_core::Result<PromptLogits> {
+) -> inference_tensor::Result<PromptLogits> {
     let logits = Tensor::cat(&chunks, 0)?.to_dtype(DType::F32)?;
     let (rows, vocab_size) = logits.dims2()?;
     if rows != tokens.len() {
-        candle_core::bail!("{rows} rows of logits for {} prompt tokens", tokens.len());
+        inference_tensor::bail!("{rows} rows of logits for {} prompt tokens", tokens.len());
     }
     if let Some(token) = tokens.iter().find(|&&token| token as usize >= vocab_size) {
-        candle_core::bail!("token {token} is outside the model's {vocab_size}-entry vocabulary");
+        inference_tensor::bail!(
+            "token {token} is outside the model's {vocab_size}-entry vocabulary"
+        );
     }
     // Row i - 1 predicts token i, so the last row predicts nothing in the prompt.
     let predicting = logits.narrow(0, 0, rows - 1)?;
@@ -182,7 +184,7 @@ fn scored(
         .flatten_all()?
         .to_vec1::<f32>()?;
     if scores.iter().any(|score| !score.is_finite()) {
-        candle_core::bail!("the model's logits are not finite");
+        inference_tensor::bail!("the model's logits are not finite");
     }
     let logits = match output {
         LogitsOutput::Logits => Some(logits.flatten_all()?.to_vec1::<f32>()?),
@@ -203,16 +205,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_token_outside_the_vocabulary_is_an_error() -> candle_core::Result<()> {
-        let logits = Tensor::new(&[[0.0_f32, 2.0], [5.0, 0.0]], &candle_core::Device::Cpu)?;
+    fn a_token_outside_the_vocabulary_is_an_error() -> inference_tensor::Result<()> {
+        let logits = Tensor::new(
+            &[[0.0_f32, 2.0], [5.0, 0.0]],
+            &inference_tensor::Device::Cpu,
+        )?;
         assert!(scored(vec![logits], vec![0, 7], LogitsOutput::Logprobs).is_err());
         Ok(())
     }
 
     #[test]
-    fn each_token_is_scored_by_the_row_before_it() -> candle_core::Result<()> {
+    fn each_token_is_scored_by_the_row_before_it() -> inference_tensor::Result<()> {
         // Two positions over a vocabulary of two; row 0 predicts token 1, which is the second prompt token.
-        let logits = Tensor::new(&[[0.0_f32, 2.0], [5.0, 0.0]], &candle_core::Device::Cpu)?;
+        let logits = Tensor::new(
+            &[[0.0_f32, 2.0], [5.0, 0.0]],
+            &inference_tensor::Device::Cpu,
+        )?;
         let scored = scored(vec![logits], vec![0, 1], LogitsOutput::Logits)?;
         assert_eq!(scored.token_logprobs[0], None);
         let expected = 2.0 - (1.0_f32 + 2.0_f32.exp()).ln();

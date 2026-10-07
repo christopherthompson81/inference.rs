@@ -1,11 +1,11 @@
 use anyhow::Result;
 #[cfg(feature = "cuda")]
-use candle_core::DType;
+use inference_tensor::DType;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::cuda_backend::cudarc::driver::{CudaEvent, CudaStream};
-use candle_core::{Device, Tensor};
+use inference_tensor::cuda_backend::cudarc::driver::{CudaEvent, CudaStream};
+use inference_tensor::{Device, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::{DeviceLocation, TensorId};
+use inference_tensor::{DeviceLocation, TensorId};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use std::{
     collections::HashMap,
@@ -40,7 +40,7 @@ const FA3_COMPUTE_MAJOR: usize = 9;
 
 #[cfg(feature = "cuda")]
 fn cuda_sm_count() -> usize {
-    use candle_core::cuda::cudarc::driver::{result, sys};
+    use inference_tensor::cuda::cudarc::driver::{result, sys};
     static SM_COUNT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *SM_COUNT.get_or_init(|| {
         result::init()
@@ -324,7 +324,7 @@ pub fn make_fa3_decode_state(
     kv_cache: &[(Tensor, Tensor)],
     model_metadata: Option<&(dyn ModelConfigLike + Send + Sync)>,
     activation_dtype: DType,
-) -> candle_core::Result<Option<Fa3DecodeState>> {
+) -> inference_tensor::Result<Option<Fa3DecodeState>> {
     if !inference_paged_attn::USE_FA3_FP8_PAGED
         || activation_dtype != DType::BF16
         || batch == 0
@@ -395,7 +395,7 @@ pub fn make_fa3_decode_state(
     _kv_cache: &[(Tensor, Tensor)],
     _model_metadata: Option<&(dyn ModelConfigLike + Send + Sync)>,
     _activation_dtype: DType,
-) -> candle_core::Result<Option<Fa3DecodeState>> {
+) -> inference_tensor::Result<Option<Fa3DecodeState>> {
     Ok(None)
 }
 
@@ -415,7 +415,7 @@ pub fn fa3_prefill_cache_num_sm(
     kv_heads: usize,
     head_dim: usize,
     page_size: usize,
-) -> candle_core::Result<Option<usize>> {
+) -> inference_tensor::Result<Option<usize>> {
     let Ok((num_pages, cache_kv_heads, cache_page_size, cache_head_dim)) = key_cache.dims4() else {
         return Ok(None);
     };
@@ -447,7 +447,7 @@ pub fn fa3_prefill_cache_num_sm(
 fn fa3_view_capacity(
     view: &FlashInferPagedAttentionView,
     key: &Fa3DecodeScheduleKey,
-) -> candle_core::Result<Option<usize>> {
+) -> inference_tensor::Result<Option<usize>> {
     let Some(source_rows) = key.total_q() else {
         return Ok(None);
     };
@@ -457,9 +457,9 @@ fn fa3_view_capacity(
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 fn fa3_view_capacity_for_rows(
     view: &FlashInferPagedAttentionView,
-    device: candle_core::DeviceLocation,
+    device: inference_tensor::DeviceLocation,
     source_rows: usize,
-) -> candle_core::Result<Option<usize>> {
+) -> inference_tensor::Result<Option<usize>> {
     let Some(indptr) = view.paged_kv.indptr.get(&device) else {
         return Ok(None);
     };
@@ -533,7 +533,7 @@ pub struct Fa3PrefillWorkspaceRegistration {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn register_fa3_prefill_caches(
     caches: &[(Tensor, Tensor)],
-) -> candle_core::Result<Fa3PrefillWorkspaceRegistration> {
+) -> inference_tensor::Result<Fa3PrefillWorkspaceRegistration> {
     let pool = Arc::new(Fa3PrefillWorkspacePool::default());
     let cache_ids = caches
         .iter()
@@ -543,7 +543,7 @@ pub fn register_fa3_prefill_caches(
         .collect::<Vec<_>>();
     let mut registry = fa3_prefill_registry()
         .lock()
-        .map_err(|_| candle_core::Error::msg("FA3 prefill registry mutex was poisoned"))?;
+        .map_err(|_| inference_tensor::Error::msg("FA3 prefill registry mutex was poisoned"))?;
     for &cache_id in &cache_ids {
         registry.insert(cache_id, Arc::downgrade(&pool));
     }
@@ -572,11 +572,11 @@ impl Drop for Fa3PrefillWorkspaceRegistration {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 fn fa3_prefill_pool(
     key_cache: &Tensor,
-) -> candle_core::Result<Option<Arc<Fa3PrefillWorkspacePool>>> {
+) -> inference_tensor::Result<Option<Arc<Fa3PrefillWorkspacePool>>> {
     let cache_id = key_cache.id();
     let mut registry = fa3_prefill_registry()
         .lock()
-        .map_err(|_| candle_core::Error::msg("FA3 prefill registry mutex was poisoned"))?;
+        .map_err(|_| inference_tensor::Error::msg("FA3 prefill registry mutex was poisoned"))?;
     let pool = registry.get(&cache_id).and_then(Weak::upgrade);
     if pool.is_none() {
         registry.remove(&cache_id);
@@ -585,10 +585,10 @@ fn fa3_prefill_pool(
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-fn checked_fa3_len(parts: &[usize], name: &str) -> candle_core::Result<usize> {
+fn checked_fa3_len(parts: &[usize], name: &str) -> inference_tensor::Result<usize> {
     parts.iter().try_fold(1usize, |len, part| {
         len.checked_mul(*part)
-            .ok_or_else(|| candle_core::Error::msg(format!("FA3 {name} size overflow")))
+            .ok_or_else(|| inference_tensor::Error::msg(format!("FA3 {name} size overflow")))
     })
 }
 
@@ -598,7 +598,7 @@ fn ensure_fa3_flat_buffer(
     len: usize,
     dtype: DType,
     device: &Device,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     if tensor
         .as_ref()
         .is_some_and(|tensor| tensor.elem_count() >= len)
@@ -610,18 +610,21 @@ fn ensure_fa3_flat_buffer(
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-fn fa3_flat_view(tensor: &Tensor, len: usize) -> candle_core::Result<Tensor> {
+fn fa3_flat_view(tensor: &Tensor, len: usize) -> inference_tensor::Result<Tensor> {
     tensor.narrow(0, 0, len)
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 impl Fa3PrefillWorkspace {
-    fn ensure_completion_event(&mut self, stream: &Arc<CudaStream>) -> candle_core::Result<()> {
+    fn ensure_completion_event(
+        &mut self,
+        stream: &Arc<CudaStream>,
+    ) -> inference_tensor::Result<()> {
         if let Some(owner_stream) = &self.owner_stream {
             if owner_stream.cu_stream() != stream.cu_stream()
                 || owner_stream.context().cu_ctx() != stream.context().cu_ctx()
             {
-                candle_core::bail!("FA3 prefill workspace cannot change CUDA streams");
+                inference_tensor::bail!("FA3 prefill workspace cannot change CUDA streams");
             }
         } else {
             self.owner_stream = Some(stream.clone());
@@ -631,33 +634,35 @@ impl Fa3PrefillWorkspace {
                 stream
                     .context()
                     .new_event(None)
-                    .map_err(candle_core::Error::wrap)?,
+                    .map_err(inference_tensor::Error::wrap)?,
             );
         }
         Ok(())
     }
 
-    fn synchronize_completion(&mut self) -> candle_core::Result<()> {
+    fn synchronize_completion(&mut self) -> inference_tensor::Result<()> {
         if self.completion_pending {
             self.completion
                 .as_ref()
                 .expect("pending FA3 workspace must have a completion event")
                 .synchronize()
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
             self.completion_pending = false;
         }
         Ok(())
     }
 
-    fn record_completion(&mut self, stream: &Arc<CudaStream>) -> candle_core::Result<()> {
+    fn record_completion(&mut self, stream: &Arc<CudaStream>) -> inference_tensor::Result<()> {
         let event = self
             .completion
             .as_ref()
             .expect("FA3 workspace completion event must be initialized");
         if let Err(err) = event.record(stream) {
-            stream.synchronize().map_err(candle_core::Error::wrap)?;
+            stream
+                .synchronize()
+                .map_err(inference_tensor::Error::wrap)?;
             self.completion_pending = false;
-            return Err(candle_core::Error::wrap(err));
+            return Err(inference_tensor::Error::wrap(err));
         }
         self.completion_pending = true;
         Ok(())
@@ -669,10 +674,10 @@ impl Fa3PrefillWorkspace {
         key: Fa3DecodeScheduleKey,
         max_pages_per_sequence: usize,
         num_sm: usize,
-    ) -> candle_core::Result<Fa3DecodeBuffers> {
+    ) -> inference_tensor::Result<Fa3DecodeBuffers> {
         let total_q = key
             .total_q()
-            .ok_or_else(|| candle_core::Error::msg("FA3 query count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("FA3 query count overflow"))?;
         let query_len = checked_fa3_len(&[total_q, key.q_heads, key.head_dim], "query")?;
         let scheduler_len = fa3_scheduler_metadata_len(key.batch, key.causal);
         let output_accum_len = checked_fa3_len(
@@ -719,9 +724,11 @@ impl Fa3PrefillWorkspace {
                     .map(|row| {
                         row.checked_mul(key.query_len)
                             .and_then(|offset| i32::try_from(offset).ok())
-                            .ok_or_else(|| candle_core::Error::msg("FA3 query offset overflow"))
+                            .ok_or_else(|| {
+                                inference_tensor::Error::msg("FA3 query offset overflow")
+                            })
                     })
-                    .collect::<candle_core::Result<Vec<_>>>()?,
+                    .collect::<inference_tensor::Result<Vec<_>>>()?,
                 (key.batch + 1,),
                 device,
             )?);
@@ -768,9 +775,9 @@ impl Drop for Fa3PrefillWorkspace {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 fn fa3_prefill_lane_key(
     execution_device: &Device,
-) -> candle_core::Result<(Fa3PrefillLaneKey, Arc<CudaStream>)> {
+) -> inference_tensor::Result<(Fa3PrefillLaneKey, Arc<CudaStream>)> {
     let Device::Cuda(cuda) = execution_device else {
-        candle_core::bail!("FA3 prefill execution device must be CUDA");
+        inference_tensor::bail!("FA3 prefill execution device must be CUDA");
     };
     let stream = cuda.cuda_stream();
     let stream_handle = stream.cu_stream() as usize;
@@ -796,28 +803,31 @@ pub fn with_fa3_prefill_workspace<R>(
     key: Fa3DecodeScheduleKey,
     key_cache: &Tensor,
     execution_device: &Device,
-    run: impl FnOnce(&Fa3DecodeBuffers) -> candle_core::Result<R>,
-) -> candle_core::Result<R> {
+    run: impl FnOnce(&Fa3DecodeBuffers) -> inference_tensor::Result<R>,
+) -> inference_tensor::Result<R> {
     if !key.supported()
         || key.device != key_cache.device().location()
         || key.device != execution_device.location()
     {
-        candle_core::bail!("FA3 prefill workspace request does not match its selected schedule");
+        inference_tensor::bail!(
+            "FA3 prefill workspace request does not match its selected schedule"
+        );
     }
     let pool = fa3_prefill_pool(key_cache)?
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill workspace is not registered"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill workspace is not registered"))?;
     let max_pages_per_sequence =
-        fa3_view_capacity_for_rows(&metadata.views.logical, key.device, key.batch)?
-            .ok_or_else(|| candle_core::Error::msg("FA3 prefill paged metadata is unavailable"))?;
+        fa3_view_capacity_for_rows(&metadata.views.logical, key.device, key.batch)?.ok_or_else(
+            || inference_tensor::Error::msg("FA3 prefill paged metadata is unavailable"),
+        )?;
     let num_sm = fa3_device_num_sm(execution_device).ok_or_else(|| {
-        candle_core::Error::msg("FA3 prefill CUDA device metadata is unavailable")
+        inference_tensor::Error::msg("FA3 prefill CUDA device metadata is unavailable")
     })?;
     let (lane_key, execution_stream) = fa3_prefill_lane_key(execution_device)?;
     let workspace = {
         let mut lanes = pool
             .lanes
             .lock()
-            .map_err(|_| candle_core::Error::msg("FA3 prefill lane map mutex was poisoned"))?;
+            .map_err(|_| inference_tensor::Error::msg("FA3 prefill lane map mutex was poisoned"))?;
         lanes
             .entry(lane_key)
             .or_insert_with(|| Arc::new(Mutex::new(Fa3PrefillWorkspace::default())))
@@ -828,20 +838,20 @@ pub fn with_fa3_prefill_workspace<R>(
         .paged_kv
         .indptr
         .get(&key.device)
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill indptr missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill indptr missing"))?;
     let indices = view
         .paged_kv
         .indices
         .get(&key.device)
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill indices missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill indices missing"))?;
     let last_page_len = view
         .paged_kv
         .last_page_len
         .get(&key.device)
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill last-page lengths missing"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill last-page lengths missing"))?;
     let mut workspace = workspace
         .lock()
-        .map_err(|_| candle_core::Error::msg("FA3 prefill workspace mutex was poisoned"))?;
+        .map_err(|_| inference_tensor::Error::msg("FA3 prefill workspace mutex was poisoned"))?;
     workspace.ensure_completion_event(&execution_stream)?;
     let buffers = workspace.buffers(execution_device, key, max_pages_per_sequence, num_sm)?;
     let result = (|| {
@@ -874,10 +884,10 @@ fn allocate_fa3_decode_buffers(
     key: Fa3DecodeScheduleKey,
     max_pages_per_sequence: usize,
     num_sm: usize,
-) -> candle_core::Result<Fa3DecodeBuffers> {
+) -> inference_tensor::Result<Fa3DecodeBuffers> {
     let total_q = key
         .total_q()
-        .ok_or_else(|| candle_core::Error::msg("FA3 query count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 query count overflow"))?;
     let scheduler_len = fa3_scheduler_metadata_len(key.batch, key.causal);
     let cu_seqlens_q = Tensor::from_vec(
         (0..=key.batch)
@@ -961,7 +971,7 @@ mod tests {
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     #[test]
-    fn fa3_prefill_workspace_registration_controls_lifetime() -> candle_core::Result<()> {
+    fn fa3_prefill_workspace_registration_controls_lifetime() -> inference_tensor::Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
         };
@@ -976,12 +986,12 @@ mod tests {
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     #[test]
-    fn fa3_prefill_workspace_lanes_follow_execution_streams() -> candle_core::Result<()> {
+    fn fa3_prefill_workspace_lanes_follow_execution_streams() -> inference_tensor::Result<()> {
         let Ok(device) = Device::new_cuda(0) else {
             return Ok(());
         };
         let (first, stream) = fa3_prefill_lane_key(&device)?;
-        let fork = stream.fork().map_err(candle_core::Error::wrap)?;
+        let fork = stream.fork().map_err(inference_tensor::Error::wrap)?;
         let second = Fa3PrefillLaneKey {
             device: device.location(),
             context: fork.context().cu_ctx() as usize,

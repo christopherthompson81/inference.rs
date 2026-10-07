@@ -3,10 +3,10 @@
 /// Mistral LLM, https://github.com/mistralai/mistral-src
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -327,7 +327,7 @@ impl Model {
             );
         }
         if !matches!(attention_mechanism, AttentionImplementation::Eager) {
-            candle_core::bail!("Expected AttentionImplementation::Eager");
+            inference_tensor::bail!("Expected AttentionImplementation::Eager");
         }
 
         let mapper = normal_loading_metadata.mapper;
@@ -476,7 +476,7 @@ impl EmbeddingModel for Model {
         &self,
         input_ids: &Tensor,
         flash_params: &FlashParams,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         self.forward(input_ids, flash_params)
     }
     fn device(&self) -> &Device {

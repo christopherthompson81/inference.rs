@@ -1,4 +1,4 @@
-use candle_core::{DType, Result};
+use inference_tensor::{DType, Result};
 
 use super::{
     ModelConfigLike, attention_backend::AttentionBackendKind,
@@ -187,7 +187,7 @@ fn gather_prefill_workspace_bytes(input: GatherPrefillWorkspaceInput) -> Result<
         || input.k_head_dim == 0
         || input.v_head_dim == 0
     {
-        candle_core::bail!("invalid gather prefill workspace shape");
+        inference_tensor::bail!("invalid gather prefill workspace shape");
     }
     let dtype_bytes = input.dtype.size_in_bytes();
     let packed_k = checked_tensor_bytes(
@@ -254,14 +254,14 @@ fn gather_prefill_workspace_bytes(input: GatherPrefillWorkspaceInput) -> Result<
             padded_k,
             padded_v
                 .checked_mul(2)
-                .ok_or_else(|| candle_core::Error::msg("padded value workspace overflow"))?,
+                .ok_or_else(|| inference_tensor::Error::msg("padded value workspace overflow"))?,
         ],
         "KV unpack",
     )?
     .max(
         padded_k
             .checked_mul(2)
-            .ok_or_else(|| candle_core::Error::msg("padded key workspace overflow"))?,
+            .ok_or_else(|| inference_tensor::Error::msg("padded key workspace overflow"))?,
     );
 
     let padded_mask_elements = checked_product(
@@ -273,10 +273,10 @@ fn gather_prefill_workspace_bytes(input: GatherPrefillWorkspaceInput) -> Result<
     let mask_elements = padded_mask_elements.max(packed_mask_elements);
     let mask_f32 = mask_elements
         .checked_mul(DType::F32.size_in_bytes())
-        .ok_or_else(|| candle_core::Error::msg("F32 attention mask workspace overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("F32 attention mask workspace overflow"))?;
     let mask_dtype = mask_elements
         .checked_mul(dtype_bytes)
-        .ok_or_else(|| candle_core::Error::msg("attention mask workspace overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("attention mask workspace overflow"))?;
     let mask_peak = checked_sum(&[packed_kv, mask_f32, mask_dtype], "attention mask peak")?;
 
     let repeated_k = if input.q_heads > input.kv_heads {
@@ -332,16 +332,18 @@ fn gather_prefill_workspace_bytes(input: GatherPrefillWorkspaceInput) -> Result<
                 .size_in_bytes()
                 .checked_mul(2)
                 .and_then(|bytes| bytes.checked_add(dtype_bytes))
-                .ok_or_else(|| candle_core::Error::msg("attention score element size overflow"))?,
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("attention score element size overflow")
+                })?,
         )
-        .ok_or_else(|| candle_core::Error::msg("attention score workspace overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("attention score workspace overflow"))?;
     let score_and_output_peak = checked_sum(&[score_peak, output], "attention score/output peak")?;
     let score_dtype = score_elements
         .checked_mul(dtype_bytes)
-        .ok_or_else(|| candle_core::Error::msg("attention score dtype workspace overflow"))?;
-    let retained_bias_and_scores = score_dtype
-        .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::msg("retained attention bias workspace overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("attention score dtype workspace overflow"))?;
+    let retained_bias_and_scores = score_dtype.checked_mul(2).ok_or_else(|| {
+        inference_tensor::Error::msg("retained attention bias workspace overflow")
+    })?;
     let attended_v = checked_tensor_bytes(
         &[input.batch, input.q_heads, input.max_kv, input.v_head_dim],
         dtype_bytes,
@@ -358,7 +360,7 @@ fn gather_prefill_workspace_bytes(input: GatherPrefillWorkspaceInput) -> Result<
     )?;
     let retained_output_peak = output
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::msg("retained attention output overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("retained attention output overflow"))?;
     let unpack_peak = checked_sum(&[packed_kv, mask_dtype, unpack_peak], "gather unpack peak")?;
     let attention_peak = checked_sum(
         &[
@@ -397,18 +399,18 @@ pub fn gather_prefill_workspace_for_lengths(
         || input.query_lens.contains(&0)
         || input.kv_lens.contains(&0)
     {
-        candle_core::bail!("invalid gather prefill sequence lengths");
+        inference_tensor::bail!("invalid gather prefill sequence lengths");
     }
     let total_q = input
         .query_lens
         .iter()
         .try_fold(0usize, |total, &len| total.checked_add(len))
-        .ok_or_else(|| candle_core::Error::msg("gather query length sum overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("gather query length sum overflow"))?;
     let total_kv = input
         .kv_lens
         .iter()
         .try_fold(0usize, |total, &len| total.checked_add(len))
-        .ok_or_else(|| candle_core::Error::msg("gather context length sum overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("gather context length sum overflow"))?;
     gather_prefill_workspace_bytes(GatherPrefillWorkspaceInput {
         batch: input.query_lens.len(),
         total_q,
@@ -450,21 +452,21 @@ fn checked_product(parts: &[usize], name: &str) -> Result<usize> {
     parts.iter().try_fold(1usize, |value, part| {
         value
             .checked_mul(*part)
-            .ok_or_else(|| candle_core::Error::msg(format!("{name} size overflow")))
+            .ok_or_else(|| inference_tensor::Error::msg(format!("{name} size overflow")))
     })
 }
 
 fn checked_tensor_bytes(dimensions: &[usize], element_size: usize, name: &str) -> Result<usize> {
     checked_product(dimensions, name)?
         .checked_mul(element_size)
-        .ok_or_else(|| candle_core::Error::msg(format!("{name} workspace overflow")))
+        .ok_or_else(|| inference_tensor::Error::msg(format!("{name} workspace overflow")))
 }
 
 fn checked_sum(values: &[usize], name: &str) -> Result<usize> {
     values.iter().try_fold(0usize, |total, value| {
         total
             .checked_add(*value)
-            .ok_or_else(|| candle_core::Error::msg(format!("{name} workspace overflow")))
+            .ok_or_else(|| inference_tensor::Error::msg(format!("{name} workspace overflow")))
     })
 }
 
@@ -482,13 +484,13 @@ pub fn prompt_prefill_workspace(
         return Ok(PromptPrefillWorkspace::default());
     }
     let Some(model) = model else {
-        candle_core::bail!("prompt prefix attention requires model metadata");
+        inference_tensor::bail!("prompt prefix attention requires model metadata");
     };
     if input.query_lens.is_empty()
         || input.query_lens.len() != input.full_context_lens.len()
         || input.query_lens.contains(&0)
     {
-        candle_core::bail!("invalid prompt prefill workspace dimensions");
+        inference_tensor::bail!("invalid prompt prefill workspace dimensions");
     }
     let query_len = input.query_lens[0];
     let query_layout_is_dense = input.query_lens.iter().all(|&len| len == query_len);
@@ -496,7 +498,7 @@ pub fn prompt_prefill_workspace(
         .query_lens
         .iter()
         .try_fold(0usize, |total, &len| total.checked_add(len))
-        .ok_or_else(|| candle_core::Error::msg("prompt query length sum overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("prompt query length sum overflow"))?;
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     let mut fa3_pool = crate::flashinfer::Fa3PrefillPoolBytes::default();
     let mut max_layer_transient = 0usize;
@@ -528,7 +530,7 @@ pub fn prompt_prefill_workspace(
                 model.k_head_dim_for_layer(layer_idx),
                 input.max_pages_per_sequence,
                 fa3_num_sm.ok_or_else(|| {
-                    candle_core::Error::msg("FA3 prefill workspace is missing the SM count")
+                    inference_tensor::Error::msg("FA3 prefill workspace is missing the SM count")
                 })?,
             )?;
             fa3_pool = fa3_pool.component_max(fa3_workspace.pool());
@@ -557,7 +559,7 @@ pub fn prompt_prefill_workspace(
             #[cfg(not(all(feature = "cuda", target_family = "unix")))]
             let outputs = 2;
             let output_peak = output.checked_mul(outputs).ok_or_else(|| {
-                candle_core::Error::msg("paged FlashAttention output workspace overflow")
+                inference_tensor::Error::msg("paged FlashAttention output workspace overflow")
             })?;
             max_layer_transient = max_layer_transient.max(output_peak);
             continue;
@@ -603,7 +605,7 @@ pub fn prompt_prefill_workspace(
     let fa3_pool_bytes = 0usize;
     let bytes = fa3_pool_bytes
         .checked_add(max_layer_transient)
-        .ok_or_else(|| candle_core::Error::msg("prompt prefill workspace size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("prompt prefill workspace size overflow"))?;
     Ok(PromptPrefillWorkspace {
         bytes,
         gather_workspace_bytes,

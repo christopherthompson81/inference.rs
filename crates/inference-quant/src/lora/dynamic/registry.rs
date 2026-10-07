@@ -6,7 +6,7 @@ use std::{
     },
 };
 
-use candle_core::{DType, Device, Result};
+use inference_tensor::{DType, Device, Result};
 
 use crate::Shard;
 
@@ -55,7 +55,7 @@ impl LoraSiteKey {
 
     pub fn with_slice(path: impl Into<Arc<str>>, index: usize, count: usize) -> Result<Self> {
         if count == 0 || index >= count {
-            candle_core::bail!("invalid LoRA site slice {index}/{count}");
+            inference_tensor::bail!("invalid LoRA site slice {index}/{count}");
         }
         Ok(Self {
             path: path.into(),
@@ -187,7 +187,7 @@ fn validate_feature_permutation(
     features: usize,
 ) -> Result<()> {
     if runtime_to_canonical.len() != features {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LoRA {axis} runtime-to-canonical map has length {}, expected {features}",
             runtime_to_canonical.len()
         );
@@ -195,12 +195,12 @@ fn validate_feature_permutation(
     let mut seen = vec![false; features];
     for (runtime, &canonical) in runtime_to_canonical.iter().enumerate() {
         let Some(seen) = seen.get_mut(canonical) else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LoRA {axis} runtime-to-canonical map index {runtime} references out-of-range feature {canonical}"
             );
         };
         if std::mem::replace(seen, true) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LoRA {axis} runtime-to-canonical map references canonical feature {canonical} more than once"
             );
         }
@@ -240,10 +240,9 @@ impl LoraSiteHandle {
     }
 
     pub(crate) fn id(&self) -> Result<u32> {
-        self.id
-            .get()
-            .copied()
-            .ok_or_else(|| candle_core::Error::msg("LoRA layer registry has not been finalized"))
+        self.id.get().copied().ok_or_else(|| {
+            inference_tensor::Error::msg("LoRA layer registry has not been finalized")
+        })
     }
 }
 
@@ -299,14 +298,14 @@ impl LoraLayerRegistry {
         let source = source.into();
         let target = target.into();
         if source.is_empty() || target.is_empty() {
-            candle_core::bail!("LoRA site prefix aliases must not be empty");
+            inference_tensor::bail!("LoRA site prefix aliases must not be empty");
         }
         if source.starts_with('.')
             || source.ends_with('.')
             || target.starts_with('.')
             || target.ends_with('.')
         {
-            candle_core::bail!("LoRA site prefix aliases must not start or end with `.`");
+            inference_tensor::bail!("LoRA site prefix aliases must not start or end with `.`");
         }
         Ok(Self {
             runtime_id: LoraRuntimeId::next(),
@@ -330,7 +329,7 @@ impl LoraLayerRegistry {
         let key = self.canonical_site_key(key);
         let mut state = self.state.lock().expect("LoRA layer registry poisoned");
         if state.expert_sites.contains_key(&key) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LoRA site `{}` was registered as both a linear and an expert group",
                 key.path()
             );
@@ -340,7 +339,7 @@ impl LoraLayerRegistry {
                 || site.activation_dtype != activation_dtype
                 || site.device.location() != device.location()
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LoRA site `{}` was registered with incompatible specifications",
                     key.path()
                 );
@@ -348,7 +347,7 @@ impl LoraLayerRegistry {
             return Ok(site.clone());
         }
         if state.finalized {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cannot register LoRA site `{}` after registry finalization",
                 key.path()
             );
@@ -375,11 +374,11 @@ impl LoraLayerRegistry {
     ) -> Result<Arc<LoraExpertSiteHandle>> {
         let key = self.canonical_site_key(key);
         if key.slice().is_some() {
-            candle_core::bail!("expert LoRA group sites cannot be sliced");
+            inference_tensor::bail!("expert LoRA group sites cannot be sliced");
         }
         let mut state = self.state.lock().expect("LoRA layer registry poisoned");
         if state.sites.contains_key(&key) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LoRA site `{}` was registered as both a linear and an expert group",
                 key.path()
             );
@@ -389,7 +388,7 @@ impl LoraLayerRegistry {
                 || site.activation_dtype() != activation_dtype
                 || site.device().location() != device.location()
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LoRA expert site `{}` was registered with incompatible specifications",
                     key.path()
                 );
@@ -397,7 +396,7 @@ impl LoraLayerRegistry {
             return Ok(site.clone());
         }
         if state.finalized {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cannot register LoRA expert site `{}` after registry finalization",
                 key.path()
             );
@@ -418,15 +417,15 @@ impl LoraLayerRegistry {
         let mut state = self.state.lock().expect("LoRA layer registry poisoned");
         if !state.finalized {
             for (id, site) in state.sites.values().enumerate() {
-                let id = u32::try_from(id).map_err(candle_core::Error::wrap)?;
-                site.id
-                    .set(id)
-                    .map_err(|_| candle_core::Error::msg("LoRA site ID was already assigned"))?;
+                let id = u32::try_from(id).map_err(inference_tensor::Error::wrap)?;
+                site.id.set(id).map_err(|_| {
+                    inference_tensor::Error::msg("LoRA site ID was already assigned")
+                })?;
             }
             let first_expert_id = state.sites.len();
             for (offset, site) in state.expert_sites.values().enumerate() {
-                let id =
-                    u32::try_from(first_expert_id + offset).map_err(candle_core::Error::wrap)?;
+                let id = u32::try_from(first_expert_id + offset)
+                    .map_err(inference_tensor::Error::wrap)?;
                 site.assign_id(id)?;
             }
             state.finalized = true;

@@ -1,8 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{DType, Result, Tensor};
-use candle_nn::{Embedding, Module};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{Embedding, Module};
+use inference_tensor::{DType, Result, Tensor};
 
 use crate::layers;
 

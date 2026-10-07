@@ -5,8 +5,8 @@ mod mla;
 
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 pub use mla::{MlaAttention, MlaConfig, MlaKvLayout, mla_softmax_scale};
 

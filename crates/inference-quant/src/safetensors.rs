@@ -1,6 +1,6 @@
-use candle_core::{DType, Device, Error, IndexOp, Result, Shape, Storage, Tensor, WithDType};
-use candle_nn::var_builder::{Backend, SimpleBackend, VarBuilderArgs};
 use float8::F8E4M3;
+use inference_tensor::nn::var_builder::{Backend, SimpleBackend, VarBuilderArgs};
+use inference_tensor::{DType, Device, Error, IndexOp, Result, Shape, Storage, Tensor, WithDType};
 use regex::Regex;
 use safetensors::tensor as st;
 use safetensors::tensor::SafeTensors;
@@ -179,10 +179,10 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
     let storage = match device {
         Device::Cpu => {
             let cpu_storage = match dtype {
-                DType::F6E2M3 => candle_core::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
-                DType::F6E3M2 => candle_core::cpu_backend::CpuStorage::F6E3M2(data.to_vec()),
-                DType::F4 => candle_core::cpu_backend::CpuStorage::F4(data.to_vec()),
-                DType::F8E8M0 => candle_core::cpu_backend::CpuStorage::F8E8M0(data.to_vec()),
+                DType::F6E2M3 => inference_tensor::cpu_backend::CpuStorage::F6E2M3(data.to_vec()),
+                DType::F6E3M2 => inference_tensor::cpu_backend::CpuStorage::F6E3M2(data.to_vec()),
+                DType::F4 => inference_tensor::cpu_backend::CpuStorage::F4(data.to_vec()),
+                DType::F8E8M0 => inference_tensor::cpu_backend::CpuStorage::F8E8M0(data.to_vec()),
                 _ => unreachable!(),
             };
             Storage::Cpu(cpu_storage)
@@ -193,13 +193,13 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
             device.memcpy_htod(data, &mut slice)?;
 
             let slice = match dtype {
-                DType::F6E2M3 => candle_core::cuda_backend::CudaStorageSlice::F6E2M3(slice),
-                DType::F6E3M2 => candle_core::cuda_backend::CudaStorageSlice::F6E3M2(slice),
-                DType::F4 => candle_core::cuda_backend::CudaStorageSlice::F4(slice),
-                DType::F8E8M0 => candle_core::cuda_backend::CudaStorageSlice::F8E8M0(slice),
+                DType::F6E2M3 => inference_tensor::cuda_backend::CudaStorageSlice::F6E2M3(slice),
+                DType::F6E3M2 => inference_tensor::cuda_backend::CudaStorageSlice::F6E3M2(slice),
+                DType::F4 => inference_tensor::cuda_backend::CudaStorageSlice::F4(slice),
+                DType::F8E8M0 => inference_tensor::cuda_backend::CudaStorageSlice::F8E8M0(slice),
                 _ => unreachable!(),
             };
-            let storage = candle_core::cuda_backend::CudaStorage {
+            let storage = inference_tensor::cuda_backend::CudaStorage {
                 slice,
                 device: device.clone(),
             };
@@ -213,7 +213,7 @@ fn convert_dummy(view: &st::TensorView<'_>, device: &Device) -> Result<Tensor> {
         Device::Metal(device) => {
             let buffer = device.new_buffer_with_data(data)?;
 
-            let storage = candle_core::metal_backend::MetalStorage::new(
+            let storage = inference_tensor::metal_backend::MetalStorage::new(
                 buffer,
                 device.clone(),
                 data.len(),
@@ -310,7 +310,7 @@ impl MmapedSafetensors {
                         routing.get(k).copied().filter(|_| reject_duplicates)
                     {
                         let previous = paths[previous_index].as_ref();
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Duplicate tensor key `{k}` found in `{}` and `{}`.",
                             previous.display(),
                             p.display()
@@ -368,13 +368,13 @@ impl SimpleBackend for MmapedSafetensors {
         &self,
         s: Shape,
         name: &str,
-        _: candle_nn::Init,
+        _: inference_tensor::nn::Init,
         dtype: DType,
         dev: &Device,
     ) -> Result<Tensor> {
         let tensor = self.get_unchecked(name, dtype, dev)?;
         if tensor.shape() != &s {
-            Err(candle_core::Error::UnexpectedShape {
+            Err(inference_tensor::Error::UnexpectedShape {
                 msg: format!("shape mismatch for {name}"),
                 expected: s,
                 got: tensor.shape().clone(),
@@ -476,7 +476,7 @@ impl TensorShapes for HashMap<String, Tensor> {
     }
 }
 
-impl TensorShapes for candle_nn::VarMap {
+impl TensorShapes for inference_tensor::nn::VarMap {
     fn tensor_shapes(&self) -> HashMap<String, Vec<usize>> {
         self.data()
             .lock()
@@ -558,7 +558,7 @@ impl Shard {
                 } else if dim == 2 {
                     tensor.i((.., .., start..stop))
                 } else {
-                    candle_core::bail!("Got sharded on dimensions != 0 or 1 or 2")
+                    inference_tensor::bail!("Got sharded on dimensions != 0 or 1 or 2")
                 }
             }
             Shard::Offset { dim, offset, len } => {
@@ -572,7 +572,7 @@ impl Shard {
                 } else if dim == 2 {
                     tensor.i((.., .., start..stop))
                 } else {
-                    candle_core::bail!("Got sharded on dimensions != 0 or 1 or 2")
+                    inference_tensor::bail!("Got sharded on dimensions != 0 or 1 or 2")
                 }
             }
         }
@@ -722,7 +722,7 @@ impl Backend for ShardedSafeTensors {
                                 ))
                             })?
                         } else {
-                            candle_core::bail!("Got sharded on dimensions != 0 or 1 or 2")
+                            inference_tensor::bail!("Got sharded on dimensions != 0 or 1 or 2")
                         };
 
                         shape[dim] = block_size;
@@ -789,7 +789,7 @@ impl Backend for ShardedSafeTensors {
                                 ))
                             })?
                         } else {
-                            candle_core::bail!("Got sharded on dimensions != 0 or 1 or 2")
+                            inference_tensor::bail!("Got sharded on dimensions != 0 or 1 or 2")
                         };
 
                         shape[dim] = len;

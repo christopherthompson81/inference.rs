@@ -1,7 +1,7 @@
 pub mod gdn;
 pub mod ssm;
 
-use candle_core::{Device, Result};
+use inference_tensor::{Device, Result};
 
 #[cfg(feature = "metal")]
 use candle_metal_kernels::source::Source;
@@ -34,11 +34,11 @@ pub fn warmup_metal_kernels(device: &Device) -> Result<()> {
             device
                 .kernels()
                 .load_library(device.device(), source)
-                .map_err(candle_core::Error::wrap)?;
+                .map_err(inference_tensor::Error::wrap)?;
         }
         inference_quant::metal_kernels::Kernels::global()
             .load_library(device.device())
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
     }
     Ok(())
 }

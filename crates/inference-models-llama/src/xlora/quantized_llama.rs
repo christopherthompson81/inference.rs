@@ -8,12 +8,12 @@ use crate::attention::{AttentionMask, SdpaParams};
 use crate::gguf::Content;
 use crate::lora::{LinearLayerLike, LoraConfig, Merge, Ordering, QLoraLinear, get_lora_cfg};
 use crate::utils::progress::{NiceProgressBar, new_multi_progress};
-use candle_core::quantized::QMatMul;
-use candle_core::quantized::ggml_file;
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Embedding, Module};
 use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::{MatMul, ShardedVarBuilder};
+use inference_tensor::nn::{Embedding, Module};
+use inference_tensor::quantized::QMatMul;
+use inference_tensor::quantized::ggml_file;
+use inference_tensor::{DType, Device, Result, Tensor};
 use tracing::info;
 
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
@@ -69,7 +69,7 @@ impl Mlp {
             is_scaling_pass,
         )?;
         self.feed_forward_w2.lora_forward(
-            &(candle_nn::ops::silu(&w1)? * w3)?,
+            &(inference_tensor::nn::ops::silu(&w1)? * w3)?,
             scalings.clone(),
             global_scaling_weight,
             is_scaling_pass,
@@ -442,7 +442,9 @@ impl FromAdapterGGML for ModelWeights {
         )?;
         if xlora_config.is_some() && output.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
         Ok(Self {
             tok_embeddings: Embedding::new(tok_embeddings, ct.hparams.n_embd as usize),
@@ -495,11 +497,11 @@ impl FromAdapterGGUF for ModelWeights {
             rope_freq_base,
             key_length,
             value_length,
-        } = PropsGGUF::try_from(metadata).or_else(|err| candle_core::bail!("{err}"))?;
+        } = PropsGGUF::try_from(metadata).or_else(|err| inference_tensor::bail!("{err}"))?;
 
         let head_dim = key_length;
         if key_length != value_length {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Expected key_length == value_length, got {key_length} != {value_length}"
             );
         }
@@ -733,7 +735,9 @@ impl FromAdapterGGUF for ModelWeights {
         )?;
         if xlora_config.is_some() && output.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
         Ok(Self {
             tok_embeddings: Embedding::new(tok_embeddings, embedding_length),

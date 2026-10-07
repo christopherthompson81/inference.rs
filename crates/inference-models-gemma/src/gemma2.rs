@@ -6,11 +6,11 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use crate::serde_default_fn;
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder, softcap,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -97,7 +97,9 @@ impl Config {
                 // If both are set just use hidden_act
                 Ok(act)
             }
-            (None, None) => candle_core::bail!("none of hidden_act and hidden_activation are set"),
+            (None, None) => {
+                inference_tensor::bail!("none of hidden_act and hidden_activation are set")
+            }
         }
     }
 }
@@ -229,7 +231,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
 

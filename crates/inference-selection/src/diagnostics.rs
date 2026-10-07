@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-use candle_core::Device;
-#[cfg(any(feature = "cuda", feature = "metal"))]
 use inference_core::MemoryUsage;
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use inference_tensor::Device;
 
 // nvidia-smi's header gives the CUDA version the driver supports; R615+ labels it `CUDA UMD Version:`.
 const NVIDIA_SMI_CUDA_LABELS: [&str; 2] = ["CUDA UMD Version:", "CUDA Version:"];
@@ -165,7 +165,7 @@ fn build_info() -> BuildInfo {
         cuda_toolkit_version_code: inference_nn::BUILD_CUDA_VERSION_CODE
             .and_then(|s| s.parse().ok()),
         #[cfg(feature = "cuda")]
-        cuda_archs: candle_core::cuda_backend::kernels::ARCHS
+        cuda_archs: inference_tensor::cuda_backend::kernels::ARCHS
             .iter()
             .map(|arch| arch.to_string())
             .collect(),
@@ -194,7 +194,7 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
 
     #[cfg(feature = "cuda")]
     {
-        use candle_core::cuda_backend::{device_compute_cap, device_count, kernel_arch};
+        use inference_tensor::cuda_backend::{device_compute_cap, device_count, kernel_arch};
         // a device of an unbuilt arch refuses to open, so it is listed from the driver alone
         for ord in 0..device_count().unwrap_or(0) {
             let compute_cap = device_compute_cap(ord).ok();

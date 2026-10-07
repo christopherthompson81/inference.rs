@@ -13,7 +13,7 @@ pub use sinks::{sinks_attn, sinks_backend_is_available, sinks_backend_supports};
 
 #[cfg(not(feature = "metal"))]
 pub mod metal_flash_attn {
-    use candle_core::{Result, Tensor};
+    use inference_tensor::{Result, Tensor};
     pub fn try_flash_attn_ext_bf16_dk512(
         _q: &Tensor,
         _k: &Tensor,

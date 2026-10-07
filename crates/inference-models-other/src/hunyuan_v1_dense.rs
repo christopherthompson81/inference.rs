@@ -3,11 +3,11 @@
 use super::hunyuan_rope::{RopeScalingConfig, effective_rope_theta};
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -215,7 +215,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let q = self.q_norm.forward(&q)?;
         let k = self.k_norm.forward(&k)?;
@@ -360,19 +360,19 @@ impl Model {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         if cfg.use_cla {
-            candle_core::bail!("HunYuanDenseV1 CLA is not implemented")
+            inference_tensor::bail!("HunYuanDenseV1 CLA is not implemented")
         }
         if cfg.attention_bias {
-            candle_core::bail!("HunYuanDenseV1 attention_bias=true is not implemented")
+            inference_tensor::bail!("HunYuanDenseV1 attention_bias=true is not implemented")
         }
         if cfg.mlp_bias {
-            candle_core::bail!("HunYuanDenseV1 mlp_bias=true is not implemented")
+            inference_tensor::bail!("HunYuanDenseV1 mlp_bias=true is not implemented")
         }
         if cfg.pretraining_tp != 1 {
-            candle_core::bail!("HunYuanDenseV1 pretraining_tp>1 is not implemented")
+            inference_tensor::bail!("HunYuanDenseV1 pretraining_tp>1 is not implemented")
         }
         if cfg.add_classification_head {
-            candle_core::bail!("HunYuanDenseV1 classification head is not implemented")
+            inference_tensor::bail!("HunYuanDenseV1 classification head is not implemented")
         }
         let rope_theta = cfg.effective_rope_theta()? as f32;
         if let Some(quant_cfg) = &cfg.quantization_config {

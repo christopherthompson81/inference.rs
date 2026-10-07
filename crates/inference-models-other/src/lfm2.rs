@@ -8,12 +8,12 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, Linear};
 use inference_quant::{
     ColumnParallelLayer, Convolution, QuantMethod, QuantizedConfig, ReplicatedLayer,
     RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::nn::{Conv1d, Conv1dConfig, Linear};
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use crate::gdn::RecurrentBatchKind;
@@ -508,7 +508,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         (q, k) = self.rotary_emb.forward_qk_norm(
             &q,
             &k,
@@ -594,30 +594,30 @@ fn packed_query_ranges(
     query_lens: &[usize],
 ) -> Result<Vec<Range<usize>>> {
     if physical_batch != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LFM2 packed ShortConv requires physical batch size 1, got {}",
             physical_batch
         );
     }
     if query_lens.is_empty() {
-        candle_core::bail!("LFM2 packed ShortConv requires at least one logical sequence");
+        inference_tensor::bail!("LFM2 packed ShortConv requires at least one logical sequence");
     }
     let mut offset = 0usize;
     let mut ranges = Vec::with_capacity(query_lens.len());
     for (sequence_index, &query_len) in query_lens.iter().enumerate() {
         if query_len == 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LFM2 packed ShortConv logical sequence {sequence_index} has zero tokens"
             );
         }
         let end = offset.checked_add(query_len).ok_or_else(|| {
-            candle_core::Error::msg("LFM2 packed ShortConv query length overflow")
+            inference_tensor::Error::msg("LFM2 packed ShortConv query length overflow")
         })?;
         ranges.push(offset..end);
         offset = end;
     }
     if offset != physical_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LFM2 packed ShortConv has {offset} logical tokens but {} physical tokens",
             physical_tokens
         );
@@ -630,21 +630,21 @@ fn packed_short_conv_ranges(
     query_lens: &[usize],
 ) -> Result<Vec<Range<usize>>> {
     if shape.state_batch != query_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LFM2 packed ShortConv has {} recurrent state rows but {} logical sequences",
             shape.state_batch,
             query_lens.len()
         );
     }
     if shape.state_hidden_size != shape.hidden_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LFM2 packed ShortConv hidden size mismatch: tokens have {}, state has {}",
             shape.hidden_size,
             shape.state_hidden_size
         );
     }
     if shape.state_cache_len != shape.expected_cache_len {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "LFM2 packed ShortConv state length mismatch: expected {}, got {}",
             shape.expected_cache_len,
             shape.state_cache_len
@@ -808,14 +808,16 @@ impl ShortConv {
             query_lens,
         )?;
         if x.dtype() != conv_state.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LFM2 packed ShortConv dtype mismatch: tokens are {:?}, state is {:?}",
                 x.dtype(),
                 conv_state.dtype()
             );
         }
         if !x.device().same_device(conv_state.device()) {
-            candle_core::bail!("LFM2 packed ShortConv tokens and state are on different devices");
+            inference_tensor::bail!(
+                "LFM2 packed ShortConv tokens and state are on different devices"
+            );
         }
 
         let mut outputs = Vec::with_capacity(ranges.len());
@@ -929,7 +931,7 @@ impl DecoderLayer {
         layer_idx: usize,
     ) -> Result<Tensor> {
         let LayerImpl::Attention(attn) = &self.layer_impl else {
-            candle_core::bail!("expected attention layer")
+            inference_tensor::bail!("expected attention layer")
         };
         let residual = x;
         let attn_out = attn.forward(
@@ -954,13 +956,13 @@ impl DecoderLayer {
         packed_query_lens: Option<&[usize]>,
     ) -> Result<Tensor> {
         let LayerImpl::Conv(conv) = &self.layer_impl else {
-            candle_core::bail!("expected conv layer")
+            inference_tensor::bail!("expected conv layer")
         };
         let residual = x;
         let normalized = self.operator_norm.forward(x)?;
         let conv_out = if let Some(query_lens) = packed_query_lens {
             if batch_kind != RecurrentBatchKind::Prefill {
-                candle_core::bail!("LFM2 packed ShortConv cannot run a decode batch");
+                inference_tensor::bail!("LFM2 packed ShortConv cannot run a decode batch");
             }
             conv.forward_packed_prefill(&normalized, conv_state, query_lens, use_existing_state)?
         } else {
@@ -1014,7 +1016,7 @@ impl Model {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         if cfg.rope_parameters.rope_type != "default" && !cfg.rope_parameters.rope_type.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LFM2 rope type `{}` is not supported",
                 cfg.rope_parameters.rope_type
             );
@@ -1191,7 +1193,7 @@ impl Model {
                 ctx.paged_input_metadata()
                     .and_then(|metadata| metadata.query_lens.clone())
                     .ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "LFM2 packed ShortConv requires logical query lengths",
                         )
                     })?,
@@ -1200,20 +1202,20 @@ impl Model {
             None
         };
         if has_conv_layers && recurrent_metadata.is_none() {
-            candle_core::bail!("Hybrid recurrent metadata is required for LFM2 conv layers");
+            inference_tensor::bail!("Hybrid recurrent metadata is required for LFM2 conv layers");
         }
         if has_conv_layers && let Some(query_lens) = packed_query_lens.as_deref() {
             let recurrent_metadata = recurrent_metadata
                 .as_ref()
                 .expect("checked above: LFM2 conv layers require recurrent metadata");
             if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
-                candle_core::bail!("LFM2 packed ShortConv cannot run a decode batch");
+                inference_tensor::bail!("LFM2 packed ShortConv cannot run a decode batch");
             }
             let (physical_batch, physical_tokens, _) = x.dims3()?;
             packed_query_ranges(physical_batch, physical_tokens, query_lens)?;
             let index_count = recurrent_metadata.state_indices().dims1()?;
             if index_count != query_lens.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LFM2 packed ShortConv has {index_count} recurrent state indices but {} logical sequences",
                     query_lens.len()
                 );
@@ -1221,7 +1223,7 @@ impl Model {
             if let Some(host_indices) = recurrent_metadata.state_indices_host()
                 && host_indices.len() != query_lens.len()
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LFM2 packed ShortConv has {} host state indices but {} logical sequences",
                     host_indices.len(),
                     query_lens.len()
@@ -1254,7 +1256,7 @@ impl Model {
                     let Some(HybridLayerCache::Attention(kv_cache)) =
                         hybrid_cache.get_mut(layer_idx)
                     else {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Hybrid cache layer {layer_idx} is not attention for LFM2"
                         );
                     };
@@ -1273,13 +1275,13 @@ impl Model {
                     let indices = hybrid_cache
                         .state_indices_for_layer(layer_idx)?
                         .ok_or_else(|| {
-                            candle_core::Error::msg(format!(
+                            inference_tensor::Error::msg(format!(
                                 "Hybrid cache layer {layer_idx} is missing recurrent state indices"
                             ))
                         })?;
                     let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(layer_idx)
                     else {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Hybrid cache layer {layer_idx} is not recurrent for LFM2"
                         );
                     };
@@ -1418,7 +1420,7 @@ impl NormalModel for Model {
         _flash_params: &FlashParams,
         _flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
-        candle_core::bail!("LFM2 does not support X-LoRA forward")
+        inference_tensor::bail!("LFM2 does not support X-LoRA forward")
     }
 
     fn is_xlora(&self) -> bool {

@@ -1,6 +1,6 @@
 use std::{collections::HashMap, ops::Range};
 
-use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
+use inference_tensor::{DType, Device, DeviceLocation, Result, Tensor};
 
 use crate::gdn::RecurrentBatchKind;
 
@@ -80,7 +80,7 @@ impl PackedGdnLayout {
         self.cu_seqlens
             .get(&device.location())
             .map(Some)
-            .ok_or_else(|| candle_core::Error::msg("packed GDN is missing CUDA cu_seqlens"))
+            .ok_or_else(|| inference_tensor::Error::msg("packed GDN is missing CUDA cu_seqlens"))
     }
 
     fn cuda_ragged_transforms_supported(&self, source: &Tensor) -> bool {
@@ -106,9 +106,9 @@ fn reshape_packed_input(x: &Tensor, shape: UniformPackedShape) -> Result<Tensor>
     let expected_tokens = shape
         .batch_size
         .checked_mul(shape.seq_len)
-        .ok_or_else(|| candle_core::Error::msg("packed GDN token count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("packed GDN token count overflow"))?;
     if physical_batch != 1 || physical_tokens != expected_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "packed GDN cannot reshape [{physical_batch}, {physical_tokens}, {hidden_size}] into [{}, {}, {hidden_size}]",
             shape.batch_size,
             shape.seq_len
@@ -121,9 +121,9 @@ fn restore_packed_output(output: Tensor, physical_tokens: usize) -> Result<Tenso
     let (batch_size, seq_len, hidden_size) = output.dims3()?;
     let output_tokens = batch_size
         .checked_mul(seq_len)
-        .ok_or_else(|| candle_core::Error::msg("packed GDN output token count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("packed GDN output token count overflow"))?;
     if output_tokens != physical_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "packed GDN returned {output_tokens} tokens for {physical_tokens} packed inputs"
         );
     }
@@ -140,7 +140,7 @@ fn repack_padded_core_output(
     let logical_tokens = query_lens.iter().try_fold(0usize, |total, &len| {
         total
             .checked_add(len)
-            .ok_or_else(|| candle_core::Error::msg("padded GDN output token count overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("padded GDN output token count overflow"))
     })?;
     if batch_size != query_lens.len()
         || query_lens.is_empty()
@@ -148,7 +148,7 @@ fn repack_padded_core_output(
         || query_lens.iter().any(|&len| len > padded_len)
         || logical_tokens != physical_tokens
     {
-        candle_core::bail!("padded GDN output has incompatible logical dimensions");
+        inference_tensor::bail!("padded GDN output has incompatible logical dimensions");
     }
 
     if let Some(cu_seqlens) = layout.cu_seqlens(output.device())?
@@ -178,11 +178,11 @@ fn packed_gdn_plan(query_lens: &[usize]) -> Result<PackedGdnPlan> {
     let mut token_count = 0usize;
     for (state_index, &seq_len) in query_lens.iter().enumerate() {
         if seq_len == 0 {
-            candle_core::bail!("packed GDN query lengths cannot contain zero");
+            inference_tensor::bail!("packed GDN query lengths cannot contain zero");
         }
         let token_end = token_count
             .checked_add(seq_len)
-            .ok_or_else(|| candle_core::Error::msg("packed GDN token count overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("packed GDN token count overflow"))?;
         let row = PackedGdnRow {
             token_range: token_count..token_end,
             state_index,
@@ -256,7 +256,7 @@ fn restore_logical_rows(
             .enumerate()
             .any(|(expected, (state_index, _))| expected != *state_index)
     {
-        candle_core::bail!("packed GDN returned an invalid {kind} row mapping");
+        inference_tensor::bail!("packed GDN returned an invalid {kind} row mapping");
     }
     let rows = rows
         .into_iter()
@@ -298,13 +298,13 @@ pub fn try_forward_grouped_packed_gdn(
         || cache.conv_state.dim(0)? != query_lens.len()
         || cache.recurrent_state.dim(0)? != query_lens.len()
     {
-        candle_core::bail!("packed GDN requires gathered logical state rows");
+        inference_tensor::bail!("packed GDN requires gathered logical state rows");
     }
 
     let plan = &layout.plan;
     let (physical_batch, physical_tokens, _) = x.dims3()?;
     if physical_batch != 1 || physical_tokens != plan.token_count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "packed GDN input has shape {:?}, expected one batch row and {} tokens",
             x.dims(),
             plan.token_count
@@ -342,7 +342,7 @@ pub fn try_forward_grouped_packed_gdn(
         let output = gdn.forward_projected_prefill_core(&group_projection, &mut group_cache)?;
         let output_shape = output.dims4()?;
         if output_shape.0 != group.rows.len() || output_shape.1 != group.seq_len {
-            candle_core::bail!("packed GDN grouped forward returned an incompatible shape");
+            inference_tensor::bail!("packed GDN grouped forward returned an incompatible shape");
         }
         for (group_index, row) in group.rows.iter().enumerate() {
             outputs.push((row.state_index, output.narrow(0, group_index, 1)?));
@@ -371,7 +371,7 @@ pub fn try_forward_grouped_packed_gdn(
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::{
         PackedGdnLayout, UniformPackedShape, gather_tensor_rows, gather_token_rows,
@@ -395,7 +395,7 @@ mod tests {
     }
 
     #[test]
-    fn uniform_packed_reshape_preserves_logical_row_order() -> candle_core::Result<()> {
+    fn uniform_packed_reshape_preserves_logical_row_order() -> inference_tensor::Result<()> {
         let x = Tensor::from_vec((0..24).collect::<Vec<u32>>(), (1, 6, 4), &Device::Cpu)?;
         let batched = reshape_packed_input(
             &x,
@@ -428,8 +428,8 @@ mod tests {
     }
 
     #[test]
-    fn uniform_packed_reshape_rejects_inconsistent_token_counts() -> candle_core::Result<()> {
-        let x = Tensor::zeros((1, 5, 4), candle_core::DType::F32, &Device::Cpu)?;
+    fn uniform_packed_reshape_rejects_inconsistent_token_counts() -> inference_tensor::Result<()> {
+        let x = Tensor::zeros((1, 5, 4), inference_tensor::DType::F32, &Device::Cpu)?;
         assert!(
             reshape_packed_input(
                 &x,
@@ -444,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn ragged_packed_plan_groups_equal_lengths_stably() -> candle_core::Result<()> {
+    fn ragged_packed_plan_groups_equal_lengths_stably() -> inference_tensor::Result<()> {
         let plan = packed_gdn_plan(&[2, 5, 2, 1, 5])?;
         assert_eq!(plan.token_count, 15);
         assert_eq!(
@@ -462,7 +462,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_core_shape_bounds_extra_work() -> candle_core::Result<()> {
+    fn padded_core_shape_bounds_extra_work() -> inference_tensor::Result<()> {
         let compact = packed_gdn_plan(&[7, 8, 9])?;
         assert_eq!(
             padded_core_shape(&compact),
@@ -478,7 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn padded_core_output_restores_original_token_order() -> candle_core::Result<()> {
+    fn padded_core_output_restores_original_token_order() -> inference_tensor::Result<()> {
         let padded = Tensor::from_vec(
             vec![0u32, 1, 99, 2, 3, 4, 5, 99, 99],
             (3, 3, 1, 1),
@@ -495,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn ragged_packed_gathers_and_restores_logical_order() -> candle_core::Result<()> {
+    fn ragged_packed_gathers_and_restores_logical_order() -> inference_tensor::Result<()> {
         let plan = packed_gdn_plan(&[2, 3, 2])?;
         let tokens = Tensor::from_vec((0..7).collect::<Vec<u32>>(), (1, 7, 1), &Device::Cpu)?;
         let states = Tensor::from_vec(vec![10u32, 20, 30], (3, 1), &Device::Cpu)?;

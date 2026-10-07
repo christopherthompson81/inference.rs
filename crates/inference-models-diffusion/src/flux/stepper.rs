@@ -5,9 +5,9 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::Module;
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use tokenizers::Tokenizer;
 use tracing::info;
 
@@ -121,7 +121,7 @@ fn get_t5_model(
     device: &Device,
     silent: bool,
     offloaded: bool,
-) -> candle_core::Result<T5EncoderModel> {
+) -> inference_tensor::Result<T5EncoderModel> {
     let repo_id = T5_XXL_REPO;
 
     let vb = match local_weights {
@@ -130,7 +130,7 @@ fn get_t5_model(
             T5_XXL_SAFETENSOR_FILES
                 .iter()
                 .map(|f| fetch(repo_id, HUB_REVISION, f))
-                .collect::<candle_core::Result<Vec<_>>>()?,
+                .collect::<inference_tensor::Result<Vec<_>>>()?,
             vec![],
             Some(dtype),
             device,
@@ -143,7 +143,7 @@ fn get_t5_model(
     };
     let config_filename = fetch(repo_id, HUB_REVISION, "config.json")?;
     let config = std::fs::read_to_string(config_filename)?;
-    let config: t5::Config = serde_json::from_str(&config).map_err(candle_core::Error::msg)?;
+    let config: t5::Config = serde_json::from_str(&config).map_err(inference_tensor::Error::msg)?;
 
     t5::T5EncoderModel::load(vb, &config, device, offloaded)
 }
@@ -185,7 +185,7 @@ fn get_clip_model_and_tokenizer(
 fn get_tokenization(tok: &Tokenizer, prompts: Vec<String>, device: &Device) -> Result<Tensor> {
     Tensor::new(
         tok.encode_batch(prompts, true)
-            .map_err(|e| candle_core::Error::Msg(e.to_string()))?
+            .map_err(|e| inference_tensor::Error::Msg(e.to_string()))?
             .into_iter()
             .map(|e| e.get_ids().to_vec())
             .collect::<Vec<_>>(),
@@ -241,7 +241,7 @@ impl DiffusionModel for FluxStepper {
         if !self.is_guidance {
             match t5_input_ids.dim(1)?.cmp(&256) {
                 Ordering::Greater => {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "T5 embedding length greater than 256, please shrink the prompt or use the -dev (with guidance distillation) version."
                     )
                 }

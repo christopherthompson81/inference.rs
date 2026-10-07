@@ -47,7 +47,7 @@ unsafe extern "C" {
         weight_scale_stride: i32,
         activation_scale_stride_m: i32,
         activation_scale_stride_g: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
     pub(crate) fn inference_fp8_mma_quantize_bf16(
         input: *const bf16,
@@ -57,7 +57,7 @@ unsafe extern "C" {
         columns: i32,
         scale_stride_m: i32,
         scale_stride_g: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 }
 
@@ -202,7 +202,7 @@ unsafe extern "C" {
         scale_stride: i32,
         weight_block_size_y: i32,
         weight_block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_dequant_fp8_blockwise_kernel_f16(
@@ -215,7 +215,7 @@ unsafe extern "C" {
         scale_stride: i32,
         weight_block_size_y: i32,
         weight_block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_dequant_fp8_blockwise_kernel_bf16(
@@ -228,7 +228,7 @@ unsafe extern "C" {
         scale_stride: i32,
         weight_block_size_y: i32,
         weight_block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_quant_fp8_blockwise_kernel_f32(
@@ -241,7 +241,7 @@ unsafe extern "C" {
         scale_stride: i32,
         weight_block_size_y: i32,
         weight_block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_quant_fp8_blockwise_kernel_f16(
@@ -254,7 +254,7 @@ unsafe extern "C" {
         scale_stride: i32,
         weight_block_size_y: i32,
         weight_block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_quant_fp8_blockwise_kernel_bf16(
@@ -267,7 +267,7 @@ unsafe extern "C" {
         scale_stride: i32,
         weight_block_size_y: i32,
         weight_block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     #[cfg(feature = "cutile")]
@@ -278,7 +278,7 @@ unsafe extern "C" {
         rows: i32,
         columns: i32,
         row_stride: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 
     #[cfg(feature = "cutile")]
@@ -289,7 +289,7 @@ unsafe extern "C" {
         rows: i32,
         columns: i32,
         row_stride: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 
     #[cfg(feature = "cutile")]
@@ -300,7 +300,7 @@ unsafe extern "C" {
         rows: i32,
         columns: i32,
         row_stride: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 
     #[cfg(feature = "cutile")]
@@ -309,7 +309,7 @@ unsafe extern "C" {
         scale: *const f32,
         output: *mut F8E4M3,
         elements: usize,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 
     #[cfg(feature = "cutile")]
@@ -318,7 +318,7 @@ unsafe extern "C" {
         scale: *const f32,
         output: *mut F8E4M3,
         elements: usize,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 
     #[cfg(feature = "cutile")]
@@ -327,7 +327,7 @@ unsafe extern "C" {
         scale: *const f32,
         output: *mut F8E4M3,
         elements: usize,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     ) -> i32;
 
     // FP8 Matmul kernels (for forward method)
@@ -342,7 +342,7 @@ unsafe extern "C" {
         scale_row_stride: i32,
         block_size_y: i32,
         block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_fp8_matmul_bf16(
@@ -356,7 +356,7 @@ unsafe extern "C" {
         scale_row_stride: i32,
         block_size_y: i32,
         block_size_x: i32,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     // FP8 Indexed MoE GEMM kernels (for gather_forward method)
@@ -375,7 +375,7 @@ unsafe extern "C" {
         block_size_y: i32,
         block_size_x: i32,
         input_has_topk_dim: bool,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 
     pub(crate) fn launch_fp8_indexed_moe_gemm_bf16(
@@ -393,6 +393,6 @@ unsafe extern "C" {
         block_size_y: i32,
         block_size_x: i32,
         input_has_topk_dim: bool,
-        stream: candle_core::cuda::cudarc::driver::sys::CUstream,
+        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
     );
 }

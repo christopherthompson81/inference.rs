@@ -1,4 +1,4 @@
-use candle_core::{Device, Result, Tensor, WithDType};
+use inference_tensor::{Device, Result, Tensor, WithDType};
 use rayon::prelude::*;
 use std::sync::OnceLock;
 
@@ -139,7 +139,7 @@ where
         let out_ptr = out.as_mut_ptr() as usize;
         let n_q_blocks = q_len.div_ceil(Q_BLOCK);
         let total_units = b * h * n_q_blocks;
-        candle_core::utils::barrier_pool().execute_chunked(total_units, |range| {
+        inference_tensor::utils::barrier_pool().execute_chunked(total_units, |range| {
             let out_ptr = out_ptr as *mut T;
             let mut kscratch: Vec<f32> = Vec::new();
             let mut qscratch: Vec<f32> = Vec::new();

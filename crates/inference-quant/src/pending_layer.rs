@@ -7,7 +7,7 @@ use std::{
     },
 };
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::{
     ActivationQuantizationScheme, ActivationScaleLayout, DistributedKind, IsqJobOutput, IsqType,
@@ -48,16 +48,16 @@ impl PendingIsqLayer {
         match &*state {
             PendingState::Ready(layer) => Ok(layer.clone()),
             PendingState::Taken => {
-                candle_core::bail!("PendingIsqLayer is in an invalid transitional state")
+                inference_tensor::bail!("PendingIsqLayer is in an invalid transitional state")
             }
             PendingState::Pending(_) => {
                 // Take the receiver out so we can receive without holding the
                 // lock on the enum variant (swap to Taken first).
                 let old = std::mem::replace(&mut *state, PendingState::Taken);
                 if let PendingState::Pending(rx) = old {
-                    let result = rx
-                        .recv()
-                        .map_err(|e| candle_core::Error::Msg(format!("ISQ channel error: {e}")))?;
+                    let result = rx.recv().map_err(|e| {
+                        inference_tensor::Error::Msg(format!("ISQ channel error: {e}"))
+                    })?;
                     match result {
                         Ok(output) => {
                             let layer = output.value;
@@ -114,7 +114,7 @@ impl QuantMethod for PendingIsqLayer {
     where
         Self: Sized,
     {
-        candle_core::bail!("PendingIsqLayer cannot be created via QuantMethodConfig")
+        inference_tensor::bail!("PendingIsqLayer cannot be created via QuantMethodConfig")
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
@@ -146,7 +146,7 @@ impl QuantMethod for PendingIsqLayer {
     }
 
     #[cfg(feature = "cuda")]
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         self.resolve().ok()?.get_qtensor()
     }
 

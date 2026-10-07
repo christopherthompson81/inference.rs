@@ -3,8 +3,8 @@ use std::{
     sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
-use candle_core::{Device, Tensor};
 use indicatif::MultiProgress;
+use inference_tensor::{Device, Tensor};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -30,7 +30,7 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
         &self,
         input_ids: &Tensor,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor>;
+    ) -> inference_tensor::Result<Tensor>;
     #[allow(clippy::too_many_arguments)]
     fn xlora_forward(
         &self,
@@ -44,7 +44,7 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
         position_ids: Vec<usize>,
         flash_params: &FlashParams,
         flash_params_full: &FlashParams,
-    ) -> candle_core::Result<Tensor>;
+    ) -> inference_tensor::Result<Tensor>;
     fn is_xlora(&self) -> bool;
     fn device(&self) -> &Device;
     fn cache(&self) -> &EitherCache;
@@ -88,7 +88,7 @@ pub trait MultimodalModel:
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn Any>, // pixel attention mask, or image sizes, or anything else
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor>;
+    ) -> inference_tensor::Result<Tensor>;
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
         false
@@ -144,7 +144,7 @@ pub trait EmbeddingModel: IsqModel + AnyMoeBaseModelMixin {
         &self,
         input_ids: &Tensor,
         flash_params: &FlashParams,
-    ) -> candle_core::Result<Tensor>;
+    ) -> inference_tensor::Result<Tensor>;
     fn device(&self) -> &Device;
 }
 
@@ -154,7 +154,7 @@ pub trait DiffusionModel {
         &mut self,
         prompts: Vec<String>,
         params: DiffusionGenerationParams,
-    ) -> candle_core::Result<Tensor>;
+    ) -> inference_tensor::Result<Tensor>;
     fn device(&self) -> &Device;
     fn max_seq_len(&self) -> usize;
 }

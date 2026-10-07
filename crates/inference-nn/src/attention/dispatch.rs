@@ -1,6 +1,6 @@
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, Sdpa, SdpaParams},
@@ -38,7 +38,7 @@ impl AttentionDispatch<'_> {
             None => {
                 // no cache blocks means a prompt-only pass (e.g. imatrix collection); a dummy plan skips cache writes
                 if matches!(mask, AttentionMask::None) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "paged attention without cache metadata needs a prompt attention mask"
                     );
                 }

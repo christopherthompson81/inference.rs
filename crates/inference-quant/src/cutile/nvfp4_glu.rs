@@ -340,7 +340,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex;
 
-use candle_core::{CudaStorage, DType, Device, Layout, Result, Shape, Storage, Tensor};
 use cutile::core::{f4e2m1fnx2, f8e4m3fn};
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
@@ -349,6 +348,7 @@ use cutile::tensor::IntoPartition;
 use cutile::tile_kernel::{CompileOptions, TileKernel, contains_cuda_function};
 use float8::F8E4M3;
 use half::{bf16, f16};
+use inference_tensor::{CudaStorage, DType, Device, Layout, Result, Shape, Storage, Tensor};
 
 use super::nvfp4::nvfp4_supported;
 use super::{catch_cutile_panic, context};
@@ -446,7 +446,7 @@ pub(crate) fn launch(
             .device()
             .same_device(args.activation_global_scale.device())
     {
-        candle_core::bail!("NVFP4 GLU global scale must be an F32 scalar on the input device")
+        inference_tensor::bail!("NVFP4 GLU global scale must be an F32 scalar on the input device")
     }
     let (gate_storage, gate_layout) = args.gate.storage_and_layout();
     let (value_storage, value_layout) = args.value.storage_and_layout();
@@ -467,7 +467,7 @@ pub(crate) fn launch(
     let (Storage::Cuda(gate_cuda), Storage::Cuda(value_cuda), Storage::Cuda(global_cuda)) =
         (&*gate_storage, &*value_storage, &*global_storage)
     else {
-        candle_core::bail!("NVFP4 GLU inputs must use CUDA storage")
+        inference_tensor::bail!("NVFP4 GLU inputs must use CUDA storage")
     };
     let stream = dev.cuda_stream();
     let ordinal = stream.context().ordinal();
@@ -549,7 +549,7 @@ pub(crate) fn launch(
             if compile_only {
                 catch_cutile_panic("NVFP4 GLU compile", || {
                     make_launcher().compile_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "cuTile NVFP4 GLU compile failed: {error:?}"
                         ))
                     })
@@ -559,7 +559,7 @@ pub(crate) fn launch(
                     make_launcher()
                         .l1_cache_key_on(&cutile_stream)
                         .map_err(|error| {
-                            candle_core::Error::msg(format!(
+                            inference_tensor::Error::msg(format!(
                                 "cuTile NVFP4 GLU specialization failed: {error:?}"
                             ))
                         })
@@ -570,7 +570,7 @@ pub(crate) fn launch(
                 }
                 catch_cutile_panic("NVFP4 GLU launch", || unsafe {
                     make_launcher().async_on(&cutile_stream).map_err(|error| {
-                        candle_core::Error::msg(format!(
+                        inference_tensor::Error::msg(format!(
                             "cuTile NVFP4 GLU launch failed: {error:?}"
                         ))
                     })
@@ -794,7 +794,7 @@ mod tests {
 
     #[test]
     fn common_warmup_covers_packed_tail_graph_replay() -> Result<()> {
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         const ROWS: usize = 33;
         const COLUMNS: usize = 272;
@@ -837,7 +837,7 @@ mod tests {
             if tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = launch(
             GluQuantArgs {
@@ -857,13 +857,13 @@ mod tests {
         let output = captured?.expect("common warmup must cover the packed tail layout");
         assert_eq!(cutile::tile_kernel::jit_compile_count(), warmed_count);
         let graph = graph
-            .map_err(|error| candle_core::Error::msg(error.to_string()))?
-            .ok_or_else(|| candle_core::Error::msg("NVFP4 GLU capture produced no graph"))?;
+            .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+            .ok_or_else(|| inference_tensor::Error::msg("NVFP4 GLU capture produced no graph"))?;
         for alternate_input in [false, true, false] {
             packed_input.slice_set(if alternate_input { &alternate } else { &source }, 0, 0)?;
             graph
                 .launch()
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
             device.synchronize()?;
             assert_quantized_equal(
                 &output,
@@ -1093,7 +1093,7 @@ mod tests {
     fn separate_projection_hook_supports_graph_replay_without_compiling() -> Result<()> {
         use crate::nvfp4::{Nvfp4Layer, Nvfp4LayerParts};
         use crate::{Nvfp4ActivationMode, QuantMethod};
-        use candle_core::cuda::cudarc::driver::sys;
+        use inference_tensor::cuda::cudarc::driver::sys;
 
         const ROWS: usize = 33;
         const COLUMNS: usize = 272;
@@ -1158,7 +1158,7 @@ mod tests {
                 if tracking {
                     unsafe { stream.context().enable_event_tracking() };
                 }
-                return Err(candle_core::Error::msg(error.to_string()));
+                return Err(inference_tensor::Error::msg(error.to_string()));
             }
             let captured =
                 crate::try_forward_fused_quantized_glu(&gate, &value, &layer, activation);
@@ -1170,8 +1170,10 @@ mod tests {
             }
             let output = captured?.expect("warmup must cover the separate-source projection hook");
             let graph = graph
-                .map_err(|error| candle_core::Error::msg(error.to_string()))?
-                .ok_or_else(|| candle_core::Error::msg("separate GLU capture returned no graph"))?;
+                .map_err(|error| inference_tensor::Error::msg(error.to_string()))?
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("separate GLU capture returned no graph")
+                })?;
             assert_eq!(cutile::tile_kernel::jit_compile_count(), compiled);
             for alternate_input in [false, true, false] {
                 gate.slice_set(
@@ -1185,7 +1187,7 @@ mod tests {
                 )?;
                 graph
                     .launch()
-                    .map_err(|error| candle_core::Error::msg(error.to_string()))?;
+                    .map_err(|error| inference_tensor::Error::msg(error.to_string()))?;
                 device.synchronize()?;
                 let actual = output
                     .to_device(&Device::Cpu)?

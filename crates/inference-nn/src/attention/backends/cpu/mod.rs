@@ -13,7 +13,7 @@ mod single_q;
 mod tests;
 mod threading;
 
-use candle_core::{Context, DType, Result, Storage, Tensor, WithDType};
+use inference_tensor::{Context, DType, Result, Storage, Tensor, WithDType};
 use std::iter::Sum;
 
 use crate::attention::SdpaParams;
@@ -50,7 +50,7 @@ impl<'a, T> TensorView<'a, T> {
         let dims = tensor.dims4()?;
         let stride = tensor.stride();
         if stride.len() != 4 {
-            candle_core::bail!("Expected rank-4 CPU attention tensor.");
+            inference_tensor::bail!("Expected rank-4 CPU attention tensor.");
         }
         Ok(Self {
             data,
@@ -72,7 +72,7 @@ struct CpuAttnCtx<'a, T> {
 
 fn cpu_mask_data(storage: &Storage, start_offset: usize, dtype: DType) -> Result<MaskData<'_>> {
     let Storage::Cpu(cpu) = storage else {
-        candle_core::bail!("Expected CPU storage for mask");
+        inference_tensor::bail!("Expected CPU storage for mask");
     };
 
     match dtype {
@@ -98,7 +98,7 @@ fn cpu_mask_data(storage: &Storage, start_offset: usize, dtype: DType) -> Result
                 data[start_offset..].iter().map(|v| v.to_f32()).collect(),
             ))
         }
-        _ => candle_core::bail!("Unsupported CPU attention mask dtype {dtype:?}"),
+        _ => inference_tensor::bail!("Unsupported CPU attention mask dtype {dtype:?}"),
     }
 }
 
@@ -117,7 +117,7 @@ where
         let data = cpu.as_slice::<T>().context("Expected CPU storage for q")?;
         &data[q_layout.start_offset()..]
     } else {
-        candle_core::bail!("Expected CPU storage for q");
+        inference_tensor::bail!("Expected CPU storage for q");
     };
 
     let (k_guard, k_layout) = k.storage_and_layout();
@@ -125,7 +125,7 @@ where
         let data = cpu.as_slice::<T>().context("Expected CPU storage for k")?;
         &data[k_layout.start_offset()..]
     } else {
-        candle_core::bail!("Expected CPU storage for k");
+        inference_tensor::bail!("Expected CPU storage for k");
     };
 
     let (v_guard, v_layout) = v.storage_and_layout();
@@ -133,7 +133,7 @@ where
         let data = cpu.as_slice::<T>().context("Expected CPU storage for v")?;
         &data[v_layout.start_offset()..]
     } else {
-        candle_core::bail!("Expected CPU storage for v");
+        inference_tensor::bail!("Expected CPU storage for v");
     };
 
     let mut mask_guard = None;
@@ -181,7 +181,7 @@ where
 #[cfg(test)]
 mod decode_attn_bench {
     use super::*;
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     #[test]
     #[ignore = "benchmark"]

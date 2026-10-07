@@ -1,8 +1,8 @@
 //! Image preprocessing mirroring transformers' (torchvision-backed) `PaddleOCRVLImageProcessor`.
 //! torchvision BICUBIC+antialias is not byte-reproducible with CatmullRom, so resized pixels differ slightly.
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
+use inference_tensor::{Device, Result, Tensor};
 
 pub const PATCH: usize = 14;
 pub const MERGE: usize = 2;
@@ -26,7 +26,7 @@ pub fn smart_resize_bounded(
     max_pixels: usize,
 ) -> Result<(usize, usize)> {
     if height == 0 || width == 0 {
-        candle_core::bail!("image has a zero dimension ({width}x{height})");
+        inference_tensor::bail!("image has a zero dimension ({width}x{height})");
     }
     let f = FACTOR as f64;
     let (mut h, mut w) = (height as f64, width as f64);
@@ -39,7 +39,7 @@ pub fn smart_resize_bounded(
         w = f;
     }
     if h.max(w) / h.min(w) > MAX_ASPECT_RATIO {
-        candle_core::bail!("image aspect ratio {width}x{height} exceeds {MAX_ASPECT_RATIO}");
+        inference_tensor::bail!("image aspect ratio {width}x{height} exceeds {MAX_ASPECT_RATIO}");
     }
     let mut h_bar = (h / f).round_ties_even() * f;
     let mut w_bar = (w / f).round_ties_even() * f;

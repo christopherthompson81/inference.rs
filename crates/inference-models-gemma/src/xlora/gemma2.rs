@@ -4,9 +4,9 @@ use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::{QuantMethod, ShardedVarBuilder, softcap};
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 use tracing::info;
 
 use crate::{
@@ -280,7 +280,7 @@ impl Attention {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
@@ -566,7 +566,9 @@ impl Model {
         )?;
         if xlora_config.is_some() && lm_head.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
 
         Ok(Self {

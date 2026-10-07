@@ -1,5 +1,5 @@
-use candle_core::{Module, Result, Tensor};
-use candle_nn::{Activation, VarBuilder};
+use inference_tensor::nn::{Activation, VarBuilder};
+use inference_tensor::{Module, Result, Tensor};
 
 use crate::layers::{ConvNorm, ConvNormSpec};
 

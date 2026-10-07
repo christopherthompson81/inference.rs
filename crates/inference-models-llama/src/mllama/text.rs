@@ -4,11 +4,11 @@ use crate::layers::masker::CausalMaskConfig;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{ops::Range, sync::Arc};
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{Activation, Module};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::nn::{Activation, Module};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
@@ -187,7 +187,7 @@ impl MLlamaTextSelfAttention {
 
         let positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
             .clone();
         let (q, mut k) = self.rope.forward(&q, &k, &positions)?;
 
@@ -207,7 +207,9 @@ impl MLlamaTextSelfAttention {
                 )?,
                 None => {
                     if matches!(attention_mask, AttentionMask::None) {
-                        candle_core::bail!("Mllama paged self-attention is missing cache metadata");
+                        inference_tensor::bail!(
+                            "Mllama paged self-attention is missing cache metadata"
+                        );
                     }
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     paged_attn.forward(
@@ -354,15 +356,15 @@ fn validate_packed_query_lens(
     total_tokens: usize,
 ) -> Result<()> {
     if query_lens.len() != logical_batch || query_lens.is_empty() || query_lens.contains(&0) {
-        candle_core::bail!("Mllama packed query lengths do not match the logical batch");
+        inference_tensor::bail!("Mllama packed query lengths do not match the logical batch");
     }
     let query_tokens = query_lens.iter().try_fold(0usize, |total, &query_len| {
         total
             .checked_add(query_len)
-            .ok_or_else(|| candle_core::Error::msg("Mllama packed query length overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("Mllama packed query length overflow"))
     })?;
     if query_tokens != total_tokens {
-        candle_core::bail!("Mllama packed query lengths do not cover the physical tokens");
+        inference_tensor::bail!("Mllama packed query lengths do not cover the physical tokens");
     }
     Ok(())
 }
@@ -381,7 +383,7 @@ fn packed_cross_attention_ranges(
     query_lens: &[usize],
 ) -> Result<Vec<Range<usize>>> {
     if shape.physical_batch != 1 {
-        candle_core::bail!("Mllama packed cross-attention requires physical batch size 1");
+        inference_tensor::bail!("Mllama packed cross-attention requires physical batch size 1");
     }
     validate_packed_query_lens(query_lens, shape.state_batch, shape.total_tokens)?;
     if let Some((mask_batch, max_query_len, mask_tokens)) = shape.mask_shape
@@ -389,7 +391,7 @@ fn packed_cross_attention_ranges(
             || mask_tokens != shape.state_tokens
             || query_lens.iter().any(|&len| len > max_query_len))
     {
-        candle_core::bail!("Mllama packed cross-attention mask is inconsistent");
+        inference_tensor::bail!("Mllama packed cross-attention mask is inconsistent");
     }
 
     let mut offset = 0usize;
@@ -406,11 +408,11 @@ fn packed_cross_attention_ranges(
 fn pack_full_text_row_mask(mask: &Tensor, query_lens: &[usize]) -> Result<Tensor> {
     let (logical_batch, singleton, max_query_len, tail) = mask.dims4()?;
     if singleton != 1 || tail != 1 {
-        candle_core::bail!("Mllama full-row mask has invalid dimensions");
+        inference_tensor::bail!("Mllama full-row mask has invalid dimensions");
     }
     validate_packed_query_lens(query_lens, logical_batch, query_lens.iter().sum::<usize>())?;
     if query_lens.iter().any(|&len| len > max_query_len) {
-        candle_core::bail!("Mllama full-row mask is shorter than a logical query");
+        inference_tensor::bail!("Mllama full-row mask is shorter than a logical query");
     }
     let mut rows = Vec::with_capacity(logical_batch);
     for (batch_idx, &query_len) in query_lens.iter().enumerate() {
@@ -500,7 +502,7 @@ impl MLlamaTextCrossAttention {
             let mut values = Vec::with_capacity(batch);
             for batch_idx in 0..batch {
                 let route_row = batch_idx.checked_mul(query_len).ok_or_else(|| {
-                    candle_core::Error::msg("Mllama cross-attention route row overflow")
+                    inference_tensor::Error::msg("Mllama cross-attention route row overflow")
                 })?;
                 let states = cross_attn_states.narrow(0, batch_idx, 1)?;
                 let (k, v) = inference_quant::with_lora_execution_repeated_row(
@@ -545,13 +547,13 @@ impl MLlamaTextCrossAttention {
 
         let (k, v) = if let Some(cross_attn_states) = cross_attn_states {
             if cross_attn_states.dim(0)? != bs {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Mllama cross-attention state batch does not match the query batch"
                 );
             }
             self.project_cross_states(cross_attn_states, q_len)?
         } else {
-            candle_core::bail!("Cross attn cannot find k,v cache or cross attn hidden states!")
+            inference_tensor::bail!("Cross attn cannot find k,v cache or cross attn hidden states!")
         };
 
         let repeated_mask = match attention_mask {
@@ -692,7 +694,7 @@ impl MLlamaCrossAttentionDecoderLayer {
             self.attn.forward_packed(
                 &hidden_states,
                 cross_attn_states.ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "Mllama packed cross-attention is missing encoder states",
                     )
                 })?,
@@ -893,13 +895,13 @@ impl MLlamaTextModel {
         let packed_query_lens = if ctx.flash_params().packed {
             let (physical_batch, physical_tokens) = input_ids.dims2()?;
             if physical_batch != 1 {
-                candle_core::bail!("packed Mllama forward requires physical batch size 1");
+                inference_tensor::bail!("packed Mllama forward requires physical batch size 1");
             }
             let query_lens = ctx
                 .paged_input_metadata()
                 .and_then(|metadata| metadata.query_lens.as_deref())
                 .ok_or_else(|| {
-                    candle_core::Error::msg(
+                    inference_tensor::Error::msg(
                         "packed Mllama forward is missing logical query lengths",
                     )
                 })?;
@@ -1027,7 +1029,7 @@ mod tests {
         PackedCrossAttentionShape, pack_full_text_row_mask, packed_cross_attention_ranges,
         validate_packed_query_lens,
     };
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     #[test]
     fn packed_query_lengths_require_an_exact_partition() {

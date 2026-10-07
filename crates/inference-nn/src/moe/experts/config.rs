@@ -1,7 +1,7 @@
-use candle_core::{DType, Device, Result};
 use inference_quant::QuantizedConfig;
 #[cfg(feature = "cuda")]
 use inference_quant::log::once_log_info;
+use inference_tensor::{DType, Device, Result};
 
 use crate::layers::Activation;
 
@@ -140,14 +140,14 @@ pub(super) fn gated_act(act: Activation) -> Result<inference_quant::moe::cuda::G
         Activation::NewGelu | Activation::GeluPytorchTanh => {
             Ok(inference_quant::moe::cuda::GatedAct::GeluTanh)
         }
-        _ => candle_core::bail!("activation {act:?} is not supported by grouped MoE kernels"),
+        _ => inference_tensor::bail!("activation {act:?} is not supported by grouped MoE kernels"),
     }
 }
 
 #[cfg(feature = "cuda")]
 fn validate_raw_weights(c: &BackendChoice, backend: &str) -> Result<()> {
     if c.quantized || c.loading_isq || c.immediate_isq {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "INFERENCE_RS_MOE_BACKEND={backend} requires raw, unquantized expert weights"
         );
     }
@@ -158,10 +158,10 @@ fn validate_raw_weights(c: &BackendChoice, backend: &str) -> Result<()> {
 fn validate_fused(c: &BackendChoice) -> Result<()> {
     validate_raw_weights(c, "fused")?;
     if !matches!(c.dtype, DType::F16 | DType::BF16) {
-        candle_core::bail!("INFERENCE_RS_MOE_BACKEND=fused requires F16 or BF16 weights");
+        inference_tensor::bail!("INFERENCE_RS_MOE_BACKEND=fused requires F16 or BF16 weights");
     }
     if !c.device.is_cuda() {
-        candle_core::bail!("INFERENCE_RS_MOE_BACKEND=fused requires a CUDA device");
+        inference_tensor::bail!("INFERENCE_RS_MOE_BACKEND=fused requires a CUDA device");
     }
     Ok(())
 }
@@ -170,11 +170,11 @@ fn validate_fused(c: &BackendChoice) -> Result<()> {
 fn validate_grouped(c: &BackendChoice, backend: &str) -> Result<()> {
     validate_raw_weights(c, backend)?;
     if c.dtype != DType::BF16 {
-        candle_core::bail!("INFERENCE_RS_MOE_BACKEND={backend} requires BF16 weights");
+        inference_tensor::bail!("INFERENCE_RS_MOE_BACKEND={backend} requires BF16 weights");
     }
     gated_act(c.act)?;
     if !c.device.is_cuda() {
-        candle_core::bail!("INFERENCE_RS_MOE_BACKEND={backend} requires a CUDA device");
+        inference_tensor::bail!("INFERENCE_RS_MOE_BACKEND={backend} requires a CUDA device");
     }
     Ok(())
 }
@@ -206,18 +206,18 @@ impl MoEExpertsBackend {
                         return Ok(Self::Fused);
                     }
                     #[cfg(not(feature = "cuda"))]
-                    candle_core::bail!("INFERENCE_RS_MOE_BACKEND=fused requires a CUDA build");
+                    inference_tensor::bail!("INFERENCE_RS_MOE_BACKEND=fused requires a CUDA build");
                 }
                 #[cfg(feature = "cutile")]
                 Self::Cutile => {
                     validate_grouped(c, "cutile")?;
                     if !cutile_arch_supported(&c.device) {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "INFERENCE_RS_MOE_BACKEND=cutile is unsupported by this CUDA/GPU pair"
                         );
                     }
                     if !cutile_jit_available(&c.device) {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "INFERENCE_RS_MOE_BACKEND=cutile requires tileiras support for this GPU"
                         );
                     }
@@ -227,7 +227,7 @@ impl MoEExpertsBackend {
                 Self::Cutlass => {
                     validate_grouped(c, "cutlass")?;
                     if !cutlass_moe_supported(&c.device) {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "INFERENCE_RS_MOE_BACKEND=cutlass is unsupported by this CUDA/GPU pair"
                         );
                     }

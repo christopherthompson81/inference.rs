@@ -4,8 +4,8 @@
 use std::{fmt::Display, str::FromStr};
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use inference_quant::log::once_log_info;
+use inference_tensor::{DType, Device, Tensor};
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "cuda")]
 use tracing::debug;
@@ -120,7 +120,7 @@ fn get_dtypes() -> Vec<DType> {
     get_dtypes_non_cuda()
 }
 
-fn determine_auto_dtype_all(devices: &[&Device]) -> candle_core::Result<DType> {
+fn determine_auto_dtype_all(devices: &[&Device]) -> inference_tensor::Result<DType> {
     // We can safely use bf16 for accelerate because we cast up to f32 in all matmuls anyway.
     #[cfg(feature = "accelerate")]
     return Ok(DType::BF16);
@@ -152,14 +152,14 @@ fn determine_auto_dtype_all(devices: &[&Device]) -> candle_core::Result<DType> {
                         Ok(_) => (),
                         Err(e) => match e {
                             // For CUDA
-                            candle_core::Error::UnsupportedDTypeForOp(_, _) => continue,
+                            inference_tensor::Error::UnsupportedDTypeForOp(_, _) => continue,
                             // Accelerate backend doesn't support f16/bf16
                             // Metal backend doesn't support f16
-                            candle_core::Error::Msg(_) => continue,
+                            inference_tensor::Error::Msg(_) => continue,
                             // This is when the metal backend doesn't support bf16
-                            candle_core::Error::Metal(_) => continue,
+                            inference_tensor::Error::Metal(_) => continue,
                             // If running with RUST_BACKTRACE=1
-                            candle_core::Error::WithBacktrace { .. } => continue,
+                            inference_tensor::Error::WithBacktrace { .. } => continue,
                             other => return Err(other),
                         },
                     }
@@ -195,7 +195,7 @@ pub fn is_integrated_gpu(device: &Device) -> bool {
         Device::Metal(_) => true,
         #[cfg(feature = "cuda")]
         Device::Cuda(dev) => {
-            use candle_core::cuda::cudarc::driver::{result, sys};
+            use inference_tensor::cuda::cudarc::driver::{result, sys};
             let ordinal = dev.cuda_stream().context().ordinal();
             #[allow(clippy::cast_possible_truncation)]
             let cu_device = match result::device::get(ordinal as i32) {

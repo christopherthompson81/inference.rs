@@ -1,6 +1,6 @@
 #![cfg(all(feature = "cuda", feature = "cutile"))]
 
-use candle_core::{DType, Device, Result, Storage, Tensor};
+use inference_tensor::{DType, Device, Result, Storage, Tensor};
 
 fn gelu_tanh(x: f32) -> f32 {
     0.5 * x * (1.0 + ((2.0f32 / std::f32::consts::PI).sqrt() * (x + 0.044715 * x * x * x)).tanh())
@@ -91,7 +91,7 @@ fn run_cutile_case(
     let (ti_storage, _l) = ti_flat.storage_and_layout();
     let ti_slice = match &*ti_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-        _ => candle_core::bail!("topk_ids must be cuda"),
+        _ => inference_tensor::bail!("topk_ids must be cuda"),
     };
     let (sids, eids, ntpp, em) = inference_quant::moe::cuda::moe_align(
         ti_slice,
@@ -111,7 +111,7 @@ fn run_cutile_case(
     let (tw_storage, _l) = tw_flat.storage_and_layout();
     let tw_slice = match &*tw_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("topk_weights must be cuda"),
+        _ => inference_tensor::bail!("topk_weights must be cuda"),
     };
     let ic3 = inference_quant::cutile::cutile_grouped_gemm(
         &ic2,

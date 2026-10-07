@@ -7,8 +7,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{Error, Result};
 use futures::future::{join_all, try_join_all};
+use inference_tensor::{Error, Result};
 use safetensors::tensor::{Dtype, Metadata};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -578,7 +578,7 @@ fn resolve_uqff_groups_with_report(
 ) -> Result<Vec<UqffArtifactGroup>> {
     let paths = resolve_uqff_paths(path, report)?;
     if paths.is_empty() {
-        candle_core::bail!("No `.uqff` files found at `{}`.", path.display());
+        inference_tensor::bail!("No `.uqff` files found at `{}`.", path.display());
     }
 
     let mut remaining = paths
@@ -641,7 +641,7 @@ fn resolve_uqff_paths(path: &Path, report: Option<&UqffReport>) -> Result<Vec<Pa
             .collect();
     }
     if !path.is_file() {
-        candle_core::bail!("UQFF path `{}` does not exist.", path.display());
+        inference_tensor::bail!("UQFF path `{}` does not exist.", path.display());
     }
 
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -853,7 +853,7 @@ async fn read_safetensors_metadata(file: &UqffArtifactFile) -> Result<(u64, Meta
         .map_err(|_| Error::Msg(format!("{}: safetensors header is too small", file.name())))?;
     let header_len = u64::from_le_bytes(len_bytes);
     if header_len > MAX_SAFETENSORS_HEADER_BYTES {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{}: safetensors header is too large: {header_len} bytes",
             file.name()
         );
@@ -870,7 +870,7 @@ async fn read_safetensors_metadata(file: &UqffArtifactFile) -> Result<(u64, Meta
 
 async fn read_local_range(path: &Path, range: Range<u64>) -> Result<Vec<u8>> {
     if range.start > range.end {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{}: invalid byte range {}..{}",
             path.display(),
             range.start,
@@ -1298,7 +1298,7 @@ fn report_path_for_input(path: &Path) -> Result<PathBuf> {
             .unwrap_or_else(|| Path::new("."))
             .join(UQFF_REPORT_JSON))
     } else {
-        candle_core::bail!("UQFF path `{}` does not exist.", path.display());
+        inference_tensor::bail!("UQFF path `{}` does not exist.", path.display());
     }
 }
 
@@ -1551,7 +1551,7 @@ fn version_string_from_metadata(metadata: &[UqffMetadataSummary]) -> Option<Stri
 
 fn version_from_metadata(metadata: &[UqffMetadataSummary]) -> Result<(u32, u32, u32)> {
     let Some(version) = version_string_from_metadata(metadata) else {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "missing UQFF version tensor `{}`",
             super::UQFF_VERSION_MAJOR_KEY
         );
@@ -1562,7 +1562,7 @@ fn version_from_metadata(metadata: &[UqffMetadataSummary]) -> Result<(u32, u32, 
 fn parse_version_string(version: &str) -> Result<(u32, u32, u32)> {
     let parts = version.split('.').collect::<Vec<_>>();
     if parts.len() != 3 {
-        candle_core::bail!("invalid UQFF version metadata `{version}`");
+        inference_tensor::bail!("invalid UQFF version metadata `{version}`");
     }
     let major = parts[0]
         .parse::<u32>()

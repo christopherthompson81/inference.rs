@@ -1,24 +1,21 @@
 use std::{collections::HashMap, fs};
 
 use anyhow::Context;
-use candle_core::{
+use indexmap::IndexMap;
+use inference_tensor::{
     Device, Result,
     quantized::{
         GgmlDType, QTensor,
         gguf_file::{self, TensorInfo, Value},
     },
 };
-use indexmap::IndexMap;
 use tracing::{debug, info};
 
 use crate::utils::debug::DEBUG;
 
 use super::GGUFArchitecture;
 
-/// List of all GgmlDType variants from Candle.
-/// This should be kept in sync with candle_core::quantized::GgmlDType.
-/// If Candle adds new dtype variants, add them here to include in error messages.
-/// Reference: candle-core/src/quantized/mod.rs in the Candle repository.
+/// Every `inference_tensor::quantized::GgmlDType` variant, for error messages; keep in sync with that enum.
 const KNOWN_DTYPES: &[GgmlDType] = &[
     GgmlDType::F32,
     GgmlDType::F16,
@@ -91,7 +88,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                     let error_msg = format!("{}", e);
                     if error_msg.contains("unknown dtype for tensor") {
                         {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Critical failure loading model part {}\n\
                                 Verify you are using a supported quantization type\n\
                                 Supported types: {}\n\
@@ -102,7 +99,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                             );
                         }
                     }
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Critical failure loading model part {}!\n\
                         Check whether your current quantization format is supported: {}",
                         i,
@@ -125,13 +122,13 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 accum
             });
         if n_splits.len() > 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?"
             );
         }
         #[allow(clippy::cast_possible_truncation)]
         if !n_splits.is_empty() && n_readers != n_splits[0] as usize {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Number of GGUF files does not match the number of splits, expected {} files.",
                 n_splits[0]
             );
@@ -179,7 +176,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 return Ok(tensor_info);
             }
         }
-        candle_core::bail!("Cannot find tensor info for {name}")
+        inference_tensor::bail!("Cannot find tensor info for {name}")
     }
 
     /// Retrieve a tensor, searching through each content.
@@ -189,7 +186,7 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 return tensor_info.read(reader, ct.tensor_data_offset, device);
             }
         }
-        candle_core::bail!("Cannot find tensor info for {name}")
+        inference_tensor::bail!("Cannot find tensor info for {name}")
     }
 
     /// Check for a tensor, searching through each content.

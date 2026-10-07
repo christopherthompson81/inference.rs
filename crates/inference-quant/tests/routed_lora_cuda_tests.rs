@@ -2,10 +2,6 @@
 
 use std::sync::Arc;
 
-use candle_core::{
-    CudaDevice, D, DType, Device, Result, Tensor,
-    cuda::cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr},
-};
 use half::{bf16, f16};
 use inference_quant::{
     LoraExecution, LoraExecutionArena, LoraExpertDelta, LoraExpertExecution, LoraExpertInputMode,
@@ -15,6 +11,10 @@ use inference_quant::{
     RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable, RoutedLoraGroupedLaunch,
     RoutedLoraInputMode, RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, Shard,
     add_expert_delta_reference, launch_routed_lora_grouped, with_lora_execution,
+};
+use inference_tensor::{
+    CudaDevice, D, DType, Device, Result, Tensor,
+    cuda::cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr},
 };
 
 const NUM_EXPERTS: usize = 4;

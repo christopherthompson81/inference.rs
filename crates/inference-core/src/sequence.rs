@@ -16,8 +16,8 @@ use crate::{
     response::CompletionChoice,
     tools::ToolCallState,
 };
-use candle_core::Tensor;
 use image::DynamicImage;
+use inference_tensor::Tensor;
 use rand::SeedableRng;
 use rand_isaac::Isaac64Rng;
 use std::{

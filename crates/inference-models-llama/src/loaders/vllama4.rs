@@ -1,6 +1,6 @@
 use super::*;
-use candle_core::{D, Device};
 use image::{ColorType, DynamicImage};
+use inference_tensor::{D, Device};
 
 /// `MultimodalLoader` for an Llama Vision model.
 pub struct VLlama4Loader;

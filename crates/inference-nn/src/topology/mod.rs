@@ -1,8 +1,8 @@
 use std::{fs, io::Read, ops::Range, path::Path};
 
-use candle_core::Device;
 use indexmap::IndexMap;
 use inference_quant::{ImmediateIsqOverride, IsqType, parse_isq_value};
+use inference_tensor::Device;
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;

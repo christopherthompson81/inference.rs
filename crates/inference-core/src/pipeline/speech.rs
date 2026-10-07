@@ -19,13 +19,13 @@ use crate::{
     TryIntoDType, distributed,
 };
 use anyhow::Result;
-use candle_core::{Device, Tensor};
-use candle_nn::VarBuilder;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput};
 use inference_quant::IsqType;
+use inference_tensor::nn::VarBuilder;
+use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -307,9 +307,9 @@ impl Loader for SpeechLoader {
         let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
             let payload: WorkerTransferData = serde_json::from_str(&payload)?;
             let WorkerTransferData::Init { worker_rank, .. } = payload;
-            vec![candle_core::Device::new_cuda(worker_rank + 1)?]
+            vec![inference_tensor::Device::new_cuda(worker_rank + 1)?]
         } else if use_nccl || use_ring() {
-            vec![candle_core::Device::new_cuda(0)?]
+            vec![inference_tensor::Device::new_cuda(0)?]
         } else {
             device_map::get_all_similar_devices(device)?
         };
@@ -399,7 +399,7 @@ impl IsqPipelineMixin for SpeechPipeline {
 }
 
 impl CacheManagerMixin for SpeechPipeline {
-    fn clone_in_cache(&self, _seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, _seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn clone_out_cache(&self, _seqs: &mut [&mut Sequence]) {}
@@ -409,7 +409,7 @@ impl CacheManagerMixin for SpeechPipeline {
         _reset_non_granular: bool,
         _modify_draft_cache: bool,
         _load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
@@ -441,7 +441,7 @@ impl Pipeline for SpeechPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> candle_core::Result<ForwardInputsResult> {
+    ) -> inference_tensor::Result<ForwardInputsResult> {
         assert!(!return_raw_logits);
 
         let ModelInputs { prompts } = *inputs.downcast().expect("Downcast failed.");
@@ -473,8 +473,8 @@ impl Pipeline for SpeechPipeline {
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _srng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
-        Box::pin(std::future::ready(Err(candle_core::Error::Msg(
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
+        Box::pin(std::future::ready(Err(inference_tensor::Error::Msg(
             "`sample_causal_gen` is incompatible with `SpeechPipeline`".to_string(),
         )
         .bt())))

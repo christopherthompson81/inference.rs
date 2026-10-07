@@ -3,13 +3,13 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, LoraLinearSpec, LoraSiteHandle, QuantMethod, ReplicatedLayer,
     RowParallelLayer, ShardedVarBuilder, apply_dynamic_lora_delta, is_dynamic_lora_site_active,
     register_dynamic_lora_site, softcap,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, IndexOp, Module, Result, Tensor};
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -76,15 +76,17 @@ fn kv_shared_layer_index_for_layout(
     let first_kv_shared_layer_idx = layer_types
         .len()
         .checked_sub(num_kv_shared_layers)
-        .ok_or_else(|| candle_core::Error::msg("Gemma 3n has more shared KV layers than layers"))?;
+        .ok_or_else(|| {
+            inference_tensor::Error::msg("Gemma 3n has more shared KV layers than layers")
+        })?;
     let attention_type = layer_types.get(layer_idx).ok_or_else(|| {
-        candle_core::Error::msg(format!("Gemma 3n layer index {layer_idx} is out of bounds"))
+        inference_tensor::Error::msg(format!("Gemma 3n layer index {layer_idx} is out of bounds"))
     })?;
     if num_kv_shared_layers == 0 || layer_idx < first_kv_shared_layer_idx {
         return Ok(None);
     }
     if first_kv_shared_layer_idx == 0 {
-        candle_core::bail!("Gemma 3n shared KV layers have no donor layers");
+        inference_tensor::bail!("Gemma 3n shared KV layers have no donor layers");
     }
 
     layer_types[..first_kv_shared_layer_idx]
@@ -92,7 +94,7 @@ fn kv_shared_layer_index_for_layout(
         .rposition(|candidate| candidate == attention_type)
         .map(Some)
         .ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "Gemma 3n layer {layer_idx} shares KV without a prior `{attention_type}` donor"
             ))
         })
@@ -100,7 +102,7 @@ fn kv_shared_layer_index_for_layout(
 
 fn kv_shared_layer_index(cfg: &Gemma3nTextConfig, layer_idx: usize) -> Result<Option<usize>> {
     if cfg.layer_types.len() != cfg.num_hidden_layers {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3n has {} layer types for {} layers",
             cfg.layer_types.len(),
             cfg.num_hidden_layers
@@ -507,12 +509,16 @@ impl Attention {
                     ctx.flash_params,
                 )?,
                 None if is_shared => {
-                    candle_core::bail!("Gemma 3n shared KV attention is missing paged metadata")
+                    inference_tensor::bail!(
+                        "Gemma 3n shared KV attention is missing paged metadata"
+                    )
                 }
                 None => {
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     if matches!(mask, AttentionMask::None) {
-                        candle_core::bail!("Gemma 3n paged prompt is missing an attention mask");
+                        inference_tensor::bail!(
+                            "Gemma 3n paged prompt is missing an attention mask"
+                        );
                     }
                     paged_attn.forward(
                         &q,
@@ -532,10 +538,10 @@ impl Attention {
                 {
                     let shared_cache = &ctx.kv_caches[kv_shared_layer_index];
                     let k = shared_cache.appended_k()?.ok_or_else(|| {
-                        candle_core::Error::msg("Gemma 3n shared KV donor has no key cache")
+                        inference_tensor::Error::msg("Gemma 3n shared KV donor has no key cache")
                     })?;
                     let v = shared_cache.appended_v()?.ok_or_else(|| {
-                        candle_core::Error::msg("Gemma 3n shared KV donor has no value cache")
+                        inference_tensor::Error::msg("Gemma 3n shared KV donor has no value cache")
                     })?;
                     (k.to_device(q.device())?, v.to_device(q.device())?)
                 } else {
@@ -1055,7 +1061,7 @@ pub fn handle_matformer_slicing(
     match matformer_slicing_config {
         Some(slicing_config) => {
             let matformer_slice = slicing_config.get_slicing().ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "Matformer slice '{}' not found in config",
                     slicing_config.slice_name
                 ))
@@ -1071,7 +1077,7 @@ pub fn handle_matformer_slicing(
             if layers_skipped.contains(&local_kv_sharing_layer_idx)
                 || layers_skipped.contains(&global_kv_sharing_layer_idx)
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Layers {} and {} are reserved.",
                     local_kv_sharing_layer_idx,
                     global_kv_sharing_layer_idx
@@ -1722,7 +1728,7 @@ impl TextModel {
                         &query_selection.num_cached_tokens,
                         &query_selection.query_lens,
                     )
-                    .map_err(|error| candle_core::Error::Msg(error.to_string()))?,
+                    .map_err(|error| inference_tensor::Error::Msg(error.to_string()))?,
             )
         } else {
             None
@@ -1833,7 +1839,7 @@ impl TextModel {
                     .expect("missing active fast prefill plan");
                 if let Some(metadata) = plan.paged_metadata.as_ref() {
                     crate::model::metadata_rope_positions(metadata, xs.device())
-                        .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+                        .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
                         .clone()
                 } else {
                     ctx.text_positions_from_offsets(
@@ -1844,7 +1850,7 @@ impl TextModel {
                 }
             } else {
                 ctx.text_positions(xs.device(), xs.dim(2)?)?
-                    .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+                    .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
                     .clone()
             };
             let (layer_attention_mask, layer_sliding_attention_mask) = if reduced_to_logits {
@@ -2025,7 +2031,7 @@ impl MultimodalModel for TextModel {
         _pixel_values: Option<Tensor>,
         _model_specific_args: Box<dyn std::any::Any>, // pixel attention mask, or image sizes, or anything else
         _ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         unreachable!()
     }
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn std::any::Any> {
@@ -2061,15 +2067,15 @@ mod tests {
         },
     };
 
-    use candle_core::{
-        DType, Device, Tensor,
-        quantized::{GgmlDType, QTensor, gguf_file},
-    };
-    use candle_nn::Linear;
     use inference_quant::{
         GgufArchive, GgufBindingMap, GgufTensorBinding, GgufWeightSource, ImmediateIsqConfig,
         IsqCaptureMode, IsqExecutorConfig, QuantMethod, QuantMethodConfig, QuantizedWeightSource,
         Shard, ShardedSafeTensors, UnquantLinear, create_isq_executor,
+    };
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{
+        DType, Device, Tensor,
+        quantized::{GgmlDType, QTensor, gguf_file},
     };
     use tempfile::NamedTempFile;
 
@@ -2096,7 +2102,7 @@ mod tests {
             key: &str,
             device: &Device,
             _shard: Shard,
-        ) -> candle_core::Result<Option<Arc<dyn QuantMethod>>> {
+        ) -> inference_tensor::Result<Option<Arc<dyn QuantMethod>>> {
             if !self.available || key != "model.language_model.embed_tokens_per_layer" {
                 return Ok(None);
             }
@@ -2112,24 +2118,28 @@ mod tests {
             &self,
             _name: &str,
             _device: &Device,
-        ) -> candle_core::Result<Option<Tensor>> {
+        ) -> inference_tensor::Result<Option<Tensor>> {
             Ok(None)
         }
 
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
+        fn shard_alignment(&self, _key: &str) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
+        fn pack_factor(&self, _dtype: DType) -> inference_tensor::Result<usize> {
             Ok(if self.available { 2 } else { 1 })
         }
 
-        fn pack_factor_for(&self, key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
+        fn pack_factor_for(
+            &self,
+            key: &str,
+            _dtype: DType,
+        ) -> inference_tensor::Result<Option<usize>> {
             Ok(self.contains(key).then_some(2))
         }
     }
 
-    fn per_layer_weight(rows: usize, cols: usize) -> candle_core::Result<Tensor> {
+    fn per_layer_weight(rows: usize, cols: usize) -> inference_tensor::Result<Tensor> {
         Tensor::from_vec(
             (0..rows * cols).map(|value| value as f32).collect(),
             (rows, cols),
@@ -2138,12 +2148,12 @@ mod tests {
     }
 
     #[test]
-    fn default_per_layer_embedding_uses_weight_source_gather() -> candle_core::Result<()> {
+    fn default_per_layer_embedding_uses_weight_source_gather() -> inference_tensor::Result<()> {
         inference_quant::clear_immediate_isq();
         let weight = per_layer_weight(4, 32)?;
         let q_weight = QTensor::quantize(&weight, GgmlDType::Q4_0)?;
         let expected_weight = q_weight.dequantize(&Device::Cpu)?.narrow(0, 0, 3)?;
-        let mut file = NamedTempFile::new().map_err(candle_core::Error::wrap)?;
+        let mut file = NamedTempFile::new().map_err(inference_tensor::Error::wrap)?;
         gguf_file::write(
             file.as_file_mut(),
             &[],
@@ -2151,7 +2161,7 @@ mod tests {
         )?;
         file.as_file_mut()
             .flush()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
 
         let archive = Arc::new(GgufArchive::open_file(file.path())?);
         let bindings = GgufBindingMap::new().with_binding(
@@ -2187,7 +2197,7 @@ mod tests {
     }
 
     #[test]
-    fn matformer_per_layer_embedding_selects_dense_layer_groups() -> candle_core::Result<()> {
+    fn matformer_per_layer_embedding_selects_dense_layer_groups() -> inference_tensor::Result<()> {
         inference_quant::clear_immediate_isq();
         let prefix = "model.language_model.embed_tokens_per_layer";
         let vb = ShardedSafeTensors::wrap(
@@ -2211,7 +2221,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_uqff_per_layer_embedding_stays_in_residual() -> candle_core::Result<()> {
+    fn legacy_uqff_per_layer_embedding_stays_in_residual() -> inference_tensor::Result<()> {
         inference_quant::clear_immediate_isq();
         let prefix = "model.language_model.embed_tokens_per_layer";
         let weight = per_layer_weight(3, 4)?;
@@ -2240,7 +2250,7 @@ mod tests {
     }
 
     #[test]
-    fn uqff_capture_tracks_per_layer_embedding_without_residual() -> candle_core::Result<()> {
+    fn uqff_capture_tracks_per_layer_embedding_without_residual() -> inference_tensor::Result<()> {
         inference_quant::clear_immediate_isq();
         let prefix = "model.language_model.embed_tokens_per_layer";
         let vb = ShardedSafeTensors::wrap(

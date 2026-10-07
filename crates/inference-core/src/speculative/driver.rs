@@ -2,7 +2,7 @@ use crate::speculative::DraftSequence;
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
 use crate::IntervalLogger;
@@ -59,7 +59,7 @@ fn materialize_prepared_proposals(prepared: &mut [Option<PreparedVerification>])
         .iter()
         .any(|(_, tokens)| !tokens.device().same_device(device))
     {
-        candle_core::bail!("one speculative verification batch cannot span devices");
+        inference_tensor::bail!("one speculative verification batch cannot span devices");
     }
     let tensors = device_rows
         .iter()
@@ -782,7 +782,7 @@ where
         return Ok(());
     };
     if proposal_batch.proposals.len() != active_indices.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "speculative proposer returned {} proposals for {} active sequences",
             proposal_batch.proposals.len(),
             active_indices.len()
@@ -823,7 +823,7 @@ fn clear_active_staged(seqs: &mut [&mut Sequence], active_indices: &[usize]) {
 mod tests {
     use std::cell::Cell;
 
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::{
         PreparedVerification, commit_then_publish_verified_batch, complete_after_preparation,
@@ -832,7 +832,7 @@ mod tests {
     use crate::speculative::SpeculativeTokens;
 
     #[test]
-    fn materializes_device_proposals_as_one_batch() -> candle_core::Result<()> {
+    fn materializes_device_proposals_as_one_batch() -> inference_tensor::Result<()> {
         let device = Device::Cpu;
         let mut prepared = vec![
             Some(PreparedVerification {
@@ -870,7 +870,7 @@ mod tests {
     #[test]
     fn completion_runs_after_preparation_error() {
         let completed = Cell::new(false);
-        let preparation = Err::<(), _>(candle_core::Error::msg("preparation failed"));
+        let preparation = Err::<(), _>(inference_tensor::Error::msg("preparation failed"));
         let error = complete_after_preparation(preparation, || {
             completed.set(true);
             Ok(())
@@ -881,7 +881,7 @@ mod tests {
     }
 
     #[test]
-    fn recurrent_commit_precedes_finished_prefix_publication() -> candle_core::Result<()> {
+    fn recurrent_commit_precedes_finished_prefix_publication() -> inference_tensor::Result<()> {
         let events = std::cell::RefCell::new(Vec::new());
         commit_then_publish_verified_batch(
             &mut (),

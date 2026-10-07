@@ -1,7 +1,9 @@
-use candle_core::{DType, MetalStorage, Result, Shape, Storage, Tensor, backend::BackendStorage};
 use inference_quant::metal_kernels::{
     FA_NCPSG, Kernels, call_flash_attn_ext_bf16_dk512, call_flash_attn_ext_vec_bf16_dk512,
     flash_attn_ext_blk_scratch_size,
+};
+use inference_tensor::{
+    DType, MetalStorage, Result, Shape, Storage, Tensor, backend::BackendStorage,
 };
 
 const HEAD_DIM: usize = 512;
@@ -127,7 +129,7 @@ pub fn try_flash_attn_ext_bf16_dk512(
         mask_stride,
         scale,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     let out = Tensor::from((
         Storage::Metal(MetalStorage::new(
@@ -270,7 +272,7 @@ pub fn try_flash_attn_ext_vec_bf16_dk512(
         &mask_stride,
         scale,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     let out = Tensor::from((
         Storage::Metal(MetalStorage::new(

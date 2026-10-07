@@ -7,8 +7,8 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{Context, D, Device, IndexOp, Result, Tensor};
 use image::DynamicImage;
+use inference_tensor::{Context, D, Device, IndexOp, Result, Tensor};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, Rescale, TensorTransforms, ToTensorNoNorm,
     Transforms,
@@ -90,7 +90,7 @@ fn llama4_mm_features(
 ) -> Result<Vec<MultiModalFeature>> {
     let ranges = find_image_delimited_ranges(tokens, image_start_id, image_end_id);
     if ranges.len() != image_hashes.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Llama4 has {} image spans but {} image inputs",
             ranges.len(),
             image_hashes.len()
@@ -109,11 +109,11 @@ fn llama4_tile_counts(aspect_ratios: &Tensor) -> Result<Vec<usize>> {
         .into_iter()
         .map(|ratio| {
             if ratio.len() != 2 || ratio[0] == 0 || ratio[1] == 0 {
-                candle_core::bail!("Llama4 image has an invalid aspect ratio");
+                inference_tensor::bail!("Llama4 image has an invalid aspect ratio");
             }
             let local_tiles = (ratio[0] as usize)
                 .checked_mul(ratio[1] as usize)
-                .ok_or_else(|| candle_core::Error::msg("Llama4 tile count overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("Llama4 tile count overflow"))?;
             Ok(if local_tiles > 1 { local_tiles + 1 } else { 1 })
         })
         .collect()
@@ -121,16 +121,16 @@ fn llama4_tile_counts(aspect_ratios: &Tensor) -> Result<Vec<usize>> {
 
 fn llama4_tile_range(tile_counts: &[usize], item_range: Range<usize>) -> Result<Range<usize>> {
     if item_range.start > item_range.end || item_range.end > tile_counts.len() {
-        candle_core::bail!("Llama4 image selection is outside the preprocessed images");
+        inference_tensor::bail!("Llama4 image selection is outside the preprocessed images");
     }
     let start = tile_counts[..item_range.start]
         .iter()
         .try_fold(0usize, |sum, count| sum.checked_add(*count))
-        .ok_or_else(|| candle_core::Error::msg("Llama4 tile offset overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("Llama4 tile offset overflow"))?;
     let len = tile_counts[item_range]
         .iter()
         .try_fold(0usize, |sum, count| sum.checked_add(*count))
-        .ok_or_else(|| candle_core::Error::msg("Llama4 tile count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("Llama4 tile count overflow"))?;
     Ok(start..start + len)
 }
 
@@ -143,7 +143,7 @@ fn llama4_item_selection(
     total_items: usize,
 ) -> Result<Option<(Range<usize>, Range<usize>)>> {
     if encoded_items > total_items || cached_items > total_items {
-        candle_core::bail!("Llama4 image selection metadata is inconsistent");
+        inference_tensor::bail!("Llama4 image selection metadata is inconsistent");
     }
     let selection = if is_chunked {
         active_item_range.and_then(|original| {
@@ -168,7 +168,7 @@ fn llama4_item_selection(
             || original.end > total_items
             || encoded.len() != original.len())
     {
-        candle_core::bail!("Llama4 active image range is outside the retained images");
+        inference_tensor::bail!("Llama4 active image range is outside the retained images");
     }
     Ok(selection)
 }
@@ -183,11 +183,11 @@ fn llama4_layout_items(
         .filter(|feature| feature.kind == MultimodalKind::Image)
         .map(|feature| {
             if feature.item_range.len() != 1 || feature.hashes.len() != 1 {
-                candle_core::bail!("Llama4 image feature must describe exactly one image");
+                inference_tensor::bail!("Llama4 image feature must describe exactly one image");
             }
             let placeholder = feature.offset..feature.end();
             let item_tokens = tokens.get(placeholder.clone()).ok_or_else(|| {
-                candle_core::Error::msg("Llama4 image feature is outside the prompt")
+                inference_tensor::Error::msg("Llama4 image feature is outside the prompt")
             })?;
             let destination_positions = item_tokens
                 .iter()
@@ -197,7 +197,7 @@ fn llama4_layout_items(
                 })
                 .collect::<Vec<_>>();
             if destination_positions.is_empty() {
-                candle_core::bail!("Llama4 image feature has no patch placeholders");
+                inference_tensor::bail!("Llama4 image feature has no patch placeholders");
             }
             let source_positions = (0..destination_positions.len()).collect();
             MultimodalItemLayout::new(
@@ -233,20 +233,20 @@ fn llama4_image_metadata(
         });
         let feature = matching
             .next()
-            .ok_or_else(|| candle_core::Error::msg("Llama4 image feature is missing"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Llama4 image feature is missing"))?;
         if matching.next().is_some() || feature.hashes.len() != 1 {
-            candle_core::bail!("Llama4 image feature metadata is ambiguous");
+            inference_tensor::bail!("Llama4 image feature metadata is ambiguous");
         }
         let placeholder = feature.offset..feature.end();
-        let item_tokens = tokens
-            .get(placeholder)
-            .ok_or_else(|| candle_core::Error::msg("Llama4 image feature is outside the prompt"))?;
+        let item_tokens = tokens.get(placeholder).ok_or_else(|| {
+            inference_tensor::Error::msg("Llama4 image feature is outside the prompt")
+        })?;
         let token_count = item_tokens
             .iter()
             .filter(|&&token| token == patch_token_id)
             .count();
         if token_count == 0 {
-            candle_core::bail!("Llama4 image feature has no patch placeholders");
+            inference_tensor::bail!("Llama4 image feature has no patch placeholders");
         }
         hashes.push(feature.hashes[0]);
         token_counts.push(token_count);
@@ -257,7 +257,7 @@ fn llama4_image_metadata(
 fn llama4_prompt_query(seq: &dyn MediaSequence, query_len: usize) -> Result<Range<usize>> {
     if let Some(query) = seq.active_prompt_query_range() {
         if query.len() != query_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Llama4 active prompt has {} tokens but packed metadata has {query_len}",
                 query.len()
             );
@@ -265,9 +265,9 @@ fn llama4_prompt_query(seq: &dyn MediaSequence, query_len: usize) -> Result<Rang
         return Ok(query);
     }
     let token_count = seq.prompt_position_source_toks().len();
-    let start = token_count
-        .checked_sub(query_len)
-        .ok_or_else(|| candle_core::Error::msg("Llama4 packed query is longer than the prompt"))?;
+    let start = token_count.checked_sub(query_len).ok_or_else(|| {
+        inference_tensor::Error::msg("Llama4 packed query is longer than the prompt")
+    })?;
     Ok(start..token_count)
 }
 
@@ -278,7 +278,7 @@ fn validate_llama4_image_spans(query: &Range<usize>, items: &[MultimodalItemLayo
         if overlaps_query
             && (query.start > item.placeholder.start || query.end < item.placeholder.end)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Llama4 image item {} must be scheduled as a complete span",
                 item.item_index
             );
@@ -293,7 +293,7 @@ fn llama4_packed_layout(
     patch_token_id: u32,
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("Llama4 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Llama4 packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
@@ -728,7 +728,7 @@ impl Llama4ImageProcessor {
         let height = size["height"];
         let width = size["width"];
         if height != width {
-            candle_core::bail!("Expected config size height==width ({height}!={width})");
+            inference_tensor::bail!("Expected config size height==width ({height}!={width})");
         }
 
         let patch_size = height;
@@ -984,7 +984,7 @@ impl ImagePreProcessor for Llama4ImageProcessor {
                     let nt_w = image_size.1.max(max_upscaling_size).min(target_size.1);
                     (nt_h, nt_w)
                 } else {
-                    candle_core::bail!("Currently resize_to_max_canvas is assumed!");
+                    inference_tensor::bail!("Currently resize_to_max_canvas is assumed!");
                 };
 
             // Resize to target_size while preserving aspect ratio
@@ -1105,7 +1105,7 @@ mod tests {
             },
         ])
         .unwrap();
-        let text = Tensor::zeros((1, 7, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let text = Tensor::zeros((1, 7, 2), inference_tensor::DType::F32, &Device::Cpu).unwrap();
         let image = Tensor::from_vec(vec![1f32, 2., 3., 4.], (2, 2), &Device::Cpu).unwrap();
         let outputs: MultimodalEncoderOutputs = HashMap::from([(
             MultimodalEncoderKey {

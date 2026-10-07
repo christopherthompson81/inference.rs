@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
 pub struct DiaKvCache {
     k: Tensor,

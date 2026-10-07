@@ -3,13 +3,13 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::{DType, Tensor};
 use inference_nn::loaders::MultimodalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
     Snapshot, assert_err_contains, assert_snapshot, forward_multimodal, load_synthesized, metadata,
     names_digest, patched,
 };
+use inference_tensor::{DType, Tensor};
 use serde_json::{Value, json};
 
 use crate::loaders::{Qwen2_5VLLoader, Qwen2VLLoader, Qwen3VLLoader, Qwen3VLMoELoader};

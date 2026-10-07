@@ -1,7 +1,7 @@
 use futures::future::BoxFuture;
 use std::sync::Arc;
 
-use candle_core::{DType, IndexOp, Result, Tensor};
+use inference_tensor::{DType, IndexOp, Result, Tensor};
 #[cfg(feature = "cuda")]
 use rand::distr::{Distribution, Uniform};
 use rand_isaac::Isaac64Rng;
@@ -42,7 +42,7 @@ fn parse_text_and_tool_calls(
     };
     let parsed = state
         .finalize_for_response(raw_text, None, None, None)
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     Ok((parsed.content, parsed.tool_calls))
 }
 
@@ -61,7 +61,7 @@ fn parse_streaming_text_and_tool_calls(
     };
     let parsed = state
         .parse_streaming(content_delta, raw_delta, None, has_reasoning_parser, false)
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     Ok((parsed.content, parsed.tool_calls))
 }
 
@@ -212,7 +212,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
 ) -> Result<()> {
     let is_done = seq.is_done(logprobs.token, eos_tok, this.get_metadata().max_seq_len);
     let metadata = this.get_metadata();
-    let tok_env = metadata.tok_env().ok_or(candle_core::Error::Msg(
+    let tok_env = metadata.tok_env().ok_or(inference_tensor::Error::Msg(
         "`finish_or_add_toks_to_seq` requires the pipeline to have a token trie".to_string(),
     ))?;
     // Include special tokens when tool calling is active (so tool parsers can see
@@ -237,7 +237,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
     {
         let (_tool_use_still_possible, tool_use_is_done) = state
             .prefix_status(d.as_str())
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
 
         if tool_use_is_done
             && state.stops_after_complete_tool_call()
@@ -297,7 +297,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
         {
             (tool_use_still_possible, tool_use_is_done) = state
                 .prefix_status(d.as_str())
-                .map_err(candle_core::Error::msg)?;
+                .map_err(inference_tensor::Error::msg)?;
         };
 
         // Send chunks when:
@@ -361,7 +361,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                                 has_external_reasoning_parser,
                                 is_done.is_some(),
                             )
-                            .map_err(candle_core::Error::msg)?;
+                            .map_err(inference_tensor::Error::msg)?;
                         content_delta = parsed.content;
                         let parsed_tool_use_is_done = parsed.tool_use_is_done;
                         let _parsed_tool_use_still_possible = parsed.tool_use_still_possible;
@@ -537,7 +537,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 for logprob in logprobs_for_response {
                     let token = tokenizer
                         .as_ref()
-                        .ok_or(candle_core::Error::Msg(
+                        .ok_or(inference_tensor::Error::Msg(
                             "`finish_or_add_toks_to_seq` requires the pipeline to have a tokenizer"
                                 .to_string(),
                         ))?
@@ -573,7 +573,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 }
                 crate::sequence::StopReason::GeneratedImage
                 | crate::sequence::StopReason::GeneratedSpeech => {
-                    candle_core::bail!("Stop reason was `GeneratedImage`.")
+                    inference_tensor::bail!("Stop reason was `GeneratedImage`.")
                 }
             };
 
@@ -606,7 +606,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                             reasoning_content,
                             parser_text.as_deref(),
                         )
-                        .map_err(candle_core::Error::msg)?
+                        .map_err(inference_tensor::Error::msg)?
                 } else {
                     crate::tools::state::ToolCallParse {
                         content: parsed_content.or_else(|| Some(text.clone())),
@@ -676,7 +676,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                         seq.responder(),
                     )
                     .await
-                    .map_err(candle_core::Error::msg)?;
+                    .map_err(inference_tensor::Error::msg)?;
             } else {
                 group
                     .maybe_send_completion_done_response(
@@ -695,7 +695,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                         seq.responder(),
                     )
                     .await
-                    .map_err(candle_core::Error::msg)?;
+                    .map_err(inference_tensor::Error::msg)?;
             }
         }
         this.reset_non_granular_state();
@@ -815,7 +815,7 @@ impl CausalLogitsBatch {
             Self::PerSequence(logits) => coalesce_batch_logits_to_cpu(logits),
             Self::Batched(logits) => {
                 let batch = logits.dim(0)?;
-                let logits = logits.to_device(&candle_core::Device::Cpu)?;
+                let logits = logits.to_device(&inference_tensor::Device::Cpu)?;
                 (0..batch).map(|idx| logits.i(idx)).collect()
             }
         }
@@ -944,7 +944,7 @@ impl CudaTokenBatchSubmission {
 
     pub(crate) fn wait_on(
         &self,
-        stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
         match &self.inner {
             CudaTokenBatchSubmissionInner::Top1(inner) => inner.wait_on(stream),
@@ -954,7 +954,7 @@ impl CudaTokenBatchSubmission {
 
     pub(crate) fn release_after(
         &self,
-        stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
+        stream: &Arc<inference_tensor::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
         match &self.inner {
             CudaTokenBatchSubmissionInner::Top1(inner) => inner.release_after(stream),
@@ -1169,7 +1169,7 @@ fn validate_token_batch_cardinality(
     commit_count: usize,
 ) -> Result<()> {
     if token_count != sequence_count || commit_count != sequence_count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "CUDA token completion rows do not match the active batch: tokens={token_count}, commits={commit_count}, sequences={sequence_count}"
         );
     }
@@ -1266,7 +1266,7 @@ fn stack_final_logits(logits: &[Tensor]) -> Result<Tensor> {
 fn final_batched_logits(logits: &Tensor) -> Result<Tensor> {
     let dims = logits.dims();
     if dims.len() < 2 || dims[1..dims.len() - 1].iter().any(|&dim| dim != 1) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "batched causal logits must have shape [batch, ..., vocab] with singleton middle dimensions, got {dims:?}"
         );
     }
@@ -1279,7 +1279,7 @@ fn coalesce_batch_logits_to_cpu(logits: Vec<Tensor>) -> Result<Vec<Tensor>> {
     if logits.len() <= 1 || logits.iter().all(|logits| logits.device().is_cpu()) {
         return Ok(logits);
     }
-    let batch = stack_final_logits(&logits)?.to_device(&candle_core::Device::Cpu)?;
+    let batch = stack_final_logits(&logits)?.to_device(&inference_tensor::Device::Cpu)?;
     (0..logits.len())
         .map(|idx| batch.i(idx)?.unsqueeze(0)?.unsqueeze(0))
         .collect()
@@ -1493,7 +1493,7 @@ pub async fn sample_sequence(
         SequenceRecognizer::Llguidance(llg) => {
             // llguidance's EOS is <|endoftext|>-style; turn enders like <|im_end|> must pass once the grammar could stop
             let grammar_can_stop =
-                llg.is_stopped() || llg.is_accepting().map_err(candle_core::Error::msg)?;
+                llg.is_stopped() || llg.is_accepting().map_err(inference_tensor::Error::msg)?;
             let is_model_eos = |token: u32| eos_tok.is_some_and(|eos| eos.contains(&token));
             if !stop_token_requires_tool
                 && (grammar_can_stop && is_model_eos(first_lobprobs_response.token)
@@ -1505,7 +1505,9 @@ pub async fn sample_sequence(
             {
                 None
             } else {
-                let mask = llg.compute_mask_or_eos().map_err(candle_core::Error::msg)?;
+                let mask = llg
+                    .compute_mask_or_eos()
+                    .map_err(inference_tensor::Error::msg)?;
                 if mask.is_allowed(first_lobprobs_response.token) {
                     // shouldn't really happen, except for EOS
                     None
@@ -1569,10 +1571,10 @@ pub async fn sample_sequence(
         SequenceRecognizer::Llguidance(ref mut llg) => {
             let ends_turn = eos_tok
                 .is_some_and(|eos| eos.contains(&second_logprobs_response.token))
-                && llg.is_accepting().map_err(candle_core::Error::msg)?;
+                && llg.is_accepting().map_err(inference_tensor::Error::msg)?;
             if !llg.is_stopped() && !ends_turn {
                 llg.consume_token(second_logprobs_response.token)
-                    .map_err(candle_core::Error::msg)?;
+                    .map_err(inference_tensor::Error::msg)?;
             }
         }
         SequenceRecognizer::None => {}
@@ -1725,7 +1727,7 @@ mod tests {
         let logits = Tensor::from_vec(
             vec![0.1f32, 0.2, 0.3, 0.4],
             (1, 1, 4),
-            &candle_core::Device::Cpu,
+            &inference_tensor::Device::Cpu,
         )
         .unwrap();
         sample_sequence(
@@ -1861,7 +1863,7 @@ mod tests {
         let backing = Tensor::from_vec(
             vec![0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0],
             (3, 1, 1, 4),
-            &candle_core::Device::Cpu,
+            &inference_tensor::Device::Cpu,
         )
         .unwrap();
         let rows = vec![backing.i(2).unwrap(), backing.i(0).unwrap()];
@@ -1879,7 +1881,7 @@ mod tests {
         let logits = Tensor::from_vec(
             vec![0.0f32, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0],
             (2, 1, 1, 4),
-            &candle_core::Device::Cpu,
+            &inference_tensor::Device::Cpu,
         )
         .unwrap();
 
@@ -1896,7 +1898,8 @@ mod tests {
 
     #[test]
     fn final_batched_logits_preserves_dtype() {
-        let logits = Tensor::zeros((2, 1, 1, 4), DType::BF16, &candle_core::Device::Cpu).unwrap();
+        let logits =
+            Tensor::zeros((2, 1, 1, 4), DType::BF16, &inference_tensor::Device::Cpu).unwrap();
 
         let packed = final_batched_logits(&logits).unwrap();
 

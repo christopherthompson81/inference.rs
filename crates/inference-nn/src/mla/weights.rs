@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::{D, Device, Result, Tensor};
+use inference_tensor::{D, Device, Result, Tensor};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_quant::QuantMethod;
@@ -45,7 +45,7 @@ impl MlaWeights {
     }
 
     #[cfg(not(all(feature = "cuda", target_family = "unix")))]
-    pub fn new(_paged_attn_enabled: bool, _device: Option<&candle_core::Device>) -> Self {
+    pub fn new(_paged_attn_enabled: bool, _device: Option<&inference_tensor::Device>) -> Self {
         Self {
             _phantom: std::marker::PhantomData,
         }
@@ -78,7 +78,7 @@ impl MlaWeights {
         }
         let (out_dim, in_dim) = w.dims2()?;
         if in_dim != kv_lora_rank {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "kv_b_proj weight in_dim mismatch: expected {}, got {}",
                 kv_lora_rank,
                 in_dim
@@ -86,7 +86,7 @@ impl MlaWeights {
         }
         let per_head_dim = qk_nope_head_dim + v_head_dim;
         if out_dim != num_attention_heads * per_head_dim {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "kv_b_proj weight out_dim mismatch: expected {}, got {}",
                 num_attention_heads * per_head_dim,
                 out_dim
@@ -115,12 +115,12 @@ impl MlaWeights {
         v_head_dim: usize,
     ) -> Result<(Tensor, Tensor)> {
         if kv_b_proj.is_dynamic_lora_active() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cached MLA weights cannot be used with an active dynamic LoRA projection"
             );
         }
         let Some(mla_weights) = &self.weights else {
-            candle_core::bail!("MLA weights are not initialized on this device");
+            inference_tensor::bail!("MLA weights are not initialized on this device");
         };
         let mut guard = mla_weights.lock().expect("MLA weights mutex was poisoned");
         if let Some((w_uk, w_uv_t)) = guard.as_ref() {
@@ -142,12 +142,12 @@ impl MlaWeights {
     pub fn get_or_compute(
         &self,
         _kv_b_proj: &dyn inference_quant::QuantMethod,
-        _device: &candle_core::Device,
+        _device: &inference_tensor::Device,
         _num_attention_heads: usize,
         _kv_lora_rank: usize,
         _qk_nope_head_dim: usize,
         _v_head_dim: usize,
-    ) -> candle_core::Result<(candle_core::Tensor, candle_core::Tensor)> {
-        candle_core::bail!("MLA weights require CUDA support")
+    ) -> inference_tensor::Result<(inference_tensor::Tensor, inference_tensor::Tensor)> {
+        inference_tensor::bail!("MLA weights require CUDA support")
     }
 }

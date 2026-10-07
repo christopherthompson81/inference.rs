@@ -4,9 +4,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Result, Tensor};
 pub use config::MiniCpmOConfig;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::{DType, Device, Result, Tensor};
 use resampler::Resampler;
 
 use crate::attention::AttentionMask;
@@ -98,10 +98,10 @@ impl MiniCpmOModel {
         input: &MiniCpmOVisualInput,
     ) -> Result<Vec<Tensor>> {
         if input.key.kind != MultimodalKind::Image {
-            candle_core::bail!("MiniCPMO received a non-image visual input");
+            inference_tensor::bail!("MiniCPMO received a non-image visual input");
         }
         if input.pixel_values.len() != input.tgt_sizes.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MiniCPMO visual input has {} slices but {} target sizes",
                 input.pixel_values.len(),
                 input.tgt_sizes.dim(0)?
@@ -129,7 +129,7 @@ impl MiniCpmOModel {
             .collect::<Result<Vec<_>>>()?
             .into_iter()
             .max()
-            .ok_or_else(|| candle_core::Error::msg("MiniCPMO visual input has no slices"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("MiniCPMO visual input has no slices"))?;
         pixels = pixels
             .into_iter()
             .map(|pixel| pixel.pad_with_zeros(0, 0, max_pixel_len - pixel.dim(0)?))
@@ -173,7 +173,7 @@ impl MiniCpmOModel {
         for slice_idx in 0..batch_size {
             let output = outputs.get(slice_idx)?;
             if output.dim(0)? != self.cfg.query_num {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "MiniCPMO resampler produced {} rows, expected {}",
                     output.dim(0)?,
                     self.cfg.query_num
@@ -210,7 +210,7 @@ impl MiniCpmOModel {
             return layout.splice_embeddings(&embedding, &encoder_outputs);
         }
         if legacy_maps.len() != input_ids.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MiniCPMO legacy map count {} does not match batch {}",
                 legacy_maps.len(),
                 input_ids.dim(0)?
@@ -220,22 +220,22 @@ impl MiniCpmOModel {
         for (batch, maps) in legacy_maps.iter().enumerate() {
             for map in maps {
                 if map.destination.end > input_ids.dim(1)? {
-                    candle_core::bail!("MiniCPMO image destination exceeds the input row");
+                    inference_tensor::bail!("MiniCPMO image destination exceeds the input row");
                 }
                 let outputs = encoder_outputs.get(&map.key).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "missing MiniCPMO image output with hash {}",
                         map.key.hash
                     ))
                 })?;
                 let output = outputs.get(map.source_output).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "missing MiniCPMO slice output {} for hash {}",
                         map.source_output, map.key.hash
                     ))
                 })?;
                 if output.dims2()? != (map.destination.len(), hidden_size) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "MiniCPMO slice output shape {:?} does not match destination {:?}",
                         output.shape(),
                         map.destination

@@ -12,10 +12,10 @@ use crate::{
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
 };
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::Module;
 use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::Module;
+use inference_tensor::{DType, Device, Result, Tensor};
 use std::{collections::HashMap, sync::Arc};
 use tracing::info;
 
@@ -102,7 +102,7 @@ impl CausalSelfAttention {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
@@ -213,7 +213,7 @@ impl Mlp {
         global_scaling_weight: f64,
         is_scaling_pass: Option<f64>,
     ) -> Result<Tensor> {
-        let x = (candle_nn::ops::silu(&self.c_fc1.lora_forward(
+        let x = (inference_tensor::nn::ops::silu(&self.c_fc1.lora_forward(
             x,
             scalings.clone(),
             global_scaling_weight,
@@ -441,7 +441,9 @@ impl XLoraLlama {
         )?;
         if xlora_config.is_some() && lm_head.is_lora() {
             // This is why we can pass dummy values (..., None, 1.0, None)?
-            candle_core::bail!("Got an adapter `lm_head` layer, this is unsupported with X-LoRA.");
+            inference_tensor::bail!(
+                "Got an adapter `lm_head` layer, this is unsupported with X-LoRA."
+            );
         }
         let ln_f = RmsNorm::new(
             cfg.hidden_size,

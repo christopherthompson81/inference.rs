@@ -79,7 +79,7 @@ pub(crate) fn get_adapter_paths(
     } = options;
     match (lora_adapters, xlora_model_id, xlora_order) {
         (None, Some(xlora_id), Some(xlora_order)) => {
-            let api = build_api(token_source, true).map_err(candle_core::Error::msg)?;
+            let api = build_api(token_source, true).map_err(inference_tensor::Error::msg)?;
             let api = api.repo(Repo::with_revision(
                 xlora_id.clone(),
                 RepoType::Model,
@@ -101,9 +101,9 @@ pub(crate) fn get_adapter_paths(
             let xlora_classifier = xlora_classifier.first();
 
             let classifier_path = xlora_classifier
-                .map(|xlora_classifier| -> candle_core::Result<_> {
+                .map(|xlora_classifier| -> inference_tensor::Result<_> {
                     crate::pipeline::hf::get_file(&api, model_id, xlora_classifier, &base_revision)
-                        .map_err(candle_core::Error::msg)
+                        .map_err(inference_tensor::Error::msg)
                 })
                 .transpose()?;
 
@@ -362,7 +362,7 @@ pub(crate) fn get_adapter_paths(
                     adapter.revision()
                 );
 
-                let api = build_api(token_source, true).map_err(candle_core::Error::msg)?;
+                let api = build_api(token_source, true).map_err(inference_tensor::Error::msg)?;
                 let api = api.repo(Repo::with_revision(
                     source.to_string(),
                     RepoType::Model,
@@ -415,7 +415,7 @@ pub fn get_model_paths(
             let mut files = Vec::new();
 
             for name in names {
-                let qapi = build_api(token_source, true).map_err(candle_core::Error::msg)?;
+                let qapi = build_api(token_source, true).map_err(inference_tensor::Error::msg)?;
                 let qapi = qapi.repo(Repo::with_revision(
                     id.to_string(),
                     RepoType::Model,

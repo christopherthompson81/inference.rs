@@ -8,8 +8,8 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView};
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use itertools::Itertools;
 use regex::Regex;
@@ -47,7 +47,7 @@ pub struct Gemma3ImageProcessor {
 
 fn expanded_image_hashes(raw_hashes: &[u64], num_crops: &[usize]) -> Result<Vec<u64>> {
     if raw_hashes.len() != num_crops.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3 has {} image hashes but {} crop counts",
             raw_hashes.len(),
             num_crops.len()
@@ -77,7 +77,7 @@ fn gemma3_mm_features(
     let ranges = find_image_placeholder_ranges(tokens, image_token_id);
     let expanded_hashes = expanded_image_hashes(raw_hashes, num_crops)?;
     if ranges.len() != expanded_hashes.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3 has {} image placeholder spans but {} encoder items",
             ranges.len(),
             expanded_hashes.len()
@@ -129,7 +129,7 @@ fn active_expanded_image_indices(
     query: Range<usize>,
 ) -> Result<Vec<usize>> {
     if query.start > query.end {
-        candle_core::bail!("Gemma 3 active query range is reversed");
+        inference_tensor::bail!("Gemma 3 active query range is reversed");
     }
     let active_hashes = features
         .iter()
@@ -146,7 +146,7 @@ fn active_expanded_image_indices(
             .enumerate()
             .find_map(|(index, candidate)| (!used[index] && *candidate == hash).then_some(index))
             .ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "Gemma 3 active encoder hash {hash} is missing from preprocessed images"
                 ))
             })?;
@@ -163,7 +163,7 @@ fn gemma3_layout_items(
 ) -> Result<Vec<MultimodalItemLayout>> {
     let ranges = find_image_placeholder_ranges(tokens, image_token_id);
     if ranges.len() != image_hashes.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Gemma 3 has {} image placeholder spans but {} encoder outputs",
             ranges.len(),
             image_hashes.len()
@@ -196,7 +196,7 @@ fn gemma3_packed_layout(
     image_token_id: u32,
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() || input_seqs.len() != image_hashes_by_sequence.len() {
-        candle_core::bail!("Gemma 3 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Gemma 3 packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
@@ -204,7 +204,7 @@ fn gemma3_packed_layout(
         .zip(image_hashes_by_sequence)
         .map(|((seq, &query_len), image_hashes)| {
             if query_len != seq.get_toks().len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Gemma 3 packed multimodal prefill requires the complete uncached prompt"
                 );
             }
@@ -508,7 +508,7 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                         .collect::<Vec<_>>();
                     let active_indices = active_indices
                         .into_iter()
-                        .map(|index| u32::try_from(index).map_err(candle_core::Error::wrap))
+                        .map(|index| u32::try_from(index).map_err(inference_tensor::Error::wrap))
                         .collect::<Result<Vec<_>>>()?;
                     let active_count = active_indices.len();
                     let active_indices = Tensor::from_vec(active_indices, active_count, device)?;

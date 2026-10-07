@@ -182,7 +182,7 @@ use std::time::Duration;
 use tokenizers::Tokenizer;
 
 use anyhow::Result;
-use candle_core::{DType, Device, DeviceLocation, IndexOp, Tensor, Var};
+use inference_tensor::{DType, Device, DeviceLocation, IndexOp, Tensor, Var};
 
 use crate::paged_attention::block_hash::{
     MultimodalAttentionPolicy, adapter_generation_key, compute_block_hashes,
@@ -217,19 +217,21 @@ pub(crate) fn resolve_lora_execution(
     paged_attn_meta: Option<&PagedAttentionInputMetadata>,
     flash_meta: &FlashParams,
     adapter_leases: &[Option<crate::AdapterLease>],
-) -> candle_core::Result<Option<Arc<inference_quant::LoraExecution>>> {
+) -> inference_tensor::Result<Option<Arc<inference_quant::LoraExecution>>> {
     let (batch, sequence_length) = input_ids.dims2()?;
     let query_lens = if flash_meta.packed {
         if batch != 1 {
-            candle_core::bail!("packed adapter routing requires a flat physical batch");
+            inference_tensor::bail!("packed adapter routing requires a flat physical batch");
         }
         let query_lens = paged_attn_meta
             .and_then(|metadata| metadata.query_lens.as_deref())
             .ok_or_else(|| {
-                candle_core::Error::msg("packed adapter routing requires logical query lengths")
+                inference_tensor::Error::msg(
+                    "packed adapter routing requires logical query lengths",
+                )
             })?;
         if adapter_leases.len() != query_lens.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "adapter lease count {} does not match packed logical sequence count {}",
                 adapter_leases.len(),
                 query_lens.len()
@@ -237,14 +239,14 @@ pub(crate) fn resolve_lora_execution(
         }
         let logical_tokens = query_lens.iter().sum::<usize>();
         if logical_tokens != sequence_length {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed logical query lengths total {logical_tokens} does not match physical sequence length {sequence_length}"
             );
         }
         Some(query_lens)
     } else {
         if adapter_leases.len() != batch {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "adapter lease count {} does not match model batch size {batch}",
                 adapter_leases.len()
             );
@@ -255,7 +257,9 @@ pub(crate) fn resolve_lora_execution(
         return Ok(None);
     }
     let runtime = runtime.ok_or_else(|| {
-        candle_core::Error::msg("request selected an adapter on a pipeline without dynamic LoRA")
+        inference_tensor::Error::msg(
+            "request selected an adapter on a pipeline without dynamic LoRA",
+        )
     })?;
     match query_lens {
         Some(query_lens) => runtime
@@ -551,7 +555,7 @@ fn recurrent_budgets(
             .get(&device.location())
             .copied()
             .ok_or_else(|| {
-                candle_core::Error::msg(
+                inference_tensor::Error::msg(
                     "recurrent device is missing from the snapshot memory inventory",
                 )
             })?;
@@ -704,7 +708,7 @@ fn reserve_recurrent_serving_capacity(
     };
     let requested_capacity = serving_capacity
         .checked_add(RECURRENT_GRAPH_PAD_SLOTS)
-        .ok_or_else(|| candle_core::Error::msg("recurrent serving capacity overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("recurrent serving capacity overflow"))?;
     let context = RecurrentBudgetContext {
         cache,
         paged_attn_config,
@@ -786,17 +790,19 @@ fn add_recurrent_prefix_memory_reservations(
     }
     let peak_snapshots = prefix_capacity
         .checked_add(1)
-        .ok_or_else(|| candle_core::Error::msg("recurrent prefix capacity overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("recurrent prefix capacity overflow"))?;
     let mut secondary_prefix_bytes = 0usize;
     for (device, bytes_per_snapshot) in bytes_by_device {
         let bytes = bytes_per_snapshot
             .checked_mul(peak_snapshots)
-            .ok_or_else(|| candle_core::Error::msg("recurrent prefix reservation overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("recurrent prefix reservation overflow"))?;
         if device == primary_device {
             reservations.primary_device_bytes = reservations
                 .primary_device_bytes
                 .checked_add(bytes)
-                .ok_or_else(|| candle_core::Error::msg("recurrent prefix reservation overflow"))?;
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("recurrent prefix reservation overflow")
+                })?;
         } else {
             secondary_prefix_bytes = secondary_prefix_bytes.max(bytes);
         }
@@ -804,7 +810,7 @@ fn add_recurrent_prefix_memory_reservations(
     reservations.secondary_device_bytes = reservations
         .secondary_device_bytes
         .checked_add(secondary_prefix_bytes)
-        .ok_or_else(|| candle_core::Error::msg("recurrent prefix reservation overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("recurrent prefix reservation overflow"))?;
     Ok(reservations)
 }
 
@@ -815,7 +821,7 @@ fn paged_attention_memory_reservations(
 ) -> Result<CacheMemoryReservations> {
     let reservations = paged_attn_config
         .memory_reservations()
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     if paged_attn_config.recurrent_prefix_capacity == 0 || !cache.is_hybrid() {
         return Ok(reservations);
     }
@@ -901,7 +907,7 @@ pub trait IsqPipelineMixin {
 pub trait CacheManagerMixin {
     /// Clone the cache FROM the sequences' cache TO the model cache. Only called for completion seqs.
     /// It is not a guarantee that this will be called for each completion step.
-    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()>;
+    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()>;
     /// Clone the cache FROM the model cache TO the sequences. Called for prompt and completion seqs.
     /// It is not a guarantee that this will be called for each step.
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]);
@@ -914,7 +920,7 @@ pub trait CacheManagerMixin {
         reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
-    ) -> candle_core::Result<()>;
+    ) -> inference_tensor::Result<()>;
     fn cache(&self) -> &EitherCache;
 }
 
@@ -957,7 +963,10 @@ pub trait AnyMoePipelineMixin {
     fn amoe_layer_vars(&self) -> Vec<Vec<Var>> {
         unreachable!()
     }
-    fn amoe_finish_training(&mut self, _gate_model_id: Option<String>) -> candle_core::Result<()> {
+    fn amoe_finish_training(
+        &mut self,
+        _gate_model_id: Option<String>,
+    ) -> inference_tensor::Result<()> {
         unreachable!()
     }
     fn amoe_base_model_trainable_params(&self) -> usize {
@@ -986,7 +995,7 @@ pub trait AnyMoePipelineMixin {
         _expert_type: AnyMoeExpertType,
         _silent: bool,
         _gate_model_id: Option<String>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         unreachable!()
     }
     /// Pre-train the gating layers
@@ -1000,7 +1009,7 @@ pub trait AnyMoePipelineMixin {
         _revision: Option<String>,
         _layers: Vec<usize>,
         _silent: bool,
-    ) -> Result<Option<AnyMoeTrainingResult>, candle_core::Error> {
+    ) -> Result<Option<AnyMoeTrainingResult>, inference_tensor::Error> {
         unreachable!()
     }
 }
@@ -1106,7 +1115,7 @@ pub enum ForwardInputsResult {
 }
 
 impl ForwardInputsResult {
-    fn index_bs(&self, bs_idx: usize) -> candle_core::Result<Self> {
+    fn index_bs(&self, bs_idx: usize) -> inference_tensor::Result<Self> {
         match self {
             Self::CausalGeneration { logits } => Ok(Self::CausalGeneration {
                 logits: logits.i(bs_idx)?,
@@ -1139,7 +1148,7 @@ impl ForwardInputsResult {
         }
     }
 
-    fn to_device(&self, device: &Device) -> candle_core::Result<Self> {
+    fn to_device(&self, device: &Device) -> inference_tensor::Result<Self> {
         match self {
             Self::CausalGeneration { logits } => Ok(Self::CausalGeneration {
                 logits: logits.to_device(device)?,
@@ -1160,7 +1169,7 @@ impl ForwardInputsResult {
         self,
         batch_size: usize,
         preserve_causal_generation: bool,
-    ) -> candle_core::Result<Self> {
+    ) -> inference_tensor::Result<Self> {
         if batch_size <= 1
             || preserve_causal_generation && matches!(&self, Self::CausalGeneration { .. })
         {
@@ -1302,14 +1311,14 @@ pub trait Pipeline:
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> Result<ForwardInputsResult, candle_core::Error>;
+    ) -> Result<ForwardInputsResult, inference_tensor::Error>;
 
     #[doc(hidden)]
     fn forward_step(
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> Result<ForwardStepResult, candle_core::Error> {
+    ) -> Result<ForwardStepResult, inference_tensor::Error> {
         self.forward_inputs(inputs, return_raw_logits)
             .map(ForwardStepResult::eager)
     }
@@ -1319,15 +1328,15 @@ pub trait Pipeline:
     fn replay_cuda_decode_one_token(
         &mut self,
         _launch: CudaDecodeGraphLaunch,
-    ) -> Result<Option<ForwardStepResult>, candle_core::Error> {
+    ) -> Result<Option<ForwardStepResult>, inference_tensor::Error> {
         Ok(None)
     }
 
     fn attach_speculative(
         &mut self,
         _config: crate::speculative::SpeculativeConfig,
-    ) -> Result<(), candle_core::Error> {
-        candle_core::bail!("This pipeline does not support speculative decoding attachment.")
+    ) -> Result<(), inference_tensor::Error> {
+        inference_tensor::bail!("This pipeline does not support speculative decoding attachment.")
     }
 
     #[doc(hidden)]
@@ -1335,18 +1344,21 @@ pub trait Pipeline:
         &mut self,
         config: crate::speculative::SpeculativeConfig,
         _runtime: crate::speculative::MtpRuntimeConfig,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         self.attach_speculative(config)
     }
 
-    fn release_speculative_sequences(&mut self, _seq_ids: &[usize]) -> candle_core::Result<()> {
+    fn release_speculative_sequences(
+        &mut self,
+        _seq_ids: &[usize],
+    ) -> inference_tensor::Result<()> {
         Ok(())
     }
 
     fn flush_recurrent_speculative_transitions(
         &self,
         _seq_ids: &[usize],
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         Ok(())
     }
 
@@ -1375,7 +1387,7 @@ pub trait Pipeline:
         &mut self,
         _sequence_id: usize,
         _cached_tokens: usize,
-    ) -> Result<Option<Arc<dyn PagedAuxiliaryPrefixState>>, candle_core::Error> {
+    ) -> Result<Option<Arc<dyn PagedAuxiliaryPrefixState>>, inference_tensor::Error> {
         Ok(None)
     }
 
@@ -1384,8 +1396,8 @@ pub trait Pipeline:
         _sequence_id: usize,
         _cached_tokens: usize,
         _state: &dyn PagedAuxiliaryPrefixState,
-    ) -> Result<(), candle_core::Error> {
-        candle_core::bail!("This pipeline does not support auxiliary paged prefix state.")
+    ) -> Result<(), inference_tensor::Error> {
+        inference_tensor::bail!("This pipeline does not support auxiliary paged prefix state.")
     }
 
     /// Called after a prompt chunk forward so a speculative proposer with its own KV cache can
@@ -1395,7 +1407,7 @@ pub trait Pipeline:
         _seqs: &[&mut Sequence],
         _chunk: &SpeculativePromptChunk,
         _metadata: &PagedAttentionMeta,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         Ok(())
     }
 
@@ -1409,8 +1421,8 @@ pub trait Pipeline:
         _denoise_times: Vec<std::time::Duration>,
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
-        Box::pin(std::future::ready(Err(candle_core::Error::Msg(
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
+        Box::pin(std::future::ready(Err(inference_tensor::Error::Msg(
             "This pipeline does not support block generation.".to_string(),
         )
         .bt())))
@@ -1427,7 +1439,7 @@ pub trait Pipeline:
         _rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         _metadata: Option<PagedAttentionMeta>,
         _logger: &'a IntervalLogger,
-    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<bool, inference_tensor::Error>> {
         Box::pin(std::future::ready(Ok(false)))
     }
 
@@ -1437,7 +1449,7 @@ pub trait Pipeline:
         prefix_cacher: &mut PrefixCacheManagerV2,
         block_size: usize,
         cached_tokens: usize,
-    ) -> Result<(), candle_core::Error> {
+    ) -> Result<(), inference_tensor::Error> {
         if cached_tokens == 0
             || !cached_tokens.is_multiple_of(block_size)
             || !self.cache().is_hybrid()
@@ -1495,7 +1507,7 @@ pub trait Pipeline:
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<bool, inference_tensor::Error>> {
         Box::pin(std::future::ready(Ok(false)))
     }
 
@@ -1506,7 +1518,7 @@ pub trait Pipeline:
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>>;
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>>;
 
     fn category(&self) -> ModelCategory;
 
@@ -1530,7 +1542,7 @@ impl dyn Pipeline {
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         backend_metadata: CacheBackendMetadata,
         logger: &IntervalLogger,
-    ) -> Result<Duration, candle_core::Error> {
+    ) -> Result<Duration, inference_tensor::Error> {
         let completion = self
             .submit_step(
                 input_seqs,
@@ -1582,9 +1594,9 @@ mod tests {
         paged_attention::block_hash::MultimodalAttentionPolicy,
         pipeline::prompt_chunks::PromptChunkPlan,
     };
-    use candle_core::{Device, DeviceLocation, Tensor};
     use either::Either;
     use indexmap::IndexMap;
+    use inference_tensor::{Device, DeviceLocation, Tensor};
 
     fn prompt_chunk(start: usize, end: usize) -> PromptChunkPlan {
         PromptChunkPlan {
@@ -1846,10 +1858,10 @@ mod tests {
                         key_dim: 4,
                         value_dim: 4,
                     },
-                    recurrent_dtype: Some(candle_core::DType::F32),
+                    recurrent_dtype: Some(inference_tensor::DType::F32),
                 },
             },
-            candle_core::DType::BF16,
+            inference_tensor::DType::BF16,
             &[Device::Cpu],
         )
         .unwrap();
@@ -1869,7 +1881,7 @@ mod tests {
                 checkpoints: false,
                 transitions: false,
                 deferred_spec: None,
-                model_dtype: candle_core::DType::F32,
+                model_dtype: inference_tensor::DType::F32,
             },
             &Device::Cpu,
             1,
@@ -1897,10 +1909,10 @@ mod tests {
                         key_dim: 4,
                         value_dim: 4,
                     },
-                    recurrent_dtype: Some(candle_core::DType::F32),
+                    recurrent_dtype: Some(inference_tensor::DType::F32),
                 },
             },
-            candle_core::DType::BF16,
+            inference_tensor::DType::BF16,
             &[Device::Cpu],
         )
         .unwrap();
@@ -1920,7 +1932,7 @@ mod tests {
                 checkpoints: true,
                 transitions: true,
                 deferred_spec: None,
-                model_dtype: candle_core::DType::F32,
+                model_dtype: inference_tensor::DType::F32,
             },
             &Device::Cpu,
             1,
@@ -1951,10 +1963,10 @@ mod tests {
                         key_dim: 4,
                         value_dim: 4,
                     },
-                    recurrent_dtype: Some(candle_core::DType::F32),
+                    recurrent_dtype: Some(inference_tensor::DType::F32),
                 },
             },
-            candle_core::DType::BF16,
+            inference_tensor::DType::BF16,
             &[Device::Cpu],
         )
         .unwrap();
@@ -1974,7 +1986,7 @@ mod tests {
                 checkpoints: true,
                 transitions: true,
                 deferred_spec: None,
-                model_dtype: candle_core::DType::F32,
+                model_dtype: inference_tensor::DType::F32,
             },
             &Device::Cpu,
             1,
@@ -2025,10 +2037,10 @@ mod tests {
                         key_dim: 4,
                         value_dim: 4,
                     },
-                    recurrent_dtype: Some(candle_core::DType::F32),
+                    recurrent_dtype: Some(inference_tensor::DType::F32),
                 },
             },
-            candle_core::DType::BF16,
+            inference_tensor::DType::BF16,
             &[Device::Cpu],
         )
         .unwrap();
@@ -2049,8 +2061,8 @@ mod tests {
     use serde_json::Value;
 
     #[test]
-    fn base_lora_routes_still_validate_dense_batch_cardinality() -> candle_core::Result<()> {
-        let input_ids = Tensor::zeros((2, 3), candle_core::DType::U32, &Device::Cpu)?;
+    fn base_lora_routes_still_validate_dense_batch_cardinality() -> inference_tensor::Result<()> {
+        let input_ids = Tensor::zeros((2, 3), inference_tensor::DType::U32, &Device::Cpu)?;
         let flash_meta = FlashParams::empty(true);
 
         assert!(
@@ -2067,8 +2079,8 @@ mod tests {
     }
 
     #[test]
-    fn base_lora_routes_validate_packed_logical_shape() -> candle_core::Result<()> {
-        let input_ids = Tensor::zeros((1, 5), candle_core::DType::U32, &Device::Cpu)?;
+    fn base_lora_routes_validate_packed_logical_shape() -> inference_tensor::Result<()> {
+        let input_ids = Tensor::zeros((1, 5), inference_tensor::DType::U32, &Device::Cpu)?;
         let mut flash_meta = FlashParams::empty(true);
         flash_meta.packed = true;
         let mut paged_meta = PagedAttentionInputMetadata::dummy(&Device::Cpu)?;

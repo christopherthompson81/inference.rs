@@ -8,10 +8,10 @@ use crate::{
     device_map::DummyDeviceMapper,
     matformer::{MatformerConfig, MatformerSliceConfig, Slice},
 };
-use candle_core::Device;
 use inference_models_gemma::gemma4::config::Gemma4Config;
 use inference_models_qwen::muse_glimmer::Config as MuseGlimmerConfig;
 use inference_quant::IsqType;
+use inference_tensor::Device;
 
 fn matches_any(regexes: &[Regex], name: &str) -> bool {
     regexes.iter().any(|regex| regex.is_match(name))

@@ -74,7 +74,7 @@ fn resolve_layer_sliding_windows(
     sliding_window: Option<usize>,
     max_window_layers: usize,
     layer_types: Option<Vec<AttentionType>>,
-) -> candle_core::Result<Vec<Option<usize>>> {
+) -> inference_tensor::Result<Vec<Option<usize>>> {
     let sliding_window = use_sliding_window.then_some(sliding_window).flatten();
     let layer_types = layer_types.unwrap_or_else(|| {
         (0..num_hidden_layers)
@@ -88,7 +88,7 @@ fn resolve_layer_sliding_windows(
             .collect()
     });
     if layer_types.len() != num_hidden_layers {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "layer_types has {} entries for {} layers",
             layer_types.len(),
             num_hidden_layers
@@ -99,7 +99,7 @@ fn resolve_layer_sliding_windows(
         .map(|layer_type| match layer_type {
             AttentionType::FullAttention => Ok(None),
             AttentionType::SlidingAttention => sliding_window.map(Some).ok_or_else(|| {
-                candle_core::Error::msg(
+                inference_tensor::Error::msg(
                     "sliding_attention requires use_sliding_window and sliding_window",
                 )
             }),
@@ -108,7 +108,7 @@ fn resolve_layer_sliding_windows(
 }
 
 impl<V> QwenVlConfig<V> {
-    pub(crate) fn layer_sliding_windows(&self) -> candle_core::Result<Vec<Option<usize>>> {
+    pub(crate) fn layer_sliding_windows(&self) -> inference_tensor::Result<Vec<Option<usize>>> {
         resolve_layer_sliding_windows(
             self.num_hidden_layers,
             self.use_sliding_window,
@@ -124,7 +124,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn generated_layer_windows_match_transformers_semantics() -> candle_core::Result<()> {
+    fn generated_layer_windows_match_transformers_semantics() -> inference_tensor::Result<()> {
         assert_eq!(
             resolve_layer_sliding_windows(4, true, Some(128), 2, None)?,
             vec![None, None, Some(128), Some(128)]

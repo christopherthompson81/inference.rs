@@ -2,11 +2,13 @@
 //!
 //! See: [Descript Audio Codec](https://github.com/descriptinc/descript-audio-codec)
 //!
+use inference_quant::Convolution;
+use inference_tensor::nn::{
+    Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder,
+};
 /// An efficient neural codec for compressing/decompressing audio
 ///
-use candle_core::{D, IndexOp, Result, Tensor};
-use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
-use inference_quant::Convolution;
+use inference_tensor::{D, IndexOp, Result, Tensor};
 
 // Applies weight norm for inference by recomputing the weight tensor. This
 // does not apply to training.
@@ -15,7 +17,7 @@ fn conv1d_weight_norm(
     in_c: usize,
     out_c: usize,
     kernel_size: usize,
-    config: candle_nn::Conv1dConfig,
+    config: inference_tensor::nn::Conv1dConfig,
     vb: VarBuilder,
 ) -> Result<Conv1d> {
     let weight_g = vb.get((out_c, 1, 1), "weight_g")?;
@@ -31,7 +33,7 @@ fn conv_transpose1d_weight_norm(
     out_c: usize,
     kernel_size: usize,
     bias: bool,
-    config: candle_nn::ConvTranspose1dConfig,
+    config: inference_tensor::nn::ConvTranspose1dConfig,
     vb: VarBuilder,
 ) -> Result<ConvTranspose1d> {
     let weight_g = vb.get((in_c, 1, 1), "weight_g")?;
@@ -75,7 +77,7 @@ impl Snake1d {
     }
 }
 
-impl candle_core::Module for Snake1d {
+impl inference_tensor::Module for Snake1d {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let xs_shape = xs.shape();
         let xs = xs.flatten_from(2)?;
@@ -115,7 +117,7 @@ impl ResidualUnit {
     }
 }
 
-impl candle_core::Module for ResidualUnit {
+impl inference_tensor::Module for ResidualUnit {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let mut ys = self.snake1.forward(xs)?;
         ys = Convolution.forward_1d(&self.conv1, &ys)?;
@@ -163,7 +165,7 @@ impl DecoderBlock {
     }
 }
 
-impl candle_nn::Module for DecoderBlock {
+impl inference_tensor::nn::Module for DecoderBlock {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         xs.apply(&self.snake1)?
             .apply(&self.conv_tr1)?
@@ -211,7 +213,7 @@ impl Decoder {
     }
 }
 
-impl candle_core::Module for Decoder {
+impl inference_tensor::Module for Decoder {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let mut xs = Convolution.forward_1d(&self.conv1, xs)?;
         for block in self.blocks.iter() {
@@ -225,14 +227,14 @@ impl candle_core::Module for Decoder {
 #[derive(Clone, Debug)]
 pub struct VectorQuantizer {
     out_proj: Conv1d,
-    codebook: candle_nn::Embedding,
+    codebook: inference_tensor::nn::Embedding,
 }
 
 impl VectorQuantizer {
     pub fn new(in_dim: usize, cb_size: usize, cb_dim: usize, vb: VarBuilder) -> Result<Self> {
         let out_proj =
             conv1d_weight_norm(cb_dim, in_dim, 1, Default::default(), vb.pp("out_proj"))?;
-        let codebook = candle_nn::embedding(cb_size, cb_dim, vb.pp("codebook"))?;
+        let codebook = inference_tensor::nn::embedding(cb_size, cb_dim, vb.pp("codebook"))?;
         Ok(Self { out_proj, codebook })
     }
 
@@ -279,7 +281,7 @@ impl ResidualVectorQuantizer {
         }
         match sum {
             Some(s) => Ok(s),
-            None => candle_core::bail!("empty codebooks"),
+            None => inference_tensor::bail!("empty codebooks"),
         }
     }
 }

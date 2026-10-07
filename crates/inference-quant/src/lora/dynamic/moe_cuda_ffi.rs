@@ -1,5 +1,5 @@
-use candle_core::cuda::cudarc::driver::sys::CUstream;
 use half::{bf16, f16};
+use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
 use super::moe_cuda::RoutedLoraAdapterWeight;
 

@@ -5,8 +5,8 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -146,7 +146,7 @@ impl DecoderAttention {
 
         let positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?
             .clone();
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
@@ -373,16 +373,16 @@ pub struct VoxtralModel {
 fn encoder_output_len(mel_frames: usize) -> Result<usize> {
     let padded_frames = mel_frames
         .checked_add(AUDIO_ENCODER_LEFT_PADDING)
-        .ok_or_else(|| candle_core::Error::msg("Voxtral mel length overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("Voxtral mel length overflow"))?;
     if padded_frames < AUDIO_ENCODER_KERNEL_SIZE {
-        candle_core::bail!("Voxtral mel input is too short for the audio encoder");
+        inference_tensor::bail!("Voxtral mel input is too short for the audio encoder");
     }
     Ok((padded_frames - AUDIO_ENCODER_KERNEL_SIZE) / AUDIO_ENCODER_STRIDE + 1)
 }
 
 fn adapter_output_len(encoder_tokens: usize, downsample_factor: usize) -> Result<usize> {
     if downsample_factor == 0 {
-        candle_core::bail!("Voxtral adapter downsample factor cannot be zero");
+        inference_tensor::bail!("Voxtral adapter downsample factor cannot be zero");
     }
     Ok(encoder_tokens / downsample_factor)
 }
@@ -397,43 +397,43 @@ fn validate_audio_request_layout(
     let mut mel_indices = vec![false; mel_count];
     for request in requests {
         if request.logical_index >= logical_count {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral audio request index {} exceeds logical batch size {logical_count}",
                 request.logical_index
             );
         }
         if !logical_indices.insert(request.logical_index) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral audio request index {} is duplicated",
                 request.logical_index
             );
         }
         if !keys.insert(request.key.clone()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral audio cache key is duplicated for sequence {}",
                 request.key.sequence_id
             );
         }
         if request.key.hashes.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral audio request {} is missing audio hashes",
                 request.key.sequence_id
             );
         }
         if let Some(mel_index) = request.mel_index {
             let Some(seen) = mel_indices.get_mut(mel_index) else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Voxtral mel index {mel_index} exceeds mel batch size {mel_count}"
                 );
             };
             if *seen {
-                candle_core::bail!("Voxtral mel index {mel_index} is duplicated");
+                inference_tensor::bail!("Voxtral mel index {mel_index} is duplicated");
             }
             *seen = true;
         }
     }
     if let Some(missing) = mel_indices.iter().position(|seen| !seen) {
-        candle_core::bail!("Voxtral mel batch row {missing} has no request metadata");
+        inference_tensor::bail!("Voxtral mel batch row {missing} has no request metadata");
     }
     Ok(())
 }
@@ -442,10 +442,10 @@ fn add_audio_to_segment(segment: &Tensor, audio: &Tensor, offset: usize) -> Resu
     let (segment_batch, segment_len, segment_dim) = segment.dims3()?;
     let (audio_batch, audio_len, audio_dim) = audio.dims3()?;
     if segment_batch != 1 || audio_batch != 1 {
-        candle_core::bail!("Voxtral audio conditioning requires single-request segments");
+        inference_tensor::bail!("Voxtral audio conditioning requires single-request segments");
     }
     if segment_dim != audio_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Voxtral audio/text dimension mismatch: audio={audio_dim}, text={segment_dim}"
         );
     }
@@ -482,7 +482,7 @@ fn condition_audio_embeddings(
     let (physical_batch, physical_tokens, _) = text_embeds.dims3()?;
     let logical_count = query_lens.map_or(physical_batch, <[usize]>::len);
     if seqlen_offsets.len() != logical_count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Voxtral offset count {} does not match logical batch size {logical_count}",
             seqlen_offsets.len()
         );
@@ -493,7 +493,7 @@ fn condition_audio_embeddings(
         .collect::<Vec<Option<Tensor>>>();
     for request in requests {
         let audio = audio_cache.get(&request.key).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "missing Voxtral audio state for sequence {} and hashes {:?}",
                 request.key.sequence_id, request.key.hashes
             ))
@@ -503,18 +503,18 @@ fn condition_audio_embeddings(
 
     if let Some(query_lens) = query_lens {
         if physical_batch != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral packed prefill requires a flat physical batch, received {physical_batch}"
             );
         }
         let logical_tokens = query_lens.iter().sum::<usize>();
         if logical_tokens != physical_tokens {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral packed query lengths total {logical_tokens}, expected {physical_tokens}"
             );
         }
         if query_lens.contains(&0) {
-            candle_core::bail!("Voxtral packed query lengths cannot be empty");
+            inference_tensor::bail!("Voxtral packed query lengths cannot be empty");
         }
 
         let mut cursor = 0;
@@ -534,7 +534,7 @@ fn condition_audio_embeddings(
     }
 
     if physical_batch != logical_count {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Voxtral physical batch size {physical_batch} does not match logical batch size {logical_count}"
         );
     }
@@ -709,14 +709,14 @@ impl VoxtralModel {
     ) -> Result<()> {
         let (mel_count, padded_frames, _) = mel_features.dims3()?;
         if mel_lengths.len() != mel_count {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Voxtral mel length count {} does not match mel batch size {mel_count}",
                 mel_lengths.len()
             );
         }
         for &frames in mel_lengths {
             if frames == 0 || frames > padded_frames {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Voxtral mel length {frames} is outside padded length {padded_frames}"
                 );
             }
@@ -741,7 +741,7 @@ impl VoxtralModel {
             let encoder_tokens = encoder_output_len(mel_lengths[mel_index])?;
             let audio_tokens = adapter_output_len(encoder_tokens, self.adapter_downsample_factor)?;
             if encoder_tokens == 0 || encoder_tokens > padded_encoder_tokens {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Voxtral encoder length {encoder_tokens} is outside padded length {padded_encoder_tokens}"
                 );
             }
@@ -750,7 +750,7 @@ impl VoxtralModel {
                 .narrow(1, 0, encoder_tokens)?;
             let audio = self.adapter.forward(&audio)?.to_dtype(self.dtype)?;
             if audio.dim(1)? != audio_tokens {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Voxtral adapter produced {} tokens, expected {audio_tokens}",
                     audio.dim(1)?
                 );
@@ -781,7 +781,7 @@ impl VoxtralModel {
                 ctx.paged_input_metadata()
                     .and_then(|metadata| metadata.query_lens.as_deref())
                     .ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "Voxtral packed prefill requires logical query lengths",
                         )
                     })?,
@@ -798,7 +798,7 @@ impl VoxtralModel {
         if let Some(mel_features) = mel_features {
             self.cache_audio_embeddings(mel_features, mel_lengths, audio_requests)?;
         } else if !mel_lengths.is_empty() {
-            candle_core::bail!("Voxtral mel lengths were provided without mel features");
+            inference_tensor::bail!("Voxtral mel lengths were provided without mel features");
         }
 
         let input_embeds = {
@@ -952,7 +952,7 @@ impl MultimodalModel for VoxtralModel {
         _pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn Any>,
         ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let args = model_specific_args
             .downcast::<VoxtralSpecificArgs>()
             .expect("Downcast to VoxtralSpecificArgs failed");
@@ -1023,7 +1023,7 @@ impl AnyMoeBaseModelMixin for VoxtralModel {}
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::{
         VoxtralAudioCacheKey, VoxtralAudioRequest, adapter_output_len, condition_audio_embeddings,
@@ -1044,7 +1044,7 @@ mod tests {
     }
 
     #[test]
-    fn audio_lengths_follow_causal_conv_and_adapter_shapes() -> candle_core::Result<()> {
+    fn audio_lengths_follow_causal_conv_and_adapter_shapes() -> inference_tensor::Result<()> {
         assert_eq!(encoder_output_len(8)?, 4);
         assert_eq!(encoder_output_len(9)?, 4);
         assert_eq!(encoder_output_len(10)?, 5);
@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn conditioning_isolates_reordered_requests_and_row_offsets() -> candle_core::Result<()> {
+    fn conditioning_isolates_reordered_requests_and_row_offsets() -> inference_tensor::Result<()> {
         let first_key = key(1, &[10]);
         let second_key = key(2, &[20]);
         let mut cache = HashMap::new();
@@ -1082,14 +1082,14 @@ mod tests {
         ];
         validate_audio_request_layout(2, 0, &requests)?;
 
-        let text = Tensor::zeros((2, 1, 1), candle_core::DType::F32, &Device::Cpu)?;
+        let text = Tensor::zeros((2, 1, 1), inference_tensor::DType::F32, &Device::Cpu)?;
         let conditioned = condition_audio_embeddings(&text, &[1, 2], None, &requests, &cache)?;
         assert_eq!(conditioned.flatten_all()?.to_vec1::<f32>()?, vec![11., 22.]);
         Ok(())
     }
 
     #[test]
-    fn packed_conditioning_respects_logical_query_ranges() -> candle_core::Result<()> {
+    fn packed_conditioning_respects_logical_query_ranges() -> inference_tensor::Result<()> {
         let first_key = key(1, &[10]);
         let second_key = key(2, &[20]);
         let cache = HashMap::from([
@@ -1116,7 +1116,7 @@ mod tests {
         ];
         validate_audio_request_layout(2, 0, &requests)?;
 
-        let text = Tensor::zeros((1, 3, 1), candle_core::DType::F32, &Device::Cpu)?;
+        let text = Tensor::zeros((1, 3, 1), inference_tensor::DType::F32, &Device::Cpu)?;
         let conditioned =
             condition_audio_embeddings(&text, &[0, 1], Some(&[2, 1]), &requests, &cache)?;
         assert_eq!(
@@ -1161,22 +1161,22 @@ mod tests {
     }
 
     #[test]
-    fn sequence_scoped_reset_preserves_other_audio_requests() -> candle_core::Result<()> {
+    fn sequence_scoped_reset_preserves_other_audio_requests() -> inference_tensor::Result<()> {
         let first_key = key(1, &[10]);
         let first_replacement_key = key(1, &[11]);
         let second_key = key(2, &[20]);
         let mut cache = HashMap::from([
             (
                 first_key.clone(),
-                Tensor::zeros((1, 1, 1), candle_core::DType::F32, &Device::Cpu)?,
+                Tensor::zeros((1, 1, 1), inference_tensor::DType::F32, &Device::Cpu)?,
             ),
             (
                 first_replacement_key.clone(),
-                Tensor::zeros((1, 1, 1), candle_core::DType::F32, &Device::Cpu)?,
+                Tensor::zeros((1, 1, 1), inference_tensor::DType::F32, &Device::Cpu)?,
             ),
             (
                 second_key.clone(),
-                Tensor::zeros((1, 1, 1), candle_core::DType::F32, &Device::Cpu)?,
+                Tensor::zeros((1, 1, 1), inference_tensor::DType::F32, &Device::Cpu)?,
             ),
         ]);
 

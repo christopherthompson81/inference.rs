@@ -6,9 +6,9 @@
 #![allow(clippy::cast_possible_truncation)]
 
 #[cfg(feature = "metal")]
-use candle_core::backend::BackendStorage;
+use inference_tensor::backend::BackendStorage;
 #[cfg(feature = "metal")]
-use candle_core::{DType, Device, Result, Storage, Tensor};
+use inference_tensor::{DType, Device, Result, Storage, Tensor};
 
 #[cfg(feature = "metal")]
 use candle_metal_kernels::metal::{
@@ -49,7 +49,7 @@ fn load_ssm_library(device: &MetalRawDevice) -> Result<Library> {
     let lib = device
         .new_library_with_source(SSM_METAL_SOURCE, Some(&compile_options))
         .map_err(|e| {
-            candle_core::Error::Msg(format!("Failed to compile SSM Metal kernels: {e}"))
+            inference_tensor::Error::Msg(format!("Failed to compile SSM Metal kernels: {e}"))
         })?;
     Ok(SSM_LIBRARY.get_or_init(|| lib).clone())
 }
@@ -60,7 +60,7 @@ fn load_pipeline(device: &MetalRawDevice, name: &str) -> Result<ComputePipeline>
 
     {
         let pipelines = pipelines_lock.read().map_err(|e| {
-            candle_core::Error::Msg(format!("Failed to lock SSM pipeline cache: {e}"))
+            inference_tensor::Error::Msg(format!("Failed to lock SSM pipeline cache: {e}"))
         })?;
         if let Some(pipeline) = pipelines.get(name) {
             return Ok(pipeline.clone());
@@ -69,16 +69,16 @@ fn load_pipeline(device: &MetalRawDevice, name: &str) -> Result<ComputePipeline>
 
     let lib = load_ssm_library(device)?;
     let func = lib.get_function(name, None).map_err(|e| {
-        candle_core::Error::Msg(format!("Failed to load SSM Metal function '{name}': {e}"))
+        inference_tensor::Error::Msg(format!("Failed to load SSM Metal function '{name}': {e}"))
     })?;
     let pipeline = device
         .new_compute_pipeline_state_with_function(&func)
         .map_err(|e| {
-            candle_core::Error::Msg(format!("Failed to create SSM pipeline for '{name}': {e}"))
+            inference_tensor::Error::Msg(format!("Failed to create SSM pipeline for '{name}': {e}"))
         })?;
 
     let mut pipelines = pipelines_lock.write().map_err(|e| {
-        candle_core::Error::Msg(format!("Failed to lock SSM pipeline cache for write: {e}"))
+        inference_tensor::Error::Msg(format!("Failed to lock SSM pipeline cache for write: {e}"))
     })?;
     pipelines.insert(name.to_string(), pipeline.clone());
     Ok(pipeline)
@@ -92,7 +92,7 @@ fn metal_buffer_and_offset(tensor: &Tensor) -> Result<(Buffer, usize)> {
             let offset = layout.start_offset() * m.dtype().size_in_bytes();
             Ok((m.buffer().clone(), offset))
         }
-        _ => candle_core::bail!("Expected Metal tensor"),
+        _ => inference_tensor::bail!("Expected Metal tensor"),
     }
 }
 
@@ -141,7 +141,7 @@ pub fn selective_scan_metal(
     let c_flat = c.reshape((batch_size, seq_len, n_heads * d_state))?;
 
     let Device::Metal(dev) = x_flat.device() else {
-        candle_core::bail!("selective_scan_metal: expected Metal device");
+        inference_tensor::bail!("selective_scan_metal: expected Metal device");
     };
 
     // Select kernel based on c_factor = ceil(d_state / 32)
@@ -217,16 +217,16 @@ pub fn selective_scan_metal(
 #[cfg(not(feature = "metal"))]
 #[allow(dead_code, clippy::too_many_arguments)]
 pub fn selective_scan_metal(
-    _x: &candle_core::Tensor,
-    _dt: &candle_core::Tensor,
-    _a: &candle_core::Tensor,
-    _b: &candle_core::Tensor,
-    _c: &candle_core::Tensor,
-    _d: &candle_core::Tensor,
-    _dt_bias: &candle_core::Tensor,
-    _state: &mut candle_core::Tensor,
+    _x: &inference_tensor::Tensor,
+    _dt: &inference_tensor::Tensor,
+    _a: &inference_tensor::Tensor,
+    _b: &inference_tensor::Tensor,
+    _c: &inference_tensor::Tensor,
+    _d: &inference_tensor::Tensor,
+    _dt_bias: &inference_tensor::Tensor,
+    _state: &mut inference_tensor::Tensor,
     _dt_min: f32,
     _dt_max: f32,
-) -> candle_core::Result<candle_core::Tensor> {
-    candle_core::bail!("selective_scan_metal requires the metal feature")
+) -> inference_tensor::Result<inference_tensor::Tensor> {
+    inference_tensor::bail!("selective_scan_metal requires the metal feature")
 }

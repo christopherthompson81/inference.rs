@@ -1,12 +1,12 @@
 #![cfg(feature = "cuda")]
 
-use candle_core::{
-    Device, Result, Storage, Tensor,
-    quantized::{GgmlDType, QTensor},
-};
 use inference_quant::{
     GluActivationType, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
     grouped_moe_mmq_from_glu_pair, grouped_moe_mmq_pair_packed, moe_dispatch_build,
+};
+use inference_tensor::{
+    Device, Result, Storage, Tensor,
+    quantized::{GgmlDType, QTensor},
 };
 
 const NUM_EXPERTS: usize = 3;
@@ -17,7 +17,7 @@ const HIDDEN: usize = 64;
 const INTERMEDIATE: usize = 96;
 const TOLERANCE: f32 = 5e-4;
 
-fn patterned(shape: impl Into<candle_core::Shape>, salt: usize, scale: f32) -> Result<Tensor> {
+fn patterned(shape: impl Into<inference_tensor::Shape>, salt: usize, scale: f32) -> Result<Tensor> {
     let shape = shape.into();
     let values = (0..shape.elem_count())
         .map(|index| {

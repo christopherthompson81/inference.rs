@@ -3,7 +3,7 @@ mod config;
 
 use std::sync::MutexGuard;
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 pub use crate::model::NonGranularState;
 use crate::{
@@ -176,7 +176,7 @@ pub fn verify_sanity_adapters(ordering: &Ordering, supported_layers: &[&str]) ->
     }
     for path in ordering.layers.as_ref().unwrap().keys() {
         if !supported_layers.iter().any(|layer| path.ends_with(layer)) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Got a layer name `{path}` in the ordering, expected it to end with one of {supported_layers:?}"
             );
         }

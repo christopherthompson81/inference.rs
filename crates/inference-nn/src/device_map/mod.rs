@@ -12,8 +12,8 @@ use std::{
 };
 
 use crate::{topology::Topology, utils::debug::DeviceRepr, utils::memory_usage::MemoryUsage};
-use candle_core::{Device, DeviceLocation, Result};
 use inference_quant::log::once_log_info;
+use inference_tensor::{Device, DeviceLocation, Result};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -110,7 +110,7 @@ impl DeviceMapMetadata {
             .host_layers
             .unwrap_or(model_layers.saturating_sub(n_device_layers));
         if n_device_layers + n_host_layers != model_layers {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Expected the total number of GPU ({n_device_layers}) and host layers ({n_host_layers}) to sum to the number of model hidden layers ({model_layers})"
             );
         }
@@ -224,7 +224,7 @@ impl DeviceMapSetting {
                 metadata.build_mapper(model_layers, device, topology, all_devices)
             }
             Self::Auto(_) => {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     ".into_mapper does not work on Auto device map, convert it to a Map with the auto device mapper first"
                 )
             }
@@ -260,7 +260,7 @@ fn mapped_device_for_ordinal(
             .find(|d| d.is_cuda() && device_ordinal(d) == ordinal)
             .cloned()
             .ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "Could not find cuda device with ordinal {ordinal}"
                 ))
             }),
@@ -336,9 +336,9 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
         #[cfg(feature = "cuda")]
         Device::Cuda(_) => {
             let DeviceLocation::Cuda { gpu_id: base_ord } = base.location() else {
-                candle_core::bail!("location and device do not match");
+                inference_tensor::bail!("location and device do not match");
             };
-            for ord in 0..candle_core::cuda_backend::device_count()? {
+            for ord in 0..inference_tensor::cuda_backend::device_count()? {
                 if ord == base_ord {
                     devices.push(base.clone());
                     continue;
@@ -354,7 +354,7 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
         Device::Cuda(_) => devices.push(base.clone()),
         #[cfg(not(feature = "metal"))]
         Device::Metal(_) => {
-            candle_core::bail!("Not compiled with metal features, but have a metal device.");
+            inference_tensor::bail!("Not compiled with metal features, but have a metal device.");
         }
         #[cfg(feature = "metal")]
         Device::Metal(_) => {
@@ -364,7 +364,7 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
             let total_ords = 0;
             let mut ord = 0;
             let DeviceLocation::Metal { gpu_id: base_ord } = base.location() else {
-                candle_core::bail!("location and device do not match");
+                inference_tensor::bail!("location and device do not match");
             };
             loop {
                 if base_ord == ord {
@@ -485,12 +485,12 @@ impl AutoDeviceMapParams {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, DeviceLocation};
+    use inference_tensor::{Device, DeviceLocation};
 
     use super::{LayerDeviceMapper, peer::CudaPeerAccess, per_layer_device};
 
     #[test]
-    fn unmapped_layers_fall_back_and_devices_build_once() -> candle_core::Result<()> {
+    fn unmapped_layers_fall_back_and_devices_build_once() -> inference_tensor::Result<()> {
         let mapper = LayerDeviceMapper::new(
             vec![Device::Cpu, Device::Cpu],
             Device::Cpu,
@@ -509,7 +509,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    fn one_value_per_distinct_device() -> candle_core::Result<()> {
+    fn one_value_per_distinct_device() -> inference_tensor::Result<()> {
         skip_without_cuda!();
         let cuda = Device::new_cuda(0)?;
         let mapper = LayerDeviceMapper::new(

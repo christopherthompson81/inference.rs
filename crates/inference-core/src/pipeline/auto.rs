@@ -14,11 +14,11 @@ use crate::{
     PagedAttentionConfig, Pipeline, TryIntoDType,
 };
 use anyhow::Result;
-use candle_core::Device;
 use hf_hub::{
     Cache, Repo, RepoType,
     api::sync::{ApiError, ApiRepo},
 };
+use inference_tensor::Device;
 use serde::Deserialize;
 use std::io;
 use std::path::Path;

@@ -1,9 +1,9 @@
 use std::{collections::HashMap, iter::zip, ops::Mul, sync::Arc};
 
-use candle_core::{Module, Result, Tensor};
-use candle_nn::Linear;
 use either::Either;
 use inference_quant::{QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear};
+use inference_tensor::nn::Linear;
+use inference_tensor::{Module, Result, Tensor};
 
 use crate::layers::MatMul;
 

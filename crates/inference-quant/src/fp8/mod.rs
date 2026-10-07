@@ -1,7 +1,7 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::{Linear, Module};
+use inference_tensor::nn::{Linear, Module};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use quantize::QuantizationResult;
 use safetensors::tensor::Dtype;
 
@@ -109,7 +109,9 @@ impl FP8Linear {
         for id in ids {
             let id = id as usize;
             if id >= row_count {
-                candle_core::bail!("embedding index {id} is out of bounds for {row_count} rows");
+                inference_tensor::bail!(
+                    "embedding index {id} is out of bounds for {row_count} rows"
+                );
             }
             let row = weight.narrow(0, id, 1)?.force_contiguous()?;
             rows.push(crate::scalar_fp8::ops::fp8_to_dtype(&row, DType::F32)?);
@@ -120,7 +122,7 @@ impl FP8Linear {
 }
 
 impl QuantMethod for FP8Linear {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -151,7 +153,7 @@ impl QuantMethod for FP8Linear {
             }
         }
     }
-    fn dequantize_w(&self) -> Result<candle_core::Tensor> {
+    fn dequantize_w(&self) -> Result<inference_tensor::Tensor> {
         Ok(self.dequantize(DType::F32)?.weight().clone())
     }
 
@@ -182,7 +184,7 @@ impl QuantMethod for FP8Linear {
             Some(handle) => {
                 let n_dims = x.dims().len();
                 if n_dims < 3 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "FP8Linear `matmul` via cuBLASlt expects `x` to have at least 3 dimensions"
                     );
                 }
@@ -259,7 +261,7 @@ impl QuantMethod for FP8Linear {
         })?))
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         (DType::F8E4M3, self.lin.weight().device().clone())
     }
 
@@ -322,7 +324,7 @@ impl QuantizedSerde for FP8Linear {
     }
     fn serialize_uqff(&self, prefix: &str, ty: IsqType) -> Result<Vec<UqffTensor>> {
         if ty != IsqType::F8E4M3 {
-            candle_core::bail!("Cannot serialize FP8 layer as {ty}; actual type is F8E4M3.");
+            inference_tensor::bail!("Cannot serialize FP8 layer as {ty}; actual type is F8E4M3.");
         }
 
         let mut data = vec![

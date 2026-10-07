@@ -4,10 +4,10 @@ use std::{
     sync::{Arc, Mutex, OnceLock},
 };
 
-use candle_core::cuda_backend::cudarc::driver::{
+use inference_tensor::cuda_backend::cudarc::driver::{
     CudaEvent, CudaStream, DevicePtr, PinnedHostSlice, sys,
 };
-use candle_core::{DType, Device, DeviceLocation, Storage, Tensor, Var};
+use inference_tensor::{DType, Device, DeviceLocation, Storage, Tensor, Var};
 
 const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =
     sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH.0 as u64;
@@ -347,11 +347,11 @@ impl Drop for CudaGraphHandle {
 }
 
 impl CudaGraphHandle {
-    pub fn end_capture(stream: &Arc<CudaStream>) -> candle_core::Result<Option<Self>> {
+    pub fn end_capture(stream: &Arc<CudaStream>) -> inference_tensor::Result<Option<Self>> {
         let mut graph = std::ptr::null_mut();
         let result = unsafe { sys::cuStreamEndCapture(stream.cu_stream(), &mut graph) };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("CUDA graph stream end capture failed"));
         }
         if graph.is_null() {
@@ -364,7 +364,7 @@ impl CudaGraphHandle {
         };
         if result != sys::CUresult::CUDA_SUCCESS {
             let _ = unsafe { sys::cuGraphDestroy(graph) };
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("CUDA graph instantiate failed"));
         }
 
@@ -375,23 +375,21 @@ impl CudaGraphHandle {
         }))
     }
 
-    pub fn upload(&self) -> candle_core::Result<()> {
+    pub fn upload(&self) -> inference_tensor::Result<()> {
         let result = unsafe { sys::cuGraphUpload(self.exec, self.stream.cu_stream()) };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(
-                candle_core::Error::msg(format!("{result:?}")).context("CUDA graph upload failed")
-            );
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
+                .context("CUDA graph upload failed"));
         }
         let _ = self.stream.context().check_err();
         Ok(())
     }
 
-    pub fn launch(&self) -> candle_core::Result<()> {
+    pub fn launch(&self) -> inference_tensor::Result<()> {
         let result = unsafe { sys::cuGraphLaunch(self.exec, self.stream.cu_stream()) };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(
-                candle_core::Error::msg(format!("{result:?}")).context("CUDA graph launch failed")
-            );
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
+                .context("CUDA graph launch failed"));
         }
         let _ = self.stream.context().check_err();
         Ok(())
@@ -551,7 +549,7 @@ impl Drop for CudaMemoryPoolRetention {
 fn memory_pool_scope(
     scopes: &mut HashMap<usize, MemoryPoolScopeState>,
     pool: sys::CUmemoryPool,
-) -> candle_core::Result<&mut MemoryPoolScopeState> {
+) -> inference_tensor::Result<&mut MemoryPoolScopeState> {
     use std::collections::hash_map::Entry;
 
     Ok(match scopes.entry(pool as usize) {
@@ -570,7 +568,7 @@ fn memory_pool_scope(
 
 pub fn retain_cuda_memory_pool(
     stream: &Arc<CudaStream>,
-) -> candle_core::Result<CudaMemoryPoolRetention> {
+) -> inference_tensor::Result<CudaMemoryPoolRetention> {
     let pool = if stream.context().has_async_alloc() {
         let pool = cuda_memory_pool(stream)?;
         let scopes = CUDA_GRAPH_MEMORY_POOL_SCOPES.get_or_init(Default::default);
@@ -592,7 +590,7 @@ pub fn retain_cuda_memory_pool(
     })
 }
 
-fn memory_pool_release_threshold(pool: sys::CUmemoryPool) -> candle_core::Result<u64> {
+fn memory_pool_release_threshold(pool: sys::CUmemoryPool) -> inference_tensor::Result<u64> {
     let mut value = 0u64;
     let result = unsafe {
         sys::cuMemPoolGetAttribute(
@@ -602,7 +600,7 @@ fn memory_pool_release_threshold(pool: sys::CUmemoryPool) -> candle_core::Result
         )
     };
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(candle_core::Error::msg(format!("{result:?}"))
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
             .context("CUDA graph mempool release threshold lookup failed"));
     }
     Ok(value)
@@ -611,7 +609,7 @@ fn memory_pool_release_threshold(pool: sys::CUmemoryPool) -> candle_core::Result
 fn set_memory_pool_release_threshold(
     pool: sys::CUmemoryPool,
     mut value: u64,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     let result = unsafe {
         sys::cuMemPoolSetAttribute(
             pool,
@@ -620,27 +618,27 @@ fn set_memory_pool_release_threshold(
         )
     };
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(candle_core::Error::msg(format!("{result:?}"))
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
             .context("CUDA graph mempool release threshold setup failed"));
     }
     Ok(())
 }
 
-fn cuda_memory_pool(stream: &Arc<CudaStream>) -> candle_core::Result<sys::CUmemoryPool> {
+fn cuda_memory_pool(stream: &Arc<CudaStream>) -> inference_tensor::Result<sys::CUmemoryPool> {
     stream
         .context()
         .bind_to_thread()
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
     let mut pool = std::ptr::null_mut();
     let result = unsafe { sys::cuDeviceGetMemPool(&mut pool, stream.context().cu_device()) };
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(candle_core::Error::msg(format!("{result:?}"))
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
             .context("CUDA graph mempool lookup failed"));
     }
     Ok(pool)
 }
 
-pub fn cuda_graph_memory_pool_scope_active(device: &Device) -> candle_core::Result<bool> {
+pub fn cuda_graph_memory_pool_scope_active(device: &Device) -> inference_tensor::Result<bool> {
     let Device::Cuda(device) = device else {
         return Ok(false);
     };
@@ -658,12 +656,11 @@ pub fn cuda_graph_memory_pool_scope_active(device: &Device) -> candle_core::Resu
         .is_some_and(|scope| scope.graph_guards != 0))
 }
 
-fn trim_cuda_graph_memory_bound(stream: &Arc<CudaStream>) -> candle_core::Result<()> {
+fn trim_cuda_graph_memory_bound(stream: &Arc<CudaStream>) -> inference_tensor::Result<()> {
     let result = unsafe { sys::cuDeviceGraphMemTrim(stream.context().cu_device()) };
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(
-            candle_core::Error::msg(format!("{result:?}")).context("CUDA graph memory trim failed")
-        );
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
+            .context("CUDA graph memory trim failed"));
     }
     Ok(())
 }
@@ -671,11 +668,11 @@ fn trim_cuda_graph_memory_bound(stream: &Arc<CudaStream>) -> candle_core::Result
 pub fn cuda_graph_memory_attribute(
     stream: &Arc<CudaStream>,
     attribute: sys::CUgraphMem_attribute,
-) -> candle_core::Result<usize> {
+) -> inference_tensor::Result<usize> {
     stream
         .context()
         .bind_to_thread()
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
     let mut value = 0usize;
     let result = unsafe {
         sys::cuDeviceGetGraphMemAttribute(
@@ -685,17 +682,17 @@ pub fn cuda_graph_memory_attribute(
         )
     };
     if result != sys::CUresult::CUDA_SUCCESS {
-        return Err(candle_core::Error::msg(format!("{result:?}"))
+        return Err(inference_tensor::Error::msg(format!("{result:?}"))
             .context("CUDA graph memory attribute lookup failed"));
     }
     Ok(value)
 }
 
-pub fn trim_cuda_graph_memory(stream: &Arc<CudaStream>) -> candle_core::Result<()> {
+pub fn trim_cuda_graph_memory(stream: &Arc<CudaStream>) -> inference_tensor::Result<()> {
     stream
         .context()
         .bind_to_thread()
-        .map_err(candle_core::Error::wrap)
+        .map_err(inference_tensor::Error::wrap)
         .map_err(|err| err.context("CUDA graph memory trim context bind failed"))?;
     let pool = cuda_memory_pool(stream)? as usize;
     let scopes = CUDA_GRAPH_MEMORY_POOL_SCOPES.get_or_init(Default::default);
@@ -710,14 +707,14 @@ pub fn trim_cuda_graph_memory(stream: &Arc<CudaStream>) -> candle_core::Result<(
     }
     stream
         .synchronize()
-        .map_err(candle_core::Error::wrap)
+        .map_err(inference_tensor::Error::wrap)
         .map_err(|err| err.context("CUDA graph memory trim synchronization failed"))?;
     trim_cuda_graph_memory_bound(stream)
 }
 
 pub fn prepare_cuda_graph_memory_pool(
     stream: &Arc<CudaStream>,
-) -> candle_core::Result<CudaGraphMemoryPoolGuard> {
+) -> inference_tensor::Result<CudaGraphMemoryPoolGuard> {
     if !stream.context().has_async_alloc() {
         return Ok(CudaGraphMemoryPoolGuard {
             stream: stream.clone(),
@@ -751,7 +748,7 @@ pub fn prepare_cuda_graph_memory_pool(
         let result =
             unsafe { sys::cuMemPoolSetAttribute(pool, attr, (&mut enabled as *mut i32).cast()) };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("CUDA graph mempool reuse setup failed"));
         }
     }
@@ -774,8 +771,8 @@ pub fn restore_event_tracking_after_capture(stream: &Arc<CudaStream>, restore: b
 }
 
 /// Whether `device`'s stream is capturing a CUDA graph.
-pub fn device_is_capturing(device: &candle_core::Device) -> bool {
-    let candle_core::Device::Cuda(dev) = device else {
+pub fn device_is_capturing(device: &inference_tensor::Device) -> bool {
+    let inference_tensor::Device::Cuda(dev) = device else {
         return false;
     };
     matches!(
@@ -798,9 +795,9 @@ pub fn end_cuda_capture_discard(stream: &Arc<CudaStream>) {
 }
 
 impl CudaGraphPinnedBuffer {
-    fn new(dst: &Var) -> candle_core::Result<Self> {
+    fn new(dst: &Var) -> inference_tensor::Result<Self> {
         let Device::Cuda(device) = dst.device() else {
-            candle_core::bail!("CUDA graph host staging requires a CUDA destination");
+            inference_tensor::bail!("CUDA graph host staging requires a CUDA destination");
         };
         let stream = device.cuda_stream();
         let context = stream.context();
@@ -810,12 +807,16 @@ impl CudaGraphPinnedBuffer {
                 let mut allocation = unsafe {
                     context
                         .alloc_pinned::<$ty>(len)
-                        .map_err(candle_core::Error::wrap)?
+                        .map_err(inference_tensor::Error::wrap)?
                 };
-                let ptr = NonNull::new(allocation.as_mut_ptr().map_err(candle_core::Error::wrap)?)
-                    .ok_or_else(|| {
-                        candle_core::Error::msg("CUDA returned a null pinned pointer")
-                    })?;
+                let ptr = NonNull::new(
+                    allocation
+                        .as_mut_ptr()
+                        .map_err(inference_tensor::Error::wrap)?,
+                )
+                .ok_or_else(|| {
+                    inference_tensor::Error::msg("CUDA returned a null pinned pointer")
+                })?;
                 CudaGraphPinnedData::$variant(CudaGraphPinnedAllocation { allocation, ptr })
             }};
         }
@@ -825,7 +826,7 @@ impl CudaGraphPinnedBuffer {
             DType::I32 => allocate!(I32, i32),
             DType::I64 => allocate!(I64, i64),
             DType::F32 => allocate!(F32, f32),
-            dtype => candle_core::bail!(
+            dtype => inference_tensor::bail!(
                 "CUDA graph host staging does not support metadata dtype {dtype:?}"
             ),
         };
@@ -840,23 +841,25 @@ impl CudaGraphPinnedBuffer {
         src: &Tensor,
         dst: &Var,
         stream: &Arc<CudaStream>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         if src.shape() != dst.shape() || src.dtype() != dst.dtype() {
-            candle_core::bail!("CUDA graph host staging expected matching tensors");
+            inference_tensor::bail!("CUDA graph host staging expected matching tensors");
         }
         let (src_storage, src_layout) = src.storage_and_layout();
         let Storage::Cpu(src_storage) = &*src_storage else {
-            candle_core::bail!("CUDA graph host staging expected CPU source metadata");
+            inference_tensor::bail!("CUDA graph host staging expected CPU source metadata");
         };
         if !src_layout.is_contiguous() {
-            candle_core::bail!("CUDA graph host staging expected contiguous source metadata");
+            inference_tensor::bail!("CUDA graph host staging expected contiguous source metadata");
         }
         let (dst_storage, dst_layout) = dst.storage_and_layout();
         let Storage::Cuda(dst_storage) = &*dst_storage else {
-            candle_core::bail!("CUDA graph host staging expected CUDA destination metadata");
+            inference_tensor::bail!("CUDA graph host staging expected CUDA destination metadata");
         };
         if !dst_layout.is_contiguous() {
-            candle_core::bail!("CUDA graph host staging expected contiguous destination metadata");
+            inference_tensor::bail!(
+                "CUDA graph host staging expected contiguous destination metadata"
+            );
         }
         let len = src.elem_count();
         let src_offset = src_layout.start_offset();
@@ -865,7 +868,7 @@ impl CudaGraphPinnedBuffer {
         macro_rules! stage_and_copy {
             ($variant:ident, $ty:ty) => {{
                 let CudaGraphPinnedData::$variant(host) = &mut self.data else {
-                    candle_core::bail!("CUDA graph host staging dtype changed");
+                    inference_tensor::bail!("CUDA graph host staging dtype changed");
                 };
                 let src = src_storage.as_slice::<$ty>()?;
                 let src = &src[src_offset..src_offset + len];
@@ -887,7 +890,7 @@ impl CudaGraphPinnedBuffer {
                     )
                 };
                 if result != sys::CUresult::CUDA_SUCCESS {
-                    return Err(candle_core::Error::msg(format!("{result:?}"))
+                    return Err(inference_tensor::Error::msg(format!("{result:?}"))
                         .context("CUDA graph metadata H2D copy failed"));
                 }
             }};
@@ -899,7 +902,7 @@ impl CudaGraphPinnedBuffer {
             DType::I32 => stage_and_copy!(I32, i32),
             DType::I64 => stage_and_copy!(I64, i64),
             DType::F32 => stage_and_copy!(F32, f32),
-            dtype => candle_core::bail!(
+            dtype => inference_tensor::bail!(
                 "CUDA graph host staging does not support metadata dtype {dtype:?}"
             ),
         }
@@ -911,19 +914,19 @@ impl CudaGraphPinnedBuffer {
         src: &[u32],
         dst: &Var,
         stream: &Arc<CudaStream>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         if dst.dtype() != DType::U32 || dst.elem_count() != src.len() {
-            candle_core::bail!("CUDA graph host staging expected matching u32 state indices");
+            inference_tensor::bail!("CUDA graph host staging expected matching u32 state indices");
         }
         let (dst_storage, dst_layout) = dst.storage_and_layout();
         let Storage::Cuda(dst_storage) = &*dst_storage else {
-            candle_core::bail!("CUDA graph host staging expected CUDA state indices");
+            inference_tensor::bail!("CUDA graph host staging expected CUDA state indices");
         };
         if !dst_layout.is_contiguous() {
-            candle_core::bail!("CUDA graph host staging expected contiguous state indices");
+            inference_tensor::bail!("CUDA graph host staging expected contiguous state indices");
         }
         let CudaGraphPinnedData::U32(host) = &mut self.data else {
-            candle_core::bail!("CUDA graph host staging state index dtype changed");
+            inference_tensor::bail!("CUDA graph host staging state index dtype changed");
         };
         let host_slice = host.as_mut_slice();
         if self.initialized && host_slice == src {
@@ -944,7 +947,7 @@ impl CudaGraphPinnedBuffer {
             )
         };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("CUDA graph state index H2D copy failed"));
         }
         Ok(())
@@ -956,19 +959,19 @@ impl CudaGraphPinnedBuffer {
         src: &[f32],
         dst: &Var,
         stream: &Arc<CudaStream>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         if dst.dtype() != DType::F32 || dst.elem_count() != src.len() {
-            candle_core::bail!("CUDA graph host staging expected matching f32 metadata");
+            inference_tensor::bail!("CUDA graph host staging expected matching f32 metadata");
         }
         let (dst_storage, dst_layout) = dst.storage_and_layout();
         let Storage::Cuda(dst_storage) = &*dst_storage else {
-            candle_core::bail!("CUDA graph host staging expected CUDA f32 metadata");
+            inference_tensor::bail!("CUDA graph host staging expected CUDA f32 metadata");
         };
         if !dst_layout.is_contiguous() {
-            candle_core::bail!("CUDA graph host staging expected contiguous f32 metadata");
+            inference_tensor::bail!("CUDA graph host staging expected contiguous f32 metadata");
         }
         let CudaGraphPinnedData::F32(host) = &mut self.data else {
-            candle_core::bail!("CUDA graph host staging f32 metadata dtype changed");
+            inference_tensor::bail!("CUDA graph host staging f32 metadata dtype changed");
         };
         let host_slice = host.as_mut_slice();
         if self.initialized && host_slice == src {
@@ -989,7 +992,7 @@ impl CudaGraphPinnedBuffer {
             )
         };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("CUDA graph f32 metadata H2D copy failed"));
         }
         Ok(())
@@ -1001,19 +1004,19 @@ impl CudaGraphPinnedBuffer {
         src: &[i64],
         dst: &Var,
         stream: &Arc<CudaStream>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         if dst.dtype() != DType::I64 || dst.elem_count() != src.len() {
-            candle_core::bail!("CUDA graph host staging expected matching i64 metadata");
+            inference_tensor::bail!("CUDA graph host staging expected matching i64 metadata");
         }
         let (dst_storage, dst_layout) = dst.storage_and_layout();
         let Storage::Cuda(dst_storage) = &*dst_storage else {
-            candle_core::bail!("CUDA graph host staging expected CUDA i64 metadata");
+            inference_tensor::bail!("CUDA graph host staging expected CUDA i64 metadata");
         };
         if !dst_layout.is_contiguous() {
-            candle_core::bail!("CUDA graph host staging expected contiguous i64 metadata");
+            inference_tensor::bail!("CUDA graph host staging expected contiguous i64 metadata");
         }
         let CudaGraphPinnedData::I64(host) = &mut self.data else {
-            candle_core::bail!("CUDA graph host staging i64 metadata dtype changed");
+            inference_tensor::bail!("CUDA graph host staging i64 metadata dtype changed");
         };
         let host_slice = host.as_mut_slice();
         if self.initialized && host_slice == src {
@@ -1034,7 +1037,7 @@ impl CudaGraphPinnedBuffer {
             )
         };
         if result != sys::CUresult::CUDA_SUCCESS {
-            return Err(candle_core::Error::msg(format!("{result:?}"))
+            return Err(inference_tensor::Error::msg(format!("{result:?}"))
                 .context("CUDA graph i64 metadata H2D copy failed"));
         }
         Ok(())
@@ -1050,11 +1053,11 @@ impl CudaGraphHostStaging {
         self.completions.len()
     }
 
-    pub fn new(graph_stream: Arc<CudaStream>) -> candle_core::Result<Self> {
+    pub fn new(graph_stream: Arc<CudaStream>) -> inference_tensor::Result<Self> {
         let graph_complete = graph_stream
             .context()
             .new_event(None)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         Ok(Self {
             buffers: HashMap::new(),
             completions: HashMap::new(),
@@ -1066,36 +1069,36 @@ impl CudaGraphHostStaging {
 
     pub fn update(
         &mut self,
-        copy: impl FnOnce(&mut Self) -> candle_core::Result<()>,
-    ) -> candle_core::Result<()> {
+        copy: impl FnOnce(&mut Self) -> inference_tensor::Result<()>,
+    ) -> inference_tensor::Result<()> {
         self.begin_update()?;
         let copy_result = copy(self);
         let finish_result = self.finish_update();
         copy_result.and(finish_result)
     }
 
-    fn begin_update(&mut self) -> candle_core::Result<()> {
+    fn begin_update(&mut self) -> inference_tensor::Result<()> {
         for completion in self.completions.values_mut() {
             completion.ordered_after_graph = false;
             if completion.active {
                 completion
                     .stream
                     .synchronize()
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
                 completion.active = false;
             }
             if completion.pending {
                 completion
                     .event
                     .synchronize()
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
                 completion.pending = false;
             }
         }
         Ok(())
     }
 
-    fn finish_update(&mut self) -> candle_core::Result<()> {
+    fn finish_update(&mut self) -> inference_tensor::Result<()> {
         let mut result = Ok(());
         for completion in self.completions.values_mut() {
             if !completion.active {
@@ -1112,7 +1115,7 @@ impl CudaGraphHostStaging {
                         completion.active = false;
                     }
                     if result.is_ok() {
-                        result = Err(candle_core::Error::wrap(err));
+                        result = Err(inference_tensor::Error::wrap(err));
                     }
                 }
             }
@@ -1120,21 +1123,21 @@ impl CudaGraphHostStaging {
         result
     }
 
-    pub fn order_before_graph(&self) -> candle_core::Result<()> {
+    pub fn order_before_graph(&self) -> inference_tensor::Result<()> {
         for completion in self.completions.values() {
             if completion.pending && !same_cuda_stream(&completion.stream, &self.graph_stream) {
                 self.graph_stream
                     .wait(&completion.event)
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
             }
         }
         Ok(())
     }
 
-    pub fn record_graph_complete(&mut self) -> candle_core::Result<()> {
+    pub fn record_graph_complete(&mut self) -> inference_tensor::Result<()> {
         self.graph_complete
             .record(&self.graph_stream)
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         self.graph_pending = true;
         Ok(())
     }
@@ -1143,14 +1146,14 @@ impl CudaGraphHostStaging {
         &mut self,
         location: DeviceLocation,
         stream: &Arc<CudaStream>,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let completion = match self.completions.entry(location) {
             std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
             std::collections::hash_map::Entry::Vacant(entry) => {
                 let event = stream
                     .context()
                     .new_event(Some(sys::CUevent_flags::CU_EVENT_BLOCKING_SYNC))
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
                 entry.insert(CudaGraphCopyCompletion {
                     event,
                     stream: stream.clone(),
@@ -1161,14 +1164,14 @@ impl CudaGraphHostStaging {
             }
         };
         if !same_cuda_stream(&completion.stream, stream) {
-            candle_core::bail!("CUDA graph metadata stream changed during replay");
+            inference_tensor::bail!("CUDA graph metadata stream changed during replay");
         }
         if self.graph_pending && !completion.ordered_after_graph {
             if !same_cuda_stream(&completion.stream, &self.graph_stream) {
                 completion
                     .stream
                     .wait(&self.graph_complete)
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
             }
             completion.ordered_after_graph = true;
         }
@@ -1182,7 +1185,7 @@ impl CudaGraphHostStaging {
         location: DeviceLocation,
         src: &Tensor,
         dst: &Var,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let stream = dst.device().as_cuda_device()?.cuda_stream();
         self.prepare_copy(location, &stream)?;
         let buffer = match self.buffers.entry((name, location)) {
@@ -1200,7 +1203,7 @@ impl CudaGraphHostStaging {
         location: DeviceLocation,
         src: &[u32],
         dst: &Var,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let stream = dst.device().as_cuda_device()?.cuda_stream();
         self.prepare_copy(location, &stream)?;
         let buffer = match self.buffers.entry((name, location)) {
@@ -1219,7 +1222,7 @@ impl CudaGraphHostStaging {
         location: DeviceLocation,
         src: &[f32],
         dst: &Var,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let stream = dst.device().as_cuda_device()?.cuda_stream();
         self.prepare_copy(location, &stream)?;
         let buffer = match self.buffers.entry((name, location)) {
@@ -1238,7 +1241,7 @@ impl CudaGraphHostStaging {
         location: DeviceLocation,
         src: &[i64],
         dst: &Var,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         let stream = dst.device().as_cuda_device()?.cuda_stream();
         self.prepare_copy(location, &stream)?;
         let buffer = match self.buffers.entry((name, location)) {

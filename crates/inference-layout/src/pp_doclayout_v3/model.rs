@@ -1,5 +1,5 @@
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::{LayerNorm, VarBuilder};
+use inference_tensor::nn::{LayerNorm, VarBuilder};
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::backbone::HGNetV2Backbone;
 use super::config::PPDocLayoutV3Config;
@@ -82,13 +82,13 @@ impl PPDocLayoutV3 {
     pub fn new(cfg: PPDocLayoutV3Config, input_hw: (usize, usize), vb: VarBuilder) -> Result<Self> {
         // the custom kernels are f32-only, and TF32-level error already flips the encoder's top-k query selection
         if vb.dtype() != DType::F32 {
-            candle_core::bail!("PP-DocLayoutV3 runs in f32 only, got {:?}", vb.dtype());
+            inference_tensor::bail!("PP-DocLayoutV3 runs in f32 only, got {:?}", vb.dtype());
         }
         if cfg.backbone_config.arch != "L" {
-            candle_core::bail!("unsupported HGNetV2 arch {}", cfg.backbone_config.arch);
+            inference_tensor::bail!("unsupported HGNetV2 arch {}", cfg.backbone_config.arch);
         }
         if cfg.decoder_in_channels.len() != cfg.num_feature_levels {
-            candle_core::bail!("extra strided decoder levels are not supported");
+            inference_tensor::bail!("extra strided decoder levels are not supported");
         }
         if !cfg.mask_enhanced
             || cfg.learn_initial_query
@@ -96,7 +96,7 @@ impl PPDocLayoutV3 {
             || cfg.anchor_image_size.is_some()
             || cfg.eval_size.is_some()
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "only mask_enhanced=true, learn_initial_query=false, normalize_before=false and \
                  anchor_image_size/eval_size=null are supported"
             );
@@ -150,7 +150,7 @@ impl PPDocLayoutV3 {
         let geom = LevelGeom::new(shapes);
         let fallback_sampler = !crate::has_kernels(&dev);
         if geom.total < cfg.num_queries || (fallback_sampler && geom.total > MAX_EXACT_F32_INDEX) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "input {input_hw:?} gives {} memory tokens; need {}..={MAX_EXACT_F32_INDEX}",
                 geom.total,
                 cfg.num_queries
@@ -171,7 +171,7 @@ impl PPDocLayoutV3 {
             decoder_input_proj,
             enc_output: (
                 linear(d, d, vbm.pp("enc_output").pp(0))?,
-                candle_nn::layer_norm(d, eps, vbm.pp("enc_output").pp(1))?,
+                inference_tensor::nn::layer_norm(d, eps, vbm.pp("enc_output").pp(1))?,
             ),
             // decoder.class_embed / bbox_embed are tied to these in the checkpoint
             enc_score_head: linear(d, nl, vbm.pp("enc_score_head"))?,
@@ -184,7 +184,7 @@ impl PPDocLayoutV3 {
                 cfg.global_pointer_head_size * 2,
                 vbm.pp("decoder_global_pointer").pp("dense"),
             )?,
-            decoder_norm: candle_nn::layer_norm(d, eps, vbm.pp("decoder_norm"))?,
+            decoder_norm: inference_tensor::nn::layer_norm(d, eps, vbm.pp("decoder_norm"))?,
             mask_query_head: MlpHead::new(d, d, cfg.num_prototypes, 3, vbm.pp("mask_query_head"))?,
             geom,
             input_hw,
@@ -253,7 +253,7 @@ impl PPDocLayoutV3 {
     ) -> Result<RawOutputs> {
         let (b, _, h, w) = pixel_values.dims4()?;
         if (h, w) != self.input_hw {
-            candle_core::bail!("expected {:?} input, got {:?}", self.input_hw, (h, w));
+            inference_tensor::bail!("expected {:?} input, got {:?}", self.input_hw, (h, w));
         }
         let d = self.cfg.d_model;
         let q = self.cfg.num_queries;
@@ -315,12 +315,12 @@ impl PPDocLayoutV3 {
         };
 
         let mut hs = target;
-        let mut ref_boxes = candle_nn::ops::sigmoid(&init_ref)?;
+        let mut ref_boxes = inference_tensor::nn::ops::sigmoid(&init_ref)?;
         let mut hidden = Vec::new();
         for layer in &self.layers {
             let pos = self.query_pos_head.forward(&ref_boxes)?;
             hs = layer.forward(&hs, &pos, &ref_boxes, &ctx)?;
-            ref_boxes = candle_nn::ops::sigmoid(
+            ref_boxes = inference_tensor::nn::ops::sigmoid(
                 &(self.enc_bbox_head.forward(&hs)? + inverse_sigmoid(&ref_boxes)?)?,
             )?;
             if inter.is_some() {
@@ -364,8 +364,8 @@ impl PPDocLayoutV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Shape;
-    use candle_nn::var_builder::SimpleBackend;
+    use inference_tensor::Shape;
+    use inference_tensor::nn::var_builder::SimpleBackend;
 
     const TEST_INPUT: usize = 160;
 
@@ -377,7 +377,7 @@ mod tests {
             &self,
             s: Shape,
             name: &str,
-            _: candle_nn::Init,
+            _: inference_tensor::nn::Init,
             dtype: DType,
             dev: &Device,
         ) -> Result<Tensor> {
@@ -399,7 +399,7 @@ mod tests {
         }
 
         fn get_unchecked(&self, name: &str, _: DType, _: &Device) -> Result<Tensor> {
-            candle_core::bail!("no shape for {name}")
+            inference_tensor::bail!("no shape for {name}")
         }
 
         fn contains_tensor(&self, _: &str) -> bool {

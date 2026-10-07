@@ -377,7 +377,7 @@ impl Engine {
                 pipeline
                     .execution_devices()
                     .iter()
-                    .all(candle_core::Device::is_cuda),
+                    .all(inference_tensor::Device::is_cuda),
                 metadata.sliding_window.is_some(),
                 metadata
                     .cache_engine
@@ -556,7 +556,7 @@ impl Engine {
             .iter()
             .map(|seq| !seq.is_finished_paged_attn())
             .collect::<Vec<_>>();
-        let finish_result: candle_core::Result<_> = async {
+        let finish_result: inference_tensor::Result<_> = async {
             let pipeline = get_mut_arcmutex!(self.pipeline);
             if crate::pipeline::sampling::cuda_token_batch_will_finish(
                 &*pipeline,

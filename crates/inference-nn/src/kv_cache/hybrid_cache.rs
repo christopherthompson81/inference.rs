@@ -7,7 +7,7 @@
 //! The key insight is that recurrent state is accessed via `state_indices` which map
 //! each sequence in the current batch to its slot in the pool.
 
-use candle_core::{DType, Device, DeviceLocation, IndexOp, Result, Tensor};
+use inference_tensor::{DType, Device, DeviceLocation, IndexOp, Result, Tensor};
 use std::collections::{HashMap, HashSet};
 
 use super::KvCache;
@@ -105,7 +105,7 @@ impl GdnPendingTransitionPool {
             || spec.max_rows == 0
             || spec.max_rows > crate::cuda::gdn::GDN_SPEC_FUSED_MAX_TOKENS
         {
-            candle_core::bail!("invalid GDN pending transition dimensions");
+            inference_tensor::bail!("invalid GDN pending transition dimensions");
         }
         let (num_v_heads, head_k_dim, head_v_dim) = match (state_layout, state_dims) {
             (RecurrentStateLayout::GdnKeyMajor, [heads, key_dim, value_dim]) => {
@@ -114,14 +114,16 @@ impl GdnPendingTransitionPool {
             (RecurrentStateLayout::GdnValueMajor, [heads, value_dim, key_dim]) => {
                 (*heads, *key_dim, *value_dim)
             }
-            _ => candle_core::bail!("pending transitions require a GDN recurrent state layout"),
+            _ => {
+                inference_tensor::bail!("pending transitions require a GDN recurrent state layout")
+            }
         };
         if num_v_heads == 0
             || head_k_dim == 0
             || head_v_dim == 0
             || !num_v_heads.is_multiple_of(spec.num_k_heads)
         {
-            candle_core::bail!("GDN pending transition head dimensions are incompatible");
+            inference_tensor::bail!("GDN pending transition head dimensions are incompatible");
         }
 
         let conv_blocks = conv_dim.div_ceil(crate::cuda::gdn::GDN_CHANNEL_BLOCK_SIZE);
@@ -210,7 +212,7 @@ impl GdnPendingTransitionPool {
 
     fn clear_slot(&mut self, slot_idx: usize) -> Result<()> {
         if slot_idx >= self.capacity {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN pending transition slot {slot_idx} exceeds capacity {}",
                 self.capacity
             );
@@ -263,10 +265,10 @@ impl GdnPendingTransitionPool {
                 .elem_count()
                 .checked_mul(tensor.dtype().size_in_bytes())
                 .ok_or_else(|| {
-                    candle_core::Error::msg("GDN pending transition storage size overflow")
+                    inference_tensor::Error::msg("GDN pending transition storage size overflow")
                 })?;
             bytes.checked_add(tensor_bytes).ok_or_else(|| {
-                candle_core::Error::msg("GDN pending transition storage size overflow")
+                inference_tensor::Error::msg("GDN pending transition storage size overflow")
             })
         })
     }
@@ -299,7 +301,7 @@ impl GdnDeferredStatePool {
             | (RecurrentStateLayout::GdnValueMajor, [heads, value_dim, key_dim]) => {
                 Ok((*heads, *key_dim, *value_dim))
             }
-            _ => candle_core::bail!("deferred state requires a GDN recurrent state layout"),
+            _ => inference_tensor::bail!("deferred state requires a GDN recurrent state layout"),
         }
     }
 
@@ -310,7 +312,7 @@ impl GdnDeferredStatePool {
         spec: GdnDeferredStateSpec,
     ) -> Result<usize> {
         let (num_v_heads, head_k_dim, head_v_dim) = Self::gdn_dims(state_layout, state_dims)?;
-        let overflow = || candle_core::Error::msg("GDN deferred state slot size overflow");
+        let overflow = || inference_tensor::Error::msg("GDN deferred state slot size overflow");
         let row_elems = spec
             .num_k_heads
             .checked_mul(head_k_dim)
@@ -338,7 +340,7 @@ impl GdnDeferredStatePool {
             || head_v_dim == 0
             || !num_v_heads.is_multiple_of(spec.num_k_heads)
         {
-            candle_core::bail!("GDN deferred state dimensions are incompatible");
+            inference_tensor::bail!("GDN deferred state dimensions are incompatible");
         }
 
         Ok(Self {
@@ -391,7 +393,7 @@ impl GdnDeferredStatePool {
 
     fn clear_slot(&self, slot_idx: usize) -> Result<()> {
         if slot_idx >= self.capacity {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN deferred state slot {slot_idx} exceeds capacity {}",
                 self.capacity
             );
@@ -417,10 +419,10 @@ impl GdnDeferredStatePool {
                     .elem_count()
                     .checked_mul(tensor.dtype().size_in_bytes())
                     .ok_or_else(|| {
-                        candle_core::Error::msg("GDN deferred state storage size overflow")
+                        inference_tensor::Error::msg("GDN deferred state storage size overflow")
                     })?;
                 bytes.checked_add(tensor_bytes).ok_or_else(|| {
-                    candle_core::Error::msg("GDN deferred state storage size overflow")
+                    inference_tensor::Error::msg("GDN deferred state storage size overflow")
                 })
             })
     }
@@ -579,7 +581,7 @@ impl RecurrentStatePool {
     )> {
         let physical_capacity = new_capacity
             .checked_mul(self.checkpoint_lanes)
-            .ok_or_else(|| candle_core::Error::msg("recurrent physical capacity overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("recurrent physical capacity overflow"))?;
         let new_conv = Tensor::zeros(
             (physical_capacity, self.conv_dim, self.conv_width),
             self.conv_dtype,
@@ -627,7 +629,7 @@ impl RecurrentStatePool {
     fn layout_storage(&self, capacity: usize, checkpoint_lanes: usize) -> Result<(Tensor, Tensor)> {
         let physical_capacity = capacity
             .checked_mul(checkpoint_lanes)
-            .ok_or_else(|| candle_core::Error::msg("recurrent physical capacity overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("recurrent physical capacity overflow"))?;
         let conv_state = Tensor::zeros(
             (physical_capacity, self.conv_dim, self.conv_width),
             self.conv_dtype,
@@ -734,7 +736,7 @@ impl RecurrentStatePool {
         if let Err(err) = self.reset_slot(slot_idx) {
             let released = self.free(slot_idx);
             debug_assert!(released);
-            return Err(candle_core::Error::msg(format!(
+            return Err(inference_tensor::Error::msg(format!(
                 "failed to reset recurrent state slot {slot_idx}: {err}"
             )));
         }
@@ -743,13 +745,13 @@ impl RecurrentStatePool {
 
     fn reserve_at(&mut self, slot_idx: usize) -> Result<()> {
         let allocated = self.allocated_slots.get(slot_idx).copied().ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "recurrent state slot {slot_idx} exceeds capacity {}",
                 self.capacity
             ))
         })?;
         if allocated {
-            candle_core::bail!("recurrent state slot {slot_idx} is already allocated");
+            inference_tensor::bail!("recurrent state slot {slot_idx} is already allocated");
         }
         self.allocated_slots[slot_idx] = true;
         self.allocated_count += 1;
@@ -906,13 +908,13 @@ impl RecurrentStatePool {
 
     pub fn physical_slot(&self, logical_slot: usize, lane: usize) -> Result<usize> {
         if logical_slot >= self.capacity {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent logical slot {logical_slot} exceeds capacity {}",
                 self.capacity
             );
         }
         if lane >= self.checkpoint_lanes {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint lane {lane} exceeds lane count {}",
                 self.checkpoint_lanes
             );
@@ -920,7 +922,7 @@ impl RecurrentStatePool {
         logical_slot
             .checked_mul(self.checkpoint_lanes)
             .and_then(|base| base.checked_add(lane))
-            .ok_or_else(|| candle_core::Error::msg("recurrent physical slot overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("recurrent physical slot overflow"))
     }
 
     pub fn num_free_slots(&self) -> usize {
@@ -945,24 +947,26 @@ impl RecurrentStatePool {
 
     fn snapshot_bytes(&self) -> Result<usize> {
         let conv_elements = self.conv_dim.checked_mul(self.conv_width).ok_or_else(|| {
-            candle_core::Error::msg("recurrent convolution snapshot size overflow")
+            inference_tensor::Error::msg("recurrent convolution snapshot size overflow")
         })?;
         let recurrent_elements = self.state_dims.iter().try_fold(1usize, |elements, dim| {
-            elements
-                .checked_mul(*dim)
-                .ok_or_else(|| candle_core::Error::msg("recurrent state snapshot size overflow"))
+            elements.checked_mul(*dim).ok_or_else(|| {
+                inference_tensor::Error::msg("recurrent state snapshot size overflow")
+            })
         })?;
         let conv_bytes = conv_elements
             .checked_mul(self.conv_dtype.size_in_bytes())
             .ok_or_else(|| {
-                candle_core::Error::msg("recurrent convolution snapshot size overflow")
+                inference_tensor::Error::msg("recurrent convolution snapshot size overflow")
             })?;
         let recurrent_bytes = recurrent_elements
             .checked_mul(self.recurrent_dtype.size_in_bytes())
-            .ok_or_else(|| candle_core::Error::msg("recurrent state snapshot size overflow"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("recurrent state snapshot size overflow")
+            })?;
         conv_bytes
             .checked_add(recurrent_bytes)
-            .ok_or_else(|| candle_core::Error::msg("recurrent snapshot size overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("recurrent snapshot size overflow"))
     }
 
     pub fn state_layout(&self) -> RecurrentStateLayout {
@@ -1086,11 +1090,11 @@ impl HybridCache {
 
     pub fn new(
         config: HybridCacheConfig,
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
         layer_devices: &[Device],
     ) -> Result<Self> {
         if layer_devices.len() != config.layer_types.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Hybrid cache has {} layers but {} layer devices",
                 config.layer_types.len(),
                 layer_devices.len()
@@ -1214,7 +1218,7 @@ impl HybridCache {
         speculative_storage: RecurrentSpeculativeStorage,
     ) -> Result<bool> {
         if checkpoint_lanes == 0 {
-            candle_core::bail!("recurrent checkpoint lane count must be nonzero");
+            inference_tensor::bail!("recurrent checkpoint lane count must be nonzero");
         }
         if checkpoint_lanes == self.checkpoint_lanes
             && speculative_storage == self.speculative_storage
@@ -1222,12 +1226,12 @@ impl HybridCache {
             return Ok(false);
         }
         if self.recurrent_storage_locked {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint lanes must be configured before reservation or allocation"
             );
         }
         if self.slot_owners.iter().any(Option::is_some) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint lanes cannot change while sequence slots are allocated"
             );
         }
@@ -1293,7 +1297,7 @@ impl HybridCache {
             .get(logical_slot)
             .copied()
             .ok_or_else(|| {
-                candle_core::Error::msg(format!(
+                inference_tensor::Error::msg(format!(
                     "recurrent logical slot {logical_slot} exceeds capacity {}",
                     self.committed_lanes.len()
                 ))
@@ -1302,21 +1306,21 @@ impl HybridCache {
 
     pub fn physical_slot(&self, logical_slot: usize, lane: usize) -> Result<usize> {
         if logical_slot >= self.recurrent_capacity() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent logical slot {logical_slot} exceeds capacity {}",
                 self.recurrent_capacity()
             );
         }
         let physical_lanes = self.physical_checkpoint_lanes();
         if lane >= physical_lanes {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent physical lane {lane} exceeds lane count {physical_lanes}"
             );
         }
         logical_slot
             .checked_mul(physical_lanes)
             .and_then(|base| base.checked_add(lane))
-            .ok_or_else(|| candle_core::Error::msg("recurrent physical slot overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("recurrent physical slot overflow"))
     }
 
     pub fn active_physical_slot(&self, logical_slot: usize) -> Result<usize> {
@@ -1337,14 +1341,14 @@ impl HybridCache {
             .map(|&logical_slot| {
                 let logical_slot = logical_slot as usize;
                 let lane = committed_lanes.get(logical_slot).copied().ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "recurrent logical slot {logical_slot} exceeds capacity {}",
                         committed_lanes.len()
                     ))
                 })?;
                 let physical_slot = self.physical_slot(logical_slot, lane)?;
                 u32::try_from(physical_slot).map_err(|_| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "recurrent physical slot {physical_slot} exceeds u32"
                     ))
                 })
@@ -1441,7 +1445,7 @@ impl HybridCache {
             let bytes = pool.snapshot_bytes()?;
             let entry = bytes_by_device.entry(pool.device().location()).or_default();
             *entry = (*entry).checked_add(bytes).ok_or_else(|| {
-                candle_core::Error::msg("recurrent snapshot device size overflow")
+                inference_tensor::Error::msg("recurrent snapshot device size overflow")
             })?;
         }
         Ok(bytes_by_device)
@@ -1484,16 +1488,16 @@ impl HybridCache {
             .iter()
             .filter_map(HybridLayerCache::as_recurrent_pool);
         let Some(first) = pools.next() else {
-            candle_core::bail!("hybrid cache has no recurrent state pool");
+            inference_tensor::bail!("hybrid cache has no recurrent state pool");
         };
         let allocated = first.is_allocated(slot_idx);
         if pools.any(|pool| pool.is_allocated(slot_idx) != allocated) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "hybrid recurrent pool allocation state diverged for slot {slot_idx}"
             );
         }
         if !allocated {
-            candle_core::bail!("recurrent state slot {slot_idx} is not allocated");
+            inference_tensor::bail!("recurrent state slot {slot_idx} is not allocated");
         }
         Ok(())
     }
@@ -1506,7 +1510,7 @@ impl HybridCache {
         self.ensure_recurrent_slot_allocated(slot_idx)?;
         let owner = self.slot_owners.get(slot_idx).copied().flatten();
         if owner != Some(expected_owner) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent state slot {slot_idx} is owned by {owner:?}, expected {expected_owner:?}"
             );
         }
@@ -1516,7 +1520,7 @@ impl HybridCache {
     fn ensure_recurrent_slot_initialized(&self, slot_idx: usize) -> Result<()> {
         self.ensure_recurrent_slot_allocated(slot_idx)?;
         if !self.initialized_slots[slot_idx] {
-            candle_core::bail!("recurrent state slot {slot_idx} is not initialized");
+            inference_tensor::bail!("recurrent state slot {slot_idx} is not initialized");
         }
         Ok(())
     }
@@ -1525,7 +1529,7 @@ impl HybridCache {
         let mut unique_slots = HashSet::with_capacity(sequence_slots.len());
         for &(sequence_id, slot_idx) in sequence_slots {
             if !unique_slots.insert(slot_idx) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "recurrent state slot {slot_idx} is assigned to multiple sequences in one batch"
                 );
             }
@@ -1550,7 +1554,7 @@ impl HybridCache {
     fn resize_recurrent_storage(&mut self, min_capacity: usize) -> Result<bool> {
         let current_capacity = self.recurrent_capacity();
         if current_capacity == 0 {
-            candle_core::bail!("hybrid cache has no recurrent state pool");
+            inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
         if min_capacity <= current_capacity {
             return Ok(false);
@@ -1561,7 +1565,7 @@ impl HybridCache {
             .filter_map(HybridLayerCache::as_recurrent_pool)
             .any(|pool| pool.capacity() != current_capacity)
         {
-            candle_core::bail!("hybrid recurrent pool capacities diverged before resize");
+            inference_tensor::bail!("hybrid recurrent pool capacities diverged before resize");
         }
 
         let storage = self
@@ -1625,17 +1629,17 @@ impl HybridCache {
         spec: GdnPendingTransitionSpec,
     ) -> Result<bool> {
         if !self.uses_recurrent_transition_log() {
-            candle_core::bail!("GDN pending transitions require transition-log storage");
+            inference_tensor::bail!("GDN pending transitions require transition-log storage");
         }
         if spec.max_rows != self.checkpoint_lanes {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN pending transition depth {} does not match logical checkpoint depth {}",
                 spec.max_rows,
                 self.checkpoint_lanes
             );
         }
         if self.slot_owners.iter().any(Option::is_some) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN pending transitions must be reserved before recurrent slot allocation"
             );
         }
@@ -1645,7 +1649,7 @@ impl HybridCache {
             .filter_map(HybridLayerCache::as_recurrent_pool)
             .collect::<Vec<_>>();
         if recurrent_pools.is_empty() {
-            candle_core::bail!("hybrid cache has no recurrent state pool");
+            inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
         let existing = recurrent_pools
             .iter()
@@ -1658,7 +1662,7 @@ impl HybridCache {
             return Ok(false);
         }
         if existing.iter().any(Option::is_some) {
-            candle_core::bail!("GDN pending transition pool configuration diverged");
+            inference_tensor::bail!("GDN pending transition pool configuration diverged");
         }
         let storage = recurrent_pools
             .into_iter()
@@ -1666,7 +1670,7 @@ impl HybridCache {
             .collect::<Result<Vec<_>>>()?;
         let storage_bytes = storage.iter().try_fold(0usize, |bytes, pending| {
             bytes.checked_add(pending.storage_bytes()?).ok_or_else(|| {
-                candle_core::Error::msg("GDN pending transition storage size overflow")
+                inference_tensor::Error::msg("GDN pending transition storage size overflow")
             })
         })?;
         let mut storage = storage.into_iter();
@@ -1699,7 +1703,7 @@ impl HybridCache {
                 GdnDeferredStatePool::slot_bytes(&pool.state_dims, pool.state_layout, spec)?;
             let entry = bytes_by_device.entry(pool.device().location()).or_default();
             *entry = (*entry).checked_add(bytes).ok_or_else(|| {
-                candle_core::Error::msg("GDN deferred state device size overflow")
+                inference_tensor::Error::msg("GDN deferred state device size overflow")
             })?;
         }
         Ok(bytes_by_device)
@@ -1707,14 +1711,14 @@ impl HybridCache {
 
     pub fn reserve_gdn_deferred_state(&mut self, spec: GdnDeferredStateSpec) -> Result<bool> {
         if spec.depth != crate::cuda::gdn::GDN_DEFERRED_STATE_DEPTH {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN deferred state depth {} does not match kernel depth {}",
                 spec.depth,
                 crate::cuda::gdn::GDN_DEFERRED_STATE_DEPTH
             );
         }
         if self.slot_owners.iter().any(Option::is_some) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN deferred state must be reserved before recurrent slot allocation"
             );
         }
@@ -1724,7 +1728,7 @@ impl HybridCache {
             .filter_map(HybridLayerCache::as_recurrent_pool)
             .collect::<Vec<_>>();
         if recurrent_pools.is_empty() {
-            candle_core::bail!("hybrid cache has no recurrent state pool");
+            inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
         let existing = recurrent_pools
             .iter()
@@ -1734,16 +1738,16 @@ impl HybridCache {
             return Ok(false);
         }
         if existing.iter().any(Option::is_some) {
-            candle_core::bail!("GDN deferred state pool configuration diverged");
+            inference_tensor::bail!("GDN deferred state pool configuration diverged");
         }
         let storage = recurrent_pools
             .into_iter()
             .map(|pool| pool.deferred_state_storage(spec))
             .collect::<Result<Vec<_>>>()?;
         let storage_bytes = storage.iter().try_fold(0usize, |bytes, deferred| {
-            bytes
-                .checked_add(deferred.storage_bytes()?)
-                .ok_or_else(|| candle_core::Error::msg("GDN deferred state storage size overflow"))
+            bytes.checked_add(deferred.storage_bytes()?).ok_or_else(|| {
+                inference_tensor::Error::msg("GDN deferred state storage size overflow")
+            })
         })?;
         let mut storage = storage.into_iter();
         for cache in &mut self.caches {
@@ -1773,7 +1777,7 @@ impl HybridCache {
 
     pub fn disable_gdn_deferred_state(&mut self) -> Result<bool> {
         if self.slot_owners.iter().any(Option::is_some) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "GDN deferred state must be disabled before recurrent slot allocation"
             );
         }
@@ -1793,15 +1797,15 @@ impl HybridCache {
             return Ok(false);
         }
         if configured.iter().any(|&configured| !configured) {
-            candle_core::bail!("GDN deferred state pool configuration diverged");
+            inference_tensor::bail!("GDN deferred state pool configuration diverged");
         }
         let storage_bytes = recurrent_pools.iter().try_fold(0usize, |bytes, pool| {
             let deferred = pool
                 .deferred_state()
                 .expect("GDN deferred state configuration was validated");
-            bytes
-                .checked_add(deferred.storage_bytes()?)
-                .ok_or_else(|| candle_core::Error::msg("GDN deferred state storage size overflow"))
+            bytes.checked_add(deferred.storage_bytes()?).ok_or_else(|| {
+                inference_tensor::Error::msg("GDN deferred state storage size overflow")
+            })
         })?;
         for cache in &mut self.caches {
             if let HybridLayerCache::Recurrent(pool) = cache {
@@ -1820,17 +1824,17 @@ impl HybridCache {
         speculative_storage: RecurrentSpeculativeStorage,
     ) -> Result<bool> {
         if checkpoint_lanes == 0 {
-            candle_core::bail!("recurrent checkpoint lane count must be nonzero");
+            inference_tensor::bail!("recurrent checkpoint lane count must be nonzero");
         }
         let current_capacity = self.recurrent_capacity();
         if current_capacity == 0 {
-            candle_core::bail!("hybrid cache has no recurrent state pool");
+            inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
         if self.recurrent_storage_locked {
-            candle_core::bail!("recurrent storage is already reserved or allocated");
+            inference_tensor::bail!("recurrent storage is already reserved or allocated");
         }
         if self.slot_owners.iter().any(Option::is_some) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent layout cannot change while recurrent slots are allocated"
             );
         }
@@ -1840,7 +1844,7 @@ impl HybridCache {
             .filter_map(HybridLayerCache::as_recurrent_pool)
             .any(|pool| pool.capacity() != current_capacity)
         {
-            candle_core::bail!("hybrid recurrent pool capacities diverged before reservation");
+            inference_tensor::bail!("hybrid recurrent pool capacities diverged before reservation");
         }
         let current_physical_lanes = self.physical_checkpoint_lanes();
         if self
@@ -1849,7 +1853,7 @@ impl HybridCache {
             .filter_map(HybridLayerCache::as_recurrent_pool)
             .any(|pool| pool.checkpoint_lanes() != current_physical_lanes)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "hybrid recurrent pool checkpoint lanes diverged before reservation"
             );
         }
@@ -1940,16 +1944,16 @@ impl HybridCache {
     ) -> Result<usize> {
         self.recurrent_storage_locked = true;
         if self.slot_owners.contains(&Some(owner)) {
-            candle_core::bail!("recurrent slot owner {owner:?} already has an allocation");
+            inference_tensor::bail!("recurrent slot owner {owner:?} already has an allocation");
         }
         if self.recurrent_capacity() == 0 {
-            candle_core::bail!("hybrid cache has no recurrent state pool");
+            inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
         if !self.slot_owners.iter().any(Option::is_none) {
             let new_capacity = self
                 .recurrent_capacity()
                 .checked_mul(2)
-                .ok_or_else(|| candle_core::Error::msg("recurrent state capacity overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("recurrent state capacity overflow"))?;
             self.resize_recurrent_storage(new_capacity)?;
         }
         let slot_idx = self
@@ -2006,7 +2010,7 @@ impl HybridCache {
         let owner = self.slot_owners.get(slot_idx).copied().flatten();
         match owner {
             Some(RecurrentSlotOwner::Sequence(owner_id)) if owner_id == sequence_id => {}
-            Some(owner) => candle_core::bail!(
+            Some(owner) => inference_tensor::bail!(
                 "cannot release recurrent state slot {slot_idx} for sequence {sequence_id}: owned by {owner:?}"
             ),
             None if self
@@ -2018,7 +2022,7 @@ impl HybridCache {
             {
                 return Ok(false);
             }
-            None => candle_core::bail!(
+            None => inference_tensor::bail!(
                 "cannot release unowned recurrent state slot {slot_idx} for sequence {sequence_id}"
             ),
         }
@@ -2066,7 +2070,7 @@ impl HybridCache {
         }
         let capacity = self.committed_lanes.len();
         *self.committed_lanes.get_mut(slot_idx).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "recurrent logical slot {slot_idx} exceeds capacity {capacity}"
             ))
         })? = 0;
@@ -2076,7 +2080,7 @@ impl HybridCache {
 
     pub fn reset(&mut self) -> Result<()> {
         if self.graph_pad_slot.is_some() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cannot reset recurrent storage while CUDA graph storage is registered"
             );
         }
@@ -2085,7 +2089,9 @@ impl HybridCache {
             .iter()
             .any(|owner| matches!(owner, Some(RecurrentSlotOwner::Sequence(_))))
         {
-            candle_core::bail!("cannot reset recurrent storage while sequence slots are allocated");
+            inference_tensor::bail!(
+                "cannot reset recurrent storage while sequence slots are allocated"
+            );
         }
         let physical_lanes = self.physical_checkpoint_lanes();
         let storage = self
@@ -2141,7 +2147,7 @@ impl HybridCache {
                     for slot in slots {
                         pool.reset_slot(*slot)?;
                         *self.committed_lanes.get_mut(*slot).ok_or_else(|| {
-                            candle_core::Error::msg(format!(
+                            inference_tensor::Error::msg(format!(
                                 "recurrent logical slot {slot} exceeds capacity {capacity}"
                             ))
                         })? = 0;
@@ -2225,7 +2231,7 @@ impl HybridCache {
             .iter()
             .map(|&(_, slot_idx)| {
                 u32::try_from(slot_idx).map_err(|_| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "recurrent logical slot {slot_idx} exceeds u32"
                     ))
                 })
@@ -2241,25 +2247,25 @@ impl HybridCache {
             return Ok(false);
         }
         let logical_slots = self.logical_state_indices_host.clone().ok_or_else(|| {
-            candle_core::Error::msg("recurrent batch has no logical slot mapping")
+            inference_tensor::Error::msg("recurrent batch has no logical slot mapping")
         })?;
         let updates = rows
             .iter()
             .map(|&(batch_idx, keep_rows)| {
                 if keep_rows == 0 || keep_rows > self.checkpoint_lanes {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "recurrent keep row count {keep_rows} is outside 1..={}",
                         self.checkpoint_lanes
                     );
                 }
                 let logical_slot = *logical_slots.get(batch_idx).ok_or_else(|| {
-                    candle_core::Error::msg(format!(
+                    inference_tensor::Error::msg(format!(
                         "recurrent batch row {batch_idx} exceeds batch size {}",
                         logical_slots.len()
                     ))
                 })? as usize;
                 if logical_slot >= self.committed_lanes.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "recurrent logical slot {logical_slot} exceeds capacity {}",
                         self.committed_lanes.len()
                     );
@@ -3968,7 +3974,7 @@ impl HybridCache {
         self.ensure_recurrent_slot_initialized(slot_idx)?;
         let physical_slot = self.active_physical_slot(slot_idx)?;
         let physical_slot = u32::try_from(physical_slot).map_err(|_| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "recurrent physical slot {physical_slot} exceeds u32"
             ))
         })?;
@@ -4003,7 +4009,7 @@ impl HybridCache {
             .filter(|cache| matches!(cache, HybridLayerCache::Recurrent(_)))
             .count();
         if snapshots.len() != expected {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent snapshot count mismatch: got {}, expected {expected}",
                 snapshots.len()
             );
@@ -4015,7 +4021,7 @@ impl HybridCache {
             .zip(snapshots)
         {
             if snap.state_layout != cache.state_layout() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "recurrent state layout mismatch: snapshot {:?}, pool {:?}",
                     snap.state_layout,
                     cache.state_layout()
@@ -4035,7 +4041,7 @@ impl HybridCache {
         self.committed_lanes[slot_idx] = 0;
         let physical_slot = self.physical_slot(slot_idx, 0)?;
         let physical_slot = u32::try_from(physical_slot).map_err(|_| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "recurrent physical slot {physical_slot} exceeds u32"
             ))
         })?;
@@ -4063,7 +4069,7 @@ impl HybridCache {
         let committed_lane = self.committed_lane(slot_idx)?;
         let physical_slot = self.physical_slot(slot_idx, committed_lane)?;
         let physical_slot = u32::try_from(physical_slot).map_err(|_| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "recurrent physical slot {physical_slot} exceeds u32"
             ))
         })?;
@@ -4098,14 +4104,14 @@ impl HybridCache {
     ) -> Result<()> {
         self.ensure_recurrent_slot_initialized(slot_idx)?;
         if snapshot.checkpoint_lanes != self.checkpoint_lanes {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint lane mismatch: snapshot {}, pool {}",
                 snapshot.checkpoint_lanes,
                 self.checkpoint_lanes
             );
         }
         if snapshot.speculative_storage != self.speculative_storage {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint storage mismatch: snapshot {:?}, pool {:?}",
                 snapshot.speculative_storage,
                 self.speculative_storage
@@ -4113,7 +4119,7 @@ impl HybridCache {
         }
         let physical_lanes = self.physical_checkpoint_lanes();
         if snapshot.committed_lane >= physical_lanes {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint committed lane {} exceeds physical lane count {}",
                 snapshot.committed_lane,
                 physical_lanes
@@ -4125,7 +4131,7 @@ impl HybridCache {
             .filter_map(HybridLayerCache::as_recurrent_pool)
             .collect::<Vec<_>>();
         if snapshot.states.len() != pools.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "recurrent checkpoint snapshot count mismatch: got {}, expected {}",
                 snapshot.states.len(),
                 pools.len()
@@ -4133,25 +4139,27 @@ impl HybridCache {
         }
         for (pool, state) in pools.into_iter().zip(&snapshot.states) {
             if state.state_layout != pool.state_layout() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "recurrent state layout mismatch: snapshot {:?}, pool {:?}",
                     state.state_layout,
                     pool.state_layout()
                 );
             }
             if state.conv_state.dim(0)? != 1 || state.recurrent_state.dim(0)? != 1 {
-                candle_core::bail!("recurrent checkpoint snapshot must contain its active lane");
+                inference_tensor::bail!(
+                    "recurrent checkpoint snapshot must contain its active lane"
+                );
             }
         }
 
         let physical_slot = self.physical_slot(slot_idx, snapshot.committed_lane)?;
         let physical_slot = u32::try_from(physical_slot).map_err(|_| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "recurrent physical slot {physical_slot} exceeds u32"
             ))
         })?;
         let logical_slot = u32::try_from(slot_idx).map_err(|_| {
-            candle_core::Error::msg(format!("recurrent logical slot {slot_idx} exceeds u32"))
+            inference_tensor::Error::msg(format!("recurrent logical slot {slot_idx} exceeds u32"))
         })?;
         self.initialized_slots[slot_idx] = false;
         self.pristine_zero_slots[slot_idx] = false;

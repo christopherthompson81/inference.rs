@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
@@ -55,7 +55,7 @@ impl MXFP4Layer {
 }
 
 impl QuantMethod for MXFP4Layer {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -82,7 +82,7 @@ impl QuantMethod for MXFP4Layer {
         }
     }
 
-    fn dequantize_w(&self) -> Result<candle_core::Tensor> {
+    fn dequantize_w(&self) -> Result<inference_tensor::Tensor> {
         self.dequantize_weights_to(self.blocks.device())
     }
 
@@ -182,10 +182,10 @@ impl QuantMethod for MXFP4Layer {
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("MXFP4Layer does not support add_delta_w")
+        inference_tensor::bail!("MXFP4Layer does not support add_delta_w")
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         (DType::BF16, self.scales.device().clone())
     }
 
@@ -199,7 +199,7 @@ impl QuantMethod for MXFP4Layer {
             *last = last.saturating_mul(2);
         }
         if shape.len() == 3 && request.ty.is_some_and(|ty| !Self::supports_stacked_isq(ty)) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Cannot requantize packed MXFP4 expert weights to {}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, MXFP4, or omit ISQ.",
                 request.ty.expect("rank-3 rejection requires an ISQ target")
             );
@@ -242,12 +242,12 @@ impl QuantMethod for MXFP4Layer {
         if weight.rank() == 3 {
             let Some(dtype) = dtype else {
                 return Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
-                    candle_nn::Linear::new(weight, bias),
+                    inference_tensor::nn::Linear::new(weight, bias),
                 ))?)
                 .apply_isq(None, device, n_quantized, imatrix_weight, guard);
             };
 
-            if candle_core::quantized::GgmlDType::try_from(dtype).is_ok() {
+            if inference_tensor::quantized::GgmlDType::try_from(dtype).is_ok() {
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let weight = crate::GgufMatMul::quantize_expert_stack(
                     &weight,
@@ -263,14 +263,14 @@ impl QuantMethod for MXFP4Layer {
             }
 
             if !Self::supports_stacked_isq(dtype) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Cannot requantize packed MXFP4 expert weights to {dtype}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, MXFP4, or omit ISQ."
                 );
             }
         }
 
         Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
-            candle_nn::Linear::new(weight, bias),
+            inference_tensor::nn::Linear::new(weight, bias),
         ))?)
         .apply_isq(dtype, device, n_quantized, imatrix_weight, guard)
     }
@@ -300,7 +300,7 @@ impl MXFP4Layer {
             Some((dim, start, len)) if dim == dims.len() - 1 => {
                 if !start.is_multiple_of(MXFP4_BLOCK_SIZE) || !len.is_multiple_of(MXFP4_BLOCK_SIZE)
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Sharding the MXFP4 packed dim requires alignment of {MXFP4_BLOCK_SIZE}: start {start}, len {len}."
                     );
                 }
@@ -343,7 +343,7 @@ impl MXFP4Layer {
         let (n, k) = (dims.0, dims.1);
 
         if k % MXFP4_BLOCK_SIZE != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MXFP4 quantization requires K ({k}) divisible by block size ({MXFP4_BLOCK_SIZE})"
             );
         }
@@ -456,11 +456,11 @@ impl MXFP4Layer {
         vb: ShardedVarBuilder,
     ) -> Result<Arc<dyn QuantMethod>> {
         if !Self::device_supported(vb.device()) {
-            candle_core::bail!("MXFP4Layer requires CUDA or Metal device.");
+            inference_tensor::bail!("MXFP4Layer requires CUDA or Metal device.");
         }
 
         let QuantizedConfig::MXFP4 {} = config else {
-            candle_core::bail!("Unexpected quantization config.")
+            inference_tensor::bail!("Unexpected quantization config.")
         };
 
         let blocks = vb.get_with_hints_dtype(
@@ -498,11 +498,11 @@ impl MXFP4Layer {
         vb: ShardedVarBuilder,
     ) -> Result<Arc<dyn QuantMethod>> {
         if !Self::device_supported(vb.device()) {
-            candle_core::bail!("MXFP4Layer requires CUDA or Metal device.");
+            inference_tensor::bail!("MXFP4Layer requires CUDA or Metal device.");
         }
 
         let QuantizedConfig::MXFP4 {} = config else {
-            candle_core::bail!("Unexpected quantization config.")
+            inference_tensor::bail!("Unexpected quantization config.")
         };
 
         let blocks = vb.get_with_hints_dtype(
@@ -892,7 +892,7 @@ impl QuantizedSerde for MXFP4Layer {
     }
     fn serialize_uqff(&self, prefix: &str, ty: IsqType) -> Result<Vec<UqffTensor>> {
         if ty != IsqType::MXFP4 {
-            candle_core::bail!("Cannot serialize MXFP4 layer as {ty}; actual type is MXFP4.");
+            inference_tensor::bail!("Cannot serialize MXFP4 layer as {ty}; actual type is MXFP4.");
         }
 
         let mut data = vec![
@@ -1023,7 +1023,7 @@ mod tests {
             None,
             &path,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         let reader = UqffReader::open(std::slice::from_ref(&path))?;
         let loaded = reader

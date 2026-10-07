@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 #[cfg(feature = "cuda")]
 use crate::attention::FlashKMeta;
@@ -25,7 +25,7 @@ pub fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
 #[cfg(feature = "cuda")]
 pub fn fattn_sinks(sinks: Option<&Tensor>) -> Result<Option<Tensor>> {
     sinks
-        .map(|sinks| sinks.to_dtype(candle_core::DType::F32)?.contiguous())
+        .map(|sinks| sinks.to_dtype(inference_tensor::DType::F32)?.contiguous())
         .transpose()
 }
 
@@ -57,14 +57,14 @@ fn varlen_metadata<'a>(
     let location = q.device().location();
     let Some(cumulative_seqlens_q) = params.cumulative_seqlens_q.get(&location) else {
         if params.packed {
-            candle_core::bail!("packed prefill is missing query metadata for {location:?}");
+            inference_tensor::bail!("packed prefill is missing query metadata for {location:?}");
         }
         return Ok(None);
     };
     let k_meta = params.k_meta(sliding_window);
     let Some(cumulative_seqlens_k) = k_meta.cumulative_seqlens.get(&location) else {
         if params.packed {
-            candle_core::bail!("packed prefill is missing key metadata for {location:?}");
+            inference_tensor::bail!("packed prefill is missing key metadata for {location:?}");
         }
         return Ok(None);
     };
@@ -136,11 +136,11 @@ fn flash_attn_v3(
     sdpa_params: &SdpaParams,
 ) -> Result<Tensor> {
     if sdpa_params.softcap.is_some() {
-        candle_core::bail!("FlashAttention v3 does not support attention softcap");
+        inference_tensor::bail!("FlashAttention v3 does not support attention softcap");
     }
     let head_dim = q.dim(3)?;
     if !matches!(head_dim, 64 | 128 | 256 | 512) {
-        candle_core::bail!("FlashAttention v3 does not support head_dim={head_dim}");
+        inference_tensor::bail!("FlashAttention v3 does not support head_dim={head_dim}");
     }
     let (b_sz, seq_len, _n_attn_heads, _head_dim) = q.dims4()?;
     let default_causal = seq_len > 1;
@@ -160,7 +160,7 @@ fn flash_attn_v3(
                 let window_size_left = sliding_window_left(sdpa_params.sliding_window);
                 let window_size_right = if params.causal { Some(0) } else { None };
 
-                return candle_flash_attn_v3::flash_attn_varlen_windowed(
+                return inference_flash_attn_v3::flash_attn_varlen_windowed(
                     &q,
                     &k,
                     &v,
@@ -179,7 +179,7 @@ fn flash_attn_v3(
     }
 
     let causal = flash_params.map_or(default_causal, |p| p.causal);
-    candle_flash_attn_v3::flash_attn_windowed(
+    inference_flash_attn_v3::flash_attn_windowed(
         q,
         k,
         v,
@@ -223,7 +223,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use candle_core::{DType, Device};
+    use inference_tensor::{DType, Device};
 
     #[test]
     fn packed_varlen_metadata_fails_closed() {

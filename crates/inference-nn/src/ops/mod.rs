@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
-use candle_core::{D, DType, Result, Tensor, shape::Dim};
+use inference_tensor::{D, DType, Result, Tensor, shape::Dim};
 
 #[cfg(feature = "cuda")]
 use crate::cuda::ffi;
 use crate::layers::Activation;
 #[cfg(feature = "cuda")]
-use candle_core::Shape;
+use inference_tensor::Shape;
 
 #[cfg(feature = "cuda")]
 const CUDA_TOPK_CHUNK_SIZE: usize = 2048;

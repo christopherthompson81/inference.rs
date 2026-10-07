@@ -7,10 +7,10 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Result as CandleResult, Shape, Tensor};
-use candle_nn::{Init, var_builder::SimpleBackend};
 use inference_nn::{device_map::DeviceMapSetting, model::NormalLoadingMetadata};
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, TensorShapes};
+use inference_tensor::nn::{Init, var_builder::SimpleBackend};
+use inference_tensor::{DType, Device, Result as CandleResult, Shape, Tensor};
 use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 
@@ -61,7 +61,7 @@ impl SimpleBackend for RecordingWeights {
         if let Some(t) = seen.get(name) {
             return Ok(t.clone());
         }
-        let normal = Normal::new(0f32, WEIGHT_STD).map_err(candle_core::Error::wrap)?;
+        let normal = Normal::new(0f32, WEIGHT_STD).map_err(inference_tensor::Error::wrap)?;
         let mut named = self
             .3
             .then(|| StdRng::seed_from_u64(WEIGHT_SEED ^ fnv1a(name)));
@@ -76,7 +76,7 @@ impl SimpleBackend for RecordingWeights {
 
     fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> CandleResult<Tensor> {
         let Some(shape) = self.2.get(name) else {
-            candle_core::bail!("no shape for {name}")
+            inference_tensor::bail!("no shape for {name}")
         };
         self.get(shape.as_slice().into(), name, Init::Const(0.), dtype, dev)
     }
@@ -162,7 +162,7 @@ fn record(
         metadata,
     )?;
     let tensors = std::mem::take(&mut weights.0.lock().unwrap().1);
-    candle_core::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
+    inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
     Ok(dir)
 }
 

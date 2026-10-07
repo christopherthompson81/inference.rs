@@ -2,8 +2,8 @@
 
 use crate::utils::memory_usage::MemoryUsage;
 
-use candle_core::{Device, Result, Tensor};
 use inference_quant::MatMul;
+use inference_tensor::{Device, Result, Tensor};
 
 use crate::attention::{SdpaParams, chunked_attention};
 
@@ -51,10 +51,10 @@ pub fn naive_sdpa(
 
         // Compute softmax in F32 for precision (BF16 exp() loses information).
         let att_dtype = att.dtype();
-        if att_dtype == candle_core::DType::BF16 || att_dtype == candle_core::DType::F16 {
-            att = att.to_dtype(candle_core::DType::F32)?;
+        if att_dtype == inference_tensor::DType::BF16 || att_dtype == inference_tensor::DType::F16 {
+            att = att.to_dtype(inference_tensor::DType::F32)?;
         }
-        att = candle_nn::ops::softmax_last_dim(&att)?;
+        att = inference_tensor::nn::ops::softmax_last_dim(&att)?;
         if att.dtype() != att_dtype {
             att = att.to_dtype(att_dtype)?;
         }

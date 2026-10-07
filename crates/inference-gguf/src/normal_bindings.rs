@@ -1,8 +1,8 @@
 use super::normal_registry::CanonicalGgufArchitecture;
 use anyhow::{Context, Result, bail};
-use candle_core::{DType, quantized::gguf_file::Value};
 use inference_nn::loaders::NormalLoaderType;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
+use inference_tensor::{DType, quantized::gguf_file::Value};
 
 pub fn build_normal_bindings(
     archive: &GgufArchive,

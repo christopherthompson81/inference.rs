@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::LayerNorm;
+use inference_tensor::nn::LayerNorm;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::qlinear::MaybeQuantLinear;
 use inference_quant::ShardedVarBuilder;
@@ -34,7 +34,7 @@ impl Config {
             shapes
                 .get(name)
                 .and_then(|shape| shape.get(axis).copied())
-                .ok_or_else(|| candle_core::Error::Msg(format!("FLUX weights lack `{name}`")))
+                .ok_or_else(|| inference_tensor::Error::Msg(format!("FLUX weights lack `{name}`")))
         };
         let count = |prefix: &str, tensor: &str| {
             (0..)
@@ -43,7 +43,9 @@ impl Config {
         };
         let hidden = dim("img_in.weight", 0)?;
         if hidden != HIDDEN_SIZE {
-            candle_core::bail!("FLUX weights have hidden size {hidden}, expected {HIDDEN_SIZE}");
+            inference_tensor::bail!(
+                "FLUX weights have hidden size {hidden}, expected {HIDDEN_SIZE}"
+            );
         }
         Ok(Self {
             in_channels: dim("img_in.weight", 1)?,
@@ -72,7 +74,10 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
     let k = k.flatten_to(batch_dims.len() - 1)?;
     let v = v.flatten_to(batch_dims.len() - 1)?;
     let attn_weights = (MatMul.matmul(&q, &k.t()?)? * scale_factor)?;
-    let attn_scores = MatMul.matmul(&candle_nn::ops::softmax_last_dim(&attn_weights)?, &v)?;
+    let attn_scores = MatMul.matmul(
+        &inference_tensor::nn::ops::softmax_last_dim(&attn_weights)?,
+        &v,
+    )?;
     batch_dims.push(attn_scores.dim(D::Minus2)?);
     batch_dims.push(attn_scores.dim(D::Minus1)?);
     attn_scores.reshape(batch_dims)
@@ -80,7 +85,7 @@ fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Te
 
 fn rope(pos: &Tensor, dim: usize, theta: usize) -> Result<Tensor> {
     if dim % 2 == 1 {
-        candle_core::bail!("dim {dim} is odd")
+        inference_tensor::bail!("dim {dim} is odd")
     }
     let dev = pos.device();
     let theta = theta as f64;
@@ -121,16 +126,16 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
     const TIME_FACTOR: f64 = 1000.;
     const MAX_PERIOD: f64 = 10000.;
     if dim % 2 == 1 {
-        candle_core::bail!("{dim} is odd")
+        inference_tensor::bail!("{dim} is odd")
     }
     let dev = t.device();
     let half = dim / 2;
     let t = (t * TIME_FACTOR)?;
-    let arange = Tensor::arange(0, half as u32, dev)?.to_dtype(candle_core::DType::F32)?;
+    let arange = Tensor::arange(0, half as u32, dev)?.to_dtype(inference_tensor::DType::F32)?;
     let freqs = (arange * (-MAX_PERIOD.ln() / half as f64))?.exp()?;
     let args = t
         .unsqueeze(1)?
-        .to_dtype(candle_core::DType::F32)?
+        .to_dtype(inference_tensor::DType::F32)?
         .broadcast_mul(&freqs.unsqueeze(0)?)?;
     let emb = Tensor::cat(&[args.cos()?, args.sin()?], D::Minus1)?.to_dtype(dtype)?;
     Ok(emb)
@@ -148,7 +153,7 @@ impl EmbedNd {
     }
 }
 
-impl candle_core::Module for EmbedNd {
+impl inference_tensor::Module for EmbedNd {
     fn forward(&self, ids: &Tensor) -> Result<Tensor> {
         let n_axes = ids.dim(D::Minus1)?;
         let mut emb = Vec::with_capacity(n_axes);
@@ -182,7 +187,7 @@ impl MlpEmbedder {
     }
 }
 
-impl candle_core::Module for MlpEmbedder {
+impl inference_tensor::Module for MlpEmbedder {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         xs.apply(&self.in_layer)?.silu()?.apply(&self.out_layer)
     }
@@ -242,7 +247,7 @@ impl Modulation1 {
             .unsqueeze(1)?
             .chunk(3, D::Minus1)?;
         if ys.len() != 3 {
-            candle_core::bail!("unexpected len from chunk {ys:?}")
+            inference_tensor::bail!("unexpected len from chunk {ys:?}")
         }
         Ok(ModulationOut {
             shift: ys[0].clone(),
@@ -270,7 +275,7 @@ impl Modulation2 {
             .unsqueeze(1)?
             .chunk(6, D::Minus1)?;
         if ys.len() != 6 {
-            candle_core::bail!("unexpected len from chunk {ys:?}")
+            inference_tensor::bail!("unexpected len from chunk {ys:?}")
         }
         let mod1 = ModulationOut {
             shift: ys[0].clone(),
@@ -356,7 +361,7 @@ impl Mlp {
     }
 }
 
-impl candle_core::Module for Mlp {
+impl inference_tensor::Module for Mlp {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         xs.apply(&self.lin1)?.gelu()?.apply(&self.lin2)
     }
@@ -661,10 +666,10 @@ impl Flux {
         guidance: Option<&Tensor>,
     ) -> Result<Tensor> {
         if txt.rank() != 3 {
-            candle_core::bail!("unexpected shape for txt {:?}", txt.shape())
+            inference_tensor::bail!("unexpected shape for txt {:?}", txt.shape())
         }
         if img.rank() != 3 {
-            candle_core::bail!("unexpected shape for img {:?}", img.shape())
+            inference_tensor::bail!("unexpected shape for img {:?}", img.shape())
         }
         let dtype = img.dtype();
         let pe = {

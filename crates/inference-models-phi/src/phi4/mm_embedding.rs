@@ -4,8 +4,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{D, DType, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::{D, DType, Result, Tensor};
 
 use crate::{
     paged_attention::encoder_cache::EncoderCacheManager,
@@ -113,7 +113,7 @@ impl Phi4MMImageAudioEmbedding {
                     encoder_cache,
                 )?;
                 if outputs.len() != inputs.image_hashes.len() {
-                    candle_core::bail!("Phi4MM packed image encoder output count mismatch");
+                    inference_tensor::bail!("Phi4MM packed image encoder output count mismatch");
                 }
                 for (&hash, output) in inputs.image_hashes.iter().zip(outputs) {
                     encoder_outputs.insert(
@@ -127,9 +127,9 @@ impl Phi4MMImageAudioEmbedding {
             }
             (_, None, None, None) if inputs.image_hashes.is_empty() => {}
             (None, Some(_), _, _) => {
-                candle_core::bail!("Phi4MM model has no image encoder")
+                inference_tensor::bail!("Phi4MM model has no image encoder")
             }
-            _ => candle_core::bail!("Phi4MM packed image inputs are incomplete"),
+            _ => inference_tensor::bail!("Phi4MM packed image inputs are incomplete"),
         }
 
         match (
@@ -147,7 +147,7 @@ impl Phi4MMImageAudioEmbedding {
                     encoder_cache,
                 )?;
                 if outputs.len() != inputs.audio_hashes.len() {
-                    candle_core::bail!("Phi4MM packed audio encoder output count mismatch");
+                    inference_tensor::bail!("Phi4MM packed audio encoder output count mismatch");
                 }
                 for (&hash, output) in inputs.audio_hashes.iter().zip(outputs) {
                     encoder_outputs.insert(
@@ -161,9 +161,9 @@ impl Phi4MMImageAudioEmbedding {
             }
             (_, None, None, None) if inputs.audio_hashes.is_empty() => {}
             (None, Some(_), _, _) => {
-                candle_core::bail!("Phi4MM model has no audio encoder")
+                inference_tensor::bail!("Phi4MM model has no audio encoder")
             }
-            _ => candle_core::bail!("Phi4MM packed audio inputs are incomplete"),
+            _ => inference_tensor::bail!("Phi4MM packed audio inputs are incomplete"),
         }
 
         inputs

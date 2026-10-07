@@ -350,7 +350,7 @@ impl InferenceRs {
         // Propagate Engine::new's outcome so a creation failure is a clean load error, not a zombie-engine panic.
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         let engine_handler = thread::spawn(move || {
-            candle_core::utils::init_global_threadpool();
+            inference_tensor::utils::init_global_threadpool();
             #[cfg(feature = "metal")]
             objc::rc::autoreleasepool(move || {
                 let rt = build_engine_runtime();
@@ -661,10 +661,10 @@ impl InferenceRs {
         let device = get_mut_arcmutex!(pipeline).device();
         inference_quant::cublaslt::maybe_init_cublas_lt_wrapper(device.clone());
         #[cfg(feature = "cuda")]
-        match cuda::preload::preload_candle_kernels(&device) {
-            Ok(count) if count > 0 => info!("Preloaded {count} Candle CUDA functions."),
+        match cuda::preload::preload_tensor_kernels(&device) {
+            Ok(count) if count > 0 => info!("Preloaded {count} tensor CUDA functions."),
             Ok(_) => {}
-            Err(err) => warn!("Failed to preload Candle CUDA functions: {err}"),
+            Err(err) => warn!("Failed to preload tensor CUDA functions: {err}"),
         }
 
         let no_kv_cache = no_kv_cache.unwrap_or(false);

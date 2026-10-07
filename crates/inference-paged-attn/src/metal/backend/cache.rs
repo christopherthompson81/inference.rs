@@ -1,6 +1,6 @@
 use std::{collections::HashMap, iter::zip};
 
-use candle_core::{
+use inference_tensor::{
     CpuStorage, Device, IndexOp, Layout, MetalDevice, MetalStorage, Result, Storage, Tensor,
     WithDType, backend::BackendStorage,
 };
@@ -17,14 +17,14 @@ pub fn copy_blocks(
         panic!("Expected the key caches to be on a Metal device.")
     };
     if !cache_dev.same_device(value_caches.first().unwrap().device()) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "`key` and `value` caches have different devices, got {:?} and {:?} respectively.",
             cache_dev,
             value_caches.first().unwrap().device()
         );
     }
     if key_caches.first().unwrap().dtype() != value_caches.first().unwrap().dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Key and value caches have different types, got {:?} and {:?}.",
             key_caches.first().unwrap().dtype(),
             value_caches.first().unwrap().dtype()
@@ -63,7 +63,7 @@ pub fn copy_blocks(
         .try_into()
         .unwrap();
     if numel_per_block_key != numel_per_block_value {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "numel_per_block_key ({numel_per_block_key}) and numel_per_block_value ({numel_per_block_value}) must be the same",
         );
     }
@@ -100,7 +100,7 @@ pub fn copy_blocks(
             numel_per_block_key,
             numel_per_block_value,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
     }
 
     Ok(())
@@ -116,7 +116,7 @@ pub unsafe fn swap_blocks(
 ) -> Result<()> {
     let block_size_in_bytes = src.dtype().size_in_bytes() * src.dims()[0];
     if src.device().location() != dst.device().location() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Tensors must be on the same device to copy, got locations {:?} (src) and {:?} (dst).",
             src.device().location(),
             dst.device().location()
@@ -227,11 +227,11 @@ pub unsafe fn swap_blocks(
                     block_size_in_bytes,
                     block_mapping,
                 )?,
-                _ => candle_core::bail!("expected bf16, f16, or f32 for cpu<>gpu swap-blocks"),
+                _ => inference_tensor::bail!("expected bf16, f16, or f32 for cpu<>gpu swap-blocks"),
             }
         }
         (src, dst) => {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst)."
             );
         }

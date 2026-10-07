@@ -4,9 +4,9 @@ use std::{sync::Arc, time::Instant};
 
 use audio::{apply_audio_delay, build_delay_indices, build_revert_indices, revert_audio_delay};
 use cache::DiaKvCache;
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::VarBuilder;
 use inference_quant::{BitWiseOp, ShardedVarBuilder};
+use inference_tensor::nn::VarBuilder;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 use model::DiaModel;
 use rand::{
     SeedableRng,
@@ -219,7 +219,7 @@ impl DiaPipeline {
             return logits.argmax(D::Minus1)?.to_vec1();
         }
 
-        let logits = candle_nn::ops::softmax_last_dim(
+        let logits = inference_tensor::nn::ops::softmax_last_dim(
             &(logits.to_dtype(DType::F32)? / temperature as f64)?,
         )?;
         let batch_logits: Vec<Vec<f32>> = logits.to_vec2::<f32>()?;
@@ -256,7 +256,7 @@ impl DiaPipeline {
                 }
             }
 
-            let distr = WeightedIndex::new(&probs).map_err(candle_core::Error::msg)?;
+            let distr = WeightedIndex::new(&probs).map_err(inference_tensor::Error::msg)?;
             sampled.push(distr.sample(rng) as u32);
         }
         Ok(sampled)

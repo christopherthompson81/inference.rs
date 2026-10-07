@@ -1,7 +1,9 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{D, DType, Device, DeviceLocation, Result, Shape, Tensor, quantized::GgmlDType};
-use candle_nn::Linear;
+use inference_tensor::nn::Linear;
+use inference_tensor::{
+    D, DType, Device, DeviceLocation, Result, Shape, Tensor, quantized::GgmlDType,
+};
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
@@ -72,7 +74,7 @@ impl UnquantLinear {
                     .reshape(Shape::from_dims(result.dims()))?;
                 result.broadcast_add(&selected)
             }
-            dims => candle_core::bail!(
+            dims => inference_tensor::bail!(
                 "UnquantLinear::gather_forward: bias shape {:?} is incompatible with weight shape {:?}",
                 dims,
                 self.w.dims()
@@ -82,7 +84,7 @@ impl UnquantLinear {
 }
 
 impl QuantMethod for UnquantLinear {
-    fn new(method: QuantMethodConfig) -> candle_core::Result<Self>
+    fn new(method: QuantMethodConfig) -> inference_tensor::Result<Self>
     where
         Self: Sized,
     {
@@ -265,7 +267,7 @@ impl QuantMethod for UnquantLinear {
                 if num_tokens != indices_num_tokens
                     || num_experts_per_tok != indices_num_experts_per_tok
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "UnquantLinear::gather_forward: input shape {:?} does not match indices shape {:?}",
                         a.dims(),
                         indices.dims()
@@ -287,7 +289,7 @@ impl QuantMethod for UnquantLinear {
             &[b_size, seq_len, num_experts_per_tok, hidden_dim] => {
                 let (ib, is, ik) = indices.dims3()?;
                 if (b_size, seq_len, num_experts_per_tok) != (ib, is, ik) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "UnquantLinear::gather_forward: input shape {:?} does not match indices shape {:?}",
                         a.dims(),
                         indices.dims()
@@ -306,7 +308,7 @@ impl QuantMethod for UnquantLinear {
                 result.reshape((b_size, seq_len, num_experts_per_tok, out_features))
             }
             dims => {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "UnquantLinear::gather_forward: unsupported input shape {:?}",
                     dims
                 );
@@ -327,13 +329,13 @@ impl QuantMethod for UnquantLinear {
         }))
     }
 
-    fn dtype_and_device(&self) -> (DType, candle_core::Device) {
+    fn dtype_and_device(&self) -> (DType, inference_tensor::Device) {
         (self.w.dtype(), self.w.device().clone())
     }
 
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
         if self.w.rank() == 3 && request.ty.is_some_and(|ty| !ty.supports_stacked_gather()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Cannot quantize stacked expert weights to {}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, or omit ISQ.",
                 request.ty.expect("rank-3 rejection requires an ISQ target")
             );
@@ -365,7 +367,7 @@ impl QuantMethod for UnquantLinear {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
                     // TODO just warn?
-                    candle_core::bail!("HQQ does not support imatrix.");
+                    inference_tensor::bail!("HQQ does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -398,7 +400,7 @@ impl QuantMethod for UnquantLinear {
             Some(IsqType::AFQ2 | IsqType::AFQ3 | IsqType::AFQ4 | IsqType::AFQ6 | IsqType::AFQ8) => {
                 if imatrix_weight.is_some() {
                     // TODO just warn?
-                    candle_core::bail!("AFQ does not support imatrix.");
+                    inference_tensor::bail!("AFQ does not support imatrix.");
                 }
 
                 let bits = match dtype.unwrap() {
@@ -490,7 +492,7 @@ impl QuantMethod for UnquantLinear {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
                     // TODO just warn?
-                    candle_core::bail!("F8E4M3 does not support imatrix.");
+                    inference_tensor::bail!("F8E4M3 does not support imatrix.");
                 }
 
                 let w = self.w.to_device(&device)?;
@@ -507,7 +509,7 @@ impl QuantMethod for UnquantLinear {
             Some(IsqType::MXFP4) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("MXFP4 does not support imatrix.");
+                    inference_tensor::bail!("MXFP4 does not support imatrix.");
                 }
 
                 n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -518,7 +520,7 @@ impl QuantMethod for UnquantLinear {
             Some(IsqType::F8Q8) => {
                 let _acquired_quantize_guard = guard.acquire(&device);
                 if imatrix_weight.is_some() {
-                    candle_core::bail!("F8Q8 does not support imatrix.");
+                    inference_tensor::bail!("F8Q8 does not support imatrix.");
                 }
 
                 let w = self.w.to_device(&device)?;
@@ -555,12 +557,12 @@ impl QuantMethod for UnquantLinear {
         if self.w.dims().len() == 3 {
             self.stats.enable_routed(
                 self.w.dim(0)?,
-                self.w.dim(candle_core::D::Minus1)?,
+                self.w.dim(inference_tensor::D::Minus1)?,
                 self.w.device(),
             )
         } else {
             self.stats
-                .enable(self.w.dim(candle_core::D::Minus1)?, self.w.device())
+                .enable(self.w.dim(inference_tensor::D::Minus1)?, self.w.device())
         }
     }
 
@@ -577,7 +579,7 @@ impl QuantMethod for UnquantLinear {
             self.stats.clear()?;
             imatrix
         } else {
-            candle_core::bail!("`{}` is not tracking stats.", self.name())
+            inference_tensor::bail!("`{}` is not tracking stats.", self.name())
         }
     }
 }
@@ -591,7 +593,7 @@ impl QuantizedSerde for UnquantLinear {
     }
     fn serialize_uqff(&self, prefix: &str, ty: IsqType) -> Result<Vec<UqffTensor>> {
         if !ty.supports_uqff() {
-            candle_core::bail!("UQFF serialization does not support {ty}.");
+            inference_tensor::bail!("UQFF serialization does not support {ty}.");
         }
 
         let mut data = vec![
@@ -890,7 +892,7 @@ mod tests {
             None,
             &path,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         let reader = UqffReader::open(std::slice::from_ref(&path))?;
         let loaded = reader
             .load_linear("test.linear", &device, Shard::default())?

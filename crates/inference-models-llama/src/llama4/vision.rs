@@ -3,10 +3,10 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module};
 use indicatif::MultiProgress;
 use inference_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder};
+use inference_tensor::nn::{LayerNorm, LayerNormConfig, Linear, Module};
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},

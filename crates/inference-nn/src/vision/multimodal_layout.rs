@@ -3,7 +3,7 @@ use std::{
     ops::Range,
 };
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind};
 
@@ -39,7 +39,7 @@ impl MultimodalEmbeddingMap {
         target_output: usize,
     ) -> Result<Self> {
         if destination_positions.len() != source_positions.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "multimodal embedding map has {} destinations but {} sources",
                 destination_positions.len(),
                 source_positions.len()
@@ -50,7 +50,7 @@ impl MultimodalEmbeddingMap {
             .iter()
             .any(|position| !unique_destinations.insert(*position))
         {
-            candle_core::bail!("multimodal embedding map contains duplicate destinations");
+            inference_tensor::bail!("multimodal embedding map contains duplicate destinations");
         }
         Ok(Self {
             destination_positions,
@@ -65,9 +65,9 @@ impl MultimodalEmbeddingMap {
         source_start: usize,
         source_output: usize,
     ) -> Result<Self> {
-        let source_end = source_start
-            .checked_add(destination.len())
-            .ok_or_else(|| candle_core::Error::Msg("multimodal source range overflow".into()))?;
+        let source_end = source_start.checked_add(destination.len()).ok_or_else(|| {
+            inference_tensor::Error::Msg("multimodal source range overflow".into())
+        })?;
         Self::new(
             destination.collect(),
             (source_start..source_end).collect(),
@@ -101,19 +101,19 @@ impl MultimodalItemLayout {
         embedding_maps: Vec<MultimodalEmbeddingMap>,
     ) -> Result<Self> {
         if placeholder.start > placeholder.end {
-            candle_core::bail!("multimodal placeholder range is reversed");
+            inference_tensor::bail!("multimodal placeholder range is reversed");
         }
         let mut destinations = HashSet::new();
         for map in &embedding_maps {
             for destination in &map.destination_positions {
                 if !placeholder.contains(destination) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "multimodal embedding destination {destination} is outside placeholder {:?}",
                         placeholder
                     );
                 }
                 if !destinations.insert((map.target_output, *destination)) {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "multimodal item contains duplicate embedding destination {destination} for output {}",
                         map.target_output
                     );
@@ -161,13 +161,13 @@ impl PackedMultimodalLayout {
 
         for request in requests {
             if !sequence_ids.insert(request.sequence_id) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "packed multimodal layout contains duplicate sequence {}",
                     request.sequence_id
                 );
             }
             if request.query.start > request.query.end {
-                candle_core::bail!("multimodal query range is reversed");
+                inference_tensor::bail!("multimodal query range is reversed");
             }
             for item in &request.items {
                 let overlaps_query = item.placeholder.start < request.query.end
@@ -177,7 +177,7 @@ impl PackedMultimodalLayout {
                     && (request.query.start > item.placeholder.start
                         || request.query.end < item.placeholder.end)
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "noncausal multimodal item {} in sequence {} must be scheduled as a complete span",
                         item.item_index,
                         request.sequence_id
@@ -191,7 +191,7 @@ impl PackedMultimodalLayout {
                         if request.query.contains(&destination) {
                             let destination = packed_offset + destination - request.query.start;
                             if !packed_destinations.insert((map.target_output, destination)) {
-                                candle_core::bail!(
+                                inference_tensor::bail!(
                                     "duplicate packed multimodal destination {destination} for output {}",
                                     map.target_output
                                 );
@@ -214,7 +214,7 @@ impl PackedMultimodalLayout {
             packed_offset = packed_offset
                 .checked_add(request.query.len())
                 .ok_or_else(|| {
-                    candle_core::Error::Msg("packed multimodal token count overflow".into())
+                    inference_tensor::Error::Msg("packed multimodal token count overflow".into())
                 })?;
         }
 
@@ -253,7 +253,7 @@ impl PackedMultimodalLayout {
         reference: &Tensor,
         encoder_outputs: &MultimodalEncoderOutputs,
     ) -> Result<Tensor> {
-        let hidden_size = reference.dim(candle_core::D::Minus1)?;
+        let hidden_size = reference.dim(inference_tensor::D::Minus1)?;
         let mut sources = Vec::with_capacity(self.copies.len());
         let mut destinations = Vec::new();
         for copy in self
@@ -262,21 +262,21 @@ impl PackedMultimodalLayout {
             .filter(|copy| copy.target_output == target_output)
         {
             let outputs = encoder_outputs.get(&copy.key).ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "missing {:?} encoder output with hash {}",
                     copy.key.kind, copy.key.hash
                 ))
             })?;
             let output = outputs.get(copy.source_output).ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "missing encoder output {} for {:?} hash {}",
                     copy.source_output, copy.key.kind, copy.key.hash
                 ))
             })?;
-            if output.dim(candle_core::D::Minus1)? != hidden_size {
-                candle_core::bail!(
+            if output.dim(inference_tensor::D::Minus1)? != hidden_size {
+                inference_tensor::bail!(
                     "encoder output hidden size {} does not match text hidden size {hidden_size}",
-                    output.dim(candle_core::D::Minus1)?
+                    output.dim(inference_tensor::D::Minus1)?
                 );
             }
             let output = output
@@ -289,7 +289,7 @@ impl PackedMultimodalLayout {
                 .iter()
                 .any(|position| *position >= output_rows)
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "multimodal embedding source is outside encoder output with {} rows",
                     output_rows
                 );
@@ -320,10 +320,10 @@ impl PackedMultimodalLayout {
         encoder_outputs: &MultimodalEncoderOutputs,
     ) -> Result<Tensor> {
         let original_shape = text_embeddings.shape().clone();
-        let hidden_size = text_embeddings.dim(candle_core::D::Minus1)?;
+        let hidden_size = text_embeddings.dim(inference_tensor::D::Minus1)?;
         let row_count = text_embeddings.elem_count() / hidden_size;
         if row_count != self.token_count {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "packed text embeddings have {row_count} tokens but layout has {}",
                 self.token_count
             );
@@ -360,21 +360,21 @@ pub fn gather_packed_mrope_positions(
     device: &Device,
 ) -> Result<Tensor> {
     if sources.len() != query_ranges.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "MRoPE source count {} does not match query count {}",
             sources.len(),
             query_ranges.len()
         );
     }
     if sources.is_empty() {
-        candle_core::bail!("cannot gather an empty MRoPE batch");
+        inference_tensor::bail!("cannot gather an empty MRoPE batch");
     }
 
     let mut planes = None;
     let mut slices = Vec::with_capacity(sources.len());
     for (source, query) in sources.iter().zip(query_ranges) {
         if query.start > query.end {
-            candle_core::bail!("MRoPE query range is reversed");
+            inference_tensor::bail!("MRoPE query range is reversed");
         }
         let position_ids = normalize_mrope_positions(&source.position_ids)?;
         let source_planes = position_ids.dim(0)?;
@@ -382,20 +382,20 @@ pub fn gather_packed_mrope_positions(
             .replace(source_planes)
             .is_some_and(|value| value != source_planes)
         {
-            candle_core::bail!("MRoPE sources have different plane counts");
+            inference_tensor::bail!("MRoPE sources have different plane counts");
         }
         let stored_len = position_ids.dim(1)?;
         let slice = if query.end <= stored_len {
             position_ids.narrow(1, query.start, query.len())?
         } else if query.start >= stored_len {
-            let start = i64::try_from(query.start).map_err(candle_core::Error::wrap)?;
-            let end = i64::try_from(query.end).map_err(candle_core::Error::wrap)?;
+            let start = i64::try_from(query.start).map_err(inference_tensor::Error::wrap)?;
+            let end = i64::try_from(query.end).map_err(inference_tensor::Error::wrap)?;
             Tensor::arange(start, end, device)?
                 .broadcast_add(&Tensor::new(source.delta, device)?)?
                 .reshape((1, query.len()))?
                 .repeat((source_planes, 1))?
         } else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MRoPE query {:?} crosses the stored position boundary {stored_len}",
                 query
             );
@@ -409,7 +409,7 @@ fn normalize_mrope_positions(position_ids: &Tensor) -> Result<Tensor> {
     match position_ids.dims() {
         [_, _] => Ok(position_ids.clone()),
         [_, 1, _] => position_ids.squeeze(1),
-        shape => candle_core::bail!(
+        shape => inference_tensor::bail!(
             "MRoPE positions must have shape [planes, length] or [planes, 1, length], got {shape:?}"
         ),
     }
@@ -418,7 +418,7 @@ fn normalize_mrope_positions(position_ids: &Tensor) -> Result<Tensor> {
 fn positions_tensor(positions: &[usize], device: &Device) -> Result<Tensor> {
     let positions = positions
         .iter()
-        .map(|position| u32::try_from(*position).map_err(candle_core::Error::wrap))
+        .map(|position| u32::try_from(*position).map_err(inference_tensor::Error::wrap))
         .collect::<Result<Vec<_>>>()?;
     let len = positions.len();
     Tensor::from_vec(positions, len, device)

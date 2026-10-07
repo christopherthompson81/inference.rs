@@ -6,9 +6,9 @@ use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::layers::{Sdpa, layer_norm, linear};
 use crate::utils::unvarbuilder::UnVarBuilder;
-use candle_core::{D, Device, Result, Tensor};
-use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::{LayerNorm, Linear, Module};
+use inference_tensor::{D, Device, Result, Tensor};
 
 fn rotate_half(x: &Tensor) -> Result<Tensor> {
     let hd = x.dim(D::Minus1)?;

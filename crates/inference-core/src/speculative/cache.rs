@@ -1,4 +1,4 @@
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::paged_attention::CacheEngine;
 use crate::paged_attention::PagedAttentionMeta;
@@ -45,7 +45,7 @@ pub trait SpeculativeCacheAccess {
         outcomes: &[Option<SpeculativeCacheOutcome>],
     ) -> Result<()> {
         if guards.len() != seqs.len() || outcomes.len() != seqs.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "speculative cache batch shape mismatch: guards={}, seqs={}, outcomes={}",
                 guards.len(),
                 seqs.len(),

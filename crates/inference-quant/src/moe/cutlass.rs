@@ -4,15 +4,15 @@
 
 #![cfg(has_cutlass_moe_kernels)]
 
-use candle_core::cuda::cudarc::driver::CudaSlice;
-use candle_core::{CudaDevice, DType, Result, Storage, Tensor};
 use half::bf16;
+use inference_tensor::cuda::cudarc::driver::CudaSlice;
+use inference_tensor::{CudaDevice, DType, Result, Storage, Tensor};
 
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
 mod ffi {
-    use candle_core::cuda::cudarc::driver::sys::CUstream;
     use core::ffi::c_void;
+    use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
     unsafe extern "C" {
         pub fn launch_cutlass_moe_problem_sizes(
@@ -99,7 +99,7 @@ fn bf16_cuda_slice(t: &Tensor, what: &str) -> Result<(std::sync::Arc<CudaSlice<b
     let (storage, layout) = t.storage_and_layout();
     let slice = match &*storage {
         Storage::Cuda(c) => c.as_cuda_slice::<bf16>()?.clone(),
-        _ => candle_core::bail!("{what} must be a cuda tensor"),
+        _ => inference_tensor::bail!("{what} must be a cuda tensor"),
     };
     Ok((std::sync::Arc::new(slice), layout.start_offset()))
 }
@@ -124,10 +124,10 @@ pub fn cutlass_fused_moe(
     let (_, two_inter, k1) = gate_up.dims3()?;
     let inter = two_inter / 2;
     if k1 != hidden {
-        candle_core::bail!("gate_up K must equal hidden");
+        inference_tensor::bail!("gate_up K must equal hidden");
     }
     if xs.dtype() != DType::BF16 {
-        candle_core::bail!("cutlass moe path is bf16-only");
+        inference_tensor::bail!("cutlass moe path is bf16-only");
     }
     let topk = topk_ids.dim(1)?;
     let num_valid = num_tokens * topk;
@@ -149,7 +149,7 @@ pub fn cutlass_fused_moe(
     let (ti_storage, ti_layout) = ti_flat.storage_and_layout();
     let ti_slice = match &*ti_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<u32>()?,
-        _ => candle_core::bail!("topk_ids must be a cuda tensor"),
+        _ => inference_tensor::bail!("topk_ids must be a cuda tensor"),
     };
     assert_eq!(ti_layout.start_offset(), 0, "expected contiguous topk_ids");
 
@@ -160,7 +160,7 @@ pub fn cutlass_fused_moe(
     let (tw_storage, tw_layout) = tw_flat.storage_and_layout();
     let tw_slice = match &*tw_storage {
         Storage::Cuda(c) => c.as_cuda_slice::<f32>()?,
-        _ => candle_core::bail!("topk_weights must be a cuda tensor"),
+        _ => inference_tensor::bail!("topk_weights must be a cuda tensor"),
     };
     assert_eq!(
         tw_layout.start_offset(),
@@ -283,13 +283,13 @@ pub fn cutlass_fused_moe(
             cu_stream,
         );
         if status != 0 {
-            candle_core::bail!("cutlass grouped gemm 1 failed with status {status}");
+            inference_tensor::bail!("cutlass grouped gemm 1 failed with status {status}");
         }
     }
     drop((ps1_g, at_g, ip_g, ap_g));
 
     drop(c1_g);
-    let c1_storage = candle_core::CudaStorage::wrap_cuda_slice(c1, dev.clone());
+    let c1_storage = inference_tensor::CudaStorage::wrap_cuda_slice(c1, dev.clone());
     let c1_tensor = Tensor::from((Storage::Cuda(c1_storage), (num_valid, two_inter)));
     let act = super::cuda::act_and_mul(&c1_tensor, inter, act)?;
     let (act_slice, act_off) = bf16_cuda_slice(&act, "act")?;
@@ -327,7 +327,7 @@ pub fn cutlass_fused_moe(
             cu_stream,
         );
         if status != 0 {
-            candle_core::bail!("cutlass grouped gemm 2 failed with status {status}");
+            inference_tensor::bail!("cutlass grouped gemm 2 failed with status {status}");
         }
         ffi::launch_cutlass_moe_gather_weighted_bf16(
             out_ptr as *mut core::ffi::c_void,
@@ -343,7 +343,7 @@ pub fn cutlass_fused_moe(
         ps2_g, off_g, op_g, c2_g, out_g, apt_g, bpt_g, dpt_g, lda_g, ldb_g, ldd_g, ws_g,
     ));
 
-    let out_storage = candle_core::CudaStorage::wrap_cuda_slice(out, dev.clone());
+    let out_storage = inference_tensor::CudaStorage::wrap_cuda_slice(out, dev.clone());
     let out_tensor = Tensor::from((Storage::Cuda(out_storage), (num_valid, hidden)));
     super::cuda::moe_sum_bf16(&out_tensor, num_tokens, topk, dev)
 }

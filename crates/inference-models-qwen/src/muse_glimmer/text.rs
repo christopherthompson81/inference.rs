@@ -2,10 +2,10 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder, softcap,
 };
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::config::{TextAttentionType, TextConfig};
 use crate::{
@@ -252,9 +252,9 @@ impl Attention {
         q = (rms_norm_f32(&q, None, self.qk_norm_eps)? * self.qk_scale_factor)?;
         k = rms_norm_f32(&k, None, self.qk_norm_eps)?;
         if let Some(rotary_emb) = &self.rotary_emb {
-            let positions = positions
-                .as_ref()
-                .ok_or_else(|| candle_core::Error::msg("missing Muse-Glimmer RoPE positions"))?;
+            let positions = positions.as_ref().ok_or_else(|| {
+                inference_tensor::Error::msg("missing Muse-Glimmer RoPE positions")
+            })?;
             (q, k) = rotary_emb.forward(&q, &k, positions)?;
         }
 
@@ -315,7 +315,7 @@ impl Attention {
         } else {
             attention_output.reshape((batch_size, query_len, ()))?
         };
-        let gate = candle_nn::ops::sigmoid(&self.gate_proj.forward(xs)?)?;
+        let gate = inference_tensor::nn::ops::sigmoid(&self.gate_proj.forward(xs)?)?;
         self.o_proj.forward(&attention_output.broadcast_mul(&gate)?)
     }
 }

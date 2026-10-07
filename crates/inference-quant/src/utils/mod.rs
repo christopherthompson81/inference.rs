@@ -28,7 +28,7 @@ pub use ops::{GluActivationType, fused_glu, fused_split_glu};
 pub(crate) use uqff::{data_to_bytes, dtype_to_uqff_code, uqff_code_to_dtype};
 
 #[cfg(feature = "cuda")]
-use candle_core::{
+use inference_tensor::{
     CudaDevice, Device, Tensor,
     cuda::cudarc::{
         self,
@@ -37,10 +37,10 @@ use candle_core::{
 };
 
 #[cfg(feature = "cuda")]
-pub(crate) fn get_cuda_device(x: &Tensor) -> candle_core::Result<&CudaDevice> {
+pub(crate) fn get_cuda_device(x: &Tensor) -> inference_tensor::Result<&CudaDevice> {
     match x.device() {
         Device::Cuda(dev) => Ok(dev),
-        _ => candle_core::bail!("Expected CUDA device"),
+        _ => inference_tensor::bail!("Expected CUDA device"),
     }
 }
 

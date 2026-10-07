@@ -8,8 +8,8 @@ use crate::{
     sequence::{SeqPreallocatedCache, SeqStepType},
     tools::{ToolCallFormat, ToolCallState, ToolChoice},
 };
-use candle_core::Tensor;
 use either::Either;
+use inference_tensor::Tensor;
 use std::{
     ops::Deref,
     sync::{Arc, atomic::Ordering},
@@ -736,8 +736,9 @@ impl Engine {
         let max_seq_len = required_blocks * NormalCache::CACHE_GROW_SIZE;
         let mut dtype = metadata.activation_dtype;
         // matches the f16 conversion KvCache::append applies on CPU
-        if device.is_cpu() && dtype == candle_core::DType::F32 && crate::kv_cache::cpu_kv_f16() {
-            dtype = candle_core::DType::F16;
+        if device.is_cpu() && dtype == inference_tensor::DType::F32 && crate::kv_cache::cpu_kv_f16()
+        {
+            dtype = inference_tensor::DType::F16;
         }
         let alloc = |shape: (usize, usize, usize, usize)| {
             Tensor::zeros(shape, dtype, &device).map_err(|err| {

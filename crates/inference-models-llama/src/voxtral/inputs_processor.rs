@@ -2,7 +2,7 @@
 
 use std::{any::Any, sync::Arc};
 
-use candle_core::{Device, Tensor};
+use inference_tensor::{Device, Tensor};
 use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
@@ -126,7 +126,7 @@ fn batch_mel_features(mels: &[Tensor]) -> anyhow::Result<Option<Tensor>> {
             let frames = mel.dim(1)?;
             mel.pad_with_zeros(1, 0, max_frames - frames)
         })
-        .collect::<candle_core::Result<Vec<_>>>()?;
+        .collect::<inference_tensor::Result<Vec<_>>>()?;
     Ok(Some(Tensor::cat(&padded, 0)?))
 }
 
@@ -336,7 +336,7 @@ impl MultimodalInputsProcessor for VoxtralInputsProcessor {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::{N_DELAY_TOKENS, N_LEFT_PAD_TOKENS, audio_prompt_feature, batch_mel_features};
 

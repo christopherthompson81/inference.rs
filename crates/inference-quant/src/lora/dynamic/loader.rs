@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 mod expert;
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::{LoraConfig, Shard, ShardedVarBuilder, shard_range};
 
@@ -88,15 +88,15 @@ impl AdapterTensorIndex {
             return Ok(None);
         };
         if candidates.next().is_some() {
-            candle_core::bail!("multiple LoRA tensor pairs match site `{path}`");
+            inference_tensor::bail!("multiple LoRA tensor pairs match site `{path}`");
         }
         let a = pair.a.as_deref().ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "LoRA tensor pair `{prefix}` suffix `{suffix}` is missing A"
             ))
         })?;
         let b = pair.b.as_deref().ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "LoRA tensor pair `{prefix}` suffix `{suffix}` is missing B"
             ))
         })?;
@@ -145,16 +145,18 @@ fn site_load_spec<'a>(
         return Ok(None);
     };
     if !config.try_targets_path(path)? {
-        candle_core::bail!("LoRA tensors for site `{path}` are not declared by target_modules");
+        inference_tensor::bail!(
+            "LoRA tensors for site `{path}` are not declared by target_modules"
+        );
     }
     if config.try_excludes_path(path)? {
-        candle_core::bail!("LoRA tensors for site `{path}` are excluded by exclude_modules");
+        inference_tensor::bail!("LoRA tensors for site `{path}` are excluded by exclude_modules");
     }
     if path.split('.').any(|part| part == "experts") {
-        candle_core::bail!("dynamic LoRA does not support routed MoE expert site `{path}`");
+        inference_tensor::bail!("dynamic LoRA does not support routed MoE expert site `{path}`");
     }
     if path == "lm_head" || path.ends_with(".lm_head") {
-        candle_core::bail!("dynamic LoRA does not support adapters targeting lm_head");
+        inference_tensor::bail!("dynamic LoRA does not support adapters targeting lm_head");
     }
 
     let spec = site.spec();
@@ -182,12 +184,12 @@ fn tensor_elements_after_shard(
     name: &str,
 ) -> Result<u64> {
     if shape != expected {
-        candle_core::bail!("LoRA tensor `{name}` has shape {shape:?}, expected {expected:?}");
+        inference_tensor::bail!("LoRA tensor `{name}` has shape {shape:?}, expected {expected:?}");
     }
     let mut elements = shape.iter().try_fold(1u64, |elements, dim| {
         elements
-            .checked_mul(u64::try_from(*dim).map_err(candle_core::Error::wrap)?)
-            .ok_or_else(|| candle_core::Error::msg("LoRA tensor size overflow"))
+            .checked_mul(u64::try_from(*dim).map_err(inference_tensor::Error::wrap)?)
+            .ok_or_else(|| inference_tensor::Error::msg("LoRA tensor size overflow"))
     })?;
     match shard {
         Shard::Simple { world_size: 1, .. } => {}
@@ -197,24 +199,24 @@ fn tensor_elements_after_shard(
             world_size,
         } => {
             let size = *shape.get(dim).ok_or_else(|| {
-                candle_core::Error::msg(format!("invalid shard dimension {dim} for `{name}`"))
+                inference_tensor::Error::msg(format!("invalid shard dimension {dim} for `{name}`"))
             })?;
             if rank >= world_size || !size.is_multiple_of(world_size) {
-                candle_core::bail!("invalid LoRA shard for tensor `{name}`");
+                inference_tensor::bail!("invalid LoRA shard for tensor `{name}`");
             }
-            elements /= u64::try_from(world_size).map_err(candle_core::Error::wrap)?;
+            elements /= u64::try_from(world_size).map_err(inference_tensor::Error::wrap)?;
         }
         Shard::Offset { dim, offset, len } => {
             let size = *shape.get(dim).ok_or_else(|| {
-                candle_core::Error::msg(format!("invalid shard dimension {dim} for `{name}`"))
+                inference_tensor::Error::msg(format!("invalid shard dimension {dim} for `{name}`"))
             })?;
             if offset.checked_add(len).is_none_or(|end| end > size) {
-                candle_core::bail!("invalid LoRA shard for tensor `{name}`");
+                inference_tensor::bail!("invalid LoRA shard for tensor `{name}`");
             }
             elements = elements
-                .checked_div(u64::try_from(size).map_err(candle_core::Error::wrap)?)
+                .checked_div(u64::try_from(size).map_err(inference_tensor::Error::wrap)?)
                 .and_then(|value| value.checked_mul(u64::try_from(len).ok()?))
-                .ok_or_else(|| candle_core::Error::msg("LoRA tensor size overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("LoRA tensor size overflow"))?;
         }
     }
     Ok(elements)
@@ -245,9 +247,9 @@ fn load_factor(weights: &ShardedVarBuilder, spec: FactorLoadSpec<'_>) -> Result<
         Some((dim, start, len)) if dim == feature_dim => {
             let end = start
                 .checked_add(len)
-                .ok_or_else(|| candle_core::Error::msg("LoRA feature shard range overflow"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("LoRA feature shard range overflow"))?;
             let indices = runtime_to_canonical.get(start..end).ok_or_else(|| {
-                candle_core::Error::msg("LoRA feature shard exceeds runtime-to-canonical map")
+                inference_tensor::Error::msg("LoRA feature shard exceeds runtime-to-canonical map")
             })?;
             (tensor, indices)
         }
@@ -256,7 +258,7 @@ fn load_factor(weights: &ShardedVarBuilder, spec: FactorLoadSpec<'_>) -> Result<
     };
     let indices = indices
         .iter()
-        .map(|&index| u32::try_from(index).map_err(candle_core::Error::wrap))
+        .map(|&index| u32::try_from(index).map_err(inference_tensor::Error::wrap))
         .collect::<Result<Vec<_>>>()?;
     let index_count = indices.len();
     let indices = Tensor::from_vec(indices, index_count, tensor.device())?;
@@ -266,13 +268,13 @@ fn load_factor(weights: &ShardedVarBuilder, spec: FactorLoadSpec<'_>) -> Result<
 fn validate_consumption(tensors: &AdapterTensorIndex, consumed: &BTreeSet<String>) -> Result<()> {
     let unconsumed = tensors.unconsumed(consumed);
     if !unconsumed.is_empty() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "adapter contains tensors not consumed by registered LoRA sites: {}",
             unconsumed.join(", ")
         );
     }
     if consumed.is_empty() {
-        candle_core::bail!("adapter does not contain weights for any registered LoRA site");
+        inference_tensor::bail!("adapter does not contain weights for any registered LoRA site");
     }
     Ok(())
 }
@@ -284,7 +286,7 @@ pub fn plan_dynamic_lora_weights(
 ) -> Result<DynamicLoraLoadPlan> {
     config.validate_dynamic()?;
     let tensors = AdapterTensorIndex::new(weights.tensor_names().ok_or_else(|| {
-        candle_core::Error::msg("dynamic LoRA loading requires an indexed tensor backend")
+        inference_tensor::Error::msg("dynamic LoRA loading requires an indexed tensor backend")
     })?);
     let mut consumed = BTreeSet::new();
     let mut bytes = 0u64;
@@ -294,13 +296,13 @@ pub fn plan_dynamic_lora_weights(
         };
         let spec = site.spec();
         let a_shape = weights.tensor_shape(load.a_name).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "LoRA tensor `{}` has no shape metadata",
                 load.a_name
             ))
         })?;
         let b_shape = weights.tensor_shape(load.b_name).ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "LoRA tensor `{}` has no shape metadata",
                 load.b_name
             ))
@@ -317,16 +319,16 @@ pub fn plan_dynamic_lora_weights(
             load.b_shard,
             load.b_name,
         )?)
-        .ok_or_else(|| candle_core::Error::msg("LoRA tensor size overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("LoRA tensor size overflow"))?;
         let site_bytes = elements
             .checked_mul(
                 u64::try_from(site.activation_dtype().size_in_bytes())
-                    .map_err(candle_core::Error::wrap)?,
+                    .map_err(inference_tensor::Error::wrap)?,
             )
-            .ok_or_else(|| candle_core::Error::msg("LoRA tensor size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("LoRA tensor size overflow"))?;
         bytes = bytes
             .checked_add(site_bytes)
-            .ok_or_else(|| candle_core::Error::msg("LoRA tensor size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("LoRA tensor size overflow"))?;
         consumed.insert(load.a_name.to_string());
         consumed.insert(load.b_name.to_string());
     }
@@ -337,7 +339,7 @@ pub fn plan_dynamic_lora_weights(
         };
         bytes = bytes
             .checked_add(plan.bytes())
-            .ok_or_else(|| candle_core::Error::msg("LoRA tensor size overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("LoRA tensor size overflow"))?;
         consumed.extend(plan.consumed().iter().cloned());
     }
     validate_consumption(&tensors, &consumed)?;
@@ -376,7 +378,7 @@ pub fn load_dynamic_lora_weights(
 ) -> Result<DynamicLoraWeights> {
     config.validate_dynamic()?;
     let tensors = AdapterTensorIndex::new(weights.tensor_names().ok_or_else(|| {
-        candle_core::Error::msg("dynamic LoRA loading requires an indexed tensor backend")
+        inference_tensor::Error::msg("dynamic LoRA loading requires an indexed tensor backend")
     })?);
 
     let mut linear = Vec::new();
@@ -436,7 +438,7 @@ pub fn load_dynamic_lora_weights(
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
 
     use super::*;
     use crate::lora::dynamic::{LoraExpertProjectionNames, LoraExpertSiteSpec};
@@ -630,7 +632,7 @@ mod tests {
             "target_modules": ["q_proj"],
             "exclude_modules": ["q_proj"]
         }))
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         let error = load_dynamic_lora_weights(&registry, &config, &weights).unwrap_err();
         assert!(error.to_string().contains("excluded by exclude_modules"));
@@ -645,7 +647,7 @@ mod tests {
         let b_name = format!("{path}.lora_B.weight");
         let a = Tensor::new(&[[1f32, 0.]], &device)?;
         let b = Tensor::new(&[[1f32], [0.]], &device)?;
-        let directory = tempfile::tempdir().map_err(candle_core::Error::wrap)?;
+        let directory = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
         let weights_path = directory.path().join("adapter_model.safetensors");
         safetensors::serialize_to_file(
             [(a_name.as_str(), &a), (b_name.as_str(), &b)],
@@ -655,7 +657,7 @@ mod tests {
             ])),
             &weights_path,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         let weights = unsafe {
             ShardedSafeTensors::sharded(
                 std::slice::from_ref(&weights_path),
@@ -735,7 +737,7 @@ mod tests {
                 Tensor::new(&[[7f32], [8.]], &device)?,
             ),
         ];
-        let directory = tempfile::tempdir().map_err(candle_core::Error::wrap)?;
+        let directory = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
         let weights_path = directory.path().join("adapter_model.safetensors");
         safetensors::serialize_to_file(
             tensors.iter().map(|(name, tensor)| (name.as_str(), tensor)),
@@ -745,7 +747,7 @@ mod tests {
             ])),
             &weights_path,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         let weights = unsafe {
             ShardedSafeTensors::sharded(
                 std::slice::from_ref(&weights_path),

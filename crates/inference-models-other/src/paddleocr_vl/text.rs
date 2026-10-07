@@ -11,10 +11,10 @@ use crate::kv_cache::KvCache as EngineKvCache;
 use crate::layers::{Activation, Mlp};
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
 use crate::utils::unvarbuilder::UnVarBuilder;
-use candle_core::{D, DType, Device, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 struct RmsNorm {
     weight: Tensor,
@@ -483,9 +483,9 @@ mod tests {
     use super::*;
     use crate::layers::CausalMasker;
     use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
-    use candle_core::Var;
-    use candle_nn::VarMap;
     use inference_quant::ShardedSafeTensors;
+    use inference_tensor::Var;
+    use inference_tensor::nn::VarMap;
     use rand::{SeedableRng, rngs::StdRng};
     use rand_distr::{Distribution, Normal};
 

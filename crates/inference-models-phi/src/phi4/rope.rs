@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use super::config::Phi4MMConfig;

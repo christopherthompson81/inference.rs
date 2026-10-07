@@ -1,17 +1,17 @@
-use candle_core::{DType, Device, Result, Shape, Tensor};
+use inference_tensor::{DType, Device, Result, Shape, Tensor};
 
 #[cfg(feature = "cuda")]
-use candle_core::{
+use inference_tensor::{
     CudaStorage, Storage,
     cuda::{CudaStorageSlice, cudarc::driver::DevicePtr},
 };
 
 #[cfg(feature = "metal")]
-use candle_core::Storage;
+use inference_tensor::Storage;
 
-use candle_nn::Linear;
 #[cfg(feature = "cuda")]
 use half::{bf16, f16};
+use inference_tensor::nn::Linear;
 use safetensors::tensor::Dtype;
 use std::{
     num::NonZeroUsize,
@@ -59,22 +59,22 @@ macro_rules! dequant_for_dtype {
         paste::paste! {
             let (wq, _) = $this.w_q.storage_and_layout();
             let wq = match &*wq {
-                candle_core::Storage::Cuda(s) => s,
-                _ => candle_core::bail!("wq must be a cuda tensor"),
+                inference_tensor::Storage::Cuda(s) => s,
+                _ => inference_tensor::bail!("wq must be a cuda tensor"),
             };
             let (w_slice, _w_guard) = crate::utils::slice_ptr(wq.as_cuda_slice::<$wq_t>()?, $this.w_q.layout().start_offset());
 
             let (scale, _) = $this.scales.storage_and_layout();
             let scale = match &*scale {
-                candle_core::Storage::Cuda(s) => s,
-                _ => candle_core::bail!("scale must be a cuda tensor"),
+                inference_tensor::Storage::Cuda(s) => s,
+                _ => inference_tensor::bail!("scale must be a cuda tensor"),
             };
             let (scale_slice, _scale_guard) = crate::utils::slice_ptr(scale.as_cuda_slice::<$scale_t>()?, $this.scales.layout().start_offset());
 
             let (zero, _) = $this.zeros.storage_and_layout();
             let zero = match &*zero {
-                candle_core::Storage::Cuda(s) => s,
-                _ => candle_core::bail!("zero must be a cuda tensor"),
+                inference_tensor::Storage::Cuda(s) => s,
+                _ => inference_tensor::bail!("zero must be a cuda tensor"),
             };
             let (zero_slice, _zero_guard) = crate::utils::slice_ptr(zero.as_cuda_slice::<$scale_t>()?, $this.zeros.layout().start_offset());
 
@@ -114,12 +114,12 @@ pub enum HqqAxis {
 }
 
 impl TryFrom<usize> for HqqAxis {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: usize) -> std::result::Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Zero),
             1 => Ok(Self::One),
-            other => candle_core::bail!("Unexpected value for HQQ axis {other}"),
+            other => inference_tensor::bail!("Unexpected value for HQQ axis {other}"),
         }
     }
 }
@@ -134,7 +134,7 @@ pub enum HqqBits {
 }
 
 impl TryFrom<usize> for HqqBits {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: usize) -> std::result::Result<Self, Self::Error> {
         match value {
             8 => Ok(Self::Eight),
@@ -142,7 +142,7 @@ impl TryFrom<usize> for HqqBits {
             3 => Ok(Self::Three),
             2 => Ok(Self::Two),
             1 => Ok(Self::One),
-            other => candle_core::bail!("Unexpected value for HQQ bits {other}"),
+            other => inference_tensor::bail!("Unexpected value for HQQ bits {other}"),
         }
     }
 }
@@ -163,7 +163,7 @@ impl HqqBits {
                     let (wq_storage, _) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("Expected CUDA storage"),
+                        _ => inference_tensor::bail!("Expected CUDA storage"),
                     };
 
                     let output_shape = wq.shape().clone();
@@ -192,7 +192,7 @@ impl HqqBits {
 
                 #[cfg(feature = "metal")]
                 if device.is_metal() {
-                    use candle_core::MetalStorage;
+                    use inference_tensor::MetalStorage;
 
                     let dev = device.as_metal_device()?;
                     let encoder = dev.command_encoder()?;
@@ -201,7 +201,7 @@ impl HqqBits {
                     let (wq_storage, _wq_layout) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Metal(s) => s,
-                        _ => candle_core::bail!("Expected Metal storage"),
+                        _ => inference_tensor::bail!("Expected Metal storage"),
                     };
 
                     let output_shape = wq.shape().clone();
@@ -219,7 +219,7 @@ impl HqqBits {
                         &output,
                         output_shape.elem_count(),
                     )
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
 
                     let storage = MetalStorage::new(
                         output,
@@ -246,7 +246,7 @@ impl HqqBits {
                     let (wq_storage, _) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("Expected CUDA storage"),
+                        _ => inference_tensor::bail!("Expected CUDA storage"),
                     };
 
                     let output_height = wq.dims()[0] / 2;
@@ -277,7 +277,7 @@ impl HqqBits {
 
                 #[cfg(feature = "metal")]
                 if device.is_metal() {
-                    use candle_core::MetalStorage;
+                    use inference_tensor::MetalStorage;
 
                     let dev = device.as_metal_device()?;
                     let encoder = dev.command_encoder()?;
@@ -287,7 +287,7 @@ impl HqqBits {
                     let (wq_storage, _wq_layout) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Metal(s) => s,
-                        _ => candle_core::bail!("Expected Metal storage"),
+                        _ => inference_tensor::bail!("Expected Metal storage"),
                     };
 
                     let output_height = wq.dims()[0] / 2;
@@ -307,7 +307,7 @@ impl HqqBits {
                         wq.dims()[0],
                         wq.dims()[1],
                     )
-                    .map_err(candle_core::Error::wrap)?;
+                    .map_err(inference_tensor::Error::wrap)?;
 
                     let storage = MetalStorage::new(
                         output,
@@ -340,7 +340,7 @@ impl HqqBits {
                     let (wq_storage, _) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("Expected CUDA storage"),
+                        _ => inference_tensor::bail!("Expected CUDA storage"),
                     };
 
                     let output_height = wq.dims()[0] / 4;
@@ -416,7 +416,7 @@ impl HqqBits {
                     let (wq_storage, _) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("Expected CUDA storage"),
+                        _ => inference_tensor::bail!("Expected CUDA storage"),
                     };
 
                     let output_height = padded_height / 10;
@@ -489,7 +489,7 @@ impl HqqBits {
                     let (wq_storage, _) = wq.storage_and_layout();
                     let wq_storage = match &*wq_storage {
                         Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("Expected CUDA storage"),
+                        _ => inference_tensor::bail!("Expected CUDA storage"),
                     };
 
                     let output_height = wq.dims()[0] / 8;
@@ -714,17 +714,17 @@ impl HqqLayer {
         chunk_elements: usize,
     ) -> Result<Tensor> {
         if !matches!(self.cfg.axis, HqqAxis::Zero) || !self.cfg.channel_wise {
-            candle_core::bail!("HQQ embedding requires channel-wise axis-0 quantization.");
+            inference_tensor::bail!("HQQ embedding requires channel-wise axis-0 quantization.");
         }
         let pack_factor = match self.cfg.bits {
             HqqBits::Eight => 1,
             HqqBits::Four => 2,
             HqqBits::One | HqqBits::Two | HqqBits::Three => {
-                candle_core::bail!("HQQ embedding supports only 4-bit and 8-bit weights.")
+                inference_tensor::bail!("HQQ embedding supports only 4-bit and 8-bit weights.")
             }
         };
         let [vocab_size, embedding_dim] = self.w_shape.dims() else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "HQQ embedding requires rank-2 weights, got {:?}.",
                 self.w_shape.dims()
             );
@@ -747,13 +747,13 @@ impl HqqLayer {
             .to_vec1::<u32>()?;
         for &token_id in &ids {
             if token_id as usize >= *vocab_size {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "HQQ embedding index {token_id} is out of bounds for vocabulary size {vocab_size}."
                 );
             }
         }
         let output_elements = ids.len().checked_mul(*embedding_dim).ok_or_else(|| {
-            candle_core::Error::Msg("HQQ embedding output element count overflowed.".into())
+            inference_tensor::Error::Msg("HQQ embedding output element count overflowed.".into())
         })?;
         let w_q = self.w_q.flatten_all()?;
         let scales = self.scales.flatten_all()?;
@@ -796,7 +796,7 @@ impl HqqLayer {
 
     fn from_uqff(reader: &UqffReader, key: &str, device: &Device, shard: Shard) -> Result<Self> {
         if !matches!(shard, Shard::Simple { world_size: 1, .. }) {
-            candle_core::bail!("HQQ UQFF artifacts do not support sharded loading.");
+            inference_tensor::bail!("HQQ UQFF artifacts do not support sharded loading.");
         }
         let w_q = reader.load_tensor(&format!("{key}.weight"), device)?;
         let scales = reader.load_tensor(&format!("{key}.weight.scales"), device)?;
@@ -829,15 +829,15 @@ impl HqqLayer {
         match (self.scales.dtype(), self.zeros.dtype()) {
             (DType::F16, DType::F16) | (DType::BF16, DType::BF16) | (DType::F32, DType::F32) => (),
             (a, b) => {
-                candle_core::bail!("Expected all dtypes to be the same, got ({a:?}, {b:?}).")
+                inference_tensor::bail!("Expected all dtypes to be the same, got ({a:?}, {b:?}).")
             }
         }
         if !(self.w_q.is_contiguous() && self.scales.is_contiguous() && self.zeros.is_contiguous())
         {
-            candle_core::bail!("All tensors must be contiguous!");
+            inference_tensor::bail!("All tensors must be contiguous!");
         }
         if self.cfg.axis as usize != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CPU HQQ dequantization requires axis == 0, got {}.",
                 self.cfg.axis as usize
             );
@@ -865,7 +865,7 @@ impl HqqLayer {
                 .w_q
                 .apply_op3_no_bwd(&self.scales, &self.zeros, &Dequant1Bit { h, w })?
                 .reshape(&self.w_shape),
-            b => candle_core::bail!("Unreachable bits {b}"),
+            b => inference_tensor::bail!("Unreachable bits {b}"),
         }
     }
 
@@ -875,15 +875,15 @@ impl HqqLayer {
         match (self.scales.dtype(), self.zeros.dtype()) {
             (DType::F16, DType::F16) | (DType::BF16, DType::BF16) | (DType::F32, DType::F32) => (),
             (a, b) => {
-                candle_core::bail!("Expected all dtypes to be the same, got ({a:?}, {b:?}).")
+                inference_tensor::bail!("Expected all dtypes to be the same, got ({a:?}, {b:?}).")
             }
         }
         if !(self.w_q.is_contiguous() && self.scales.is_contiguous() && self.zeros.is_contiguous())
         {
-            candle_core::bail!("All tensors must be contiguous!");
+            inference_tensor::bail!("All tensors must be contiguous!");
         }
         if self.cfg.axis as usize != 0 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "CUDA HQQ dequantization requires axis == 0, got {}.",
                 self.cfg.axis as usize
             );
@@ -1084,7 +1084,9 @@ impl HqqLayer {
                     1bit_u8_kernel_bf16
                 )
             }
-            (bits, dtype) => candle_core::bail!("Unsupported bit width {bits} and dtype {dtype:?}"),
+            (bits, dtype) => {
+                inference_tensor::bail!("Unsupported bit width {bits} and dtype {dtype:?}")
+            }
         };
         inner.reshape(&self.w_shape)
     }
@@ -1175,7 +1177,7 @@ impl QuantMethod for HqqLayer {
     }
 
     fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        candle_core::bail!("HQQ quantization does not support adding weight delta.")
+        inference_tensor::bail!("HQQ quantization does not support adding weight delta.")
     }
 
     fn dtype_and_device(&self) -> (DType, Device) {
@@ -1226,14 +1228,14 @@ impl QuantMethod for HqqLayer {
             Some(IsqType::HQQ4) => HqqBits::Four,
             other => {
                 return Arc::new(crate::UnquantLinear::new(QuantMethodConfig::Unquantized(
-                    candle_nn::Linear::new(self.dequantize()?, self.bias.clone()),
+                    inference_tensor::nn::Linear::new(self.dequantize()?, self.bias.clone()),
                 ))?)
                 .apply_isq(other, device, n_quantized, imatrix_weight, guard);
             }
         };
         let _acquired_quantize_guard = guard.acquire(&device);
         if imatrix_weight.is_some() {
-            candle_core::bail!("HQQ does not support imatrix.");
+            inference_tensor::bail!("HQQ does not support imatrix.");
         }
 
         n_quantized.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -1274,10 +1276,12 @@ impl QuantizedSerde for HqqLayer {
     }
     fn serialize_uqff(&self, prefix: &str, ty: IsqType) -> Result<Vec<UqffTensor>> {
         let Some(actual_ty) = self.uqff_type() else {
-            candle_core::bail!("Cannot serialize unsupported HQQ bit width as UQFF.")
+            inference_tensor::bail!("Cannot serialize unsupported HQQ bit width as UQFF.")
         };
         if ty != actual_ty {
-            candle_core::bail!("Cannot serialize HQQ layer as {ty}; actual type is {actual_ty}.");
+            inference_tensor::bail!(
+                "Cannot serialize HQQ layer as {ty}; actual type is {actual_ty}."
+            );
         }
 
         let mut data = vec![
@@ -1331,7 +1335,7 @@ impl QuantizedSerde for HqqLayer {
             HqqBits::Eight => Ok(IsqType::HQQ8),
             HqqBits::Four => Ok(IsqType::HQQ4),
             HqqBits::One | HqqBits::Two | HqqBits::Three => {
-                candle_core::bail!("Cannot convert HQQ bit width to an ISQ type.")
+                inference_tensor::bail!("Cannot convert HQQ bit width to an ISQ type.")
             }
         }
     }
@@ -1341,7 +1345,7 @@ impl QuantizedSerde for HqqLayer {
 mod tests {
     use std::sync::{Arc, atomic::AtomicUsize};
 
-    use candle_core::{DType, Device, Result, Tensor};
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
     use crate::{
@@ -1531,7 +1535,7 @@ mod tests {
             None,
             &path,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
         let reader = UqffReader::open(std::slice::from_ref(&path))?;
         let loaded = reader
             .load_linear("test.embedding", &device, Shard::default())?

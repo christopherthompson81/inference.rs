@@ -5,7 +5,9 @@ use std::{
     thread::ThreadId,
 };
 
-use candle_core::{
+use float8::F8E4M3;
+use half::{bf16, f16};
+use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
     cuda::{
         DeviceId,
@@ -15,8 +17,6 @@ use candle_core::{
         },
     },
 };
-use float8::F8E4M3;
-use half::{bf16, f16};
 
 use super::Nvfp4LayerParts;
 use crate::{
@@ -122,16 +122,18 @@ fn check_status(operation: &str, status: i32) -> Result<()> {
     } else {
         unsafe { CStr::from_ptr(message) }.to_string_lossy()
     };
-    candle_core::bail!("CUTLASS NVFP4 {operation} failed: {message} (status {status})")
+    inference_tensor::bail!("CUTLASS NVFP4 {operation} failed: {message} (status {status})")
 }
 
 fn outside_capture(device: &CudaDevice, operation: &str) -> Result<()> {
     let status = device
         .cuda_stream()
         .capture_status()
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     if status != CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
-        candle_core::bail!("CUTLASS NVFP4 {operation} must be warmed before CUDA graph capture");
+        inference_tensor::bail!(
+            "CUTLASS NVFP4 {operation} must be warmed before CUDA graph capture"
+        );
     }
     Ok(())
 }
@@ -144,7 +146,7 @@ fn prepare(device: &CudaDevice) -> Result<[Context; CONTEXT_COUNT]> {
     stream
         .context()
         .bind_to_thread()
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     let prepared = PREPARED_DEVICES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut prepared = prepared.lock().unwrap();
     if let Some(contexts) = prepared.get(&device.id()) {
@@ -184,7 +186,7 @@ fn workspace(device: &CudaDevice, bytes: usize) -> Result<Option<Workspace>> {
     }
     let capacity = bytes
         .checked_next_power_of_two()
-        .ok_or_else(|| candle_core::Error::msg("CUTLASS NVFP4 workspace capacity overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("CUTLASS NVFP4 workspace capacity overflow"))?;
     let stream = device.cuda_stream().cu_stream() as usize;
     let key = WorkspaceKey {
         device: device.id(),
@@ -238,11 +240,11 @@ fn scale_bytes(rows: usize, k: usize) -> Result<usize> {
 pub(crate) fn swizzle_scales(canonical: &Tensor) -> Result<Tensor> {
     let (rows, columns) = canonical.dims2()?;
     if canonical.dtype() != DType::F8E4M3 {
-        candle_core::bail!("CUTLASS NVFP4 canonical scales must be F8E4M3");
+        inference_tensor::bail!("CUTLASS NVFP4 canonical scales must be F8E4M3");
     }
     let k = columns
         .checked_mul(NVFP4_BLOCK_SIZE)
-        .ok_or_else(|| candle_core::Error::msg("CUTLASS NVFP4 scale dimension overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("CUTLASS NVFP4 scale dimension overflow"))?;
     let bytes = scale_bytes(rows, k)?;
     let canonical = crate::utils::contiguous_fp8(canonical)?;
     let device = canonical.device().as_cuda_device()?;
@@ -250,7 +252,7 @@ pub(crate) fn swizzle_scales(canonical: &Tensor) -> Result<Tensor> {
     stream
         .context()
         .bind_to_thread()
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
     let (storage, layout) = canonical.storage_and_layout();
     let Storage::Cuda(storage) = &*storage else {
         unreachable!()
@@ -322,7 +324,7 @@ impl State {
                 CUdevice_attribute::CU_DEVICE_ATTRIBUTE_L2_CACHE_SIZE,
             )
         }
-        .map_err(candle_core::Error::msg)? as usize;
+        .map_err(inference_tensor::Error::msg)? as usize;
         let weight_bytes = parts.weight.elem_count() + parts.scales.elem_count();
         Ok(Some(Self {
             weights: aligned_bytes(&parts.weight)?,
@@ -351,7 +353,7 @@ impl State {
     ) -> Result<Tensor> {
         let (rows, packed_k) = packed.dims2()?;
         let activation_global = args.activation_global_scale.ok_or_else(|| {
-            candle_core::Error::msg("CUTLASS NVFP4 requires an activation global scale")
+            inference_tensor::Error::msg("CUTLASS NVFP4 requires an activation global scale")
         })?;
         if !self.supports(rows, dtype)
             || packed_k != self.k / 2
@@ -363,7 +365,9 @@ impl State {
             || activation_global.dtype() != DType::F32
             || activation_global.elem_count() != 1
         {
-            candle_core::bail!("invalid CUTLASS NVFP4 activation shape, dtype, or global scale");
+            inference_tensor::bail!(
+                "invalid CUTLASS NVFP4 activation shape, dtype, or global scale"
+            );
         }
         for tensor in [
             packed,
@@ -372,7 +376,7 @@ impl State {
             activation_global,
         ] {
             if !tensor.device().same_device(self.weights.device()) {
-                candle_core::bail!("CUTLASS NVFP4 operands must be on the layer device");
+                inference_tensor::bail!("CUTLASS NVFP4 operands must be on the layer device");
             }
         }
         let packed = aligned_bytes(packed)?;
@@ -384,7 +388,7 @@ impl State {
         stream
             .context()
             .bind_to_thread()
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
         let dtype_index = if dtype == DType::BF16 {
             BF16_CONTEXT
         } else {
@@ -477,9 +481,9 @@ impl State {
             workspace_bytes,
             stream: stream.cu_stream() as *mut c_void,
         };
-        let elements = rows
-            .checked_mul(self.n)
-            .ok_or_else(|| candle_core::Error::msg("CUTLASS NVFP4 output dimension overflow"))?;
+        let elements = rows.checked_mul(self.n).ok_or_else(|| {
+            inference_tensor::Error::msg("CUTLASS NVFP4 output dimension overflow")
+        })?;
         macro_rules! run {
             ($dtype:ty) => {{
                 let mut output = unsafe { device.alloc::<$dtype>(elements)? };

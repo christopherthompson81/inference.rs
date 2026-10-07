@@ -1,8 +1,8 @@
 use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{Context, Result, bail};
-use candle_core::quantized::gguf_file::Value;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
+use inference_tensor::quantized::gguf_file::Value;
 
 use inference_nn::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, loaders::MultimodalLoaderType};
 
@@ -900,13 +900,13 @@ fn bind(
 mod tests {
     use std::{io::Write, sync::Arc};
 
-    use candle_core::{
-        DType, Device, Tensor,
-        quantized::{GgmlDType, QTensor, gguf_file},
-    };
     use inference_quant::{
         ColumnParallelLayer, Comm, GgufWeightSource, Id, QuantizedConfig, QuantizedWeightSource,
         Shard,
+    };
+    use inference_tensor::{
+        DType, Device, Tensor,
+        quantized::{GgmlDType, QTensor, gguf_file},
     };
     use tempfile::NamedTempFile;
 

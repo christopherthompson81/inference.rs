@@ -15,9 +15,8 @@ homepage.workspace = true
 [dependencies]
 inference-protocol.workspace = true
 anyhow.workspace = true
-candle-core.workspace = true
+inference-tensor.workspace = true
 metrics.workspace = true
-candle-nn.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
@@ -82,8 +81,7 @@ models-other = ["dep:inference-models-other"]
 models-phi = ["dep:inference-models-phi"]
 models-qwen = ["dep:inference-models-qwen"]
 cuda = [
-    "candle-core/cuda",
-    "candle-nn/cuda",
+    "inference-tensor/cuda",
     "inference-quant/cuda",
     "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
@@ -96,11 +94,10 @@ cuda = [
     "inference-models-qwen?/cuda",
     "inference-models-speech/cuda",
 ]
-cudnn = ["candle-core/cudnn"]
+cudnn = ["inference-tensor/cudnn"]
 cutile = ["cuda", "inference-quant/cutile", "inference-nn/cutile"]
 metal = [
-    "candle-core/metal",
-    "candle-nn/metal",
+    "inference-tensor/metal",
     "inference-quant/metal",
     "dep:objc",
     "dep:inference-paged-attn",
@@ -115,8 +112,8 @@ metal = [
     "inference-models-speech/metal",
 ]
 flash-attn-v3 = ["cuda", "inference-nn/flash-attn-v3"]
-accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate", "inference-nn/accelerate"]
-mkl = ["candle-core/mkl", "candle-nn/mkl"]
+accelerate = ["inference-tensor/accelerate", "inference-quant/accelerate", "inference-nn/accelerate"]
+mkl = ["inference-tensor/mkl"]
 nccl = ["cuda", "inference-quant/nccl"]
 utoipa = ["dep:utoipa", "inference-protocol/utoipa", "inference-nn/utoipa", "inference-code-exec/utoipa", "inference-sandbox/utoipa"]
 ring = ["inference-quant/ring"]

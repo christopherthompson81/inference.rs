@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::{
     gdn::RecurrentBatchKind,
@@ -20,22 +20,24 @@ fn packed_gdn_segments(
     query_lens: &[usize],
 ) -> Result<Vec<PackedGdnSegment>> {
     if physical_batch != 1 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN requires physical batch size 1, got {physical_batch}"
         );
     }
     if query_lens.is_empty() {
-        candle_core::bail!("Qwen3.5 packed GDN requires at least one logical sequence");
+        inference_tensor::bail!("Qwen3.5 packed GDN requires at least one logical sequence");
     }
     let mut offset = 0usize;
     let mut segments = Vec::with_capacity(query_lens.len());
     for (state_index, &query_len) in query_lens.iter().enumerate() {
         if query_len == 0 {
-            candle_core::bail!("Qwen3.5 packed GDN logical sequence {state_index} has zero tokens");
+            inference_tensor::bail!(
+                "Qwen3.5 packed GDN logical sequence {state_index} has zero tokens"
+            );
         }
         let end = offset
             .checked_add(query_len)
-            .ok_or_else(|| candle_core::Error::msg("Qwen3.5 packed GDN length overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 packed GDN length overflow"))?;
         segments.push(PackedGdnSegment {
             token_range: offset..end,
             state_index,
@@ -43,7 +45,7 @@ fn packed_gdn_segments(
         offset = end;
     }
     if offset != physical_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN has {offset} logical tokens but {physical_tokens} physical tokens"
         );
     }
@@ -56,12 +58,12 @@ fn validate_packed_gdn_state_rows(
     recurrent_state_batch: usize,
 ) -> Result<()> {
     if conv_state_batch != logical_batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN has {conv_state_batch} convolution state rows but {logical_batch} logical sequences"
         );
     }
     if recurrent_state_batch != logical_batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN has {recurrent_state_batch} recurrent state rows but {logical_batch} logical sequences"
         );
     }
@@ -76,25 +78,25 @@ pub fn packed_gdn_layout(
         return Ok(None);
     }
     if !ctx.is_first_prompt_chunk() {
-        candle_core::bail!("Qwen3.5 packed GDN requires the first prompt chunk");
+        inference_tensor::bail!("Qwen3.5 packed GDN requires the first prompt chunk");
     }
     let query_lens = ctx
         .paged_input_metadata()
         .and_then(|metadata| metadata.query_lens.clone())
         .ok_or_else(|| {
-            candle_core::Error::msg("Qwen3.5 packed GDN requires logical query lengths")
+            inference_tensor::Error::msg("Qwen3.5 packed GDN requires logical query lengths")
         })?;
-    let recurrent_metadata = ctx
-        .recurrent_metadata()
-        .ok_or_else(|| candle_core::Error::msg("Qwen3.5 packed GDN requires recurrent metadata"))?;
+    let recurrent_metadata = ctx.recurrent_metadata().ok_or_else(|| {
+        inference_tensor::Error::msg("Qwen3.5 packed GDN requires recurrent metadata")
+    })?;
     if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
-        candle_core::bail!("Qwen3.5 packed GDN cannot run a decode batch");
+        inference_tensor::bail!("Qwen3.5 packed GDN cannot run a decode batch");
     }
     let (physical_batch, physical_tokens, _) = x.dims3()?;
     packed_gdn_segments(physical_batch, physical_tokens, &query_lens)?;
     let index_count = recurrent_metadata.state_indices().dims1()?;
     if index_count != query_lens.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN has {index_count} state indices but {} logical sequences",
             query_lens.len()
         );
@@ -102,7 +104,7 @@ pub fn packed_gdn_layout(
     if let Some(host_indices) = recurrent_metadata.state_indices_host()
         && host_indices.len() != query_lens.len()
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN has {} host state indices but {} logical sequences",
             host_indices.len(),
             query_lens.len()
@@ -122,17 +124,17 @@ pub fn forward_packed_gdn(
     layout: &PackedGdnLayout,
 ) -> Result<Tensor> {
     if batch_kind != RecurrentBatchKind::Prefill {
-        candle_core::bail!("Qwen3.5 packed GDN cannot run a decode batch");
+        inference_tensor::bail!("Qwen3.5 packed GDN cannot run a decode batch");
     }
     let (physical_batch, physical_tokens, _) = x.dims3()?;
     let (conv_state_batch, _, _) = cache.conv_state.dims3()?;
     let (recurrent_state_batch, _, _, _) = cache.recurrent_state.dims4()?;
     if physical_batch != 1 || physical_tokens != layout.token_count() {
-        candle_core::bail!("Qwen3.5 packed GDN token dimensions are incompatible");
+        inference_tensor::bail!("Qwen3.5 packed GDN token dimensions are incompatible");
     }
     validate_packed_gdn_state_rows(layout.batch_size(), conv_state_batch, recurrent_state_batch)?;
     if x.dtype() != cache.conv_state.dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN dtype mismatch: tokens are {:?}, convolution state is {:?}",
             x.dtype(),
             cache.conv_state.dtype()
@@ -141,7 +143,7 @@ pub fn forward_packed_gdn(
     if !x.device().same_device(cache.conv_state.device())
         || !x.device().same_device(cache.recurrent_state.device())
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen3.5 packed GDN tokens and recurrent states are on different devices"
         );
     }

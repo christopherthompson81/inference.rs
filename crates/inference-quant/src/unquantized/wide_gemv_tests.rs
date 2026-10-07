@@ -1,6 +1,6 @@
 use super::*;
-use candle_core::cuda::cudarc::driver::sys;
 use half::{bf16, f16};
+use inference_tensor::cuda::cudarc::driver::sys;
 
 const OUTPUT_DIM: usize = 32_769;
 const INPUT_DIM: usize = 3_074;
@@ -271,7 +271,7 @@ fn wide_gemv_graph_replay_reads_changed_inputs_and_preserves_bias() -> Result<()
             if tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error));
+            return Err(inference_tensor::Error::msg(error));
         }
         let output = layer.forward(&input4);
         let graph = stream.end_capture(
@@ -282,11 +282,11 @@ fn wide_gemv_graph_replay_reads_changed_inputs_and_preserves_bias() -> Result<()
         }
         let output = output?;
         let graph = graph
-            .map_err(candle_core::Error::msg)?
-            .ok_or_else(|| candle_core::Error::msg("wide GEMV capture returned no graph"))?;
+            .map_err(inference_tensor::Error::msg)?
+            .ok_or_else(|| inference_tensor::Error::msg("wide GEMV capture returned no graph"))?;
         for negative in [false, true, false] {
             input.slice_set(if negative { &alternate } else { &source }, 0, 0)?;
-            graph.launch().map_err(candle_core::Error::msg)?;
+            graph.launch().map_err(inference_tensor::Error::msg)?;
             device.synchronize()?;
             let reference = if negative {
                 (&bias * 2.0)?

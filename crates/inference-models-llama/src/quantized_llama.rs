@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use candle_core::quantized::ggml_file;
-use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::{Embedding, Module};
 use inference_quant::{GgufMatMul, QuantMethod, QuantMethodConfig};
+use inference_tensor::nn::{Embedding, Module};
+use inference_tensor::quantized::ggml_file;
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};

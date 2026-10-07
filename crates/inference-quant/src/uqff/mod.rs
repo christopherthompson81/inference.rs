@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Result, Shape, Tensor};
-use candle_nn::var_builder::{Backend, VarBuilderArgs};
+use inference_tensor::nn::var_builder::{Backend, VarBuilderArgs};
+use inference_tensor::{DType, Device, Result, Shape, Tensor};
 use safetensors::tensor::Dtype;
 
 use crate::{QuantizedSerdeType, QuantizedWeightSource, Shard, ShardedSafeTensors};
@@ -114,22 +114,22 @@ pub fn shard_range(shard: Shard, dims: &[usize]) -> Result<Option<(usize, usize,
             world_size,
         } => {
             let size = *dims.get(dim).ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "Cannot shard dimension {dim} of rank-{} tensor.",
                     dims.len()
                 ))
             })?;
             if world_size == 0 {
-                candle_core::bail!("Shard world size must be non-zero.");
+                inference_tensor::bail!("Shard world size must be non-zero.");
             }
             if rank >= world_size {
-                candle_core::bail!("Shard rank {rank} is outside world size {world_size}.");
+                inference_tensor::bail!("Shard rank {rank} is outside world size {world_size}.");
             }
             if world_size == 1 {
                 return Ok(None);
             }
             if !size.is_multiple_of(world_size) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Weight shard dim {dim} of size {size} is not divisible by world size {world_size}."
                 );
             }
@@ -138,16 +138,16 @@ pub fn shard_range(shard: Shard, dims: &[usize]) -> Result<Option<(usize, usize,
         }
         Shard::Offset { dim, offset, len } => {
             let size = *dims.get(dim).ok_or_else(|| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "Cannot shard dimension {dim} of rank-{} tensor.",
                     dims.len()
                 ))
             })?;
             let end = offset
                 .checked_add(len)
-                .ok_or_else(|| candle_core::Error::Msg("Shard range overflow.".to_string()))?;
+                .ok_or_else(|| inference_tensor::Error::Msg("Shard range overflow.".to_string()))?;
             if end > size {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Shard range {offset}..{end} exceeds dimension {dim} of size {size}."
                 );
             }
@@ -205,7 +205,7 @@ pub(crate) fn u8_scalar_with_suffix(
     suffix: &str,
 ) -> Result<u8> {
     tensor_with_suffix(tensors, prefix, suffix)
-        .ok_or_else(|| candle_core::Error::Msg(format!("Missing `{prefix}.{suffix}`")))?
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("Missing `{prefix}.{suffix}`")))?
         .scalar_u8()
 }
 
@@ -215,7 +215,7 @@ pub(crate) fn u32_scalar_with_suffix(
     suffix: &str,
 ) -> Result<u32> {
     tensor_with_suffix(tensors, prefix, suffix)
-        .ok_or_else(|| candle_core::Error::Msg(format!("Missing `{prefix}.{suffix}`")))?
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("Missing `{prefix}.{suffix}`")))?
         .scalar_u32()
 }
 
@@ -231,52 +231,52 @@ pub fn slice_blocked_data(
     len: usize,
 ) -> Result<Vec<u8>> {
     if block == 0 || block_bytes == 0 {
-        candle_core::bail!("Packed block sizes must be non-zero.");
+        inference_tensor::bail!("Packed block sizes must be non-zero.");
     }
     let Some(&last) = dims.last() else {
-        candle_core::bail!("Cannot shard scalar packed data.");
+        inference_tensor::bail!("Cannot shard scalar packed data.");
     };
     let size = *dims.get(dim).ok_or_else(|| {
-        candle_core::Error::Msg(format!(
+        inference_tensor::Error::Msg(format!(
             "Cannot shard dimension {dim} of rank-{} packed tensor.",
             dims.len()
         ))
     })?;
     let end = start
         .checked_add(len)
-        .ok_or_else(|| candle_core::Error::Msg("Packed shard range overflow.".to_string()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("Packed shard range overflow.".to_string()))?;
     if end > size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Packed shard range {start}..{end} exceeds dimension {dim} of size {size}."
         );
     }
     if !last.is_multiple_of(block) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Cannot shard block-quantized data: last dim {last} is not a multiple of block size {block}."
         );
     }
-    let row_bytes = (last / block)
-        .checked_mul(block_bytes)
-        .ok_or_else(|| candle_core::Error::Msg("Packed row byte size overflow.".to_string()))?;
+    let row_bytes = (last / block).checked_mul(block_bytes).ok_or_else(|| {
+        inference_tensor::Error::Msg("Packed row byte size overflow.".to_string())
+    })?;
     let rows = dims[..dims.len() - 1]
         .iter()
         .try_fold(1usize, |count, size| {
             count.checked_mul(*size).ok_or_else(|| {
-                candle_core::Error::Msg("Packed tensor row count overflow.".to_string())
+                inference_tensor::Error::Msg("Packed tensor row count overflow.".to_string())
             })
         })?;
-    let expected_bytes = rows
-        .checked_mul(row_bytes)
-        .ok_or_else(|| candle_core::Error::Msg("Packed tensor byte size overflow.".to_string()))?;
+    let expected_bytes = rows.checked_mul(row_bytes).ok_or_else(|| {
+        inference_tensor::Error::Msg("Packed tensor byte size overflow.".to_string())
+    })?;
     if data.len() < expected_bytes {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Packed tensor needs {expected_bytes} bytes for shape {dims:?}, but only {} are available.",
             data.len()
         );
     }
     if dim == dims.len() - 1 {
         if !start.is_multiple_of(block) || !len.is_multiple_of(block) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Sharding the packed dim requires block alignment: start {start}, len {len}, block {block}."
             );
         }
@@ -293,22 +293,22 @@ pub fn slice_blocked_data(
             .iter()
             .try_fold(1usize, |count, size| {
                 count.checked_mul(*size).ok_or_else(|| {
-                    candle_core::Error::Msg("Packed tensor inner size overflow.".to_string())
+                    inference_tensor::Error::Msg("Packed tensor inner size overflow.".to_string())
                 })
             })?;
         let chunk_bytes = inner.checked_mul(row_bytes).ok_or_else(|| {
-            candle_core::Error::Msg("Packed tensor chunk size overflow.".to_string())
+            inference_tensor::Error::Msg("Packed tensor chunk size overflow.".to_string())
         })?;
         let pre = dims[..dim].iter().try_fold(1usize, |count, size| {
             count.checked_mul(*size).ok_or_else(|| {
-                candle_core::Error::Msg("Packed tensor outer size overflow.".to_string())
+                inference_tensor::Error::Msg("Packed tensor outer size overflow.".to_string())
             })
         })?;
         let capacity = pre
             .checked_mul(len)
             .and_then(|value| value.checked_mul(chunk_bytes))
             .ok_or_else(|| {
-                candle_core::Error::Msg("Packed shard byte size overflow.".to_string())
+                inference_tensor::Error::Msg("Packed shard byte size overflow.".to_string())
             })?;
         let mut out = Vec::with_capacity(capacity);
         for p in 0..pre {

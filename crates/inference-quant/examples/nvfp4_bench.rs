@@ -1,8 +1,8 @@
 use std::{env, hint::black_box, time::Instant};
 
-use candle_core::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 use float8::F8E4M3;
 use inference_quant::cutile::{Nvfp4GemmArgs, cutile_nvfp4, cutile_nvfp4_gather};
+use inference_tensor::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 
 const DEFAULT_ITERATIONS: usize = 20;
 const WARMUP_ITERATIONS: usize = 4;
@@ -52,26 +52,26 @@ impl Options {
                 "--iterations" => {
                     options.iterations = args
                         .next()
-                        .ok_or_else(|| candle_core::Error::msg("missing iteration count"))?
+                        .ok_or_else(|| inference_tensor::Error::msg("missing iteration count"))?
                         .parse()
-                        .map_err(candle_core::Error::msg)?;
+                        .map_err(inference_tensor::Error::msg)?;
                 }
                 "--suite" => {
                     options.suite = args
                         .next()
-                        .ok_or_else(|| candle_core::Error::msg("missing suite"))?;
+                        .ok_or_else(|| inference_tensor::Error::msg("missing suite"))?;
                     if !matches!(options.suite.as_str(), "all" | "dense" | "moe" | "decode") {
-                        candle_core::bail!("suite must be all, dense, moe, or decode");
+                        inference_tensor::bail!("suite must be all, dense, moe, or decode");
                     }
                 }
                 "--f16" => options.dtype = DType::F16,
                 "--w4a16" => options.a4 = false,
                 "--graph" => options.graph = true,
-                _ => candle_core::bail!("unknown option {arg}"),
+                _ => inference_tensor::bail!("unknown option {arg}"),
             }
         }
         if options.iterations == 0 {
-            candle_core::bail!("iterations must be positive");
+            inference_tensor::bail!("iterations must be positive");
         }
         Ok(options)
     }
@@ -100,7 +100,7 @@ fn measure(
             if tracking {
                 unsafe { stream.context().enable_event_tracking() };
             }
-            return Err(candle_core::Error::msg(error.to_string()));
+            return Err(inference_tensor::Error::msg(error.to_string()));
         }
         let captured = launch();
         let graph = stream.end_capture(
@@ -112,8 +112,8 @@ fn measure(
         output = Some(captured?);
         Some(
             graph
-                .map_err(|e| candle_core::Error::msg(e.to_string()))?
-                .ok_or_else(|| candle_core::Error::msg("capture produced no graph"))?,
+                .map_err(|e| inference_tensor::Error::msg(e.to_string()))?
+                .ok_or_else(|| inference_tensor::Error::msg("capture produced no graph"))?,
         )
     } else {
         None
@@ -123,26 +123,26 @@ fn measure(
     for _ in 0..SAMPLES {
         let begin = stream
             .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
-            .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+            .map_err(|e| inference_tensor::Error::msg(e.to_string()))?;
         let start = Instant::now();
         for _ in 0..options.iterations {
             if let Some(graph) = &graph {
                 graph
                     .launch()
-                    .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+                    .map_err(|e| inference_tensor::Error::msg(e.to_string()))?;
             } else {
                 output = Some(launch()?);
             }
         }
         let end = stream
             .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
-            .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+            .map_err(|e| inference_tensor::Error::msg(e.to_string()))?;
         end.synchronize()
-            .map_err(|e| candle_core::Error::msg(e.to_string()))?;
+            .map_err(|e| inference_tensor::Error::msg(e.to_string()))?;
         gpu_samples.push(
             begin
                 .elapsed_ms(&end)
-                .map_err(|e| candle_core::Error::msg(e.to_string()))? as f64
+                .map_err(|e| inference_tensor::Error::msg(e.to_string()))? as f64
                 / options.iterations as f64,
         );
         host_samples.push(start.elapsed().as_secs_f64() * 1000.0 / options.iterations as f64);
@@ -222,7 +222,9 @@ fn run_case(
         let input_row = if per_route { route } else { route / topk };
         let expected = ACTIVATIONS[input_row % ACTIVATIONS.len()] * (ids[route] + 1) as f32;
         if row.iter().any(|&value| value != expected) {
-            candle_core::bail!("benchmark output mismatch at route {route}, expected {expected}");
+            inference_tensor::bail!(
+                "benchmark output mismatch at route {route}, expected {expected}"
+            );
         }
     }
     println!(

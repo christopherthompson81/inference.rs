@@ -8,8 +8,8 @@ use std::{
 };
 
 use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 pub use text::Qwen3_5TextModel;
 
 use crate::{
@@ -131,7 +131,9 @@ impl Qwen3_5Model {
         let input_embeds = self.text.embed_tokens(input_ids)?;
         if let Some(layout) = packed_layout {
             let position_ids = prompt_position_ids.ok_or_else(|| {
-                candle_core::Error::msg("packed Qwen3.5 prefill is missing prompt position IDs")
+                inference_tensor::Error::msg(
+                    "packed Qwen3.5 prefill is missing prompt position IDs",
+                )
             })?;
             let visual = PackedVisualEncoder::new(
                 &self.vision,
@@ -169,7 +171,7 @@ impl Qwen3_5Model {
 
         if let Some(pixel_values) = &pixel_values {
             let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
-                candle_core::bail!("pixel_values require image_grid_thw");
+                inference_tensor::bail!("pixel_values require image_grid_thw");
             };
             let mut pixel_values = pixel_values.clone();
             let ndim = pixel_values.dims().len();
@@ -206,7 +208,7 @@ impl Qwen3_5Model {
                 .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
                 .sum();
             if image_embeds.dim(0)? != total_expected {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Image embedding length {} does not match placeholder tokens {}",
                     image_embeds.dim(0)?,
                     total_expected
@@ -232,7 +234,7 @@ impl Qwen3_5Model {
 
         if let Some(pixel_values_videos) = &pixel_values_videos {
             let Some(video_grid_thw_ref) = video_grid_thw.as_ref() else {
-                candle_core::bail!("pixel_values_videos require video_grid_thw");
+                inference_tensor::bail!("pixel_values_videos require video_grid_thw");
             };
             let mut pixel_values = pixel_values_videos.clone();
             let ndim = pixel_values.dims().len();
@@ -267,7 +269,7 @@ impl Qwen3_5Model {
                 .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
                 .sum();
             if video_embeds.dim(0)? != total_expected {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Video embedding length {} does not match placeholder tokens {}",
                     video_embeds.dim(0)?,
                     total_expected
@@ -310,7 +312,7 @@ impl Qwen3_5Model {
                     .to_vec1::<u8>()?;
                 let num_visual = visual_indices_vec.len();
                 if image_deepstack.len() != video_deepstack.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "DeepStack image layers ({}) do not match video layers ({})",
                         image_deepstack.len(),
                         video_deepstack.len()
@@ -332,7 +334,7 @@ impl Qwen3_5Model {
                         }
                     }
                     if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
                             img_offset,
                             img_layer.dim(0)?,
@@ -372,7 +374,7 @@ impl Qwen3_5Model {
                 let max_seqlens = *seqlens
                     .iter()
                     .max()
-                    .ok_or(candle_core::Error::Msg("seqlens is empty".to_string()))?;
+                    .ok_or(inference_tensor::Error::Msg("seqlens is empty".to_string()))?;
                 for len in &seqlens {
                     ropeidx_attn_mask_bs.push(Tensor::new(
                         [vec![1f32; *len], vec![0f32; max_seqlens - len]].concat(),

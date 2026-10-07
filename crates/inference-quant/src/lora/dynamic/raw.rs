@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 use crate::ShardedVarBuilder;
 
@@ -48,7 +48,7 @@ mod tests {
     use crate::{
         LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, with_lora_execution,
     };
-    use candle_core::{DType, Device};
+    use inference_tensor::{DType, Device};
 
     #[test]
     fn raw_site_activity_matches_delta_execution() -> Result<()> {

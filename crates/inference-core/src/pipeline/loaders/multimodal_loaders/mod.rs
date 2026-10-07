@@ -4,9 +4,9 @@ use std::fmt::Debug;
 use std::sync::Arc;
 
 use anyhow::Result;
-use candle_core::DType;
 use inference_quant::ShardedVarBuilder;
 use inference_quant::log::once_log_debug;
+use inference_tensor::DType;
 
 use regex::Regex;
 use serde::Deserialize;

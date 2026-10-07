@@ -1,11 +1,11 @@
 use std::{collections::HashMap, iter::zip, ops::Mul, sync::Arc};
 
-use candle_core::{Module, Result, Tensor, quantized::QMatMul};
-use candle_nn::Linear;
 use either::Either;
 use inference_quant::{
     GgufMatMul, QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear,
 };
+use inference_tensor::nn::Linear;
+use inference_tensor::{Module, Result, Tensor, quantized::QMatMul};
 
 use crate::layers::MatMul;
 
@@ -44,7 +44,7 @@ impl QLoraLinear {
                 .as_ref()
                 .is_some_and(|target_modules| &cfg.target_modules != *target_modules)
             {
-                candle_core::bail!("Expected all target modules to be the same.");
+                inference_tensor::bail!("Expected all target modules to be the same.");
             }
         }
 

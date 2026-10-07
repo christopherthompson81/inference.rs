@@ -1,4 +1,4 @@
-use candle_core::{D, DType, Result, Storage, Tensor};
+use inference_tensor::{D, DType, Result, Storage, Tensor};
 use rayon::prelude::*;
 
 use super::cache::GdnLayerCache;
@@ -100,7 +100,7 @@ pub fn gated_delta_rule_recurrence(
         betaf.as_slice(),
     );
 
-    candle_core::utils::barrier_pool().execute_chunked(b_sz * n_heads, |range| {
+    inference_tensor::utils::barrier_pool().execute_chunked(b_sz * n_heads, |range| {
         let out_ptr = out_ptr as *mut f32;
         let s_ptr = s_ptr as *mut f32;
         let mut kv_mem = vec![0f32; v_dim];
@@ -186,7 +186,7 @@ fn compute_beta_g_cpu(
     dt_bias: &Tensor,
     _dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
-    let beta = candle_nn::ops::sigmoid(&b.to_dtype(DType::F32)?)?;
+    let beta = inference_tensor::nn::ops::sigmoid(&b.to_dtype(DType::F32)?)?;
     let a_f = a.to_dtype(DType::F32)?;
     let dt_bias_expanded = dt_bias.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(0)?;
     let g = a_log
@@ -265,7 +265,7 @@ fn decode_recurrence_cpu_from_convolved(
     dtype: DType,
 ) -> Result<Tensor> {
     if cache.state_layout != RecurrentStateLayout::GdnKeyMajor {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "CPU GDN recurrence requires key-major state, got {:?}",
             cache.state_layout
         );
@@ -391,7 +391,7 @@ fn cpu_f32_slice<'a>(
     name: &'static str,
 ) -> Result<&'a [f32]> {
     let Storage::Cpu(cpu) = storage else {
-        candle_core::bail!("Expected CPU storage for {name}");
+        inference_tensor::bail!("Expected CPU storage for {name}");
     };
     let data = cpu.as_slice::<f32>()?;
     Ok(&data[start_offset..])
@@ -553,7 +553,7 @@ pub fn apply_recurrence(
     }
 
     if cache.state_layout != RecurrentStateLayout::GdnKeyMajor {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "CPU GDN recurrence requires key-major state, got {:?}",
             cache.state_layout
         );
@@ -576,7 +576,7 @@ fn recurrence_metal(
     dtype: DType,
 ) -> Result<Tensor> {
     if cache.state_layout != RecurrentStateLayout::GdnKeyMajor {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Metal GDN recurrence requires key-major state, got {:?}",
             cache.state_layout
         );
@@ -666,7 +666,9 @@ fn recurrent_physical_dims(layout: RecurrentStateLayout, dims: &GdnDims) -> Resu
     match layout {
         RecurrentStateLayout::GdnKeyMajor => Ok((dims.head_k_dim, dims.head_v_dim)),
         RecurrentStateLayout::GdnValueMajor => Ok((dims.head_v_dim, dims.head_k_dim)),
-        RecurrentStateLayout::Opaque => candle_core::bail!("GDN cache has opaque state layout"),
+        RecurrentStateLayout::Opaque => {
+            inference_tensor::bail!("GDN cache has opaque state layout")
+        }
     }
 }
 
@@ -682,7 +684,7 @@ fn prepare_state_for_backend(
         || state_dims.2 != physical_dim_2
         || state_dims.3 != physical_dim_3
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GDN {:?} state shape mismatch: got {:?}, expected [B, {}, {}, {}]",
             cache.state_layout,
             cache.recurrent_state.dims(),
@@ -695,7 +697,7 @@ fn prepare_state_for_backend(
         if !crate::cuda::gdn::recurrent_state_dtype_supported(cache.recurrent_state.dtype())
             || !cache.recurrent_state.is_contiguous()
         {
-            candle_core::bail!("pooled GDN recurrent state must be contiguous f16/bf16/f32");
+            inference_tensor::bail!("pooled GDN recurrent state must be contiguous f16/bf16/f32");
         }
         return Ok(cache.recurrent_state.clone());
     }
@@ -734,7 +736,7 @@ fn finish_recurrence(
             .to_dtype(dtype),
         RecurrenceOutput::TokenMajor(output) => {
             if output.dims4()? != (batch_size, seq_len, dims.num_v_heads, dims.head_v_dim) {
-                candle_core::bail!("GDN token-major output has an incompatible shape")
+                inference_tensor::bail!("GDN token-major output has an incompatible shape")
             }
             output.to_dtype(dtype)
         }
@@ -751,7 +753,7 @@ pub fn causal_conv1d(
     let (_, seq_len, _) = x.dims3()?;
     if matches!(batch_kind, RecurrentBatchKind::Decode) {
         if seq_len != 1 {
-            candle_core::bail!("GDN decode expects a single-token query.");
+            inference_tensor::bail!("GDN decode expects a single-token query.");
         }
         causal_conv1d_update(x, conv1d_weight, dims, cache)
     } else {
@@ -823,7 +825,7 @@ fn causal_conv1d_update(
         let out = (window * weight.unsqueeze(0)?)?.sum(D::Minus1)?;
         conv_outputs.push(out);
     }
-    candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
+    inference_tensor::nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
 }
 
 fn causal_conv1d_update_cpu(
@@ -834,7 +836,7 @@ fn causal_conv1d_update_cpu(
 ) -> Result<Tensor> {
     let (batch_size, seq_len, conv_dim) = x.dims3()?;
     if seq_len != 1 {
-        candle_core::bail!("GDN CPU conv decode expects a single-token query.");
+        inference_tensor::bail!("GDN CPU conv decode expects a single-token query.");
     }
 
     let dev = x.device();
@@ -933,7 +935,7 @@ fn causal_conv1d_full(
 
     let state_len = cache.conv_state.dim(2)?;
     if state_len != dims.conv_kernel_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "GDN convolution state width is {state_len}, expected {}",
             dims.conv_kernel_size
         );
@@ -952,7 +954,7 @@ fn causal_conv1d_full(
 
     let weight = conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
-    if padded_t.device().is_cpu() && padded_t.dtype() == candle_core::DType::F32 {
+    if padded_t.device().is_cpu() && padded_t.dtype() == inference_tensor::DType::F32 {
         return causal_conv1d_full_cpu_f32(&padded_t, &weight, batch_size, conv_dim, seq_len, dims);
     }
 
@@ -962,7 +964,7 @@ fn causal_conv1d_full(
         let out = (window * weight.unsqueeze(0)?)?.sum(D::Minus1)?;
         conv_outputs.push(out);
     }
-    candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
+    inference_tensor::nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
 }
 
 // Direct depthwise causal conv + silu over the padded [b, c, k-1+seq] rows: one fused pass
@@ -985,7 +987,7 @@ fn causal_conv1d_full_cpu_f32(
     let out_ptr = out.as_mut_ptr() as usize;
     let src = src.as_slice();
 
-    candle_core::utils::barrier_pool().execute_chunked(batch_size * conv_dim, |range| {
+    inference_tensor::utils::barrier_pool().execute_chunked(batch_size * conv_dim, |range| {
         let out_ptr = out_ptr as *mut f32;
         for bc in range {
             let c = bc % conv_dim;
@@ -1009,7 +1011,7 @@ fn causal_conv1d_full_cpu_f32(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, Result as CandleResult};
+    use inference_tensor::{Device, Result as CandleResult};
 
     const ASSERT_EPS: f32 = 5e-5;
     const TEST_RMS_NORM_EPS: f64 = 1e-6;
@@ -1172,7 +1174,7 @@ mod tests {
         assert_eq!(num_v_heads, dims.num_v_heads);
         assert_eq!(head_v_dim, dims.head_v_dim);
         let recurrent = recurrent.reshape(((), dims.head_v_dim))?;
-        let gate = candle_nn::ops::silu(&z.reshape(((), dims.head_v_dim))?)?;
+        let gate = inference_tensor::nn::ops::silu(&z.reshape(((), dims.head_v_dim))?)?;
         let variance = recurrent.sqr()?.mean_keepdim(D::Minus1)?;
         let normalized = recurrent.broadcast_div(&(variance + TEST_RMS_NORM_EPS)?.sqrt()?)?;
         let normalized = normalized
@@ -1343,7 +1345,7 @@ mod tests {
                 .sum(D::Minus1)?;
             conv_outputs.push(out);
         }
-        candle_nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
+        inference_tensor::nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
     }
 
     #[test]

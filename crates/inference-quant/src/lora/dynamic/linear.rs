@@ -1,6 +1,6 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use crate::{
     DummyLayerInfo, IsqPlanParams, IsqRequest, IsqType, QuantMethod, QuantMethodConfig,
@@ -83,7 +83,7 @@ impl QuantMethod for DynamicLoraLinear {
     where
         Self: Sized,
     {
-        candle_core::bail!("DynamicLoraLinear requires an existing base linear")
+        inference_tensor::bail!("DynamicLoraLinear requires an existing base linear")
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
@@ -105,7 +105,7 @@ impl QuantMethod for DynamicLoraLinear {
         if let Some(execution) = current_lora_execution(self.runtime_id)
             && execution.site_is_active(&self.site)?
         {
-            candle_core::bail!("dynamic LoRA does not support embedding linears");
+            inference_tensor::bail!("dynamic LoRA does not support embedding linears");
         }
         self.base.embedding_forward_raw(ids)
     }
@@ -114,12 +114,12 @@ impl QuantMethod for DynamicLoraLinear {
         if let Some(execution) = current_lora_execution(self.runtime_id)
             && execution.site_is_active(&self.site)?
         {
-            candle_core::bail!("dynamic LoRA does not support gather-forward linears");
+            inference_tensor::bail!("dynamic LoRA does not support gather-forward linears");
         }
         self.base.gather_forward_raw(input, indices)
     }
 
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         if self.site_is_active() {
             None
         } else {
@@ -264,8 +264,8 @@ mod tests {
     use std::collections::HashMap;
     use std::fmt;
 
-    use candle_core::{Device, Tensor};
-    use candle_nn::Linear;
+    use inference_tensor::nn::Linear;
+    use inference_tensor::{Device, Tensor};
 
     use super::*;
     use crate::{
@@ -275,7 +275,7 @@ mod tests {
     struct ProbeLayer {
         weight: Tensor,
         afq: crate::AfqInner,
-        qtensor: Arc<candle_core::quantized::QTensor>,
+        qtensor: Arc<inference_tensor::quantized::QTensor>,
     }
 
     impl ProbeLayer {
@@ -291,9 +291,9 @@ mod tests {
                     bits: crate::AfqBits::Four,
                     group_size: crate::AfqGroupSize::Low,
                 },
-                qtensor: Arc::new(candle_core::quantized::QTensor::quantize(
+                qtensor: Arc::new(inference_tensor::quantized::QTensor::quantize(
                     &weight,
-                    candle_core::quantized::GgmlDType::Q8_0,
+                    inference_tensor::quantized::GgmlDType::Q8_0,
                 )?),
             })
         }
@@ -332,7 +332,7 @@ mod tests {
             Ok(input.clone())
         }
 
-        fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+        fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
             Some(self.qtensor.clone())
         }
 
@@ -364,11 +364,11 @@ mod tests {
         }
 
         fn plan_isq(&self, _request: &IsqRequest) -> Result<IsqPlanParams> {
-            candle_core::bail!("probe layer cannot be quantized")
+            inference_tensor::bail!("probe layer cannot be quantized")
         }
 
         fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-            candle_core::bail!("probe layer cannot apply static deltas")
+            inference_tensor::bail!("probe layer cannot apply static deltas")
         }
 
         fn apply_isq(

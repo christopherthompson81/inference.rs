@@ -1,8 +1,8 @@
 use super::normal_registry::{CanonicalGgufArchitecture, GgufDescriptor, schema_for};
 #[cfg(test)]
 use super::normal_registry::{NORMAL_MODEL_ADAPTERS, NativeModelAdapter};
-use candle_core::quantized::gguf_file::Value as GgufValue;
 use inference_nn::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, loaders::NormalLoaderType};
+use inference_tensor::quantized::gguf_file::Value as GgufValue;
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::{collections::HashMap, error::Error, fmt, num::TryFromIntError};
 

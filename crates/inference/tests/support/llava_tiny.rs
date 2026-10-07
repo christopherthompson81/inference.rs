@@ -23,7 +23,7 @@ fn record(
         &Config,
         inference_quant::ShardedVarBuilder,
         inference_nn::model::NormalLoadingMetadata,
-    ) -> candle_core::Result<()>,
+    ) -> inference_tensor::Result<()>,
 ) -> anyhow::Result<tempfile::TempDir> {
     let cfg: Config =
         serde_json::from_str(&std::fs::read_to_string(format!("{dir}/config.json"))?)?;

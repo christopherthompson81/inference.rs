@@ -5,8 +5,8 @@ use std::{
 };
 
 #[cfg(feature = "metal")]
-use candle_core::D;
-use candle_core::{
+use inference_tensor::D;
+use inference_tensor::{
     DType, Device, Result, Tensor,
     quantized::{GgmlDType, QMatMul, QTensor},
 };
@@ -56,11 +56,11 @@ use regex::Regex;
 #[cfg(feature = "cuda")]
 const FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY: usize = 89;
 
-pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
+pub(crate) fn fp8_tensor_cores(device: &inference_tensor::Device) -> bool {
     #[cfg(feature = "cuda")]
-    if let candle_core::Device::Cuda(dev) = device {
+    if let inference_tensor::Device::Cuda(dev) = device {
         // an sm_89 device running sm_86 SASS has the kernels' sm_89 bodies compiled out
-        return candle_core::cuda_backend::kernel_arch(dev.compute_cap())
+        return inference_tensor::cuda_backend::kernel_arch(dev.compute_cap())
             .is_some_and(|arch| arch >= FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY);
     }
     let _ = device;
@@ -243,7 +243,7 @@ pub use utils::softmax_with_sinks;
 pub use utils::{BitWiseOp, LeftshiftOp, NonZeroOp, log};
 pub use utils::{GluActivationType, fused_glu, fused_split_glu};
 
-use candle_nn::{Conv1d, Conv2d, Linear, Module};
+use inference_tensor::nn::{Conv1d, Conv2d, Linear, Module};
 use serde::{Deserialize, Deserializer, Serialize};
 
 #[derive(Clone, Debug)]
@@ -686,12 +686,12 @@ impl QuantizedConfig {
                 fmt.as_deref(),
                 modules_to_not_convert,
             )
-            .map_err(candle_core::Error::msg)?
+            .map_err(inference_tensor::Error::msg)?
             .resolve_checked(prefix)
-            .map_err(candle_core::Error::msg),
+            .map_err(inference_tensor::Error::msg),
             Self::CompressedTensors { config, .. } | Self::ModelOpt { config, .. } => config
                 .resolve_checked(prefix)
-                .map_err(candle_core::Error::msg),
+                .map_err(inference_tensor::Error::msg),
             _ => Ok(None),
         }
     }
@@ -700,7 +700,7 @@ impl QuantizedConfig {
         match self.resolve_checkpoint(prefix)? {
             Some(CheckpointLinearSpec::Fp8(spec)) => Ok(Some(spec)),
             Some(CheckpointLinearSpec::Nvfp4(_)) => {
-                candle_core::bail!("NVFP4 layer `{prefix}` requires the NVFP4 loader")
+                inference_tensor::bail!("NVFP4 layer `{prefix}` requires the NVFP4 loader")
             }
             None => Ok(None),
         }
@@ -1327,7 +1327,7 @@ impl IsqType {
 }
 
 impl TryFrom<IsqType> for GgmlDType {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
 
     fn try_from(value: IsqType) -> Result<Self> {
         let tp = match value {
@@ -1343,7 +1343,7 @@ impl TryFrom<IsqType> for GgmlDType {
             IsqType::Q8K => Self::Q8K,
             IsqType::Q8_0 => Self::Q8_0,
             IsqType::Q8_1 => Self::Q8_1,
-            _ => candle_core::bail!("Expected valid GGML ISQ type."),
+            _ => inference_tensor::bail!("Expected valid GGML ISQ type."),
         };
         #[cfg(feature = "cuda")]
         {
@@ -1360,7 +1360,7 @@ impl TryFrom<IsqType> for GgmlDType {
                     | GgmlDType::Q5K
                     | GgmlDType::Q6K
             ) {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "GGML ISQ type on CUDA must be one of `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `HQQ8`, `HQQ4`"
                 )
             }
@@ -1370,7 +1370,7 @@ impl TryFrom<IsqType> for GgmlDType {
 }
 
 impl TryFrom<GgmlDType> for IsqType {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
 
     fn try_from(value: GgmlDType) -> Result<Self> {
         match value {
@@ -1387,7 +1387,7 @@ impl TryFrom<GgmlDType> for IsqType {
             GgmlDType::Q8_1 => Ok(Self::Q8_1),
             GgmlDType::Q8K => Ok(Self::Q8K),
             GgmlDType::BF16 | GgmlDType::F32 | GgmlDType::F16 => {
-                candle_core::bail!("Expected valid GGML ISQ type.")
+                inference_tensor::bail!("Expected valid GGML ISQ type.")
             }
         }
     }
@@ -1478,7 +1478,7 @@ impl QuantizedSerdeType {
 }
 
 impl TryFrom<usize> for QuantizedSerdeType {
-    type Error = candle_core::Error;
+    type Error = inference_tensor::Error;
     fn try_from(value: usize) -> std::result::Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::Gguf),
@@ -1488,7 +1488,7 @@ impl TryFrom<usize> for QuantizedSerdeType {
             4 => Ok(Self::Afq),
             5 => Ok(Self::F8Q8),
             6 => Ok(Self::Mxfp4),
-            other => candle_core::bail!("QuantizedSerdeType {other} is invalid."),
+            other => inference_tensor::bail!("QuantizedSerdeType {other} is invalid."),
         }
     }
 }
@@ -1502,7 +1502,7 @@ pub trait QuantizedSerde {
         None
     }
     fn serialize_uqff(&self, _prefix: &str, ty: IsqType) -> Result<Vec<UqffTensor>> {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "`{}` does not support UQFF serialization for {ty}.",
             self.name()
         )
@@ -1516,7 +1516,7 @@ pub trait QuantizedSerde {
     where
         Self: Sized,
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "`{}` does not support UQFF deserialization.",
             std::any::type_name::<Self>()
         )
@@ -1525,7 +1525,7 @@ pub trait QuantizedSerde {
     where
         Self: Sized,
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "`{}` does not support UQFF type detection.",
             std::any::type_name::<Self>()
         )
@@ -1649,7 +1649,7 @@ fn aligned_activation_scale_rows(rows: usize, row_alignment: NonZeroUsize) -> Re
     let alignment = row_alignment.get();
     rows.checked_add(alignment - 1)
         .ok_or_else(|| {
-            candle_core::Error::msg("group-major activation scale row count overflows usize")
+            inference_tensor::Error::msg("group-major activation scale row count overflows usize")
         })
         .map(|rows| rows / alignment * alignment)
 }
@@ -1693,35 +1693,38 @@ impl QuantizedActivation {
     ) -> Result<Self> {
         let [row_block, col_block] = scheme.block_shape;
         if row_block == 0 || col_block == 0 {
-            candle_core::bail!("activation quantization block dimensions must be nonzero");
+            inference_tensor::bail!("activation quantization block dimensions must be nonzero");
         }
         if quantized.dtype() != scheme.dtype {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "quantized activation has dtype {:?}, expected {:?}",
                 quantized.dtype(),
                 scheme.dtype
             );
         }
         if scales.dtype() != DType::F32 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "quantized activation scales must be F32, got {:?}",
                 scales.dtype()
             );
         }
         if !quantized.device().same_device(scales.device()) {
-            candle_core::bail!("quantized activation values and scales are on different devices");
+            inference_tensor::bail!(
+                "quantized activation values and scales are on different devices"
+            );
         }
         let (rows, cols) = quantized.dims2()?;
-        let source_cols = source_shape
-            .last()
-            .copied()
-            .ok_or_else(|| candle_core::Error::msg("activation source shape cannot be empty"))?;
+        let source_cols = source_shape.last().copied().ok_or_else(|| {
+            inference_tensor::Error::msg("activation source shape cannot be empty")
+        })?;
         let source_rows = source_shape[..source_shape.len() - 1]
             .iter()
             .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
-            .ok_or_else(|| candle_core::Error::msg("activation source shape overflows usize"))?;
+            .ok_or_else(|| {
+                inference_tensor::Error::msg("activation source shape overflows usize")
+            })?;
         if (rows, cols) != (source_rows, source_cols) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "quantized activation shape ({rows}, {cols}) does not match source shape {:?}",
                 source_shape
             );
@@ -1730,7 +1733,7 @@ impl QuantizedActivation {
             ActivationScaleLayout::RowMajor => (rows.div_ceil(row_block), cols.div_ceil(col_block)),
             ActivationScaleLayout::GroupMajor { row_alignment } => {
                 if row_block != 1 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "group-major activation scales require a row block size of 1, got {row_block}"
                     );
                 }
@@ -1739,7 +1742,7 @@ impl QuantizedActivation {
             }
         };
         if scales.dims2()? != expected_scale_shape {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "quantized activation scale shape {:?} does not match expected {:?} for {:?}",
                 scales.dims(),
                 expected_scale_shape,
@@ -1764,28 +1767,32 @@ impl QuantizedActivation {
         global_scale: f32,
     ) -> Result<Self> {
         if source.rank() < 2 || !matches!(source.dtype(), DType::BF16 | DType::F16) {
-            candle_core::bail!("NVFP4 activation source must be rank >= 2 and BF16 or F16");
+            inference_tensor::bail!("NVFP4 activation source must be rank >= 2 and BF16 or F16");
         }
-        let columns = source.dim(candle_core::D::Minus1)?;
+        let columns = source.dim(inference_tensor::D::Minus1)?;
         if columns == 0 || !columns.is_multiple_of(NVFP4_BLOCK_SIZE) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 activation columns must be a nonzero multiple of {NVFP4_BLOCK_SIZE}"
             );
         }
         let rows = source.elem_count() / columns;
         if quantized.dtype() != DType::U8 || quantized.dims() != [rows, columns / 2] {
-            candle_core::bail!("NVFP4 activation values must be packed U8 [rows, columns / 2]");
+            inference_tensor::bail!(
+                "NVFP4 activation values must be packed U8 [rows, columns / 2]"
+            );
         }
         if scales.dtype() != DType::F8E4M3 || scales.dims() != [rows, columns / NVFP4_BLOCK_SIZE] {
-            candle_core::bail!("NVFP4 activation block scales must be E4M3 [rows, columns / 16]");
+            inference_tensor::bail!(
+                "NVFP4 activation block scales must be E4M3 [rows, columns / 16]"
+            );
         }
         if !quantized.device().same_device(source.device())
             || !scales.device().same_device(source.device())
         {
-            candle_core::bail!("NVFP4 activation tensors must be on the same device");
+            inference_tensor::bail!("NVFP4 activation tensors must be on the same device");
         }
         if !global_scale.is_finite() || global_scale <= 0.0 {
-            candle_core::bail!("NVFP4 activation global scale must be finite and positive");
+            inference_tensor::bail!("NVFP4 activation global scale must be finite and positive");
         }
         Ok(Self {
             quantized,
@@ -1838,7 +1845,7 @@ impl FusedRmsNormQuantized {
         if residual.dtype() != activation.source_dtype()
             || residual.dims() != activation.source_shape()
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "fused RMSNorm residual shape {:?} and dtype {:?} do not match activation source shape {:?} and dtype {:?}",
                 residual.dims(),
                 residual.dtype(),
@@ -1850,7 +1857,9 @@ impl FusedRmsNormQuantized {
             .device()
             .same_device(activation.quantized().device())
         {
-            candle_core::bail!("fused RMSNorm residual and activation are on different devices");
+            inference_tensor::bail!(
+                "fused RMSNorm residual and activation are on different devices"
+            );
         }
         Ok(Self {
             residual,
@@ -1912,7 +1921,7 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// Raw gather matmul without dtype casting. Implementors override this.
     /// Callers should use `gather_forward` instead.
     fn gather_forward_raw(&self, _a: &Tensor, _indices: &Tensor) -> Result<Tensor> {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} does not support `gather_forward`. Please raise an issue.",
             self.name()
         )
@@ -1923,7 +1932,7 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     }
 
     fn embedding_forward_raw(&self, _ids: &Tensor) -> Result<Tensor> {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} does not support `embedding_forward`. Please raise an issue.",
             self.name()
         )
@@ -1931,7 +1940,7 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
 
     /// Get the underlying QTensor if this is a GGUF quantized layer.
     /// Used for direct kernel access in grouped MoE prefill and CPU fused GEMV paths.
-    fn get_qtensor(&self) -> Option<Arc<candle_core::quantized::QTensor>> {
+    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
         None
     }
 
@@ -1984,11 +1993,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     }
 
     fn quantize_activation(&self, _a: &Tensor) -> Result<QuantizedActivation> {
-        candle_core::bail!("{} does not support activation quantization", self.name())
+        inference_tensor::bail!("{} does not support activation quantization", self.name())
     }
 
     fn forward_quantized(&self, _a: &QuantizedActivation) -> Result<Tensor> {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} does not support prequantized activation input",
             self.name()
         )
@@ -2052,12 +2061,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
 
     /// Begin tracking stats into an ImatrixLayerStats
     fn begin_track_stats(&self) -> Result<()> {
-        candle_core::bail!("`{}` does not support tracking stats.", self.name())
+        inference_tensor::bail!("`{}` does not support tracking stats.", self.name())
     }
 
     /// End tracking stats into an ImatrixLayerStats. Returns the computed imatrix.
     fn end_track_stats(&self) -> Result<Tensor> {
-        candle_core::bail!("`{}` does not support tracking stats.", self.name())
+        inference_tensor::bail!("`{}` does not support tracking stats.", self.name())
     }
 
     /// (forward calls, token rows) accumulated by stats tracking, if enabled.
@@ -2119,7 +2128,7 @@ pub fn try_forward_with_shared_quantized_activation(
     }
     let activation = first.quantize_activation(a)?;
     if activation.scheme() != scheme {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} produced activation quantization scheme {:?}, expected {:?}",
             first.name(),
             activation.scheme(),
@@ -2127,12 +2136,12 @@ pub fn try_forward_with_shared_quantized_activation(
         );
     }
     if activation.global_scale() != global_scale {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "shared activation quantizer returned a different calibrated global scale"
         );
     }
     if activation.scale_layout() != ActivationScaleLayout::RowMajor {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{} produced activation scale layout {:?}, expected row-major",
             first.name(),
             activation.scale_layout()
@@ -2187,7 +2196,7 @@ pub fn try_forward_fused_quantized_glu(
             .iter()
             .try_fold(1usize, |rows, dim| rows.checked_mul(*dim))
             .ok_or_else(|| {
-                candle_core::Error::msg("fused GLU activation row count overflows usize")
+                inference_tensor::Error::msg("fused GLU activation row count overflows usize")
             })?;
         if rows == 0 || columns == 0 {
             return Ok(None);
@@ -2257,7 +2266,9 @@ pub fn try_fused_quantized_ffn(
 
     if let Some(outputs) = try_forward_with_shared_quantized_activation(xs, &[gate, up])? {
         let [gate_out, up_out]: [Tensor; 2] = outputs.try_into().map_err(|_| {
-            candle_core::Error::msg("shared gate/up projection returned the wrong output count")
+            inference_tensor::Error::msg(
+                "shared gate/up projection returned the wrong output count",
+            )
         })?;
         if let Some(output) = try_forward_fused_quantized_glu(&gate_out, &up_out, down, activation)?
         {
@@ -2362,7 +2373,9 @@ pub fn try_fused_quantized_gate_up(
 
     if let Some(outputs) = try_forward_with_shared_quantized_activation(xs, &[gate, up])? {
         let [gate_out, up_out]: [Tensor; 2] = outputs.try_into().map_err(|_| {
-            candle_core::Error::msg("shared gate/up projection returned the wrong output count")
+            inference_tensor::Error::msg(
+                "shared gate/up projection returned the wrong output count",
+            )
         })?;
         return Ok(Some(fused_glu(&gate_out, &up_out, activation)?));
     }
@@ -2443,8 +2456,8 @@ pub fn try_fused_gemv_shared_lhs_cpu(
         };
         qs.push(q);
     }
-    let refs: Vec<&candle_core::quantized::QTensor> = qs.iter().map(|a| a.as_ref()).collect();
-    candle_core::quantized::QTensor::gemv_fused_shared_lhs(&refs, xs)
+    let refs: Vec<&inference_tensor::quantized::QTensor> = qs.iter().map(|a| a.as_ref()).collect();
+    inference_tensor::quantized::QTensor::gemv_fused_shared_lhs(&refs, xs)
 }
 
 #[cfg(feature = "cuda")]
@@ -2473,7 +2486,7 @@ pub fn try_fused_quantized_qkv(
 
     if let Some(outputs) = try_forward_with_shared_quantized_activation(xs, &[q, k, v])? {
         let [q_out, k_out, v_out]: [Tensor; 3] = outputs.try_into().map_err(|_| {
-            candle_core::Error::msg("shared QKV projection returned the wrong output count")
+            inference_tensor::Error::msg("shared QKV projection returned the wrong output count")
         })?;
         return Ok(Some((q_out, k_out, v_out)));
     }
@@ -2547,7 +2560,7 @@ pub fn try_fused_gate_up_metal(
     up: &dyn QuantMethod,
     activation: GluActivationType,
 ) -> Result<Option<Tensor>> {
-    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
+    use inference_tensor::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     if gate.has_bias() || up.has_bias() {
         return Ok(None);
@@ -2667,7 +2680,7 @@ pub fn try_fused_gate_up_metal(
         gi.group_size as usize,
         act_code,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     let out_t = Tensor::from((
         Storage::Metal(MetalStorage::new(
@@ -2690,7 +2703,7 @@ pub fn try_fused_qkv_metal(
     k: &dyn QuantMethod,
     v: &dyn QuantMethod,
 ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
-    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
+    use inference_tensor::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     if q.has_bias() || k.has_bias() || v.has_bias() {
         return Ok(None);
@@ -2813,7 +2826,7 @@ pub fn try_fused_qkv_metal(
         qi.bits as usize,
         qi.group_size as usize,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     let q_t = Tensor::from((
         Storage::Metal(MetalStorage::new(
@@ -2874,7 +2887,7 @@ pub(crate) fn make_dummy_or_error(
 ) -> Result<Arc<dyn QuantMethod>> {
     let missing = missing_required_tensors(vb, required);
     if missing.is_empty() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Internal error: requested DummyLayer for {context} without missing tensors"
         );
     }
@@ -2883,7 +2896,7 @@ pub(crate) fn make_dummy_or_error(
         .iter()
         .any(|name| safetensors::is_uqff_dummy_tensor(vb, name));
     if !has_uqff_placeholder {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Missing required tensor(s) for {context} at prefix `{}`: {}. Dummy layers are only allowed for tensors intentionally omitted while loading UQFF artifacts.",
             tensor_prefix(vb),
             missing.join(", ")
@@ -3096,11 +3109,11 @@ mod tests {
         }
 
         fn plan_isq(&self, _request: &IsqRequest) -> Result<IsqPlanParams> {
-            candle_core::bail!("probe cannot be quantized")
+            inference_tensor::bail!("probe cannot be quantized")
         }
 
         fn add_delta_w(&self, _delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-            candle_core::bail!("probe cannot apply deltas")
+            inference_tensor::bail!("probe cannot apply deltas")
         }
 
         fn apply_isq(
@@ -3890,7 +3903,7 @@ mod tests {
 
     #[test]
     fn uqff_source_precedes_checkpoint_quantization_for_plain_linears() -> Result<()> {
-        let dir = tempfile::tempdir().map_err(candle_core::Error::wrap)?;
+        let dir = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;
         let path = dir.path().join("source-first.uqff");
         let mut tensors = uqff_version_tensors();
         for (prefix, bias) in [("no_bias", false), ("with_bias", true)] {
@@ -3910,7 +3923,7 @@ mod tests {
             None,
             &path,
         )
-        .map_err(candle_core::Error::wrap)?;
+        .map_err(inference_tensor::Error::wrap)?;
 
         let reader = Arc::new(UqffReader::open(&[path])?);
         let config = Some(QuantizedConfig::GptqAwq {

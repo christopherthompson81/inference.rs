@@ -1,8 +1,8 @@
 //! Bridge candle's CUDA stream into a non-owning cuTile stream.
 
-use candle_core::CudaDevice;
 use core::ffi::{c_int, c_void};
 use cutile::cuda_core::{Device as CutileDevice, Stream as CutileStream};
+use inference_tensor::CudaDevice;
 use std::sync::Arc;
 
 /// Borrow candle's current stream for cuTile launches while retaining its owners.

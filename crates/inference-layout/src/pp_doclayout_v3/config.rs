@@ -1,4 +1,4 @@
-use candle_nn::Activation;
+use inference_tensor::nn::Activation;
 use serde::Deserialize;
 
 /// Paddle `inference.yml` label order; HF's `id2label` collapses several of these (e.g. both formula kinds).

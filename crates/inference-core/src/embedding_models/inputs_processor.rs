@@ -5,7 +5,7 @@ use crate::attention::flash_params::make_flash_params;
 use std::{any::Any, fmt::Debug, sync::Arc};
 
 use anyhow::Result;
-use candle_core::{Device, Tensor, WithDType};
+use inference_tensor::{Device, Tensor, WithDType};
 use tokenizers::Tokenizer;
 
 use crate::paged_attention::PagedAttentionMeta;

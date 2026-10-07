@@ -22,8 +22,8 @@ pub(crate) use plan::{
 use std::{collections::HashMap, path::PathBuf};
 
 use anyhow::{Context, Result};
-use candle_core::Tensor;
 use inference_quant::{IsqType, QuantMethod, TrackedModule};
+use inference_tensor::Tensor;
 use tracing::info;
 
 use super::isq::{UqffFullSer, UqffWriteConfig, UqffWriteRequest, write_uqff_artifacts};

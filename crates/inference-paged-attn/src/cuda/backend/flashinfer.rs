@@ -3,9 +3,9 @@ use crate::cuda::ffi::{
     gather_kv_cache_flashinfer as ffi_gather_kv_cache_flashinfer,
     reshape_and_cache_flashinfer as ffi_reshape_and_cache_flashinfer,
 };
-use candle_core::backend::BackendStorage;
-use candle_core::{DType, Result, Storage, Tensor};
 use float8::F8E4M3;
+use inference_tensor::backend::BackendStorage;
+use inference_tensor::{DType, Result, Storage, Tensor};
 
 use crate::{DEFAULT_FP8_KV_CACHE_SCALES, KvCacheScales};
 
@@ -14,7 +14,7 @@ fn dtype_code(dtype: DType, op: &str) -> Result<u32> {
         DType::F16 => Ok(0),
         DType::BF16 => Ok(1),
         DType::F32 => Ok(2),
-        other => candle_core::bail!("{op} only supports f16, bf16, f32 (got {other:?})"),
+        other => inference_tensor::bail!("{op} only supports f16, bf16, f32 (got {other:?})"),
     }
 }
 
@@ -24,9 +24,11 @@ fn cache_dtype_code(dtype: DType, op: &str) -> Result<u32> {
         DType::BF16 => Ok(1),
         DType::F32 => Ok(2),
         DType::F8E4M3 if crate::cuda::USE_FP8 => Ok(3),
-        DType::F8E4M3 => candle_core::bail!("{op} requires FP8 CUDA support"),
+        DType::F8E4M3 => inference_tensor::bail!("{op} requires FP8 CUDA support"),
         other => {
-            candle_core::bail!("{op} only supports f16, bf16, f32, f8e4m3 cache (got {other:?})")
+            inference_tensor::bail!(
+                "{op} only supports f16, bf16, f32, f8e4m3 cache (got {other:?})"
+            )
         }
     }
 }
@@ -35,7 +37,7 @@ fn validate_cache_dtype(activation_dtype: DType, cache_dtype: DType, op: &str) -
     dtype_code(activation_dtype, op)?;
     cache_dtype_code(cache_dtype, op)?;
     if cache_dtype != activation_dtype && cache_dtype != DType::F8E4M3 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{op} requires matching activation/cache dtypes or an f8e4m3 cache, got activation={activation_dtype:?}, cache={cache_dtype:?}"
         );
     }
@@ -44,14 +46,14 @@ fn validate_cache_dtype(activation_dtype: DType, cache_dtype: DType, op: &str) -
 
 fn validate_cache_scales(cache_dtype: DType, scales: KvCacheScales, op: &str) -> Result<()> {
     if !scales.k.is_finite() || scales.k <= 0.0 || !scales.v.is_finite() || scales.v <= 0.0 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{op} requires finite positive K/V cache scales, got k={} v={}",
             scales.k,
             scales.v
         );
     }
     if cache_dtype != DType::F8E4M3 && scales != DEFAULT_FP8_KV_CACHE_SCALES {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{op} only accepts non-unit cache scales for f8e4m3 caches, got cache={cache_dtype:?} k={} v={}",
             scales.k,
             scales.v
@@ -78,7 +80,7 @@ pub fn reshape_and_cache_flashinfer(
     let dtype = key.dtype();
     let cache_dtype = key_cache.dtype();
     if value.dtype() != dtype || value_cache.dtype() != cache_dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "reshape_and_cache_flashinfer expects matching K/V dtypes and matching cache dtypes, got key={:?}, value={:?}, key_cache={:?}, value_cache={:?}",
             key.dtype(),
             value.dtype(),
@@ -89,7 +91,7 @@ pub fn reshape_and_cache_flashinfer(
     validate_cache_dtype(dtype, cache_dtype, "reshape_and_cache_flashinfer")?;
     validate_cache_scales(cache_dtype, scales, "reshape_and_cache_flashinfer")?;
     if slot_mapping.dtype() != DType::I64 {
-        candle_core::bail!("reshape_and_cache_flashinfer expects i64 slot_mapping");
+        inference_tensor::bail!("reshape_and_cache_flashinfer expects i64 slot_mapping");
     }
 
     let (key_s, key_l) = key.storage_and_layout();
@@ -99,7 +101,7 @@ pub fn reshape_and_cache_flashinfer(
     let (value_tokens, value_heads, value_head_size, value_stride) =
         cache_input_layout(value_l, "value", "reshape_and_cache_flashinfer")?;
     if (value_tokens, value_heads, value_head_size) != (num_tokens, num_heads, head_size) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "reshape_and_cache_flashinfer key/value shape mismatch: {:?} vs {:?}",
             key.shape(),
             value.shape()
@@ -107,17 +109,17 @@ pub fn reshape_and_cache_flashinfer(
     }
     let (_, cache_heads, block_size, cache_head_size) = key_cache.dims4()?;
     if value_cache.dims4()? != key_cache.dims4()? {
-        candle_core::bail!("reshape_and_cache_flashinfer cache shape mismatch");
+        inference_tensor::bail!("reshape_and_cache_flashinfer cache shape mismatch");
     }
     if cache_heads != num_heads || cache_head_size != head_size {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "reshape_and_cache_flashinfer cache shape {:?} incompatible with key {:?}",
             key_cache.shape(),
             key.shape()
         );
     }
     if slot_mapping.dims1()? != num_tokens {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "reshape_and_cache_flashinfer slot_mapping length mismatch: expected {num_tokens}, got {}",
             slot_mapping.dims1()?
         );
@@ -129,23 +131,23 @@ pub fn reshape_and_cache_flashinfer(
 
     let key_s = match &*key_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("key must be a cuda tensor"),
+        _ => inference_tensor::bail!("key must be a cuda tensor"),
     };
     let value_s = match &*value_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("value must be a cuda tensor"),
+        _ => inference_tensor::bail!("value must be a cuda tensor"),
     };
     let key_cache_s = match &*key_cache_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("key_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("key_cache must be a cuda tensor"),
     };
     let value_cache_s = match &*value_cache_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("value_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("value_cache must be a cuda tensor"),
     };
     let slot_s = match &*slot_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("slot_mapping must be a cuda tensor"),
+        _ => inference_tensor::bail!("slot_mapping must be a cuda tensor"),
     };
 
     let (key_ptr, _key_guard) = match dtype {
@@ -217,8 +219,8 @@ pub fn reshape_and_cache_flashinfer(
             num_heads as i32,
             head_size as i32,
             block_size as i32,
-            i32::try_from(key_stride).map_err(candle_core::Error::wrap)?,
-            i32::try_from(value_stride).map_err(candle_core::Error::wrap)?,
+            i32::try_from(key_stride).map_err(inference_tensor::Error::wrap)?,
+            i32::try_from(value_stride).map_err(inference_tensor::Error::wrap)?,
             scales.k,
             scales.v,
             dtype_code(dtype, "reshape_and_cache_flashinfer")?,
@@ -241,14 +243,14 @@ pub fn gather_kv_cache_flashinfer(
 ) -> Result<(Tensor, Tensor)> {
     let cache_dtype = key_cache.dtype();
     if value_cache.dtype() != cache_dtype {
-        candle_core::bail!("gather_kv_cache_flashinfer expects matching cache dtypes");
+        inference_tensor::bail!("gather_kv_cache_flashinfer expects matching cache dtypes");
     }
     validate_cache_dtype(out_dtype, cache_dtype, "gather_kv_cache_flashinfer")?;
     validate_cache_scales(cache_dtype, scales, "gather_kv_cache_flashinfer")?;
 
     let (_, num_kv_heads, block_size, head_size) = key_cache.dims4()?;
     if value_cache.dims4()? != key_cache.dims4()? {
-        candle_core::bail!("gather_kv_cache_flashinfer cache shape mismatch");
+        inference_tensor::bail!("gather_kv_cache_flashinfer cache shape mismatch");
     }
 
     let block_table = block_table.contiguous()?;
@@ -256,17 +258,17 @@ pub fn gather_kv_cache_flashinfer(
     if !matches!(block_table.dtype(), DType::I32 | DType::U32)
         || !matches!(cu_seq_lens.dtype(), DType::I32 | DType::U32)
     {
-        candle_core::bail!("gather_kv_cache_flashinfer expects i32/u32 metadata");
+        inference_tensor::bail!("gather_kv_cache_flashinfer expects i32/u32 metadata");
     }
 
     let cu_len = cu_seq_lens.dims1()?;
-    let num_seqs = cu_len
-        .checked_sub(1)
-        .ok_or_else(|| candle_core::Error::msg("cu_seq_lens must contain an initial offset"))?;
+    let num_seqs = cu_len.checked_sub(1).ok_or_else(|| {
+        inference_tensor::Error::msg("cu_seq_lens must contain an initial offset")
+    })?;
     let num_tokens_i32 = i32::try_from(num_tokens)
-        .map_err(|_| candle_core::Error::msg("num_tokens exceeds the kernel i32 limit"))?;
+        .map_err(|_| inference_tensor::Error::msg("num_tokens exceeds the kernel i32 limit"))?;
     let num_seqs_i32 = i32::try_from(num_seqs)
-        .map_err(|_| candle_core::Error::msg("num_seqs exceeds the kernel i32 limit"))?;
+        .map_err(|_| inference_tensor::Error::msg("num_seqs exceeds the kernel i32 limit"))?;
 
     let k_out = unsafe {
         Tensor::empty(
@@ -295,27 +297,27 @@ pub fn gather_kv_cache_flashinfer(
 
     let kc_s = match &*kc_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("key_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("key_cache must be a cuda tensor"),
     };
     let vc_s = match &*vc_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("value_cache must be a cuda tensor"),
+        _ => inference_tensor::bail!("value_cache must be a cuda tensor"),
     };
     let ko_s = match &*ko_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("k_out must be a cuda tensor"),
+        _ => inference_tensor::bail!("k_out must be a cuda tensor"),
     };
     let vo_s = match &*vo_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("v_out must be a cuda tensor"),
+        _ => inference_tensor::bail!("v_out must be a cuda tensor"),
     };
     let bt_s = match &*bt_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("block_table must be a cuda tensor"),
+        _ => inference_tensor::bail!("block_table must be a cuda tensor"),
     };
     let cu_s = match &*cu_s {
         Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cu_seq_lens must be a cuda tensor"),
+        _ => inference_tensor::bail!("cu_seq_lens must be a cuda tensor"),
     };
 
     let (kc_ptr, _kc_guard) = match cache_dtype {
@@ -384,7 +386,7 @@ pub fn gather_kv_cache_flashinfer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     const BLOCK_SIZE: usize = 8;
     const HEAD_SIZE: usize = 64;

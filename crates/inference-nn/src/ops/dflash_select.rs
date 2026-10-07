@@ -8,9 +8,9 @@ pub fn cuda_dflash_greedy_select(
     successor_codebook: &Tensor,
     anchors: &Tensor,
 ) -> Result<Tensor> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     const OP: &str = "cuda_dflash_greedy_select";
@@ -18,37 +18,37 @@ pub fn cuda_dflash_greedy_select(
     let k = topk.k;
 
     let [rows, packed_width] = packed_topk.dims() else {
-        candle_core::bail!("{OP} expected packed top-k with shape [batch * positions, 2 * k]");
+        inference_tensor::bail!("{OP} expected packed top-k with shape [batch * positions, 2 * k]");
     };
     let [hidden_rows, rank] = projected_hidden.dims() else {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected projected hidden states with shape [batch * positions, rank]"
         );
     };
     let [predecessor_vocab, predecessor_rank] = predecessor_codebook.dims() else {
-        candle_core::bail!("{OP} expected predecessor codebook with shape [vocab, rank]");
+        inference_tensor::bail!("{OP} expected predecessor codebook with shape [vocab, rank]");
     };
     let [successor_vocab, successor_rank] = successor_codebook.dims() else {
-        candle_core::bail!("{OP} expected successor codebook with shape [vocab, rank]");
+        inference_tensor::bail!("{OP} expected successor codebook with shape [vocab, rank]");
     };
     let [batch] = anchors.dims() else {
-        candle_core::bail!("{OP} expected anchors with shape [batch]");
+        inference_tensor::bail!("{OP} expected anchors with shape [batch]");
     };
     let (rows, packed_width, hidden_rows, rank) = (*rows, *packed_width, *hidden_rows, *rank);
     let (predecessor_vocab, predecessor_rank) = (*predecessor_vocab, *predecessor_rank);
     let (successor_vocab, successor_rank, batch) = (*successor_vocab, *successor_rank, *batch);
 
     if rows == 0 || batch == 0 || rank == 0 || predecessor_vocab == 0 {
-        candle_core::bail!("{OP} does not support empty inputs");
+        inference_tensor::bail!("{OP} does not support empty inputs");
     }
     if rows % batch != 0 {
-        candle_core::bail!("{OP} row count {rows} is not divisible by batch size {batch}");
+        inference_tensor::bail!("{OP} row count {rows} is not divisible by batch size {batch}");
     }
     if hidden_rows != rows {
-        candle_core::bail!("{OP} expected {rows} projected hidden rows, got {hidden_rows}");
+        inference_tensor::bail!("{OP} expected {rows} projected hidden rows, got {hidden_rows}");
     }
     if predecessor_vocab != successor_vocab || predecessor_rank != rank || successor_rank != rank {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} codebook shapes {:?} and {:?} do not match hidden rank {rank}",
             predecessor_codebook.dims(),
             successor_codebook.dims()
@@ -56,25 +56,25 @@ pub fn cuda_dflash_greedy_select(
     }
     let expected_packed_width = k
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed width overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} packed width overflow")))?;
     if packed_width != expected_packed_width {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected rank-only packed top-k width {expected_packed_width}, got {packed_width}"
         );
     }
     if k == 0 || k > CUDA_DFLASH_SELECTOR_MAX_K {
-        candle_core::bail!("{OP} k={k} must be in [1, {CUDA_DFLASH_SELECTOR_MAX_K}]");
+        inference_tensor::bail!("{OP} k={k} must be in [1, {CUDA_DFLASH_SELECTOR_MAX_K}]");
     }
     if predecessor_vocab > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} vocabulary size {predecessor_vocab} cannot be represented exactly by packed F32 indices"
         );
     }
     if packed_topk.dtype() != DType::F32 {
-        candle_core::bail!("{OP} requires F32 packed top-k values");
+        inference_tensor::bail!("{OP} requires F32 packed top-k values");
     }
     if anchors.dtype() != DType::U32 {
-        candle_core::bail!("{OP} requires U32 anchors");
+        inference_tensor::bail!("{OP} requires U32 anchors");
     }
     for (name, tensor) in [
         ("projected hidden states", projected_hidden),
@@ -82,7 +82,7 @@ pub fn cuda_dflash_greedy_select(
         ("successor codebook", successor_codebook),
     ] {
         if !matches!(tensor.dtype(), DType::BF16 | DType::F32) {
-            candle_core::bail!("{OP} requires BF16 or F32 {name}");
+            inference_tensor::bail!("{OP} requires BF16 or F32 {name}");
         }
     }
     for tensor in [
@@ -93,53 +93,53 @@ pub fn cuda_dflash_greedy_select(
         anchors,
     ] {
         if !tensor.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: OP });
+            return Err(inference_tensor::Error::RequiresContiguous { op: OP });
         }
         if !packed_topk.device().same_device(tensor.device()) {
-            candle_core::bail!("{OP} tensors must be on the same CUDA device");
+            inference_tensor::bail!("{OP} tensors must be on the same CUDA device");
         }
     }
     let positions = rows / batch;
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let positions_i32 = i32::try_from(positions).map_err(candle_core::Error::wrap)?;
-    let rank_i32 = i32::try_from(rank).map_err(candle_core::Error::wrap)?;
-    let vocab_i32 = i32::try_from(predecessor_vocab).map_err(candle_core::Error::wrap)?;
-    let k_i32 = i32::try_from(k).map_err(candle_core::Error::wrap)?;
-    let packed_width_i32 = i32::try_from(packed_width).map_err(candle_core::Error::wrap)?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let positions_i32 = i32::try_from(positions).map_err(inference_tensor::Error::wrap)?;
+    let rank_i32 = i32::try_from(rank).map_err(inference_tensor::Error::wrap)?;
+    let vocab_i32 = i32::try_from(predecessor_vocab).map_err(inference_tensor::Error::wrap)?;
+    let k_i32 = i32::try_from(k).map_err(inference_tensor::Error::wrap)?;
+    let packed_width_i32 = i32::try_from(packed_width).map_err(inference_tensor::Error::wrap)?;
 
     let (packed_storage, packed_layout) = packed_topk.storage_and_layout();
     let packed_storage = match &*packed_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (hidden_storage, hidden_layout) = projected_hidden.storage_and_layout();
     let hidden_storage = match &*hidden_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (predecessor_storage, predecessor_layout) = predecessor_codebook.storage_and_layout();
     let predecessor_storage = match &*predecessor_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (successor_storage, successor_layout) = successor_codebook.storage_and_layout();
     let successor_storage = match &*successor_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (anchor_storage, anchor_layout) = anchors.storage_and_layout();
     let anchor_storage = match &*anchor_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
 
     let dev = packed_storage.device();
     let stream = dev.cuda_stream();
     let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
-        candle_core::bail!("{OP} packed top-k dtype mismatch");
+        inference_tensor::bail!("{OP} packed top-k dtype mismatch");
     };
     let CudaStorageSlice::U32(anchor_slice) = &anchor_storage.slice else {
-        candle_core::bail!("{OP} anchor dtype mismatch");
+        inference_tensor::bail!("{OP} anchor dtype mismatch");
     };
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
     let packed_ptr = unsafe { (packed_ptr as *const f32).add(packed_layout.start_offset()) };
@@ -162,7 +162,7 @@ pub fn cuda_dflash_greedy_select(
                     };
                     (ptr, CUDA_DFLASH_SELECTOR_BF16, guard)
                 }
-                _ => candle_core::bail!("{OP} {} dtype mismatch", $name),
+                _ => inference_tensor::bail!("{OP} {} dtype mismatch", $name),
             }
         }};
     }
@@ -208,7 +208,7 @@ pub fn cuda_dflash_greedy_select(
     drop(selected_guard);
 
     Ok(Tensor::from((
-        candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+        inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
             slice: CudaStorageSlice::U32(selected),
             device: dev.clone(),
         }),
@@ -220,9 +220,9 @@ pub fn cuda_dflash_greedy_select(
 pub fn cuda_dflash_sample_select(
     input: DFlashSelectorSampleInput<'_>,
 ) -> Result<DFlashSelectorSampleOutput> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::CudaStorageSlice;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     const OP: &str = "cuda_dflash_sample_select";
@@ -239,37 +239,37 @@ pub fn cuda_dflash_sample_select(
     let k = topk.k;
 
     let [rows, packed_width] = packed_topk.dims() else {
-        candle_core::bail!("{OP} expected packed top-k with shape [batch * positions, 2 * k]");
+        inference_tensor::bail!("{OP} expected packed top-k with shape [batch * positions, 2 * k]");
     };
     let [hidden_rows, rank] = projected_hidden.dims() else {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected projected hidden states with shape [batch * positions, rank]"
         );
     };
     let [predecessor_vocab, predecessor_rank] = predecessor_codebook.dims() else {
-        candle_core::bail!("{OP} expected predecessor codebook with shape [vocab, rank]");
+        inference_tensor::bail!("{OP} expected predecessor codebook with shape [vocab, rank]");
     };
     let [successor_vocab, successor_rank] = successor_codebook.dims() else {
-        candle_core::bail!("{OP} expected successor codebook with shape [vocab, rank]");
+        inference_tensor::bail!("{OP} expected successor codebook with shape [vocab, rank]");
     };
     let [batch] = anchors.dims() else {
-        candle_core::bail!("{OP} expected anchors with shape [batch]");
+        inference_tensor::bail!("{OP} expected anchors with shape [batch]");
     };
     let (rows, packed_width, hidden_rows, rank) = (*rows, *packed_width, *hidden_rows, *rank);
     let (predecessor_vocab, predecessor_rank) = (*predecessor_vocab, *predecessor_rank);
     let (successor_vocab, successor_rank, batch) = (*successor_vocab, *successor_rank, *batch);
 
     if rows == 0 || batch == 0 || rank == 0 || predecessor_vocab == 0 {
-        candle_core::bail!("{OP} does not support empty inputs");
+        inference_tensor::bail!("{OP} does not support empty inputs");
     }
     if rows % batch != 0 {
-        candle_core::bail!("{OP} row count {rows} is not divisible by batch size {batch}");
+        inference_tensor::bail!("{OP} row count {rows} is not divisible by batch size {batch}");
     }
     if hidden_rows != rows {
-        candle_core::bail!("{OP} expected {rows} projected hidden rows, got {hidden_rows}");
+        inference_tensor::bail!("{OP} expected {rows} projected hidden rows, got {hidden_rows}");
     }
     if predecessor_vocab != successor_vocab || predecessor_rank != rank || successor_rank != rank {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} codebook shapes {:?} and {:?} do not match hidden rank {rank}",
             predecessor_codebook.dims(),
             successor_codebook.dims()
@@ -277,29 +277,29 @@ pub fn cuda_dflash_sample_select(
     }
     let expected_packed_width = k
         .checked_mul(2)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} packed width overflow")))?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} packed width overflow")))?;
     if packed_width != expected_packed_width {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected rank-only packed top-k width {expected_packed_width}, got {packed_width}"
         );
     }
     if k == 0 || k > CUDA_DFLASH_SELECTOR_MAX_K {
-        candle_core::bail!("{OP} k={k} must be in [1, {CUDA_DFLASH_SELECTOR_MAX_K}]");
+        inference_tensor::bail!("{OP} k={k} must be in [1, {CUDA_DFLASH_SELECTOR_MAX_K}]");
     }
     if predecessor_vocab > CUDA_TOPK_MAX_EXACT_PACKED_VOCAB {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} vocabulary size {predecessor_vocab} cannot be represented exactly by packed F32 indices"
         );
     }
     let positions = rows / batch;
     if inverse_temperatures.dims() != [batch] {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected inverse temperatures with shape [{batch}], got {:?}",
             inverse_temperatures.dims()
         );
     }
     if uniforms.dims() != [batch, positions] {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "{OP} expected uniforms with shape [{batch}, {positions}], got {:?}",
             uniforms.dims()
         );
@@ -308,10 +308,12 @@ pub fn cuda_dflash_sample_select(
         || inverse_temperatures.dtype() != DType::F32
         || uniforms.dtype() != DType::F32
     {
-        candle_core::bail!("{OP} requires F32 packed top-k, inverse temperatures, and uniforms");
+        inference_tensor::bail!(
+            "{OP} requires F32 packed top-k, inverse temperatures, and uniforms"
+        );
     }
     if anchors.dtype() != DType::U32 {
-        candle_core::bail!("{OP} requires U32 anchors");
+        inference_tensor::bail!("{OP} requires U32 anchors");
     }
     for (name, tensor) in [
         ("projected hidden states", projected_hidden),
@@ -319,7 +321,7 @@ pub fn cuda_dflash_sample_select(
         ("successor codebook", successor_codebook),
     ] {
         if !matches!(tensor.dtype(), DType::BF16 | DType::F32) {
-            candle_core::bail!("{OP} requires BF16 or F32 {name}");
+            inference_tensor::bail!("{OP} requires BF16 or F32 {name}");
         }
     }
     for tensor in [
@@ -332,72 +334,72 @@ pub fn cuda_dflash_sample_select(
         uniforms,
     ] {
         if !tensor.is_contiguous() {
-            return Err(candle_core::Error::RequiresContiguous { op: OP });
+            return Err(inference_tensor::Error::RequiresContiguous { op: OP });
         }
         if !packed_topk.device().same_device(tensor.device()) {
-            candle_core::bail!("{OP} tensors must be on the same CUDA device");
+            inference_tensor::bail!("{OP} tensors must be on the same CUDA device");
         }
     }
 
     let sparse_elems = rows
         .checked_mul(k)
-        .ok_or_else(|| candle_core::Error::Msg(format!("{OP} output overflow")))?;
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let positions_i32 = i32::try_from(positions).map_err(candle_core::Error::wrap)?;
-    let rank_i32 = i32::try_from(rank).map_err(candle_core::Error::wrap)?;
-    let vocab_i32 = i32::try_from(predecessor_vocab).map_err(candle_core::Error::wrap)?;
-    let k_i32 = i32::try_from(k).map_err(candle_core::Error::wrap)?;
-    let packed_width_i32 = i32::try_from(packed_width).map_err(candle_core::Error::wrap)?;
+        .ok_or_else(|| inference_tensor::Error::Msg(format!("{OP} output overflow")))?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let positions_i32 = i32::try_from(positions).map_err(inference_tensor::Error::wrap)?;
+    let rank_i32 = i32::try_from(rank).map_err(inference_tensor::Error::wrap)?;
+    let vocab_i32 = i32::try_from(predecessor_vocab).map_err(inference_tensor::Error::wrap)?;
+    let k_i32 = i32::try_from(k).map_err(inference_tensor::Error::wrap)?;
+    let packed_width_i32 = i32::try_from(packed_width).map_err(inference_tensor::Error::wrap)?;
 
     let (packed_storage, packed_layout) = packed_topk.storage_and_layout();
     let packed_storage = match &*packed_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (hidden_storage, hidden_layout) = projected_hidden.storage_and_layout();
     let hidden_storage = match &*hidden_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (predecessor_storage, predecessor_layout) = predecessor_codebook.storage_and_layout();
     let predecessor_storage = match &*predecessor_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (successor_storage, successor_layout) = successor_codebook.storage_and_layout();
     let successor_storage = match &*successor_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (anchor_storage, anchor_layout) = anchors.storage_and_layout();
     let anchor_storage = match &*anchor_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (temperature_storage, temperature_layout) = inverse_temperatures.storage_and_layout();
     let temperature_storage = match &*temperature_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
     let (uniform_storage, uniform_layout) = uniforms.storage_and_layout();
     let uniform_storage = match &*uniform_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("{OP} requires CUDA tensors"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("{OP} requires CUDA tensors"),
     };
 
     let dev = packed_storage.device();
     let stream = dev.cuda_stream();
     let CudaStorageSlice::F32(packed_slice) = &packed_storage.slice else {
-        candle_core::bail!("{OP} packed top-k dtype mismatch");
+        inference_tensor::bail!("{OP} packed top-k dtype mismatch");
     };
     let CudaStorageSlice::U32(anchor_slice) = &anchor_storage.slice else {
-        candle_core::bail!("{OP} anchor dtype mismatch");
+        inference_tensor::bail!("{OP} anchor dtype mismatch");
     };
     let CudaStorageSlice::F32(temperature_slice) = &temperature_storage.slice else {
-        candle_core::bail!("{OP} inverse temperature dtype mismatch");
+        inference_tensor::bail!("{OP} inverse temperature dtype mismatch");
     };
     let CudaStorageSlice::F32(uniform_slice) = &uniform_storage.slice else {
-        candle_core::bail!("{OP} uniform dtype mismatch");
+        inference_tensor::bail!("{OP} uniform dtype mismatch");
     };
     let (packed_ptr, packed_guard) = packed_slice.device_ptr(&stream);
     let packed_ptr = unsafe { (packed_ptr as *const f32).add(packed_layout.start_offset()) };
@@ -425,7 +427,7 @@ pub fn cuda_dflash_sample_select(
                     };
                     (ptr, CUDA_DFLASH_SELECTOR_BF16, guard)
                 }
-                _ => candle_core::bail!("{OP} {} dtype mismatch", $name),
+                _ => inference_tensor::bail!("{OP} {} dtype mismatch", $name),
             }
         }};
     }
@@ -483,21 +485,21 @@ pub fn cuda_dflash_sample_select(
     drop(candidate_probs_guard);
 
     let tokens = Tensor::from((
-        candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+        inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
             slice: CudaStorageSlice::U32(selected),
             device: dev.clone(),
         }),
         Shape::from_dims(&[batch, positions]),
     ));
     let candidate_ids = Tensor::from((
-        candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+        inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
             slice: CudaStorageSlice::U32(candidate_ids),
             device: dev.clone(),
         }),
         Shape::from_dims(&[batch, positions, k]),
     ));
     let candidate_probs = Tensor::from((
-        candle_core::Storage::Cuda(candle_core::cuda_backend::CudaStorage {
+        inference_tensor::Storage::Cuda(inference_tensor::cuda_backend::CudaStorage {
             slice: CudaStorageSlice::F32(candidate_probs),
             device: dev.clone(),
         }),

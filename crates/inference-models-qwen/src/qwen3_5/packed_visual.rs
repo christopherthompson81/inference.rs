@@ -1,6 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Result, Tensor};
+use inference_tensor::{DType, Result, Tensor};
 
 use crate::{
     paged_attention::{
@@ -80,12 +80,12 @@ impl<'a> PackedVisualEncoder<'a> {
     ) -> Result<()> {
         let Some(pixel_values) = pixel_values else {
             if grid_thw.is_some() || !hashes.is_empty() {
-                candle_core::bail!("packed Qwen {kind:?} metadata is missing pixel values");
+                inference_tensor::bail!("packed Qwen {kind:?} metadata is missing pixel values");
             }
             return Ok(());
         };
         let grid_thw = grid_thw.ok_or_else(|| {
-            candle_core::Error::msg(format!(
+            inference_tensor::Error::msg(format!(
                 "packed Qwen {kind:?} pixel values are missing grid metadata"
             ))
         })?;
@@ -115,13 +115,13 @@ fn encoder_output_count(encoder_outputs: &MultimodalEncoderOutputs) -> Result<us
     };
     let count = first.len();
     if count == 0 {
-        candle_core::bail!("packed Qwen encoder item has no outputs");
+        inference_tensor::bail!("packed Qwen encoder item has no outputs");
     }
     if encoder_outputs
         .values()
         .any(|outputs| outputs.len() != count)
     {
-        candle_core::bail!("packed Qwen media items have different DeepStack output counts");
+        inference_tensor::bail!("packed Qwen media items have different DeepStack output counts");
     }
     Ok(count)
 }
@@ -145,7 +145,7 @@ fn apply_packed_visual_layout(
     let indices = Tensor::from_vec(
         destinations
             .iter()
-            .map(|position| u32::try_from(*position).map_err(candle_core::Error::wrap))
+            .map(|position| u32::try_from(*position).map_err(inference_tensor::Error::wrap))
             .collect::<Result<Vec<_>>>()?,
         destinations.len(),
         input_embeds.device(),
@@ -186,7 +186,7 @@ mod tests {
             RequestMultimodalLayout,
         },
     };
-    use candle_core::Device;
+    use inference_tensor::Device;
 
     fn item(
         kind: MultimodalKind,

@@ -1,5 +1,5 @@
-use candle_core::{Device, Result};
 use indexmap::IndexMap;
+use inference_tensor::{Device, Result};
 use itertools::Itertools;
 use std::{collections::HashSet, sync::Arc};
 use tracing::info;
@@ -891,7 +891,7 @@ impl PrefixCacheManagerV2 {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::{DType, Device, Tensor};
     use std::{
         collections::HashSet,
         sync::{
@@ -914,14 +914,14 @@ mod tests {
         paged_attention::block_pool::BlockPool,
     };
 
-    fn make_cache_tensor(len: usize) -> candle_core::Result<Tensor> {
+    fn make_cache_tensor(len: usize) -> inference_tensor::Result<Tensor> {
         Tensor::zeros((1, 1, len, 1), DType::F32, &Device::Cpu)
     }
 
     fn make_rotating_kv_cache(
         logical_len: usize,
         sliding_window: usize,
-    ) -> candle_core::Result<KvCache> {
+    ) -> inference_tensor::Result<KvCache> {
         let src = make_cache_tensor(logical_len)?;
         let mut k = RotatingCache::new(2, sliding_window, sliding_window);
         let mut v = RotatingCache::new(2, sliding_window, sliding_window);
@@ -930,7 +930,7 @@ mod tests {
         Ok(KvCache::Rotating { k, v })
     }
 
-    fn make_normal_kv_cache(logical_len: usize) -> candle_core::Result<KvCache> {
+    fn make_normal_kv_cache(logical_len: usize) -> inference_tensor::Result<KvCache> {
         let src = make_cache_tensor(logical_len)?;
         let mut k = SingleCache::new(2, logical_len, logical_len);
         let mut v = SingleCache::new(2, logical_len, logical_len);
@@ -939,7 +939,7 @@ mod tests {
         Ok(KvCache::Normal { k, v })
     }
 
-    fn make_recurrent_snapshot() -> candle_core::Result<RecurrentStateSnapshot> {
+    fn make_recurrent_snapshot() -> inference_tensor::Result<RecurrentStateSnapshot> {
         Ok(RecurrentStateSnapshot {
             conv_state: Tensor::zeros((1, 1, 1), DType::F32, &Device::Cpu)?,
             recurrent_state: Tensor::zeros((1, 1, 1), DType::F32, &Device::Cpu)?,
@@ -979,7 +979,8 @@ mod tests {
     }
 
     #[test]
-    fn advancing_paged_recurrent_sequence_replaces_its_checkpoint() -> candle_core::Result<()> {
+    fn advancing_paged_recurrent_sequence_replaces_its_checkpoint() -> inference_tensor::Result<()>
+    {
         let mut prefix_cacher = PrefixCacheManagerV2::new(2, false, true);
         let hashes = block_hashes(10, 8);
         let owner = *hashes.last().unwrap();
@@ -1007,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn paged_recurrent_capacity_tracks_independent_sequences() -> candle_core::Result<()> {
+    fn paged_recurrent_capacity_tracks_independent_sequences() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(2, false, true);
         let hashes_a = block_hashes(10, 3);
         let hashes_b = block_hashes(20, 3);
@@ -1063,7 +1064,7 @@ mod tests {
     }
 
     #[test]
-    fn retained_blocks_follow_shared_owner_replacement_and_clear() -> candle_core::Result<()> {
+    fn retained_blocks_follow_shared_owner_replacement_and_clear() -> inference_tensor::Result<()> {
         let pool = BlockPool::new(8, true, 1);
         let retention = pool.prefix_block_retention();
         let mut prefix_cacher = PrefixCacheManagerV2::new(2, false, true);
@@ -1117,7 +1118,8 @@ mod tests {
     }
 
     #[test]
-    fn allocation_pressure_invalidates_paired_recurrent_checkpoint() -> candle_core::Result<()> {
+    fn allocation_pressure_invalidates_paired_recurrent_checkpoint() -> inference_tensor::Result<()>
+    {
         let mut pool = BlockPool::new(4, true, 1);
         let retention = pool.prefix_block_retention();
         let hashes = block_hashes(10, 2);
@@ -1155,7 +1157,7 @@ mod tests {
     }
 
     #[test]
-    fn paged_recurrent_owner_metrics_track_logical_occupancy() -> candle_core::Result<()> {
+    fn paged_recurrent_owner_metrics_track_logical_occupancy() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(2, false, true);
         let hashes_a = compute_block_hashes(&[10, 11, 12, 13], 1, &[], &[]);
         let hashes_b = compute_block_hashes(&[10, 11, 20, 21], 1, &[], &[]);
@@ -1216,7 +1218,7 @@ mod tests {
     }
 
     #[test]
-    fn identical_paged_recurrent_prefixes_share_one_entry() -> candle_core::Result<()> {
+    fn identical_paged_recurrent_prefixes_share_one_entry() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(2, false, true);
         let hashes_a = compute_block_hashes(&[10, 11, 12, 13, 14, 15], 1, &[], &[]);
         let hashes_b = compute_block_hashes(&[10, 11, 20, 21, 22, 23], 1, &[], &[]);
@@ -1285,7 +1287,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_checkpoint_lookup_promotes_only_the_current_owner() -> candle_core::Result<()> {
+    fn shared_checkpoint_lookup_promotes_only_the_current_owner() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(2, false, true);
         let hashes_a = compute_block_hashes(&[10, 11, 12, 13], 1, &[], &[]);
         let hashes_b = compute_block_hashes(&[10, 11, 20, 21], 1, &[], &[]);
@@ -1344,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn zero_capacity_keeps_no_paged_recurrent_snapshots() -> candle_core::Result<()> {
+    fn zero_capacity_keeps_no_paged_recurrent_snapshots() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(0, false, true);
         let hashes = block_hashes(10, 2);
         let owner = *hashes.last().unwrap();
@@ -1369,7 +1371,8 @@ mod tests {
     }
 
     #[test]
-    fn auxiliary_checkpoint_bytes_and_lifetime_follow_lru_entries() -> candle_core::Result<()> {
+    fn auxiliary_checkpoint_bytes_and_lifetime_follow_lru_entries() -> inference_tensor::Result<()>
+    {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, true);
         let hashes_a = block_hashes(10, 2);
         let hashes_b = block_hashes(20, 2);
@@ -1423,7 +1426,7 @@ mod tests {
     }
 
     #[test]
-    fn exact_repeat_recomputes_only_the_last_token() -> candle_core::Result<()> {
+    fn exact_repeat_recomputes_only_the_last_token() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3, 4, 5].into(),
@@ -1454,7 +1457,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_generations_do_not_cross_hit() -> candle_core::Result<()> {
+    fn adapter_generations_do_not_cross_hit() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         let generation_a = generation(1);
         let generation_b = generation(2);
@@ -1491,7 +1494,7 @@ mod tests {
     }
 
     #[test]
-    fn skips_rolled_over_rotating_candidate_that_cannot_rewind() -> candle_core::Result<()> {
+    fn skips_rolled_over_rotating_candidate_that_cannot_rewind() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
 
         prefix_cacher.caches.insert(
@@ -1536,7 +1539,7 @@ mod tests {
     }
 
     #[test]
-    fn allows_exact_extension_from_rolled_over_rotating_cache() -> candle_core::Result<()> {
+    fn allows_exact_extension_from_rolled_over_rotating_cache() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
 
         prefix_cacher.caches.insert(
@@ -1571,7 +1574,7 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_snapshot_only_matches_its_exact_boundary() -> candle_core::Result<()> {
+    fn hybrid_snapshot_only_matches_its_exact_boundary() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
@@ -1641,7 +1644,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_multimodal_hit_clamps_and_retains_boundary_items() -> candle_core::Result<()> {
+    fn normal_multimodal_hit_clamps_and_retains_boundary_items() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
@@ -1712,7 +1715,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_multimodal_hit_reuses_text_before_a_hash_mismatch() -> candle_core::Result<()> {
+    fn normal_multimodal_hit_reuses_text_before_a_hash_mismatch() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3, 4, 5, 6, 7, 8].into(),
@@ -1772,7 +1775,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_prefix_cache_rejects_video_hits() -> candle_core::Result<()> {
+    fn normal_prefix_cache_rejects_video_hits() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3].into(),
@@ -1800,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_multimodal_hit_rejects_empty_layout() -> candle_core::Result<()> {
+    fn normal_multimodal_hit_rejects_empty_layout() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3].into(),
@@ -1830,7 +1833,7 @@ mod tests {
     }
 
     #[test]
-    fn normal_multimodal_hit_rejects_incomplete_layout() -> candle_core::Result<()> {
+    fn normal_multimodal_hit_rejects_incomplete_layout() -> inference_tensor::Result<()> {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3, 4].into(),
@@ -1892,7 +1895,8 @@ mod tests {
     }
 
     #[test]
-    fn normal_multimodal_hit_without_hashes_stops_before_first_item() -> candle_core::Result<()> {
+    fn normal_multimodal_hit_without_hashes_stops_before_first_item() -> inference_tensor::Result<()>
+    {
         let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
         prefix_cacher.caches.insert(
             vec![1, 2, 3].into(),

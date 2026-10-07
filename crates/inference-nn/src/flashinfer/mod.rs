@@ -7,8 +7,8 @@ use std::sync::{
 };
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::Result;
-use candle_core::{DeviceLocation, Tensor};
+use inference_tensor::Result;
+use inference_tensor::{DeviceLocation, Tensor};
 
 use crate::paged_attention::attention_backend::{
     AttentionBackend, AttentionBackendKind, AttentionLayerSpec,
@@ -187,7 +187,7 @@ impl Fa3PrefillPoolBytes {
         }
     }
 
-    pub fn bytes(self) -> candle_core::Result<usize> {
+    pub fn bytes(self) -> inference_tensor::Result<usize> {
         checked_workspace_sum(&[
             self.quantized_query,
             self.scheduler_metadata,
@@ -218,11 +218,11 @@ impl Fa3PrefillWorkspaceBytes {
         self.transient
     }
 
-    pub fn bytes(self) -> candle_core::Result<usize> {
+    pub fn bytes(self) -> inference_tensor::Result<usize> {
         self.pool
             .bytes()?
             .checked_add(self.transient)
-            .ok_or_else(|| candle_core::Error::msg("FA3 prefill workspace size overflow"))
+            .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill workspace size overflow"))
     }
 }
 
@@ -235,65 +235,68 @@ pub fn fa3_prefill_workspace_components(
     head_dim: usize,
     max_pages_per_sequence: usize,
     num_sm: usize,
-) -> candle_core::Result<Fa3PrefillWorkspaceBytes> {
+) -> inference_tensor::Result<Fa3PrefillWorkspaceBytes> {
     if head_dim != FA3_DECODE_HEAD_DIM || max_pages_per_sequence == 0 {
-        candle_core::bail!("invalid FA3 prefill workspace shape");
+        inference_tensor::bail!("invalid FA3 prefill workspace shape");
     }
     let num_splits = fa3_prefill_num_splits(batch, query_len, q_heads, kv_heads, num_sm)
-        .ok_or_else(|| candle_core::Error::msg("invalid FA3 prefill workspace shape"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("invalid FA3 prefill workspace shape"))?;
     let total_q = batch
         .checked_mul(query_len)
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill query count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill query count overflow"))?;
     let rounded_batch = batch
         .div_ceil(FA3_SCHEDULER_BATCH_ALIGNMENT)
         .checked_mul(FA3_SCHEDULER_BATCH_ALIGNMENT)
-        .ok_or_else(|| candle_core::Error::msg("FA3 scheduler row count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 scheduler row count overflow"))?;
     let scheduler_len = (2 + usize::from(query_len > 1))
         .checked_mul(rounded_batch)
         .and_then(|len| len.checked_add(1))
-        .ok_or_else(|| candle_core::Error::msg("FA3 scheduler row count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 scheduler row count overflow"))?;
     let cu_seqlens_len = batch
         .checked_add(1)
-        .ok_or_else(|| candle_core::Error::msg("FA3 cumulative query length overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 cumulative query length overflow"))?;
     let query_bytes = checked_workspace_bytes(
         &[total_q, q_heads, head_dim],
-        candle_core::DType::BF16.size_in_bytes(),
+        inference_tensor::DType::BF16.size_in_bytes(),
     )?;
     Ok(Fa3PrefillWorkspaceBytes {
         pool: Fa3PrefillPoolBytes {
             quantized_query: checked_workspace_bytes(
                 &[total_q, q_heads, head_dim],
-                candle_core::DType::F8E4M3.size_in_bytes(),
+                inference_tensor::DType::F8E4M3.size_in_bytes(),
             )?,
             output_accum: checked_workspace_bytes(
                 &[num_splits, q_heads, total_q, head_dim],
-                candle_core::DType::F32.size_in_bytes(),
+                inference_tensor::DType::F32.size_in_bytes(),
             )?,
             lse_accum: checked_workspace_bytes(
                 &[num_splits, q_heads, total_q],
-                candle_core::DType::F32.size_in_bytes(),
+                inference_tensor::DType::F32.size_in_bytes(),
             )?,
             output_lse: checked_workspace_bytes(
                 &[q_heads, total_q],
-                candle_core::DType::F32.size_in_bytes(),
+                inference_tensor::DType::F32.size_in_bytes(),
             )?,
             page_table: checked_workspace_bytes(
                 &[batch, max_pages_per_sequence],
-                candle_core::DType::I32.size_in_bytes(),
+                inference_tensor::DType::I32.size_in_bytes(),
             )?,
             scheduler_metadata: checked_workspace_bytes(
                 &[scheduler_len],
-                candle_core::DType::I32.size_in_bytes(),
+                inference_tensor::DType::I32.size_in_bytes(),
             )?,
             cu_seqlens_q: checked_workspace_bytes(
                 &[cu_seqlens_len],
-                candle_core::DType::I32.size_in_bytes(),
+                inference_tensor::DType::I32.size_in_bytes(),
             )?,
-            seqused_k: checked_workspace_bytes(&[batch], candle_core::DType::I32.size_in_bytes())?,
+            seqused_k: checked_workspace_bytes(
+                &[batch],
+                inference_tensor::DType::I32.size_in_bytes(),
+            )?,
         },
         transient: query_bytes
             .checked_mul(2)
-            .ok_or_else(|| candle_core::Error::msg("FA3 prefill transient size overflow"))?,
+            .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill transient size overflow"))?,
     })
 }
 
@@ -306,7 +309,7 @@ pub fn fa3_prefill_workspace_bytes(
     head_dim: usize,
     max_pages_per_sequence: usize,
     num_sm: usize,
-) -> candle_core::Result<usize> {
+) -> inference_tensor::Result<usize> {
     fa3_prefill_workspace_components(
         batch,
         query_len,
@@ -320,19 +323,22 @@ pub fn fa3_prefill_workspace_bytes(
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-fn checked_workspace_sum(bytes: &[usize]) -> candle_core::Result<usize> {
+fn checked_workspace_sum(bytes: &[usize]) -> inference_tensor::Result<usize> {
     bytes
         .iter()
         .try_fold(0usize, |total, bytes| total.checked_add(*bytes))
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill workspace size overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill workspace size overflow"))
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-fn checked_workspace_bytes(parts: &[usize], element_size: usize) -> candle_core::Result<usize> {
+fn checked_workspace_bytes(
+    parts: &[usize],
+    element_size: usize,
+) -> inference_tensor::Result<usize> {
     parts
         .iter()
         .try_fold(element_size, |bytes, part| bytes.checked_mul(*part))
-        .ok_or_else(|| candle_core::Error::msg("FA3 prefill workspace size overflow"))
+        .ok_or_else(|| inference_tensor::Error::msg("FA3 prefill workspace size overflow"))
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -357,18 +363,18 @@ impl Fa3DecodeBuffers {
         key: Fa3DecodeScheduleKey,
     ) -> Result<inference_paged_attn::Fa3DecodeSchedule> {
         let DeviceLocation::Cuda { gpu_id } = key.device else {
-            candle_core::bail!("FA3 decode state must be on CUDA");
+            inference_tensor::bail!("FA3 decode state must be on CUDA");
         };
         let max_seqlen_k = self
             .max_pages_per_sequence
             .checked_mul(key.page_size)
-            .ok_or_else(|| candle_core::Error::msg("FA3 maximum KV length overflow"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("FA3 maximum KV length overflow"))?;
         Ok(inference_paged_attn::Fa3DecodeSchedule {
             batch_size: key.batch,
             query_len: key.query_len,
             total_q: key
                 .total_q()
-                .ok_or_else(|| candle_core::Error::msg("FA3 query count overflow"))?,
+                .ok_or_else(|| inference_tensor::Error::msg("FA3 query count overflow"))?,
             causal: key.causal,
             q_heads: key.q_heads,
             kv_heads: key.kv_heads,
@@ -475,7 +481,7 @@ pub struct FlashInferDecodePlanInput {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn decode_plan(input: FlashInferDecodePlanInput) -> Result<FlashInferDecodePlan> {
     if input.has_alibi {
-        candle_core::bail!("HND-layout decode does not support alibi");
+        inference_tensor::bail!("HND-layout decode does not support alibi");
     }
     Ok(FlashInferDecodePlan)
 }
@@ -588,7 +594,7 @@ fn metadata_tensor<'a>(
     name: &'static str,
 ) -> Result<&'a Tensor> {
     map.get(device)
-        .ok_or_else(|| candle_core::Error::msg(format!("{name} missing")))
+        .ok_or_else(|| inference_tensor::Error::msg(format!("{name} missing")))
 }
 
 #[cfg(test)]
@@ -601,7 +607,7 @@ mod tests {
         fa3_prefill_num_splits, fa3_prefill_workspace_bytes, fa3_prefill_workspace_components,
     };
     #[cfg(all(feature = "cuda", target_family = "unix"))]
-    use candle_core::DeviceLocation;
+    use inference_tensor::DeviceLocation;
 
     #[test]
     fn fa3_group_sizes_are_the_ones_it_ran_with() {

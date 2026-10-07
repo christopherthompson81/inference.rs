@@ -1,5 +1,5 @@
-use candle_core::{DType, Device, Result, Tensor};
 use float8::F8E4M3;
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use super::{Nvfp4Layer, Nvfp4LayerParts, cutlass::SM121_COMPUTE_CAP};
 use crate::{Nvfp4ActivationMode, QuantMethod};

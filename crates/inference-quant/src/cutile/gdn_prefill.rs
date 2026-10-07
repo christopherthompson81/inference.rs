@@ -4,13 +4,13 @@
 
 use std::sync::Arc;
 
-use candle_core::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 use cutile::core::bf16 as tile_bf16;
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tile_kernel::TileKernel;
 use half::bf16;
+use inference_tensor::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 
 use super::warmup::CutileKernel;
 use super::{catch_cutile_panic, context, jit_available};
@@ -621,7 +621,7 @@ fn launch(args: &GdnPrefillArgs<'_>, dev: &CudaDevice, compile_only: bool) -> Re
     let v_dim = args.v.dim(2)?;
     let seq_len = args.seq_len;
     if k_dim != GDN_PREFILL_HEAD_DIM || v_dim != GDN_PREFILL_HEAD_DIM {
-        candle_core::bail!("cuTile GDN prefill needs K = V = {GDN_PREFILL_HEAD_DIM}")
+        inference_tensor::bail!("cuTile GDN prefill needs K = V = {GDN_PREFILL_HEAD_DIM}")
     }
     if args.k.dims3()? != (bh, padded, k_dim)
         || args.v.dims3()? != (bh, padded, v_dim)
@@ -635,7 +635,7 @@ fn launch(args: &GdnPrefillArgs<'_>, dev: &CudaDevice, compile_only: bool) -> Re
         || padded < seq_len
         || !padded.is_multiple_of(GDN_PREFILL_CHUNK)
     {
-        candle_core::bail!("cuTile GDN prefill got inconsistent operand shapes")
+        inference_tensor::bail!("cuTile GDN prefill got inconsistent operand shapes")
     }
     if args.q.dtype() != DType::BF16
         || args.k.dtype() != DType::BF16
@@ -645,7 +645,7 @@ fn launch(args: &GdnPrefillArgs<'_>, dev: &CudaDevice, compile_only: bool) -> Re
         || args.state.dtype() != DType::F32
         || args.slots.is_some_and(|slots| slots.dtype() != DType::U32)
     {
-        candle_core::bail!("cuTile GDN prefill got unexpected operand dtypes")
+        inference_tensor::bail!("cuTile GDN prefill got unexpected operand dtypes")
     }
     let chunk = GDN_PREFILL_CHUNK;
     let num_chunks = padded / chunk;
@@ -661,7 +661,7 @@ fn launch(args: &GdnPrefillArgs<'_>, dev: &CudaDevice, compile_only: bool) -> Re
         .chain(args.slots)
     {
         if !tensor.is_contiguous() {
-            candle_core::bail!("cuTile GDN prefill needs contiguous operands")
+            inference_tensor::bail!("cuTile GDN prefill needs contiguous operands")
         }
     }
     let (q_storage, q_layout) = args.q.storage_and_layout();
@@ -686,14 +686,14 @@ fn launch(args: &GdnPrefillArgs<'_>, dev: &CudaDevice, compile_only: bool) -> Re
         &*s_storage,
     )
     else {
-        candle_core::bail!("cuTile GDN prefill operands must be CUDA tensors")
+        inference_tensor::bail!("cuTile GDN prefill operands must be CUDA tensors")
     };
     let slots_storage = args.slots.map(|slots| slots.storage_and_layout());
     let mut slots_guard = None;
     let mut slots_addr = 0u64;
     if let Some((storage, layout)) = &slots_storage {
         let Storage::Cuda(slots_cuda) = &**storage else {
-            candle_core::bail!("cuTile GDN prefill slots must be a CUDA tensor")
+            inference_tensor::bail!("cuTile GDN prefill slots must be a CUDA tensor")
         };
         let (addr, guard) = slice_ptr_on_stream(
             slots_cuda.as_cuda_slice::<u32>()?,
@@ -826,26 +826,28 @@ fn launch(args: &GdnPrefillArgs<'_>, dev: &CudaDevice, compile_only: bool) -> Re
     .grid(((bh * num_chunks) as u32, 1, 1));
     if compile_only {
         catch_cutile_panic("GDN prefill compile", || {
-            wy.compile_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile gdn wy compile: {e:?}")))?;
-            state
-                .compile_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile gdn state compile: {e:?}")))?;
-            out_k
-                .compile_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile gdn out compile: {e:?}")))?;
+            wy.compile_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile gdn wy compile: {e:?}"))
+            })?;
+            state.compile_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile gdn state compile: {e:?}"))
+            })?;
+            out_k.compile_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile gdn out compile: {e:?}"))
+            })?;
             Ok(())
         })?;
     } else {
         catch_cutile_panic("GDN prefill launch", || unsafe {
-            wy.async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile gdn wy launch: {e:?}")))?;
-            state
-                .async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile gdn state launch: {e:?}")))?;
-            out_k
-                .async_on(&cutile_stream)
-                .map_err(|e| candle_core::Error::Msg(format!("cutile gdn out launch: {e:?}")))?;
+            wy.async_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile gdn wy launch: {e:?}"))
+            })?;
+            state.async_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile gdn state launch: {e:?}"))
+            })?;
+            out_k.async_on(&cutile_stream).map_err(|e| {
+                inference_tensor::Error::Msg(format!("cutile gdn out launch: {e:?}"))
+            })?;
             Ok(())
         })?;
     }
@@ -895,8 +897,8 @@ impl CutileKernel for GdnPrefillKernel {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{DType, Device, Result, Tensor};
     use half::bf16;
+    use inference_tensor::{DType, Device, Result, Tensor};
 
     use super::{GDN_PREFILL_CHUNK, GDN_PREFILL_HEAD_DIM, GdnPrefillArgs, cutile_gdn_prefill};
 

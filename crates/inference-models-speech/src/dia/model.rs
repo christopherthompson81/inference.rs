@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use candle_core::{D, DType, IndexOp, Result, Tensor};
-use candle_nn::{Embedding, Linear, Module};
 use inference_quant::{
     QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear, apply_immediate_isq,
 };
+use inference_tensor::nn::{Embedding, Linear, Module};
+use inference_tensor::{D, DType, IndexOp, Result, Tensor};
 
 use crate::{
     attention::{SdpaParams, naive_sdpa},

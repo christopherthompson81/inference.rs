@@ -1,9 +1,9 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
 use inference_audio::AudioInput;
 use inference_audio::fft::{Complex32, plan_forward_f32};
+use inference_tensor::{Device, Tensor};
 use rubato::Resampler;
 
 use super::config::AudioEncodingArgs;

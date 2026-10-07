@@ -1,9 +1,9 @@
 //! Time PP-DocLayoutV3 forward passes (model only, preprocessing excluded).
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
 use clap::Parser;
 use inference_layout::pp_doclayout_v3::PPDocLayoutV3Detector;
+use inference_tensor::{DType, Device, Tensor};
 
 #[derive(Parser)]
 struct Args {

@@ -2,8 +2,8 @@
 
 use std::{any::Any, ops::Range, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView};
+use inference_tensor::{Device, Result, Tensor};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -78,7 +78,7 @@ fn idefics2_mm_features(
     let expected_ranges = image_hashes
         .len()
         .checked_mul(subimages_per_image)
-        .ok_or_else(|| candle_core::Error::msg("Idefics2 image count overflow"))?;
+        .ok_or_else(|| inference_tensor::Error::msg("Idefics2 image count overflow"))?;
     if ranges.len() != expected_ranges {
         return Err(InputsProcessorValidationError(format!(
             "Idefics2 has {} image placeholder spans but {} encoder inputs",
@@ -123,11 +123,11 @@ fn idefics2_layout_items(
         .filter(|feature| feature.kind == MultimodalKind::Image)
         .map(|feature| {
             if feature.item_range.len() != 1 || feature.hashes.len() != 1 {
-                candle_core::bail!("Idefics2 image feature must describe exactly one image");
+                inference_tensor::bail!("Idefics2 image feature must describe exactly one image");
             }
             let placeholder = feature.offset..feature.end();
             let item_tokens = tokens.get(placeholder.clone()).ok_or_else(|| {
-                candle_core::Error::msg("Idefics2 image feature is outside the prompt")
+                inference_tensor::Error::msg("Idefics2 image feature is outside the prompt")
             })?;
             let ranges = image_token_ranges(item_tokens, image_token_id)
                 .into_iter()
@@ -136,7 +136,7 @@ fn idefics2_layout_items(
             if ranges.len() != subimages_per_image
                 || ranges.iter().any(|range| range.len() != image_seq_len)
             {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Idefics2 image feature does not match its encoder output layout"
                 );
             }
@@ -164,7 +164,7 @@ fn idefics2_layout_items(
 fn prompt_query(seq: &dyn MediaSequence, query_len: usize) -> Result<Range<usize>> {
     if let Some(query) = seq.active_prompt_query_range() {
         if query.len() != query_len {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Idefics2 active prompt has {} tokens but packed metadata has {query_len}",
                 query.len()
             );
@@ -173,7 +173,7 @@ fn prompt_query(seq: &dyn MediaSequence, query_len: usize) -> Result<Range<usize
     }
     let token_count = seq.prompt_position_source_toks().len();
     let start = token_count.checked_sub(query_len).ok_or_else(|| {
-        candle_core::Error::msg("Idefics2 packed query is longer than the prompt")
+        inference_tensor::Error::msg("Idefics2 packed query is longer than the prompt")
     })?;
     Ok(start..token_count)
 }
@@ -188,7 +188,7 @@ fn validate_idefics2_image_spans(
         if overlaps_query
             && (query.start > item.placeholder.start || query.end < item.placeholder.end)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Idefics2 image item {} must be scheduled as a complete span",
                 item.item_index
             );
@@ -205,7 +205,7 @@ fn idefics2_packed_layout(
     image_seq_len: usize,
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("Idefics2 packed multimodal metadata length mismatch");
+        inference_tensor::bail!("Idefics2 packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
@@ -240,7 +240,7 @@ fn image_item_selection(
     total_items: usize,
 ) -> Result<Option<(Range<usize>, Range<usize>)>> {
     if available_items > total_items || cached_items > total_items {
-        candle_core::bail!("Idefics2 image selection metadata is inconsistent");
+        inference_tensor::bail!("Idefics2 image selection metadata is inconsistent");
     }
     let selection = if is_chunked {
         active_local_range.zip(active_item_range)
@@ -259,7 +259,7 @@ fn image_item_selection(
             || original.end > total_items
             || local.len() != original.len())
     {
-        candle_core::bail!("Idefics2 active image range is outside the retained images");
+        inference_tensor::bail!("Idefics2 active image range is outside the retained images");
     }
     Ok(selection)
 }
@@ -622,7 +622,7 @@ impl ImagePreProcessor for Idefics2ImageProcessor {
                 } else if size.contains_key("height") && size.contains_key("width") {
                     (size["height"] as usize, size["width"] as usize)
                 } else {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Size must be a map of `shortest_edge` and `longest_edge` or `height` and `width`."
                     );
                 };
@@ -743,7 +743,7 @@ mod tests {
             },
         ])
         .unwrap();
-        let text = Tensor::zeros((1, 6, 2), candle_core::DType::F32, &Device::Cpu).unwrap();
+        let text = Tensor::zeros((1, 6, 2), inference_tensor::DType::F32, &Device::Cpu).unwrap();
         let image = Tensor::from_vec(vec![1f32, 2., 3., 4.], (2, 2), &Device::Cpu).unwrap();
         let outputs: MultimodalEncoderOutputs = HashMap::from([(
             MultimodalEncoderKey {

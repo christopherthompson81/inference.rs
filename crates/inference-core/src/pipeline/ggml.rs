@@ -29,11 +29,11 @@ use crate::{
 #[cfg(feature = "models-llama")]
 use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLoraQLlama};
 use anyhow::Result;
-use candle_core::quantized::ggml_file;
-use candle_core::{Device, Tensor};
 use futures::future::BoxFuture;
 use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
 use inference_quant::IsqType;
+use inference_tensor::quantized::ggml_file;
+use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::fs;
@@ -457,7 +457,7 @@ impl IsqPipelineMixin for GGMLPipeline {
 }
 
 impl CacheManagerMixin for GGMLPipeline {
-    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
+    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
         FullCacheManager.clone_in_cache(self as &dyn Pipeline, seqs, false)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
@@ -470,7 +470,7 @@ impl CacheManagerMixin for GGMLPipeline {
         modify_draft_cache: bool,
 
         load_preallocated_cache: bool,
-    ) -> candle_core::Result<()> {
+    ) -> inference_tensor::Result<()> {
         FullCacheManager.set_none_cache(
             self as &dyn Pipeline,
             seqs,
@@ -527,7 +527,7 @@ impl Pipeline for GGMLPipeline {
         &mut self,
         inputs: Box<dyn Any>,
         return_raw_logits: bool,
-    ) -> Result<ForwardInputsResult, candle_core::Error> {
+    ) -> Result<ForwardInputsResult, inference_tensor::Error> {
         let ModelInputs {
             input_ids,
             input_ids_full,
@@ -565,7 +565,7 @@ impl Pipeline for GGMLPipeline {
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
         sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
     }
     fn category(&self) -> ModelCategory {

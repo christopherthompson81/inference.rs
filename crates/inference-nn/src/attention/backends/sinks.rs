@@ -1,6 +1,6 @@
 use crate::attention::FlashParams;
-use candle_core::{DType, DeviceLocation, Result, Tensor};
 use inference_quant::MatMul;
+use inference_tensor::{DType, DeviceLocation, Result, Tensor};
 
 use crate::attention::{SdpaParams, repeat_kv};
 
@@ -150,12 +150,12 @@ fn sinks_attn_varlen(
         .k_meta(sdpa_params.sliding_window)
         .cumulative_seqlens[&device.location()];
     if cu_seqlens_q.dim(0)? != q.dim(0)? + 1 || cu_seqlens_k.dim(0)? != q.dim(0)? + 1 {
-        candle_core::bail!("sinks varlen metadata does not match the query batch");
+        inference_tensor::bail!("sinks varlen metadata does not match the query batch");
     }
 
     // the per-sequence loop below applies neither causality nor a window, which only CPU callers can do without
     if device.is_cuda() {
-        candle_core::bail!("no fattn kernel takes this varlen sinks attention");
+        inference_tensor::bail!("no fattn kernel takes this varlen sinks attention");
     }
 
     #[cfg(feature = "metal")]
@@ -255,7 +255,7 @@ fn sinks_attn_cpu_varlen(
 #[cfg(test)]
 mod tests {
     use super::{kv_layout_is_packed, metal_sinks_kernel_supports, sinks_backend_supports};
-    use candle_core::{DType, DeviceLocation};
+    use inference_tensor::{DType, DeviceLocation};
 
     #[test]
     fn packed_kv_layout_rejects_regular_batched_tensors() {

@@ -5,8 +5,8 @@ pub mod generation;
 
 use std::sync::Arc;
 
-use candle_core::{D, DType, Module, Result, Tensor};
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
+use inference_tensor::{D, DType, Module, Result, Tensor};
 
 use crate::model::ModelForwardContext;
 use crate::model::NormalLoadingMetadata;
@@ -230,7 +230,7 @@ impl DiffusionGemmaModel {
 
     pub fn soft_embed(&self, logits: &Tensor) -> Result<Tensor> {
         let embed_w = self.text.embedding_weight()?;
-        let probs = candle_nn::ops::softmax(&logits.to_dtype(DType::F32)?, D::Minus1)?;
+        let probs = inference_tensor::nn::ops::softmax(&logits.to_dtype(DType::F32)?, D::Minus1)?;
         let soft = probs
             .to_dtype(embed_w.dtype())?
             .broadcast_matmul(&embed_w)?;
@@ -257,7 +257,7 @@ impl DiffusionGemmaModel {
         image_sizes: &[(u32, u32)],
     ) -> Result<Tensor> {
         let (tower, embedder) = self.vision.as_ref().ok_or_else(|| {
-            candle_core::Error::Msg(
+            inference_tensor::Error::Msg(
                 "DiffusionGemma model was loaded without a vision encoder.".to_string(),
             )
         })?;
@@ -375,7 +375,7 @@ impl crate::model::MultimodalModel for DiffusionGemmaModel {
 
         // Chunked prompts encode chunk by chunk; only the final chunk denoises a canvas.
         if !ctx.is_final_prompt_chunk() {
-            return Tensor::from_vec(Vec::<u32>::new(), (b_sz, 0), &candle_core::Device::Cpu);
+            return Tensor::from_vec(Vec::<u32>::new(), (b_sz, 0), &inference_tensor::Device::Cpu);
         }
 
         if let Ok(dump_path) = std::env::var("INFERENCE_RS_DIFFUSION_DEBUG_DUMP")
@@ -383,7 +383,7 @@ impl crate::model::MultimodalModel for DiffusionGemmaModel {
         {
             input_ids
                 .to_dtype(DType::I64)?
-                .to_device(&candle_core::Device::Cpu)?
+                .to_device(&inference_tensor::Device::Cpu)?
                 .write_npy(format!("{dump_path}.prompt_ids.npy"))?;
         }
 
@@ -402,7 +402,7 @@ impl crate::model::MultimodalModel for DiffusionGemmaModel {
         }
         let kv_len = cache_offsets[0];
         if cache_offsets.iter().any(|&len| len != kv_len) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "block-diffusion batch must share one context length, got {cache_offsets:?}"
             );
         }
@@ -423,7 +423,7 @@ impl crate::model::MultimodalModel for DiffusionGemmaModel {
         Tensor::from_vec(
             blocks.into_iter().flatten().collect::<Vec<u32>>(),
             (b_sz, canvas_length),
-            &candle_core::Device::Cpu,
+            &inference_tensor::Device::Cpu,
         )
     }
 
@@ -435,7 +435,7 @@ impl crate::model::MultimodalModel for DiffusionGemmaModel {
         crate::model::MultimodalModel::cache(&self.text)
     }
 
-    fn device(&self) -> &candle_core::Device {
+    fn device(&self) -> &inference_tensor::Device {
         crate::model::MultimodalModel::device(&self.text)
     }
 

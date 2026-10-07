@@ -1,7 +1,7 @@
 // layers/mod.rs allows these for its own math; this file keeps the crate-wide deny
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{Result, Tensor};
+use inference_tensor::{Result, Tensor};
 
 pub fn repeat_kv(x: Tensor, n_rep: usize) -> Result<Tensor> {
     if n_rep == 1 {

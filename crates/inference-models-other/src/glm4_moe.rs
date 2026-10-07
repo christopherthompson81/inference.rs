@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Deserialize;
 
 use crate::deepseek_family::{
@@ -371,7 +371,7 @@ impl FamilyAttention for Glm4MoeAttention {
         {
             let positions = ctx
                 .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
             if let (Some(q_norm), Some(k_norm)) = (&self.q_norm, &self.k_norm) {
                 (q, k) = self
                     .rotary_emb

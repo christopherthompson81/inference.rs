@@ -3,7 +3,7 @@ mod gather_kv;
 mod paged_attention;
 mod scale_update;
 
-use candle_core::{DType, Result, Tensor};
+use inference_tensor::{DType, Result, Tensor};
 
 fn validate_kv_cache_scales(
     cache_dtype: DType,
@@ -18,14 +18,14 @@ fn validate_kv_cache_scales(
                 || k_scale.elem_count() != 1
                 || v_scale.elem_count() != 1
             {
-                candle_core::bail!("{op} requires scalar f32 K/V scales for an f8e4m3 cache");
+                inference_tensor::bail!("{op} requires scalar f32 K/V scales for an f8e4m3 cache");
             }
         }
         (DType::F8E4M3, _, _) => {
-            candle_core::bail!("{op} requires explicit K/V scales for an f8e4m3 cache");
+            inference_tensor::bail!("{op} requires explicit K/V scales for an f8e4m3 cache");
         }
         (_, None, None) => {}
-        (_, _, _) => candle_core::bail!("{op} only accepts K/V scales for an f8e4m3 cache"),
+        (_, _, _) => inference_tensor::bail!("{op} only accepts K/V scales for an f8e4m3 cache"),
     }
     Ok(())
 }

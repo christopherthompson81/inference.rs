@@ -1,16 +1,16 @@
 use std::sync::Arc;
 
-use candle_core::Tensor;
 use image::DynamicImage;
+use inference_tensor::Tensor;
 
 use crate::sequence::{Sequence, SequenceState, StopReason};
 
 pub async fn send_image_responses(
     input_seqs: &mut [&mut Sequence],
     images: Vec<DynamicImage>,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     if input_seqs.len() != images.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Input seqs len ({}) does not match images generated len ({})",
             input_seqs.len(),
             images.len()
@@ -24,7 +24,7 @@ pub async fn send_image_responses(
         seq.get_mut_group()
             .maybe_send_image_gen_response(created, responder)
             .await
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
 
         seq.set_state(SequenceState::Done(StopReason::GeneratedImage));
     }
@@ -37,9 +37,9 @@ pub async fn send_speech_responses(
     pcms: &[Arc<Vec<f32>>],
     rates: &[usize],
     channels: &[usize],
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     if input_seqs.len() != pcms.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Input seqs len ({}) does not match pcms generated len ({})",
             input_seqs.len(),
             pcms.len()
@@ -56,7 +56,7 @@ pub async fn send_speech_responses(
         group
             .maybe_send_speech_response(seq.responder())
             .await
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
 
         seq.set_state(SequenceState::Done(StopReason::GeneratedSpeech));
     }
@@ -67,11 +67,11 @@ pub async fn send_speech_responses(
 pub async fn send_raw_responses(
     input_seqs: &mut [&mut Sequence],
     logits_chunks: Vec<Vec<Tensor>>,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     let logits_chunks = if logits_chunks.len() == 1 {
         logits_chunks[0].clone()
     } else {
-        candle_core::bail!("Raw response only supports batch size of 1.");
+        inference_tensor::bail!("Raw response only supports batch size of 1.");
     };
     assert_eq!(input_seqs.len(), 1);
 
@@ -83,7 +83,7 @@ pub async fn send_raw_responses(
     group
         .maybe_send_raw_done_response(seq.responder())
         .await
-        .map_err(candle_core::Error::msg)?;
+        .map_err(inference_tensor::Error::msg)?;
 
     seq.set_state(SequenceState::Done(StopReason::Length(0)));
 
@@ -93,9 +93,9 @@ pub async fn send_raw_responses(
 pub async fn send_embedding_responses(
     input_seqs: &mut [&mut Sequence],
     embedings: Vec<Vec<f32>>,
-) -> candle_core::Result<()> {
+) -> inference_tensor::Result<()> {
     if embedings.len() != input_seqs.len() {
-        candle_core::bail!("Number of embeddings must match number of sequences..");
+        inference_tensor::bail!("Number of embeddings must match number of sequences..");
     }
 
     for (seq, embeddings) in input_seqs.iter_mut().zip(embedings) {
@@ -105,7 +105,7 @@ pub async fn send_embedding_responses(
         group
             .maybe_send_embedding_done_response(seq.responder())
             .await
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
 
         seq.set_state(SequenceState::Done(StopReason::Length(0)));
     }

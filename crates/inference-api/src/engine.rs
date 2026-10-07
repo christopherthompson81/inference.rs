@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
     CalibrationAction, CalibrationStatus, ChatCompletionResponse, CompletionResponse,
@@ -10,6 +9,7 @@ use inference_core::{
     SandboxPolicy, SerializedSession,
 };
 use inference_selection::quant;
+use inference_tensor::Device;
 use serde::Deserialize;
 
 use crate::{

@@ -2,12 +2,12 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{D, DType, Device, Module, Result, Tensor};
-use candle_nn::LayerNorm;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::nn::LayerNorm;
+use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::kv_cache::EitherCache;
@@ -201,7 +201,7 @@ impl Attention {
         let position_ids = ctx.position_ids_vec();
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self
             .rotary_emb
             .forward(&q, &k, rope_positions, &position_ids)?;
@@ -227,7 +227,7 @@ impl Attention {
 }
 
 struct MoeMlp {
-    gate: candle_nn::Linear,
+    gate: inference_tensor::nn::Linear,
     gate_lora: Option<Arc<inference_quant::LoraSiteHandle>>,
     experts: MoEExperts,
     router_jitter_noise: f64,
@@ -289,7 +289,7 @@ impl MoeMlp {
         let masked_gates = masked_fill(scores, &mask_logits_threshold, f64::NEG_INFINITY)?;
 
         // Compute scores
-        let masked_gates = candle_nn::ops::softmax_last_dim(&masked_gates)?;
+        let masked_gates = inference_tensor::nn::ops::softmax_last_dim(&masked_gates)?;
         let multiplier = masked_gates.gather(&selected_experts, D::Minus1)?;
 
         // Mask out first expert
@@ -313,7 +313,7 @@ impl MoeMlp {
         // Apply mask
         let masked_gates_top2 =
             masked_fill(&masked_scores, &mask_logits_threshold, f64::NEG_INFINITY)?;
-        let masked_gates_top2 = candle_nn::ops::softmax_last_dim(&masked_gates_top2)?;
+        let masked_gates_top2 = inference_tensor::nn::ops::softmax_last_dim(&masked_gates_top2)?;
         let multiplier_top2 = masked_gates_top2.gather(&selected_experts_top2, D::Minus1)?;
 
         let multiplier = Tensor::cat(&[multiplier, multiplier_top2], D::Minus1)?;

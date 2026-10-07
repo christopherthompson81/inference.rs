@@ -6,9 +6,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{D, DType, Device, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::ShardedVarBuilder;
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, Result, Tensor};
 use rand_isaac::Isaac64Rng;
 use serde::Deserialize;
 
@@ -77,48 +77,48 @@ impl Gemma4MtpRuntime {
         let path = config.resolve_path()?;
         let config_path = path.join("config.json");
         let raw_config = fs::read_to_string(&config_path).map_err(|e| {
-            candle_core::Error::Msg(format!(
+            inference_tensor::Error::Msg(format!(
                 "failed to read MTP config at {}: {e}",
                 config_path.display()
             ))
         })?;
         let mut assistant_cfg: Gemma4AssistantConfig =
-            serde_json::from_str(&raw_config).map_err(candle_core::Error::msg)?;
+            serde_json::from_str(&raw_config).map_err(inference_tensor::Error::msg)?;
         assistant_cfg.text_config.max_position_embeddings = assistant_cfg
             .text_config
             .max_position_embeddings
             .min(target_cfg.max_position_embeddings);
 
         if assistant_cfg.model_type != "gemma4_assistant" {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP model_type mismatch: expected `gemma4_assistant`, got `{}`",
                 assistant_cfg.model_type
             );
         }
         if assistant_cfg.backbone_hidden_size != target_cfg.hidden_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP backbone hidden size mismatch: assistant {}, target {}",
                 assistant_cfg.backbone_hidden_size,
                 target_cfg.hidden_size
             );
         }
         if assistant_cfg.text_config.vocab_size != target_cfg.vocab_size {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP vocab size mismatch: assistant {}, target {}",
                 assistant_cfg.text_config.vocab_size,
                 target_cfg.vocab_size
             );
         }
         if !assistant_cfg.tie_word_embeddings {
-            candle_core::bail!("MTP currently expects tied assistant word embeddings.");
+            inference_tensor::bail!("MTP currently expects tied assistant word embeddings.");
         }
         if !assistant_cfg.use_ordered_embeddings {
-            candle_core::bail!("MTP currently requires ordered centroid embeddings.");
+            inference_tensor::bail!("MTP currently requires ordered centroid embeddings.");
         }
 
         let mut weight_paths = fs::read_dir(&path)
             .map_err(|e| {
-                candle_core::Error::Msg(format!(
+                inference_tensor::Error::Msg(format!(
                     "failed to list MTP model directory {}: {e}",
                     path.display()
                 ))
@@ -128,7 +128,7 @@ impl Gemma4MtpRuntime {
             .collect::<Vec<_>>();
         weight_paths.sort();
         if weight_paths.is_empty() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP model directory {} has no safetensors weights.",
                 path.display()
             );
@@ -173,7 +173,7 @@ impl Gemma4MtpRuntime {
             return Ok(Vec::new());
         }
         if seq_ids.len() != batch || base_lens.len() != batch || sequences.len() != batch {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP batch shape mismatch: sampled={}, seq_ids={}, base_lens={}, sequences={}",
                 batch,
                 seq_ids.len(),
@@ -182,7 +182,7 @@ impl Gemma4MtpRuntime {
             );
         }
         if target_hiddens.dim(0)? != batch {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP hidden batch mismatch: hidden={}, sampled={}",
                 target_hiddens.dim(0)?,
                 batch
@@ -278,7 +278,7 @@ fn sample_draft_tokens(
 ) -> Result<Tensor> {
     let batch = sequences.len();
     if contexts.len() != batch {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "MTP sampling context batch mismatch: contexts={}, sequences={batch}",
             contexts.len()
         );
@@ -315,12 +315,12 @@ impl SpeculativeProposer for Gemma4MtpRuntime {
         target_embedder: Option<&TargetTokenEmbedder<'_>>,
     ) -> Result<SpeculativeProposalBatch> {
         let target_hiddens = ctx.target_hiddens.ok_or_else(|| {
-            candle_core::Error::Msg(
+            inference_tensor::Error::Msg(
                 "MTP requires target hidden state for speculative proposal.".to_string(),
             )
         })?;
         let target_embedder = target_embedder.ok_or_else(|| {
-            candle_core::Error::Msg(
+            inference_tensor::Error::Msg(
                 "MTP requires a target token embedder for speculative proposal.".to_string(),
             )
         })?;
@@ -354,13 +354,13 @@ fn read_generation_n_predict(path: &Path) -> Result<Option<usize>> {
         return Ok(None);
     }
     let raw = fs::read_to_string(&path).map_err(|e| {
-        candle_core::Error::Msg(format!(
+        inference_tensor::Error::Msg(format!(
             "failed to read MTP generation config at {}: {e}",
             path.display()
         ))
     })?;
     let cfg: AssistantGenerationConfig =
-        serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
+        serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
     Ok(cfg.num_assistant_tokens)
 }
 
@@ -508,7 +508,7 @@ fn donor_indices(
             .iter()
             .rposition(|layer_type| layer_type == draft_layer_type)
         else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "MTP draft layer {draft_idx} has type `{draft_layer_type}` but the target has no non-shared donor layer of that type."
             );
         };
@@ -709,7 +709,7 @@ impl Gemma4MtpAttention {
             .copied()
             .map(u32::try_from)
             .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(candle_core::Error::wrap)?;
+            .map_err(inference_tensor::Error::wrap)?;
         let positions = Tensor::from_vec(positions, b_sz, q.device())?;
         q = if let Some(rotary) = &self.rotary_emb_local {
             rotary.forward_q(&q, &positions)?
@@ -726,7 +726,7 @@ impl Gemma4MtpAttention {
             } => {
                 let (key_cache, value_cache) =
                     kv_cache.get(self.donor_layer_idx).ok_or_else(|| {
-                        candle_core::Error::Msg(format!(
+                        inference_tensor::Error::Msg(format!(
                             "MTP donor layer {} is missing from the target paged KV cache",
                             self.donor_layer_idx
                         ))
@@ -856,9 +856,9 @@ fn topk_indices_u32(logits: &Tensor, top_k: usize) -> Result<Tensor> {
     let width = rows
         .first()
         .map(Vec::len)
-        .ok_or_else(|| candle_core::Error::Msg("empty top-k logits".into()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("empty top-k logits".into()))?;
     if top_k > width {
-        candle_core::bail!("top-k {top_k} exceeds logits width {width}");
+        inference_tensor::bail!("top-k {top_k} exceeds logits width {width}");
     }
 
     let mut indices = Vec::with_capacity(rows.len() * top_k);

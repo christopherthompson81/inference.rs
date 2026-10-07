@@ -1,9 +1,9 @@
 use anyhow::Context;
-use candle_core::{DType, Device};
 use core::ffi::c_char;
 use futures::future::LocalBoxFuture;
 pub use inference_quant::distributed::{use_nccl, use_ring};
 use inference_quant::{RingConfig, ShardedVarBuilder};
+use inference_tensor::{DType, Device};
 use interprocess::local_socket::traits::{Listener, Stream};
 use interprocess::local_socket::{GenericNamespaced, Name, ToNsName};
 use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use candle_core::{Device, Tensor};
+use inference_tensor::{Device, Tensor};
 
 pub fn make_ranges_tensor(
     seq_ids: &[usize],

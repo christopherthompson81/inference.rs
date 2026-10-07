@@ -2,10 +2,10 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder, softcap,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -55,7 +55,9 @@ fn select_paged_mm_prefix_path(
     has_range_metadata: bool,
 ) -> Result<bool> {
     if requires_noncausal && packed && !has_range_metadata {
-        candle_core::bail!("packed Gemma 3 multimodal prefill is missing noncausal range metadata");
+        inference_tensor::bail!(
+            "packed Gemma 3 multimodal prefill is missing noncausal range metadata"
+        );
     }
     Ok(requires_noncausal && is_paged && is_cuda && flash_attn && has_range_metadata)
 }
@@ -225,7 +227,7 @@ impl Attention {
         {
             let positions = ctx
                 .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
             (q, k) = match self.use_sliding_window {
                 true => self.rotary_emb_local.forward_qk_norm(
                     &q,
@@ -779,7 +781,7 @@ impl TextModel {
         // is_image: (seq_len,) boolean - true where token is an image token
         let is_image = input_ids_1d
             .eq(image_token_index as f64)?
-            .to_dtype(candle_core::DType::U32)?;
+            .to_dtype(inference_tensor::DType::U32)?;
 
         // Compute image group IDs via contiguous block detection
         // is_prev_image: shift right by 1, pad left with 0
@@ -824,7 +826,7 @@ impl TextModel {
         // Where override is 1, set mask to 0.0 (attend); otherwise keep original causal mask.
         // We use where_cond instead of multiplication to avoid NaN from -inf * 0.
         let zero = Tensor::zeros((seq_len, total_len), dtype, device)?;
-        let override_bool = override_mask.to_dtype(candle_core::DType::U8)?;
+        let override_bool = override_mask.to_dtype(inference_tensor::DType::U8)?;
         override_bool.where_cond(&zero, causal_mask)
     }
 }
@@ -874,7 +876,7 @@ impl MultimodalModel for TextModel {
         _pixel_values: Option<Tensor>,
         _model_specific_args: Box<dyn std::any::Any>, // pixel attention mask, or image sizes, or anything else
         _ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         unreachable!()
     }
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn std::any::Any> {
@@ -938,7 +940,7 @@ impl AnyMoeBaseModelMixin for TextModel {
 
 #[cfg(test)]
 mod tests {
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::{TextModel, attention_layers_support_packed_prefill, select_paged_mm_prefix_path};
 

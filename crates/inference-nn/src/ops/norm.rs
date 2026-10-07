@@ -6,28 +6,28 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     if x.device().is_cuda() {
         return cuda_rms_norm(x, weight, eps);
     }
-    candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps)
+    inference_tensor::nn::ops::rms_norm(&x.contiguous()?, weight, eps)
 }
 
 #[cfg(feature = "cuda")]
 fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     let dtype = input.dtype();
     if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32) || weight.dtype() != dtype {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda rms_norm needs f32/f16/bf16 input and weight, got {dtype:?} and {:?}",
             weight.dtype()
         );
     }
     if !weight.device().same_device(input.device()) {
-        candle_core::bail!("cuda rms_norm weight is on another device");
+        inference_tensor::bail!("cuda rms_norm weight is on another device");
     }
     if input.rank() == 0 {
-        candle_core::bail!("cuda rms_norm needs at least one dim");
+        inference_tensor::bail!("cuda rms_norm needs at least one dim");
     }
     if input.elem_count() == 0 {
         return input.zeros_like();
@@ -46,23 +46,23 @@ fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         (1, 1, input.elem_count() / head_dim)
     };
     if weight.dims1()? != head_dim {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda rms_norm weight size {} does not match last dim {head_dim}",
             weight.dims1()?
         );
     }
     if batch * heads * seq_len > i32::MAX as usize || head_dim > i32::MAX as usize {
-        candle_core::bail!("cuda rms_norm input is too large: {:?}", input.shape());
+        inference_tensor::bail!("cuda rms_norm input is too large: {:?}", input.shape());
     }
 
     let (input_storage, input_layout) = input.storage_and_layout();
-    let candle_core::Storage::Cuda(input_storage) = &*input_storage else {
-        candle_core::bail!("cuda rms_norm input is not on CUDA");
+    let inference_tensor::Storage::Cuda(input_storage) = &*input_storage else {
+        inference_tensor::bail!("cuda rms_norm input is not on CUDA");
     };
     let weight = weight.contiguous()?;
     let (weight_storage, weight_layout) = weight.storage_and_layout();
-    let candle_core::Storage::Cuda(weight_storage) = &*weight_storage else {
-        candle_core::bail!("cuda rms_norm weight is not on CUDA");
+    let inference_tensor::Storage::Cuda(weight_storage) = &*weight_storage else {
+        inference_tensor::bail!("cuda rms_norm weight is not on CUDA");
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
@@ -73,23 +73,23 @@ fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
         input_layout
             .stride()
             .try_into()
-            .map_err(candle_core::Error::wrap)?
+            .map_err(inference_tensor::Error::wrap)?
     } else {
         let rows = seq_len * head_dim;
         [rows, rows, head_dim, 1]
     };
-    let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
-    let heads_i32 = i32::try_from(heads).map_err(candle_core::Error::wrap)?;
-    let seq_len_i32 = i32::try_from(seq_len).map_err(candle_core::Error::wrap)?;
-    let head_dim_i32 = i32::try_from(head_dim).map_err(candle_core::Error::wrap)?;
+    let batch_i32 = i32::try_from(batch).map_err(inference_tensor::Error::wrap)?;
+    let heads_i32 = i32::try_from(heads).map_err(inference_tensor::Error::wrap)?;
+    let seq_len_i32 = i32::try_from(seq_len).map_err(inference_tensor::Error::wrap)?;
+    let head_dim_i32 = i32::try_from(head_dim).map_err(inference_tensor::Error::wrap)?;
 
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi_fn:ident) => {{
             let CudaStorageSlice::$variant(src) = &input_storage.slice else {
-                candle_core::bail!("cuda rms_norm input dtype mismatch");
+                inference_tensor::bail!("cuda rms_norm input dtype mismatch");
             };
             let CudaStorageSlice::$variant(weight_src) = &weight_storage.slice else {
-                candle_core::bail!("cuda rms_norm weight dtype mismatch");
+                inference_tensor::bail!("cuda rms_norm weight dtype mismatch");
             };
             let mut out = unsafe { dev.alloc::<$ty>(elem_count) }?;
             let (src_ptr, src_guard) = src.device_ptr(&stream);
@@ -126,7 +126,7 @@ fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
                 device: dev.clone(),
             };
             Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
+                inference_tensor::Storage::Cuda(out_storage),
                 shape,
             )))
         }};
@@ -148,20 +148,20 @@ pub fn cuda_rms_norm_residual(
     scale: Option<&Tensor>,
     eps: f32,
 ) -> Result<Tensor> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if input.shape() != residual.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual input/residual shape mismatch: {:?} vs {:?}",
             input.shape(),
             residual.shape()
         );
     }
     if input.dtype() != residual.dtype() || input.dtype() != weight.dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual dtype mismatch: input {:?}, residual {:?}, weight {:?}",
             input.dtype(),
             residual.dtype(),
@@ -169,7 +169,7 @@ pub fn cuda_rms_norm_residual(
         );
     }
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual only supports BF16/F16/F32, got {:?}",
             input.dtype()
         );
@@ -177,46 +177,46 @@ pub fn cuda_rms_norm_residual(
     if !residual.device().same_device(input.device())
         || !weight.device().same_device(input.device())
     {
-        candle_core::bail!("cuda_rms_norm_residual tensors must be on the same CUDA device");
+        inference_tensor::bail!("cuda_rms_norm_residual tensors must be on the same CUDA device");
     }
     if let Some(scale) = scale {
         if scale.elem_count() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuda_rms_norm_residual scale must have one element, got {}",
                 scale.elem_count()
             );
         }
         if scale.dtype() != input.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuda_rms_norm_residual scale dtype mismatch: input {:?}, scale {:?}",
                 input.dtype(),
                 scale.dtype()
             );
         }
         if !scale.device().same_device(input.device()) {
-            candle_core::bail!("cuda_rms_norm_residual scale must be on the same CUDA device");
+            inference_tensor::bail!("cuda_rms_norm_residual scale must be on the same CUDA device");
         }
     }
 
     let ncols = input.dim(D::Minus1)?;
     if weight.dims1()? != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual weight size {} does not match last dim {ncols}",
             weight.dims1()?
         );
     }
     let elem_count = input.elem_count();
     if elem_count == 0 {
-        candle_core::bail!("cuda_rms_norm_residual got empty input");
+        inference_tensor::bail!("cuda_rms_norm_residual got empty input");
     }
     let nrows = elem_count / ncols;
     if nrows > i32::MAX as usize || ncols > i32::MAX as usize {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual input is too large: nrows={nrows}, ncols={ncols}"
         );
     }
-    let nrows_i32 = i32::try_from(nrows).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(ncols).map_err(candle_core::Error::wrap)?;
+    let nrows_i32 = i32::try_from(nrows).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(ncols).map_err(inference_tensor::Error::wrap)?;
 
     let input = input.contiguous()?;
     let residual = residual.contiguous()?;
@@ -225,18 +225,18 @@ pub fn cuda_rms_norm_residual(
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_rms_norm_residual requires CUDA input"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_rms_norm_residual requires CUDA input"),
     };
     let (residual_storage, residual_layout) = residual.storage_and_layout();
     let residual_storage = match &*residual_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_rms_norm_residual requires CUDA residual"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_rms_norm_residual requires CUDA residual"),
     };
     let (weight_storage, weight_layout) = weight.storage_and_layout();
     let weight_storage = match &*weight_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_rms_norm_residual requires CUDA weight"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_rms_norm_residual requires CUDA weight"),
     };
     let scale_storage_and_layout = scale.as_ref().map(|scale| scale.storage_and_layout());
 
@@ -248,22 +248,22 @@ pub fn cuda_rms_norm_residual(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi_fn:ident) => {{
             let CudaStorageSlice::$variant(src) = &input_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_residual input dtype mismatch");
+                inference_tensor::bail!("cuda_rms_norm_residual input dtype mismatch");
             };
             let CudaStorageSlice::$variant(residual_src) = &residual_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_residual residual dtype mismatch");
+                inference_tensor::bail!("cuda_rms_norm_residual residual dtype mismatch");
             };
             let CudaStorageSlice::$variant(weight_src) = &weight_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_residual weight dtype mismatch");
+                inference_tensor::bail!("cuda_rms_norm_residual weight dtype mismatch");
             };
             let (scale_ptr, scale_guard) =
                 if let Some((scale_storage, scale_layout)) = &scale_storage_and_layout {
                     let scale_storage = match &**scale_storage {
-                        candle_core::Storage::Cuda(s) => s,
-                        _ => candle_core::bail!("cuda_rms_norm_residual requires CUDA scale"),
+                        inference_tensor::Storage::Cuda(s) => s,
+                        _ => inference_tensor::bail!("cuda_rms_norm_residual requires CUDA scale"),
                     };
                     let CudaStorageSlice::$variant(scale_src) = &scale_storage.slice else {
-                        candle_core::bail!("cuda_rms_norm_residual scale dtype mismatch");
+                        inference_tensor::bail!("cuda_rms_norm_residual scale dtype mismatch");
                     };
                     let (scale_ptr, scale_guard) = scale_src.device_ptr(&stream);
                     (
@@ -311,7 +311,7 @@ pub fn cuda_rms_norm_residual(
                 device: dev.clone(),
             };
             Ok(Tensor::from((
-                candle_core::Storage::Cuda(out_storage),
+                inference_tensor::Storage::Cuda(out_storage),
                 shape,
             )))
         }};
@@ -320,7 +320,7 @@ pub fn cuda_rms_norm_residual(
         DType::BF16 => launch!(BF16, half::bf16, rms_norm_residual_bf16),
         DType::F16 => launch!(F16, half::f16, rms_norm_residual_f16),
         DType::F32 => launch!(F32, f32, rms_norm_residual_f32),
-        dtype => candle_core::bail!("cuda_rms_norm_residual unsupported dtype {dtype:?}"),
+        dtype => inference_tensor::bail!("cuda_rms_norm_residual unsupported dtype {dtype:?}"),
     }
 }
 
@@ -331,20 +331,20 @@ pub fn cuda_add_rms_norm(
     weight: &Tensor,
     eps: f32,
 ) -> Result<(Tensor, Tensor)> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if input.shape() != residual.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_add_rms_norm input/residual shape mismatch: {:?} vs {:?}",
             input.shape(),
             residual.shape()
         );
     }
     if input.dtype() != residual.dtype() || input.dtype() != weight.dtype() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_add_rms_norm dtype mismatch: input {:?}, residual {:?}, weight {:?}",
             input.dtype(),
             residual.dtype(),
@@ -352,7 +352,7 @@ pub fn cuda_add_rms_norm(
         );
     }
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_add_rms_norm only supports BF16/F16/F32, got {:?}",
             input.dtype()
         );
@@ -360,26 +360,28 @@ pub fn cuda_add_rms_norm(
     if !residual.device().same_device(input.device())
         || !weight.device().same_device(input.device())
     {
-        candle_core::bail!("cuda_add_rms_norm tensors must be on the same CUDA device");
+        inference_tensor::bail!("cuda_add_rms_norm tensors must be on the same CUDA device");
     }
 
     let ncols = input.dim(D::Minus1)?;
     if weight.dims1()? != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_add_rms_norm weight size {} does not match last dim {ncols}",
             weight.dims1()?
         );
     }
     let elem_count = input.elem_count();
     if ncols == 0 || elem_count == 0 {
-        candle_core::bail!("cuda_add_rms_norm got empty input");
+        inference_tensor::bail!("cuda_add_rms_norm got empty input");
     }
     let nrows = elem_count / ncols;
     if nrows > i32::MAX as usize || ncols > i32::MAX as usize {
-        candle_core::bail!("cuda_add_rms_norm input is too large: nrows={nrows}, ncols={ncols}");
+        inference_tensor::bail!(
+            "cuda_add_rms_norm input is too large: nrows={nrows}, ncols={ncols}"
+        );
     }
-    let nrows_i32 = i32::try_from(nrows).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(ncols).map_err(candle_core::Error::wrap)?;
+    let nrows_i32 = i32::try_from(nrows).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(ncols).map_err(inference_tensor::Error::wrap)?;
 
     let input = input.contiguous()?;
     let residual = residual.contiguous()?;
@@ -387,18 +389,18 @@ pub fn cuda_add_rms_norm(
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("cuda_add_rms_norm requires CUDA input"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("cuda_add_rms_norm requires CUDA input"),
     };
     let (residual_storage, residual_layout) = residual.storage_and_layout();
     let residual_storage = match &*residual_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("cuda_add_rms_norm requires CUDA residual"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("cuda_add_rms_norm requires CUDA residual"),
     };
     let (weight_storage, weight_layout) = weight.storage_and_layout();
     let weight_storage = match &*weight_storage {
-        candle_core::Storage::Cuda(storage) => storage,
-        _ => candle_core::bail!("cuda_add_rms_norm requires CUDA weight"),
+        inference_tensor::Storage::Cuda(storage) => storage,
+        _ => inference_tensor::bail!("cuda_add_rms_norm requires CUDA weight"),
     };
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
@@ -408,13 +410,13 @@ pub fn cuda_add_rms_norm(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi_fn:ident) => {{
             let CudaStorageSlice::$variant(src) = &input_storage.slice else {
-                candle_core::bail!("cuda_add_rms_norm input dtype mismatch");
+                inference_tensor::bail!("cuda_add_rms_norm input dtype mismatch");
             };
             let CudaStorageSlice::$variant(residual_src) = &residual_storage.slice else {
-                candle_core::bail!("cuda_add_rms_norm residual dtype mismatch");
+                inference_tensor::bail!("cuda_add_rms_norm residual dtype mismatch");
             };
             let CudaStorageSlice::$variant(weight_src) = &weight_storage.slice else {
-                candle_core::bail!("cuda_add_rms_norm weight dtype mismatch");
+                inference_tensor::bail!("cuda_add_rms_norm weight dtype mismatch");
             };
 
             let mut residual_out = unsafe { dev.alloc::<$ty>(elem_count) }?;
@@ -460,8 +462,11 @@ pub fn cuda_add_rms_norm(
                 device: dev.clone(),
             };
             Ok((
-                Tensor::from((candle_core::Storage::Cuda(residual_storage), shape.clone())),
-                Tensor::from((candle_core::Storage::Cuda(norm_storage), shape)),
+                Tensor::from((
+                    inference_tensor::Storage::Cuda(residual_storage),
+                    shape.clone(),
+                )),
+                Tensor::from((inference_tensor::Storage::Cuda(norm_storage), shape)),
             ))
         }};
     }
@@ -469,7 +474,7 @@ pub fn cuda_add_rms_norm(
         DType::BF16 => launch!(BF16, half::bf16, add_rms_norm_bf16),
         DType::F16 => launch!(F16, half::f16, add_rms_norm_f16),
         DType::F32 => launch!(F32, f32, add_rms_norm_f32),
-        dtype => candle_core::bail!("cuda_add_rms_norm unsupported dtype {dtype:?}"),
+        dtype => inference_tensor::bail!("cuda_add_rms_norm unsupported dtype {dtype:?}"),
     }
 }
 
@@ -481,7 +486,7 @@ pub fn metal_rms_norm_residual(
     scale: Option<&Tensor>,
     eps: f32,
 ) -> Result<Option<Tensor>> {
-    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
+    use inference_tensor::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     if input.shape() != residual.shape() {
         return Ok(None);
@@ -555,7 +560,7 @@ pub fn metal_rms_norm_residual(
         n_rows,
         eps,
     )
-    .map_err(candle_core::Error::wrap)?;
+    .map_err(inference_tensor::Error::wrap)?;
 
     let out = Tensor::from((
         Storage::Metal(MetalStorage::new(
@@ -579,13 +584,13 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
     residual_eps: f32,
     norm_eps: f32,
 ) -> Result<(Tensor, Tensor)> {
-    use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
-    use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
     use std::ffi::c_void;
 
     if input.shape() != residual.shape() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm input/residual shape mismatch: {:?} vs {:?}",
             input.shape(),
             residual.shape()
@@ -595,7 +600,7 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
         || input.dtype() != residual_weight.dtype()
         || input.dtype() != norm_weight.dtype()
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm dtype mismatch: input {:?}, residual {:?}, residual_weight {:?}, norm_weight {:?}",
             input.dtype(),
             residual.dtype(),
@@ -604,7 +609,7 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
         );
     }
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm only supports BF16/F16/F32, got {:?}",
             input.dtype()
         );
@@ -613,26 +618,26 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
         || !residual_weight.device().same_device(input.device())
         || !norm_weight.device().same_device(input.device())
     {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm tensors must be on the same CUDA device"
         );
     }
     if let Some(scale) = scale {
         if scale.elem_count() != 1 {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuda_rms_norm_residual_then_rms_norm scale must have one element, got {}",
                 scale.elem_count()
             );
         }
         if scale.dtype() != input.dtype() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuda_rms_norm_residual_then_rms_norm scale dtype mismatch: input {:?}, scale {:?}",
                 input.dtype(),
                 scale.dtype()
             );
         }
         if !scale.device().same_device(input.device()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "cuda_rms_norm_residual_then_rms_norm scale must be on the same CUDA device"
             );
         }
@@ -640,29 +645,29 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
 
     let ncols = input.dim(D::Minus1)?;
     if residual_weight.dims1()? != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm residual weight size {} does not match last dim {ncols}",
             residual_weight.dims1()?
         );
     }
     if norm_weight.dims1()? != ncols {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm norm weight size {} does not match last dim {ncols}",
             norm_weight.dims1()?
         );
     }
     let elem_count = input.elem_count();
     if elem_count == 0 {
-        candle_core::bail!("cuda_rms_norm_residual_then_rms_norm got empty input");
+        inference_tensor::bail!("cuda_rms_norm_residual_then_rms_norm got empty input");
     }
     let nrows = elem_count / ncols;
     if nrows > i32::MAX as usize || ncols > i32::MAX as usize {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "cuda_rms_norm_residual_then_rms_norm input is too large: nrows={nrows}, ncols={ncols}"
         );
     }
-    let nrows_i32 = i32::try_from(nrows).map_err(candle_core::Error::wrap)?;
-    let ncols_i32 = i32::try_from(ncols).map_err(candle_core::Error::wrap)?;
+    let nrows_i32 = i32::try_from(nrows).map_err(inference_tensor::Error::wrap)?;
+    let ncols_i32 = i32::try_from(ncols).map_err(inference_tensor::Error::wrap)?;
 
     let input = input.contiguous()?;
     let residual = residual.contiguous()?;
@@ -672,25 +677,29 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
 
     let (input_storage, input_layout) = input.storage_and_layout();
     let input_storage = match &*input_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_rms_norm_residual_then_rms_norm requires CUDA input"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_rms_norm_residual_then_rms_norm requires CUDA input"),
     };
     let (residual_storage, residual_layout) = residual.storage_and_layout();
     let residual_storage = match &*residual_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_rms_norm_residual_then_rms_norm requires CUDA residual"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!("cuda_rms_norm_residual_then_rms_norm requires CUDA residual"),
     };
     let (residual_weight_storage, residual_weight_layout) = residual_weight.storage_and_layout();
     let residual_weight_storage = match &*residual_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
+        inference_tensor::Storage::Cuda(s) => s,
         _ => {
-            candle_core::bail!("cuda_rms_norm_residual_then_rms_norm requires CUDA residual weight")
+            inference_tensor::bail!(
+                "cuda_rms_norm_residual_then_rms_norm requires CUDA residual weight"
+            )
         }
     };
     let (norm_weight_storage, norm_weight_layout) = norm_weight.storage_and_layout();
     let norm_weight_storage = match &*norm_weight_storage {
-        candle_core::Storage::Cuda(s) => s,
-        _ => candle_core::bail!("cuda_rms_norm_residual_then_rms_norm requires CUDA norm weight"),
+        inference_tensor::Storage::Cuda(s) => s,
+        _ => inference_tensor::bail!(
+            "cuda_rms_norm_residual_then_rms_norm requires CUDA norm weight"
+        ),
     };
     let scale_storage_and_layout = scale.as_ref().map(|scale| scale.storage_and_layout());
 
@@ -702,43 +711,48 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
     macro_rules! launch {
         ($variant:ident, $ty:ty, $ffi_fn:ident) => {{
             let CudaStorageSlice::$variant(src) = &input_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_residual_then_rms_norm input dtype mismatch");
+                inference_tensor::bail!(
+                    "cuda_rms_norm_residual_then_rms_norm input dtype mismatch"
+                );
             };
             let CudaStorageSlice::$variant(residual_src) = &residual_storage.slice else {
-                candle_core::bail!("cuda_rms_norm_residual_then_rms_norm residual dtype mismatch");
+                inference_tensor::bail!(
+                    "cuda_rms_norm_residual_then_rms_norm residual dtype mismatch"
+                );
             };
             let CudaStorageSlice::$variant(residual_weight_src) = &residual_weight_storage.slice
             else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cuda_rms_norm_residual_then_rms_norm residual weight dtype mismatch"
                 );
             };
             let CudaStorageSlice::$variant(norm_weight_src) = &norm_weight_storage.slice else {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "cuda_rms_norm_residual_then_rms_norm norm weight dtype mismatch"
                 );
             };
-            let (scale_ptr, scale_guard) = if let Some((scale_storage, scale_layout)) =
-                &scale_storage_and_layout
-            {
-                let scale_storage = match &**scale_storage {
-                    candle_core::Storage::Cuda(s) => s,
-                    _ => candle_core::bail!(
-                        "cuda_rms_norm_residual_then_rms_norm requires CUDA scale"
-                    ),
+            let (scale_ptr, scale_guard) =
+                if let Some((scale_storage, scale_layout)) = &scale_storage_and_layout {
+                    let scale_storage = match &**scale_storage {
+                        inference_tensor::Storage::Cuda(s) => s,
+                        _ => inference_tensor::bail!(
+                            "cuda_rms_norm_residual_then_rms_norm requires CUDA scale"
+                        ),
+                    };
+                    let CudaStorageSlice::$variant(scale_src) = &scale_storage.slice else {
+                        inference_tensor::bail!(
+                            "cuda_rms_norm_residual_then_rms_norm scale dtype mismatch"
+                        );
+                    };
+                    let (scale_ptr, scale_guard) = scale_src.device_ptr(&stream);
+                    (
+                        unsafe { (scale_ptr as *const $ty).add(scale_layout.start_offset()) }
+                            as *const c_void,
+                        Some(scale_guard),
+                    )
+                } else {
+                    (std::ptr::null(), None)
                 };
-                let CudaStorageSlice::$variant(scale_src) = &scale_storage.slice else {
-                    candle_core::bail!("cuda_rms_norm_residual_then_rms_norm scale dtype mismatch");
-                };
-                let (scale_ptr, scale_guard) = scale_src.device_ptr(&stream);
-                (
-                    unsafe { (scale_ptr as *const $ty).add(scale_layout.start_offset()) }
-                        as *const c_void,
-                    Some(scale_guard),
-                )
-            } else {
-                (std::ptr::null(), None)
-            };
 
             let mut residual_out = unsafe { dev.alloc::<$ty>(elem_count) }?;
             let mut norm_out = unsafe { dev.alloc::<$ty>(elem_count) }?;
@@ -793,8 +807,11 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
                 device: dev.clone(),
             };
             Ok((
-                Tensor::from((candle_core::Storage::Cuda(residual_storage), shape.clone())),
-                Tensor::from((candle_core::Storage::Cuda(norm_storage), shape)),
+                Tensor::from((
+                    inference_tensor::Storage::Cuda(residual_storage),
+                    shape.clone(),
+                )),
+                Tensor::from((inference_tensor::Storage::Cuda(norm_storage), shape)),
             ))
         }};
     }
@@ -803,7 +820,9 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
         DType::F16 => launch!(F16, half::f16, rms_norm_residual_then_rms_norm_f16),
         DType::F32 => launch!(F32, f32, rms_norm_residual_then_rms_norm_f32),
         dtype => {
-            candle_core::bail!("cuda_rms_norm_residual_then_rms_norm unsupported dtype {dtype:?}")
+            inference_tensor::bail!(
+                "cuda_rms_norm_residual_then_rms_norm unsupported dtype {dtype:?}"
+            )
         }
     }
 }

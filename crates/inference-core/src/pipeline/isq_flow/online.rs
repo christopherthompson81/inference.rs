@@ -4,8 +4,8 @@
 use std::{collections::HashMap, sync::atomic::AtomicUsize};
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
 use inference_quant::{IsqType, QuantMethod, TrackedModule};
+use inference_tensor::{Device, Tensor};
 use tracing::info;
 
 use super::{harvest_imatrix, module_imatrix, requantize_and_swap};
@@ -246,7 +246,7 @@ fn quantize_source_tensor(
     guard: inference_quant::QuantizeOntoGuard,
 ) -> Result<std::sync::Arc<dyn QuantMethod>> {
     let unquant = std::sync::Arc::new(inference_quant::UnquantLinear::new(
-        inference_quant::QuantMethodConfig::Unquantized(candle_nn::Linear::new(w, b)),
+        inference_quant::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(w, b)),
     )?) as std::sync::Arc<dyn QuantMethod>;
     Ok(unquant.apply_isq(
         Some(ty),
@@ -371,7 +371,7 @@ pub(crate) fn requantize_from_source(
                     .replace(resident.preserve_dynamic_lora(replacement));
                 Ok(())
             };
-            job().map_err(|e| candle_core::Error::msg(format!("{e:#}")))
+            job().map_err(|e| inference_tensor::Error::msg(format!("{e:#}")))
         });
         dense_receivers.push((key, rx));
     }
@@ -459,7 +459,7 @@ pub(crate) fn requantize_from_source(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::DType;
+    use inference_tensor::DType;
     use std::sync::Arc;
 
     const E: usize = 4;
@@ -479,13 +479,13 @@ mod tests {
             key: &str,
             device: &Device,
             shard: inference_quant::Shard,
-        ) -> candle_core::Result<Option<Arc<dyn QuantMethod>>> {
+        ) -> inference_tensor::Result<Option<Arc<dyn QuantMethod>>> {
             if key != "m.lin" {
                 return Ok(None);
             }
             let weight = shard.apply_to(&self.weight)?.to_device(device)?;
             Ok(Some(Arc::new(inference_quant::UnquantLinear::new(
-                inference_quant::QuantMethodConfig::Unquantized(candle_nn::Linear::new(
+                inference_quant::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(
                     weight, None,
                 )),
             )?)))
@@ -495,34 +495,38 @@ mod tests {
             &self,
             _name: &str,
             _device: &Device,
-        ) -> candle_core::Result<Option<Tensor>> {
+        ) -> inference_tensor::Result<Option<Tensor>> {
             Ok(None)
         }
 
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
+        fn shard_alignment(&self, _key: &str) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
+        fn pack_factor(&self, _dtype: DType) -> inference_tensor::Result<usize> {
             Ok(1)
         }
 
-        fn pack_factor_for(&self, _key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
+        fn pack_factor_for(
+            &self,
+            _key: &str,
+            _dtype: DType,
+        ) -> inference_tensor::Result<Option<usize>> {
             Ok(Some(1))
         }
     }
 
     fn write_st(path: &std::path::Path, tensors: Vec<(String, Tensor)>) {
-        candle_core::safetensors::save(&tensors.into_iter().collect(), path).unwrap();
+        inference_tensor::safetensors::save(&tensors.into_iter().collect(), path).unwrap();
     }
 
     #[test]
     fn calibration_prefers_quantized_source_over_checkpoint_paths() -> Result<()> {
         use inference_quant::{QuantMethod, Shard, TrackedModule};
 
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((2, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {
@@ -567,7 +571,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let file = dir.path().join("model.safetensors");
         let truth = Tensor::randn(0f32, 1f32, (8, 32), &Device::Cpu)?;
-        candle_core::safetensors::save(
+        inference_tensor::safetensors::save(
             &[("m.lin.weight".to_string(), truth.clone())]
                 .into_iter()
                 .collect(),
@@ -575,9 +579,9 @@ mod tests {
         )?;
 
         // resident is rank 1 of 2: rows 4..8, quantized zeros until the swap
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((4, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = std::sync::Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {
@@ -625,7 +629,7 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let file = dir.path().join("model.safetensors");
         let source_weight = Tensor::zeros((2, 32), DType::F32, &Device::Cpu)?;
-        candle_core::safetensors::save(
+        inference_tensor::safetensors::save(
             &[("m.lin.weight".to_string(), source_weight)]
                 .into_iter()
                 .collect(),
@@ -642,7 +646,7 @@ mod tests {
         .with_lora_registry(registry.clone())
         .pp("m.lin");
         let base = std::sync::Arc::new(UnquantLinear::new(
-            inference_quant::QuantMethodConfig::Unquantized(candle_nn::Linear::new(
+            inference_quant::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(
                 Tensor::zeros((2, 32), DType::F32, &Device::Cpu)?,
                 None,
             )),
@@ -698,9 +702,9 @@ mod tests {
         write_st(&file, tensors);
 
         // resident starts as quantized zeros; from-source must replace it with real weights
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((E, INTER, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = std::sync::Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {
@@ -762,9 +766,9 @@ mod tests {
         }
         write_st(&file, tensors);
 
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((E, INTER, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {
@@ -818,9 +822,9 @@ mod tests {
             ],
         );
 
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((E, INTER / 2, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {
@@ -888,9 +892,9 @@ mod tests {
                 ),
             ],
         );
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((E, INTER, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {
@@ -932,9 +936,9 @@ mod tests {
                 Tensor::zeros((E, INTER, 32), DType::F32, &Device::Cpu)?,
             )],
         );
-        let zeros = candle_core::quantized::QTensor::quantize(
+        let zeros = inference_tensor::quantized::QTensor::quantize(
             &Tensor::zeros((E, INTER, 32), DType::F32, &Device::Cpu)?,
-            candle_core::quantized::GgmlDType::Q8_0,
+            inference_tensor::quantized::GgmlDType::Q8_0,
         )?;
         let resident = Arc::new(inference_quant::GgufMatMul::new(
             inference_quant::QuantMethodConfig::Gguf {

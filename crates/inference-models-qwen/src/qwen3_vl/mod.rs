@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 use text::Qwen3VLTextModel;
 use vision::Qwen3VLVisionModel;
 
@@ -80,7 +80,7 @@ pub fn get_rope_index(
             let mut data = Vec::with_capacity(raw.len());
             for row in raw {
                 if row.len() != 3 {
-                    candle_core::bail!("image_grid_thw entries must have length 3");
+                    inference_tensor::bail!("image_grid_thw entries must have length 3");
                 }
                 data.push([row[0], row[1], row[2]]);
             }
@@ -94,7 +94,7 @@ pub fn get_rope_index(
             let mut data = Vec::with_capacity(raw.len());
             for row in raw {
                 if row.len() != 3 {
-                    candle_core::bail!("video_grid_thw entries must have length 3");
+                    inference_tensor::bail!("video_grid_thw entries must have length 3");
                 }
                 // Timestamps split each video into per-frame vision spans, so the grid splits too.
                 for _ in 0..row[0] {
@@ -145,7 +145,7 @@ pub fn get_rope_index(
                             .iter()
                             .any(|&token| token == image_token_id || token == video_token_id);
                         if truncated_media {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "vision_start_token_id without matching vision_end_token_id"
                             );
                         }
@@ -176,7 +176,9 @@ pub fn get_rope_index(
                 let placeholder_start = match placeholder_start {
                     Some(pos) => pos,
                     None => {
-                        candle_core::bail!("vision span missing image/video placeholder tokens");
+                        inference_tensor::bail!(
+                            "vision span missing image/video placeholder tokens"
+                        );
                     }
                 };
 
@@ -194,23 +196,25 @@ pub fn get_rope_index(
                 let placeholder_token_id = filtered_tokens[placeholder_start];
                 let placeholder_slice = &filtered_tokens[placeholder_start..end_idx];
                 if placeholder_slice.is_empty() {
-                    candle_core::bail!("vision span placeholder slice is empty");
+                    inference_tensor::bail!("vision span placeholder slice is empty");
                 }
                 if !placeholder_slice
                     .iter()
                     .all(|&tok| tok == placeholder_token_id)
                 {
-                    candle_core::bail!("Mixed placeholder tokens found within a vision span");
+                    inference_tensor::bail!("Mixed placeholder tokens found within a vision span");
                 }
                 let placeholder_len = placeholder_slice.len();
 
                 let (grid_t, grid_h, grid_w) = match placeholder_token_id {
                     id if id == image_token_id => {
                         let Some(ref img_grid) = image_grid_data else {
-                            candle_core::bail!("image_grid_thw required for image placeholders");
+                            inference_tensor::bail!(
+                                "image_grid_thw required for image placeholders"
+                            );
                         };
                         if image_index >= img_grid.len() {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Not enough image_grid_thw entries for placeholders"
                             );
                         }
@@ -218,7 +222,7 @@ pub fn get_rope_index(
                         image_index += 1;
                         if merge_size == 0 || grid[1] % merge_size != 0 || grid[2] % merge_size != 0
                         {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "image grid dimensions must be divisible by spatial_merge_size"
                             );
                         }
@@ -230,10 +234,12 @@ pub fn get_rope_index(
                     }
                     id if id == video_token_id => {
                         let Some(ref vid_grid) = video_grid_data else {
-                            candle_core::bail!("video_grid_thw required for video placeholders");
+                            inference_tensor::bail!(
+                                "video_grid_thw required for video placeholders"
+                            );
                         };
                         if video_index >= vid_grid.len() {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "Not enough video_grid_thw entries for placeholders"
                             );
                         }
@@ -241,7 +247,7 @@ pub fn get_rope_index(
                         video_index += 1;
                         if merge_size == 0 || grid[1] % merge_size != 0 || grid[2] % merge_size != 0
                         {
-                            candle_core::bail!(
+                            inference_tensor::bail!(
                                 "video grid dimensions must be divisible by spatial_merge_size"
                             );
                         }
@@ -252,17 +258,17 @@ pub fn get_rope_index(
                         )
                     }
                     other => {
-                        candle_core::bail!("Unexpected placeholder token id {other}");
+                        inference_tensor::bail!("Unexpected placeholder token id {other}");
                     }
                 };
 
                 if grid_t == 0 || grid_h == 0 || grid_w == 0 {
-                    candle_core::bail!("Zero-sized grid encountered in vision span");
+                    inference_tensor::bail!("Zero-sized grid encountered in vision span");
                 }
 
                 let expected_len = grid_t * grid_h * grid_w;
                 if placeholder_len != expected_len {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Placeholder token count {placeholder_len} does not match expected {expected_len}"
                     );
                 }
@@ -302,7 +308,7 @@ pub fn get_rope_index(
             }
 
             if positions_for_valid.len() != valid_indices.len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Mismatch between computed positions ({}) and valid tokens ({})",
                     positions_for_valid.len(),
                     valid_indices.len()
@@ -387,16 +393,16 @@ fn visual_encoder_cache_hash(content_hash: u64, grid: &[u32], spatial_merge_size
 
 fn checked_visual_sum(name: &str, values: impl IntoIterator<Item = usize>) -> Result<usize> {
     values.into_iter().try_fold(0usize, |total, value| {
-        total
-            .checked_add(value)
-            .ok_or_else(|| candle_core::Error::msg(format!("Qwen vision {name} count overflow")))
+        total.checked_add(value).ok_or_else(|| {
+            inference_tensor::Error::msg(format!("Qwen vision {name} count overflow"))
+        })
     })
 }
 
 fn validate_visual_input_rows(pixel_values: &Tensor, expected_rows: usize) -> Result<()> {
     let pixel_rows = pixel_values.dim(0)?;
     if pixel_rows != expected_rows {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen vision received {pixel_rows} pixel rows, expected {expected_rows} from grid metadata"
         );
     }
@@ -410,14 +416,14 @@ fn validate_visual_encoder_rows(
 ) -> Result<()> {
     let main_rows = main.dim(0)?;
     if main_rows != expected_rows {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen vision encoder returned {main_rows} rows, expected {expected_rows}"
         );
     }
     for (index, output) in deepstack.iter().enumerate() {
         let output_rows = output.dim(0)?;
         if output_rows != expected_rows {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen vision DeepStack output {index} returned {output_rows} rows, expected {expected_rows}"
             );
         }
@@ -447,7 +453,7 @@ impl<'a> VisualEncoder<'a> {
     ) -> Result<Vec<Vec<Tensor>>> {
         let grid_data = grid_thw.to_vec2::<u32>()?;
         if !hashes.is_empty() && hashes.len() != grid_data.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen encoder has {} hashes but {} grid rows",
                 hashes.len(),
                 grid_data.len()
@@ -460,7 +466,7 @@ impl<'a> VisualEncoder<'a> {
                     .insert(hash, grid)
                     .is_some_and(|previous| previous != grid)
                 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Qwen encoder hash {hash} is associated with different visual grids"
                     );
                 }
@@ -470,9 +476,9 @@ impl<'a> VisualEncoder<'a> {
             .iter()
             .map(|row| {
                 row.iter().try_fold(1usize, |count, &value| {
-                    count
-                        .checked_mul(value as usize)
-                        .ok_or_else(|| candle_core::Error::msg("Qwen vision patch count overflow"))
+                    count.checked_mul(value as usize).ok_or_else(|| {
+                        inference_tensor::Error::msg("Qwen vision patch count overflow")
+                    })
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -485,7 +491,7 @@ impl<'a> VisualEncoder<'a> {
                     .checked_mul(row[1] as usize / self.spatial_merge_size)
                     .and_then(|count| count.checked_mul(row[2] as usize / self.spatial_merge_size))
                     .ok_or_else(|| {
-                        candle_core::Error::msg("Qwen vision encoder output count overflow")
+                        inference_tensor::Error::msg("Qwen vision encoder output count overflow")
                     })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -515,9 +521,9 @@ impl<'a> VisualEncoder<'a> {
             let mut pixel_offset = 0usize;
             for &patch_count in &patches_per_item {
                 patch_offsets.push(pixel_offset);
-                pixel_offset = pixel_offset
-                    .checked_add(patch_count)
-                    .ok_or_else(|| candle_core::Error::msg("Qwen vision patch offset overflow"))?;
+                pixel_offset = pixel_offset.checked_add(patch_count).ok_or_else(|| {
+                    inference_tensor::Error::msg("Qwen vision patch offset overflow")
+                })?;
             }
             let miss_indices = lookup
                 .miss_groups()
@@ -566,10 +572,10 @@ impl<'a> VisualEncoder<'a> {
 pub fn concatenate_visual_items(per_item: &[Vec<Tensor>]) -> Result<(Tensor, Vec<Tensor>)> {
     let output_count = per_item
         .first()
-        .ok_or_else(|| candle_core::Error::msg("Qwen visual batch is empty"))?
+        .ok_or_else(|| inference_tensor::Error::msg("Qwen visual batch is empty"))?
         .len();
     if per_item.iter().any(|outputs| outputs.len() != output_count) {
-        candle_core::bail!("Qwen visual items have different DeepStack output counts");
+        inference_tensor::bail!("Qwen visual items have different DeepStack output counts");
     }
     let main = Tensor::cat(
         &per_item
@@ -598,7 +604,7 @@ pub fn insert_current_visual_outputs(
     outputs: Vec<Vec<Tensor>>,
 ) -> Result<()> {
     if hashes.len() != outputs.len() {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "Qwen has {} current {kind:?} outputs but {} hashes",
             outputs.len(),
             hashes.len()
@@ -702,7 +708,7 @@ impl Qwen3VLModel {
 
         if let Some(pixel_values) = &pixel_values {
             let Some(image_grid_thw_ref) = image_grid_thw.as_ref() else {
-                candle_core::bail!("pixel_values require image_grid_thw");
+                inference_tensor::bail!("pixel_values require image_grid_thw");
             };
             let mut pixel_values = pixel_values.clone();
             let ndim = pixel_values.dims().len();
@@ -752,7 +758,7 @@ impl Qwen3VLModel {
                     .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
                     .sum();
                 if image_embeds.dim(0)? != total_expected {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Image embedding length {} does not match placeholder tokens {}",
                         image_embeds.dim(0)?,
                         total_expected
@@ -779,7 +785,7 @@ impl Qwen3VLModel {
 
         if let Some(pixel_values_videos) = &pixel_values_videos {
             let Some(video_grid_thw_ref) = video_grid_thw.as_ref() else {
-                candle_core::bail!("pixel_values_videos require video_grid_thw");
+                inference_tensor::bail!("pixel_values_videos require video_grid_thw");
             };
             let mut pixel_values = pixel_values_videos.clone();
             let ndim = pixel_values.dims().len();
@@ -827,7 +833,7 @@ impl Qwen3VLModel {
                     .flat_map(|spans| spans.iter().map(|(s, e)| e - s))
                     .sum();
                 if video_embeds.dim(0)? != total_expected {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Video embedding length {} does not match placeholder tokens {}",
                         video_embeds.dim(0)?,
                         total_expected
@@ -871,7 +877,7 @@ impl Qwen3VLModel {
                     .to_vec1::<u8>()?;
                 let num_visual = visual_indices_vec.len();
                 if image_deepstack.len() != video_deepstack.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "DeepStack image layers ({}) do not match video layers ({})",
                         image_deepstack.len(),
                         video_deepstack.len()
@@ -893,7 +899,7 @@ impl Qwen3VLModel {
                         }
                     }
                     if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
                             img_offset,
                             img_layer.dim(0)?,
@@ -924,7 +930,9 @@ impl Qwen3VLModel {
                 let indices = Tensor::from_vec(
                     destinations
                         .iter()
-                        .map(|position| u32::try_from(*position).map_err(candle_core::Error::wrap))
+                        .map(|position| {
+                            u32::try_from(*position).map_err(inference_tensor::Error::wrap)
+                        })
                         .collect::<Result<Vec<_>>>()?,
                     destinations.len(),
                     input_ids.device(),

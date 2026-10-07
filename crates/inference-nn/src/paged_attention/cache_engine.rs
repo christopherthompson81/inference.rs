@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
-use candle_core::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 use super::config::{KvCacheLayout, ModelConfigLike};
@@ -137,7 +137,7 @@ impl CacheEngine {
         cache_config
             .cache_type
             .validate(dtype, model_config, device, &layer_devices)
-            .map_err(candle_core::Error::msg)?;
+            .map_err(inference_tensor::Error::msg)?;
         let dtype = cache_config.cache_type.to_dtype(dtype);
         let gpu_cache =
             Self::allocate_gpu_cache(model_config, cache_config, dtype, device, layer_devices)?;
@@ -214,7 +214,7 @@ impl CacheEngine {
                     let key_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
-                            use candle_core::{MetalStorage, Shape, Storage};
+                            use inference_tensor::{MetalStorage, Shape, Storage};
 
                             let elem_count = num_gpu_blocks
                                 * key_block_shape.0
@@ -263,7 +263,7 @@ impl CacheEngine {
                     let value_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
-                            use candle_core::{MetalStorage, Shape, Storage};
+                            use inference_tensor::{MetalStorage, Shape, Storage};
 
                             let elem_count = num_gpu_blocks
                                 * value_block_shape.0
@@ -317,7 +317,7 @@ impl CacheEngine {
                     let key_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
-                            use candle_core::{MetalStorage, Shape, Storage};
+                            use inference_tensor::{MetalStorage, Shape, Storage};
 
                             let elem_count = num_gpu_blocks
                                 * key_block_shape.0
@@ -381,7 +381,7 @@ impl CacheEngine {
                     let key_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
-                            use candle_core::{MetalStorage, Shape, Storage};
+                            use inference_tensor::{MetalStorage, Shape, Storage};
 
                             let elem_count =
                                 num_gpu_blocks * cache_config.block_size * kv_lora_rank;
@@ -419,7 +419,7 @@ impl CacheEngine {
                     let value_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
-                            use candle_core::{MetalStorage, Shape, Storage};
+                            use inference_tensor::{MetalStorage, Shape, Storage};
 
                             let elem_count =
                                 num_gpu_blocks * cache_config.block_size * kpe_head_dim;

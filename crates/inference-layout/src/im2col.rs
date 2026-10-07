@@ -1,4 +1,4 @@
-use candle_core::{CpuStorage, CustomOp1, Layout, Result, Shape, Tensor};
+use inference_tensor::{CpuStorage, CustomOp1, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 #[cfg(feature = "cuda")]
@@ -37,7 +37,7 @@ impl CustomOp1 for Im2Col {
     fn cpu_fwd(&self, s: &CpuStorage, l: &Layout) -> Result<(CpuStorage, Shape)> {
         let (b, c, h, w) = l.shape().dims4()?;
         let CpuStorage::F32(x) = s else {
-            candle_core::bail!("im2col CPU path is f32 only");
+            inference_tensor::bail!("im2col CPU path is f32 only");
         };
         let x = &x[l.start_offset()..];
         let (ho, wo) = self.out_hw(h, w);
@@ -77,10 +77,10 @@ impl CustomOp1 for Im2Col {
     #[cfg(feature = "cuda")]
     fn cuda_fwd(
         &self,
-        s: &candle_core::CudaStorage,
+        s: &inference_tensor::CudaStorage,
         l: &Layout,
-    ) -> Result<(candle_core::CudaStorage, Shape)> {
-        use candle_core::cuda_backend::{
+    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
+        use inference_tensor::cuda_backend::{
             CudaStorageSlice, WrapErr,
             cudarc::driver::{LaunchConfig, PushKernelArg},
         };
@@ -119,7 +119,7 @@ impl CustomOp1 for Im2Col {
         };
         unsafe { builder.launch(cfg) }.w()?;
         Ok((
-            candle_core::CudaStorage {
+            inference_tensor::CudaStorage {
                 slice: CudaStorageSlice::F32(out),
                 device: dev.clone(),
             },

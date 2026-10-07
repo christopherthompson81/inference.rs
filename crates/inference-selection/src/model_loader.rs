@@ -1031,7 +1031,7 @@ mod tests {
             token_source: inference_core::TokenSource::None,
             hf_revision: None,
             dtype: ModelDType::Auto,
-            device: candle_core::Device::Cpu,
+            device: inference_tensor::Device::Cpu,
             device_map_setting: inference_core::DeviceMapSetting::dummy(),
             isq: None,
             paged_attn_config: None,

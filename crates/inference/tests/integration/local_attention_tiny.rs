@@ -91,7 +91,7 @@ fn record(
     build: impl FnOnce(
         inference_quant::ShardedVarBuilder,
         inference_nn::model::NormalLoadingMetadata,
-    ) -> candle_core::Result<()>,
+    ) -> inference_tensor::Result<()>,
 ) -> anyhow::Result<tempfile::TempDir> {
     let scratch = tempfile::tempdir()?;
     let config_path = scratch.path().join("config.json");
@@ -160,13 +160,14 @@ fn tiny_gpt_oss() -> anyhow::Result<tempfile::TempDir> {
         },
     )?;
     let weights = checkpoint.path().join("model.safetensors");
-    let mut tensors = candle_core::safetensors::load(&weights, &candle_core::Device::Cpu)?;
+    let mut tensors =
+        inference_tensor::safetensors::load(&weights, &inference_tensor::Device::Cpu)?;
     for (name, tensor) in tensors.iter_mut() {
         if name.ends_with(".self_attn.sinks") {
             *tensor = tensor.ones_like()?.affine(SINK_LOGIT, 0.0)?;
         }
     }
-    candle_core::safetensors::save(&tensors, &weights)?;
+    inference_tensor::safetensors::save(&tensors, &weights)?;
     Ok(checkpoint)
 }
 

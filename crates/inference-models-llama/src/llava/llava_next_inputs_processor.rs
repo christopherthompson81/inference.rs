@@ -3,9 +3,9 @@
 use std::sync::Arc;
 use std::{any::Any, ops::Range};
 
-use candle_core::Result;
-use candle_core::{DType, Device, Tensor};
 use image::GenericImageView;
+use inference_tensor::Result;
+use inference_tensor::{DType, Device, Tensor};
 use itertools::Itertools;
 use regex_automata::meta::Regex;
 use tokenizers::Tokenizer;
@@ -162,7 +162,7 @@ fn llava_next_layout_items(features: &[MultiModalFeature]) -> Result<Vec<Multimo
         .filter(|feature| feature.kind == MultimodalKind::Image)
         .map(|feature| {
             if feature.item_range.len() != 1 || feature.hashes.len() != 1 {
-                candle_core::bail!("LLaVA-Next image feature must describe exactly one image");
+                inference_tensor::bail!("LLaVA-Next image feature must describe exactly one image");
             }
             let placeholder = feature.offset..feature.end();
             MultimodalItemLayout::new(
@@ -184,14 +184,14 @@ fn llava_next_packed_layout(
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
-        candle_core::bail!("LLaVA-Next packed multimodal metadata length mismatch");
+        inference_tensor::bail!("LLaVA-Next packed multimodal metadata length mismatch");
     }
     let requests = input_seqs
         .iter()
         .zip(query_lens)
         .map(|(seq, &query_len)| {
             if query_len != seq.get_toks().len() {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "LLaVA-Next packed multimodal prefill requires the complete uncached prompt"
                 );
             }
@@ -629,11 +629,11 @@ impl ImagePreProcessor for LLaVANextInputProcessor {
         images: Vec<image::DynamicImage>,
         videos: Vec<Vec<image::DynamicImage>>,
         config: &preprocessor_config::PreProcessorConfig,
-        device: &candle_core::Device,
+        device: &inference_tensor::Device,
         (_, _): (usize, usize),
-    ) -> candle_core::Result<image_processor::PreprocessedImages> {
+    ) -> inference_tensor::Result<image_processor::PreprocessedImages> {
         if images.len() > 1 {
-            candle_core::bail!("Can only process one image per batch"); // This is no different from phi3_input_processor
+            inference_tensor::bail!("Can only process one image per batch"); // This is no different from phi3_input_processor
         };
         assert!(videos.is_empty());
 
@@ -709,7 +709,7 @@ impl ImagePreProcessor for LLaVANextInputProcessor {
 mod tests {
     use std::collections::HashMap;
 
-    use candle_core::{Device, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     use super::*;
     use crate::paged_attention::block_hash::MultimodalAttentionPolicy;

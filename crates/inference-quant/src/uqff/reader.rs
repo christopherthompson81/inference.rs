@@ -4,7 +4,7 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 use safetensors::tensor::Dtype;
 
 use super::{BiasShard, bias_shard};
@@ -31,27 +31,30 @@ fn repeating_layer_key(prefix: &str) -> Option<String> {
     None
 }
 
-fn aggregate_pack_factor(layouts: &[(usize, usize)], dtype: candle_core::DType) -> Result<usize> {
+fn aggregate_pack_factor(
+    layouts: &[(usize, usize)],
+    dtype: inference_tensor::DType,
+) -> Result<usize> {
     let logical_elements = layouts.iter().try_fold(0usize, |total, (logical, _)| {
-        total
-            .checked_add(*logical)
-            .ok_or_else(|| candle_core::Error::Msg("UQFF logical element estimate overflow".into()))
+        total.checked_add(*logical).ok_or_else(|| {
+            inference_tensor::Error::Msg("UQFF logical element estimate overflow".into())
+        })
     })?;
     let resident_bytes = layouts.iter().try_fold(0usize, |total, (_, resident)| {
-        total
-            .checked_add(*resident)
-            .ok_or_else(|| candle_core::Error::Msg("UQFF resident byte estimate overflow".into()))
+        total.checked_add(*resident).ok_or_else(|| {
+            inference_tensor::Error::Msg("UQFF resident byte estimate overflow".into())
+        })
     })?;
     let dtype_bytes = dtype.size_in_bytes();
     let mut factor = block_pack_factor(logical_elements, dtype, resident_bytes);
     while factor > 1 {
         let estimated_bytes = layouts.iter().try_fold(0usize, |total, (logical, _)| {
             let bytes = (logical / factor).checked_mul(dtype_bytes).ok_or_else(|| {
-                candle_core::Error::Msg("UQFF packed byte estimate overflow".into())
+                inference_tensor::Error::Msg("UQFF packed byte estimate overflow".into())
             })?;
-            total
-                .checked_add(bytes)
-                .ok_or_else(|| candle_core::Error::Msg("UQFF packed byte estimate overflow".into()))
+            total.checked_add(bytes).ok_or_else(|| {
+                inference_tensor::Error::Msg("UQFF packed byte estimate overflow".into())
+            })
         })?;
         if estimated_bytes >= resident_bytes {
             break;
@@ -63,15 +66,15 @@ fn aggregate_pack_factor(layouts: &[(usize, usize)], dtype: candle_core::DType) 
 
 fn ensure_pack_factor_representable(
     prefix: &str,
-    dtype: candle_core::DType,
+    dtype: inference_tensor::DType,
     logical_elements: usize,
     resident_bytes: usize,
 ) -> Result<()> {
     let dense_bytes = logical_elements
         .checked_mul(dtype.size_in_bytes())
-        .ok_or_else(|| candle_core::Error::Msg("UQFF dense byte estimate overflow".into()))?;
+        .ok_or_else(|| inference_tensor::Error::Msg("UQFF dense byte estimate overflow".into()))?;
     if resident_bytes > dense_bytes {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "UQFF layer `{prefix}` occupies {resident_bytes} bytes, more than its {dense_bytes}-byte {dtype:?} dense estimate; use an equal-or-wider model dtype or explicit device mapping."
         );
     }
@@ -93,7 +96,7 @@ fn version_scalar(
     path: &Path,
 ) -> Result<u32> {
     if tensor.dtype() != Dtype::U32 || !tensor.shape().is_empty() || tensor.data().len() != 4 {
-        candle_core::bail!(
+        inference_tensor::bail!(
             "UQFF version tensor `{name}` in `{}` must be a scalar U32.",
             path.display()
         );
@@ -116,12 +119,12 @@ fn validate_shard_tensor_keys(paths: &[PathBuf], artifacts: &MmapedSafetensors) 
             };
             match (*previous_value, value) {
                 (Some(previous), Some(current)) if previous == current => {}
-                (Some(previous), Some(current)) => candle_core::bail!(
+                (Some(previous), Some(current)) => inference_tensor::bail!(
                     "Conflicting UQFF version tensor `{name}` found in `{}` ({previous}) and `{}` ({current}).",
                     previous_path.display(),
                     path.display()
                 ),
-                _ => candle_core::bail!(
+                _ => inference_tensor::bail!(
                     "Duplicate tensor key `{name}` found in `{}` and `{}`.",
                     previous_path.display(),
                     path.display()
@@ -142,7 +145,7 @@ impl UqffReader {
             .map(|(name, _)| name)
             .collect::<HashSet<_>>();
         if !names.is_empty() && names.iter().all(|name| name.parse::<usize>().is_ok()) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Pre-1.0 UQFF artifacts are no longer supported; regenerate with `inference quantize`."
             );
         }
@@ -160,18 +163,18 @@ impl UqffReader {
                 super::UQFF_VERSION_PATCH
             );
             if major != super::UQFF_VERSION_MAJOR {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "UQFF version {major}.{minor}.{patch} is incompatible with this build ({ours}); regenerate with `inference quantize`."
                 );
             }
             // Same major, higher minor: the file may use additions this reader does not know.
             if minor > super::UQFF_VERSION_MINOR {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "UQFF version {major}.{minor}.{patch} was written by a newer inference.rs than this build ({ours}); upgrade inference.rs."
                 );
             }
         } else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "UQFF artifact has no version tag (pre-1.0 file); regenerate with `inference quantize`."
             );
         }
@@ -182,7 +185,7 @@ impl UqffReader {
         self.names.contains(name)
     }
 
-    pub fn pack_factor(&self, dtype: candle_core::DType) -> Result<usize> {
+    pub fn pack_factor(&self, dtype: inference_tensor::DType) -> Result<usize> {
         let mut layers = HashMap::<String, Vec<(usize, usize)>>::new();
         let mut all_layouts = Vec::new();
         let mut non_repeating_layouts = Vec::new();
@@ -216,7 +219,7 @@ impl UqffReader {
     pub fn pack_factor_for(
         &self,
         prefix: &str,
-        dtype: candle_core::DType,
+        dtype: inference_tensor::DType,
     ) -> Result<Option<usize>> {
         let prefix = prefix.strip_suffix(".weight").unwrap_or(prefix);
         if !self.contains(&format!("{prefix}.weight.format")) {
@@ -244,7 +247,7 @@ impl UqffReader {
                     .into_iter()
                     .try_fold(1usize, |elements, dim| elements.checked_mul(dim))
                     .ok_or_else(|| {
-                        candle_core::Error::Msg("UQFF logical element overflow".into())
+                        inference_tensor::Error::Msg("UQFF logical element overflow".into())
                     })?;
                 (logical_elements, &["weight"])
             }
@@ -253,7 +256,7 @@ impl UqffReader {
                     self.load_u8_scalar(&format!("{prefix}.weight.group_size"))? as usize;
                 let groups = self.tensor_elem_count(&format!("{prefix}.weight.scales"))?;
                 let logical_elements = groups.checked_mul(group_size).ok_or_else(|| {
-                    candle_core::Error::Msg("UQFF AFQ logical element overflow".into())
+                    inference_tensor::Error::Msg("UQFF AFQ logical element overflow".into())
                 })?;
                 (
                     logical_elements,
@@ -266,7 +269,7 @@ impl UqffReader {
                     .into_iter()
                     .try_fold(1usize, |elements, dim| elements.checked_mul(dim))
                     .ok_or_else(|| {
-                        candle_core::Error::Msg("UQFF logical element overflow".into())
+                        inference_tensor::Error::Msg("UQFF logical element overflow".into())
                     })?;
                 (
                     logical_elements,
@@ -291,7 +294,7 @@ impl UqffReader {
                     .into_iter()
                     .try_fold(1usize, |elements, dim| elements.checked_mul(dim))
                     .ok_or_else(|| {
-                        candle_core::Error::Msg("UQFF logical element overflow".into())
+                        inference_tensor::Error::Msg("UQFF logical element overflow".into())
                     })?;
                 (logical_elements, &["weight"])
             }
@@ -300,7 +303,7 @@ impl UqffReader {
                 let logical_elements = packed_elements
                     .checked_mul(u8::BITS as usize / crate::mxfp4::N_BITS)
                     .ok_or_else(|| {
-                        candle_core::Error::Msg("UQFF MXFP4 logical element overflow".into())
+                        inference_tensor::Error::Msg("UQFF MXFP4 logical element overflow".into())
                     })?;
                 (logical_elements, &["weight", "weight.scales"])
             }
@@ -313,7 +316,7 @@ impl UqffReader {
                         .data()
                         .len(),
                 )
-                .ok_or_else(|| candle_core::Error::Msg("UQFF resident byte overflow".into()))
+                .ok_or_else(|| inference_tensor::Error::Msg("UQFF resident byte overflow".into()))
         })?;
         Ok((logical_elements, packed_bytes))
     }
@@ -341,7 +344,7 @@ impl UqffReader {
                 QuantizedSerdeType::Hqq | QuantizedSerdeType::Fp8 | QuantizedSerdeType::F8Q8
             )
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "UQFF layer `{key}` uses {format:?} for stacked expert weights, but that format does not support stacked expert gather."
             );
         }
@@ -383,7 +386,7 @@ impl UqffReader {
             QuantizedSerdeType::Mxfp4 | QuantizedSerdeType::F8Q8 => Ok(32),
             QuantizedSerdeType::Fp8 => Ok(1),
             QuantizedSerdeType::Hqq => {
-                candle_core::bail!("HQQ UQFF artifacts do not support sharded loading.")
+                inference_tensor::bail!("HQQ UQFF artifacts do not support sharded loading.")
             }
             QuantizedSerdeType::Unquant => Ok(1),
         }
@@ -463,13 +466,13 @@ impl UqffReader {
             .shape()
             .iter()
             .try_fold(1usize, |elements, dim| elements.checked_mul(*dim))
-            .ok_or_else(|| candle_core::Error::Msg("UQFF tensor element overflow".into()))
+            .ok_or_else(|| inference_tensor::Error::Msg("UQFF tensor element overflow".into()))
     }
 
     pub(crate) fn load_raw_u8(&self, name: &str) -> Result<Vec<u8>> {
         let view = self.artifacts.get(name)?;
         if view.dtype() != Dtype::U8 {
-            candle_core::bail!("Expected U8 UQFF tensor `{name}`, got {:?}.", view.dtype());
+            inference_tensor::bail!("Expected U8 UQFF tensor `{name}`, got {:?}.", view.dtype());
         }
         Ok(view.data().to_vec())
     }
@@ -518,11 +521,11 @@ impl QuantizedWeightSource for UqffReader {
         UqffReader::shard_alignment(self, key)
     }
 
-    fn pack_factor(&self, dtype: candle_core::DType) -> Result<usize> {
+    fn pack_factor(&self, dtype: inference_tensor::DType) -> Result<usize> {
         UqffReader::pack_factor(self, dtype)
     }
 
-    fn pack_factor_for(&self, key: &str, dtype: candle_core::DType) -> Result<Option<usize>> {
+    fn pack_factor_for(&self, key: &str, dtype: inference_tensor::DType) -> Result<Option<usize>> {
         UqffReader::pack_factor_for(self, key, dtype)
     }
 }
@@ -531,7 +534,7 @@ impl QuantizedWeightSource for UqffReader {
 mod tests {
     use super::*;
     use crate::{IsqType, QuantizedSerdeType, UqffTensor, uqff_version_tensors};
-    use candle_core::{
+    use inference_tensor::{
         DType,
         quantized::{GgmlDType, QTensor},
     };
@@ -923,18 +926,18 @@ mod tests {
 
         let reader = UqffReader::open(&[path]).unwrap();
         assert_eq!(
-            reader.pack_factor(candle_core::DType::BF16).unwrap(),
-            IsqType::AFQ6.pack_factor(candle_core::DType::BF16)
+            reader.pack_factor(inference_tensor::DType::BF16).unwrap(),
+            IsqType::AFQ6.pack_factor(inference_tensor::DType::BF16)
         );
         assert_eq!(
             reader
-                .pack_factor_for("model.embed_tokens.weight", candle_core::DType::BF16)
+                .pack_factor_for("model.embed_tokens.weight", inference_tensor::DType::BF16)
                 .unwrap(),
-            Some(IsqType::AFQ6.pack_factor(candle_core::DType::BF16))
+            Some(IsqType::AFQ6.pack_factor(inference_tensor::DType::BF16))
         );
         assert_eq!(
             reader
-                .pack_factor_for("missing", candle_core::DType::BF16)
+                .pack_factor_for("missing", inference_tensor::DType::BF16)
                 .unwrap(),
             None
         );
@@ -951,8 +954,8 @@ mod tests {
         .unwrap();
         let reader = UqffReader::open(&[tied_path]).unwrap();
         assert_eq!(
-            reader.pack_factor(candle_core::DType::BF16).unwrap(),
-            IsqType::AFQ8.pack_factor(candle_core::DType::BF16)
+            reader.pack_factor(inference_tensor::DType::BF16).unwrap(),
+            IsqType::AFQ8.pack_factor(inference_tensor::DType::BF16)
         );
     }
 
@@ -1106,7 +1109,7 @@ mod tests {
         let reader = UqffReader::open(&[path]).unwrap();
         assert_eq!(
             reader
-                .pack_factor_for("model.embed_tokens.weight", candle_core::DType::BF16)
+                .pack_factor_for("model.embed_tokens.weight", inference_tensor::DType::BF16)
                 .unwrap(),
             Some(1)
         );

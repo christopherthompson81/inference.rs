@@ -2,11 +2,11 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use inference_tensor::{DType, Device, Module, Result, Tensor};
 
 use std::sync::Arc;
 
@@ -105,7 +105,7 @@ impl Config {
                 .collect()
         });
         if layer_types.len() != self.num_hidden_layers {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Qwen2 layer_types has {} entries for {} layers",
                 layer_types.len(),
                 self.num_hidden_layers
@@ -117,7 +117,7 @@ impl Config {
                 Qwen2AttentionType::FullAttention => Ok(None),
                 Qwen2AttentionType::SlidingAttention => {
                     sliding_window.map(Some).ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "Qwen2 sliding_attention layer requires use_sliding_window and sliding_window",
                         )
                     })
@@ -261,7 +261,7 @@ impl Attention {
 
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
         let metadata = ctx.paged_layer(layer_idx);
         let attention_mask = if self.sdpa_params.sliding_window.is_some() {

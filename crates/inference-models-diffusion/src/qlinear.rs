@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 
-use candle_core::{Device, Module, Result, Tensor};
-use candle_nn::Linear;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::Linear;
+use inference_tensor::{Device, Module, Result, Tensor};
 
 use crate::layers;
 
@@ -38,7 +38,9 @@ impl MaybeQuantLinear {
                     .transpose()?,
             ))),
             Self::Quantized(_) => {
-                candle_core::bail!("quantized diffusion layers cannot be offloaded between devices")
+                inference_tensor::bail!(
+                    "quantized diffusion layers cannot be offloaded between devices"
+                )
             }
         }
     }

@@ -191,8 +191,8 @@ mod tests {
         multimodal_binding_utils::binding_sources,
         multimodal_vision_registry::resolve_native_multimodal_gguf, normal_registry::RopePairing,
     };
-    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
-    use candle_core::{DType, Device, Tensor};
+    use inference_tensor::quantized::{GgmlDType, QTensor, gguf_file};
+    use inference_tensor::{DType, Device, Tensor};
     use tempfile::NamedTempFile;
 
     #[test]
@@ -319,9 +319,9 @@ mod tests {
             .map(|(name, tensor)| (name.as_str(), tensor))
             .collect::<Vec<_>>();
         let architecture =
-            candle_core::quantized::gguf_file::Value::String("muse-glimmer".to_string());
+            inference_tensor::quantized::gguf_file::Value::String("muse-glimmer".to_string());
         let projector =
-            candle_core::quantized::gguf_file::Value::String("muse-glimmer".to_string());
+            inference_tensor::quantized::gguf_file::Value::String("muse-glimmer".to_string());
         let metadata = [
             ("general.architecture", &architecture),
             ("clip.projector_type", &projector),

@@ -4,7 +4,7 @@
 //!
 //! ## Example
 //! ```rust
-//! use candle_core::Device;
+//! use inference_tensor::Device;
 //! use image::{ColorType, DynamicImage};
 //! use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 //!
@@ -20,8 +20,8 @@
 //! assert_eq!(transformed.dims(), &[3, 4, 3]);
 //! ```
 
-use candle_core::{Device, Result, Tensor};
 use image::DynamicImage;
+use inference_tensor::{Device, Result, Tensor};
 mod ops;
 mod pad;
 mod transforms;

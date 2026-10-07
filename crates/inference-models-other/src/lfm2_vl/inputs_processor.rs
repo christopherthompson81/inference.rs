@@ -2,8 +2,8 @@
 
 use std::{any::Any, ops::Range, sync::Arc};
 
-use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, RgbImage, imageops};
+use inference_tensor::{Device, Result, Tensor};
 use itertools::Itertools;
 use tokenizers::Tokenizer;
 
@@ -299,14 +299,16 @@ impl Lfm2VlImageProcessor {
         let height = height as usize;
         let width = width as usize;
         if !height.is_multiple_of(patch_size) || !width.is_multiple_of(patch_size) {
-            candle_core::bail!("LFM2-VL image crop is not divisible by patch size {patch_size}");
+            inference_tensor::bail!(
+                "LFM2-VL image crop is not divisible by patch size {patch_size}"
+            );
         }
 
         let patches_h = height / patch_size;
         let patches_w = width / patch_size;
         let num_patches = patches_h * patches_w;
         if num_patches > max_num_patches {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LFM2-VL crop has {num_patches} patches but max_num_patches is {max_num_patches}"
             );
         }
@@ -506,7 +508,7 @@ impl Lfm2VlImageProcessor {
         image_range: Range<usize>,
     ) -> Result<Option<(Tensor, Tensor, Tensor)>> {
         if image_range.start > image_range.end || image_range.end > processed.num_crops.len() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "LFM2-VL image range {:?} exceeds {} preprocessed images",
                 image_range,
                 processed.num_crops.len()
@@ -658,7 +660,7 @@ impl MultimodalInputsProcessor for Lfm2VlImageProcessor {
                 let image_range = if seq.is_chunked_prefill_view() {
                     seq.active_local_multimodal_item_range(MultimodalKind::Image, image_count)
                         .ok_or_else(|| {
-                            candle_core::Error::msg(
+                            inference_tensor::Error::msg(
                                 "LFM2-VL image chunk is missing its active image range",
                             )
                         })?
@@ -805,7 +807,7 @@ impl ImagePreProcessor for Lfm2VlImageProcessor {
         }
 
         if pixel_values.is_empty() {
-            candle_core::bail!("LFM2-VL preprocessing received no images");
+            inference_tensor::bail!("LFM2-VL preprocessing received no images");
         }
 
         Ok(PreprocessedImages {

@@ -4,11 +4,10 @@ use super::marlin_ffi::{
     HAVE_MARLIN_KERNELS, awq_marlin_repack, gptq_marlin_repack, marlin_awq_4bit_bf16,
     marlin_awq_4bit_f16, marlin_gptq_4bit_bf16, marlin_gptq_4bit_f16,
 };
-use candle::backend::BackendStorage;
-use candle::cuda_backend::cudarc::driver::DevicePtr;
-use candle::{CpuStorage, CudaStorage, DType, Layout, Result, Shape, Storage, Tensor};
-use candle_core as candle;
 use half::{bf16, f16};
+use inference_tensor::backend::BackendStorage;
+use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
+use inference_tensor::{CpuStorage, CudaStorage, DType, Layout, Result, Shape, Storage, Tensor};
 
 struct MarlinMatMul {
     workspace: Tensor,
@@ -19,7 +18,8 @@ struct MarlinMatMul {
 
 impl MarlinMatMul {
     fn cuda_fwd_t<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         &self,
         x: &CudaStorage,
@@ -65,7 +65,7 @@ impl MarlinMatMul {
             let (workspace, workspace_l) = self.workspace.storage_and_layout();
             let workspace = match &*workspace {
                 Storage::Cuda(p) => p,
-                _ => candle::bail!("workspace must be a cuda tensor"),
+                _ => inference_tensor::bail!("workspace must be a cuda tensor"),
             };
             let workspace_ = workspace.as_cuda_slice::<u32>()?;
             let (workspace_, _workspace_guard) = slice_ptr(workspace_, workspace_l.start_offset());
@@ -76,7 +76,7 @@ impl MarlinMatMul {
             let (qzeros, qzeros_l) = qzeros_tensor.storage_and_layout();
             let qzeros = match &*qzeros {
                 Storage::Cuda(p) => p,
-                _ => candle::bail!("qzeros must be a cuda tensor"),
+                _ => inference_tensor::bail!("qzeros must be a cuda tensor"),
             };
             let qzeros_ = qzeros.as_cuda_slice::<i32>()?;
             let (qzeros_, _qzeros_guard) = slice_ptr(qzeros_, qzeros_l.start_offset());
@@ -91,7 +91,7 @@ impl MarlinMatMul {
             (size_k / scale_shape[0]) as i32
         };
         if !HAVE_MARLIN_KERNELS {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Marlin INT4xF16 matmul kernels were not compiled, please raise an issue."
             )
         }
@@ -149,11 +149,13 @@ impl MarlinMatMul {
                     groupsize,
                     dev.cuda_stream().cu_stream() as i64,
                 ),
-                (dtype, _) => candle::bail!("Marlin does not support {dtype:?} activations"),
+                (dtype, _) => {
+                    inference_tensor::bail!("Marlin does not support {dtype:?} activations")
+                }
             }
         };
         if status != 0 {
-            candle::bail!("Marlin matmul failed with CUDA status {status}");
+            inference_tensor::bail!("Marlin matmul failed with CUDA status {status}");
         }
 
         drop(out_guard);
@@ -163,7 +165,7 @@ impl MarlinMatMul {
     }
 }
 
-impl candle::CustomOp3 for MarlinMatMul {
+impl inference_tensor::CustomOp3 for MarlinMatMul {
     fn name(&self) -> &'static str {
         "MarlinMatMul"
     }
@@ -177,7 +179,7 @@ impl candle::CustomOp3 for MarlinMatMul {
         _: &CpuStorage,
         _: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        candle::bail!("no cpu support for MarlinMatMul")
+        inference_tensor::bail!("no cpu support for MarlinMatMul")
     }
 
     fn cuda_fwd(
@@ -192,7 +194,9 @@ impl candle::CustomOp3 for MarlinMatMul {
         match x.dtype() {
             DType::F16 => self.cuda_fwd_t::<f16>(x, x_l, qweight, qweight_l, scale, scale_l),
             DType::BF16 => self.cuda_fwd_t::<bf16>(x, x_l, qweight, qweight_l, scale, scale_l),
-            dt => candle::bail!("MarlinMatMul is only supported for f16 and bf16 ({dt:?})"),
+            dt => {
+                inference_tensor::bail!("MarlinMatMul is only supported for f16 and bf16 ({dt:?})")
+            }
         }
     }
 }
@@ -224,7 +228,8 @@ struct MarlinRepack {
 
 impl MarlinRepack {
     fn cuda_fwd_t<
-        T: candle::cuda_backend::CudaDType + candle::cuda_backend::cudarc::driver::DeviceRepr,
+        T: inference_tensor::cuda_backend::CudaDType
+            + inference_tensor::cuda_backend::cudarc::driver::DeviceRepr,
     >(
         &self,
         qweight: &CudaStorage,
@@ -257,7 +262,7 @@ impl MarlinRepack {
             let (perm_, perm_l) = perm_tensor.storage_and_layout();
             let perm_ = match &*perm_ {
                 Storage::Cuda(p) => p,
-                _ => candle::bail!("perm must be a cuda tensor"),
+                _ => inference_tensor::bail!("perm must be a cuda tensor"),
             };
             let perm_ = perm_.as_cuda_slice::<u32>()?;
             let (perm_, _perm_guard) = slice_ptr(perm_, perm_l.start_offset());
@@ -291,7 +296,7 @@ impl MarlinRepack {
                 }
             }
         } else {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Not compiled with marlin kernels, but attempted to use one. Please raise an issue."
             );
         }
@@ -303,20 +308,22 @@ impl MarlinRepack {
     }
 }
 
-impl candle::CustomOp1 for MarlinRepack {
+impl inference_tensor::CustomOp1 for MarlinRepack {
     fn name(&self) -> &'static str {
         "MarlinRepack"
     }
 
     fn cpu_fwd(&self, _: &CpuStorage, _: &Layout) -> Result<(CpuStorage, Shape)> {
-        candle::bail!("no cpu support for MarlinRepack")
+        inference_tensor::bail!("no cpu support for MarlinRepack")
     }
 
     fn cuda_fwd(&self, qweight: &CudaStorage, qweight_l: &Layout) -> Result<(CudaStorage, Shape)> {
         match qweight.dtype() {
             DType::U32 => self.cuda_fwd_t::<u32>(qweight, qweight_l),
             DType::I32 => self.cuda_fwd_t::<i32>(qweight, qweight_l),
-            dt => candle::bail!("MarlinRepack is only supported for i32/u32 weight ({dt:?})"),
+            dt => inference_tensor::bail!(
+                "MarlinRepack is only supported for i32/u32 weight ({dt:?})"
+            ),
         }
     }
 }

@@ -2,10 +2,10 @@
 
 pub mod inputs_processor;
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::Module;
 use inference_nn::vision::siglip::SiglipVisionTransformer;
 use inference_quant::{QuantizedConfig, ShardedVarBuilder};
+use inference_tensor::nn::Module;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 use serde::Deserialize;
 use std::{
     any::Any,
@@ -408,7 +408,7 @@ impl PerceiverAttention {
             attn_weights,
             &self.neg_inf,
         )?;
-        let attn_weights = candle_nn::ops::softmax_last_dim(&attn_weights)?;
+        let attn_weights = inference_tensor::nn::ops::softmax_last_dim(&attn_weights)?;
         let mut attn_output = MatMul.matmul(&attn_weights, &v.contiguous()?)?;
 
         if self.q_proj.is_quant() {
@@ -687,7 +687,7 @@ impl Idefics2 {
             .filter(|&&is_image| is_image != 0)
             .count();
         if image_token_count != reshaped_image_hidden_states.dim(0)? {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "Idefics2 has {image_token_count} image tokens but {} image embeddings",
                 reshaped_image_hidden_states.dim(0)?
             );
@@ -716,7 +716,7 @@ impl Idefics2 {
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         if args.packed_prefill && args.packed_layout.is_none() {
-            candle_core::bail!("packed Idefics2 prefill is missing its multimodal layout");
+            inference_tensor::bail!("packed Idefics2 prefill is missing its multimodal layout");
         }
         let input_embeds = if let Some(pixel_values) = pixel_values {
             let (pixel_values, pixel_attention_mask) = if args.packed_prefill {
@@ -806,7 +806,7 @@ impl Idefics2 {
 
             let (image_hidden_states, encoder_outputs) = if !args.image_hashes.is_empty() {
                 if args.image_hashes.len() != args.subimage_counts.len() {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Idefics2 has {} image hashes but {} subimage counts",
                         args.image_hashes.len(),
                         args.subimage_counts.len()
@@ -816,7 +816,7 @@ impl Idefics2 {
                 offsets.push(0usize);
                 for &count in &args.subimage_counts {
                     if count == 0 {
-                        candle_core::bail!("Idefics2 image has no encoder inputs");
+                        inference_tensor::bail!("Idefics2 image has no encoder inputs");
                     }
                     offsets.push(
                         offsets
@@ -825,12 +825,12 @@ impl Idefics2 {
                             .unwrap()
                             .checked_add(count)
                             .ok_or_else(|| {
-                                candle_core::Error::msg("Idefics2 subimage count overflow")
+                                inference_tensor::Error::msg("Idefics2 subimage count overflow")
                             })?,
                     );
                 }
                 if offsets.last().copied().unwrap_or_default() != pixel_values.dim(0)? {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Idefics2 has {} encoder inputs but subimage counts total {}",
                         pixel_values.dim(0)?,
                         offsets.last().copied().unwrap_or_default()
@@ -877,7 +877,7 @@ impl Idefics2 {
                         .connector
                         .forward(&hidden, &mask.reshape((count, ()))?)?;
                     if hidden.dim(0)? != count || hidden.dim(1)? != expected_rows {
-                        candle_core::bail!(
+                        inference_tensor::bail!(
                             "Idefics2 encoder returned {:?} for {count} image inputs",
                             hidden.dims()
                         );
@@ -917,7 +917,7 @@ impl Idefics2 {
                 (Tensor::stack(&flat, 0)?, Some(encoder_outputs))
             } else {
                 if args.packed_prefill {
-                    candle_core::bail!("packed Idefics2 media input has no image hashes");
+                    inference_tensor::bail!("packed Idefics2 media input has no image hashes");
                 }
                 let image_hidden_states = self.vision_model.forward(
                     &pixel_values,
@@ -938,7 +938,7 @@ impl Idefics2 {
                 layout.splice_embeddings(
                     &input_embeds,
                     &encoder_outputs.ok_or_else(|| {
-                        candle_core::Error::msg(
+                        inference_tensor::Error::msg(
                             "packed Idefics2 input requires per-image encoder outputs",
                         )
                     })?,
@@ -1023,7 +1023,7 @@ impl MultimodalModel for Idefics2 {
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor> {
+    ) -> inference_tensor::Result<Tensor> {
         let args = *model_specific_args
             .downcast()
             .expect("Cannot downcast into `Idefics2SpecificArgs`");

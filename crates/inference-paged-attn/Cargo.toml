@@ -13,7 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-candle-core.workspace = true
+inference-tensor.workspace = true
 half.workspace = true
 float8.workspace = true
 objc2-metal = { workspace = true, optional = true }
@@ -28,9 +28,9 @@ anyhow.workspace = true
 inference-metal-compile = { workspace = true, optional = true }
 
 [features]
-cuda = ["dep:cudaforge", "candle-core/cuda"]
+cuda = ["dep:cudaforge", "inference-tensor/cuda"]
 metal = [
-    "candle-core/metal",
+    "inference-tensor/metal",
     "dep:objc2-metal",
     "dep:dispatch2",
     "dep:candle-metal-kernels",

@@ -4,9 +4,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use candle_nn::Module;
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
+use inference_tensor::nn::Module;
+use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     conformer::encoder::ConformerEncoder,
@@ -42,7 +42,7 @@ impl AudioEmbedding {
 
         let conformer_config = match &cfg.audio_processor {
             Some(Phi4MMAudioConfig { config, name }) if name == "cascades" => config,
-            _ => candle_core::bail!("Must have audio processor (`cascades`)"),
+            _ => inference_tensor::bail!("Must have audio processor (`cascades`)"),
         };
         let encoder = ConformerEncoder::new(conformer_config.clone(), vb.pp("encoder"))?;
 
@@ -129,7 +129,7 @@ impl AudioEmbedding {
         input_mode: &InputMode,
     ) -> Result<Tensor> {
         let projection_layers = self.proj.get(input_mode).ok_or_else(|| {
-            candle_core::Error::Msg(format!("Projection mode {input_mode:?} not found"))
+            inference_tensor::Error::Msg(format!("Projection mode {input_mode:?} not found"))
         })?;
 
         let mut audio_set_tensor = audio_features.clone();
@@ -150,7 +150,7 @@ impl AudioEmbedding {
     ) -> Result<Vec<Vec<Tensor>>> {
         let batch = input_embeds.dim(0)?;
         if feature_lens.len() != batch || embed_sizes.len() != batch || hashes.len() != batch {
-            candle_core::bail!("Phi4MM packed audio metadata length mismatch");
+            inference_tensor::bail!("Phi4MM packed audio metadata length mismatch");
         }
 
         let (target_device, target_dtype) = &self.target_device_dtype;
@@ -162,7 +162,7 @@ impl AudioEmbedding {
                 .get(CacheModality::Audio, hashes[item]);
             if let Some(cached) = cached {
                 if cached.len() != 2 {
-                    candle_core::bail!(
+                    inference_tensor::bail!(
                         "Phi4MM cached audio output must contain speech and vision projections"
                     );
                 }
@@ -172,7 +172,7 @@ impl AudioEmbedding {
 
             let feature_len = feature_lens[item];
             if feature_len == 0 || feature_len > input_embeds.dim(1)? {
-                candle_core::bail!("Phi4MM packed audio feature length is invalid");
+                inference_tensor::bail!("Phi4MM packed audio feature length is invalid");
             }
             let input = input_embeds
                 .i((item, ..feature_len, ..))?
@@ -182,7 +182,7 @@ impl AudioEmbedding {
             let (features, _) = self.encoder.forward(&input, None)?;
             let embed_size = embed_sizes[item];
             if embed_size == 0 || embed_size > features.dim(1)? {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "Phi4MM audio embedding size {embed_size} exceeds {} encoder rows",
                     features.dim(1)?
                 );
@@ -242,7 +242,7 @@ impl AudioEmbedding {
 
             if let Some(vision_modes) = audio_vision_modes {
                 if vision_modes.len() != input_embeds.dim(0)? {
-                    candle_core::bail!("Phi4MM audio projection mode count mismatch");
+                    inference_tensor::bail!("Phi4MM audio projection mode count mismatch");
                 }
                 if vision_modes.iter().all(|&mode| mode) {
                     self.get_audio_features(
@@ -288,7 +288,7 @@ impl AudioEmbedding {
         // Verify that audio_embed_sizes sum matches positions count
         let total_audio_tokens = audio_embed_sizes.iter().sum::<usize>();
         if total_audio_tokens != positions.dim(0)? {
-            return Err(candle_core::Error::Msg(format!(
+            return Err(inference_tensor::Error::Msg(format!(
                 "Audio embed sizes sum ({}) doesn't match positions count ({})",
                 total_audio_tokens,
                 positions.dim(0)?

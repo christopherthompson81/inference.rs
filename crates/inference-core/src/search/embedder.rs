@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Context;
-use candle_core::{DType, Device, Error as E};
 use inference_quant::log::once_log_info;
+use inference_tensor::{DType, Device, Error as E};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex as TokioMutex;
 

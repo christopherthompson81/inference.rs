@@ -1,8 +1,8 @@
 use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
-use candle_nn::Linear;
 use float8::F8E4M3;
+use inference_tensor::nn::Linear;
+use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
     NVFP4_BLOCK_SIZE, Nvfp4ActivationMode, Nvfp4LinearSpec, QuantMethod, QuantMethodConfig,
@@ -82,7 +82,7 @@ impl Nvfp4Layer {
             .chain(parts.input_scale.iter())
         {
             if scale.dtype() != DType::F32 {
-                candle_core::bail!("NVFP4 global scales must be F32");
+                inference_tensor::bail!("NVFP4 global scales must be F32");
             }
             for value in scale.flatten_all()?.to_vec1::<f32>()? {
                 dequant_scale(value, ScaleConvention::Dequantize)?;
@@ -97,51 +97,55 @@ impl Nvfp4Layer {
     ) -> Result<Self> {
         let dims = parts.weight.dims();
         if !matches!(dims.len(), 2 | 3) || parts.weight.dtype() != DType::U8 {
-            candle_core::bail!("NVFP4 weights must be rank-2 or rank-3 packed U8 tensors");
+            inference_tensor::bail!("NVFP4 weights must be rank-2 or rank-3 packed U8 tensors");
         }
         if dims.contains(&0) {
-            candle_core::bail!("NVFP4 weight dimensions must be nonzero");
+            inference_tensor::bail!("NVFP4 weight dimensions must be nonzero");
         }
         if !matches!(parts.dtype, DType::BF16 | DType::F16 | DType::F32) {
-            candle_core::bail!("NVFP4 output dtype must be BF16, F16, or F32");
+            inference_tensor::bail!("NVFP4 output dtype must be BF16, F16, or F32");
         }
         if parts.weight.device().is_cuda() && parts.dtype == DType::F32 {
-            candle_core::bail!("NVFP4 CUDA inference requires BF16 or F16 output dtype");
+            inference_tensor::bail!("NVFP4 CUDA inference requires BF16 or F16 output dtype");
         }
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         if let Device::Cuda(device) = parts.weight.device()
             && !crate::cutile::nvfp4_supported(device)
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 CUDA inference requires Blackwell or newer, CUDA 13.3, and a compatible tileiras"
             );
         }
         #[cfg(not(all(feature = "cuda", feature = "cutile")))]
         if parts.weight.device().is_cuda() {
-            candle_core::bail!("NVFP4 CUDA inference requires the cuda and cutile features");
+            inference_tensor::bail!("NVFP4 CUDA inference requires the cuda and cutile features");
         }
         if parts.weight.device().is_metal() {
-            candle_core::bail!("NVFP4 accelerator inference requires CUDA");
+            inference_tensor::bail!("NVFP4 accelerator inference requires CUDA");
         }
         let k = dims[dims.len() - 1] * VALUES_PER_BYTE;
         if !k.is_multiple_of(NVFP4_BLOCK_SIZE) {
-            candle_core::bail!("NVFP4 input dimension {k} must be divisible by {NVFP4_BLOCK_SIZE}");
+            inference_tensor::bail!(
+                "NVFP4 input dimension {k} must be divisible by {NVFP4_BLOCK_SIZE}"
+            );
         }
         let mut scale_dims = dims.to_vec();
         *scale_dims.last_mut().unwrap() = k / NVFP4_BLOCK_SIZE;
         if parts.scales.dtype() != DType::F8E4M3 || parts.scales.dims() != scale_dims {
-            candle_core::bail!("NVFP4 block scales must be F8E4M3 with shape {scale_dims:?}");
+            inference_tensor::bail!("NVFP4 block scales must be F8E4M3 with shape {scale_dims:?}");
         }
         if parts.global_scales.dtype() != DType::F32
             || parts.global_scales.dims() != &dims[..dims.len() - 1]
         {
-            candle_core::bail!("NVFP4 global scales must be F32 with one value per weight row");
+            inference_tensor::bail!(
+                "NVFP4 global scales must be F32 with one value per weight row"
+            );
         }
         if parts.activation == Nvfp4ActivationMode::DynamicBlock && parts.input_scale.is_none() {
-            candle_core::bail!("NVFP4 W4A4 requires a calibrated input global scale");
+            inference_tensor::bail!("NVFP4 W4A4 requires a calibrated input global scale");
         }
         if parts.activation == Nvfp4ActivationMode::None && parts.input_scale.is_some() {
-            candle_core::bail!("NVFP4 W4A16 must not contain an input global scale");
+            inference_tensor::bail!("NVFP4 W4A16 must not contain an input global scale");
         }
         for tensor in [&parts.scales, &parts.global_scales]
             .into_iter()
@@ -149,7 +153,7 @@ impl Nvfp4Layer {
             .chain(parts.bias.iter())
         {
             if !tensor.device().same_device(parts.weight.device()) {
-                candle_core::bail!("NVFP4 tensors must be on the same device");
+                inference_tensor::bail!("NVFP4 tensors must be on the same device");
             }
         }
         if let Some(scale) = &parts.input_scale {
@@ -159,13 +163,15 @@ impl Nvfp4Layer {
                 vec![]
             };
             if scale.dtype() != DType::F32 || scale.dims() != expected {
-                candle_core::bail!("NVFP4 input global scale must be F32 with shape {expected:?}");
+                inference_tensor::bail!(
+                    "NVFP4 input global scale must be F32 with shape {expected:?}"
+                );
             }
         }
         if let Some(bias) = &parts.bias
             && (bias.dtype() != parts.dtype || bias.dims() != &dims[..dims.len() - 1])
         {
-            candle_core::bail!("NVFP4 bias must match the output dtype and weight rows");
+            inference_tensor::bail!("NVFP4 bias must match the output dtype and weight rows");
         }
         parts.weight = parts.weight.contiguous()?;
         parts.scales = crate::utils::contiguous_fp8(&parts.scales)?;
@@ -263,17 +269,19 @@ impl Nvfp4Layer {
         let input_axis = dims.len() - 1;
         let k = dims[input_axis];
         if dims.contains(&0) {
-            candle_core::bail!("NVFP4 weight dimensions must be nonzero");
+            inference_tensor::bail!("NVFP4 weight dimensions must be nonzero");
         }
         if !k.is_multiple_of(NVFP4_BLOCK_SIZE) {
-            candle_core::bail!("NVFP4 input dimension {k} must be divisible by {NVFP4_BLOCK_SIZE}");
+            inference_tensor::bail!(
+                "NVFP4 input dimension {k} must be divisible by {NVFP4_BLOCK_SIZE}"
+            );
         }
         let range = crate::shard_range(hints, &dims)?;
         if let Some((axis, offset, len)) = range
             && axis == input_axis
             && (!offset.is_multiple_of(NVFP4_BLOCK_SIZE) || !len.is_multiple_of(NVFP4_BLOCK_SIZE))
         {
-            candle_core::bail!("NVFP4 input shards must align to {NVFP4_BLOCK_SIZE} elements");
+            inference_tensor::bail!("NVFP4 input shards must align to {NVFP4_BLOCK_SIZE} elements");
         }
         let packed_shard = |packing: usize| match range {
             Some((axis, offset, len)) => {
@@ -309,7 +317,7 @@ impl Nvfp4Layer {
             || !rows.is_multiple_of(values.len())
             || (dims.len() == 3 && values.len() != 1 && !values.len().is_multiple_of(dims[0]))
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 global scale shape {:?} does not match weight rows",
                 global.dims()
             );
@@ -328,13 +336,13 @@ impl Nvfp4Layer {
         };
         let input_scale = if spec.activation == Nvfp4ActivationMode::DynamicBlock {
             let name = spec.scale_names.activation_scale.ok_or_else(|| {
-                candle_core::Error::msg("NVFP4 W4A4 config has no input global scale name")
+                inference_tensor::Error::msg("NVFP4 W4A4 config has no input global scale name")
             })?;
             let source = vb.get_unchecked_dtype(name, DType::F32)?;
             let values = source.flatten_all()?.to_vec1::<f32>()?;
             let count = if dims.len() == 3 { dims[0] } else { 1 };
             if values.len() != 1 && values.len() != count {
-                candle_core::bail!(
+                inference_tensor::bail!(
                     "NVFP4 input scale {name} must be scalar or one value per expert"
                 );
             }
@@ -460,7 +468,7 @@ impl Nvfp4Layer {
     pub fn stack(layers: Vec<Self>) -> Result<Self> {
         let first = layers
             .first()
-            .ok_or_else(|| candle_core::Error::msg("NVFP4 expert list is empty"))?;
+            .ok_or_else(|| inference_tensor::Error::msg("NVFP4 expert list is empty"))?;
         let activation = first.parts.activation;
         let dtype = first.parts.dtype;
         if layers.iter().any(|layer| {
@@ -469,7 +477,7 @@ impl Nvfp4Layer {
                 || layer.parts.dtype != dtype
                 || layer.parts.bias.is_some() != first.parts.bias.is_some()
         }) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 expert stack requires rank-2 weights and matching activation modes, output dtypes, and bias presence"
             );
         }
@@ -635,20 +643,20 @@ impl Nvfp4Layer {
 
     fn validate_input(&self, x: &Tensor, weight_rank: usize) -> Result<()> {
         if self.parts.weight.rank() != weight_rank {
-            candle_core::bail!("NVFP4 operation requires rank-{weight_rank} weights");
+            inference_tensor::bail!("NVFP4 operation requires rank-{weight_rank} weights");
         }
         let k = self.parts.weight.dim(D::Minus1)? * VALUES_PER_BYTE;
         if x.rank() < 2 || x.dims().last() != Some(&k) {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 activation shape {:?} must have rank >= 2 and input dimension {k}",
                 x.dims()
             );
         }
         if !x.device().same_device(self.parts.weight.device()) {
-            candle_core::bail!("NVFP4 activations and weights must be on the same device");
+            inference_tensor::bail!("NVFP4 activations and weights must be on the same device");
         }
         if !matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-            candle_core::bail!("NVFP4 activations must have BF16, F16, or F32 dtype");
+            inference_tensor::bail!("NVFP4 activations must have BF16, F16, or F32 dtype");
         }
         Ok(())
     }
@@ -686,7 +694,7 @@ fn dequant_scale(scale: f32, convention: ScaleConvention) -> Result<f32> {
         ScaleConvention::Quantize => scale.recip(),
     };
     if !scale.is_finite() || scale <= 0.0 {
-        candle_core::bail!("NVFP4 global scales must be finite and positive, got {scale}");
+        inference_tensor::bail!("NVFP4 global scales must be finite and positive, got {scale}");
     }
     Ok(scale)
 }
@@ -711,7 +719,7 @@ fn quantize_fp4(value: f32) -> f32 {
 
 impl QuantMethod for Nvfp4Layer {
     fn new(_method: QuantMethodConfig) -> Result<Self> {
-        candle_core::bail!("Construct NVFP4 layers using Nvfp4Layer::from_parts")
+        inference_tensor::bail!("Construct NVFP4 layers using Nvfp4Layer::from_parts")
     }
 
     fn dequantize_w(&self) -> Result<Tensor> {
@@ -742,7 +750,7 @@ impl QuantMethod for Nvfp4Layer {
             return output.reshape(shape);
         }
         if !x.device().is_cpu() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 accelerator inference requires CUDA 13.3 and the cutile feature"
             );
         }
@@ -752,7 +760,7 @@ impl QuantMethod for Nvfp4Layer {
     fn gather_forward_raw(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
         self.validate_input(x, 3)?;
         if indices.dtype() != DType::U32 || !indices.device().same_device(x.device()) {
-            candle_core::bail!("NVFP4 gather indices must be U32 on the activation device");
+            inference_tensor::bail!("NVFP4 gather indices must be U32 on the activation device");
         }
         let out_dim = self.parts.weight.dim(1)?;
         let (tokens, topk, input_routes, k, output_shape) = match (x.dims(), indices.dims()) {
@@ -788,7 +796,7 @@ impl QuantMethod for Nvfp4Layer {
                     vec![batch, seq, topk, 1, out_dim],
                 )
             }
-            _ => candle_core::bail!(
+            _ => inference_tensor::bail!(
                 "NVFP4 gather activation shape {:?} does not match indices {:?}",
                 x.dims(),
                 indices.dims()
@@ -813,7 +821,7 @@ impl QuantMethod for Nvfp4Layer {
             return output.reshape(output_shape);
         }
         if !x.device().is_cpu() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 accelerator inference requires CUDA 13.3 and the cutile feature"
             );
         }
@@ -853,7 +861,7 @@ impl QuantMethod for Nvfp4Layer {
 
     fn quantize_activation(&self, x: &Tensor) -> Result<crate::QuantizedActivation> {
         if self.activation_quantization_scheme_for(x).is_none() {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 shared activation requires CUDA W4A4 with more than one input row"
             );
         }
@@ -874,7 +882,7 @@ impl QuantMethod for Nvfp4Layer {
             )
         }
         #[cfg(not(all(feature = "cuda", feature = "cutile")))]
-        candle_core::bail!("NVFP4 shared activation requires CUDA and cuTile");
+        inference_tensor::bail!("NVFP4 shared activation requires CUDA and cuTile");
     }
 
     fn forward_quantized(&self, activation: &crate::QuantizedActivation) -> Result<Tensor> {
@@ -891,7 +899,7 @@ impl QuantMethod for Nvfp4Layer {
             || !activation.quantized().device().is_cuda()
             || rows <= 1
         {
-            candle_core::bail!(
+            inference_tensor::bail!(
                 "NVFP4 shared activation does not match this projection's calibration or input shape"
             );
         }
@@ -907,7 +915,7 @@ impl QuantMethod for Nvfp4Layer {
             output.reshape(shape)
         }
         #[cfg(not(all(feature = "cuda", feature = "cutile")))]
-        candle_core::bail!("NVFP4 shared activation requires CUDA and cuTile");
+        inference_tensor::bail!("NVFP4 shared activation requires CUDA and cuTile");
     }
 
     #[cfg(all(feature = "cuda", feature = "cutile"))]
