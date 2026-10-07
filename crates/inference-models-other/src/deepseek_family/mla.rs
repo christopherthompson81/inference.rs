@@ -7,6 +7,7 @@ use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::{FamilyAttention, FamilyConfig, LayerCtx};
 use crate::attention::{AttentionMask, SdpaParams};
+use crate::decoder::LayerAttention;
 use crate::kv_cache::KvCache;
 use crate::layers::{
     DeepSeekV2RopeConfig, DeepSeekV2RopeScaling, DeepSeekV2RotaryEmbedding, RmsNorm, Sdpa,
@@ -110,178 +111,18 @@ pub struct MlaAttention {
     mla_weights: MlaWeights,
 }
 
-impl FamilyAttention for MlaAttention {
-    type Config = MlaConfig;
-    type Rope = DeepSeekV2RotaryEmbedding;
-
-    fn rope(
-        cfg: &FamilyConfig<MlaConfig>,
-        dtype: DType,
-        device: &Device,
-        _is_gptx: bool,
-    ) -> Result<DeepSeekV2RotaryEmbedding> {
-        let rope_cfg = DeepSeekV2RopeConfig {
-            rope_scaling: cfg.attn.rope_scaling.clone(),
-            max_position_embeddings: cfg.max_position_embeddings,
-            rope_theta: cfg.attn.rope_theta,
-            qk_rope_head_dim: cfg.attn.qk_rope_head_dim,
-        };
-        DeepSeekV2RotaryEmbedding::new(&rope_cfg, dtype, device)
-    }
-
-    fn paged_head_dim(cfg: &FamilyConfig<MlaConfig>) -> usize {
-        cfg.attn.v_head_dim
-    }
-
-    fn new(
-        ctx: &LayerCtx<'_, MlaConfig>,
-        rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-        vb: ShardedVarBuilder,
-        paged_attn: Option<PagedAttention>,
-    ) -> Result<Self> {
-        let LayerCtx {
-            cfg,
-            mapper,
-            layer_idx,
-            loading_isq,
-            comm,
-        } = *ctx;
-        let mla = &cfg.attn;
-        let q_head_dim = mla.q_head_dim();
-        let q = match mla.q_lora_rank {
-            Some(lora_rank) => {
-                let a = ReplicatedLayer::new(
-                    cfg.hidden_size,
-                    lora_rank,
-                    &cfg.quantization_config,
-                    mla.attention_bias,
-                    mapper.set_device(layer_idx, vb.pp("q_a_proj"), loading_isq),
-                )?;
-                let norm = RmsNorm::new(
-                    lora_rank,
-                    cfg.rms_norm_eps,
-                    mapper.set_device(layer_idx, vb.pp("q_a_layernorm"), false),
-                )?;
-                let b = ColumnParallelLayer::new(
-                    lora_rank,
-                    cfg.num_attention_heads * q_head_dim,
-                    &cfg.quantization_config,
-                    false,
-                    comm,
-                    mapper.set_device(layer_idx, vb.pp("q_b_proj"), loading_isq),
-                )?;
-                QProj::Lora { a, norm, b }
-            }
-            None => QProj::Plain(ColumnParallelLayer::new(
-                cfg.hidden_size,
-                cfg.num_attention_heads * q_head_dim,
-                &cfg.quantization_config,
-                false,
-                comm,
-                mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
-            )?),
-        };
-
-        let kv_a_proj_with_mqa = ReplicatedLayer::new(
-            cfg.hidden_size,
-            mla.kv_lora_rank + mla.qk_rope_head_dim,
-            &cfg.quantization_config,
-            mla.attention_bias,
-            mapper.set_device(layer_idx, vb.pp("kv_a_proj_with_mqa"), loading_isq),
-        )?;
-        let kv_a_layernorm = RmsNorm::new(
-            mla.kv_lora_rank,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("kv_a_layernorm"), false),
-        )?;
-        let k_b_vb = vb.pp("k_b_proj");
-        let v_b_vb = vb.pp("v_b_proj");
-        let kv_b_proj = match (
-            crate::layers::contains_tensor_or_weight_source(&k_b_vb, "weight"),
-            crate::layers::contains_tensor_or_weight_source(&v_b_vb, "weight"),
-        ) {
-            (true, true) => MlaKvBProjection::split(
-                ColumnParallelLayer::new(
-                    mla.qk_nope_head_dim,
-                    cfg.num_attention_heads * mla.kv_lora_rank,
-                    &cfg.quantization_config,
-                    false,
-                    comm,
-                    mapper.set_device(layer_idx, k_b_vb, loading_isq),
-                )?,
-                ColumnParallelLayer::new(
-                    mla.kv_lora_rank,
-                    cfg.num_attention_heads * mla.v_head_dim,
-                    &cfg.quantization_config,
-                    false,
-                    comm,
-                    mapper.set_device(layer_idx, v_b_vb, loading_isq),
-                )?,
-            ),
-            (false, false) => MlaKvBProjection::fused(ColumnParallelLayer::new(
-                mla.kv_lora_rank,
-                cfg.num_attention_heads * (q_head_dim - mla.qk_rope_head_dim + mla.v_head_dim),
-                &cfg.quantization_config,
-                false,
-                comm,
-                mapper.set_device(layer_idx, vb.pp("kv_b_proj"), loading_isq),
-            )?),
-            _ => inference_tensor::bail!(
-                "{} layer {layer_idx} has incomplete split MLA weights",
-                mla.label
-            ),
-        };
-
-        let o_proj = RowParallelLayer::new(
-            cfg.num_attention_heads * mla.v_head_dim,
-            cfg.hidden_size,
-            &cfg.quantization_config,
-            mla.attention_bias,
-            comm,
-            mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
-        )?;
-
-        let mla_weights = MlaWeights::new(
-            paged_attn.is_some(),
-            mapper.device_for(layer_idx, loading_isq),
-        );
-
-        Ok(Self {
-            q,
-            kv_a_proj_with_mqa,
-            kv_a_layernorm,
-            kv_b_proj,
-            o_proj,
-            rotary_emb,
-            dims: MlaDims {
-                kv_lora_rank: mla.kv_lora_rank,
-                qk_nope_head_dim: mla.qk_nope_head_dim,
-                qk_rope_head_dim: mla.qk_rope_head_dim,
-                v_head_dim: mla.v_head_dim,
-            },
-            q_head_dim,
-            paged_attn,
-            num_attention_heads: cfg.num_attention_heads / comm.world_size(),
-            sdpa_params: SdpaParams {
-                n_kv_groups: 1,
-                softcap: None,
-                softmax_scale: mla.softmax_scale,
-                sliding_window: None,
-                sinks: None,
-                chunk: None,
-            },
-            mla_weights,
-        })
-    }
-
+impl LayerAttention for MlaAttention {
     fn forward(
         &self,
         xs: &Tensor,
         attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
+        kv_cache: Option<&mut KvCache>,
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
     ) -> Result<Tensor> {
+        let Some(kv_cache) = kv_cache else {
+            inference_tensor::bail!("MlaAttention needs a KV cache")
+        };
         let (bs, seq_len, _) = xs.dims3()?;
 
         let mut q = self.q.forward(xs)?;
@@ -502,6 +343,171 @@ impl FamilyAttention for MlaAttention {
             uvb.pp("v_b_proj").add(value);
         }
         uvb.pp("o_proj").add(&self.o_proj);
+    }
+}
+
+impl FamilyAttention for MlaAttention {
+    type Config = MlaConfig;
+    type Rope = DeepSeekV2RotaryEmbedding;
+
+    fn rope(
+        cfg: &FamilyConfig<MlaConfig>,
+        dtype: DType,
+        device: &Device,
+        _is_gptx: bool,
+    ) -> Result<DeepSeekV2RotaryEmbedding> {
+        let rope_cfg = DeepSeekV2RopeConfig {
+            rope_scaling: cfg.attn.rope_scaling.clone(),
+            max_position_embeddings: cfg.max_position_embeddings,
+            rope_theta: cfg.attn.rope_theta,
+            qk_rope_head_dim: cfg.attn.qk_rope_head_dim,
+        };
+        DeepSeekV2RotaryEmbedding::new(&rope_cfg, dtype, device)
+    }
+
+    fn paged_head_dim(cfg: &FamilyConfig<MlaConfig>) -> usize {
+        cfg.attn.v_head_dim
+    }
+
+    fn new(
+        ctx: &LayerCtx<'_, MlaConfig>,
+        rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
+        vb: ShardedVarBuilder,
+        paged_attn: Option<PagedAttention>,
+    ) -> Result<Self> {
+        let LayerCtx {
+            cfg,
+            mapper,
+            layer_idx,
+            loading_isq,
+            comm,
+        } = *ctx;
+        let mla = &cfg.attn;
+        let q_head_dim = mla.q_head_dim();
+        let q = match mla.q_lora_rank {
+            Some(lora_rank) => {
+                let a = ReplicatedLayer::new(
+                    cfg.hidden_size,
+                    lora_rank,
+                    &cfg.quantization_config,
+                    mla.attention_bias,
+                    mapper.set_device(layer_idx, vb.pp("q_a_proj"), loading_isq),
+                )?;
+                let norm = RmsNorm::new(
+                    lora_rank,
+                    cfg.rms_norm_eps,
+                    mapper.set_device(layer_idx, vb.pp("q_a_layernorm"), false),
+                )?;
+                let b = ColumnParallelLayer::new(
+                    lora_rank,
+                    cfg.num_attention_heads * q_head_dim,
+                    &cfg.quantization_config,
+                    false,
+                    comm,
+                    mapper.set_device(layer_idx, vb.pp("q_b_proj"), loading_isq),
+                )?;
+                QProj::Lora { a, norm, b }
+            }
+            None => QProj::Plain(ColumnParallelLayer::new(
+                cfg.hidden_size,
+                cfg.num_attention_heads * q_head_dim,
+                &cfg.quantization_config,
+                false,
+                comm,
+                mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
+            )?),
+        };
+
+        let kv_a_proj_with_mqa = ReplicatedLayer::new(
+            cfg.hidden_size,
+            mla.kv_lora_rank + mla.qk_rope_head_dim,
+            &cfg.quantization_config,
+            mla.attention_bias,
+            mapper.set_device(layer_idx, vb.pp("kv_a_proj_with_mqa"), loading_isq),
+        )?;
+        let kv_a_layernorm = RmsNorm::new(
+            mla.kv_lora_rank,
+            cfg.rms_norm_eps,
+            mapper.set_device(layer_idx, vb.pp("kv_a_layernorm"), false),
+        )?;
+        let k_b_vb = vb.pp("k_b_proj");
+        let v_b_vb = vb.pp("v_b_proj");
+        let kv_b_proj = match (
+            crate::layers::contains_tensor_or_weight_source(&k_b_vb, "weight"),
+            crate::layers::contains_tensor_or_weight_source(&v_b_vb, "weight"),
+        ) {
+            (true, true) => MlaKvBProjection::split(
+                ColumnParallelLayer::new(
+                    mla.qk_nope_head_dim,
+                    cfg.num_attention_heads * mla.kv_lora_rank,
+                    &cfg.quantization_config,
+                    false,
+                    comm,
+                    mapper.set_device(layer_idx, k_b_vb, loading_isq),
+                )?,
+                ColumnParallelLayer::new(
+                    mla.kv_lora_rank,
+                    cfg.num_attention_heads * mla.v_head_dim,
+                    &cfg.quantization_config,
+                    false,
+                    comm,
+                    mapper.set_device(layer_idx, v_b_vb, loading_isq),
+                )?,
+            ),
+            (false, false) => MlaKvBProjection::fused(ColumnParallelLayer::new(
+                mla.kv_lora_rank,
+                cfg.num_attention_heads * (q_head_dim - mla.qk_rope_head_dim + mla.v_head_dim),
+                &cfg.quantization_config,
+                false,
+                comm,
+                mapper.set_device(layer_idx, vb.pp("kv_b_proj"), loading_isq),
+            )?),
+            _ => inference_tensor::bail!(
+                "{} layer {layer_idx} has incomplete split MLA weights",
+                mla.label
+            ),
+        };
+
+        let o_proj = RowParallelLayer::new(
+            cfg.num_attention_heads * mla.v_head_dim,
+            cfg.hidden_size,
+            &cfg.quantization_config,
+            mla.attention_bias,
+            comm,
+            mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
+        )?;
+
+        let mla_weights = MlaWeights::new(
+            paged_attn.is_some(),
+            mapper.device_for(layer_idx, loading_isq),
+        );
+
+        Ok(Self {
+            q,
+            kv_a_proj_with_mqa,
+            kv_a_layernorm,
+            kv_b_proj,
+            o_proj,
+            rotary_emb,
+            dims: MlaDims {
+                kv_lora_rank: mla.kv_lora_rank,
+                qk_nope_head_dim: mla.qk_nope_head_dim,
+                qk_rope_head_dim: mla.qk_rope_head_dim,
+                v_head_dim: mla.v_head_dim,
+            },
+            q_head_dim,
+            paged_attn,
+            num_attention_heads: cfg.num_attention_heads / comm.world_size(),
+            sdpa_params: SdpaParams {
+                n_kv_groups: 1,
+                softcap: None,
+                softmax_scale: mla.softmax_scale,
+                sliding_window: None,
+                sinks: None,
+                chunk: None,
+            },
+            mla_weights,
+        })
     }
 
     #[cfg_attr(

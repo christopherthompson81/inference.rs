@@ -8,6 +8,7 @@ use inference_quant::{
 use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Deserialize;
 
+use crate::decoder::LayerAttention;
 use crate::deepseek_family::{
     FamilyAttention, FamilyConfig, FamilyModel, LayerCtx, MoeSpec, SharedExpert,
 };
@@ -213,11 +214,96 @@ pub struct Glm4MoeAttention {
     sdpa_params: SdpaParams,
 }
 
+impl LayerAttention for Glm4MoeAttention {
+    const CUDA_DECODE_GRAPHS: bool = true;
+
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: &AttentionMask,
+        kv_cache: Option<&mut KvCache>,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
+    ) -> Result<Tensor> {
+        let Some(kv_cache) = kv_cache else {
+            inference_tensor::bail!("Glm4MoeAttention needs a KV cache")
+        };
+        let (b_sz, q_len, _) = xs.dims3()?;
+
+        let (mut q, mut k, mut v) =
+            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
+        (q, k, v) = if q_len != 1 {
+            let q = q
+                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let k = k
+                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            let v = v
+                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
+                .transpose(1, 2)?;
+            (q, k, v)
+        } else {
+            let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
+            let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
+            let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
+            (q, k, v)
+        };
+
+        {
+            let positions = ctx
+                .text_positions(q.device(), q.dim(2)?)?
+                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
+            if let (Some(q_norm), Some(k_norm)) = (&self.q_norm, &self.k_norm) {
+                (q, k) = self
+                    .rotary_emb
+                    .forward_qk_norm(&q, &k, q_norm, k_norm, positions)?;
+            } else {
+                q = self.rotary_emb.apply_rotary_emb_positions(&q, positions)?;
+                k = self.rotary_emb.apply_rotary_emb_positions(&k, positions)?;
+            }
+        }
+
+        let metadata = ctx.paged_layer(layer_idx);
+        let flash_params = ctx.flash_params();
+        let mut attn_output = AttentionDispatch {
+            paged_attn: self.paged_attn.as_ref(),
+            paged_layer: metadata,
+            kv_cache,
+            sdpa_params: &self.sdpa_params,
+            flash_params,
+        }
+        .run(&q, &k, &v, attention_mask)?;
+
+        attn_output = if !matches!(attention_mask, AttentionMask::None) {
+            attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
+        } else {
+            attn_output.reshape((b_sz, q_len, ()))?
+        };
+        let res = self.o_proj.forward(&attn_output)?;
+        Ok(res)
+    }
+
+    fn add_residual(&self, uvb: &UnVarBuilder) {
+        if let Some(ref q_norm) = self.q_norm {
+            uvb.pp("q_norm").add(q_norm);
+        }
+        if let Some(ref k_norm) = self.k_norm {
+            uvb.pp("k_norm").add(k_norm);
+        }
+    }
+
+    fn add_projections(&self, uvb: &UnVarBuilder) {
+        uvb.pp("q_proj").add(&self.q_proj);
+        uvb.pp("k_proj").add(&self.k_proj);
+        uvb.pp("v_proj").add(&self.v_proj);
+        uvb.pp("o_proj").add(&self.o_proj);
+    }
+}
+
 impl FamilyAttention for Glm4MoeAttention {
     type Config = Glm4MoeAttnConfig;
     type Rope = RotaryEmbedding;
-
-    const CUDA_DECODE_GRAPHS: bool = true;
 
     fn rope(
         cfg: &FamilyConfig<Glm4MoeAttnConfig>,
@@ -336,86 +422,6 @@ impl FamilyAttention for Glm4MoeAttention {
                 chunk: None,
             },
         })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor> {
-        let (b_sz, q_len, _) = xs.dims3()?;
-
-        let (mut q, mut k, mut v) =
-            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
-        (q, k, v) = if q_len != 1 {
-            let q = q
-                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let k = k
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let v = v
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            (q, k, v)
-        } else {
-            let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
-            let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            (q, k, v)
-        };
-
-        {
-            let positions = ctx
-                .text_positions(q.device(), q.dim(2)?)?
-                .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
-            if let (Some(q_norm), Some(k_norm)) = (&self.q_norm, &self.k_norm) {
-                (q, k) = self
-                    .rotary_emb
-                    .forward_qk_norm(&q, &k, q_norm, k_norm, positions)?;
-            } else {
-                q = self.rotary_emb.apply_rotary_emb_positions(&q, positions)?;
-                k = self.rotary_emb.apply_rotary_emb_positions(&k, positions)?;
-            }
-        }
-
-        let metadata = ctx.paged_layer(layer_idx);
-        let flash_params = ctx.flash_params();
-        let mut attn_output = AttentionDispatch {
-            paged_attn: self.paged_attn.as_ref(),
-            paged_layer: metadata,
-            kv_cache,
-            sdpa_params: &self.sdpa_params,
-            flash_params,
-        }
-        .run(&q, &k, &v, attention_mask)?;
-
-        attn_output = if !matches!(attention_mask, AttentionMask::None) {
-            attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
-        } else {
-            attn_output.reshape((b_sz, q_len, ()))?
-        };
-        let res = self.o_proj.forward(&attn_output)?;
-        Ok(res)
-    }
-
-    fn add_residual(&self, uvb: &UnVarBuilder) {
-        if let Some(ref q_norm) = self.q_norm {
-            uvb.pp("q_norm").add(q_norm);
-        }
-        if let Some(ref k_norm) = self.k_norm {
-            uvb.pp("k_norm").add(k_norm);
-        }
-    }
-
-    fn add_projections(&self, uvb: &UnVarBuilder) {
-        uvb.pp("q_proj").add(&self.q_proj);
-        uvb.pp("k_proj").add(&self.k_proj);
-        uvb.pp("v_proj").add(&self.v_proj);
-        uvb.pp("o_proj").add(&self.o_proj);
     }
 
     fn model_metadata(

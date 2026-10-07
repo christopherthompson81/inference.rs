@@ -1,13 +1,13 @@
 //! The pre-norm attention + gated-MLP decoder most text models share, built from a [`DecoderSpec`].
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
-use inference_tensor::{DType, Device, Module, Result, Tensor};
+use inference_tensor::{DType, Device, DeviceLocation, Module, Result, Tensor};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
@@ -144,16 +144,15 @@ impl DecoderSpec {
         }
     }
 
-    fn cache_types(&self) -> Vec<NormalCacheType> {
-        self.layer_windows
-            .iter()
-            .map(|window| match window {
-                Some(window) => NormalCacheType::SlidingWindow { window: *window },
-                None => NormalCacheType::Normal {
-                    max_seq_len: self.max_position_embeddings,
-                },
-            })
-            .collect()
+    pub fn shape(&self) -> StackShape<'_> {
+        StackShape {
+            vocab_size: self.vocab_size,
+            hidden_size: self.hidden_size,
+            rms_norm_eps: self.rms_norm_eps,
+            layer_windows: &self.layer_windows,
+            tie_word_embeddings: self.tie_word_embeddings,
+            quantization_config: &self.quantization_config,
+        }
     }
 }
 
@@ -173,28 +172,177 @@ pub struct AttentionBlock {
     sdpa_params: SdpaParams,
 }
 
-/// Where a layer's weights come from and how they are placed.
-struct LayerLoad<'a> {
+/// Where a layer's weights go: its index, device, communicator and attention implementation.
+pub struct LayerLoad<'a> {
+    pub mapper: &'a dyn DeviceMapper,
+    pub layer_idx: usize,
+    pub loading_isq: bool,
+    pub comm: &'a Arc<inference_quant::Comm>,
+    pub device: &'a Device,
+    pub attention: &'a AttentionImplementation,
+}
+
+/// A sliding cache for each sliding layer and a full one, of `max_seq_len`, for the rest.
+fn cache_types(layer_windows: &[Option<usize>], max_seq_len: usize) -> Vec<NormalCacheType> {
+    layer_windows
+        .iter()
+        .map(|window| match window {
+            Some(window) => NormalCacheType::SlidingWindow { window: *window },
+            None => NormalCacheType::Normal { max_seq_len },
+        })
+        .collect()
+}
+
+/// The attention half of a decoder layer.
+pub trait LayerAttention: Send + Sync {
+    const CUDA_DECODE_GRAPHS: bool = false;
+
+    /// Without a `kv_cache` the layer attends over this call's tokens only, as an encoder does.
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: &AttentionMask,
+        kv_cache: Option<&mut KvCache>,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
+    ) -> Result<Tensor>;
+
+    /// The window this layer slides over, which picks its mask.
+    fn sliding_window(&self) -> Option<usize> {
+        None
+    }
+
+    /// The tensors ISQ leaves alone, under `self_attn`.
+    fn add_residual(&self, uvb: &UnVarBuilder);
+
+    /// The projections, under `self_attn`, that a MoE-experts-only ISQ also leaves alone.
+    fn add_projections(&self, _uvb: &UnVarBuilder) {}
+}
+
+/// The feed-forward half of a decoder layer.
+pub trait LayerFfn: Send + Sync {
+    /// Whether a MoE-experts-only ISQ applies, quantizing the experts and keeping the rest.
+    const MOE_EXPERTS_ONLY_ISQ: bool = false;
+    /// Whether AnyMoE can wrap this feed-forward in experts.
+    const AMOE: bool = false;
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor>;
+
+    /// The tensors ISQ leaves alone, under `mlp`.
+    fn add_residual(&self, _uvb: &UnVarBuilder) {}
+
+    /// The dense MLP AnyMoE can wrap in experts, when this is one.
+    fn as_mlp(&self) -> Option<&dyn MlpLayer> {
+        None
+    }
+
+    fn as_mlp_mut(&mut self) -> Option<&mut Box<dyn MlpLayer>> {
+        None
+    }
+}
+
+impl LayerFfn for Box<dyn MlpLayer> {
+    const AMOE: bool = true;
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        MlpLayer::forward(&**self, xs)
+    }
+    fn as_mlp(&self) -> Option<&dyn MlpLayer> {
+        Some(&**self)
+    }
+    fn as_mlp_mut(&mut self) -> Option<&mut Box<dyn MlpLayer>> {
+        Some(self)
+    }
+}
+
+/// Builds each layer's attention and feed-forward halves from the layer's weights.
+pub trait LayerBuilder: Sync {
+    type Attention: LayerAttention;
+    type Ffn: LayerFfn;
+
+    fn build(
+        &self,
+        load: &LayerLoad<'_>,
+        vb: ShardedVarBuilder,
+    ) -> Result<(Self::Attention, Self::Ffn)>;
+}
+
+/// What the stack itself reads from a config, apart from its layers.
+#[derive(Clone, Copy)]
+pub struct StackShape<'a> {
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub rms_norm_eps: f64,
+    pub layer_windows: &'a [Option<usize>],
+    pub tie_word_embeddings: bool,
+    pub quantization_config: &'a Option<QuantizedConfig>,
+}
+
+impl StackShape<'_> {
+    fn sliding_window(&self) -> Option<usize> {
+        self.layer_windows.iter().flatten().next().copied()
+    }
+}
+
+/// [`AttentionBlock`] and the gated [`Mlp`], as a [`DecoderSpec`] describes them.
+struct StandardLayers<'a> {
     spec: &'a DecoderSpec,
-    mapper: &'a dyn DeviceMapper,
-    layer_idx: usize,
-    loading_isq: bool,
-    comm: &'a Arc<inference_quant::Comm>,
+    ropes: HashMap<DeviceLocation, Arc<RotaryEmbedding>>,
+}
+
+impl LayerBuilder for StandardLayers<'_> {
+    type Attention = AttentionBlock;
+    type Ffn = Box<dyn MlpLayer>;
+
+    fn build(
+        &self,
+        load: &LayerLoad<'_>,
+        vb: ShardedVarBuilder,
+    ) -> Result<(AttentionBlock, Box<dyn MlpLayer>)> {
+        let spec = self.spec;
+        let rotary_emb = self
+            .ropes
+            .get(&load.device.location())
+            .expect("No RoPE for device location!")
+            .clone();
+        let paged_attn = match load.attention {
+            AttentionImplementation::Eager => None,
+            AttentionImplementation::PagedAttention => {
+                Some(PagedAttention::new(spec.head_dim, load.device, None)?)
+            }
+        };
+        let place = |name| {
+            load.mapper
+                .set_device(load.layer_idx, vb.pp(name), load.loading_isq)
+        };
+        let attention =
+            AttentionBlock::new(spec, load, place("self_attn"), rotary_emb, paged_attn)?;
+        let mlp = Mlp::new(
+            place("mlp"),
+            spec.hidden_size,
+            spec.intermediate_size,
+            &spec.quantization_config,
+            spec.hidden_act,
+            load.comm,
+        )?;
+        Ok((attention, Box::new(mlp)))
+    }
 }
 
 impl AttentionBlock {
     fn new(
+        spec: &DecoderSpec,
         load: &LayerLoad<'_>,
         vb: ShardedVarBuilder,
         rotary_emb: Arc<RotaryEmbedding>,
         paged_attn: Option<PagedAttention>,
     ) -> Result<Self> {
         let LayerLoad {
-            spec,
             mapper,
             layer_idx,
             loading_isq,
             comm,
+            ..
         } = *load;
         let (hidden, head_dim) = (spec.hidden_size, spec.head_dim);
         let qc = &spec.quantization_config;
@@ -271,8 +419,7 @@ impl AttentionBlock {
         })
     }
 
-    /// Without a `kv_cache` the block attends over this call's tokens only, as an encoder does.
-    pub fn forward(
+    fn attend(
         &self,
         xs: &Tensor,
         attention_mask: &AttentionMask,
@@ -366,7 +513,7 @@ impl AttentionBlock {
         Ok((q, k))
     }
 
-    fn add_residual(&self, uvb: &UnVarBuilder) {
+    fn qk_norm_residual(&self, uvb: &UnVarBuilder) {
         if let Some((placement, q_norm, k_norm)) = &self.qk_norm {
             let (q, k) = match placement {
                 QkNorm::BeforeRope => QK_NORM_BEFORE_ROPE,
@@ -378,57 +525,42 @@ impl AttentionBlock {
     }
 }
 
-/// Pre-norm residual attention then MLP.
-pub struct DecoderLayer {
-    pub self_attn: AttentionBlock,
-    pub mlp: Box<dyn MlpLayer>,
+impl LayerAttention for AttentionBlock {
+    const CUDA_DECODE_GRAPHS: bool = true;
+
+    fn forward(
+        &self,
+        xs: &Tensor,
+        attention_mask: &AttentionMask,
+        kv_cache: Option<&mut KvCache>,
+        ctx: &mut ModelForwardContext<'_>,
+        layer_idx: usize,
+    ) -> Result<Tensor> {
+        self.attend(xs, attention_mask, kv_cache, ctx, layer_idx)
+    }
+    fn sliding_window(&self) -> Option<usize> {
+        self.sdpa_params.sliding_window
+    }
+    fn add_residual(&self, uvb: &UnVarBuilder) {
+        self.qk_norm_residual(uvb)
+    }
+    fn add_projections(&self, uvb: &UnVarBuilder) {
+        uvb.pp("q_proj").add(&self.q_proj);
+        uvb.pp("k_proj").add(&self.k_proj);
+        uvb.pp("v_proj").add(&self.v_proj);
+        uvb.pp("o_proj").add(&self.o_proj);
+    }
+}
+
+/// Pre-norm residual attention then feed-forward.
+pub struct DecoderLayer<A, F> {
+    pub self_attn: A,
+    pub mlp: F,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
 }
 
-impl DecoderLayer {
-    fn new(
-        load: &LayerLoad<'_>,
-        vb: ShardedVarBuilder,
-        rotary_emb: Arc<RotaryEmbedding>,
-        paged_attn: Option<PagedAttention>,
-    ) -> Result<Self> {
-        let LayerLoad {
-            spec,
-            mapper,
-            layer_idx,
-            loading_isq,
-            comm,
-        } = *load;
-        let self_attn = AttentionBlock::new(
-            load,
-            mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
-            rotary_emb,
-            paged_attn,
-        )?;
-        let mlp = Mlp::new(
-            mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-            spec.hidden_size,
-            spec.intermediate_size,
-            &spec.quantization_config,
-            spec.hidden_act,
-            comm,
-        )?;
-        let norm = |name| {
-            RmsNorm::new(
-                spec.hidden_size,
-                spec.rms_norm_eps,
-                mapper.set_device(layer_idx, vb.pp(name), false),
-            )
-        };
-        Ok(Self {
-            self_attn,
-            mlp: Box::new(mlp),
-            input_layernorm: norm("input_layernorm")?,
-            post_attention_layernorm: norm("post_attention_layernorm")?,
-        })
-    }
-
+impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
     fn forward(
         &self,
         xs: &Tensor,
@@ -458,9 +590,9 @@ pub struct LayerMasks {
 }
 
 /// Embeddings, layers and final norm: the part a causal LM and an embedder share.
-pub struct DecoderStack {
+pub struct DecoderStack<A = AttentionBlock, F = Box<dyn MlpLayer>> {
     pub embed_tokens: Arc<dyn QuantMethod>,
-    pub layers: Vec<DecoderLayer>,
+    pub layers: Vec<DecoderLayer<A, F>>,
     norm: RmsNorm,
     dtype: DType,
     sliding_window: Option<usize>,
@@ -487,18 +619,6 @@ impl DecoderStack {
                 "NoPE layers with q/k norm or attention temperature are not supported"
             );
         }
-        // one sliding mask serves every sliding layer
-        if spec
-            .layer_windows
-            .iter()
-            .flatten()
-            .any(|window| Some(*window) != spec.sliding_window())
-        {
-            inference_tensor::bail!(
-                "decoder layers slide over different windows: {:?}",
-                spec.layer_windows
-            );
-        }
         if let Some(quant_cfg) = &spec.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
@@ -506,65 +626,109 @@ impl DecoderStack {
                 quant_cfg.get_bits_name(&vb_m)
             );
         }
+        let dtype = vb_m.dtype();
+        let vb_rope = vb_m.clone();
+        Self::new_with(
+            spec.shape(),
+            vb_m,
+            tied_lm_head,
+            normal_loading_metadata,
+            attention_mechanism,
+            |mapper, real_device| {
+                let ropes = crate::device_map::per_layer_device(
+                    mapper,
+                    spec.num_layers(),
+                    real_device,
+                    |device| spec.rope(&vb_rope, device, is_gptx, dtype),
+                )?;
+                Ok(StandardLayers { spec, ropes })
+            },
+        )
+    }
+}
+
+impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
+    /// The stack with layers from the builder `make` returns once the device mapper is known.
+    pub fn new_with<B: LayerBuilder<Attention = A, Ffn = F>>(
+        shape: StackShape<'_>,
+        vb_m: ShardedVarBuilder,
+        tied_lm_head: Option<ShardedVarBuilder>,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: &AttentionImplementation,
+        make: impl FnOnce(&dyn DeviceMapper, &Device) -> Result<B>,
+    ) -> Result<Self> {
+        // one sliding mask serves every sliding layer
+        if shape
+            .layer_windows
+            .iter()
+            .flatten()
+            .any(|window| Some(*window) != shape.sliding_window())
+        {
+            inference_tensor::bail!(
+                "decoder layers slide over different windows: {:?}",
+                shape.layer_windows
+            );
+        }
         let mapper = normal_loading_metadata.mapper;
         let loading_isq = normal_loading_metadata.loading_isq;
+        let real_device = &normal_loading_metadata.real_device;
         let dtype = vb_m.dtype();
         let embed_vb = mapper.set_nm_device(vb_m.pp("embed_tokens"), loading_isq);
         let embed_tokens = match tied_lm_head {
             Some(head) => embedding_with_legacy_tied_uqff(
-                spec.vocab_size,
-                spec.hidden_size,
+                shape.vocab_size,
+                shape.hidden_size,
                 embed_vb,
-                spec.tie_word_embeddings
+                shape
+                    .tie_word_embeddings
                     .then(|| mapper.set_nm_device(head, loading_isq)),
-                &spec.quantization_config,
+                shape.quantization_config,
             )?,
             None => embedding(
-                spec.vocab_size,
-                spec.hidden_size,
+                shape.vocab_size,
+                shape.hidden_size,
                 embed_vb,
-                &spec.quantization_config,
+                shape.quantization_config,
             )?,
         };
 
-        let real_device = &normal_loading_metadata.real_device;
-        let ropes = crate::device_map::per_layer_device(
-            &*mapper,
-            spec.num_layers(),
-            real_device,
-            |device| spec.rope(&vb_m, device, is_gptx, dtype),
-        )?;
+        let builder = make(&*mapper, real_device)?;
         let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
-            0..spec.num_layers(),
+            0..shape.layer_windows.len(),
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         )
-        .par_iter_if_isq(|layer_idx| -> Result<DecoderLayer> {
+        .par_iter_if_isq(|layer_idx| -> Result<DecoderLayer<A, F>> {
             let device = mapper.device_for(layer_idx, false).unwrap_or(real_device);
-            let rotary_emb = ropes
-                .get(&device.location())
-                .expect("No RoPE for device location!")
-                .clone();
-            let paged_attn = match attention_mechanism {
-                AttentionImplementation::Eager => None,
-                AttentionImplementation::PagedAttention => {
-                    Some(PagedAttention::new(spec.head_dim, device, None)?)
-                }
-            };
             let comm = mapper.get_comm_for(layer_idx)?;
             let load = LayerLoad {
-                spec,
                 mapper: &*mapper,
                 layer_idx,
                 loading_isq,
                 comm: &comm,
+                device,
+                attention: attention_mechanism,
             };
-            DecoderLayer::new(&load, vb_l.pp(layer_idx), rotary_emb, paged_attn)
+            let vb = vb_l.pp(layer_idx);
+            let (self_attn, mlp) = builder.build(&load, vb.clone())?;
+            let norm = |name| {
+                RmsNorm::new(
+                    shape.hidden_size,
+                    shape.rms_norm_eps,
+                    mapper.set_device(layer_idx, vb.pp(name), false),
+                )
+            };
+            Ok(DecoderLayer {
+                self_attn,
+                mlp,
+                input_layernorm: norm("input_layernorm")?,
+                post_attention_layernorm: norm("post_attention_layernorm")?,
+            })
         })?;
         let norm = RmsNorm::new(
-            spec.hidden_size,
-            spec.rms_norm_eps,
+            shape.hidden_size,
+            shape.rms_norm_eps,
             mapper.set_nm_device(vb_m.pp("norm"), false),
         )?;
         Ok(Self {
@@ -572,8 +736,8 @@ impl DecoderStack {
             layers,
             norm,
             dtype,
-            sliding_window: spec.sliding_window(),
-            has_full_layers: spec.layer_windows.iter().any(Option::is_none),
+            sliding_window: shape.sliding_window(),
+            has_full_layers: shape.layer_windows.iter().any(Option::is_none),
             device: real_device.clone(),
             mapper,
         })
@@ -629,9 +793,7 @@ impl DecoderStack {
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             let layer_mask = match (&masks.sliding, &masks.full) {
-                (Some(sliding), _) if layer.self_attn.sdpa_params.sliding_window.is_some() => {
-                    sliding
-                }
+                (Some(sliding), _) if layer.self_attn.sliding_window().is_some() => sliding,
                 (_, Some(full)) => full,
                 (Some(sliding), None) => sliding,
                 (None, None) => unreachable!("a stack has a full or a sliding layer"),
@@ -642,8 +804,8 @@ impl DecoderStack {
         xs.to_device(&self.device)?.apply(&self.norm)
     }
 
-    /// The tensors ISQ leaves alone, under the stack's own prefix.
-    pub fn residual_uvb(&self, uvb_m: &UnVarBuilder) {
+    /// The tensors ISQ leaves alone, under the stack's own prefix; `with_projections` for MoE-experts-only ISQ.
+    pub fn residual_uvb(&self, uvb_m: &UnVarBuilder, with_projections: bool) {
         uvb_m.pp("embed_tokens").add(&self.embed_tokens);
         uvb_m.pp("norm").add(&self.norm);
         for (layer_idx, layer) in self.layers.iter().enumerate() {
@@ -653,13 +815,17 @@ impl DecoderStack {
                 .pp("post_attention_layernorm")
                 .add(&layer.post_attention_layernorm);
             layer.self_attn.add_residual(&uvb_l.pp("self_attn"));
+            layer.mlp.add_residual(&uvb_l.pp("mlp"));
+            if with_projections {
+                layer.self_attn.add_projections(&uvb_l.pp("self_attn"));
+            }
         }
     }
 }
 
 /// A [`DecoderStack`] under `model.` with an `lm_head`, as the engine runs a text model.
-pub struct CausalLm {
-    stack: DecoderStack,
+pub struct CausalLm<A = AttentionBlock, F = Box<dyn MlpLayer>> {
+    stack: DecoderStack<A, F>,
     lm_head: Arc<dyn QuantMethod>,
     cache: EitherCache,
     max_seq_len: usize,
@@ -702,34 +868,57 @@ impl CausalLm {
             normal_loading_metadata,
             &attention_mechanism,
         )?;
-        let lm_head = if spec.tie_word_embeddings {
+        let world_size = stack.mapper.get_comm_for(0)?.world_size();
+        let cfg = ModelConfigMetadata {
+            max_seq_len: spec.max_position_embeddings,
+            num_layers: spec.num_layers(),
+            hidden_size: spec.hidden_size,
+            num_kv_heads: (spec.num_kv_heads / world_size).max(1),
+            num_attn_heads: spec.num_heads / world_size,
+            sliding_window: spec.sliding_window(),
+            k_head_dim: spec.head_dim,
+            v_head_dim: spec.head_dim,
+            kv_cache_layout: KvCacheLayout::Standard,
+        };
+        Self::with_stack(
+            stack,
+            spec.shape(),
+            vb_lm_head,
+            loading_isq,
+            spec.max_position_embeddings,
+            cfg,
+        )
+    }
+}
+
+impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
+    /// The stack's model, with the `lm_head` (or the tied embedding) and the KV cache its layers' windows need.
+    pub fn with_stack(
+        stack: DecoderStack<A, F>,
+        shape: StackShape<'_>,
+        vb_lm_head: ShardedVarBuilder,
+        loading_isq: bool,
+        max_position_embeddings: usize,
+        cfg: ModelConfigMetadata,
+    ) -> Result<Self> {
+        let lm_head = if shape.tie_word_embeddings {
             stack.embed_tokens.clone()
         } else {
             ReplicatedLayer::new(
-                spec.hidden_size,
-                spec.vocab_size,
-                &spec.quantization_config,
+                shape.hidden_size,
+                shape.vocab_size,
+                shape.quantization_config,
                 false,
                 stack.mapper.set_nm_device(vb_lm_head, loading_isq),
             )?
         };
-        let world_size = stack.mapper.get_comm_for(0)?.world_size();
+        let cache_types = cache_types(shape.layer_windows, max_position_embeddings);
         Ok(Self {
-            lm_head,
-            cache: EitherCache::Normal(NormalCache::from_types(spec.cache_types())),
-            max_seq_len: spec.max_position_embeddings,
-            cfg: ModelConfigMetadata {
-                max_seq_len: spec.max_position_embeddings,
-                num_layers: spec.num_layers(),
-                hidden_size: spec.hidden_size,
-                num_kv_heads: (spec.num_kv_heads / world_size).max(1),
-                num_attn_heads: spec.num_heads / world_size,
-                sliding_window: spec.sliding_window(),
-                k_head_dim: spec.head_dim,
-                v_head_dim: spec.head_dim,
-                kv_cache_layout: KvCacheLayout::Standard,
-            },
             stack,
+            lm_head,
+            cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
+            max_seq_len: max_position_embeddings,
+            cfg,
         })
     }
 
@@ -763,27 +952,32 @@ impl CausalLm {
         let xs = ctx.logits(&xs)?;
         ctx.lm_head(&*self.lm_head, &xs)
     }
-}
 
-impl CausalLm {
     /// The tensors ISQ leaves alone, under `uvb_m`, the stack's prefix.
     pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
-        self.stack.residual_uvb(&uvb_m);
+        self.stack.residual_uvb(&uvb_m, false);
         uvb_m.to_safetensors()
     }
-}
 
-impl IsqModel for CausalLm {
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    fn residual_uvb(&self, with_projections: bool) -> UnVarBuilder {
         let uvb = UnVarBuilder::new();
-        self.stack.residual_uvb(&uvb.pp("model"));
-        uvb.to_safetensors()
+        self.stack.residual_uvb(&uvb.pp("model"), with_projections);
+        uvb
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for CausalLm {}
+impl<A: LayerAttention, F: LayerFfn> IsqModel for CausalLm<A, F> {
+    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        self.residual_uvb(false).to_safetensors()
+    }
+    fn residual_tensors_moe_experts_only(&self) -> Option<Vec<(String, Tensor)>> {
+        F::MOE_EXPERTS_ONLY_ISQ.then(|| self.residual_uvb(true).to_safetensors())
+    }
+}
 
-impl NormalModel for CausalLm {
+impl<A: LayerAttention, F: LayerFfn> crate::speculative::SpeculativeTargetMixin for CausalLm<A, F> {}
+
+impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
@@ -804,19 +998,23 @@ impl NormalModel for CausalLm {
     }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        true
+        A::CUDA_DECODE_GRAPHS
     }
 }
 
-impl AnyMoeBaseModelMixin for CausalLm {
+impl<A: LayerAttention, F: LayerFfn> AnyMoeBaseModelMixin for CausalLm<A, F> {
     fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
-        self.stack.layers.iter().map(|layer| &*layer.mlp).collect()
+        self.stack
+            .layers
+            .iter()
+            .filter_map(|layer| layer.mlp.as_mlp())
+            .collect()
     }
     fn get_mlps_mut(&mut self) -> Vec<&mut Box<dyn MlpLayer>> {
         self.stack
             .layers
             .iter_mut()
-            .map(|layer| &mut layer.mlp)
+            .filter_map(|layer| layer.mlp.as_mlp_mut())
             .collect()
     }
     fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
@@ -837,7 +1035,7 @@ impl AnyMoeBaseModelMixin for CausalLm {
         )?))
     }
     fn amoe_supported(&self) -> bool {
-        true
+        F::AMOE
     }
 }
 
@@ -869,7 +1067,7 @@ mod tests {
             tie_word_embeddings: false,
             quantization_config: None,
         };
-        let types = spec.cache_types();
+        let types = cache_types(&spec.layer_windows, spec.max_position_embeddings);
         assert!(matches!(
             types[0],
             NormalCacheType::Normal {
