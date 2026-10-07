@@ -1522,3 +1522,33 @@ collapsing cuDNN algorithm selection (all 16 call sites pass `None`).
 local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2828 + 2443)
 local_ci.sh --size-update  -> file -9 KB
 ```
+
+## Run 43 - 2026-10-06 22:40
+
+#270 step 5, usage-scan trims, last slice: the scan's remaining Tier B items, each re-grepped tree-wide (Metal-gated
+code included) and compiled on CPU, CUDA and `cudnn`.
+
+- Aliased in-place ops: no crate implements `InplaceOpN` directly or overrides `src_access_pattern` (always
+  `None`), so a source sharing the destination's storage always bailed and the `*_fwd_aliased` paths could never
+  run. Removed `AccessPattern`, `Src`, `all_distinct`, the aliased trait methods and macro arms, and
+  `Layout::relation`/`LayoutRelation`; `Tensor::inplace_op` keeps the same error and the sorted lock order.
+  `has_internal_overlap` (the one live use of the layout-range code) is now a direct injectivity walk, pinned by
+  `internal_overlap_is_found_only_where_two_indices_share_a_cell` (no test covered it before).
+- Device helpers (`new_cuda_with_stream`, `supports_bf16`, `bf16_default_to_f32`, `metal_if_available`,
+  `utils::has_mkl/has_accelerate/metal_is_available`, `CudaDevice::new_with_stream`,
+  `CudaFunc::into_cuda_function`, `get_or_load_custom_func`), the gemm reduced-precision setters (their statics
+  keep the defaults), the `quantize_imatrix_onto` chain across QTensor/QStorage/CUDA/Metal/dummies,
+  `QMatMul::forward_via_f16`, BatchNorm/LayerNorm/VarMap accessors, pickle `read_all(_with_key)`,
+  `GradStore::insert_id`, `par_for_each`/`par_range`.
+- CPU conv paths behind constants: `Conv2dImpl` and `conv2d_direct` (always the tiled im2col), the direct
+  `Conv1D` map (`USE_IM2COL_CONV1D` was const true); `USE_COL2IM_CONV1D_TR` folded (its else branch is the
+  real fallback for kernels col2im cannot take).
+
+```
+22 files, -876 / +72 lines
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2829 + 2444)
+local_ci.sh --size-update  -> file -1 KB
+```
+
+Usage scan done: four slices plus the kernel cut (#317-#320 and this), about 2,500 Rust and 2,400 CUDA lines, one
+scan false positive (`Tensor::ceil`) caught by the compiler, two latent bugs found (`ucopy_i16`/`i32`).

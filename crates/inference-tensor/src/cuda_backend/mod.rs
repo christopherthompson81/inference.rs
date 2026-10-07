@@ -2555,12 +2555,6 @@ pub fn gemm_reduced_precision_f32() -> bool {
     MM_F32_REDUCED_PRECISION.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// This bool controls whether reduced precision reductions (e.g., with tf32 accumulation type) are
-/// allowed with f32 GEMMs.
-pub fn set_gemm_reduced_precision_f32(b: bool) {
-    MM_F32_REDUCED_PRECISION.store(b, std::sync::atomic::Ordering::Relaxed)
-}
-
 /// This bool controls whether reduced precision reductions (e.g., with fp16 accumulation type) are
 /// allowed with f16 GEMMs.
 pub fn gemm_reduced_precision_f16() -> bool {
@@ -2568,21 +2562,9 @@ pub fn gemm_reduced_precision_f16() -> bool {
 }
 
 /// This bool controls whether reduced precision reductions (e.g., with fp16 accumulation type) are
-/// allowed with f16 GEMMs.
-pub fn set_gemm_reduced_precision_f16(b: bool) {
-    MM_F16_REDUCED_PRECISION.store(b, std::sync::atomic::Ordering::Relaxed)
-}
-
-/// This bool controls whether reduced precision reductions (e.g., with fp16 accumulation type) are
 /// allowed with bf16 GEMMs.
 pub fn gemm_reduced_precision_bf16() -> bool {
     MM_BF16_REDUCED_PRECISION.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// This bool controls whether reduced precision reductions (e.g., with fp16 accumulation type) are
-/// allowed with bf16 GEMMs.
-pub fn set_gemm_reduced_precision_bf16(b: bool) {
-    MM_BF16_REDUCED_PRECISION.store(b, std::sync::atomic::Ordering::Relaxed)
 }
 
 unsafe fn gemm_strided_batched_f32(

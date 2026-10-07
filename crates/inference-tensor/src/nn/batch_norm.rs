@@ -132,64 +132,8 @@ impl BatchNorm {
         Ok(out)
     }
 
-    pub fn new_with_momentum(
-        num_features: usize,
-        running_mean: Tensor,
-        running_var: Tensor,
-        weight: Tensor,
-        bias: Tensor,
-        eps: f64,
-        momentum: f64,
-    ) -> Result<Self> {
-        let out = Self {
-            running_mean: Var::from_tensor(&running_mean)?,
-            running_var: Var::from_tensor(&running_var)?,
-            weight_and_bias: Some((weight, bias)),
-            remove_mean: true,
-            eps,
-            momentum,
-        };
-        out.check_validity(num_features)?;
-        Ok(out)
-    }
-
-    pub fn new_no_bias_with_momentum(
-        num_features: usize,
-        running_mean: Tensor,
-        running_var: Tensor,
-        eps: f64,
-        momentum: f64,
-    ) -> Result<Self> {
-        let out = Self {
-            running_mean: Var::from_tensor(&running_mean)?,
-            running_var: Var::from_tensor(&running_var)?,
-            weight_and_bias: None,
-            remove_mean: true,
-            eps,
-            momentum,
-        };
-        out.check_validity(num_features)?;
-        Ok(out)
-    }
-
-    pub fn running_mean(&self) -> &Tensor {
-        self.running_mean.as_tensor()
-    }
-
-    pub fn running_var(&self) -> &Tensor {
-        self.running_var.as_tensor()
-    }
-
     pub fn eps(&self) -> f64 {
         self.eps
-    }
-
-    pub fn weight_and_bias(&self) -> Option<(&Tensor, &Tensor)> {
-        self.weight_and_bias.as_ref().map(|v| (&v.0, &v.1))
-    }
-
-    pub fn momentum(&self) -> f64 {
-        self.momentum
     }
 
     pub fn forward_train(&self, x: &Tensor) -> Result<Tensor> {

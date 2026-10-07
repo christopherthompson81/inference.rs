@@ -9,11 +9,11 @@
     ".dynamic": 512,
     ".dynstr": 8559,
     ".dynsym": 10272,
-    ".eh_frame": 4458852,
-    ".eh_frame_hdr": 518404,
+    ".eh_frame": 4458624,
+    ".eh_frame_hdr": 518372,
     ".fini": 13,
     ".fini_array": 8,
-    ".gcc_except_table": 2483165,
+    ".gcc_except_table": 2482449,
     ".gnu.hash": 972,
     ".gnu.version": 856,
     ".gnu.version_r": 752,
@@ -27,12 +27,12 @@
     ".plt": 1424,
     ".rela.dyn": 2650608,
     ".rela.plt": 2112,
-    ".relro_padding": 72,
+    ".relro_padding": 1256,
     ".rodata": 6329708,
     ".tbss": 1312,
     ".tdata": 536,
-    ".text": 56597042,
+    ".text": 56596130,
     ".tm_clone_table": 0,
-    "file": 107094256
+    "file": 107093104
   }
 }

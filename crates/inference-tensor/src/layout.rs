@@ -97,13 +97,7 @@ impl Layout {
 
     /// Checks if more than one logical index lands on the same cell (or when we can't prove it does not)
     pub fn has_internal_overlap(&self) -> bool {
-        !self.range().is_some_and(|f| f.injective)
-    }
-
-    /// Returns range of cells this layout can reach, and whether it reaches all of them.
-    /// Returns `None` on arithmetic overflow.
-    fn range(&self) -> Option<LayoutRange> {
-        // Filter out dims <= 1 as their strides are irrelevant.
+        // Dims of size 1 do not move; walk the rest by increasing stride, each must clear the span before it.
         let mut axes: Vec<(usize, usize)> = self
             .dims()
             .iter()
@@ -114,60 +108,19 @@ impl Layout {
         axes.sort_unstable_by_key(|&(_, s)| s);
 
         let mut span = 0usize;
-        let mut injective = true;
-        let mut dense = true;
-
         for (d, s) in axes {
             if s <= span {
-                // This dim can land on a cell another dim already reaches.
-                injective = false;
-                dense = false;
-            } else if s - span != 1 {
-                // Has a gap
-                dense = false;
+                return true;
             }
-            span = span.checked_add((d - 1).checked_mul(s)?)?;
+            let Some(next) = (d - 1)
+                .checked_mul(s)
+                .and_then(|reach| span.checked_add(reach))
+            else {
+                return true; // address arithmetic overflowed
+            };
+            span = next;
         }
-
-        let lo = self.start_offset();
-        Some(LayoutRange {
-            lo,
-            hi: lo.checked_add(span)?,
-            injective,
-            dense,
-        })
-    }
-
-    /// Relation between this layout and another
-    pub fn relation(&self, other: &Self) -> LayoutRelation {
-        if self == other {
-            return LayoutRelation::Identical;
-        }
-
-        if self.shape().elem_count() == 0 || other.shape().elem_count() == 0 {
-            return LayoutRelation::Disjoint;
-        }
-
-        // Extract [`LayoutRange`] from layout.
-        let (a, b) = match (self.range(), other.range()) {
-            (Some(a), Some(b)) => (a, b),
-            _ => return LayoutRelation::Unknown, // address arithmetic overflowed
-        };
-
-        if a.separated_from(&b) {
-            return LayoutRelation::Disjoint;
-        }
-
-        if a.densely_contains(&b) || b.densely_contains(&a) {
-            return LayoutRelation::Overlapping;
-        }
-
-        // We end up here when layouts ranges overlap and neither is dense, such as disjoint
-        // column slices. Figuring out these cases is a bounded integer feasibility problem
-        // over the strides. This is NP-hard in general. Cheap at common tensor ranks.
-        // If we want to move more cases out of unknown into disjoint/overlapping it can be done using the
-        // same approach as numpy: https://github.com/numpy/numpy/blob/main/numpy/_core/src/common/mem_overlap.c
-        LayoutRelation::Unknown
+        self.start_offset().checked_add(span).is_none()
     }
 
     /// Returns the appropriate start and stop offset if the data is stored in a C
@@ -363,41 +316,27 @@ impl Layout {
     }
 }
 
-/// Describes the range of cells a [`Layout`] can reach within its allocation,
-/// and whether it reaches all of them.
-struct LayoutRange {
-    /// Lowest reachable cell. Equal to layout `start_offset`.
-    lo: usize,
-    /// Highest reachable cell (inclusive).
-    hi: usize,
-    /// Proven to map distinct logical indices to distinct cells.
-    injective: bool,
-    /// Indicates that layout occupies every cell in `lo..=hi`.
-    /// Does not necessarily mean that layout is contiguous.
-    dense: bool,
-}
+#[cfg(test)]
+mod tests {
+    use super::Layout;
 
-impl LayoutRange {
-    /// Bounding intervals cannot meet, which means these layouts are separate.
-    fn separated_from(&self, other: &Self) -> bool {
-        self.hi < other.lo || other.hi < self.lo
+    #[test]
+    fn internal_overlap_is_found_only_where_two_indices_share_a_cell() {
+        let contiguous = Layout::contiguous((2, 3, 4));
+        assert!(!contiguous.has_internal_overlap());
+        assert!(!contiguous.transpose(0, 2).unwrap().has_internal_overlap());
+        // size-1 dims never move, whatever their stride
+        assert!(!Layout::new((1, 4).into(), vec![0, 1], 0).has_internal_overlap());
+        // broadcast: a zero stride on a dim of size > 1
+        assert!(Layout::contiguous((1, 4))
+            .broadcast_as((3, 4))
+            .unwrap()
+            .has_internal_overlap());
+        // the outer stride lands inside the inner dim's span
+        assert!(Layout::new((3, 4).into(), vec![2, 1], 0).has_internal_overlap());
+        // strides that leave gaps but never collide
+        assert!(!Layout::new((3, 4).into(), vec![8, 2], 5).has_internal_overlap());
+        // unprovable once address arithmetic overflows
+        assert!(Layout::new((2, 2).into(), vec![usize::MAX, 1], 0).has_internal_overlap());
     }
-
-    /// If a dense layout contains another's `lo` there is overlap.
-    fn densely_contains(&self, other: &Self) -> bool {
-        self.dense && other.lo >= self.lo && other.lo <= self.hi
-    }
-}
-
-/// How two layouts over the same allocation relate.
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum LayoutRelation {
-    /// Simple assignment. `x[i] += x[i]`
-    Identical,
-    /// Completely distinct layouts.
-    Disjoint,
-    /// Any kind of overlap.
-    Overlapping,
-    /// Could not prove relation.
-    Unknown,
 }

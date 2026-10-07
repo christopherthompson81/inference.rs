@@ -14,9 +14,6 @@ pub use utils::{
 mod conv2d;
 use conv2d::Conv2D;
 
-const USE_IM2COL_CONV1D: bool = true;
-const USE_COL2IM_CONV1D_TR: bool = true;
-
 // TODO: Maybe we should not implement [Clone] here and instead have an explicit allocator +
 // intercept the oom errors to avoid panicking and provide a proper error.
 #[derive(Debug, Clone)]
@@ -985,68 +982,6 @@ fn copy_strided_src_<T: Copy>(src: &[T], dst: &mut [T], dst_offset: usize, src_l
                 dst_index += block_len;
             }
         }
-    }
-}
-
-struct Conv1D<'a>(&'a crate::conv::ParamsConv1D);
-
-impl Map2 for Conv1D<'_> {
-    const OP: &'static str = "conv1d";
-    fn f<T: WithDType>(&self, inp: &[T], inp_l: &Layout, k: &[T], k_l: &Layout) -> Result<Vec<T>> {
-        let p = self.0;
-        let inp = &inp[inp_l.start_offset()..];
-        let k = &k[k_l.start_offset()..];
-        let (inp_s0, inp_s1, inp_s2) = crate::shape::dims3(inp_l.stride())?;
-        let (k_s0, k_s1, k_s2) = crate::shape::dims3(k_l.stride())?;
-        let l_out = p.l_out();
-        let dst_elems = p.c_out * l_out * p.b_size;
-        // The output shape is [b_size, c_out, l_out]
-        let dst = vec![T::zero(); dst_elems];
-
-        // TODO: Avoid making this copy if `inp` already has the appropriate layout.
-        let mut inp_cont = vec![T::zero(); p.b_size * p.c_in * p.l_in];
-        for b_idx in 0..p.b_size {
-            for src_l in 0..p.l_in {
-                for src_c_idx in 0..p.c_in {
-                    let inp_idx = b_idx * inp_s0 + src_c_idx * inp_s1 + src_l * inp_s2;
-                    inp_cont[b_idx * p.l_in * p.c_in + src_l * p.c_in + src_c_idx] = inp[inp_idx]
-                }
-            }
-        }
-
-        for offset in 0..p.k_size {
-            (0..p.c_out).into_par_iter().for_each(|dst_c_idx| {
-                let dst_idx = dst_c_idx * l_out;
-                let k_cont = (0..p.c_in)
-                    .map(|c_in_idx| k[dst_c_idx * k_s0 + c_in_idx * k_s1 + offset * k_s2])
-                    .collect::<Vec<_>>();
-                for b_idx in 0..p.b_size {
-                    let dst_idx = dst_idx + b_idx * p.c_out * l_out;
-                    for dst_l in 0..l_out {
-                        let dst_idx = dst_idx + dst_l;
-                        let src_l = p.stride * dst_l + offset * p.dilation;
-                        if src_l < p.padding || src_l >= p.padding + p.l_in {
-                            continue;
-                        }
-                        let src_l = src_l - p.padding;
-                        let inp_cont = &inp_cont[b_idx * p.l_in * p.c_in + src_l * p.c_in..];
-                        assert!(inp_cont.len() >= p.c_in);
-                        assert!(k_cont.len() >= p.c_in);
-                        let mut d = T::zero();
-                        unsafe { T::vec_dot(inp_cont.as_ptr(), k_cont.as_ptr(), &mut d, p.c_in) }
-                        let dst_p = dst.as_ptr();
-                        // Safety: dst_idx are uniques per dst_c_idx which is used to parallelise
-                        // the different tasks so no two threads can try to write at the same
-                        // location.
-                        unsafe {
-                            let ptr = dst_p.add(dst_idx) as *mut T;
-                            *ptr += d
-                        }
-                    }
-                }
-            })
-        }
-        Ok(dst)
     }
 }
 
@@ -2794,9 +2729,6 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
-        if !USE_IM2COL_CONV1D {
-            return Conv1D(params).map(self, l, kernel, kernel_l);
-        }
         let op = Im2Col1D {
             l_k: params.k_size,
             padding: params.padding,
@@ -2844,7 +2776,7 @@ impl BackendStorage for CpuStorage {
             && params.dilation == 1
             && params.padding == 0
             && params.output_padding == 0;
-        if USE_COL2IM_CONV1D_TR && can_use_col2im {
+        if can_use_col2im {
             let (b_size, c_in, l_in) = l.shape().dims3()?;
             let (c_in2, c_out, k_size) = kernel_l.shape().dims3()?;
             if !kernel_l.is_contiguous() {

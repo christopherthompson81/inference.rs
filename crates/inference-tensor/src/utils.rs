@@ -583,20 +583,8 @@ pub fn set_thread_affinity() {
     }
 }
 
-pub fn has_accelerate() -> bool {
-    cfg!(feature = "accelerate")
-}
-
-pub fn has_mkl() -> bool {
-    cfg!(feature = "mkl")
-}
-
 pub fn cuda_is_available() -> bool {
     cfg!(feature = "cuda")
-}
-
-pub fn metal_is_available() -> bool {
-    cfg!(feature = "metal")
 }
 
 pub fn with_avx() -> bool {

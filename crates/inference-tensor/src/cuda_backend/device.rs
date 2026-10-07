@@ -336,11 +336,7 @@ impl std::ops::Deref for CudaFunc {
     }
 }
 
-impl CudaFunc {
-    pub fn into_cuda_function(self) -> CudaFunction {
-        self.func
-    }
-}
+impl CudaFunc {}
 
 #[macro_export]
 macro_rules! builder_arg {
@@ -396,15 +392,6 @@ impl CudaDevice {
 
     pub fn sm_count(&self) -> usize {
         self.sm_count
-    }
-
-    pub fn get_or_load_custom_func(
-        &self,
-        fn_name: &str,
-        module_name: &str,
-        ptx: &str,
-    ) -> Result<CudaFunc> {
-        self.get_or_load_custom(fn_name, module_name, || ptx.into())
     }
 
     /// Like `get_or_load_custom_func`, from a compiled cubin or fatbin, so loading needs no JIT.
@@ -471,16 +458,6 @@ impl CudaDevice {
 }
 
 impl CudaDevice {
-    pub fn new_with_stream(ordinal: usize) -> Result<Self> {
-        require_lib(
-            unsafe { cudarc::driver::sys::is_culib_present() },
-            "libcuda",
-        )?;
-        let context = cudarc::driver::CudaContext::new(ordinal).w()?;
-        let stream = context.new_stream().w()?;
-        Self::from_context_and_stream(context, stream)
-    }
-
     fn rng(&self) -> Result<RngGuard<'_>> {
         let mut rng = self.curand.lock().unwrap();
         if rng.is_none() {
