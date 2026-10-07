@@ -15,6 +15,8 @@ mod phi2_tests;
 pub mod phi3;
 pub mod phi3_5_moe;
 #[cfg(test)]
+mod phi3_5_moe_tests;
+#[cfg(test)]
 mod phi3_tests;
 pub mod phi3_vision;
 #[cfg(test)]
