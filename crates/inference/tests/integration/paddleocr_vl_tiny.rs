@@ -71,6 +71,33 @@ fn greedy_ids(resp: &inference::ChatCompletionResponse) -> Vec<u32> {
         .unwrap_or_default()
 }
 
+// Greedy ids of one image and of two, pinned so the text stack's numerics can't drift unnoticed; GPU runs paged flash.
+#[tokio::test]
+async fn image_decodes_are_pinned() -> anyhow::Result<()> {
+    let checkpoint = tiny_checkpoint()?;
+    let model = build(checkpoint.path()).await?;
+    let one = model
+        .send_chat_request(image_request(&["ocr.png"])?)
+        .await?;
+    let two = model
+        .send_chat_request(image_request(&["ocr.png", "table.png"])?)
+        .await?;
+    let traces = (greedy_ids(&one), greedy_ids(&two));
+    let expected: (Vec<u32>, Vec<u32>) = if ON_GPU {
+        (
+            vec![135, 219, 156, 129, 129, 129, 175, 129],
+            vec![69, 119, 15, 86, 255, 8, 129, 129],
+        )
+    } else {
+        (
+            vec![172, 129, 129, 129, 129, 255, 8, 51],
+            vec![69, 119, 15, 86, 255, 8, 129, 129],
+        )
+    };
+    assert_eq!(traces, expected);
+    Ok(())
+}
+
 #[tokio::test]
 async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;

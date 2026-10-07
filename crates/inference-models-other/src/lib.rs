@@ -28,6 +28,8 @@ pub mod lfm2;
 pub mod lfm2_vl;
 pub mod loaders;
 pub mod paddleocr_vl;
+#[cfg(test)]
+mod paddleocr_vl_tests;
 pub mod starcoder2;
 #[cfg(test)]
 mod starcoder2_tests;
