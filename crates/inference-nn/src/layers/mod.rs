@@ -26,7 +26,7 @@ pub use crate::attention::Sdpa;
 pub use crate::layers::masker::{CausalMaskConfig, CausalMasker};
 pub use crate::layers::utils::repeat_kv;
 use crate::{
-    amoe::{AnyMoeTrainableLayer, MlpLayer},
+    amoe::{AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
     ops::SplitOp,
 };
 
@@ -3041,6 +3041,85 @@ impl MlpLayer for Mlp {
 
     fn dtype_device(&self) -> (DType, Device) {
         self.gate.dtype_and_device()
+    }
+}
+
+/// An ungated MLP, `down(act(up(x)))`, with its projections named by the AnyMoE targets.
+#[derive(Clone)]
+pub struct PlainMlp {
+    up: Arc<dyn QuantMethod>,
+    down: Arc<dyn QuantMethod>,
+    act: Activation,
+    params: Vec<usize>,
+}
+
+impl PlainMlp {
+    /// `params` is `[hidden_size, intermediate_size]`, as [`MlpLayer::get_params`] reports it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        vb: ShardedVarBuilder,
+        params: &[usize],
+        projections: &[AnyMoeLoraTarget; 2],
+        bias: bool,
+        quantization_config: &Option<QuantizedConfig>,
+        act: Activation,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
+        let (hidden_size, intermediate_size) = (params[0], params[1]);
+        let [up, down] = projections;
+        Ok(Self {
+            up: ColumnParallelLayer::new(
+                hidden_size,
+                intermediate_size,
+                quantization_config,
+                bias,
+                comm,
+                vb.pp(up.name),
+            )?,
+            down: RowParallelLayer::new(
+                intermediate_size,
+                hidden_size,
+                quantization_config,
+                bias,
+                comm,
+                vb.pp(down.name),
+            )?,
+            act,
+            params: params.to_vec(),
+        })
+    }
+}
+
+impl AnyMoeTrainableLayer for PlainMlp {}
+
+impl MlpLayer for PlainMlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.down.forward(&self.up.forward(xs)?.apply(&self.act)?)
+    }
+    fn clone(&self) -> Box<dyn MlpLayer> {
+        Box::new(Clone::clone(self))
+    }
+    fn get_params(&self) -> &[usize] {
+        &self.params
+    }
+    fn hidden_act(&self) -> Activation {
+        self.act
+    }
+    // up, down
+    fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
+        let added = |layer: &Arc<dyn QuantMethod>, delta: &Option<Tensor>| match delta {
+            Some(delta) => layer.add_delta_w(delta),
+            None => Ok(layer.clone()),
+        };
+        Ok(Box::new(Self {
+            up: added(&self.up, &deltas[0])?,
+            down: added(&self.down, &deltas[1])?,
+            act: self.act,
+            params: self.params.clone(),
+        }))
+    }
+    fn dtype_device(&self) -> (DType, Device) {
+        self.up.dtype_and_device()
     }
 }
 

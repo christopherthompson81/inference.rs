@@ -60,7 +60,7 @@ impl Config {
             },
             max_position_embeddings: self.max_position_embeddings,
             qkv_bias: false,
-            qk_norm: Some(QkNorm::BeforeRope),
+            qk_norm: Some(QkNorm::BEFORE_ROPE),
             no_rope_layers: Vec::new(),
             attention_temperature: None,
             layer_windows: (0..self.num_hidden_layers)

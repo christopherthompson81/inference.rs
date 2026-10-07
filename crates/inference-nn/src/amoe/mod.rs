@@ -22,6 +22,7 @@ use crate::{
 };
 
 /// One LoRA-targetable MLP projection: its tensor name and its delta shape from the base (hidden, intermediate).
+#[derive(Debug)]
 pub struct AnyMoeLoraTarget {
     pub name: &'static str,
     pub shape: fn(usize, usize) -> (usize, usize),

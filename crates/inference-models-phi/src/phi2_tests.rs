@@ -4,7 +4,8 @@ use anyhow::Result;
 use inference_nn::loaders::NormalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
-    Snapshot, assert_snapshot, forward_normal, load_synthesized, metadata, names_digest, patched,
+    Snapshot, assert_err_contains, assert_snapshot, forward_normal, load_synthesized, metadata,
+    names_digest, patched,
 };
 use inference_tensor::DType;
 use serde_json::{Value, json};
@@ -73,4 +74,32 @@ fn phi2_prefill_full_rotary() -> Result<()> {
             l2: 15.516547,
         },
     )
+}
+
+// per-head q/k LayerNorm before RoPE, as HF's PhiAttention applies it
+#[test]
+fn phi2_prefill_qk_layernorm() -> Result<()> {
+    prefill(
+        &patched(config(), json!({"qk_layernorm": true})),
+        0x688f_6d37_2f66_5ad2,
+        &Snapshot {
+            probes: [-0.025898028, -1.0577716, -0.93444204, -0.87819564],
+            sum: -70.57359,
+            l2: 15.530089,
+        },
+    )
+}
+
+#[test]
+fn phi2_tied_biased_head_is_rejected() {
+    let config = patched(config(), json!({"tie_word_embeddings": true}));
+    let loaded = load_synthesized(&[], Default::default(), DType::F32, |vb| {
+        Phi2Loader.load(
+            &config.to_string(),
+            vb,
+            metadata(),
+            AttentionImplementation::Eager,
+        )
+    });
+    assert_err_contains(loaded, "tied lm_head with a bias");
 }

@@ -42,7 +42,7 @@ impl Gemma3TextConfig {
             max_position_embeddings: self.max_position_embeddings,
             qkv_bias: self.attention_bias,
             o_bias: self.attention_bias,
-            qk_norm: Some(QkNorm::BeforeRope),
+            qk_norm: Some(QkNorm::BEFORE_ROPE),
             layer_windows: (0..self.num_hidden_layers)
                 .map(|layer_idx| {
                     (!(layer_idx + 1).is_multiple_of(self.sliding_window_pattern))

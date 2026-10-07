@@ -9,16 +9,17 @@ use inference_quant::QuantizedConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    decoder::{DecoderSpec, NormNames, RopeKind},
+    decoder::{DecoderSpec, MlpKind, NormNames, RopeKind},
     layers::Activation,
     serde_default_fn,
 };
 
 pub const SANDWICH_NORMS: NormNames = NormNames {
     input: "input_layernorm",
-    pre_ffn: "post_attention_layernorm",
+    pre_ffn: Some("post_attention_layernorm"),
     post_attn: Some("post_self_attn_layernorm"),
     post_ffn: Some("post_mlp_layernorm"),
+    last: "norm",
 };
 
 serde_default_fn!(bool, tie_word_embeddings, false);
@@ -71,7 +72,7 @@ impl Config {
             rope: RopeKind::Partial {
                 theta: self.rope_theta as f32,
                 rotary_dim,
-                is_gpt_neox: false,
+                is_gpt_neox: Some(false),
             },
             max_position_embeddings: self.max_position_embeddings,
             qkv_bias: bias,
@@ -79,7 +80,7 @@ impl Config {
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: self.quantization_config.clone(),
             norm_names: SANDWICH_NORMS,
-            merged_gate_up: true,
+            mlp: MlpKind::MergedGateUp,
             ..Default::default()
         }
     }
