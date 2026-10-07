@@ -154,7 +154,14 @@ async fn a_qwen3_window_reaches_only_its_sliding_layers() -> anyhow::Result<()> 
         cfg.num_hidden_layers,
         HashMap::new(),
         &|vb, metadata| {
-            qwen3::Model::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+            qwen3::Model::new(
+                &cfg.decoder_spec(),
+                vb,
+                true,
+                metadata,
+                AttentionImplementation::Eager,
+            )
+            .map(|_| ())
         },
     )
     .await

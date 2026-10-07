@@ -3,8 +3,8 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::{
-    amoe, attention, cuda, device_map, gdn, kv_cache, layers, media_inputs, model, moe, ops,
-    paged_attention, speculative, utils, vision,
+    amoe, attention, cuda, decoder, device_map, gdn, kv_cache, layers, media_inputs, model, moe,
+    ops, paged_attention, speculative, utils, vision,
 };
 use inference_nn::{get_mut_arcmutex, serde_default_fn};
 
@@ -25,6 +25,8 @@ pub mod qwen3_moe;
 #[cfg(test)]
 mod qwen3_moe_tests;
 pub mod qwen3_next;
+#[cfg(test)]
+mod qwen3_tests;
 pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 mod qwen_vl_inputs;
@@ -40,7 +42,6 @@ inference_nn::json_config!(
     qwen3::Config,
     qwen3_5::config::Config,
     qwen3_5::config::TextConfig,
-    qwen3_embedding::Config,
     qwen3_moe::Config,
     qwen3_next::Config,
     qwen3_vl::config::Config,

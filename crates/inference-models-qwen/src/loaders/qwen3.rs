@@ -14,7 +14,7 @@ impl NormalModelLoader for Qwen3Loader {
         let cfg = crate::qwen3::Config::from_json(config)?;
 
         Ok(Box::new(crate::qwen3::Model::new(
-            &cfg,
+            &cfg.decoder_spec(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,
@@ -95,7 +95,7 @@ impl DeviceMappedModelLoader for Qwen3Loader {
         Ok(Box::new(decoder_shape(&cfg).model_config(
             cfg.num_hidden_layers,
             cfg.max_position_embeddings,
-            cfg.sliding_window,
+            cfg.decoder_spec().sliding_window(),
         )))
     }
 }
