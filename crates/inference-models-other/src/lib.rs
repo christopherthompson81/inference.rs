@@ -15,6 +15,8 @@ mod deepseek_family_tests;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;
+#[cfg(test)]
+mod glm4_tests;
 pub mod gpt_oss;
 pub mod granite;
 #[cfg(test)]

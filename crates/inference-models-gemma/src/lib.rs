@@ -14,6 +14,8 @@ pub mod gemma2;
 pub mod gemma3;
 pub mod gemma3n;
 pub mod gemma4;
+#[cfg(test)]
+mod gemma_dense_tests;
 pub mod loaders;
 
 inference_nn::json_config!(
