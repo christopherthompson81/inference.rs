@@ -655,6 +655,14 @@ impl<'de> Deserialize<'de> for QuantizedConfig {
 }
 
 impl QuantizedConfig {
+    /// Whether a column-parallel layer loads just its shard of this format's weight; the others load it whole.
+    pub fn loads_column_shards(&self) -> bool {
+        matches!(
+            self,
+            Self::Fp8 { .. } | Self::CompressedTensors { .. } | Self::ModelOpt { .. }
+        )
+    }
+
     pub fn from_modelopt_config(config: &serde_json::Value) -> std::result::Result<Self, String> {
         Ok(Self::ModelOpt {
             config: CheckpointQuantConfig::model_opt(config)?,

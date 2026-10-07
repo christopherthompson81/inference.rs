@@ -2,14 +2,8 @@
 
 pub mod inputs_processor;
 
-// This implementation is based on:
-// https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
-use crate::layers::masker::CausalMaskConfig;
-use crate::phi3::DecoderLayer;
 use either::Either;
-use inference_quant::{
-    BitWiseOp, NonZeroOp, QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder,
-};
+use inference_quant::{BitWiseOp, NonZeroOp, QuantMethod, QuantizedConfig, ShardedVarBuilder};
 use inference_tensor::{
     D, DType, Device, IndexOp, Module, Result, Shape, Tensor, shape::ShapeWithOneHole,
 };
@@ -21,17 +15,16 @@ use std::{
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
-    attention::AttentionMask,
-    device_map::{DeviceMappedMask, DeviceMapper},
-    kv_cache::{EitherCache, NormalCache},
-    layers::{self, Activation, CausalMasker, PhiRopeScalingConfig, PhiRotaryEmbedding, RmsNorm},
-    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
+    decoder::{CausalLm, DecoderSpec},
+    kv_cache::EitherCache,
+    layers::{Activation, PhiRopeScalingConfig},
+    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
-        AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        AttentionImplementation, ModelConfigMetadata,
         encoder_cache::{CacheModality, EncoderCacheManager},
     },
     serde_default_fn,
-    utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
+    utils::unvarbuilder::UnVarBuilder,
     vision::clip::{ClipConfig, ClipVisionTransformer},
     vision::multimodal_layout::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
@@ -39,6 +32,8 @@ use crate::{
 };
 
 use crate::vision::clip;
+
+const ENCODER_CACHE_ENTRIES: usize = 32;
 
 #[derive(Debug, Clone, serde::Deserialize, Default)]
 pub struct EmbedLayerConfig {
@@ -885,17 +880,7 @@ impl ImageEmbedding {
 
 pub struct Model {
     vision_embed_tokens: ImageEmbedding,
-    embed_tokens: Arc<dyn QuantMethod>,
-    layers: Vec<DecoderLayer>,
-    norm: RmsNorm,
-    lm_head: Arc<dyn QuantMethod>,
-    dtype: DType,
-    device: Device,
-    cache: EitherCache,
-    max_seq_len: usize,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
-    sliding_window: Option<usize>,
-    cfg: ModelConfigMetadata,
+    lm: CausalLm,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
 }
 
@@ -903,113 +888,35 @@ impl Model {
     pub fn new(
         cfg: &Config,
         vb: ShardedVarBuilder,
-        _is_gptx: bool,
+        is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        let mapper = normal_loading_metadata.mapper;
         let vb_m = vb.pp("model");
-        let dtype = vb_m.dtype();
-
-        let embed_tokens = layers::embedding_with_legacy_tied_uqff(
-            cfg.vocab_size,
-            cfg.hidden_size,
-            mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
-            cfg.tie_word_embeddings.then(|| {
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq)
-            }),
-            &cfg.quantization_config,
+        let spec = DecoderSpec {
+            // Phi-3V reads its lm_head under the checkpoint's quantization config, Phi-3 never does
+            unquantized_lm_head: false,
+            ..cfg.text_config().decoder_spec()
+        };
+        let lm = CausalLm::new(
+            &spec,
+            vb,
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
         )?;
         let vision_embed_tokens = ImageEmbedding::new(
             cfg,
-            embed_tokens.clone(),
-            dtype,
+            lm.embed_tokens().clone(),
+            vb_m.dtype(),
             &cfg.embd_layer,
-            mapper.set_nm_device(vb_m.pp("vision_embed_tokens"), false),
+            lm.stack_mapper()
+                .set_nm_device(vb_m.pp("vision_embed_tokens"), false),
         )?;
-        let vb_l = vb_m.pp("layers");
-        let text_cfg = cfg.text_config();
-        let ropes = crate::device_map::per_layer_device(
-            &*mapper,
-            cfg.num_hidden_layers,
-            &normal_loading_metadata.real_device,
-            |device| PhiRotaryEmbedding::new(vb.dtype(), text_cfg.clone(), device),
-        )?;
-        let layers = NiceProgressBar::<_, 'b'>(
-            0..cfg.num_hidden_layers,
-            "Loading repeating layers",
-            &normal_loading_metadata.multi_progress,
-        )
-        .par_iter_if_isq(|layer_idx| {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            let rotary_emb = ropes
-                .get(&device.location())
-                .expect("No RoPE for device location!")
-                .clone();
-            let paged_attn = match &attention_mechanism {
-                AttentionImplementation::Eager => None,
-                AttentionImplementation::PagedAttention => {
-                    Some(PagedAttention::new(cfg.head_dim(), device, None)?)
-                }
-            };
-            DecoderLayer::new(
-                rotary_emb,
-                &text_cfg,
-                vb_l.pp(layer_idx),
-                &*mapper,
-                layer_idx,
-                normal_loading_metadata.loading_isq,
-                paged_attn,
-            )
-        })?;
-        let norm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
-        )?;
-        let lm_head = if !cfg.tie_word_embeddings {
-            ReplicatedLayer::new(
-                cfg.hidden_size,
-                cfg.vocab_size,
-                &cfg.quantization_config,
-                false,
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
-            )?
-        } else {
-            embed_tokens.clone()
-        };
-
         Ok(Self {
             vision_embed_tokens,
-            layers,
-            norm,
-            lm_head,
-            dtype,
-            device: normal_loading_metadata.real_device,
-            cache: EitherCache::Normal(NormalCache::new_sliding(
-                cfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-                cfg.sliding_window,
-            )),
-            max_seq_len: cfg.max_position_embeddings,
-            sliding_window: cfg.sliding_window,
-            embed_tokens,
-            cfg: ModelConfigMetadata {
-                max_seq_len: cfg.max_position_embeddings,
-                num_layers: cfg.num_hidden_layers,
-                hidden_size: cfg.hidden_size,
-                num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
-                num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size())
-                    .max(1),
-                sliding_window: cfg.sliding_window,
-                k_head_dim: cfg.head_dim(),
-                v_head_dim: cfg.head_dim(),
-                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-            },
-            mapper,
-            encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
+            lm,
+            encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(ENCODER_CACHE_ENTRIES))),
         })
     }
 
@@ -1022,67 +929,29 @@ impl Model {
         image_hashes: &[u64],
         packed_layout: Option<&PackedMultimodalLayout>,
     ) -> Result<Tensor> {
-        let mut xs = if let Some(ref pixel_values) = pixel_values {
-            self.vision_embed_tokens.forward(
-                input_ids,
-                pixel_values,
-                image_sizes,
-                image_hashes,
-                packed_layout,
-                &self.encoder_cache,
-            )?
-        } else {
-            self.embed_tokens.embedding_forward(input_ids, self.dtype)?
+        let Some(pixel_values) = pixel_values else {
+            return self.lm.forward(input_ids, ctx);
         };
-        let cache = &mut self.cache.normal().0;
-        let mask_cache = ctx.mask_cache(cache);
-        let attention_mask = CausalMasker.make_causal_mask(
+        let xs = self.vision_embed_tokens.forward(
             input_ids,
-            &mask_cache,
-            xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
+            &pixel_values,
+            image_sizes,
+            image_hashes,
+            packed_layout,
+            &self.encoder_cache,
         )?;
-        let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
-        } else {
-            AttentionMask::None
-        };
-        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
-
-        for (i, layer) in self.layers.iter().enumerate() {
-            xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?
-        }
-        let xs = xs.to_device(&self.device)?;
-        let xs = xs.apply(&self.norm)?;
-        let xs = ctx.logits(&xs)?;
-        ctx.lm_head(&*self.lm_head, &xs)
+        self.lm.forward_embeds(input_ids, xs, ctx)
     }
 }
 
 impl IsqModel for Model {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-
         let uvb_m = uvb.pp("model");
-        uvb_m.pp("embed_tokens").add(&self.embed_tokens);
-        uvb_m.pp("norm").add(&self.norm);
         uvb_m
             .pp("vision_embed_tokens")
             .extend(self.vision_embed_tokens.residual_tensors());
-
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb_m.pp("layers").pp(layer_idx);
-            uvb_l.pp("input_layernorm").add(&layer.input_layernorm);
-            uvb_l
-                .pp("post_attention_layernorm")
-                .add(&layer.post_attention_layernorm);
-        }
-
-        uvb.to_safetensors()
+        self.lm.residual_tensors_m(uvb_m)
     }
 }
 
@@ -1130,16 +999,16 @@ impl MultimodalModel for Model {
         )
     }
     fn cache(&self) -> &EitherCache {
-        &self.cache
+        NormalModel::cache(&self.lm)
     }
     fn device(&self) -> &Device {
-        &self.device
+        NormalModel::device(&self.lm)
     }
     fn max_seq_len(&self) -> usize {
-        self.max_seq_len
+        NormalModel::max_seq_len(&self.lm)
     }
     fn config(&self) -> &ModelConfigMetadata {
-        &self.cfg
+        NormalModel::config(&self.lm)
     }
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn Any> {
         Box::new(Phi3VisionSpecificArgs::default())
@@ -1164,38 +1033,23 @@ impl MultimodalModel for Model {
 
 impl AnyMoeBaseModelMixin for Model {
     fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
-        let mut mlps = Vec::new();
-        for layer in &self.layers {
-            mlps.push(&*layer.mlp);
-        }
-        mlps
+        self.lm.get_mlps()
     }
     fn get_mlps_mut(&mut self) -> Vec<&mut Box<dyn MlpLayer>> {
-        let mut mlps = Vec::new();
-        for layer in &mut self.layers {
-            mlps.push(&mut layer.mlp);
-        }
-        mlps
+        self.lm.get_mlps_mut()
     }
     fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
-        crate::phi3::ANYMOE_LORA_TARGETS
+        self.lm.amoe_lora_targets()
     }
     fn amoe_fine_tuned_expert(
         &self,
-        _layer: usize,
+        layer: usize,
         base: &dyn MlpLayer,
         vb: ShardedVarBuilder,
     ) -> Result<Box<dyn MlpLayer>> {
-        Ok(Box::new(crate::phi3::Mlp::new(
-            &crate::phi3::Config {
-                intermediate_size: base.get_params()[1],
-                hidden_size: base.get_params()[0],
-                ..Default::default()
-            },
-            vb,
-        )?))
+        self.lm.amoe_fine_tuned_expert(layer, base, vb)
     }
     fn amoe_supported(&self) -> bool {
-        true
+        self.lm.amoe_supported()
     }
 }
