@@ -100,3 +100,29 @@ fn mixtral_prefill_sliding_tied() -> Result<()> {
         },
     )
 }
+
+// an experts-only ISQ quantizes the experts alone; the router and attention projections are residuals
+#[test]
+fn mixtral_experts_only_residuals_keep_router_and_attention() -> Result<()> {
+    let (model, _) = load_synthesized(&[], expert_shapes(), DType::F32, |vb| {
+        MixtralLoader.load(
+            &config().to_string(),
+            vb,
+            metadata(),
+            AttentionImplementation::Eager,
+        )
+    })?;
+    let residuals = model
+        .residual_tensors_moe_experts_only()
+        .expect("Mixtral routes over experts");
+    let names: Vec<_> = residuals.iter().map(|(name, _)| name.as_str()).collect();
+    for kept in [
+        "model.layers.0.block_sparse_moe.gate.weight",
+        "model.layers.0.self_attn.q_proj.weight",
+        "model.layers.0.post_attention_layernorm.weight",
+    ] {
+        assert!(names.contains(&kept), "{kept} missing from {names:?}");
+    }
+    assert!(!names.iter().any(|name| name.contains(".experts.")));
+    Ok(())
+}

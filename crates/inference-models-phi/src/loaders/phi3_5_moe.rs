@@ -14,7 +14,7 @@ impl NormalModelLoader for Phi3_5MoELoader {
         let cfg = crate::phi3_5_moe::Config::from_json(config)?;
 
         Ok(Box::new(crate::phi3_5_moe::Model::new(
-            &cfg,
+            &cfg.decoder_spec(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

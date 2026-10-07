@@ -1849,3 +1849,30 @@ the same bug) falls back to it for those formats. AnyMoE on a merged gate/up now
 checkpoints carry, instead of the absent `gate_proj`/`up_proj`.
 
 Next: #324 step 6 (MoE feed-forwards).
+
+## Run 54 - 2026-10-07 12:00
+
+Question: what does #324 step 6 (Mixtral, Qwen3-MoE and Phi-3.5-MoE onto the shared decoder) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,559,984  105,453,488    -106,496
+.text                  55,353,058   55,266,850     -86,208
+```
+
+Raw finding: -106 KB from 1,852 lines of code removed and 276 added, the largest step yet: three models whose
+attention was already the shared block, so only the feed-forward was new. The decoder grew a shared `SparseMoe`
+(`decoder/moe.rs`: a quantized or plain+LoRA router, top-k softmax or Phi-3.5-MoE's sparsemixer, `MoEExperts`), and
+the stack's default feed-forward became `Ffn { Dense, Moe }`, so dense models build the same type. `LayerFfn` reports
+its name (`block_sparse_moe` for Mixtral and Phi-3.5-MoE), whether it routes over experts, and whether CUDA decode
+graphs are trusted with it (Qwen3-MoE on as before, Mixtral and Phi-3.5-MoE off as before).
+
+Pins recorded on the old code (Mixtral full and sliding/tied; Phi-3.5-MoE biased, and LongRoPE unbiased) and the
+existing Qwen3-MoE pin pass unchanged. Experts-only ISQ residuals are now returned for any model with expert layers
+(Mixtral and Qwen3-MoE returned none before). Negative result on my first read that this fixed lost UQFF tensors: the
+review showed a UQFF write tracks every QuantMethod, quantized or not, and drops residuals that duplicate them, so the
+old fallback lost nothing; the change is consistency, not a fix.
+
+Next: #324 step 7 (VL text stacks, Phi-4MM).
+
