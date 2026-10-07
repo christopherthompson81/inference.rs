@@ -14,7 +14,7 @@ impl NormalModelLoader for LlamaLoader {
         let cfg = crate::llama::Config::from_json(config)?;
 
         Ok(Box::new(crate::llama::Llama::new(
-            &cfg,
+            &cfg.decoder_spec(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

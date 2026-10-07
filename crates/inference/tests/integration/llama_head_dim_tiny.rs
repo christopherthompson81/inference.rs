@@ -51,7 +51,14 @@ async fn a_llama_with_an_explicit_head_dim_loads_its_projections_and_generates()
         cfg.num_hidden_layers,
         &[ROPE_FREQS],
         |vb, metadata| {
-            Llama::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+            Llama::new(
+                &cfg.decoder_spec(),
+                vb,
+                true,
+                metadata,
+                AttentionImplementation::Eager,
+            )
+            .map(|_| ())
         },
     )?;
 

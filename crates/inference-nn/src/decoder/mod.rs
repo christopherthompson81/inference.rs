@@ -15,8 +15,9 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
-        Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, embedding,
-        embedding_with_legacy_tied_uqff, masker::CausalMaskConfig, masker::PastKvLenCache,
+        Activation, CausalMasker, Llama3RopeConfig, Llama3RopeSpec, Llama3RotaryEmbedding, Mlp,
+        RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding, embedding_with_legacy_tied_uqff,
+        masker::CausalMaskConfig, masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
@@ -25,11 +26,43 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+// Llama 3 checkpoints may carry per-frequency rope factors under this name
+const ROPE_FREQS: &str = "rope_freqs.weight";
+const QK_NORM_BEFORE_ROPE: (&str, &str) = ("q_norm", "k_norm");
+
 const AMOE_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
     AnyMoeLoraTarget::up("gate_proj"),
     AnyMoeLoraTarget::up("up_proj"),
     AnyMoeLoraTarget::down("down_proj"),
 ];
+
+/// How the stack's RoPE tables are built.
+#[derive(Clone, Debug)]
+pub enum RopeKind {
+    Default {
+        theta: f32,
+    },
+    /// Llama 3 or linear scaling, with the checkpoint's `rope_freqs.weight` factors when it has them.
+    Llama3 {
+        theta: f32,
+        scaling: Option<Llama3RopeConfig>,
+    },
+    Yarn(YarnRopeConfig),
+}
+
+/// Per-head q/k RMS norm: fused into RoPE as `q_norm`/`k_norm`, or applied after it under the given names.
+#[derive(Clone, Copy, Debug)]
+pub enum QkNorm {
+    BeforeRope,
+    AfterRope { q: &'static str, k: &'static str },
+}
+
+/// Mistral's position-dependent query scaling, `1 + scale * ln(1 + floor(pos / floor_scale))`.
+#[derive(Clone, Copy, Debug)]
+pub struct AttentionTemperature {
+    pub scale: f32,
+    pub floor_scale: usize,
+}
 
 /// The shape and switches of one decoder stack; a model's config builds it.
 #[derive(Clone, Debug)]
@@ -42,10 +75,13 @@ pub struct DecoderSpec {
     pub head_dim: usize,
     pub hidden_act: Activation,
     pub rms_norm_eps: f64,
-    pub rope_theta: f32,
+    pub rope: RopeKind,
     pub max_position_embeddings: usize,
-    /// RMS-normalize each head of q and k before RoPE.
-    pub qk_norm: bool,
+    pub qkv_bias: bool,
+    pub qk_norm: Option<QkNorm>,
+    /// Layers that skip RoPE (NoPE).
+    pub no_rope_layers: Vec<usize>,
+    pub attention_temperature: Option<AttentionTemperature>,
     /// One entry per layer: the sliding window it attends over, or `None` for full attention.
     pub layer_windows: Vec<Option<usize>>,
     pub tie_word_embeddings: bool,
@@ -60,6 +96,52 @@ impl DecoderSpec {
     /// The window the stack's sliding layers share; the mask is built once for all of them.
     pub fn sliding_window(&self) -> Option<usize> {
         self.layer_windows.iter().flatten().next().copied()
+    }
+
+    fn rope(
+        &self,
+        vb_m: &ShardedVarBuilder,
+        device: &Device,
+        is_gptx: bool,
+        dtype: DType,
+    ) -> Result<RotaryEmbedding> {
+        match &self.rope {
+            RopeKind::Default { theta } => RotaryEmbedding::new(
+                *theta,
+                self.head_dim,
+                self.max_position_embeddings,
+                device,
+                is_gptx,
+                dtype,
+            ),
+            RopeKind::Llama3 { theta, scaling } => {
+                let freq_factors = vb_m
+                    .contains_tensor(ROPE_FREQS)
+                    .then(|| {
+                        vb_m.clone()
+                            .set_device(device.clone())
+                            .get_unchecked_dtype(ROPE_FREQS, DType::F32)
+                    })
+                    .transpose()?;
+                let spec = Llama3RopeSpec {
+                    rope_theta: *theta,
+                    head_dim: self.head_dim,
+                    max_position_embeddings: self.max_position_embeddings,
+                    scaling: scaling.as_ref(),
+                };
+                Ok(
+                    Llama3RotaryEmbedding::new(
+                        dtype,
+                        spec,
+                        device,
+                        is_gptx,
+                        freq_factors.as_ref(),
+                    )?
+                    .into_inner(),
+                )
+            }
+            RopeKind::Yarn(yarn) => RotaryEmbedding::new_yarn(yarn, device, is_gptx, dtype),
+        }
     }
 
     fn cache_types(&self) -> Vec<NormalCacheType> {
@@ -81,11 +163,12 @@ pub struct AttentionBlock {
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
     o_proj: Arc<dyn QuantMethod>,
-    qk_norm: Option<(RmsNorm, RmsNorm)>,
+    qk_norm: Option<(QkNorm, RmsNorm, RmsNorm)>,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rotary_emb: Arc<RotaryEmbedding>,
+    rotary_emb: Option<Arc<RotaryEmbedding>>,
+    attention_temperature: Option<AttentionTemperature>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
 }
@@ -119,7 +202,7 @@ impl AttentionBlock {
             hidden,
             spec.num_heads * head_dim,
             qc,
-            false,
+            spec.qkv_bias,
             comm,
             mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
         )?;
@@ -129,7 +212,7 @@ impl AttentionBlock {
                 hidden,
                 spec.num_kv_heads * head_dim,
                 qc,
-                false,
+                spec.qkv_bias,
                 comm,
                 kv_shard,
                 mapper.set_device(layer_idx, vb.pp(name), loading_isq),
@@ -144,18 +227,23 @@ impl AttentionBlock {
             comm,
             mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
         )?;
-        let qk_norm = if spec.qk_norm {
-            let norm = |name| {
-                RmsNorm::new(
-                    head_dim,
-                    spec.rms_norm_eps,
-                    mapper.set_device(layer_idx, vb.pp(name), false),
-                )
-            };
-            Some((norm("q_norm")?, norm("k_norm")?))
-        } else {
-            None
-        };
+        let qk_norm = spec
+            .qk_norm
+            .map(|placement| -> Result<_> {
+                let (q, k) = match placement {
+                    QkNorm::BeforeRope => QK_NORM_BEFORE_ROPE,
+                    QkNorm::AfterRope { q, k } => (q, k),
+                };
+                let norm = |name| {
+                    RmsNorm::new(
+                        head_dim,
+                        spec.rms_norm_eps,
+                        mapper.set_device(layer_idx, vb.pp(name), false),
+                    )
+                };
+                Ok((placement, norm(q)?, norm(k)?))
+            })
+            .transpose()?;
         Ok(Self {
             q_proj,
             k_proj,
@@ -165,7 +253,8 @@ impl AttentionBlock {
             num_heads: spec.num_heads / comm.world_size(),
             num_kv_heads: (spec.num_kv_heads / comm.world_size()).max(1),
             head_dim,
-            rotary_emb,
+            rotary_emb: (!spec.no_rope_layers.contains(&layer_idx)).then_some(rotary_emb),
+            attention_temperature: spec.attention_temperature,
             paged_attn,
             sdpa_params: SdpaParams {
                 n_kv_groups: inference_quant::compute_n_kv_groups(
@@ -207,21 +296,7 @@ impl AttentionBlock {
             heads(v, self.num_kv_heads)?,
         );
 
-        let rope_positions = ctx
-            .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
-        let (q, k) = match &self.qk_norm {
-            Some((q_norm, k_norm)) => self.rotary_emb.forward_qk_norm(
-                &q,
-                &k,
-                q_norm.weight(),
-                k_norm.weight(),
-                q_norm.eps(),
-                k_norm.eps(),
-                rope_positions,
-            )?,
-            None => self.rotary_emb.forward(&q, &k, rope_positions)?,
-        };
+        let (q, k) = self.rope_and_norm(q, k, ctx)?;
 
         let attn_output = match kv_cache {
             Some(kv_cache) => AttentionDispatch {
@@ -249,10 +324,56 @@ impl AttentionBlock {
         self.o_proj.forward(&attn_output)
     }
 
+    fn rope_and_norm(
+        &self,
+        q: Tensor,
+        k: Tensor,
+        ctx: &mut ModelForwardContext<'_>,
+    ) -> Result<(Tensor, Tensor)> {
+        let Some(rotary_emb) = &self.rotary_emb else {
+            return Ok((q, k));
+        };
+        let positions = ctx
+            .text_positions(q.device(), q.dim(2)?)?
+            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
+        let (q, k) = match &self.qk_norm {
+            Some((QkNorm::BeforeRope, q_norm, k_norm)) => rotary_emb.forward_qk_norm(
+                &q,
+                &k,
+                q_norm.weight(),
+                k_norm.weight(),
+                q_norm.eps(),
+                k_norm.eps(),
+                positions,
+            )?,
+            Some((QkNorm::AfterRope { .. }, q_norm, k_norm)) => {
+                let (q, k) = rotary_emb.forward(&q, &k, positions)?;
+                (q_norm.forward(&q)?, k_norm.forward(&k)?)
+            }
+            None => rotary_emb.forward(&q, &k, positions)?,
+        };
+        let Some(AttentionTemperature { scale, floor_scale }) = self.attention_temperature else {
+            return Ok((q, k));
+        };
+        let (b_sz, _, q_len, _) = q.dims4()?;
+        let floor = (positions.to_dtype(DType::F32)? / floor_scale as f64)?.floor()?;
+        let scales =
+            ((((floor + 1.)?.log()? * f64::from(scale))? + 1.)?).reshape((b_sz, 1, q_len, 1))?;
+        let q = q
+            .to_dtype(DType::F32)?
+            .broadcast_mul(&scales)?
+            .to_dtype(q.dtype())?;
+        Ok((q, k))
+    }
+
     fn add_residual(&self, uvb: &UnVarBuilder) {
-        if let Some((q_norm, k_norm)) = &self.qk_norm {
-            uvb.pp("q_norm").add(q_norm);
-            uvb.pp("k_norm").add(k_norm);
+        if let Some((placement, q_norm, k_norm)) = &self.qk_norm {
+            let (q, k) = match placement {
+                QkNorm::BeforeRope => QK_NORM_BEFORE_ROPE,
+                QkNorm::AfterRope { q, k } => (*q, *k),
+            };
+            uvb.pp(q).add(q_norm);
+            uvb.pp(k).add(k_norm);
         }
     }
 }
@@ -330,9 +451,9 @@ impl DecoderLayer {
     }
 }
 
-/// Each layer attends through `full`, or through `sliding` when it has a window.
+/// Each layer attends through `full`, or through `sliding` when it has a window; either is built only if used.
 pub struct LayerMasks {
-    full: DeviceMappedMask,
+    full: Option<DeviceMappedMask>,
     sliding: Option<DeviceMappedMask>,
 }
 
@@ -343,6 +464,7 @@ pub struct DecoderStack {
     norm: RmsNorm,
     dtype: DType,
     sliding_window: Option<usize>,
+    has_full_layers: bool,
     pub device: Device,
     pub mapper: Box<dyn DeviceMapper + Send + Sync>,
 }
@@ -357,6 +479,14 @@ impl DecoderStack {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: &AttentionImplementation,
     ) -> Result<Self> {
+        // a NoPE layer skips the RoPE step that carries q/k norm and the temperature
+        if !spec.no_rope_layers.is_empty()
+            && (spec.qk_norm.is_some() || spec.attention_temperature.is_some())
+        {
+            inference_tensor::bail!(
+                "NoPE layers with q/k norm or attention temperature are not supported"
+            );
+        }
         // one sliding mask serves every sliding layer
         if spec
             .layer_windows
@@ -402,16 +532,7 @@ impl DecoderStack {
             &*mapper,
             spec.num_layers(),
             real_device,
-            |device| {
-                RotaryEmbedding::new(
-                    spec.rope_theta,
-                    spec.head_dim,
-                    spec.max_position_embeddings,
-                    device,
-                    is_gptx,
-                    dtype,
-                )
-            },
+            |device| spec.rope(&vb_m, device, is_gptx, dtype),
         )?;
         let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
@@ -452,6 +573,7 @@ impl DecoderStack {
             norm,
             dtype,
             sliding_window: spec.sliding_window(),
+            has_full_layers: spec.layer_windows.iter().any(Option::is_none),
             device: real_device.clone(),
             mapper,
         })
@@ -488,7 +610,7 @@ impl DecoderStack {
             DeviceMappedMask::new(mask, &*self.mapper)
         };
         Ok(LayerMasks {
-            full: mask(None)?,
+            full: self.has_full_layers.then(|| mask(None)).transpose()?,
             sliding: self
                 .sliding_window
                 .map(|window| mask(Some(window)))
@@ -506,9 +628,13 @@ impl DecoderStack {
     ) -> Result<Tensor> {
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
-            let layer_mask = match &masks.sliding {
-                Some(sliding) if layer.self_attn.sdpa_params.sliding_window.is_some() => sliding,
-                _ => &masks.full,
+            let layer_mask = match (&masks.sliding, &masks.full) {
+                (Some(sliding), _) if layer.self_attn.sdpa_params.sliding_window.is_some() => {
+                    sliding
+                }
+                (_, Some(full)) => full,
+                (Some(sliding), None) => sliding,
+                (None, None) => unreachable!("a stack has a full or a sliding layer"),
             };
             let kv_cache = cache.as_deref_mut().map(|cache| &mut cache[i]);
             xs = layer.forward(&xs, &layer_mask.get(xs.device()), kv_cache, ctx, i)?;
@@ -548,11 +674,29 @@ impl CausalLm {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        let vb_lm_head = vb.pp("lm_head");
+        Self::new_inner(
+            spec,
+            vb.pp("model"),
+            vb.pp("lm_head"),
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )
+    }
+
+    /// As [`CausalLm::new`] with the stack and head under the prefixes a multimodal checkpoint gives them.
+    pub fn new_inner(
+        spec: &DecoderSpec,
+        vb_m: ShardedVarBuilder,
+        vb_lm_head: ShardedVarBuilder,
+        is_gptx: bool,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Self> {
         let loading_isq = normal_loading_metadata.loading_isq;
         let stack = DecoderStack::new(
             spec,
-            vb.pp("model"),
+            vb_m,
             Some(vb_lm_head.clone()),
             is_gptx,
             normal_loading_metadata,
@@ -589,8 +733,25 @@ impl CausalLm {
         })
     }
 
+    pub fn get_input_embeddings(&self, input_ids: &Tensor) -> Result<Tensor> {
+        self.stack.embed(input_ids)
+    }
+
+    pub fn embed_dtype(&self) -> DType {
+        self.stack.dtype
+    }
+
     pub fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
-        let xs = self.stack.embed(input_ids)?;
+        self.forward_embeds(input_ids, self.stack.embed(input_ids)?, ctx)
+    }
+
+    /// Runs the stack over `xs`, embeddings a multimodal model may have spliced media into.
+    pub fn forward_embeds(
+        &self,
+        input_ids: &Tensor,
+        xs: Tensor,
+        ctx: &mut ModelForwardContext<'_>,
+    ) -> Result<Tensor> {
         let cache = &mut self.cache.normal().0;
         let masks = self.stack.masks(
             input_ids,
@@ -601,6 +762,14 @@ impl CausalLm {
         let xs = self.stack.forward(xs, &masks, Some(cache), ctx)?;
         let xs = ctx.logits(&xs)?;
         ctx.lm_head(&*self.lm_head, &xs)
+    }
+}
+
+impl CausalLm {
+    /// The tensors ISQ leaves alone, under `uvb_m`, the stack's prefix.
+    pub fn residual_tensors_m(&self, uvb_m: UnVarBuilder) -> Vec<(String, Tensor)> {
+        self.stack.residual_uvb(&uvb_m);
+        uvb_m.to_safetensors()
     }
 }
 
@@ -669,5 +838,54 @@ impl AnyMoeBaseModelMixin for CausalLm {
     }
     fn amoe_supported(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const MAX_SEQ: usize = 4096;
+    const WINDOW: usize = 128;
+
+    #[test]
+    fn eager_cache_layout_follows_each_layers_window() {
+        let spec = DecoderSpec {
+            vocab_size: 8,
+            hidden_size: 8,
+            intermediate_size: 8,
+            num_heads: 1,
+            num_kv_heads: 1,
+            head_dim: 8,
+            hidden_act: Activation::Silu,
+            rms_norm_eps: 1e-6,
+            rope: RopeKind::Default { theta: 1e4 },
+            max_position_embeddings: MAX_SEQ,
+            qkv_bias: false,
+            qk_norm: None,
+            no_rope_layers: Vec::new(),
+            attention_temperature: None,
+            layer_windows: vec![None, Some(WINDOW), None],
+            tie_word_embeddings: false,
+            quantization_config: None,
+        };
+        let types = spec.cache_types();
+        assert!(matches!(
+            types[0],
+            NormalCacheType::Normal {
+                max_seq_len: MAX_SEQ
+            }
+        ));
+        assert!(matches!(
+            types[1],
+            NormalCacheType::SlidingWindow { window: WINDOW }
+        ));
+        assert!(matches!(
+            types[2],
+            NormalCacheType::Normal {
+                max_seq_len: MAX_SEQ
+            }
+        ));
+        assert_eq!(spec.sliding_window(), Some(WINDOW));
     }
 }

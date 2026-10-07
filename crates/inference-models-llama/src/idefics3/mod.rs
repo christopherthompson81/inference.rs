@@ -81,7 +81,7 @@ impl Idefics3Model {
                 .set_device(normal_loading_metadata.real_device.clone()),
         )?;
         let text_model = Llama::new_inner(
-            &cfg.text_config,
+            &cfg.text_config.decoder_spec(),
             vb_m.pp("text_model"),
             vb.pp("lm_head"),
             is_gptx,

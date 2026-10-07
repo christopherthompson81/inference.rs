@@ -190,7 +190,7 @@ impl Mistral3Model {
                 .set_device(normal_loading_metadata.real_device.clone()),
         )?;
         let text_model = Mistral::new(
-            &cfg.text_config,
+            &cfg.text_config.decoder_spec()?,
             vb.pp("language_model"),
             is_gptx,
             normal_loading_metadata,

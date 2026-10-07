@@ -12,7 +12,7 @@ impl NormalModelLoader for MistralLoader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = crate::mistral::Config::from_json(config)?;
         Ok(Box::new(crate::mistral::Model::new(
-            &cfg,
+            &cfg.decoder_spec()?,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

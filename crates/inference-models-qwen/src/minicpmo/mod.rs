@@ -64,7 +64,7 @@ impl MiniCpmOModel {
     ) -> Result<Self> {
         let real_device = normal_loading_metadata.real_device.clone();
         let llm = qwen2::Model::new(
-            &cfg.text_config,
+            &cfg.text_config.decoder_spec()?,
             vb.pp("llm"),
             is_gptx,
             normal_loading_metadata,
@@ -264,7 +264,7 @@ impl MiniCpmOModel {
         let vllm_embedding =
             self.get_vllm_embedding(input_ids, visual_inputs, legacy_maps, packed_layout)?;
 
-        self.llm.forward_embed(input_ids, vllm_embedding, ctx)
+        self.llm.forward_embeds(input_ids, vllm_embedding, ctx)
     }
 }
 

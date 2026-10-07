@@ -1128,6 +1128,10 @@ impl Llama3RotaryEmbedding {
         }))
     }
 
+    pub fn into_inner(self) -> RotaryEmbedding {
+        self.0
+    }
+
     pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
         self.0.forward(q, k, positions)
     }
