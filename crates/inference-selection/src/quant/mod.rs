@@ -91,7 +91,7 @@ async fn resolve_model_source_inner(
     if !model.needs_source_resolution() {
         return Ok(ResolvedModelQuant::unchanged(model));
     }
-    if let Some(path) = hf_cache_path(&model) {
+    if let Some(path) = model.hf_cache_path() {
         inference_core::set_hf_cache_path(path.clone());
     }
     if matches!(model, ModelSelected::GGUF { .. }) {
@@ -143,18 +143,6 @@ async fn resolve_model_source_inner(
         isq: resolved.in_situ_quant,
         requested_model_id,
     })
-}
-
-fn hf_cache_path(model: &ModelSelected) -> Option<&PathBuf> {
-    match model {
-        ModelSelected::Run { hf_cache_path, .. }
-        | ModelSelected::Plain { hf_cache_path, .. }
-        | ModelSelected::Lora { hf_cache_path, .. }
-        | ModelSelected::MultimodalPlain { hf_cache_path, .. }
-        | ModelSelected::Embedding { hf_cache_path, .. }
-        | ModelSelected::GGUF { hf_cache_path, .. } => hf_cache_path.as_ref(),
-        _ => None,
-    }
 }
 
 /// The repository a safetensors spec loads from, and whether it already names a UQFF.

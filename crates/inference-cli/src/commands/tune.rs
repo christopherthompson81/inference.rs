@@ -271,22 +271,12 @@ fn model_kind(model_type: &ModelType) -> &'static str {
 
 fn model_dtype(model_selected: &ModelSelected) -> Option<&'static str> {
     use inference_api::engine::ModelDType;
-    match model_selected {
-        ModelSelected::Plain { dtype, .. }
-        | ModelSelected::Lora { dtype, .. }
-        | ModelSelected::GGUF { dtype, .. }
-        | ModelSelected::GGML { dtype, .. }
-        | ModelSelected::MultimodalPlain { dtype, .. }
-        | ModelSelected::DiffusionPlain { dtype, .. }
-        | ModelSelected::Run { dtype, .. }
-        | ModelSelected::Speech { dtype, .. }
-        | ModelSelected::Embedding { dtype, .. } => Some(match dtype {
-            ModelDType::Auto => "auto",
-            ModelDType::F16 => "f16",
-            ModelDType::BF16 => "bf16",
-            ModelDType::F32 => "f32",
-        }),
-    }
+    Some(match model_selected.dtype() {
+        ModelDType::Auto => "auto",
+        ModelDType::F16 => "f16",
+        ModelDType::BF16 => "bf16",
+        ModelDType::F32 => "f32",
+    })
 }
 
 #[cfg(test)]

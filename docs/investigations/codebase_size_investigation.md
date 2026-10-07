@@ -2289,3 +2289,30 @@ paged-attention CUDA vs Metal host validation                                   
 
 Next, in order: this hygiene PR; #223 and the small loader fixes (#214, #209/#211/#213); `ModelSelected` common
 options; the pipeline merge (pinned first, like the decoder); the C ABI table generating the binding declarations.
+
+## Run 72 - 2026-10-07 17:13
+
+Question: what do accessors on `ModelSelected` (option 1 of two; the owner chose it over flattening a shared struct,
+which would keep the JSON but reshape the OpenAPI schema and the generated Python classes) actually recover?
+
+Raw finding: 106 lines added, 130 removed, net -24. `dtype()`, `hf_cache_path()` and `sequence_limits()` replace the
+per-variant matches in `get_auto_device_map_params` (six arms to one), `get_model_dtype`, tune's dtype mapping and
+the quant module's cache-path helper. Negative result on Run 71's ~800 duplicated lines: nearly all of it is the
+nine variants' field declarations and the per-variant construction in `serve.rs` and the SDK, which accessors cannot
+reach; only the flatten (a public schema change) would. Recorded so the figure is not read as still on the table.
+
+Check of the next item's figure before planning it (owner's request, after the ModelSelected miss): `normal.rs` vs
+`multimodal.rs`, lines normalised (whitespace, comments, brace-only lines dropped), `difflib` matching blocks:
+
+```
+meaningful lines            1,577 (normal) vs 1,832 (multimodal)
+in exact blocks >= 4 lines  961 (61% of normal.rs); >= 8: 823; >= 15: 637
+raw normal.rs lines spanned 1,161 of 1,989
+```
+
+Largest blocks: a 66-line `too_many_arguments` helper, the CUDA-graph capture path (47 + 22 + 31), KV cache setup,
+AnyMoE training hooks (41), `re_isq_model` (31), the chat-template load (28), `cleanup_cuda_graphs` (25), forward
+input dispatch (41). Unlike ModelSelected this sits in function bodies, so a merge removes it; expected saving
+~800-1,000 lines after hooks for the multimodal-only parts.
+
+Next: the normal/multimodal pipeline merge, pinned first.

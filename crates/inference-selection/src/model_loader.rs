@@ -211,124 +211,58 @@ impl SafetensorsOptions {
 }
 
 pub fn get_model_dtype(model: &ModelSelected) -> anyhow::Result<ModelDType> {
-    match model {
-        ModelSelected::Plain { dtype, .. }
-        | ModelSelected::Lora { dtype, .. }
-        | ModelSelected::MultimodalPlain { dtype, .. }
-        | ModelSelected::DiffusionPlain { dtype, .. }
-        | ModelSelected::GGML { dtype, .. }
-        | ModelSelected::GGUF { dtype, .. }
-        | ModelSelected::Run { dtype, .. }
-        | ModelSelected::Speech { dtype, .. }
-        | ModelSelected::Embedding { dtype, .. } => Ok(*dtype),
-    }
+    Ok(model.dtype())
 }
 
 pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoDeviceMapParams> {
-    match model {
-        ModelSelected::Plain {
-            max_seq_len,
-            max_batch_size,
-            ..
-        }
-        | ModelSelected::GGML {
-            max_seq_len,
-            max_batch_size,
-            ..
-        } => Ok(AutoDeviceMapParams::Text {
-            max_seq_len: *max_seq_len,
-            max_batch_size: *max_batch_size,
-        }),
+    let Some((max_seq_len, max_batch_size)) = model.sequence_limits() else {
+        return Ok(AutoDeviceMapParams::default_text());
+    };
+    // GGUF is multimodal with a projector; an auto or LoRA spec when it sets an image limit (a LoRA only unpinned)
+    let images = match model {
         ModelSelected::GGUF {
-            mmproj_filename,
-            max_seq_len,
-            max_batch_size,
-            max_image_length,
+            mmproj_filename: Some(_),
             max_num_images,
+            max_image_length,
             ..
-        } => {
-            if mmproj_filename.is_some() {
-                let max_image_length =
-                    max_image_length.unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH);
-                Ok(AutoDeviceMapParams::Multimodal {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                    max_image_shape: (max_image_length, max_image_length),
-                    max_num_images: max_num_images
-                        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
-                })
-            } else {
-                Ok(AutoDeviceMapParams::Text {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                })
-            }
-        }
+        } => Some((*max_num_images, *max_image_length)),
         ModelSelected::Lora {
-            arch,
-            max_seq_len,
-            max_batch_size,
-            max_image_length,
+            arch: None,
             max_num_images,
+            max_image_length,
             ..
-        } => {
-            if arch.is_none() && (max_num_images.is_some() || max_image_length.is_some()) {
-                let max_image_length =
-                    max_image_length.unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH);
-                Ok(AutoDeviceMapParams::Multimodal {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                    max_image_shape: (max_image_length, max_image_length),
-                    max_num_images: max_num_images
-                        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
-                })
-            } else {
-                Ok(AutoDeviceMapParams::Text {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                })
-            }
         }
-        ModelSelected::Run {
-            max_seq_len,
-            max_batch_size,
-            max_image_length,
+        | ModelSelected::Run {
             max_num_images,
+            max_image_length,
             ..
-        } => {
-            if max_num_images.is_some() || max_image_length.is_some() {
-                let max_image_length =
-                    max_image_length.unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH);
-                Ok(AutoDeviceMapParams::Multimodal {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                    max_image_shape: (max_image_length, max_image_length),
-                    max_num_images: max_num_images
-                        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
-                })
-            } else {
-                Ok(AutoDeviceMapParams::Text {
-                    max_seq_len: *max_seq_len,
-                    max_batch_size: *max_batch_size,
-                })
-            }
+        } if max_num_images.is_some() || max_image_length.is_some() => {
+            Some((*max_num_images, *max_image_length))
         }
         ModelSelected::MultimodalPlain {
+            max_num_images,
+            max_image_length,
+            ..
+        } => Some((Some(*max_num_images), Some(*max_image_length))),
+        _ => None,
+    };
+    Ok(match images {
+        Some((max_num_images, max_image_length)) => {
+            let max_image_length =
+                max_image_length.unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH);
+            AutoDeviceMapParams::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape: (max_image_length, max_image_length),
+                max_num_images: max_num_images
+                    .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
+            }
+        }
+        None => AutoDeviceMapParams::Text {
             max_seq_len,
             max_batch_size,
-            max_image_length,
-            max_num_images,
-            ..
-        } => Ok(AutoDeviceMapParams::Multimodal {
-            max_seq_len: *max_seq_len,
-            max_batch_size: *max_batch_size,
-            max_image_shape: (*max_image_length, *max_image_length),
-            max_num_images: *max_num_images,
-        }),
-        ModelSelected::DiffusionPlain { .. }
-        | ModelSelected::Speech { .. }
-        | ModelSelected::Embedding { .. } => Ok(AutoDeviceMapParams::default_text()),
-    }
+        },
+    })
 }
 
 fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loader>> {

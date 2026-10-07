@@ -627,6 +627,70 @@ pub enum ModelSelected {
 }
 
 impl ModelSelected {
+    pub fn dtype(&self) -> ModelDType {
+        match self {
+            Self::Run { dtype, .. }
+            | Self::Plain { dtype, .. }
+            | Self::Lora { dtype, .. }
+            | Self::GGUF { dtype, .. }
+            | Self::GGML { dtype, .. }
+            | Self::MultimodalPlain { dtype, .. }
+            | Self::DiffusionPlain { dtype, .. }
+            | Self::Speech { dtype, .. }
+            | Self::Embedding { dtype, .. } => *dtype,
+        }
+    }
+
+    /// Where Hugging Face downloads go; `None` for the default cache or kinds that take no cache path.
+    pub fn hf_cache_path(&self) -> Option<&PathBuf> {
+        match self {
+            Self::Run { hf_cache_path, .. }
+            | Self::Plain { hf_cache_path, .. }
+            | Self::Lora { hf_cache_path, .. }
+            | Self::MultimodalPlain { hf_cache_path, .. }
+            | Self::Embedding { hf_cache_path, .. }
+            | Self::GGUF { hf_cache_path, .. } => hf_cache_path.as_ref(),
+            Self::GGML { .. } | Self::DiffusionPlain { .. } | Self::Speech { .. } => None,
+        }
+    }
+
+    /// The (max_seq_len, max_batch_size) device mapping sizes for; `None` for kinds sized by their defaults.
+    pub fn sequence_limits(&self) -> Option<(usize, usize)> {
+        match self {
+            Self::Run {
+                max_seq_len,
+                max_batch_size,
+                ..
+            }
+            | Self::Plain {
+                max_seq_len,
+                max_batch_size,
+                ..
+            }
+            | Self::Lora {
+                max_seq_len,
+                max_batch_size,
+                ..
+            }
+            | Self::GGUF {
+                max_seq_len,
+                max_batch_size,
+                ..
+            }
+            | Self::GGML {
+                max_seq_len,
+                max_batch_size,
+                ..
+            }
+            | Self::MultimodalPlain {
+                max_seq_len,
+                max_batch_size,
+                ..
+            } => Some((*max_seq_len, *max_batch_size)),
+            Self::DiffusionPlain { .. } | Self::Speech { .. } | Self::Embedding { .. } => None,
+        }
+    }
+
     /// Where the spec writes a UQFF of the weights it loads; `None` for kinds that cannot write one.
     pub fn write_uqff_mut(&mut self) -> Option<&mut Option<UqffWriteConfig>> {
         match self {
