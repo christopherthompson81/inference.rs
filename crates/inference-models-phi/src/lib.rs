@@ -3,13 +3,15 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, device_map, gdn, kv_cache, layers, media_inputs, model, moe, ops,
+    amoe, attention, decoder, device_map, gdn, kv_cache, layers, media_inputs, model, moe, ops,
     paged_attention, speculative, utils, vision,
 };
 
 pub mod conformer;
 pub mod loaders;
 pub mod phi2;
+#[cfg(test)]
+mod phi2_tests;
 pub mod phi3;
 pub mod phi3_5_moe;
 pub mod phi3_vision;

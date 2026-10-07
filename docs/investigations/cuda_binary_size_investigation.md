@@ -1797,3 +1797,29 @@ Metal case can't be exercised here. `EmbeddingGemmaConfig` was a field-for-field
 an alias of it, sharing its `decoder_spec`.
 
 Next: #324 step 4 (StarCoder2, Phi-2).
+
+## Run 52 - 2026-10-07 10:43
+
+Question: what does #324 step 4 (StarCoder2 and Phi-2 onto the shared decoder) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,647,344  105,596,976     -50,368
+.text                  55,428,898   55,384,802     -44,096
+```
+
+Raw finding: -50 KB from 1,243 lines of code removed and 369 added. The decoder grew a LayerNorm norm kind, an ungated
+two-projection MLP (`MlpKind::Plain`, a shared `PlainMlp` replacing both models' own), the parallel layer (no
+`pre_ffn` norm: attention and MLP both read the input norm), a configurable final-norm and output-projection name,
+an lm_head bias, and q/k norms of any name before RoPE (unfused when they are LayerNorms).
+
+Pins recorded on the old code first (StarCoder2 full and sliding/tied/unbiased; Phi-2 partial and full rotary) pass
+unchanged. Found on the way: Phi-2 with `qk_layernorm` failed to load (`shape mismatch in layer-norm src: [1, 5, 32]
+alpha: [8]`, the per-head norm applied to the unsplit projection); it now norms per head before RoPE, as HF does, and
+has its own pin. Phi-2's ISQ residuals named its final norm `norm` rather than `final_layernorm`, and both models'
+AnyMoE fine-tuned experts took a default config's activation rather than the base MLP's. Phi-2's `n_kv_groups`
+was computed from the query heads twice (always 1). Review pass: a tied Phi-2 (GGUF without `output.weight`) used to
+hit `unreachable!`; the shared stack would have silently dropped its `lm_head` bias, so it now fails to load instead.
+
+Next: #324 step 5 (Phi-3, Phi-4).
