@@ -21,7 +21,6 @@ pub enum ReduceOp {
     Sum,
     Min,
     Max,
-    ArgMin,
     ArgMax,
 }
 
@@ -29,7 +28,6 @@ impl ReduceOp {
     pub(crate) fn name(&self) -> &'static str {
         match self {
             Self::ArgMax => "argmax",
-            Self::ArgMin => "argmin",
             Self::Min => "min",
             Self::Max => "max",
             Self::Sum => "sum",
@@ -137,10 +135,6 @@ pub enum Op {
         stride: (usize, usize),
     },
 
-    UpsampleNearest1D {
-        arg: Tensor,
-        target_size: usize,
-    },
     UpsampleNearest2D {
         arg: Tensor,
         target_h: usize,

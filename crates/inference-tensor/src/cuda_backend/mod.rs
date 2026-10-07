@@ -369,7 +369,6 @@ impl Map1Any for FastReduce<'_> {
             ReduceOp::Sum => ("fast_sum", false, false),
             ReduceOp::Min => ("fast_min", true, false),
             ReduceOp::Max => ("fast_max", true, false),
-            ReduceOp::ArgMin => ("fast_argmin", true, true),
             ReduceOp::ArgMax => ("fast_argmax", true, true),
         };
         // For small reductions (e.g. MoE topk sum with el_to_sum=8), use a one-thread-per-output
@@ -2178,10 +2177,6 @@ impl BackendStorage for CudaStorage {
         }
         .map(&self.slice, &device, l)?;
         Ok(Self { slice, device })
-    }
-
-    fn upsample_nearest1d(&self, _: &Layout, _out_sz: usize) -> Result<Self> {
-        crate::bail!("upsample-nearest1d is not supported on cuda")
     }
 
     fn upsample_nearest2d(&self, l: &Layout, out_w: usize, out_h: usize) -> Result<Self> {

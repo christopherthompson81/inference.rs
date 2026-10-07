@@ -324,32 +324,26 @@ impl BackendStorage for MetalStorage {
                 (ReduceOp::Sum, DType::F32) => ("fast_sum_f32", false, false),
                 (ReduceOp::Min, DType::F32) => ("fast_min_f32", true, false),
                 (ReduceOp::Max, DType::F32) => ("fast_max_f32", true, false),
-                (ReduceOp::ArgMin, DType::F32) => ("fast_argmin_f32", true, true),
                 (ReduceOp::ArgMax, DType::F32) => ("fast_argmax_f32", true, true),
                 (ReduceOp::Sum, DType::U32) => ("fast_sum_u32", false, false),
                 (ReduceOp::Min, DType::U32) => ("fast_min_u32", true, false),
                 (ReduceOp::Max, DType::U32) => ("fast_max_u32", true, false),
-                (ReduceOp::ArgMin, DType::U32) => ("fast_argmin_u32", true, true),
                 (ReduceOp::ArgMax, DType::U32) => ("fast_argmax_u32", true, true),
                 (ReduceOp::Sum, DType::F16) => ("fast_sum_f16", false, false),
                 (ReduceOp::Min, DType::F16) => ("fast_min_f16", true, false),
                 (ReduceOp::Max, DType::F16) => ("fast_max_f16", true, false),
-                (ReduceOp::ArgMin, DType::F16) => ("fast_argmin_f16", true, true),
                 (ReduceOp::ArgMax, DType::F16) => ("fast_argmax_f16", true, true),
                 (ReduceOp::Sum, DType::BF16) => ("fast_sum_bf16", false, false),
                 (ReduceOp::Min, DType::BF16) => ("fast_min_bf16", true, false),
                 (ReduceOp::Max, DType::BF16) => ("fast_max_bf16", true, false),
-                (ReduceOp::ArgMin, DType::BF16) => ("fast_argmin_bf16", true, true),
                 (ReduceOp::ArgMax, DType::BF16) => ("fast_argmax_bf16", true, true),
                 (ReduceOp::Sum, DType::I64) => ("fast_sum_i64", false, false),
                 (ReduceOp::Min, DType::I64) => ("fast_min_i64", true, false),
                 (ReduceOp::Max, DType::I64) => ("fast_max_i64", true, false),
-                (ReduceOp::ArgMin, DType::I64) => ("fast_argmin_i64", true, true),
                 (ReduceOp::ArgMax, DType::I64) => ("fast_argmax_i64", true, true),
                 (ReduceOp::Sum, DType::U8) => ("fast_sum_u8", false, false),
                 (ReduceOp::Min, DType::U8) => ("fast_min_u8", true, false),
                 (ReduceOp::Max, DType::U8) => ("fast_max_u8", true, false),
-                (ReduceOp::ArgMin, DType::U8) => ("fast_argmin_u8", true, true),
                 (ReduceOp::ArgMax, DType::U8) => ("fast_argmax_u8", true, true),
                 (k, dtype) => {
                     crate::bail!("Metal contiguous reduce op {k:?} {dtype:?} not implemented")
@@ -385,32 +379,26 @@ impl BackendStorage for MetalStorage {
             (ReduceOp::Sum, DType::F32) => ("fast_sum_f32_strided", false, false),
             (ReduceOp::Min, DType::F32) => ("fast_min_f32_strided", true, false),
             (ReduceOp::Max, DType::F32) => ("fast_max_f32_strided", true, false),
-            (ReduceOp::ArgMin, DType::F32) => ("fast_argmin_f32_strided", true, true),
             (ReduceOp::ArgMax, DType::F32) => ("fast_argmax_f32_strided", true, true),
             (ReduceOp::Sum, DType::U32) => ("fast_sum_u32_strided", false, false),
             (ReduceOp::Min, DType::U32) => ("fast_min_u32_strided", true, false),
             (ReduceOp::Max, DType::U32) => ("fast_max_u32_strided", true, false),
-            (ReduceOp::ArgMin, DType::U32) => ("fast_argmin_u32_strided", true, true),
             (ReduceOp::ArgMax, DType::U32) => ("fast_argmax_u32_strided", true, true),
             (ReduceOp::Sum, DType::F16) => ("fast_sum_f16_strided", false, false),
             (ReduceOp::Min, DType::F16) => ("fast_min_f16_strided", true, false),
             (ReduceOp::Max, DType::F16) => ("fast_max_f16_strided", true, false),
-            (ReduceOp::ArgMin, DType::F16) => ("fast_argmin_f16_strided", true, true),
             (ReduceOp::ArgMax, DType::F16) => ("fast_argmax_f16_strided", true, true),
             (ReduceOp::Sum, DType::BF16) => ("fast_sum_bf16_strided", false, false),
             (ReduceOp::Min, DType::BF16) => ("fast_min_bf16_strided", true, false),
             (ReduceOp::Max, DType::BF16) => ("fast_max_bf16_strided", true, false),
-            (ReduceOp::ArgMin, DType::BF16) => ("fast_argmin_bf16_strided", true, true),
             (ReduceOp::ArgMax, DType::BF16) => ("fast_argmax_bf16_strided", true, true),
             (ReduceOp::Sum, DType::I64) => ("fast_sum_i64_strided", false, false),
             (ReduceOp::Min, DType::I64) => ("fast_min_i64_strided", true, false),
             (ReduceOp::Max, DType::I64) => ("fast_max_i64_strided", true, false),
-            (ReduceOp::ArgMin, DType::I64) => ("fast_argmin_i64_strided", true, true),
             (ReduceOp::ArgMax, DType::I64) => ("fast_argmax_i64_strided", true, true),
             (ReduceOp::Sum, DType::U8) => ("fast_sum_u8_strided", false, false),
             (ReduceOp::Min, DType::U8) => ("fast_min_u8_strided", true, false),
             (ReduceOp::Max, DType::U8) => ("fast_max_u8_strided", true, false),
-            (ReduceOp::ArgMin, DType::U8) => ("fast_argmin_u8_strided", true, true),
             (ReduceOp::ArgMax, DType::U8) => ("fast_argmax_u8_strided", true, true),
             (k, dtype) => crate::bail!("Metal strided reduce op {k:?} {dtype:?} not implemented"),
         };
@@ -1347,10 +1335,6 @@ impl BackendStorage for MetalStorage {
         )
         .map_err(MetalError::from)?;
         Ok(Self::new(buffer, self.device.clone(), dst_el, self.dtype))
-    }
-
-    fn upsample_nearest1d(&self, _: &Layout, _: usize) -> Result<Self> {
-        crate::bail!("Metal upsample_nearest1d not implemented")
     }
 
     fn upsample_nearest2d(&self, inp_l: &Layout, out_w: usize, out_h: usize) -> Result<Self> {

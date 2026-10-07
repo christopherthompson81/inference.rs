@@ -388,56 +388,6 @@ fast_min(const size_t src_numel, const size_t el_to_sum_per_block,
 
 template <typename T>
 __device__ void
-fast_argmin(const size_t src_numel, const size_t el_to_sum_per_block,
-         const size_t num_dims, const size_t *info, const T *src, uint32_t *dst) {
-  const size_t *dims = info;
-  const size_t *strides = info + num_dims;
-
-  __shared__ T shr[BLOCK_SIZE];
-  __shared__ uint32_t shr_index[BLOCK_SIZE];
-  size_t tid = threadIdx.x;
-  size_t dst_id = blockIdx.x;
-
-  // For floating types this uses +inf; for integer types we use the largest
-  // representable value instead of casting INFINITY to an integer.
-  shr[tid] = reduce_init_highest<T>();
-  shr_index[tid] = 0xFFFFFFFF;
-  bool not_set = true;
-  // Elements summed in this block range from dst_id * el_to_sum_per_block
-  // to (dst_id + 1) * el_to_sum_per_block.
-  size_t start_idx = dst_id * el_to_sum_per_block;
-  size_t stop_idx = min(start_idx + el_to_sum_per_block, src_numel);
-  size_t idx = start_idx + tid;
-
-  while (idx < stop_idx) {
-    // TODO: Fast version for the contiguous case.
-    size_t strided_i = get_strided_index(idx, num_dims, dims, strides);
-    if (not_set || src[strided_i] < shr[tid]) {
-      shr[tid] = src[strided_i];
-      // Assume that the reduction takes place over the last dimension which is contiguous.
-      shr_index[tid] = idx % dims[num_dims - 1];
-      not_set = false;
-    }
-    idx += blockDim.x;
-  }
-
-  // Parallel reduction, see the slides:
-  // https://www.olcf.ornl.gov/wp-content/uploads/2019/12/05_Atomics_Reductions_Warp_Shuffle.pdf
-  // https://stackoverflow.com/questions/66078814/is-cuda-atomicadd-operation-faster-than-launch-another-kernel-when-we-do-reduce
-  for (int s = blockDim.x / 2; s > 0; s >>= 1) {
-    __syncthreads();
-    if (tid < s && shr[tid + s] < shr[tid]) {
-      shr[tid] = shr[tid + s];
-      shr_index[tid] = shr_index[tid + s];
-    }
-  }
-
-  if (tid == 0)
-    dst[dst_id] = shr_index[0];
-}
-
-template <typename T>
-__device__ void
 fast_argmax(const size_t src_numel, const size_t el_to_sum_per_block,
          const size_t num_dims, const size_t *info, const T *src, uint32_t *dst) {
   const size_t *dims = info;
@@ -486,13 +436,7 @@ fast_argmax(const size_t src_numel, const size_t el_to_sum_per_block,
     dst[dst_id] = shr_index[0];
 }
 
-#define FAST_OP(TYPENAME, MIN_NAME, MAX_NAME, ARGMIN_NAME, ARGMAX_NAME, SUM_NAME) \
-  extern "C" __global__ void ARGMIN_NAME(                                      \
-      const size_t src_numel, const size_t el_to_sum_per_block,                \
-      const size_t num_dims, const size_t *info, const TYPENAME *src,          \
-      uint32_t *dst) {                                                         \
-    fast_argmin(src_numel, el_to_sum_per_block, num_dims, info, src, dst);     \
-  }                                                                            \
+#define FAST_OP(TYPENAME, MIN_NAME, MAX_NAME, ARGMAX_NAME, SUM_NAME) \
   extern "C" __global__ void ARGMAX_NAME(                                     \
       const size_t src_numel, const size_t el_to_sum_per_block,                \
       const size_t num_dims, const size_t *info, const TYPENAME *src,          \
@@ -684,12 +628,6 @@ extern "C" __global__ void fast_max_bf16(
     __nv_bfloat16 *dst) {
   fast_max(src_numel, el_to_sum_per_block, num_dims, info, src, dst);
 }
-extern "C" __global__ void fast_argmin_bf16(
-    const size_t src_numel, const size_t el_to_sum_per_block,
-    const size_t num_dims, const size_t *info, const __nv_bfloat16 *src,
-    uint32_t *dst) {
-  fast_argmin(src_numel, el_to_sum_per_block, num_dims, info, src, dst);
-}
 extern "C" __global__ void fast_argmax_bf16(
     const size_t src_numel, const size_t el_to_sum_per_block,
     const size_t num_dims, const size_t *info, const __nv_bfloat16 *src,
@@ -700,13 +638,13 @@ extern "C" __global__ void fast_argmax_bf16(
 // NOTE: No reduce ops for f8
 // SOFTMAX_OP(__nv_fp8_e4m3, float, softmax_fp8_e4m3)
 // LAYERNORM_OP(__nv_fp8_e4m3, layernorm_fp8_e4m3)
-// FAST_OP(__nv_fp8_e4m3, fast_min_fp8_e4m3, fast_max_fp8_e4m3, fast_argmin_fp8_e4m3, fast_argmax_fp8_e4m3, fast_sum_fp8_e4m3)
+// FAST_OP(__nv_fp8_e4m3, fast_min_fp8_e4m3, fast_max_fp8_e4m3, fast_argmax_fp8_e4m3, fast_sum_fp8_e4m3)
 #endif
 
 #if __CUDA_ARCH__ >= 530
 SOFTMAX_OP(__half, float, softmax_f16)
 LAYERNORM_OP(__half, layernorm_f16)
-FAST_OP(__half, fast_min_f16, fast_max_f16, fast_argmin_f16, fast_argmax_f16, fast_sum_f16)
+FAST_OP(__half, fast_min_f16, fast_max_f16, fast_argmax_f16, fast_sum_f16)
 #endif
 
 SOFTMAX_OP(float, float, softmax_f32)
@@ -774,9 +712,8 @@ extern "C" __global__ void fast_sum_f32(
 }
 extern "C" __global__ void fast_min_f32(const size_t src_numel, const size_t el_to_sum_per_block, const size_t num_dims, const size_t *info, const float *src, float *dst) { fast_min(src_numel, el_to_sum_per_block, num_dims, info, src, dst); }
 extern "C" __global__ void fast_max_f32(const size_t src_numel, const size_t el_to_sum_per_block, const size_t num_dims, const size_t *info, const float *src, float *dst) { fast_max(src_numel, el_to_sum_per_block, num_dims, info, src, dst); }
-extern "C" __global__ void fast_argmin_f32(const size_t src_numel, const size_t el_to_sum_per_block, const size_t num_dims, const size_t *info, const float *src, uint32_t *dst) { fast_argmin(src_numel, el_to_sum_per_block, num_dims, info, src, dst); }
 extern "C" __global__ void fast_argmax_f32(const size_t src_numel, const size_t el_to_sum_per_block, const size_t num_dims, const size_t *info, const float *src, uint32_t *dst) { fast_argmax(src_numel, el_to_sum_per_block, num_dims, info, src, dst); }
-FAST_OP(double, fast_min_f64, fast_max_f64, fast_argmin_f64, fast_argmax_f64, fast_sum_f64)
-FAST_OP(uint32_t, fast_min_u32, fast_max_u32, fast_argmin_u32, fast_argmax_u32, fast_sum_u32)
-FAST_OP(int64_t, fast_min_i64, fast_max_i64, fast_argmin_i64, fast_argmax_i64, fast_sum_i64)
-FAST_OP(uint8_t, fast_min_u8, fast_max_u8, fast_argmin_u8, fast_argmax_u8, fast_sum_u8)
+FAST_OP(double, fast_min_f64, fast_max_f64, fast_argmax_f64, fast_sum_f64)
+FAST_OP(uint32_t, fast_min_u32, fast_max_u32, fast_argmax_u32, fast_sum_u32)
+FAST_OP(int64_t, fast_min_i64, fast_max_i64, fast_argmax_i64, fast_sum_i64)
+FAST_OP(uint8_t, fast_min_u8, fast_max_u8, fast_argmax_u8, fast_sum_u8)

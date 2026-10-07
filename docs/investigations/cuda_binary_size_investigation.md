@@ -1474,3 +1474,34 @@ local_ci.sh --size-update  -> file -6 KB (most of this code was generic or never
 local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2828 + 2443; the two removed tests
                                                                        covered npy parsing and save_safetensors)
 ```
+
+## Run 41 - 2026-10-06 22:05
+
+#270 step 5, usage-scan trims, third slice: Tensor methods nothing calls (Run 39's scan, Tier B), with the op chains
+only they reached.
+
+- 27 Tensor methods: `one_set`, `from_storage`, `round_to`, `roll`, `var`/`var_keepdim`, `argmin`/
+  `argmin_keepdim`, `interpolate1d`, `upsample_nearest1d`, `upsample_bilinear2d_with_scale`, `max_pool2d`
+  (the `_with_stride` one stays), `mv`, `dot`, `norm`, the Tensor-level `scatter_set`/`scatter_add_set`,
+  `slice_scatter`, `strided_blocks`, `is_fortran_contiguous`, `pad_with_same`, `apply_t`, `normalize_axis`,
+  `tril2`, `log_sum_exp`, `broadcast_pow`, `flip`, `broadcast_ne/le/gt`.
+- `upsample_nearest1d`'s chain: the storage and backend-trait method (CPU-only; CUDA and Metal bailed), the CPU
+  map, `Op::UpsampleNearest1D` and its backprop arms.
+- `ReduceOp::ArgMin`: the variant, its CPU/CUDA/backprop arms, twelve Metal kernel-name arms, and the CUDA
+  `fast_argmin` template and kernels.
+
+Negative: the scan also listed `Tensor::ceil` (with `UnaryOp::Ceil` and the `uceil` kernels) as dead, having
+read every external `.ceil()` as an f32/f64 call. Removing it broke the build: Phi's conformer subsampling
+(`conformer/nemo.rs:167`) calls it on a tensor. Restored in full; the grep-based parts of the scan need the compiler
+behind them, which is how the slices are being checked. Metal-gated files were grepped for every removed method.
+
+```
+12 files, -612 / +19 lines
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2828 + 2443)
+local_ci.sh --size-update  -> file -5.5 KB
+```
+
+Left from the scan: the unreachable aliased in-place path (`AccessPattern`, `*_fwd_aliased`, `LayoutRelation`),
+small Device/CudaDevice helpers, the gemm reduced-precision setters, `quantize_imatrix_onto`, BatchNorm and pickle
+leftovers, the CPU direct conv paths behind constants, and two decisions for the user: dropping wasm (simd128) and
+collapsing cuDNN algorithm selection (all 16 call sites pass `None`).
