@@ -1384,3 +1384,20 @@ local_ci.sh --size-update  -> file 107,413,808 -> 107,122,032 bytes (-285 KB; no
 
 Next in step 5: cudaforge as a workspace crate, then lint and typos pay-down, then usage-scan trims (the usage check
 found backprop, pickle, npy and cuDNN all in use, so step 5 is structural rather than a size win).
+
+## Run 37 - 2026-10-06 20:12
+
+#270 step 5, second PR: cudaforge (the build-time nvcc driver every kernel crate's `build.rs` uses, vendored from
+crates.io 0.1.6 and patched in) becomes `crates/inference-kernel-build`, a workspace member, by the user's choice of
+name. The `[patch.crates-io]` entry for it is gone (cudarc keeps its patch). The cache directory `~/.cudaforge` and
+the `CUDAFORGE_HOME`/`CUDAFORGE_THREADS` variables keep their names, so existing CUTLASS/DeepGEMM checkouts and
+settings still apply.
+
+Unlike the candle crates it passes clippy and typos as it is, so no allow-list. Its 17 unit tests now run in the
+workspace suite (they needed `--manifest-path` before). FA3's build script still compiles against it (checked to its
+sm90 assert; the full sm90 build was checked in Run 36).
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2830 + 2445)
+local_ci.sh --size  -> unchanged (build-time crate)
+```

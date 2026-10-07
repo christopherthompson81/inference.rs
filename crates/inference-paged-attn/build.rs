@@ -109,7 +109,7 @@ fn main() -> Result<()> {
         cuda_header_hash("kernels/cuda", &["kernels/cuda/fa3"])?
     );
 
-    let mut builder = cudaforge::KernelBuilder::new()
+    let mut builder = inference_kernel_build::KernelBuilder::new()
         .source_glob("kernels/cuda/*.cu")
         .watch(["kernels/cuda"])
         .out_dir(&kernel_build_dir)
@@ -165,7 +165,7 @@ fn main() -> Result<()> {
             ^ cuda_header_hash("kernels/cuda/fa3", &[])?;
         let fa3_header_hash_arg = format!("-DINFERENCE_RS_FA3_HEADER_HASH={fa3_header_hash:016x}");
         let fa3_build_dir = cuda_build_dir(&out_dir, "fa3");
-        let mut fa3_builder = cudaforge::KernelBuilder::new()
+        let mut fa3_builder = inference_kernel_build::KernelBuilder::new()
             .source_files(FA3_SOURCES)
             .out_dir(&fa3_build_dir)
             .compute_cap_arch("90a")

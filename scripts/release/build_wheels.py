@@ -73,7 +73,7 @@ def default_accelerator() -> str:
 def compute_capability() -> str | None:
     """The SMs the kernels build for (`sm80.sm86`): the build scripts read CUDA_COMPUTE_CAP, else the first GPU."""
     if os.environ.get("CUDA_COMPUTE_CAP"):
-        # cudaforge's list: 86, 8.6, sm_90 or 90a, split on commas, semicolons or spaces
+        # inference-kernel-build's list: 86, 8.6, sm_90 or 90a, split on commas, semicolons or spaces
         archs = {
             int(re.sub(r"\D", "", arch))
             for arch in re.split(r"[,;\s]+", os.environ["CUDA_COMPUTE_CAP"])

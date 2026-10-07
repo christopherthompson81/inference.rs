@@ -115,6 +115,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-tensor-kernels/` - The CUDA kernels inference-tensor's backend loads, built into SASS fatbins under the `cuda` feature
 - `crates/inference-flash-attn-v3/` - FlashAttention-3 for Hopper prefill, from candle-flash-attn-v3; excluded from `--workspace` builds (its sm90 CUTLASS instances are heavy), built by inference-nn's `flash-attn-v3` feature
 - `crates/inference-fattn/` - Flash attention kernels (llama.cpp's fattn): prefill, packed, paged and fp8 attention for every CUDA build
+- `crates/inference-kernel-build/` - Build-time CUDA (nvcc) compilation for the kernel crates' `build.rs`, derived from cudaforge (its README lists what changed)
 - `crates/inference-metal-compile/` - Build-time Metal shader compilation for the kernel crates
 - `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
 - `bindings/python/` - the Python SDK: a pure-Python ctypes package over the C ABI (`inference_rs`); its coverage test enforces the same, and `scripts/release/build_wheels.py` builds wheels that bundle the library. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`

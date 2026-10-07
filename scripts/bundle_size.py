@@ -71,7 +71,7 @@ def report(baseline: dict[str, int], current: dict[str, int]) -> str:
 
 
 def build_key(compute_cap: str, cuda_version: str) -> dict[str, str]:
-    # cudaforge's list: 86, 8.6, sm_90 or 90a, split on commas, semicolons or spaces, in any order
+    # inference-kernel-build's list: 86, 8.6, sm_90 or 90a, split on commas, semicolons or spaces, in any order
     archs = {int(re.sub(r"\D", "", arch)) for arch in re.split(r"[,;\s]+", compute_cap) if arch}
     return {"compute_cap": ",".join(map(str, sorted(archs))), "cuda": cuda_version}
 

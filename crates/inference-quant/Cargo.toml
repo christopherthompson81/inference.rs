@@ -44,7 +44,7 @@ inference-metal-compile = { workspace = true, optional = true, features = ["meta
 [features]
 cuda = [
     "inference-tensor/cuda",
-    "dep:cudaforge"
+    "dep:inference-kernel-build"
 ]
 cutile = [
     "cuda",
@@ -63,7 +63,7 @@ ring = []
 
 
 [build-dependencies]
-cudaforge = { workspace = true, optional = true }
+inference-kernel-build = { workspace = true, optional = true }
 inference-metal-compile = { workspace = true, optional = true }
 
 [dev-dependencies]

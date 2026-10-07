@@ -1,5 +1,5 @@
 #[cfg(feature = "cuda")]
-use cudaforge::{KernelBuilder, Result};
+use inference_kernel_build::{KernelBuilder, Result};
 #[cfg(feature = "cuda")]
 use std::env;
 #[cfg(feature = "cuda")]
@@ -38,7 +38,7 @@ fn main() -> Result<()> {
         .arg("-O3")
         .compress_fatbin()
         .build_fatbin()?;
-    let cuobjdump = cudaforge::CudaToolkit::detect()?
+    let cuobjdump = inference_kernel_build::CudaToolkit::detect()?
         .nvcc_path
         .with_file_name(CUOBJDUMP);
     let images_path = out_dir.join("images.rs");

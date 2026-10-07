@@ -56,8 +56,8 @@ fn prepare_cuda_archive(path: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_kernel_builder(build_dir: &std::path::Path) -> cudaforge::KernelBuilder {
-    cudaforge::KernelBuilder::new()
+fn cuda_kernel_builder(build_dir: &std::path::Path) -> inference_kernel_build::KernelBuilder {
+    inference_kernel_build::KernelBuilder::new()
         .compress_fatbin()
         .out_dir(build_dir)
         .arg("-std=c++17")
@@ -217,7 +217,7 @@ fn main() -> Result<(), String> {
         if deepgemm_fp8_sm90 {
             println!("cargo:rustc-cfg=has_deepgemm_fp8_sm90_provider");
             let deepgemm_cutlass =
-                cudaforge::ExternalDependency::cutlass(Some(DEEPGEMM_CUTLASS_COMMIT))
+                inference_kernel_build::ExternalDependency::cutlass(Some(DEEPGEMM_CUTLASS_COMMIT))
                     .fetch(&out_dir)
                     .map_err(|error| error.to_string())?;
             deepgemm_source_hash = deepgemm_jit_bundle::write(
@@ -317,7 +317,7 @@ fn main() -> Result<(), String> {
             let nvfp4_build_dir = cuda_build_dir(&out_dir, "nvfp4-cutlass");
             let nvfp4_cutlass_commit = std::env::var(CUTLASS_COMMIT_ENV)
                 .unwrap_or_else(|_| NVFP4_CUTLASS_COMMIT.to_string());
-            let mut nvfp4_builder = cudaforge::KernelBuilder::new()
+            let mut nvfp4_builder = inference_kernel_build::KernelBuilder::new()
                 .out_dir(&nvfp4_build_dir)
                 .source_files(["kernels/cuda/nvfp4_cutlass/nvfp4_cutlass.cu"])
                 .watch(["kernels/cuda/nvfp4_cutlass"])
@@ -349,7 +349,7 @@ fn main() -> Result<(), String> {
         if deepgemm_fp8_sm90 {
             println!("cargo:rustc-link-lib=inferencedeepgemm");
             // the driver's stub, for build hosts without a driver installed
-            let lib_dir = cudaforge::CudaToolkit::detect()
+            let lib_dir = inference_kernel_build::CudaToolkit::detect()
                 .expect("CUDA toolkit")
                 .lib_dir;
             println!(

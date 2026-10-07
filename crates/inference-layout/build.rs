@@ -9,7 +9,7 @@ fn main() {
 mod cuda {
     pub fn build() {
         let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-        cudaforge::KernelBuilder::new()
+        inference_kernel_build::KernelBuilder::new()
             .source_files(["kernels/cuda/layout.cu"])
             .out_dir(&out_dir)
             .compress_fatbin()

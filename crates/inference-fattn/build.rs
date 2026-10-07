@@ -27,7 +27,7 @@ mod cuda {
             .collect::<Vec<_>>();
         instances.sort();
         sources.extend(instances);
-        let mut builder = cudaforge::KernelBuilder::new()
+        let mut builder = inference_kernel_build::KernelBuilder::new()
             .source_files(sources)
             .watch(["kernels/cuda"])
             .compress_fatbin()

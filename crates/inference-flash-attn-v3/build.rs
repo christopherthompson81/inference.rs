@@ -11,7 +11,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 use anyhow::anyhow;
-use cudaforge::{KernelBuilder, Result};
+use inference_kernel_build::{KernelBuilder, Result};
 use std::path::PathBuf;
 
 const CUDA_NVCC_FLAGS: Option<&'static str> = option_env!("CUDA_NVCC_FLAGS");

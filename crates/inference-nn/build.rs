@@ -97,7 +97,7 @@ fn main() {
                 .expect("failed to hash CUDA headers")
         );
 
-        let mut builder = cudaforge::KernelBuilder::new()
+        let mut builder = inference_kernel_build::KernelBuilder::new()
             .source_glob("kernels/cuda/*.cu")
             .watch(["kernels/cuda"])
             .out_dir(&build_dir)
@@ -159,7 +159,7 @@ fn main() {
             println!("cargo:rustc-cfg=has_flashinfer_gdn_sm90_kernel");
             println!("cargo:rerun-if-changed=third_party/flashinfer_gdn_sm90");
             let gdn_build_dir = cuda_build_dir(&out_dir, "flashinfer-gdn-sm90");
-            let mut flashinfer_gdn = cudaforge::KernelBuilder::new()
+            let mut flashinfer_gdn = inference_kernel_build::KernelBuilder::new()
                 .source_files(["third_party/flashinfer_gdn_sm90/inference_flashinfer_gdn_sm90.cu"])
                 .out_dir(&gdn_build_dir)
                 .compute_cap_arch("90a")
@@ -236,7 +236,9 @@ fn set_cuda_toolkit_version() -> Option<u32> {
 
 #[cfg(feature = "cuda")]
 fn cuda_toolkit_version() -> Option<(String, u32)> {
-    let version = cudaforge::CudaToolkit::detect().ok()?.version?;
+    let version = inference_kernel_build::CudaToolkit::detect()
+        .ok()?
+        .version?;
     parse_cuda_version(&version)
 }
 
