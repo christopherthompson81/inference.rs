@@ -1128,10 +1128,9 @@ fn init_mapper(
 /// Logs hardware feature information and the model's sampling strategy and kind.
 fn inference_instance_info(loader: &dyn Loader) {
     debug!(
-        "avx: {}, neon: {}, simd128: {}, f16c: {}",
+        "avx: {}, neon: {}, f16c: {}",
         inference_tensor::utils::with_avx(),
         inference_tensor::utils::with_neon(),
-        inference_tensor::utils::with_simd128(),
         inference_tensor::utils::with_f16c()
     );
 

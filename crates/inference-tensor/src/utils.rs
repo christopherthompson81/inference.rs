@@ -607,10 +607,6 @@ pub fn with_neon() -> bool {
     crate::cpu::features::get().neon
 }
 
-pub fn with_simd128() -> bool {
-    cfg!(target_feature = "simd128")
-}
-
 pub fn with_f16c() -> bool {
     crate::cpu::features::get().f16c
 }

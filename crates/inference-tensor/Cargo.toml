@@ -29,7 +29,7 @@ cudarc = { version = "0.19.8", features = [
     "cuda-version-from-build-system",
     "dynamic-loading",
 ], default-features = false, optional = true }
-gemm = { version = "0.19.0", features = ["wasm-simd128-enable"] }
+gemm = "0.19.0"
 half = { version = "2.5.0", features = ["num-traits", "use-intrinsics", "rand_distr", "zerocopy"] }
 float8 = { version = "0.7.0", features = ["num-traits", "rand_distr"] }
 intel-mkl-src = { version = "0.8.1", features = ["mkl-static-lp64-iomp"], optional = true }

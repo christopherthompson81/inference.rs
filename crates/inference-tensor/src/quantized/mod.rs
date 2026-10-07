@@ -33,8 +33,6 @@ mod cuda {
     all(target_arch = "arm", target_feature = "neon")
 ))]
 pub mod neon;
-#[cfg(target_feature = "simd128")]
-pub mod simd128;
 pub mod utils;
 use half::{bf16, f16};
 
