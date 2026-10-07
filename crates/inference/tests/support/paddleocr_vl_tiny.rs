@@ -24,7 +24,7 @@ pub fn tiny_checkpoint() -> anyhow::Result<tempfile::TempDir> {
     let cfg: Config =
         serde_json::from_str(&std::fs::read_to_string(format!("{TINY}/config.json"))?)?;
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
-    recording::record_checkpoint(
+    recording::record_checkpoint_seeded_by_name(
         &files,
         cfg.text_config().num_hidden_layers,
         &[],
