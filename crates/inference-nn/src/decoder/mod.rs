@@ -18,8 +18,8 @@ use crate::{
         Activation, CausalMasker, F32RmsNorm, FusedGateUpMlp, Gemma3RopeScalingConfig,
         Gemma3RopeSpec, Gemma3RotaryEmbedding, GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec,
         Llama3RotaryEmbedding, Mlp, PhiRopeConfig, PhiRotaryEmbedding, PlainMlp,
-        Qwen2VLRotaryEmbedding, RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding,
-        embedding_with_legacy_tied_uqff, layer_norm, masker::CausalMaskConfig,
+        Qwen2VLRotaryEmbedding, Qwen3VLRotaryEmbedding, RmsNorm, RotaryEmbedding, YarnRopeConfig,
+        embedding, embedding_with_legacy_tied_uqff, layer_norm, masker::CausalMaskConfig,
         masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
@@ -82,10 +82,11 @@ pub enum RopeKind {
     },
     /// Phi's LongRoPE, switching to its long factors once a sequence outgrows the original context.
     Phi(PhiRopeConfig),
-    /// Qwen2-VL's M-RoPE over (temporal, height, width) positions in `sections`; the model sets the forward's tables.
+    /// M-RoPE over (t, h, w) `sections`, chunked (Qwen2-VL) or interleaved (Qwen3-VL); the model sets the tables.
     MRope {
         theta: f32,
         sections: Vec<usize>,
+        interleaved: bool,
     },
 }
 
@@ -203,6 +204,8 @@ pub struct DecoderSpec {
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
     pub norm: NormKind,
+    /// The q/k norms' kind, when not the layer norms'.
+    pub qk_norm_kind: Option<NormKind>,
     pub norm_names: NormNames,
     pub o_bias: bool,
     /// The attention output projection's name, when not `o_proj`.
@@ -245,13 +248,28 @@ impl DecoderSpec {
         is_gptx: bool,
         dtype: DType,
     ) -> Result<LayerRope> {
-        if let RopeKind::MRope { theta, sections } = kind {
-            return Ok(LayerRope::MRope(Qwen2VLRotaryEmbedding::new(
-                *theta,
-                self.head_dim,
-                device,
-                sections.clone(),
-            )?));
+        if let RopeKind::MRope {
+            theta,
+            sections,
+            interleaved,
+        } = kind
+        {
+            let (theta, sections) = (*theta, sections.clone());
+            return Ok(if *interleaved {
+                LayerRope::InterleavedMRope(Qwen3VLRotaryEmbedding::new(
+                    theta,
+                    self.head_dim,
+                    device,
+                    sections,
+                )?)
+            } else {
+                LayerRope::MRope(Qwen2VLRotaryEmbedding::new(
+                    theta,
+                    self.head_dim,
+                    device,
+                    sections,
+                )?)
+            });
         }
         if let RopeKind::Phi(cfg) = kind {
             let factor = |name| {
@@ -369,9 +387,38 @@ pub enum LayerRope {
     Plain(RotaryEmbedding),
     Phi(PhiRotaryEmbedding),
     MRope(Qwen2VLRotaryEmbedding),
+    InterleavedMRope(Qwen3VLRotaryEmbedding),
 }
 
 impl LayerRope {
+    /// The M-RoPE (cos, sin) for 3D `position_ids`; `None` for the RoPEs that build their own from positions.
+    fn mrope_cos_sin(
+        &self,
+        position_ids: &Tensor,
+        dtype: DType,
+    ) -> Option<Result<(Tensor, Tensor)>> {
+        match self {
+            Self::MRope(rope) => Some(rope.compute_cos_sin(position_ids, dtype)),
+            Self::InterleavedMRope(rope) => Some(rope.compute_cos_sin(position_ids, dtype)),
+            Self::Plain(_) | Self::Phi(_) => None,
+        }
+    }
+
+    /// Applies the forward's M-RoPE `tables`; `None` for the RoPEs that build their own from positions.
+    fn apply_mrope(
+        &self,
+        tables: &(Tensor, Tensor),
+        mut q: Tensor,
+        mut k: Tensor,
+    ) -> Option<Result<(Tensor, Tensor)>> {
+        let applied = match self {
+            Self::MRope(rope) => rope.forward(tables, &mut q, &mut k),
+            Self::InterleavedMRope(rope) => rope.forward(tables, &mut q, &mut k),
+            Self::Plain(_) | Self::Phi(_) => return None,
+        };
+        Some(applied.map(|()| (q, k)))
+    }
+
     fn forward(
         &self,
         q: &Tensor,
@@ -382,7 +429,9 @@ impl LayerRope {
         match self {
             Self::Plain(rope) => rope.forward(q, k, positions),
             Self::Phi(rope) => rope.forward(q, k, positions, position_ids),
-            Self::MRope(_) => unreachable!("M-RoPE reads the forward's tables"),
+            Self::MRope(_) | Self::InterleavedMRope(_) => {
+                unreachable!("M-RoPE reads the forward's tables")
+            }
         }
     }
 }
@@ -758,7 +807,7 @@ impl AttentionBlock {
                 let (q, k) = placement.names();
                 let norm = |name| {
                     Norm::new(
-                        spec.norm,
+                        spec.qk_norm_kind.unwrap_or(spec.norm),
                         head_dim,
                         spec.rms_norm_eps,
                         mapper.set_device(layer_idx, vb.pp(name), false),
@@ -885,14 +934,35 @@ impl AttentionBlock {
         let Some(rope) = &self.rotary_emb else {
             return Ok((q, k));
         };
-        if let LayerRope::MRope(rope) = &**rope {
-            let (mut q, mut k) = (q, k);
-            rope.forward(ctx.rope_tables(q.device())?, &mut q, &mut k)?;
-            return Ok((q, k));
+        match (&**rope, &self.qk_norm) {
+            (LayerRope::MRope(_) | LayerRope::InterleavedMRope(_), None) => {
+                let tables = ctx.rope_tables(q.device())?;
+                return rope.apply_mrope(tables, q, k).expect("an M-RoPE layer");
+            }
+            (
+                LayerRope::InterleavedMRope(rope),
+                Some((QkNorm::BeforeRope { .. }, q_norm, k_norm)),
+            ) => {
+                let (Some((q_weight, q_eps)), Some((k_weight, k_eps))) =
+                    (q_norm.rms_params(), k_norm.rms_params())
+                else {
+                    inference_tensor::bail!("interleaved M-RoPE fuses only RMS q/k norms");
+                };
+                let tables = ctx.rope_tables(q.device())?;
+                return rope.forward_qk_norm(tables, &q, &k, q_weight, k_weight, q_eps, k_eps);
+            }
+            (LayerRope::MRope(_) | LayerRope::InterleavedMRope(_), Some(_)) => {
+                inference_tensor::bail!(
+                    "M-RoPE takes q/k norm only fused before interleaved M-RoPE"
+                )
+            }
+            _ => {}
         }
         let position_ids = match **rope {
             LayerRope::Phi(_) => ctx.position_ids_vec(),
-            LayerRope::Plain(_) | LayerRope::MRope(_) => Vec::new(),
+            LayerRope::Plain(_) | LayerRope::MRope(_) | LayerRope::InterleavedMRope(_) => {
+                Vec::new()
+            }
         };
         let positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
@@ -963,7 +1033,7 @@ impl LayerAttention for AttentionBlock {
     fn cuda_decode_graphs(&self) -> bool {
         !matches!(
             self.rotary_emb.as_deref(),
-            Some(LayerRope::Phi(_) | LayerRope::MRope(_))
+            Some(LayerRope::Phi(_) | LayerRope::MRope(_) | LayerRope::InterleavedMRope(_))
         )
     }
     fn add_residual(&self, uvb: &UnVarBuilder) {
@@ -1158,13 +1228,19 @@ impl DecoderStack {
                 "NoPE layers with q/k norm or attention temperature are not supported"
             );
         }
-        // M-RoPE applies its tables alone, without the q/k norm or temperature the other RoPEs carry
-        if matches!(spec.rope, RopeKind::MRope { .. })
-            && (spec.qk_norm.is_some() || spec.attention_temperature.is_some())
-        {
-            inference_tensor::bail!(
-                "M-RoPE with q/k norm or attention temperature is not supported"
-            );
+        if let RopeKind::MRope { interleaved, .. } = spec.rope {
+            // interleaved M-RoPE fuses an RMS q/k norm before rotating; nothing else rides along
+            let fused_qk_norm = interleaved
+                && matches!(spec.qk_norm, Some(QkNorm::BeforeRope { .. }))
+                && matches!(
+                    spec.qk_norm_kind.unwrap_or(spec.norm),
+                    NormKind::Rms | NormKind::Gemma
+                );
+            if spec.attention_temperature.is_some() || (spec.qk_norm.is_some() && !fused_qk_norm) {
+                inference_tensor::bail!(
+                    "M-RoPE takes no attention temperature, and q/k norm only fused before interleaved M-RoPE"
+                );
+            }
         }
         if let Some(quant_cfg) = &spec.quantization_config {
             tracing::info!(
@@ -1358,10 +1434,22 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
     /// The normed hidden states; `cache` is `None` for an encoder pass over the call's tokens alone.
     pub fn forward(
         &self,
+        xs: Tensor,
+        masks: &LayerMasks,
+        cache: Option<&mut [KvCache]>,
+        ctx: &mut ModelForwardContext<'_>,
+    ) -> Result<Tensor> {
+        self.forward_hooked(xs, masks, cache, ctx, &|_, xs| Ok(xs))
+    }
+
+    /// As [`DecoderStack::forward`], passing each layer's output through `after_layer` with the layer's index.
+    pub fn forward_hooked(
+        &self,
         mut xs: Tensor,
         masks: &LayerMasks,
         mut cache: Option<&mut [KvCache]>,
         ctx: &mut ModelForwardContext<'_>,
+        after_layer: &dyn Fn(usize, Tensor) -> Result<Tensor>,
     ) -> Result<Tensor> {
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
@@ -1380,6 +1468,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 i,
                 masks.flash.as_ref(),
             )?;
+            xs = after_layer(i, xs)?;
         }
         self.norm.forward(&xs.to_device(&self.device)?)
     }
@@ -1489,14 +1578,15 @@ impl CausalLm {
 impl<F: LayerFfn> CausalLm<AttentionBlock, F> {
     /// This forward's M-RoPE (cos, sin) for `position_ids`, which [`ModelForwardContext::set_rope_tables`] takes.
     pub fn mrope_tables(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
-        let rope = self.stack.layers.iter().find_map(|layer| {
-            match layer.self_attn.rotary_emb.as_deref() {
-                Some(LayerRope::MRope(rope)) => Some(rope),
-                _ => None,
-            }
+        let tables = self.stack.layers.iter().find_map(|layer| {
+            layer
+                .self_attn
+                .rotary_emb
+                .as_deref()?
+                .mrope_cos_sin(position_ids, dtype)
         });
-        match rope {
-            Some(rope) => rope.compute_cos_sin(position_ids, dtype),
+        match tables {
+            Some(tables) => tables,
             None => inference_tensor::bail!("the stack has no M-RoPE layer"),
         }
     }
@@ -1590,8 +1680,21 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         masks: &LayerMasks,
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
+        self.forward_hooked(xs, masks, ctx, &|_, xs| Ok(xs))
+    }
+
+    /// As [`CausalLm::forward_with_masks`], with each layer's output through `after_layer` (Qwen3-VL's deepstack).
+    pub fn forward_hooked(
+        &self,
+        xs: Tensor,
+        masks: &LayerMasks,
+        ctx: &mut ModelForwardContext<'_>,
+        after_layer: &dyn Fn(usize, Tensor) -> Result<Tensor>,
+    ) -> Result<Tensor> {
         let cache = &mut self.cache.normal().0;
-        let xs = self.stack.forward(xs, masks, Some(cache), ctx)?;
+        let xs = self
+            .stack
+            .forward_hooked(xs, masks, Some(cache), ctx, after_layer)?;
         let xs = ctx.logits(&xs)?;
         let logits = ctx.lm_head(&*self.lm_head, &xs)?;
         match self.final_logit_softcap {
