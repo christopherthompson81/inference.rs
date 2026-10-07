@@ -1,6 +1,7 @@
 use inference_quant::QuantizedConfig;
 use serde::Deserialize;
 
+use crate::decoder::DecoderSpec;
 use crate::layers::{Activation, Llama3RopeConfig};
 use crate::serde_default_fn;
 
@@ -73,6 +74,15 @@ pub struct LLaVAVisionConfig {
 }
 
 impl Config {
+    /// The language model's decoder: Llama's or Mistral's, as the text config names it.
+    pub fn decoder_spec(&self) -> inference_tensor::Result<DecoderSpec> {
+        match self.text_config.model_type.as_str() {
+            "llama" => Ok(self.to_llama_config().decoder_spec()),
+            "mistral" => self.to_mistral_config().decoder_spec(),
+            other => inference_tensor::bail!("Unsupported model type: {other}"),
+        }
+    }
+
     pub fn to_llama_config(&self) -> LLaMAConfig {
         LLaMAConfig {
             hidden_size: self.text_config.hidden_size,

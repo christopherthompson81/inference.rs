@@ -300,7 +300,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         Ok(Box::new(decoder_shape(txt_cfg).model_config(
             txt_cfg.num_hidden_layers,
             txt_cfg.max_position_embeddings,
-            None,
+            txt_cfg.decoder_spec().sliding_window(),
         )))
     }
 

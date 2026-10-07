@@ -23,15 +23,6 @@ use crate::paged_attention::{
 };
 use crate::utils::unvarbuilder::UnVarBuilder;
 
-/// When the paged KV cache takes the compressed MLA layout instead of the standard one.
-#[derive(Clone, Copy, Debug)]
-pub enum MlaKvLayout {
-    /// Whenever paged attention is on (DeepSeek-V2/V3).
-    Paged,
-    /// Paged attention on a CUDA device (GLM4-MoE-Lite).
-    PagedOnCudaDevice,
-}
-
 #[derive(Clone, Debug)]
 pub struct MlaConfig {
     pub q_lora_rank: Option<usize>,
@@ -43,7 +34,6 @@ pub struct MlaConfig {
     pub softmax_scale: f32,
     pub rope_theta: f32,
     pub rope_scaling: Option<DeepSeekV2RopeScaling>,
-    pub kv_layout: MlaKvLayout,
     // names the model in load errors
     pub label: &'static str,
 }
@@ -511,10 +501,6 @@ impl FamilyAttention for MlaAttention {
         })
     }
 
-    #[cfg_attr(
-        not(all(feature = "cuda", target_family = "unix")),
-        allow(unused_variables)
-    )]
     fn model_metadata(
         cfg: &FamilyConfig<MlaConfig>,
         attention_mechanism: &AttentionImplementation,
@@ -523,14 +509,7 @@ impl FamilyAttention for MlaAttention {
     ) -> ModelConfigMetadata {
         let mla = &cfg.attn;
         let paged = matches!(attention_mechanism, AttentionImplementation::PagedAttention);
-        #[cfg(all(feature = "cuda", target_family = "unix"))]
-        let mla_layout = paged
-            && match mla.kv_layout {
-                MlaKvLayout::Paged => true,
-                MlaKvLayout::PagedOnCudaDevice => matches!(real_device, Device::Cuda(_)),
-            };
-        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
-        let mla_layout = false;
+        let mla_layout = crate::mla::uses_mla_paged_cache(paged, real_device.is_cuda());
         ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
             num_layers: cfg.num_hidden_layers,

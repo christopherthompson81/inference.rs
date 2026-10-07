@@ -92,11 +92,9 @@ pub fn should_use_mla_decode(
     metadata: &Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
     kv_b_proj: &MlaKvBProjection,
 ) -> bool {
-    !is_mla_disabled()
+    uses_mla_paged_cache(paged_attn_enabled, matches!(device, Device::Cuda(_)))
         && matches!(attention_mask, AttentionMask::None)
         && seq_len == 1
-        && paged_attn_enabled
-        && matches!(device, Device::Cuda(_))
         && supports_cached_mla_weights(kv_b_proj)
         && metadata
             .as_ref()
@@ -129,10 +127,19 @@ pub fn should_use_mla_cache(
     device: &Device,
     kv_b_proj: &MlaKvBProjection,
 ) -> bool {
-    !is_mla_disabled()
-        && paged_attn_enabled
-        && matches!(device, Device::Cuda(_))
+    uses_mla_paged_cache(paged_attn_enabled, matches!(device, Device::Cuda(_)))
         && supports_cached_mla_weights(kv_b_proj)
+}
+
+/// Whether paged MLA layers keep the compact latent cache rather than per-head K/V; KV planning reads it too.
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+pub fn uses_mla_paged_cache(paged_attn_enabled: bool, on_cuda_device: bool) -> bool {
+    !is_mla_disabled() && paged_attn_enabled && on_cuda_device
+}
+
+#[cfg(not(all(feature = "cuda", target_family = "unix")))]
+pub fn uses_mla_paged_cache(_paged_attn_enabled: bool, _on_cuda_device: bool) -> bool {
+    false
 }
 
 #[cfg(not(all(feature = "cuda", target_family = "unix")))]

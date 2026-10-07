@@ -392,6 +392,7 @@ fn calculate_max_context(
     model_size_bytes: u64,
     available_vram_bytes: u64,
     dtype: DType,
+    paged_attn: bool,
 ) -> Result<(usize, bool)> {
     let model_cfg = loader.model_config(config)?;
     let native_max_seq_len = model_cfg.max_seq_len();
@@ -402,9 +403,12 @@ fn calculate_max_context(
 
     let remaining_bytes = available_vram_bytes - model_size_bytes;
 
-    // KV cache elements per token (from ModelConfigLike trait)
-    // This accounts for num_kv_heads, k_head_dim, v_head_dim correctly
-    let kv_elems_per_token = model_cfg.kv_cache_elements_per_token();
+    // the loader describes the paged cache (an MLA model's compact latent); without paging every head keeps K and V
+    let kv_elems_per_token = if paged_attn {
+        model_cfg.kv_cache_elements_per_token()
+    } else {
+        2 * model_cfg.num_kv_heads() * model_cfg.k_head_dim().max(model_cfg.v_head_dim())
+    };
     let num_layers = model_cfg.num_layers();
 
     // Total KV cache bytes per token = elements * dtype_size * num_layers
@@ -490,6 +494,7 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
 
     let devices = select_devices(req.force_cpu)?;
     let backend = backend_from_devices(&devices);
+    let paged_attn = backend != TuneBackend::Cpu && paged_attn_supported();
 
     let dtype = {
         let model_dtype = get_model_dtype(&req.model)?;
@@ -586,9 +591,15 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
             1.0
         };
 
-        let (context_room, context_is_model_max) =
-            calculate_max_context(loader, &config, estimated_size, avail_vram_bytes, dtype)
-                .unwrap_or((0, false));
+        let (context_room, context_is_model_max) = calculate_max_context(
+            loader,
+            &config,
+            estimated_size,
+            avail_vram_bytes,
+            dtype,
+            paged_attn,
+        )
+        .unwrap_or((0, false));
 
         let candidate = TuneCandidate {
             isq,
@@ -641,7 +652,7 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
             (None, None, None, format!("inference serve -m {model_id}"))
         };
 
-    let paged_attn_mode = if backend != TuneBackend::Cpu && paged_attn_supported() {
+    let paged_attn_mode = if paged_attn {
         Some("auto".to_string())
     } else {
         Some("off".to_string())

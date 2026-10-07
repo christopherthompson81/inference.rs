@@ -33,8 +33,6 @@ pub(super) enum AttentionSizing {
         qk_rope_head_dim: usize,
         v_head_dim: usize,
         attention_bias: bool,
-        // DeepSeek sizes the q projections unpacked, GLM4-MoE-Lite packs them
-        packed_q: bool,
     },
     Gqa {
         num_kv_heads: usize,
@@ -69,8 +67,6 @@ pub(super) struct FamilyLoaderSpec {
     pub moe: Option<MoeSizing>,
     // in order, ahead of the per-layer MLP patterns
     pub isq_head: Vec<&'static str>,
-    // DeepSeek's dense up_proj pattern leaves the layer dots unescaped
-    pub loose_dense_up: bool,
 }
 
 impl FamilyLoaderSpec {
@@ -121,14 +117,9 @@ impl FamilyLoaderSpec {
                     ])?);
                 }
             } else {
-                let up = if self.loose_dense_up {
-                    format!(r"layers.{layer_idx}.mlp\.up_proj\.(weight|bias)$")
-                } else {
-                    format!(r"layers\.{layer_idx}\.mlp\.up_proj\.(weight|bias)$")
-                };
                 data.extend(isq_regexes(&[
                     format!(r"layers\.{layer_idx}\.mlp\.gate_proj\.(weight|bias)$"),
-                    up,
+                    format!(r"layers\.{layer_idx}\.mlp\.up_proj\.(weight|bias)$"),
                     format!(r"layers\.{layer_idx}\.mlp\.down_proj\.(weight|bias)$"),
                 ])?);
             }
@@ -165,17 +156,15 @@ impl FamilyLoaderSpec {
                 qk_rope_head_dim,
                 v_head_dim,
                 attention_bias,
-                packed_q,
             } => {
-                let q_pack = if packed_q { weight_pack_factor } else { 1 };
                 let q_proj = match q_lora_rank {
                     Some(lora_rank) => {
-                        let a = h * lora_rank / q_pack;
+                        let a = h * lora_rank / weight_pack_factor;
                         let norm = lora_rank;
-                        let b = (heads * q_head_dim) * lora_rank / q_pack;
+                        let b = (heads * q_head_dim) * lora_rank / weight_pack_factor;
                         a + norm + b
                     }
-                    None => (heads * q_head_dim) * h / q_pack,
+                    None => (heads * q_head_dim) * h / weight_pack_factor,
                 };
                 let kv_a_proj_with_mqa = h * (kv_lora_rank + qk_rope_head_dim) / weight_pack_factor
                     + bias_if!(attention_bias, kv_lora_rank + qk_rope_head_dim);
@@ -246,7 +235,30 @@ impl FamilyLoaderSpec {
             .collect()
     }
 
+    /// KV planning sizes a paged cache, so MLA reports what the model does under paged attention on CUDA.
     pub fn model_config(&self) -> Box<dyn ModelConfigLike> {
+        let (v_head_dim, kv_cache_layout) = match self.attention {
+            AttentionSizing::Mla {
+                q_head_dim,
+                kv_lora_rank,
+                qk_rope_head_dim,
+                ..
+            } => (
+                q_head_dim,
+                if crate::mla::uses_mla_paged_cache(true, true) {
+                    crate::paged_attention::KvCacheLayout::Mla {
+                        kv_lora_rank,
+                        kpe_head_dim: qk_rope_head_dim,
+                    }
+                } else {
+                    crate::paged_attention::KvCacheLayout::Standard
+                },
+            ),
+            AttentionSizing::Gqa { .. } => (
+                self.v_head_dim,
+                crate::paged_attention::KvCacheLayout::Standard,
+            ),
+        };
         Box::new(ModelConfigMetadata {
             max_seq_len: self.max_position_embeddings,
             num_layers: self.num_hidden_layers,
@@ -255,8 +267,8 @@ impl FamilyLoaderSpec {
             num_attn_heads: self.num_attention_heads,
             sliding_window: None,
             k_head_dim: self.k_head_dim,
-            v_head_dim: self.v_head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+            v_head_dim,
+            kv_cache_layout,
         })
     }
 }
@@ -321,8 +333,10 @@ mod tests {
     use super::*;
 
     // shared experts are moe_intermediate_size * n_shared_experts wide, as in HF
-    const DS2_PLAIN_Q: [usize; 5] = [26432, 48960, 48960, 48960, 48960];
-    const DS3_LORA_Q: [usize; 5] = [24448, 46976, 46976, 46976, 46976];
+    const DS2_PLAIN_Q: [usize; 5] = [22336, 44864, 44864, 44864, 44864];
+    const DS3_LORA_Q: [usize; 5] = [21376, 43904, 43904, 43904, 43904];
+    // noaux_tc loads an `e_score_correction_bias` of n_routed_experts floats per MoE layer
+    const DS3_NOAUX_TC: [usize; 5] = [21376, 43936, 43936, 43936, 43936];
     const LITE: [usize; 5] = [21376, 43936, 43936, 43936, 43936];
     const GLM: [usize; 5] = [15936, 38496, 38496, 38496, 38496];
     const PACK_FACTOR: usize = 2;
@@ -361,8 +375,45 @@ mod tests {
     fn layer_sizes_are_pinned() -> Result<()> {
         assert_eq!(sizes(&DeepSeekV2Loader, &deepseek(None))?, DS2_PLAIN_Q);
         assert_eq!(sizes(&DeepSeekV3Loader, &deepseek(Some(16)))?, DS3_LORA_Q);
+        let mut noaux_tc = deepseek(Some(16));
+        noaux_tc["topk_method"] = json!("noaux_tc");
+        assert_eq!(sizes(&DeepSeekV3Loader, &noaux_tc)?, DS3_NOAUX_TC);
         assert_eq!(sizes(&GLM4MoeLiteLoader, &glm())?, LITE);
         assert_eq!(sizes(&GLM4MoeLoader, &glm())?, GLM);
+        Ok(())
+    }
+
+    // paged KV planning reads the loader's metadata, which must describe the latent cache the model keeps on CUDA
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    #[test]
+    fn mla_loader_metadata_describes_the_paged_latent_cache() -> Result<()> {
+        let meta = DeepSeekV3Loader.model_config(&deepseek(Some(16)).to_string())?;
+        assert!(matches!(
+            meta.kv_cache_layout(),
+            crate::paged_attention::KvCacheLayout::Mla {
+                kv_lora_rank: 16,
+                kpe_head_dim: 8
+            }
+        ));
+        assert_eq!(meta.v_head_dim(), meta.k_head_dim());
+        Ok(())
+    }
+
+    // the latent cache needs the CUDA MLA kernels, so a model on a CPU device keeps per-head K/V even when paged
+    #[test]
+    fn mla_paged_layout_needs_a_cuda_device() -> Result<()> {
+        use crate::deepseek_family::{FamilyAttention, MlaAttention};
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(&deepseek(Some(16)).to_string())?;
+        let meta = MlaAttention::model_metadata(
+            &cfg.family(),
+            &AttentionImplementation::PagedAttention,
+            &inference_tensor::Device::Cpu,
+            1,
+        );
+        assert!(matches!(
+            meta.kv_cache_layout,
+            crate::paged_attention::KvCacheLayout::Standard
+        ));
         Ok(())
     }
 }

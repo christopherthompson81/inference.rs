@@ -2,8 +2,7 @@ use inference_quant::QuantizedConfig;
 use serde::Deserialize;
 
 use crate::deepseek_family::{
-    FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MlaKvLayout, MoeSpec, SharedExpert,
-    mla_softmax_scale,
+    FamilyConfig, FamilyModel, MlaAttention, MlaConfig, MoeSpec, SharedExpert, mla_softmax_scale,
 };
 use crate::{
     layers::Activation,
@@ -18,6 +17,7 @@ serde_default_fn!(Activation, hidden_act, Activation::Silu);
 serde_default_fn!(bool, tie_word_embeddings, false);
 serde_default_fn!(usize, n_group, 1);
 serde_default_fn!(usize, topk_group, 1);
+serde_default_fn!(bool, norm_topk_prob, true);
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Glm4MoeLiteConfig {
@@ -40,6 +40,8 @@ pub struct Glm4MoeLiteConfig {
     pub first_k_dense_replace: usize,
     #[serde(default = "routed_scaling_factor")]
     pub routed_scaling_factor: f64,
+    #[serde(default = "norm_topk_prob")]
+    pub norm_topk_prob: bool,
     #[serde(default = "n_group")]
     pub n_group: usize,
     #[serde(default = "topk_group")]
@@ -61,14 +63,16 @@ pub struct Glm4MoeLiteConfig {
 }
 
 impl Glm4MoeLiteConfig {
-    fn router_config(&self) -> GroupedRouterConfig {
+    pub(crate) fn router_config(&self) -> GroupedRouterConfig {
         GroupedRouterConfig {
             scoring: RouterScoring::Sigmoid,
             method: RouterMethod::NoAuxTc,
             n_group: self.n_group,
             topk_group: self.topk_group,
             routed_scaling_factor: self.routed_scaling_factor,
-            renorm: RouterRenorm::Always,
+            renorm: RouterRenorm::TopkProb {
+                norm_topk_prob: self.norm_topk_prob,
+            },
         }
     }
 
@@ -109,7 +113,6 @@ impl Glm4MoeLiteConfig {
                 softmax_scale: mla_softmax_scale(self.q_head_dim(), None),
                 rope_theta: self.rope_theta,
                 rope_scaling: None,
-                kv_layout: MlaKvLayout::PagedOnCudaDevice,
                 label: "GLM4 MoE",
             },
         }

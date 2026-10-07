@@ -1,4 +1,4 @@
-//! The process-wide rustls provider every reqwest client in the workspace is built on.
+//! The process-wide rustls provider the workspace's reqwest clients and `wss://` connections are built on.
 
 use std::sync::Once;
 

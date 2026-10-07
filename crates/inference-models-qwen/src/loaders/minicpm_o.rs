@@ -235,7 +235,7 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
         Ok(Box::new(super::qwen2::decoder_shape(&cfg).model_config(
             cfg.num_hidden_layers,
             cfg.max_position_embeddings,
-            None,
+            cfg.decoder_spec()?.sliding_window(),
         )))
     }
 }

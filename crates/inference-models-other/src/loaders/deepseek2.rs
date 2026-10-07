@@ -1,5 +1,6 @@
 use super::deepseek_family::*;
 use super::*;
+use crate::moe::RouterMethod;
 
 /// `NormalLoader` for a DeepSeekV2 model.
 pub struct DeepSeekV2Loader;
@@ -59,7 +60,6 @@ impl DeepSeekV2Loader {
                 qk_rope_head_dim: cfg.qk_rope_head_dim,
                 v_head_dim: cfg.v_head_dim,
                 attention_bias: cfg.attention_bias,
-                packed_q: false,
             },
             moe: cfg.n_routed_experts.map(|n_routed_experts| MoeSizing {
                 n_routed_experts,
@@ -67,10 +67,9 @@ impl DeepSeekV2Loader {
                 first_k_dense_replace: cfg.first_k_dense_replace,
                 moe_layer_freq: Some(cfg.moe_layer_freq),
                 shared_intermediate: cfg.n_shared_experts.map(|n| cfg.moe_intermediate_size * n),
-                correction_bias: false,
+                correction_bias: cfg.router_config().method == RouterMethod::NoAuxTc,
             }),
             isq_head,
-            loose_dense_up: true,
         })
     }
 }

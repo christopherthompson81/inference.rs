@@ -8,7 +8,7 @@ use std::{collections::HashMap, sync::Arc};
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
 use inference_tensor::{DType, Device, DeviceLocation, Result, Tensor};
 
-pub use mla::{MlaAttention, MlaConfig, MlaKvLayout, mla_softmax_scale};
+pub use mla::{MlaAttention, MlaConfig, mla_softmax_scale};
 
 use crate::model::NormalLoadingMetadata;
 use crate::{

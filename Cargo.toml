@@ -163,7 +163,8 @@ rand_distr = "0.5.1"
 dirs = "6.0.0"
 thiserror = "2.0.18"
 tokenizers = { version = "0.23.2", default-features = false }
-tokio-tungstenite = "0.28.0"
+# rustls on the provider `inference_mcp::tls::install_provider()` installs, trusting the system roots
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-native-roots"] }
 chrono = "0.4.43"
 minijinja = { version = "2.14.0", features = ["builtins", "json", "preserve_order"] }
 minijinja-contrib = { version = "2.14.0", features = ["pycompat"] }

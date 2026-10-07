@@ -1,5 +1,6 @@
 use super::deepseek_family::*;
 use super::*;
+use crate::moe::RouterMethod;
 
 const K_PROJ: &str = r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$";
 const V_PROJ: &str = r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$";
@@ -60,10 +61,9 @@ impl GLM4MoeLoader {
                 moe_layer_freq: None,
                 shared_intermediate: (cfg.n_shared_experts > 0)
                     .then_some(cfg.moe_intermediate_size * cfg.n_shared_experts),
-                correction_bias: true,
+                correction_bias: cfg.router_config().method == RouterMethod::NoAuxTc,
             }),
             isq_head: vec![LM_HEAD, Q_PROJ, K_PROJ, V_PROJ, O_PROJ, STACKED_EXPERTS],
-            loose_dense_up: false,
         })
     }
 }
