@@ -3068,26 +3068,17 @@ pub struct FusedGateUpMlp {
 }
 
 impl FusedGateUpMlp {
+    /// `linear` builds each unbiased projection from (in, out, its weights).
     pub fn new(
         vb: ShardedVarBuilder,
         hidden_size: usize,
         intermediate_size: usize,
-        quantization_config: &Option<QuantizedConfig>,
         act: Activation,
+        linear: impl Fn(usize, usize, ShardedVarBuilder) -> Result<Arc<dyn QuantMethod>>,
     ) -> Result<Self> {
         Ok(Self {
-            gate_up: inference_quant::linear_no_bias(
-                hidden_size,
-                2 * intermediate_size,
-                quantization_config,
-                vb.pp("gate_up_proj"),
-            )?,
-            down: inference_quant::linear_no_bias(
-                intermediate_size,
-                hidden_size,
-                quantization_config,
-                vb.pp("down_proj"),
-            )?,
+            gate_up: linear(hidden_size, 2 * intermediate_size, vb.pp("gate_up_proj"))?,
+            down: linear(intermediate_size, hidden_size, vb.pp("down_proj"))?,
             act,
             params: vec![hidden_size, intermediate_size],
         })

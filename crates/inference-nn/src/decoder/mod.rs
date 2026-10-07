@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
-    ShardedVarBuilder,
+    ShardedVarBuilder, StaticLoraConfig,
 };
 use inference_tensor::{D, DType, Device, DeviceLocation, Module, Result, Tensor, nn::LayerNorm};
 
@@ -212,6 +212,8 @@ pub struct DecoderSpec {
     pub o_proj_name: Option<&'static str>,
     /// q, k and v come from one `qkv_proj`; it and the output projection are replicated, not split across ranks.
     pub fused_qkv: bool,
+    /// LoRAs merged into the replicated projections at load, as Phi-4MM's vision adapter is.
+    pub static_loras: Option<HashMap<String, StaticLoraConfig>>,
     /// `tanh(scores / cap) * cap` on the attention scores.
     pub attn_softcap: Option<f32>,
     /// The attention score scale; `1 / sqrt(head_dim)` when unset.
@@ -231,6 +233,23 @@ pub struct DecoderSpec {
 }
 
 impl DecoderSpec {
+    /// A projection kept whole on every rank, with the static LoRAs merged in when the spec has them.
+    fn replicated_linear(
+        &self,
+        in_dim: usize,
+        out_dim: usize,
+        bias: bool,
+        vb: ShardedVarBuilder,
+    ) -> Result<Arc<dyn QuantMethod>> {
+        match &self.static_loras {
+            Some(_) if bias => inference_tensor::bail!("static LoRA projections take no bias"),
+            Some(loras) => {
+                inference_quant::linear_no_bias_static_lora(in_dim, out_dim, loras.clone(), vb)
+            }
+            None => inference_quant::linear_b(in_dim, out_dim, bias, &self.quantization_config, vb),
+        }
+    }
+
     pub fn num_layers(&self) -> usize {
         self.layer_windows.len()
     }
@@ -708,8 +727,8 @@ impl LayerBuilder for StandardLayers<'_> {
                 place(MLP),
                 spec.hidden_size,
                 spec.intermediate_size,
-                qc,
                 spec.hidden_act,
+                |in_dim, out_dim, vb| spec.replicated_linear(in_dim, out_dim, false, vb),
             )?),
             MlpKind::Gated => Box::new(Mlp::new(
                 place(MLP),
@@ -763,15 +782,13 @@ impl AttentionBlock {
         let o_proj_name = spec.o_proj_name.unwrap_or(O_PROJ);
         let (q_size, kv_size) = (spec.num_heads * head_dim, spec.num_kv_heads * head_dim);
         let (qkv, o_proj, world_size, n_kv_groups) = if spec.fused_qkv {
-            let qkv = inference_quant::linear_b(
+            let qkv = spec.replicated_linear(
                 hidden,
                 q_size + 2 * kv_size,
                 spec.qkv_bias,
-                qc,
                 place(QKV_PROJ),
             )?;
-            let o_proj =
-                inference_quant::linear_b(q_size, hidden, spec.o_bias, qc, place(o_proj_name))?;
+            let o_proj = spec.replicated_linear(q_size, hidden, spec.o_bias, place(o_proj_name))?;
             let n_kv_groups = spec.num_heads / spec.num_kv_heads;
             (QkvProj::Fused(qkv), o_proj, 1, n_kv_groups)
         } else {
@@ -1822,8 +1839,8 @@ impl<A: LayerAttention, F: LayerFfn> AnyMoeBaseModelMixin for CausalLm<A, F> {
                 vb,
                 base.get_params()[0],
                 base.get_params()[1],
-                &None,
                 base.hidden_act(),
+                |in_dim, out_dim, vb| inference_quant::linear_no_bias(in_dim, out_dim, &None, vb),
             )?),
         })
     }
