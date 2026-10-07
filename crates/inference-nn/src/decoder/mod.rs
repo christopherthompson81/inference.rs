@@ -11,13 +11,14 @@ use inference_tensor::{DType, Device, DeviceLocation, Module, Result, Tensor};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
-    attention::{AttentionDispatch, AttentionMask, Sdpa, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, FlashParams, Sdpa, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
-        Activation, CausalMasker, GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec,
-        Llama3RotaryEmbedding, Mlp, RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding,
-        embedding_with_legacy_tied_uqff, masker::CausalMaskConfig, masker::PastKvLenCache,
+        Activation, CausalMasker, Gemma3RopeScalingConfig, Gemma3RopeSpec, Gemma3RotaryEmbedding,
+        GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec, Llama3RotaryEmbedding, Mlp, RmsNorm,
+        RotaryEmbedding, YarnRopeConfig, embedding, embedding_with_legacy_tied_uqff,
+        masker::CausalMaskConfig, masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
@@ -56,6 +57,11 @@ pub enum RopeKind {
         scaling: Option<Llama3RopeConfig>,
     },
     Yarn(YarnRopeConfig),
+    /// Gemma 3's RoPE: frequencies in f64, with optional linear scaling.
+    Gemma3 {
+        theta: f64,
+        scaling: Option<Gemma3RopeScalingConfig>,
+    },
 }
 
 impl Default for RopeKind {
@@ -129,6 +135,8 @@ pub struct DecoderSpec {
     pub qk_norm: Option<QkNorm>,
     /// Layers that skip RoPE (NoPE).
     pub no_rope_layers: Vec<usize>,
+    /// The RoPE sliding layers take instead, as Gemma 3's local layers do.
+    pub local_rope: Option<RopeKind>,
     pub attention_temperature: Option<AttentionTemperature>,
     /// One entry per layer: the sliding window it attends over, or `None` for full attention.
     pub layer_windows: Vec<Option<usize>>,
@@ -161,12 +169,13 @@ impl DecoderSpec {
 
     fn rope(
         &self,
+        kind: &RopeKind,
         vb_m: &ShardedVarBuilder,
         device: &Device,
         is_gptx: bool,
         dtype: DType,
     ) -> Result<RotaryEmbedding> {
-        match &self.rope {
+        match kind {
             RopeKind::Default { theta } => RotaryEmbedding::new(
                 *theta,
                 self.head_dim,
@@ -214,6 +223,15 @@ impl DecoderSpec {
                 dtype,
             ),
             RopeKind::Yarn(yarn) => RotaryEmbedding::new_yarn(yarn, device, is_gptx, dtype),
+            RopeKind::Gemma3 { theta, scaling } => {
+                let spec = Gemma3RopeSpec {
+                    rope_theta: *theta,
+                    head_dim: self.head_dim,
+                    max_position_embeddings: self.max_position_embeddings,
+                    scaling: scaling.as_ref(),
+                };
+                Ok(Gemma3RotaryEmbedding::new(is_gptx, dtype, spec, device)?.into_inner())
+            }
         }
     }
 
@@ -239,7 +257,7 @@ pub struct AttentionBlock {
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
     o_proj: Arc<dyn QuantMethod>,
-    qk_norm: Option<(QkNorm, RmsNorm, RmsNorm)>,
+    qk_norm: Option<(QkNorm, Norm, Norm)>,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -274,7 +292,7 @@ fn cache_types(layer_windows: &[Option<usize>], max_seq_len: usize) -> Vec<Norma
 pub trait LayerAttention: Send + Sync {
     const CUDA_DECODE_GRAPHS: bool = false;
 
-    /// Without a `kv_cache` the layer attends over this call's tokens only, as an encoder does.
+    /// Without a `kv_cache` the layer attends over this call's tokens only; `flash` overrides the ctx's flash params.
     fn forward(
         &self,
         xs: &Tensor,
@@ -282,6 +300,7 @@ pub trait LayerAttention: Send + Sync {
         kv_cache: Option<&mut KvCache>,
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
+        flash: Option<&FlashParams>,
     ) -> Result<Tensor>;
 
     /// The window this layer slides over, which picks its mask.
@@ -374,6 +393,7 @@ impl StackShape<'_> {
 struct StandardLayers<'a> {
     spec: &'a DecoderSpec,
     ropes: HashMap<DeviceLocation, Arc<RotaryEmbedding>>,
+    local_ropes: Option<HashMap<DeviceLocation, Arc<RotaryEmbedding>>>,
 }
 
 impl LayerBuilder for StandardLayers<'_> {
@@ -386,8 +406,11 @@ impl LayerBuilder for StandardLayers<'_> {
         vb: ShardedVarBuilder,
     ) -> Result<(AttentionBlock, Box<dyn MlpLayer>)> {
         let spec = self.spec;
-        let rotary_emb = self
-            .ropes
+        let ropes = match &self.local_ropes {
+            Some(local) if spec.layer_windows[load.layer_idx].is_some() => local,
+            _ => &self.ropes,
+        };
+        let rotary_emb = ropes
             .get(&load.device.location())
             .expect("No RoPE for device location!")
             .clone();
@@ -481,7 +504,8 @@ impl AttentionBlock {
                     QkNorm::AfterRope { q, k } => (q, k),
                 };
                 let norm = |name| {
-                    RmsNorm::new(
+                    Norm::new(
+                        spec.norm,
                         head_dim,
                         spec.rms_norm_eps,
                         mapper.set_device(layer_idx, vb.pp(name), false),
@@ -526,6 +550,7 @@ impl AttentionBlock {
         kv_cache: Option<&mut KvCache>,
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
+        flash: Option<&FlashParams>,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
         let (q, k, v) =
@@ -551,7 +576,7 @@ impl AttentionBlock {
                 paged_layer: ctx.paged_layer(layer_idx),
                 kv_cache,
                 sdpa_params: &self.sdpa_params,
-                flash_params: ctx.flash_params(),
+                flash_params: flash.unwrap_or(ctx.flash_params()),
             }
             .run(&q, &k, &v, attention_mask)?,
             None => Sdpa.run_attention(
@@ -559,7 +584,7 @@ impl AttentionBlock {
                 &k,
                 &v,
                 attention_mask,
-                Some(ctx.flash_params()),
+                Some(flash.unwrap_or(ctx.flash_params())),
                 &self.sdpa_params,
             )?,
         };
@@ -619,8 +644,8 @@ impl AttentionBlock {
                 QkNorm::BeforeRope => QK_NORM_BEFORE_ROPE,
                 QkNorm::AfterRope { q, k } => (*q, *k),
             };
-            uvb.pp(q).add(q_norm);
-            uvb.pp(k).add(k_norm);
+            q_norm.add_residual(&uvb.pp(q));
+            k_norm.add_residual(&uvb.pp(k));
         }
     }
 }
@@ -635,8 +660,9 @@ impl LayerAttention for AttentionBlock {
         kv_cache: Option<&mut KvCache>,
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
+        flash: Option<&FlashParams>,
     ) -> Result<Tensor> {
-        self.attend(xs, attention_mask, kv_cache, ctx, layer_idx)
+        self.attend(xs, attention_mask, kv_cache, ctx, layer_idx, flash)
     }
     fn sliding_window(&self) -> Option<usize> {
         self.sdpa_params.sliding_window
@@ -709,6 +735,21 @@ impl Norm {
             Self::Gemma(norm) => uvb.add(norm),
         }
     }
+
+    /// The weight the norm multiplies by, `1 + weight` for Gemma's.
+    fn weight(&self) -> &Tensor {
+        match self {
+            Self::Rms(norm) => norm.weight(),
+            Self::Gemma(norm) => norm.weight(),
+        }
+    }
+
+    fn eps(&self) -> f64 {
+        match self {
+            Self::Rms(norm) => norm.eps(),
+            Self::Gemma(norm) => norm.eps(),
+        }
+    }
 }
 
 /// A layer's norms under [`NormNames`]: pre-norm, or the sandwich with norms after attention and feed-forward too.
@@ -733,12 +774,13 @@ impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
         kv_cache: Option<&mut KvCache>,
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
+        flash: Option<&FlashParams>,
     ) -> Result<Tensor> {
         let residual = xs;
         let xs = self.norms.input.forward(xs)?;
         let xs = self
             .self_attn
-            .forward(&xs, attention_mask, kv_cache, ctx, layer_idx)?;
+            .forward(&xs, attention_mask, kv_cache, ctx, layer_idx, flash)?;
         let Some((post_attn, post_ffn)) = &self.norms.post else {
             let xs = (xs + residual)?;
             let residual = &xs;
@@ -756,6 +798,22 @@ impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
 pub struct LayerMasks {
     full: Option<DeviceMappedMask>,
     sliding: Option<DeviceMappedMask>,
+    flash: Option<FlashParams>,
+}
+
+impl LayerMasks {
+    /// Masks a model built itself, with the flash parameters they need when not the call's own.
+    pub fn new(
+        full: Option<DeviceMappedMask>,
+        sliding: Option<DeviceMappedMask>,
+        flash: Option<FlashParams>,
+    ) -> Self {
+        Self {
+            full,
+            sliding,
+            flash,
+        }
+    }
 }
 
 /// Embeddings, layers and final norm: the part a causal LM and an embedder share.
@@ -806,13 +864,19 @@ impl DecoderStack {
             normal_loading_metadata,
             attention_mechanism,
             |mapper, real_device| {
-                let ropes = crate::device_map::per_layer_device(
-                    mapper,
-                    spec.num_layers(),
-                    real_device,
-                    |device| spec.rope(&vb_rope, device, is_gptx, dtype),
-                )?;
-                Ok(StandardLayers { spec, ropes })
+                let ropes_of = |kind: &RopeKind| {
+                    crate::device_map::per_layer_device(
+                        mapper,
+                        spec.num_layers(),
+                        real_device,
+                        |device| spec.rope(kind, &vb_rope, device, is_gptx, dtype),
+                    )
+                };
+                Ok(StandardLayers {
+                    spec,
+                    ropes: ropes_of(&spec.rope)?,
+                    local_ropes: spec.local_rope.as_ref().map(ropes_of).transpose()?,
+                })
             },
         )
     }
@@ -967,6 +1031,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 .sliding_window
                 .map(|window| mask(Some(window)))
                 .transpose()?,
+            flash: None,
         })
     }
 
@@ -987,7 +1052,14 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
                 (None, None) => unreachable!("a stack has a full or a sliding layer"),
             };
             let kv_cache = cache.as_deref_mut().map(|cache| &mut cache[i]);
-            xs = layer.forward(&xs, &layer_mask.get(xs.device()), kv_cache, ctx, i)?;
+            xs = layer.forward(
+                &xs,
+                &layer_mask.get(xs.device()),
+                kv_cache,
+                ctx,
+                i,
+                masks.flash.as_ref(),
+            )?;
         }
         self.norm.forward(&xs.to_device(&self.device)?)
     }
@@ -1121,6 +1193,11 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         self.stack.embed(input_ids)
     }
 
+    /// The device mapper a model maps the masks it builds itself with.
+    pub fn stack_mapper(&self) -> &(dyn DeviceMapper + Send + Sync) {
+        &*self.stack.mapper
+    }
+
     pub fn embed_dtype(&self) -> DType {
         self.stack.dtype
     }
@@ -1136,14 +1213,27 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         xs: Tensor,
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
+        let masks = {
+            let cache = &self.cache.normal().0;
+            self.stack.masks(
+                input_ids,
+                xs.dtype(),
+                &ctx.mask_cache(cache),
+                ctx.is_first_prompt_chunk(),
+            )?
+        };
+        self.forward_with_masks(xs, &masks, ctx)
+    }
+
+    /// Runs the stack over `xs` with masks the model built itself.
+    pub fn forward_with_masks(
+        &self,
+        xs: Tensor,
+        masks: &LayerMasks,
+        ctx: &mut ModelForwardContext<'_>,
+    ) -> Result<Tensor> {
         let cache = &mut self.cache.normal().0;
-        let masks = self.stack.masks(
-            input_ids,
-            xs.dtype(),
-            &ctx.mask_cache(cache),
-            ctx.is_first_prompt_chunk(),
-        )?;
-        let xs = self.stack.forward(xs, &masks, Some(cache), ctx)?;
+        let xs = self.stack.forward(xs, masks, Some(cache), ctx)?;
         let xs = ctx.logits(&xs)?;
         let logits = ctx.lm_head(&*self.lm_head, &xs)?;
         match self.final_logit_softcap {

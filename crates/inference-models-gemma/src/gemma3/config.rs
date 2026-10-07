@@ -1,7 +1,7 @@
 use inference_quant::QuantizedConfig;
 
 use crate::{
-    layers::{Activation, Gemma3RopeScalingConfig, Gemma3RopeSpec},
+    layers::{Activation, Gemma3RopeScalingConfig},
     serde_default_fn,
     vision::siglip::SiglipVisionConfig,
 };
@@ -58,17 +58,6 @@ pub struct Gemma3TextConfig {
     #[serde(default = "sliding_window_pattern")]
     pub sliding_window_pattern: usize,
     pub rope_scaling: Option<Gemma3RopeScalingConfig>,
-}
-
-impl Gemma3TextConfig {
-    pub fn rope_spec(&self) -> Gemma3RopeSpec<'_> {
-        Gemma3RopeSpec {
-            rope_theta: self.rope_theta,
-            head_dim: self.head_dim,
-            max_position_embeddings: self.max_position_embeddings,
-            scaling: self.rope_scaling.as_ref(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

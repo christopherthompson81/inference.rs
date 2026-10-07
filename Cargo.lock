@@ -2412,6 +2412,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-api",
  "inference-macros",
+ "inference-models-gemma",
  "inference-models-llama",
  "inference-models-other",
  "inference-models-qwen",

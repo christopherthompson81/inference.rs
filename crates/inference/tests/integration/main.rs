@@ -3,6 +3,7 @@
 #![allow(clippy::duplicate_mod)]
 
 mod embedding_tiny;
+mod gemma3_tiny;
 mod gguf_iq;
 mod gguf_lora_tiny;
 mod llama_head_dim_tiny;

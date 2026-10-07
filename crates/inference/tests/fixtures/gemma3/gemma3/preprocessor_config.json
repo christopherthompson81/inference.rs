@@ -1,0 +1,24 @@
+{
+  "do_convert_rgb": true,
+  "do_normalize": true,
+  "do_rescale": true,
+  "do_resize": true,
+  "do_pan_and_scan": false,
+  "image_mean": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "image_std": [
+    0.5,
+    0.5,
+    0.5
+  ],
+  "rescale_factor": 0.00392156862745098,
+  "resample": 2,
+  "size": {
+    "height": 32,
+    "width": 32
+  },
+  "image_processor_type": "Gemma3ImageProcessor"
+}
