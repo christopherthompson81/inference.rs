@@ -1742,3 +1742,24 @@ unstripped bundle build (`nm -S --size-sort`), which the stripped bundle profile
 
 Value of the step is structural: one model shell, and an `F` slot that step 6 (MoE FFN on the shared attention:
 qwen3_moe, mixtral, phi3_5_moe, hunyuan_moe, gpt_oss) needs.
+
+## Run 50 - 2026-10-07 08:56
+
+Question: what does #324 step 3a (Gemma, Gemma 2 and GLM4 onto the shared decoder) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,803,952  105,718,064     -85,888
+.text                  55,562,914   55,490,146     -72,768
+```
+
+Raw finding: -86 KB for three stacks (~29 KB each), from 1,834 lines removed and 394 added. The decoder grew Gemma's
+`1 + weight` RMS norm (`NormKind`), named sandwich norms (`NormNames`, fused residual-add kernels for both
+kinds), attention and final-logit softcaps, a softmax scale, embedding scale, q/k/v and o bias, partial RoPE with
+its own pairing, the fused gate/up MLP, and per-layer packed-prefill support. Step 2's +48 KB is recovered.
+
+Pins: `gemma_dense_tests` (gemma, gemma2 with both softcaps and a sliding layer) and `glm4_tests` (sandwich,
+partial rotary, bias), recorded on the old code in the previous commit, pass unchanged.
+
+Next: #324 step 3b, Gemma 3 text (dual RoPE, Gemma q/k norm), its VL wrapper and EmbeddingGemma.

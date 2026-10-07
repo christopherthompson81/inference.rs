@@ -14,7 +14,7 @@ impl NormalModelLoader for Gemma2Loader {
         let cfg = crate::gemma2::Config::from_json(config)?;
 
         Ok(Box::new(crate::gemma2::Model::new(
-            &cfg,
+            &cfg.decoder_spec()?,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

@@ -134,6 +134,7 @@ impl Config {
             layer_windows: vec![self.sliding_window; self.num_hidden_layers],
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: self.quantization_config.clone(),
+            ..Default::default()
         })
     }
 }

@@ -13,7 +13,8 @@ pub use mla::{MlaAttention, MlaConfig, MlaKvLayout, mla_softmax_scale};
 use crate::model::NormalLoadingMetadata;
 use crate::{
     decoder::{
-        CausalLm, DecoderStack, LayerAttention, LayerBuilder, LayerFfn, LayerLoad, StackShape,
+        CausalLm, DecoderStack, LayerAttention, LayerBuilder, LayerFfn, LayerLoad, NormKind,
+        NormNames, StackShape,
     },
     device_map::DeviceMapper,
     layers::{Activation, Mlp},
@@ -414,6 +415,10 @@ pub fn new_family_model<T: FamilyAttention>(
         layer_windows: &layer_windows,
         tie_word_embeddings: cfg.tie_word_embeddings,
         quantization_config: &cfg.quantization_config,
+        norm: NormKind::Rms,
+        norm_names: NormNames::PRE,
+        embed_scale: None,
+        final_logit_softcap: None,
     };
     let loading_isq = normal_loading_metadata.loading_isq;
     let dtype = vb.dtype();
