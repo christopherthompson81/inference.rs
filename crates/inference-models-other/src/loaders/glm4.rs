@@ -14,7 +14,7 @@ impl NormalModelLoader for GLM4Loader {
         let cfg = crate::glm4::Config::from_json(config)?;
 
         Ok(Box::new(crate::glm4::Model::new(
-            &cfg,
+            &cfg.decoder_spec(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

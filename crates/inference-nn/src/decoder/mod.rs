@@ -15,9 +15,9 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
-        Activation, CausalMasker, Llama3RopeConfig, Llama3RopeSpec, Llama3RotaryEmbedding, Mlp,
-        RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding, embedding_with_legacy_tied_uqff,
-        masker::CausalMaskConfig, masker::PastKvLenCache,
+        Activation, CausalMasker, GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec,
+        Llama3RotaryEmbedding, Mlp, RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding,
+        embedding_with_legacy_tied_uqff, masker::CausalMaskConfig, masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
@@ -26,6 +26,8 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+const DEFAULT_ROPE_THETA: f32 = 10_000.0;
+const MERGED_GATE_UP_CHUNKS: usize = 2;
 // Llama 3 checkpoints may carry per-frequency rope factors under this name
 const ROPE_FREQS: &str = "rope_freqs.weight";
 const QK_NORM_BEFORE_ROPE: (&str, &str) = ("q_norm", "k_norm");
@@ -42,12 +44,58 @@ pub enum RopeKind {
     Default {
         theta: f32,
     },
+    /// RoPE over the first `rotary_dim` features of each head, with its own pairing whatever the loader's.
+    Partial {
+        theta: f32,
+        rotary_dim: usize,
+        is_gpt_neox: bool,
+    },
     /// Llama 3 or linear scaling, with the checkpoint's `rope_freqs.weight` factors when it has them.
     Llama3 {
         theta: f32,
         scaling: Option<Llama3RopeConfig>,
     },
     Yarn(YarnRopeConfig),
+}
+
+impl Default for RopeKind {
+    fn default() -> Self {
+        Self::Default {
+            theta: DEFAULT_ROPE_THETA,
+        }
+    }
+}
+
+/// The layer and final norms: RMS, or Gemma's RMS over `1 + weight`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum NormKind {
+    #[default]
+    Rms,
+    Gemma,
+}
+
+/// A layer's norm names: before attention and the feed-forward, and after both in a sandwich layer (Gemma 2, GLM4).
+#[derive(Clone, Copy, Debug)]
+pub struct NormNames {
+    pub input: &'static str,
+    pub pre_ffn: &'static str,
+    pub post_attn: Option<&'static str>,
+    pub post_ffn: Option<&'static str>,
+}
+
+impl NormNames {
+    pub const PRE: Self = Self {
+        input: "input_layernorm",
+        pre_ffn: "post_attention_layernorm",
+        post_attn: None,
+        post_ffn: None,
+    };
+}
+
+impl Default for NormNames {
+    fn default() -> Self {
+        Self::PRE
+    }
 }
 
 /// Per-head q/k RMS norm: fused into RoPE as `q_norm`/`k_norm`, or applied after it under the given names.
@@ -65,7 +113,7 @@ pub struct AttentionTemperature {
 }
 
 /// The shape and switches of one decoder stack; a model's config builds it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DecoderSpec {
     pub vocab_size: usize,
     pub hidden_size: usize,
@@ -86,6 +134,19 @@ pub struct DecoderSpec {
     pub layer_windows: Vec<Option<usize>>,
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
+    pub norm: NormKind,
+    pub norm_names: NormNames,
+    pub o_bias: bool,
+    /// `tanh(scores / cap) * cap` on the attention scores.
+    pub attn_softcap: Option<f32>,
+    /// The attention score scale; `1 / sqrt(head_dim)` when unset.
+    pub softmax_scale: Option<f32>,
+    /// `tanh(logits / cap) * cap` on the output logits.
+    pub final_logit_softcap: Option<f32>,
+    /// Multiplies the token embeddings, as Gemma scales them by `sqrt(hidden_size)`.
+    pub embed_scale: Option<f64>,
+    /// The MLP's gate and up projections are stored as one fused `gate_up_proj`.
+    pub merged_gate_up: bool,
 }
 
 impl DecoderSpec {
@@ -140,6 +201,18 @@ impl DecoderSpec {
                     .into_inner(),
                 )
             }
+            RopeKind::Partial {
+                theta,
+                rotary_dim,
+                is_gpt_neox,
+            } => RotaryEmbedding::new_partial(
+                *theta,
+                *rotary_dim,
+                self.max_position_embeddings,
+                device,
+                *is_gpt_neox,
+                dtype,
+            ),
             RopeKind::Yarn(yarn) => RotaryEmbedding::new_yarn(yarn, device, is_gptx, dtype),
         }
     }
@@ -152,6 +225,10 @@ impl DecoderSpec {
             layer_windows: &self.layer_windows,
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: &self.quantization_config,
+            norm: self.norm,
+            norm_names: self.norm_names,
+            embed_scale: self.embed_scale,
+            final_logit_softcap: self.final_logit_softcap,
         }
     }
 }
@@ -210,6 +287,11 @@ pub trait LayerAttention: Send + Sync {
     /// The window this layer slides over, which picks its mask.
     fn sliding_window(&self) -> Option<usize> {
         None
+    }
+
+    /// Whether the flash backend can run this layer's packed prefill.
+    fn supports_packed_prefill(&self) -> bool {
+        true
     }
 
     /// The tensors ISQ leaves alone, under `self_attn`.
@@ -276,6 +358,10 @@ pub struct StackShape<'a> {
     pub layer_windows: &'a [Option<usize>],
     pub tie_word_embeddings: bool,
     pub quantization_config: &'a Option<QuantizedConfig>,
+    pub norm: NormKind,
+    pub norm_names: NormNames,
+    pub embed_scale: Option<f64>,
+    pub final_logit_softcap: Option<f32>,
 }
 
 impl StackShape<'_> {
@@ -317,14 +403,26 @@ impl LayerBuilder for StandardLayers<'_> {
         };
         let attention =
             AttentionBlock::new(spec, load, place("self_attn"), rotary_emb, paged_attn)?;
-        let mlp = Mlp::new(
-            place("mlp"),
-            spec.hidden_size,
-            spec.intermediate_size,
-            &spec.quantization_config,
-            spec.hidden_act,
-            load.comm,
-        )?;
+        let mlp = if spec.merged_gate_up {
+            Mlp::new_merged(
+                place("mlp"),
+                spec.hidden_size,
+                spec.intermediate_size,
+                MERGED_GATE_UP_CHUNKS,
+                &spec.quantization_config,
+                spec.hidden_act,
+                load.comm,
+            )?
+        } else {
+            Mlp::new(
+                place("mlp"),
+                spec.hidden_size,
+                spec.intermediate_size,
+                &spec.quantization_config,
+                spec.hidden_act,
+                load.comm,
+            )?
+        };
         Ok((attention, Box::new(mlp)))
     }
 }
@@ -371,7 +469,7 @@ impl AttentionBlock {
             spec.num_heads * head_dim,
             hidden,
             qc,
-            false,
+            spec.o_bias,
             comm,
             mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
         )?;
@@ -410,8 +508,10 @@ impl AttentionBlock {
                     spec.num_heads,
                     comm,
                 )?,
-                softcap: None,
-                softmax_scale: 1.0 / (head_dim as f32).sqrt(),
+                softcap: spec.attn_softcap,
+                softmax_scale: spec
+                    .softmax_scale
+                    .unwrap_or_else(|| 1.0 / (head_dim as f32).sqrt()),
                 sliding_window: spec.layer_windows[layer_idx],
                 sinks: None,
                 chunk: None,
@@ -541,6 +641,10 @@ impl LayerAttention for AttentionBlock {
     fn sliding_window(&self) -> Option<usize> {
         self.sdpa_params.sliding_window
     }
+    fn supports_packed_prefill(&self) -> bool {
+        self.sdpa_params.softcap.is_none()
+            || crate::attention::flash_backend_supports(self.head_dim, true)
+    }
     fn add_residual(&self, uvb: &UnVarBuilder) {
         self.qk_norm_residual(uvb)
     }
@@ -552,12 +656,73 @@ impl LayerAttention for AttentionBlock {
     }
 }
 
-/// Pre-norm residual attention then feed-forward.
+/// One layer or final norm of the stack's [`NormKind`].
+pub enum Norm {
+    Rms(RmsNorm),
+    Gemma(GemmaRmsNorm),
+}
+
+impl Norm {
+    fn new(kind: NormKind, size: usize, eps: f64, vb: ShardedVarBuilder) -> Result<Self> {
+        Ok(match kind {
+            NormKind::Rms => Self::Rms(RmsNorm::new(size, eps, vb)?),
+            NormKind::Gemma => Self::Gemma(GemmaRmsNorm::new(size, eps, vb)?),
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Rms(norm) => norm.forward(xs),
+            Self::Gemma(norm) => norm.forward(xs),
+        }
+    }
+
+    /// `self(x) + residual`, fused.
+    fn forward_residual(&self, x: &Tensor, residual: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Rms(norm) => norm.forward_residual(x, residual),
+            Self::Gemma(norm) => norm.forward_residual(x, residual),
+        }
+    }
+
+    /// `self(x) + residual` and `next` of it, fused; both norms are of one kind.
+    fn forward_residual_then_norm(
+        &self,
+        x: &Tensor,
+        residual: &Tensor,
+        next: &Self,
+    ) -> Result<(Tensor, Tensor)> {
+        match (self, next) {
+            (Self::Rms(norm), Self::Rms(next)) => {
+                norm.forward_residual_then_rms_norm(x, residual, next)
+            }
+            (Self::Gemma(norm), Self::Gemma(next)) => {
+                norm.forward_residual_then_rms_norm(x, residual, next)
+            }
+            _ => unreachable!("a stack's norms share one kind"),
+        }
+    }
+
+    fn add_residual(&self, uvb: &UnVarBuilder) {
+        match self {
+            Self::Rms(norm) => uvb.add(norm),
+            Self::Gemma(norm) => uvb.add(norm),
+        }
+    }
+}
+
+/// A layer's norms under [`NormNames`]: pre-norm, or the sandwich with norms after attention and feed-forward too.
+struct LayerNorms {
+    input: Norm,
+    pre_ffn: Norm,
+    post: Option<(Norm, Norm)>,
+}
+
+/// Pre-norm residual attention then feed-forward, or the sandwich of Gemma 2 and GLM4.
 pub struct DecoderLayer<A, F> {
     pub self_attn: A,
     pub mlp: F,
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
+    norms: LayerNorms,
 }
 
 impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
@@ -570,16 +735,20 @@ impl<A: LayerAttention, F: LayerFfn> DecoderLayer<A, F> {
         layer_idx: usize,
     ) -> Result<Tensor> {
         let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
+        let xs = self.norms.input.forward(xs)?;
         let xs = self
             .self_attn
             .forward(&xs, attention_mask, kv_cache, ctx, layer_idx)?;
-        let xs = (xs + residual)?;
-        let residual = &xs;
-        let xs = self
-            .mlp
-            .forward(&xs.apply(&self.post_attention_layernorm)?)?;
-        residual + xs
+        let Some((post_attn, post_ffn)) = &self.norms.post else {
+            let xs = (xs + residual)?;
+            let residual = &xs;
+            let xs = self.mlp.forward(&self.norms.pre_ffn.forward(&xs)?)?;
+            return residual + xs;
+        };
+        let (xs, mlp_in) =
+            post_attn.forward_residual_then_norm(&xs, residual, &self.norms.pre_ffn)?;
+        let mlp_out = self.mlp.forward(&mlp_in)?;
+        post_ffn.forward_residual(&mlp_out, &xs)
     }
 }
 
@@ -593,7 +762,9 @@ pub struct LayerMasks {
 pub struct DecoderStack<A = AttentionBlock, F = Box<dyn MlpLayer>> {
     pub embed_tokens: Arc<dyn QuantMethod>,
     pub layers: Vec<DecoderLayer<A, F>>,
-    norm: RmsNorm,
+    norm: Norm,
+    norm_names: NormNames,
+    embed_scale: Option<f64>,
     dtype: DType,
     sliding_window: Option<usize>,
     has_full_layers: bool,
@@ -713,20 +884,31 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             let vb = vb_l.pp(layer_idx);
             let (self_attn, mlp) = builder.build(&load, vb.clone())?;
             let norm = |name| {
-                RmsNorm::new(
+                Norm::new(
+                    shape.norm,
                     shape.hidden_size,
                     shape.rms_norm_eps,
                     mapper.set_device(layer_idx, vb.pp(name), false),
                 )
             };
+            let names = shape.norm_names;
+            let post = match (names.post_attn, names.post_ffn) {
+                (Some(post_attn), Some(post_ffn)) => Some((norm(post_attn)?, norm(post_ffn)?)),
+                (None, None) => None,
+                _ => inference_tensor::bail!("a sandwich layer names both post norms"),
+            };
             Ok(DecoderLayer {
                 self_attn,
                 mlp,
-                input_layernorm: norm("input_layernorm")?,
-                post_attention_layernorm: norm("post_attention_layernorm")?,
+                norms: LayerNorms {
+                    input: norm(names.input)?,
+                    pre_ffn: norm(names.pre_ffn)?,
+                    post,
+                },
             })
         })?;
-        let norm = RmsNorm::new(
+        let norm = Norm::new(
+            shape.norm,
             shape.hidden_size,
             shape.rms_norm_eps,
             mapper.set_nm_device(vb_m.pp("norm"), false),
@@ -735,6 +917,8 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             embed_tokens,
             layers,
             norm,
+            norm_names: shape.norm_names,
+            embed_scale: shape.embed_scale,
             dtype,
             sliding_window: shape.sliding_window(),
             has_full_layers: shape.layer_windows.iter().any(Option::is_none),
@@ -744,7 +928,11 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
     }
 
     pub fn embed(&self, input_ids: &Tensor) -> Result<Tensor> {
-        self.embed_tokens.embedding_forward(input_ids, self.dtype)
+        let xs = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
+        match self.embed_scale {
+            Some(scale) => xs * scale,
+            None => Ok(xs),
+        }
     }
 
     /// The full mask, and the sliding one when a layer slides, for this call's tokens after `past`.
@@ -801,19 +989,24 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             let kv_cache = cache.as_deref_mut().map(|cache| &mut cache[i]);
             xs = layer.forward(&xs, &layer_mask.get(xs.device()), kv_cache, ctx, i)?;
         }
-        xs.to_device(&self.device)?.apply(&self.norm)
+        self.norm.forward(&xs.to_device(&self.device)?)
     }
 
     /// The tensors ISQ leaves alone, under the stack's own prefix; `with_projections` for MoE-experts-only ISQ.
     pub fn residual_uvb(&self, uvb_m: &UnVarBuilder, with_projections: bool) {
         uvb_m.pp("embed_tokens").add(&self.embed_tokens);
-        uvb_m.pp("norm").add(&self.norm);
+        self.norm.add_residual(&uvb_m.pp("norm"));
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let uvb_l = uvb_m.pp("layers").pp(layer_idx);
-            uvb_l.pp("input_layernorm").add(&layer.input_layernorm);
-            uvb_l
-                .pp("post_attention_layernorm")
-                .add(&layer.post_attention_layernorm);
+            let names = self.norm_names;
+            layer.norms.input.add_residual(&uvb_l.pp(names.input));
+            layer.norms.pre_ffn.add_residual(&uvb_l.pp(names.pre_ffn));
+            if let (Some((post_attn, post_ffn)), Some(attn_name), Some(ffn_name)) =
+                (&layer.norms.post, names.post_attn, names.post_ffn)
+            {
+                post_attn.add_residual(&uvb_l.pp(attn_name));
+                post_ffn.add_residual(&uvb_l.pp(ffn_name));
+            }
             layer.self_attn.add_residual(&uvb_l.pp("self_attn"));
             layer.mlp.add_residual(&uvb_l.pp("mlp"));
             if with_projections {
@@ -827,6 +1020,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
 pub struct CausalLm<A = AttentionBlock, F = Box<dyn MlpLayer>> {
     stack: DecoderStack<A, F>,
     lm_head: Arc<dyn QuantMethod>,
+    final_logit_softcap: Option<f32>,
     cache: EitherCache,
     max_seq_len: usize,
     cfg: ModelConfigMetadata,
@@ -916,6 +1110,7 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         Ok(Self {
             stack,
             lm_head,
+            final_logit_softcap: shape.final_logit_softcap,
             cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: max_position_embeddings,
             cfg,
@@ -950,7 +1145,11 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
         )?;
         let xs = self.stack.forward(xs, &masks, Some(cache), ctx)?;
         let xs = ctx.logits(&xs)?;
-        ctx.lm_head(&*self.lm_head, &xs)
+        let logits = ctx.lm_head(&*self.lm_head, &xs)?;
+        match self.final_logit_softcap {
+            Some(cap) => inference_quant::softcap(&logits, cap)?.to_dtype(logits.dtype()),
+            None => Ok(logits),
+        }
     }
 
     /// The tensors ISQ leaves alone, under `uvb_m`, the stack's prefix.
@@ -994,7 +1193,10 @@ impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
         &self.cfg
     }
     fn supports_packed_prefill(&self) -> bool {
-        true
+        self.stack
+            .layers
+            .iter()
+            .all(|layer| layer.self_attn.supports_packed_prefill())
     }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
@@ -1066,6 +1268,7 @@ mod tests {
             layer_windows: vec![None, Some(WINDOW), None],
             tie_word_embeddings: false,
             quantization_config: None,
+            ..Default::default()
         };
         let types = cache_types(&spec.layer_windows, spec.max_position_embeddings);
         assert!(matches!(

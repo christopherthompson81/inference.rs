@@ -89,6 +89,7 @@ impl Config {
             layer_windows: self.layer_sliding_windows()?,
             tie_word_embeddings: self.tie_word_embeddings,
             quantization_config: self.quantization_config.clone(),
+            ..Default::default()
         })
     }
 
