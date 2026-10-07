@@ -50,80 +50,6 @@ impl CustomOp1 for Fp8ToDtype {
         Ok((output, input_l.shape().clone()))
     }
 
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        input_s: &candle_core::CudaStorage,
-        input_l: &candle_core::Layout,
-    ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::{CudaStorage, backend::BackendStorage};
-        use half::{bf16, f16};
-
-        use crate::utils::slice_ptr;
-
-        if !super::ffi::HAVE_SCALAR_FP8_KERNELS {
-            candle_core::bail!("Do not have scalar FP8 kernels.");
-        }
-
-        if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
-        }
-
-        let dev = input_s.device();
-        let num_elements = input_l.shape().elem_count();
-
-        let (input, _input_guard) =
-            slice_ptr(input_s.as_cuda_slice::<F8E4M3>()?, input_l.start_offset());
-
-        let res = match self.target_dtype {
-            DType::F32 => {
-                let output = dev.alloc_zeros::<f32>(num_elements)?;
-                let (output_ptr, output_guard) = slice_ptr(&output, 0);
-                unsafe {
-                    super::ffi::launch_fp8_to_f32_kernel(
-                        input as *const _,
-                        output_ptr as *mut _,
-                        num_elements,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-                drop(output_guard);
-                CudaStorage::wrap_cuda_slice(output, dev.clone())
-            }
-            DType::F16 => {
-                let output = dev.alloc_zeros::<f16>(num_elements)?;
-                let (output_ptr, output_guard) = slice_ptr(&output, 0);
-                unsafe {
-                    super::ffi::launch_fp8_to_f16_kernel(
-                        input as *const _,
-                        output_ptr as *mut _,
-                        num_elements,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-                drop(output_guard);
-                CudaStorage::wrap_cuda_slice(output, dev.clone())
-            }
-            DType::BF16 => {
-                let output = dev.alloc_zeros::<bf16>(num_elements)?;
-                let (output_ptr, output_guard) = slice_ptr(&output, 0);
-                unsafe {
-                    super::ffi::launch_fp8_to_bf16_kernel(
-                        input as *const _,
-                        output_ptr as *mut _,
-                        num_elements,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-                drop(output_guard);
-                CudaStorage::wrap_cuda_slice(output, dev.clone())
-            }
-            other => candle_core::bail!("Unsupported target dtype for FP8 conversion: {other:?}"),
-        };
-
-        Ok((res, input_l.shape().clone()))
-    }
-
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
@@ -213,76 +139,6 @@ impl CustomOp1 for DtypeToFp8 {
         Ok((output, input_l.shape().clone()))
     }
 
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        input_s: &candle_core::CudaStorage,
-        input_l: &candle_core::Layout,
-    ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::{CudaStorage, backend::BackendStorage};
-        use half::{bf16, f16};
-
-        use crate::utils::slice_ptr;
-
-        if !super::ffi::HAVE_SCALAR_FP8_KERNELS {
-            candle_core::bail!("Do not have scalar FP8 kernels.");
-        }
-
-        if input_l.start_offset() != 0 || !input_l.is_contiguous() {
-            candle_core::bail!("Expected input to have start offset 0, continuous");
-        }
-
-        let dev = input_s.device();
-        let num_elements = input_l.shape().elem_count();
-
-        let output = dev.alloc_zeros::<F8E4M3>(num_elements)?;
-        let (output_ptr, output_guard) = slice_ptr(&output, 0);
-
-        match self.source_dtype {
-            DType::F32 => {
-                let (input, _input_guard) =
-                    slice_ptr(input_s.as_cuda_slice::<f32>()?, input_l.start_offset());
-                unsafe {
-                    super::ffi::launch_f32_to_fp8_kernel(
-                        input as *const _,
-                        output_ptr as *mut _,
-                        num_elements,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-            }
-            DType::F16 => {
-                let (input, _input_guard) =
-                    slice_ptr(input_s.as_cuda_slice::<f16>()?, input_l.start_offset());
-                unsafe {
-                    super::ffi::launch_f16_to_fp8_kernel(
-                        input as *const _,
-                        output_ptr as *mut _,
-                        num_elements,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-            }
-            DType::BF16 => {
-                let (input, _input_guard) =
-                    slice_ptr(input_s.as_cuda_slice::<bf16>()?, input_l.start_offset());
-                unsafe {
-                    super::ffi::launch_bf16_to_fp8_kernel(
-                        input as *const _,
-                        output_ptr as *mut _,
-                        num_elements,
-                        dev.cuda_stream().cu_stream(),
-                    );
-                }
-            }
-            other => candle_core::bail!("Unsupported source dtype for FP8 conversion: {other:?}"),
-        }
-
-        drop(output_guard);
-        let res = CudaStorage::wrap_cuda_slice(output, dev.clone());
-        Ok((res, input_l.shape().clone()))
-    }
-
     #[cfg(feature = "metal")]
     fn metal_fwd(
         &self,
@@ -326,6 +182,10 @@ pub(crate) fn fp8_to_dtype(input: &Tensor, target_dtype: DType) -> Result<Tensor
     if input.dtype() != DType::F8E4M3 {
         candle_core::bail!("Input tensor must be F8E4M3, got {:?}", input.dtype());
     }
+    // candle's CUDA cast is the CUDA conversion; the op below covers CPU and Metal
+    if input.device().is_cuda() {
+        return input.to_dtype(target_dtype);
+    }
     input.apply_op1_no_bwd(&Fp8ToDtype { target_dtype })
 }
 
@@ -338,5 +198,74 @@ pub(crate) fn dtype_to_fp8(input: &Tensor) -> Result<Tensor> {
             source_dtype
         );
     }
+    if input.device().is_cuda() {
+        return input.to_dtype(DType::F8E4M3);
+    }
     input.apply_op1_no_bwd(&DtypeToFp8 { source_dtype })
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use candle_core::{DType, Device, IndexOp, Result, Tensor};
+    use float8::F8E4M3;
+
+    fn bits(t: &Tensor) -> Result<Vec<Vec<u8>>> {
+        let rows = t.to_device(&Device::Cpu)?.to_vec2::<F8E4M3>()?;
+        Ok(rows
+            .into_iter()
+            .map(|row| row.iter().map(F8E4M3::to_bits).collect())
+            .collect())
+    }
+
+    #[test]
+    fn cuda_fp8_casts_match_the_cpu_bit_for_bit() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        // spans subnormals, signed zeros, the rounding grid and both saturation edges (448 is E4M3's largest finite)
+        let values = Tensor::arange(0f32, 2048f32, &Device::Cpu)?
+            .affine(0.37, -380.0)?
+            .reshape((32, 64))?;
+        let mut edges = vec![
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            448.0,
+            -448.0,
+            464.0,
+            -1e-9,
+        ];
+        edges.resize(64, 1.0);
+        let edges = Tensor::from_vec(edges, (1, 64), &Device::Cpu)?;
+        let values = Tensor::cat(&[&values, &(&values * 1e-3)?, &(&values * 3.0)?, &edges], 0)?;
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let cpu = values.to_dtype(dtype)?;
+            let expected = super::dtype_to_fp8(&cpu)?;
+            let actual = super::dtype_to_fp8(&cpu.to_device(&device)?)?;
+            assert_eq!(bits(&actual)?, bits(&expected)?, "{dtype:?} to fp8");
+            let back = super::fp8_to_dtype(&expected.to_device(&device)?, dtype)?;
+            assert_eq!(back.dtype(), dtype);
+            assert_eq!(
+                back.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+                super::fp8_to_dtype(&expected, dtype)?
+                    .to_dtype(DType::F32)?
+                    .to_vec2::<f32>()?,
+                "fp8 to {dtype:?}"
+            );
+            // a strided FP8 CUDA view copies to contiguous
+            let fp8 = expected.to_device(&device)?.t()?.contiguous()?;
+            assert_eq!(bits(&fp8)?, bits(&expected.t()?.contiguous()?)?);
+            // a strided CUDA view converts too
+            let strided = super::dtype_to_fp8(&cpu.to_device(&device)?.t()?)?;
+            assert_eq!(
+                bits(&strided.i((.., 0..1))?.t()?.contiguous()?)?,
+                bits(&expected.i(0..1)?)?
+            );
+        }
+        let nan = Tensor::new(&[[f32::NAN, -f32::NAN]], &device)?;
+        let nan = super::dtype_to_fp8(&nan)?
+            .to_dtype(DType::F32)?
+            .to_vec2::<f32>()?;
+        assert!(nan[0].iter().all(|v| v.is_nan()), "{nan:?}");
+        Ok(())
+    }
 }

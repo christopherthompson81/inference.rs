@@ -1310,3 +1310,34 @@ to 8192 ids (both kernels are unstable). Candle's decode path would have failed 
 shared memory); those rows now take the global kernel. Test now also covers i64 and f64 on both kernels.
 
 No Metal change: `ArgSortOp` delegates to candle off CUDA, which is what these callers ran before.
+
+## Run 35 - 2026-10-06 18:01
+
+#270 step 1, FP8 casts and activation quantizers (Run 27 row 7), the last inventory item.
+
+Casts. inference-quant's `scalar_fp8` carried its own CUDA E4M3 cast kernels beside candle's `cast.cu` ones. The
+reason became clear on the first test run: candle's never loaded. candle-core names a dtype's kernels with
+`DType::as_str()` (`f8e4m3`) while candle-kernels defines every E4M3 kernel as `*_f8_e4m3`, so
+`Tensor::to_dtype(F8E4M3)` (and E4M3 binary/comparison ops) on CUDA failed with "named symbol not found", and the
+strided E4M3 copy asked for `ucopy_f8e4m3` (`ucopy_f8_e4m3` exists, but for sm89+ only). Fixed in candle-core (`kernel_dtype`, and
+the strided copy runs `ucopy_u8`); `fp8_to_dtype`/`dtype_to_fp8` now take candle's cast on CUDA and the
+`scalar_fp8` CUDA kernels, FFI and `has_scalar_fp8_kernels` cfg are deleted (CPU and Metal keep their ops).
+
+Numerics: the old CUDA path clamped to +-448 and converted f32 -> f16 -> E4M3 (two roundings); candle's converts
+f32 -> E4M3 once with SATFINITE, as the CPU op does after its clamp. `cuda_fp8_casts_match_the_cpu_bit_for_bit`
+pins f32/f16/bf16 both ways on raw E4M3 bits over subnormals, signed zeros, the rounding grid, both saturation edges
+and +-inf (448 on both sides), NaN staying NaN, plus strided reads and a strided E4M3 copy. Below sm80 the cast now
+reports a missing kernel instead of "no scalar FP8 kernels"; a multi-arch build with an sm75 floor no longer turns
+FP8 casts off for its sm80+ devices. The existing `test_roundtrip_f8e4m3` failed on the first run for the same naming reason.
+
+Activation quantizers: not folded. The sm86 MMA path's `inference_fp8_mma_quantize_bf16` and the sm90 CUTLASS
+`inference_fp8_quantize_activation_*` both do 128-wide per-token-group E4M3 quantization, but the sm90 one writes
+column-major scales, takes f16, uses programmatic dependent launch, and seeds its amax with an epsilon where the MMA
+one floors the scale; it only builds for sm90, which this machine cannot run. Folding it would change Hopper
+numerics and launch overlap blind. The row-wise and static quantizers in `blockwise_fp8.cu` are different
+granularities, and the fused GLU/RMSNorm quantizers stay fused.
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2791 + 2406)
+local_ci.sh --size-update  -> file 107,424,456 -> 107,413,808 bytes (-10.6 KB)
+```

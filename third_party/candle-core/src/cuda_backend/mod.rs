@@ -128,8 +128,16 @@ impl Map1 for Clone {
 }
 
 pub fn kernel_name<T: WithDType>(root: &str) -> String {
-    let dtype = T::DTYPE.as_str();
+    let dtype = kernel_dtype(T::DTYPE);
     format!("{root}_{dtype}")
+}
+
+/// A dtype as candle-kernels spells it in kernel names: `f8_e4m3` where `DType::as_str` says `f8e4m3`.
+fn kernel_dtype(dtype: DType) -> &'static str {
+    match dtype {
+        DType::F8E4M3 => "f8_e4m3",
+        dtype => dtype.as_str(),
+    }
 }
 
 struct Affine(f64, f64);
@@ -1590,7 +1598,7 @@ impl BackendStorage for CudaStorage {
         };
         let inp = &inp;
 
-        let kernel_name = format!("cast_{}_{}", self.dtype().as_str(), dtype.as_str());
+        let kernel_name = format!("cast_{}_{}", kernel_dtype(self.dtype()), kernel_dtype(dtype));
         let func = dev.get_or_load_func(&kernel_name, &kernels::CAST)?;
         let slice = match dtype {
             DType::U8 => {
@@ -2511,7 +2519,8 @@ impl BackendStorage for CudaStorage {
                 if src_l.is_contiguous() {
                     dev.memcpy_dtod(&src, &mut dst)?
                 } else {
-                    let func = dev.get_or_load_func("ucopy_f8e4m3", &kernels::UNARY)?;
+                    // a byte copy: ucopy_f8_e4m3 is built for sm89+ only, the f8 casts from sm80
+                    let func = dev.get_or_load_func("ucopy_u8", &kernels::UNARY)?;
                     let mut builder = func.builder();
                     barg!(builder, el_count);
                     barg!(builder, dims.len());

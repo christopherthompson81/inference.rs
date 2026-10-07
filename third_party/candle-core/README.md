@@ -22,6 +22,9 @@
 >   `tokenizers` dependency) and `src/cuda_backend/cutile.rs` (and the `cutile` feature and dependency).
 > - `src/cpu/erf.rs`: drops `use std::f64;`, which made `f64::INFINITY` resolve to the module constants that Rust 1.99
 >   deprecates (a path dependency's lints are not capped like a git dependency's).
+> - `src/cuda_backend/mod.rs`: kernel names spell F8E4M3 `f8_e4m3`, as candle-kernels defines them (upstream asked for
+>   `f8e4m3`, so every F8E4M3 cast, binary and comparison kernel failed to load), and a strided F8E4M3 copy runs
+>   `ucopy_u8` (`ucopy_f8_e4m3` is sm89+ only, the casts sm80+).
 > - `src/sort.rs`: the CUDA arm of `arg_sort_last_dim`/`sort_last_dim` is removed with candle-kernels' `sort.cu`;
 >   inference-nn's `ArgSortOp` sorts on CUDA.
 >
