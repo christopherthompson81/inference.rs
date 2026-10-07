@@ -297,32 +297,3 @@ impl crate::nn::ModuleT for BatchNorm {
         }
     }
 }
-
-pub fn batch_norm<C: Into<BatchNormConfig>>(
-    num_features: usize,
-    config: C,
-    vb: crate::nn::VarBuilder,
-) -> Result<BatchNorm> {
-    use crate::nn::Init;
-    let config = config.into();
-    if config.eps < 0. {
-        crate::bail!("batch-norm eps cannot be negative {}", config.eps)
-    }
-    let running_mean = vb.get_with_hints(num_features, "running_mean", Init::Const(0.))?;
-    let running_var = vb.get_with_hints(num_features, "running_var", Init::Const(1.))?;
-    let weight_and_bias = if config.affine {
-        let weight = vb.get_with_hints(num_features, "weight", Init::Const(1.))?;
-        let bias = vb.get_with_hints(num_features, "bias", Init::Const(0.))?;
-        Some((weight, bias))
-    } else {
-        None
-    };
-    Ok(BatchNorm {
-        running_mean: Var::from_tensor(&running_mean)?,
-        running_var: Var::from_tensor(&running_var)?,
-        weight_and_bias,
-        remove_mean: config.remove_mean,
-        eps: config.eps,
-        momentum: config.momentum,
-    })
-}

@@ -1449,3 +1449,28 @@ local_ci.sh --size-update  -> file -8.4 KB (.rodata -6.7 KB, .nv_fatbin unchange
 
 Next slices: dead Rust types/modules (Tier A), then Tensor methods with their op chains (argmin, ceil,
 upsample_nearest1d, which take the fast_argmin and uceil kernels with them).
+
+## Run 40 - 2026-10-06 21:47
+
+#270 step 5, usage-scan trims, second slice: whole types and modules of inference-tensor with no reachable use
+(Run 39's scan, Tier A). Each name was re-checked by path before deletion, since many collide with our own crates'
+functions (inference-quant's `linear_b`/`linear_no_bias`, Tensor's `conv_transpose1d`), and the compiler had the
+final say on CPU and CUDA; Metal-gated files were grepped for every removed name.
+
+- `cpu/erf.rs`: only the two libm wrappers stay (the statrs `erf_inv`/`erfc` port and its tables go).
+- `npy.rs`: only `write_npy` (diffusion_gemma's debug dumps) and what it needs; the npy/npz readers,
+  `write_npz`, `NpzTensors` go.
+- `safetensors.rs`: `SliceSafetensors`, `BufferedSafetensors`, the memory-mapped file wrapper, `Tensor::save_safetensors`, and
+  `VarBuilder::from_varmap`/`from_buffered_safetensors`/`from_slice_safetensors` with their backends.
+- `nn`: `PReLU`, `ConvTranspose2d` and `Conv2d::absorb_bn`, the builder functions only the re-export named
+  (`batch_norm`, `conv1d*`, `conv2d_no_bias`, `conv_transpose*`, `group_norm`, `linear_b`,
+  `linear_no_bias`, `layer_norm_no_bias`), `nn::RmsNorm` and its builder (inference-nn's `RmsNorm` is the one),
+  `selu`, `pixel_(un)shuffle`, `replication_pad2d`, `Identity`.
+- `display.rs`: the printer-option setters (the formatter reads the static directly).
+
+```
+13 files, -1,365 / +11 lines
+local_ci.sh --size-update  -> file -6 KB (most of this code was generic or never monomorphized)
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2828 + 2443; the two removed tests
+                                                                       covered npy parsing and save_safetensors)
+```

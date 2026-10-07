@@ -389,66 +389,6 @@ impl SimpleBackend for crate::safetensors::MmapedSafetensors {
     }
 }
 
-impl SimpleBackend for crate::safetensors::BufferedSafetensors {
-    fn get(
-        &self,
-        s: Shape,
-        name: &str,
-        _: crate::nn::Init,
-        dtype: DType,
-        dev: &Device,
-    ) -> Result<Tensor> {
-        let tensor = self.load(name, dev)?.to_dtype(dtype)?;
-        if tensor.shape() != &s {
-            Err(crate::Error::UnexpectedShape {
-                msg: format!("shape mismatch for {name}"),
-                expected: s,
-                got: tensor.shape().clone(),
-            }
-            .bt())?
-        }
-        Ok(tensor)
-    }
-
-    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> Result<Tensor> {
-        self.load(name, dev)?.to_dtype(dtype)
-    }
-
-    fn contains_tensor(&self, name: &str) -> bool {
-        self.get(name).is_ok()
-    }
-}
-
-impl SimpleBackend for crate::safetensors::SliceSafetensors<'_> {
-    fn get(
-        &self,
-        s: Shape,
-        name: &str,
-        _: crate::nn::Init,
-        dtype: DType,
-        dev: &Device,
-    ) -> Result<Tensor> {
-        let tensor = self.load(name, dev)?.to_dtype(dtype)?;
-        if tensor.shape() != &s {
-            Err(crate::Error::UnexpectedShape {
-                msg: format!("shape mismatch for {name}"),
-                expected: s,
-                got: tensor.shape().clone(),
-            }
-            .bt())?
-        }
-        Ok(tensor)
-    }
-
-    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> Result<Tensor> {
-        self.load(name, dev)?.to_dtype(dtype)
-    }
-
-    fn contains_tensor(&self, name: &str) -> bool {
-        self.get(name).is_ok()
-    }
-}
-
 impl<'a> VarBuilder<'a> {
     /// Initializes a `VarBuilder` using a custom backend.
     ///
@@ -484,16 +424,6 @@ impl<'a> VarBuilder<'a> {
         Self::from_backend(Box::new(ts), dtype, dev.clone())
     }
 
-    /// Initializes a `VarBuilder` using a `VarMap`. The requested tensors are created and
-    /// initialized on new paths, the same tensor is used if the same path is requested multiple
-    /// times. This is commonly used when initializing a model before training.
-    ///
-    /// Note that it is possible to load the tensor values after model creation using the `load`
-    /// method on `varmap`, this can be used to start model training from an existing checkpoint.
-    pub fn from_varmap(varmap: &VarMap, dtype: DType, dev: &Device) -> Self {
-        Self::from_backend(Box::new(varmap.clone()), dtype, dev.clone())
-    }
-
     /// Initializes a `VarBuilder` that retrieves tensors stored in a collection of safetensors
     /// files.
     ///
@@ -506,18 +436,6 @@ impl<'a> VarBuilder<'a> {
         dev: &Device,
     ) -> Result<Self> {
         let tensors = crate::safetensors::MmapedSafetensors::multi(paths)?;
-        Ok(Self::from_backend(Box::new(tensors), dtype, dev.clone()))
-    }
-
-    /// Initializes a `VarBuilder` from a binary buffer in the safetensor format.
-    pub fn from_buffered_safetensors(data: Vec<u8>, dtype: DType, dev: &Device) -> Result<Self> {
-        let tensors = crate::safetensors::BufferedSafetensors::new(data)?;
-        Ok(Self::from_backend(Box::new(tensors), dtype, dev.clone()))
-    }
-
-    /// Initializes a `VarBuilder` from a binary slice in the safetensor format.
-    pub fn from_slice_safetensors(data: &'a [u8], dtype: DType, dev: &Device) -> Result<Self> {
-        let tensors = crate::safetensors::SliceSafetensors::new(data)?;
         Ok(Self::from_backend(Box::new(tensors), dtype, dev.clone()))
     }
 }
