@@ -291,7 +291,7 @@ unsafe extern "C" {
         stream: *mut c_void,
     );
 
-    // ============== Grouped MoE dispatch and GEMM ==============
+    // Grouped MoE dispatch and GEMM
 
     /// Build expert dispatch tables on GPU: expert_bounds + sorted_token_ids
     pub fn launch_moe_dispatch(
@@ -347,7 +347,7 @@ unsafe extern "C" {
         stream: *mut c_void,
     ) -> i32;
 
-    // ============== Fused MoE decode kernels ==============
+    // Fused MoE decode kernels
 
     // Fused gate+up+activation+multiply launchers
     // All share the same signature: (gate_weights, up_weights, inputs_q8_1,
@@ -1318,7 +1318,7 @@ unsafe extern "C" {
         stream: *mut c_void,
     );
 
-    // ---- MMQ (prompt) kernels ----
+    // MMQ (prompt) kernels
 
     // MMQ quantize launchers (f32 -> block_q8_1_mmq)
     pub fn launch_mmq_quantize_q8_1_D4(

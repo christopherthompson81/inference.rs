@@ -205,7 +205,7 @@ impl DecoderMlp {
 
 /// Adaptive RMS normalization with time conditioning.
 /// Applies: `ffn_norm(x) * (1 + ada_norm_mlp(t_cond))`
-/// MLP: Linear(dim→t_cond_dim) → GELU → Linear(t_cond_dim→dim)
+/// MLP: Linear(dim->t_cond_dim) -> GELU -> Linear(t_cond_dim->dim)
 struct AdaptiveNorm {
     w0: Arc<dyn QuantMethod>,
     w2: Arc<dyn QuantMethod>,

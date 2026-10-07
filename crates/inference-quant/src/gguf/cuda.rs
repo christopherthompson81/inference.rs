@@ -573,7 +573,7 @@ pub fn qmatmul_indexed_moe_forward(qmatmul: &QMatMul, x: &Tensor, ids: &Tensor) 
     }
 }
 
-// ============== Grouped MoE (prefill-optimized) ==============
+// Grouped MoE (prefill-optimized)
 
 /// Build expert dispatch tables on GPU using u32 buffers.
 ///
@@ -1340,7 +1340,7 @@ impl<'a> IndexedMoeLoraDecode<'a> {
 pub const ACT_GELU_PYTORCH_TANH: i32 = 0;
 pub const ACT_SILU: i32 = 1;
 
-/// Perform fused MoE decode: gate+up+activation → quantize → down+aggregate.
+/// Perform fused MoE decode: gate+up+activation -> quantize -> down+aggregate.
 ///
 /// This fuses the entire MoE decode into 4 kernel launches:
 ///   1. quantize input to Q8_1

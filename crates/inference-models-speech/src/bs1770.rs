@@ -167,9 +167,9 @@ impl Sum {
 /// units are logarithmic. `loudness_lkfs` and `from_lkfs` convert between power,
 /// and K-weighted Loudness Units relative to nominal Full Scale (LKFS).
 ///
-/// The term “LKFS” (Loudness Units, K-Weighted, relative to nominal Full Scale)
+/// The term "LKFS" (Loudness Units, K-Weighted, relative to nominal Full Scale)
 /// is used in BS.1770-4 to emphasize K-weighting, but the term is otherwise
-/// interchangeable with the more widespread term “LUFS” (Loudness Units,
+/// interchangeable with the more widespread term "LUFS" (Loudness Units,
 /// relative to Full Scale). Loudness units are related to decibels in the
 /// following sense: boosting a signal that has a loudness of
 /// -<var>L<sub>K</sub></var> LUFS by <var>L<sub>K</sub></var> dB (by
@@ -181,7 +181,7 @@ impl Sum {
 /// be less loud than the same amount of power in higher frequencies. In this
 /// library the `Power` type is used exclusively to refer to power after applying K-weighting.
 ///
-/// The nominal “full scale” is the range [-1.0, 1.0]. Because the power is the
+/// The nominal "full scale" is the range [-1.0, 1.0]. Because the power is the
 /// mean square of the samples, if no input samples exceeded the full scale, the
 /// power will be in the range [0.0, 1.0]. However, the power delivered by
 /// multiple channels, which is a weighted sum over individual channel powers,

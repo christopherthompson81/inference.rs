@@ -782,10 +782,6 @@ impl Sequence {
         &mut self.normal_cache
     }
 
-    pub fn normal_cache_ref(&self) -> &[Option<KvCache>] {
-        &self.normal_cache
-    }
-
     pub fn normal_draft_cache(&mut self) -> &mut Vec<Option<KvCache>> {
         &mut self.normal_draft_cache
     }
@@ -1232,10 +1228,6 @@ impl Sequence {
 
     pub fn prompt_timestamp(&self) -> Option<u128> {
         self.prompt_timestamp
-    }
-
-    pub fn set_step_start_instant(&mut self) {
-        self.start_prompt_timing();
     }
 
     pub(crate) fn start_prompt_timing(&mut self) {

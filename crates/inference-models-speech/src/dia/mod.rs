@@ -231,7 +231,7 @@ impl DiaPipeline {
             let mut argsort_indices: Vec<usize> = (0..probs.len()).collect();
             argsort_indices.sort_unstable_by(|&i, &j| probs[j].partial_cmp(&probs[i]).unwrap());
 
-            // ---- Mask out EOS unless it is the highest ----
+            // Mask out EOS unless it is the highest
             if !argsort_indices.is_empty() && argsort_indices[0] != audio_eos_value {
                 probs[audio_eos_value] = 0.0;
             }

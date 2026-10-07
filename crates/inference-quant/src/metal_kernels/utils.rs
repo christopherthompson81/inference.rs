@@ -90,16 +90,16 @@ pub(crate) fn get_2d_grid_dims_divisor(
     }
 }
 
-/// Choose a 3‑D thread‑group size whose total thread count is a power‑of‑two
-/// (default 2¹⁰ = 1024) while staying within the extents of each dimension.
+/// Choose a 3-D thread-group size whose total thread count is a power-of-two
+/// (default 2^10 = 1024) while staying within the extents of each dimension.
 ///
-/// This is a direct port of MLX’s `get_block_dims` helper used by the copy
+/// This is a direct port of MLX's `get_block_dims` helper used by the copy
 /// kernels.
 ///
-/// * `dim0`, `dim1`, `dim2` – logical extents of the tensor “tile” in each
+/// * `dim0`, `dim1`, `dim2` - logical extents of the tensor "tile" in each
 ///   dimension (with `dim0` varying fastest).
-/// * `pow2` – desired power‑of‑two for the total number of threads
-///   (`10 -> 1024`, `9 -> 512`, …).
+/// * `pow2` - desired power-of-two for the total number of threads
+///   (`10 -> 1024`, `9 -> 512`, ...).
 pub(crate) fn get_block_dims(dim0: usize, dim1: usize, dim2: usize, pow2: usize) -> MTLSize {
     let mut pows = [0usize; 3];
     let mut sum = 0usize;
@@ -107,7 +107,7 @@ pub(crate) fn get_block_dims(dim0: usize, dim1: usize, dim2: usize, pow2: usize)
     loop {
         let presum = sum;
 
-        // Try to increment along dim‑0
+        // Try to increment along dim-0
         if dim0 >= (1usize << (pows[0] + 1)) {
             pows[0] += 1;
             sum += 1;
@@ -116,7 +116,7 @@ pub(crate) fn get_block_dims(dim0: usize, dim1: usize, dim2: usize, pow2: usize)
             break;
         }
 
-        // Then along dim‑1
+        // Then along dim-1
         if dim1 >= (1usize << (pows[1] + 1)) {
             pows[1] += 1;
             sum += 1;
@@ -125,13 +125,13 @@ pub(crate) fn get_block_dims(dim0: usize, dim1: usize, dim2: usize, pow2: usize)
             break;
         }
 
-        // Finally along dim‑2
+        // Finally along dim-2
         if dim2 >= (1usize << (pows[2] + 1)) {
             pows[2] += 1;
             sum += 1;
         }
 
-        // If we made no progress, or hit the target thread‑count, stop.
+        // If we made no progress, or hit the target thread-count, stop.
         if sum == presum || sum == pow2 {
             break;
         }

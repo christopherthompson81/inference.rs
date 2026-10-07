@@ -433,7 +433,7 @@ impl Gemma4ImageProcessor {
 
     /// Build the expanded token sequence for all frames of a single video.
     ///
-    /// Format per frame: `"mm:ss <boi>{N × <video_token>}<eoi>"`
+    /// Format per frame: `"mm:ss <boi>{N x <video_token>}<eoi>"`
     /// All frames are space-joined.
     fn build_video_sequence(&self, timestamps: &[String], tokens_per_frame: usize) -> String {
         let video_tokens = vec![VIDEO_TOKEN.to_string(); tokens_per_frame].join("");

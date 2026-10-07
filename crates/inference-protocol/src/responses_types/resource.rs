@@ -167,7 +167,7 @@ pub struct ResponseResource {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub previous_response_id: Option<String>,
 
-    // ===== Request Parameters (echoed back) =====
+    // Request Parameters (echoed back)
     /// Tool definitions from the request
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<OpenAiTool>>,
@@ -325,7 +325,7 @@ impl ResponseResource {
         self.status = ResponseStatus::Cancelled;
     }
 
-    // ===== Builder methods for request parameters =====
+    // Builder methods for request parameters
 
     /// Set the tools
     pub fn with_tools(mut self, tools: Option<Vec<OpenAiTool>>) -> Self {

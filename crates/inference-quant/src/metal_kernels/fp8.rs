@@ -5,9 +5,7 @@
 
 use super::*;
 
-// ============================================================================
 // Scalar FP8 conversion kernels
-// ============================================================================
 
 /// Convert FP8 E4M3 tensor to another dtype (F32, F16, BF16)
 #[allow(clippy::too_many_arguments)]

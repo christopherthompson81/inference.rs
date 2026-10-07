@@ -461,7 +461,7 @@ impl fmt::Display for TokenSource {
 }
 
 /// The kind of model to build.
-#[derive(Clone, Default, derive_more::From, strum::Display)]
+#[derive(Clone, Default, strum::Display)]
 pub enum ModelKind {
     #[default]
     #[strum(to_string = "normal (no adapters)")]
@@ -470,14 +470,11 @@ pub enum ModelKind {
     #[strum(to_string = "gguf quantized from {quant} (no adapters)")]
     GgufQuantized { quant: QuantizationKind },
 
-    #[strum(to_string = "{adapter}")]
-    Adapter { adapter: AdapterKind },
+    #[strum(to_string = "lora")]
+    Lora,
 
-    #[strum(to_string = "{adapter}, gguf quantized from {quant}")]
-    GgufAdapter {
-        adapter: AdapterKind,
-        quant: QuantizationKind,
-    },
+    #[strum(to_string = "lora, gguf quantized from {quant}")]
+    GgufLora { quant: QuantizationKind },
 
     #[strum(to_string = "anymoe: target: `{target}`")]
     AnyMoe { target: Box<ModelKind> },
@@ -494,29 +491,13 @@ pub enum QuantizationKind {
     Gptq,
 }
 
-#[derive(Clone, Copy, strum::Display, strum::EnumIs)]
-#[strum(serialize_all = "kebab-case")]
-pub enum AdapterKind {
-    /// LoRA
-    Lora,
-}
-
 impl ModelKind {
-    // Quantized helpers:
-    pub fn is_quantized(&self) -> bool {
-        self.quantized_kind().iter().any(|q| q.is_some())
-    }
-
-    pub fn is_quantized_and(&self, mut f: impl FnMut(QuantizationKind) -> bool) -> bool {
-        self.quantized_kind().iter().any(|q| q.is_some_and(&mut f))
-    }
-
     pub fn quantized_kind(&self) -> Vec<Option<QuantizationKind>> {
         use ModelKind::*;
 
         match self {
-            Normal | Adapter { .. } => vec![None],
-            GgufQuantized { quant } | GgufAdapter { quant, .. } => vec![Some(*quant)],
+            Normal | Lora => vec![None],
+            GgufQuantized { quant } | GgufLora { quant } => vec![Some(*quant)],
             AnyMoe { target } => target.quantized_kind(),
         }
     }

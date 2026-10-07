@@ -567,7 +567,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
             for batch in samples.chunks(batch_size) {
                 steps += 1;
 
-                // === PREPARE INPUTS ==
+                // PREPARE INPUTS
                 let mut seqs = Vec::new();
                 for AnyMoeTrainingInputRow {
                     prompt,
@@ -658,7 +658,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                     None,
                 );
 
-                // === PREPARE AND RUN MODEL ==
+                // PREPARE AND RUN MODEL
 
                 // Run the model, ignoring the logits
                 let _ = target.forward_inputs(inputs.unwrap().inputs, false)?;
@@ -666,7 +666,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                 // Clear the KV cache
                 target.set_none_cache(&mut input_seqs, true, false)?;
 
-                // === BACKWARD STEP ==
+                // BACKWARD STEP
                 #[allow(clippy::cast_possible_truncation)]
                 let labels = Tensor::from_vec(
                     batch

@@ -76,9 +76,9 @@ impl GpuArch {
     /// Create GPU arch with auto-detected suffix for newer architectures
     ///
     /// Suffix selection follows PTX ISA rules:
-    /// - SM 120: 'a' suffix — enables arch-specific NVFP4/MXFP4 MMA instructions
-    /// - SM 121 (GB10/Spark): 'f' suffix — family-level features only
-    /// - SM 90-100/103: 'a' suffix — async/accelerated features
+    /// - SM 120: 'a' suffix - enables arch-specific NVFP4/MXFP4 MMA instructions
+    /// - SM 121 (GB10/Spark): 'f' suffix - family-level features only
+    /// - SM 90-100/103: 'a' suffix - async/accelerated features
     /// - SM < 90: no suffix
     pub fn auto_suffix(base: usize) -> Self {
         match base {
@@ -439,13 +439,13 @@ mod tests {
             "-gencode=arch=compute_100a,code=sm_100a"
         );
 
-        // SM120 (RTX 5090/B200) — 'a' suffix for arch-specific NVFP4/MXFP4 MMA
+        // SM120 (RTX 5090/B200) - 'a' suffix for arch-specific NVFP4/MXFP4 MMA
         assert_eq!(
             GpuArch::auto_suffix(120).to_gencode_arg(),
             "-gencode=arch=compute_120a,code=sm_120a"
         );
 
-        // SM121 (GB10/Spark) — 'f' suffix for family features only (no NVFP4 hardware)
+        // SM121 (GB10/Spark) - 'f' suffix for family features only (no NVFP4 hardware)
         assert_eq!(
             GpuArch::auto_suffix(121).to_gencode_arg(),
             "-gencode=arch=compute_121f,code=sm_121f"

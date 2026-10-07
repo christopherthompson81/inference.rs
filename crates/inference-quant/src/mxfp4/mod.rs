@@ -578,7 +578,7 @@ impl MXFP4Layer {
         }))
     }
 
-    /// Combined FP4 × E8M0 dequant table: `DEQUANT_LUT[scale][nibble]`.
+    /// Combined FP4 x E8M0 dequant table: `DEQUANT_LUT[scale][nibble]`.
     /// For each of the 256 possible E8M0 scale values, stores the 16 possible
     /// dequantized values (FP4_LUT[nibble] * 2^(scale - 127)).
     /// This turns dequantization into a single table lookup per element.

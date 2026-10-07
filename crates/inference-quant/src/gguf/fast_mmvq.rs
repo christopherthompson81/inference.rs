@@ -395,7 +395,7 @@ fn fused_qkv_launcher(input_ty: DType, dtype: GgufType) -> Option<FusedQkvLaunch
 /// Output has the same leading dimensions as `xs` with the last axis replaced
 /// by `w.shape().dims2()?.0` (nrows of the weight).
 ///
-/// The output dtype matches the input dtype (BF16 → BF16, F16 → F16, F32 → F32).
+/// The output dtype matches the input dtype (BF16 -> BF16, F16 -> F16, F32 -> F32).
 pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
     let dtype = w.gguf_type();
     if !supports(dtype) {

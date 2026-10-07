@@ -3245,7 +3245,7 @@ impl Module for ReflectionPad2d {
 
         let (_n, _c, h, w) = xs.dims4()?;
 
-        // --- Horizontal Padding (along width, axis = 3) ---
+        // Horizontal Padding (along width, axis = 3)
         // For left padding, we reflect columns 1..=pad_left (in reverse order).
         let left_pad = if pad_left > 0 {
             // Create indices: [pad_left, pad_left-1, ..., 1]
@@ -3273,7 +3273,7 @@ impl Module for ReflectionPad2d {
             (None, None) => xs.clone(),
         };
 
-        // --- Vertical Padding (along height, axis = 2) ---
+        // Vertical Padding (along height, axis = 2)
         // For top padding, reflect rows 1..=pad_top (in reverse order)
         let top_pad = if pad_top > 0 {
             let indices: Vec<i64> = (1..=pad_top as i64).rev().collect();

@@ -163,7 +163,7 @@ impl BarrierPool {
                                 if spins < spin_limit {
                                     spin_loop();
                                 } else {
-                                    // Park deposits a token; unpark() before park() returns immediately — no race.
+                                    // Park deposits a token; unpark() before park() returns immediately - no race.
                                     std::thread::park();
                                     spins = 0;
                                 }

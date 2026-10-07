@@ -248,7 +248,7 @@ impl MlpLayer for GraniteMlp {
 
 impl crate::amoe::AnyMoeTrainableLayer for GraniteMlp {}
 
-// ====================== MoE (Mixture of Experts) Implementation ======================
+// MoE (Mixture of Experts) Implementation
 
 /// Top-K gating router for sparse MoE
 struct GraniteTopKGating {
@@ -580,7 +580,7 @@ impl GraniteMoE {
     }
 }
 
-// ====================== Mamba Implementation ======================
+// Mamba Implementation
 
 /// Per-layer Mamba state cache (local to granite model).
 /// Stores conv state and SSM state for recurrent processing.
@@ -1522,7 +1522,7 @@ enum DecoderLayer {
 
 // Use HybridLayerCache from kv_cache instead of a local type alias
 
-// ====================== End Mamba Implementation ======================
+// End Mamba Implementation
 
 struct CausalSelfAttention {
     q_proj: Arc<dyn QuantMethod>,

@@ -130,14 +130,14 @@ impl<const CROSS_ATTN: bool> DiaAttention<CROSS_ATTN> {
         xq = self.rope.forward(&xq, q_positions)?;
         xq = xq.transpose(1, 2)?;
 
-        // ---- K‒V computation & cache handling --------------------------------
+        // K-V computation & cache handling
         let (mut k, mut v) = if CROSS_ATTN {
-            // Cross‑attention re‑uses a pre‑computed immutable cache.
+            // Cross-attention re-uses a pre-computed immutable cache.
             cached_kv
                 .expect("cross-attention requires cached KV tensors")
                 .k_v()
         } else {
-            // Compute fresh K and V for self‑attention.
+            // Compute fresh K and V for self-attention.
             let mut k =
                 self.k_proj
                     .forward(xkv)?
@@ -161,7 +161,7 @@ impl<const CROSS_ATTN: bool> DiaAttention<CROSS_ATTN> {
                         kv_cache.update(&k, &v, current_index)?
                     }
                 }
-                // No cache supplied – just use freshly computed tensors.
+                // No cache supplied - just use freshly computed tensors.
                 None => (k, v),
             }
         };

@@ -312,7 +312,7 @@ mod tests {
         // lhs row-major [2,3] strides [3,1]
         // rhs col-major [2,3] strides [1,2]
         // lhs can merge (3 == 1 * 3)
-        // rhs can not (1 ≠ 2 * 3 = 6) -> no merge for the pair
+        // rhs can not (1 != 2 * 3 = 6) -> no merge for the pair
         let lhs = Layout::contiguous(&[2, 3]);
         let rhs = layout(&[2, 3], &[1, 2]);
         let it = NdIter::new([&lhs, &rhs]);

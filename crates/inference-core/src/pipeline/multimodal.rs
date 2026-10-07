@@ -1,11 +1,11 @@
 use super::isq::{UqffFullSer, UqffWriteConfig};
 use super::loaders::MultimodalLoaderTypeExt;
 use super::{
-    AdapterKind, AnyMoePipelineMixin, AutoMultimodalLoader, CacheManagerMixin,
-    DecodeGraphPrecaptureCtx, EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata,
-    IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
-    MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, MultimodalPromptPrefixer,
-    PreProcessingMixin, Processor, TokenSource, paged_attention_memory_reservations,
+    AnyMoePipelineMixin, AutoMultimodalLoader, CacheManagerMixin, DecodeGraphPrecaptureCtx,
+    EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata, IsqPipelineMixin, Loader,
+    MetadataMixin, ModelCategory, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
+    MultimodalModelLoader, MultimodalPromptPrefixer, PreProcessingMixin, Processor, TokenSource,
+    paged_attention_memory_reservations,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
@@ -332,9 +332,7 @@ impl MultimodalLoaderBuilder {
         adapters: Vec<LoraAdapterSpec>,
         runtime_config: LoraRuntimeConfig,
     ) -> Self {
-        self.kind = ModelKind::Adapter {
-            adapter: AdapterKind::Lora,
-        };
+        self.kind = ModelKind::Lora;
         self.lora_adapters = Some(adapters);
         self.lora_runtime_config = Some(runtime_config);
         self
@@ -672,13 +670,7 @@ impl Loader for MultimodalLoader {
                     .as_ref()
                     .map(|source| (&source.weights, source.rope_pairing)),
                 lora: match self.kind {
-                    ModelKind::Adapter {
-                        adapter: AdapterKind::Lora,
-                    }
-                    | ModelKind::GgufAdapter {
-                        adapter: AdapterKind::Lora,
-                        ..
-                    } => Some(
+                    ModelKind::Lora | ModelKind::GgufLora { .. } => Some(
                         self.lora_runtime_config
                             .expect("LoRA loaders have a runtime config"),
                     ),

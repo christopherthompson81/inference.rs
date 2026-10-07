@@ -4,7 +4,7 @@ use inference_quant::QuantizedConfig;
 
 use crate::{layers::Activation, serde_default_fn};
 
-// ── Rope parameter structs ──────────────────────────────────────────────────
+// Rope parameter structs
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Gemma4RopeLayerParams {
@@ -24,7 +24,7 @@ pub struct Gemma4RopeParameters {
     pub partial_rotary_factor: Option<f64>,
 }
 
-// ── Text config defaults ────────────────────────────────────────────────────
+// Text config defaults
 
 serde_default_fn!(bool, attention_bias, false);
 serde_default_fn!(usize, head_dim, 256);
@@ -44,7 +44,7 @@ serde_default_fn!(bool, enable_moe_block, false);
 serde_default_fn!(usize, num_kv_shared_layers, 0);
 serde_default_fn!(bool, use_double_wide_mlp, false);
 
-// ── Gemma4TextConfig ────────────────────────────────────────────────────────
+// Gemma4TextConfig
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Gemma4TextConfig {
@@ -153,7 +153,7 @@ impl Gemma4TextConfig {
     }
 }
 
-// ── Vision config defaults ──────────────────────────────────────────────────
+// Vision config defaults
 
 serde_default_fn!(usize, vision_hidden_size, 768);
 serde_default_fn!(usize, vision_intermediate_size, 3072);
@@ -174,7 +174,7 @@ serde_default_fn!(usize, vision_default_output_length, 280);
 serde_default_fn!(bool, vision_use_clipped_linears, false);
 serde_default_fn!(bool, vision_standardize, false);
 
-// ── Gemma4VisionConfig ──────────────────────────────────────────────────────
+// Gemma4VisionConfig
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Gemma4VisionConfig {
@@ -235,7 +235,7 @@ impl Gemma4VisionConfig {
     }
 }
 
-// ── Audio config defaults ───────────────────────────────────────────────────
+// Audio config defaults
 
 serde_default_fn!(usize, audio_input_feat_size, 128);
 serde_default_fn!(usize, audio_hidden_size, 1024);
@@ -273,7 +273,7 @@ serde_default_fn!(String, sscp_conv_padding_type, "semicausal".to_string());
 serde_default_fn!(bool, streaming, false);
 serde_default_fn!(bool, use_clipped_linears, true);
 
-// ── Gemma4AudioConfig ───────────────────────────────────────────────────────
+// Gemma4AudioConfig
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Gemma4AudioConfig {
@@ -361,7 +361,7 @@ impl Gemma4AudioConfig {
     }
 }
 
-// ── Top-level config defaults ───────────────────────────────────────────────
+// Top-level config defaults
 
 serde_default_fn!(usize, image_token_id, 258880);
 serde_default_fn!(usize, audio_token_id, 258881);
@@ -371,7 +371,7 @@ serde_default_fn!(usize, eoi_token_id, 258882);
 serde_default_fn!(usize, boa_token_id, 256000);
 serde_default_fn!(usize, eoa_token_id, 258883);
 
-// ── Gemma4Config ────────────────────────────────────────────────────────────
+// Gemma4Config
 
 #[derive(Debug, Clone)]
 pub struct Gemma4Config {

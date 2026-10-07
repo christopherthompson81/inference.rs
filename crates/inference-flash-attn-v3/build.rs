@@ -137,7 +137,7 @@ fn main() -> Result<()> {
     let mut builder = KernelBuilder::new()
         .source_files(kernels)
         .out_dir(&build_dir)
-        .with_cutlass(Some(CUTLASS_COMMIT)) // ✅ Auto-fetch and include CUTLASS from GitHub
+        .with_cutlass(Some(CUTLASS_COMMIT)) // Auto-fetch and include CUTLASS from GitHub
         .arg("-std=c++17")
         .arg("-O3")
         .arg("-U__CUDA_NO_HALF_OPERATORS__")

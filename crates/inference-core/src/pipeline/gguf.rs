@@ -1,4 +1,4 @@
-use super::{AdapterKind, Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
+use super::{Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
 use crate::gguf::{
     GgufTokenizerConversion,
     base_model::infer_hf_base_model_id,
@@ -290,7 +290,9 @@ impl GGUFLoaderBuilder {
         adapters: Vec<LoraAdapterSpec>,
         runtime: LoraRuntimeConfig,
     ) -> Self {
-        self.kind = (AdapterKind::Lora, QuantizationKind::Gguf).into();
+        self.kind = ModelKind::GgufLora {
+            quant: QuantizationKind::Gguf,
+        };
         self.dynamic_lora = Some(DynamicLoraConfig { adapters, runtime });
         self
     }

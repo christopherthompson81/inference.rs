@@ -20,7 +20,7 @@ impl std::fmt::Debug for Error {
 /// Main library error type.
 #[derive(thiserror::Error)]
 pub enum Error {
-    // === DType Errors ===
+    // DType Errors
     #[error("{msg}, expected: {expected:?}, got: {got:?}")]
     UnexpectedDType {
         msg: &'static str,
@@ -38,7 +38,7 @@ pub enum Error {
     #[error("unsupported dtype {0:?} for op {1}")]
     UnsupportedDTypeForOp(DType, &'static str),
 
-    // === Dimension Index Errors ===
+    // Dimension Index Errors
     #[error("{op}: dimension index {dim} out of range for shape {shape:?}")]
     DimOutOfRange {
         shape: Shape,
@@ -53,7 +53,7 @@ pub enum Error {
         op: &'static str,
     },
 
-    // === Shape Errors ===
+    // Shape Errors
     #[error("unexpected rank, expected: {expected}, got: {got} ({shape:?})")]
     UnexpectedNumberOfDims {
         expected: usize,
@@ -101,7 +101,7 @@ pub enum Error {
     #[error("empty tensor for {op}")]
     EmptyTensor { op: &'static str },
 
-    // === Device Errors ===
+    // Device Errors
     #[error("device mismatch in {op}, lhs: {lhs:?}, rhs: {rhs:?}")]
     DeviceMismatchBinaryOp {
         lhs: DeviceLocation,
@@ -109,7 +109,7 @@ pub enum Error {
         op: &'static str,
     },
 
-    // === Op Specific Errors ===
+    // Op Specific Errors
     #[error("narrow invalid args {msg}: {shape:?}, dim: {dim}, start: {start}, len:{len}")]
     NarrowInvalidArgs {
         shape: Shape,
@@ -157,7 +157,7 @@ pub enum Error {
     #[error("backward is not supported for {op}")]
     BackwardNotSupported { op: &'static str },
 
-    // === Other Errors ===
+    // Other Errors
     #[error("inference-tensor has not been built with cuda support")]
     NotCompiledWithCudaSupport,
 
@@ -167,7 +167,7 @@ pub enum Error {
     #[error("cannot find tensor {path}")]
     CannotFindTensor { path: String },
 
-    // === Wrapped Errors ===
+    // Wrapped Errors
     #[error(transparent)]
     Cuda(Box<dyn std::error::Error + Send + Sync>),
 

@@ -666,7 +666,7 @@ impl McpClient {
         Ok(())
     }
 
-    // ==================== Connection Management Methods ====================
+    // Connection Management Methods
 
     /// Gracefully shutdown all server connections.
     ///
@@ -890,7 +890,7 @@ impl McpClient {
         Ok(())
     }
 
-    // ==================== Tool Management Methods ====================
+    // Tool Management Methods
 
     /// Re-discover tools from all connected servers.
     ///
@@ -1039,7 +1039,7 @@ impl McpClient {
         self.tools.len()
     }
 
-    // ==================== Status / Convenience Methods ====================
+    // Status / Convenience Methods
 
     /// Get the number of connected servers.
     ///
@@ -1115,7 +1115,7 @@ impl McpClient {
         results
     }
 
-    // ==================== Resource Access Methods ====================
+    // Resource Access Methods
 
     /// List resources from all connected servers.
     ///

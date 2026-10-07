@@ -66,7 +66,7 @@ impl GemmaLarkBuilder {
             .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect())
             .unwrap_or_default();
 
-        // Build pair rules — iteration is alphabetical (BTreeMap).
+        // Build pair rules - iteration is alphabetical (BTreeMap).
         let mut req_pairs = Vec::new();
         let mut opt_pairs = Vec::new();
 
@@ -99,7 +99,7 @@ impl GemmaLarkBuilder {
         }
 
         if parts.is_empty() {
-            // No properties at all — empty args only.
+            // No properties at all - empty args only.
             self.rules.push(format!(r#"{args_name}: "#));
         } else {
             // Build a fixed-order sequence.  Each element is either
@@ -111,11 +111,11 @@ impl GemmaLarkBuilder {
                 if i > 0 {
                     // Need a comma before this element.
                     if is_req {
-                        // Required — comma always present.
+                        // Required - comma always present.
                         seq.push(r#"",""#.to_string());
                         seq.push(name.to_string());
                     } else {
-                        // Optional — wrap `"," pair` together so the
+                        // Optional - wrap `"," pair` together so the
                         // comma only appears when the field does.
                         let wid = self.next_id();
                         let wrapper = format!("w{wid}");
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn strict_grammar_all_required_fixed_order() {
-        // Both fields required — grammar should emit them in fixed
+        // Both fields required - grammar should emit them in fixed
         // alphabetical order with no ? and no bag pattern.
         let tools = [crate::Tool {
             tp: ToolType::Function,
@@ -531,12 +531,12 @@ mod tests {
             .lines()
             .find(|l| l.starts_with('a') && l.contains(": p"))
             .expect("should have args rule");
-        // No optional markers — both required.
+        // No optional markers - both required.
         assert!(
             !args_line.contains('?'),
             "all-required should have no optional fields"
         );
-        // No Kleene star — fixed sequence, not a bag.
+        // No Kleene star - fixed sequence, not a bag.
         assert!(
             !args_line.contains('*'),
             "all-required should not use bag pattern"

@@ -192,7 +192,7 @@ impl AudioProcessor {
 
             // Pre-emphasis, HTK flavour.
             let mut frame: Vec<f32> = Vec::with_capacity(frame_length);
-            // First sample – scaled, no look-back.
+            // First sample - scaled, no look-back.
             frame.push(raw_frame[0] * (1.0 - self.preemphasis));
             // Remaining samples use the previous raw sample within the frame.
             for i in 1..frame_length {

@@ -8,9 +8,7 @@
 
 use half::{bf16, f16};
 
-// ============================================================================
 // Dequantize kernel bindings
-// ============================================================================
 
 macro_rules! dequant_kernel_power_of_2 {
     ($bits:tt, $gs:tt, $scalar:ty, $postfix:tt) => {
@@ -57,9 +55,7 @@ macro_rules! dequant_kernel_6bit {
     };
 }
 
-// ============================================================================
 // Embedding kernel bindings
-// ============================================================================
 
 macro_rules! embedding_kernel {
     ($bits:tt, $gs:tt, $scalar:ty, $postfix:tt) => {
@@ -77,9 +73,7 @@ macro_rules! embedding_kernel {
     };
 }
 
-// ============================================================================
 // Quantize kernel bindings
-// ============================================================================
 
 macro_rules! quant_kernel {
     ($bits:tt, $gs:tt, $scalar:ty, $postfix:tt) => {
@@ -96,9 +90,7 @@ macro_rules! quant_kernel {
     };
 }
 
-// ============================================================================
 // QMV (quantized matrix-vector) kernel bindings
-// ============================================================================
 
 macro_rules! qmv_kernel_power_of_2 {
     ($bits:tt, $gs:tt, $scalar:ty, $postfix:tt) => {
@@ -151,9 +143,7 @@ macro_rules! qmv_kernel_6bit {
     };
 }
 
-// ============================================================================
 // QMM (quantized matrix-matrix) kernel bindings
-// ============================================================================
 
 macro_rules! qmm_kernel {
     ($bits:tt, $gs:tt, $scalar:ty, $postfix:tt) => {
@@ -172,12 +162,10 @@ macro_rules! qmm_kernel {
     };
 }
 
-// ============================================================================
 // Extern "C" declarations
-// ============================================================================
 
 unsafe extern "C" {
-    // --- Dequantize: 2-bit ---
+    // Dequantize: 2-bit
     dequant_kernel_power_of_2!(2, 32, f32, f32);
     dequant_kernel_power_of_2!(2, 64, f32, f32);
     dequant_kernel_power_of_2!(2, 128, f32, f32);
@@ -188,7 +176,7 @@ unsafe extern "C" {
     dequant_kernel_power_of_2!(2, 64, bf16, bf16);
     dequant_kernel_power_of_2!(2, 128, bf16, bf16);
 
-    // --- Dequantize: 3-bit ---
+    // Dequantize: 3-bit
     dequant_kernel_3bit!(32, f32, f32);
     dequant_kernel_3bit!(64, f32, f32);
     dequant_kernel_3bit!(128, f32, f32);
@@ -199,7 +187,7 @@ unsafe extern "C" {
     dequant_kernel_3bit!(64, bf16, bf16);
     dequant_kernel_3bit!(128, bf16, bf16);
 
-    // --- Dequantize: 4-bit ---
+    // Dequantize: 4-bit
     dequant_kernel_power_of_2!(4, 32, f32, f32);
     dequant_kernel_power_of_2!(4, 64, f32, f32);
     dequant_kernel_power_of_2!(4, 128, f32, f32);
@@ -210,7 +198,7 @@ unsafe extern "C" {
     dequant_kernel_power_of_2!(4, 64, bf16, bf16);
     dequant_kernel_power_of_2!(4, 128, bf16, bf16);
 
-    // --- Dequantize: 6-bit ---
+    // Dequantize: 6-bit
     dequant_kernel_6bit!(32, f32, f32);
     dequant_kernel_6bit!(64, f32, f32);
     dequant_kernel_6bit!(128, f32, f32);
@@ -221,7 +209,7 @@ unsafe extern "C" {
     dequant_kernel_6bit!(64, bf16, bf16);
     dequant_kernel_6bit!(128, bf16, bf16);
 
-    // --- Dequantize: 8-bit ---
+    // Dequantize: 8-bit
     dequant_kernel_power_of_2!(8, 32, f32, f32);
     dequant_kernel_power_of_2!(8, 64, f32, f32);
     dequant_kernel_power_of_2!(8, 128, f32, f32);
@@ -232,7 +220,7 @@ unsafe extern "C" {
     dequant_kernel_power_of_2!(8, 64, bf16, bf16);
     dequant_kernel_power_of_2!(8, 128, bf16, bf16);
 
-    // --- Embedding: 2-bit ---
+    // Embedding: 2-bit
     embedding_kernel!(2, 32, f32, f32);
     embedding_kernel!(2, 64, f32, f32);
     embedding_kernel!(2, 128, f32, f32);
@@ -243,7 +231,7 @@ unsafe extern "C" {
     embedding_kernel!(2, 64, bf16, bf16);
     embedding_kernel!(2, 128, bf16, bf16);
 
-    // --- Embedding: 3-bit ---
+    // Embedding: 3-bit
     embedding_kernel!(3, 32, f32, f32);
     embedding_kernel!(3, 64, f32, f32);
     embedding_kernel!(3, 128, f32, f32);
@@ -254,7 +242,7 @@ unsafe extern "C" {
     embedding_kernel!(3, 64, bf16, bf16);
     embedding_kernel!(3, 128, bf16, bf16);
 
-    // --- Embedding: 4-bit ---
+    // Embedding: 4-bit
     embedding_kernel!(4, 32, f32, f32);
     embedding_kernel!(4, 64, f32, f32);
     embedding_kernel!(4, 128, f32, f32);
@@ -265,7 +253,7 @@ unsafe extern "C" {
     embedding_kernel!(4, 64, bf16, bf16);
     embedding_kernel!(4, 128, bf16, bf16);
 
-    // --- Embedding: 6-bit ---
+    // Embedding: 6-bit
     embedding_kernel!(6, 32, f32, f32);
     embedding_kernel!(6, 64, f32, f32);
     embedding_kernel!(6, 128, f32, f32);
@@ -276,7 +264,7 @@ unsafe extern "C" {
     embedding_kernel!(6, 64, bf16, bf16);
     embedding_kernel!(6, 128, bf16, bf16);
 
-    // --- Embedding: 8-bit ---
+    // Embedding: 8-bit
     embedding_kernel!(8, 32, f32, f32);
     embedding_kernel!(8, 64, f32, f32);
     embedding_kernel!(8, 128, f32, f32);
@@ -287,7 +275,7 @@ unsafe extern "C" {
     embedding_kernel!(8, 64, bf16, bf16);
     embedding_kernel!(8, 128, bf16, bf16);
 
-    // --- Quantize: 2-bit ---
+    // Quantize: 2-bit
     quant_kernel!(2, 32, f32, f32);
     quant_kernel!(2, 64, f32, f32);
     quant_kernel!(2, 128, f32, f32);
@@ -298,7 +286,7 @@ unsafe extern "C" {
     quant_kernel!(2, 64, bf16, bf16);
     quant_kernel!(2, 128, bf16, bf16);
 
-    // --- Quantize: 4-bit ---
+    // Quantize: 4-bit
     quant_kernel!(4, 32, f32, f32);
     quant_kernel!(4, 64, f32, f32);
     quant_kernel!(4, 128, f32, f32);
@@ -309,7 +297,7 @@ unsafe extern "C" {
     quant_kernel!(4, 64, bf16, bf16);
     quant_kernel!(4, 128, bf16, bf16);
 
-    // --- Quantize: 8-bit ---
+    // Quantize: 8-bit
     quant_kernel!(8, 32, f32, f32);
     quant_kernel!(8, 64, f32, f32);
     quant_kernel!(8, 128, f32, f32);
@@ -320,7 +308,7 @@ unsafe extern "C" {
     quant_kernel!(8, 64, bf16, bf16);
     quant_kernel!(8, 128, bf16, bf16);
 
-    // --- QMV: 2-bit ---
+    // QMV: 2-bit
     qmv_kernel_power_of_2!(2, 32, f32, f32);
     qmv_kernel_power_of_2!(2, 64, f32, f32);
     qmv_kernel_power_of_2!(2, 128, f32, f32);
@@ -331,7 +319,7 @@ unsafe extern "C" {
     qmv_kernel_power_of_2!(2, 64, bf16, bf16);
     qmv_kernel_power_of_2!(2, 128, bf16, bf16);
 
-    // --- QMV: 3-bit ---
+    // QMV: 3-bit
     qmv_kernel_3bit!(32, f32, f32);
     qmv_kernel_3bit!(64, f32, f32);
     qmv_kernel_3bit!(128, f32, f32);
@@ -342,7 +330,7 @@ unsafe extern "C" {
     qmv_kernel_3bit!(64, bf16, bf16);
     qmv_kernel_3bit!(128, bf16, bf16);
 
-    // --- QMV: 4-bit ---
+    // QMV: 4-bit
     qmv_kernel_power_of_2!(4, 32, f32, f32);
     qmv_kernel_power_of_2!(4, 64, f32, f32);
     qmv_kernel_power_of_2!(4, 128, f32, f32);
@@ -353,7 +341,7 @@ unsafe extern "C" {
     qmv_kernel_power_of_2!(4, 64, bf16, bf16);
     qmv_kernel_power_of_2!(4, 128, bf16, bf16);
 
-    // --- QMV: 6-bit ---
+    // QMV: 6-bit
     qmv_kernel_6bit!(32, f32, f32);
     qmv_kernel_6bit!(64, f32, f32);
     qmv_kernel_6bit!(128, f32, f32);
@@ -364,7 +352,7 @@ unsafe extern "C" {
     qmv_kernel_6bit!(64, bf16, bf16);
     qmv_kernel_6bit!(128, bf16, bf16);
 
-    // --- QMV: 8-bit ---
+    // QMV: 8-bit
     qmv_kernel_power_of_2!(8, 32, f32, f32);
     qmv_kernel_power_of_2!(8, 64, f32, f32);
     qmv_kernel_power_of_2!(8, 128, f32, f32);
@@ -375,7 +363,7 @@ unsafe extern "C" {
     qmv_kernel_power_of_2!(8, 64, bf16, bf16);
     qmv_kernel_power_of_2!(8, 128, bf16, bf16);
 
-    // --- QMM: 2-bit ---
+    // QMM: 2-bit
     qmm_kernel!(2, 32, f32, f32);
     qmm_kernel!(2, 64, f32, f32);
     qmm_kernel!(2, 128, f32, f32);
@@ -386,7 +374,7 @@ unsafe extern "C" {
     qmm_kernel!(2, 64, bf16, bf16);
     qmm_kernel!(2, 128, bf16, bf16);
 
-    // --- QMM: 4-bit ---
+    // QMM: 4-bit
     qmm_kernel!(4, 32, f32, f32);
     qmm_kernel!(4, 64, f32, f32);
     qmm_kernel!(4, 128, f32, f32);
@@ -397,7 +385,7 @@ unsafe extern "C" {
     qmm_kernel!(4, 64, bf16, bf16);
     qmm_kernel!(4, 128, bf16, bf16);
 
-    // --- QMM: 8-bit ---
+    // QMM: 8-bit
     qmm_kernel!(8, 32, f32, f32);
     qmm_kernel!(8, 64, f32, f32);
     qmm_kernel!(8, 128, f32, f32);

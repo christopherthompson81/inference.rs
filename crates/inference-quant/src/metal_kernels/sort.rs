@@ -9,7 +9,7 @@ use super::*;
 /// operation.  Bundling them keeps the public API readable as the kernel
 /// signatures grow.
 ///
-/// All slice references point into caller‑owned data – the struct itself
+/// All slice references point into caller-owned data - the struct itself
 /// owns **no** memory.
 #[derive(Debug)]
 pub struct SortArgs<'a> {
@@ -17,11 +17,11 @@ pub struct SortArgs<'a> {
     pub axis: usize,
     /// Shape of the input tensor.
     pub shape: &'a [usize],
-    /// Strides (element‑wise) for the input tensor.
+    /// Strides (element-wise) for the input tensor.
     pub strides: &'a [usize],
     /// Shape of the output tensor.
     pub out_shape: &'a [usize],
-    /// Strides (element‑wise) for the output tensor.
+    /// Strides (element-wise) for the output tensor.
     pub out_strides: &'a [usize],
     /// Whether the input tensor is already contiguous in memory.
     pub in_contiguous: bool,
@@ -40,7 +40,7 @@ pub struct SortArgs<'a> {
     pub n_blocks: usize,
 }
 
-/// Scratch buffers that can be reused between consecutive multi‑block sort
+/// Scratch buffers that can be reused between consecutive multi-block sort
 /// calls.  Providing them avoids the internal allocations performed each
 /// time by `call_multi_block_sort`.
 #[derive(Debug)]
@@ -52,13 +52,11 @@ pub struct MultiBlockSortCache {
     block_partitions: Arc<Buffer>,
 }
 
-// --------------------------------------------------------------------------
-// Simple LRU cache for scratch buffers used by multi‑block sort / argsort
-// --------------------------------------------------------------------------
+// Simple LRU cache for scratch buffers used by multi-block sort / argsort
 
 use std::collections::VecDeque;
 
-/// Uniquely identifies a scratch‑buffer layout.
+/// Uniquely identifies a scratch-buffer layout.
 ///
 /// We key only on the dimensions that impact required buffer sizes.  If two
 /// calls have the same `(rows, cols, dtype_size, blocks)` tuple they can
@@ -81,15 +79,15 @@ struct CachedBuffers {
     block_partitions: Arc<Buffer>,
 }
 
-/// Thread‑safe LRU cache with a fixed maximum number of entries.
+/// Thread-safe LRU cache with a fixed maximum number of entries.
 ///
-/// *   The cache is **thread‑safe** (internally uses a `RwLock`).
+/// *   The cache is **thread-safe** (internally uses a `RwLock`).
 /// *   Reuses scratch buffers across launches that share the same
 ///     (`rows`, `cols`, `dtype`, `blocks`) tuple.
 pub struct SortScratchCache {
     cap: usize,
     map: RwLock<HashMap<CacheKey, CachedBuffers>>,
-    order: RwLock<VecDeque<CacheKey>>, // most‑recent access at the back
+    order: RwLock<VecDeque<CacheKey>>, // most-recent access at the back
 }
 
 impl SortScratchCache {
@@ -105,7 +103,7 @@ impl SortScratchCache {
     /// Retrieve a set of scratch buffers (creating them if absent) and return
     /// a `MultiBlockSortCache::External` pointing to them.
     ///
-    /// The borrow lasts for `'a` (caller’s scope) and is safe because the
+    /// The borrow lasts for `'a` (caller's scope) and is safe because the
     /// buffers live inside `self`.
     pub fn checkout(
         &self,
@@ -122,7 +120,7 @@ impl SortScratchCache {
             n_blocks,
         };
 
-        // Fast path – try read‑lock first
+        // Fast path - try read-lock first
         if let Some(buffers) = self.map.read().unwrap().get(&key) {
             // Touch LRU order (needs write lock)
             self.touch_key(key);
@@ -135,11 +133,11 @@ impl SortScratchCache {
             };
         }
 
-        // Slow path – allocate new buffers
+        // Slow path - allocate new buffers
         let mut map_guard = self.map.write().unwrap();
         let mut order_guard = self.order.write().unwrap();
 
-        // Evict least‑recently used if we’re at capacity
+        // Evict least-recently used if we're at capacity
         if map_guard.len() == self.cap
             && let Some(oldest) = order_guard.pop_front()
         {
@@ -169,7 +167,7 @@ impl SortScratchCache {
         map_guard.insert(key, cached);
         order_guard.push_back(key);
 
-        // SAFETY: we must re‑borrow from the fresh entry since `map_guard`
+        // SAFETY: we must re-borrow from the fresh entry since `map_guard`
         // holds ownership of the buffers.
         let buffers = map_guard.get(&key).unwrap();
         MultiBlockSortCache {
@@ -194,9 +192,9 @@ impl SortScratchCache {
 /// How the copy kernel should behave.
 #[derive(Copy, Clone)]
 enum CopyType {
-    /// The last axis is contiguous – we can treat the tensor as a 1‑D slice.
+    /// The last axis is contiguous - we can treat the tensor as a 1-D slice.
     Vector,
-    /// Arbitrary layout – we need to jump using the supplied strides.
+    /// Arbitrary layout - we need to jump using the supplied strides.
     General,
 }
 
@@ -228,7 +226,7 @@ fn call_copy_gpu_inplace(
     dst_offset: usize,
     copy_type: CopyType,
 ) -> Result<(), MetalKernelError> {
-    // === Constants & helpers =================================================
+    // Constants & helpers
     const MAX_COPY_SPECIALIZED_DIMS: usize = 3;
 
     /// https://github.com/ml-explore/mlx/blob/eebe73001affcb424171e9d49657e508f70a9201/mlx/backend/metal/utils.h#L87
@@ -243,9 +241,9 @@ fn call_copy_gpu_inplace(
         x.div_ceil(y)
     }
 
-    // === Sanity checks =======================================================
+    // Sanity checks
     if shape.is_empty() {
-        // Nothing to do – mimic early‑return in the C++ version.
+        // Nothing to do - mimic early-return in the C++ version.
         return Ok(());
     }
     assert!(
@@ -253,11 +251,11 @@ fn call_copy_gpu_inplace(
         "shape/stride rank mismatch in call_copy_gpu_inplace"
     );
 
-    // === Derived sizes / flags ==============================================
+    // Derived sizes / flags
     let elem_count: usize = shape.iter().product();
     let large = match copy_type {
         CopyType::General => {
-            // Allow negative strides – original code switches to 32‑bit indexing once strides
+            // Allow negative strides - original code switches to 32-bit indexing once strides
             // are flattened, but here we only care about the element count threshold.
             elem_count > i32::MAX as usize
         }
@@ -274,7 +272,7 @@ fn call_copy_gpu_inplace(
         }
     };
 
-    // === Kernel name construction ===========================================
+    // Kernel name construction
     let mut kernel_name = match copy_type {
         CopyType::Vector => {
             if large {
@@ -301,24 +299,23 @@ fn call_copy_gpu_inplace(
     // name, even when they are the same.
     kernel_name.push_str(&format!("_copy{}{}", type_to_name(ty), type_to_name(ty)));
 
-    // === Pipeline & encoder ==================================================
+    // Pipeline & encoder
     let pipeline = kernels.load_pipeline(device, &kernel_name)?;
 
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
 
-    // === Buffers (slots 0/1) =================================================
+    // Buffers (slots 0/1)
     let byte_offset_src = src_offset * ty.size_in_bytes();
     let byte_offset_dst = dst_offset * ty.size_in_bytes();
     encoder.set_input_buffer(0, Some(src), byte_offset_src);
     encoder.set_output_buffer(1, Some(dst), byte_offset_dst);
 
-    // === Specialisation for each CopyType ===================================
+    // Specialisation for each CopyType
     match copy_type {
-        // ---------------------------------------------------------------------
         CopyType::Vector => {
-            // Slot 2 – total elements (32‑ or 64‑bit depending on `large`)
+            // Slot 2 - total elements (32- or 64-bit depending on `large`)
             if large {
                 <i64 as EncoderParam>::set_param(encoder, 2, elem_count as i64);
             } else {
@@ -336,7 +333,7 @@ fn call_copy_gpu_inplace(
                 depth: 1,
             };
             let grid_dims = if large {
-                // 64‑bit indexing path – fall back to 2‑D tiling helper.
+                // 64-bit indexing path - fall back to 2-D tiling helper.
                 get_2d_grid_dims_divisor(shape, dst_strides, work_per_thread)
             } else {
                 MTLSize {
@@ -348,11 +345,10 @@ fn call_copy_gpu_inplace(
             encoder.dispatch_threads(grid_dims, group_dims);
         }
 
-        // ---------------------------------------------------------------------
         CopyType::General => {
             let ndim = shape.len() as i32;
 
-            // ---- Shape / stride descriptors ---------------------------------
+            // Shape / stride descriptors
             if shape.len() > 3 {
                 let shape_i32: Vec<i32> = shape.iter().map(|&x| x as i32).collect();
                 encoder.set_bytes_raw(
@@ -361,7 +357,7 @@ fn call_copy_gpu_inplace(
                     shape_i32.as_ptr() as *const _,
                 );
             }
-            // Strides – always required (slot 3)
+            // Strides - always required (slot 3)
             let strides_in_i64: Vec<i64> = src_strides.iter().map(|&x| x as i64).collect();
             encoder.set_bytes_raw(
                 3,
@@ -369,12 +365,12 @@ fn call_copy_gpu_inplace(
                 strides_in_i64.as_ptr() as *const _,
             );
 
-            // If the kernel is the generic “gn*” variant we also pass `ndim`
+            // If the kernel is the generic "gn*" variant we also pass `ndim`
             if shape.len() > MAX_COPY_SPECIALIZED_DIMS {
                 <i32 as EncoderParam>::set_param(encoder, 5, ndim);
             }
 
-            // ---- Thread/work‑grid ------------------------------------------
+            // Thread/work-grid
             let mut dim0 = *shape.last().unwrap_or(&1);
             let dim1 = if shape.len() > 1 {
                 shape[shape.len() - 2]
@@ -414,7 +410,7 @@ fn call_single_block_sort<'a>(
     tn: usize,
     argsort: bool,
 ) -> Result<(), MetalKernelError> {
-    // --- destructure helper -------------------------------------------------
+    // destructure helper
     let axis = args.axis;
     let shape = args.shape;
     let strides = args.strides;
@@ -561,7 +557,7 @@ fn call_multi_block_sort<'a>(
     argsort: bool,
     cache: &MultiBlockSortCache,
 ) -> Result<(), MetalKernelError> {
-    // --- destructure helper -------------------------------------------------
+    // destructure helper
     let axis = args.axis;
     let shape = args.shape;
     let strides = args.strides;
@@ -589,9 +585,7 @@ fn call_multi_block_sort<'a>(
     let size_sorted_axis = shape[axis];
     let stride_sorted_axis = strides[axis];
 
-    // ------------------------------------------------------------------
     // Acquire scratch buffers (either cached or freshly allocated)
-    // ------------------------------------------------------------------
 
     // Scratch buffers supplied by the caller (from SortScratchCache)
     let dev_vals_0 = cache.dev_vals_ping.clone();
@@ -795,16 +789,16 @@ fn call_block_sort<'a>(
     argsort: bool,
     cache: &MultiBlockSortCache,
 ) -> Result<(), MetalKernelError> {
-    // --- destructure helper -------------------------------------------------
+    // destructure helper
     let bn = args.bn;
     let tn = args.tn;
     let n_blocks = args.n_blocks;
 
     if n_blocks > 1 {
-        // multi‑block path
+        // multi-block path
         call_multi_block_sort(device, ep, kernels, args, bn, tn, n_blocks, argsort, cache)
     } else {
-        // single‑block path
+        // single-block path
         call_single_block_sort(device, ep, kernels, args, bn, tn, argsort)
     }
 }

@@ -2245,3 +2245,47 @@ Review follow-ups:
 - The tower tests share one config helper per model.
 - Doc comments that only restated the function name are dropped.
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`. Result: exit 0, 2411 + 2736 + 1 tests passed.
+
+## Run 71 - 2026-10-07 15:35
+
+Question (user): with the shared decoder (#324) merged and bundle shrinking set aside, what housekeeping is left
+repo-wide, ranked?
+
+Method: two read-only surveys (duplication outside the model crates, by `diff -w` of side-by-side blocks; hygiene:
+`cargo machete`, uncalled pub functions, stale docs, style violations, open issues checked against the code), plus
+incremental build timings after touching `inference-nn` and `inference-core`.
+
+Build time (touch, then rebuild): workspace `cargo check --tests` 6.7 s after an `inference-nn` touch; the test build
+(`nextest --no-run`) 12.2 s after `inference-nn`, 8.1 s after `inference-core`. Not the bottleneck; full local CI is
+about 10 minutes, mostly CUDA tests and the clippy configurations.
+
+Hygiene (done in this run's PR): 5 unused dependencies (`either` in inference-nn and examples, `tracing` in
+inference-models-phi, `anyhow` in inference-kernel-build, and `derive_more`, unused once `ModelKind` lost its `From`); 16 uncalled pub functions in inference-nn and
+inference-core plus the helpers only they used; `AdapterKind`, single-variant since the X-LoRA removal, folded into
+`ModelKind::{Lora, GgufLora}`; CLAUDE.md's `FlashParams` pitfall showed fields that no longer exist; 59 banner lines
+and the typographic non-ASCII in comments (box-drawing, dashes, arrows, smart quotes) replaced, keeping copyright
+signs, quoted tokenizer tokens and names.
+
+Open issues against the code: #223 is partly fixed (Qwen3's loader reads `decoder_spec().sliding_window()`; Qwen2,
+Qwen2-VL/2.5-VL, Qwen3-embedding, MiniCPM-o, Gemma 2/3, LLaVA, Idefics2 and, not in the issue, Qwen3-VL/-MoE still
+disagree with their models); #252's premise (the `flash-attn` feature) is gone; #219's X-LoRA item is gone. #209,
+#211, #213, #214, #215 and #121 still hold.
+
+Duplication outside the model crates, by duplicated lines (approximate, +/-30%):
+
+```
+NormalPipeline vs MultimodalPipeline (CUDA graphs, Pipeline impl, Loader, mixins)   ~1,100
+C ABI extern wrappers (67 x ~18 lines) + hand-kept Python/C# declaration tables      ~1,000
+ModelSelected: 9 variants re-declaring ~15 load options, destructured per consumer    ~800
+inference-quant distributed layers: QuantMethod delegation x4, quant-config match x6  ~650
+cuTile kernel scaffolding (config, registry, tuner, warm) per GEMM kind               ~600
+vision Processor wrappers (12 near-identical files)                                   ~480
+pipeline Loader boilerplate (load_model_from_hf x6, cacheless mixins)                 ~350
+GGUF native loader paths and duplicated bindings helpers                              ~250
+hand-written Sequence::new_waiting test calls                                         ~200
+OpenAI request -> NormalRequest builders (chat, completion, core)                     ~150
+paged-attention CUDA vs Metal host validation                                         ~150
+```
+
+Next, in order: this hygiene PR; #223 and the small loader fixes (#214, #209/#211/#213); `ModelSelected` common
+options; the pipeline merge (pinned first, like the decoder); the C ABI table generating the binding declarations.

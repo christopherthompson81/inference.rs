@@ -26,7 +26,7 @@ fn v_norm(v: &Tensor, eps: f64) -> Result<Tensor> {
     v_f32.broadcast_div(&rms)?.to_dtype(original_dtype)
 }
 
-// ── Clippable Linear (Gemma4ClippableLinear equivalent) ─────────────────────
+// Clippable Linear (Gemma4ClippableLinear equivalent)
 
 /// Linear layer with optional input/output clamping, matching HF's Gemma4ClippableLinear.
 struct ClippableLinear {
@@ -133,7 +133,7 @@ impl ClippableLinear {
     }
 }
 
-// ── 2D Vision Rotary Embedding ──────────────────────────────────────────────
+// 2D Vision Rotary Embedding
 
 struct VisionRotaryEmbedding {
     inv_freq: Tensor,
@@ -204,7 +204,7 @@ fn apply_2d_rope(x: &Tensor, cos: &Tensor, sin: &Tensor, ndim: usize) -> Result<
     Tensor::cat(&parts, D::Minus1)
 }
 
-// ── PatchEmbedder ───────────────────────────────────────────────────────────
+// PatchEmbedder
 
 struct PatchEmbedder {
     input_proj: ClippableLinear,
@@ -304,7 +304,7 @@ impl PatchEmbedder {
     }
 }
 
-// ── VisionAttention ─────────────────────────────────────────────────────────
+// VisionAttention
 
 struct VisionAttention {
     q_proj: ClippableLinear,
@@ -436,7 +436,7 @@ impl VisionAttention {
     }
 }
 
-// ── VisionMlp ───────────────────────────────────────────────────────────────
+// VisionMlp
 
 struct VisionMlp {
     gate_proj: ClippableLinear,
@@ -479,7 +479,7 @@ impl VisionMlp {
     }
 }
 
-// ── VisionEncoderLayer ──────────────────────────────────────────────────────
+// VisionEncoderLayer
 
 struct VisionEncoderLayer {
     self_attn: VisionAttention,
@@ -562,7 +562,7 @@ impl VisionEncoderLayer {
     }
 }
 
-// ── VisionPooler ────────────────────────────────────────────────────────────
+// VisionPooler
 
 struct VisionPooler {
     hidden_size: usize,
@@ -602,14 +602,14 @@ impl VisionPooler {
         // max_x per batch: [b, 1]
         let max_x = (pos_x.max_keepdim(D::Minus1)? + 1.0)?;
 
-        // kernel indices: kx + (max_x / k).floor() * ky  →  [b, num_patches]
+        // kernel indices: kx + (max_x / k).floor() * ky  ->  [b, num_patches]
         let kf = k as f64;
         let kx = (pos_x / kf)?.floor()?;
         let ky = (pos_y / kf)?.floor()?;
         let stride = (max_x / kf)?.floor()?;
         let kernel_idxs = (kx + stride.broadcast_mul(&ky)?)?.to_dtype(DType::U32)?;
 
-        // Scatter-add pooling: accumulate x / k² into output bins
+        // Scatter-add pooling: accumulate x / k^2 into output bins
         let original_dtype = x.dtype();
         let x_scaled = (x.to_dtype(DType::F32)? / k_sq as f64)?;
         let idx_expanded = kernel_idxs
@@ -655,7 +655,7 @@ impl VisionPooler {
     }
 }
 
-// ── VisionTower ─────────────────────────────────────────────────────────────
+// VisionTower
 
 pub struct VisionTower {
     patch_embedder: PatchEmbedder,
@@ -842,7 +842,7 @@ impl VisionTower {
         })
     }
 
-    /// Encode a single image: embed → encoder (flash attention, no padding) → pool.
+    /// Encode a single image: embed -> encoder (flash attention, no padding) -> pool.
     fn encode_single(&self, pv: &Tensor, device: &Device, dtype: DType) -> Result<Tensor> {
         let (_, _, h, w) = pv.dims4()?;
         let ph = h / self.patch_size;
@@ -882,7 +882,7 @@ impl VisionTower {
             )?;
         }
 
-        // Pool: output_length = num_patches / k² (computed from actual patches)
+        // Pool: output_length = num_patches / k^2 (computed from actual patches)
         let k = self.pooler.pooling_k();
         let output_length = num_patches / (k * k);
         let (pooled, pool_mask) =

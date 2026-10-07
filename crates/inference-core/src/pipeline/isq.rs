@@ -618,11 +618,6 @@ impl UqffWriteConfig {
         self.repo_id = repo_id;
         self
     }
-
-    /// Build from an ISQ specifier; numeric shorthands expand to all variants, platform-preferred first.
-    pub fn expand_from_str(output: PathBuf, spec: &str) -> anyhow::Result<Self> {
-        Ok(Self::with_types(output, expand_isq_value(spec)?))
-    }
 }
 
 pub(crate) struct UqffWriteRequest<'a> {

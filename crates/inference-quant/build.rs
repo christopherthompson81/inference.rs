@@ -191,7 +191,7 @@ fn main() -> Result<(), String> {
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
         let compute_caps = builder.get_compute_caps();
         let listed = |cap: usize| compute_caps.contains(&cap);
-        // ======== Handle optional kernel compilation via rustc-cfg flags
+        // Handle optional kernel compilation via rustc-cfg flags
         let cc_over_80 = compute_cap >= 80;
         let target = std::env::var("TARGET").unwrap();
 

@@ -1,15 +1,15 @@
 use super::llg::build_llg_factory;
 use super::loaders::NormalLoaderTypeExt;
 use super::{
-    AdapterKind, DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind, ModelPaths,
-    NormalModel, NormalModelLoader, TokenSource, paged_attention_memory_reservations,
-    text_models_inputs_processor::ModelInputs,
-};
-use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, ForwardStepResult,
     IsqOrganization, IsqPipelineMixin, MetadataMixin, ModelCategory, PreProcessingMixin,
 };
 use super::{AutoNormalLoader, NormalLoaderType};
+use super::{
+    DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind, ModelPaths, NormalModel,
+    NormalModelLoader, TokenSource, paged_attention_memory_reservations,
+    text_models_inputs_processor::ModelInputs,
+};
 use crate::amoe::AnyMoeExpertType;
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
@@ -412,9 +412,7 @@ impl NormalLoaderBuilder {
         adapters: Vec<LoraAdapterSpec>,
         runtime_config: LoraRuntimeConfig,
     ) -> Self {
-        self.kind = ModelKind::Adapter {
-            adapter: AdapterKind::Lora,
-        };
+        self.kind = ModelKind::Lora;
         self.lora_adapters = Some(adapters);
         self.lora_runtime_config = Some(runtime_config);
         self
@@ -616,13 +614,7 @@ impl Loader for NormalLoader {
                     .as_ref()
                     .map(|source| (&source.weights, source.rope_pairing)),
                 lora: match self.kind {
-                    ModelKind::Adapter {
-                        adapter: AdapterKind::Lora,
-                    }
-                    | ModelKind::GgufAdapter {
-                        adapter: AdapterKind::Lora,
-                        ..
-                    } => Some(
+                    ModelKind::Lora | ModelKind::GgufLora { .. } => Some(
                         self.lora_runtime_config
                             .expect("LoRA loaders have a runtime config"),
                     ),

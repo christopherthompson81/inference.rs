@@ -205,9 +205,7 @@ impl ProportionalRotaryEmbedding {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Router
-// ────────────────────────────────────────────────────────────────────────────
+// Router
 
 struct Gemma4Router {
     norm: RmsNorm,
@@ -274,9 +272,7 @@ impl Gemma4Router {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Attention
-// ────────────────────────────────────────────────────────────────────────────
+// Attention
 
 struct Attention {
     q_proj: Arc<dyn QuantMethod>,
@@ -951,9 +947,7 @@ fn is_paged_decode_forward(
     is_paged && q_len > 0 && !is_first_prompt_chunk && !has_prompt_cache_metadata
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  Decoder layer
-// ────────────────────────────────────────────────────────────────────────────
+// Decoder layer
 
 struct DecoderLayer {
     self_attn: Attention,
@@ -1268,7 +1262,7 @@ impl DecoderLayer {
                 .as_ref()
                 .expect("pre_feedforward_layernorm_2 required for MoE");
 
-            // Branch 1: MLP with pre_feedforward_layernorm → post_feedforward_layernorm_1
+            // Branch 1: MLP with pre_feedforward_layernorm -> post_feedforward_layernorm_1
             let mlp_in = pre_ff_normed.clone();
             let mlp_out = self.mlp.forward(&mlp_in)?;
             let mlp_normed = mlp_out.apply(post_ff_1)?;
@@ -1368,9 +1362,7 @@ impl DecoderLayer {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  TextModel
-// ────────────────────────────────────────────────────────────────────────────
+// TextModel
 
 #[derive(Clone)]
 struct Gemma4ModelConfigLike {
@@ -2637,9 +2629,7 @@ impl IsqModel for TextModel {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  MultimodalModel
-// ────────────────────────────────────────────────────────────────────────────
+// MultimodalModel
 
 impl crate::speculative::SpeculativeTargetMixin for TextModel {}
 
@@ -2675,9 +2665,7 @@ impl MultimodalModel for TextModel {
     }
 }
 
-// ────────────────────────────────────────────────────────────────────────────
-//  AnyMoeBaseModelMixin (empty)
-// ────────────────────────────────────────────────────────────────────────────
+// AnyMoeBaseModelMixin (empty)
 
 impl AnyMoeBaseModelMixin for TextModel {}
 

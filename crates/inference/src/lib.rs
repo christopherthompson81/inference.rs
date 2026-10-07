@@ -189,14 +189,14 @@
 //!
 //! ```text
 //! ModelBuilder / TextModelBuilder / MultimodalModelBuilder / GgufModelBuilder / ...
-//!     │
-//!     ▼
-//!   Model ──── send_chat_request() ──► Engine ──► Pipeline ──► Output
-//!     │                                  │
-//!     ├── chat()                    Scheduler + PagedAttention
-//!     ├── stream_chat_request()
-//!     ├── generate_structured()
-//!     └── send_*_with_model()       (multi-model dispatch)
+//!     |
+//!     v
+//!   Model - send_chat_request() -> Engine -> Pipeline -> Output
+//!     |                            |
+//!     +- chat()                    Scheduler + PagedAttention
+//!     +- stream_chat_request()
+//!     +- generate_structured()
+//!     `- send_*_with_model()       (multi-model dispatch)
 //! ```
 
 #[macro_use]
