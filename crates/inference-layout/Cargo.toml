@@ -22,12 +22,12 @@ serde.workspace = true
 serde_json.workspace = true
 
 [build-dependencies]
-cudaforge = { workspace = true, optional = true }
+inference-kernel-build = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow.workspace = true
 clap.workspace = true
 
 [features]
-cuda = ["inference-tensor/cuda", "dep:cudaforge"]
+cuda = ["inference-tensor/cuda", "dep:inference-kernel-build"]
 metal = ["inference-tensor/metal"]

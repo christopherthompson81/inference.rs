@@ -50,11 +50,17 @@ impl GpuArch {
 
         // "8.6" and "12.1" as nvidia-smi prints them, or "86" and "121"
         let base = match num_part.split_once('.') {
-            Some((major, minor)) if !major.is_empty() && minor.len() == 1 => format!("{major}{minor}").parse::<usize>(),
+            Some((major, minor)) if !major.is_empty() && minor.len() == 1 => {
+                format!("{major}{minor}").parse::<usize>()
+            }
             Some(_) => "".parse::<usize>(),
-            None => num_part.parse::<usize>().map(|base| if base < 20 { base * 10 } else { base }),
+            None => num_part
+                .parse::<usize>()
+                .map(|base| if base < 20 { base * 10 } else { base }),
         }
-        .map_err(|_| Error::ComputeCapDetectionFailed(format!("Invalid compute capability: {}", s)))?;
+        .map_err(|_| {
+            Error::ComputeCapDetectionFailed(format!("Invalid compute capability: {}", s))
+        })?;
 
         // If explicit suffix provided, use it; otherwise auto-suffix for >=90
         if explicit_suffix.is_some() {
@@ -131,7 +137,11 @@ pub fn gencode_args(archs: &[GpuArch]) -> Vec<String> {
 
 /// The archs as one key (`sm_80,sm_90a`); a single arch keys as `to_nvcc_arch` alone.
 pub fn arch_key(archs: &[GpuArch]) -> String {
-    archs.iter().map(GpuArch::to_nvcc_arch).collect::<Vec<_>>().join(",")
+    archs
+        .iter()
+        .map(GpuArch::to_nvcc_arch)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Parse a list like "80,86,90" (commas, semicolons or spaces), deduplicated and sorted by base.
@@ -204,7 +214,7 @@ impl ComputeCapability {
     /// Priority:
     /// 1. Per-file override matching pattern (that arch alone)
     /// 2. Default compute cap (that arch alone)
-    /// 3. Detected: CUDA_COMPUTE_CAP (one value or a list), else every GPU nvidia-smi lists
+    /// 3. Detected: CUDA_COMPUTE_CAP (one value or a list), else the first GPU nvidia-smi lists
     pub fn get_for_file(&self, filename: &str) -> Result<Vec<GpuArch>> {
         for (pattern, arch) in &self.overrides {
             if matches_pattern(filename, pattern) {
@@ -281,7 +291,9 @@ fn parse_nvidia_smi_output(output: &str) -> Result<Vec<GpuArch>> {
         .lines()
         .skip(1)
         .find(|line| !line.trim().is_empty())
-        .ok_or_else(|| Error::ComputeCapDetectionFailed("Unexpected nvidia-smi output".to_string()))?;
+        .ok_or_else(|| {
+            Error::ComputeCapDetectionFailed("Unexpected nvidia-smi output".to_string())
+        })?;
     Ok(vec![GpuArch::parse(line)?])
 }
 
@@ -388,11 +400,17 @@ mod tests {
         // one value keys exactly as before
         assert_eq!(arch_key(&parse_arch_list("8.6").unwrap()), "sm_86");
         assert!(parse_arch_list(" , ").is_err());
-        assert_eq!(arch_key(&parse_arch_list("121a,121f,121a").unwrap()), "sm_121a,sm_121f");
+        assert_eq!(
+            arch_key(&parse_arch_list("121a,121f,121a").unwrap()),
+            "sm_121a,sm_121f"
+        );
         assert!(GpuArch::parse("8.").is_err());
         assert_eq!(GpuArch::parse("12.1").unwrap().to_nvcc_arch(), "sm_121f");
         // a mixed host builds for its first GPU unless CUDA_COMPUTE_CAP lists more
-        assert_eq!(arch_key(&parse_nvidia_smi_output("compute_cap\n8.6\n9.0\n").unwrap()), "sm_86");
+        assert_eq!(
+            arch_key(&parse_nvidia_smi_output("compute_cap\n8.6\n9.0\n").unwrap()),
+            "sm_86"
+        );
     }
 
     #[test]

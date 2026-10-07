@@ -23,12 +23,12 @@ inference-metal-compile = { workspace = true, optional = true, features = ["meta
 thiserror.workspace = true
 
 [build-dependencies]
-cudaforge = { workspace = true, optional = true }
+inference-kernel-build = { workspace = true, optional = true }
 anyhow.workspace = true
 inference-metal-compile = { workspace = true, optional = true }
 
 [features]
-cuda = ["dep:cudaforge", "inference-tensor/cuda"]
+cuda = ["dep:inference-kernel-build", "inference-tensor/cuda"]
 metal = [
     "inference-tensor/metal",
     "dep:objc2-metal",

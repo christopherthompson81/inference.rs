@@ -14,11 +14,11 @@ float8.workspace = true
 half = { workspace = true }
 
 [build-dependencies]
-cudaforge = { workspace = true, optional = true }
+inference-kernel-build = { workspace = true, optional = true }
 
 [dev-dependencies]
 anyhow = { workspace = true, features = ["backtrace"] }
 
 [features]
 default = []
-cuda = ["dep:cudaforge", "inference-tensor/cuda"]
+cuda = ["dep:inference-kernel-build", "inference-tensor/cuda"]

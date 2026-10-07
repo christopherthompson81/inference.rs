@@ -1,6 +1,6 @@
 [workspace]
 # FA3 compiles ~60 sm90 CUTLASS instances, so only the `flash-attn-v3` feature builds it, never `--workspace`
-exclude = ["crates/inference-flash-attn-v3", "third_party/cudaforge", "third_party/cudarc"]
+exclude = ["crates/inference-flash-attn-v3", "third_party/cudarc"]
 members = [
     "crates/inference-server-core",
     "crates/inference-api",
@@ -25,6 +25,7 @@ members = [
     "crates/inference-fattn",
     "crates/inference-tensor",
     "crates/inference-tensor-kernels",
+    "crates/inference-kernel-build",
 
     "crates/inference-audio",
     "crates/inference-agent",
@@ -62,6 +63,7 @@ default-members = [
     "crates/inference-fattn",
     "crates/inference-tensor",
     "crates/inference-tensor-kernels",
+    "crates/inference-kernel-build",
 
     "crates/inference-audio",
     "crates/inference-agent",
@@ -213,7 +215,7 @@ include_dir = "0.7.4"
 http = "1.4.0"
 http-body = "1.0.1"
 rust-mcp-schema = { version = "0.9.5", default-features = false, features = ["schema_utils", "latest"] }
-cudaforge = "=0.1.6"
+inference-kernel-build = { path = "crates/inference-kernel-build" }
 rubato = { version = "0.16.2", default-features = false }
 # Scalar kernels only: audio front ends run small FFTs (microseconds each) and the SIMD variants cost ~700k IR lines.
 rustfft = { version = "6.4.1", default-features = false }
@@ -286,8 +288,6 @@ codegen-units = 1
 inherits = "dev"
 debug = true
 
-# cudaforge with cargo jobserver support, so kernel crates building in parallel share `cargo -j`; see third_party/cudaforge/README.md
 [patch.crates-io]
-cudaforge = { path = "third_party/cudaforge" }
 # cudarc loading CUDA libraries by soname first; see third_party/cudarc/README.md
 cudarc = { path = "third_party/cudarc" }

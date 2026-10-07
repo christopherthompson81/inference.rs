@@ -11,8 +11,8 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 
 [build-dependencies]
-cudaforge = { workspace = true, optional = true }
+inference-kernel-build = { workspace = true, optional = true }
 
 [features]
 default = []
-cuda = ["dep:cudaforge"]
+cuda = ["dep:inference-kernel-build"]

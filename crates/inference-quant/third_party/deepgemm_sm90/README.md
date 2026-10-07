@@ -3,7 +3,7 @@
 The official kernel family under `include/official/deep_gemm` is from
 DeepGEMM 2.6.1 commit `559d79fb6994a58b8a15b4b93bf13ccc16edf247`.
 Its pinned CUTLASS commit `f3fde58372d33e9a5650ba7b80fc48b3b49d40c8`
-is fetched by cudaforge during the build. The Rust build generates an embedded
+is fetched by inference-kernel-build during the build. The Rust build generates an embedded
 runtime header bundle, so serving does not depend on Python, vLLM, or a
 machine-local CUTLASS checkout.
 

@@ -1,7 +1,7 @@
-//! # CudaForge
+//! # inference-kernel-build
 //!
-//! Advanced CUDA kernel builder for Rust with incremental builds, auto-detection,
-//! and external dependency support.
+//! Build-time CUDA kernel compilation for the kernel crates: incremental builds, toolkit and arch detection, and
+//! fetched dependencies. Derived from cudaforge.
 //!
 //! ## Features
 //!
@@ -16,7 +16,7 @@
 //! ## Quick Start
 //!
 //! ```no_run
-//! use cudaforge::KernelBuilder;
+//! use inference_kernel_build::KernelBuilder;
 //!
 //! fn main() {
 //!     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR must be set");
@@ -38,9 +38,9 @@
 //! ## Per-Kernel Compute Capability
 //!
 //! ```no_run
-//! use cudaforge::KernelBuilder;
+//! use inference_kernel_build::KernelBuilder;
 //!
-//! # fn main() -> cudaforge::Result<()> {
+//! # fn main() -> inference_kernel_build::Result<()> {
 //! KernelBuilder::new()
 //!     .source_glob("src/**/*.cu")
 //!     .with_compute_override("sm90_*.cu", 90)  // Hopper kernels
@@ -53,9 +53,9 @@
 //! ## With CUTLASS
 //!
 //! ```no_run
-//! use cudaforge::KernelBuilder;
+//! use inference_kernel_build::KernelBuilder;
 //!
-//! # fn main() -> cudaforge::Result<()> {
+//! # fn main() -> inference_kernel_build::Result<()> {
 //! KernelBuilder::new()
 //!     .source_dir("src/kernels")
 //!     .with_cutlass(Some("7127592069c2fe01b041e174ba4345ef9b279671"))
@@ -68,9 +68,9 @@
 //! ## PTX Generation
 //!
 //! ```no_run
-//! use cudaforge::KernelBuilder;
+//! use inference_kernel_build::KernelBuilder;
 //!
-//! # fn main() -> cudaforge::Result<()> {
+//! # fn main() -> inference_kernel_build::Result<()> {
 //! let output = KernelBuilder::new()
 //!     .source_glob("src/**/*.cu")
 //!     .build_ptx()?;
@@ -95,8 +95,8 @@ mod toolkit;
 // Re-export main types
 pub use builder::{KernelBuilder, PtxOutput};
 pub use compute_cap::{
-    arch_key, detect_compute_cap, detect_compute_caps, gencode_args, get_gpu_arch_string, parse_arch_list,
-    ComputeCapability, GpuArch,
+    arch_key, detect_compute_cap, detect_compute_caps, gencode_args, get_gpu_arch_string,
+    parse_arch_list, ComputeCapability, GpuArch,
 };
 pub use dependency::{resolve_cutlass_from_cargo_checkouts, DependencyManager, ExternalDependency};
 pub use error::{Error, Result};

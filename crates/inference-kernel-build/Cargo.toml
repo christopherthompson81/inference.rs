@@ -1,0 +1,25 @@
+[package]
+name = "inference-kernel-build"
+version.workspace = true
+# cudaforge's edition
+edition = "2021"
+rust-version.workspace = true
+
+description = "Build-time CUDA kernel compilation for inference.rs's kernel crates, derived from cudaforge."
+repository.workspace = true
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+
+[dependencies]
+glob = "0.3.1"
+num_cpus = "1.16.0"
+rayon = "1.10.0"
+which = "7.0.0"
+sha2 = "0.10.8"
+walkdir = "2.5.0"
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+fs2 = "0.4"
+jobserver = "0.1.34"

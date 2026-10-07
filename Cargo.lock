@@ -905,24 +905,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cudaforge"
-version = "0.1.6"
-dependencies = [
- "anyhow",
- "fs2",
- "glob",
- "jobserver",
- "num_cpus",
- "rayon",
- "serde",
- "serde_json",
- "sha2",
- "thiserror 2.0.18",
- "walkdir",
- "which 7.0.3",
-]
-
-[[package]]
 name = "cudarc"
 version = "0.19.10"
 dependencies = [
@@ -2665,9 +2647,9 @@ name = "inference-fattn"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "cudaforge",
  "float8",
  "half",
+ "inference-kernel-build",
  "inference-tensor",
 ]
 
@@ -2696,8 +2678,8 @@ name = "inference-flash-attn-v3"
 version = "0.9.3"
 dependencies = [
  "anyhow",
- "cudaforge",
  "half",
+ "inference-kernel-build",
  "inference-tensor",
  "num_cpus",
  "rayon",
@@ -2727,14 +2709,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-kernel-build"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "fs2",
+ "glob",
+ "jobserver",
+ "num_cpus",
+ "rayon",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "walkdir",
+ "which 7.0.3",
+]
+
+[[package]]
 name = "inference-layout"
 version = "0.9.3"
 dependencies = [
  "anyhow",
  "clap",
- "cudaforge",
  "gemm",
  "image",
+ "inference-kernel-build",
  "inference-tensor",
  "num_cpus",
  "rayon",
@@ -2935,7 +2935,6 @@ dependencies = [
  "anyhow",
  "candle-metal-kernels",
  "csv",
- "cudaforge",
  "either",
  "float8",
  "half",
@@ -2945,6 +2944,7 @@ dependencies = [
  "inference-audio",
  "inference-fattn",
  "inference-flash-attn-v3",
+ "inference-kernel-build",
  "inference-paged-attn",
  "inference-quant",
  "inference-tensor",
@@ -2977,10 +2977,10 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "candle-metal-kernels",
- "cudaforge",
  "dispatch2",
  "float8",
  "half",
+ "inference-kernel-build",
  "inference-metal-compile",
  "inference-tensor",
  "objc2-metal",
@@ -3022,7 +3022,6 @@ dependencies = [
  "bytemuck",
  "byteorder",
  "candle-metal-kernels",
- "cudaforge",
  "cutile",
  "dispatch2",
  "fancy-regex",
@@ -3031,6 +3030,7 @@ dependencies = [
  "half",
  "indexmap",
  "indicatif 0.18.3",
+ "inference-kernel-build",
  "inference-metal-compile",
  "inference-tensor",
  "libc",
@@ -3165,7 +3165,7 @@ dependencies = [
 name = "inference-tensor-kernels"
 version = "0.9.3"
 dependencies = [
- "cudaforge",
+ "inference-kernel-build",
 ]
 
 [[package]]

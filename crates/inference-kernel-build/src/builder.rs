@@ -160,14 +160,14 @@ impl KernelBuilder {
     ///
     /// # Example
     /// ```no_run
-    /// use cudaforge::KernelBuilder;
+    /// use inference_kernel_build::KernelBuilder;
     ///
     /// // For Docker builds, require explicit compute cap
     /// KernelBuilder::new()
     ///     .require_explicit_compute_cap()?  // Fails if CUDA_COMPUTE_CAP not set
     ///     .source_dir("src/kernels")
     ///     .build_lib("libkernels.a")?;
-    /// # Ok::<(), cudaforge::Error>(())
+    /// # Ok::<(), inference_kernel_build::Error>(())
     /// ```
     pub fn require_explicit_compute_cap(self) -> Result<Self> {
         // Check if compute cap is already set
@@ -291,7 +291,7 @@ impl KernelBuilder {
         let version = self.toolkit.as_ref().and_then(|t| t.version.as_deref());
         let parsed = version.and_then(parse_major_minor);
         if parsed.is_none() {
-            println!("cargo:warning=cudaforge: unknown CUDA version {version:?}, falling back to -Xfatbin=-compress-all");
+            println!("cargo:warning=inference-kernel-build: unknown CUDA version {version:?}, falling back to -Xfatbin=-compress-all");
         }
         let flag = if parsed >= Some(SIZE_COMPRESSION_SINCE) {
             "-compress-mode=size"
@@ -356,7 +356,10 @@ impl KernelBuilder {
             Some(t) => t,
             None => CudaToolkit::detect()?,
         };
-        println!("cargo:rustc-link-search=native={}", toolkit.lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            toolkit.lib_dir.display()
+        );
         let mut key = DefaultHasher::new();
         name.hash(&mut key);
         self.extra_args.hash(&mut key);
@@ -653,7 +656,10 @@ impl KernelBuilder {
         );
 
         // Sources generated into out_dir (PTX feeding a fatbin build) are rewritten after cargo stamps the run
-        for file in kernel_files.iter().filter(|f| !f.starts_with(&self.out_dir)) {
+        for file in kernel_files
+            .iter()
+            .filter(|f| !f.starts_with(&self.out_dir))
+        {
             println!("cargo:rerun-if-changed={}", file.display());
         }
         for path in self.sources.watch_paths() {
@@ -684,9 +690,12 @@ impl KernelBuilder {
                 gpu_arch.truncate(1);
             }
 
-            let output_file = self
-                .out_dir
-                .join(kernel_file.with_extension(kind.extension()).file_name().unwrap());
+            let output_file = self.out_dir.join(
+                kernel_file
+                    .with_extension(kind.extension())
+                    .file_name()
+                    .unwrap(),
+            );
 
             // Check if output is current using BuildCache
             if self.incremental
@@ -787,9 +796,12 @@ impl KernelBuilder {
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
                 let gpu_arch = self.compute_cap.get_for_file(filename)?;
-                let output_file = self
-                    .out_dir
-                    .join(kernel_file.with_extension(kind.extension()).file_name().unwrap());
+                let output_file = self.out_dir.join(
+                    kernel_file
+                        .with_extension(kind.extension())
+                        .file_name()
+                        .unwrap(),
+                );
 
                 cache.update(
                     kernel_file,
@@ -853,12 +865,12 @@ fn dev_shared_libs() -> bool {
 
 /// `<target>/<profile>/cuda-kernels`, derived from `OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out`.
 fn shared_lib_root() -> Result<PathBuf> {
-    let out_dir = std::env::var("OUT_DIR").map_err(|_| Error::LinkingFailed("OUT_DIR not set".into()))?;
+    let out_dir =
+        std::env::var("OUT_DIR").map_err(|_| Error::LinkingFailed("OUT_DIR not set".into()))?;
     let out_dir = PathBuf::from(out_dir);
-    let profile_dir = out_dir
-        .ancestors()
-        .nth(3)
-        .ok_or_else(|| Error::LinkingFailed(format!("unexpected OUT_DIR layout: {}", out_dir.display())))?;
+    let profile_dir = out_dir.ancestors().nth(3).ok_or_else(|| {
+        Error::LinkingFailed(format!("unexpected OUT_DIR layout: {}", out_dir.display()))
+    })?;
     Ok(profile_dir.join("cuda-kernels"))
 }
 
@@ -945,8 +957,10 @@ mod tests {
 
     #[test]
     fn test_incremental_rebuild_on_header_change() {
-        // Skip test if nvcc is not available (e.g. in some CI environments)
-        if crate::toolkit::CudaToolkit::detect().is_err() {
+        // Needs nvcc and an arch to build for; a toolkit-only host without a GPU or CUDA_COMPUTE_CAP has no arch
+        if crate::toolkit::CudaToolkit::detect().is_err()
+            || crate::compute_cap::detect_compute_caps().is_err()
+        {
             return;
         }
 

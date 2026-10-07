@@ -1,9 +1,9 @@
-//! Error types for CudaForge
+//! Error types for inference-kernel-build
 
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Result type alias for CudaForge operations
+/// Result type alias for inference-kernel-build operations
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur during CUDA kernel building

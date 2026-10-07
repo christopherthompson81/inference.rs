@@ -56,13 +56,13 @@ objc2-metal = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 
 [build-dependencies]
-cudaforge = { workspace = true, optional = true }
+inference-kernel-build = { workspace = true, optional = true }
 
 [features]
 utoipa = ["dep:utoipa"]
 cuda = [
     "inference-tensor/cuda",
-    "dep:cudaforge",
+    "dep:inference-kernel-build",
     "inference-quant/cuda",
     "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
