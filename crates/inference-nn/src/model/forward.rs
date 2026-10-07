@@ -94,6 +94,11 @@ pub enum ForwardPositions<'a> {
     None,
 }
 
+struct RopeTables {
+    computed: (Tensor, Tensor),
+    on_device: HashMap<DeviceLocation, (Tensor, Tensor)>,
+}
+
 pub enum ForwardMaskCache<'a> {
     Normal(&'a [KvCache]),
     Paged(&'a [usize]),
@@ -162,6 +167,7 @@ pub struct ModelForwardContext<'a> {
     cache: ForwardCache<'a>,
     positions: ForwardPositions<'a>,
     rope_positions: HashMap<(DeviceLocation, usize), Tensor>,
+    rope_tables: Option<RopeTables>,
     context_lens: &'a [(usize, usize)],
     position_ids: &'a [usize],
     flash_params: &'a FlashParams,
@@ -182,6 +188,7 @@ impl<'a> ModelForwardContext<'a> {
             cache: ForwardCache::from_paged(metadata),
             positions: ForwardPositions::Text { seqlen_offsets },
             rope_positions: HashMap::new(),
+            rope_tables: None,
             context_lens,
             position_ids,
             flash_params,
@@ -202,6 +209,7 @@ impl<'a> ModelForwardContext<'a> {
             cache,
             positions: ForwardPositions::Text { seqlen_offsets },
             rope_positions: HashMap::new(),
+            rope_tables: None,
             context_lens,
             position_ids,
             flash_params,
@@ -225,6 +233,28 @@ impl<'a> ModelForwardContext<'a> {
         }
         self.recurrent_metadata = recurrent_metadata;
         self
+    }
+
+    /// The (cos, sin) a model computed from its own positions, as M-RoPE does, for its layers to share.
+    pub fn set_rope_tables(&mut self, cos: Tensor, sin: Tensor) {
+        self.rope_tables = Some(RopeTables {
+            computed: (cos, sin),
+            on_device: HashMap::new(),
+        });
+    }
+
+    /// The tables [`Self::set_rope_tables`] stored, moved to `device` once.
+    pub fn rope_tables(&mut self, device: &Device) -> inference_tensor::Result<&(Tensor, Tensor)> {
+        let Some(tables) = self.rope_tables.as_mut() else {
+            inference_tensor::bail!("this forward set no RoPE tables");
+        };
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            tables.on_device.entry(device.location())
+        {
+            let (cos, sin) = &tables.computed;
+            entry.insert((cos.to_device(device)?, sin.to_device(device)?));
+        }
+        Ok(&tables.on_device[&device.location()])
     }
 
     pub fn require_full_prefill_queries(&mut self) {

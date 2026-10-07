@@ -9,15 +9,16 @@ use std::{
 
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{Context, DType, Device, IndexOp, Result, Tensor};
-use text::Qwen2VLTextModel;
 use vision::Qwen2VLVisionModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
+    decoder::{CausalLm, LayerMasks},
+    device_map::DeviceMappedMask,
     kv_cache::EitherCache,
     layers::CausalMasker,
     layers::masker::PastKvLenCache,
-    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
+    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
         AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
@@ -208,7 +209,8 @@ pub fn compute_rope_index(
 }
 
 pub struct QwenVlModel<V> {
-    text: Qwen2VLTextModel,
+    text: CausalLm,
+    sliding_window: Option<usize>,
     vision: V,
     vision_prefix: &'static str,
     spatial_merge_size: usize,
@@ -256,7 +258,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
             vision_vb.set_device(normal_loading_metadata.real_device.clone()),
             &normal_loading_metadata.mapper.get_comm_for(0)?,
         )?;
-        let text = Qwen2VLTextModel::new(
+        let text = text::text_model(
             cfg,
             vb.clone(),
             is_gptx,
@@ -264,6 +266,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
             attention_mechanism,
         )?;
         Ok(Self {
+            sliding_window: NormalModel::config(&text).sliding_window,
             text,
             vision,
             vision_prefix,
@@ -372,27 +375,27 @@ impl<V: QwenVlVision> QwenVlModel<V> {
         video_hashes: &[u64],
         packed_layout: Option<&PackedMultimodalLayout>,
         prompt_position_ids: Option<&Tensor>,
-        ctx: &ModelForwardContext<'_>,
+        ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let seqlen_offsets = ctx.seqlen_offsets();
         let attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.dtype,
+            self.text.embed_dtype(),
             &CausalMaskConfig::default(),
         )?;
         let sliding_attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &seqlen_offsets as &dyn PastKvLenCache,
-            self.text.dtype,
+            self.text.embed_dtype(),
             &CausalMaskConfig {
-                sliding_window: self.text.sliding_window,
+                sliding_window: self.sliding_window,
                 ..Default::default()
             },
         )?;
 
         let input_embeds = if pixel_values.is_some() || pixel_values_videos.is_some() {
-            let mut xs = self.text.embed_tokens(input_ids)?;
+            let mut xs = self.text.get_input_embeddings(input_ids)?;
             let mut packed_encoder_outputs = MultimodalEncoderOutputs::new();
 
             if let Some(pixel_values) = pixel_values {
@@ -420,7 +423,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
                     Some(outputs) => Tensor::cat(outputs, 0)?,
                     None => self.vision.forward(&pixel_values, grid_thw)?,
                 }
-                .to_dtype(self.text.dtype)?;
+                .to_dtype(self.text.embed_dtype())?;
 
                 if packed_layout.is_some() {
                     insert_current_visual_outputs(
@@ -462,7 +465,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
                     Some(outputs) => Tensor::cat(outputs, 0)?,
                     None => self.vision.forward(&pixel_values_videos, grid)?,
                 }
-                .to_dtype(self.text.dtype)?;
+                .to_dtype(self.text.embed_dtype())?;
 
                 if packed_layout.is_some() {
                     insert_current_visual_outputs(
@@ -492,7 +495,7 @@ impl<V: QwenVlVision> QwenVlModel<V> {
                 xs
             }
         } else {
-            self.text.embed_tokens(input_ids)?
+            self.text.get_input_embeddings(input_ids)?
         };
 
         let decode_position_ids = if rope_img_grid_thw.is_none() && rope_vid_grid_thw.is_none() {
@@ -553,14 +556,17 @@ impl<V: QwenVlVision> QwenVlModel<V> {
                 )?
             }
         };
-        let out = self.text.forward_embeds(
-            input_embeds,
-            &attention_mask,
-            &sliding_attention_mask,
-            &position_ids,
-            ctx,
-        )?;
-        Ok(out)
+        let mapper = self.text.stack_mapper();
+        let masks = LayerMasks::new(
+            Some(DeviceMappedMask::new(attention_mask, mapper)?),
+            Some(DeviceMappedMask::new(sliding_attention_mask, mapper)?),
+            None,
+        );
+        let (cos, sin) = self
+            .text
+            .mrope_tables(&position_ids, input_embeds.dtype())?;
+        ctx.set_rope_tables(cos, sin);
+        self.text.forward_with_masks(input_embeds, &masks, ctx)
     }
 }
 
@@ -645,16 +651,16 @@ impl<V: QwenVlVision> MultimodalModel for QwenVlModel<V> {
         )
     }
     fn cache(&self) -> &EitherCache {
-        &self.text.cache
+        NormalModel::cache(&self.text)
     }
     fn device(&self) -> &Device {
-        &self.text.device
+        NormalModel::device(&self.text)
     }
     fn max_seq_len(&self) -> usize {
-        self.text.max_seq_len
+        NormalModel::max_seq_len(&self.text)
     }
     fn config(&self) -> &ModelConfigMetadata {
-        &self.text.cfg
+        NormalModel::config(&self.text)
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         assert_eq!(input_ids.dims()[0], 1);

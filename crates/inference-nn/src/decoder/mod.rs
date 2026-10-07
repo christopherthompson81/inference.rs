@@ -15,11 +15,12 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
-        Activation, CausalMasker, FusedGateUpMlp, Gemma3RopeScalingConfig, Gemma3RopeSpec,
-        Gemma3RotaryEmbedding, GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec,
-        Llama3RotaryEmbedding, Mlp, PhiRopeConfig, PhiRotaryEmbedding, PlainMlp, RmsNorm,
-        RotaryEmbedding, YarnRopeConfig, embedding, embedding_with_legacy_tied_uqff, layer_norm,
-        masker::CausalMaskConfig, masker::PastKvLenCache,
+        Activation, CausalMasker, F32RmsNorm, FusedGateUpMlp, Gemma3RopeScalingConfig,
+        Gemma3RopeSpec, Gemma3RotaryEmbedding, GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec,
+        Llama3RotaryEmbedding, Mlp, PhiRopeConfig, PhiRotaryEmbedding, PlainMlp,
+        Qwen2VLRotaryEmbedding, RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding,
+        embedding_with_legacy_tied_uqff, layer_norm, masker::CausalMaskConfig,
+        masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
@@ -81,6 +82,11 @@ pub enum RopeKind {
     },
     /// Phi's LongRoPE, switching to its long factors once a sequence outgrows the original context.
     Phi(PhiRopeConfig),
+    /// Qwen2-VL's M-RoPE over (temporal, height, width) positions in `sections`; the model sets the forward's tables.
+    MRope {
+        theta: f32,
+        sections: Vec<usize>,
+    },
 }
 
 impl Default for RopeKind {
@@ -91,13 +97,14 @@ impl Default for RopeKind {
     }
 }
 
-/// The layer and final norms: RMS, Gemma's RMS over `1 + weight`, or LayerNorm with a bias.
+/// The layer and final norms: RMS, Gemma's RMS over `1 + weight`, LayerNorm with a bias, or RMS computed in f32.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum NormKind {
     #[default]
     Rms,
     Gemma,
     Layer,
+    F32Rms,
 }
 
 /// A layer's norm names; a sandwich adds post norms (Gemma 2, GLM4), no `pre_ffn` makes it parallel (Phi-2).
@@ -216,6 +223,8 @@ pub struct DecoderSpec {
     pub lm_head_bias: bool,
     /// The lm_head is stored unquantized even in a quantized checkpoint.
     pub unquantized_lm_head: bool,
+    /// Eager attention runs in f32 whatever the model's dtype.
+    pub eager_attention_f32: bool,
 }
 
 impl DecoderSpec {
@@ -236,6 +245,14 @@ impl DecoderSpec {
         is_gptx: bool,
         dtype: DType,
     ) -> Result<LayerRope> {
+        if let RopeKind::MRope { theta, sections } = kind {
+            return Ok(LayerRope::MRope(Qwen2VLRotaryEmbedding::new(
+                *theta,
+                self.head_dim,
+                device,
+                sections.clone(),
+            )?));
+        }
         if let RopeKind::Phi(cfg) = kind {
             let factor = |name| {
                 vb_m.contains_tensor(name)
@@ -324,7 +341,7 @@ impl DecoderSpec {
                 };
                 Ok(Gemma3RotaryEmbedding::new(is_gptx, dtype, spec, device)?.into_inner())
             }
-            RopeKind::Phi(_) => unreachable!("built by `rope`"),
+            RopeKind::Phi(_) | RopeKind::MRope { .. } => unreachable!("built by `rope`"),
         }
     }
 
@@ -351,6 +368,7 @@ impl DecoderSpec {
 pub enum LayerRope {
     Plain(RotaryEmbedding),
     Phi(PhiRotaryEmbedding),
+    MRope(Qwen2VLRotaryEmbedding),
 }
 
 impl LayerRope {
@@ -364,6 +382,7 @@ impl LayerRope {
         match self {
             Self::Plain(rope) => rope.forward(q, k, positions),
             Self::Phi(rope) => rope.forward(q, k, positions, position_ids),
+            Self::MRope(_) => unreachable!("M-RoPE reads the forward's tables"),
         }
     }
 }
@@ -388,6 +407,7 @@ pub struct AttentionBlock {
     num_kv_heads: usize,
     head_dim: usize,
     rotary_emb: Option<Arc<LayerRope>>,
+    eager_attention_f32: bool,
     attention_temperature: Option<AttentionTemperature>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
@@ -758,6 +778,7 @@ impl AttentionBlock {
             num_kv_heads,
             head_dim,
             rotary_emb: (!spec.no_rope_layers.contains(&layer_idx)).then_some(rotary_emb),
+            eager_attention_f32: spec.eager_attention_f32,
             attention_temperature: spec.attention_temperature,
             paged_attn,
             sdpa_params: SdpaParams {
@@ -812,6 +833,24 @@ impl AttentionBlock {
         let (q, k) = self.rope_and_norm(q, k, ctx)?;
 
         let attn_output = match kv_cache {
+            Some(kv_cache) if self.eager_attention_f32 && self.paged_attn.is_none() => {
+                let (k, v) = kv_cache.append(&k.contiguous()?, &v.contiguous()?)?;
+                let f32_mask = match attention_mask {
+                    AttentionMask::Custom(mask) => {
+                        AttentionMask::Custom(mask.to_dtype(DType::F32)?)
+                    }
+                    other => other.clone(),
+                };
+                Sdpa.run_attention(
+                    &q.contiguous()?.to_dtype(DType::F32)?,
+                    &k.contiguous()?.to_dtype(DType::F32)?,
+                    &v.contiguous()?.to_dtype(DType::F32)?,
+                    &f32_mask,
+                    Some(flash.unwrap_or(ctx.flash_params())),
+                    &self.sdpa_params,
+                )?
+                .to_dtype(q.dtype())?
+            }
             Some(kv_cache) => AttentionDispatch {
                 paged_attn: self.paged_attn.as_ref(),
                 paged_layer: ctx.paged_layer(layer_idx),
@@ -846,9 +885,14 @@ impl AttentionBlock {
         let Some(rope) = &self.rotary_emb else {
             return Ok((q, k));
         };
+        if let LayerRope::MRope(rope) = &**rope {
+            let (mut q, mut k) = (q, k);
+            rope.forward(ctx.rope_tables(q.device())?, &mut q, &mut k)?;
+            return Ok((q, k));
+        }
         let position_ids = match **rope {
             LayerRope::Phi(_) => ctx.position_ids_vec(),
-            LayerRope::Plain(_) => Vec::new(),
+            LayerRope::Plain(_) | LayerRope::MRope(_) => Vec::new(),
         };
         let positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
@@ -915,9 +959,12 @@ impl LayerAttention for AttentionBlock {
         self.sdpa_params.softcap.is_none()
             || crate::attention::flash_backend_supports(self.head_dim, true)
     }
-    // LongRoPE picks its tables on the host, which a replayed graph would freeze
+    // LongRoPE and M-RoPE pick their tables on the host, which a replayed graph would freeze
     fn cuda_decode_graphs(&self) -> bool {
-        !matches!(self.rotary_emb.as_deref(), Some(LayerRope::Phi(_)))
+        !matches!(
+            self.rotary_emb.as_deref(),
+            Some(LayerRope::Phi(_) | LayerRope::MRope(_))
+        )
     }
     fn add_residual(&self, uvb: &UnVarBuilder) {
         self.qk_norm_residual(uvb)
@@ -940,6 +987,7 @@ pub enum Norm {
     Rms(RmsNorm),
     Gemma(GemmaRmsNorm),
     Layer(LayerNorm),
+    F32Rms(F32RmsNorm),
 }
 
 impl Norm {
@@ -948,6 +996,7 @@ impl Norm {
             NormKind::Rms => Self::Rms(RmsNorm::new(size, eps, vb)?),
             NormKind::Gemma => Self::Gemma(GemmaRmsNorm::new(size, eps, vb)?),
             NormKind::Layer => Self::Layer(layer_norm(size, eps, vb)?),
+            NormKind::F32Rms => Self::F32Rms(F32RmsNorm::new(size, eps, vb)?),
         })
     }
 
@@ -956,6 +1005,7 @@ impl Norm {
             Self::Rms(norm) => norm.forward(xs),
             Self::Gemma(norm) => norm.forward(xs),
             Self::Layer(norm) => norm.forward(xs),
+            Self::F32Rms(norm) => norm.forward(xs),
         }
     }
 
@@ -964,7 +1014,7 @@ impl Norm {
         match self {
             Self::Rms(norm) => norm.forward_residual(x, residual),
             Self::Gemma(norm) => norm.forward_residual(x, residual),
-            Self::Layer(norm) => norm.forward(x)? + residual,
+            Self::Layer(_) | Self::F32Rms(_) => self.forward(x)? + residual,
         }
     }
 
@@ -982,7 +1032,7 @@ impl Norm {
             (Self::Gemma(norm), Self::Gemma(next)) => {
                 norm.forward_residual_then_rms_norm(x, residual, next)
             }
-            (Self::Layer(_), Self::Layer(_)) => {
+            (Self::Layer(_), Self::Layer(_)) | (Self::F32Rms(_), Self::F32Rms(_)) => {
                 let xs = self.forward_residual(x, residual)?;
                 let normed = next.forward(&xs)?;
                 Ok((xs, normed))
@@ -996,6 +1046,7 @@ impl Norm {
             Self::Rms(norm) => uvb.add(norm),
             Self::Gemma(norm) => uvb.add(norm),
             Self::Layer(norm) => uvb.add(norm),
+            Self::F32Rms(norm) => uvb.add(norm),
         }
     }
 
@@ -1004,7 +1055,7 @@ impl Norm {
         match self {
             Self::Rms(norm) => Some((norm.weight(), norm.eps())),
             Self::Gemma(norm) => Some((norm.weight(), norm.eps())),
-            Self::Layer(_) => None,
+            Self::Layer(_) | Self::F32Rms(_) => None,
         }
     }
 }
@@ -1105,6 +1156,14 @@ impl DecoderStack {
         {
             inference_tensor::bail!(
                 "NoPE layers with q/k norm or attention temperature are not supported"
+            );
+        }
+        // M-RoPE applies its tables alone, without the q/k norm or temperature the other RoPEs carry
+        if matches!(spec.rope, RopeKind::MRope { .. })
+            && (spec.qk_norm.is_some() || spec.attention_temperature.is_some())
+        {
+            inference_tensor::bail!(
+                "M-RoPE with q/k norm or attention temperature is not supported"
             );
         }
         if let Some(quant_cfg) = &spec.quantization_config {
@@ -1424,6 +1483,22 @@ impl CausalLm {
             spec.max_position_embeddings,
             cfg,
         )
+    }
+}
+
+impl<F: LayerFfn> CausalLm<AttentionBlock, F> {
+    /// This forward's M-RoPE (cos, sin) for `position_ids`, which [`ModelForwardContext::set_rope_tables`] takes.
+    pub fn mrope_tables(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
+        let rope = self.stack.layers.iter().find_map(|layer| {
+            match layer.self_attn.rotary_emb.as_deref() {
+                Some(LayerRope::MRope(rope)) => Some(rope),
+                _ => None,
+            }
+        });
+        match rope {
+            Some(rope) => rope.compute_cos_sin(position_ids, dtype),
+            None => inference_tensor::bail!("the stack has no M-RoPE layer"),
+        }
     }
 }
 
