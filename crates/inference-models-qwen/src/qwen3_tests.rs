@@ -87,6 +87,21 @@ fn qwen3_prefill_with_a_sliding_layer() -> Result<()> {
     )
 }
 
+// The embedding doubles as the head, read under either name.
+#[test]
+fn qwen3_prefill_with_tied_embeddings() -> Result<()> {
+    let config = patched(qwen3_config(), json!({"tie_word_embeddings": true}));
+    prefill(
+        &config,
+        0x292c_d3bd_cfeb_bb7c,
+        &Snapshot {
+            probes: [-0.6211252, -0.45686415, 1.1973644, -0.12869316],
+            sum: -49.599045,
+            l2: 16.99228,
+        },
+    )
+}
+
 #[test]
 fn qwen3_embedding_hidden_states() -> Result<()> {
     let config = patched(qwen3_config(), json!({"hidden_size": EMBEDDING_HIDDEN}));

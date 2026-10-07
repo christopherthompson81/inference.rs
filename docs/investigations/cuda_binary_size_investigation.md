@@ -1669,3 +1669,27 @@ stamped Q/K layout from the config; MLA and partial-rotary adjacent layouts are 
 by architecture name.
 
 Next: the shared dense-decoder block from Run 45.
+
+## Run 47 - 2026-10-07 07:38
+
+Question: what does #324 step 0 (the shared `inference_nn::decoder`, with Qwen3 and the Qwen3 embedder migrated onto
+it) do to the bundle, before any other model uses it?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,982,768  105,943,536     -39,232
+.text                  55,711,714   55,677,666     -34,048
+.gcc_except_table       2,433,457    2,431,765      -1,692
+.eh_frame               4,386,816    4,386,048        -768
+```
+
+Raw finding: -39 KB. Source: qwen3.rs + qwen3_embedding.rs 1,142 -> 141 lines, plus a 661-line shared module. The
+two Qwen3 stacks were close copies, so this is one copy's machine code; the shared module's own code is new. The
+saving per model should grow as later steps move models with no shared code yet onto the block (Run 45: ~53 B of
+machine code per model-crate source line).
+
+Pins: `qwen3_tests` (Qwen3 prefill, a sliding layer, the embedder's hidden states) were recorded on the old code
+and pass unchanged; the embedder now takes the fused q/k-norm RoPE path, within the snapshot tolerance.
+
+Next: #324 step 1, cluster A (qwen2, llama, smollm3, mistral, hunyuan dense).
