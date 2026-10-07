@@ -224,6 +224,7 @@ impl LayerAttention for Glm4MoeAttention {
         kv_cache: Option<&mut KvCache>,
         ctx: &mut ModelForwardContext<'_>,
         layer_idx: usize,
+        _flash: Option<&crate::attention::FlashParams>,
     ) -> Result<Tensor> {
         let Some(kv_cache) = kv_cache else {
             inference_tensor::bail!("Glm4MoeAttention needs a KV cache")

@@ -1763,3 +1763,37 @@ Pins: `gemma_dense_tests` (gemma, gemma2 with both softcaps and a sliding layer)
 partial rotary, bias), recorded on the old code in the previous commit, pass unchanged.
 
 Next: #324 step 3b, Gemma 3 text (dual RoPE, Gemma q/k norm), its VL wrapper and EmbeddingGemma.
+
+## Run 51 - 2026-10-07 09:54
+
+Question: what does #324 step 3b (Gemma 3 text, under its VL wrapper, and EmbeddingGemma onto the shared decoder)
+recover, and does the migration hold on the paths only the VL model takes?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,718,064  105,647,344     -70,720
+.text                  55,490,146   55,428,898     -61,248
+```
+
+Raw finding: -71 KB from 1,203 lines removed and 318 added (with the config alias below). The decoder grew `RopeKind::Gemma3` (f64 frequencies,
+linear scaling), a `local_rope` for sliding layers, q/k norms of the stack's norm kind, a per-call flash override,
+and `LayerMasks::new` + `CausalLm::forward_with_masks` so Gemma 3 keeps building its own masks (image tokens
+attend both ways; the paged media-prefix path) while its layers run on the shared block.
+
+Verification, beyond the synthesized-weight pins: a new tiny Gemma 3 VL checkpoint (fixtures/gemma3) with tests for
+the paged prefix cache serving only the same image, a text request in the batch leaving the image output alone, and
+pinned CPU traces of an image and a text prompt. First attempt: the image pin moved (-3.80 -> -3.77) while text held;
+the cause was the test recorder, which hands out random values in request order, and the shared stack asks for the
+layer norms in another order, so the two versions recorded different checkpoints. Seeding the fixture by tensor name
+fixed that; re-recorded on the old code, the migrated code matches the CPU pins and its CUDA traces (image, short
+image, text) are bit-identical to the old code's.
+
+Review pass: one behaviour change, a fix. Where `make_causal_mask` returns `Custom` on the paged path (Metal, CUDA
+without the mma flash kernels, or the forced-custom image path), the old code gave sliding layers the global mask, and
+`run_attention_noflash` ignores `sliding_window`, so those layers attended past the window. The shared stack hands
+them the sliding mask, matching eager. CUDA with flash gets `CausalFlash` for both, hence the identical traces. The
+Metal case can't be exercised here. `EmbeddingGemmaConfig` was a field-for-field copy of `Gemma3TextConfig` and is now
+an alias of it, sharing its `decoder_spec`.
+
+Next: #324 step 4 (StarCoder2, Phi-2).

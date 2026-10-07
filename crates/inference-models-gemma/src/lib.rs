@@ -25,5 +25,5 @@ inference_nn::json_config!(
     gemma3n::config::Gemma3nConfig,
     gemma4::config::Gemma4Config,
     diffusion_gemma::config::DiffusionGemmaConfig,
-    embedding_gemma::EmbeddingGemmaConfig,
+    gemma3::config::Gemma3TextConfig,
 );

@@ -1707,6 +1707,10 @@ impl Gemma3RotaryEmbedding {
         }))
     }
 
+    pub fn into_inner(self) -> RotaryEmbedding {
+        self.0
+    }
+
     pub fn get_cos_sin(&self) -> Result<(Tensor, Tensor)> {
         self.0.get_cos_sin()
     }
