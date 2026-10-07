@@ -1876,3 +1876,28 @@ old fallback lost nothing; the change is consistency, not a fix.
 
 Next: #324 step 7 (VL text stacks, Phi-4MM).
 
+## Run 55 - 2026-10-07 13:03
+
+Question: what does #324 step 7a (Qwen2-VL's text stack, shared by Qwen2-VL and Qwen2.5-VL, onto the shared decoder)
+recover? Step 7 opened with a survey of the multimodal text stacks still off the decoder: M-RoPE unlocks the most
+(Qwen2-VL/2.5-VL, PaddleOCR-VL, and with a deepstack hook Qwen3-VL/-MoE), then Phi-4MM (static-LoRA projections) and
+Voxtral (projection names, adaptive norm); Mllama and Llama 4 would need mixed layer kinds, and Gemma 3n, Gemma 4,
+Qwen3.5 and LFM2 stay bespoke.
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,453,488  105,412,720     -40,768
+.text                  55,266,850   55,230,050     -36,800
+```
+
+Raw finding: -41 KB from 587 lines of code removed and 202 added. The decoder grew `RopeKind::MRope` (layers
+read the forward's (cos, sin), which the model stores once with `ModelForwardContext::set_rope_tables`, copied once per
+device), `NormKind::F32Rms` and `eager_attention_f32`; Qwen2-VL keeps building its own full and sliding masks and runs
+the stack through `forward_with_masks`. A BF16 pin with a sliding layer, recorded on the old code to cover the F32
+norm and attention paths, and the F32 Qwen2-VL and Qwen2.5-VL pins pass unchanged. Review pass: nothing changed on the
+paged, packed or multi-device paths; M-RoPE layers now also opt out of CUDA decode graphs (the wrapper never enables
+them, but a replay would freeze host-built tables).
+
+Next: #324 step 7b (Qwen3-VL and Qwen3-VL-MoE: interleaved M-RoPE with q/k norm, deepstack injection).
+
