@@ -22,6 +22,8 @@ pub mod phi3_vision;
 #[cfg(test)]
 mod phi3v_tests;
 pub mod phi4;
+#[cfg(test)]
+mod phi4mm_tests;
 
 inference_nn::json_config!(
     phi2::Config,
