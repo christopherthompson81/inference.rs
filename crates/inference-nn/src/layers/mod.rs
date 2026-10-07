@@ -672,6 +672,7 @@ pub enum PhiRopeScalingConfig {
     },
 }
 
+#[derive(Clone, Debug)]
 pub struct PhiRopeConfig {
     pub rope_scaling: Option<PhiRopeScalingConfig>,
     pub scaling_attn_factor: Option<f64>,
@@ -3010,8 +3011,21 @@ impl MlpLayer for Mlp {
     fn hidden_act(&self) -> Activation {
         self.act
     }
-    // gate, up, down
-    fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
+    // gate, up, down; or gate_up, down when the checkpoint fuses gate and up
+    fn new_added_delta(&self, mut deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
+        if let [gate_up, down] = &mut deltas[..] {
+            let (gate, up) = match gate_up.take() {
+                Some(delta) => {
+                    let half = delta.dim(0)? / 2;
+                    (
+                        Some(delta.narrow(0, 0, half)?),
+                        Some(delta.narrow(0, half, half)?),
+                    )
+                }
+                None => (None, None),
+            };
+            deltas = vec![gate, up, down.take()];
+        }
         let gate = if let Some(ref delta) = deltas[0] {
             self.gate.add_delta_w(delta)?
         } else {
@@ -3041,6 +3055,77 @@ impl MlpLayer for Mlp {
 
     fn dtype_device(&self) -> (DType, Device) {
         self.gate.dtype_and_device()
+    }
+}
+
+/// A gated MLP over one replicated `gate_up_proj`, split into gate then up after a single matmul.
+#[derive(Clone)]
+pub struct FusedGateUpMlp {
+    gate_up: Arc<dyn QuantMethod>,
+    down: Arc<dyn QuantMethod>,
+    act: Activation,
+    params: Vec<usize>,
+}
+
+impl FusedGateUpMlp {
+    pub fn new(
+        vb: ShardedVarBuilder,
+        hidden_size: usize,
+        intermediate_size: usize,
+        quantization_config: &Option<QuantizedConfig>,
+        act: Activation,
+    ) -> Result<Self> {
+        Ok(Self {
+            gate_up: inference_quant::linear_no_bias(
+                hidden_size,
+                2 * intermediate_size,
+                quantization_config,
+                vb.pp("gate_up_proj"),
+            )?,
+            down: inference_quant::linear_no_bias(
+                intermediate_size,
+                hidden_size,
+                quantization_config,
+                vb.pp("down_proj"),
+            )?,
+            act,
+            params: vec![hidden_size, intermediate_size],
+        })
+    }
+}
+
+impl AnyMoeTrainableLayer for FusedGateUpMlp {}
+
+impl MlpLayer for FusedGateUpMlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let gate_up = self.gate_up.forward(xs)?;
+        let xs = crate::ops::split_mul_and_act(&gate_up, self.params[1], self.act)?;
+        self.down.forward(&xs)
+    }
+    fn clone(&self) -> Box<dyn MlpLayer> {
+        Box::new(Clone::clone(self))
+    }
+    fn get_params(&self) -> &[usize] {
+        &self.params
+    }
+    fn hidden_act(&self) -> Activation {
+        self.act
+    }
+    // gate_up, down
+    fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
+        let added = |layer: &Arc<dyn QuantMethod>, delta: &Option<Tensor>| match delta {
+            Some(delta) => layer.add_delta_w(delta),
+            None => Ok(layer.clone()),
+        };
+        Ok(Box::new(Self {
+            gate_up: added(&self.gate_up, &deltas[0])?,
+            down: added(&self.down, &deltas[1])?,
+            act: self.act,
+            params: self.params.clone(),
+        }))
+    }
+    fn dtype_device(&self) -> (DType, Device) {
+        self.gate_up.dtype_and_device()
     }
 }
 

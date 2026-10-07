@@ -7,7 +7,7 @@ use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
-use inference_tensor::{DType, Device, DeviceLocation, Module, Result, Tensor, nn::LayerNorm};
+use inference_tensor::{D, DType, Device, DeviceLocation, Module, Result, Tensor, nn::LayerNorm};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
@@ -15,10 +15,11 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
-        Activation, CausalMasker, Gemma3RopeScalingConfig, Gemma3RopeSpec, Gemma3RotaryEmbedding,
-        GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec, Llama3RotaryEmbedding, Mlp, PlainMlp,
-        RmsNorm, RotaryEmbedding, YarnRopeConfig, embedding, embedding_with_legacy_tied_uqff,
-        layer_norm, masker::CausalMaskConfig, masker::PastKvLenCache,
+        Activation, CausalMasker, FusedGateUpMlp, Gemma3RopeScalingConfig, Gemma3RopeSpec,
+        Gemma3RotaryEmbedding, GemmaRmsNorm, Llama3RopeConfig, Llama3RopeSpec,
+        Llama3RotaryEmbedding, Mlp, PhiRopeConfig, PhiRotaryEmbedding, PlainMlp, RmsNorm,
+        RotaryEmbedding, YarnRopeConfig, embedding, embedding_with_legacy_tied_uqff, layer_norm,
+        masker::CausalMaskConfig, masker::PastKvLenCache,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
@@ -30,12 +31,22 @@ use crate::{
 const DEFAULT_ROPE_THETA: f32 = 10_000.0;
 const MERGED_GATE_UP_CHUNKS: usize = 2;
 const O_PROJ: &str = "o_proj";
+const QKV_PROJ: &str = "qkv_proj";
+// Phi-3 GGUFs carry their LongRoPE factors as tensors
+const PHI_ROPE_FACTORS: (&str, &str) = ("rope_factors_short.weight", "rope_factors_long.weight");
 // Llama 3 checkpoints may carry per-frequency rope factors under this name
 const ROPE_FREQS: &str = "rope_freqs.weight";
 
 const AMOE_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
     AnyMoeLoraTarget::up("gate_proj"),
     AnyMoeLoraTarget::up("up_proj"),
+    AnyMoeLoraTarget::down("down_proj"),
+];
+const AMOE_MERGED_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
+    AnyMoeLoraTarget {
+        name: "gate_up_proj",
+        shape: |hidden, intermediate| (hidden, 2 * intermediate),
+    },
     AnyMoeLoraTarget::down("down_proj"),
 ];
 
@@ -62,6 +73,8 @@ pub enum RopeKind {
         theta: f64,
         scaling: Option<Gemma3RopeScalingConfig>,
     },
+    /// Phi's LongRoPE, switching to its long factors once a sequence outgrows the original context.
+    Phi(PhiRopeConfig),
 }
 
 impl Default for RopeKind {
@@ -133,7 +146,10 @@ impl QkNorm {
 pub enum MlpKind {
     #[default]
     Gated,
+    /// A fused `gate_up_proj`, split into gate and up for tensor parallelism when the quantization allows.
     MergedGateUp,
+    /// A fused `gate_up_proj` kept whole and replicated, one matmul for both halves.
+    FusedGateUp,
     /// Up then down, named by the AnyMoE targets, which are those projections.
     Plain {
         projections: &'static [AnyMoeLoraTarget; 2],
@@ -178,6 +194,8 @@ pub struct DecoderSpec {
     pub o_bias: bool,
     /// The attention output projection's name, when not `o_proj`.
     pub o_proj_name: Option<&'static str>,
+    /// q, k and v come from one `qkv_proj`; it and the output projection are replicated, not split across ranks.
+    pub fused_qkv: bool,
     /// `tanh(scores / cap) * cap` on the attention scores.
     pub attn_softcap: Option<f32>,
     /// The attention score scale; `1 / sqrt(head_dim)` when unset.
@@ -188,6 +206,8 @@ pub struct DecoderSpec {
     pub embed_scale: Option<f64>,
     pub mlp: MlpKind,
     pub lm_head_bias: bool,
+    /// The lm_head is stored unquantized even in a quantized checkpoint.
+    pub unquantized_lm_head: bool,
 }
 
 impl DecoderSpec {
@@ -201,6 +221,37 @@ impl DecoderSpec {
     }
 
     fn rope(
+        &self,
+        kind: &RopeKind,
+        vb_m: &ShardedVarBuilder,
+        device: &Device,
+        is_gptx: bool,
+        dtype: DType,
+    ) -> Result<LayerRope> {
+        if let RopeKind::Phi(cfg) = kind {
+            let factor = |name| {
+                vb_m.contains_tensor(name)
+                    .then(|| {
+                        vb_m.clone()
+                            .set_device(device.clone())
+                            .get_unchecked_dtype(name, DType::F32)
+                    })
+                    .transpose()
+            };
+            let (short, long) = (factor(PHI_ROPE_FACTORS.0)?, factor(PHI_ROPE_FACTORS.1)?);
+            return Ok(LayerRope::Phi(PhiRotaryEmbedding::new_with_factors(
+                dtype,
+                cfg.clone(),
+                device,
+                short.as_ref(),
+                long.as_ref(),
+            )?));
+        }
+        self.plain_rope(kind, vb_m, device, is_gptx, dtype)
+            .map(LayerRope::Plain)
+    }
+
+    fn plain_rope(
         &self,
         kind: &RopeKind,
         vb_m: &ShardedVarBuilder,
@@ -265,6 +316,7 @@ impl DecoderSpec {
                 };
                 Ok(Gemma3RotaryEmbedding::new(is_gptx, dtype, spec, device)?.into_inner())
             }
+            RopeKind::Phi(_) => unreachable!("built by `rope`"),
         }
     }
 
@@ -282,22 +334,52 @@ impl DecoderSpec {
             final_logit_softcap: self.final_logit_softcap,
             mlp: self.mlp,
             lm_head_bias: self.lm_head_bias,
+            unquantized_lm_head: self.unquantized_lm_head,
         }
     }
 }
 
+/// A layer's RoPE: plain tables, or Phi's LongRoPE, which picks its tables from the batch's positions on the host.
+pub enum LayerRope {
+    Plain(RotaryEmbedding),
+    Phi(PhiRotaryEmbedding),
+}
+
+impl LayerRope {
+    fn forward(
+        &self,
+        q: &Tensor,
+        k: &Tensor,
+        positions: &Tensor,
+        position_ids: &[usize],
+    ) -> Result<(Tensor, Tensor)> {
+        match self {
+            Self::Plain(rope) => rope.forward(q, k, positions),
+            Self::Phi(rope) => rope.forward(q, k, positions, position_ids),
+        }
+    }
+}
+
+/// The q/k/v projections: separate and split across ranks, or one replicated `qkv_proj`.
+enum QkvProj {
+    Split {
+        q: Arc<dyn QuantMethod>,
+        k: Arc<dyn QuantMethod>,
+        v: Arc<dyn QuantMethod>,
+    },
+    Fused(Arc<dyn QuantMethod>),
+}
+
 /// Separate q/k/v/o projections, optional per-head q/k RMS norm, RoPE, and the engine's attention dispatch.
 pub struct AttentionBlock {
-    q_proj: Arc<dyn QuantMethod>,
-    k_proj: Arc<dyn QuantMethod>,
-    v_proj: Arc<dyn QuantMethod>,
+    qkv: QkvProj,
     o_proj: Arc<dyn QuantMethod>,
     o_proj_name: &'static str,
     qk_norm: Option<(QkNorm, Norm, Norm)>,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rotary_emb: Option<Arc<RotaryEmbedding>>,
+    rotary_emb: Option<Arc<LayerRope>>,
     attention_temperature: Option<AttentionTemperature>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
@@ -347,6 +429,11 @@ pub trait LayerAttention: Send + Sync {
     /// Whether the flash backend can run this layer's packed prefill.
     fn supports_packed_prefill(&self) -> bool {
         true
+    }
+
+    /// Whether a captured CUDA decode graph replays this layer correctly.
+    fn cuda_decode_graphs(&self) -> bool {
+        Self::CUDA_DECODE_GRAPHS
     }
 
     /// The tensors ISQ leaves alone, under `self_attn`.
@@ -419,6 +506,7 @@ pub struct StackShape<'a> {
     pub final_logit_softcap: Option<f32>,
     pub mlp: MlpKind,
     pub lm_head_bias: bool,
+    pub unquantized_lm_head: bool,
 }
 
 impl StackShape<'_> {
@@ -430,8 +518,8 @@ impl StackShape<'_> {
 /// [`AttentionBlock`] and the MLP a [`DecoderSpec`] describes.
 struct StandardLayers<'a> {
     spec: &'a DecoderSpec,
-    ropes: HashMap<DeviceLocation, Arc<RotaryEmbedding>>,
-    local_ropes: Option<HashMap<DeviceLocation, Arc<RotaryEmbedding>>>,
+    ropes: HashMap<DeviceLocation, Arc<LayerRope>>,
+    local_ropes: Option<HashMap<DeviceLocation, Arc<LayerRope>>>,
 }
 
 impl LayerBuilder for StandardLayers<'_> {
@@ -464,7 +552,21 @@ impl LayerBuilder for StandardLayers<'_> {
         };
         let attention =
             AttentionBlock::new(spec, load, place("self_attn"), rotary_emb, paged_attn)?;
-        let mlp: Box<dyn MlpLayer> = match spec.mlp {
+        let qc = &spec.quantization_config;
+        let mlp_kind = match spec.mlp {
+            MlpKind::MergedGateUp if qc.as_ref().is_some_and(|qc| !qc.loads_column_shards()) => {
+                MlpKind::FusedGateUp
+            }
+            kind => kind,
+        };
+        let mlp: Box<dyn MlpLayer> = match mlp_kind {
+            MlpKind::FusedGateUp => Box::new(FusedGateUpMlp::new(
+                place("mlp"),
+                spec.hidden_size,
+                spec.intermediate_size,
+                qc,
+                spec.hidden_act,
+            )?),
             MlpKind::Gated => Box::new(Mlp::new(
                 place("mlp"),
                 spec.hidden_size,
@@ -501,7 +603,7 @@ impl AttentionBlock {
         spec: &DecoderSpec,
         load: &LayerLoad<'_>,
         vb: ShardedVarBuilder,
-        rotary_emb: Arc<RotaryEmbedding>,
+        rotary_emb: Arc<LayerRope>,
         paged_attn: Option<PagedAttention>,
     ) -> Result<Self> {
         let LayerLoad {
@@ -513,36 +615,48 @@ impl AttentionBlock {
         } = *load;
         let (hidden, head_dim) = (spec.hidden_size, spec.head_dim);
         let qc = &spec.quantization_config;
-        let q_proj = ColumnParallelLayer::new(
-            hidden,
-            spec.num_heads * head_dim,
-            qc,
-            spec.qkv_bias,
-            comm,
-            mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
-        )?;
-        let kv_shard = inference_quant::compute_kv_shard(spec.num_kv_heads, head_dim, comm)?;
-        let kv = |name| {
-            ColumnParallelLayer::new_with_shard(
+        let place = |name| mapper.set_device(layer_idx, vb.pp(name), loading_isq);
+        let o_proj_name = spec.o_proj_name.unwrap_or(O_PROJ);
+        let (q_size, kv_size) = (spec.num_heads * head_dim, spec.num_kv_heads * head_dim);
+        let (qkv, o_proj, world_size, n_kv_groups) = if spec.fused_qkv {
+            let qkv = inference_quant::linear_b(
                 hidden,
-                spec.num_kv_heads * head_dim,
-                qc,
+                q_size + 2 * kv_size,
                 spec.qkv_bias,
-                comm,
-                kv_shard,
-                mapper.set_device(layer_idx, vb.pp(name), loading_isq),
+                qc,
+                place(QKV_PROJ),
+            )?;
+            let o_proj =
+                inference_quant::linear_b(q_size, hidden, spec.o_bias, qc, place(o_proj_name))?;
+            let n_kv_groups = spec.num_heads / spec.num_kv_heads;
+            (QkvProj::Fused(qkv), o_proj, 1, n_kv_groups)
+        } else {
+            let q =
+                ColumnParallelLayer::new(hidden, q_size, qc, spec.qkv_bias, comm, place("q_proj"))?;
+            let kv_shard = inference_quant::compute_kv_shard(spec.num_kv_heads, head_dim, comm)?;
+            let kv = |name| {
+                ColumnParallelLayer::new_with_shard(
+                    hidden,
+                    kv_size,
+                    qc,
+                    spec.qkv_bias,
+                    comm,
+                    kv_shard,
+                    place(name),
+                )
+            };
+            let (k, v) = (kv("k_proj")?, kv("v_proj")?);
+            let o_proj =
+                RowParallelLayer::new(q_size, hidden, qc, spec.o_bias, comm, place(o_proj_name))?;
+            let n_kv_groups =
+                inference_quant::compute_n_kv_groups(spec.num_kv_heads, spec.num_heads, comm)?;
+            (
+                QkvProj::Split { q, k, v },
+                o_proj,
+                comm.world_size(),
+                n_kv_groups,
             )
         };
-        let (k_proj, v_proj) = (kv("k_proj")?, kv("v_proj")?);
-        let o_proj_name = spec.o_proj_name.unwrap_or(O_PROJ);
-        let o_proj = RowParallelLayer::new(
-            spec.num_heads * head_dim,
-            hidden,
-            qc,
-            spec.o_bias,
-            comm,
-            mapper.set_device(layer_idx, vb.pp(o_proj_name), loading_isq),
-        )?;
         let qk_norm = spec
             .qk_norm
             .map(|placement| -> Result<_> {
@@ -558,25 +672,21 @@ impl AttentionBlock {
                 Ok((placement, norm(q)?, norm(k)?))
             })
             .transpose()?;
+        let num_heads = spec.num_heads / world_size;
+        let num_kv_heads = (spec.num_kv_heads / world_size).max(1);
         Ok(Self {
-            q_proj,
-            k_proj,
-            v_proj,
+            qkv,
             o_proj,
             o_proj_name,
             qk_norm,
-            num_heads: spec.num_heads / comm.world_size(),
-            num_kv_heads: (spec.num_kv_heads / comm.world_size()).max(1),
+            num_heads,
+            num_kv_heads,
             head_dim,
             rotary_emb: (!spec.no_rope_layers.contains(&layer_idx)).then_some(rotary_emb),
             attention_temperature: spec.attention_temperature,
             paged_attn,
             sdpa_params: SdpaParams {
-                n_kv_groups: inference_quant::compute_n_kv_groups(
-                    spec.num_kv_heads,
-                    spec.num_heads,
-                    comm,
-                )?,
+                n_kv_groups,
                 softcap: spec.attn_softcap,
                 softmax_scale: spec
                     .softmax_scale
@@ -598,8 +708,19 @@ impl AttentionBlock {
         flash: Option<&FlashParams>,
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
-        let (q, k, v) =
-            crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
+        let (q, k, v) = match &self.qkv {
+            QkvProj::Split { q, k, v } => crate::ops::qkv_projections(xs, &**q, &**k, &**v)?,
+            QkvProj::Fused(qkv) => {
+                let qkv = qkv.forward(xs)?;
+                let q_size = self.num_heads * self.head_dim;
+                let kv_size = self.num_kv_heads * self.head_dim;
+                (
+                    qkv.narrow(D::Minus1, 0, q_size)?,
+                    qkv.narrow(D::Minus1, q_size, kv_size)?,
+                    qkv.narrow(D::Minus1, q_size + kv_size, kv_size)?,
+                )
+            }
+        };
         let heads = |t: Tensor, n: usize| -> Result<Tensor> {
             if q_len != 1 {
                 t.reshape((b_sz, q_len, n, self.head_dim))?.transpose(1, 2)
@@ -647,27 +768,35 @@ impl AttentionBlock {
         k: Tensor,
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<(Tensor, Tensor)> {
-        let Some(rotary_emb) = &self.rotary_emb else {
+        let Some(rope) = &self.rotary_emb else {
             return Ok((q, k));
+        };
+        let position_ids = match **rope {
+            LayerRope::Phi(_) => ctx.position_ids_vec(),
+            LayerRope::Plain(_) => Vec::new(),
         };
         let positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
             .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
         let (q, k) = match &self.qk_norm {
             Some((QkNorm::BeforeRope { .. }, q_norm, k_norm)) => {
-                match (q_norm.rms_params(), k_norm.rms_params()) {
-                    (Some((q_weight, q_eps)), Some((k_weight, k_eps))) => rotary_emb
-                        .forward_qk_norm(&q, &k, q_weight, k_weight, q_eps, k_eps, positions)?,
-                    _ => {
-                        rotary_emb.forward(&q_norm.forward(&q)?, &k_norm.forward(&k)?, positions)?
+                match (&**rope, q_norm.rms_params(), k_norm.rms_params()) {
+                    (LayerRope::Plain(rope), Some((q_weight, q_eps)), Some((k_weight, k_eps))) => {
+                        rope.forward_qk_norm(&q, &k, q_weight, k_weight, q_eps, k_eps, positions)?
                     }
+                    _ => rope.forward(
+                        &q_norm.forward(&q)?,
+                        &k_norm.forward(&k)?,
+                        positions,
+                        &position_ids,
+                    )?,
                 }
             }
             Some((QkNorm::AfterRope { .. }, q_norm, k_norm)) => {
-                let (q, k) = rotary_emb.forward(&q, &k, positions)?;
+                let (q, k) = rope.forward(&q, &k, positions, &position_ids)?;
                 (q_norm.forward(&q)?, k_norm.forward(&k)?)
             }
-            None => rotary_emb.forward(&q, &k, positions)?,
+            None => rope.forward(&q, &k, positions, &position_ids)?,
         };
         let Some(AttentionTemperature { scale, floor_scale }) = self.attention_temperature else {
             return Ok((q, k));
@@ -693,8 +822,6 @@ impl AttentionBlock {
 }
 
 impl LayerAttention for AttentionBlock {
-    const CUDA_DECODE_GRAPHS: bool = true;
-
     fn forward(
         &self,
         xs: &Tensor,
@@ -713,13 +840,22 @@ impl LayerAttention for AttentionBlock {
         self.sdpa_params.softcap.is_none()
             || crate::attention::flash_backend_supports(self.head_dim, true)
     }
+    // LongRoPE picks its tables on the host, which a replayed graph would freeze
+    fn cuda_decode_graphs(&self) -> bool {
+        !matches!(self.rotary_emb.as_deref(), Some(LayerRope::Phi(_)))
+    }
     fn add_residual(&self, uvb: &UnVarBuilder) {
         self.qk_norm_residual(uvb)
     }
     fn add_projections(&self, uvb: &UnVarBuilder) {
-        uvb.pp("q_proj").add(&self.q_proj);
-        uvb.pp("k_proj").add(&self.k_proj);
-        uvb.pp("v_proj").add(&self.v_proj);
+        match &self.qkv {
+            QkvProj::Split { q, k, v } => {
+                uvb.pp("q_proj").add(q);
+                uvb.pp("k_proj").add(k);
+                uvb.pp("v_proj").add(v);
+            }
+            QkvProj::Fused(qkv) => uvb.pp(QKV_PROJ).add(qkv),
+        }
         uvb.pp(self.o_proj_name).add(&self.o_proj);
     }
 }
@@ -1187,7 +1323,11 @@ impl CausalLm {
             normal_loading_metadata,
             &attention_mechanism,
         )?;
-        let world_size = stack.mapper.get_comm_for(0)?.world_size();
+        let world_size = if spec.fused_qkv {
+            1
+        } else {
+            stack.mapper.get_comm_for(0)?.world_size()
+        };
         let cfg = ModelConfigMetadata {
             max_seq_len: spec.max_position_embeddings,
             num_layers: spec.num_layers(),
@@ -1229,7 +1369,11 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
             ReplicatedLayer::new(
                 shape.hidden_size,
                 shape.vocab_size,
-                shape.quantization_config,
+                if shape.unquantized_lm_head {
+                    &None
+                } else {
+                    shape.quantization_config
+                },
                 shape.lm_head_bias,
                 stack.mapper.set_nm_device(vb_lm_head, loading_isq),
             )?
@@ -1248,6 +1392,11 @@ impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {
 
     pub fn get_input_embeddings(&self, input_ids: &Tensor) -> Result<Tensor> {
         self.stack.embed(input_ids)
+    }
+
+    /// The token embedding, for a multimodal model that embeds its text tokens beside its media.
+    pub fn embed_tokens(&self) -> &Arc<dyn QuantMethod> {
+        &self.stack.embed_tokens
     }
 
     /// The device mapper a model maps the masks it builds itself with.
@@ -1347,7 +1496,10 @@ impl<A: LayerAttention, F: LayerFfn> NormalModel for CausalLm<A, F> {
     }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        A::CUDA_DECODE_GRAPHS
+        self.stack
+            .layers
+            .iter()
+            .all(|layer| layer.self_attn.cuda_decode_graphs())
     }
 }
 
@@ -1369,7 +1521,8 @@ impl<A: LayerAttention, F: LayerFfn> AnyMoeBaseModelMixin for CausalLm<A, F> {
     fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
         match self.mlp {
             MlpKind::Plain { projections, .. } => projections,
-            MlpKind::Gated | MlpKind::MergedGateUp => AMOE_LORA_TARGETS,
+            MlpKind::Gated => AMOE_LORA_TARGETS,
+            MlpKind::MergedGateUp | MlpKind::FusedGateUp => AMOE_MERGED_LORA_TARGETS,
         }
     }
     fn amoe_fine_tuned_expert(
@@ -1391,11 +1544,27 @@ impl<A: LayerAttention, F: LayerFfn> AnyMoeBaseModelMixin for CausalLm<A, F> {
                 base.hidden_act(),
                 &comm,
             )?),
-            MlpKind::Gated | MlpKind::MergedGateUp => Box::new(Mlp::replicate(
+            MlpKind::Gated => Box::new(Mlp::replicate(
                 base.get_params(),
                 vb,
                 base.hidden_act(),
                 &comm,
+            )?),
+            MlpKind::MergedGateUp => Box::new(Mlp::new_merged(
+                vb,
+                base.get_params()[0],
+                base.get_params()[1],
+                MERGED_GATE_UP_CHUNKS,
+                &None,
+                base.hidden_act(),
+                &comm,
+            )?),
+            MlpKind::FusedGateUp => Box::new(FusedGateUpMlp::new(
+                vb,
+                base.get_params()[0],
+                base.get_params()[1],
+                &None,
+                base.hidden_act(),
             )?),
         })
     }
@@ -1407,6 +1576,20 @@ impl<A: LayerAttention, F: LayerFfn> AnyMoeBaseModelMixin for CausalLm<A, F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merged_gate_up_lora_shapes_follow_peft_in_out_features() {
+        let (hidden, intermediate) = (3, 5);
+        let shapes: Vec<_> = AMOE_MERGED_LORA_TARGETS
+            .iter()
+            .map(|t| (t.name, (t.shape)(hidden, intermediate)))
+            .collect();
+        // (in_features, out_features): gate_up maps hidden -> 2 * intermediate, down maps intermediate -> hidden
+        assert_eq!(
+            shapes,
+            vec![("gate_up_proj", (3, 10)), ("down_proj", (5, 3))]
+        );
+    }
 
     const MAX_SEQ: usize = 4096;
     const WINDOW: usize = 128;

@@ -14,7 +14,7 @@ impl NormalModelLoader for Phi3Loader {
         let cfg = crate::phi3::Config::from_json(config)?;
 
         Ok(Box::new(crate::phi3::Model::new(
-            &cfg,
+            &cfg.decoder_spec(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

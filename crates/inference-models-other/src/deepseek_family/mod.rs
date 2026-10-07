@@ -421,6 +421,7 @@ pub fn new_family_model<T: FamilyAttention>(
         final_logit_softcap: None,
         mlp: MlpKind::Gated,
         lm_head_bias: false,
+        unquantized_lm_head: false,
     };
     let loading_isq = normal_loading_metadata.loading_isq;
     let dtype = vb.dtype();

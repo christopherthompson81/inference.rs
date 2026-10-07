@@ -50,14 +50,15 @@ fn phi3v_text_prefill() -> Result<()> {
         "quantization_config": null,
         "tie_word_embeddings": false,
     });
-    let (model, names) = load_synthesized(&[], HashMap::new(), DType::F32, |vb| {
-        Phi3VLoader.load(
-            &config.to_string(),
-            vb,
-            metadata(),
-            AttentionImplementation::Eager,
-        )
-    })?;
+    let (model, names) =
+        load_synthesized(&["model.rope_factors"], HashMap::new(), DType::F32, |vb| {
+            Phi3VLoader.load(
+                &config.to_string(),
+                vb,
+                metadata(),
+                AttentionImplementation::Eager,
+            )
+        })?;
     assert_eq!(
         names_digest(names.keys()),
         0x0675_75b5_9300_56f5,

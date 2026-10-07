@@ -1822,4 +1822,30 @@ AnyMoE fine-tuned experts took a default config's activation rather than the bas
 was computed from the query heads twice (always 1). Review pass: a tied Phi-2 (GGUF without `output.weight`) used to
 hit `unreachable!`; the shared stack would have silently dropped its `lm_head` bias, so it now fails to load instead.
 
-Next: #324 step 5 (Phi-3, Phi-4).
+Next: #324 step 5 (Phi-3; Phi-4MM moves to the VL step).
+
+## Run 53 - 2026-10-07 11:26
+
+Question: what does #324 step 5 (Phi-3 and Phi-3V's text stack onto the shared decoder) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,596,976  105,559,984     -36,992
+.text                  55,384,802   55,353,058     -31,744
+```
+
+Raw finding: -37 KB from 850 lines of code removed and 421 added. Smaller than the earlier steps because the decoder
+grew more for it: Phi's LongRoPE as a `LayerRope` beside the plain tables (with the GGUF factor tensors), a fused
+replicated `qkv_proj`, a replicated one-matmul `FusedGateUpMlp`, an unquantized-lm_head switch, and CUDA decode graphs
+decided per layer (off under LongRoPE, which picks its tables on the host). Phi-4MM stays for the VL step: its text
+layers carry static LoRA adapters and their own copy of the Phi RoPE.
+
+Pins recorded on the old code (plain RoPE; config LongRoPE past the original context, sliding and tied; GGUF factor
+tensors) and the Phi-3V text pin pass unchanged. Review pass: the first cut put Phi-3 on the TP-splitting merged MLP,
+which loads `gate_up_proj` whole into both halves for GPTQ/AWQ, BNB, AFQ and MXFP4 (they ignore the column shard),
+breaking quantized Phi-3; Phi-3 now keeps its replicated single `gate_up_proj`, and `MergedGateUp` (GLM4, which had
+the same bug) falls back to it for those formats. AnyMoE on a merged gate/up now targets `gate_up_proj`, which GLM4
+checkpoints carry, instead of the absent `gate_proj`/`up_proj`.
+
+Next: #324 step 6 (MoE feed-forwards).
