@@ -15,9 +15,6 @@
 //! The tensor layer of inference.rs: tensors, devices and their CPU/CUDA/Metal backends, quantized storage, weight
 //! file formats, and neural-net building blocks under [`nn`]. Derived from candle-core and candle-nn.
 
-// Adopted from candle, whose clippy and rustdoc findings were never gated here; they are paid down module by module
-#![allow(clippy::all, rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
-
 #[cfg(feature = "accelerate")]
 mod accelerate;
 pub mod backend;

@@ -3,10 +3,8 @@ extend-exclude = [
     ".git/",
     "calibration_data/",
     "**/third_party/",
-    # adopted from candle; their spelling is paid down separately
-    "crates/inference-tensor/",
-    "crates/inference-tensor-kernels/",
-    "crates/inference-flash-attn-v3/",
+    # FlashAttention-3 sources copied unchanged (see crates/inference-flash-attn-v3/third_party/README.md)
+    "crates/inference-flash-attn-v3/hkernel/",
     # llama.cpp sources vendored unchanged (see crates/inference-fattn/third_party/README.md)
     "crates/inference-fattn/kernels/cuda/ggml/",
     "crates/inference-fattn/kernels/cuda/instances/",
@@ -73,6 +71,11 @@ shll = "shll"
 "ot" = "ot"
 "thr" = "thr"
 "worl" = "worl"
+# inference-tensor: n-dimensional (NdArray, NdIter, nd_iter), minus-one SIMD constants, unary sin/sign kernels
+"nd" = "nd"
+"mone" = "mone"
+"usin" = "usin"
+"usign" = "usign"
 
 [default.extend-identifiers]
 "AtomLayoutNdKV" = "AtomLayoutNdKV"
@@ -83,6 +86,7 @@ shll = "shll"
 "cna" = "cna"
 "from_mmaped_safetensors" = "from_mmaped_safetensors"
 "MmapedSafetensors" = "MmapedSafetensors"
+"MmapedFile" = "MmapedFile"
 "nin_shortcut" = "nin_shortcut"
 "EmbedNd" = "EmbedNd"
 "gather_nd" = "gather_nd"

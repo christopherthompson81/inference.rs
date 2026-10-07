@@ -1873,7 +1873,7 @@ impl Tensor {
     ///
     /// * `self` - The input tensor.
     /// * `indexes` - The indices of elements to gather, this should have same number of dimensions as `self`
-    ///   and indexes.dims()[d] <= self.dims()[d] for all dimensions d != dim
+    ///   and `indexes.dims()[d] <= self.dims()[d]` for all dimensions `d != dim`
     /// * `dim` - the target dimension.
     ///
     /// The resulting tensor has the same shape as `indexes` and use values from `self` indexed on

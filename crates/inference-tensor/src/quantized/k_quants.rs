@@ -59,13 +59,13 @@ pub trait GgmlType: Sized + Clone + Send + Sync {
     fn vec_dot(n: usize, xs: &[Self], ys: &[Self::VecDotType]) -> f32;
 
     /// Two dot products sharing one LHS load: returns (dot(xs0,ys), dot(xs1,ys)).
-    /// Can be overriden with optimized kernel
+    /// Can be overridden with optimized kernel
     fn vec_dot_2(n: usize, xs0: &[Self], xs1: &[Self], ys: &[Self::VecDotType]) -> (f32, f32) {
         (Self::vec_dot(n, xs0, ys), Self::vec_dot(n, xs1, ys))
     }
 
     /// Four dot products sharing one LHS load: returns (dot(xs0,ys),..dot(xs3,ys)).
-    /// Can be overriden with optimized kernel
+    /// Can be overridden with optimized kernel
     fn vec_dot_4(
         n: usize,
         xs0: &[Self],

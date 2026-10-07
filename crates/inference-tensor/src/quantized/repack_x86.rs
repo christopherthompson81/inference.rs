@@ -794,8 +794,8 @@ mod amx {
                                     c_scratch.as_ptr().add(cbase + mi * 16) as *const _,
                                 );
                                 let cf = _mm512_cvtepi32_ps(ci);
-                                let fo = (half * 16 + mi) * 32 + ntl * 16;
-                                let f = _mm512_loadu_ps(facc.as_ptr().add(fo));
+                                let f_off = (half * 16 + mi) * 32 + ntl * 16;
+                                let f = _mm512_loadu_ps(facc.as_ptr().add(f_off));
                                 let bsum = (act.bsums[sub * 2] as i32
                                     + act.bsums[sub * 2 + 1] as i32)
                                     as f32;
@@ -805,7 +805,7 @@ mod amx {
                                     f,
                                 );
                                 let f = _mm512_fnmadd_ps(min, _mm512_set1_ps(dall * bsum), f);
-                                _mm512_storeu_ps(facc.as_mut_ptr().add(fo), f);
+                                _mm512_storeu_ps(facc.as_mut_ptr().add(f_off), f);
                             }
                         }
                     }

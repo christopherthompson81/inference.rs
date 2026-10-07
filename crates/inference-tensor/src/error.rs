@@ -313,7 +313,7 @@ pub(crate) mod private {
 
 /// Attach more context to an error.
 ///
-/// Inspired by [`anyhow::Context`].
+/// Inspired by `anyhow::Context`.
 pub trait Context<T, E>: private::Sealed {
     /// Wrap the error value with additional context.
     fn context<C>(self, context: C) -> std::result::Result<T, Error>
