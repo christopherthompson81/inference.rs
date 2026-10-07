@@ -1421,3 +1421,31 @@ local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (283
 ```
 
 Left in step 5: usage-scan trims, and possibly moving the adopted crates to edition 2024.
+
+## Run 39 - 2026-10-06 21:33
+
+#270 step 5, usage-scan trims, first cut: CUDA kernels in inference-tensor-kernels that the backend never requests.
+The scan (a research agent) made every inference-tensor item not named outside the crate `pub(crate)` in a scratch
+copy and let rustc's dead-code pass report across CPU, cuda, cudnn+nccl and aarch64, then matched the built entry list
+(`images.rs`) against every kernel name the Rust side builds. Its findings, in three tiers (~2,300 dead Rust lines,
+~2,500 dead CUDA lines), are being cut in slices; this one is the kernels that die without any Rust change.
+
+- `quantized.cu` 3,247 -> 979 lines: everything but the `dequantize_block_*`/`get_rows_*` kernels and their
+  helpers (matvec, MMQ tiles, `vec_dot_*_q8_1`, dp4a and warp helpers, the per-arch MMQ macros). The built entry list
+  is identical before and after (35 entries).
+- `fill_*` (fills run `const_set_*`), `sum_*` (reductions run `fast_sum`), `unormcdf_*`, `copy2d_f8_e4m3`,
+  and `restrided`/`chunk_sum` in `cuda_utils.cuh`.
+
+Found by the scan: the backend requests `ucopy_i16`/`ucopy_i32` for strided I16/I32 copies, which were never
+defined, so `t().contiguous()` on such a tensor failed with "named symbol not found" (same class as #308's fill
+kernels). Added; `fill_cat_and_strided_copy_run_for_every_integer_dtype` fails without them.
+
+```
+local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep  -> pass (2830 + 2445)
+local_ci.sh --size-update  -> file -8.4 KB (.rodata -6.7 KB, .nv_fatbin unchanged): the quantized.cu code was
+                              uninstantiated templates and unlaunched device functions, so the gain is source nvcc
+                              no longer parses, not SASS
+```
+
+Next slices: dead Rust types/modules (Tier A), then Tensor methods with their op chains (argmin, ceil,
+upsample_nearest1d, which take the fast_argmin and uceil kernels with them).

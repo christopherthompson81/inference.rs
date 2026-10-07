@@ -30,3 +30,9 @@ Apache-2.0, see `LICENSE-MIT` and `LICENSE-APACHE`), and maintained here; upstre
 - `src/reduce.cu`: the `rope`, `rope_i` and `rope_thd` kernels are removed with candle-nn's `rotary_emb`.
 - `src/reduce.cu`: the `rmsnorm` kernels are removed with candle-nn's CUDA `rms_norm`.
 - `src/sort.cu` is removed with candle-core's CUDA argsort; its kernel lives on as inference-nn's `argsort_rows`.
+- `src/quantized.cu`: only the `dequantize_block_*` and `get_rows_*` kernels and what they use remain; the matvec,
+  MMQ and dot-product device code (2,268 lines) went once nothing launched it.
+- Removed as never requested by the backend: `fill_*` (`const_set_*` fills), `sum_*` (reductions run `fast_sum`),
+  `unormcdf_*`, `copy2d_f8_e4m3` (E4M3 copies run `copy2d_u8`), and `restrided`/`chunk_sum` in `cuda_utils.cuh`.
+- `src/unary.cu`: adds `ucopy_i16`/`ucopy_i32`, which the backend requested for strided I16/I32 copies but upstream
+  never defined.

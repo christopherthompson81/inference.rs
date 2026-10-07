@@ -98,7 +98,7 @@ mod tests {
 
     // const_set and copy2d back full/ones and cat/slice_set; every dtype the CUDA backend maps needs its kernel
     #[test]
-    fn fill_and_copy_run_for_every_integer_dtype() -> Result<()> {
+    fn fill_cat_and_strided_copy_run_for_every_integer_dtype() -> Result<()> {
         skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         for dtype in [DType::U8, DType::U32, DType::I16, DType::I32, DType::I64] {
@@ -110,6 +110,19 @@ mod tests {
                 got.to_vec2::<f32>()?,
                 expected.to_vec2::<f32>()?,
                 "{dtype:?}"
+            );
+            // a transposed view copies through the strided ucopy kernel
+            let ramp = Tensor::arange(0u32, 6, &Device::Cpu)?
+                .reshape((2, 3))?
+                .to_dtype(dtype)?;
+            let copied = ramp.to_device(&device)?.t()?.contiguous()?;
+            assert_eq!(
+                copied
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(DType::F32)?
+                    .to_vec2::<f32>()?,
+                ramp.t()?.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+                "strided {dtype:?}"
             );
         }
         Ok(())

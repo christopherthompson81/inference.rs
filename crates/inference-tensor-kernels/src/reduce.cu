@@ -518,42 +518,6 @@ fast_argmax(const size_t src_numel, const size_t el_to_sum_per_block,
     fast_sum(src_numel, el_to_sum_per_block, num_dims, info, src, dst);        \
   }
 
-#define SUM_OP(TYPENAME, FN_NAME)                                              \
-  extern "C" __global__ void FN_NAME(                                          \
-      const size_t numel, const size_t num_dims, const size_t num_sum_dims,    \
-      const size_t *info, const TYPENAME *inp, TYPENAME *out) {                \
-    const size_t *dims = info;                                                 \
-    const size_t *strides = info + num_dims;                                   \
-    const size_t *sum_dims_l = info + 2 * num_dims;                            \
-    const size_t *sum_dims_s = info + 2 * num_dims + num_sum_dims;             \
-    if (is_contiguous(num_dims, dims, strides)) {                              \
-      for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel;  \
-           i += blockDim.x * gridDim.x) {                                      \
-        size_t dst_index = i;                                                  \
-        for (unsigned int nd = 0; nd < num_sum_dims; ++nd) {                   \
-          size_t stride = sum_dims_s[nd];                                      \
-          size_t pre = dst_index / stride;                                     \
-          size_t post = dst_index % stride;                                    \
-          dst_index = (pre / sum_dims_l[nd]) * stride + post;                  \
-        }                                                                      \
-        atomicAdd(out + dst_index, inp[i]);                                    \
-      }                                                                        \
-    } else {                                                                   \
-      for (unsigned int i = blockIdx.x * blockDim.x + threadIdx.x; i < numel;  \
-           i += blockDim.x * gridDim.x) {                                      \
-        unsigned strided_i = get_strided_index(i, num_dims, dims, strides);    \
-        size_t dst_index = i;                                                  \
-        for (unsigned int nd = 0; nd < num_sum_dims; ++nd) {                   \
-          size_t stride = sum_dims_s[nd];                                      \
-          size_t pre = dst_index / stride;                                     \
-          size_t post = dst_index % stride;                                    \
-          dst_index = (pre / sum_dims_l[nd]) * stride + post;                  \
-        }                                                                      \
-        atomicAdd(out + dst_index, inp[strided_i]);                            \
-      }                                                                        \
-    }                                                                          \
-  }
-
 #define SOFTMAX_OP(TYPENAME, ACC_TYPENAME, FN_NAME) \
   extern "C" __global__ void FN_NAME(                                          \
       const TYPENAME *src, TYPENAME *dst,                                      \
@@ -700,7 +664,6 @@ extern "C" __global__ void fast_sum_small_f16(
 #if __CUDA_ARCH__ >= 800
 SOFTMAX_OP(__nv_bfloat16, float, softmax_bf16)
 LAYERNORM_OP(__nv_bfloat16, layernorm_bf16)
-SUM_OP(__nv_bfloat16, sum_bf16)
 
 // Use vectorized fast_sum for bf16, original for other ops
 extern "C" __global__ void fast_sum_bf16(
@@ -735,7 +698,6 @@ extern "C" __global__ void fast_argmax_bf16(
 }
 
 // NOTE: No reduce ops for f8
-// SUM_OP(__nv_fp8_e4m3, sum_fp8_e4m3)
 // SOFTMAX_OP(__nv_fp8_e4m3, float, softmax_fp8_e4m3)
 // LAYERNORM_OP(__nv_fp8_e4m3, layernorm_fp8_e4m3)
 // FAST_OP(__nv_fp8_e4m3, fast_min_fp8_e4m3, fast_max_fp8_e4m3, fast_argmin_fp8_e4m3, fast_argmax_fp8_e4m3, fast_sum_fp8_e4m3)
@@ -744,13 +706,9 @@ extern "C" __global__ void fast_argmax_bf16(
 #if __CUDA_ARCH__ >= 530
 SOFTMAX_OP(__half, float, softmax_f16)
 LAYERNORM_OP(__half, layernorm_f16)
-SUM_OP(__half, sum_f16)
 FAST_OP(__half, fast_min_f16, fast_max_f16, fast_argmin_f16, fast_argmax_f16, fast_sum_f16)
 #endif
 
-SUM_OP(float, sum_f32)
-SUM_OP(double, sum_f64)
-SUM_OP(uint32_t, sum_u32)
 SOFTMAX_OP(float, float, softmax_f32)
 SOFTMAX_OP(double, double, softmax_f64)
 LAYERNORM_OP(float, layernorm_f32)
