@@ -393,7 +393,9 @@ impl Model {
             layers,
             norm,
             dtype,
-            sliding_window: cfg.sliding_window,
+            // only layers past max_window_layers slide, and only when use_sliding_window is set
+            sliding_window: (0..cfg.num_hidden_layers)
+                .find_map(|layer_idx| sliding_window!(layer_idx, cfg)),
             device: normal_loading_metadata.real_device,
             mapper,
         })
@@ -419,22 +421,33 @@ impl Model {
         let (bs, _seqlen) = input_ids.dims2()?;
         let seqlen_offsets = vec![0; bs];
 
-        let attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &NotACache,
-            xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
-        )?;
-        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
+        let mask = |sliding_window| -> Result<DeviceMappedMask> {
+            let mask = CausalMasker.make_causal_mask(
+                input_ids,
+                &NotACache,
+                xs.dtype(),
+                &CausalMaskConfig {
+                    sliding_window,
+                    ..Default::default()
+                },
+            )?;
+            DeviceMappedMask::new(mask, &*self.mapper)
+        };
+        let full_mask = mask(None)?;
+        let sliding_mask = self
+            .sliding_window
+            .map(|window| mask(Some(window)))
+            .transpose()?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
+            let layer_mask = match &sliding_mask {
+                Some(sliding) if layer.self_attn.sdpa_params.sliding_window.is_some() => sliding,
+                _ => &full_mask,
+            };
             xs = layer.forward(
                 &xs,
-                &attention_mask.get(xs.device()),
+                &layer_mask.get(xs.device()),
                 &seqlen_offsets,
                 flash_params,
             )?;

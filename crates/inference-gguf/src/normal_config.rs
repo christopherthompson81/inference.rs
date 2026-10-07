@@ -1124,11 +1124,26 @@ fn build_mixtral(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     Ok(JsonValue::Object(config))
 }
 
+// The model rotates the whole head; llama.cpp rotates `rope.dimension_count` dims, so the two must agree
+fn require_full_rotary(metadata: &MetadataView<'_>, head_dim: usize) -> SynthesisResult<()> {
+    match metadata.optional_usize("rope.dimension_count")? {
+        Some(rotary_dim) if rotary_dim != head_dim => {
+            Err(NormalConfigSynthesisError::new(format!(
+                "GGUF metadata `{}` ({rotary_dim}) must equal the head dimension {head_dim}",
+                metadata.key("rope.dimension_count")
+            )))
+        }
+        _ => Ok(()),
+    }
+}
+
 fn build_llama(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     let fields = StandardFields::read(metadata, Some(DEFAULT_ROPE_THETA))?;
+    require_full_rotary(metadata, fields.head_dim)?;
     let mut config = fields.rms_json();
     config.remove("sliding_window");
     config.insert("hidden_act".into(), json!("silu"));
+    config.insert("head_dim".into(), json!(fields.head_dim));
     config.insert("rope_scaling".into(), llama_rope_scaling(metadata)?);
     Ok(JsonValue::Object(config))
 }
@@ -1443,9 +1458,11 @@ fn build_qwen3_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
 
 fn build_smollm3(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     let fields = StandardFields::read(metadata, Some(DEFAULT_ROPE_THETA))?;
+    require_full_rotary(metadata, fields.head_dim)?;
     let mut config = fields.rms_json();
     config.remove("sliding_window");
     config.insert("hidden_act".into(), json!("silu"));
+    config.insert("head_dim".into(), json!(fields.head_dim));
     config.insert("rope_scaling".into(), smollm3_rope_scaling(metadata)?);
     config.insert("no_rope_layers".into(), JsonValue::Null);
     config.insert(
@@ -3112,6 +3129,28 @@ mod tests {
         let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
         assert!(config["rope_scaling"].is_null());
         assert_native_config_deserializes(&loader, config);
+    }
+
+    #[test]
+    fn llama_and_smollm3_keep_a_head_dim_apart_from_hidden_over_heads() {
+        for loader in [NormalLoaderType::Llama, NormalLoaderType::SmolLm3] {
+            let (architecture, mut metadata, tensors) = default_fixture(&loader);
+            // 512 hidden over 8 heads would be 64
+            insert_u32(&mut metadata, architecture, "attention.key_length", 128);
+            insert_u32(&mut metadata, architecture, "rope.dimension_count", 128);
+            let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
+            assert_eq!(config["head_dim"], 128, "{loader:?}");
+            assert_native_config_deserializes(&loader, config);
+
+            insert_u32(&mut metadata, architecture, "rope.dimension_count", 64);
+            let error = synthesize_normal_config_value(&loader, &metadata, &tensors)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("rope.dimension_count"),
+                "{loader:?}: {error}"
+            );
+        }
     }
 
     #[test]

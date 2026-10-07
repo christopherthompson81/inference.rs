@@ -5,6 +5,7 @@
 mod embedding_tiny;
 mod gguf_iq;
 mod gguf_lora_tiny;
+mod llama_head_dim_tiny;
 mod llama_tiny;
 mod llava_tiny;
 mod local_attention_tiny;
@@ -12,4 +13,5 @@ mod paddleocr_vl;
 mod paddleocr_vl_tiny;
 mod qwen3_5_mtp;
 mod qwen3_5_text_tiny;
+mod qwen3_sliding_window_tiny;
 mod qwen_vl_tiny;

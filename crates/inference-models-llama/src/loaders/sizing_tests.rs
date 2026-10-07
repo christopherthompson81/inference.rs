@@ -46,6 +46,16 @@ fn llama_sizing() {
 }
 
 #[test]
+fn llama_sizing_reads_head_dim() {
+    let mut config = llama_text();
+    config["head_dim"] = json!(HEAD_DIM);
+    assert_eq!(
+        sizing(&LlamaLoader, &config),
+        ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
+    );
+}
+
+#[test]
 fn mistral_sizing() {
     let mut config = llama_text();
     config["sliding_window"] = json!(null);
@@ -73,7 +83,7 @@ fn smollm3_sizing() {
     config["head_dim"] = json!(HEAD_DIM);
     assert_eq!(
         sizing(&SmolLm3Loader, &config),
-        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
+        ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -112,7 +122,7 @@ fn idefics3_sizing() {
     });
     assert_eq!(
         sizing(&Idefics3Loader, &config),
-        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
+        ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -161,7 +171,7 @@ fn llava_sizing() {
     for model_type in ["llama", "mistral"] {
         assert_eq!(
             sizing(&LLaVALoader, &llava(model_type)),
-            ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
+            ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
         );
     }
 }
@@ -171,7 +181,7 @@ fn llava_next_sizing() {
     for model_type in ["llama", "mistral"] {
         assert_eq!(
             sizing(&LLaVANextLoader, &llava(model_type)),
-            ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
+            ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
         );
     }
 }
