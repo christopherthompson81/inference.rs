@@ -1693,3 +1693,28 @@ Pins: `qwen3_tests` (Qwen3 prefill, a sliding layer, the embedder's hidden state
 and pass unchanged; the embedder now takes the fused q/k-norm RoPE path, within the snapshot tolerance.
 
 Next: #324 step 1, cluster A (qwen2, llama, smollm3, mistral, hunyuan dense).
+
+## Run 48 - 2026-10-07 08:01
+
+Question: what does #324 step 1 (Qwen2, Llama, SmolLM3, Mistral and HunYuan dense onto the shared decoder) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,943,536  105,754,416    -189,120
+.text                  55,677,666   55,522,338    -155,328
+.gcc_except_table       2,431,765    2,422,521      -9,244
+.eh_frame               4,386,048    4,378,388      -7,660
+```
+
+Raw finding: -189 KB for five stacks, ~38 KB per migrated model, from 3,024 lines removed and 513 added (the decoder
+grew a RoPE kind, q/k norm placement, NoPE layers, attention temperature and an embeddings entry point; LLaVA's
+text-model trait object went, since Llama and Mistral are now one type). The per-model figure is below Run 45's
+~53 B/line estimate for the deleted lines (~2.5k lines would predict ~130 KB of the 155 KB .text drop, close), so
+model code shrinks roughly in proportion to its source.
+
+Pins: `qwen2_tests`, `dense_decoder_tests` (llama, llama3 rope, smollm3 NoPE, mistral sliding window, mistral
+YaRN with attention temperature) and `hunyuan_dense_tests` (plain and dynamic-alpha rope), recorded on the old code
+in the previous commit, pass unchanged; so do the LLaVA, Idefics and llama_tiny suites.
+
+Next: #324 step 2, folding the deepseek_family FamilyModel shell into CausalLm.

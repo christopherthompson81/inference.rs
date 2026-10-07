@@ -3,7 +3,11 @@
 use inference_quant::QuantizedConfig;
 use serde::{Deserialize, Serialize};
 
-use crate::{decoder::DecoderSpec, layers::Activation, serde_default_fn};
+use crate::{
+    decoder::{DecoderSpec, QkNorm, RopeKind},
+    layers::Activation,
+    serde_default_fn,
+};
 
 serde_default_fn!(bool, tie_word_embeddings, false);
 
@@ -51,9 +55,14 @@ impl Config {
             head_dim: self.head_dim(),
             hidden_act: self.hidden_act,
             rms_norm_eps: self.rms_norm_eps,
-            rope_theta: self.rope_theta as f32,
+            rope: RopeKind::Default {
+                theta: self.rope_theta as f32,
+            },
             max_position_embeddings: self.max_position_embeddings,
-            qk_norm: true,
+            qkv_bias: false,
+            qk_norm: Some(QkNorm::BeforeRope),
+            no_rope_layers: Vec::new(),
+            attention_temperature: None,
             layer_windows: (0..self.num_hidden_layers)
                 .map(|layer_idx| self.layer_window(layer_idx))
                 .collect(),

@@ -3,10 +3,12 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, device_map, gdn, gguf, kv_cache, layers, media_inputs, model, moe, ops,
-    paged_attention, speculative, utils, vision,
+    amoe, attention, decoder, device_map, gdn, gguf, kv_cache, layers, media_inputs, model, moe,
+    ops, paged_attention, speculative, utils, vision,
 };
 
+#[cfg(test)]
+mod dense_decoder_tests;
 pub mod idefics2;
 pub mod idefics3;
 #[cfg(test)]

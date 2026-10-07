@@ -14,6 +14,8 @@ pub mod minicpmo;
 pub mod muse_glimmer;
 pub mod qwen2;
 pub mod qwen2_5_vl;
+#[cfg(test)]
+mod qwen2_tests;
 pub mod qwen2vl;
 pub mod qwen3;
 pub mod qwen3_5;

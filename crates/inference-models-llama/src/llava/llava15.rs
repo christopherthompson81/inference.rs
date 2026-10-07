@@ -6,9 +6,10 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use super::llava_llm::{LLaVALLM, Llama, Mistral};
 use crate::amoe::AnyMoeBaseModelMixin;
 use crate::amoe::MlpLayer;
+use crate::decoder::CausalLm;
+use crate::model::NormalModel;
 
 use crate::amoe::AnyMoeConfig;
 use crate::amoe::AnyMoeExpertType;
@@ -165,7 +166,7 @@ impl ClipVisionTower {
 pub struct Model {
     clip_vision_tower: ClipVisionTower,
     mm_projector: MMProjector,
-    llm: Box<dyn LLaVALLM>,
+    llm: CausalLm,
     config: Config,
     device: Device,
     dtype: DType,
@@ -192,33 +193,20 @@ impl Model {
             &clip_config,
         )?;
 
-        let llm: Box<dyn LLaVALLM> = match config.text_config.model_type.as_str() {
-            "llama" => {
-                let llama_config = config.to_llama_config();
-                let llama = Llama::new(
-                    &llama_config,
-                    vb.pp("language_model"),
-                    is_gptx,
-                    normal_loading_metadata,
-                    attention_mechanism,
-                )?;
-                Box::new(llama)
-            }
-            "mistral" => {
-                let mistral_config = config.to_mistral_config();
-                let mistral = Mistral::new(
-                    &mistral_config,
-                    vb.pp("language_model"),
-                    is_gptx,
-                    normal_loading_metadata,
-                    attention_mechanism,
-                )?;
-                Box::new(mistral)
-            }
+        let spec = match config.text_config.model_type.as_str() {
+            "llama" => config.to_llama_config().decoder_spec(),
+            "mistral" => config.to_mistral_config().decoder_spec()?,
             _ => {
                 bail!("Unsupported model type: {}", config.text_config.model_type);
             }
         };
+        let llm = CausalLm::new(
+            &spec,
+            vb.pp("language_model"),
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )?;
         Ok(Self {
             clip_vision_tower,
             mm_projector,
@@ -245,7 +233,7 @@ impl Model {
         packed_layout: Option<&PackedMultimodalLayout>,
     ) -> Result<Tensor> {
         let mut result = input_ids.clamp(0i64, i64::MAX)?.to_dtype(DType::U32)?;
-        result = self.llm.embed(&result)?;
+        result = self.llm.get_input_embeddings(&result)?;
         let images_typed = images.to_dtype(self.dtype)?;
         let image_features = cached_encode_images(
             CacheModality::Image,
@@ -306,7 +294,7 @@ impl Model {
                 image_hashes,
                 packed_layout,
             )?;
-            self.llm.forward_input_embed(input_ids, input_embeds, ctx)
+            self.llm.forward_embeds(input_ids, input_embeds, ctx)
         } else {
             self.llm.forward(input_ids, ctx)
         }

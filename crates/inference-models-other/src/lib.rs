@@ -3,8 +3,8 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, cuda, device_map, gdn, kv_cache, layers, media_inputs, metal, mla, model, moe,
-    ops, paged_attention, speculative, utils, vision,
+    amoe, attention, cuda, decoder, device_map, gdn, kv_cache, layers, media_inputs, metal, mla,
+    model, moe, ops, paged_attention, speculative, utils, vision,
 };
 
 pub mod deepseek2;
@@ -17,6 +17,8 @@ pub mod glm4_moe;
 pub mod glm4_moe_lite;
 pub mod gpt_oss;
 pub mod granite;
+#[cfg(test)]
+mod hunyuan_dense_tests;
 mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;

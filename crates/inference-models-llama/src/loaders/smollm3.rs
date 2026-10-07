@@ -14,7 +14,7 @@ impl NormalModelLoader for SmolLm3Loader {
         let cfg = crate::smollm3::Config::from_json(config)?;
 
         Ok(Box::new(crate::smollm3::SmolLm3::new(
-            &cfg,
+            &cfg.decoder_spec(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

@@ -14,7 +14,7 @@ impl NormalModelLoader for HunYuanDenseV1Loader {
         let cfg = crate::hunyuan_v1_dense::Config::from_json(config)?;
 
         Ok(Box::new(crate::hunyuan_v1_dense::Model::new(
-            &cfg,
+            &cfg.decoder_spec()?,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

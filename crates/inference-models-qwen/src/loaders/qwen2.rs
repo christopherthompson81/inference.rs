@@ -14,7 +14,7 @@ impl NormalModelLoader for Qwen2Loader {
         let cfg = crate::qwen2::Config::from_json(config)?;
 
         Ok(Box::new(crate::qwen2::Model::new(
-            &cfg,
+            &cfg.decoder_spec()?,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

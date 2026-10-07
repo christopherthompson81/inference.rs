@@ -33,7 +33,14 @@ pub fn tiny_llama_checkpoint() -> anyhow::Result<tempfile::TempDir> {
         cfg.num_hidden_layers,
         &[ROPE_FREQS],
         |vb, metadata| {
-            Llama::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+            Llama::new(
+                &cfg.decoder_spec(),
+                vb,
+                true,
+                metadata,
+                AttentionImplementation::Eager,
+            )
+            .map(|_| ())
         },
     )
 }

@@ -634,7 +634,7 @@ impl Idefics2 {
     ) -> Result<Self> {
         let vb_m = vb.pp("model");
         let text_model = Mistral::new_inner(
-            &config.text_config.clone().into(),
+            &mistral::Config::from(config.text_config.clone()).decoder_spec()?,
             vb_m.pp("text_model"),
             vb.pp("lm_head"),
             is_gptx,
@@ -959,9 +959,7 @@ impl IsqModel for Idefics2 {
         let uvb = UnVarBuilder::new();
 
         let uvb_m = uvb.pp("model");
-        uvb_m
-            .pp("text_model")
-            .extend(self.text_model.residual_tensors());
+        uvb.extend(self.text_model.residual_tensors_m(uvb_m.pp("text_model")));
         uvb_m
             .pp("vision_model")
             .extend(self.vision_model.residual_tensors());

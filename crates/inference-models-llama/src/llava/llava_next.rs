@@ -31,7 +31,8 @@ use crate::{
     layers,
 };
 
-use super::llava_llm::{LLaVALLM, Llama, Mistral};
+use crate::decoder::CausalLm;
+use crate::model::NormalModel;
 
 #[derive(Default)]
 pub struct LLaVANextVisionSpecificArgs {
@@ -128,7 +129,7 @@ pub struct Model {
     clip_vision_tower: ClipVisionTower,
     image_newline: Tensor,
     mm_projector: MMProjector,
-    llm: Box<dyn LLaVALLM>,
+    llm: CausalLm,
     config: Config,
     device: Device,
     dtype: DType,
@@ -158,33 +159,20 @@ impl Model {
             .get(&[config.text_config.hidden_size], "image_newline")?
             .to_device(&device)?;
 
-        let llm: Box<dyn LLaVALLM> = match config.text_config.model_type.as_str() {
-            "llama" => {
-                let llama_config = config.to_llama_config();
-                let llama = Llama::new(
-                    &llama_config,
-                    vb.pp("language_model"),
-                    is_gptx,
-                    normal_loading_metadata,
-                    attention_mechanism,
-                )?;
-                Box::new(llama)
-            }
-            "mistral" => {
-                let mistral_config = config.to_mistral_config();
-                let mistral = Mistral::new(
-                    &mistral_config,
-                    vb.pp("language_model"),
-                    is_gptx,
-                    normal_loading_metadata,
-                    attention_mechanism,
-                )?;
-                Box::new(mistral)
-            }
+        let spec = match config.text_config.model_type.as_str() {
+            "llama" => config.to_llama_config().decoder_spec(),
+            "mistral" => config.to_mistral_config().decoder_spec()?,
             _ => {
                 bail!("Unsupported model type: {}", config.text_config.model_type);
             }
         };
+        let llm = CausalLm::new(
+            &spec,
+            vb.pp("language_model"),
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )?;
         Ok(Self {
             clip_vision_tower,
             image_newline,
@@ -241,7 +229,7 @@ impl Model {
             .squeeze(1)?
             .to_vec1::<u32>()?;
         let mut result = input_ids.clamp(0i64, i64::MAX)?.to_dtype(DType::U32)?;
-        result = self.llm.embed(&result)?; //[seq_len,hidden_size]
+        result = self.llm.get_input_embeddings(&result)?; //[seq_len,hidden_size]
 
         let images_typed = images.to_dtype(self.dtype)?;
         let n_images = num_image_samples.len();
@@ -515,7 +503,7 @@ impl Model {
                 image_hashes,
                 packed_layout,
             )?;
-            self.llm.forward_input_embed(input_ids, input_embeds, ctx)
+            self.llm.forward_embeds(input_ids, input_embeds, ctx)
         } else {
             self.llm.forward(input_ids, ctx)
         }
