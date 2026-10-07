@@ -4,6 +4,7 @@
 
 mod embedding_tiny;
 mod gguf_iq;
+mod gguf_lora_tiny;
 mod llama_tiny;
 mod llava_tiny;
 mod local_attention_tiny;

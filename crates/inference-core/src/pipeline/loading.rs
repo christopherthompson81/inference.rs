@@ -822,15 +822,15 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
             .set_device(session.plan.load_device.clone()),
         (None, None) => from_files(&*mapper)?,
     };
+    let rope_pairing = prepared.map(|(_, rope_pairing)| rope_pairing);
     let layers = lora
-        .map(|_| super::normal::new_dynamic_lora_registry(config))
+        .map(|_| super::normal::new_dynamic_lora_registry(config, rope_pairing))
         .transpose()?;
     let vb = match &layers {
         Some(layers) => vb.with_lora_registry(layers.clone()),
         None => vb,
     };
     let tracker = vb.tracker().clone();
-    let rope_pairing = prepared.map(|(_, rope_pairing)| rope_pairing);
     let model = loader.build(
         config,
         vb,
