@@ -427,6 +427,22 @@ impl<'a> ReadyBufferBuilder<'a> {
     }
 }
 
+fn find_available_buffer(size: usize, buffers: &BufferMap) -> Option<Arc<Buffer>> {
+    let mut best_buffer: Option<&Arc<Buffer>> = None;
+    let mut best_buffer_size = usize::MAX;
+    for (buffer_size, subbuffers) in buffers.iter() {
+        if buffer_size >= &size && buffer_size < &best_buffer_size {
+            for sub in subbuffers {
+                if Arc::strong_count(sub) == 1 {
+                    best_buffer = Some(sub);
+                    best_buffer_size = *buffer_size;
+                }
+            }
+        }
+    }
+    best_buffer.cloned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -458,20 +474,4 @@ mod tests {
         // a 2-byte buffer. This must not be rounded down to 1.
         assert_eq!(buf_size(2), 2);
     }
-}
-
-fn find_available_buffer(size: usize, buffers: &BufferMap) -> Option<Arc<Buffer>> {
-    let mut best_buffer: Option<&Arc<Buffer>> = None;
-    let mut best_buffer_size = usize::MAX;
-    for (buffer_size, subbuffers) in buffers.iter() {
-        if buffer_size >= &size && buffer_size < &best_buffer_size {
-            for sub in subbuffers {
-                if Arc::strong_count(sub) == 1 {
-                    best_buffer = Some(sub);
-                    best_buffer_size = *buffer_size;
-                }
-            }
-        }
-    }
-    best_buffer.cloned()
 }

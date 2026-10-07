@@ -1408,12 +1408,12 @@ local_ci.sh --size  -> unchanged (build-time crate)
 added turned out to cover almost nothing on the platforms this machine can check:
 
 - clippy with the allow removed: 0 findings on inference-tensor for CPU, CUDA and aarch64 (scratch target dir,
-  deleted). Run 36's one CUDA finding (`div_ceil`) was already fixed. The Metal backend is the only unchecked part;
-  the macOS clippy job on the PR is its first unallowed lint.
+  deleted). Run 36's one CUDA finding (`div_ceil`) was already fixed. The macOS clippy job, the Metal backend's first
+  unallowed lint, found one: `items_after_test_module` in `metal_backend/device.rs` (test module moved to the end).
 - rustdoc: 12 findings (bracketed math read as links, a link to a `TensorIndex` that does not exist, a bare URL, an
   `anyhow` link from a crate without anyhow), all fixed.
 - typos: 168 findings, mostly identifiers (`NdArray`/`NdIter`/`nd_iter`, the `mone` SIMD constants, the `usin`/
-  `usign` unary kernels, `MmapedFile`), added to `.typos.toml`; four real misspellings in comments fixed and an
+  `usign` unary kernels, the memory-mapped file type), added to `.typos.toml`; four real misspellings in comments fixed and an
   AVX-512 local renamed. Only FA3's `hkernel/` (upstream FlashAttention-3, copied unchanged) stays excluded.
 
 ```
