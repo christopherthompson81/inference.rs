@@ -58,7 +58,7 @@ impl Model {
 impl IsqModel for Model {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        self.stack.residual_uvb(&uvb);
+        self.stack.residual_uvb(&uvb, false);
         uvb.to_safetensors()
     }
 }

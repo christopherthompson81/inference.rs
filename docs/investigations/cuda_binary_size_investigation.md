@@ -1718,3 +1718,27 @@ YaRN with attention temperature) and `hunyuan_dense_tests` (plain and dynamic-al
 in the previous commit, pass unchanged; so do the LLaVA, Idefics and llama_tiny suites.
 
 Next: #324 step 2, folding the deepseek_family FamilyModel shell into CausalLm.
+
+## Run 49 - 2026-10-07 08:30
+
+Question: what does #324 step 2 (the deepseek_family FamilyModel shell folded into a generic
+`CausalLm<A: LayerAttention, F: LayerFfn>`, MLA and GLM4-MoE attention as `LayerAttention` impls, the family's
+MoE-or-MLP as a `LayerFfn`) do to the bundle?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,754,416  105,803,952     +49,536
+.text                  55,522,338   55,562,914     +40,576
+```
+
+Raw finding: +48 KB, a regression, with source line-neutral (734 added, 716 removed). The family still compiles
+two instances (MLA, GLM4-MoE attention) as FamilyModel<T> did, so the growth is per-instance code the generic shell
+carries that the old one did not. Gating the generic AnyMoE impl on a `LayerFfn::AMOE` constant (so the family
+instances fold it away) recovered only ~3 KB of an initial +52 KB. Candidates not yet measured: the generic
+`DecoderStack::new_with` compiling both embedding branches (tied-UQFF and plain) and the window checks per
+instance, the sliding-mask path, `with_stack`'s lm_head and cache-type construction. Pinning it down needs an
+unstripped bundle build (`nm -S --size-sort`), which the stripped bundle profile does not give.
+
+Value of the step is structural: one model shell, and an `F` slot that step 6 (MoE FFN on the shared attention:
+qwen3_moe, mixtral, phi3_5_moe, hunyuan_moe, gpt_oss) needs.

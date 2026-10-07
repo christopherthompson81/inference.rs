@@ -16,7 +16,9 @@ impl NormalModelLoader for GLM4MoeLoader {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = crate::glm4_moe::Glm4MoeConfig::from_json(config)?;
-        Ok(Box::new(crate::glm4_moe::Glm4Moe::new(
+        Ok(Box::new(crate::deepseek_family::new_family_model::<
+            crate::glm4_moe::Glm4MoeAttention,
+        >(
             &cfg.family(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,

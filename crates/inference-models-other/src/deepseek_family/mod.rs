@@ -3,24 +3,23 @@
 
 mod mla;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
-use inference_tensor::{DType, Device, Module, Result, Tensor};
+use inference_tensor::{DType, Device, DeviceLocation, Result, Tensor};
 
 pub use mla::{MlaAttention, MlaConfig, MlaKvLayout, mla_softmax_scale};
 
-use crate::attention::AttentionMask;
-use crate::kv_cache::{EitherCache, KvCache, NormalCache};
-use crate::layers::masker::CausalMaskConfig;
-use crate::model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel};
+use crate::model::NormalLoadingMetadata;
 use crate::{
-    amoe::AnyMoeBaseModelMixin,
-    device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{Activation, CausalMasker, Mlp, RmsNorm, embedding_with_legacy_tied_uqff},
+    decoder::{
+        CausalLm, DecoderStack, LayerAttention, LayerBuilder, LayerFfn, LayerLoad, StackShape,
+    },
+    device_map::DeviceMapper,
+    layers::{Activation, Mlp},
     moe::{GroupedRouter, GroupedRouterConfig, MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
+    utils::unvarbuilder::UnVarBuilder,
 };
 
 /// The normalised config of one family model; `A` is its attention's own config.
@@ -85,12 +84,10 @@ pub struct LayerCtx<'a, A> {
     pub comm: &'a Arc<inference_quant::Comm>,
 }
 
-/// The attention half of a family decoder layer.
-pub trait FamilyAttention: Sized + Send + Sync {
+/// How a family's attention is built; it runs as the shared decoder's [`LayerAttention`].
+pub trait FamilyAttention: LayerAttention + Sized {
     type Config: Send + Sync;
     type Rope: Send + Sync;
-
-    const CUDA_DECODE_GRAPHS: bool = false;
 
     fn rope(
         cfg: &FamilyConfig<Self::Config>,
@@ -107,21 +104,6 @@ pub trait FamilyAttention: Sized + Send + Sync {
         vb: ShardedVarBuilder,
         paged_attn: Option<PagedAttention>,
     ) -> Result<Self>;
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor>;
-
-    /// The tensors ISQ leaves alone, under `self_attn`.
-    fn add_residual(&self, uvb: &UnVarBuilder);
-
-    /// The projections, under `self_attn`, that only a MoE-experts-only ISQ keeps unquantized.
-    fn add_projections(&self, uvb: &UnVarBuilder);
 
     fn model_metadata(
         cfg: &FamilyConfig<Self::Config>,
@@ -248,7 +230,7 @@ pub(crate) fn add_moe_gate_residual_tensors(
     }
 }
 
-struct Moe {
+pub struct Moe {
     experts: MoEExperts,
     shared_experts: Option<SharedMlp>,
     gate: MoeGate,
@@ -332,104 +314,26 @@ impl Moe {
     }
 }
 
-enum MoeOrMlp {
+/// A family layer's feed-forward: a routed MoE block, or a dense MLP on the first dense layers.
+pub enum MoeOrMlp {
     Moe(Box<Moe>),
     Mlp(Mlp),
 }
 
-impl MoeOrMlp {
+impl LayerFfn for MoeOrMlp {
+    const MOE_EXPERTS_ONLY_ISQ: bool = true;
+
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Mlp(mlp) => mlp.forward(xs),
             Self::Moe(moe) => moe.forward(xs),
         }
     }
-}
 
-struct DecoderLayer<T> {
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
-    attn: T,
-    moe_or_mlp: MoeOrMlp,
-}
-
-impl<T: FamilyAttention> DecoderLayer<T> {
-    fn new(
-        ctx: &LayerCtx<'_, T::Config>,
-        rotary_emb: Arc<T::Rope>,
-        vb: ShardedVarBuilder,
-        paged_attn: Option<PagedAttention>,
-        real_device: Device,
-    ) -> Result<Self> {
-        let LayerCtx {
-            cfg,
-            mapper,
-            layer_idx,
-            loading_isq,
-            comm,
-        } = *ctx;
-        let attn = T::new(ctx, rotary_emb, vb.pp("self_attn"), paged_attn)?;
-        let input_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
-        )?;
-        let post_attention_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
-        )?;
-        let moe_or_mlp = if cfg.is_moe_layer(layer_idx) {
-            MoeOrMlp::Moe(Box::new(Moe::new(ctx, vb.pp("mlp"), real_device)?))
-        } else {
-            MoeOrMlp::Mlp(Mlp::new(
-                mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                &cfg.quantization_config,
-                cfg.hidden_act,
-                comm,
-            )?)
-        };
-
-        Ok(Self {
-            input_layernorm,
-            post_attention_layernorm,
-            attn,
-            moe_or_mlp,
-        })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor> {
-        let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
-        let xs = self
-            .attn
-            .forward(&xs, attention_mask, kv_cache, ctx, layer_idx)?;
-        let xs = (xs + residual)?;
-        let residual = &xs;
-        let xs = self
-            .moe_or_mlp
-            .forward(&xs.apply(&self.post_attention_layernorm)?)?;
-        residual + xs
-    }
-
-    fn add_residual(&self, uvb_l: &UnVarBuilder) {
-        uvb_l.pp("input_layernorm").add(&self.input_layernorm);
-        uvb_l
-            .pp("post_attention_layernorm")
-            .add(&self.post_attention_layernorm);
-        self.attn.add_residual(&uvb_l.pp("self_attn"));
-        if let MoeOrMlp::Moe(moe) = &self.moe_or_mlp {
+    fn add_residual(&self, uvb: &UnVarBuilder) {
+        if let Self::Moe(moe) = self {
             add_moe_gate_residual_tensors(
-                &uvb_l.pp("mlp").pp("gate"),
+                &uvb.pp("gate"),
                 &moe.gate.weight,
                 moe.gate.router.e_score_correction_bias(),
             );
@@ -437,210 +341,113 @@ impl<T: FamilyAttention> DecoderLayer<T> {
     }
 }
 
-pub struct FamilyModel<T> {
-    lm_head: Arc<dyn QuantMethod>,
-    embed_tokens: Arc<dyn QuantMethod>,
-    dtype: DType,
-    norm: RmsNorm,
-    layers: Vec<DecoderLayer<T>>,
-    cache: EitherCache,
-    device: Device,
-    max_seq_len: usize,
-    cfg: ModelConfigMetadata,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
+/// The family attention `T` and its MoE or MLP, layer by layer.
+struct FamilyLayers<'a, T: FamilyAttention> {
+    cfg: &'a FamilyConfig<T::Config>,
+    ropes: HashMap<DeviceLocation, Arc<T::Rope>>,
+    real_device: Device,
 }
 
-impl<T: FamilyAttention> FamilyModel<T> {
-    pub fn new(
-        cfg: &FamilyConfig<T::Config>,
-        vb: ShardedVarBuilder,
-        is_gptx: bool,
-        normal_loading_metadata: NormalLoadingMetadata,
-        attention_mechanism: AttentionImplementation,
-    ) -> Result<Self> {
-        let vb_m = vb.pp("model");
+impl<T: FamilyAttention> LayerBuilder for FamilyLayers<'_, T> {
+    type Attention = T;
+    type Ffn = MoeOrMlp;
 
-        let mapper = normal_loading_metadata.mapper;
-        let dtype = vb_m.dtype();
-
-        let embed_tokens = embedding_with_legacy_tied_uqff(
-            cfg.vocab_size,
-            cfg.hidden_size,
-            mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
-            cfg.tie_word_embeddings.then(|| {
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq)
-            }),
-            &cfg.quantization_config,
-        )?;
-        let lm_head = if !cfg.tie_word_embeddings {
-            ReplicatedLayer::new(
-                cfg.hidden_size,
-                cfg.vocab_size,
-                &cfg.quantization_config,
-                false,
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
-            )?
-        } else {
-            embed_tokens.clone()
+    fn build(&self, load: &LayerLoad<'_>, vb: ShardedVarBuilder) -> Result<(T, MoeOrMlp)> {
+        let cfg = self.cfg;
+        let ctx = LayerCtx {
+            cfg,
+            mapper: load.mapper,
+            layer_idx: load.layer_idx,
+            loading_isq: load.loading_isq,
+            comm: load.comm,
         };
-        let norm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
-        )?;
-
-        let ropes = crate::device_map::per_layer_device(
-            &*mapper,
-            cfg.num_hidden_layers,
-            &normal_loading_metadata.real_device,
-            |device| T::rope(cfg, vb.dtype(), device, is_gptx),
-        )?;
-
-        let paged_head_dim = T::paged_head_dim(cfg);
-        let vb_l = vb_m.pp("layers");
-        let layers: Vec<DecoderLayer<T>> = NiceProgressBar::<_, 'b'>(
-            0..cfg.num_hidden_layers,
-            "Loading repeating layers",
-            &normal_loading_metadata.multi_progress,
-        )
-        .par_iter_if_isq(|layer_idx| {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            let rotary_emb = ropes
-                .get(&device.location())
-                .expect("No RoPE for device location!")
-                .clone();
-            let paged_attn = match &attention_mechanism {
-                AttentionImplementation::Eager => None,
-                AttentionImplementation::PagedAttention => Some(
-                    PagedAttention::new(paged_head_dim, device, None)
-                        .expect("Failed to create PagedAttention"),
-                ),
-            };
-            let comm = mapper.get_comm_for(layer_idx)?;
-            let ctx = LayerCtx {
-                cfg,
-                mapper: &*mapper,
-                layer_idx,
-                loading_isq: normal_loading_metadata.loading_isq,
-                comm: &comm,
-            };
-            DecoderLayer::new(
+        let rotary_emb = self
+            .ropes
+            .get(&load.device.location())
+            .expect("No RoPE for device location!")
+            .clone();
+        let paged_attn = match load.attention {
+            AttentionImplementation::Eager => None,
+            AttentionImplementation::PagedAttention => Some(PagedAttention::new(
+                T::paged_head_dim(cfg),
+                load.device,
+                None,
+            )?),
+        };
+        let attn = T::new(&ctx, rotary_emb, vb.pp("self_attn"), paged_attn)?;
+        let ffn = if cfg.is_moe_layer(load.layer_idx) {
+            MoeOrMlp::Moe(Box::new(Moe::new(
                 &ctx,
-                rotary_emb,
-                vb_l.pp(layer_idx),
-                paged_attn,
-                normal_loading_metadata.real_device.clone(),
-            )
-        })?;
-
-        let world_size = mapper.get_comm_for(0)?.world_size();
-        Ok(Self {
-            lm_head,
-            embed_tokens,
-            dtype,
-            norm,
-            layers,
-            cache: EitherCache::Normal(NormalCache::new(
-                cfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-            )),
-            device: normal_loading_metadata.real_device.clone(),
-            max_seq_len: cfg.max_position_embeddings,
-            cfg: T::model_metadata(
-                cfg,
-                &attention_mechanism,
-                &normal_loading_metadata.real_device,
-                world_size,
-            ),
-            mapper,
-        })
-    }
-
-    pub fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
-        let mut xs = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
-        let cache = &mut self.cache.normal().0;
-        let mask_cache = ctx.mask_cache(cache);
-        let attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &mask_cache,
-            xs.dtype(),
-            &CausalMaskConfig::default(),
-        )?;
-        // PagedAttention prompt chunking
-        let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
+                vb.pp("mlp"),
+                self.real_device.clone(),
+            )?))
         } else {
-            AttentionMask::None
+            MoeOrMlp::Mlp(Mlp::new(
+                load.mapper
+                    .set_device(load.layer_idx, vb.pp("mlp"), load.loading_isq),
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                &cfg.quantization_config,
+                cfg.hidden_act,
+                load.comm,
+            )?)
         };
-        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
-        for (i, layer) in self.layers.iter().enumerate() {
-            xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?;
-        }
-        let xs = xs.to_device(&self.device)?;
-        let xs = xs.apply(&self.norm)?;
-        let xs = ctx.logits(&xs)?;
-        ctx.lm_head(&*self.lm_head, &xs)
-    }
-
-    fn residual_uvb(&self, with_projections: bool) -> UnVarBuilder {
-        let uvb = UnVarBuilder::new();
-
-        let uvb_m = uvb.pp("model");
-        uvb_m.pp("embed_tokens").add(&self.embed_tokens);
-        uvb_m.pp("norm").add(&self.norm);
-
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb_m.pp("layers").pp(layer_idx);
-            layer.add_residual(&uvb_l);
-            if with_projections {
-                layer.attn.add_projections(&uvb_l.pp("self_attn"));
-            }
-        }
-        uvb
+        Ok((attn, ffn))
     }
 }
 
-impl<T: FamilyAttention> IsqModel for FamilyModel<T> {
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
-        self.residual_uvb(false).to_safetensors()
-    }
+pub type FamilyModel<T> = CausalLm<T, MoeOrMlp>;
 
-    fn residual_tensors_moe_experts_only(&self) -> Option<Vec<(String, Tensor)>> {
-        Some(self.residual_uvb(true).to_safetensors())
-    }
+/// A family model over the attention `T`: the shared decoder with a MoE feed-forward past the dense layers.
+pub fn new_family_model<T: FamilyAttention>(
+    cfg: &FamilyConfig<T::Config>,
+    vb: ShardedVarBuilder,
+    is_gptx: bool,
+    normal_loading_metadata: NormalLoadingMetadata,
+    attention_mechanism: AttentionImplementation,
+) -> Result<FamilyModel<T>> {
+    let layer_windows = vec![None; cfg.num_hidden_layers];
+    let shape = StackShape {
+        vocab_size: cfg.vocab_size,
+        hidden_size: cfg.hidden_size,
+        rms_norm_eps: cfg.rms_norm_eps,
+        layer_windows: &layer_windows,
+        tie_word_embeddings: cfg.tie_word_embeddings,
+        quantization_config: &cfg.quantization_config,
+    };
+    let loading_isq = normal_loading_metadata.loading_isq;
+    let dtype = vb.dtype();
+    let stack = DecoderStack::new_with(
+        shape,
+        vb.pp("model"),
+        Some(vb.pp("lm_head")),
+        normal_loading_metadata,
+        &attention_mechanism,
+        |mapper, real_device| {
+            let ropes = crate::device_map::per_layer_device(
+                mapper,
+                cfg.num_hidden_layers,
+                real_device,
+                |device| T::rope(cfg, dtype, device, is_gptx),
+            )?;
+            Ok(FamilyLayers::<T> {
+                cfg,
+                ropes,
+                real_device: real_device.clone(),
+            })
+        },
+    )?;
+    let world_size = stack.mapper.get_comm_for(0)?.world_size();
+    let metadata = T::model_metadata(cfg, &attention_mechanism, &stack.device, world_size);
+    CausalLm::with_stack(
+        stack,
+        shape,
+        vb.pp("lm_head"),
+        loading_isq,
+        cfg.max_position_embeddings,
+        metadata,
+    )
 }
-
-impl<T: FamilyAttention> crate::speculative::SpeculativeTargetMixin for FamilyModel<T> {}
-
-impl<T: FamilyAttention> NormalModel for FamilyModel<T> {
-    fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
-        self.forward(input_ids, ctx)
-    }
-    fn cache(&self) -> &EitherCache {
-        &self.cache
-    }
-    fn device(&self) -> &Device {
-        &self.device
-    }
-    fn max_seq_len(&self) -> usize {
-        self.max_seq_len
-    }
-    fn config(&self) -> &ModelConfigMetadata {
-        &self.cfg
-    }
-    fn supports_packed_prefill(&self) -> bool {
-        true
-    }
-    #[cfg(feature = "cuda")]
-    fn supports_cuda_decode_graphs(&self) -> bool {
-        T::CUDA_DECODE_GRAPHS
-    }
-}
-
-impl<T: FamilyAttention> AnyMoeBaseModelMixin for FamilyModel<T> {}
 
 /// A `moe_layer_freq` of 0 would make no layer past the first a MoE layer and divide by zero in the sizing.
 pub(crate) fn nonzero_moe_layer_freq<'de, D: serde::Deserializer<'de>>(
