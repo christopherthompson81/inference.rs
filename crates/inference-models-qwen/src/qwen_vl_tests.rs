@@ -243,6 +243,35 @@ fn qwen2_5_vl_prefill() -> Result<()> {
     assert_snapshot(&logits, VOCAB, &expected)
 }
 
+fn qwen2_vl_vision() -> Value {
+    json!({
+        "depth": 2,
+        "embed_dim": 16,
+        "hidden_size": HIDDEN,
+        "mlp_ratio": 2.0,
+        "num_heads": 2,
+        "patch_size": 2,
+        "spatial_merge_size": 2,
+        "temporal_patch_size": 2,
+    })
+}
+
+// BF16 pins the F32 norms and F32 eager attention; the second layer slides over a window shorter than the prompt.
+#[test]
+fn qwen2_vl_prefill_bf16_sliding() -> Result<()> {
+    let config = patched(
+        qwen2_vl_config(qwen2_vl_vision()),
+        json!({"use_sliding_window": true, "sliding_window": 3, "max_window_layers": 1}),
+    );
+    let (logits, _) = prefill_as(&Qwen2VLLoader, &config, HashMap::new(), DType::BF16)?;
+    let expected = Snapshot {
+        probes: [0.096191406, 1.5859375, 0.7109375, 0.6484375],
+        sum: 36.21855,
+        l2: 17.498833,
+    };
+    assert_snapshot(&logits, VOCAB, &expected)
+}
+
 // In BF16 the dense model's F32 norms and the MoE model's fused ones round differently, so these pin which each gets.
 #[test]
 fn qwen3_vl_dense_prefill_bf16() -> Result<()> {
