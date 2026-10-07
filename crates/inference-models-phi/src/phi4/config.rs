@@ -3,9 +3,28 @@ use std::collections::HashMap;
 use inference_quant::{QuantizedConfig, StaticLoraConfig};
 use serde::{Deserialize, Serialize};
 
-use super::rope::Phi4MMRopeScalingConfig;
+use crate::{
+    conformer::config::ConformerEncoderConfig,
+    decoder::{DecoderSpec, MlpKind, RopeKind},
+    layers::{Activation, PhiRopeConfig, PhiRopeScalingConfig, ScaledRopeType},
+};
 
-use crate::{conformer::config::ConformerEncoderConfig, layers::Activation};
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Phi4MMScaledRopeType {
+    #[serde(alias = "longrope")]
+    LongRope,
+    #[default]
+    Default,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Phi4MMRopeScalingConfig {
+    short_factor: Option<Vec<f64>>,
+    long_factor: Option<Vec<f64>>,
+    #[serde(rename = "type")]
+    scaling_type: Phi4MMScaledRopeType,
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Phi4MMImageEmbedConfig {
@@ -88,6 +107,53 @@ impl Phi4MMConfig {
 
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
+    }
+
+    /// Phi's LongRoPE over the rotated part, when the config names both factor lists; plain RoPE otherwise.
+    fn rope_config(&self) -> PhiRopeConfig {
+        let rope_scaling = match &self.rope_scaling {
+            Some(Phi4MMRopeScalingConfig {
+                scaling_type: Phi4MMScaledRopeType::LongRope,
+                short_factor: Some(short_factor),
+                long_factor: Some(long_factor),
+            }) => Some(PhiRopeScalingConfig::Classic {
+                short_factor: short_factor.clone(),
+                long_factor: long_factor.clone(),
+                scaling_type: ScaledRopeType::Su,
+            }),
+            _ => None,
+        };
+        PhiRopeConfig {
+            rope_scaling,
+            scaling_attn_factor: None,
+            max_position_embeddings: self.max_position_embeddings,
+            original_max_position_embeddings: self.original_max_position_embeddings,
+            rope_theta: self.rope_theta,
+            head_dim: self.head_dim(),
+            partial_rotary_factor: Some(self.partial_rotary_factor),
+        }
+    }
+
+    pub fn decoder_spec(&self) -> DecoderSpec {
+        DecoderSpec {
+            vocab_size: self.vocab_size,
+            hidden_size: self.hidden_size,
+            intermediate_size: self.intermediate_size,
+            num_heads: self.num_attention_heads,
+            num_kv_heads: self.num_key_value_heads(),
+            head_dim: self.head_dim(),
+            hidden_act: self.hidden_act,
+            rms_norm_eps: self.rms_norm_eps,
+            rope: RopeKind::Phi(self.rope_config()),
+            max_position_embeddings: self.max_position_embeddings,
+            layer_windows: vec![self.sliding_window; self.num_hidden_layers],
+            tie_word_embeddings: self.tie_word_embeddings,
+            quantization_config: self.quantization_config.clone(),
+            fused_qkv: true,
+            static_loras: Some(self.loras()),
+            mlp: MlpKind::FusedGateUp,
+            ..Default::default()
+        }
     }
 
     pub fn loras(&self) -> HashMap<String, StaticLoraConfig> {

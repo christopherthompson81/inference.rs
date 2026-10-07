@@ -1,29 +1,24 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers::masker::CausalMaskConfig;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
 };
 
-use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
-use inference_tensor::nn::Module;
-use inference_tensor::{D, DType, Device, Result, Tensor};
+use inference_quant::ShardedVarBuilder;
+use inference_tensor::{Device, Result, Tensor};
 use mm_embedding::{InputMode, Phi4MMImageAudioEmbedding, Phi4MMPackedInputs};
-use rope::Phi4MMRotaryEmbedding;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionDispatch, AttentionMask, SdpaParams},
-    device_map::{DeviceMappedMask, DeviceMapper},
-    kv_cache::{EitherCache, KvCache, NormalCache},
-    layers::{self, Activation, CausalMasker, RmsNorm},
-    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
+    attention::AttentionMask,
+    decoder::CausalLm,
+    kv_cache::EitherCache,
+    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
-        AttentionImplementation, ModelConfigMetadata, PagedAttention,
-        encoder_cache::EncoderCacheManager,
+        AttentionImplementation, ModelConfigMetadata, encoder_cache::EncoderCacheManager,
     },
-    utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
+    utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::PackedMultimodalLayout,
 };
 
@@ -32,255 +27,15 @@ pub mod config;
 pub mod image_embedding;
 pub mod inputs_processor;
 pub mod mm_embedding;
-pub mod rope;
 
 pub use config::Phi4MMConfig;
 pub use image_embedding::PHI4_MM_VISION_CFG;
 
-struct Attention {
-    qkv_proj: Arc<dyn QuantMethod>,
-    o_proj: Arc<dyn QuantMethod>,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    rotary_emb: Arc<Phi4MMRotaryEmbedding>,
-    paged_attn: Option<PagedAttention>,
-    sdpa_params: SdpaParams,
-}
-
-impl Attention {
-    fn new(
-        rotary_emb: Arc<Phi4MMRotaryEmbedding>,
-        cfg: &Phi4MMConfig,
-        vb: ShardedVarBuilder,
-        paged_attn: Option<PagedAttention>,
-    ) -> Result<Self> {
-        let num_heads = cfg.num_attention_heads;
-        let num_kv_heads = cfg.num_key_value_heads();
-        let head_dim = cfg.head_dim();
-        let op_size = num_heads * head_dim + 2 * num_kv_heads * head_dim;
-
-        // No TP here.
-        let qkv_proj = inference_quant::linear_no_bias_static_lora(
-            cfg.hidden_size,
-            op_size,
-            cfg.loras(),
-            vb.pp("qkv_proj"),
-        )?;
-
-        let o_proj = inference_quant::linear_no_bias_static_lora(
-            num_heads * head_dim,
-            cfg.hidden_size,
-            cfg.loras(),
-            vb.pp("o_proj"),
-        )?;
-
-        Ok(Self {
-            qkv_proj,
-            o_proj,
-            rotary_emb,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            paged_attn,
-            sdpa_params: SdpaParams {
-                n_kv_groups: num_heads / num_kv_heads,
-                softcap: None,
-                softmax_scale: 1.0 / (head_dim as f32).sqrt(),
-                sliding_window: cfg.sliding_window,
-                sinks: None,
-                chunk: None,
-            },
-        })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor> {
-        let (b_sz, q_len, _) = xs.dims3()?;
-
-        let qkv = self.qkv_proj.forward(xs)?;
-        let query_pos = self.num_heads * self.head_dim;
-        let q = qkv.narrow(D::Minus1, 0, query_pos)?;
-        let k = qkv.narrow(D::Minus1, query_pos, self.num_kv_heads * self.head_dim)?;
-        let v = qkv.narrow(
-            D::Minus1,
-            query_pos + self.num_kv_heads * self.head_dim,
-            self.num_kv_heads * self.head_dim,
-        )?;
-
-        let (q, k, v) = if q_len != 1 {
-            let q = q
-                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let k = k
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let v = v
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            (q, k, v)
-        } else {
-            let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
-            let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            (q, k, v)
-        };
-
-        let position_ids = ctx.position_ids_vec();
-        let positions = ctx
-            .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| inference_tensor::Error::msg("missing RoPE positions"))?;
-        let (q, k) = self.rotary_emb.forward(&q, &k, positions, &position_ids)?;
-
-        let metadata = ctx.paged_layer(layer_idx);
-        let flash_params = ctx.flash_params();
-        let mut attn_output = AttentionDispatch {
-            paged_attn: self.paged_attn.as_ref(),
-            paged_layer: metadata,
-            kv_cache,
-            sdpa_params: &self.sdpa_params,
-            flash_params,
-        }
-        .run(&q, &k.contiguous()?, &v.contiguous()?, attention_mask)?;
-
-        attn_output = if !matches!(attention_mask, AttentionMask::None) {
-            attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
-        } else {
-            attn_output.reshape((b_sz, q_len, ()))?
-        };
-        let res = self.o_proj.forward(&attn_output)?;
-        Ok(res)
-    }
-}
-
-#[derive(Clone)]
-struct Mlp {
-    gate_up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
-    act_fn: Activation,
-    i_size: usize,
-}
-
-impl Mlp {
-    fn new(cfg: &Phi4MMConfig, vb: ShardedVarBuilder) -> Result<Self> {
-        let hidden_size = cfg.hidden_size;
-        let i_size = cfg.intermediate_size;
-
-        // No TP here.
-        let gate_up_proj = inference_quant::linear_no_bias_static_lora(
-            hidden_size,
-            2 * i_size,
-            cfg.loras(),
-            vb.pp("gate_up_proj"),
-        )?;
-
-        let down_proj = inference_quant::linear_no_bias_static_lora(
-            i_size,
-            hidden_size,
-            cfg.loras(),
-            vb.pp("down_proj"),
-        )?;
-
-        Ok(Self {
-            gate_up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act,
-            i_size,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let up_states = self.gate_up_proj.forward(xs)?;
-        let up_states = crate::ops::split_mul_and_act(&up_states, self.i_size, self.act_fn)?;
-        let res = self.down_proj.forward(&up_states)?;
-        Ok(res)
-    }
-}
-
-struct DecoderLayer {
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
-    mlp: Mlp,
-    self_attn: Attention,
-}
-
-impl DecoderLayer {
-    fn new(
-        rotary_emb: Arc<Phi4MMRotaryEmbedding>,
-        cfg: &Phi4MMConfig,
-        vb: ShardedVarBuilder,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-        paged_attn: Option<PagedAttention>,
-    ) -> Result<Self> {
-        let self_attn = Attention::new(
-            rotary_emb,
-            cfg,
-            mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
-            paged_attn,
-        )?;
-        let mlp = Mlp::new(cfg, mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq))?;
-        let input_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
-        )?;
-        let post_attention_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
-        )?;
-
-        Ok(Self {
-            input_layernorm,
-            post_attention_layernorm,
-            mlp,
-            self_attn,
-        })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor> {
-        let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
-        let xs = self
-            .self_attn
-            .forward(&xs, attention_mask, kv_cache, ctx, layer_idx)?;
-        let xs = (xs + residual)?;
-        let residual = &xs;
-        let xs = self
-            .mlp
-            .forward(&xs.apply(&self.post_attention_layernorm)?)?;
-        residual + xs
-    }
-}
+const ENCODER_CACHE_ENTRIES: usize = 32;
 
 pub struct Phi4MMModel {
-    embed_tokens: Arc<dyn QuantMethod>,
+    text: CausalLm,
     embed_tokens_extend: Phi4MMImageAudioEmbedding,
-    layers: Vec<DecoderLayer>,
-    norm: RmsNorm,
-    lm_head: Arc<dyn QuantMethod>,
-    dtype: DType,
-    device: Device,
-    cache: EitherCache,
-    max_seq_len: usize,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
-    sliding_window: Option<usize>,
-    cfg: ModelConfigMetadata,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
 }
 
@@ -288,112 +43,29 @@ impl Phi4MMModel {
     pub fn new(
         cfg: &Phi4MMConfig,
         vb: ShardedVarBuilder,
-        _is_gptx: bool,
+        is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        let mapper = normal_loading_metadata.mapper;
         let vb_m = vb.pp("model");
-        let dtype = vb_m.dtype();
-
-        let embed_tokens = layers::embedding_with_legacy_tied_uqff(
-            cfg.vocab_size,
-            cfg.hidden_size,
-            mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
-            cfg.tie_word_embeddings.then(|| {
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq)
-            }),
-            &cfg.quantization_config,
+        let text = CausalLm::new(
+            &cfg.decoder_spec(),
+            vb,
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
         )?;
-
-        let vb_l = vb_m.pp("layers");
-        let ropes = crate::device_map::per_layer_device(
-            &*mapper,
-            cfg.num_hidden_layers,
-            &normal_loading_metadata.real_device,
-            |device| Phi4MMRotaryEmbedding::new(vb.dtype(), cfg, device),
-        )?;
-        let layers = NiceProgressBar::<_, 'b'>(
-            0..cfg.num_hidden_layers,
-            "Loading repeating layers",
-            &normal_loading_metadata.multi_progress,
-        )
-        .par_iter_if_isq(|layer_idx| {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            let rotary_emb = ropes
-                .get(&device.location())
-                .expect("No RoPE for device location!")
-                .clone();
-            let paged_attn = match &attention_mechanism {
-                AttentionImplementation::Eager => None,
-                AttentionImplementation::PagedAttention => {
-                    Some(PagedAttention::new(cfg.head_dim(), device, None)?)
-                }
-            };
-            DecoderLayer::new(
-                rotary_emb,
-                cfg,
-                vb_l.pp(layer_idx),
-                &*mapper,
-                layer_idx,
-                normal_loading_metadata.loading_isq,
-                paged_attn,
-            )
-        })?;
-        let norm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
-        )?;
-        let lm_head = if !cfg.tie_word_embeddings {
-            ReplicatedLayer::new(
-                cfg.hidden_size,
-                cfg.vocab_size,
-                &cfg.quantization_config,
-                false,
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
-            )?
-        } else {
-            embed_tokens.clone()
-        };
-
         let embed_tokens_extend = Phi4MMImageAudioEmbedding::new(
             cfg,
-            embed_tokens.clone(),
-            dtype,
-            mapper.set_nm_device(vb_m.pp("embed_tokens_extend"), false),
+            text.embed_tokens().clone(),
+            vb_m.dtype(),
+            text.stack_mapper()
+                .set_nm_device(vb_m.pp("embed_tokens_extend"), false),
         )?;
-
         Ok(Self {
-            layers,
-            norm,
-            lm_head,
-            dtype,
-            device: normal_loading_metadata.real_device,
-            cache: EitherCache::Normal(NormalCache::new_sliding(
-                cfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-                cfg.sliding_window,
-            )),
-            max_seq_len: cfg.max_position_embeddings,
-            sliding_window: cfg.sliding_window,
-            embed_tokens,
-            cfg: ModelConfigMetadata {
-                max_seq_len: cfg.max_position_embeddings,
-                num_layers: cfg.num_hidden_layers,
-                hidden_size: cfg.hidden_size,
-                num_attn_heads: cfg.num_attention_heads,
-                num_kv_heads: cfg.num_key_value_heads(),
-                sliding_window: cfg.sliding_window,
-                k_head_dim: cfg.head_dim(),
-                v_head_dim: cfg.head_dim(),
-                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-            },
-            mapper,
+            text,
             embed_tokens_extend,
-            encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
+            encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(ENCODER_CACHE_ENTRIES))),
         })
     }
 
@@ -414,7 +86,7 @@ impl Phi4MMModel {
         audio_hashes: &[u64],
         packed_layout: Option<&PackedMultimodalLayout>,
     ) -> Result<Tensor> {
-        let mut xs = if let Some(packed_layout) = packed_layout {
+        let xs = if let Some(packed_layout) = packed_layout {
             self.embed_tokens_extend.forward_packed(
                 input_ids,
                 Phi4MMPackedInputs {
@@ -457,34 +129,9 @@ impl Phi4MMModel {
                 &self.encoder_cache,
             )?
         } else {
-            self.embed_tokens.embedding_forward(input_ids, self.dtype)?
+            return self.text.forward(input_ids, ctx);
         };
-        let cache = &mut self.cache.normal().0;
-        let mask_cache = ctx.mask_cache(cache);
-        let attention_mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &mask_cache,
-            xs.dtype(),
-            &CausalMaskConfig {
-                sliding_window: self.sliding_window,
-                ..Default::default()
-            },
-        )?;
-        let attention_mask = if ctx.is_first_prompt_chunk() {
-            attention_mask
-        } else {
-            AttentionMask::None
-        };
-        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
-
-        for (i, layer) in self.layers.iter().enumerate() {
-            xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?
-        }
-        let xs = xs.to_device(&self.device)?;
-        let xs = xs.apply(&self.norm)?;
-        let xs = ctx.logits(&xs)?;
-        ctx.lm_head(&*self.lm_head, &xs)
+        self.text.forward_embeds(input_ids, xs, ctx)
     }
 }
 
@@ -556,16 +203,16 @@ impl MultimodalModel for Phi4MMModel {
         )
     }
     fn cache(&self) -> &EitherCache {
-        &self.cache
+        NormalModel::cache(&self.text)
     }
     fn device(&self) -> &Device {
-        &self.device
+        NormalModel::device(&self.text)
     }
     fn max_seq_len(&self) -> usize {
-        self.max_seq_len
+        NormalModel::max_seq_len(&self.text)
     }
     fn config(&self) -> &ModelConfigMetadata {
-        &self.cfg
+        NormalModel::config(&self.text)
     }
     fn default_model_specific_args(&self, _input_ids: &Tensor) -> Box<dyn Any> {
         Box::new(Phi4MMVisionSpecificArgs::default())
@@ -591,23 +238,11 @@ impl MultimodalModel for Phi4MMModel {
 impl IsqModel for Phi4MMModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-
         let uvb_m = uvb.pp("model");
-        uvb_m.pp("embed_tokens").add(&self.embed_tokens);
-        uvb_m.pp("norm").add(&self.norm);
         uvb_m
             .pp("embed_tokens_extend")
             .extend(self.embed_tokens_extend.residual_tensors());
-
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let uvb_l = uvb_m.pp("layers").pp(layer_idx);
-            uvb_l.pp("input_layernorm").add(&layer.input_layernorm);
-            uvb_l
-                .pp("post_attention_layernorm")
-                .add(&layer.post_attention_layernorm);
-        }
-
-        uvb.to_safetensors()
+        self.text.residual_tensors_m(uvb_m)
     }
 }
 

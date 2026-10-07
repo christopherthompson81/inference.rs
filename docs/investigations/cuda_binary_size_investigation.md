@@ -1921,3 +1921,24 @@ side by side only: paged attention, tied embeddings, the MLX prefix, multi-devic
 
 Next: #324 step 7c (Phi-4MM: static-LoRA projections).
 
+## Run 57 - 2026-10-07 14:12
+
+Question: what does #324 step 7c (Phi-4MM's text stack onto the shared decoder) recover?
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  105,372,016  105,336,496     -35,520
+.text                  55,195,682   55,162,786     -32,896
+```
+
+Raw finding: -36 KB from 578 lines of code removed and 127 added. Phi-4MM was already Phi-3's layout (fused replicated
+`qkv_proj` and `gate_up_proj`, LongRoPE) with a static vision LoRA merged into every projection; the decoder grew
+only `static_loras`, which the replicated projections build through `linear_no_bias_static_lora`. Phi-4MM's own
+`Phi4MMRotaryEmbedding` was a copy of the shared Phi LongRoPE with a partial rotary dim and is gone. Pins recorded on
+the old code (rank-2 vision LoRA; partial LongRoPE past the original context, sliding and tied) pass unchanged in F32.
+In BF16 the LongRoPE tables now round once (scaled in F32, then cast), as HF does, where the copy cast first and then
+scaled; at most about one BF16 ulp.
+
+Next: #324 step 7d (Voxtral: projection names, adaptive norm), then PaddleOCR-VL (chunked M-RoPE).
+
