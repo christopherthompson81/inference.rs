@@ -17,6 +17,8 @@ pub mod glm4_moe;
 pub mod glm4_moe_lite;
 pub mod gpt_oss;
 pub mod granite;
+#[cfg(test)]
+mod hunyuan_dense_tests;
 mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;

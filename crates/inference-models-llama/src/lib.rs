@@ -7,6 +7,8 @@ use inference_nn::{
     paged_attention, speculative, utils, vision,
 };
 
+#[cfg(test)]
+mod dense_decoder_tests;
 pub mod idefics2;
 pub mod idefics3;
 #[cfg(test)]
