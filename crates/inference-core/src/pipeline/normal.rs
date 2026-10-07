@@ -308,6 +308,7 @@ pub(crate) struct PreparedNormalSource {
 
 pub(crate) fn new_dynamic_lora_registry(
     config: &str,
+    rope_pairing: Option<crate::gguf::normal_registry::RopePairing>,
 ) -> Result<Arc<inference_quant::LoraLayerRegistry>> {
     let config = serde_json::from_str::<serde_json::Value>(config)?;
     let qwen35_moe_identity = config
@@ -328,7 +329,27 @@ pub(crate) fn new_dynamic_lora_registry(
     } else {
         inference_quant::LoraLayerRegistry::new()
     };
+    let registry = match rope_pairing {
+        Some(crate::gguf::normal_registry::RopePairing::Adjacent) => {
+            registry.with_adjacent_qk_rope(attention_head_dim(&config)?)?
+        }
+        _ => registry,
+    };
     Ok(Arc::new(registry))
+}
+
+fn attention_head_dim(config: &serde_json::Value) -> Result<usize> {
+    let field = |name: &str| config.get(name).and_then(serde_json::Value::as_u64);
+    let head_dim = match (
+        field("head_dim"),
+        field("hidden_size"),
+        field("num_attention_heads"),
+    ) {
+        (Some(head_dim), _, _) => head_dim,
+        (None, Some(hidden), Some(heads)) if heads > 0 => hidden / heads,
+        _ => anyhow::bail!("the model config has no head_dim, hidden_size or num_attention_heads"),
+    };
+    Ok(usize::try_from(head_dim)?)
 }
 
 #[derive(Default)]
@@ -638,10 +659,8 @@ impl Loader for NormalLoader {
             .inner
             .runtime_config(&source_config, self.config.max_model_len)?
             .into_owned();
-        super::loaders::validate_lora_qk_rope_layout(
-            &config,
-            self.lora_adapters.is_some() || self.xlora_model_id.is_some(),
-        )?;
+        // Runtime LoRA maps Q/K rows itself (see new_dynamic_lora_registry); X-LoRA's model copies cannot.
+        super::loaders::validate_lora_qk_rope_layout(&config, self.xlora_model_id.is_some())?;
 
         if !self.inner.supports_paged_attention(&config)? {
             paged_attn_config = None;
@@ -2079,7 +2098,7 @@ mod tests {
             "architectures":["Qwen3NextForCausalLM"],
             "_inference_gdn_v_head_layout":"tiled"
         }"#;
-        let registry = new_dynamic_lora_registry(config).unwrap();
+        let registry = new_dynamic_lora_registry(config, None).unwrap();
         let site = registry
             .register(
                 LoraSiteKey::new("model.layers.0.self_attn.q_proj"),
@@ -2102,6 +2121,7 @@ mod tests {
                 "architectures":["Qwen3_5ForCausalLM"],
                 "_inference_gdn_v_head_layout":"tiled"
             }"#,
+            None,
         )
         .unwrap();
         let site = registry

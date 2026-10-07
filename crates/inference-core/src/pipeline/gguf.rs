@@ -94,14 +94,20 @@ const PROJECTOR_REQUIRED_ARCHITECTURES: &[&str] = &[
     "qwen3vlmoe",
 ];
 
+// Adjacent-RoPE GGUFs whose Q/K are not plain per-head projections: MLA (deepseek2) and partial rotary (glm4).
+const ADJACENT_ROPE_WITHOUT_QK_LORA_LAYOUT: &[&str] = &["deepseek2", "glm4"];
+
 fn validate_native_dynamic_lora(
     dynamic_lora: Option<&DynamicLoraConfig>,
     rope_pairing: RopePairing,
     architecture: &str,
 ) -> Result<()> {
-    if dynamic_lora.is_some() && rope_pairing == RopePairing::Adjacent {
+    if dynamic_lora.is_some()
+        && rope_pairing == RopePairing::Adjacent
+        && ADJACENT_ROPE_WITHOUT_QK_LORA_LAYOUT.contains(&architecture)
+    {
         bail!(
-            "dynamic LoRA is not supported for native GGUF architecture `{architecture}` because its Q/K tensors use converter-permuted adjacent RoPE order; load the original safetensors model or omit the LoRA adapter"
+            "dynamic LoRA is not supported for native GGUF architecture `{architecture}`: its converter-permuted Q/K tensors do not map onto Hugging Face adapter rows; load the original safetensors model or omit the LoRA adapter"
         );
     }
     Ok(())
@@ -1615,22 +1621,36 @@ mod tests {
     }
 
     #[test]
-    fn native_dynamic_lora_rejects_adjacent_rope_gguf() {
+    fn native_dynamic_lora_refuses_only_adjacent_rope_gguf_without_plain_qk_rows() {
         let dynamic_lora = DynamicLoraConfig {
             adapters: Vec::new(),
             runtime: Default::default(),
         };
-        let error =
-            validate_native_dynamic_lora(Some(&dynamic_lora), RopePairing::Adjacent, "llama")
-                .unwrap_err();
-        let error = error.to_string();
-        assert!(error.contains("converter-permuted adjacent RoPE order"));
-        assert!(error.contains("original safetensors model"));
+        for architecture in ["deepseek2", "glm4"] {
+            let error = validate_native_dynamic_lora(
+                Some(&dynamic_lora),
+                RopePairing::Adjacent,
+                architecture,
+            )
+            .unwrap_err()
+            .to_string();
+            assert!(error.contains("original safetensors model"), "{error}");
+        }
+        for architecture in ["llama", "mistral3", "smollm3", "granite"] {
+            assert!(
+                validate_native_dynamic_lora(
+                    Some(&dynamic_lora),
+                    RopePairing::Adjacent,
+                    architecture
+                )
+                .is_ok()
+            );
+        }
         assert!(
-            validate_native_dynamic_lora(Some(&dynamic_lora), RopePairing::HalfSplit, "qwen35",)
+            validate_native_dynamic_lora(Some(&dynamic_lora), RopePairing::HalfSplit, "qwen35")
                 .is_ok()
         );
-        assert!(validate_native_dynamic_lora(None, RopePairing::Adjacent, "llama").is_ok());
+        assert!(validate_native_dynamic_lora(None, RopePairing::Adjacent, "glm4").is_ok());
     }
 
     #[test]

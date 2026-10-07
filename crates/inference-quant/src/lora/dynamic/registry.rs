@@ -264,6 +264,19 @@ pub struct LoraLayerRegistry {
     runtime_id: LoraRuntimeId,
     state: Mutex<RegistryState>,
     site_prefix_alias: Option<LoraSitePrefixAlias>,
+    // Head dim of Q/K projections whose rows a GGUF converter reordered to adjacent RoPE pairs
+    adjacent_qk_head_dim: Option<usize>,
+}
+
+/// Row `2i + j` of each adjacent-pair head holds half-split row `j * head_dim / 2 + i` (llama.cpp's Q/K permute).
+fn adjacent_to_half_split(out_features: usize, head_dim: usize) -> Vec<usize> {
+    let half = head_dim / 2;
+    (0..out_features)
+        .map(|row| {
+            let (head, within) = (row / head_dim, row % head_dim);
+            head * head_dim + (within % 2) * half + within / 2
+        })
+        .collect()
 }
 
 impl Default for LoraLayerRegistry {
@@ -288,6 +301,7 @@ impl LoraLayerRegistry {
             runtime_id: LoraRuntimeId::next(),
             state: Mutex::new(RegistryState::default()),
             site_prefix_alias: None,
+            adjacent_qk_head_dim: None,
         }
     }
 
@@ -311,7 +325,17 @@ impl LoraLayerRegistry {
             runtime_id: LoraRuntimeId::next(),
             state: Mutex::new(RegistryState::default()),
             site_prefix_alias: Some(LoraSitePrefixAlias { source, target }),
+            adjacent_qk_head_dim: None,
         })
+    }
+
+    /// Adapters are trained on half-split Q/K rows; a GGUF Llama-family checkpoint stores them in adjacent RoPE pairs.
+    pub fn with_adjacent_qk_rope(mut self, head_dim: usize) -> Result<Self> {
+        if head_dim == 0 || !head_dim.is_multiple_of(2) {
+            inference_tensor::bail!("adjacent Q/K RoPE needs an even head dim, got {head_dim}");
+        }
+        self.adjacent_qk_head_dim = Some(head_dim);
+        Ok(self)
     }
 
     pub fn runtime_id(&self) -> LoraRuntimeId {
@@ -325,6 +349,7 @@ impl LoraLayerRegistry {
         activation_dtype: DType,
         device: Device,
     ) -> Result<Arc<LoraSiteHandle>> {
+        let spec = self.with_qk_row_layout(&key, spec)?;
         spec.validate()?;
         let key = self.canonical_site_key(key);
         let mut state = self.state.lock().expect("LoRA layer registry poisoned");
@@ -451,6 +476,34 @@ impl LoraLayerRegistry {
             .values()
             .cloned()
             .collect()
+    }
+
+    // An adapter's B rows for Q/K are half-split per head; map them onto the base layer's adjacent-pair rows.
+    fn with_qk_row_layout(
+        &self,
+        key: &LoraSiteKey,
+        spec: LoraLinearSpec,
+    ) -> Result<LoraLinearSpec> {
+        let Some(head_dim) = self.adjacent_qk_head_dim else {
+            return Ok(spec);
+        };
+        if !(key.path().ends_with(".q_proj") || key.path().ends_with(".k_proj")) {
+            return Ok(spec);
+        }
+        if key.slice().is_some() {
+            inference_tensor::bail!(
+                "LoRA site `{}` is a packed Q/K slice, which adjacent-RoPE GGUF weights do not support",
+                key.path()
+            );
+        }
+        let out_features = spec.out_features();
+        if !out_features.is_multiple_of(head_dim) {
+            inference_tensor::bail!(
+                "LoRA site `{}` has {out_features} outputs, not a multiple of head dim {head_dim}",
+                key.path()
+            );
+        }
+        spec.with_output_runtime_to_canonical(adjacent_to_half_split(out_features, head_dim))
     }
 
     fn canonical_site_key(&self, key: LoraSiteKey) -> LoraSiteKey {
