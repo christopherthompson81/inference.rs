@@ -1,7 +1,6 @@
 //! The qwen family's loaders: config parsing, weight sizing, ISQ patterns and prompt prefixes.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -11,7 +10,6 @@ use inference_nn::bias_if;
 use inference_nn::device_map::{AutoDeviceMapParams, DeviceMapper};
 use inference_nn::layers::Conv3dConfig;
 use inference_nn::loaders::*;
-use inference_nn::lora::{LoraConfig, Ordering};
 use inference_nn::matformer::MatformerSliceConfig;
 use inference_nn::media_inputs::video::VideoFrameSampling;
 use inference_nn::model::{EmbeddingModel, MultimodalModel, NormalLoadingMetadata, NormalModel};
@@ -19,7 +17,6 @@ use inference_nn::paged_attention::{
     AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
 };
 use inference_nn::utils::varbuilder_utils::DeviceForLoadTensor;
-use inference_nn::xlora::XLoraConfig;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::DType;
 use inference_tensor::nn::Conv2dConfig;

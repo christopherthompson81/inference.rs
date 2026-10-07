@@ -188,7 +188,6 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -198,9 +197,6 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> Result<InputProcessorOutput> {
-        if is_xlora {
-            anyhow::bail!("Cannot make inputs for X-LoRA vision model.");
-        }
         if no_kv_cache {
             anyhow::bail!("Vision model must have kv cache.");
         }

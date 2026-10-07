@@ -43,26 +43,6 @@ impl NormalModelLoader for AutoNormalLoader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         Self::get_loader(config)?.load(config, vb, normal_loading_metadata, attention_mechanism)
     }
-    fn load_xlora(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        lora_config: &[((String, String), LoraConfig)],
-        xlora_config: Option<XLoraConfig>,
-        xlora_ordering: Ordering,
-        normal_loading_metadata: NormalLoadingMetadata,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        Self::get_loader(config)?.load_xlora(
-            config,
-            vb,
-            lora_config,
-            xlora_config,
-            xlora_ordering,
-            normal_loading_metadata,
-            preload_adapters,
-        )
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Self::get_loader(config)?.get_config_repr(config)
     }

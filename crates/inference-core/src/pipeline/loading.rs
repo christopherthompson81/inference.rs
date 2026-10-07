@@ -341,46 +341,8 @@ impl WeightFiles<'_> {
         placeholders: Option<Vec<regex::Regex>>,
         device_for_tensor: DeviceForTensor,
     ) -> Result<inference_quant::ShardedVarBuilder> {
-        let files = self.paths.get_weight_filenames().to_vec();
-        self.load_files(files, Vec::new(), placeholders, device_for_tensor)
-    }
-
-    /// An X-LoRA model's weights: the model's, its classifier's and its adapters'.
-    pub fn load_xlora(
-        &self,
-        device_for_tensor: DeviceForTensor,
-    ) -> Result<inference_quant::ShardedVarBuilder> {
-        let super::AdapterPaths::XLora {
-            adapter_safetensors,
-            classifier_path,
-            ..
-        } = self.paths.get_adapter_paths()
-        else {
-            unreachable!("X-LoRA loaders require resolved X-LoRA adapter paths")
-        };
-        let classifier = classifier_path
-            .clone()
-            .expect("X-LoRA adapters name a classifier");
-        let mut files = self.paths.get_weight_filenames().to_vec();
-        files.push(classifier);
-        let adapters = adapter_safetensors
-            .iter()
-            .flatten()
-            .map(|(_, path)| path.clone())
-            .collect();
-        self.load_files(files, adapters, None, device_for_tensor)
-    }
-
-    fn load_files(
-        &self,
-        files: Vec<PathBuf>,
-        adapter_files: Vec<PathBuf>,
-        placeholders: Option<Vec<regex::Regex>>,
-        device_for_tensor: DeviceForTensor,
-    ) -> Result<inference_quant::ShardedVarBuilder> {
         let vb = crate::utils::varbuilder_utils::from_mmaped_safetensors(
-            files,
-            adapter_files,
+            self.paths.get_weight_filenames().to_vec(),
             Some(self.dtype),
             self.device,
             self.layer_devices.clone(),
@@ -713,14 +675,8 @@ pub(crate) type LoadedModel<M> = (
     Option<Arc<crate::DynamicLoraRuntime>>,
 );
 
-pub(crate) type XLoraLoad<'a, M> = dyn Fn(
-        &WeightFiles<'_>,
-        Box<dyn DeviceMapper + Send + Sync>,
-    ) -> Result<(Box<M>, inference_quant::Tracker)>
-    + 'a;
-
 /// What [`load_model`] reads beyond the session.
-pub(crate) struct ModelLoadInputs<'a, M: ?Sized> {
+pub(crate) struct ModelLoadInputs<'a> {
     pub config: &'a str,
     pub paths: &'a dyn super::ModelPaths,
     pub silent: bool,
@@ -732,7 +688,6 @@ pub(crate) struct ModelLoadInputs<'a, M: ?Sized> {
         crate::model::RopePairing,
     )>,
     pub lora: Option<crate::LoraRuntimeConfig>,
-    pub xlora: Option<&'a XLoraLoad<'a, M>>,
 }
 
 /// Builds the model over a tensor-parallel shard, a prepared source or the weight files, with LoRA if asked.
@@ -740,7 +695,7 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
     loader: &L,
     session: &LoadSession,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
-    inputs: ModelLoadInputs<'_, L::Model>,
+    inputs: ModelLoadInputs<'_>,
 ) -> Result<LoadedModel<L::Model>> {
     let ModelLoadInputs {
         config,
@@ -751,7 +706,6 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         write_uqff,
         prepared,
         lora,
-        xlora,
     } = inputs;
     let loading_isq = session.plan.loading_isq;
     let distributed = session.tensor_parallelism.is_enabled();
@@ -807,11 +761,6 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
     } else {
         (mapper, None)
     };
-    if let Some(xlora) = xlora {
-        let (model, tracker) = xlora(&weights, mapper)?;
-        return Ok((model, tracker, None));
-    }
-
     let vb = match (sharded, prepared) {
         // a LoRA load with no prepared source reads the files even when tensor parallel
         (Some(_), None) if lora.is_some() => from_files(&*mapper)?,
@@ -823,8 +772,13 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         (None, None) => from_files(&*mapper)?,
     };
     let rope_pairing = prepared.map(|(_, rope_pairing)| rope_pairing);
+    // A UQFF written from a GGUF keeps the stamped layout without a prepared source
+    let lora_rope_pairing = match rope_pairing {
+        Some(pairing) => Some(pairing),
+        None => super::loaders::qk_rope_layout_from_config(config)?,
+    };
     let layers = lora
-        .map(|_| super::normal::new_dynamic_lora_registry(config, rope_pairing))
+        .map(|_| super::normal::new_dynamic_lora_registry(config, lora_rope_pairing))
         .transpose()?;
     let vb = match &layers {
         Some(layers) => vb.with_lora_registry(layers.clone()),

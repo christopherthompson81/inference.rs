@@ -1221,28 +1221,6 @@ class ModelSelectedPlain:
 
 
 @dataclass(kw_only=True)
-class ModelSelectedXLora:
-    """Select an X-LoRA architecture"""
-
-    arch: NormalLoaderType | None = None
-    dtype: ModelDType | None = ModelDType.AUTO
-    from_uqff: str | None = None
-    hf_cache_path: str | None = None
-    max_batch_size: int | None = 1
-    max_seq_len: int | None = 4096
-    model_id: str | None = None
-    order: str
-    organization: IsqOrganization | None = None
-    quant: str | None = None
-    tgt_non_granular_index: int | None = None
-    tokenizer_json: str | None = None
-    topology: str | None = None
-    write_uqff: UqffWriteSpec | None = None
-    xlora_model_id: str
-    _external = 'XLora'
-
-
-@dataclass(kw_only=True)
 class ModelSelectedLora:
     """Select a LoRA architecture"""
 
@@ -1302,57 +1280,6 @@ class ModelSelectedGGUF:
 
 
 @dataclass(kw_only=True)
-class ModelSelectedXLoraGGUF:
-    """Select a GGUF model with X-LoRA."""
-
-    calibration_file: str | None = None
-    dtype: ModelDType | None = ModelDType.AUTO
-    hf_cache_path: str | None = None
-    imatrix: str | None = None
-    matformer_config_path: str | None = None
-    matformer_slice_name: str | None = None
-    max_batch_size: int | None = 1
-    max_seq_len: int | None = 4096
-    order: str
-    organization: IsqOrganization | None = None
-    quant: str | None = None
-    quantized_filename: str | None = None
-    quantized_model_id: str
-    tgt_non_granular_index: int | None = None
-    tok_model_id: str | None = None
-    tokenizer_json: str | None = None
-    topology: str | None = None
-    write_uqff: UqffWriteSpec | None = None
-    xlora_model_id: str
-    _external = 'XLoraGGUF'
-
-
-@dataclass(kw_only=True)
-class ModelSelectedLoraGGUF:
-    """Select a GGUF model with LoRA."""
-
-    adapters_model_id: str
-    calibration_file: str | None = None
-    dtype: ModelDType | None = ModelDType.AUTO
-    hf_cache_path: str | None = None
-    imatrix: str | None = None
-    matformer_config_path: str | None = None
-    matformer_slice_name: str | None = None
-    max_batch_size: int | None = 1
-    max_seq_len: int | None = 4096
-    order: str
-    organization: IsqOrganization | None = None
-    quant: str | None = None
-    quantized_filename: str | None = None
-    quantized_model_id: str
-    tok_model_id: str | None = None
-    tokenizer_json: str | None = None
-    topology: str | None = None
-    write_uqff: UqffWriteSpec | None = None
-    _external = 'LoraGGUF'
-
-
-@dataclass(kw_only=True)
 class ModelSelectedGGML:
     """Select a GGML model."""
 
@@ -1366,43 +1293,6 @@ class ModelSelectedGGML:
     tokenizer_json: str | None = None
     topology: str | None = None
     _external = 'GGML'
-
-
-@dataclass(kw_only=True)
-class ModelSelectedXLoraGGML:
-    """Select a GGML model with X-LoRA."""
-
-    dtype: ModelDType | None = ModelDType.AUTO
-    gqa: int
-    max_batch_size: int | None = 1
-    max_seq_len: int | None = 4096
-    order: str
-    quantized_filename: str
-    quantized_model_id: str
-    tgt_non_granular_index: int | None = None
-    tok_model_id: str | None = None
-    tokenizer_json: str | None = None
-    topology: str | None = None
-    xlora_model_id: str
-    _external = 'XLoraGGML'
-
-
-@dataclass(kw_only=True)
-class ModelSelectedLoraGGML:
-    """Select a GGML model with LoRA."""
-
-    adapters_model_id: str
-    dtype: ModelDType | None = ModelDType.AUTO
-    gqa: int
-    max_batch_size: int | None = 1
-    max_seq_len: int | None = 4096
-    order: str
-    quantized_filename: str
-    quantized_model_id: str
-    tok_model_id: str | None = None
-    tokenizer_json: str | None = None
-    topology: str | None = None
-    _external = 'LoraGGML'
 
 
 @dataclass(kw_only=True)
@@ -2905,7 +2795,7 @@ Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
-ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]

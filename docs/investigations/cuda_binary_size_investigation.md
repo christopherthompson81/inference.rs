@@ -1636,3 +1636,36 @@ not yet examined for duplication.
 Next lever with the biggest expected effect on host size: a shared dense-decoder building block that the ~40 model
 implementations instantiate instead of re-declaring (the llama.cpp `build_*` shape), measured per family as it
 lands.
+
+## Run 46 - 2026-10-07 00:18
+
+Question: what does retiring X-LoRA and the static GGUF/GGML LoRA path recover, now that runtime LoRA covers GGUF
+Llama-family models (Q/K rows remapped at adapter load)?
+
+Removed: the per-model X-LoRA copies (llama, mistral, mixtral, gemma, gemma2, phi2, phi3, starcoder2, quantized llama
+and phi3: 14 files), `inference_nn::xlora` and the legacy LoRA linear layers, every model's `load_xlora` and
+`xlora_forward`, the GGUF adapter pipeline and `model_config.rs`, the X-LoRA KV and scalings caches, the doubled
+`*_full` model inputs, the ordering files, five `ModelSelected` variants, their CLI flags and SDK builders.
+190 files, about 14,500 lines net.
+
+```
+./scripts/local_ci.sh --size-update     (CUDA C ABI library, bundle profile, sm_86)
+                      before       after        delta
+file                  107,093,104  105,982,768  -1,110,336 (-1.06 MiB)
+.text                  56,596,130   55,711,714    -884,416
+.eh_frame + _hdr        4,976,996    4,898,436     -78,560
+.gcc_except_table       2,482,449    2,433,457     -48,992
+.rela.dyn               2,650,608    2,598,576     -52,032
+.nv_fatbin             31,463,416   31,463,416           0
+```
+
+Raw finding: -1.06 MiB, all host code; the GPU side is untouched since X-LoRA had no kernels. That is ~140 B of
+machine code per deleted source line, above Run 45's ~53 B/line average for model crates: the X-LoRA copies were
+full monomorphized model stacks with their own unwind tables.
+
+Side findings while deleting: the GGML pipeline called the full-cache manager on its quantized Llama's normal cache
+(a panic on the first request), now routed by cache kind; runtime LoRA on a UQFF written from a GGUF now reads the
+stamped Q/K layout from the config; MLA and partial-rotary adjacent layouts are refused from the config instead of
+by architecture name.
+
+Next: the shared dense-decoder block from Run 45.

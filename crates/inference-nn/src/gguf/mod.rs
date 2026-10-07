@@ -10,9 +10,7 @@ use anyhow::{Context, Result};
 use strum::EnumString;
 
 pub use content::Content;
-pub use model_traits::{
-    FromAdapterGGML, FromAdapterGGUF, FromGGML, QuantizedForwardInputs, QuantizedModel,
-};
+pub use model_traits::{FromGGML, QuantizedModel};
 
 #[derive(Debug, EnumString, Clone, Copy, strum::Display)]
 #[strum(serialize_all = "lowercase")]

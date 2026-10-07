@@ -235,65 +235,6 @@ pub enum ModelSelected {
         matformer_slice_name: Option<String>,
     },
 
-    /// Select an X-LoRA architecture
-    XLora {
-        /// Force a base model ID to load from instead of using the ordering file. This may be a HF hub repo or a local path.
-        model_id: Option<String>,
-
-        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`.
-        #[serde(default)]
-        quant: Option<String>,
-
-        /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
-        tokenizer_json: Option<String>,
-
-        /// Model ID to load X-LoRA from. This may be a HF hub repo or a local path.
-        xlora_model_id: String,
-
-        /// Ordering JSON file
-        order: String,
-
-        /// Index of completion tokens to generate scalings up until. If this is 1, then there will be one completion token generated before it is cached.
-        /// This makes the maximum running sequences 1.
-        tgt_non_granular_index: Option<usize>,
-
-        /// The architecture of the model.
-        arch: Option<NormalLoaderType>,
-
-        /// Model data type. Defaults to `auto`.
-        #[serde(default = "default_model_dtype")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
-        dtype: ModelDType,
-
-        /// Path to a topology YAML file.
-        topology: Option<String>,
-
-        /// UQFF path to write to.
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
-        write_uqff: Option<UqffWriteConfig>,
-
-        /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
-        from_uqff: Option<String>,
-
-        /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_seq_len")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
-        max_seq_len: usize,
-
-        /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_batch_size")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
-        max_batch_size: usize,
-
-        /// Cache path for Hugging Face models downloaded locally
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        hf_cache_path: Option<PathBuf>,
-
-        /// ISQ organization: `default` or `moqe`.
-        #[serde(default)]
-        organization: Option<IsqOrganization>,
-    },
-
     /// Select a LoRA architecture
     Lora {
         /// Base model ID. This may be a Hugging Face repository or a local path.
@@ -484,174 +425,6 @@ pub enum ModelSelected {
         matformer_slice_name: Option<String>,
     },
 
-    /// Select a GGUF model with X-LoRA.
-    XLoraGGUF {
-        /// `tok_model_id` is the local or remote model ID where you can find a `tokenizer_config.json` file.
-        /// If the `chat_template` is specified, then it will be treated as a path and used over remote files,
-        /// removing all remote accesses.
-        tok_model_id: Option<String>,
-
-        /// Quantized model ID to find the `quantized_filename`.
-        /// This may be a HF hub repo or a local path.
-        quantized_model_id: String,
-
-        /// Quantized filename(s).
-        /// May be a single filename, or use semicolons to separate multiple files.
-        #[serde(default)]
-        quantized_filename: String,
-
-        /// A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files.
-        #[serde(default)]
-        quant: Option<String>,
-
-        /// Model ID to load X-LoRA from. This may be a HF hub repo or a local path.
-        xlora_model_id: String,
-
-        /// Ordering JSON file
-        order: String,
-
-        /// Index of completion tokens to generate scalings up until. If this is 1, then there will be one completion token generated before it is cached.
-        /// This makes the maximum running sequences 1.
-        tgt_non_granular_index: Option<usize>,
-
-        /// Model data type. Defaults to `auto`.
-        #[serde(default = "default_model_dtype")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
-        dtype: ModelDType,
-
-        /// Path to a topology YAML file.
-        topology: Option<String>,
-
-        /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_seq_len")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
-        max_seq_len: usize,
-
-        /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_batch_size")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
-        max_batch_size: usize,
-
-        /// Path to a local `tokenizer.json` file. If specified, it is used over any remote file.
-        #[serde(default)]
-        tokenizer_json: Option<String>,
-
-        /// ISQ organization: `default` or `moqe`.
-        #[serde(default)]
-        organization: Option<IsqOrganization>,
-
-        /// UQFF path and quantization types to write.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
-        write_uqff: Option<UqffWriteConfig>,
-
-        /// Imatrix file to use while requantizing the GGUF weights.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        imatrix: Option<PathBuf>,
-
-        /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        calibration_file: Option<PathBuf>,
-
-        /// Cache path for Hugging Face models downloaded locally.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        hf_cache_path: Option<PathBuf>,
-
-        /// Path to a local Matryoshka Transformer configuration CSV file.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        matformer_config_path: Option<PathBuf>,
-
-        /// Name of the Matryoshka Transformer slice to use.
-        #[serde(default)]
-        matformer_slice_name: Option<String>,
-    },
-
-    /// Select a GGUF model with LoRA.
-    LoraGGUF {
-        /// `tok_model_id` is the local or remote model ID where you can find a `tokenizer_config.json` file.
-        /// If the `chat_template` is specified, then it will be treated as a path and used over remote files,
-        /// removing all remote accesses.
-        tok_model_id: Option<String>,
-
-        /// Quantized model ID to find the `quantized_filename`.
-        /// This may be a HF hub repo or a local path.
-        quantized_model_id: String,
-
-        /// Quantized filename(s).
-        /// May be a single filename, or use semicolons to separate multiple files.
-        #[serde(default)]
-        quantized_filename: String,
-
-        /// A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files.
-        #[serde(default)]
-        quant: Option<String>,
-
-        /// Model ID to load LoRA from. This may be a HF hub repo or a local path.
-        adapters_model_id: String,
-
-        /// Ordering JSON file
-        order: String,
-
-        /// Model data type. Defaults to `auto`.
-        #[serde(default = "default_model_dtype")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
-        dtype: ModelDType,
-
-        /// Path to a topology YAML file.
-        topology: Option<String>,
-
-        /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_seq_len")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
-        max_seq_len: usize,
-
-        /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_batch_size")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
-        max_batch_size: usize,
-
-        /// Path to a local `tokenizer.json` file. If specified, it is used over any remote file.
-        #[serde(default)]
-        tokenizer_json: Option<String>,
-
-        /// ISQ organization: `default` or `moqe`.
-        #[serde(default)]
-        organization: Option<IsqOrganization>,
-
-        /// UQFF path and quantization types to write.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
-        write_uqff: Option<UqffWriteConfig>,
-
-        /// Imatrix file to use while requantizing the GGUF weights.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        imatrix: Option<PathBuf>,
-
-        /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        calibration_file: Option<PathBuf>,
-
-        /// Cache path for Hugging Face models downloaded locally.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        hf_cache_path: Option<PathBuf>,
-
-        /// Path to a local Matryoshka Transformer configuration CSV file.
-        #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
-        matformer_config_path: Option<PathBuf>,
-
-        /// Name of the Matryoshka Transformer slice to use.
-        #[serde(default)]
-        matformer_slice_name: Option<String>,
-    },
-
     /// Select a GGML model.
     GGML {
         /// Model ID to load the tokenizer from. This may be a HF hub repo or a local path.
@@ -666,96 +439,6 @@ pub enum ModelSelected {
 
         /// Quantized filename.
         quantized_filename: String,
-
-        /// GQA value
-        gqa: usize,
-
-        /// Model data type. Defaults to `auto`.
-        #[serde(default = "default_model_dtype")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
-        dtype: ModelDType,
-
-        /// Path to a topology YAML file.
-        topology: Option<String>,
-
-        /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_seq_len")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
-        max_seq_len: usize,
-
-        /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_batch_size")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
-        max_batch_size: usize,
-    },
-
-    /// Select a GGML model with X-LoRA.
-    XLoraGGML {
-        /// Model ID to load the tokenizer from. This may be a HF hub repo or a local path.
-        tok_model_id: Option<String>,
-
-        /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
-        tokenizer_json: Option<String>,
-
-        /// Quantized model ID to find the `quantized_filename`.
-        /// This may be a HF hub repo or a local path.
-        quantized_model_id: String,
-
-        /// Quantized filename.
-        quantized_filename: String,
-
-        /// Model ID to load X-LoRA from. This may be a HF hub repo or a local path.
-        xlora_model_id: String,
-
-        /// Ordering JSON file
-        order: String,
-
-        /// Index of completion tokens to generate scalings up until. If this is 1, then there will be one completion token generated before it is cached.
-        /// This makes the maximum running sequences 1.
-        tgt_non_granular_index: Option<usize>,
-
-        /// GQA value
-        gqa: usize,
-
-        /// Model data type. Defaults to `auto`.
-        #[serde(default = "default_model_dtype")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
-        dtype: ModelDType,
-
-        /// Path to a topology YAML file.
-        topology: Option<String>,
-
-        /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_seq_len")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
-        max_seq_len: usize,
-
-        /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
-        #[serde(default = "default_max_batch_size")]
-        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
-        max_batch_size: usize,
-    },
-
-    /// Select a GGML model with LoRA.
-    LoraGGML {
-        /// Model ID to load the tokenizer from. This may be a HF hub repo or a local path.
-        tok_model_id: Option<String>,
-
-        /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
-        tokenizer_json: Option<String>,
-
-        /// Quantized model ID to find the `quantized_filename`.
-        /// This may be a HF hub repo or a local path.
-        quantized_model_id: String,
-
-        /// Quantized filename.
-        quantized_filename: String,
-
-        /// Model ID to load LoRA from. This may be a HF hub repo or a local path.
-        adapters_model_id: String,
-
-        /// Ordering JSON file
-        order: String,
 
         /// GQA value
         gqa: usize,
@@ -949,18 +632,11 @@ impl ModelSelected {
         match self {
             Self::Run { write_uqff, .. }
             | Self::Plain { write_uqff, .. }
-            | Self::XLora { write_uqff, .. }
             | Self::Lora { write_uqff, .. }
             | Self::GGUF { write_uqff, .. }
-            | Self::XLoraGGUF { write_uqff, .. }
-            | Self::LoraGGUF { write_uqff, .. }
             | Self::MultimodalPlain { write_uqff, .. }
             | Self::Embedding { write_uqff, .. } => Some(write_uqff),
-            Self::GGML { .. }
-            | Self::XLoraGGML { .. }
-            | Self::LoraGGML { .. }
-            | Self::DiffusionPlain { .. }
-            | Self::Speech { .. } => None,
+            Self::GGML { .. } | Self::DiffusionPlain { .. } | Self::Speech { .. } => None,
         }
     }
 
@@ -972,10 +648,7 @@ impl ModelSelected {
             | Self::Lora { quant, .. }
             | Self::MultimodalPlain { quant, .. }
             | Self::Embedding { quant, .. }
-            | Self::XLora { quant, .. }
-            | Self::GGUF { quant, .. }
-            | Self::LoraGGUF { quant, .. }
-            | Self::XLoraGGUF { quant, .. } => quant.as_deref(),
+            | Self::GGUF { quant, .. } => quant.as_deref(),
             _ => None,
         }
     }
@@ -988,11 +661,6 @@ impl ModelSelected {
                 Self::GGUF { quantized_filename, mmproj_filename, mmproj_selection, .. }
                     if quantized_filename.is_empty()
                         || (mmproj_filename.is_none() && *mmproj_selection != MmprojSelection::Given)
-            )
-            || matches!(
-                self,
-                Self::LoraGGUF { quantized_filename, .. } | Self::XLoraGGUF { quantized_filename, .. }
-                    if quantized_filename.is_empty()
             )
     }
 }

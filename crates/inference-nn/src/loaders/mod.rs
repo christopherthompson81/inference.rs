@@ -25,7 +25,6 @@ macro_rules! boxed_loaders {
 }
 
 use std::borrow::Cow;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
@@ -35,7 +34,6 @@ use inference_tensor::DType;
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::{AutoDeviceMapParams, DeviceMapper};
-use crate::lora::{LoraConfig, Ordering};
 use crate::matformer::MatformerSliceConfig;
 use crate::media_inputs::video::VideoFrameSampling;
 use crate::model::{
@@ -43,7 +41,6 @@ use crate::model::{
 };
 use crate::paged_attention::{AttentionImplementation, ModelConfigLike};
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
-use crate::xlora::XLoraConfig;
 
 #[derive(Clone, PartialEq, Eq)]
 pub enum SupportedModality {
@@ -158,17 +155,6 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
         vb: ShardedVarBuilder,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>>;
-    #[allow(clippy::too_many_arguments)]
-    fn load_xlora(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        lora_config: &[((String, String), LoraConfig)],
-        xlora_config: Option<XLoraConfig>,
-        xlora_ordering: Ordering,
-        normal_loading_metadata: NormalLoadingMetadata,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>>;
     fn runtime_config<'a>(
         &self,

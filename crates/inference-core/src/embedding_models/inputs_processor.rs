@@ -139,7 +139,6 @@ impl InputsProcessor for EmbeddingInputsProcessor {
         _: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut Sequence],
         is_prompt: bool,
-        _is_xlora: bool,
         device: &Device,
         _no_kv_cache: bool,
         _last_n_context_len: Option<(usize, usize)>,

@@ -36,7 +36,7 @@
 //! | Tool calling | [`Tool`], [`ToolChoice`] | `examples/rust/advanced/tools/` |
 //! | Agents (the engine's tool loop) | [`TextModelBuilder::with_tool`], [`TextModelBuilder::with_max_tool_rounds`] | `examples/rust/advanced/agent/` |
 //! | Multi-model | [`MultiModelBuilder`] | `examples/rust/advanced/multi_model/` |
-//! | LoRA / X-LoRA | [`LoraModelBuilder`], [`XLoraModelBuilder`] | `examples/rust/advanced/lora/` |
+//! | LoRA | [`LoraModelBuilder`] | `examples/rust/advanced/lora/` |
 //! | AnyMoE | [`AnyMoeModelBuilder`] | `examples/rust/advanced/anymoe/` |
 //! | MCP client | [`McpClientConfig`] | `examples/rust/advanced/mcp_client/` |
 //!
@@ -209,8 +209,6 @@ mod embedding;
 mod embedding_model;
 pub mod error;
 mod gguf;
-mod gguf_lora_model;
-mod gguf_xlora_model;
 mod lora_model;
 mod model;
 mod multi_model;
@@ -218,7 +216,6 @@ mod multimodal_model;
 mod request;
 mod speech_model;
 mod text_model;
-mod xlora_model;
 
 pub use anymoe::AnyMoeModelBuilder;
 pub use auto_model::ModelBuilder;
@@ -226,8 +223,6 @@ pub use diffusion_model::DiffusionModelBuilder;
 pub use embedding::EmbeddingRequestBuilder;
 pub use embedding_model::{EmbeddingModelBuilder, UqffEmbeddingModelBuilder};
 pub use gguf::GgufModelBuilder;
-pub use gguf_lora_model::GgufLoraModelBuilder;
-pub use gguf_xlora_model::GgufXLoraModelBuilder;
 pub use load::{IsqBits, MemoryGpuConfig, PagedAttentionMetaBuilder, ToolCallback};
 pub use lora_model::LoraModelBuilder;
 pub use model::{ChatEventStream, Model};
@@ -239,7 +234,6 @@ pub use request::{
 };
 pub use speech_model::SpeechModelBuilder;
 pub use text_model::{TextModelBuilder, UqffTextModelBuilder};
-pub use xlora_model::XLoraModelBuilder;
 
 pub use image::DynamicImage;
 /// The engine surface the SDK builds on, for its request and response types by their own paths.

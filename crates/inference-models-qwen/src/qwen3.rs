@@ -1,7 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-/// Mistral LLM, <https://github.com/mistralai/mistral-src>
-use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -566,29 +564,11 @@ impl NormalModel for Model {
     ) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
-    fn xlora_forward(
-        &self,
-        _input_ids: &Tensor,
-        _input_ids_full: &Tensor,
-        _seqlen_offsets: &[usize],
-        _seqlen_offsets_full: &[usize],
-        _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::model::NonGranularState>,
-        _context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
-        _flash_params: &FlashParams,
-        _flash_params_full: &FlashParams,
-    ) -> Result<Tensor> {
-        unimplemented!()
-    }
     fn cache(&self) -> &EitherCache {
         &self.cache
     }
     fn device(&self) -> &Device {
         &self.device
-    }
-    fn is_xlora(&self) -> bool {
-        false
     }
     fn max_seq_len(&self) -> usize {
         self.max_seq_len

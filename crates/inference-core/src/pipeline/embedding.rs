@@ -316,7 +316,6 @@ impl Loader for EmbeddingLoader {
                 write_uqff: self.config.write_uqff.is_some(),
                 prepared: None,
                 lora: None,
-                xlora: None,
             },
         )?;
         let super::loading::LoadSession {
@@ -377,7 +376,7 @@ impl Loader for EmbeddingLoader {
         );
 
         Ok(Arc::new(Mutex::new(EmbeddingPipeline {
-            dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0, false)),
+            dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0)),
             model,
             tracked_modules,
             source_weight_files,
@@ -386,7 +385,6 @@ impl Loader for EmbeddingLoader {
             metadata: Arc::new(GeneralMetadata {
                 max_seq_len,
                 llg_factory: None,
-                is_xlora: false,
                 no_prefix_cache: false,
                 num_hidden_layers: 1, // read only to size caches
                 eos_tok: vec![],
@@ -466,7 +464,6 @@ impl CacheManagerMixin for EmbeddingPipeline {
     fn set_none_cache(
         &self,
         _seqs: &mut [&mut Sequence],
-        _reset_non_granular: bool,
         _modify_draft_cache: bool,
         _load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
@@ -487,7 +484,6 @@ impl MetadataMixin for EmbeddingPipeline {
     fn name(&self) -> String {
         self.model_id.clone()
     }
-    fn reset_non_granular_state(&self) {}
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
         Some(self.tokenizer.clone())
     }

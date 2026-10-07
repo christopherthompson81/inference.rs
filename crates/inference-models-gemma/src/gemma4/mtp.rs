@@ -137,7 +137,6 @@ impl Gemma4MtpRuntime {
         let dtype = dtype_from_config(assistant_cfg.dtype.as_deref());
         let vb = from_mmaped_safetensors(
             weight_paths,
-            Vec::new(),
             Some(dtype),
             device,
             Vec::new(),

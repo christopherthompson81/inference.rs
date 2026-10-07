@@ -132,7 +132,7 @@ inference doctor
 - ⭐ Auto-select fastest quant method for your hardware
 
 **Flexibility**
-- [LoRA & X-LoRA](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/customize/lora-adapters.mdx) with per-request LoRA selection and X-LoRA adapter mixing
+- [LoRA](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/customize/lora-adapters.mdx) with per-request adapter selection and live hot-swapping
 - AnyMoE: Create mixture-of-experts on any base model
 - [Multiple models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/multiple-models.mdx): Load/unload at runtime
 

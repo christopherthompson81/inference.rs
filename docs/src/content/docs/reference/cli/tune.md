@@ -31,11 +31,6 @@ inference tune [OPTIONS] [COMMAND]
 | `--lora-max-adapters <LORA_MAX_ADAPTERS>` | `16` | Maximum loaded LoRA aliases and, independently, resident adapter generations |
 | `--lora-max-rank <LORA_MAX_RANK>` | `256` | Maximum rank accepted for a LoRA adapter |
 | `--lora-max-bytes <BYTES>` | `8589934592` | Maximum memory used by loaded adapters |
-| `--legacy-lora <SOURCE>` |  | Static LoRA adapter source for GGML or a Phi3 GGUF model |
-| `--legacy-lora-order <LEGACY_LORA_ORDER>` |  | Ordering JSON file for a legacy raw GGUF or GGML LoRA adapter |
-| `--xlora <XLORA>` |  | X-LoRA adapter model ID |
-| `--xlora-order <XLORA_ORDER>` |  | X-LoRA ordering JSON file |
-| `--tgt-non-granular-index <TGT_NON_GRANULAR_INDEX>` |  | Target non-granular index for X-LoRA |
 | `--quant <QUANT>` |  | Quantization target. Inference commands select a matching GGUF or UQFF artifact when available. Source checkpoints without a matching UQFF use in-situ quantization. `tune` evaluates the requested level instead of selecting an artifact. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or supported quantization names |
 | `--isq <IN_SITU_QUANT>` |  | In-situ quantization target. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or raw quant names (`q4k`, `q8_0`, etc.). Supports compatible GGUF sources |
 | `--from-uqff <FROM_UQFF>` |  | UQFF artifact to load. Accepts a filename, numeric quantization level (`2`, `3`, `4`, `5`, `6`, `8`), or quantization type (`q4k`, `afq8`, etc.). Report-declared artifacts and conventional shard names expand to all of their shards. Use semicolons only to list disjoint shards manually |
@@ -88,11 +83,6 @@ inference tune auto [OPTIONS] --model-id <MODEL_ID>
 | `--lora-max-adapters <LORA_MAX_ADAPTERS>` | `16` | Maximum loaded LoRA aliases and, independently, resident adapter generations |
 | `--lora-max-rank <LORA_MAX_RANK>` | `256` | Maximum rank accepted for a LoRA adapter |
 | `--lora-max-bytes <BYTES>` | `8589934592` | Maximum memory used by loaded adapters |
-| `--legacy-lora <SOURCE>` |  | Static LoRA adapter source for GGML or a Phi3 GGUF model |
-| `--legacy-lora-order <LEGACY_LORA_ORDER>` |  | Ordering JSON file for a legacy raw GGUF or GGML LoRA adapter |
-| `--xlora <XLORA>` |  | X-LoRA adapter model ID |
-| `--xlora-order <XLORA_ORDER>` |  | X-LoRA ordering JSON file |
-| `--tgt-non-granular-index <TGT_NON_GRANULAR_INDEX>` |  | Target non-granular index for X-LoRA |
 | `--quant <QUANT>` |  | Quantization target. Inference commands select a matching GGUF or UQFF artifact when available. Source checkpoints without a matching UQFF use in-situ quantization. `tune` evaluates the requested level instead of selecting an artifact. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or supported quantization names |
 | `--isq <IN_SITU_QUANT>` |  | In-situ quantization target. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or raw quant names (`q4k`, `q8_0`, etc.). Supports compatible GGUF sources |
 | `--from-uqff <FROM_UQFF>` |  | UQFF artifact to load. Accepts a filename, numeric quantization level (`2`, `3`, `4`, `5`, `6`, `8`), or quantization type (`q4k`, `afq8`, etc.). Report-declared artifacts and conventional shard names expand to all of their shards. Use semicolons only to list disjoint shards manually |
@@ -142,11 +132,6 @@ inference tune text [OPTIONS] --model-id <MODEL_ID>
 | `--lora-max-adapters <LORA_MAX_ADAPTERS>` | `16` | Maximum loaded LoRA aliases and, independently, resident adapter generations |
 | `--lora-max-rank <LORA_MAX_RANK>` | `256` | Maximum rank accepted for a LoRA adapter |
 | `--lora-max-bytes <BYTES>` | `8589934592` | Maximum memory used by loaded adapters |
-| `--legacy-lora <SOURCE>` |  | Static LoRA adapter source for GGML or a Phi3 GGUF model |
-| `--legacy-lora-order <LEGACY_LORA_ORDER>` |  | Ordering JSON file for a legacy raw GGUF or GGML LoRA adapter |
-| `--xlora <XLORA>` |  | X-LoRA adapter model ID |
-| `--xlora-order <XLORA_ORDER>` |  | X-LoRA ordering JSON file |
-| `--tgt-non-granular-index <TGT_NON_GRANULAR_INDEX>` |  | Target non-granular index for X-LoRA |
 | `--quant <QUANT>` |  | Quantization target. Inference commands select a matching GGUF or UQFF artifact when available. Source checkpoints without a matching UQFF use in-situ quantization. `tune` evaluates the requested level instead of selecting an artifact. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or supported quantization names |
 | `--isq <IN_SITU_QUANT>` |  | In-situ quantization target. Accepts numeric levels (`2`, `3`, `4`, `5`, `6`, `8`) or raw quant names (`q4k`, `q8_0`, etc.). Supports compatible GGUF sources |
 | `--from-uqff <FROM_UQFF>` |  | UQFF artifact to load. Accepts a filename, numeric quantization level (`2`, `3`, `4`, `5`, `6`, `8`), or quantization type (`q4k`, `afq8`, etc.). Report-declared artifacts and conventional shard names expand to all of their shards. Use semicolons only to list disjoint shards manually |

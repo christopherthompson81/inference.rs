@@ -219,7 +219,7 @@ pub(crate) fn validate_lora_qk_rope_layout(config: &str, has_adapter: bool) -> R
             == Some(crate::gguf::normal_registry::RopePairing::Adjacent)
     {
         anyhow::bail!(
-            "LoRA and X-LoRA adapters are not supported when Q/K tensors use adjacent RoPE layout; load the original safetensors model or omit the adapter"
+            "LoRA adapters are not supported on a multimodal model whose Q/K tensors use adjacent RoPE layout; load the original safetensors model or omit the adapter"
         );
     }
     Ok(())
@@ -483,7 +483,7 @@ pub enum ModelKind {
     AnyMoe { target: Box<ModelKind> },
 }
 
-#[derive(Clone, Copy, strum::Display, strum::EnumIs, strum::EnumMessage)]
+#[derive(Clone, Copy, strum::Display, strum::EnumIs)]
 #[strum(serialize_all = "kebab-case")]
 pub enum QuantizationKind {
     /// GGML
@@ -494,29 +494,12 @@ pub enum QuantizationKind {
     Gptq,
 }
 
-#[derive(Clone, Copy, strum::Display, strum::EnumIs, strum::EnumMessage)]
+#[derive(Clone, Copy, strum::Display, strum::EnumIs)]
 #[strum(serialize_all = "kebab-case")]
 pub enum AdapterKind {
     /// LoRA
     Lora,
-    /// X-LoRA
-    XLora,
 }
-
-// For the proper name as formatted via doc comment for a variant
-pub trait PrettyName: strum::EnumMessage + ToString {
-    fn pretty_name(&self) -> String {
-        match self.get_documentation() {
-            Some(s) => s.to_string(),
-            // Instead of panic via expect(),
-            // fallback to default kebab-case:
-            None => self.to_string(),
-        }
-    }
-}
-
-impl PrettyName for AdapterKind {}
-impl PrettyName for QuantizationKind {}
 
 impl ModelKind {
     // Quantized helpers:
@@ -535,25 +518,6 @@ impl ModelKind {
             Normal | Adapter { .. } => vec![None],
             GgufQuantized { quant } | GgufAdapter { quant, .. } => vec![Some(*quant)],
             AnyMoe { target } => target.quantized_kind(),
-        }
-    }
-
-    // Adapter helpers:
-    pub fn is_adapted(&self) -> bool {
-        self.adapted_kind().iter().any(|a| a.is_some())
-    }
-
-    pub fn is_adapted_and(&self, mut f: impl FnMut(AdapterKind) -> bool) -> bool {
-        self.adapted_kind().iter().any(|a| a.is_some_and(&mut f))
-    }
-
-    pub fn adapted_kind(&self) -> Vec<Option<AdapterKind>> {
-        use ModelKind::*;
-
-        match self {
-            Normal | GgufQuantized { .. } => vec![None],
-            Adapter { adapter } | GgufAdapter { adapter, .. } => vec![Some(*adapter)],
-            AnyMoe { target } => target.adapted_kind(),
         }
     }
 }

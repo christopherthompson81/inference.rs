@@ -3,11 +3,10 @@
 use inference_api::engine::{EngineCallbacks, EngineSpec, ModelSelected, ModelSpec};
 
 use crate::{
-    DiffusionModelBuilder, EmbeddingModelBuilder, EngineLoadError, GgufLoraModelBuilder,
-    GgufModelBuilder, GgufXLoraModelBuilder, LoraModelBuilder, Model, ModelBuilder,
-    MultimodalModelBuilder, SpeechModelBuilder, TextModelBuilder, UqffEmbeddingModelBuilder,
-    UqffMultimodalModelBuilder, UqffTextModelBuilder, XLoraModelBuilder, error::Result,
-    load::LoadOptions,
+    DiffusionModelBuilder, EmbeddingModelBuilder, EngineLoadError, GgufModelBuilder,
+    LoraModelBuilder, Model, ModelBuilder, MultimodalModelBuilder, SpeechModelBuilder,
+    TextModelBuilder, UqffEmbeddingModelBuilder, UqffMultimodalModelBuilder, UqffTextModelBuilder,
+    error::Result, load::LoadOptions,
 };
 
 const NO_MODELS: &str = "MultiModelBuilder needs at least one model";
@@ -55,21 +54,6 @@ into_model_spec! {
     SpeechModelBuilder => options;
     EmbeddingModelBuilder => options;
     LoraModelBuilder => text_model.options;
-    XLoraModelBuilder => text_model.options;
-}
-
-impl IntoModelSpec for GgufLoraModelBuilder {
-    fn model_spec(self) -> Result<ModelSpec> {
-        let model = self.checked_model_selected()?;
-        Ok(per_model(model, self.gguf_model.options))
-    }
-}
-
-impl IntoModelSpec for GgufXLoraModelBuilder {
-    fn model_spec(self) -> Result<ModelSpec> {
-        let model = self.checked_model_selected()?;
-        Ok(per_model(model, self.gguf_model.options))
-    }
 }
 
 impl IntoModelSpec for UqffTextModelBuilder {

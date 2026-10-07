@@ -151,7 +151,6 @@ impl InputsProcessor for SpeechInputsProcessor {
         _tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut Sequence],
         _is_prompt: bool,
-        _is_xlora: bool,
         _device: &Device,
         _no_kv_cache: bool,
         _last_n_context_len: Option<(usize, usize)>,
@@ -322,7 +321,6 @@ impl Loader for SpeechLoader {
         let model_weights = paths.weights[..paths.weights.len() - 1].to_vec();
         let vb = from_mmaped_safetensors(
             model_weights,
-            Vec::new(),
             Some(dtype),
             device,
             vec![None],
@@ -347,7 +345,6 @@ impl Loader for SpeechLoader {
             metadata: Arc::new(GeneralMetadata {
                 max_seq_len: 1024,
                 llg_factory: None,
-                is_xlora: false,
                 no_prefix_cache: false,
                 num_hidden_layers: 1, // read only to size caches
                 eos_tok: vec![],
@@ -364,7 +361,7 @@ impl Loader for SpeechLoader {
                 },
                 loaded_for_uqff_write: false,
             }),
-            dummy_cache: EitherCache::Full(Cache::new(0, false)),
+            dummy_cache: EitherCache::Full(Cache::new(0)),
             cfg: self.cfg.unwrap_or_else(|| match self.arch {
                 SpeechLoaderType::Dia => SpeechGenerationConfig::dia_default(),
             }),
@@ -406,7 +403,6 @@ impl CacheManagerMixin for SpeechPipeline {
     fn set_none_cache(
         &self,
         _seqs: &mut [&mut Sequence],
-        _reset_non_granular: bool,
         _modify_draft_cache: bool,
         _load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
@@ -427,7 +423,6 @@ impl MetadataMixin for SpeechPipeline {
     fn name(&self) -> String {
         self.model_id.clone()
     }
-    fn reset_non_granular_state(&self) {}
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
         None
     }

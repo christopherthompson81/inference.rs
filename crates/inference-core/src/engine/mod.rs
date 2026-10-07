@@ -580,14 +580,13 @@ impl Engine {
             prefix_policy,
         ) = {
             let pipeline = get_mut_arcmutex!(pipeline);
-            let pipeline_metadata = pipeline.get_metadata();
             (
                 pipeline.requires_uniform_prompt_batch(),
                 pipeline.requires_uniform_completion_batch(),
                 pipeline.requires_uniform_media_batch(),
                 pipeline.supports_packed_prefill(),
                 pipeline.cache().is_hybrid(),
-                pipeline.device().is_cuda() && !pipeline_metadata.is_xlora,
+                pipeline.device().is_cuda(),
                 pipeline.cache().is_hybrid(),
                 pipeline.speculative_prefix_checkpoint_policy(),
             )
@@ -1108,7 +1107,6 @@ impl Engine {
                 } else {
                     CacheInstruction::Reset {
                         load_preallocated_cache: false,
-                        reset_non_granular: false,
                     }
                 };
 
@@ -1167,7 +1165,6 @@ impl Engine {
                 } else {
                     CacheInstruction::Reset {
                         load_preallocated_cache: false,
-                        reset_non_granular: false,
                     }
                 };
 
@@ -1187,7 +1184,6 @@ impl Engine {
                 } else {
                     CacheInstruction::Reset {
                         load_preallocated_cache: true,
-                        reset_non_granular: false,
                     }
                 };
 

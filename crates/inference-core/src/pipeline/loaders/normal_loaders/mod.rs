@@ -1,10 +1,9 @@
 pub use crate::model::{NormalLoadingMetadata, NormalModel};
-use std::{borrow::Cow, collections::HashMap, fmt::Debug};
+use std::{borrow::Cow, fmt::Debug};
 
 use crate::matformer::MatformerSliceConfig;
 
 use crate::{
-    lora::{LoraConfig, Ordering},
     paged_attention::{AttentionImplementation, ModelConfigLike},
     pipeline::isq::IsqModelLoader,
 };
@@ -16,8 +15,6 @@ use inference_quant::ShardedVarBuilder;
 
 use regex::Regex;
 use serde::Deserialize;
-
-use crate::xlora_models::XLoraConfig;
 
 use super::{AutoDeviceMapParams, AutoDeviceMapQuantization, DeviceMappedModelLoader};
 

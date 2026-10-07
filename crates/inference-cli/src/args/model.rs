@@ -292,12 +292,13 @@ fn split_quantized_filenames(value: &str) -> anyhow::Result<Vec<&str>> {
     Ok(filenames)
 }
 
-/// Adapter options (LoRA/X-LoRA)
+/// LoRA adapter options
 #[derive(Args, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AdapterOptions {
     /// Enable dynamic LoRA without preloading an adapter. Supports compatible text and multimodal
     /// language models, including GGUF. Vision, audio, and projector adapters are unsupported.
-    #[arg(long, conflicts_with = "xlora")]
+    #[arg(long)]
     #[serde(default)]
     pub enable_lora: bool,
 
@@ -310,8 +311,7 @@ pub struct AdapterOptions {
         value_name = "ALIAS=SOURCE|JSON",
         value_parser = parse_lora_adapter,
         num_args = 1..,
-        action = clap::ArgAction::Append,
-        conflicts_with = "xlora"
+        action = clap::ArgAction::Append
     )]
     #[serde(default)]
     pub lora: Vec<LoraAdapterSpec>,
@@ -319,8 +319,7 @@ pub struct AdapterOptions {
     /// Maximum loaded LoRA aliases and, independently, resident adapter generations
     #[arg(
         long,
-        default_value_t = DEFAULT_LORA_MAX_ADAPTERS,
-        conflicts_with_all = ["xlora", "legacy_lora"]
+        default_value_t = DEFAULT_LORA_MAX_ADAPTERS
     )]
     #[serde(default = "default_lora_max_adapters")]
     pub lora_max_adapters: usize,
@@ -329,8 +328,7 @@ pub struct AdapterOptions {
     #[arg(
         long,
         visible_alias = "max-lora-rank",
-        default_value_t = DEFAULT_LORA_MAX_RANK,
-        conflicts_with_all = ["xlora", "legacy_lora"]
+        default_value_t = DEFAULT_LORA_MAX_RANK
     )]
     #[serde(default = "default_lora_max_rank")]
     pub lora_max_rank: usize,
@@ -340,35 +338,10 @@ pub struct AdapterOptions {
         long,
         value_parser = parse_lora_bytes,
         value_name = "BYTES",
-        default_value_t = DEFAULT_LORA_MAX_BYTES,
-        conflicts_with_all = ["xlora", "legacy_lora"]
+        default_value_t = DEFAULT_LORA_MAX_BYTES
     )]
     #[serde(default = "default_lora_max_bytes")]
     pub lora_max_bytes: u64,
-
-    /// Static LoRA adapter source for GGML or a Phi3 GGUF model
-    #[arg(
-        long,
-        value_name = "SOURCE",
-        conflicts_with_all = ["enable_lora", "lora", "xlora"]
-    )]
-    pub legacy_lora: Option<String>,
-
-    /// Ordering JSON file for a legacy raw GGUF or GGML LoRA adapter
-    #[arg(long, requires = "legacy_lora")]
-    pub legacy_lora_order: Option<PathBuf>,
-
-    /// X-LoRA adapter model ID
-    #[arg(long, conflicts_with_all = ["enable_lora", "lora", "legacy_lora"])]
-    pub xlora: Option<String>,
-
-    /// X-LoRA ordering JSON file
-    #[arg(long, requires = "xlora")]
-    pub xlora_order: Option<PathBuf>,
-
-    /// Target non-granular index for X-LoRA
-    #[arg(long, requires = "xlora")]
-    pub tgt_non_granular_index: Option<usize>,
 }
 
 impl AdapterOptions {
@@ -385,33 +358,13 @@ impl AdapterOptions {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        let dynamic_lora = self.dynamic_lora_enabled();
-        let legacy_lora = self.legacy_lora.is_some();
-        let xlora = self.xlora.is_some();
-        if usize::from(dynamic_lora) + usize::from(legacy_lora) + usize::from(xlora) > 1 {
-            return Err("dynamic LoRA, legacy LoRA, and X-LoRA are mutually exclusive".to_string());
-        }
-        if !dynamic_lora && self.lora_runtime_config() != LoraRuntimeConfig::default() {
+        if !self.dynamic_lora_enabled()
+            && self.lora_runtime_config() != LoraRuntimeConfig::default()
+        {
             return Err(
                 "LoRA runtime limits require --enable-lora or at least one --lora preload"
                     .to_string(),
             );
-        }
-        if legacy_lora != self.legacy_lora_order.is_some() {
-            return Err("legacy_lora and legacy_lora_order must be specified together".to_string());
-        }
-        if xlora != self.xlora_order.is_some() {
-            return Err("xlora and xlora_order must be specified together".to_string());
-        }
-        if !xlora && self.tgt_non_granular_index.is_some() {
-            return Err("tgt_non_granular_index only applies to X-LoRA (xlora)".to_string());
-        }
-        if self
-            .legacy_lora
-            .as_ref()
-            .is_some_and(|source| source.trim().is_empty())
-        {
-            return Err("legacy LoRA adapter source must not be empty".to_string());
         }
         if self.lora_max_adapters == 0 {
             return Err("--lora-max-adapters must be greater than zero".to_string());
@@ -445,11 +398,6 @@ impl Default for AdapterOptions {
             lora_max_adapters: DEFAULT_LORA_MAX_ADAPTERS,
             lora_max_rank: DEFAULT_LORA_MAX_RANK,
             lora_max_bytes: DEFAULT_LORA_MAX_BYTES,
-            legacy_lora: None,
-            legacy_lora_order: None,
-            xlora: None,
-            xlora_order: None,
-            tgt_non_granular_index: None,
         }
     }
 }
@@ -507,7 +455,6 @@ impl MultimodalAdapterOptions {
             lora_max_adapters: self.lora_max_adapters,
             lora_max_rank: self.lora_max_rank,
             lora_max_bytes: self.lora_max_bytes,
-            ..AdapterOptions::default()
         }
     }
 

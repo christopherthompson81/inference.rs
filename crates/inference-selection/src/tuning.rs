@@ -167,7 +167,6 @@ fn hf_cache_path_from_model(model: &ModelSelected) -> Option<PathBuf> {
     match model {
         ModelSelected::Plain { hf_cache_path, .. }
         | ModelSelected::Lora { hf_cache_path, .. }
-        | ModelSelected::XLora { hf_cache_path, .. }
         | ModelSelected::MultimodalPlain { hf_cache_path, .. }
         | ModelSelected::Embedding { hf_cache_path, .. }
         | ModelSelected::Run { hf_cache_path, .. } => hf_cache_path.clone(),
@@ -179,10 +178,6 @@ fn model_id_from_selected(model: &ModelSelected) -> String {
     match model {
         ModelSelected::Plain { model_id, .. }
         | ModelSelected::Lora { model_id, .. }
-        | ModelSelected::XLora {
-            model_id: Some(model_id),
-            ..
-        }
         | ModelSelected::MultimodalPlain { model_id, .. }
         | ModelSelected::Embedding { model_id, .. }
         | ModelSelected::Run { model_id, .. } => model_id.clone(),
@@ -191,22 +186,9 @@ fn model_id_from_selected(model: &ModelSelected) -> String {
         }
         | ModelSelected::GGML {
             quantized_model_id, ..
-        }
-        | ModelSelected::LoraGGUF {
-            quantized_model_id, ..
-        }
-        | ModelSelected::XLoraGGUF {
-            quantized_model_id, ..
-        }
-        | ModelSelected::LoraGGML {
-            quantized_model_id, ..
-        }
-        | ModelSelected::XLoraGGML {
-            quantized_model_id, ..
         } => quantized_model_id.clone(),
         ModelSelected::DiffusionPlain { model_id, .. } => model_id.clone(),
         ModelSelected::Speech { model_id, .. } => model_id.clone(),
-        _ => "unknown".to_string(),
     }
 }
 
@@ -215,7 +197,6 @@ fn topology_from_model(model: &ModelSelected) -> Result<Option<Topology>> {
         ModelSelected::Run { topology, .. }
         | ModelSelected::Plain { topology, .. }
         | ModelSelected::Lora { topology, .. }
-        | ModelSelected::XLora { topology, .. }
         | ModelSelected::MultimodalPlain { topology, .. }
         | ModelSelected::Embedding { topology, .. } => topology.as_deref(),
         _ => None,
@@ -479,12 +460,7 @@ fn map_for_candidate(
 pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     let model_id = model_id_from_selected(&req.model);
     match &req.model {
-        ModelSelected::GGUF { .. }
-        | ModelSelected::GGML { .. }
-        | ModelSelected::LoraGGUF { .. }
-        | ModelSelected::XLoraGGUF { .. }
-        | ModelSelected::LoraGGML { .. }
-        | ModelSelected::XLoraGGML { .. } => {
+        ModelSelected::GGUF { .. } | ModelSelected::GGML { .. } => {
             anyhow::bail!("Auto-tuning is not supported for pre-quantized GGUF/GGML models.");
         }
         ModelSelected::DiffusionPlain { .. } | ModelSelected::Speech { .. } => {

@@ -131,7 +131,6 @@ fn get_t5_model(
                 .iter()
                 .map(|f| fetch(repo_id, HUB_REVISION, f))
                 .collect::<inference_tensor::Result<Vec<_>>>()?,
-            vec![],
             Some(dtype),
             device,
             vec![None],
@@ -162,7 +161,6 @@ fn get_clip_model_and_tokenizer(
     };
     let vb = from_mmaped_safetensors(
         vec![model_file],
-        vec![],
         None,
         device,
         vec![None],

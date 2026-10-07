@@ -504,7 +504,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 seq.set_state(crate::sequence::SequenceState::Done(
                     crate::sequence::StopReason::Canceled,
                 ));
-                this.reset_non_granular_state();
+                this.release_sequence_state(*seq.id());
             }
         }
 
@@ -515,7 +515,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                 cache_finished_sequence(this, prefix_cacher, seq)?;
             }
             seq.set_state(crate::sequence::SequenceState::Done(reason));
-            this.reset_non_granular_state();
+            this.release_sequence_state(*seq.id());
         }
     } else if let Some(mut reason) = is_done {
         /*
@@ -698,7 +698,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                     .map_err(inference_tensor::Error::msg)?;
             }
         }
-        this.reset_non_granular_state();
+        this.release_sequence_state(*seq.id());
     }
 
     Ok(())
@@ -1642,7 +1642,6 @@ mod tests {
             vec![],
             max_len,
             false,
-            false,
             group,
             0,
             0,
@@ -1693,7 +1692,6 @@ mod tests {
             vec![],
             vec![],
             None,
-            false,
             false,
             group,
             0,

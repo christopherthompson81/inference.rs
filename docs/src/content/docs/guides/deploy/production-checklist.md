@@ -55,7 +55,7 @@ Work through this list before a `inference serve` deployment receives traffic fr
 - [ ] Use `expected_generation` on replacement and unload operations, then verify the published generation through `GET /v1/lora_adapters`.
 - [ ] Keep live mutation out of tensor-parallel deployments; preload adapters instead.
 
-See [LoRA and X-LoRA adapters](/guides/customize/lora-adapters/) for rollout, rollback, errors, and the vLLM migration table.
+See [LoRA adapters](/guides/customize/lora-adapters/) for rollout, rollback, errors, and the vLLM migration table.
 
 ## Multi-model
 

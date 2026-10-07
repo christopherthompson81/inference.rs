@@ -257,7 +257,6 @@ impl MultimodalInputsProcessor for Phi3InputsProcessor {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -267,11 +266,6 @@ impl MultimodalInputsProcessor for Phi3InputsProcessor {
         mut paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> anyhow::Result<InputProcessorOutput> {
-        if is_xlora {
-            return Err(anyhow::Error::msg(
-                "Cannot make inputs for X-LoRA vision model.",
-            ));
-        }
         if no_kv_cache {
             return Err(anyhow::Error::msg("Vision model must have kv cache."));
         }
@@ -294,7 +288,6 @@ impl MultimodalInputsProcessor for Phi3InputsProcessor {
                     ProcessInputsCall {
                         tokenizer: Some(tokenizer),
                         is_prompt,
-                        is_xlora,
                         device,
                         no_kv_cache,
                         last_n_context_len,

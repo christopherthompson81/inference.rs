@@ -14,10 +14,8 @@ use tracing::{debug, info, trace, warn};
 use inference_protocol::chat_template::{BeginEndUnkPadTok, ChatTemplate, ChatTemplateValue};
 
 use crate::{
-    LoraAdapterSpec, ModelPaths, Ordering, TokenSource,
-    lora::LoraConfig,
+    LoraAdapterSpec, ModelPaths, TokenSource,
     pipeline::{hf::build_api, isq::UQFF_RESIDUAL_SAFETENSORS},
-    xlora_models::XLoraConfig,
 };
 
 // Match files against these
@@ -36,368 +34,90 @@ pub struct ResolvedLoraAdapter {
     pub weights_path: PathBuf,
 }
 
-#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug)]
 pub enum AdapterPaths {
-    XLora {
-        adapter_configs: Option<Vec<((String, String), LoraConfig)>>,
-        adapter_safetensors: Option<Vec<(String, PathBuf)>>,
-        classifier_path: Option<PathBuf>,
-        xlora_order: Option<Ordering>,
-        xlora_config: Option<XLoraConfig>,
-        lora_preload_adapter_info: Option<HashMap<String, (PathBuf, LoraConfig)>>,
-    },
     Lora(Vec<ResolvedLoraAdapter>),
     None,
 }
 
-#[derive(Clone, Copy, Debug)]
-pub(crate) enum XLoraPreload {
-    Skip,
-    Load,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub(crate) struct AdapterPathOptions<'a> {
-    pub(crate) xlora_model_id: Option<&'a String>,
-    pub(crate) lora_adapters: Option<&'a [LoraAdapterSpec]>,
-    pub(crate) xlora_order: Option<&'a Ordering>,
-    pub(crate) xlora_preload: XLoraPreload,
-}
-
-pub(crate) fn get_adapter_paths(
-    base_model_id: String,
-    options: AdapterPathOptions<'_>,
+fn get_adapter_paths(
+    lora_adapters: Option<&[LoraAdapterSpec]>,
     token_source: &TokenSource,
-    base_revision: String,
 ) -> Result<AdapterPaths> {
-    let AdapterPathOptions {
-        xlora_model_id,
-        lora_adapters,
-        xlora_order,
-        xlora_preload,
-    } = options;
-    match (lora_adapters, xlora_model_id, xlora_order) {
-        (None, Some(xlora_id), Some(xlora_order)) => {
-            let api = build_api(token_source, true).map_err(inference_tensor::Error::msg)?;
-            let api = api.repo(Repo::with_revision(
-                xlora_id.clone(),
-                RepoType::Model,
-                base_revision.clone(),
-            ));
-            let model_id = Path::new(&xlora_id);
-            let dir_list =
-                crate::pipeline::hf::list_repo_files(&api, model_id, true, &base_revision)?;
-            // Get the path for the xlora classifier
-            let xlora_classifier = &dir_list
-                .clone()
-                .into_iter()
-                .filter(|x| x.contains("xlora_classifier.safetensors"))
-                .collect::<Vec<_>>();
-            if xlora_classifier.len() > 1 {
-                warn!("Detected multiple X-LoRA classifiers: {xlora_classifier:?}");
-                warn!("Selected classifier: `{}`", &xlora_classifier[0]);
-            }
-            let xlora_classifier = xlora_classifier.first();
-
-            let classifier_path = xlora_classifier
-                .map(|xlora_classifier| -> inference_tensor::Result<_> {
-                    crate::pipeline::hf::get_file(&api, model_id, xlora_classifier, &base_revision)
-                        .map_err(inference_tensor::Error::msg)
-                })
-                .transpose()?;
-
-            // Get the path for the xlora config by checking all for valid versions.
-            // NOTE(EricLBuehler): Remove this functionality because all configs should be deserializable
-            let xlora_configs = &dir_list
-                .clone()
-                .into_iter()
-                .filter(|x| x.contains("xlora_config.json"))
-                .collect::<Vec<_>>();
-            if xlora_configs.len() > 1 {
-                warn!("Detected multiple X-LoRA configs: {xlora_configs:?}");
-            }
-
-            let mut xlora_config: Option<XLoraConfig> = None;
-            let mut last_err: Option<serde_json::Error> = None;
-            for (i, config_path) in xlora_configs.iter().enumerate() {
-                if xlora_configs.len() != 1 {
-                    warn!("Selecting config: `{}`", config_path);
-                }
-                let config_path =
-                    crate::pipeline::hf::get_file(&api, model_id, config_path, &base_revision)?;
-                let conf = fs::read_to_string(config_path)?;
-                let deser: Result<XLoraConfig, serde_json::Error> = serde_json::from_str(&conf);
-                match deser {
-                    Ok(conf) => {
-                        xlora_config = Some(conf);
-                        break;
-                    }
-                    Err(e) => {
-                        if i != xlora_configs.len() - 1 {
-                            warn!("Config is broken with error `{e}`");
-                        }
-                        last_err = Some(e);
-                    }
-                }
-            }
-            let xlora_config = xlora_config.map(Some).unwrap_or_else(|| {
-                if let Some(last_err) = last_err {
-                    panic!("Unable to derserialize any configs. Last error: {last_err}")
-                } else {
-                    None
-                }
-            });
-
-            // If there are adapters in the ordering file, get their names and remote paths
-            let adapter_files = dir_list
-                .into_iter()
-                .filter_map(|name| {
-                    if let Some(ref adapters) = xlora_order.adapters {
-                        for adapter_name in adapters {
-                            if name.contains(adapter_name) {
-                                return Some((name, adapter_name.clone()));
-                            }
-                        }
-                    }
-                    None
-                })
-                .collect::<Vec<_>>();
-            if adapter_files.is_empty() && xlora_order.adapters.is_some() {
-                anyhow::bail!(
-                    "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
-                )
-            }
-
-            // Get the local paths for each adapter
-            let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
-            for (file, name) in adapter_files {
-                if let Some(paths) = adapters_paths.get_mut(&name) {
-                    paths.push(crate::pipeline::hf::get_file(
-                        &api,
-                        model_id,
-                        &file,
-                        &base_revision,
-                    )?);
-                } else {
-                    adapters_paths.insert(
-                        name,
-                        vec![crate::pipeline::hf::get_file(
-                            &api,
-                            model_id,
-                            &file,
-                            &base_revision,
-                        )?],
-                    );
-                }
-            }
-
-            // Sort local paths for the adapter configs and safetensors files
-            let mut adapters_configs = Vec::new();
-            let mut adapters_safetensors = Vec::new();
-            if let Some(ref adapters) = xlora_order.adapters {
-                for (i, name) in adapters.iter().enumerate() {
-                    let paths = adapters_paths
-                        .get(name)
-                        .unwrap_or_else(|| panic!("Adapter {name} not found."));
-                    for path in paths {
-                        if path.extension().unwrap() == "safetensors" {
-                            adapters_safetensors.push((name.clone(), path.to_owned()));
-                        } else {
-                            let conf = fs::read_to_string(path)?;
-                            let lora_config: LoraConfig = serde_json::from_str(&conf)?;
-                            adapters_configs
-                                .push((((i + 1).to_string(), name.clone()), lora_config));
-                        }
-                    }
-                }
-            }
-
-            // Make sure they all match
-            if xlora_order.base_model_id
-                != *xlora_config
-                    .as_ref()
-                    .map(|cfg| &cfg.base_model_id)
-                    .unwrap_or(&base_model_id)
-                || xlora_config
-                    .as_ref()
-                    .map(|cfg| &cfg.base_model_id)
-                    .unwrap_or(&base_model_id)
-                    != &base_model_id
-            {
-                anyhow::bail!(
-                    "Adapter ordering file, adapter model config, and base model ID do not match: {}, {}, and {} respectively.",
-                    xlora_order.base_model_id,
-                    xlora_config
-                        .map(|cfg| cfg.base_model_id)
-                        .unwrap_or(base_model_id.clone()),
-                    base_model_id
-                );
-            }
-
-            let lora_preload_adapter_info = if matches!(xlora_preload, XLoraPreload::Load) {
-                if let Some(preload_adapters) = &xlora_order.preload_adapters {
-                    let mut output = HashMap::new();
-                    for adapter in preload_adapters {
-                        // Get the names and remote paths of the files associated with this adapter
-                        let adapter_files = crate::pipeline::hf::list_repo_files(
-                            &api,
-                            std::path::Path::new(&adapter.adapter_model_id),
-                            true,
-                            &base_revision,
-                        )?
-                        .into_iter()
-                        .filter_map(|f| {
-                            if f.contains(&adapter.name) {
-                                Some((f, adapter.name.clone()))
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>();
-                        if adapter_files.is_empty() {
-                            anyhow::bail!(
-                                "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
-                            )
-                        }
-                        // Get local paths for this adapter
-                        let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
-                        for (file, name) in adapter_files {
-                            if let Some(paths) = adapters_paths.get_mut(&name) {
-                                paths.push(crate::pipeline::hf::get_file(
-                                    &api,
-                                    model_id,
-                                    &file,
-                                    &base_revision,
-                                )?);
-                            } else {
-                                adapters_paths.insert(
-                                    name,
-                                    vec![crate::pipeline::hf::get_file(
-                                        &api,
-                                        model_id,
-                                        &file,
-                                        &base_revision,
-                                    )?],
-                                );
-                            }
-                        }
-
-                        let mut config = None;
-                        let mut safetensor = None;
-
-                        // Sort local paths for the adapter configs and safetensors files
-                        let paths = adapters_paths
-                            .get(&adapter.name)
-                            .unwrap_or_else(|| panic!("Adapter {} not found.", adapter.name));
-                        for path in paths {
-                            if path.extension().unwrap() == "safetensors" {
-                                safetensor = Some(path.to_owned());
-                            } else {
-                                let conf = fs::read_to_string(path)?;
-                                let lora_config: LoraConfig = serde_json::from_str(&conf)?;
-                                config = Some(lora_config);
-                            }
-                        }
-
-                        let (config, safetensor) = (config.unwrap(), safetensor.unwrap());
-                        output.insert(adapter.name.clone(), (safetensor, config));
-                    }
-                    Some(output)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            Ok(AdapterPaths::XLora {
-                adapter_configs: Some(adapters_configs),
-                adapter_safetensors: Some(adapters_safetensors),
-                classifier_path,
-                xlora_order: Some(xlora_order.clone()),
-                xlora_config,
-                lora_preload_adapter_info,
-            })
+    let Some(adapters) = lora_adapters else {
+        return Ok(AdapterPaths::None);
+    };
+    let mut lora_adapter_paths = Vec::new();
+    let mut aliases = HashSet::new();
+    for adapter in adapters {
+        let alias = adapter.alias.trim();
+        let source = adapter.source.trim();
+        if alias.is_empty() {
+            anyhow::bail!("LoRA adapter alias must not be empty");
         }
-        (Some(adapters), None, None) => {
-            let mut lora_adapter_paths = Vec::new();
-            let mut aliases = HashSet::new();
-            for adapter in adapters {
-                let alias = adapter.alias.trim();
-                let source = adapter.source.trim();
-                if alias.is_empty() {
-                    anyhow::bail!("LoRA adapter alias must not be empty");
-                }
-                if source.is_empty() {
-                    anyhow::bail!(
-                        "LoRA adapter source for alias `{}` must not be empty",
-                        adapter.alias
-                    );
-                }
-                if adapter.revision().is_empty() {
-                    anyhow::bail!(
-                        "LoRA adapter revision for alias `{}` must not be empty",
-                        adapter.alias
-                    );
-                }
-                if let Some(expected) = adapter.base_model_name.as_deref().map(str::trim)
-                    && expected.is_empty()
-                {
-                    anyhow::bail!(
-                        "LoRA adapter `{}` has an empty base_model_name",
-                        adapter.alias
-                    );
-                }
-                if !aliases.insert(alias) {
-                    anyhow::bail!(
-                        "LoRA adapter alias `{}` is specified more than once",
-                        adapter.alias
-                    );
-                }
-                info!(
-                    "Loading LoRA adapter `{}` from `{}` at revision `{}`",
-                    alias,
-                    source,
-                    adapter.revision()
-                );
-
-                let api = build_api(token_source, true).map_err(inference_tensor::Error::msg)?;
-                let api = api.repo(Repo::with_revision(
-                    source.to_string(),
-                    RepoType::Model,
-                    adapter.revision().to_string(),
-                ));
-
-                let adapter_path_buf = std::path::Path::new(source);
-                let config_path = crate::pipeline::hf::get_file(
-                    &api,
-                    adapter_path_buf,
-                    "adapter_config.json",
-                    adapter.revision(),
-                )?;
-                let weights_path = crate::pipeline::hf::get_file(
-                    &api,
-                    adapter_path_buf,
-                    "adapter_model.safetensors",
-                    adapter.revision(),
-                )?;
-                lora_adapter_paths.push(ResolvedLoraAdapter {
-                    alias: alias.to_string(),
-                    source: source.to_string(),
-                    revision: (!adapter_path_buf.exists()).then(|| adapter.revision().to_string()),
-                    config_path,
-                    weights_path,
-                });
-            }
-
-            Ok(AdapterPaths::Lora(lora_adapter_paths))
+        if source.is_empty() {
+            anyhow::bail!(
+                "LoRA adapter source for alias `{}` must not be empty",
+                adapter.alias
+            );
         }
-        (None, None, None) => Ok(AdapterPaths::None),
-        _ => anyhow::bail!(
-            "Incorrect configuration for an adapter model. Lora and XLora are mutually exclusive."
-        ),
+        if adapter.revision().is_empty() {
+            anyhow::bail!(
+                "LoRA adapter revision for alias `{}` must not be empty",
+                adapter.alias
+            );
+        }
+        if let Some(expected) = adapter.base_model_name.as_deref().map(str::trim)
+            && expected.is_empty()
+        {
+            anyhow::bail!(
+                "LoRA adapter `{}` has an empty base_model_name",
+                adapter.alias
+            );
+        }
+        if !aliases.insert(alias) {
+            anyhow::bail!(
+                "LoRA adapter alias `{}` is specified more than once",
+                adapter.alias
+            );
+        }
+        info!(
+            "Loading LoRA adapter `{}` from `{}` at revision `{}`",
+            alias,
+            source,
+            adapter.revision()
+        );
+
+        let api = build_api(token_source, true).map_err(inference_tensor::Error::msg)?;
+        let api = api.repo(Repo::with_revision(
+            source.to_string(),
+            RepoType::Model,
+            adapter.revision().to_string(),
+        ));
+
+        let adapter_path_buf = std::path::Path::new(source);
+        let config_path = crate::pipeline::hf::get_file(
+            &api,
+            adapter_path_buf,
+            "adapter_config.json",
+            adapter.revision(),
+        )?;
+        let weights_path = crate::pipeline::hf::get_file(
+            &api,
+            adapter_path_buf,
+            "adapter_model.safetensors",
+            adapter.revision(),
+        )?;
+        lora_adapter_paths.push(ResolvedLoraAdapter {
+            alias: alias.to_string(),
+            source: source.to_string(),
+            revision: (!adapter_path_buf.exists()).then(|| adapter.revision().to_string()),
+            config_path,
+            weights_path,
+        });
     }
+
+    Ok(AdapterPaths::Lora(lora_adapter_paths))
 }
 
 pub fn get_model_paths(
@@ -835,7 +555,7 @@ pub(crate) struct PathsRequest<'a> {
 /// The tokenizer, config, weights, adapters, templates and processor configs a model loads from.
 pub(crate) fn get_paths(
     request: PathsRequest<'_>,
-    adapters: AdapterPathOptions<'_>,
+    lora_adapters: Option<&[LoraAdapterSpec]>,
 ) -> Result<crate::pipeline::LocalModelPaths<PathBuf>> {
     let repo = RepoFiles::open(
         request.model_id,
@@ -867,12 +587,7 @@ pub(crate) fn get_paths(
         request.quantized_filenames,
         request.loading_uqff,
     )?;
-    let adapter_paths = get_adapter_paths(
-        request.model_id.to_string(),
-        adapters,
-        request.token_source,
-        repo.revision.clone(),
-    )?;
+    let adapter_paths = get_adapter_paths(lora_adapters, request.token_source)?;
     let processor_configs = ProcessorConfigs::fetch(&repo)?;
     let template_filename = match request.chat_template {
         Some(path) => {
@@ -1023,10 +738,10 @@ pub(crate) struct GgufPathsRequest<'a> {
     pub silent: bool,
 }
 
-/// A GGUF model's files; `adapters`, when given, resolves its LoRA or X-LoRA adapters too.
+/// A GGUF model's files, with its LoRA adapters' when given.
 pub(crate) fn get_paths_gguf(
     request: GgufPathsRequest<'_>,
-    adapters: Option<AdapterPathOptions<'_>>,
+    lora_adapters: Option<&[LoraAdapterSpec]>,
 ) -> Result<crate::pipeline::LocalModelPaths<PathBuf>> {
     let this_model_id = request.model_id.unwrap_or(request.quantized_model_id);
     let repo = RepoFiles::open(
@@ -1051,15 +766,7 @@ pub(crate) fn get_paths_gguf(
         false,
     )?;
     debug!("GGUF file(s) {:?}", filenames);
-    let adapter_paths = match adapters {
-        Some(adapters) => get_adapter_paths(
-            this_model_id.to_string(),
-            adapters,
-            request.token_source,
-            repo.revision.clone(),
-        )?,
-        None => AdapterPaths::None,
-    };
+    let adapter_paths = get_adapter_paths(lora_adapters, request.token_source)?;
     let processor_configs = ProcessorConfigs::fetch(&repo)?;
     // empty when the repository has none, and the GGUF file's own tokenizer and config are used
     let tokenizer_filename = repo.get_listed("tokenizer.json")?.unwrap_or_default();

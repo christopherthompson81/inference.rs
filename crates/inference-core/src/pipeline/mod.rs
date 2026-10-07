@@ -4,7 +4,6 @@ pub(crate) mod cache_manager;
 pub(crate) use crate::model::{
     ModelForwardContext, RecurrentMetadata, recurrent_batch_kind_for_input,
 };
-pub use cache_manager::CacheManager;
 pub mod chat_template;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda_graph;
@@ -26,7 +25,6 @@ pub use isq_flow::CalibrationStatus;
 pub(crate) mod llg;
 mod loaders;
 mod loading;
-pub(crate) mod model_config;
 mod multimodal;
 mod normal;
 mod paths;
@@ -91,7 +89,7 @@ pub use loaders::{
     EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, Loader,
     LocalModelPaths, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
     MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
-    PrettyName, QuantizationKind, TokenSource,
+    QuantizationKind, TokenSource,
 };
 #[cfg(feature = "models-llama")]
 pub use loaders::{
@@ -165,7 +163,7 @@ pub(crate) fn finish_dynamic_lora_runtime(
 use inference_quant::IsqType;
 pub use multimodal::{MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig};
 pub use normal::{NormalLoader, NormalLoaderBuilder, NormalSpecificConfig};
-pub(crate) use paths::{AdapterPathOptions, XLoraPreload, get_chat_template};
+pub(crate) use paths::get_chat_template;
 pub use paths::{AdapterPaths, ResolvedLoraAdapter};
 #[cfg(feature = "models-llama")]
 pub(crate) use processing::apply_chat_template;
@@ -843,8 +841,6 @@ pub struct GeneralMetadata {
     pub num_hidden_layers: usize,
     pub eos_tok: Vec<u32>,
     pub kind: ModelKind,
-    // TODO: Replace is_xlora queries to check via kind instead:
-    pub is_xlora: bool,
     pub activation_dtype: DType,
     pub sliding_window: Option<usize>,
     // PagedAttention stuff
@@ -869,7 +865,6 @@ pub enum CacheInstruction {
     /// load_preallocated_cache means to load the preallocated cache, if applicable.
     Reset {
         load_preallocated_cache: bool,
-        reset_non_granular: bool,
     },
     Nothing,
 }
@@ -913,11 +908,9 @@ pub trait CacheManagerMixin {
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]);
     /// Set the model cache to all None. Only called for prompt seqs.
     /// It is not a guarantee that this will be called for each prompt step.
-    /// This may also reset the non granular state if applicable.
     fn set_none_cache(
         &self,
         seqs: &mut [&mut Sequence],
-        reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()>;
@@ -929,7 +922,8 @@ pub trait MetadataMixin {
     /// Only None if it doesnt make sense for the model
     fn tokenizer(&self) -> Option<Arc<Tokenizer>>;
     fn name(&self) -> String;
-    fn reset_non_granular_state(&self);
+    /// Drops model state kept per sequence, such as cached audio embeddings, once the sequence is done.
+    fn release_sequence_state(&self, _sequence_id: usize) {}
     /// Destroy decode graphs at teardown, while the engine thread's cuTile modules are still loaded.
     fn cleanup_cuda_graphs(&self) {}
     /// Evict least-recently-used decode graphs without disturbing recurrent state.

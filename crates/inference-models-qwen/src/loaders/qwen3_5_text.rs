@@ -53,18 +53,6 @@ impl NormalModelLoader for Qwen3_5TextLoader {
             attention_mechanism,
         )?))
     }
-    fn load_xlora(
-        &self,
-        _config: &str,
-        _vb: ShardedVarBuilder,
-        _lora_config: &[((String, String), LoraConfig)],
-        _xlora_config: Option<XLoraConfig>,
-        _xlora_ordering: Ordering,
-        _normal_loading_metadata: NormalLoadingMetadata,
-        _preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        anyhow::bail!("Qwen3.5 does not support X-LoRA")
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = parse_qwen35_text_config(config)?;
         Ok(Box::new(cfg))

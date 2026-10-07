@@ -3,8 +3,8 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, device_map, flashinfer, gdn, kv_cache, layers, lora, matformer, media_inputs,
-    model, moe, ops, paged_attention, speculative, utils, vision,
+    amoe, attention, device_map, flashinfer, gdn, kv_cache, layers, matformer, media_inputs, model,
+    moe, ops, paged_attention, speculative, utils, vision,
 };
 
 pub mod diffusion_gemma;
@@ -15,7 +15,6 @@ pub mod gemma3;
 pub mod gemma3n;
 pub mod gemma4;
 pub mod loaders;
-pub mod xlora;
 
 inference_nn::json_config!(
     gemma::Config,

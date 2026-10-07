@@ -579,7 +579,6 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
         tokenizer: Option<Arc<Tokenizer>>,
         input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
-        is_xlora: bool,
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -592,7 +591,6 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
         let step = QwenVlStep {
             host,
             is_prompt,
-            is_xlora,
             no_kv_cache,
             last_n_context_len,
             return_raw_logits,

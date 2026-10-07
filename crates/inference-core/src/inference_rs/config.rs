@@ -143,8 +143,6 @@ pub struct LoadOverrides {
     pub topology: Option<Topology>,
     /// Generation config for speech models.
     pub speech_cfg: Option<SpeechGenerationConfig>,
-    /// Used instead of reading the selection's adapter ordering file.
-    pub ordering: Option<Ordering>,
     /// Wraps the loaded model in an AnyMoE pipeline.
     pub anymoe: Option<AnyMoeSpec>,
 }

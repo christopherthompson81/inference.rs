@@ -11,7 +11,6 @@ use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, safetensors::Mmaped
 use inference_tensor::{DType, Device, Result, Tensor, pickle::PthTensors};
 use regex::Regex;
 
-use crate::lora::LoraConfig;
 use crate::utils::progress::{NiceProgressBar, new_multi_progress};
 use indicatif::MultiProgress;
 
@@ -67,7 +66,6 @@ pub enum DeviceForLoadTensor {
 #[allow(clippy::too_many_arguments)]
 pub fn from_mmaped_safetensors(
     paths: Vec<PathBuf>,
-    xlora_paths: Vec<PathBuf>,
     dtype: Option<DType>,
     base_device: &Device,
     layer_devices: Vec<Option<Device>>,
@@ -79,7 +77,6 @@ pub fn from_mmaped_safetensors(
     // Erased here so the loading body compiles once rather than once per caller's closure type.
     load_safetensors(
         paths,
-        xlora_paths,
         dtype,
         base_device,
         layer_devices,
@@ -93,7 +90,6 @@ pub fn from_mmaped_safetensors(
 #[allow(clippy::too_many_arguments)]
 fn load_safetensors(
     paths: Vec<PathBuf>,
-    xlora_paths: Vec<PathBuf>,
     dtype: Option<DType>,
     base_device: &Device,
     layer_devices: Vec<Option<Device>>,
@@ -103,7 +99,7 @@ fn load_safetensors(
     get_device_for_tensor: Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>,
 ) -> Result<ShardedVarBuilder> {
     let use_no_mmap = std::env::var(INFERENCE_RS_NO_MMAP).is_ok_and(|x| x == "1");
-    if xlora_paths.is_empty() && !use_no_mmap {
+    if !use_no_mmap {
         if !silent {
             tracing::debug!("Loading model using mmap strategy.");
         }
@@ -124,15 +120,10 @@ fn load_safetensors(
         Some(regexes) => Arc::new(move |key| regexes.iter().any(|r| r.is_match(key))),
         None => Arc::new(|_| false),
     };
-    let loaders = paths.into_iter().map(|path| (path, None)).chain(
-        xlora_paths
-            .into_iter()
-            .enumerate()
-            .map(|(i, path)| (path, Some(i + 1))),
-    );
     #[allow(clippy::type_complexity)]
-    let handles: Vec<JoinHandle<Result<HashMap<String, Tensor>>>> = loaders
-        .map(|(path, xlora_index)| {
+    let handles: Vec<JoinHandle<Result<HashMap<String, Tensor>>>> = paths
+        .into_iter()
+        .map(|path| {
             let base_device = base_device.clone();
             let layer_devices = layer_devices.clone();
             let get_device_for_tensor = get_device_for_tensor.clone();
@@ -140,7 +131,7 @@ fn load_safetensors(
             let make_dummy = make_dummy.clone();
             let progress = progress.clone();
             thread::spawn(move || {
-                let load = TensorLoad {
+                load_tensors_from_path(TensorLoad {
                     path: &path,
                     base_device: &base_device,
                     layer_devices,
@@ -149,11 +140,7 @@ fn load_safetensors(
                     progress,
                     predicate: &*predicate,
                     make_dummy_predicate: &*make_dummy,
-                };
-                match xlora_index {
-                    None => Common.load_tensors_from_path(load),
-                    Some(adapter_index) => XLora { adapter_index }.load_tensors_from_path(load),
-                }
+                })
             })
         })
         .collect();
@@ -175,39 +162,6 @@ fn load_safetensors(
     ))
 }
 
-pub fn load_preload_adapters(
-    paths: &Option<HashMap<String, (PathBuf, LoraConfig)>>,
-    dtype: DType,
-    device: &Device,
-    silent: bool,
-) -> Result<Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>> {
-    if let Some(paths) = paths {
-        let mut map = HashMap::new();
-        for (name, (path, config)) in paths {
-            let loader = Common;
-            let loaded_tensors = loader.load_tensors_from_path(TensorLoad {
-                path,
-                base_device: device,
-                layer_devices: vec![None],
-                get_device_for_tensor: Arc::new(|_| DeviceForLoadTensor::Base),
-                dtype: Some(dtype),
-                progress: (!silent).then(new_multi_progress),
-                predicate: &|_| true,
-                make_dummy_predicate: &|_| false,
-            })?;
-
-            // TODO(EricLBuehler): separation of concerns.
-            // This is to have WNA16 for GPTQ which is required. No bf16 for GPTQ
-            let vb = ShardedSafeTensors::wrap(loaded_tensors, dtype, device.clone());
-
-            map.insert(name.clone(), (vb, config.clone()));
-        }
-        Ok(Some(map))
-    } else {
-        Ok(None)
-    }
-}
-
 /// One checkpoint file to load and how to place and filter its tensors.
 struct TensorLoad<'a> {
     path: &'a PathBuf,
@@ -220,106 +174,69 @@ struct TensorLoad<'a> {
     make_dummy_predicate: &'a dyn Fn(&str) -> bool,
 }
 
-// Presently this logic only needs to diverge for X-LoRA support via `get_name_key_pairs()`
-trait LoadTensors {
-    fn load_tensors_from_path(&self, load: TensorLoad<'_>) -> Result<HashMap<String, Tensor>> {
-        let TensorLoad {
-            path,
-            base_device,
-            layer_devices,
-            get_device_for_tensor,
-            dtype,
-            progress,
-            predicate,
-            make_dummy_predicate,
-        } = load;
-        let tensors: Box<dyn TensorLoaderBackend> = match path
-            .extension()
-            .expect("Expected extension")
-            .to_str()
-            .expect("Expected to convert")
-        {
-            "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
-            "pth" | "pt" | "bin" => Box::new(PickleBackend(
-                inference_tensor::pickle::PthTensors::new(path, None)?,
-            )),
-            other => inference_tensor::bail!(
-                "Unexpected extension `{other}`, this should have been handled by `get_model_paths`."
-            ),
+fn load_tensors_from_path(load: TensorLoad<'_>) -> Result<HashMap<String, Tensor>> {
+    let TensorLoad {
+        path,
+        base_device,
+        layer_devices,
+        get_device_for_tensor,
+        dtype,
+        progress,
+        predicate,
+        make_dummy_predicate,
+    } = load;
+    let tensors: Box<dyn TensorLoaderBackend> = match path
+        .extension()
+        .expect("Expected extension")
+        .to_str()
+        .expect("Expected to convert")
+    {
+        "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
+        "pth" | "pt" | "bin" => Box::new(PickleBackend(inference_tensor::pickle::PthTensors::new(
+            path, None,
+        )?)),
+        other => inference_tensor::bail!(
+            "Unexpected extension `{other}`, this should have been handled by `get_model_paths`."
+        ),
+    };
+
+    // Extracts the tensor name and processes it, filtering tensors and deriving the key name:
+    let names_only = tensors
+        .get_names()
+        .into_iter()
+        .filter(|x| predicate(x.to_string()));
+    let iter = names_only
+        .map(|name| {
+            let key = name.replace("base_model.model.model", "model");
+            (name, key)
+        })
+        .collect::<Vec<_>>();
+
+    // Take the filtered list of tensors to load, store with derived lookup key:
+    let mut loaded_tensors = HashMap::new();
+    if !iter.is_empty() {
+        let pairs: Box<dyn Iterator<Item = (String, String)>> = match &progress {
+            Some(multi) => {
+                Box::new(NiceProgressBar::<_, 'b'>(iter.into_iter(), "Loading", multi).into_iter())
+            }
+            None => Box::new(iter.into_iter()),
         };
+        for (load_name, key_name) in pairs {
+            if !make_dummy_predicate(&load_name) {
+                let dev = match get_device_for_tensor(load_name.clone()) {
+                    DeviceForLoadTensor::Base => base_device,
+                    DeviceForLoadTensor::Idx(i) => layer_devices
+                        .get(i)
+                        .and_then(|d| d.as_ref())
+                        .unwrap_or(base_device),
+                };
+                // If making a dummy, don't add the tensor. `inference_quant` handles this!
+                let tensor = tensors.load_name(&load_name, dev, dtype)?;
 
-        // Extracts the tensor name and processes it, filtering tensors and deriving the key name:
-        let names_only = tensors
-            .get_names()
-            .into_iter()
-            .filter(|x| predicate(x.to_string()));
-        let iter = self.get_name_key_pairs(names_only).collect::<Vec<_>>();
-
-        // Take the filtered list of tensors to load, store with derived lookup key:
-        let mut loaded_tensors = HashMap::new();
-        if !iter.is_empty() {
-            let pairs: Box<dyn Iterator<Item = (String, String)>> = match &progress {
-                Some(multi) => Box::new(
-                    NiceProgressBar::<_, 'b'>(iter.into_iter(), "Loading", multi).into_iter(),
-                ),
-                None => Box::new(iter.into_iter()),
-            };
-            for (load_name, key_name) in pairs {
-                if !make_dummy_predicate(&load_name) {
-                    let dev = match get_device_for_tensor(load_name.clone()) {
-                        DeviceForLoadTensor::Base => base_device,
-                        DeviceForLoadTensor::Idx(i) => layer_devices
-                            .get(i)
-                            .and_then(|d| d.as_ref())
-                            .unwrap_or(base_device),
-                    };
-                    // If making a dummy, don't add the tensor. `inference_quant` handles this!
-                    let tensor = tensors.load_name(&load_name, dev, dtype)?;
-
-                    loaded_tensors.insert(key_name, tensor);
-                }
+                loaded_tensors.insert(key_name, tensor);
             }
         }
-
-        Ok(loaded_tensors)
     }
 
-    fn get_name_key_pairs(
-        &self,
-        tensors: impl Iterator<Item = String>,
-    ) -> impl Iterator<Item = (String, String)> {
-        tensors.map(|name| {
-            let new_name = name.replace("base_model.model.model", "model");
-
-            (name, new_name)
-        })
-    }
-}
-
-struct Common;
-impl LoadTensors for Common {}
-
-struct XLora {
-    // Matches the associated path instance for reference in `get_name_key_pairs()`
-    adapter_index: usize,
-}
-
-impl LoadTensors for XLora {
-    fn get_name_key_pairs(
-        &self,
-        tensors: impl Iterator<Item = String>,
-    ) -> impl Iterator<Item = (String, String)> {
-        let expectation = "tensor name `{new_name}` should have substring `.lora`";
-
-        tensors
-            .filter(|name| !name.contains("internal_xlora_classifier"))
-            .map(|name| {
-                let mut new_name = name.replace("base_model.model.model", "model");
-                // TODO: Add better context to describe intent / requirement:
-                let pos = new_name.find(".lora").expect(expectation);
-                new_name.insert_str(pos + 7, &format!(".{}", self.adapter_index));
-
-                (name, new_name)
-            })
-    }
+    Ok(loaded_tensors)
 }

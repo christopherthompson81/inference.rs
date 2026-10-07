@@ -250,7 +250,6 @@ pub(crate) struct QwenVlInputs<'a> {
 pub(crate) struct QwenVlStep<'a> {
     pub(crate) host: &'a dyn InputsHost,
     pub(crate) is_prompt: bool,
-    pub(crate) is_xlora: bool,
     pub(crate) no_kv_cache: bool,
     pub(crate) last_n_context_len: Option<(usize, usize)>,
     pub(crate) return_raw_logits: bool,
@@ -332,7 +331,6 @@ impl QwenVlInputs<'_> {
         let QwenVlStep {
             host,
             is_prompt,
-            is_xlora,
             no_kv_cache,
             last_n_context_len,
             return_raw_logits,
@@ -340,11 +338,6 @@ impl QwenVlInputs<'_> {
             mut paged_attn_metadata,
             mapper,
         } = step;
-        if is_xlora {
-            return Err(anyhow::Error::msg(
-                "Cannot make inputs for X-LoRA vision model.",
-            ));
-        }
         if no_kv_cache {
             return Err(anyhow::Error::msg("Vision model must have kv cache."));
         }

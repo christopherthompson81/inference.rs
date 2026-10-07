@@ -10,7 +10,6 @@ use inference_tensor::{DType, Device, Result, Tensor};
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::FromGGML;
-use crate::gguf::metadata::ContentMetadata;
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCache;
@@ -240,76 +239,6 @@ impl FromGGML for ModelWeights {
     }
 }
 
-// llama `llm` fields:
-// https://github.com/ggerganov/ggml/blob/master/docs/gguf.md#llm
-// NOTE: Types here do not match spec
-pub(crate) struct PropsGGUF {
-    pub n_expert: usize,
-    pub n_expert_used: usize,
-    pub head_count: usize,
-    pub head_count_kv: usize,
-    pub block_count: usize,
-    pub embedding_length: usize,
-    pub rope_dim: usize,
-    pub rms_norm_eps: f32,
-    pub max_seq_len: usize,
-    pub rope_freq_base: f32,
-    pub key_length: usize,
-    pub value_length: usize,
-}
-
-impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
-    type Error = anyhow::Error;
-
-    fn try_from(c: ContentMetadata) -> std::result::Result<Self, Self::Error> {
-        c.verify_arch_any(&["llama", "mistral3"])?;
-
-        let required = [
-            "attention.head_count",
-            "attention.head_count_kv",
-            "block_count",
-            "embedding_length",
-            "rope.dimension_count",
-            "attention.layer_norm_rms_epsilon",
-        ];
-        c.has_required_keys(&required)?;
-
-        let embed_len = c.get_value::<u32>("embedding_length")? as usize;
-        let head_count = c.get_value::<u32>("attention.head_count")? as usize;
-
-        // NOTE: Values are not aligned with GGUFv3 types
-        // TODO: Normalize value types to spec
-        let props = Self {
-            n_expert: c.get_value::<u32>("expert_count").ok().unwrap_or(0) as usize,
-            n_expert_used: c.get_value::<u32>("expert_used_count").ok().unwrap_or(0) as usize,
-            head_count,
-            head_count_kv: c.get_value::<u32>("attention.head_count_kv")? as usize,
-            block_count: c.get_value::<u32>("block_count")? as usize,
-            embedding_length: embed_len,
-            rope_dim: c.get_value::<u32>("rope.dimension_count")? as usize,
-            // Strangely this value is generally 1e-6 in GGUF file but used to be 1e-5 by default.
-            rms_norm_eps: c.get_value("attention.layer_norm_rms_epsilon")?,
-            max_seq_len: c
-                .get_value::<u64>("context_length")
-                .ok()
-                .unwrap_or(DEFAULT_MAX_SEQ_LEN as u64) as usize,
-            rope_freq_base: c.get_value("rope.freq_base").ok().unwrap_or(10_000_f32),
-            key_length: c
-                .get_value::<u32>("attention.key_length")
-                .ok()
-                .map(|x| x as usize)
-                .unwrap_or(embed_len / head_count),
-            value_length: c
-                .get_value::<u32>("attention.value_length")
-                .ok()
-                .map(|x| x as usize)
-                .unwrap_or(embed_len / head_count),
-        };
-
-        Ok(props)
-    }
-}
-
 impl ModelWeights {
     pub fn forward(
         &self,
@@ -377,13 +306,13 @@ impl ModelWeights {
 }
 
 impl crate::gguf::QuantizedModel for ModelWeights {
-    fn forward_step(&self, inputs: crate::gguf::QuantizedForwardInputs<'_>) -> Result<Tensor> {
-        self.forward(
-            inputs.input_ids,
-            inputs.seqlen_offsets,
-            inputs.context_lens,
-            None,
-        )
+    fn forward_step(
+        &self,
+        input_ids: &Tensor,
+        seqlen_offsets: &[usize],
+        context_lens: Vec<(usize, usize)>,
+    ) -> Result<Tensor> {
+        self.forward(input_ids, seqlen_offsets, context_lens, None)
     }
     fn cache(&self) -> &EitherCache {
         &self.cache

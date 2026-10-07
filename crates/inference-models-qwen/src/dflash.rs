@@ -2249,7 +2249,6 @@ impl DFlashDraftModel {
         }
         let vb = from_mmaped_safetensors(
             weight_paths,
-            Vec::new(),
             Some(dtype),
             device,
             Vec::new(),

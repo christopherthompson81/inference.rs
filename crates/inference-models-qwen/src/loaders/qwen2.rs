@@ -21,18 +21,6 @@ impl NormalModelLoader for Qwen2Loader {
             attention_mechanism,
         )?))
     }
-    fn load_xlora(
-        &self,
-        _config: &str,
-        _vb: ShardedVarBuilder,
-        _lora_config: &[((String, String), LoraConfig)],
-        _xlora_config: Option<XLoraConfig>,
-        _xlora_ordering: Ordering,
-        _normal_loading_metadata: NormalLoadingMetadata,
-        _preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        todo!()
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = crate::qwen2::Config::from_json(config)?;
 

@@ -461,7 +461,6 @@ pub struct FullCacheManager;
 
 enum SeqCache {
     Normal,
-    XLora,
     Draft,
 }
 
@@ -478,7 +477,6 @@ fn clone_in_cache(
         for seq in &mut *seqs {
             let src_cache = match src {
                 SeqCache::Normal => seq.cache(),
-                SeqCache::XLora => seq.xlora_cache(),
                 SeqCache::Draft => seq.draft_cache(),
             };
             let cache = src_cache.get(layer).unwrap();
@@ -533,7 +531,6 @@ fn clone_out_cache(
         for (seq_i, seq) in seqs.iter_mut().enumerate() {
             let output_cache = match target {
                 SeqCache::Normal => seq.cache(),
-                SeqCache::XLora => seq.xlora_cache(),
                 SeqCache::Draft => seq.draft_cache(),
             };
             let seq_cache = &mut output_cache[layer];
@@ -566,21 +563,6 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for FullCach
             seqs,
             SeqCache::Normal,
         );
-        if pipeline.get_metadata().is_xlora && !pipeline.get_metadata().no_kv_cache {
-            clone_in_cache(
-                pipeline.get_metadata().num_hidden_layers,
-                &mut pipeline.cache().full().xlora_lock(),
-                seqs,
-                SeqCache::XLora,
-            );
-        }
-        if pipeline.get_metadata().is_xlora {
-            pipeline
-                .cache()
-                .full()
-                .get_scalings_cache()
-                .clone_from(seqs[0].scaling_cache());
-        }
         Ok(())
     }
 
@@ -605,19 +587,6 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for FullCach
             seqs,
             SeqCache::Normal,
         );
-        if pipeline.get_metadata().is_xlora && !pipeline.get_metadata().no_kv_cache {
-            clone_out_cache(
-                pipeline.get_metadata().num_hidden_layers,
-                &mut pipeline.cache().full().xlora_lock(),
-                seqs,
-                SeqCache::XLora,
-            );
-        }
-        if pipeline.get_metadata().is_xlora {
-            seqs[0]
-                .scaling_cache()
-                .clone_from(&pipeline.cache().full().get_scalings_cache());
-        }
     }
 
     fn set_none_cache(
@@ -634,9 +603,6 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for FullCach
         pipeline.cache().full().lock().clone_from(&new_cache);
         if modify_draft_cache {
             pipeline.cache().full().draft_lock().clone_from(&new_cache);
-        }
-        if pipeline.cache().full().is_xlora() {
-            *pipeline.cache().full().xlora_lock() = new_cache;
         }
         Ok(())
     }

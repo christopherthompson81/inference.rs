@@ -208,10 +208,6 @@ name = "lora"
 path = "advanced/lora/main.rs"
 
 [[example]]
-name = "xlora"
-path = "advanced/xlora/main.rs"
-
-[[example]]
 name = "anymoe"
 path = "advanced/anymoe/main.rs"
 

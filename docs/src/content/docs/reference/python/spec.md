@@ -280,7 +280,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelSelected`
 
-One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]`.
+One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]`.
 
 
 ## `ModelSelectedDiffusionPlain`
@@ -391,51 +391,6 @@ Select a LoRA architecture
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
 
 
-## `ModelSelectedLoraGGML`
-
-Select a GGML model with LoRA.
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `adapters_model_id` | `str` | required |
-| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
-| `gqa` | `int` | required |
-| `max_batch_size` | `int \| None` | `1` |
-| `max_seq_len` | `int \| None` | `4096` |
-| `order` | `str` | required |
-| `quantized_filename` | `str` | required |
-| `quantized_model_id` | `str` | required |
-| `tok_model_id` | `str \| None` | optional |
-| `tokenizer_json` | `str \| None` | optional |
-| `topology` | `str \| None` | optional |
-
-
-## `ModelSelectedLoraGGUF`
-
-Select a GGUF model with LoRA.
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `adapters_model_id` | `str` | required |
-| `calibration_file` | `str \| None` | optional |
-| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
-| `hf_cache_path` | `str \| None` | optional |
-| `imatrix` | `str \| None` | optional |
-| `matformer_config_path` | `str \| None` | optional |
-| `matformer_slice_name` | `str \| None` | optional |
-| `max_batch_size` | `int \| None` | `1` |
-| `max_seq_len` | `int \| None` | `4096` |
-| `order` | `str` | required |
-| `organization` | `IsqOrganization \| None` | optional |
-| `quant` | `str \| None` | optional |
-| `quantized_filename` | `str \| None` | optional |
-| `quantized_model_id` | `str` | required |
-| `tok_model_id` | `str \| None` | optional |
-| `tokenizer_json` | `str \| None` | optional |
-| `topology` | `str \| None` | optional |
-| `write_uqff` | `UqffWriteSpec \| None` | optional |
-
-
 ## `ModelSelectedMultimodalPlain`
 
 Select a multimodal plain model, without quantization or adapters
@@ -522,76 +477,6 @@ Select a model for running via auto loader
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `generation` | `SpeechGenerationSpec \| None` | optional |
 | `model_id` | `str` | required |
-
-
-## `ModelSelectedXLora`
-
-Select an X-LoRA architecture
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `arch` | `NormalLoaderType \| None` | optional |
-| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
-| `from_uqff` | `str \| None` | optional |
-| `hf_cache_path` | `str \| None` | optional |
-| `max_batch_size` | `int \| None` | `1` |
-| `max_seq_len` | `int \| None` | `4096` |
-| `model_id` | `str \| None` | optional |
-| `order` | `str` | required |
-| `organization` | `IsqOrganization \| None` | optional |
-| `quant` | `str \| None` | optional |
-| `tgt_non_granular_index` | `int \| None` | optional |
-| `tokenizer_json` | `str \| None` | optional |
-| `topology` | `str \| None` | optional |
-| `write_uqff` | `UqffWriteSpec \| None` | optional |
-| `xlora_model_id` | `str` | required |
-
-
-## `ModelSelectedXLoraGGML`
-
-Select a GGML model with X-LoRA.
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
-| `gqa` | `int` | required |
-| `max_batch_size` | `int \| None` | `1` |
-| `max_seq_len` | `int \| None` | `4096` |
-| `order` | `str` | required |
-| `quantized_filename` | `str` | required |
-| `quantized_model_id` | `str` | required |
-| `tgt_non_granular_index` | `int \| None` | optional |
-| `tok_model_id` | `str \| None` | optional |
-| `tokenizer_json` | `str \| None` | optional |
-| `topology` | `str \| None` | optional |
-| `xlora_model_id` | `str` | required |
-
-
-## `ModelSelectedXLoraGGUF`
-
-Select a GGUF model with X-LoRA.
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `calibration_file` | `str \| None` | optional |
-| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
-| `hf_cache_path` | `str \| None` | optional |
-| `imatrix` | `str \| None` | optional |
-| `matformer_config_path` | `str \| None` | optional |
-| `matformer_slice_name` | `str \| None` | optional |
-| `max_batch_size` | `int \| None` | `1` |
-| `max_seq_len` | `int \| None` | `4096` |
-| `order` | `str` | required |
-| `organization` | `IsqOrganization \| None` | optional |
-| `quant` | `str \| None` | optional |
-| `quantized_filename` | `str \| None` | optional |
-| `quantized_model_id` | `str` | required |
-| `tgt_non_granular_index` | `int \| None` | optional |
-| `tok_model_id` | `str \| None` | optional |
-| `tokenizer_json` | `str \| None` | optional |
-| `topology` | `str \| None` | optional |
-| `write_uqff` | `UqffWriteSpec \| None` | optional |
-| `xlora_model_id` | `str` | required |
 
 
 ## `ModelSpec`

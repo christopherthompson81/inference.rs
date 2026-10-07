@@ -479,7 +479,6 @@ impl DynamicLoraRuntime {
         let generation = AdapterGenerationId::from_adapter_digests(config_digest, weights_digest);
         let weights = crate::utils::varbuilder_utils::from_mmaped_safetensors(
             vec![snapshot.path().to_path_buf()],
-            Vec::new(),
             Some(inference_tensor::DType::F32),
             &inference_tensor::Device::Cpu,
             Vec::new(),

@@ -147,7 +147,7 @@ Each `[[models]]` entry can carry nested sections whose field shapes mirror the 
 | Section | Purpose |
 |---|---|
 | `[models.format]` | Weight format selection and overrides (`format`, `quantized_file`, `mmproj`, `tok_model_id`, and GGML `gqa`). |
-| `[models.adapter]` | LoRA/X-LoRA adapter configuration. |
+| `[models.adapter]` | LoRA adapter configuration. |
 | `[models.quantization]` | Quantization and artifact selection: `quant` (same as `--quant`), `isq` (explicit ISQ, same as `--isq`), `from_uqff`, `isq_organization`, `imatrix`, `calibration_file`. |
 | `[models.device]` | Device placement: `cpu`, `device_layers`, `topology`, `hf_cache`, `max_seq_len`, `max_batch_size`. `cpu` must be consistent across every entry. |
 | `[models.multimodal]` | Multimodal load-time caps: `max_edge` (resize images to this longest edge, aspect kept), `max_num_images` (per request), `max_image_length` (largest image dimension planned for in device mapping), `encoder_cache_memory_mb` (encoder cache cap in MiB). |
@@ -192,8 +192,7 @@ lora = [
 ```
 
 Multimodal GGUF supports dynamic language-model LoRA. Vision, audio, and projector adapters are not
-supported. Legacy LoRA and X-LoRA remain unavailable with multimodal GGUF. GGML uses `legacy_lora`
-together with `legacy_lora_order`; legacy static GGUF mode remains available for Phi3.
+supported. GGML does not support LoRA.
 
 ## Multi-model example
 
@@ -265,9 +264,8 @@ Flag interactions that hold on the command line and as TOML keys:
 - Multimodal GGUF repositories select a projector when one compatible candidate can be identified.
   Use `mmproj` (`--mmproj`) to choose explicitly and `tok_model_id` (`--tok-model-id`) to override
   the configuration, tokenizer, and processor source. Dynamic language-model LoRA keeps the
-  selected projector. Vision, audio, and projector adapters are unsupported. Legacy LoRA and
-  X-LoRA cannot be combined with a multimodal projector.
-- Dynamic LoRA (`enable_lora` or `lora`), legacy GGUF/GGML LoRA (`legacy_lora` with `legacy_lora_order`), and X-LoRA (`xlora` with `xlora_order`) are mutually exclusive. Dynamic `lora` entries require unique, nonempty aliases and sources. Supported GGUF uses dynamic LoRA; GGML uses legacy mode, and legacy static GGUF mode remains available for Phi3. `tgt_non_granular_index` requires `xlora`.
+  selected projector. Vision, audio, and projector adapters are unsupported.
+- Dynamic `lora` entries require unique, nonempty aliases and sources. GGML does not support LoRA. `[models.adapter]` rejects unknown keys, including the removed `xlora` and `legacy_lora` settings.
 - `--matformer-slice-name` requires `--matformer-config-path`.
 - `inference run`: `--image`, `--video`, and `--audio` require `-i`/`--input`.
 - `inference bench`: `--prompt-len` and `--depth` accept comma-separated values for sweeps.

@@ -201,13 +201,11 @@ impl CacheManagerMixin for AnyMoePipeline {
     fn set_none_cache(
         &self,
         seqs: &mut [&mut Sequence],
-        reset_non_granular: bool,
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) -> inference_tensor::Result<()> {
         get_mut_arcmutex!(self.target).set_none_cache(
             seqs,
-            reset_non_granular,
             modify_draft_cache,
             load_preallocated_cache,
         )
@@ -257,8 +255,8 @@ impl MetadataMixin for AnyMoePipeline {
     fn name(&self) -> String {
         get_mut_arcmutex!(self.target).name()
     }
-    fn reset_non_granular_state(&self) {
-        get_mut_arcmutex!(self.target).reset_non_granular_state()
+    fn release_sequence_state(&self, sequence_id: usize) {
+        get_mut_arcmutex!(self.target).release_sequence_state(sequence_id)
     }
     fn cleanup_cuda_graphs(&self) {
         get_mut_arcmutex!(self.target).cleanup_cuda_graphs()
@@ -644,13 +642,12 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                 let mut input_seqs = seqs.iter_mut().collect::<Vec<_>>();
 
                 // Clear KV cache in prep for training
-                target.set_none_cache(&mut input_seqs, true, true, false)?;
+                target.set_none_cache(&mut input_seqs, true, false)?;
 
                 let inputs = inputs_processor.process_inputs(
                     tokenizer.clone(),
                     &mut input_seqs,
                     true, // Always a prompt
-                    metadata.is_xlora,
                     &device,
                     metadata.no_kv_cache,
                     None,
@@ -667,7 +664,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                 let _ = target.forward_inputs(inputs.unwrap().inputs, false)?;
 
                 // Clear the KV cache
-                target.set_none_cache(&mut input_seqs, true, true, false)?;
+                target.set_none_cache(&mut input_seqs, true, false)?;
 
                 // === BACKWARD STEP ==
                 #[allow(clippy::cast_possible_truncation)]
@@ -760,7 +757,6 @@ fn new_dummy_seq(
         vec![],
         None,
         false,
-        false,
         dummy_group,
         0,
         0,
@@ -840,7 +836,6 @@ pub(crate) fn load_anymoe_weights(
         let layers = src.layers.to_vec();
         let vb = from_mmaped_safetensors(
             filenames,
-            vec![],
             Some(src.dtype),
             src.dev,
             vec![None],
@@ -874,7 +869,6 @@ pub(crate) fn load_anymoe_weights(
         let gate_path = gate_filenames[0].display().to_string();
         let vb = from_mmaped_safetensors(
             gate_filenames,
-            vec![],
             Some(src.dtype),
             src.dev,
             vec![None],

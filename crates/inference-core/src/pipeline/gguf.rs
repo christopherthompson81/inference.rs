@@ -1,21 +1,8 @@
-use super::llg::build_llg_factory;
-use super::{
-    AdapterKind, CacheManager, GeneralMetadata, Loader, ModelKind, ModelPaths, PrettyName,
-    QuantizationKind, TokenSource, text_models_inputs_processor::ModelInputs,
-};
-use super::{
-    AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqPipelineMixin,
-    MetadataMixin, ModelCategory, PreProcessingMixin,
-};
-use crate::device_map::{self, DeviceMapper};
-use crate::distributed::WorkerTransferData;
-use crate::gguf::metadata::{ContentConfig, GgufDeviceMapLoaderInner};
-use crate::gguf::{Content, GGUFArchitecture};
+use super::{AdapterKind, Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource};
 use crate::gguf::{
     GgufTokenizerConversion,
     base_model::infer_hf_base_model_id,
-    convert_gguf_metadata_to_hf_tokenizer, get_gguf_chat_template,
-    get_gguf_chat_template_from_metadata,
+    convert_gguf_metadata_to_hf_tokenizer, get_gguf_chat_template_from_metadata,
     multimodal_bindings::build_gemma4_bindings,
     multimodal_vision_registry::resolve_native_multimodal_gguf,
     muse_glimmer_bindings::normalize_muse_glimmer_config,
@@ -39,48 +26,27 @@ use crate::gguf::{
         prepare_gemma3_text_config,
     },
 };
-use crate::lora::Ordering;
-use crate::pipeline::ChatTemplate;
-use crate::pipeline::cache_manager::FullCacheManager;
-use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
+use crate::pipeline::chat_template::GenerationConfig;
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
-use crate::pipeline::loaders::{DeviceMappedModelLoader, stamp_qk_rope_layout};
-use crate::pipeline::model_config as ModelConfig;
+use crate::pipeline::loaders::stamp_qk_rope_layout;
 use crate::pipeline::multimodal::{
     MultimodalLoaderBuilder, MultimodalSpecificConfig, PreparedMultimodalSource,
 };
 use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig, PreparedNormalSource};
-use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{Modalities, SupportedModality, get_chat_template};
-use crate::prefix_cacher::PrefixCacheManagerV2;
-use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::xlora_models::NonGranularState;
-#[cfg(feature = "models-llama")]
-use crate::xlora_models::XLoraQLlama;
-#[cfg(feature = "models-phi")]
-use crate::xlora_models::XLoraQPhi3;
 use crate::{
     DeviceMapSetting, GLOBAL_HF_CACHE, LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig,
     MultimodalLoaderType, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, UqffWriteConfig,
-    distributed, get_mut_arcmutex,
 };
 use anyhow::{Context, Result, bail};
-use either::Either;
-use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
-use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
-use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
-use inference_tensor::{Device, Tensor};
-use rand_isaac::Isaac64Rng;
-use std::any::Any;
+use inference_tensor::Device;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::{env, fs};
-use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
 
@@ -93,37 +59,6 @@ const PROJECTOR_REQUIRED_ARCHITECTURES: &[&str] = &[
     "qwen3vl",
     "qwen3vlmoe",
 ];
-
-// Adjacent-RoPE GGUFs whose Q/K are not plain per-head projections: MLA (deepseek2) and partial rotary (glm4).
-const ADJACENT_ROPE_WITHOUT_QK_LORA_LAYOUT: &[&str] = &["deepseek2", "glm4"];
-
-fn validate_native_dynamic_lora(
-    dynamic_lora: Option<&DynamicLoraConfig>,
-    rope_pairing: RopePairing,
-    architecture: &str,
-) -> Result<()> {
-    if dynamic_lora.is_some()
-        && rope_pairing == RopePairing::Adjacent
-        && ADJACENT_ROPE_WITHOUT_QK_LORA_LAYOUT.contains(&architecture)
-    {
-        bail!(
-            "dynamic LoRA is not supported for native GGUF architecture `{architecture}`: its converter-permuted Q/K tensors do not map onto Hugging Face adapter rows; load the original safetensors model or omit the LoRA adapter"
-        );
-    }
-    Ok(())
-}
-
-fn validate_legacy_gguf_adapter_qk_layout(architecture: GGUFArchitecture) -> Result<()> {
-    if matches!(
-        architecture,
-        GGUFArchitecture::Llama | GGUFArchitecture::Mistral3
-    ) {
-        bail!(
-            "legacy LoRA and X-LoRA are not supported for GGUF `{architecture}` models because their Q/K tensors use converter-permuted adjacent RoPE order; load the original safetensors model or omit the adapter"
-        );
-    }
-    Ok(())
-}
 
 fn preferred_hf_config(files: &[String]) -> Option<&'static str> {
     if files.iter().any(|file| file == "config.json") {
@@ -141,32 +76,17 @@ fn requires_multimodal_projector(architecture: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(architecture))
 }
 
-pub struct GGUFPipeline {
-    model: Box<dyn QuantizedModel>,
-    tokenizer: Arc<Tokenizer>,
-    no_kv_cache: bool,
-    chat_template: Arc<ChatTemplate>,
-    model_id: String,
-    non_granular_state: Option<NonGranularState>,
-    metadata: Arc<GeneralMetadata>,
-    generation_defaults: Option<crate::ModelGenerationDefaults>,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
-}
-
 /// Loader for a GGUF model.
 pub struct GGUFLoader {
     model_id: Option<String>,
     quantized_model_id: String,
     quantized_filenames: Vec<String>,
     mmproj_filenames: Option<Vec<String>>,
-    xlora_model_id: Option<String>,
-    xlora_order: Option<Ordering>,
     no_kv_cache: bool,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
     dynamic_lora: Option<DynamicLoraConfig>,
     kind: ModelKind,
-    tgt_non_granular_index: Option<usize>,
     config: GGUFSpecificConfig,
     jinja_explicit: Option<String>,
     encoder_cache_memory_bytes: Option<usize>,
@@ -307,14 +227,11 @@ pub struct GGUFLoaderBuilder {
     quantized_model_id: String,
     quantized_filenames: Vec<String>,
     mmproj_filenames: Option<Vec<String>>,
-    xlora_model_id: Option<String>,
     kind: ModelKind,
-    xlora_order: Option<Ordering>,
     no_kv_cache: bool,
     chat_template: Option<String>,
     tokenizer_json: Option<String>,
     dynamic_lora: Option<DynamicLoraConfig>,
-    tgt_non_granular_index: Option<usize>,
     config: GGUFSpecificConfig,
     jinja_explicit: Option<String>,
     encoder_cache_memory_bytes: Option<usize>,
@@ -368,30 +285,6 @@ impl GGUFLoaderBuilder {
         self
     }
 
-    fn with_adapter(
-        mut self,
-        xlora_model_id: String,
-        xlora_order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.dynamic_lora = None;
-        self.xlora_model_id = Some(xlora_model_id);
-        self.xlora_order = Some(xlora_order);
-        self.no_kv_cache = no_kv_cache;
-        self.tgt_non_granular_index = tgt_non_granular_index;
-        self.model_id = if let Some(id) = self.model_id {
-            Some(id)
-        } else {
-            info!(
-                "Using adapter base model ID: `{}`",
-                self.xlora_order.as_ref().unwrap().base_model_id
-            );
-            Some(self.xlora_order.as_ref().unwrap().base_model_id.clone())
-        };
-        self
-    }
-
     pub fn with_dynamic_lora(
         mut self,
         adapters: Vec<LoraAdapterSpec>,
@@ -399,46 +292,17 @@ impl GGUFLoaderBuilder {
     ) -> Self {
         self.kind = (AdapterKind::Lora, QuantizationKind::Gguf).into();
         self.dynamic_lora = Some(DynamicLoraConfig { adapters, runtime });
-        self.xlora_model_id = None;
-        self.xlora_order = None;
-        self.tgt_non_granular_index = None;
         self
-    }
-
-    pub fn with_xlora(
-        mut self,
-        xlora_model_id: String,
-        xlora_order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.kind = (AdapterKind::XLora, QuantizationKind::Gguf).into();
-
-        self.with_adapter(
-            xlora_model_id,
-            xlora_order,
-            no_kv_cache,
-            tgt_non_granular_index,
-        )
-    }
-
-    pub fn with_lora(mut self, lora_model_id: String, lora_order: Ordering) -> Self {
-        self.kind = (AdapterKind::Lora, QuantizationKind::Gguf).into();
-
-        self.with_adapter(lora_model_id, lora_order, false, None)
     }
 
     pub fn build(self) -> Box<dyn Loader> {
         Box::new(GGUFLoader {
             model_id: self.model_id,
-            xlora_model_id: self.xlora_model_id,
             kind: self.kind,
-            xlora_order: self.xlora_order,
             no_kv_cache: self.no_kv_cache,
             chat_template: self.chat_template,
             tokenizer_json: self.tokenizer_json,
             dynamic_lora: self.dynamic_lora,
-            tgt_non_granular_index: self.tgt_non_granular_index,
             quantized_filenames: self.quantized_filenames,
             mmproj_filenames: self.mmproj_filenames,
             quantized_model_id: self.quantized_model_id,
@@ -450,50 +314,6 @@ impl GGUFLoaderBuilder {
 }
 
 impl GGUFLoader {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        model_id: Option<String>,
-        quantized_model_id: String,
-        quantized_filenames: Vec<String>,
-        xlora_model_id: Option<String>,
-        kind: ModelKind,
-        xlora_order: Option<Ordering>,
-        no_kv_cache: bool,
-        chat_template: Option<String>,
-        tgt_non_granular_index: Option<usize>,
-        config: GGUFSpecificConfig,
-        jinja_explicit: Option<String>,
-    ) -> Self {
-        let model_id = if let Some(id) = model_id {
-            Some(id)
-        } else if let Some(xlora_order) = xlora_order.clone() {
-            info!(
-                "Using adapter base model ID: `{}`",
-                xlora_order.base_model_id
-            );
-            Some(xlora_order.base_model_id.clone())
-        } else {
-            None
-        };
-        Self {
-            model_id,
-            quantized_model_id,
-            quantized_filenames,
-            mmproj_filenames: None,
-            xlora_model_id,
-            xlora_order,
-            no_kv_cache,
-            chat_template,
-            tokenizer_json: None,
-            dynamic_lora: None,
-            kind,
-            tgt_non_granular_index,
-            config,
-            jinja_explicit,
-            encoder_cache_memory_bytes: None,
-        }
-    }
-
     fn dynamic_lora_adapters(&self) -> Option<&[LoraAdapterSpec]> {
         self.dynamic_lora
             .as_ref()
@@ -659,11 +479,6 @@ impl GGUFLoader {
         let resolved = resolve_native_adapter(&descriptor, explicit_loader)?;
         let rope_pairing =
             crate::gguf::normal_registry::schema_for(descriptor.architecture).rope_pairing;
-        validate_native_dynamic_lora(
-            self.dynamic_lora.as_ref(),
-            rope_pairing,
-            descriptor.architecture.as_str(),
-        )?;
         debug!(
             "Loading GGUF architecture `{}` through native {:?} ({:?}, layouts {:?})",
             descriptor.architecture,
@@ -885,7 +700,6 @@ impl GGUFLoader {
                 )
             }
         };
-        validate_native_dynamic_lora(self.dynamic_lora.as_ref(), rope_pairing, &architecture)?;
         if paths.get_config_filename().as_os_str().is_empty() {
             bail!(
                 "multimodal GGUF architecture `{architecture}` requires its original `config.json`; pass `--tok-model-id <original-model-id>`"
@@ -1152,10 +966,6 @@ impl Loader for GGUFLoader {
         }) {
             bail!("multimodal GGUF requires at least one nonempty projector filename");
         }
-        if self.mmproj_filenames.is_some() && self.kind.is_adapted() && self.dynamic_lora.is_none()
-        {
-            bail!("multimodal GGUF does not support legacy LoRA or X-LoRA adapters");
-        }
         let request = |quantized_filenames| super::paths::GgufPathsRequest {
             model_id: self.model_id.as_deref(),
             quantized_model_id: &self.quantized_model_id,
@@ -1165,14 +975,10 @@ impl Loader for GGUFLoader {
             revision: Some(revision.clone()),
             silent,
         };
-        let adapters = crate::pipeline::AdapterPathOptions {
-            xlora_model_id: self.xlora_model_id.as_ref(),
-            lora_adapters: self.dynamic_lora_adapters(),
-            xlora_order: self.xlora_order.as_ref(),
-            xlora_preload: crate::pipeline::XLoraPreload::Load,
-        };
-        let paths =
-            super::paths::get_paths_gguf(request(&self.quantized_filenames), Some(adapters))?;
+        let paths = super::paths::get_paths_gguf(
+            request(&self.quantized_filenames),
+            self.dynamic_lora_adapters(),
+        )?;
         if let Some(mmproj_filenames) = self.mmproj_filenames.as_ref() {
             let mmproj_paths = super::paths::get_paths_gguf(request(mmproj_filenames), None)?;
             let inferred_paths = self.infer_multimodal_asset_paths(
@@ -1215,219 +1021,26 @@ impl Loader for GGUFLoader {
         dtype: &dyn TryIntoDType,
         device: &Device,
         silent: bool,
-        mut mapper: DeviceMapSetting,
+        mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
         paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
-        if matches!(self.kind, ModelKind::GgufQuantized { .. }) || self.dynamic_lora.is_some() {
-            return self.load_native_normal(NativeNormalLoadArgs {
-                paths,
-                dtype,
-                device,
-                silent,
-                mapper,
-                in_situ_quant,
-                paged_attn_config,
-            });
-        }
-        if in_situ_quant.is_some()
-            || self.config.write_uqff.is_some()
-            || self.config.imatrix.is_some()
-            || self.config.calibration_file.is_some()
-        {
-            bail!("ISQ conversion is only supported by the native GGUF loading path");
-        }
-        if paged_attn_config.is_some() {
-            warn!("Adapter models do not currently support PagedAttention, running without");
-        }
-
-        let mut readers = Vec::new();
-        for filename in paths.get_weight_filenames() {
-            readers.push(std::fs::File::open(filename)?);
-        }
-        let mut readers = readers.iter_mut().collect::<Vec<_>>();
-        let model = Content::from_readers(&mut readers)?;
-
-        if !silent {
-            model.print_metadata()?;
-        }
-
-        let arch = model.arch();
-        validate_legacy_gguf_adapter_qk_layout(arch)?;
-
-        // If auto, convert to Map
-        let num_layers = model.get_metadata()[&format!("{arch}.block_count")].to_u32()? as usize;
-
-        if let DeviceMapSetting::Auto(params) = mapper.clone() {
-            let devices = device_map::get_all_similar_devices(device)?;
-            // Initial dtype
-            let dtype = dtype.try_into_dtype(&devices.iter().collect::<Vec<_>>())?;
-
-            let model = GgufDeviceMapLoaderInner {
-                model: &model,
-                arch,
-            };
-
-            let layer_sizes_in_bytes =
-                model.layer_sizes_in_bytes("this is a dummy config!", dtype, 1, None)?;
-            let non_mapped_size_in_bytes =
-                model.non_mapped_size_in_bytes("this is a dummy config!", dtype, 1, None, None)?;
-            let total_model_size_in_bytes =
-                layer_sizes_in_bytes.iter().sum::<usize>() + non_mapped_size_in_bytes;
-
-            let new = super::loaders::auto_device_map::get_device_layers(
-                &model,
-                "this is a dummy config!",
-                num_layers,
-                layer_sizes_in_bytes,
-                non_mapped_size_in_bytes,
-                total_model_size_in_bytes,
-                &devices,
-                dtype,
-                &params,
-                None,
-            )?;
-            mapper = DeviceMapSetting::Map(new);
-        }
-
-        #[cfg(feature = "cuda")]
-        if let Device::Cuda(dev) = &device {
-            unsafe { dev.disable_event_tracking() };
-        }
-
-        let use_nccl = inference_quant::distributed::use_nccl();
-        let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
-            let payload: WorkerTransferData = serde_json::from_str(&payload)?;
-            let WorkerTransferData::Init { worker_rank, .. } = payload;
-            vec![inference_tensor::Device::new_cuda(worker_rank + 1)?]
-        } else if use_nccl {
-            vec![inference_tensor::Device::new_cuda(0)?]
-        } else {
-            device_map::get_all_similar_devices(device)?
-        };
-
-        let pipeline_mapper = mapper.into_mapper(
-            num_layers,
-            device,
-            self.config.topology.as_ref(),
-            &available_devices,
-        )?;
-        let mapper = mapper.into_mapper(
-            num_layers,
-            device,
-            self.config.topology.as_ref(),
-            &available_devices,
-        )?;
-
-        let tokenizer = self.resolve_tokenizer(paths, model.get_metadata())?;
-        let gen_conf = self.resolve_generation_config(paths, &tokenizer);
-        let GgufTokenizerConversion {
-            tokenizer,
-            bos,
-            eos,
-            unk,
-        } = tokenizer.conversion;
-
-        // Only load gguf chat template if there is nothing else
-        let gguf_chat_template =
-            if paths.get_template_filename().is_none() && self.chat_template.is_none() {
-                get_gguf_chat_template(&model)?
-            } else {
-                None
-            };
-
-        let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
-
-        let model_config_metadata: ContentConfig = (&model).into();
-        let internal_dtype = mapper.get_min_dtype(dtype)?;
-
-        let quant = ModelConfig::ParamsGGUF(model, (device, mapper).into(), internal_dtype);
-        let adapter = ModelConfig::Adapter::try_new(paths, device, silent, is_xlora)?;
-        let model_config = ModelConfig::ModelParams::new(quant, Some(adapter));
-
-        let ModelKind::GgufAdapter { adapter, .. } = self.kind else {
-            unreachable!("only GGUF adapter models reach the quantized-model path")
-        };
-        let model = adapted_gguf_model(arch, model_config, &adapter.pretty_name())?;
-
-        let chat_template_explicit = paths
-            .get_chat_template_explicit()
-            .as_ref()
-            .map(|x| x.to_string_lossy().to_string());
-        let mut chat_template = get_chat_template(
+        self.load_native_normal(NativeNormalLoadArgs {
             paths,
-            self.jinja_explicit.as_ref(),
-            chat_template_explicit.as_ref(),
-            self.chat_template.as_ref(),
-            gguf_chat_template,
-        );
-
-        let max_seq_len = model.max_seq_len();
-        let llg_factory = build_llg_factory(tokenizer.clone())?;
-        let num_hidden_layers = model.num_hidden_layers();
-
-        if chat_template.bos_token.is_none()
-            && let Some(v) = bos
-        {
-            chat_template.bos_token = Some(BeginEndUnkPadTok(Either::Left(v)));
-        }
-        if chat_template.eos_token.is_none()
-            && let Some(v) = eos
-        {
-            chat_template.eos_token = Some(BeginEndUnkPadTok(Either::Left(v)));
-        }
-        if chat_template.unk_token.is_none()
-            && let Some(v) = unk
-        {
-            chat_template.unk_token = Some(BeginEndUnkPadTok(Either::Left(v)));
-        }
-
-        let generation_defaults = gen_conf
-            .as_ref()
-            .and_then(GenerationConfig::generation_defaults);
-        let eos = calculate_eos_tokens(&chat_template, gen_conf.as_ref(), &tokenizer);
-        Ok(Arc::new(Mutex::new(GGUFPipeline {
-            model,
-            tokenizer: tokenizer.into(),
-            no_kv_cache: self.no_kv_cache,
-            chat_template: Arc::new(chat_template),
-            model_id: self.quantized_model_id.clone(),
-            non_granular_state: self.tgt_non_granular_index.map(|tgt_non_granular_index| {
-                NonGranularState {
-                    non_granular_index: Arc::new(Mutex::new(0)),
-                    tgt_non_granular_index,
-                }
-            }),
-            metadata: Arc::new(GeneralMetadata {
-                max_seq_len,
-                llg_factory: Some(llg_factory),
-                no_kv_cache: self.no_kv_cache,
-                no_prefix_cache: false,
-                num_hidden_layers,
-                eos_tok: eos,
-                kind: self.kind.clone(),
-                is_xlora,
-                activation_dtype: internal_dtype,
-                sliding_window: None,
-                cache_config: None,
-                cache_engine: None,
-                model_metadata: Some(Arc::new(model_config_metadata)),
-                modalities: Modalities {
-                    input: vec![SupportedModality::Text],
-                    output: vec![SupportedModality::Text],
-                },
-                loaded_for_uqff_write: false,
-            }),
-            generation_defaults,
-            mapper: pipeline_mapper,
-        })))
+            dtype,
+            device,
+            silent,
+            mapper,
+            in_situ_quant,
+            paged_attn_config,
+        })
     }
 
     fn get_id(&self) -> String {
-        self.xlora_model_id
-            .as_deref()
-            .unwrap_or(self.model_id.as_ref().unwrap_or(&self.quantized_model_id))
+        self.model_id
+            .as_ref()
+            .unwrap_or(&self.quantized_model_id)
             .to_string()
     }
 
@@ -1436,166 +1049,14 @@ impl Loader for GGUFLoader {
     }
 }
 
-impl PreProcessingMixin for GGUFPipeline {
-    fn get_chat_template(&self) -> Option<Arc<ChatTemplate>> {
-        Some(self.chat_template.clone())
-    }
-    fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
-        None
-    }
-}
-
-impl IsqPipelineMixin for GGUFPipeline {
-    fn re_isq_model(&mut self, _dtype: IsqType) -> Result<()> {
-        anyhow::bail!(
-            "You are trying to in-situ requantize a GGML model. This will not do anything."
-        )
-    }
-}
-
-impl CacheManagerMixin for GGUFPipeline {
-    fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> inference_tensor::Result<()> {
-        FullCacheManager.clone_in_cache(self as &dyn Pipeline, seqs, false)
-    }
-    fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
-        FullCacheManager.clone_out_cache(self as &dyn Pipeline, seqs, false)
-    }
-    fn set_none_cache(
-        &self,
-        seqs: &mut [&mut Sequence],
-        reset_non_granular: bool,
-        modify_draft_cache: bool,
-        _load_preallocated_cache: bool,
-    ) -> inference_tensor::Result<()> {
-        FullCacheManager.set_none_cache(self as &dyn Pipeline, seqs, modify_draft_cache, false)?;
-        if reset_non_granular {
-            self.reset_non_granular_state()
-        }
-        Ok(())
-    }
-    fn cache(&self) -> &EitherCache {
-        self.model.cache()
-    }
-}
-
-impl MetadataMixin for GGUFPipeline {
-    fn device(&self) -> Device {
-        self.model.device().clone()
-    }
-    fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
-        Some(self.tokenizer.clone())
-    }
-    fn name(&self) -> String {
-        self.model_id.clone()
-    }
-    fn reset_non_granular_state(&self) {
-        if let Some(s) = self.non_granular_state.as_ref() {
-            *self.cache().full().get_scalings_cache() = None;
-            *get_mut_arcmutex!(s.non_granular_index) = 0;
-        }
-    }
-    fn get_metadata(&self) -> Arc<GeneralMetadata> {
-        self.metadata.clone()
-    }
-    fn generation_defaults(&self) -> Option<crate::ModelGenerationDefaults> {
-        self.generation_defaults.clone()
-    }
-    fn device_mapper(&self) -> Option<&dyn DeviceMapper> {
-        Some(&*self.mapper)
-    }
-}
-
-impl Pipeline for GGUFPipeline {
-    fn requires_uniform_completion_batch(&self) -> bool {
-        false
-    }
-
-    fn supports_batched_cuda_sampling(&self) -> bool {
-        true
-    }
-
-    fn forward_inputs(
-        &mut self,
-        inputs: Box<dyn Any>,
-        return_raw_logits: bool,
-    ) -> Result<ForwardInputsResult, inference_tensor::Error> {
-        let ModelInputs {
-            input_ids,
-            input_ids_full,
-            seqlen_offsets,
-            seqlen_offsets_full,
-            context_lens,
-            position_ids: _, // NOTE(EricLBuehler): ignore, it is for phi3
-            paged_attn_meta: _,
-            flash_meta,
-            flash_meta_full,
-            recurrent_batch_kind: _,
-            adapter_leases: _adapter_leases,
-        } = *inputs.downcast().expect("Downcast failed.");
-        let logits = self.model.forward_step(QuantizedForwardInputs {
-            input_ids: &input_ids,
-            input_ids_full: input_ids_full.as_ref().unwrap_or(&input_ids),
-            seqlen_offsets: &seqlen_offsets,
-            seqlen_offsets_full: seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-            no_kv_cache: self.no_kv_cache,
-            non_granular_state: &self.non_granular_state,
-            context_lens,
-            flash_params: &flash_meta,
-            flash_params_full: flash_meta_full.as_ref().unwrap_or(&flash_meta),
-        })?;
-        if return_raw_logits {
-            Ok(ForwardInputsResult::RawLogits { logits })
-        } else {
-            Ok(ForwardInputsResult::CausalGeneration { logits })
-        }
-    }
-    fn sample_causal_gen<'a>(
-        &'a self,
-        seqs: &'a mut [&mut Sequence],
-        logits: Vec<Tensor>,
-        prefix_cacher: &'a mut PrefixCacheManagerV2,
-        disable_eos_stop: bool,
-        rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> BoxFuture<'a, Result<(), inference_tensor::Error>> {
-        sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
-    }
-    fn category(&self) -> ModelCategory {
-        ModelCategory::Text
-    }
-}
-
-impl AnyMoePipelineMixin for GGUFPipeline {}
-
-fn adapted_gguf_model<R: std::io::Seek + std::io::Read>(
-    arch: GGUFArchitecture,
-    config: ModelConfig::ModelParams<'_, ModelConfig::ParamsGGUF<'_, R>>,
-    adapter: &str,
-) -> Result<Box<dyn QuantizedModel>> {
-    #[cfg(feature = "models-llama")]
-    if matches!(arch, GGUFArchitecture::Llama | GGUFArchitecture::Mistral3) {
-        return Ok(Box::new(XLoraQLlama::try_from(config)?));
-    }
-    #[cfg(feature = "models-phi")]
-    if matches!(arch, GGUFArchitecture::Phi3) {
-        return Ok(Box::new(XLoraQPhi3::try_from(config)?));
-    }
-    drop(config);
-    bail!("Unsupported architecture `{arch:?}` for GGUF {adapter}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        DynamicLoraConfig, GGUFSpecificConfig, GgufTokenizerConversion, TokenizerFallback,
-        preferred_hf_config, prepare_native_multimodal_config, requires_multimodal_projector,
-        resolve_tokenizer_candidate, validate_legacy_gguf_adapter_qk_layout,
-        validate_native_dynamic_lora,
+        GGUFSpecificConfig, GgufTokenizerConversion, TokenizerFallback, preferred_hf_config,
+        prepare_native_multimodal_config, requires_multimodal_projector,
+        resolve_tokenizer_candidate,
     };
-    use crate::{
-        MultimodalLoaderType,
-        gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY,
-        gguf::{GGUFArchitecture, normal_registry::RopePairing},
-    };
+    use crate::{MultimodalLoaderType, gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY};
     use std::path::{Path, PathBuf};
     use tokenizers::{Tokenizer, models::bpe::BPE};
 
@@ -1618,52 +1079,6 @@ mod tests {
         assert!(!requires_multimodal_projector("qwen35moe"));
         assert!(!requires_multimodal_projector("mistral3"));
         assert!(requires_multimodal_projector("muse-glimmer"));
-    }
-
-    #[test]
-    fn native_dynamic_lora_refuses_only_adjacent_rope_gguf_without_plain_qk_rows() {
-        let dynamic_lora = DynamicLoraConfig {
-            adapters: Vec::new(),
-            runtime: Default::default(),
-        };
-        for architecture in ["deepseek2", "glm4"] {
-            let error = validate_native_dynamic_lora(
-                Some(&dynamic_lora),
-                RopePairing::Adjacent,
-                architecture,
-            )
-            .unwrap_err()
-            .to_string();
-            assert!(error.contains("original safetensors model"), "{error}");
-        }
-        for architecture in ["llama", "mistral3", "smollm3", "granite"] {
-            assert!(
-                validate_native_dynamic_lora(
-                    Some(&dynamic_lora),
-                    RopePairing::Adjacent,
-                    architecture
-                )
-                .is_ok()
-            );
-        }
-        assert!(
-            validate_native_dynamic_lora(Some(&dynamic_lora), RopePairing::HalfSplit, "qwen35")
-                .is_ok()
-        );
-        assert!(validate_native_dynamic_lora(None, RopePairing::Adjacent, "glm4").is_ok());
-    }
-
-    #[test]
-    fn legacy_gguf_adapters_reject_adjacent_qk_layouts() {
-        for architecture in [GGUFArchitecture::Llama, GGUFArchitecture::Mistral3] {
-            let error = validate_legacy_gguf_adapter_qk_layout(architecture).unwrap_err();
-            assert!(
-                error
-                    .to_string()
-                    .contains("converter-permuted adjacent RoPE order")
-            );
-        }
-        assert!(validate_legacy_gguf_adapter_qk_layout(GGUFArchitecture::Phi3).is_ok());
     }
 
     #[test]

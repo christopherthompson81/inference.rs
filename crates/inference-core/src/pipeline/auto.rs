@@ -7,7 +7,6 @@ use super::{
     MultimodalLoaderType, MultimodalSpecificConfig, NormalLoaderBuilder, NormalLoaderType,
     NormalSpecificConfig, SpeechLoader, TokenSource,
 };
-use crate::Ordering;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::{
     AutoDeviceMapParams, DeviceMapSetting, IsqType, LoraAdapterSpec, LoraRuntimeConfig,
@@ -49,9 +48,6 @@ pub struct AutoLoaderBuilder {
     model_id: String,
     jinja_explicit: Option<String>,
     no_kv_cache: bool,
-    xlora_model_id: Option<String>,
-    xlora_order: Option<Ordering>,
-    tgt_non_granular_index: Option<usize>,
     lora_adapters: Option<Vec<LoraAdapterSpec>>,
     lora_runtime_config: Option<LoraRuntimeConfig>,
     hf_cache_path: Option<PathBuf>,
@@ -80,9 +76,6 @@ impl AutoLoaderBuilder {
             model_id,
             jinja_explicit,
             no_kv_cache,
-            xlora_model_id: None,
-            xlora_order: None,
-            tgt_non_granular_index: None,
             lora_adapters: None,
             lora_runtime_config: None,
             hf_cache_path: None,
@@ -102,20 +95,6 @@ impl AutoLoaderBuilder {
             assert!(max_bytes > 0, "encoder cache memory must be nonzero");
         }
         self.encoder_cache_memory_bytes = max_bytes;
-        self
-    }
-
-    pub fn with_xlora(
-        mut self,
-        model_id: String,
-        order: Ordering,
-        no_kv_cache: bool,
-        tgt_non_granular_index: Option<usize>,
-    ) -> Self {
-        self.xlora_model_id = Some(model_id);
-        self.xlora_order = Some(order);
-        self.no_kv_cache = no_kv_cache;
-        self.tgt_non_granular_index = tgt_non_granular_index;
         self
     }
 
@@ -144,9 +123,6 @@ impl AutoLoaderBuilder {
             model_id,
             jinja_explicit,
             no_kv_cache,
-            xlora_model_id,
-            xlora_order,
-            tgt_non_granular_index,
             lora_adapters,
             lora_runtime_config,
             hf_cache_path,
@@ -167,10 +143,6 @@ impl AutoLoaderBuilder {
             no_kv_cache,
             jinja_explicit.clone(),
         );
-        if let (Some(id), Some(ord)) = (xlora_model_id.clone(), xlora_order.clone()) {
-            normal_builder =
-                normal_builder.with_xlora(id, ord, no_kv_cache, tgt_non_granular_index);
-        }
         if let (Some(adapters), Some(runtime_config)) = (lora_adapters.clone(), lora_runtime_config)
         {
             normal_builder = normal_builder.with_lora(adapters, runtime_config);
