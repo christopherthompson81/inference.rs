@@ -100,7 +100,7 @@ impl Layout {
         !self.range().is_some_and(|f| f.injective)
     }
 
-    /// Returns range of cells this layout can reach, and wether it reaches all of them.
+    /// Returns range of cells this layout can reach, and whether it reaches all of them.
     /// Returns `None` on arithmetic overflow.
     fn range(&self) -> Option<LayoutRange> {
         // Filter out dims <= 1 as their strides are irrelevant.
@@ -378,7 +378,7 @@ struct LayoutRange {
 }
 
 impl LayoutRange {
-    /// Bounding intervals cannot meet, which means these layouts are seperate.
+    /// Bounding intervals cannot meet, which means these layouts are separate.
     fn separated_from(&self, other: &Self) -> bool {
         self.hi < other.lo || other.hi < self.lo
     }
@@ -392,7 +392,7 @@ impl LayoutRange {
 /// How two layouts over the same allocation relate.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum LayoutRelation {
-    /// Simple assignment. x[i] += x[i]
+    /// Simple assignment. `x[i] += x[i]`
     Identical,
     /// Completely distinct layouts.
     Disjoint,

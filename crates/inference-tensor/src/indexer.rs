@@ -250,8 +250,8 @@ macro_rules! index_op_tuple {
     };
 }
 
-index_op_tuple!("see [TensorIndex#method.i]", A, B, C);
-index_op_tuple!("see [TensorIndex#method.i]", A, B, C, D);
-index_op_tuple!("see [TensorIndex#method.i]", A, B, C, D, E);
-index_op_tuple!("see [TensorIndex#method.i]", A, B, C, D, E, F);
-index_op_tuple!("see [TensorIndex#method.i]", A, B, C, D, E, F, G);
+index_op_tuple!("see [`IndexOp::i`]", A, B, C);
+index_op_tuple!("see [`IndexOp::i`]", A, B, C, D);
+index_op_tuple!("see [`IndexOp::i`]", A, B, C, D, E);
+index_op_tuple!("see [`IndexOp::i`]", A, B, C, D, E, F);
+index_op_tuple!("see [`IndexOp::i`]", A, B, C, D, E, F, G);
