@@ -92,23 +92,3 @@ pub fn linear(in_dim: usize, out_dim: usize, vb: crate::nn::VarBuilder) -> Resul
     let bs = vb.get_with_hints(out_dim, "bias", init_bs)?;
     Ok(Linear::new(ws, Some(bs)))
 }
-
-/// Create or initialize a new linear layer without biases.
-pub fn linear_no_bias(in_dim: usize, out_dim: usize, vb: crate::nn::VarBuilder) -> Result<Linear> {
-    let init_ws = crate::nn::init::DEFAULT_KAIMING_NORMAL;
-    let ws = vb.get_with_hints((out_dim, in_dim), "weight", init_ws)?;
-    Ok(Linear::new(ws, None))
-}
-
-pub fn linear_b(
-    in_dim: usize,
-    out_dim: usize,
-    bias: bool,
-    vb: crate::nn::VarBuilder,
-) -> Result<Linear> {
-    if bias {
-        linear(in_dim, out_dim, vb)
-    } else {
-        linear_no_bias(in_dim, out_dim, vb)
-    }
-}

@@ -88,15 +88,6 @@ impl LayerNorm {
         }
     }
 
-    pub fn rms_norm(weight: Tensor, eps: f64) -> Self {
-        Self {
-            weight,
-            bias: None,
-            remove_mean: false,
-            eps,
-        }
-    }
-
     pub fn weight(&self) -> &Tensor {
         &self.weight
     }
@@ -178,59 +169,4 @@ pub fn layer_norm<C: Into<LayerNormConfig>>(
         remove_mean: config.remove_mean,
         eps: config.eps,
     })
-}
-
-pub fn layer_norm_no_bias(size: usize, eps: f64, vb: crate::nn::VarBuilder) -> Result<LayerNorm> {
-    let config = LayerNormConfig {
-        eps,
-        remove_mean: true,
-        affine: false,
-    };
-    layer_norm(size, config, vb)
-}
-
-/// RmsNorm is a specialized version of the LayerNorm module.
-#[derive(Clone, Debug)]
-pub struct RmsNorm(LayerNorm);
-
-impl RmsNorm {
-    pub fn new(weight: Tensor, eps: f64) -> Self {
-        Self(LayerNorm::rms_norm(weight, eps))
-    }
-
-    pub fn into_inner(self) -> LayerNorm {
-        self.0
-    }
-
-    pub fn weight(&self) -> &Tensor {
-        self.0.weight()
-    }
-
-    pub fn eps(&self) -> f64 {
-        self.0.eps()
-    }
-
-    /// Faster variant of the forward kernel, this can only be used on contiguous tensors though.
-    pub fn forward_diff(&self, xs: &Tensor) -> Result<Tensor> {
-        self.0.forward(xs)
-    }
-}
-
-impl Module for RmsNorm {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if xs.is_contiguous() {
-            crate::nn::ops::rms_norm(xs, &self.0.weight, self.0.eps as f32)
-        } else {
-            self.0.forward(xs)
-        }
-    }
-}
-
-pub fn rms_norm(size: usize, eps: f64, vb: crate::nn::VarBuilder) -> Result<RmsNorm> {
-    let config = LayerNormConfig {
-        eps,
-        remove_mean: false,
-        affine: false,
-    };
-    Ok(RmsNorm(layer_norm(size, config, vb)?))
 }

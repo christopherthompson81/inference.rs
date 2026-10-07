@@ -105,13 +105,6 @@ impl st::View for &Tensor {
     }
 }
 
-impl Tensor {
-    pub fn save_safetensors<P: AsRef<Path>>(&self, name: &str, filename: P) -> Result<()> {
-        let data = [(name, self.clone())];
-        Ok(st::serialize_to_file(data, None, filename.as_ref())?)
-    }
-}
-
 fn convert_slice<T: WithDType>(data: &[u8], shape: &[usize], device: &Device) -> Result<Tensor> {
     let size_in_bytes = T::DTYPE.size_in_bytes();
     let elem_count = data.len() / size_in_bytes;
@@ -523,104 +516,10 @@ impl MmapedSafetensors {
     }
 }
 
-pub struct SliceSafetensors<'a> {
-    safetensors: SafeTensors<'a>,
-}
-
-impl<'a> SliceSafetensors<'a> {
-    /// Creates a wrapper around a binary buffer and deserialize the safetensors header.
-    pub fn new(buffer: &'a [u8]) -> Result<Self> {
-        let safetensors = safetensors::SafeTensors::deserialize(buffer)?;
-        Ok(Self { safetensors })
-    }
-
-    pub fn load(&self, name: &str, dev: &Device) -> Result<Tensor> {
-        self.safetensors.tensor(name)?.load(dev)
-    }
-
-    pub fn tensors(&self) -> Vec<(String, st::TensorView<'_>)> {
-        self.safetensors.tensors()
-    }
-
-    pub fn get(&self, name: &str) -> Result<st::TensorView<'_>> {
-        Ok(self.safetensors.tensor(name)?)
-    }
-}
-
-pub struct BufferedSafetensors {
-    safetensors: yoke::Yoke<SafeTensors_<'static>, Vec<u8>>,
-}
-
-impl BufferedSafetensors {
-    /// Creates a wrapper around a binary buffer and deserialize the safetensors header.
-    pub fn new(buffer: Vec<u8>) -> Result<Self> {
-        let safetensors = yoke::Yoke::<SafeTensors_<'static>, Vec<u8>>::try_attach_to_cart(
-            buffer,
-            |data: &[u8]| {
-                let st = safetensors::SafeTensors::deserialize(data)?;
-                Ok::<_, Error>(SafeTensors_(st))
-            },
-        )?;
-        Ok(Self { safetensors })
-    }
-
-    pub fn load(&self, name: &str, dev: &Device) -> Result<Tensor> {
-        self.get(name)?.load(dev)
-    }
-
-    pub fn tensors(&self) -> Vec<(String, st::TensorView<'_>)> {
-        self.safetensors.get().0.tensors()
-    }
-
-    pub fn get(&self, name: &str) -> Result<st::TensorView<'_>> {
-        Ok(self.safetensors.get().0.tensor(name)?)
-    }
-}
-
-pub struct MmapedFile {
-    path: std::path::PathBuf,
-    inner: memmap2::Mmap,
-}
-
-impl MmapedFile {
-    /// Creates a wrapper around a memory mapped file from which you can retrieve
-    /// tensors using [`MmapedFile::deserialize`]
-    ///
-    /// # Safety
-    ///
-    /// The unsafe is inherited from [`memmap2::MmapOptions`].
-    pub unsafe fn new<P: AsRef<Path>>(p: P) -> Result<Self> {
-        let p = p.as_ref();
-        let file = std::fs::File::open(p).map_err(|e| Error::from(e).with_path(p))?;
-        let inner = memmap2::MmapOptions::new()
-            .map(&file)
-            .map_err(|e| Error::from(e).with_path(p))?;
-        Ok(Self {
-            inner,
-            path: p.to_path_buf(),
-        })
-    }
-
-    pub fn deserialize(&self) -> Result<SafeTensors<'_>> {
-        let st = safetensors::SafeTensors::deserialize(&self.inner)
-            .map_err(|e| Error::from(e).with_path(&self.path))?;
-        Ok(st)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
-
-    #[test]
-    fn save_single_tensor() {
-        let t = Tensor::zeros((2, 2), DType::F32, &Device::Cpu).unwrap();
-        t.save_safetensors("t", "t.safetensors").unwrap();
-        let bytes = std::fs::read("t.safetensors").unwrap();
-        assert_eq!(bytes, b"@\0\0\0\0\0\0\0{\"t\":{\"dtype\":\"F32\",\"shape\":[2,2],\"data_offsets\":[0,16]}}       \0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0");
-        std::fs::remove_file("t.safetensors").unwrap();
-    }
 
     #[test]
     fn save_load_multiple_tensors() {

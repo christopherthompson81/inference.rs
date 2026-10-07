@@ -72,14 +72,3 @@ impl crate::nn::Module for GroupNorm {
             .broadcast_add(&bias)
     }
 }
-
-pub fn group_norm(
-    num_groups: usize,
-    num_channels: usize,
-    eps: f64,
-    vb: crate::nn::VarBuilder,
-) -> Result<GroupNorm> {
-    let weight = vb.get_with_hints(num_channels, "weight", crate::nn::Init::Const(1.))?;
-    let bias = vb.get_with_hints(num_channels, "bias", crate::nn::Init::Const(0.))?;
-    GroupNorm::new(weight, bias, num_channels, num_groups, eps)
-}

@@ -3,7 +3,7 @@
 
 #[cfg(feature = "metal")]
 use crate::DType;
-use crate::{CpuStorage, Layout, Module, Result, Shape, Tensor, D};
+use crate::{CpuStorage, Layout, Result, Shape, Tensor, D};
 use rayon::prelude::*;
 
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
@@ -231,15 +231,6 @@ pub fn mish(xs: &Tensor) -> Result<Tensor> {
 pub fn leaky_relu(xs: &Tensor, negative_slope: f64) -> Result<Tensor> {
     let zeros = xs.zeros_like()?;
     xs.maximum(&zeros)? + xs.minimum(&zeros)? * negative_slope
-}
-
-pub fn selu(xs: &Tensor, alpha: f32, gamma: f32) -> Result<Tensor> {
-    let is_pos = xs.gt(0f32)?;
-    let alpha_t = Tensor::full(alpha, xs.dims(), xs.device())?;
-    let neg = xs.exp()?.mul(&alpha_t)?.sub(&alpha_t)?;
-    let selu = is_pos.where_cond(xs, &neg)?;
-    let gamma_t = Tensor::full(gamma, xs.dims(), xs.device())?;
-    selu.broadcast_mul(&gamma_t)
 }
 
 pub fn dropout(xs: &Tensor, drop_p: f32) -> Result<Tensor> {
@@ -844,64 +835,8 @@ pub fn layer_norm(xs: &Tensor, alpha: &Tensor, beta: &Tensor, eps: f32) -> Resul
 }
 
 // https://pytorch.org/docs/stable/generated/torch.nn.PixelShuffle.html
-pub fn pixel_shuffle(xs: &Tensor, upscale_factor: usize) -> Result<Tensor> {
-    let (b_size, c, h, w) = xs.dims4()?;
-    let out_c = c / upscale_factor / upscale_factor;
-    xs.reshape((b_size, out_c, upscale_factor, upscale_factor, h, w))?
-        .permute((0, 1, 4, 2, 5, 3))?
-        .reshape((b_size, out_c, h * upscale_factor, w * upscale_factor))
-}
-
-pub fn pixel_unshuffle(xs: &Tensor, downscale_factor: usize) -> Result<Tensor> {
-    let (b_size, c, h, w) = xs.dims4()?;
-    let out_c = c * downscale_factor * downscale_factor;
-    xs.reshape((
-        b_size,
-        c,
-        h / downscale_factor,
-        downscale_factor,
-        w / downscale_factor,
-        downscale_factor,
-    ))?
-    .permute((0, 1, 3, 5, 2, 4))?
-    .reshape((b_size, out_c, h / downscale_factor, w / downscale_factor))
-}
 
 // https://pytorch.org/docs/stable/generated/torch.nn.ReplicationPad2d.html
-pub fn replication_pad2d(xs: &Tensor, pad: usize) -> Result<Tensor> {
-    match pad {
-        0 => Ok(xs.clone()),
-        1 => {
-            let (_b_size, _c, h, w) = xs.dims4()?;
-            let (first, last) = (xs.narrow(3, 0, 1)?, xs.narrow(3, w - 1, 1)?);
-            let xs = Tensor::cat(&[&first, xs, &last], 3)?;
-            let (first, last) = (xs.narrow(2, 0, 1)?, xs.narrow(2, h - 1, 1)?);
-            Tensor::cat(&[&first, &xs, &last], 2)
-        }
-        n => crate::bail!("replication-pad with a size of {n} is not supported"),
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Identity;
-
-impl Identity {
-    pub fn new() -> Identity {
-        Self
-    }
-}
-
-impl Default for Identity {
-    fn default() -> Self {
-        Self
-    }
-}
-
-impl Module for Identity {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        Ok(xs.clone())
-    }
-}
 
 #[allow(dead_code)]
 struct Sdpa {
