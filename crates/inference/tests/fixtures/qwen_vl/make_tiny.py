@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes qwen2_vl/, qwen3_vl/ and qwen3_5_moe/: tiny Qwen-VL checkpoint skeletons (no weights) for engine-behavior tests.
+"""Writes qwen2_vl/, qwen2_5_vl/, qwen3_vl/, qwen3_vl_moe/ and qwen3_5_moe/: tiny Qwen-VL checkpoint skeletons (no weights) for engine-behavior tests.
 
 The tokenizer is a byte-fallback BPE with only the special tokens the processors and chat template use; the configs
 shrink every dimension and the preprocessor configs keep images to a handful of patches. The tests generate random
@@ -120,6 +120,34 @@ models = {
         "preprocessor": image_processor(16, "Qwen2VLImageProcessorFast"),
         "video_preprocessor": {**image_processor(16, "Qwen3VLVideoProcessor"), "fps": 2.0},
     },
+}
+
+# Qwen2.5-VL: window attention in the vision blocks (a 56-pixel window is 2x2 merged patches) and one full block.
+models["qwen2_5_vl"] = {
+    "config": {
+        **models["qwen2_vl"]["config"], "architectures": ["Qwen2_5_VLForConditionalGeneration"],
+        "model_type": "qwen2_5_vl",
+        "vision_config": {
+            "depth": 2, "hidden_size": 32, "out_hidden_size": 128, "hidden_act": "silu", "intermediate_size": 64,
+            "num_heads": 2, "in_chans": 3, "patch_size": 14, "spatial_merge_size": 2, "temporal_patch_size": 2,
+            "window_size": 56, "fullatt_block_indexes": [1], "tokens_per_second": 2,
+        },
+    },
+    "preprocessor": image_processor(14, "Qwen2VLImageProcessor"),
+    "video_preprocessor": None,
+}
+# Qwen3-VL-MoE: the Qwen3-VL text stack with four experts in every layer.
+models["qwen3_vl_moe"] = {
+    "config": {
+        **models["qwen3_vl"]["config"], "architectures": ["Qwen3VLMoeForConditionalGeneration"],
+        "model_type": "qwen3_vl_moe",
+        "text_config": {
+            **models["qwen3_vl"]["config"]["text_config"], "num_experts": 4, "num_experts_per_tok": 2,
+            "moe_intermediate_size": 64, "decoder_sparse_step": 1, "mlp_only_layers": [], "norm_topk_prob": True,
+        },
+    },
+    "preprocessor": models["qwen3_vl"]["preprocessor"],
+    "video_preprocessor": models["qwen3_vl"]["video_preprocessor"],
 }
 
 # Qwen3.5-MoE: three linear-attention (GDN) layers then one full-attention layer, four experts per layer.

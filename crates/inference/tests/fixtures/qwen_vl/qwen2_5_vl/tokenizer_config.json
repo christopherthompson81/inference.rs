@@ -1,0 +1,20 @@
+{
+  "add_bos_token": false,
+  "add_eos_token": false,
+  "bos_token": null,
+  "eos_token": "<|im_end|>",
+  "pad_token": "<|endoftext|>",
+  "unk_token": "<unk>",
+  "additional_special_tokens": [
+    "<|im_start|>",
+    "<|im_end|>",
+    "<|vision_start|>",
+    "<|vision_end|>",
+    "<|image_pad|>",
+    "<|video_pad|>",
+    "<|placeholder|>"
+  ],
+  "clean_up_tokenization_spaces": false,
+  "model_max_length": 4096,
+  "tokenizer_class": "Qwen2Tokenizer"
+}

@@ -1,4 +1,4 @@
-//! The image and video input paths of Qwen2-VL and Qwen3-VL on tiny random-weight checkpoints built at test time.
+//! The image and video input paths of the Qwen-VL models on tiny random-weight checkpoints built at test time.
 
 use std::path::Path;
 
@@ -11,7 +11,8 @@ use inference::{
 #[path = "../support/qwen_vl_tiny.rs"]
 mod support;
 use support::{
-    tiny_qwen2_vl, tiny_qwen3_5_moe, tiny_qwen3_5_moe_mtp, tiny_qwen3_5_mtp, tiny_qwen3_vl,
+    tiny_qwen2_5_vl, tiny_qwen2_vl, tiny_qwen3_5_moe, tiny_qwen3_5_moe_mtp, tiny_qwen3_5_mtp,
+    tiny_qwen3_vl, tiny_qwen3_vl_moe,
 };
 
 const PROMPT: &str = "describe";
@@ -145,7 +146,7 @@ async fn qwen2_vl_images_and_video() -> anyhow::Result<()> {
     let traces = traces(&model).await?;
     // 27 text tokens, a start/end pair per medium; a 56x56 image is 4 merged patches, the 84x56 one resizes to 28x56
     // (2) under max_pixels, the 4-frame video is 2 temporal by 2x2 (8)
-    // CUDA's flash path (fattn; FA2 gave the same ids) rounds these near-tied random logits unlike eager
+    // CUDA's paged prefill, split at the image, gives other ids than eager; see qwen2vl_paged_media_investigation.md
     let expected = if cfg!(feature = "cuda") {
         vec![
             (vec![5, 74, 169, 46, 249, 213], 33),
@@ -173,6 +174,44 @@ async fn qwen3_vl_images_and_video() -> anyhow::Result<()> {
         (vec![91, 91, 91, 91, 91, 91], 33),
         (vec![91, 142, 39, 91, 225, 39], 37),
         (vec![161, 213, 91, 161, 213, 91], 61),
+    ];
+    assert_eq!(traces, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn qwen2_5_vl_images_and_video() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen2_5_vl()?;
+    let model = build(checkpoint.path()).await?;
+    let traces = traces(&model).await?;
+    // Qwen2-VL's token counts, and the same paged-versus-eager split of ids
+    let expected = if cfg!(feature = "cuda") {
+        vec![
+            (vec![178, 247, 165, 246, 90, 118], 33),
+            (vec![202, 117, 182, 206, 145, 12], 37),
+            (vec![27, 69, 149, 132, 153, 153], 37),
+        ]
+    } else {
+        vec![
+            (vec![17, 158, 154, 184, 90, 248], 33),
+            (vec![68, 152, 192, 133, 101, 133], 37),
+            (vec![3, 244, 153, 27, 31, 153], 37),
+        ]
+    };
+    assert_eq!(traces, expected);
+    Ok(())
+}
+
+#[tokio::test]
+async fn qwen3_vl_moe_images_and_video() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_vl_moe()?;
+    let model = build(checkpoint.path()).await?;
+    let traces = traces(&model).await?;
+    // Qwen3-VL's token counts; the experts run on every layer
+    let expected = vec![
+        (vec![79, 86, 79, 86, 86, 86], 33),
+        (vec![249, 86, 10, 10, 86, 167], 37),
+        (vec![9, 80, 254, 251, 9, 106], 61),
     ];
     assert_eq!(traces, expected);
     Ok(())
