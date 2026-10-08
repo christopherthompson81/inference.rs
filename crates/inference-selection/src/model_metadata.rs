@@ -182,6 +182,11 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[],
             },
+            Self::Qwen3_5Moe => ArchMetadata {
+                families: &["Qwen3.5 MoE"],
+                modalities: m,
+                examples: &[],
+            },
             Self::Lfm2 => ArchMetadata {
                 families: &["LFM2", "LFM2.5"],
                 modalities: m,

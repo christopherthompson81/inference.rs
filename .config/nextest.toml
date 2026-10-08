@@ -42,15 +42,16 @@ default-filter = """
 | (package(inference-server-core) & test(/^flux::/))
 """
 
+# The IQ4_XS 27B takes ~15 GB of VRAM, real-weight FLUX ~18 GB and the 35B MoE MTP test ~20 GB, so each runs alone,
+# first; nextest takes the first override that sets a value, so this one precedes the gpu-model group.
+[[profile.deep.overrides]]
+filter = '(package(inference) & test(/^gguf_iq::/) | test(/^qwen3_5_mtp::moe_gguf/)) | (package(inference-server-core) & test(/^flux::/))'
+threads-required = 'num-test-threads'
+priority = 100
+
 [[profile.deep.overrides]]
 filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp)::/))'
 test-group = 'gpu-model'
-
-# The IQ4_XS 27B takes ~15 GB of VRAM and real-weight FLUX ~18 GB, so each runs alone, first.
-[[profile.deep.overrides]]
-filter = '(package(inference) & test(/^gguf_iq::/)) | (package(inference-server-core) & test(/^flux::/))'
-threads-required = 'num-test-threads'
-priority = 100
 
 # Metal keeps the default profile's filter; only the memory-hungry tests are held back.
 [profile.metal]

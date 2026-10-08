@@ -2,7 +2,7 @@ use inference_nn::loaders::NormalLoaderType;
 pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub const NORMAL_LOADER_TYPE_COUNT: usize = 26;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 27;
 pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 26;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -376,6 +376,18 @@ const QWEN35_METADATA: &[&str] = &[
     "{arch}.ssm.state_size",
     "{arch}.ssm.time_step_rank",
 ];
+const QWEN35_MOE_METADATA: &[&str] = &[
+    "{arch}.expert_count",
+    "{arch}.expert_used_count",
+    "{arch}.expert_feed_forward_length",
+    "{arch}.full_attention_interval",
+    "{arch}.rope.dimension_sections",
+    "{arch}.ssm.conv_kernel",
+    "{arch}.ssm.group_count",
+    "{arch}.ssm.inner_size",
+    "{arch}.ssm.state_size",
+    "{arch}.ssm.time_step_rank",
+];
 const LFM2_METADATA: &[&str] = &["{arch}.shortconv.l_cache"];
 const LFM2_MOE_METADATA: &[&str] = &[
     "{arch}.shortconv.l_cache",
@@ -422,6 +434,7 @@ const QWEN3_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen3];
 const QWEN3_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen3Moe];
 const QWEN3_NEXT_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen3Next];
 const QWEN35_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen3_5];
+const QWEN35_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Qwen3_5Moe];
 const STARCODER2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Starcoder2];
 const DEEPSEEK2_LOADERS: &[NormalLoaderType] = &[
     NormalLoaderType::DeepSeekV2,
@@ -537,9 +550,9 @@ pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     },
     GgufSchema {
         architecture: CanonicalGgufArchitecture::Qwen35Moe,
-        compatible_loaders: QWEN3_NEXT_LOADERS,
+        compatible_loaders: QWEN35_MOE_LOADERS,
         rope_pairing: RopePairing::HalfSplit,
-        required_metadata: QWEN3_NEXT_METADATA,
+        required_metadata: QWEN35_MOE_METADATA,
         required_tensors: QWEN35_MOE_TENSORS,
         unsupported_metadata: NO_REQUIREMENTS,
     },
@@ -809,16 +822,12 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
     },
     NativeModelAdapter {
         loader: NormalLoaderType::Qwen3Next,
-        architectures: &[
-            CanonicalGgufArchitecture::Qwen3Next,
-            CanonicalGgufArchitecture::Qwen35Moe,
-        ],
+        architectures: &[CanonicalGgufArchitecture::Qwen3Next],
         layouts: &[
             GgufLayout::Direct,
             GgufLayout::StackedExperts,
             GgufLayout::PerLayerInventory,
             GgufLayout::Qwen3NextSplitQkvzGroupedBa,
-            GgufLayout::Qwen35SplitQkvzSplitBetaAlpha,
             GgufLayout::ShiftedRmsNorm,
         ],
     },
@@ -827,6 +836,17 @@ pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT]
         architectures: &[CanonicalGgufArchitecture::Qwen35],
         layouts: &[
             GgufLayout::Direct,
+            GgufLayout::PerLayerInventory,
+            GgufLayout::Qwen35SplitQkvzSplitBetaAlpha,
+            GgufLayout::ShiftedRmsNorm,
+        ],
+    },
+    NativeModelAdapter {
+        loader: NormalLoaderType::Qwen3_5Moe,
+        architectures: &[CanonicalGgufArchitecture::Qwen35Moe],
+        layouts: &[
+            GgufLayout::Direct,
+            GgufLayout::StackedExperts,
             GgufLayout::PerLayerInventory,
             GgufLayout::Qwen35SplitQkvzSplitBetaAlpha,
             GgufLayout::ShiftedRmsNorm,
@@ -1216,10 +1236,6 @@ mod tests {
                 GgufLayout::Qwen3NextSplitQkvzGroupedBa,
             ),
             (
-                NormalLoaderType::Qwen3Next,
-                GgufLayout::Qwen35SplitQkvzSplitBetaAlpha,
-            ),
-            (
                 NormalLoaderType::Qwen3_5,
                 GgufLayout::Qwen35SplitQkvzSplitBetaAlpha,
             ),
@@ -1414,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen35moe_metadata_and_inventory_resolve_to_qwen3_next() {
+    fn qwen35moe_metadata_and_inventory_resolve_to_moe_text() {
         let metadata = [
             "general.architecture",
             "qwen35moe.context_length",
@@ -1425,10 +1441,14 @@ mod tests {
             "qwen35moe.attention.layer_norm_rms_epsilon",
             "qwen35moe.expert_count",
             "qwen35moe.expert_used_count",
+            "qwen35moe.expert_feed_forward_length",
             "qwen35moe.full_attention_interval",
+            "qwen35moe.rope.dimension_sections",
             "qwen35moe.ssm.conv_kernel",
+            "qwen35moe.ssm.group_count",
             "qwen35moe.ssm.inner_size",
             "qwen35moe.ssm.state_size",
+            "qwen35moe.ssm.time_step_rank",
         ];
         let tensors = [
             "token_embd.weight",
@@ -1450,7 +1470,7 @@ mod tests {
             .validate(&descriptor)
             .unwrap();
         let resolved = resolve_native_adapter(&descriptor, None).unwrap();
-        assert_eq!(resolved.adapter.loader, NormalLoaderType::Qwen3Next);
+        assert_eq!(resolved.adapter.loader, NormalLoaderType::Qwen3_5Moe);
         assert_eq!(resolved.reason, ResolutionReason::SingleCandidate);
     }
 

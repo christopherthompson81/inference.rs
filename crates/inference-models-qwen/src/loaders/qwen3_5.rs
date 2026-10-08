@@ -14,7 +14,8 @@ impl MultimodalPromptPrefixer for Qwen3_5Prefixer {
     // when it sees {"type": "image"} entries in the content.
 }
 
-const LANGUAGE_MODEL: &str = r"^(language_model\.model|model\.language_model)\.layers\.(\d+)";
+// Multimodal checkpoints nest the text stack; text-only ones keep it at `model`
+const LANGUAGE_MODEL: &str = r"^(language_model\.model|model\.language_model|model)\.layers\.(\d+)";
 const ATTENTION_ISQ: &[&str] = &[
     // Full attention projections
     r"\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
@@ -40,7 +41,7 @@ fn layer_regexes(patterns: &[&[&str]]) -> Result<Vec<Regex>> {
     isq_regexes(&names.iter().map(String::as_str).collect::<Vec<_>>())
 }
 
-fn isq_layer_regexes(moe: bool) -> Result<Vec<Regex>> {
+pub(super) fn isq_layer_regexes(moe: bool) -> Result<Vec<Regex>> {
     let mut regexes = isq_regexes(&[r"lm_head\.(weight|bias)$", r"^mtp\.fc\.weight$"])?;
     regexes.extend(if moe {
         layer_regexes(&[ATTENTION_ISQ, EXPERTS_ISQ, SHARED_EXPERT_ISQ])?
@@ -48,6 +49,14 @@ fn isq_layer_regexes(moe: bool) -> Result<Vec<Regex>> {
         layer_regexes(&[ATTENTION_ISQ, DENSE_MLP_ISQ])?
     });
     Ok(regexes)
+}
+
+pub(super) fn isq_layer_regexes_moqe(moe: bool) -> Result<Vec<Regex>> {
+    if moe {
+        layer_regexes(&[EXPERTS_ISQ])
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn parse_config(config: &str, moe: bool) -> Result<Qwen3_5Config> {
@@ -183,11 +192,7 @@ macro_rules! qwen3_5_loader {
                 self.isq_layer_regexes(config)
             }
             fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
-                if $moe {
-                    layer_regexes(&[EXPERTS_ISQ])
-                } else {
-                    Ok(Vec::new())
-                }
+                isq_layer_regexes_moqe($moe)
             }
             fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
                 self.isq_layer_regexes_moqe(config)

@@ -11,6 +11,8 @@ use inference::{
 const MODEL_ENV: &str = "INFERENCE_TEST_QWEN3_5_MODEL";
 // A Qwen3.5 or Qwen3.8 GGUF that keeps its `nextn` (MTP) blocks, as llama.cpp's converter writes by default.
 const GGUF_ENV: &str = "INFERENCE_TEST_QWEN3_5_GGUF";
+// The same for a Qwen3.5-MoE GGUF, which loads through the MoE text model
+const MOE_GGUF_ENV: &str = "INFERENCE_TEST_QWEN3_5_MOE_GGUF";
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const MAX_LEN: usize = 64;
 const N_PREDICT: usize = 2;
@@ -233,11 +235,17 @@ async fn build_gguf(file: &Path, mtp: bool) -> anyhow::Result<Model> {
 
 #[tokio::test]
 async fn gguf_builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
-    let Some(file) = std::env::var(GGUF_ENV)
-        .ok()
-        .filter(|f| Path::new(f).is_file())
-    else {
-        eprintln!("SKIP: {GGUF_ENV} is not a local GGUF file");
+    check_gguf_mtp(GGUF_ENV).await
+}
+
+#[tokio::test]
+async fn moe_gguf_builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    check_gguf_mtp(MOE_GGUF_ENV).await
+}
+
+async fn check_gguf_mtp(env: &str) -> anyhow::Result<()> {
+    let Some(file) = std::env::var(env).ok().filter(|f| Path::new(f).is_file()) else {
+        eprintln!("SKIP: {env} is not a local GGUF file");
         return Ok(());
     };
     if !ON_GPU {

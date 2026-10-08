@@ -189,19 +189,16 @@ pub fn normalize_qwen_multimodal_config(
 pub fn build_qwen35_text_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     let architecture = metadata_string(archive, GENERAL_ARCHITECTURE)?
         .context("GGUF metadata is missing `general.architecture`")?;
-    if architecture != "qwen35" {
-        bail!("Qwen3.5 text binding does not support `{architecture}`");
-    }
+    let family = match architecture {
+        "qwen35" => QwenMultimodalFamily::Qwen35,
+        "qwen35moe" => QwenMultimodalFamily::Qwen35Moe,
+        _ => bail!("Qwen3.5 text binding does not support `{architecture}`"),
+    };
     let inventory = TensorInventory::from_archive(archive);
     let mut bindings = GgufBindingMap::new();
     let gdn = Some(read_gdn_metadata(archive)?);
-    bind_text(&inventory, QwenMultimodalFamily::Qwen35, gdn, &mut bindings)?;
-    bind_mtp(
-        archive,
-        &inventory,
-        QwenMultimodalFamily::Qwen35,
-        &mut bindings,
-    )?;
+    bind_text(&inventory, family, gdn, &mut bindings)?;
+    bind_mtp(archive, &inventory, family, &mut bindings)?;
     Ok(bindings)
 }
 

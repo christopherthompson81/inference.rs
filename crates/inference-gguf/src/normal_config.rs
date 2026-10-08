@@ -43,7 +43,7 @@ pub struct NormalConfigBuilder {
     build: BuilderFn,
 }
 
-pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 26] = &[
+pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 27] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::Mistral,
         build: build_mistral,
@@ -139,6 +139,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 26] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::Qwen3_5,
         build: build_qwen35,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Qwen3_5Moe,
+        build: build_qwen35_moe,
     },
     NormalConfigBuilder {
         loader: NormalLoaderType::Lfm2,
@@ -275,14 +279,9 @@ pub fn normalize_external_normal_config(
     text_config.insert("quantization_config".to_string(), JsonValue::Null);
     if matches!(
         shape,
-        ExternalConfigShape::Nested(NestedTextConfig::Qwen35Moe)
+        ExternalConfigShape::Nested(NestedTextConfig::Qwen35 | NestedTextConfig::Qwen35Moe)
+            | ExternalConfigShape::Qwen35Text
             | ExternalConfigShape::Qwen35MoeText
-    ) {
-        normalize_qwen35_text_config(&mut text_config)?;
-    }
-    if matches!(
-        shape,
-        ExternalConfigShape::Nested(NestedTextConfig::Qwen35) | ExternalConfigShape::Qwen35Text
     ) && let Some(tie_word_embeddings) = object.get("tie_word_embeddings")
     {
         text_config.insert(
@@ -342,7 +341,7 @@ fn loader_hint_from_config_object(
         Some("mistral3") => Ok(Some(NormalLoaderType::Mistral)),
         Some("lfm2_vl") => Ok(Some(NormalLoaderType::Lfm2)),
         Some("qwen3_5" | "qwen3_5_text") => Ok(Some(NormalLoaderType::Qwen3_5)),
-        Some("qwen3_5_moe" | "qwen3_5_moe_text") => Ok(Some(NormalLoaderType::Qwen3Next)),
+        Some("qwen3_5_moe" | "qwen3_5_moe_text") => Ok(Some(NormalLoaderType::Qwen3_5Moe)),
         _ => Ok(None),
     }
 }
@@ -355,7 +354,7 @@ fn normal_loader_from_architecture(architecture: &str) -> anyhow::Result<NormalL
             return Ok(NormalLoaderType::Qwen3_5);
         }
         "Qwen3_5MoeForConditionalGeneration" | "Qwen3_5MoeForCausalLM" => {
-            return Ok(NormalLoaderType::Qwen3Next);
+            return Ok(NormalLoaderType::Qwen3_5Moe);
         }
         _ => {}
     }
@@ -388,7 +387,7 @@ impl ExternalConfigShape {
             Self::Nested(NestedTextConfig::Lfm2Vl) => NormalLoaderType::Lfm2,
             Self::Nested(NestedTextConfig::Qwen35) | Self::Qwen35Text => NormalLoaderType::Qwen3_5,
             Self::Nested(NestedTextConfig::Qwen35Moe) | Self::Qwen35MoeText => {
-                NormalLoaderType::Qwen3Next
+                NormalLoaderType::Qwen3_5Moe
             }
         }
     }
@@ -459,58 +458,6 @@ fn config_model_type(object: &JsonMap<String, JsonValue>) -> anyhow::Result<Opti
             anyhow::bail!("External config `model_type` must be a string, got {value}")
         }
     })
-}
-
-fn normalize_qwen35_text_config(
-    text_config: &mut JsonMap<String, JsonValue>,
-) -> anyhow::Result<()> {
-    copy_qwen35_rope_field(text_config, "rope_theta")?;
-    copy_qwen35_rope_field(text_config, "partial_rotary_factor")?;
-    match text_config.get("intermediate_size") {
-        Some(value) if value.is_number() => {}
-        Some(value) if !value.is_null() => {
-            anyhow::bail!(
-                "Qwen3.5 MoE text config `intermediate_size` must be numeric, got {value}"
-            )
-        }
-        _ => {
-            let intermediate_size = text_config
-                .get("shared_expert_intermediate_size")
-                .filter(|value| value.is_number())
-                .cloned()
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "Qwen3.5 MoE text config requires numeric `shared_expert_intermediate_size` to derive native `intermediate_size`"
-                    )
-                })?;
-            text_config.insert("intermediate_size".to_string(), intermediate_size);
-        }
-    }
-    Ok(())
-}
-
-fn copy_qwen35_rope_field(
-    text_config: &mut JsonMap<String, JsonValue>,
-    field: &str,
-) -> anyhow::Result<()> {
-    match text_config.get(field) {
-        Some(value) if value.is_number() => return Ok(()),
-        Some(value) if !value.is_null() => {
-            anyhow::bail!("Qwen3.5 MoE text config `{field}` must be numeric, got {value}")
-        }
-        _ => {}
-    }
-    let value = text_config
-        .get("rope_parameters")
-        .and_then(JsonValue::as_object)
-        .and_then(|rope| rope.get(field))
-        .filter(|value| value.is_number())
-        .cloned()
-        .ok_or_else(|| {
-            anyhow::anyhow!("Qwen3.5 MoE text config requires numeric `rope_parameters.{field}`")
-        })?;
-    text_config.insert(field.to_string(), value);
-    Ok(())
 }
 
 struct MetadataView<'a> {
@@ -1808,15 +1755,60 @@ fn build_qwen3_next(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         "full_attention_interval".into(),
         json!(metadata.required_usize("full_attention_interval")?),
     );
-    if metadata.architecture == CanonicalGgufArchitecture::Qwen35Moe {
-        config.insert(GDN_V_HEAD_LAYOUT_CONFIG_KEY.into(), json!("tiled"));
-    }
     Ok(JsonValue::Object(config))
 }
 
 fn build_qwen35(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     reject_unsupported_rope_scaling(metadata, "Qwen3.5")?;
     let fields = StandardFields::read(metadata, None)?;
+    Ok(JsonValue::Object(qwen35_text_config(metadata, fields)?))
+}
+
+fn build_qwen35_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    reject_unsupported_rope_scaling(metadata, "Qwen3.5 MoE")?;
+    // MoE checkpoints have no dense feed-forward length; the shared expert's stands in, as for Qwen3Next
+    let intermediate_size = match metadata.optional_usize("feed_forward_length")? {
+        Some(intermediate_size) => intermediate_size,
+        None => metadata.required_usize("expert_shared_feed_forward_length")?,
+    };
+    let fields = StandardFields::read_with_intermediate_size(metadata, None, intermediate_size)?;
+    let num_hidden_layers = fields.num_hidden_layers;
+    let mut config = qwen35_text_config(metadata, fields)?;
+    config.insert(
+        "moe_intermediate_size".into(),
+        json!(metadata.required_usize("expert_feed_forward_length")?),
+    );
+    config.insert(
+        "shared_expert_intermediate_size".into(),
+        json!(metadata.required_usize("expert_shared_feed_forward_length")?),
+    );
+    config.insert(
+        "num_experts_per_tok".into(),
+        json!(metadata.required_usize("expert_used_count")?),
+    );
+    config.insert(
+        "num_experts".into(),
+        json!(metadata.required_usize("expert_count")?),
+    );
+    config.insert(
+        "norm_topk_prob".into(),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(true)
+        ),
+    );
+    config.insert(
+        "mlp_only_layers".into(),
+        json!(dense_layer_indices(metadata, num_hidden_layers)),
+    );
+    Ok(JsonValue::Object(config))
+}
+
+fn qwen35_text_config(
+    metadata: &MetadataView<'_>,
+    fields: StandardFields,
+) -> SynthesisResult<serde_json::Map<String, JsonValue>> {
     let rotary_dim = metadata.required_usize("rope.dimension_count")?;
     let partial_rotary_factor = ratio_f64(
         metadata,
@@ -1930,7 +1922,7 @@ fn build_qwen35(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         ),
     );
     config.insert(GDN_V_HEAD_LAYOUT_CONFIG_KEY.into(), json!("tiled"));
-    Ok(JsonValue::Object(config))
+    Ok(config)
 }
 
 fn build_lfm2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
@@ -2639,6 +2631,7 @@ mod tests {
                 | NormalLoaderType::GptOss
                 | NormalLoaderType::HunYuanMoEV1
                 | NormalLoaderType::Qwen3Next
+                | NormalLoaderType::Qwen3_5Moe
                 | NormalLoaderType::Lfm2Moe
         )
     }
@@ -2751,6 +2744,7 @@ mod tests {
             loader,
             NormalLoaderType::Qwen3Next
                 | NormalLoaderType::Qwen3_5
+                | NormalLoaderType::Qwen3_5Moe
                 | NormalLoaderType::GraniteMoeHybrid
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
@@ -2762,7 +2756,7 @@ mod tests {
 
         if matches!(
             loader,
-            NormalLoaderType::Qwen3Next | NormalLoaderType::Qwen3_5
+            NormalLoaderType::Qwen3Next | NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe
         ) {
             insert_u32(&mut metadata, architecture, "full_attention_interval", 4);
             tensors.extend(
@@ -2777,7 +2771,10 @@ mod tests {
                         .map(str::to_string),
                 );
             }
-            if architecture == CanonicalGgufArchitecture::Qwen35 {
+            if matches!(
+                architecture,
+                CanonicalGgufArchitecture::Qwen35 | CanonicalGgufArchitecture::Qwen35Moe
+            ) {
                 insert_u32_array(
                     &mut metadata,
                     architecture,
@@ -2926,7 +2923,7 @@ mod tests {
             NormalLoaderType::Qwen3Next => {
                 assert_deserializes(loader, config, models::qwen3_next::Config::from_json)
             }
-            NormalLoaderType::Qwen3_5 => assert_deserializes(
+            NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe => assert_deserializes(
                 loader,
                 config,
                 inference_models_qwen::qwen3_5::TextConfig::from_json,
@@ -2977,8 +2974,8 @@ mod tests {
     }
 
     #[test]
-    fn qwen35moe_standalone_metadata_synthesizes_tiled_native_config() {
-        let loader = NormalLoaderType::Qwen3Next;
+    fn qwen35moe_standalone_metadata_synthesizes_a_qwen35_moe_text_config() {
+        let loader = NormalLoaderType::Qwen3_5Moe;
         let architecture = CanonicalGgufArchitecture::Qwen35Moe;
         let (mut metadata, tensors) = fixture(&loader, architecture);
         metadata.remove(&format!("{}.feed_forward_length", architecture.as_str()));
@@ -2992,14 +2989,13 @@ mod tests {
         let config = synthesize_normal_config_value(&loader, &metadata, &tensors).unwrap();
         assert_eq!(config["intermediate_size"], 512);
         assert_eq!(config["head_dim"], 256);
-        assert_eq!(config["partial_rotary_factor"], 0.25);
+        assert_eq!(config["rope_parameters"]["partial_rotary_factor"], 0.25);
+        assert_eq!(config["num_experts"], 8);
         assert_eq!(config[GDN_V_HEAD_LAYOUT_CONFIG_KEY], "tiled");
-        assert_eq!(config["architectures"][0], "Qwen3NextForCausalLM");
-        let native = models::qwen3_next::Config::from_json(&config.to_string()).unwrap();
-        assert_eq!(
-            inference_nn::gdn::GdnConfig::v_head_layout(&native),
-            inference_nn::gdn::GdnVHeadLayout::Tiled
-        );
+        assert_eq!(config["architectures"][0], "Qwen3_5MoeForCausalLM");
+        let native =
+            inference_models_qwen::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
+        native.check_experts(true).unwrap();
         assert_native_config_deserializes(&loader, config);
     }
 
@@ -3094,7 +3090,7 @@ mod tests {
                 CanonicalGgufArchitecture::Qwen3Next,
             ),
             (
-                NormalLoaderType::Qwen3Next,
+                NormalLoaderType::Qwen3_5Moe,
                 CanonicalGgufArchitecture::Qwen35Moe,
             ),
             (
@@ -3430,7 +3426,7 @@ mod tests {
     }
 
     #[test]
-    fn qwen35_moe_external_config_maps_to_qwen3_next() {
+    fn qwen35_moe_external_config_maps_to_the_qwen35_moe_text_loader() {
         let raw = json!({
             "architectures": ["Qwen3_5MoeForConditionalGeneration"],
             "model_type": "qwen3_5_moe",
@@ -3447,7 +3443,8 @@ mod tests {
                 "head_dim": 64,
                 "rope_parameters": {
                     "rope_theta": 10000000.0,
-                    "partial_rotary_factor": 0.25
+                    "partial_rotary_factor": 0.25,
+                    "mrope_section": [3, 3, 2]
                 },
                 "linear_conv_kernel_dim": 4,
                 "linear_key_head_dim": 64,
@@ -3468,21 +3465,22 @@ mod tests {
         .to_string();
         assert_eq!(
             normal_loader_hint_from_external_config(&raw).unwrap(),
-            Some(NormalLoaderType::Qwen3Next)
+            Some(NormalLoaderType::Qwen3_5Moe)
         );
         let normalized = normalize_external_normal_config(
-            &NormalLoaderType::Qwen3Next,
+            &NormalLoaderType::Qwen3_5Moe,
             CanonicalGgufArchitecture::Qwen35Moe,
             &raw,
         )
         .unwrap();
         let value: JsonValue = serde_json::from_str(&normalized).unwrap();
-        assert_eq!(value["rope_theta"], 10000000.0);
-        assert_eq!(value["partial_rotary_factor"], 0.25);
-        assert_eq!(value["intermediate_size"], 512);
+        assert_eq!(value["rope_parameters"]["partial_rotary_factor"], 0.25);
         assert_eq!(value[GDN_V_HEAD_LAYOUT_CONFIG_KEY], "tiled");
-        assert_eq!(value["architectures"][0], "Qwen3NextForCausalLM");
-        assert_native_config_deserializes(&NormalLoaderType::Qwen3Next, value);
+        assert_eq!(value["architectures"][0], "Qwen3_5MoeForCausalLM");
+        let native =
+            inference_models_qwen::qwen3_5::TextConfig::from_json(&value.to_string()).unwrap();
+        native.check_experts(true).unwrap();
+        assert_native_config_deserializes(&NormalLoaderType::Qwen3_5Moe, value);
     }
 
     #[test]

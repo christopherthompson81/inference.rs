@@ -255,16 +255,9 @@ struct RegistryState {
 }
 
 #[derive(Debug)]
-struct LoraSitePrefixAlias {
-    source: Arc<str>,
-    target: Arc<str>,
-}
-
-#[derive(Debug)]
 pub struct LoraLayerRegistry {
     runtime_id: LoraRuntimeId,
     state: Mutex<RegistryState>,
-    site_prefix_alias: Option<LoraSitePrefixAlias>,
     // Head dim of Q/K projections whose rows a GGUF converter reordered to adjacent RoPE pairs
     adjacent_qk_head_dim: Option<usize>,
 }
@@ -302,33 +295,8 @@ impl LoraLayerRegistry {
         Self {
             runtime_id: LoraRuntimeId::next(),
             state: Mutex::new(RegistryState::default()),
-            site_prefix_alias: None,
             adjacent_qk_head_dim: None,
         }
-    }
-
-    pub fn new_with_site_prefix_alias(
-        source: impl Into<Arc<str>>,
-        target: impl Into<Arc<str>>,
-    ) -> Result<Self> {
-        let source = source.into();
-        let target = target.into();
-        if source.is_empty() || target.is_empty() {
-            inference_tensor::bail!("LoRA site prefix aliases must not be empty");
-        }
-        if source.starts_with('.')
-            || source.ends_with('.')
-            || target.starts_with('.')
-            || target.ends_with('.')
-        {
-            inference_tensor::bail!("LoRA site prefix aliases must not start or end with `.`");
-        }
-        Ok(Self {
-            runtime_id: LoraRuntimeId::next(),
-            state: Mutex::new(RegistryState::default()),
-            site_prefix_alias: Some(LoraSitePrefixAlias { source, target }),
-            adjacent_qk_head_dim: None,
-        })
     }
 
     /// Adapters are trained on half-split Q/K rows; a GGUF Llama-family checkpoint stores them in adjacent RoPE pairs.
@@ -346,7 +314,6 @@ impl LoraLayerRegistry {
 
     /// A layer this model cannot adapt; adapters with tensors for it are refused with `reason` when they load.
     pub fn exclude_site(&self, key: LoraSiteKey, reason: &'static str) {
-        let key = self.canonical_site_key(key);
         let mut state = self.state.lock().expect("LoRA layer registry poisoned");
         state.excluded.insert(key, reason);
     }
@@ -369,7 +336,6 @@ impl LoraLayerRegistry {
     ) -> Result<Arc<LoraSiteHandle>> {
         let spec = self.with_qk_row_layout(&key, spec)?;
         spec.validate()?;
-        let key = self.canonical_site_key(key);
         let mut state = self.state.lock().expect("LoRA layer registry poisoned");
         if state.expert_sites.contains_key(&key) {
             inference_tensor::bail!(
@@ -415,7 +381,6 @@ impl LoraLayerRegistry {
         activation_dtype: DType,
         device: Device,
     ) -> Result<Arc<LoraExpertSiteHandle>> {
-        let key = self.canonical_site_key(key);
         if key.slice().is_some() {
             inference_tensor::bail!("expert LoRA group sites cannot be sliced");
         }
@@ -523,31 +488,6 @@ impl LoraLayerRegistry {
         }
         spec.with_output_runtime_to_canonical(adjacent_to_half_split(out_features, head_dim))
     }
-
-    fn canonical_site_key(&self, key: LoraSiteKey) -> LoraSiteKey {
-        let Some(alias) = &self.site_prefix_alias else {
-            return key;
-        };
-        let path = key.path();
-        let suffix = if path == alias.source.as_ref() {
-            Some("")
-        } else {
-            path.strip_prefix(alias.source.as_ref())
-                .and_then(|suffix| suffix.strip_prefix('.'))
-        };
-        let Some(suffix) = suffix else {
-            return key;
-        };
-        let path = if suffix.is_empty() {
-            alias.target.clone()
-        } else {
-            Arc::from(format!("{}.{suffix}", alias.target))
-        };
-        LoraSiteKey {
-            path,
-            slice: key.slice,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -649,45 +589,6 @@ mod tests {
                 )
                 .is_err()
         );
-        Ok(())
-    }
-
-    #[test]
-    fn site_prefix_aliases_apply_to_linear_and_expert_sites() -> Result<()> {
-        let registry =
-            LoraLayerRegistry::new_with_site_prefix_alias("model", "model.language_model")?;
-        let linear = registry.register(
-            LoraSiteKey::with_slice("model.layers.0.self_attn.q_proj", 0, 2)?,
-            LoraLinearSpec::replicated(4, 8),
-            DType::F32,
-            Device::Cpu,
-        )?;
-        let expert = registry.register_expert(
-            LoraSiteKey::new("model.layers.0.mlp.experts"),
-            expert_spec()?,
-            DType::F32,
-            Device::Cpu,
-        )?;
-        let unrelated = registry.register(
-            LoraSiteKey::new("model_extra.proj"),
-            LoraLinearSpec::replicated(4, 8),
-            DType::F32,
-            Device::Cpu,
-        )?;
-
-        assert_eq!(
-            linear.key().path(),
-            "model.language_model.layers.0.self_attn.q_proj"
-        );
-        assert_eq!(
-            linear.key().slice(),
-            Some(LoraSiteSlice { index: 0, count: 2 })
-        );
-        assert_eq!(
-            expert.key().path(),
-            "model.language_model.layers.0.mlp.experts"
-        );
-        assert_eq!(unrelated.key().path(), "model_extra.proj");
         Ok(())
     }
 

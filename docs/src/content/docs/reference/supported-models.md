@@ -50,6 +50,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `HunYuanMoEV1ForCausalLM` | HunYuan MoE | <details><summary><code>tencent/Hunyuan-A13B-Instruct</code></summary><code>inference run -m tencent/Hunyuan-A13B-Instruct</code></details> |
 | `Qwen3NextForCausalLM` | Qwen3-Next, Qwen3-Coder-Next | <details><summary><code>Qwen/Qwen3-Next-80B-A3B-Instruct</code></summary><code>inference run -m Qwen/Qwen3-Next-80B-A3B-Instruct</code></details> |
 | `Qwen3_5ForCausalLM` | Qwen3.5 | No published example |
+| `Qwen3_5MoeForCausalLM` | Qwen3.5 MoE | No published example |
 | `Lfm2ForCausalLM` | LFM2, LFM2.5 | <details><summary><code>LiquidAI/LFM2.5-1.2B-Instruct</code> (LFM2.5), <code>LiquidAI/LFM2-1.2B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-1.2B-Instruct</code><br><code>inference run -m LiquidAI/LFM2-1.2B</code></details> |
 | `Lfm2MoeForCausalLM` | LFM2 MoE, LFM2.5 MoE | <details><summary><code>LiquidAI/LFM2.5-8B-A1B</code> (LFM2.5), <code>LiquidAI/LFM2-8B-A1B</code> (LFM2)</summary><code>inference run -m LiquidAI/LFM2.5-8B-A1B</code><br><code>inference run -m LiquidAI/LFM2-8B-A1B</code></details> |
 

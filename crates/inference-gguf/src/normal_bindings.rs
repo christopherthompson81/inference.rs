@@ -9,7 +9,10 @@ pub fn build_normal_bindings(
     loader: &NormalLoaderType,
     architecture: CanonicalGgufArchitecture,
 ) -> Result<GgufBindingMap> {
-    if matches!(loader, NormalLoaderType::Qwen3_5) {
+    if matches!(
+        loader,
+        NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe
+    ) {
         return super::qwen_multimodal_bindings::build_qwen35_text_bindings(archive);
     }
     let mut bindings = GgufBindingMap::new();
@@ -508,12 +511,6 @@ fn bind_qwen3_next(
             ("in_proj_z.weight", "attn_gate.weight"),
             ("in_proj_ba.weight", "ssm_ba.weight"),
         ][..],
-        CanonicalGgufArchitecture::Qwen35Moe => &[
-            ("in_proj_qkv.weight", "attn_qkv.weight"),
-            ("in_proj_z.weight", "attn_gate.weight"),
-            ("in_proj_b.weight", "ssm_beta.weight"),
-            ("in_proj_a.weight", "ssm_alpha.weight"),
-        ][..],
         _ => bail!("native Qwen3Next binding does not support `{architecture}`"),
     };
     for (native, canonical) in projections.iter().copied().chain([
@@ -831,7 +828,6 @@ fn norm_binding(
             CanonicalGgufArchitecture::Gemma
                 | CanonicalGgufArchitecture::Gemma2
                 | CanonicalGgufArchitecture::Qwen3Next
-                | CanonicalGgufArchitecture::Qwen35Moe
         )
     {
         binding.affine(1.0, -1.0)

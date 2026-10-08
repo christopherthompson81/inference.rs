@@ -16,7 +16,7 @@ use std::{
 
 use crate::gdn::RecurrentBatchKind;
 use crate::gdn::{
-    GatedDeltaNet, GdnConfig, GdnInputProjectionKind, GdnLayerCache, GdnStateDType, GdnVHeadLayout,
+    GatedDeltaNet, GdnConfig, GdnInputProjectionKind, GdnLayerCache, GdnStateDType,
     PackedGdnLayout, try_forward_grouped_packed_gdn,
 };
 use crate::kv_cache::EitherCache;
@@ -95,8 +95,6 @@ pub struct Config {
     #[serde(default = "default_tie")]
     pub tie_word_embeddings: bool,
     pub quantization_config: Option<QuantizedConfig>,
-    #[serde(default, rename = "_inference_gdn_v_head_layout")]
-    gdn_v_head_layout: GdnVHeadLayout,
 }
 
 #[derive(Debug, Clone)]
@@ -159,9 +157,6 @@ impl GdnConfig for Config {
     }
     fn quantization_config(&self) -> &Option<QuantizedConfig> {
         &self.quantization_config
-    }
-    fn v_head_layout(&self) -> GdnVHeadLayout {
-        self.gdn_v_head_layout
     }
 }
 
