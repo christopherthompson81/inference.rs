@@ -749,50 +749,21 @@ impl InferenceRs {
             let clone_sender = engine_instance.sender.clone();
             tokio::task::block_in_place(|| {
                 let (tx, mut rx) = channel(1);
-                let req = Request::Normal(Box::new(NormalRequest {
-                    id: 0,
-                    queued_at: None,
-                    messages: RequestMessage::Completion {
+                let req = Request::Normal(Box::new(NormalRequest::new_simple(
+                    RequestMessage::Completion {
                         text: "hello".to_string(),
                         echo_prompt: false,
                         best_of: None,
                     },
-                    sampling_params: SamplingParams {
+                    SamplingParams {
                         max_len: Some(1),
                         ..SamplingParams::deterministic()
                     },
-                    seed: None,
-                    response: tx,
-                    return_logprobs: false,
-                    is_streaming: false,
-                    constraint: Constraint::None,
-                    suffix: None,
-                    tool_choice: None,
-                    tools: None,
-                    logits_processors: None,
-                    host_tools: Vec::new(),
-                    sequential_tool_calls: false,
-                    return_raw_logits: false,
-                    web_search_options: None,
-                    enable_code_execution: false,
-                    enable_shell: false,
-                    shell_options: None,
-                    code_execution_permission: None,
-                    code_execution_approval_notifier: None,
-                    agent_permission: None,
-                    agent_approval_handler: None,
-                    agent_approval_notifier: None,
-                    max_tool_rounds: None,
-                    tool_dispatch_url: None,
-                    model_id: None,
-                    adapter: None,
-                    truncate_sequence: false,
-                    session_id: None,
-                    owner: None,
-                    files: None,
-                    input_files: Vec::new(),
-                    cancellation: None,
-                }));
+                    tx,
+                    0,
+                    None,
+                    None,
+                )));
                 debug!("Beginning dummy run.");
                 let start = Instant::now();
                 clone_sender.blocking_send(req).unwrap();

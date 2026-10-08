@@ -2812,3 +2812,38 @@ tests pass.
 
 Review (subagent, read-only): no changed arguments (the `id as u128` timestamp equals the old literal 0 where id was
 0); applied its comment and blank-line nits. Full CI passed (2,494 CPU, 2,879 CUDA).
+
+## Run 91 - 2026-10-08 06:19
+
+Question: Run 71's "OpenAI request -> NormalRequest builders (chat, completion, core) (~150)".
+
+Raw finding: five `NormalRequest` literals (chat, completion, two embedding requests, the core startup probe) list
+all ~45 fields, most of them the defaults `NormalRequest::new_simple` already sets.
+
+Change: each literal names only its non-default fields and takes the rest by `..NormalRequest::new_simple(messages,
+sampling_params, response, id, tools, tool_choice)`; the two embedding requests and the probe become plain
+`new_simple` calls plus their few fields. Chat and completion hoist their `SamplingParams` (and completion its
+prompt) into a `let`. The only evaluation-order change is `state.next_request_id()`, which now runs after the other
+fields (a counter; no other side effects).
+
+Result: 81 insertions, 181 deletions (-100 net, against ~150 estimated); inference-api tests (104) pass. Left as is:
+the chat and completion `SamplingParams` mappings are field-for-field the same apart from the logprobs source, but
+over two different request types.
+
+Review (subagent, read-only): no findings; every non-default field kept, `new_simple` arguments in order, the
+later `next_request_id()` and the partial moves change nothing. Full CI passed (2,494 CPU, 2,879 CUDA).
+
+## Run 92 - 2026-10-08 06:28
+
+Question: Run 71's "paged-attention CUDA vs Metal host validation (~150)".
+
+Command: the 6-line-window duplicate finder over `crates/inference-paged-attn/src/*/backend/*.rs`.
+
+Raw finding: 887 lines sit in repeated windows, but almost all repeat within one file: bf16/f16 (and dtype)
+dispatch arms in `cuda/backend/mla.rs` (43+27 lines twice), `gather_kv.rs` in both backends, fa3 test setup. What
+CUDA and Metal actually share is `validate_kv_cache_scales` (18 lines, `cuda/backend/reshape_cache.rs` and
+`metal/backend/mod.rs`) and the k/v shape checks of reshape-and-cache (17 lines): ~35 lines, not ~150.
+
+Decision: not taken. Sharing the 35 lines touches Metal code this machine cannot build (only GitHub's macOS jobs
+see it), for ~20 lines net; the in-file dispatch repeats are the dtype-generic launch pattern each kernel family
+writes once per dtype. This closes Run 71's list.

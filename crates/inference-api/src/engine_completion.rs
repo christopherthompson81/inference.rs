@@ -159,36 +159,33 @@ pub(crate) fn parse_request(
         oairequest.dry_allowed_length,
     )?;
 
+    let messages = match oairequest.prompt {
+        CompletionPrompt::Text(text) => RequestMessage::Completion {
+            text,
+            echo_prompt: oairequest.echo_prompt,
+            best_of: oairequest.best_of,
+        },
+        CompletionPrompt::Tokens(tokens) => RequestMessage::CompletionTokens(tokens),
+    };
+    let sampling_params = SamplingParams {
+        temperature: oairequest.temperature,
+        top_k: oairequest.top_k,
+        top_p: oairequest.top_p,
+        min_p: oairequest.min_p,
+        top_n_logprobs: oairequest.logprobs.unwrap_or(1),
+        frequency_penalty: oairequest.frequency_penalty,
+        presence_penalty: oairequest.presence_penalty,
+        repetition_penalty: oairequest.repetition_penalty,
+        max_len: oairequest.max_tokens,
+        stop_toks,
+        ignore_eos: oairequest.ignore_eos,
+        logits_bias: oairequest.logit_bias,
+        n_choices: oairequest.n_choices,
+        dry_params,
+    };
     Ok((
         Request::Normal(Box::new(NormalRequest {
-            id: state.next_request_id(),
-            queued_at: None,
-            messages: match oairequest.prompt {
-                CompletionPrompt::Text(text) => RequestMessage::Completion {
-                    text,
-                    echo_prompt: oairequest.echo_prompt,
-                    best_of: oairequest.best_of,
-                },
-                CompletionPrompt::Tokens(tokens) => RequestMessage::CompletionTokens(tokens),
-            },
-            sampling_params: SamplingParams {
-                temperature: oairequest.temperature,
-                top_k: oairequest.top_k,
-                top_p: oairequest.top_p,
-                min_p: oairequest.min_p,
-                top_n_logprobs: oairequest.logprobs.unwrap_or(1),
-                frequency_penalty: oairequest.frequency_penalty,
-                presence_penalty: oairequest.presence_penalty,
-                repetition_penalty: oairequest.repetition_penalty,
-                max_len: oairequest.max_tokens,
-                stop_toks,
-                ignore_eos: oairequest.ignore_eos,
-                logits_bias: oairequest.logit_bias,
-                n_choices: oairequest.n_choices,
-                dry_params,
-            },
             seed: oairequest.seed,
-            response: tx,
             return_logprobs: oairequest.logprobs.is_some(),
             is_streaming,
             suffix: oairequest.suffix,
@@ -199,23 +196,6 @@ pub(crate) fn parse_request(
                 Some(Grammar::Llguidance(llguidance)) => Constraint::Llguidance(llguidance),
                 None => Constraint::None,
             },
-            tool_choice: oairequest.tool_choice,
-            tools: oairequest.tools,
-            logits_processors: None,
-            host_tools: Vec::new(),
-            sequential_tool_calls: false,
-            return_raw_logits: false,
-            web_search_options: None,
-            enable_code_execution: false,
-            enable_shell: false,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
             model_id: if oairequest.model == DEFAULT_MODEL_ID {
                 None
             } else {
@@ -223,11 +203,14 @@ pub(crate) fn parse_request(
             },
             adapter,
             truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
-            session_id: None,
-            owner: None,
-            files: None,
-            input_files: Vec::new(),
-            cancellation: None,
+            ..NormalRequest::new_simple(
+                messages,
+                sampling_params,
+                tx,
+                state.next_request_id(),
+                oairequest.tools,
+                oairequest.tool_choice,
+            )
         })),
         is_streaming,
     ))
