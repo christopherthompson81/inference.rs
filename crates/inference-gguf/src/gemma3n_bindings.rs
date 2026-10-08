@@ -4,7 +4,7 @@ use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use inference_models_gemma::gemma3n::vision::{BlockType, gemma3n_mobilenet_def};
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind, bind_required, bind_required_linear, bind_required_with,
+    TensorInventory, bind, bind_required, bind_required_linears, bind_required_with,
     metadata_string, metadata_usize, validate_architecture, validate_projector,
 };
 
@@ -231,22 +231,21 @@ fn bind_text_layer(
 ) -> Result<()> {
     let native = format!("model.language_model.layers.{layer}");
     let source = format!("blk.{layer}");
-    for (target, role) in [
-        ("self_attn.q_proj", "attn_q"),
-        ("self_attn.k_proj", "attn_k"),
-        ("self_attn.v_proj", "attn_v"),
-        ("self_attn.o_proj", "attn_output"),
-        ("mlp.gate_proj", "ffn_gate"),
-        ("mlp.up_proj", "ffn_up"),
-        ("mlp.down_proj", "ffn_down"),
-    ] {
-        bind_required_linear(
-            inventory,
-            bindings,
-            &format!("{native}.{target}"),
-            &format!("{source}.{role}"),
-        )?;
-    }
+    bind_required_linears(
+        inventory,
+        bindings,
+        &native,
+        &source,
+        &[
+            ("self_attn.q_proj", "attn_q"),
+            ("self_attn.k_proj", "attn_k"),
+            ("self_attn.v_proj", "attn_v"),
+            ("self_attn.o_proj", "attn_output"),
+            ("mlp.gate_proj", "ffn_gate"),
+            ("mlp.up_proj", "ffn_up"),
+            ("mlp.down_proj", "ffn_down"),
+        ],
+    )?;
     for (target, role) in [
         ("self_attn.q_norm.weight", "attn_q_norm.weight"),
         ("self_attn.k_norm.weight", "attn_k_norm.weight"),

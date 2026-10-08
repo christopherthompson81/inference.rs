@@ -2771,3 +2771,27 @@ Review (subagent, read-only): no correctness findings; every forwarded value mat
 drop, Auto's detected mapper on both paths, the GGUF native paths, speech ignoring paged attention, the embedder's
 `silent: cached`), progress guards keep their value and lifetime, no impl or caller outside core. Applied: imports in
 their `crate::` groups (dropped the redundant one in `config.rs`), `mut options` in AnyMoE's signatures.
+
+## Run 89 - 2026-10-08 05:52
+
+Question: what is in Run 71's "GGUF native loader paths and duplicated bindings helpers (~250)"?
+
+Raw finding (6-line-window finder over `crates/inference-gguf/src` and `pipeline/gguf.rs`):
+- 14 copies of "for (target, role) in [..] { bind_required_linear(.., {native}.{target}, {source}.{role}) }" across
+  eight bindings files (two in llama4's MoE caught by review), each with its own table.
+- The SigLIP vision tower binding written out three times (gemma3, idefics3 identical apart from the root;
+  lfm2_vl differs only in the patch embedding), and its one-layer test fixture three times.
+- `pipeline/gguf.rs`: the three native loaders (text, Gemma 3 text, multimodal) each build the weight source,
+  tokenizer, generation config, chat template and `PreparedSource` the same way (~25 lines each).
+
+Change: `bind_required_linears(native, source, pairs)`, `bind_siglip_vision` / `bind_siglip_encoder` and the
+test-only `siglip_test_tensors` in `multimodal_binding_utils`; `GGUFLoader::prepare_source`, with the multimodal
+path overriding the processor configs and weight files by struct update.
+
+Result: 317 insertions, 418 deletions (-101 net, against ~250 estimated: each table stays, only the loop goes). The
+inference-gguf binding tests (complete-inventory maps per family) pass unchanged.
+
+Review (subagent, read-only): no correctness findings; every pair table, native/source string, required-vs-optional
+binding and family name matches HEAD; `prepare_source` keeps the order of fallible steps and each loader's
+rope pairing, weight files and processor configs. Applied: the two llama4 MoE loops it found, one import group in
+lfm2_vl.

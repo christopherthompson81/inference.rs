@@ -2,8 +2,8 @@ use anyhow::{Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind, bind_required, bind_required_linear, validate_architecture,
-    validate_projector,
+    TensorInventory, bind, bind_required, bind_required_linear, bind_required_linears,
+    validate_architecture, validate_projector,
 };
 
 const FAMILY: &str = "Llama 4";
@@ -49,19 +49,18 @@ fn bind_text_layer(
 ) -> Result<()> {
     let native = format!("language_model.model.layers.{layer}");
     let source = format!("blk.{layer}");
-    for (target, role) in [
-        ("self_attn.q_proj", "attn_q"),
-        ("self_attn.k_proj", "attn_k"),
-        ("self_attn.v_proj", "attn_v"),
-        ("self_attn.o_proj", "attn_output"),
-    ] {
-        bind_required_linear(
-            inventory,
-            bindings,
-            &format!("{native}.{target}"),
-            &format!("{source}.{role}"),
-        )?;
-    }
+    bind_required_linears(
+        inventory,
+        bindings,
+        &native,
+        &source,
+        &[
+            ("self_attn.q_proj", "attn_q"),
+            ("self_attn.k_proj", "attn_k"),
+            ("self_attn.v_proj", "attn_v"),
+            ("self_attn.o_proj", "attn_output"),
+        ],
+    )?;
     bind_required(
         inventory,
         bindings,
@@ -89,18 +88,17 @@ fn bind_dense(
     native: &str,
     source: &str,
 ) -> Result<()> {
-    for (target, role) in [
-        ("gate_proj", "ffn_gate"),
-        ("up_proj", "ffn_up"),
-        ("down_proj", "ffn_down"),
-    ] {
-        bind_required_linear(
-            inventory,
-            bindings,
-            &format!("{native}.{target}"),
-            &format!("{source}.{role}"),
-        )?;
-    }
+    bind_required_linears(
+        inventory,
+        bindings,
+        native,
+        source,
+        &[
+            ("gate_proj", "ffn_gate"),
+            ("up_proj", "ffn_up"),
+            ("down_proj", "ffn_down"),
+        ],
+    )?;
     Ok(())
 }
 
@@ -116,18 +114,17 @@ fn bind_moe(
         &format!("{native}.router"),
         &format!("{source}.ffn_gate_inp"),
     )?;
-    for (target, role) in [
-        ("gate_proj", "ffn_gate_shexp"),
-        ("up_proj", "ffn_up_shexp"),
-        ("down_proj", "ffn_down_shexp"),
-    ] {
-        bind_required_linear(
-            inventory,
-            bindings,
-            &format!("{native}.shared_expert.{target}"),
-            &format!("{source}.{role}"),
-        )?;
-    }
+    bind_required_linears(
+        inventory,
+        bindings,
+        &format!("{native}.shared_expert"),
+        source,
+        &[
+            ("gate_proj", "ffn_gate_shexp"),
+            ("up_proj", "ffn_up_shexp"),
+            ("down_proj", "ffn_down_shexp"),
+        ],
+    )?;
 
     let fused = format!("{source}.ffn_gate_up_exps.weight");
     if inventory.contains(&fused) {
@@ -149,14 +146,13 @@ fn bind_moe(
             binding.slice(1, intermediate, intermediate),
         );
     } else {
-        for (target, role) in [("gate_proj", "ffn_gate_exps"), ("up_proj", "ffn_up_exps")] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.experts.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
+        bind_required_linears(
+            inventory,
+            bindings,
+            &format!("{native}.experts"),
+            source,
+            &[("gate_proj", "ffn_gate_exps"), ("up_proj", "ffn_up_exps")],
+        )?;
     }
     bind_required_linear(
         inventory,
@@ -220,23 +216,22 @@ fn bind_vision(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -
     for layer in inventory.require_layers("v.blk.", FAMILY)? {
         let native = format!("vision_model.model.layers.{layer}");
         let source = format!("v.blk.{layer}");
-        for (target, role) in [
-            ("self_attn.q_proj", "attn_q"),
-            ("self_attn.k_proj", "attn_k"),
-            ("self_attn.v_proj", "attn_v"),
-            ("self_attn.o_proj", "attn_out"),
-            ("mlp.fc1", "ffn_up"),
-            ("mlp.fc2", "ffn_down"),
-            ("input_layernorm", "ln1"),
-            ("post_attention_layernorm", "attn_post_norm"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
+        bind_required_linears(
+            inventory,
+            bindings,
+            &native,
+            &source,
+            &[
+                ("self_attn.q_proj", "attn_q"),
+                ("self_attn.k_proj", "attn_k"),
+                ("self_attn.v_proj", "attn_v"),
+                ("self_attn.o_proj", "attn_out"),
+                ("mlp.fc1", "ffn_up"),
+                ("mlp.fc2", "ffn_down"),
+                ("input_layernorm", "ln1"),
+                ("post_attention_layernorm", "attn_post_norm"),
+            ],
+        )?;
     }
     Ok(())
 }
