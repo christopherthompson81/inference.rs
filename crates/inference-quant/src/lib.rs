@@ -2918,70 +2918,46 @@ pub(crate) fn make_dummy_or_error(
     })))
 }
 
+// Parallel wrappers pass `bias: false` and add the bias themselves, after any reduce.
+pub(crate) fn checkpoint_linear(
+    in_dim: usize,
+    out_dim: usize,
+    quant_conf: &QuantizedConfig,
+    bias: bool,
+    shard: Shard,
+    vb: &ShardedVarBuilder,
+) -> Result<Arc<dyn QuantMethod>> {
+    match quant_conf {
+        QuantizedConfig::GptqAwq { .. } => {
+            gptq_linear(in_dim, out_dim, quant_conf, bias, vb.clone())
+        }
+        QuantizedConfig::Fp8 { .. }
+        | QuantizedConfig::CompressedTensors { .. }
+        | QuantizedConfig::ModelOpt { .. } => {
+            fp8_config::checkpoint_linear_b(in_dim, out_dim, quant_conf, bias, shard, vb.clone())
+        }
+        QuantizedConfig::Bitsandbytes { .. } => Ok(Arc::new(BnbLinear::linear_b(
+            in_dim,
+            out_dim,
+            bias,
+            vb.clone(),
+        )?)),
+        QuantizedConfig::Afq { .. } => {
+            AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())
+        }
+        QuantizedConfig::MXFP4 {} => {
+            MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())
+        }
+    }
+}
+
 pub fn linear_no_bias(
     in_dim: usize,
     out_dim: usize,
     config: &Option<QuantizedConfig>,
     vb: ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
-    let base_vb = vb.clone();
-    if let Some(source) = base_vb.weight_source() {
-        let load_device = weight_source_load_device(&base_vb);
-        if let Some(layer) =
-            source.load_linear(&base_vb.prefix(), &load_device, Shard::default())?
-        {
-            let layer = maybe_wrap_dynamic_lora(
-                &base_vb,
-                layer,
-                LoraLinearSpec::replicated(in_dim, out_dim),
-            )?;
-            return apply_immediate_isq_sharded(layer, base_vb, Some(Shard::default()));
-        }
-    }
-    let vb = if should_apply_immediate_isq(&vb) {
-        vb.set_device(Device::Cpu)
-    } else {
-        vb
-    };
-
-    let layer = if let Some(quant_conf) = &config {
-        match quant_conf {
-            QuantizedConfig::GptqAwq { .. } => gptq_linear(in_dim, out_dim, quant_conf, vb)?,
-            QuantizedConfig::Fp8 { .. }
-            | QuantizedConfig::CompressedTensors { .. }
-            | QuantizedConfig::ModelOpt { .. } => fp8_config::checkpoint_linear_b(
-                in_dim,
-                out_dim,
-                quant_conf,
-                false,
-                Default::default(),
-                vb,
-            )?,
-            QuantizedConfig::Bitsandbytes { .. } => {
-                Arc::new(BnbLinear::linear_b(in_dim, out_dim, false, vb)?) as Arc<_>
-            }
-            QuantizedConfig::Afq { .. } => {
-                AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, false, vb)?
-            }
-            QuantizedConfig::MXFP4 {} => {
-                MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, false, vb)?
-            }
-        }
-    } else {
-        if !vb.contains_tensor("weight") {
-            make_dummy_or_error("linear_no_bias", &vb, &["weight"])?
-        } else {
-            let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
-
-            let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
-                Linear::new(weight, None),
-            ))?;
-            Arc::new(layer) as Arc<dyn QuantMethod>
-        }
-    };
-    let layer =
-        maybe_wrap_dynamic_lora(&base_vb, layer, LoraLinearSpec::replicated(in_dim, out_dim))?;
-    apply_immediate_isq_sharded(layer, base_vb, Some(Shard::default()))
+    linear_b(in_dim, out_dim, false, config, vb)
 }
 
 pub fn linear(
@@ -2990,65 +2966,7 @@ pub fn linear(
     config: &Option<QuantizedConfig>,
     vb: ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
-    let base_vb = vb.clone();
-    if let Some(source) = base_vb.weight_source() {
-        let load_device = weight_source_load_device(&base_vb);
-        if let Some(layer) =
-            source.load_linear(&base_vb.prefix(), &load_device, Shard::default())?
-        {
-            let layer = maybe_wrap_dynamic_lora(
-                &base_vb,
-                layer,
-                LoraLinearSpec::replicated(in_dim, out_dim),
-            )?;
-            return apply_immediate_isq_sharded(layer, base_vb, Some(Shard::default()));
-        }
-    }
-    let vb = if should_apply_immediate_isq(&vb) {
-        vb.set_device(Device::Cpu)
-    } else {
-        vb
-    };
-
-    let layer = if let Some(quant_conf) = &config {
-        match quant_conf {
-            QuantizedConfig::GptqAwq { .. } => gptq_linear(in_dim, out_dim, quant_conf, vb)?,
-            QuantizedConfig::Fp8 { .. }
-            | QuantizedConfig::CompressedTensors { .. }
-            | QuantizedConfig::ModelOpt { .. } => fp8_config::checkpoint_linear_b(
-                in_dim,
-                out_dim,
-                quant_conf,
-                true,
-                Default::default(),
-                vb,
-            )?,
-            QuantizedConfig::Bitsandbytes { .. } => {
-                Arc::new(BnbLinear::linear_b(in_dim, out_dim, true, vb)?) as Arc<_>
-            }
-            QuantizedConfig::Afq { .. } => {
-                AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, true, vb)?
-            }
-            QuantizedConfig::MXFP4 {} => {
-                MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, true, vb)?
-            }
-        }
-    } else {
-        if has_missing_required_tensors(&vb, &["weight", "bias"]) {
-            make_dummy_or_error("linear", &vb, &["weight", "bias"])?
-        } else {
-            let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
-            let bias = vb.get_with_hints((out_dim,), "bias", Default::default())?;
-
-            let layer = <UnquantLinear as QuantMethod>::new(QuantMethodConfig::Unquantized(
-                Linear::new(weight, Some(bias)),
-            ))?;
-            Arc::new(layer) as Arc<dyn QuantMethod>
-        }
-    };
-    let layer =
-        maybe_wrap_dynamic_lora(&base_vb, layer, LoraLinearSpec::replicated(in_dim, out_dim))?;
-    apply_immediate_isq_sharded(layer, base_vb, Some(Shard::default()))
+    linear_b(in_dim, out_dim, true, config, vb)
 }
 
 pub fn linear_b(
@@ -3058,11 +2976,45 @@ pub fn linear_b(
     config: &Option<QuantizedConfig>,
     vb: ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
-    if bias {
-        linear(in_dim, out_dim, config, vb)
-    } else {
-        linear_no_bias(in_dim, out_dim, config, vb)
+    let base_vb = vb.clone();
+    let spec = LoraLinearSpec::replicated(in_dim, out_dim);
+    if let Some(source) = base_vb.weight_source() {
+        let load_device = weight_source_load_device(&base_vb);
+        if let Some(layer) =
+            source.load_linear(&base_vb.prefix(), &load_device, Shard::default())?
+        {
+            let layer = maybe_wrap_dynamic_lora(&base_vb, layer, spec)?;
+            return apply_immediate_isq_sharded(layer, base_vb, Some(Shard::default()));
+        }
     }
+    let vb = if should_apply_immediate_isq(&vb) {
+        vb.set_device(Device::Cpu)
+    } else {
+        vb
+    };
+
+    let layer = if let Some(quant_conf) = &config {
+        checkpoint_linear(in_dim, out_dim, quant_conf, bias, Shard::default(), &vb)?
+    } else {
+        let (context, required): (_, &[&str]) = if bias {
+            ("linear", &["weight", "bias"])
+        } else {
+            ("linear_no_bias", &["weight"])
+        };
+        if has_missing_required_tensors(&vb, required) {
+            make_dummy_or_error(context, &vb, required)?
+        } else {
+            let weight = vb.get_with_hints((out_dim, in_dim), "weight", Default::default())?;
+            let bias = bias
+                .then(|| vb.get_with_hints((out_dim,), "bias", Default::default()))
+                .transpose()?;
+            Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+                Linear::new(weight, bias),
+            ))?)
+        }
+    };
+    let layer = maybe_wrap_dynamic_lora(&base_vb, layer, spec)?;
+    apply_immediate_isq_sharded(layer, base_vb, Some(Shard::default()))
 }
 
 #[cfg(test)]

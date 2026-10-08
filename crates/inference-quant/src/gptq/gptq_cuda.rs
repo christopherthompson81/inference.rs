@@ -451,6 +451,7 @@ pub fn gptq_linear(
     in_dim: usize,
     out_dim: usize,
     config: &QuantizedConfig,
+    bias: bool,
     vb: ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
     let QuantizedConfig::GptqAwq {
@@ -505,7 +506,7 @@ pub fn gptq_linear(
         Default::default(),
         DType::F16,
     )?;
-    let bias = if vb.contains_tensor("bias") {
+    let bias = if bias && vb.contains_tensor("bias") {
         Some(vb.get_with_hints_dtype((out_dim,), "bias", Default::default(), DType::F16)?)
     } else {
         None

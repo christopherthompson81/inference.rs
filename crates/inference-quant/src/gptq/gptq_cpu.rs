@@ -84,6 +84,7 @@ pub fn gptq_linear(
     in_dim: usize,
     out_dim: usize,
     config: &QuantizedConfig,
+    bias: bool,
     vb: ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
     let QuantizedConfig::GptqAwq {
@@ -99,7 +100,7 @@ pub fn gptq_linear(
     let is_awq = *is_awq;
     // Handle the case where we actually have an unquantized
     if vb.contains_tensor("weight") {
-        return crate::linear_b(in_dim, out_dim, false, &None, vb);
+        return crate::linear_b(in_dim, out_dim, bias, &None, vb);
     }
 
     let mut required = vec!["qweight", "qzeros", "scales"];
@@ -137,7 +138,7 @@ pub fn gptq_linear(
         Default::default(),
         DType::F16,
     )?;
-    let bias = if vb.contains_tensor("bias") {
+    let bias = if bias && vb.contains_tensor("bias") {
         Some(vb.get_with_hints_dtype((out_dim,), "bias", Default::default(), DType::F16)?)
     } else {
         None
