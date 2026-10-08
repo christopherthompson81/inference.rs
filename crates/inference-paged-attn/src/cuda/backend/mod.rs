@@ -54,8 +54,9 @@ fn cache_input_layout(
         }
         _ => inference_tensor::bail!("{op} expects rank-3 or rank-4 {name} input, got {layout:?}"),
     };
+    // a single head's stride never addresses anything, so a transposed one-head view is still dense
     if layout.stride()[layout.stride().len() - 1] != 1
-        || layout.stride()[layout.stride().len() - 2] != head_size
+        || (num_heads > 1 && layout.stride()[layout.stride().len() - 2] != head_size)
         || row_stride < num_heads.saturating_mul(head_size)
     {
         inference_tensor::bail!("{op} expects dense {name} heads, got {layout:?}");
@@ -90,6 +91,18 @@ mod tests {
 
         let decode = Layout::new((8, 1, 2, 4).into(), vec![24, 8, 4, 1], 5);
         assert_eq!(cache_input_layout(&decode, "value", "test")?, (8, 2, 4, 24));
+        Ok(())
+    }
+
+    #[test]
+    fn cache_input_layout_accepts_a_transposed_single_head() -> Result<()> {
+        let one_head = Layout::new((1, 27, 1, 64).into(), vec![1728, 64, 1728, 1], 0);
+        assert_eq!(
+            cache_input_layout(&one_head, "key", "test")?,
+            (27, 1, 64, 64)
+        );
+        let two_heads = Layout::new((1, 27, 2, 64).into(), vec![3456, 64, 1728, 1], 0);
+        assert!(cache_input_layout(&two_heads, "key", "test").is_err());
         Ok(())
     }
 }

@@ -848,7 +848,7 @@ pub struct GeneralMetadata {
     pub cache_engine: Option<CacheEngine>,
     pub model_metadata: Option<Arc<dyn ModelConfigLike + Send + Sync>>,
     pub modalities: Modalities,
-    // UQFF writes force the whole model onto CPU, so the pipeline is not servable afterwards.
+    // a UQFF-writing load kept on the host (artifact-only, or a CPU load) skips the warm-up run
     pub loaded_for_uqff_write: bool,
 }
 

@@ -2526,3 +2526,34 @@ GGUF (text path)       37/50 (0.74)   36/50 (0.72)
   0/98 accepted (no signal, as expected).
 
 CI: 2489 CPU, 2873 CUDA tests pass; bindings pass.
+
+## Run 80 - 2026-10-07 20:46
+
+Question (owner: "fix those things"): make an ISQ load that writes UQFF servable on a GPU, and test DFlash on text.
+
+Raw findings:
+
+- UQFF on a GPU. The write builds the model unmapped on the host (CPU mapper and load device, layers captured on the
+  CPU), so a GPU session failed at its first request. Recording each tracked layer's target device fixes only the
+  quantized layers. Fix: the inner load returns `LoadOutcome::Written(shards)` after a GPU write, which drops the whole
+  first load, and `loading::load_serving_written` loads the written shards onto the requested device (`UqffLoad::Reload`),
+  for the text, multimodal and embedding loaders (embeddings had the same bug). `inference quantize` sets the new
+  in-memory `UqffWriteConfig::artifact_only` and keeps its write-and-exit behavior. Review of the first cut found:
+  - imatrix/calibration GPU writes would fail on the reload (the plan rejects them with `from_uqff`): a reload now
+    drops them, the source ISQ type, and reads only the written shards;
+  - the mode type had silently swallowed `write_uqff` + `from_uqff`: `UqffLoad::new` refuses it with the plan's message;
+  - a GGUF (prepared) source would reload the GGUF weights, not the UQFF: it now errors after writing, pointing at
+    `from_uqff`.
+- Older bug found by the calibrated GPU test, also failing on master: calibration moved its inputs to
+  `model.device()`, the requested GPU, while the write-mode weights sit on the host ("device mismatch in
+  index-select"). A write-mode session now reports the host device; the dtype still follows the requested device,
+  so the written files are unchanged.
+- DFlash on text: a tiny v1 drafter fixture (`tiny_dflash`). Without windowed layers its own graphs never engage (no
+  windowed KV pool); with `sliding_attention` layers the first request failed: `reshape_and_cache_flashinfer expects
+  dense key heads, got [1, 27, 1, 64] / [1728, 64, 1728, 1]`, a one-head view whose head stride never addresses
+  anything. The paged cache's layout check now ignores the head stride for one head. Then: target 29 captures / 26
+  replays, drafter 11 captures / 29 replays, drafts > 0, greedy traces unchanged; `--stress-count 10` 10/10.
+  Negative result: the tiny model cannot show whether the drafter got its prompt context (random weights accept 0
+  either way, with or without the text prefill); the real-weights MTP numbers of Run 79 cover that dispatch.
+
+CI: 2493 CPU, 2878 CUDA tests pass; bindings pass.

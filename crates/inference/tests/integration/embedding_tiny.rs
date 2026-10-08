@@ -119,3 +119,38 @@ async fn a_sliding_window_reaches_the_embedding_only_when_enabled() -> anyhow::R
     );
     Ok(())
 }
+
+// A GPU load that writes UQFF serves the written file on the GPU, as a later load of it does.
+#[tokio::test]
+async fn a_gpu_isq_load_that_writes_uqff_serves_it() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_embedding_checkpoint()?;
+    let uqff_dir = tempfile::tempdir()?;
+    let gpu_builder = || {
+        EmbeddingModelBuilder::new(checkpoint.path().to_string_lossy()).with_dtype(ModelDType::F32)
+    };
+    let written = gpu_builder()
+        .with_isq(IsqType::Q8_0)
+        .write_uqff(uqff_dir.path().join("model.uqff"))
+        .build()
+        .await?;
+    let served = written.generate_embedding(PROMPT).await?;
+    drop(written);
+    let reloaded = gpu_builder()
+        .from_uqff(uqff_files(uqff_dir.path())?)
+        .build()
+        .await?;
+    let expected = reloaded.generate_embedding(PROMPT).await?;
+    let max_diff = served
+        .iter()
+        .zip(&expected)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0f32, f32::max);
+    anyhow::ensure!(
+        max_diff < EMBEDDING_TOLERANCE,
+        "embeddings differ by {max_diff}"
+    );
+    Ok(())
+}

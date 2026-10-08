@@ -734,7 +734,7 @@ impl InferenceRs {
         let is_multi_threaded = tokio::runtime::Handle::try_current()
             .is_ok_and(|h| h.runtime_flavor() != tokio::runtime::RuntimeFlavor::CurrentThread);
 
-        // Do a dummy run; skip UQFF writes, whose CPU-resident model cannot serve requests.
+        // Do a dummy run; skip a UQFF-writing load, whose host-resident model only wrote the file.
         let loaded_for_uqff_write = get_mut_arcmutex!(pipeline)
             .get_metadata()
             .loaded_for_uqff_write;

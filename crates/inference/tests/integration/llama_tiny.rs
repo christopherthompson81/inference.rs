@@ -23,6 +23,7 @@ const PROMPT: &str = "hello";
 const LONG_PROMPT: &str =
     "tell me everything about the quick brown fox and the lazy dog it jumps over, from the start.";
 const PREFIX_CACHE_SEQS: usize = 16;
+const CALIBRATION_TEXT: &str = "hello world. the quick brown fox jumps over the lazy dog.";
 const MAX_LEN: usize = 8;
 const ADAPTER: &str = "q-proj-adapter";
 const ADAPTER_RANK: usize = 2;
@@ -217,14 +218,66 @@ async fn a_repeated_prompt_hits_the_prefix_cache() -> anyhow::Result<()> {
     Ok(())
 }
 
+// A GPU load that writes UQFF serves the written file on the GPU, as a later load of it does, calibrated or not.
+#[tokio::test]
+async fn a_gpu_isq_load_that_writes_uqff_serves_it() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_llama_checkpoint()?;
+    let calibration = checkpoint.path().join("calibration.txt");
+    std::fs::write(&calibration, CALIBRATION_TEXT)?;
+    let gpu_builder =
+        || TextModelBuilder::new(checkpoint.path().to_string_lossy()).with_dtype(ModelDType::F32);
+    for calibrate in [false, true] {
+        let uqff_dir = tempfile::tempdir()?;
+        let builder = gpu_builder()
+            .with_isq(IsqType::Q8_0)
+            .write_uqff(uqff_dir.path().join("model.uqff"));
+        let builder = if calibrate {
+            builder.with_calibration_file(calibration.clone())
+        } else {
+            builder
+        };
+        let written = builder.build().await?;
+        let served = greedy_trace(&written, None).await?;
+        drop(written);
+        let reloaded = gpu_builder()
+            .from_uqff(uqff_files(uqff_dir.path())?)
+            .build()
+            .await?;
+        let expected = greedy_trace(&reloaded, None).await?;
+        anyhow::ensure!(
+            close(&served, &expected, CACHED_LOGPROB_TOLERANCE),
+            "calibrated {calibrate}: the written model decoded {served:?}, a load of its UQFF {expected:?}"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn writing_uqff_while_loading_from_uqff_is_refused() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_checkpoint()?;
+    // only resolved, never read: the conflict is refused first
+    std::fs::write(checkpoint.path().join("in.uqff"), [])?;
+    let result = cpu_text_builder(checkpoint.path())
+        .from_uqff(vec!["in.uqff".into()])
+        .write_uqff(checkpoint.path().join("out.uqff"))
+        .build()
+        .await;
+    let error = result.err().map(|e| e.to_string()).unwrap_or_default();
+    anyhow::ensure!(
+        error.contains("while loading from UQFF"),
+        "expected the write/read conflict, got {error:?}"
+    );
+    Ok(())
+}
+
 #[tokio::test]
 async fn an_isq_load_can_calibrate_on_a_text_file_first() -> anyhow::Result<()> {
     let checkpoint = tiny_llama_checkpoint()?;
     let calibration = checkpoint.path().join("calibration.txt");
-    std::fs::write(
-        &calibration,
-        "hello world. the quick brown fox jumps over the lazy dog.",
-    )?;
+    std::fs::write(&calibration, CALIBRATION_TEXT)?;
     let model = cpu_text_builder(checkpoint.path())
         .with_isq(IsqType::Q8_0)
         .with_calibration_file(calibration)
