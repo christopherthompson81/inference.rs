@@ -7480,6 +7480,7 @@
           "hunyuanv1moe",
           "qwen3next",
           "qwen3_5",
+          "qwen3_5moe",
           "lfm2",
           "lfm2_moe"
         ]

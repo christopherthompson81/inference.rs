@@ -74,6 +74,7 @@ inference_nn::boxed_loaders!(
     Qwen3MoELoader,
     Qwen3NextLoader,
     Qwen3_5TextLoader,
+    Qwen3_5MoeTextLoader,
 );
 inference_nn::boxed_loaders!(
     MultimodalModelLoader:

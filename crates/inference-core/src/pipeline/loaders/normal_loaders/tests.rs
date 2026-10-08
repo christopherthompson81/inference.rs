@@ -458,6 +458,19 @@ fn native_gguf_adapter_isq_namespace_matrix() -> Result<()> {
                 "model.language_model.layers.0.self_attn.q_proj.weight",
                 "model.language_model.layers.0.linear_attn.in_proj_b.weight",
                 "model.language_model.layers.0.mlp.gate_proj.weight",
+                "mtp.layers.0.mlp.gate_proj.weight",
+            ],
+        },
+        NativeIsqNamespaceCase {
+            name: "Qwen3.5 MoE",
+            loader: Box::new(Qwen3_5MoeTextLoader),
+            config: "",
+            paths: &[
+                "model.language_model.layers.0.self_attn.q_proj.weight",
+                "model.language_model.layers.0.linear_attn.in_proj_b.weight",
+                "model.language_model.layers.0.mlp.experts.gate_up_proj.weight",
+                "model.language_model.layers.0.mlp.shared_expert.gate_proj.weight",
+                "mtp.layers.0.mlp.experts.down_proj.weight",
             ],
         },
         NativeIsqNamespaceCase {
@@ -572,6 +585,13 @@ fn normal_moe_loaders_match_canonical_expert_stacks() -> Result<()> {
             loader: Box::new(Qwen3NextLoader),
             config: "",
             prefix: "model.layers.0.mlp.experts",
+            projections: FUSED_EXPERT_PROJECTIONS,
+        },
+        ExpertIsqCase {
+            name: "Qwen3_5MoeTextLoader",
+            loader: Box::new(Qwen3_5MoeTextLoader),
+            config: "",
+            prefix: "model.language_model.layers.0.mlp.experts",
             projections: FUSED_EXPERT_PROJECTIONS,
         },
         ExpertIsqCase {
@@ -752,6 +772,10 @@ fn native_gguf_moqe_predicates_exclude_the_shared_trunk() -> Result<()> {
         ("GLM4MoeLoader", &GLM4MoeLoader as &dyn IsqModelLoader),
         ("Qwen3MoELoader", &Qwen3MoELoader as &dyn IsqModelLoader),
         ("Qwen3NextLoader", &Qwen3NextLoader as &dyn IsqModelLoader),
+        (
+            "Qwen3_5MoeTextLoader",
+            &Qwen3_5MoeTextLoader as &dyn IsqModelLoader,
+        ),
     ] {
         assert_moqe_isq_paths(
             name,
@@ -818,7 +842,7 @@ fn native_gguf_moqe_predicates_exclude_the_shared_trunk() -> Result<()> {
 
 #[test]
 fn concrete_normal_loaders_scope_promoted_isq_tensors() {
-    let loaders: [(&str, &dyn IsqModelLoader); 25] = [
+    let loaders: [(&str, &dyn IsqModelLoader); 26] = [
         ("MistralLoader", &MistralLoader),
         ("GemmaLoader", &GemmaLoader),
         ("LlamaLoader", &LlamaLoader),
@@ -843,6 +867,7 @@ fn concrete_normal_loaders_scope_promoted_isq_tensors() {
         ("GptOssLoader", &GptOssLoader),
         ("Qwen3NextLoader", &Qwen3NextLoader),
         ("Qwen3_5TextLoader", &Qwen3_5TextLoader),
+        ("Qwen3_5MoeTextLoader", &Qwen3_5MoeTextLoader),
         ("Lfm2Loader", &Lfm2Loader),
     ];
 

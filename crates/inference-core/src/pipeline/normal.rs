@@ -47,24 +47,7 @@ pub(crate) fn new_dynamic_lora_registry(
     rope_pairing: Option<crate::gguf::normal_registry::RopePairing>,
 ) -> Result<Arc<inference_quant::LoraLayerRegistry>> {
     let config = serde_json::from_str::<serde_json::Value>(config)?;
-    let qwen35_moe_identity = config
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|architectures| architectures.first())
-        .and_then(serde_json::Value::as_str)
-        == Some("Qwen3NextForCausalLM")
-        && config
-            .get(crate::gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY)
-            .and_then(serde_json::Value::as_str)
-            == Some("tiled");
-    let registry = if qwen35_moe_identity {
-        inference_quant::LoraLayerRegistry::new_with_site_prefix_alias(
-            "model",
-            "model.language_model",
-        )?
-    } else {
-        inference_quant::LoraLayerRegistry::new()
-    };
+    let registry = inference_quant::LoraLayerRegistry::new();
     let registry = match rope_pairing {
         Some(crate::gguf::normal_registry::RopePairing::Adjacent) => {
             // MLA and partial rotary pair only part of each head, which the per-head row map does not describe
@@ -556,50 +539,6 @@ mod tests {
                 .unwrap_err();
             assert!(error.to_string().contains("after registry finalization"));
         }
-    }
-
-    #[test]
-    fn persisted_qwen35_moe_config_restores_lora_namespace_alias() {
-        let config = r#"{
-            "architectures":["Qwen3NextForCausalLM"],
-            "_inference_gdn_v_head_layout":"tiled"
-        }"#;
-        let registry = new_dynamic_lora_registry(config, None).unwrap();
-        let site = registry
-            .register(
-                LoraSiteKey::new("model.layers.0.self_attn.q_proj"),
-                LoraLinearSpec::replicated(2, 2),
-                DType::F32,
-                Device::Cpu,
-            )
-            .unwrap();
-
-        assert_eq!(
-            site.key().path(),
-            "model.language_model.layers.0.self_attn.q_proj"
-        );
-    }
-
-    #[test]
-    fn dense_qwen35_config_does_not_alias_lora_namespace() {
-        let registry = new_dynamic_lora_registry(
-            r#"{
-                "architectures":["Qwen3_5ForCausalLM"],
-                "_inference_gdn_v_head_layout":"tiled"
-            }"#,
-            None,
-        )
-        .unwrap();
-        let site = registry
-            .register(
-                LoraSiteKey::new("model.layers.0.self_attn.q_proj"),
-                LoraLinearSpec::replicated(2, 2),
-                DType::F32,
-                Device::Cpu,
-            )
-            .unwrap();
-
-        assert_eq!(site.key().path(), "model.layers.0.self_attn.q_proj");
     }
 
     #[test]

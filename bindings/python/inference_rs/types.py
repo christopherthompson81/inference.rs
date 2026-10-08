@@ -1489,6 +1489,7 @@ class NormalLoaderType(str, Enum):
     HUNYUANV1MOE = "hunyuanv1moe"
     QWEN3NEXT = "qwen3next"
     QWEN3_5 = "qwen3_5"
+    QWEN3_5MOE = "qwen3_5moe"
     LFM2 = "lfm2"
     LFM2_MOE = "lfm2_moe"
 
