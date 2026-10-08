@@ -422,7 +422,7 @@ impl GgufWeightSource {
         Ok(PackedBinding {
             dtype: quant_type(info.dtype(), name)?,
             dims: info.shape().to_vec(),
-            data: self.archive.tensor_data(name)?.bytes().to_vec(),
+            data: self.archive.tensor_data(name)?.into_bytes().into_owned(),
         })
     }
 
@@ -661,7 +661,7 @@ impl GgufWeightSource {
                 Ok(Some(PackedBinding {
                     dtype,
                     dims: info.shape().to_vec(),
-                    data: self.archive.tensor_data(name)?.bytes().to_vec(),
+                    data: self.archive.tensor_data(name)?.into_bytes().into_owned(),
                 }))
             }
             GgufTensorBinding::Slice {
@@ -781,9 +781,7 @@ impl GgufWeightSource {
                         .checked_mul(dtype.size_in_bytes())
                         .ok_or_else(|| Error::msg("GGUF dense resident byte estimate overflow"))?
                 } else {
-                    info.byte_len().ok_or_else(|| {
-                        Error::msg(format!("GGUF tensor `{source_name}` has no byte range"))
-                    })?
+                    info.exact_byte_len()?
                 }
             }
             None => match self.structural_quant_dtype(binding)? {
@@ -953,13 +951,7 @@ impl QuantizedWeightSource for GgufWeightSource {
                 binding.source_tensors(&mut sources);
                 let mut bytes = 0usize;
                 for source in sources.into_iter().filter(|source| counted.insert(source)) {
-                    bytes += self
-                        .archive
-                        .tensor_info(source)?
-                        .byte_len()
-                        .ok_or_else(|| {
-                            Error::msg(format!("GGUF tensor `{source}` has no byte range"))
-                        })?;
+                    bytes += self.archive.tensor_info(source)?.exact_byte_len()?;
                 }
                 bytes
             } else {

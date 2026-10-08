@@ -67,6 +67,7 @@ inference-kernel-build = { workspace = true, optional = true }
 inference-metal-compile = { workspace = true, optional = true }
 
 [dev-dependencies]
+base64.workspace = true
 tempfile.workspace = true
 
 [[example]]

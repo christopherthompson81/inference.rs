@@ -22,6 +22,8 @@ use inference_tensor::{
 };
 use memmap2::{Mmap, MmapOptions};
 
+use super::repack;
+
 const DEFAULT_ALIGNMENT: usize = 32;
 const MAX_STRING_LENGTH: u64 = 1 << 30;
 const MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
@@ -128,12 +130,66 @@ impl GgufDType {
             154 => "IQ3_KT",
             155 => "IQ4_KT",
             158 => "IQ1_KT",
+            159 => "Q1_0_G128_R8",
+            160 => "PQ2_0_R8",
+            161 => "PTQ1_0_R8",
+            202 => "Q4_0_R8",
+            206 => "Q5_0_R4",
+            208 => "Q8_0_R8",
+            210 => "Q2_K_R4",
+            211 => "Q3_K_R4",
+            212 => "Q4_K_R4",
+            213 => "Q5_K_R4",
+            214 => "Q6_K_R4",
+            216 => "IQ2_XXS_R4",
+            217 => "IQ2_XS_R4",
+            218 => "IQ3_XXS_R4",
+            219 => "IQ1_S_R4",
+            220 => "IQ4_NL_R4",
+            221 => "IQ3_S_R4",
+            222 => "IQ2_S_R4",
+            223 => "IQ4_XS_R8",
+            229 => "IQ1_M_R4",
+            230 => "BF16_R16",
+            233 => "Q6_0_R4",
+            335 => "IQ2_BN_R4",
+            337 => "IQ2_K_R4",
+            338 => "IQ3_K_R4",
+            339 => "IQ4_K_R4",
+            340 => "IQ5_K_R4",
+            344 => "IQ4_KS_R4",
+            345 => "IQ4_KS_R16",
+            352 => "IQ5_KS_R4",
+            353 => "MXFP4_R8",
+            397 => "Q8_K_R16",
+            398 => "Q8_KV_R8",
+            399 => "Q8_K_R8",
             _ => "UNKNOWN",
         }
     }
 
+    /// The base type a CPU-repacked (`_R4` / `_R8`) type interleaves, which it is sized and loaded as.
+    pub const fn repacked_base(self) -> Option<Self> {
+        match repack::repacked(self.0) {
+            Some(ty) => Some(Self(ty.base)),
+            None => None,
+        }
+    }
+
+    // ik_llama.cpp's CPU-repacked types without an inverse here (IQ1_S_R4 / IQ1_M_R4 are their own quantizations)
+    pub const fn is_unsupported_repack(self) -> bool {
+        matches!(self.0, 159..=161 | 219 | 229 | 230 | 233 | 335 | 345 | 397..=399)
+    }
+
+    const fn sized_as(self) -> u32 {
+        match self.repacked_base() {
+            Some(base) => base.0,
+            None => self.0,
+        }
+    }
+
     pub const fn block_size(self) -> Option<usize> {
-        match self.0 {
+        match self.sized_as() {
             0 | 1 | 24..=28 | 30 => Some(1),
             2 | 3 | 6..=9 | 20 | 39 => Some(32),
             40 => Some(64),
@@ -144,7 +200,7 @@ impl GgufDType {
     }
 
     pub const fn type_size(self) -> Option<usize> {
-        match self.0 {
+        match self.sized_as() {
             0 => Some(4),
             1 => Some(2),
             2 => Some(18),
@@ -198,7 +254,7 @@ impl GgufDType {
 
     // ik_llama.cpp's trellis and `_KS` / `_KSS` / `_KL` types start each row with an f32 or f16 scale
     pub const fn row_meta_size(self) -> usize {
-        match self.0 {
+        match self.sized_as() {
             144 | 146 | 152..=155 | 158 => F32_ROW_META_BYTES,
             145 | 156 | 157 => F16_ROW_META_BYTES,
             _ => 0,
@@ -324,6 +380,8 @@ pub struct GgufTensorInfo {
     relative_offset: u64,
     data_range: Option<Range<usize>>,
     storage_range: Range<usize>,
+    // differs from `dtype` for a CPU-repacked tensor, whose rows are de-interleaved on every read
+    stored_dtype: GgufDType,
 }
 
 impl GgufTensorInfo {
@@ -337,6 +395,11 @@ impl GgufTensorInfo {
 
     pub const fn dtype(&self) -> GgufDType {
         self.dtype
+    }
+
+    /// The dtype as written in the file, which differs from `dtype` for CPU-repacked tensors.
+    pub const fn stored_dtype(&self) -> GgufDType {
+        self.stored_dtype
     }
 
     pub const fn shard_index(&self) -> usize {
@@ -362,27 +425,53 @@ impl GgufTensorInfo {
     pub fn byte_len(&self) -> Option<usize> {
         self.data_range.as_ref().map(Range::len)
     }
+
+    /// The tensor's byte length, or why it has none.
+    pub fn exact_byte_len(&self) -> Result<usize> {
+        if let Some(range) = &self.data_range {
+            return Ok(range.len());
+        }
+        let dtype = self.stored_dtype;
+        if dtype.is_unsupported_repack() {
+            inference_tensor::bail!(
+                "GGUF tensor `{}` uses ik_llama.cpp CPU-repacked type {}, which is not supported; use the non-repacked GGUF",
+                self.name,
+                dtype.name()
+            );
+        }
+        inference_tensor::bail!(
+            "cannot determine the exact byte length of GGUF tensor `{}` with dtype {} ({})",
+            self.name,
+            dtype.raw(),
+            dtype.name()
+        )
+    }
 }
 
-#[derive(Clone, Copy, Debug)]
+/// A tensor's bytes: borrowed from the mapping, or owned when they were unpacked from a CPU-repacked layout.
+#[derive(Clone, Debug)]
 pub struct GgufTensorData<'a> {
     info: &'a GgufTensorInfo,
-    bytes: &'a [u8],
+    bytes: Cow<'a, [u8]>,
 }
 
 impl<'a> GgufTensorData<'a> {
-    pub const fn info(self) -> &'a GgufTensorInfo {
+    pub const fn info(&self) -> &'a GgufTensorInfo {
         self.info
     }
 
-    pub const fn bytes(self) -> &'a [u8] {
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    pub fn into_bytes(self) -> Cow<'a, [u8]> {
         self.bytes
     }
 }
 
 impl AsRef<[u8]> for GgufTensorData<'_> {
     fn as_ref(&self) -> &[u8] {
-        self.bytes
+        &self.bytes
     }
 }
 
@@ -615,24 +704,18 @@ impl GgufArchive {
 
     pub fn tensor_data(&self, name: &str) -> Result<GgufTensorData<'_>> {
         let info = self.tensor_info(name)?;
-        let range = info.data_range.as_ref().ok_or_else(|| {
-            Error::msg(format!(
-                "cannot determine the exact byte length of GGUF tensor `{name}` with dtype {}",
-                info.dtype.raw()
-            ))
-        })?;
-        Ok(GgufTensorData {
-            info,
-            bytes: &self.mappings[info.shard_index][range.clone()],
-        })
-    }
-
-    pub fn tensor_storage_data(&self, name: &str) -> Result<GgufTensorData<'_>> {
-        let info = self.tensor_info(name)?;
-        Ok(GgufTensorData {
-            info,
-            bytes: &self.mappings[info.shard_index][info.storage_range.clone()],
-        })
+        info.exact_byte_len()?;
+        let range = info.data_range.clone().unwrap_or_default();
+        let stored = &self.mappings[info.shard_index][range];
+        let bytes = if info.stored_dtype == info.dtype {
+            Cow::Borrowed(stored)
+        } else {
+            let cols = info.shape.last().copied().unwrap_or(1);
+            let unpacked = repack::unpack(info.stored_dtype.raw(), cols, stored)
+                .map_err(|err| err.context(format!("GGUF tensor `{name}`")))?;
+            Cow::Owned(unpacked)
+        };
+        Ok(GgufTensorData { info, bytes })
     }
 
     pub fn load_qtensor(&self, name: &str, device: &Device) -> Result<QTensor> {
@@ -914,11 +997,12 @@ impl ParsedShard {
             tensors.push(GgufTensorInfo {
                 name: raw.name.clone(),
                 shape: raw.shape.clone(),
-                dtype: raw.dtype,
+                dtype: raw.dtype.repacked_base().unwrap_or(raw.dtype),
                 shard_index,
                 relative_offset: raw.offset,
                 data_range,
                 storage_range: absolute_start..storage_end,
+                stored_dtype: raw.dtype,
             });
         }
 
@@ -1698,10 +1782,107 @@ mod tests {
         assert_eq!(future.dtype().raw(), 999);
         assert_eq!(future.byte_len(), None);
         assert!(archive.tensor_data(future.name()).is_err());
-        assert_eq!(
-            archive.tensor_storage_data(future.name())?.bytes().len(),
-            DEFAULT_ALIGNMENT
+        assert_eq!(future.storage_range().len(), DEFAULT_ALIGNMENT);
+        Ok(())
+    }
+
+    #[test]
+    fn unsupported_repacked_types_are_named_when_read() -> Result<()> {
+        let file = write_test_gguf(
+            &base_metadata(),
+            &[TestTensor {
+                name: "iq1_s_r4.weight",
+                shape: vec![4, 256],
+                dtype: 219,
+                data: vec![0; 4 * 50],
+                offset: None,
+            }],
+            DEFAULT_ALIGNMENT,
         );
+        let archive = GgufArchive::open_file(file.path())?;
+        let info = archive.tensor_info("iq1_s_r4.weight")?;
+        assert_eq!(info.dtype().name(), "IQ1_S_R4");
+        assert!(info.dtype().is_unsupported_repack());
+        let err = archive
+            .tensor_data("iq1_s_r4.weight")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("ik_llama.cpp CPU-repacked type IQ1_S_R4, which is not supported; use the non-repacked GGUF"),
+            "{err}"
+        );
+        assert_eq!(info.exact_byte_len().unwrap_err().to_string(), err);
+        Ok(())
+    }
+
+    #[test]
+    fn repacked_tensors_read_as_their_base_type() -> Result<()> {
+        // a Candle type, an 8-row type and a row-scaled raw type
+        let name = |g: &repack::tests::Golden| match g.ty.as_str() {
+            "Q4_K_R4" => Some("q4_k_r4.weight"),
+            "Q8_0_R8" => Some("q8_0_r8.weight"),
+            "IQ4_KS_R4" => Some("iq4_ks_r4.weight"),
+            _ => None,
+        };
+        let goldens = repack::tests::goldens()
+            .into_iter()
+            .filter_map(|g| Some((name(&g)?, g)))
+            .collect::<Vec<_>>();
+        let tensors = goldens
+            .iter()
+            .map(|(name, g)| TestTensor {
+                name,
+                shape: vec![repack::tests::GOLDEN_ROWS as u64, g.cols as u64],
+                dtype: g.id,
+                data: g.repacked(),
+                offset: None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(tensors.len(), 3);
+        let file = write_test_gguf(&base_metadata(), &tensors, DEFAULT_ALIGNMENT);
+        let archive = GgufArchive::open_file(file.path())?;
+        for (name, g) in &goldens {
+            let info = archive.tensor_info(name)?;
+            assert_eq!(info.dtype().raw(), g.base);
+            assert_eq!(info.stored_dtype().name(), g.ty);
+            assert_eq!(info.byte_len(), Some(g.plain().len()));
+            assert!(archive.tensor_data(name)?.bytes() == g.plain(), "{}", g.ty);
+            assert!(
+                archive.tensor_data(name)?.bytes() == g.plain(),
+                "{} on a second read",
+                g.ty
+            );
+            if let Ok(dtype) = GgufDType::new(g.base).candle_dtype() {
+                let qtensor = archive.load_qtensor(name, &Device::Cpu)?;
+                assert_eq!(qtensor.dtype(), dtype);
+                assert_eq!(qtensor.shape().dims(), [repack::tests::GOLDEN_ROWS, g.cols]);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn repacked_tensor_with_a_partial_group_fails_to_read() -> Result<()> {
+        let golden = repack::tests::goldens()
+            .into_iter()
+            .find(|g| g.ty == "Q4_K_R4")
+            .unwrap();
+        let rows = repack::tests::GOLDEN_ROWS - 1;
+        let mut data = golden.repacked();
+        data.truncate(data.len() / repack::tests::GOLDEN_ROWS * rows);
+        let file = write_test_gguf(
+            &base_metadata(),
+            &[TestTensor {
+                name: "odd.weight",
+                shape: vec![rows as u64, golden.cols as u64],
+                dtype: golden.id,
+                data,
+                offset: None,
+            }],
+            DEFAULT_ALIGNMENT,
+        );
+        let archive = GgufArchive::open_file(file.path())?;
+        assert!(archive.tensor_data("odd.weight").is_err());
         Ok(())
     }
 
