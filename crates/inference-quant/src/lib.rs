@@ -859,13 +859,11 @@ impl MatMul {
         }
         #[cfg(not(feature = "accelerate"))]
         {
-            if a.device().is_cpu() {
-                let original_dtype = a.dtype();
-                a.to_dtype(DType::F16)?
-                    .matmul(&b.to_dtype(DType::F16)?)?
-                    .to_dtype(original_dtype)
-            } else {
+            // CPU attention can pair F32 queries with an F16 cache; the product keeps the left operand's dtype
+            if b.dtype() == a.dtype() {
                 a.matmul(b)
+            } else {
+                a.matmul(&b.to_dtype(a.dtype())?)
             }
         }
     }
@@ -3022,6 +3020,29 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
+
+    #[test]
+    fn cpu_matmul_keeps_the_operand_dtype() -> Result<()> {
+        let device = Device::Cpu;
+        // 1 + 2^-12 rounds to 1 in F16
+        let a = Tensor::new(&[[1f32 + 1. / 4096.]], &device)?;
+        let one = Tensor::new(&[[1f32]], &device)?;
+        assert_eq!(
+            MatMul.matmul(&a, &one)?.to_vec2::<f32>()?,
+            vec![vec![1. + 1. / 4096.]]
+        );
+        let half = Tensor::new(&[[2f32]], &device)?.to_dtype(DType::F16)?;
+        assert_eq!(
+            MatMul.matmul(&a, &half)?.to_vec2::<f32>()?,
+            vec![vec![2. + 2. / 4096.]]
+        );
+        // past F16's 65504
+        let big = Tensor::new(&[[300f32]], &device)?.to_dtype(DType::BF16)?;
+        let product = MatMul.matmul(&big, &big)?;
+        assert_eq!(product.dtype(), DType::BF16);
+        assert!(product.to_dtype(DType::F32)?.to_vec2::<f32>()?[0][0].is_finite());
+        Ok(())
+    }
 
     #[derive(Debug)]
     struct SharedActivationProbe(Option<f32>);
