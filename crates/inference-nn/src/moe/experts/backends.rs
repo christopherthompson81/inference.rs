@@ -1248,10 +1248,11 @@ impl FastExpertsWeights {
     #[cfg(feature = "cuda")]
     fn grouped_lora_preserves_route_order(&self) -> bool {
         self.fused_gate_proj
-            .get_qtensor()
-            .zip(self.fused_up_proj.get_qtensor())
+            .kernel_weight()
+            .zip(self.fused_up_proj.kernel_weight())
             .is_some_and(|(gate, up)| {
-                gate.dtype() == up.dtype() && inference_quant::supports_mmq(gate.dtype())
+                gate.gguf_type() == up.gguf_type()
+                    && inference_quant::supports_mmq(gate.gguf_type())
             })
     }
 
@@ -1277,14 +1278,34 @@ impl FastExpertsWeights {
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
         match Self::select_cuda_fast_path(forward) {
-            Some(MoECudaFastPath::Decode) => self
+            Some(MoECudaFastPath::Decode) => match self
                 .forward_decode(forward, config)
-                .map_err(|err| err.context("moe experts fast decode")),
+                .map_err(|err| err.context("moe experts fast decode"))?
+            {
+                // The indexed decode kernels take Candle's types only; grouped mmq reads raw experts on the device
+                None if self.has_raw_kernel_experts() => self
+                    .forward_grouped(forward, config)
+                    .map_err(|err| err.context("moe experts fast grouped decode")),
+                decoded => Ok(decoded),
+            },
             Some(MoECudaFastPath::GroupedPrefill) => self
                 .forward_grouped(forward, config)
                 .map_err(|err| err.context("moe experts fast grouped")),
             None => Ok(None),
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn has_raw_kernel_experts(&self) -> bool {
+        [
+            &self.fused_gate_proj,
+            &self.fused_up_proj,
+            &self.fused_down_proj,
+        ]
+        .iter()
+        .any(|projection| {
+            projection.kernel_weight().is_some() && projection.get_qtensor().is_none()
+        })
     }
 
     fn uses_flattened_gather(&self, device: &Device) -> bool {
@@ -1599,6 +1620,22 @@ impl FastExpertsWeights {
 
         let dev = forward.xs_flat.device().as_cuda_device()?;
 
+        let (Some(gate_qt), Some(up_qt), Some(down_qt)) = (
+            self.fused_gate_proj.kernel_weight(),
+            self.fused_up_proj.kernel_weight(),
+            self.fused_down_proj.kernel_weight(),
+        ) else {
+            return Ok(None);
+        };
+
+        // a weight grouped mmq cannot read runs the gather path
+        if ![gate_qt, up_qt, down_qt]
+            .into_iter()
+            .all(inference_quant::supports_mmq_weight)
+        {
+            return Ok(None);
+        }
+
         // Get topk_ids as contiguous u32 CudaSlice
         let topk_ids_flat = forward.topk_ids.flatten_all()?.contiguous()?;
         let (ti_storage, ti_layout) = topk_ids_flat.storage_and_layout();
@@ -1620,35 +1657,15 @@ impl FastExpertsWeights {
                 dev,
             )?;
 
-        let gate_qt = match self.fused_gate_proj.get_qtensor() {
-            Some(qt) => qt,
-            None => return Ok(None),
-        };
-        let up_qt = match self.fused_up_proj.get_qtensor() {
-            Some(qt) => qt,
-            None => return Ok(None),
-        };
-        let down_qt = match self.fused_down_proj.get_qtensor() {
-            Some(qt) => qt,
-            None => return Ok(None),
-        };
-
-        // a weight grouped mmq cannot read runs the gather path
-        if ![&gate_qt, &up_qt, &down_qt]
-            .iter()
-            .all(|qt| inference_quant::supports_mmq_weight(qt))
-        {
-            return Ok(None);
-        }
-        let packed = gate_qt.dtype() == up_qt.dtype();
+        let packed = gate_qt.gguf_type() == up_qt.gguf_type();
         if forward.lora.is_some() && !packed {
             return Ok(None);
         }
 
         let gate_up = if packed {
             GroupedGateUp::Packed(inference_quant::grouped_moe_mmq_pair_packed(
-                &gate_qt,
-                &up_qt,
+                gate_qt,
+                up_qt,
                 forward.xs_flat,
                 &sorted_source_ids,
                 &sorted_token_ids,
@@ -1659,7 +1676,7 @@ impl FastExpertsWeights {
                 dev,
             )?)
         } else {
-            let project = |qt: &inference_tensor::quantized::QTensor| {
+            let project = |qt: &dyn inference_quant::KernelWeight| {
                 inference_quant::grouped_moe_mmq(
                     qt,
                     forward.xs_flat,
@@ -1673,8 +1690,8 @@ impl FastExpertsWeights {
                 )
             };
             GroupedGateUp::Pair {
-                gate: project(&gate_qt)?,
-                up: project(&up_qt)?,
+                gate: project(gate_qt)?,
+                up: project(up_qt)?,
             }
         };
 
@@ -1726,7 +1743,7 @@ impl FastExpertsWeights {
                 .0 as *const f32;
             let down_assignments = match &gate_up {
                 GroupedGateUp::Packed(gate_up) => inference_quant::grouped_moe_mmq_from_glu_packed(
-                    &down_qt,
+                    down_qt,
                     gate_up,
                     &sorted_token_ids,
                     &sorted_token_ids,
@@ -1738,7 +1755,7 @@ impl FastExpertsWeights {
                     dev,
                 )?,
                 GroupedGateUp::Pair { gate, up } => inference_quant::grouped_moe_mmq_from_glu_pair(
-                    &down_qt,
+                    down_qt,
                     gate,
                     up,
                     &sorted_token_ids,
@@ -1790,7 +1807,7 @@ impl FastExpertsWeights {
             let intermediate = activated.dim(D::Minus1)?;
             let activated_flat = activated.reshape((total_assignments, intermediate))?;
             let down_assignments = inference_quant::grouped_moe_mmq(
-                &down_qt,
+                down_qt,
                 &activated_flat,
                 &sorted_token_ids,
                 &sorted_token_ids,

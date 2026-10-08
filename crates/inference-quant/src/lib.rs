@@ -201,6 +201,8 @@ pub use gguf::fast_mmq::{
     grouped_pair_packed as grouped_moe_mmq_pair_packed, supports as supports_mmq,
     supports_weight as supports_mmq_weight,
 };
+#[cfg(feature = "cuda")]
+pub use gguf::kernel::KernelWeight;
 pub use gguf::{
     GgufBindingMap, GgufBindingResolver, GgufTensorBackend, GgufTensorBinding, GgufWeightSource,
 };
@@ -1956,6 +1958,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// Get the underlying QTensor if this is a GGUF quantized layer.
     /// Used for direct kernel access in grouped MoE prefill and CPU fused GEMV paths.
     fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
+        None
+    }
+
+    /// The weight as our GGUF CUDA kernels read it in place: Candle's types and the raw IQ, trellis and IQK ones.
+    #[cfg(feature = "cuda")]
+    fn kernel_weight(&self) -> Option<&dyn gguf::kernel::KernelWeight> {
         None
     }
 
