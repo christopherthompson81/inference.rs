@@ -24,7 +24,6 @@ use inference_quant::IsqType;
 use inference_tensor::Device;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, RwLock};
 use tokenizers::AddedToken;
 use tokio::sync::Mutex;
@@ -599,7 +598,6 @@ impl Loader for MultimodalLoader {
                 prefixer: self.inner.prefixer(&config),
                 video_sampling: self.inner.video_frame_sampling(&config),
                 preprocessor_config: Arc::new(preprocessor_config),
-                last_prompt_attention: StdMutex::new(None),
             }),
         ))))
     }
