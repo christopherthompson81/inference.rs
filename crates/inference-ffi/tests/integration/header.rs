@@ -33,9 +33,20 @@ fn exported_in(dir: &Path, names: &mut BTreeSet<String>) {
         for attribute in ["\n#[no_mangle]", "\n#[unsafe(no_mangle)]"] {
             for item in source.split(attribute).skip(1) {
                 let signature = &item[..item.find(['(', '=', ';']).unwrap()];
-                if let Some((_, name)) = signature.rsplit_once("fn ") {
+                if let Some((_, name)) = signature.rsplit_once("fn ")
+                    && !name.trim().starts_with('$')
+                {
                     names.insert(name.trim().to_string());
                 }
+            }
+        }
+        // an `entry_points!` table line names its entry point before the `=>`
+        for line in source.lines() {
+            if let Some((head, _)) = line.split_once(" =>")
+                && let Some(name) = head.split_whitespace().last()
+                && name.starts_with("inference_")
+            {
+                names.insert(name.to_string());
             }
         }
     }

@@ -18,9 +18,6 @@ from ctypes import (
 )
 from pathlib import Path
 
-# The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 21
-
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
 CUDA_PATH_VARIABLE = "CUDA_PATH"
@@ -80,6 +77,9 @@ out = POINTER(c_void_p)
 # Inputs cross as a pointer and a length; c_char_p accepts bytes and never passes NULL for b"".
 buffer = (c_char_p, c_size_t)
 
+# BEGIN GENERATED from inference.h by bindings/scripts/generate_native.py
+ABI_VERSION = (0 << 16) | (0 << 8) | 21
+
 # name: (restype, argtypes)
 SIGNATURES = {
     "inference_abi_version": (c_uint32, ()),
@@ -91,10 +91,7 @@ SIGNATURES = {
     "inference_layout_model_label_count": (c_size_t, (c_void_p,)),
     "inference_layout_model_label": (status, (c_void_p, c_size_t, out)),
     "inference_layout_detect": (status, (c_void_p, POINTER(Image), c_float, out)),
-    "inference_layout_detect_batch": (
-        status,
-        (c_void_p, POINTER(Image), c_size_t, c_float, out),
-    ),
+    "inference_layout_detect_batch": (status, (c_void_p, POINTER(Image), c_size_t, c_float, out)),
     "inference_layout_result_free": (None, (c_void_p,)),
     "inference_layout_result_count": (c_size_t, (c_void_p,)),
     "inference_layout_result_detection": (
@@ -102,55 +99,53 @@ SIGNATURES = {
         (c_void_p, c_size_t, POINTER(c_int32), out, POINTER(c_float), POINTER(c_float)),
     ),
     "inference_engine_load": (status, (*buffer, out)),
-    "inference_engine_load_with_callbacks": (
-        status,
-        (*buffer, POINTER(HostCallbacks), out),
-    ),
     "inference_engine_free": (None, (c_void_p,)),
     "inference_engine_for_owner": (status, (c_void_p, *buffer, out)),
-    "inference_engine_register_logits_processor": (
-        status,
-        (c_void_p, *buffer, LOGITS_PROCESSOR_CALLBACK, c_void_p),
-    ),
-    "inference_engine_unregister_logits_processor": (status, (c_void_p, *buffer)),
+    "inference_callback_result_set": (None, (c_void_p, *buffer)),
+    "inference_callback_result_fail": (None, (c_void_p, c_char_p)),
+    "inference_engine_load_with_callbacks": (status, (*buffer, POINTER(HostCallbacks), out)),
     "inference_engine_register_tool": (status, (c_void_p, POINTER(HostTool))),
     "inference_engine_unregister_tool": (status, (c_void_p, *buffer)),
-    "inference_callback_result_set": (None, (c_void_p, c_char_p, c_size_t)),
-    "inference_callback_result_fail": (None, (c_void_p, c_char_p)),
+    "inference_engine_register_logits_processor": (status, (c_void_p, *buffer, LOGITS_PROCESSOR_CALLBACK, c_void_p)),
+    "inference_engine_unregister_logits_processor": (status, (c_void_p, *buffer)),
     "inference_chat": (status, (c_void_p, *buffer, out)),
-    "inference_chat_with_media": (
-        status,
-        (c_void_p, *buffer, POINTER(Media), c_size_t, out),
-    ),
+    "inference_chat_with_media": (status, (c_void_p, *buffer, POINTER(Media), c_size_t, out)),
     "inference_chat_stream_open": (status, (c_void_p, *buffer, out)),
-    "inference_chat_stream_open_with_media": (
-        status,
-        (c_void_p, *buffer, POINTER(Media), c_size_t, out),
-    ),
+    "inference_chat_stream_open_with_media": (status, (c_void_p, *buffer, POINTER(Media), c_size_t, out)),
+    "inference_stream_next": (status, (c_void_p, c_int64, out, POINTER(c_int32))),
+    "inference_stream_cancel": (status, (c_void_p,)),
+    "inference_stream_free": (None, (c_void_p,)),
     "inference_completion": (status, (c_void_p, *buffer, out)),
     "inference_completion_stream_open": (status, (c_void_p, *buffer, out)),
     "inference_embeddings": (status, (c_void_p, *buffer, out)),
     "inference_anthropic_messages": (status, (c_void_p, *buffer, out)),
     "inference_anthropic_messages_stream_open": (status, (c_void_p, *buffer, out)),
+    "inference_anthropic_count_tokens": (status, (c_void_p, *buffer, out)),
     "inference_responses_create": (status, (c_void_p, *buffer, out)),
     "inference_responses_stream_open": (status, (c_void_p, *buffer, out)),
     "inference_responses_get": (status, (c_void_p, *buffer, out)),
     "inference_responses_delete": (status, (c_void_p, *buffer, out)),
     "inference_responses_cancel": (status, (c_void_p, *buffer, out)),
     "inference_models_list": (status, (c_void_p, out)),
+    "inference_model_served": (status, (c_void_p, *buffer, out)),
+    "inference_mcp_tools_list": (status, (c_void_p, out)),
+    "inference_models_cache_stats": (status, (c_void_p, out)),
+    "inference_models_speculative_stats": (status, (c_void_p, out)),
     "inference_model_unload": (status, (c_void_p, *buffer, out)),
     "inference_model_reload": (status, (c_void_p, *buffer, out)),
     "inference_model_status": (status, (c_void_p, *buffer, out)),
+    "inference_model_add": (status, (c_void_p, *buffer, out)),
+    "inference_model_remove": (status, (c_void_p, *buffer, out)),
+    "inference_model_set_default": (status, (c_void_p, *buffer, out)),
+    "inference_model_alias": (status, (c_void_p, *buffer, out)),
     "inference_lora_adapters_list": (status, (c_void_p, *buffer, out)),
     "inference_lora_adapter_load": (status, (c_void_p, *buffer, out)),
     "inference_lora_adapter_unload": (status, (c_void_p, *buffer, out)),
     "inference_image_generation": (status, (c_void_p, *buffer, out)),
+    "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
     "inference_speech_generation": (status, (c_void_p, *buffer, out)),
     "inference_approval_resolve": (status, (c_void_p, *buffer, *buffer, out)),
-    "inference_file_upload": (
-        status,
-        (c_void_p, *buffer, c_char_p, c_char_p, c_char_p, out),
-    ),
+    "inference_file_upload": (status, (c_void_p, *buffer, c_char_p, c_char_p, c_char_p, out)),
     "inference_files_list": (status, (c_void_p, out)),
     "inference_file_get": (status, (c_void_p, *buffer, out)),
     "inference_file_delete": (status, (c_void_p, *buffer, out)),
@@ -158,41 +153,25 @@ SIGNATURES = {
     "inference_container_files_list": (status, (c_void_p, *buffer, out)),
     "inference_container_file_get": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_container_file_content": (status, (c_void_p, *buffer, *buffer, out)),
-    "inference_anthropic_count_tokens": (status, (c_void_p, *buffer, out)),
-    "inference_model_served": (status, (c_void_p, *buffer, out)),
-    "inference_model_add": (status, (c_void_p, *buffer, out)),
-    "inference_model_remove": (status, (c_void_p, *buffer, out)),
-    "inference_model_set_default": (status, (c_void_p, *buffer, out)),
-    "inference_model_alias": (status, (c_void_p, *buffer, out)),
-    "inference_mcp_tools_list": (status, (c_void_p, out)),
     "inference_skill_upload": (status, (c_void_p, POINTER(SkillFile), c_size_t, out)),
-    "inference_skill_version_upload": (
-        status,
-        (c_void_p, *buffer, POINTER(SkillFile), c_size_t, out),
-    ),
+    "inference_skill_version_upload": (status, (c_void_p, *buffer, POINTER(SkillFile), c_size_t, out)),
     "inference_skills_list": (status, (c_void_p, out)),
     "inference_skill_versions_list": (status, (c_void_p, *buffer, out)),
     "inference_re_isq": (status, (c_void_p, *buffer, out)),
     "inference_calibration_start": (status, (c_void_p, *buffer, out)),
     "inference_calibration_status": (status, (c_void_p, *buffer, out)),
-    "inference_models_cache_stats": (status, (c_void_p, out)),
-    "inference_models_speculative_stats": (status, (c_void_p, out)),
     "inference_calibration_apply": (status, (c_void_p, *buffer, out)),
     "inference_sessions_list": (status, (c_void_p, out)),
     "inference_session_get": (status, (c_void_p, *buffer, out)),
     "inference_session_put": (status, (c_void_p, *buffer, *buffer, out)),
-    "inference_session_fork": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_session_delete": (status, (c_void_p, *buffer, out)),
+    "inference_session_fork": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_tokenize": (status, (c_void_p, *buffer, out)),
-    "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
     "inference_detokenize": (status, (c_void_p, *buffer, out)),
     "inference_tokenize_chat": (status, (c_void_p, *buffer, out)),
     "inference_system_info": (status, (out,)),
     "inference_system_doctor": (status, (out,)),
     "inference_model_tune": (status, (*buffer, out)),
-    "inference_stream_next": (status, (c_void_p, c_int64, out, POINTER(c_int32))),
-    "inference_stream_cancel": (status, (c_void_p,)),
-    "inference_stream_free": (None, (c_void_p,)),
     "inference_blob_data": (c_void_p, (c_void_p,)),
     "inference_blob_len": (c_size_t, (c_void_p,)),
     "inference_blob_mime_type": (c_void_p, (c_void_p,)),
@@ -201,6 +180,7 @@ SIGNATURES = {
     "inference_string_len": (c_size_t, (c_void_p,)),
     "inference_string_free": (None, (c_void_p,)),
 }
+# END GENERATED
 
 
 def _file_name() -> str:

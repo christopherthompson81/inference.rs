@@ -30,6 +30,61 @@ use crate::{
     },
 };
 
+// The entry points that are one helper call, one line each: the shape fixes the C signature and the helper.
+macro_rules! entry_points {
+    () => {};
+    ($(#[$doc:meta])* json $name:ident => $call:expr; $($rest:tt)*) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            engine: *const inference_engine,
+            request: *const c_char,
+            request_len: usize,
+            out_response: *mut *mut inference_string,
+        ) -> inference_status {
+            unsafe { json_call(engine, request, request_len, out_response, $call) }
+        }
+        entry_points!($($rest)*);
+    };
+    ($(#[$doc:meta])* stream $name:ident => $call:expr; $($rest:tt)*) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            engine: *const inference_engine,
+            request: *const c_char,
+            request_len: usize,
+            out_stream: *mut *mut inference_stream,
+        ) -> inference_status {
+            unsafe { stream_call(engine, request, request_len, out_stream, $call) }
+        }
+        entry_points!($($rest)*);
+    };
+    ($(#[$doc:meta])* query $name:ident => $call:expr; $($rest:tt)*) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            engine: *const inference_engine,
+            out_response: *mut *mut inference_string,
+        ) -> inference_status {
+            unsafe { query_call(engine, out_response, $call) }
+        }
+        entry_points!($($rest)*);
+    };
+    ($(#[$doc:meta])* $kind:ident($id:ident, $id_len:ident) $name:ident => $call:expr; $($rest:tt)*) => {
+        $(#[$doc])*
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $name(
+            engine: *const inference_engine,
+            $id: *const c_char,
+            $id_len: usize,
+            out_response: *mut *mut inference_string,
+        ) -> inference_status {
+            unsafe { $kind(engine, $id, $id_len, out_response, $call) }
+        }
+        entry_points!($($rest)*);
+    };
+}
+
 /// Mirrors `inference_skill_file`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -478,145 +533,25 @@ unsafe fn json_call(
     }
 }
 
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_completion(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.completion_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat_stream_open`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_completion_stream_open(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_stream: *mut *mut inference_stream,
-) -> inference_status {
-    unsafe {
-        stream_call(
-            engine,
-            request,
-            request_len,
-            out_stream,
-            |engine, request| engine.completion_stream_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_embeddings(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.embeddings_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_anthropic_messages(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .anthropic_messages_json(request)
-                    .map_err(anthropic_failure)
-            },
-        )
-    }
-}
-
-/// Safety: as for `inference_chat_stream_open`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_anthropic_messages_stream_open(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_stream: *mut *mut inference_stream,
-) -> inference_status {
-    unsafe {
-        stream_call(
-            engine,
-            request,
-            request_len,
-            out_stream,
-            |engine, request| {
-                engine
-                    .anthropic_messages_stream_json(request)
-                    .map_err(anthropic_failure)
-            },
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_responses_create(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.responses_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat_stream_open`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_responses_stream_open(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_stream: *mut *mut inference_stream,
-) -> inference_status {
-    unsafe {
-        stream_call(
-            engine,
-            request,
-            request_len,
-            out_stream,
-            |engine, request| engine.responses_stream_json(request).map_err(api_failure),
-        )
-    }
+entry_points! {
+    /// Safety: as for `inference_chat`.
+    json inference_completion => |engine, request| engine.completion_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat_stream_open`.
+    stream inference_completion_stream_open =>
+        |engine, request| engine.completion_stream_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_embeddings => |engine, request| engine.embeddings_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_anthropic_messages =>
+        |engine, request| engine.anthropic_messages_json(request).map_err(anthropic_failure);
+    /// Safety: as for `inference_chat_stream_open`.
+    stream inference_anthropic_messages_stream_open =>
+        |engine, request| engine.anthropic_messages_stream_json(request).map_err(anthropic_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_responses_create => |engine, request| engine.responses_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat_stream_open`.
+    stream inference_responses_stream_open =>
+        |engine, request| engine.responses_stream_json(request).map_err(api_failure);
 }
 
 // Engine and a UTF-8 id in, an owned handle out.
@@ -653,71 +588,16 @@ unsafe fn response_id_call(
     }
 }
 
-/// Safety: `engine` is a live handle, `response_id` valid for `response_id_len` bytes, `out_response` valid for a
-/// write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_responses_get(
-    engine: *const inference_engine,
-    response_id: *const c_char,
-    response_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        response_id_call(
-            engine,
-            response_id,
-            response_id_len,
-            out_response,
-            Engine::response_json,
-        )
-    }
-}
-
-/// Safety: as for `inference_responses_get`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_responses_delete(
-    engine: *const inference_engine,
-    response_id: *const c_char,
-    response_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        response_id_call(
-            engine,
-            response_id,
-            response_id_len,
-            out_response,
-            Engine::delete_response_json,
-        )
-    }
-}
-
-/// Safety: as for `inference_responses_get`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_responses_cancel(
-    engine: *const inference_engine,
-    response_id: *const c_char,
-    response_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        response_id_call(
-            engine,
-            response_id,
-            response_id_len,
-            out_response,
-            Engine::cancel_response_json,
-        )
-    }
-}
-
-/// Safety: `engine` is a live handle and `out_response` valid for a write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_models_list(
-    engine: *const inference_engine,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe { query_call(engine, out_response, |engine| engine.engine().models_json()) }
+entry_points! {
+    /// Safety: `engine` is a live handle, `response_id` valid for `response_id_len` bytes, `out_response` valid for a
+    /// write.
+    response_id_call(response_id, response_id_len) inference_responses_get => Engine::response_json;
+    /// Safety: as for `inference_responses_get`.
+    response_id_call(response_id, response_id_len) inference_responses_delete => Engine::delete_response_json;
+    /// Safety: as for `inference_responses_get`.
+    response_id_call(response_id, response_id_len) inference_responses_cancel => Engine::cancel_response_json;
+    /// Safety: `engine` is a live handle and `out_response` valid for a write.
+    query inference_models_list => |engine| engine.engine().models_json();
 }
 
 // An engine call with no request body.
@@ -737,151 +617,22 @@ unsafe fn query_call(
     }
 }
 
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_unload(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .engine()
-                    .unload_model_json(request)
-                    .map_err(api_failure)
-            },
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_reload(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.reload_model_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_status(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .engine()
-                    .model_status_json(request)
-                    .map_err(api_failure)
-            },
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_lora_adapters_list(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.lora_adapters_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_lora_adapter_load(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.load_lora_adapter_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_lora_adapter_unload(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .unload_lora_adapter_json(request)
-                    .map_err(api_failure)
-            },
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_image_generation(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.image_generation_json(request).map_err(api_failure),
-        )
-    }
+entry_points! {
+    /// Safety: as for `inference_chat`.
+    json inference_model_unload => |engine, request| engine.engine().unload_model_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_model_reload => |engine, request| engine.reload_model_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_model_status => |engine, request| engine.engine().model_status_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_lora_adapters_list => |engine, request| engine.lora_adapters_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_lora_adapter_load => |engine, request| engine.load_lora_adapter_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_lora_adapter_unload =>
+        |engine, request| engine.unload_lora_adapter_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_image_generation => |engine, request| engine.image_generation_json(request).map_err(api_failure);
 }
 
 /// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_blob` valid for a write.
@@ -977,13 +728,9 @@ pub unsafe extern "C" fn inference_file_upload(
     }
 }
 
-/// Safety: `engine` is a live handle and `out_response` valid for a write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_files_list(
-    engine: *const inference_engine,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe { query_call(engine, out_response, |engine| engine.engine().files_json()) }
+entry_points! {
+    /// Safety: `engine` is a live handle and `out_response` valid for a write.
+    query inference_files_list => |engine| engine.engine().files_json();
 }
 
 unsafe fn file_id_call(
@@ -1007,42 +754,11 @@ unsafe fn file_id_call(
     }
 }
 
-/// Safety: `engine` is a live handle, `file_id` valid for `file_id_len` bytes, `out_response` valid for a write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_file_get(
-    engine: *const inference_engine,
-    file_id: *const c_char,
-    file_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        file_id_call(
-            engine,
-            file_id,
-            file_id_len,
-            out_response,
-            Engine::file_json,
-        )
-    }
-}
-
-/// Safety: as for `inference_file_get`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_file_delete(
-    engine: *const inference_engine,
-    file_id: *const c_char,
-    file_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        file_id_call(
-            engine,
-            file_id,
-            file_id_len,
-            out_response,
-            Engine::delete_file_json,
-        )
-    }
+entry_points! {
+    /// Safety: `engine` is a live handle, `file_id` valid for `file_id_len` bytes, `out_response` valid for a write.
+    file_id_call(file_id, file_id_len) inference_file_get => Engine::file_json;
+    /// Safety: as for `inference_file_get`.
+    file_id_call(file_id, file_id_len) inference_file_delete => Engine::delete_file_json;
 }
 
 /// Safety: as for `inference_file_get`, with `out_blob` valid for a write.
@@ -1367,92 +1083,19 @@ pub unsafe extern "C" fn inference_re_isq(
     }
 }
 
-/// Safety: as for `inference_models_list`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_calibration_start(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.calibration_start_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_models_list`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_models_cache_stats(
-    engine: *const inference_engine,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe { query_call(engine, out_response, BlockingEngine::cache_stats_json) }
-}
-
-/// Safety: as for `inference_models_list`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_models_speculative_stats(
-    engine: *const inference_engine,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe { query_call(engine, out_response, BlockingEngine::speculative_stats_json) }
-}
-
-/// Safety: as for `inference_models_list`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_calibration_status(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.calibration_status_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_calibration_apply(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.calibration_apply_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_models_list`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_sessions_list(
-    engine: *const inference_engine,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        query_call(engine, out_response, |engine| {
-            engine.engine().sessions_json()
-        })
-    }
+entry_points! {
+    /// Safety: as for `inference_models_list`.
+    json inference_calibration_start => |engine, request| engine.calibration_start_json(request).map_err(api_failure);
+    /// Safety: as for `inference_models_list`.
+    query inference_models_cache_stats => BlockingEngine::cache_stats_json;
+    /// Safety: as for `inference_models_list`.
+    query inference_models_speculative_stats => BlockingEngine::speculative_stats_json;
+    /// Safety: as for `inference_models_list`.
+    json inference_calibration_status => |engine, request| engine.calibration_status_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_calibration_apply => |engine, request| engine.calibration_apply_json(request).map_err(api_failure);
+    /// Safety: as for `inference_models_list`.
+    query inference_sessions_list => |engine| engine.engine().sessions_json();
 }
 
 unsafe fn session_id_call(
@@ -1476,24 +1119,10 @@ unsafe fn session_id_call(
     }
 }
 
-/// Safety: `engine` is a live handle, `session_id` valid for `session_id_len` bytes, `out_response` valid for a
-/// write.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_session_get(
-    engine: *const inference_engine,
-    session_id: *const c_char,
-    session_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        session_id_call(
-            engine,
-            session_id,
-            session_id_len,
-            out_response,
-            Engine::session_json,
-        )
-    }
+entry_points! {
+    /// Safety: `engine` is a live handle, `session_id` valid for `session_id_len` bytes, `out_response` valid for a
+    /// write.
+    session_id_call(session_id, session_id_len) inference_session_get => Engine::session_json;
 }
 
 /// Safety: as for `inference_approval_resolve`, with `session_id` in place of `approval_id`.
@@ -1525,80 +1154,15 @@ pub unsafe extern "C" fn inference_session_put(
     }
 }
 
-/// Safety: as for `inference_session_get`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_session_delete(
-    engine: *const inference_engine,
-    session_id: *const c_char,
-    session_id_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        session_id_call(
-            engine,
-            session_id,
-            session_id_len,
-            out_response,
-            Engine::delete_session_json,
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_tokenize_chat(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.tokenize_chat_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_tokenize(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.tokenize_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_detokenize(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.detokenize_json(request).map_err(api_failure),
-        )
-    }
+entry_points! {
+    /// Safety: as for `inference_session_get`.
+    session_id_call(session_id, session_id_len) inference_session_delete => Engine::delete_session_json;
+    /// Safety: as for `inference_chat`.
+    json inference_tokenize_chat => |engine, request| engine.tokenize_chat_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_tokenize => |engine, request| engine.tokenize_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_detokenize => |engine, request| engine.detokenize_json(request).map_err(api_failure);
 }
 
 fn utf8<'a>(bytes: &'a [u8], name: &str) -> FfiResult<&'a str> {
@@ -1610,23 +1174,10 @@ unsafe fn arg_utf8<'a>(data: *const c_char, len: usize, name: &str) -> FfiResult
     unsafe { utf8(arg_bytes(data, len, name)?, name) }
 }
 
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_anthropic_count_tokens(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.count_tokens_json(request).map_err(anthropic_failure),
-        )
-    }
+entry_points! {
+    /// Safety: as for `inference_chat`.
+    json inference_anthropic_count_tokens =>
+        |engine, request| engine.count_tokens_json(request).map_err(anthropic_failure);
 }
 
 /// Safety: as for `inference_file_get`, with `container_id` in place of `file_id`.
@@ -1734,41 +1285,11 @@ pub unsafe extern "C" fn inference_session_fork(
     }
 }
 
-/// Safety: as for `inference_models_list`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_mcp_tools_list(
-    engine: *const inference_engine,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        query_call(engine, out_response, |engine| {
-            engine.engine().mcp_tools_json()
-        })
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_served(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .engine()
-                    .model_served_json(request)
-                    .map_err(api_failure)
-            },
-        )
-    }
+entry_points! {
+    /// Safety: as for `inference_models_list`.
+    query inference_mcp_tools_list => |engine| engine.engine().mcp_tools_json();
+    /// Safety: as for `inference_chat`.
+    json inference_model_served => |engine, request| engine.engine().model_served_json(request).map_err(api_failure);
 }
 
 /// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
@@ -1790,90 +1311,16 @@ pub unsafe extern "C" fn inference_model_tune(
     }
 }
 
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_add(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.add_model_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_remove(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| engine.remove_model_json(request).map_err(api_failure),
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_set_default(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .engine()
-                    .set_default_model_json(request)
-                    .map_err(api_failure)
-            },
-        )
-    }
-}
-
-/// Safety: as for `inference_chat`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn inference_model_alias(
-    engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
-    out_response: *mut *mut inference_string,
-) -> inference_status {
-    unsafe {
-        json_call(
-            engine,
-            request,
-            request_len,
-            out_response,
-            |engine, request| {
-                engine
-                    .engine()
-                    .add_model_alias_json(request)
-                    .map_err(api_failure)
-            },
-        )
-    }
+entry_points! {
+    /// Safety: as for `inference_chat`.
+    json inference_model_add => |engine, request| engine.add_model_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_model_remove => |engine, request| engine.remove_model_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_model_set_default =>
+        |engine, request| engine.engine().set_default_model_json(request).map_err(api_failure);
+    /// Safety: as for `inference_chat`.
+    json inference_model_alias => |engine, request| engine.engine().add_model_alias_json(request).map_err(api_failure);
 }
 
 const F32_BLOB_MIME: &str = "application/x-f32le";
