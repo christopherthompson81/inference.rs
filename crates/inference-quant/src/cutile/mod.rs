@@ -48,6 +48,15 @@ pub use routed_lora::{
 pub use tune::{TUNE_CACHE_ENV, TUNE_MODE_ENV, TuneMode};
 pub use warmup::warmup_moe_kernels;
 
+/// The element-type generic of the kernels that take bf16 or f16 activations.
+fn element_type(dtype: inference_tensor::DType) -> &'static str {
+    match dtype {
+        inference_tensor::DType::BF16 => "bf16",
+        inference_tensor::DType::F16 => "f16",
+        other => unreachable!("cuTile kernels take bf16 or f16, got {other:?}"),
+    }
+}
+
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<String>() {
         return message.clone();

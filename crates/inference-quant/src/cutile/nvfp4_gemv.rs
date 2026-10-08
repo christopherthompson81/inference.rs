@@ -35,7 +35,8 @@ mod kernels {
     const FP8_MAX: f32 = 448.0;
 
     #[cutile::entry(unchecked_accesses = false)]
-    fn gemv_bf16<
+    fn gemv<
+        E: ElementType,
         const BN: i32,
         const BK: i32,
         const PK: i32,
@@ -43,8 +44,8 @@ mod kernels {
         const A4: bool,
         const ROUTED: bool,
     >(
-        mut y: MappedPartitionMut<bf16, { [1, BN] }, { [1, 1] }>,
-        x: &Tensor<bf16, { [-1, -1] }>,
+        mut y: MappedPartitionMut<E, { [1, BN] }, { [1, 1] }>,
+        x: &Tensor<E, { [-1, -1] }>,
         w: &Tensor<f4e2m1fnx2, { [-1, -1, -1] }>,
         ws: &Tensor<f8e4m3fn, { [-1, -1, -1] }>,
         wg: &Tensor<f32, { [-1, -1] }>,
@@ -74,7 +75,7 @@ mod kernels {
             };
             let mut acc: Tile<f32, { [BN, BK] }> = constant(0.0f32, const_shape![BN, BK]);
             for ki in 0..k {
-                let xt: Tile<bf16, { [1, BK] }> = px.load([row / x_stride, ki]);
+                let xt: Tile<E, { [1, BK] }> = px.load([row / x_stride, ki]);
                 let xf: Tile<f32, { [1, BK] }> = convert_tile(xt);
                 let xf: Tile<f32, { [1, BK] }> = if A4 {
                     let xf = xf
@@ -124,7 +125,7 @@ mod kernels {
                 let wf: Tile<f32, { [BN, BK] }> = if A4 {
                     wf
                 } else {
-                    let rounded: Tile<bf16, { [BN, BK] }> = convert_tile(wf);
+                    let rounded: Tile<E, { [BN, BK] }> = convert_tile(wf);
                     let rounded: Tile<f32, { [BN, BK] }> = convert_tile(rounded);
                     rounded
                 };
@@ -134,111 +135,7 @@ mod kernels {
             let sum = sum.reshape(const_shape![BN]);
             let gw: Tile<f32, { [BN] }> = pwg.load([expert, col]).reshape(const_shape![BN]);
             let out = sum * gw * global.broadcast(const_shape![BN]);
-            let out: Tile<bf16, { [BN] }> = convert_tile(out);
-            y.store(out.reshape(const_shape![1, BN]), out_idx);
-        }
-    }
-    #[cutile::entry(unchecked_accesses = false)]
-    fn gemv_f16<
-        const BN: i32,
-        const BK: i32,
-        const PK: i32,
-        const SK: i32,
-        const A4: bool,
-        const ROUTED: bool,
-    >(
-        mut y: MappedPartitionMut<f16, { [1, BN] }, { [1, 1] }>,
-        x: &Tensor<f16, { [-1, -1] }>,
-        w: &Tensor<f4e2m1fnx2, { [-1, -1, -1] }>,
-        ws: &Tensor<f8e4m3fn, { [-1, -1, -1] }>,
-        wg: &Tensor<f32, { [-1, -1] }>,
-        ag: &Tensor<f32, { [-1] }>,
-        ids: &Tensor<u32, { [-1] }>,
-        x_stride: i32,
-    ) {
-        let px = x.partition(const_shape![1, BK]);
-        let pw = w.partition(const_shape![1, BN, PK]);
-        let pws = ws.partition(const_shape![1, BN, SK]);
-        let pwg = wg.partition(const_shape![1, BN]);
-        let k = num_tiles(&px, 1);
-        for out_idx in y.iter_indices() {
-            let (row, col) = out_idx.components();
-            let expert: i32 = if ROUTED {
-                let expert: Tile<u32, { [1] }> = load_tile(ids, const_shape![1], [row]);
-                let expert: Tile<i32, { [1] }> = bitcast(expert);
-                tile_to_scalar(expert.reshape(const_shape![]))
-            } else {
-                0i32
-            };
-            let global: Tile<f32, { [1] }> = if A4 {
-                load_tile(ag, const_shape![1], [expert])
-            } else {
-                let one: Tile<f32, { [1] }> = constant(1.0f32, const_shape![1]);
-                one
-            };
-            let mut acc: Tile<f32, { [BN, BK] }> = constant(0.0f32, const_shape![BN, BK]);
-            for ki in 0..k {
-                let xt: Tile<f16, { [1, BK] }> = px.load([row / x_stride, ki]);
-                let xf: Tile<f32, { [1, BK] }> = convert_tile(xt);
-                let xf: Tile<f32, { [1, BK] }> = if A4 {
-                    let xf = xf
-                        / global
-                            .reshape(const_shape![1, 1])
-                            .broadcast(const_shape![1, BK]);
-                    let xb: Tile<f32, { [SK, BLOCK] }> = xf.reshape(const_shape![SK, BLOCK]);
-                    let maxima: Tile<f32, { [SK] }> = reduce_max(absf(xb), 1);
-                    let maxima = maxima.reshape(const_shape![SK]);
-                    let six: Tile<f32, { [SK] }> = constant(FP4_MAX, const_shape![SK]);
-                    let limit: Tile<f32, { [SK] }> = constant(FP8_MAX, const_shape![SK]);
-                    let raw = min_tile(maxima / six, limit);
-                    let sx: Tile<f8e4m3fn, { [SK] }> = convert_tile(raw);
-                    let sx: Tile<f32, { [SK] }> = convert_tile(sx);
-                    let zero: Tile<f32, { [SK] }> = constant(0.0f32, const_shape![SK]);
-                    let one: Tile<f32, { [SK] }> = constant(1.0f32, const_shape![SK]);
-                    let denominator = select(eq_tile(sx, zero), one, sx)
-                        .reshape(const_shape![SK, 1])
-                        .broadcast(const_shape![SK, BLOCK]);
-                    let normalized = xb / denominator;
-                    let upper: Tile<f32, { [SK, BLOCK] }> =
-                        constant(FP4_MAX, const_shape![SK, BLOCK]);
-                    let lower: Tile<f32, { [SK, BLOCK] }> =
-                        constant(FP4_MIN, const_shape![SK, BLOCK]);
-                    let normalized = max_tile(min_tile(normalized, upper), lower);
-                    let xq: Tile<f4e2m1fn, { [SK, BLOCK] }> = convert_tile(normalized);
-                    let xq: Tile<f32, { [SK, BLOCK] }> = convert_tile(xq);
-                    (xq * sx
-                        .reshape(const_shape![SK, 1])
-                        .broadcast(const_shape![SK, BLOCK]))
-                    .reshape(const_shape![1, BK])
-                } else {
-                    xf
-                };
-                let packed: Tile<f4e2m1fnx2, { [BN, PK] }> =
-                    pw.load([expert, col, ki]).reshape(const_shape![BN, PK]);
-                let wt: Tile<f4e2m1fn, { [BN, BK] }> = packed.unpack(const_shape![BN, BK]);
-                let wf: Tile<f32, { [BN, BK] }> = convert_tile(wt);
-                let sw: Tile<f8e4m3fn, { [BN, SK] }> =
-                    pws.load([expert, col, ki]).reshape(const_shape![BN, SK]);
-                let sw: Tile<f32, { [BN, SK] }> = convert_tile(sw);
-                let sw = sw
-                    .reshape(const_shape![BN, SK, 1])
-                    .broadcast(const_shape![BN, SK, BLOCK])
-                    .reshape(const_shape![BN, BK]);
-                let wf = wf * sw;
-                let wf: Tile<f32, { [BN, BK] }> = if A4 {
-                    wf
-                } else {
-                    let rounded: Tile<f16, { [BN, BK] }> = convert_tile(wf);
-                    let rounded: Tile<f32, { [BN, BK] }> = convert_tile(rounded);
-                    rounded
-                };
-                acc = acc + xf.broadcast(const_shape![BN, BK]) * wf;
-            }
-            let sum: Tile<f32, { [BN] }> = reduce_sum(acc, 1);
-            let sum = sum.reshape(const_shape![BN]);
-            let gw: Tile<f32, { [BN] }> = pwg.load([expert, col]).reshape(const_shape![BN]);
-            let out = sum * gw * global.broadcast(const_shape![BN]);
-            let out: Tile<f16, { [BN] }> = convert_tile(out);
+            let out: Tile<E, { [BN] }> = convert_tile(out);
             y.store(out.reshape(const_shape![1, BN]), out_idx);
         }
     }
@@ -373,6 +270,7 @@ pub(super) fn launch(
     let tiles = rows * n.div_ceil(tile_columns);
     let tile_blocks = tiles as u32;
     let generics = vec![
+        super::element_type(x.dtype()).to_string(),
         tile_columns.to_string(),
         tile_k.to_string(),
         (tile_k / 2).to_string(),
@@ -487,8 +385,8 @@ pub(super) fn launch(
         }};
     }
     let output = match x.dtype() {
-        DType::BF16 => run!(bf16, kernels::gemv_bf16),
-        DType::F16 => run!(f16, kernels::gemv_f16),
+        DType::BF16 => run!(bf16, kernels::gemv),
+        DType::F16 => run!(f16, kernels::gemv),
         _ => unreachable!(),
     };
     if compile_only {
@@ -512,6 +410,7 @@ mod tests {
         for dtype in ["bf16", "f16"] {
             for (a4, routed) in [(false, false), (true, false), (false, true), (true, true)] {
                 let values = generics(&[
+                    &dtype,
                     &SMALL_MATRIX_COLUMNS,
                     &SMALL_MATRIX_K,
                     &(SMALL_MATRIX_K / 2),
@@ -531,7 +430,7 @@ mod tests {
                 tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
-                    &format!("gemv_{dtype}"),
+                    &"gemv".to_string(),
                     values,
                     &tensors,
                 );

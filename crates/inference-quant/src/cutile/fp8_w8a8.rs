@@ -41,14 +41,15 @@ mod kernels {
             sm_121 = (num_cta_in_cga = 2, occupancy = 2,),
         )
     )]
-    fn fp8_w8a8_bf16<
+    fn fp8_w8a8<
+        E: ElementType,
         const BM: i32,
         const BN: i32,
         const BK: i32,
         const MAP_SHAPE: [i32; 2],
         const LATENCY: i32,
     >(
-        mut y: MappedPartitionMut<bf16, { [BM, BN] }, MAP_SHAPE>,
+        mut y: MappedPartitionMut<E, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f8e4m3fn, { [-1, -1] }>,
         w: &Tensor<f8e4m3fn, { [-1, -1] }>,
         xs: &Tensor<f32, { [-1] }>,
@@ -87,65 +88,7 @@ mod kernels {
             let sw: Tile<f32, { [BM, BN] }> = sw
                 .reshape(const_shape![1, BN])
                 .broadcast(const_shape![BM, BN]);
-            let out: Tile<bf16, { [BM, BN] }> = convert_tile(acc * sx * sw);
-            y.store(out, out_idx);
-        }
-    }
-
-    #[cutile::entry(
-        unchecked_accesses = false,
-        optimization_hints = (
-            sm_120 = (num_cta_in_cga = 2, occupancy = 2,),
-            sm_121 = (num_cta_in_cga = 2, occupancy = 2,),
-        )
-    )]
-    fn fp8_w8a8_f16<
-        const BM: i32,
-        const BN: i32,
-        const BK: i32,
-        const MAP_SHAPE: [i32; 2],
-        const LATENCY: i32,
-    >(
-        mut y: MappedPartitionMut<f16, { [BM, BN] }, MAP_SHAPE>,
-        x: &Tensor<f8e4m3fn, { [-1, -1] }>,
-        w: &Tensor<f8e4m3fn, { [-1, -1] }>,
-        xs: &Tensor<f32, { [-1] }>,
-        ws: &Tensor<f32, { [-1] }>,
-    ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let pw = w.partition(const_shape![BN, BK]);
-        let pxs = xs.partition(const_shape![BM]);
-        let pws = ws.partition(const_shape![BN]);
-        let k = num_tiles(&px, 1);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-        for out_idx in y.iter_indices() {
-            let (bid_m, bid_n) = out_idx.components();
-            let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-            for kg in 0..k {
-                let xt: Tile<f8e4m3fn, { [BM, BK] }> = if LATENCY > 0 {
-                    px.load_pipelined::<LATENCY>([bid_m, kg])
-                } else {
-                    px.load([bid_m, kg])
-                };
-                let wt: Tile<f8e4m3fn, { [BN, BK] }> = if LATENCY > 0 {
-                    pw.load_pipelined::<LATENCY>([bid_n, kg])
-                } else {
-                    pw.load([bid_n, kg])
-                };
-                let wt: Tile<f8e4m3fn, { [BK, BN] }> = permute(wt, transpose);
-                acc = mmaf(xt, wt, acc);
-            }
-            let sx: Tile<f32, { [BM] }> = pxs.load([bid_m]);
-            let sx: Tile<f32, { [BM, BN] }> = sx
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BN]);
-            let sw: Tile<f32, { [BN] }> = pws.load([bid_n]);
-            let sw: Tile<f32, { [BM, BN] }> = sw
-                .reshape(const_shape![1, BN])
-                .broadcast(const_shape![BM, BN]);
-            let out: Tile<f16, { [BM, BN] }> = convert_tile(acc * sx * sw);
+            let out: Tile<E, { [BM, BN] }> = convert_tile(acc * sx * sw);
             y.store(out, out_idx);
         }
     }
@@ -655,6 +598,7 @@ fn launch(
     let blocks_per_sm = usize::try_from(cfg.blocks_per_sm).unwrap_or(1).max(1);
     let tile_blocks = (blocks_per_sm * dev.sm_count()).clamp(1, tiles) as u32;
     let generics = vec![
+        super::element_type(operands.scheme.output_dtype).to_string(),
         cfg.bm.to_string(),
         TILE_SIZE.to_string(),
         TILE_SIZE.to_string(),
@@ -708,13 +652,7 @@ fn launch(
                 .partition([bm, TILE_SIZE])
                 .map([cfg.map_m as usize, cfg.map_n as usize], tile_blocks);
             run!(
-                kernels::fp8_w8a8_bf16(
-                    mapped,
-                    Arc::new(x),
-                    Arc::new(w),
-                    Arc::new(xs),
-                    Arc::new(ws)
-                ),
+                kernels::fp8_w8a8(mapped, Arc::new(x), Arc::new(w), Arc::new(xs), Arc::new(ws)),
                 "W8A8 BF16 GEMM"
             );
             drop(out_guard);
@@ -739,7 +677,7 @@ fn launch(
                 .partition([bm, TILE_SIZE])
                 .map([cfg.map_m as usize, cfg.map_n as usize], tile_blocks);
             run!(
-                kernels::fp8_w8a8_f16(mapped, Arc::new(x), Arc::new(w), Arc::new(xs), Arc::new(ws)),
+                kernels::fp8_w8a8(mapped, Arc::new(x), Arc::new(w), Arc::new(xs), Arc::new(ws)),
                 "W8A8 F16 GEMM"
             );
             drop(out_guard);
@@ -921,6 +859,7 @@ mod tests {
         for dtype in ["bf16", "f16"] {
             for cfg in [POLICY_SMALL, POLICY_LARGE] {
                 let values = super::super::generics(&[
+                    &dtype,
                     &cfg.bm,
                     &TILE_SIZE,
                     &TILE_SIZE,
@@ -928,7 +867,7 @@ mod tests {
                     &cfg.map_n,
                     &cfg.latency,
                 ]);
-                let entry = format!("fp8_w8a8_{dtype}");
+                let entry = "fp8_w8a8".to_string();
                 let tensors = [("y", 2), ("x", 2), ("w", 2), ("xs", 1), ("ws", 1)];
                 super::super::tile_ir(
                     kernels::__module_ast_self,
