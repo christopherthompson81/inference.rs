@@ -21,6 +21,8 @@ PYTHON_LINE_LENGTH = 120
 CSHARP_LINE_LENGTH = 120
 # Pointers the header documents as arrays rather than single values; everything else follows the rules below.
 ARRAY_PARAMS = {"out_bbox", "out_results"}
+OUT_PREFIX = "out_"
+CSHARP_STRUCT_PREFIX = "Native"
 
 SCALARS = {
     "uint32_t": ("c_uint32", "uint"),
@@ -33,34 +35,83 @@ SCALARS = {
 STATUS = "inference_status"
 # C keywords are not C# ones: a parameter named `string` or `object` must be escaped
 CSHARP_KEYWORDS = {
+    "abstract",
+    "as",
     "base",
     "bool",
+    "break",
     "byte",
+    "case",
+    "catch",
     "char",
     "checked",
+    "class",
+    "const",
+    "continue",
     "decimal",
+    "default",
     "delegate",
+    "do",
+    "double",
+    "else",
+    "enum",
     "event",
     "explicit",
+    "extern",
+    "false",
+    "finally",
     "fixed",
+    "float",
+    "for",
+    "foreach",
+    "goto",
+    "if",
+    "implicit",
     "in",
+    "int",
+    "interface",
+    "internal",
     "is",
     "lock",
+    "long",
     "namespace",
+    "new",
+    "null",
     "object",
     "operator",
     "out",
     "override",
     "params",
+    "private",
+    "protected",
+    "public",
+    "readonly",
     "ref",
+    "return",
     "sbyte",
+    "sealed",
+    "short",
+    "sizeof",
+    "stackalloc",
+    "static",
     "string",
+    "struct",
+    "switch",
     "this",
+    "throw",
+    "true",
+    "try",
+    "typeof",
     "uint",
     "ulong",
+    "unchecked",
+    "unsafe",
     "ushort",
     "using",
     "virtual",
+    "void",
+    "volatile",
+    "while",
 }
 
 
@@ -71,7 +122,7 @@ class Header:
             int(re.search(rf"#define INFERENCE_ABI_VERSION_{part} (\d+)", code).group(1))
             for part in ("MAJOR", "MINOR", "PATCH")
         )
-        self.structs = set(re.findall(r"typedef struct (\w+) \{", code))
+        self.structs = set(re.findall(r"(?:typedef )?struct (\w+)\s*\{", code))
         self.enums = set(re.findall(r"typedef enum (\w+) \{", code))
         self.callbacks = {
             name: (ret.strip(), split_params(params))
@@ -80,9 +131,12 @@ class Header:
         self.functions = [
             (name, ret.strip(), split_params(params))
             for ret, name, params in re.findall(
-                r"INFERENCE_API ([\w \*]+?)\s*\b(inference_\w+)\((.*?)\);", code, flags=re.DOTALL
+                r"INFERENCE_API\s+([\w \*]+?)\s*\b(inference_\w+)\s*\((.*?)\);", code, flags=re.DOTALL
             )
         ]
+        declared = len(re.findall(r"^(?!#).*\bINFERENCE_API\b", code, flags=re.MULTILINE))
+        if declared != len(self.functions):
+            raise ValueError(f"parsed {len(self.functions)} of the header's {declared} INFERENCE_API declarations")
 
 
 def split_params(params: str):
@@ -93,7 +147,8 @@ def split_params(params: str):
     for param in params.split(","):
         param = param.strip()
         match = re.match(r"(.*?)(\w+)$", param)
-        out.append((match.group(1).replace(" *", "*").strip().replace("const ", ""), match.group(2)))
+        ty = re.sub(r"\bconst\b", "", match.group(1)).replace(" ", "")
+        out.append((ty, match.group(2)))
     return out
 
 
@@ -109,7 +164,10 @@ def pascal(c_name: str) -> str:
 
 def is_buffer(params, i) -> bool:
     ty, _ = params[i]
-    return ty in ("char*", "uint8_t*") and i + 1 < len(params) and params[i + 1][0] == "size_t"
+    if ty not in ("char*", "uint8_t*") or i + 1 >= len(params):
+        return False
+    length_ty, length = params[i + 1]
+    return length_ty == "size_t" and (length == "len" or length.endswith("_len"))
 
 
 def python_type(header: Header, ty: str, returned: bool = False) -> str:
@@ -160,7 +218,7 @@ def python_signatures(header: Header) -> str:
     return "".join(lines)
 
 
-def csharp_type(header: Header, ty: str, name: str, returned: bool = False) -> str:
+def csharp_type(header: Header, ty: str, name: str, returned: bool = False, counted: bool = False) -> str:
     base = ty.rstrip("*")
     depth = len(ty) - len(base)
     if ty == "void":
@@ -178,17 +236,17 @@ def csharp_type(header: Header, ty: str, name: str, returned: bool = False) -> s
     if returned:
         return "IntPtr"
     if depth == 2:
-        return "IntPtr*" if name in ARRAY_PARAMS else "out IntPtr"
+        return "out IntPtr" if name.startswith(OUT_PREFIX) and name not in ARRAY_PARAMS else "IntPtr*"
     if base == "char":
         return "string?"
     if base == "void":
         return "IntPtr"
     if base in header.structs:
-        return f"Native{pascal(base)}*"
+        return f"{CSHARP_STRUCT_PREFIX}{pascal(base)}*"
     if base in SCALARS:
-        return (
-            f"{SCALARS[base][1]}*" if name in ARRAY_PARAMS or not name.startswith("out_") else f"out {SCALARS[base][1]}"
-        )
+        # a single out value is an `out` parameter; inputs and arrays (counted, or listed) stay pointers
+        single_out = name.startswith(OUT_PREFIX) and name not in ARRAY_PARAMS and not counted
+        return f"out {SCALARS[base][1]}" if single_out else f"{SCALARS[base][1]}*"
     return "IntPtr"
 
 
@@ -213,7 +271,8 @@ def csharp_methods(header: Header) -> str:
                 args.append(f"nuint {camel(params[i + 1][1])}")
                 i += 2
                 continue
-            args.append(f"{csharp_type(header, ty, param)} {camel(param)}")
+            counted = i + 1 < len(params) and params[i + 1][0] == "size_t"
+            args.append(f"{csharp_type(header, ty, param, counted=counted)} {camel(param)}")
             i += 1
         utf8 = any(arg.startswith("string?") for arg in args)
         attribute = (
@@ -226,6 +285,8 @@ def csharp_methods(header: Header) -> str:
         line = f"{head}{', '.join(args)});\n"
         if len(line) - 1 > CSHARP_LINE_LENGTH:
             line = f"{head}\n{INDENT * 2}{', '.join(args)});\n"
+        if any(len(text) > CSHARP_LINE_LENGTH for text in line.splitlines()):
+            line = f"{head}\n" + ",\n".join(f"{INDENT * 2}{arg}" for arg in args) + ");\n"
         lines.append(line)
     lines.append("}\n")
     return "".join(lines)
@@ -254,9 +315,10 @@ def main() -> int:
     parser.add_argument("--check", action="store_true", help="fail if a generated file is stale")
     args = parser.parse_args()
     if args.check:
-        for path in stale():
+        outdated = stale()
+        for path in outdated:
             print(f"{path.relative_to(ROOT)} is stale; run bindings/scripts/generate_native.py", file=sys.stderr)
-        return 1 if stale() else 0
+        return 1 if outdated else 0
     for path, text in rendered().items():
         if not path.exists() or path.read_text() != text:
             path.write_text(text)

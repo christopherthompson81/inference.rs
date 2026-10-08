@@ -81,7 +81,11 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_engine_register_logits_processor(
-        IntPtr engine, byte* name, nuint nameLen, delegate* unmanaged[Cdecl]<IntPtr, float*, nuint, uint*, nuint, int> callback, IntPtr userData);
+        IntPtr engine,
+        byte* name,
+        nuint nameLen,
+        delegate* unmanaged[Cdecl]<IntPtr, float*, nuint, uint*, nuint, int> callback,
+        IntPtr userData);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_engine_unregister_logits_processor(
@@ -231,7 +235,13 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library, StringMarshalling = StringMarshalling.Utf8)]
     internal static partial InferenceStatus inference_file_upload(
-        IntPtr engine, byte* data, nuint len, string? filename, string? mimeType, string? purpose, out IntPtr outResponse);
+        IntPtr engine,
+        byte* data,
+        nuint len,
+        string? filename,
+        string? mimeType,
+        string? purpose,
+        out IntPtr outResponse);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_files_list(IntPtr engine, out IntPtr outResponse);
@@ -266,7 +276,12 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_skill_version_upload(
-        IntPtr engine, byte* skillId, nuint skillIdLen, NativeSkillFile* files, nuint fileCount, out IntPtr outResponse);
+        IntPtr engine,
+        byte* skillId,
+        nuint skillIdLen,
+        NativeSkillFile* files,
+        nuint fileCount,
+        out IntPtr outResponse);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_skills_list(IntPtr engine, out IntPtr outResponse);
