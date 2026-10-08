@@ -1,9 +1,11 @@
-//! Builds tiny random-weight Qwen2-VL and Qwen3-VL checkpoints at test time, for the image and video input paths.
+//! Builds tiny random-weight Qwen-VL checkpoints at test time, for the image and video input paths.
 #![allow(dead_code)]
 
+use inference_models_qwen::qwen2_5_vl::{Config as Qwen2_5VLConfig, Qwen2_5VLModel};
 use inference_models_qwen::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel};
 use inference_models_qwen::qwen3_5::{Config as Qwen3_5Config, Qwen3_5Model};
 use inference_models_qwen::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel};
+use inference_models_qwen::qwen3_vl_moe::{Config as Qwen3VLMoEConfig, Qwen3VLMoEModel};
 use inference_nn::paged_attention::AttentionImplementation;
 
 #[path = "recording.rs"]
@@ -12,6 +14,14 @@ mod recording;
 const QWEN2_VL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/qwen_vl/qwen2_vl"
+);
+const QWEN2_5_VL: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/qwen_vl/qwen2_5_vl"
+);
+const QWEN3_VL_MOE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/tests/fixtures/qwen_vl/qwen3_vl_moe"
 );
 const QWEN3_VL: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
@@ -22,7 +32,7 @@ const QWEN3_5_MOE: &str = concat!(
     "/tests/fixtures/qwen_vl/qwen3_5_moe"
 );
 const TEXT_LAYERS: usize = 2;
-// From qwen3_5_moe/config.json, written by make_tiny.py.
+// From qwen3_5_moe/ and qwen3_vl_moe/config.json, written by make_tiny.py.
 const MOE_LAYERS: usize = 4;
 const MOE_EXPERTS: usize = 4;
 const MOE_HIDDEN: usize = 128;
@@ -57,6 +67,51 @@ pub fn tiny_qwen3_vl() -> anyhow::Result<tempfile::TempDir> {
     recording::record_checkpoint(&files, TEXT_LAYERS, MLX_PROBES, |vb, metadata| {
         Qwen3VLModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
     })
+}
+
+pub fn tiny_qwen2_5_vl() -> anyhow::Result<tempfile::TempDir> {
+    let cfg: Qwen2_5VLConfig = serde_json::from_str(&std::fs::read_to_string(format!(
+        "{QWEN2_5_VL}/config.json"
+    ))?)?;
+    let files = files(QWEN2_5_VL)?;
+    let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+    recording::record_checkpoint(&files, TEXT_LAYERS, MLX_PROBES, |vb, metadata| {
+        Qwen2_5VLModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
+    })
+}
+
+pub fn tiny_qwen3_vl_moe() -> anyhow::Result<tempfile::TempDir> {
+    let cfg: Qwen3VLMoEConfig = serde_json::from_str(&std::fs::read_to_string(format!(
+        "{QWEN3_VL_MOE}/config.json"
+    ))?)?;
+    let files = files(QWEN3_VL_MOE)?;
+    let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+    // HF stacks these experts transposed, gate_up [E, H, 2I] and down [E, I, H]; the layout is detected from shapes.
+    let shapes = (0..TEXT_LAYERS)
+        .flat_map(|layer| {
+            let p = format!("model.language_model.layers.{layer}.mlp.experts");
+            [
+                (
+                    format!("{p}.gate_up_proj"),
+                    vec![MOE_EXPERTS, MOE_HIDDEN, 2 * MOE_INTERMEDIATE],
+                ),
+                (
+                    format!("{p}.down_proj"),
+                    vec![MOE_EXPERTS, MOE_INTERMEDIATE, MOE_HIDDEN],
+                ),
+            ]
+        })
+        .collect();
+    recording::record_checkpoint_with_shapes(
+        &files,
+        TEXT_LAYERS,
+        MLX_PROBES,
+        shapes,
+        |vb, metadata| {
+            Qwen3VLMoEModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager)
+                .map(|_| ())
+        },
+    )
 }
 
 // HF stores the Qwen3.5 MoE experts one by one; the layout detection reads these shapes before any tensor.
