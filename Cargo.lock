@@ -3016,6 +3016,7 @@ dependencies = [
 name = "inference-quant"
 version = "0.9.3"
 dependencies = [
+ "base64 0.22.1",
  "bytemuck",
  "byteorder",
  "candle-metal-kernels",

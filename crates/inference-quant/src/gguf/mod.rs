@@ -16,6 +16,7 @@ mod kt_dequant;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
 pub mod raw;
+mod repack;
 mod weight_source;
 
 pub use weight_source::{
