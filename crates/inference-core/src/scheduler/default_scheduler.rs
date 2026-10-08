@@ -377,64 +377,22 @@ impl Scheduler for DefaultScheduler<VecDeque<Sequence>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        paged_attention::block_hash::{
-            MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind,
-        },
-        sampler::Sampler,
-        sequence::{SeqStepType, SequenceGroup, SequenceRecognizer},
+    use crate::paged_attention::block_hash::{
+        MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind,
     };
-    use tokio::sync::{Mutex as TokioMutex, mpsc::channel};
+    use crate::sequence::TestSequence;
+    use tokio::sync::mpsc::channel;
 
     fn test_sequence(id: usize, input_images: Option<Vec<image::DynamicImage>>) -> Sequence {
         let (tx, _rx) = channel(1);
-        let sampler = Sampler::new(
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            32,
-            1.0,
-            0.0,
-            HashMap::new(),
-            vec![],
-        )
-        .unwrap();
-        let group = Arc::new(TokioMutex::new(SequenceGroup::new(1, false, true, None)));
-        let seq = Sequence::new_waiting(
-            vec![1; 4],
-            "prompt".to_string(),
+        let seq = TestSequence {
             id,
-            id as u128,
-            1,
-            tx,
-            sampler,
-            vec![],
-            vec![],
-            None,
-            false,
-            group,
-            0,
-            0,
-            SequenceRecognizer::None,
-            None,
-            None,
+            layers: 1,
             input_images,
-            None,
-            None,
-            Some(8),
-            None,
-            SeqStepType::PromptAndDecode,
-            None,
-            None,
-            false,
-            false,
-            vec![],
-            None,
-        );
+            block_size: Some(8),
+            ..TestSequence::new(vec![1; 4], tx)
+        }
+        .build();
         seq.set_state(SequenceState::RunningCompletion);
         seq
     }

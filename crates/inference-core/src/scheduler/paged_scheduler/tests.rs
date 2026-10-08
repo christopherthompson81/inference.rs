@@ -1,10 +1,11 @@
 use super::*;
+use crate::sequence::TestSequence;
 use crate::{
     AudioInput, VideoInput,
     paged_attention::{PagedCacheType, block_hash::MultimodalKind},
-    sampler::{Logprobs, Sampler},
+    sampler::Logprobs,
     scheduler::IMAGE_MODALITY,
-    sequence::{SeqStepType, SequenceGroup, SequenceRecognizer},
+    sequence::SequenceGroup,
     speculative::SpeculativePrefixReplay,
 };
 use tokio::sync::{Mutex as TokioMutex, mpsc::channel};
@@ -133,52 +134,17 @@ fn test_sequence_with_media_sender_and_group(
     group: Arc<TokioMutex<SequenceGroup>>,
 ) -> Arc<Mutex<Sequence>> {
     let (input_images, input_audios, input_videos) = input_media;
-    let sampler = Sampler::new(
-        None,
-        0,
-        None,
-        None,
-        None,
-        None,
-        None,
-        32,
-        1.0,
-        0.0,
-        HashMap::new(),
-        vec![],
-    )
-    .unwrap();
-    let seq = Sequence::new_waiting(
-        vec![1; len],
-        "prompt".to_string(),
+    let seq = TestSequence {
         id,
-        id as u128,
-        1,
-        tx,
-        sampler,
-        vec![],
-        vec![],
-        None,
-        false,
+        layers: 1,
         group,
-        0,
-        0,
-        SequenceRecognizer::None,
-        None,
-        None,
         input_images,
         input_audios,
         input_videos,
-        Some(8),
-        None,
-        SeqStepType::PromptAndDecode,
-        None,
-        None,
-        false,
-        false,
-        vec![],
-        None,
-    );
+        block_size: Some(8),
+        ..TestSequence::new(vec![1; len], tx)
+    }
+    .build();
     seq.set_state(SequenceState::RunningCompletion);
     Arc::new(Mutex::new(seq))
 }

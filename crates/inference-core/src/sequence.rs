@@ -1960,6 +1960,96 @@ impl SequenceGroup {
     }
 }
 
+/// A `Sequence` for tests: `new_waiting` with neutral defaults for everything a test does not set.
+#[cfg(test)]
+pub(crate) struct TestSequence {
+    pub tokens: Vec<u32>,
+    pub id: usize,
+    pub layers: usize,
+    pub responder: Sender<Response>,
+    pub sampler: Sampler,
+    pub stop_tokens: Vec<u32>,
+    pub max_len: Option<usize>,
+    pub group: Arc<Mutex<SequenceGroup>>,
+    pub input_images: Option<Vec<DynamicImage>>,
+    pub input_audios: Option<Vec<AudioInput>>,
+    pub input_videos: Option<Vec<VideoInput>>,
+    pub block_size: Option<usize>,
+    pub ignore_eos: bool,
+    pub sampling_seed: Option<u64>,
+}
+
+#[cfg(test)]
+impl TestSequence {
+    /// One choice, greedy sampling, no stop conditions or media.
+    pub(crate) fn new(tokens: Vec<u32>, responder: Sender<Response>) -> Self {
+        Self {
+            tokens,
+            id: 0,
+            layers: 0,
+            responder,
+            sampler: Sampler::new(
+                None,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                32,
+                1.0,
+                0.0,
+                std::collections::HashMap::new(),
+                vec![],
+            )
+            .unwrap(),
+            stop_tokens: vec![],
+            max_len: None,
+            group: Arc::new(Mutex::new(SequenceGroup::new(1, false, true, None))),
+            input_images: None,
+            input_audios: None,
+            input_videos: None,
+            block_size: None,
+            ignore_eos: false,
+            sampling_seed: None,
+        }
+    }
+
+    pub(crate) fn build(self) -> Sequence {
+        Sequence::new_waiting(
+            self.tokens,
+            "prompt".to_string(),
+            self.id,
+            self.id as u128,
+            self.layers,
+            self.responder,
+            self.sampler,
+            self.stop_tokens,
+            vec![],
+            self.max_len,
+            false,
+            self.group,
+            0,
+            0,
+            SequenceRecognizer::None,
+            None,
+            None,
+            self.input_images,
+            self.input_audios,
+            self.input_videos,
+            self.block_size,
+            None,
+            SeqStepType::PromptAndDecode,
+            None,
+            None,
+            false,
+            self.ignore_eos,
+            vec![],
+            self.sampling_seed,
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1968,7 +2058,6 @@ mod tests {
     };
     use crate::{Function, Tool, ToolType};
     use rand::RngCore;
-    use std::collections::HashMap;
     use tokio::sync::mpsc::channel;
 
     fn make_test_sequence() -> Sequence {
@@ -2025,54 +2114,11 @@ mod tests {
 
     fn make_test_sequence_with_seed(seed: Option<u64>) -> Sequence {
         let (tx, _rx) = channel(1);
-        let sampler = Sampler::new(
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            32,
-            1.0,
-            0.0,
-            HashMap::new(),
-            vec![],
-        )
-        .unwrap();
-        let group = Arc::new(Mutex::new(SequenceGroup::new(1, false, true, None)));
-
-        Sequence::new_waiting(
-            vec![1, 2, 3, 4, 5, 6, 7, 8],
-            "prompt".to_string(),
-            0,
-            0,
-            0,
-            tx,
-            sampler,
-            vec![],
-            vec![],
-            None,
-            false,
-            group,
-            0,
-            0,
-            SequenceRecognizer::None,
-            None,
-            None,
-            None,
-            None,
-            None, // input_videos
-            None,
-            None,
-            SeqStepType::PromptAndDecode,
-            None,
-            None,
-            false,
-            false,
-            vec![],
-            seed,
-        )
+        TestSequence {
+            sampling_seed: seed,
+            ..TestSequence::new(vec![1, 2, 3, 4, 5, 6, 7, 8], tx)
+        }
+        .build()
     }
 
     #[tokio::test]
