@@ -444,6 +444,20 @@ impl Engine {
                     .map_err(|e| Response::InternalError(e.into()))?
             };
 
+            // Otherwise the slot this request takes could evict the very snapshot it matched
+            if let Some(MatchingCache::Normal {
+                recurrent_snapshot: Some(snapshot),
+                ..
+            }) = &prefill_cache
+            {
+                let pipeline = get_mut_arcmutex!(self.pipeline);
+                if pipeline.cache().is_hybrid() {
+                    pipeline
+                        .cache()
+                        .hybrid()
+                        .touch_recurrent_snapshot(*snapshot);
+                }
+            }
             self.assign_recurrent_slot(&mut seq)?;
 
             if matches!(extras.seq_step_type, SeqStepType::PromptAndDecode) {
@@ -892,35 +906,42 @@ impl Engine {
     ) -> Result<Sequence, Box<Response>> {
         let MatchingCache::Normal {
             normal,
-            recurrent_snapshots,
+            recurrent_snapshot,
             images_to_keep,
             audios_to_keep,
             video_frames_to_keep,
             toks,
             offset,
         } = cache;
-        if seq.record_prefix_cache_hit() {
-            self.logger.add_prefix_cache_hit();
-        }
 
-        if let (Some(snapshots), Some(slot_idx)) = (recurrent_snapshots, seq.recurrent_state_idx())
-        {
+        if let (Some(snapshot), Some(slot_idx)) = (recurrent_snapshot, seq.recurrent_state_idx()) {
             let restore_result = {
                 let pipeline = get_mut_arcmutex!(self.pipeline);
                 if pipeline.cache().is_hybrid() {
-                    pipeline.cache().hybrid().restore_recurrent_state(
+                    pipeline.cache().hybrid().restore_recurrent_snapshot(
                         *seq.id(),
                         slot_idx,
-                        &snapshots,
+                        snapshot,
                     )
                 } else {
-                    Ok(())
+                    Ok(true)
                 }
             };
-            if let Err(err) = restore_result {
-                self.release_recurrent_slot(&mut seq, "after restore error");
-                return Err(Box::new(Response::InternalError(err.into())));
+            match restore_result {
+                // The pool reclaimed the snapshot slot, so the attention cache alone is no prefix
+                Ok(false) => {
+                    get_mut_arcmutex!(self.prefix_cacher).drop_stale_recurrent_snapshot(snapshot);
+                    return Ok(seq);
+                }
+                Ok(true) => {}
+                Err(err) => {
+                    self.release_recurrent_slot(&mut seq, "after restore error");
+                    return Err(Box::new(Response::InternalError(err.into())));
+                }
             }
+        }
+        if seq.record_prefix_cache_hit() {
+            self.logger.add_prefix_cache_hit();
         }
 
         if !get_mut_arcmutex!(self.pipeline)

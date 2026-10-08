@@ -170,7 +170,7 @@ pub(crate) fn cache_finished_sequence(
     if !prefix_cacher.accepts_sequence_cache() {
         return Ok(());
     }
-    let recurrent_snapshots = if this.cache().is_hybrid() {
+    let recurrent_snapshot = if this.cache().is_hybrid() {
         let Some(idx) = seq.recurrent_state_idx() else {
             tracing::warn!(
                 sequence_id = seq.id(),
@@ -182,9 +182,10 @@ pub(crate) fn cache_finished_sequence(
         match this
             .cache()
             .hybrid()
-            .snapshot_recurrent_state(*seq.id(), idx)
+            .store_recurrent_snapshot(*seq.id(), idx)
         {
-            Ok(snapshots) => Some(snapshots),
+            Ok(Some(snapshot)) => Some(snapshot),
+            Ok(None) => return Ok(()),
             Err(error) => {
                 tracing::warn!(
                     sequence_id = seq.id(),
@@ -197,7 +198,7 @@ pub(crate) fn cache_finished_sequence(
     } else {
         None
     };
-    prefix_cacher.add_sequence(seq, recurrent_snapshots);
+    prefix_cacher.add_sequence(seq, recurrent_snapshot);
     prefix_cacher.evict_caches()?;
     Ok(())
 }
