@@ -173,7 +173,7 @@ pub use pipeline::{
     DiffusionGenerationParams, DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType,
     EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths,
     EmbeddingSpecificConfig, GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader,
-    GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, Loader,
+    GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOptions, Loader,
     LocalModelPaths, Modalities, ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder,
     MultimodalLoaderType, MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader,
     NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader,

@@ -12,6 +12,7 @@ use crate::device_map::DeviceMapper;
 #[cfg(feature = "models-llama")]
 use crate::models::quantized_llama::ModelWeights as QLlama;
 use crate::pipeline::ChatTemplate;
+use crate::pipeline::LoadOptions;
 use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
@@ -21,7 +22,7 @@ use crate::sequence::Sequence;
 use crate::utils::debug::DEBUG;
 use crate::utils::debug::DeviceRepr;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType};
+use crate::{DeviceMapSetting, Pipeline, Topology};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use inference_nn::gguf::QuantizedModel;
@@ -124,17 +125,19 @@ impl GGMLLoaderBuilder {
 }
 
 impl Loader for GGMLLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_path(
         &self,
         paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        mut paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let LoadOptions {
+            dtype,
+            device,
+            silent,
+            mapper,
+            in_situ_quant,
+            mut paged_attn_config,
+        } = options;
         let _progress_guard = ProgressScopeGuard::new(silent);
         if in_situ_quant.is_some() {
             anyhow::bail!(
@@ -246,18 +249,13 @@ impl Loader for GGMLLoader {
         })))
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let quantized_filenames = vec![self.quantized_filename.as_ref().unwrap().clone()];
         let paths = super::paths::get_paths(
@@ -274,15 +272,7 @@ impl Loader for GGMLLoader {
             },
             None,
         );
-        self.load_model_from_path(
-            &paths?,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
+        self.load_model_from_path(&paths?, options)
     }
 
     fn get_id(&self) -> String {

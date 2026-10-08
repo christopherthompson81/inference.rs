@@ -197,15 +197,18 @@ impl ModelLoaderConfig {
         loader: &dyn Loader,
         mtp_runtime: MtpRuntimeConfig,
     ) -> anyhow::Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
+        let options = LoadOptions {
+            dtype: &self.dtype,
+            device: &self.device,
+            silent: self.silent,
+            mapper: self.device_map_setting.clone(),
+            in_situ_quant: self.isq,
+            paged_attn_config: self.paged_attn_config,
+        };
         let pipeline = loader.load_model_from_hf(
             self.hf_revision.clone(),
             self.token_source.clone(),
-            &self.dtype,
-            &self.device,
-            self.silent,
-            self.device_map_setting.clone(),
-            self.isq,
-            self.paged_attn_config,
+            options,
         )?;
         if let Some(mtp_config) = self.mtp_config.clone() {
             pipeline

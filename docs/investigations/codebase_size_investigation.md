@@ -2748,3 +2748,26 @@ mutability (grep for Mutex, RefCell, Cell, atomics, RwLock, OnceLock, LazyLock, 
 list, template action, argument order and unwrap matches HEAD; `IMAGE_TOKEN.repeat(n)` equals the old join. Applied
 its style points: `vision_geometry` takes `Gemma4VisionConfig` (both configs share it), constants for the gemma4
 fallback patch size and template action, a one-line macro doc, CLAUDE.md step 1 wording.
+
+## Run 88 - 2026-10-07 22:49
+
+Question: what is left of Run 71's "pipeline Loader boilerplate (~350)" after the pipeline merge?
+
+Command: the scratch 6-line-window duplicate finder over `crates/inference-core/src/pipeline/*.rs`.
+
+Raw finding: `normal.rs`/`multimodal.rs` still share ~250 lines; the largest block (62 lines, all ten `Loader`
+impls) is the `load_model_from_hf`/`load_model_from_path` signatures (eight and seven loose parameters) plus the
+seven-argument forwarding from one to the other; GGUF's two native arg structs repeat the same six fields.
+
+Change: `LoadOptions<'a> { dtype, device, silent, mapper, in_situ_quant, paged_attn_config }` (exported) is the one
+parameter for both trait methods; impls destructure it or forward it whole; AnyMoE `take()`s paged attention with
+its warning, Auto rebuilds it with the detected mapper; GGUF's native arg structs hold it; the stale
+`too_many_arguments` allows are gone.
+
+Result: 199 insertions, 400 deletions in `crates/` (-201 net). The rest of the normal/multimodal overlap is the
+load-session setup and the two `load_model_from_path` bodies, which differ in the model build step.
+
+Review (subagent, read-only): no correctness findings; every forwarded value matches HEAD (AnyMoE's paged-attention
+drop, Auto's detected mapper on both paths, the GGUF native paths, speech ignoring paged attention, the embedder's
+`silent: cached`), progress guards keep their value and lifetime, no impl or caller outside core. Applied: imports in
+their `crate::` groups (dropped the redundant one in `config.rs`), `mut options` in AnyMoE's signatures.

@@ -86,7 +86,7 @@ pub use loaders::{
     AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
     DeviceMappedModelLoader, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader,
     EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths,
-    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, Loader,
+    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, LoadOptions, Loader,
     LocalModelPaths, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
     MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
     QuantizationKind, TokenSource,

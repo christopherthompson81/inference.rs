@@ -7,6 +7,7 @@ use tokenizers::Tokenizer;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::pipeline::ForwardInputsResult;
+use crate::pipeline::LoadOptions;
 use crate::{
     AutoDeviceMapParams, DeviceMapSetting, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
     ModelDType, Pipeline, TokenSource,
@@ -52,16 +53,15 @@ impl SearchEmbedder {
         .with_load_context(EmbeddingLoadContext::Search)
         .build(None)?;
 
-        let pipeline = loader.load_model_from_hf(
-            None,
-            TokenSource::CacheToken,
-            &ModelDType::Auto,
-            runner_device,
-            cached,
-            DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
-            None,
-            None,
-        )?;
+        let options = LoadOptions {
+            dtype: &ModelDType::Auto,
+            device: runner_device,
+            silent: cached,
+            mapper: DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
+            in_situ_quant: None,
+            paged_attn_config: None,
+        };
+        let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options)?;
 
         let guard = get_mut_arcmutex!(pipeline);
         let tokenizer = guard
