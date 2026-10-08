@@ -4,6 +4,24 @@ use std::{any::Any, sync::Arc};
 
 use inference_tensor::Tensor;
 
+/// `MultimodalProcessorFactory` per loader, from (model config, processor config, preprocessor config, max edge).
+macro_rules! processor_factory {
+    ($($loader:ty),+ => |$model_config:pat_param, $processor_config:pat_param, $preprocessor_config:pat_param,
+        $max_edge:pat_param| $body:expr) => {
+        $(impl $crate::pipeline::MultimodalProcessorFactory for $loader {
+            fn get_processor(
+                &self,
+                $model_config: &str,
+                $processor_config: Option<$crate::vision_models::processor_config::ProcessorConfig>,
+                $preprocessor_config: $crate::vision_models::preprocessor_config::PreProcessorConfig,
+                $max_edge: Option<u32>,
+            ) -> std::sync::Arc<dyn $crate::pipeline::Processor + Send + Sync> {
+                $body
+            }
+        })+
+    };
+}
+
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3;
 #[cfg(feature = "models-gemma")]

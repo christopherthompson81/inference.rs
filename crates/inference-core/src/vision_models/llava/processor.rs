@@ -1,83 +1,21 @@
-use std::sync::Arc;
-
 use inference_models_llama::llava::config::Config as LLaVAConfig;
 use inference_models_llama::llava::llava_inputs_processor::LLaVAInputProcessor;
 use inference_models_llama::llava::llava_next_inputs_processor::LLaVANextInputProcessor;
 use inference_models_llama::loaders::{LLaVALoader, LLaVANextLoader};
 
-use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::vision_models::preprocessor_config::PreProcessorConfig;
-use crate::vision_models::processor_config::ProcessorConfig;
+use crate::pipeline::MessagesAction;
+use crate::vision_models::media_host::media_processor;
 
-pub struct LLaVAProcessor {
-    inputs_processor: Arc<LLaVAInputProcessor>,
+fn config(model_config: &str) -> LLaVAConfig {
+    LLaVAConfig::from_json(model_config).expect("Failed to parse model config.")
 }
 
-impl Processor for LLaVAProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
-    }
-}
+processor_factory!(LLaVALoader => |model_config, _, _, _| {
+    let inputs = LLaVAInputProcessor::new(config(model_config));
+    media_processor(inputs, &[], MessagesAction::FlattenOnlyText)
+});
 
-impl LLaVAProcessor {
-    pub fn new(config: &str) -> Self {
-        let model_config = LLaVAConfig::from_json(config).expect("Failed to parse model config.");
-        let inputs_processor = Arc::new(LLaVAInputProcessor::new(model_config));
-        Self { inputs_processor }
-    }
-}
-
-pub struct LLaVANextProcessor {
-    inputs_processor: Arc<LLaVANextInputProcessor>,
-}
-
-impl Processor for LLaVANextProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
-    }
-}
-
-impl LLaVANextProcessor {
-    pub fn new(config: &str) -> Self {
-        let model_config = LLaVAConfig::from_json(config).expect("Failed to parse model config.");
-        let inputs_processor = Arc::new(LLaVANextInputProcessor::new(model_config));
-        Self { inputs_processor }
-    }
-}
-
-impl MultimodalProcessorFactory for LLaVALoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(LLaVAProcessor::new(model_config))
-    }
-}
-
-impl MultimodalProcessorFactory for LLaVANextLoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(LLaVANextProcessor::new(model_config))
-    }
-}
+processor_factory!(LLaVANextLoader => |model_config, _, _, _| {
+    let inputs = LLaVANextInputProcessor::new(config(model_config));
+    media_processor(inputs, &[], MessagesAction::FlattenOnlyText)
+});

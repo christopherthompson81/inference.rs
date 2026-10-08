@@ -1,33 +1,31 @@
-use std::sync::Arc;
-
 use inference_models_gemma::diffusion_gemma::config::DiffusionGemmaConfig;
-use inference_models_gemma::gemma4::config::{Gemma4BidirectionalAttention, Gemma4Config};
+use inference_models_gemma::gemma4::config::{
+    Gemma4BidirectionalAttention, Gemma4Config, Gemma4VisionConfig,
+};
 use inference_models_gemma::gemma4::inputs_processor::{
     AUDIO_TOKEN, BOA_TOKEN, BOI_TOKEN, EOA_TOKEN, EOI_TOKEN, Gemma4ImageProcessor, IMAGE_TOKEN,
     VIDEO_TOKEN,
 };
 use inference_models_gemma::loaders::{DiffusionGemmaLoader, Gemma4Loader};
 
-use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::vision_models::preprocessor_config::PreProcessorConfig;
+use crate::pipeline::MessagesAction;
+use crate::vision_models::media_host::media_processor;
 use crate::vision_models::processor_config::ProcessorConfig;
 
-pub struct Gemma4Processor {
-    patch_size: usize,
-    pooling_kernel_size: usize,
-    default_output_length: usize,
-    max_patches: usize,
-    audio_seq_length: usize,
-    raw_audio_frame_size: Option<usize>,
-    video_max_soft_tokens: usize,
-    is_unified: bool,
-    supports_images: bool,
-    supports_audio: bool,
-    decode_window: Option<usize>,
-    bidirectional_attention: Gemma4BidirectionalAttention,
-    vision_attention_on_full_layers: bool,
-}
+// The patch size a text-only checkpoint reports
+const NO_VISION_PATCH_SIZE: usize = 16;
+const DEFAULT_AUDIO_SEQ_LEN: usize = 750;
+const TEMPLATE_ACTION: MessagesAction = MessagesAction::KeepWithAudioAfterText;
+const DEFAULT_VIDEO_MAX_SOFT_TOKENS: usize = 70;
+const SPECIAL_TOKENS: &[&str] = &[
+    IMAGE_TOKEN,
+    BOI_TOKEN,
+    EOI_TOKEN,
+    AUDIO_TOKEN,
+    BOA_TOKEN,
+    EOA_TOKEN,
+    VIDEO_TOKEN,
+];
 
 pub struct Gemma4ProcessorSettings {
     pub processor_config: ProcessorConfig,
@@ -44,157 +42,90 @@ pub struct Gemma4ProcessorSettings {
     pub vision_attention_on_full_layers: bool,
 }
 
-impl Gemma4Processor {
-    pub fn new(settings: Gemma4ProcessorSettings) -> Self {
-        let Gemma4ProcessorSettings {
-            processor_config,
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            supports_images,
-            supports_audio,
-            raw_audio_frame_size,
-            is_unified,
-            decode_window,
-            bidirectional_attention,
-            vision_attention_on_full_layers,
-        } = settings;
-        let max_patches = default_output_length * pooling_kernel_size * pooling_kernel_size;
-        let audio_seq_length = processor_config.audio_seq_length.unwrap_or(750);
-        let video_max_soft_tokens = processor_config.video_max_soft_tokens.unwrap_or(70);
-
-        Self {
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            max_patches,
-            audio_seq_length,
-            raw_audio_frame_size,
-            video_max_soft_tokens,
-            is_unified,
-            supports_images,
-            supports_audio,
-            decode_window,
-            bidirectional_attention,
-            vision_attention_on_full_layers,
-        }
-    }
-}
-
-impl Processor for Gemma4Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        let video_max_patches =
-            self.video_max_soft_tokens * self.pooling_kernel_size * self.pooling_kernel_size;
-        Arc::new(MediaInputsProcessor(Arc::new(Gemma4ImageProcessor {
+impl Gemma4ProcessorSettings {
+    fn image_processor(self) -> Gemma4ImageProcessor {
+        let pooled = self.pooling_kernel_size * self.pooling_kernel_size;
+        let video_max_soft_tokens = self
+            .processor_config
+            .video_max_soft_tokens
+            .unwrap_or(DEFAULT_VIDEO_MAX_SOFT_TOKENS);
+        Gemma4ImageProcessor {
             patch_size: self.patch_size,
             pooling_kernel_size: self.pooling_kernel_size,
             default_output_length: self.default_output_length,
-            max_patches: self.max_patches,
-            audio_seq_length: self.audio_seq_length,
+            max_patches: self.default_output_length * pooled,
+            audio_seq_length: self
+                .processor_config
+                .audio_seq_length
+                .unwrap_or(DEFAULT_AUDIO_SEQ_LEN),
             raw_audio_frame_size: self.raw_audio_frame_size,
-            video_max_patches,
+            video_max_patches: video_max_soft_tokens * pooled,
             is_unified: self.is_unified,
             supports_images: self.supports_images,
             supports_audio: self.supports_audio,
             decode_window: self.decode_window,
             bidirectional_attention: self.bidirectional_attention,
             vision_attention_on_full_layers: self.vision_attention_on_full_layers,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[
-            IMAGE_TOKEN,
-            BOI_TOKEN,
-            EOI_TOKEN,
-            AUDIO_TOKEN,
-            BOA_TOKEN,
-            EOA_TOKEN,
-            VIDEO_TOKEN,
-        ]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::KeepWithAudioAfterText
+        }
     }
 }
 
-impl MultimodalProcessorFactory for Gemma4Loader {
-    fn get_processor(
-        &self,
-        config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = Gemma4Config::from_json(config).expect("Failed to parse Gemma4Config");
-        let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
-            .vision_config
-            .as_ref()
-            .map_or((16, 1, 0, false), |vision_cfg| {
-                (
-                    vision_cfg.patch_size,
-                    vision_cfg.pooling_kernel_size,
-                    vision_cfg.default_output_length,
-                    true,
-                )
-            });
-        let raw_audio_frame_size = cfg
-            .audio_config
-            .as_ref()
-            .and_then(|audio_cfg| cfg.is_unified().then_some(audio_cfg.input_feat_size()));
-        Arc::new(Gemma4Processor::new(Gemma4ProcessorSettings {
-            processor_config: processor_config.unwrap_or_default(),
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            supports_images,
-            supports_audio: cfg.audio_config.is_some(),
-            raw_audio_frame_size,
-            is_unified: cfg.is_unified(),
-            decode_window: None,
-            bidirectional_attention: cfg.text_config.bidirectional_attention(),
-            vision_attention_on_full_layers: false,
-        }))
-    }
+/// Patch size, pooling kernel, default output length and whether there is a vision tower.
+fn vision_geometry(vision: Option<&Gemma4VisionConfig>) -> (usize, usize, usize, bool) {
+    vision.map_or((NO_VISION_PATCH_SIZE, 1, 0, false), |v| {
+        (
+            v.patch_size,
+            v.pooling_kernel_size,
+            v.default_output_length,
+            true,
+        )
+    })
 }
 
-impl MultimodalProcessorFactory for DiffusionGemmaLoader {
-    fn get_processor(
-        &self,
-        config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg =
-            DiffusionGemmaConfig::from_json(config).expect("Failed to parse DiffusionGemmaConfig");
-        let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
-            .vision_config
-            .as_ref()
-            .map_or((16, 1, 0, false), |vision_cfg| {
-                (
-                    vision_cfg.patch_size,
-                    vision_cfg.pooling_kernel_size,
-                    vision_cfg.default_output_length,
-                    true,
-                )
-            });
-        Arc::new(Gemma4Processor::new(Gemma4ProcessorSettings {
-            processor_config: processor_config.unwrap_or_default(),
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            supports_images,
-            supports_audio: false,
-            raw_audio_frame_size: None,
-            is_unified: false,
-            decode_window: Some(cfg.canvas_length),
-            bidirectional_attention: cfg.text_config.bidirectional_attention(),
-            vision_attention_on_full_layers: true,
-        }))
-    }
-}
+processor_factory!(Gemma4Loader => |model_config, processor_config, _, _| {
+    let cfg = Gemma4Config::from_json(model_config).expect("Failed to parse Gemma4Config");
+    let (patch_size, pooling_kernel_size, default_output_length, supports_images) =
+        vision_geometry(cfg.vision_config.as_ref());
+    let raw_audio_frame_size = cfg
+        .audio_config
+        .as_ref()
+        .and_then(|audio_cfg| cfg.is_unified().then_some(audio_cfg.input_feat_size()));
+    let settings = Gemma4ProcessorSettings {
+        processor_config: processor_config.unwrap_or_default(),
+        patch_size,
+        pooling_kernel_size,
+        default_output_length,
+        supports_images,
+        supports_audio: cfg.audio_config.is_some(),
+        raw_audio_frame_size,
+        is_unified: cfg.is_unified(),
+        decode_window: None,
+        bidirectional_attention: cfg.text_config.bidirectional_attention(),
+        vision_attention_on_full_layers: false,
+    };
+    media_processor(settings.image_processor(), SPECIAL_TOKENS, TEMPLATE_ACTION)
+});
+
+processor_factory!(DiffusionGemmaLoader => |model_config, processor_config, _, _| {
+    let cfg = DiffusionGemmaConfig::from_json(model_config)
+        .expect("Failed to parse DiffusionGemmaConfig");
+    let (patch_size, pooling_kernel_size, default_output_length, supports_images) =
+        vision_geometry(cfg.vision_config.as_ref());
+    let settings = Gemma4ProcessorSettings {
+        processor_config: processor_config.unwrap_or_default(),
+        patch_size,
+        pooling_kernel_size,
+        default_output_length,
+        supports_images,
+        supports_audio: false,
+        raw_audio_frame_size: None,
+        is_unified: false,
+        decode_window: Some(cfg.canvas_length),
+        bidirectional_attention: cfg.text_config.bidirectional_attention(),
+        vision_attention_on_full_layers: true,
+    };
+    media_processor(settings.image_processor(), SPECIAL_TOKENS, TEMPLATE_ACTION)
+});
 
 #[cfg(test)]
 mod tests {
@@ -202,7 +133,7 @@ mod tests {
 
     #[test]
     fn defaults_audio_seq_length_to_reference_cap() {
-        let processor = Gemma4Processor::new(Gemma4ProcessorSettings {
+        let processor = Gemma4ProcessorSettings {
             processor_config: ProcessorConfig::default(),
             patch_size: 16,
             pooling_kernel_size: 3,
@@ -214,7 +145,8 @@ mod tests {
             decode_window: None,
             bidirectional_attention: Gemma4BidirectionalAttention::Vision,
             vision_attention_on_full_layers: false,
-        });
+        }
+        .image_processor();
         assert_eq!(processor.audio_seq_length, 750);
     }
 }

@@ -6,9 +6,7 @@ use inference_models_llama::loaders::Idefics2Loader;
 
 use crate::{
     MessageContent, Pipeline, Tool,
-    pipeline::{
-        InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor, apply_chat_template,
-    },
+    pipeline::{InputsProcessor, MessagesAction, Processor, apply_chat_template},
     request::ReasoningEffort,
     vision_models::{
         media_host::MediaInputsProcessor, preprocessor_config::PreProcessorConfig,
@@ -114,18 +112,6 @@ impl Processor for Idefics2Processor {
     }
 }
 
-impl MultimodalProcessorFactory for Idefics2Loader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Idefics2Processor::new(
-            processor_config.unwrap(),
-            preprocessor_config,
-            max_edge,
-        ))
-    }
-}
+processor_factory!(Idefics2Loader => |_, processor_config, preprocessor_config, max_edge| {
+    Arc::new(Idefics2Processor::new(processor_config.unwrap(), preprocessor_config, max_edge))
+});
