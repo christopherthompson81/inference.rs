@@ -250,6 +250,7 @@ impl LoraSiteHandle {
 struct RegistryState {
     sites: BTreeMap<LoraSiteKey, Arc<LoraSiteHandle>>,
     expert_sites: BTreeMap<LoraSiteKey, Arc<LoraExpertSiteHandle>>,
+    excluded: BTreeMap<LoraSiteKey, &'static str>,
     finalized: bool,
 }
 
@@ -290,6 +291,7 @@ impl std::fmt::Debug for RegistryState {
         f.debug_struct("RegistryState")
             .field("sites", &self.sites)
             .field("expert_sites", &self.expert_sites)
+            .field("excluded", &self.excluded)
             .field("finalized", &self.finalized)
             .finish()
     }
@@ -340,6 +342,22 @@ impl LoraLayerRegistry {
 
     pub fn runtime_id(&self) -> LoraRuntimeId {
         self.runtime_id
+    }
+
+    /// A layer this model cannot adapt; adapters with tensors for it are refused with `reason` when they load.
+    pub fn exclude_site(&self, key: LoraSiteKey, reason: &'static str) {
+        let key = self.canonical_site_key(key);
+        let mut state = self.state.lock().expect("LoRA layer registry poisoned");
+        state.excluded.insert(key, reason);
+    }
+
+    pub(crate) fn excluded_sites(&self) -> Vec<(LoraSiteKey, &'static str)> {
+        let state = self.state.lock().expect("LoRA layer registry poisoned");
+        state
+            .excluded
+            .iter()
+            .map(|(key, reason)| (key.clone(), *reason))
+            .collect()
     }
 
     pub fn register(

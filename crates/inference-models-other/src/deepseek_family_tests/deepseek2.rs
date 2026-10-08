@@ -182,3 +182,50 @@ fn a_zero_moe_layer_freq_is_a_config_error() {
         "moe_layer_freq must be at least 1",
     );
 }
+
+#[cfg(feature = "cuda")]
+#[test]
+fn latent_paged_cache_keeps_kv_b_proj_off_the_lora_sites() -> Result<()> {
+    use std::sync::Arc;
+
+    use inference_nn::device_map::DummyDeviceMapper;
+    use inference_nn::loaders::NormalModelLoader;
+    use inference_nn::paged_attention::AttentionImplementation;
+    use inference_quant::{LoraLayerRegistry, ShardedSafeTensors};
+    use inference_tensor::{DType, Device};
+
+    inference_nn::skip_without_cuda!();
+    let device = Device::new_cuda(0)?;
+    let mut checkpoint = Checkpoint::default();
+    checkpoint.skeleton(MOE_INTERMEDIATE * N_SHARED, false);
+    checkpoint.mla_attention(None, false, V_DIM);
+    let registry = Arc::new(LoraLayerRegistry::new());
+    let vb = ShardedSafeTensors::wrap(checkpoint.tensors()?, DType::F32, device.clone())
+        .with_lora_registry(registry.clone());
+    let metadata = inference_nn::model::traits::NormalLoadingMetadata {
+        mapper: Box::new(DummyDeviceMapper {
+            nm_device: device.clone(),
+        }),
+        real_device: device,
+        ..crate::deepseek_family_tests::metadata()
+    };
+    DeepSeekV2Loader.load(
+        &base_config().to_string(),
+        vb,
+        metadata,
+        AttentionImplementation::PagedAttention,
+    )?;
+
+    let sites = registry
+        .sites()
+        .iter()
+        .map(|site| site.key().path().to_string())
+        .collect::<Vec<_>>();
+    assert!(sites.iter().any(|path| path.ends_with("self_attn.q_proj")));
+    let latent = crate::mla::uses_mla_paged_cache(true, true);
+    assert_eq!(
+        sites.iter().any(|path| path.ends_with("kv_b_proj")),
+        !latent
+    );
+    Ok(())
+}

@@ -265,6 +265,18 @@ fn load_factor(weights: &ShardedVarBuilder, spec: FactorLoadSpec<'_>) -> Result<
     tensor.index_select(&indices, feature_dim)?.contiguous()
 }
 
+fn refuse_excluded_sites(registry: &LoraLayerRegistry, tensors: &AdapterTensorIndex) -> Result<()> {
+    for (key, reason) in registry.excluded_sites() {
+        if tensors.pair_for_site(key.path())?.is_some() {
+            inference_tensor::bail!(
+                "LoRA tensors for `{}` cannot be loaded: {reason}",
+                key.path()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn validate_consumption(tensors: &AdapterTensorIndex, consumed: &BTreeSet<String>) -> Result<()> {
     let unconsumed = tensors.unconsumed(consumed);
     if !unconsumed.is_empty() {
@@ -288,6 +300,7 @@ pub fn plan_dynamic_lora_weights(
     let tensors = AdapterTensorIndex::new(weights.tensor_names().ok_or_else(|| {
         inference_tensor::Error::msg("dynamic LoRA loading requires an indexed tensor backend")
     })?);
+    refuse_excluded_sites(registry, &tensors)?;
     let mut consumed = BTreeSet::new();
     let mut bytes = 0u64;
     for site in registry.sites() {
@@ -381,6 +394,7 @@ pub fn load_dynamic_lora_weights(
         inference_tensor::Error::msg("dynamic LoRA loading requires an indexed tensor backend")
     })?);
 
+    refuse_excluded_sites(registry, &tensors)?;
     let mut linear = Vec::new();
     let mut consumed = BTreeSet::new();
     for site in registry.sites() {
@@ -785,6 +799,40 @@ mod tests {
         assert_eq!(gate.a().dims(), &[2, 1, 2]);
         assert_eq!(gate.b().dims(), &[2, 2, 1]);
         assert_eq!(gate.scales().to_vec1::<f32>()?, vec![2., 2.]);
+        Ok(())
+    }
+
+    #[test]
+    fn excluded_sites_refuse_adapter_tensors_with_their_reason() -> Result<()> {
+        let device = Device::Cpu;
+        let path = "model.layers.0.self_attn.kv_b_proj";
+        let backend = HashMap::from([
+            (
+                format!("{path}.lora_A.weight"),
+                Tensor::zeros((2, 4), DType::F32, &device)?,
+            ),
+            (
+                format!("{path}.lora_B.weight"),
+                Tensor::zeros((4, 2), DType::F32, &device)?,
+            ),
+        ]);
+        let weights = ShardedSafeTensors::wrap(backend, DType::F32, device);
+        let registry = LoraLayerRegistry::new();
+        registry.exclude_site(LoraSiteKey::new(path), "no per-head K/V");
+        registry.finalize()?;
+        let config = config("kv_b_proj", 2, 4.0);
+        for result in [
+            plan_dynamic_lora_weights(&registry, &config, &weights).map(|_| ()),
+            load_dynamic_lora_weights(&registry, &config, &weights).map(|_| ()),
+        ] {
+            let error = result
+                .expect_err("an excluded site refuses its tensors")
+                .to_string();
+            assert!(
+                error.contains(path) && error.contains("no per-head K/V"),
+                "{error}"
+            );
+        }
         Ok(())
     }
 
