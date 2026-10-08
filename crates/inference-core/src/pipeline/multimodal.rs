@@ -1,3 +1,4 @@
+use super::decoder_core::{DecoderCore, DecoderCoreArgs, LoadedModelView};
 use super::isq::{UqffFullSer, UqffWriteConfig};
 use super::loaders::MultimodalLoaderTypeExt;
 use super::{
@@ -5,7 +6,6 @@ use super::{
     EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata, IsqPipelineMixin, Loader,
     MetadataMixin, ModelCategory, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
     MultimodalModelLoader, MultimodalPromptPrefixer, PreProcessingMixin, Processor, TokenSource,
-    paged_attention_memory_reservations,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
@@ -142,8 +142,6 @@ mod speculative_graph_tensor_metadata_tests {
 use crate::attention::FlashParams;
 use crate::gdn::RecurrentBatchKind;
 use crate::paged_attention::PagedAttentionInputMetadata;
-use crate::paged_attention::{CacheEngine, calculate_cache_config};
-use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 #[cfg(feature = "cuda")]
 use crate::pipeline::cuda_graph::{
     CudaDecodeGraphCaptureCtx, CudaDecodeGraphKey, CudaDecodeGraphLaunch, CudaDecodeGraphReplay,
@@ -158,7 +156,6 @@ use crate::pipeline::cuda_graph::{
     snapshot_hybrid_recurrent_checkpoints, snapshot_hybrid_state_indices,
     speculative_decode_logs_transitions, target_cuda_graph_cache_capacity,
 };
-use crate::pipeline::llg::build_llg_factory;
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{ChatTemplate, IsqOrganization, ModelForwardContext};
@@ -191,27 +188,13 @@ use tracing::{debug, info, trace, warn};
 
 pub struct MultimodalPipeline {
     model: Box<dyn MultimodalModel + Send + Sync>,
-    tokenizer: Arc<Tokenizer>,
-    chat_template: Arc<ChatTemplate>,
-    model_id: String,
-    metadata: Arc<GeneralMetadata>,
+    core: DecoderCore,
     processor: Arc<dyn Processor + Send + Sync>,
     preprocessor_config: Arc<PreProcessorConfig>,
     prefixer: Arc<dyn MultimodalPromptPrefixer>,
     video_sampling: crate::VideoFrameSampling,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
-    #[cfg(feature = "cuda")]
-    cuda_decode_graph: StdMutex<CudaDecodeGraphState>,
-    #[cfg(feature = "cuda")]
-    cuda_sparse_rejection: StdMutex<Option<crate::speculative::CudaSparseRejectionWorkspace>>,
     // Attention inputs of the last prompt-chunk forward, so a built-in drafter can prefill with them
     last_prompt_attention: StdMutex<Option<(PagedAttentionInputMetadata, FlashParams)>>,
-
-    generation_defaults: Option<crate::ModelGenerationDefaults>,
-    tracked_modules: Vec<inference_quant::TrackedModule>,
-    source_weight_files: Vec<std::path::PathBuf>,
-    source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
-    dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
 }
 
 /// A loader for a multimodal (non-quantized) model.
@@ -488,7 +471,7 @@ impl Loader for MultimodalLoader {
         debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
 
         // Tokenizer deserialization can briefly use far more memory than its final representation.
-        let (processor, preprocessor_config, tokenizer, llg_factory) = {
+        let (processor, preprocessor_config, tokenizer) = {
             let processor_config_json = match self.prepared_source.as_ref() {
                 Some(source) => source.processor_config.clone(),
                 None => paths
@@ -568,8 +551,7 @@ impl Loader for MultimodalLoader {
                     Some(processor.get_special_tokens()),
                 )?,
             };
-            let llg_factory = build_llg_factory(tokenizer.clone())?;
-            (processor, preprocessor_config, tokenizer, llg_factory)
+            (processor, preprocessor_config, tokenizer)
         };
 
         let matformer = super::loading::load_matformer_slice(
@@ -630,7 +612,7 @@ impl Loader for MultimodalLoader {
             weight_source,
             max_kv_tokens,
             pipeline_mapper,
-            mut layer_devices,
+            layer_devices,
             dtype,
             plan,
             ..
@@ -739,67 +721,6 @@ impl Loader for MultimodalLoader {
                 }),
         })?;
 
-        let model_metadata = model.model_config();
-        // Layers past the mapped stack (e.g. an MTP head) live on the non-mapped device.
-        while layer_devices.len() < model_metadata.num_layers() {
-            layer_devices.push(Some(device.clone()));
-        }
-        // Parallel weight loading leaves stream-ordered frees pending across loader streams;
-        // drain the whole context so the KV sizing and allocation see the real free VRAM.
-        #[cfg(feature = "cuda")]
-        super::synchronize_cuda_contexts(&device, pipeline_mapper.as_ref())?;
-
-        super::RecurrentReservation {
-            target: &*model,
-            cache: model.cache(),
-            paged_attn_config,
-            dtype,
-            model_config: model_metadata.as_ref(),
-            device: &device,
-        }
-        .reserve(pipeline_mapper.as_ref())?;
-
-        let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
-            let cache_config = calculate_cache_config(
-                paged_attn_config.mem_gpu,
-                paged_attention_memory_reservations(model.cache(), paged_attn_config, &device)?,
-                paged_attn_config.block_size,
-                dtype,
-                paged_attn_config.cache_type,
-                model_metadata.as_ref(),
-                &device,
-                &layer_devices,
-                silent,
-                None,
-                max_kv_tokens,
-            )?;
-            let cache_engine = CacheEngine::new(
-                model_metadata.as_ref(),
-                &cache_config,
-                dtype,
-                &device,
-                layer_devices,
-            )?;
-            (Some(cache_config), Some(cache_engine))
-        } else {
-            (None, None)
-        };
-
-        let max_seq_len = model.max_seq_len();
-        let num_hidden_layers = super::cache_layer_count(model.cache());
-        let mut generation_defaults = gen_conf
-            .as_ref()
-            .and_then(GenerationConfig::generation_defaults);
-        // HF's `max_new_tokens` for block-diffusion checkpoints is the per-call generate()
-        // default (a single canvas); applying it as a session cap truncates every answer.
-        if model.is_block_diffusion()
-            && let Some(defaults) = generation_defaults.as_mut()
-        {
-            defaults.max_new_tokens = None;
-            defaults.max_length = None;
-        }
-        let eos = calculate_eos_tokens(&chat_template, gen_conf.as_ref(), &tokenizer);
-        let sliding_window = model.config().sliding_window;
         let tracked_modules = tracker.get().clone();
         // rank-sliced layers re-slice at source read; inexpressible slices fall back per layer
         let source_weight_files = super::loading::source_weight_files(
@@ -807,43 +728,44 @@ impl Loader for MultimodalLoader {
             self.config.from_uqff.is_some(),
             paths.get_weight_filenames(),
         );
-
+        let core = DecoderCore::new(DecoderCoreArgs {
+            model: LoadedModelView {
+                target: &*model,
+                cache: model.cache(),
+                config: model.model_config(),
+                max_seq_len: model.max_seq_len(),
+                sliding_window: model.config().sliding_window,
+                block_diffusion: model.is_block_diffusion(),
+            },
+            tokenizer,
+            chat_template,
+            generation_config: gen_conf,
+            paged_attn_config,
+            dtype,
+            layer_devices,
+            device,
+            mapper: pipeline_mapper,
+            silent,
+            max_kv_tokens,
+            no_kv_cache: false,
+            no_prefix_cache: !self.inner.supports_prefix_cacher(&config),
+            kind: self.kind.clone(),
+            model_id: self.model_id.clone(),
+            modalities,
+            loaded_for_uqff_write: self.config.write_uqff.is_some(),
+            tracked_modules,
+            source_weight_files,
+            source_weight_source: weight_source,
+            dynamic_lora,
+        })?;
         Ok(Arc::new(Mutex::new(MultimodalPipeline {
             model,
-            tokenizer: tokenizer.into(),
-            chat_template: Arc::new(chat_template),
-            model_id: self.model_id.clone(),
-            metadata: Arc::new(GeneralMetadata {
-                max_seq_len,
-                llg_factory: Some(llg_factory),
-                num_hidden_layers,
-                eos_tok: eos,
-                kind: self.kind.clone(),
-                no_kv_cache: false,
-                no_prefix_cache: !self.inner.supports_prefix_cacher(&config),
-                activation_dtype: dtype,
-                sliding_window,
-                cache_config,
-                cache_engine,
-                model_metadata: Some(model_metadata),
-                modalities,
-                loaded_for_uqff_write: self.config.write_uqff.is_some(),
-            }),
+            core,
             processor,
             prefixer: self.inner.prefixer(&config),
             video_sampling: self.inner.video_frame_sampling(&config),
             preprocessor_config: Arc::new(preprocessor_config),
-            #[cfg(feature = "cuda")]
-            cuda_decode_graph: StdMutex::new(CudaDecodeGraphState::default()),
-            #[cfg(feature = "cuda")]
-            cuda_sparse_rejection: StdMutex::new(None),
             last_prompt_attention: StdMutex::new(None),
-            generation_defaults,
-            tracked_modules,
-            source_weight_files,
-            source_weight_source: weight_source,
-            mapper: pipeline_mapper,
-            dynamic_lora,
         })))
     }
 
@@ -858,7 +780,7 @@ impl Loader for MultimodalLoader {
 
 impl PreProcessingMixin for MultimodalPipeline {
     fn get_chat_template(&self) -> Option<Arc<ChatTemplate>> {
-        Some(self.chat_template.clone())
+        Some(self.core.chat_template.clone())
     }
     fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
         Some(self.preprocessor_config.clone())
@@ -870,16 +792,17 @@ impl PreProcessingMixin for MultimodalPipeline {
 
 impl IsqPipelineMixin for MultimodalPipeline {
     fn re_isq_model(&mut self, dtype: IsqType) -> Result<()> {
-        if !self.tracked_modules.is_empty() {
+        if !self.core.tracked_modules.is_empty() {
             self.cleanup_cuda_graphs();
         }
-        super::isq_flow::requantize_tracked_modules(&self.tracked_modules, dtype)
+        super::isq_flow::requantize_tracked_modules(&self.core.tracked_modules, dtype)
     }
 
     fn begin_calibration(&mut self) -> Result<()> {
-        super::isq_flow::begin_calibration(&self.tracked_modules)?;
+        super::isq_flow::begin_calibration(&self.core.tracked_modules)?;
         #[cfg(feature = "cuda")]
-        self.cuda_decode_graph
+        self.core
+            .cuda_decode_graph
             .lock()
             .expect("CUDA graph mutex poisoned")
             .suspend();
@@ -887,7 +810,9 @@ impl IsqPipelineMixin for MultimodalPipeline {
     }
 
     fn calibration_status(&self) -> Result<super::isq_flow::CalibrationStatus> {
-        Ok(super::isq_flow::calibration_status(&self.tracked_modules))
+        Ok(super::isq_flow::calibration_status(
+            &self.core.tracked_modules,
+        ))
     }
 
     fn apply_calibration(
@@ -896,15 +821,17 @@ impl IsqPipelineMixin for MultimodalPipeline {
     ) -> Result<super::isq_flow::CalibrationStatus> {
         self.cleanup_cuda_graphs();
         let result = super::isq_flow::apply_calibration(
-            &self.tracked_modules,
-            &self.source_weight_files,
-            self.source_weight_source.as_deref(),
+            &self.core.tracked_modules,
+            &self.core.source_weight_files,
+            self.core.source_weight_source.as_deref(),
             save_cimatrix.as_deref(),
         );
         #[cfg(feature = "cuda")]
-        if result.is_ok() || !super::isq_flow::calibration_status(&self.tracked_modules).collecting
+        if result.is_ok()
+            || !super::isq_flow::calibration_status(&self.core.tracked_modules).collecting
         {
-            self.cuda_decode_graph
+            self.core
+                .cuda_decode_graph
                 .lock()
                 .expect("CUDA graph mutex poisoned")
                 .resume();
@@ -948,10 +875,10 @@ impl MetadataMixin for MultimodalPipeline {
         self.model.device().clone()
     }
     fn get_metadata(&self) -> Arc<GeneralMetadata> {
-        self.metadata.clone()
+        self.core.metadata.clone()
     }
     fn name(&self) -> String {
-        self.model_id.clone()
+        self.core.model_id.clone()
     }
     fn release_sequence_state(&self, sequence_id: usize) {
         self.model
@@ -959,13 +886,13 @@ impl MetadataMixin for MultimodalPipeline {
     }
     fn cleanup_cuda_graphs(&self) {
         #[cfg(feature = "cuda")]
-        super::cuda_graph::clear_decode_graphs(&self.cuda_decode_graph, self.model.cache());
+        super::cuda_graph::clear_decode_graphs(&self.core.cuda_decode_graph, self.model.cache());
     }
     fn reclaim_cuda_graph_memory(&self, max_entries: usize) -> usize {
         #[cfg(feature = "cuda")]
         {
             super::cuda_graph::reclaim_decode_graphs(
-                &self.cuda_decode_graph,
+                &self.core.cuda_decode_graph,
                 &*self.model,
                 max_entries,
             )
@@ -980,7 +907,8 @@ impl MetadataMixin for MultimodalPipeline {
         #[cfg(feature = "cuda")]
         {
             if let Err(err) = self.precapture_cuda_decode_graphs_impl(ctx) {
-                self.cuda_decode_graph
+                self.core
+                    .cuda_decode_graph
                     .lock()
                     .expect("CUDA graph mutex poisoned")
                     .clear();
@@ -996,13 +924,13 @@ impl MetadataMixin for MultimodalPipeline {
         let _ = ctx;
     }
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
-        Some(self.tokenizer.clone())
+        Some(self.core.tokenizer.clone())
     }
     fn generation_defaults(&self) -> Option<crate::ModelGenerationDefaults> {
-        self.generation_defaults.clone()
+        self.core.generation_defaults.clone()
     }
     fn device_mapper(&self) -> Option<&dyn DeviceMapper> {
-        Some(&*self.mapper)
+        Some(&*self.core.mapper)
     }
 }
 
@@ -1021,7 +949,7 @@ impl crate::speculative::driver::SpeculativePipelineExt for MultimodalPipeline {
     fn cuda_sparse_rejection_workspace(
         &self,
     ) -> &StdMutex<Option<crate::speculative::CudaSparseRejectionWorkspace>> {
-        &self.cuda_sparse_rejection
+        &self.core.cuda_sparse_rejection
     }
 }
 
@@ -1087,7 +1015,7 @@ impl MultimodalPipeline {
         if !self
             .model
             .supports_cuda_decode_graphs_for_args(model_specific_args)
-            || !cuda_decode_graph_supported_for_model(self.metadata.model_metadata.as_deref())
+            || !cuda_decode_graph_supported_for_model(self.core.metadata.model_metadata.as_deref())
         {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
@@ -1153,7 +1081,7 @@ impl MultimodalPipeline {
             );
             return Ok(None);
         };
-        let Some(_) = self.metadata.cache_config.as_ref() else {
+        let Some(_) = self.core.metadata.cache_config.as_ref() else {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
                 CudaGraphDispatchMode::Skipped,
@@ -1165,6 +1093,7 @@ impl MultimodalPipeline {
         let input_ids = &input_ids.contiguous()?;
 
         let mut state = self
+            .core
             .cuda_decode_graph
             .lock()
             .expect("CUDA graph mutex poisoned");
@@ -1230,13 +1159,12 @@ impl MultimodalPipeline {
             },
             true,
         )?;
-        super::synchronize_cuda_contexts(step.input_ids.device(), self.mapper.as_ref()).map_err(
-            |err| {
+        super::synchronize_cuda_contexts(step.input_ids.device(), self.core.mapper.as_ref())
+            .map_err(|err| {
                 inference_tensor::Error::msg(format!(
                     "CUDA graph rollback synchronization failed: {err}"
                 ))
-            },
-        )?;
+            })?;
         let replay = state
             .replay(&replay_key, &step, CudaDecodeGraphReplayInput::Host)?
             .ok_or_else(|| {
@@ -1267,13 +1195,14 @@ impl MultimodalPipeline {
             || !self.model.supports_cuda_decode_graphs_for_args(
                 &*self.model.default_model_specific_args(&probe),
             )
-            || !cuda_decode_graph_supported_for_model(self.metadata.model_metadata.as_deref())
+            || !cuda_decode_graph_supported_for_model(self.core.metadata.model_metadata.as_deref())
         {
             return Ok(());
         }
-        let (Some(_), Some(cache_engine)) =
-            (&self.metadata.cache_config, &self.metadata.cache_engine)
-        else {
+        let (Some(_), Some(cache_engine)) = (
+            &self.core.metadata.cache_config,
+            &self.core.metadata.cache_engine,
+        ) else {
             return Ok(());
         };
         let speculative = self.model.has_speculative_proposer();
@@ -1311,6 +1240,7 @@ impl MultimodalPipeline {
             None
         };
         let mut state = self
+            .core
             .cuda_decode_graph
             .lock()
             .expect("CUDA graph mutex poisoned");
@@ -1524,8 +1454,8 @@ impl MultimodalPipeline {
                     position_ids: &step.position_ids,
                     kv_cache,
                     metadata: &metadata,
-                    model_metadata: self.metadata.model_metadata.as_deref(),
-                    activation_dtype: self.metadata.activation_dtype,
+                    model_metadata: self.core.metadata.model_metadata.as_deref(),
+                    activation_dtype: self.core.metadata.activation_dtype,
                     warmup_logits: &warmup_logits,
                     state_indices: state_index_buffers,
                     real_batch: step.real_batch,
@@ -1610,18 +1540,26 @@ impl Pipeline for MultimodalPipeline {
 
     fn supports_packed_prefill(&self) -> bool {
         self.model.supports_packed_prefill()
-            && self.metadata.cache_engine.is_some()
+            && self.core.metadata.cache_engine.is_some()
             && (!self.model.has_speculative_proposer()
                 || self.model.supports_speculative_packed_prefill())
             && self.model.device().is_cuda()
-            && self.mapper.get_unique_devices().iter().all(Device::is_cuda)
+            && self
+                .core
+                .mapper
+                .get_unique_devices()
+                .iter()
+                .all(Device::is_cuda)
             && crate::using_flash_attn()
             && crate::attention::flash_backend_supports_sdpa(
                 self.model.config().k_head_dim,
                 false,
-                self.metadata.sliding_window.is_some(),
+                self.core.metadata.sliding_window.is_some(),
             )
-            && matches!(self.metadata.activation_dtype, DType::F16 | DType::BF16)
+            && matches!(
+                self.core.metadata.activation_dtype,
+                DType::F16 | DType::BF16
+            )
     }
 
     fn supports_batched_cuda_sampling(&self) -> bool {
@@ -1660,7 +1598,7 @@ impl Pipeline for MultimodalPipeline {
     }
 
     fn adapter_runtime(&self) -> Option<Arc<DynamicLoraRuntime>> {
-        self.dynamic_lora.clone()
+        self.core.dynamic_lora.clone()
     }
 
     fn forward_inputs(
@@ -1689,7 +1627,7 @@ impl Pipeline for MultimodalPipeline {
             adapter_leases,
         } = *inputs.downcast::<ModelInputs>().expect("Downcast failed.");
         let lora_execution = super::resolve_lora_execution(
-            self.dynamic_lora.as_deref(),
+            self.core.dynamic_lora.as_deref(),
             &input_ids,
             paged_attn_meta.as_ref(),
             &flash_meta,
@@ -1750,8 +1688,11 @@ impl Pipeline for MultimodalPipeline {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    if !disable_cuda_decode_graph(&self.cuda_decode_graph, self.model.cache(), &err)
-                    {
+                    if !disable_cuda_decode_graph(
+                        &self.core.cuda_decode_graph,
+                        self.model.cache(),
+                        &err,
+                    ) {
                         return Err(err);
                     }
                     cuda_graph_eager_fallback = Some(CudaGraphEventGuard::new(
@@ -1815,6 +1756,7 @@ impl Pipeline for MultimodalPipeline {
     ) -> inference_tensor::Result<Option<ForwardStepResult>> {
         let replay = {
             let mut state = self
+                .core
                 .cuda_decode_graph
                 .lock()
                 .expect("CUDA graph mutex poisoned");
@@ -1829,7 +1771,7 @@ impl Pipeline for MultimodalPipeline {
                     && let Err(err) = self.model.install_speculative_graph_state(spec_state)
                 {
                     let _ = disable_cuda_decode_graph(
-                        &self.cuda_decode_graph,
+                        &self.core.cuda_decode_graph,
                         self.model.cache(),
                         &err,
                     );
@@ -1844,8 +1786,11 @@ impl Pipeline for MultimodalPipeline {
             }
             Ok(None) => Ok(None),
             Err(err) => {
-                let _ =
-                    disable_cuda_decode_graph(&self.cuda_decode_graph, self.model.cache(), &err);
+                let _ = disable_cuda_decode_graph(
+                    &self.core.cuda_decode_graph,
+                    self.model.cache(),
+                    &err,
+                );
                 Err(err)
             }
         }
@@ -1866,7 +1811,7 @@ impl Pipeline for MultimodalPipeline {
         config: crate::speculative::SpeculativeConfig,
         runtime: crate::speculative::MtpRuntimeConfig,
     ) -> inference_tensor::Result<()> {
-        if self.dynamic_lora.is_some() {
+        if self.core.dynamic_lora.is_some() {
             inference_tensor::bail!("dynamic LoRA does not support speculative decoding");
         }
         if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
@@ -2054,7 +1999,7 @@ impl Pipeline for MultimodalPipeline {
     }
     fn category(&self) -> ModelCategory {
         if matches!(
-            self.metadata.modalities.input.as_slice(),
+            self.core.metadata.modalities.input.as_slice(),
             [crate::SupportedModality::Text]
         ) {
             ModelCategory::Text
