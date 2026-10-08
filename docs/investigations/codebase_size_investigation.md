@@ -2795,3 +2795,20 @@ Review (subagent, read-only): no correctness findings; every pair table, native/
 binding and family name matches HEAD; `prepare_source` keeps the order of fallible steps and each loader's
 rope pairing, weight files and processor configs. Applied: the two llama4 MoE loops it found, one import group in
 lfm2_vl.
+
+## Run 90 - 2026-10-08 06:01
+
+Question: Run 71's "hand-written Sequence::new_waiting test calls (~200)".
+
+Raw finding: four test helpers (sequence.rs, pipeline/sampling.rs x2, default_scheduler.rs, paged_scheduler/tests.rs)
+spell out all 30 `new_waiting` arguments, and four of them the same 12-argument greedy `Sampler::new`.
+
+Change: test-only `sequence::TestSequence` holds the fields tests vary (tokens, id, layers, responder, sampler,
+stop tokens, max len, group, media, block size, ignore_eos, seed) with `TestSequence::new(tokens, responder)`
+defaults and `build()`; each helper sets its own fields by struct update.
+
+Result: 127 insertions, 224 deletions (-97 net, against ~200 estimated); the 157 sequence, sampling and scheduler
+tests pass.
+
+Review (subagent, read-only): no changed arguments (the `id as u128` timestamp equals the old literal 0 where id was
+0); applied its comment and blank-line nits. Full CI passed (2,494 CPU, 2,879 CUDA).

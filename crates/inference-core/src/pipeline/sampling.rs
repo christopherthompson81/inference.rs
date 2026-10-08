@@ -1599,14 +1599,12 @@ mod tests {
     use rand::RngCore;
     use rand::SeedableRng;
     use std::{collections::HashMap, sync::Arc};
-    use tokio::sync::{Mutex, mpsc::channel};
+    use tokio::sync::mpsc::channel;
 
     use super::*;
+    use crate::sampler::Sampler;
+    use crate::sequence::TestSequence;
     use crate::tools::{ToolCallState, ToolChoice};
-    use crate::{
-        sampler::Sampler,
-        sequence::{SeqStepType, SequenceGroup},
-    };
 
     fn terminal_test_sequence(
         stop_tokens: Vec<u32>,
@@ -1614,53 +1612,13 @@ mod tests {
         ignore_eos: bool,
     ) -> Sequence {
         let (tx, _rx) = channel(1);
-        let sampler = Sampler::new(
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            32,
-            1.0,
-            0.0,
-            HashMap::new(),
-            vec![],
-        )
-        .unwrap();
-        let group = Arc::new(Mutex::new(SequenceGroup::new(1, false, true, None)));
-        Sequence::new_waiting(
-            vec![1, 2, 3],
-            "prompt".to_string(),
-            0,
-            0,
-            0,
-            tx,
-            sampler,
+        TestSequence {
             stop_tokens,
-            vec![],
             max_len,
-            false,
-            group,
-            0,
-            0,
-            SequenceRecognizer::None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            SeqStepType::PromptAndDecode,
-            None,
-            None,
-            false,
             ignore_eos,
-            vec![],
-            None,
-        )
+            ..TestSequence::new(vec![1, 2, 3], tx)
+        }
+        .build()
     }
 
     fn sampled_test_sequence(seed: u64, top_k: i64, top_p: f64) -> Sequence {
@@ -1680,38 +1638,12 @@ mod tests {
             vec![],
         )
         .unwrap();
-        let group = Arc::new(Mutex::new(SequenceGroup::new(1, false, true, None)));
-        Sequence::new_waiting(
-            vec![1, 2, 3],
-            "prompt".to_string(),
-            0,
-            0,
-            0,
-            tx,
+        TestSequence {
             sampler,
-            vec![],
-            vec![],
-            None,
-            false,
-            group,
-            0,
-            0,
-            SequenceRecognizer::None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            SeqStepType::PromptAndDecode,
-            None,
-            None,
-            false,
-            false,
-            vec![],
-            Some(seed),
-        )
+            sampling_seed: Some(seed),
+            ..TestSequence::new(vec![1, 2, 3], tx)
+        }
+        .build()
     }
 
     fn stochastic_test_sequence(seed: u64) -> Sequence {
