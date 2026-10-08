@@ -2433,3 +2433,28 @@ from taking the struct whole. Kept apart on purpose: the KV cache setup (the tex
 unique devices, multimodal from the per-layer devices it materialized) and pipeline construction are step 3;
 `generation_config` keeps its `Option<Option<_>>` argument, which its unit test builds directly; embeddings' UQFF
 residuals ignore the MoQE organization and stay as they are.
+
+## Run 77 - 2026-10-07 19:32
+
+Question: step 3 of the pipeline merge: can both pipelines share one state struct and one constructor, and what
+changes in behavior when the text pipeline adopts multimodal's KV layer devices?
+
+Raw finding: the twelve fields both pipelines carried (tokenizer, template, id, metadata, mapper, graph state,
+sparse-rejection workspace, generation defaults, tracked modules, source weights, dynamic LoRA) are now
+`DecoderCore`; `DecoderCore::new` replaces `build_normal_pipeline` and multimodal's inline tail (CUDA drain,
+recurrent reservation, paged KV config and engine, generation defaults with the block-diffusion cap, EOS, llg
+factory, `GeneralMetadata`). Net +3 lines (4 files, 372 insertions, 369 deletions): the constructor's argument
+struct costs what the duplicate saved; the payoff is step 5, where the two sets of mixin impls collapse.
+
+Behavior found while merging the construction paths (review-verified):
+
+- The text pipeline passed the mapper's unique devices to `calculate_cache_config`, whose FP8 `validate` indexes
+  that slice by layer (`cache_engine.rs` ~60-80), so a multi-device map checked FP8 support against the wrong
+  device for most layers. Both now pass the per-layer list. Sizing dedups devices, so single-device and ordinary
+  multi-GPU sizing are unchanged; an MTP head on a device holding no mapped layer is now measured (it is where its
+  KV is allocated).
+- The text pipeline's `CacheEngine` took `model.device()`; it is `session.device` for every text model (the GGUF
+  quantized Llama, which differs, is not a `NormalPipeline`).
+- Multimodal's llg factory is built from the same final tokenizer, now inside the constructor.
+
+CI: 2489 CPU, 2873 CUDA tests pass; bindings pass.

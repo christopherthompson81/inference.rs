@@ -1,4 +1,4 @@
-use super::llg::build_llg_factory;
+use super::decoder_core::{DecoderCore, DecoderCoreArgs, LoadedModelView};
 use super::loaders::NormalLoaderTypeExt;
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, ForwardStepResult,
@@ -7,8 +7,7 @@ use super::{
 use super::{AutoNormalLoader, NormalLoaderType};
 use super::{
     DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind, ModelPaths, NormalModel,
-    NormalModelLoader, TokenSource, paged_attention_memory_reservations,
-    text_models_inputs_processor::ModelInputs,
+    NormalModelLoader, TokenSource, text_models_inputs_processor::ModelInputs,
 };
 use crate::amoe::AnyMoeExpertType;
 use crate::attention::ATTENTION_CHUNK_SIZE;
@@ -37,9 +36,7 @@ use crate::attention::FlashParams;
 use crate::gdn::RecurrentBatchKind;
 #[cfg(feature = "cuda")]
 use crate::paged_attention::PagedAttentionInputMetadata;
-use crate::paged_attention::{CacheEngine, calculate_cache_config};
 use crate::pipeline::ChatTemplate;
-use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 #[cfg(feature = "cuda")]
 use crate::pipeline::cuda_graph::{
     CudaDecodeGraphCaptureCtx, CudaDecodeGraphKey, CudaDecodeGraphLaunch, CudaDecodeGraphReplay,
@@ -83,162 +80,7 @@ const ADJACENT_PARTIAL_ROTARY_LORA: &str = "LoRA adapters are not supported when
 
 pub struct NormalPipeline {
     model: Box<dyn NormalModel + Send + Sync>,
-    tokenizer: Arc<Tokenizer>,
-    chat_template: Arc<ChatTemplate>,
-    model_id: String,
-    metadata: Arc<GeneralMetadata>,
-    #[cfg(feature = "cuda")]
-    cuda_decode_graph: StdMutex<CudaDecodeGraphState>,
-    #[cfg(feature = "cuda")]
-    cuda_sparse_rejection: StdMutex<Option<crate::speculative::CudaSparseRejectionWorkspace>>,
-    generation_defaults: Option<crate::ModelGenerationDefaults>,
-    mapper: Box<dyn DeviceMapper + Send + Sync>,
-    tracked_modules: Vec<inference_quant::TrackedModule>,
-    source_weight_files: Vec<std::path::PathBuf>,
-    source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
-    dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
-}
-
-pub(crate) struct NormalPipelineBuildArgs {
-    pub model: Box<dyn NormalModel + Send + Sync>,
-    pub tokenizer: Tokenizer,
-    pub chat_template: ChatTemplate,
-    pub generation_config: Option<GenerationConfig>,
-    pub paged_attn_config: Option<PagedAttentionConfig>,
-    pub dtype: DType,
-    pub device: Device,
-    pub mapper: Box<dyn DeviceMapper + Send + Sync>,
-    pub silent: bool,
-    pub max_kv_tokens: Option<usize>,
-    pub no_kv_cache: bool,
-    pub kind: ModelKind,
-    pub model_id: String,
-    pub loaded_for_uqff_write: bool,
-    pub tracked_modules: Vec<inference_quant::TrackedModule>,
-    pub source_weight_files: Vec<PathBuf>,
-    pub source_weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>>,
-    pub dynamic_lora: Option<Arc<DynamicLoraRuntime>>,
-}
-
-pub(crate) fn build_normal_pipeline(
-    args: NormalPipelineBuildArgs,
-) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-    let NormalPipelineBuildArgs {
-        model,
-        tokenizer,
-        chat_template,
-        generation_config,
-        paged_attn_config,
-        dtype,
-        device,
-        mapper,
-        silent,
-        max_kv_tokens,
-        no_kv_cache,
-        kind,
-        model_id,
-        loaded_for_uqff_write,
-        tracked_modules,
-        source_weight_files,
-        source_weight_source,
-        dynamic_lora,
-    } = args;
-
-    let model_metadata = model.model_config();
-    let num_hidden_layers = super::cache_layer_count(model.cache());
-    super::RecurrentReservation {
-        target: &*model,
-        cache: model.cache(),
-        paged_attn_config,
-        dtype,
-        model_config: model_metadata.as_ref(),
-        device: &device,
-    }
-    .reserve(mapper.as_ref())?;
-
-    let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
-        let cache_config = calculate_cache_config(
-            paged_attn_config.mem_gpu,
-            paged_attention_memory_reservations(model.cache(), paged_attn_config, &device)?,
-            paged_attn_config.block_size,
-            dtype,
-            paged_attn_config.cache_type,
-            model_metadata.as_ref(),
-            &device,
-            &mapper
-                .get_unique_devices()
-                .into_iter()
-                .map(Some)
-                .collect::<Vec<_>>(),
-            silent,
-            None,
-            max_kv_tokens,
-        )?;
-        // Layers past the mapped stack (e.g. an MTP head) live on the non-mapped device.
-        let layer_devices = (0..model_metadata.num_layers().max(num_hidden_layers))
-            .map(|layer| {
-                if layer < num_hidden_layers {
-                    mapper.device_for(layer, false).cloned()
-                } else {
-                    Some(device.clone())
-                }
-            })
-            .collect();
-        let cache_engine = CacheEngine::new(
-            model_metadata.as_ref(),
-            &cache_config,
-            dtype,
-            model.device(),
-            layer_devices,
-        )?;
-        (Some(cache_config), Some(cache_engine))
-    } else {
-        (None, None)
-    };
-
-    let max_seq_len = model.max_seq_len();
-    let llg_factory = build_llg_factory(tokenizer.clone())?;
-    let generation_defaults = generation_config
-        .as_ref()
-        .and_then(GenerationConfig::generation_defaults);
-    let eos = calculate_eos_tokens(&chat_template, generation_config.as_ref(), &tokenizer);
-    let sliding_window = model.config().sliding_window;
-
-    Ok(Arc::new(Mutex::new(NormalPipeline {
-        model,
-        tokenizer: tokenizer.into(),
-        chat_template: Arc::new(chat_template),
-        model_id,
-        metadata: Arc::new(GeneralMetadata {
-            max_seq_len,
-            llg_factory: Some(llg_factory),
-            no_kv_cache,
-            no_prefix_cache: false,
-            num_hidden_layers,
-            eos_tok: eos,
-            kind,
-            activation_dtype: dtype,
-            sliding_window,
-            cache_config,
-            cache_engine,
-            model_metadata: Some(model_metadata),
-            modalities: Modalities {
-                input: vec![SupportedModality::Text],
-                output: vec![SupportedModality::Text],
-            },
-            loaded_for_uqff_write,
-        }),
-        #[cfg(feature = "cuda")]
-        cuda_decode_graph: StdMutex::new(CudaDecodeGraphState::default()),
-        #[cfg(feature = "cuda")]
-        cuda_sparse_rejection: StdMutex::new(None),
-        generation_defaults,
-        mapper,
-        tracked_modules,
-        source_weight_files,
-        source_weight_source,
-        dynamic_lora,
-    })))
+    core: DecoderCore,
 }
 
 fn normal_model_requires_uniform_prompt_batch(
@@ -573,6 +415,7 @@ impl Loader for NormalLoader {
             weight_source,
             max_kv_tokens,
             pipeline_mapper,
+            layer_devices,
             dtype,
             plan,
             ..
@@ -643,9 +486,6 @@ impl Loader for NormalLoader {
                 }),
         })?;
 
-        #[cfg(feature = "cuda")]
-        super::synchronize_cuda_contexts(&device, pipeline_mapper.as_ref())?;
-
         let tracked_modules = tracker.get().clone();
         let source_weight_files = super::loading::source_weight_files(
             self.prepared_source.as_ref(),
@@ -653,26 +493,40 @@ impl Loader for NormalLoader {
             paths.get_weight_filenames(),
         );
 
-        build_normal_pipeline(NormalPipelineBuildArgs {
-            model,
+        let core = DecoderCore::new(DecoderCoreArgs {
+            model: LoadedModelView {
+                target: &*model,
+                cache: model.cache(),
+                config: model.model_config(),
+                max_seq_len: model.max_seq_len(),
+                sliding_window: model.config().sliding_window,
+                block_diffusion: false,
+            },
             tokenizer,
             chat_template,
             generation_config: gen_conf,
             paged_attn_config,
             dtype,
+            layer_devices,
             device,
             mapper: pipeline_mapper,
             silent,
             max_kv_tokens,
             no_kv_cache: self.no_kv_cache,
+            no_prefix_cache: false,
             kind: self.kind.clone(),
             model_id: self.model_id.clone(),
+            modalities: Modalities {
+                input: vec![SupportedModality::Text],
+                output: vec![SupportedModality::Text],
+            },
             loaded_for_uqff_write: self.config.write_uqff.is_some(),
             tracked_modules,
             source_weight_files,
             source_weight_source: weight_source,
             dynamic_lora,
-        })
+        })?;
+        Ok(Arc::new(Mutex::new(NormalPipeline { model, core })))
     }
 
     fn get_id(&self) -> String {
@@ -686,7 +540,7 @@ impl Loader for NormalLoader {
 
 impl PreProcessingMixin for NormalPipeline {
     fn get_chat_template(&self) -> Option<Arc<ChatTemplate>> {
-        Some(self.chat_template.clone())
+        Some(self.core.chat_template.clone())
     }
     fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
         None
@@ -695,16 +549,17 @@ impl PreProcessingMixin for NormalPipeline {
 
 impl IsqPipelineMixin for NormalPipeline {
     fn re_isq_model(&mut self, dtype: IsqType) -> Result<()> {
-        if !self.tracked_modules.is_empty() {
+        if !self.core.tracked_modules.is_empty() {
             self.cleanup_cuda_graphs();
         }
-        super::isq_flow::requantize_tracked_modules(&self.tracked_modules, dtype)
+        super::isq_flow::requantize_tracked_modules(&self.core.tracked_modules, dtype)
     }
 
     fn begin_calibration(&mut self) -> Result<()> {
-        super::isq_flow::begin_calibration(&self.tracked_modules)?;
+        super::isq_flow::begin_calibration(&self.core.tracked_modules)?;
         #[cfg(feature = "cuda")]
-        self.cuda_decode_graph
+        self.core
+            .cuda_decode_graph
             .lock()
             .expect("CUDA graph mutex poisoned")
             .suspend();
@@ -712,7 +567,9 @@ impl IsqPipelineMixin for NormalPipeline {
     }
 
     fn calibration_status(&self) -> Result<super::isq_flow::CalibrationStatus> {
-        Ok(super::isq_flow::calibration_status(&self.tracked_modules))
+        Ok(super::isq_flow::calibration_status(
+            &self.core.tracked_modules,
+        ))
     }
 
     fn apply_calibration(
@@ -721,15 +578,17 @@ impl IsqPipelineMixin for NormalPipeline {
     ) -> Result<super::isq_flow::CalibrationStatus> {
         self.cleanup_cuda_graphs();
         let result = super::isq_flow::apply_calibration(
-            &self.tracked_modules,
-            &self.source_weight_files,
-            self.source_weight_source.as_deref(),
+            &self.core.tracked_modules,
+            &self.core.source_weight_files,
+            self.core.source_weight_source.as_deref(),
             save_cimatrix.as_deref(),
         );
         #[cfg(feature = "cuda")]
-        if result.is_ok() || !super::isq_flow::calibration_status(&self.tracked_modules).collecting
+        if result.is_ok()
+            || !super::isq_flow::calibration_status(&self.core.tracked_modules).collecting
         {
-            self.cuda_decode_graph
+            self.core
+                .cuda_decode_graph
                 .lock()
                 .expect("CUDA graph mutex poisoned")
                 .resume();
@@ -769,20 +628,20 @@ impl MetadataMixin for NormalPipeline {
         self.model.device().clone()
     }
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
-        Some(self.tokenizer.clone())
+        Some(self.core.tokenizer.clone())
     }
     fn name(&self) -> String {
-        self.model_id.clone()
+        self.core.model_id.clone()
     }
     fn cleanup_cuda_graphs(&self) {
         #[cfg(feature = "cuda")]
-        super::cuda_graph::clear_decode_graphs(&self.cuda_decode_graph, self.model.cache());
+        super::cuda_graph::clear_decode_graphs(&self.core.cuda_decode_graph, self.model.cache());
     }
     fn reclaim_cuda_graph_memory(&self, max_entries: usize) -> usize {
         #[cfg(feature = "cuda")]
         {
             super::cuda_graph::reclaim_decode_graphs(
-                &self.cuda_decode_graph,
+                &self.core.cuda_decode_graph,
                 &*self.model,
                 max_entries,
             )
@@ -797,7 +656,8 @@ impl MetadataMixin for NormalPipeline {
         #[cfg(feature = "cuda")]
         {
             if let Err(err) = self.precapture_cuda_decode_graphs_impl(ctx) {
-                self.cuda_decode_graph
+                self.core
+                    .cuda_decode_graph
                     .lock()
                     .expect("CUDA graph mutex poisoned")
                     .clear();
@@ -813,13 +673,13 @@ impl MetadataMixin for NormalPipeline {
         let _ = ctx;
     }
     fn get_metadata(&self) -> Arc<GeneralMetadata> {
-        self.metadata.clone()
+        self.core.metadata.clone()
     }
     fn generation_defaults(&self) -> Option<crate::ModelGenerationDefaults> {
-        self.generation_defaults.clone()
+        self.core.generation_defaults.clone()
     }
     fn device_mapper(&self) -> Option<&dyn DeviceMapper> {
-        Some(&*self.mapper)
+        Some(&*self.core.mapper)
     }
 }
 
@@ -838,7 +698,7 @@ impl crate::speculative::driver::SpeculativePipelineExt for NormalPipeline {
     fn cuda_sparse_rejection_workspace(
         &self,
     ) -> &StdMutex<Option<crate::speculative::CudaSparseRejectionWorkspace>> {
-        &self.cuda_sparse_rejection
+        &self.core.cuda_sparse_rejection
     }
 }
 
@@ -874,7 +734,7 @@ impl NormalPipeline {
             return Ok(None);
         }
         if !self.model.supports_cuda_decode_graphs()
-            || !cuda_decode_graph_supported_for_model(self.metadata.model_metadata.as_deref())
+            || !cuda_decode_graph_supported_for_model(self.core.metadata.model_metadata.as_deref())
         {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
@@ -937,7 +797,7 @@ impl NormalPipeline {
             );
             return Ok(None);
         };
-        let Some(_) = self.metadata.cache_config.as_ref() else {
+        let Some(_) = self.core.metadata.cache_config.as_ref() else {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
                 CudaGraphDispatchMode::Skipped,
@@ -949,6 +809,7 @@ impl NormalPipeline {
         let input_ids = &input_ids.contiguous()?;
 
         let mut state = self
+            .core
             .cuda_decode_graph
             .lock()
             .expect("CUDA graph mutex poisoned");
@@ -1006,13 +867,12 @@ impl NormalPipeline {
             },
             true,
         )?;
-        super::synchronize_cuda_contexts(step.input_ids.device(), self.mapper.as_ref()).map_err(
-            |err| {
+        super::synchronize_cuda_contexts(step.input_ids.device(), self.core.mapper.as_ref())
+            .map_err(|err| {
                 inference_tensor::Error::msg(format!(
                     "CUDA graph rollback synchronization failed: {err}"
                 ))
-            },
-        )?;
+            })?;
         let replay = state
             .replay(&replay_key, &step, CudaDecodeGraphReplayInput::Host)?
             .ok_or_else(|| {
@@ -1034,14 +894,15 @@ impl NormalPipeline {
         if !cuda_decode_graphs_enabled()
             || !device.is_cuda()
             || !self.model.supports_cuda_decode_graphs()
-            || !cuda_decode_graph_supported_for_model(self.metadata.model_metadata.as_deref())
+            || !cuda_decode_graph_supported_for_model(self.core.metadata.model_metadata.as_deref())
             || self.model.has_speculative_proposer()
         {
             return Ok(());
         }
-        let (Some(_), Some(cache_engine)) =
-            (&self.metadata.cache_config, &self.metadata.cache_engine)
-        else {
+        let (Some(_), Some(cache_engine)) = (
+            &self.core.metadata.cache_config,
+            &self.core.metadata.cache_engine,
+        ) else {
             return Ok(());
         };
         let kv_cache = cache_engine.get_kv_cache().clone();
@@ -1061,6 +922,7 @@ impl NormalPipeline {
             None
         };
         let mut state = self
+            .core
             .cuda_decode_graph
             .lock()
             .expect("CUDA graph mutex poisoned");
@@ -1189,8 +1051,8 @@ impl NormalPipeline {
                     position_ids: &step.position_ids,
                     kv_cache,
                     metadata: &metadata,
-                    model_metadata: self.metadata.model_metadata.as_deref(),
-                    activation_dtype: self.metadata.activation_dtype,
+                    model_metadata: self.core.metadata.model_metadata.as_deref(),
+                    activation_dtype: self.core.metadata.activation_dtype,
                     warmup_logits: &warmup_logits,
                     state_indices: state_index_buffers,
                     real_batch: step.real_batch,
@@ -1273,22 +1135,30 @@ impl Pipeline for NormalPipeline {
 
     fn supports_packed_prefill(&self) -> bool {
         self.model.supports_packed_prefill()
-            && self.metadata.cache_engine.is_some()
+            && self.core.metadata.cache_engine.is_some()
             && (!self.model.has_speculative_proposer()
                 || self.model.supports_speculative_packed_prefill())
             && self.model.device().is_cuda()
-            && self.mapper.get_unique_devices().iter().all(Device::is_cuda)
+            && self
+                .core
+                .mapper
+                .get_unique_devices()
+                .iter()
+                .all(Device::is_cuda)
             && crate::using_flash_attn()
             && crate::attention::flash_backend_supports_sdpa(
                 self.model.config().k_head_dim,
                 false,
-                self.metadata.sliding_window.is_some(),
+                self.core.metadata.sliding_window.is_some(),
             )
-            && matches!(self.metadata.activation_dtype, DType::F16 | DType::BF16)
+            && matches!(
+                self.core.metadata.activation_dtype,
+                DType::F16 | DType::BF16
+            )
     }
 
     fn adapter_runtime(&self) -> Option<Arc<DynamicLoraRuntime>> {
-        self.dynamic_lora.clone()
+        self.core.dynamic_lora.clone()
     }
 
     fn forward_inputs(
@@ -1315,7 +1185,7 @@ impl Pipeline for NormalPipeline {
             adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
         let lora_execution = super::resolve_lora_execution(
-            self.dynamic_lora.as_deref(),
+            self.core.dynamic_lora.as_deref(),
             &input_ids,
             paged_attn_meta.as_ref(),
             &flash_meta,
@@ -1365,8 +1235,11 @@ impl Pipeline for NormalPipeline {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    if !disable_cuda_decode_graph(&self.cuda_decode_graph, self.model.cache(), &err)
-                    {
+                    if !disable_cuda_decode_graph(
+                        &self.core.cuda_decode_graph,
+                        self.model.cache(),
+                        &err,
+                    ) {
                         return Err(err);
                     }
                     cuda_graph_eager_fallback = Some(CudaGraphEventGuard::new(
@@ -1421,6 +1294,7 @@ impl Pipeline for NormalPipeline {
     ) -> inference_tensor::Result<Option<ForwardStepResult>> {
         let replay = {
             let mut state = self
+                .core
                 .cuda_decode_graph
                 .lock()
                 .expect("CUDA graph mutex poisoned");
@@ -1438,8 +1312,11 @@ impl Pipeline for NormalPipeline {
             ))),
             Ok(None) => Ok(None),
             Err(err) => {
-                let _ =
-                    disable_cuda_decode_graph(&self.cuda_decode_graph, self.model.cache(), &err);
+                let _ = disable_cuda_decode_graph(
+                    &self.core.cuda_decode_graph,
+                    self.model.cache(),
+                    &err,
+                );
                 Err(err)
             }
         }
@@ -1460,7 +1337,7 @@ impl Pipeline for NormalPipeline {
         config: crate::speculative::SpeculativeConfig,
         runtime: crate::speculative::MtpRuntimeConfig,
     ) -> inference_tensor::Result<()> {
-        if self.dynamic_lora.is_some() {
+        if self.core.dynamic_lora.is_some() {
             inference_tensor::bail!("dynamic LoRA does not support speculative decoding");
         }
         if matches!(config, crate::speculative::SpeculativeConfig::Mtp(_))
