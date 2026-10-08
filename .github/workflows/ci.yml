@@ -18,12 +18,10 @@ env:
 # Caches are saved from master only, so PRs restore master's and do not churn the repo cache limit
 # Tests are too slow per PR: they run on master, on the schedule and on dispatch; scripts/local_ci.sh runs them and Docs locally
 jobs:
+  # Linux and macOS compile under the clippy jobs below; Windows is the one target they miss
   check:
-    name: Check
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
+    name: Check (windows)
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -31,20 +29,6 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo check
-
-  check-metal:
-    name: Check (metal)
-    runs-on: macOS-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/master' }}
-      # Shaders are compiled by metal_shaders.yml, only when shader sources or their build config change
-      - run: cargo check --workspace --features metal
-        env:
-          INFERENCE_RS_METAL_PRECOMPILE: "0"
 
   fmt:
     name: Rustfmt
@@ -69,7 +53,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo clippy --workspace --tests --examples -- -D warnings
 
-  # The metal-only code paths are invisible to the Linux clippy job, and Check (metal) only runs cargo check
+  # The metal-only code paths are invisible to the Linux clippy job
   clippy-metal:
     name: Clippy (metal)
     runs-on: macOS-latest
