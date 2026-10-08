@@ -194,10 +194,12 @@ impl Engine {
                     self.add_request(*request).await;
                 }
             }
-            Request::ReIsq(level) => {
-                if let Err(e) = get_mut_arcmutex!(self.pipeline).re_isq_model(level) {
+            Request::ReIsq(req) => {
+                let result = get_mut_arcmutex!(self.pipeline).re_isq_model(req.isq);
+                if let Err(e) = &result {
                     warn!("ISQ requantization failed: {e:?}");
                 }
+                let _ = req.response.send(result).await;
             }
             Request::Calibration(req) => {
                 let result = {

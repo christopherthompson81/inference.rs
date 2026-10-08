@@ -8,6 +8,8 @@ use inference_nn::paged_attention::AttentionImplementation;
 mod decode_graphs;
 #[path = "../support/recording.rs"]
 mod recording;
+#[path = "../support/traces.rs"]
+mod traces;
 
 const DECLARED_CONTEXT: u64 = 1024;
 const RUNTIME_LIMIT: usize = 256;

@@ -476,7 +476,7 @@ One of: `Union[str, list[int]]`.
 
 ## `ReIsqResponse`
 
-Answered once the requantization is queued behind the requests already running.
+Answered once the model is requantized; a model not loaded with ISQ is a `requantize_failed` error.
 
 | Field | Type |
 | --- | --- |

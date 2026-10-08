@@ -1,16 +1,18 @@
 //! The embedding load paths on a tiny random-weight Qwen3 embedder: plain, in-situ quantized, and reloaded from UQFF.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use inference::{EmbeddingModelBuilder, IsqType, ModelDType, UqffEmbeddingModelBuilder};
 
 #[path = "../support/qwen3_embedding_tiny.rs"]
 mod support;
+#[path = "../support/traces.rs"]
+mod traces;
 use support::tiny_embedding_checkpoint;
+use traces::uqff_files;
 
 const PROMPT: &str = "hello";
 const HIDDEN_SIZE: usize = 32;
-const UQFF_EXTENSION: &str = "uqff";
 // The Normalize module scales every embedding to unit length.
 const NORM_TOLERANCE: f32 = 1e-4;
 // Shorter than LONG_PROMPT, so a window that leaked into the mask would cut what each token attends to
@@ -22,15 +24,6 @@ fn cpu_embedding_builder(dir: &Path) -> EmbeddingModelBuilder {
     EmbeddingModelBuilder::new(dir.to_string_lossy())
         .with_dtype(ModelDType::F32)
         .with_force_cpu()
-}
-
-fn uqff_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut files = std::fs::read_dir(dir)?
-        .map(|entry| entry.map(|e| e.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    files.retain(|path| path.extension().is_some_and(|ext| ext == UQFF_EXTENSION));
-    files.sort();
-    Ok(files)
 }
 
 #[tokio::test]

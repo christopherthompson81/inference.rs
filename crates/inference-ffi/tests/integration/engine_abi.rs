@@ -1451,6 +1451,9 @@ fn tokens_sessions_and_quantization_operations() {
         &json!({"ggml_type": "no-such-type"}),
     );
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    let (status, error) = request_call(inference_re_isq, engine, &json!({"ggml_type": "q8_0"}));
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert_eq!(error["error"]["code"], "requantize_failed", "{error}");
     let (status, report) = request_call(inference_calibration_status, engine, &json!({}));
     assert_eq!(
         (status, report["layers"].clone()),

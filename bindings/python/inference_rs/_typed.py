@@ -119,7 +119,7 @@ class Engine:
         return from_json(types.ResponseResource, self.json.cancel_response(response_id))
 
     def re_isq(self, ggml_type: str, model: str | None = None) -> types.ReIsqResponse:
-        """Requantizes a model that loaded with ISQ; answers once the engine has queued it."""
+        """Requantizes a model that loaded with ISQ; answers once it is requantized."""
         request = json.dumps({"ggml_type": ggml_type, "model": model})
         return from_json(types.ReIsqResponse, self.json.re_isq(request))
 

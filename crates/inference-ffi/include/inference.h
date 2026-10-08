@@ -508,7 +508,7 @@ INFERENCE_API inference_status inference_skill_versions_list(const inference_eng
 
 /* Requantizes a model, which must have loaded with ISQ, to {"ggml_type", "model"?} (an ISQ type such as "Q4K";
  * numeric shorthands resolve as on the CPU; the default model when "model" is absent); out_response echoes it once the
- * engine has queued the requantization behind the running requests. */
+ * model is requantized. A model not loaded with ISQ is INFERENCE_ERR_INVALID_REQUEST (code "requantize_failed"). */
 INFERENCE_API inference_status inference_re_isq(const inference_engine *engine, const char *request, size_t request_len,
                                                inference_string **out_response);
 /* Online calibration: start collecting activation statistics from live traffic, report per-layer progress, or apply

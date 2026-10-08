@@ -194,7 +194,7 @@
         },
         "responses": {
           "200": {
-            "description": "Requantization queued for a model that was loaded with ISQ.",
+            "description": "The model, loaded with ISQ, is requantized.",
             "content": {
               "application/json": {
                 "schema": {
@@ -204,7 +204,7 @@
             }
           },
           "400": {
-            "description": "Invalid ISQ type"
+            "description": "Invalid ISQ type, or the model was not loaded with ISQ or failed to requantize"
           },
           "500": {
             "description": "Failed to dispatch the ISQ request"
@@ -9679,7 +9679,7 @@
       },
       "ReIsqResponse": {
         "type": "object",
-        "description": "Answered once the requantization is queued behind the requests already running.",
+        "description": "Answered once the model is requantized; a model not loaded with ISQ is a `requantize_failed` error.",
         "required": [
           "ggml_type"
         ],

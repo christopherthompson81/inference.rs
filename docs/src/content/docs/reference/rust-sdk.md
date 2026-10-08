@@ -97,7 +97,7 @@ Diffusion image generation and text to speech, taking the same requests as `/v1/
 
 ## Quantization
 
-Through the engine: `re_isq(ReIsqRequest)` reapplies [ISQ (in-situ quantization)](/reference/quantization-types/) to a loaded model, and `calibration(CalibrationAction::{Start, Status, Apply}, model)` runs online calibration (the model must be loaded with ISQ). Guide: [online calibration](/guides/quantization/online-calibration/); example: [online-calibration](/examples/rust/quantization/online-calibration/).
+Through the engine: `re_isq(ReIsqRequest)` requantizes a model loaded with [ISQ (in-situ quantization)](/reference/quantization-types/) to another type, and `calibration(CalibrationAction::{Start, Status, Apply}, model)` runs online calibration (the model must be loaded with ISQ). Guide: [online calibration](/guides/quantization/online-calibration/); example: [online-calibration](/examples/rust/quantization/online-calibration/).
 
 ## Tokenization
 

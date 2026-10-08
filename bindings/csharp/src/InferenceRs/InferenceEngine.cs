@@ -293,7 +293,7 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_model_status));
     }
 
-    /// <summary>Requantizes a model that loaded with ISQ; answers once the engine has queued it.</summary>
+    /// <summary>Requantizes a model that loaded with ISQ; answers once it is requantized.</summary>
     public string ReIsq(string requestJson)
     {
         using var engine = Borrow();

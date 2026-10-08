@@ -102,8 +102,8 @@ pub async fn system_doctor() -> Json<inference_api::system::DoctorReport> {
   path = "/re_isq",
   request_body = ReIsqRequest,
   responses(
-    (status = 200, description = "Requantization queued for a model that was loaded with ISQ.", body = ReIsqResponse),
-    (status = 400, description = "Invalid ISQ type"),
+    (status = 200, description = "The model, loaded with ISQ, is requantized.", body = ReIsqResponse),
+    (status = 400, description = "Invalid ISQ type, or the model was not loaded with ISQ or failed to requantize"),
     (status = 500, description = "Failed to dispatch the ISQ request")
   )
 ))]

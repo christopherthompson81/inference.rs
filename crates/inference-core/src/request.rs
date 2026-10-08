@@ -365,11 +365,19 @@ pub struct CalibrationRequest {
 }
 
 #[derive(Clone, Serialize, Deserialize)]
+pub struct RequantizeRequest {
+    pub isq: IsqType,
+    #[serde(default = "default_responder")]
+    #[serde(skip)]
+    pub response: Sender<anyhow::Result<()>>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 /// A request to the Engine, encapsulating the various parameters as well as
 /// the `mpsc` response `Sender` used to return the [`Response`].
 pub enum Request {
     Normal(Box<NormalRequest>),
-    ReIsq(IsqType),
+    ReIsq(RequantizeRequest),
     Calibration(CalibrationRequest),
     Tokenize(TokenizationRequest),
     Detokenize(DetokenizationRequest),
@@ -395,8 +403,8 @@ impl Debug for Request {
                     "Request {id} {{ messages: `{messages:?}`, sampling_params: {sampling_params:?}, is_streaming: {is_streaming}}}",
                 )
             }
-            Request::ReIsq(tp) => {
-                write!(f, "Re ISQ Request {tp:?}",)
+            Request::ReIsq(req) => {
+                write!(f, "Re ISQ Request {:?}", req.isq)
             }
             Request::Calibration(req) => {
                 write!(f, "Calibration Request {:?}", req.action)

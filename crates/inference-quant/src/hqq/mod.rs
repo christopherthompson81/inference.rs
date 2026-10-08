@@ -37,7 +37,6 @@ mod ffi;
 #[cfg(feature = "cuda")]
 mod bitpack_ffi;
 
-#[cfg(not(feature = "cuda"))]
 mod hqq_op;
 
 mod optimize;
@@ -822,8 +821,15 @@ impl HqqLayer {
     }
 
     /// Dequantize `self` into a tensor of shape `scales` or `zeros`.
-    #[cfg(not(feature = "cuda"))]
     fn dequantize(&self) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if self.w_q.device().is_cuda() {
+            return self.dequantize_cuda();
+        }
+        self.dequantize_with_ops()
+    }
+
+    fn dequantize_with_ops(&self) -> Result<Tensor> {
         use crate::hqq::hqq_op::{Dequant1Bit, Dequant2Bit, Dequant3Bit, Dequant4Bit, Dequant8Bit};
 
         match (self.scales.dtype(), self.zeros.dtype()) {
@@ -869,9 +875,8 @@ impl HqqLayer {
         }
     }
 
-    /// Dequantize `self` into a tensor of shape `scales` or `zeros`.
     #[cfg(feature = "cuda")]
-    fn dequantize(&self) -> Result<Tensor> {
+    fn dequantize_cuda(&self) -> Result<Tensor> {
         match (self.scales.dtype(), self.zeros.dtype()) {
             (DType::F16, DType::F16) | (DType::BF16, DType::BF16) | (DType::F32, DType::F32) => (),
             (a, b) => {
@@ -1355,15 +1360,21 @@ mod tests {
 
     const TEST_VOCAB_SIZE: usize = 96;
     const TEST_EMBEDDING_DIM: usize = 32;
+    // A 4-bit grid over this weight's ~2.5 range steps by ~0.17, so the mean error sits well under it.
+    const HQQ4_MEAN_ERROR_BOUND: f32 = 0.1;
 
-    fn test_layer_on_device(bits: HqqBits, device: &Device) -> Result<HqqLayer> {
+    fn test_weight() -> Result<Tensor> {
         let values = (0..TEST_VOCAB_SIZE * TEST_EMBEDDING_DIM)
             .map(|index| {
                 let index = index as f32;
                 (index * 0.017).sin() + (index * 0.013).cos() * 0.25
             })
             .collect::<Vec<_>>();
-        let weight = Tensor::from_vec(values, (TEST_VOCAB_SIZE, TEST_EMBEDDING_DIM), &Device::Cpu)?;
+        Tensor::from_vec(values, (TEST_VOCAB_SIZE, TEST_EMBEDDING_DIM), &Device::Cpu)
+    }
+
+    fn test_layer_on_device(bits: HqqBits, device: &Device) -> Result<HqqLayer> {
+        let weight = test_weight()?;
         HqqLayer::quantize(
             &weight,
             device,
@@ -1378,7 +1389,7 @@ mod tests {
         )
     }
 
-    // Dequantization is accelerator-only when built with cuda/metal, so tests must live on that device.
+    // Accelerator builds test their own dequantization kernels; the host path has its own test.
     fn test_device() -> Result<Device> {
         #[cfg(feature = "metal")]
         {
@@ -1408,6 +1419,25 @@ mod tests {
         assert_eq!(actual.device().location(), device.location());
         let max_diff = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(max_diff <= 1e-6, "max_diff={max_diff}");
+        Ok(())
+    }
+
+    // The ISQ widths dequantize on the host in every build, the wider one closer to the weights.
+    #[test]
+    fn host_dequantization_tracks_the_weights() -> Result<()> {
+        let weight = test_weight()?;
+        let mean_error = |bits| -> Result<f32> {
+            let dequantized = test_layer_on_device(bits, &Device::Cpu)?.dequantize()?;
+            (dequantized - &weight)?
+                .abs()?
+                .mean_all()?
+                .to_scalar::<f32>()
+        };
+        let (four, eight) = (mean_error(HqqBits::Four)?, mean_error(HqqBits::Eight)?);
+        assert!(
+            eight < four && four < HQQ4_MEAN_ERROR_BOUND,
+            "mean errors: 4-bit {four}, 8-bit {eight}"
+        );
         Ok(())
     }
 

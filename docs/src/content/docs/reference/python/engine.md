@@ -174,7 +174,7 @@ re_isq(
 ) -> types.ReIsqResponse
 ```
 
-Requantizes a model that loaded with ISQ; answers once the engine has queued it.
+Requantizes a model that loaded with ISQ; answers once it is requantized.
 
 ### `Engine.calibration_start`
 

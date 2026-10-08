@@ -2350,3 +2350,39 @@ dispatch, eager fallback or failed capture, and require every dispatch to stop a
 
 Implication: PR0a pins the graph behavior; PR0b (UQFF on the multimodal path, `re_isq`, encoder cache, text prefix
 cache, mixed-length packed prefill) follows before any merge code.
+
+## Run 74 - 2026-10-07 18:06
+
+Question: the rest of the pins before the pipeline merge (UQFF write and reload on the multimodal path, in-place
+re-ISQ, the encoder cache, the text prefix cache, mixed-length packed prefill). Command: the new
+`gemma3_tiny::` and `llama_tiny::` tests under `cargo nextest run` with and without `--features cuda`.
+
+Raw findings, including three defects the pins hit on the old code:
+
+- Encoder cache on a repeated Gemma 3 image (prefix cache off, or the repeat never reaches the encoder): first
+  request 0 hits / >0 misses, repeat >0 hits / same misses, same decode. Read through `Engine::cache_stats()`.
+- Re-ISQ on a model loaded without ISQ fails ("requires the model to have been loaded with ISQ"), but
+  `Request::ReIsq` had no reply channel: the engine logged a WARN and `Engine::re_isq` / `re_isq_model` returned
+  Ok. Fixed: a `RequantizeRequest` responder the API awaits (`requantize_failed`), as calibration already did.
+- Re-ISQ works from the loaded weights: Q4_0 then Q8_0 is not a Q8_0 load (first steps -3.6856 vs -3.6783), by
+  design, so re-ISQ to a wider type keeps the narrower type's error at the wider type's size. The pins requantize
+  downward (Gemma 3 Q8_0 then Q4_0, Llama Q8_0 then HQQ4) as recorded CPU traces, not against a direct load.
+- Tiny Llama, Q4_0: sensitive tensors promote to Q6K, which cannot quantize 32-wide rows and falls back to Q5_1,
+  whose CPU dot product debug-asserts an even block count (one block here). Test uses Q8_0 then HQQ4 instead.
+- HQQ in a CUDA build: only the CUDA `dequantize` was compiled, so HQQ on the CPU failed with "Expected CUDA
+  device". Fixed: dispatch by device, the ops-based path compiled in every build.
+- Not fixed, owner's call: an ISQ load that writes UQFF loads the whole model unmapped onto the host
+  (`materialize_device_mapper`, `resolve_map_setting`, `load_device`), so on a GPU the written model cannot run:
+  Gemma 3 panics with a CPU QTensor under a CUDA matmul, Llama fails with a dtype mismatch (f32) or "rms_norm weight
+  is on another device" (bf16/f16). `inference quantize` exits after writing, so only SDK/ABI callers that keep the
+  model see it. Recording each tracked module's target device and swapping the runtime type onto it fixes the
+  quantized layers only; norms and embeddings stay on the host. The UQFF pin runs on the CPU.
+- HQQ host dequantization: 4-bit mean error 0.039, 8-bit 0.0023 on the unit-test weight. 3-bit returns padded
+  output (3360 values for a 96x32 weight; 10 values per packed word, never trimmed), so 1-3 bit HQQ cannot
+  dequantize here; those widths are commented out of `IsqType`, so only a pre-quantized checkpoint could reach it.
+- Text prefix cache (Llama, paged on GPU builds): the repeat reports cached prompt tokens and decodes the same.
+- Packed prefill has no observable of its own; the graph rounds (Run 73) already decode mixed-length concurrent
+  prompts on the GPU with every step pinned, so a packing regression in output shows there. Whether packing stays
+  enabled is a throughput question the pins do not cover.
+
+Implication: pins complete for the merge. Next: PR1 (hybrid and graph helpers as free functions).
