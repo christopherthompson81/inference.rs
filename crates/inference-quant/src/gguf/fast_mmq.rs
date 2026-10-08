@@ -97,9 +97,9 @@ pub fn supports_shape(dtype: GgufType, cols: usize) -> bool {
 }
 
 /// Whether mmq reads this weight, by its type and its column count.
-pub fn supports_weight(weight: &QTensor) -> bool {
+pub fn supports_weight(weight: &dyn KernelWeight) -> bool {
     weight
-        .shape()
+        .kernel_shape()
         .dims()
         .last()
         .is_some_and(|&cols| supports_shape(weight.gguf_type(), cols))
@@ -357,6 +357,29 @@ fn mmq_moe_launcher(dtype: GgufType) -> Option<MmqMoeLauncher> {
         GgufType::Q4K => ffi::launch_mmq_gguf_q4_k_moe,
         GgufType::Q5K => ffi::launch_mmq_gguf_q5_k_moe,
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k_moe,
+        GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl_moe,
+        GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs_moe,
+        GgufType::Iq2Xxs => ffi::launch_mmq_gguf_iq2_xxs_moe,
+        GgufType::Iq2Xs => ffi::launch_mmq_gguf_iq2_xs_moe,
+        GgufType::Iq2S => ffi::launch_mmq_gguf_iq2_s_moe,
+        GgufType::Iq3Xxs => ffi::launch_mmq_gguf_iq3_xxs_moe,
+        GgufType::Iq3S => ffi::launch_mmq_gguf_iq3_s_moe,
+        GgufType::Iq1S => ffi::launch_mmq_gguf_iq1_s_moe,
+        GgufType::Iq1Kt => ffi::launch_mmq_gguf_iq1_kt_moe,
+        GgufType::Iq2Kt => ffi::launch_mmq_gguf_iq2_kt_moe,
+        GgufType::Iq3Kt => ffi::launch_mmq_gguf_iq3_kt_moe,
+        GgufType::Iq4Kt => ffi::launch_mmq_gguf_iq4_kt_moe,
+        GgufType::Iq2K => ffi::launch_mmq_gguf_iq2_k_moe,
+        GgufType::Iq3K => ffi::launch_mmq_gguf_iq3_k_moe,
+        GgufType::Iq4K => ffi::launch_mmq_gguf_iq4_k_moe,
+        GgufType::Iq5K => ffi::launch_mmq_gguf_iq5_k_moe,
+        GgufType::Iq6K => ffi::launch_mmq_gguf_iq6_k_moe,
+        GgufType::Iq2Ks => ffi::launch_mmq_gguf_iq2_ks_moe,
+        GgufType::Iq3Ks => ffi::launch_mmq_gguf_iq3_ks_moe,
+        GgufType::Iq4Ks => ffi::launch_mmq_gguf_iq4_ks_moe,
+        GgufType::Iq4Kss => ffi::launch_mmq_gguf_iq4_kss_moe,
+        GgufType::Iq5Ks => ffi::launch_mmq_gguf_iq5_ks_moe,
+        GgufType::Iq2Kl => ffi::launch_mmq_gguf_iq2_kl_moe,
         _ => return None,
     };
     Some(f)
@@ -929,7 +952,7 @@ pub(crate) fn fused_ffn(
 /// MoE stages.
 #[allow(clippy::too_many_arguments)]
 pub fn grouped(
-    weight: &QTensor,
+    weight: &dyn KernelWeight,
     xs: &Tensor,
     ids_src: &CudaSlice<u32>,
     ids_dst: &CudaSlice<u32>,
@@ -946,7 +969,7 @@ pub fn grouped(
 
     let (_, k) = xs.dims2()?;
 
-    let (weight_experts, nrows, ncols) = weight.shape().dims3()?;
+    let (weight_experts, nrows, ncols) = weight.kernel_shape().dims3()?;
     if weight_experts != num_experts {
         inference_tensor::bail!(
             "fast_mmq grouped: expected {num_experts} experts, got {weight_experts}"
@@ -1001,7 +1024,8 @@ pub fn grouped(
 
     let out = unsafe { dev.alloc::<f32>(total_assignments * nrows)? };
 
-    let weight_ptr = weight.device_ptr()? as *const std::ffi::c_void;
+    let (weight_ptr, _weight_guard) = weight.kernel_ptr(&stream)?;
+    let weight_ptr = weight_ptr as *const std::ffi::c_void;
     let stride_row_x = mmq_row_stride(dtype, k);
     let stride_col_dst = nrows as i64;
     let di = get_device_info(dev);
@@ -1111,7 +1135,7 @@ pub fn grouped(
 }
 
 struct GroupedGluRun<'a> {
-    weight: &'a QTensor,
+    weight: &'a dyn KernelWeight,
     gate: &'a Tensor,
     up: &'a Tensor,
     row_stride: usize,
@@ -1164,7 +1188,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
         );
     }
 
-    let (weight_experts, nrows, ncols) = weight.shape().dims3()?;
+    let (weight_experts, nrows, ncols) = weight.kernel_shape().dims3()?;
     if weight_experts != num_experts {
         inference_tensor::bail!(
             "fast_mmq grouped_from_glu_pair: expected {num_experts} experts, got {weight_experts}"
@@ -1211,7 +1235,8 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
 
     let out = unsafe { dev.alloc::<f32>(total_assignments * nrows)? };
 
-    let weight_ptr = weight.device_ptr()? as *const std::ffi::c_void;
+    let (weight_ptr, _weight_guard) = weight.kernel_ptr(&stream)?;
+    let weight_ptr = weight_ptr as *const std::ffi::c_void;
     let stride_row_x = mmq_row_stride(dtype, k);
     let stride_col_dst = nrows as i64;
     let di = get_device_info(dev);
@@ -1282,7 +1307,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
 /// into the MMQ activation quantization layout.
 #[allow(clippy::too_many_arguments)]
 pub fn grouped_from_glu_pair(
-    weight: &QTensor,
+    weight: &dyn KernelWeight,
     gate: &Tensor,
     up: &Tensor,
     ids_src: &CudaSlice<u32>,
@@ -1315,7 +1340,7 @@ pub fn grouped_from_glu_pair(
 
 #[allow(clippy::too_many_arguments)]
 pub fn grouped_from_glu_packed(
-    weight: &QTensor,
+    weight: &dyn KernelWeight,
     gate_up: &Tensor,
     ids_src: &CudaSlice<u32>,
     ids_dst: &CudaSlice<u32>,
@@ -1327,7 +1352,7 @@ pub fn grouped_from_glu_packed(
     dev: &CudaDevice,
 ) -> Result<Tensor> {
     let gate_up = gate_up.contiguous()?;
-    let (_, _, k) = weight.shape().dims3()?;
+    let (_, _, k) = weight.kernel_shape().dims3()?;
     if gate_up.dims2()? != (total_assignments, 2 * k) {
         inference_tensor::bail!("fast_mmq grouped_from_glu_packed: gate/up shape mismatch");
     }
@@ -1354,8 +1379,8 @@ pub fn grouped_from_glu_packed(
 /// Gate/up share one MMQ activation quantization pass and one packed output.
 #[allow(clippy::too_many_arguments)]
 pub fn grouped_pair_packed(
-    gate: &QTensor,
-    up: &QTensor,
+    gate: &dyn KernelWeight,
+    up: &dyn KernelWeight,
     xs: &Tensor,
     ids_src: &CudaSlice<u32>,
     ids_dst: &CudaSlice<u32>,
@@ -1384,8 +1409,8 @@ pub fn grouped_pair_packed(
         );
     }
 
-    let (gate_experts, nrows, ncols) = gate.shape().dims3()?;
-    let (up_experts, up_nrows, up_ncols) = up.shape().dims3()?;
+    let (gate_experts, nrows, ncols) = gate.kernel_shape().dims3()?;
+    let (up_experts, up_nrows, up_ncols) = up.kernel_shape().dims3()?;
     if gate_experts != num_experts || up_experts != num_experts {
         inference_tensor::bail!(
             "fast_mmq grouped_pair: expected {num_experts} experts, got gate={gate_experts} up={up_experts}"
@@ -1394,8 +1419,8 @@ pub fn grouped_pair_packed(
     if nrows != up_nrows || ncols != up_ncols {
         inference_tensor::bail!(
             "fast_mmq grouped_pair: gate/up shape mismatch {:?} vs {:?}",
-            gate.shape(),
-            up.shape()
+            gate.kernel_shape(),
+            up.kernel_shape()
         );
     }
     if k != ncols {
@@ -1447,8 +1472,10 @@ pub fn grouped_pair_packed(
 
     let output = unsafe { dev.alloc::<f32>(total_assignments * nrows * 2)? };
 
-    let gate_ptr = gate.device_ptr()? as *const std::ffi::c_void;
-    let up_ptr = up.device_ptr()? as *const std::ffi::c_void;
+    let (gate_ptr, _gate_guard) = gate.kernel_ptr(&stream)?;
+    let gate_ptr = gate_ptr as *const std::ffi::c_void;
+    let (up_ptr, _up_guard) = up.kernel_ptr(&stream)?;
+    let up_ptr = up_ptr as *const std::ffi::c_void;
     let stride_row_x = mmq_row_stride(dtype, k);
     let stride_col_dst = (2 * nrows) as i64;
     let di = get_device_info(dev);
@@ -1567,8 +1594,8 @@ pub fn grouped_pair_packed(
 /// Run two GGUF-quantized MoE projections with llama.cpp-style grouped MMQ.
 #[allow(clippy::too_many_arguments)]
 pub fn grouped_pair(
-    gate: &QTensor,
-    up: &QTensor,
+    gate: &dyn KernelWeight,
+    up: &dyn KernelWeight,
     xs: &Tensor,
     ids_src: &CudaSlice<u32>,
     ids_dst: &CudaSlice<u32>,
@@ -1590,7 +1617,7 @@ pub fn grouped_pair(
         num_experts,
         dev,
     )?;
-    let (_, nrows, _) = gate.shape().dims3()?;
+    let (_, nrows, _) = gate.kernel_shape().dims3()?;
     let gate = output.narrow(1, 0, nrows)?.contiguous()?;
     let up = output.narrow(1, nrows, nrows)?.contiguous()?;
     Ok((gate, up))

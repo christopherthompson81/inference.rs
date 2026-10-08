@@ -74,3 +74,30 @@ report MTP layers past the loader's count, which failed the length check and sil
 the planner now keeps the loader's layers. Known gaps, as before the change: F32-at-runtime vectors (GDN `dt_bias`,
 `A_log`) count at the model dtype, and runtime-only per-layer buffers (MLA's cached `w_uk`/`w_uv_t`) are not counted;
 the old floored pack factor no longer leaves slack for them. Rerun on the 35B: same map, PPL 4.2080, 12.3 s.
+
+## Run 4 - 2026-10-08 13:26
+
+Question: with grouped mmq over raw experts (prefill, and decode, which has no indexed kernel for raw types), how fast
+is the checkpoint, and does it still match?
+
+Change: the compiled `launch_mmq_gguf_<type>_moe` launchers are declared for every raw type (one `declare_mmq_moe!`
+for all 33) and listed in `mmq_moe_launcher`; the grouped functions take `&dyn KernelWeight`; `QuantMethod::kernel_weight`
+hands the MoE backend a QTensor or a raw stack alike, so a layer mixing IQ3_S gate/up with Q6_K down groups too; decode
+with raw experts takes the grouped path when the indexed decode declines.
+
+Commands: the perplexity run as before; `target/debug/inference bench --format gguf -m /mnt/data/models -f
+Qwen3.6-35B-A3B-UD-IQ4_XS.gguf --prompt-len 512 --gen-len 128` on this branch and on master (gather path);
+`llama-bench -p 512 -n 128 -ngl 99` from the reference build.
+
+Raw:
+- PPL 4.2335 (mainline 4.2256, 0.19%; the gather path gave 0.42%: grouped mmq quantizes activations to Q8_1 as
+  llama.cpp does). Test: grouped mmq over every raw type mmq reads matches the gather (cosine > 0.999).
+
+| | prefill 512 tok/s | decode tok/s |
+|---|---|---|
+| master (gather) | 775 | 23.8 |
+| grouped mmq | 3978 | 75.4 |
+| mainline llama.cpp | 3525 | 152.0 |
+
+Prefill now beats mainline; decode is half of it. Decode runs mmq tiles for one token per step, where mainline has
+indexed mmvq (`mul_mat_vec_q` with ids) for these types. Next for decode: an indexed mmvq for raw types.

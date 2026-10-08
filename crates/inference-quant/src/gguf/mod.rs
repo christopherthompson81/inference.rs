@@ -519,6 +519,14 @@ impl QuantMethod for GgufMatMul {
         }
     }
 
+    #[cfg(feature = "cuda")]
+    fn kernel_weight(&self) -> Option<&dyn kernel::KernelWeight> {
+        match &self.w {
+            inference_tensor::quantized::QMatMul::QTensor(qt) => Some(qt.as_ref()),
+            _ => None,
+        }
+    }
+
     #[cfg(all(feature = "cuda", has_marlin_kernels))]
     fn prepare_gguf_affine_raw(
         &self,

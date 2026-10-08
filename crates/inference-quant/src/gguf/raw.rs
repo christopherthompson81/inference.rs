@@ -452,6 +452,11 @@ impl QuantMethod for GgufRawMatMul {
         self.w.embedding(ids)
     }
 
+    #[cfg(feature = "cuda")]
+    fn kernel_weight(&self) -> Option<&dyn super::kernel::KernelWeight> {
+        Some(&self.w)
+    }
+
     // One expert dequantized at a time, then its matmul over the inputs routed to it; `a` is per token or per slot
     fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
         let (_, rows, cols) = self.w.shape.dims3()?;
@@ -811,6 +816,70 @@ mod tests {
             )
             .is_err()
         );
+        Ok(())
+    }
+
+    // MoE prefill and raw-expert decode run grouped mmq over the stack; the gather path is the reference
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn grouped_mmq_reads_raw_expert_stacks() -> Result<()> {
+        const EXPERTS: usize = 4;
+        const ROWS: usize = 64;
+        const COLS: usize = 512;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let dev = cuda.as_cuda_device()?;
+        let ids = [
+            [2u32, 0],
+            [3, 2],
+            [0, 1],
+            [2, 3],
+            [1, 1],
+            [3, 0],
+            [2, 2],
+            [0, 3],
+            [1, 2],
+        ];
+        let (tokens, k) = (ids.len(), ids[0].len());
+        let total = tokens * k;
+        let indices = Tensor::new(&ids, &cuda)?;
+        let flat = indices.flatten_all()?.contiguous()?;
+        let (storage, _) = flat.storage_and_layout();
+        let inference_tensor::Storage::Cuda(ids_cuda) = &*storage else {
+            unreachable!()
+        };
+        let (bounds, sorted_tokens, sorted_sources) =
+            crate::moe_dispatch_build(ids_cuda.as_cuda_slice::<u32>()?, total, EXPERTS, k, dev)?;
+        let xs = Tensor::randn(0f32, 1f32, (tokens, COLS), &cuda)?.to_dtype(DType::BF16)?;
+        for ty in GgufType::RAW_BLOCKS
+            .into_iter()
+            .filter(|&ty| super::super::fast_mmq::supports_shape(ty, COLS))
+        {
+            let weight = RawGgufTensor::new(
+                ty,
+                &[EXPERTS, ROWS, COLS],
+                random_rows(ty, EXPERTS * ROWS, COLS, 17),
+                &cuda,
+            )?;
+            let grouped = super::super::fast_mmq::grouped(
+                &weight,
+                &xs,
+                &sorted_sources,
+                &sorted_tokens,
+                &bounds,
+                total,
+                tokens,
+                EXPERTS,
+                dev,
+            )?
+            .reshape((tokens, k, ROWS))?;
+            let gathered =
+                GgufRawMatMul::new(weight, None).gather_forward(&xs.unsqueeze(1)?, &indices)?;
+            let similarity = cosine(&grouped, &gathered)?;
+            assert!(similarity > 0.999, "{ty:?}: cosine {similarity}");
+        }
         Ok(())
     }
 
