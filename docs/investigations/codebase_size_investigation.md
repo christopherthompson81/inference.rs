@@ -2832,3 +2832,18 @@ over two different request types.
 
 Review (subagent, read-only): no findings; every non-default field kept, `new_simple` arguments in order, the
 later `next_request_id()` and the partial moves change nothing. Full CI passed (2,494 CPU, 2,879 CUDA).
+
+## Run 92 - 2026-10-08 06:28
+
+Question: Run 71's "paged-attention CUDA vs Metal host validation (~150)".
+
+Command: the 6-line-window duplicate finder over `crates/inference-paged-attn/src/*/backend/*.rs`.
+
+Raw finding: 887 lines sit in repeated windows, but almost all repeat within one file: bf16/f16 (and dtype)
+dispatch arms in `cuda/backend/mla.rs` (43+27 lines twice), `gather_kv.rs` in both backends, fa3 test setup. What
+CUDA and Metal actually share is `validate_kv_cache_scales` (18 lines, `cuda/backend/reshape_cache.rs` and
+`metal/backend/mod.rs`) and the k/v shape checks of reshape-and-cache (17 lines): ~35 lines, not ~150.
+
+Decision: not taken. Sharing the 35 lines touches Metal code this machine cannot build (only GitHub's macOS jobs
+see it), for ~20 lines net; the in-file dispatch repeats are the dtype-generic launch pattern each kernel family
+writes once per dtype. This closes Run 71's list.
