@@ -2557,3 +2557,26 @@ Raw findings:
   either way, with or without the text prefill); the real-weights MTP numbers of Run 79 cover that dispatch.
 
 CI: 2493 CPU, 2878 CUDA tests pass; bindings pass.
+
+## Run 81 - 2026-10-07 20:57
+
+Question: the C ABI table (housekeeping item 2, est. ~1,000 duplicated Rust lines plus hand-kept Python and C#
+tables): measured before planning, as asked after the ModelSelected estimate missed.
+
+```
+entry points                 94 (#[unsafe(no_mangle)]): engine.rs 79, layout.rs 9, lib.rs 4, callbacks.rs 2
+their lines (docs included)  1,939
+  thin wrappers over a helper  55 fns, ~1,230 lines: json_call 29 (674), id_call 7 (191), stream_call 4 (89),
+                               query_call 6 (68), response/file/session id 7 (142), engine_call 2 (65)
+  custom bodies                32 fns, 710 lines (load, media, uploads, streams, blobs, strings, layout, callbacks)
+copies of every signature    the Rust fn, inference.h (584 lines, the documented ABI), Python _native.py SIGNATURES
+                             (~100 lines), C# NativeMethods.cs (373 lines, 94 LibraryImport declarations)
+```
+
+Raw finding: the estimate holds (~1,000 lines from the wrapper table). Not an undetected-bug class, though: the
+header test checks names against the Rust exports, and the Python and C# coverage tests check names and C types
+against the header, so drift already fails CI; generating the bindings removes the hand edits, not silent errors.
+
+Plan: the header stays the single hand-written source (it carries the ABI's documentation). Step 1: a generator
+renders Python's SIGNATURES and C#'s P/Invoke declarations from it, with a committed-matches check (docs-regen /
+docs-check pattern). Step 2: a macro table for the 55 shaped Rust wrappers.

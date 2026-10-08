@@ -117,8 +117,8 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-fattn/` - Flash attention kernels (llama.cpp's fattn): prefill, packed, paged and fp8 attention for every CUDA build
 - `crates/inference-kernel-build/` - Build-time CUDA (nvcc) compilation for the kernel crates' `build.rs`, derived from cudaforge (its README lists what changed)
 - `crates/inference-metal-compile/` - Build-time Metal shader compilation for the kernel crates
-- `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
-- `bindings/python/` - the Python SDK: a pure-Python ctypes package over the C ABI (`inference_rs`); its coverage test enforces the same, and `scripts/release/build_wheels.py` builds wheels that bundle the library. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
+- `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); its P/Invoke declarations (`Native/NativeMethods.g.cs`) and Python's ctypes table are generated from `include/inference.h` by `python3 bindings/scripts/generate_native.py` (also in `make docs-regen`): after changing the header, rerun it; a Python test fails while either is stale
+- `bindings/python/` - the Python SDK: a pure-Python ctypes package over the C ABI (`inference_rs`), whose `_native.py` signature table is generated as above; `scripts/release/build_wheels.py` builds wheels that bundle the library. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
 - Kernel sources live in `<crate>/kernels/{cuda,metal}/` and are built ahead of time, never with NVRTC at runtime; each kernel crate's `third_party/README.md` records upstream provenance and license.
 
 ### Key Design Patterns
