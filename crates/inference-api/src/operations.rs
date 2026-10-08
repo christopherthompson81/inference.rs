@@ -5,8 +5,8 @@ use either::Either;
 use futures::future::BoxFuture;
 pub use inference_core::{CalibrationAction, CalibrationStatus, SerializedSession};
 use inference_core::{
-    CalibrationRequest, DetokenizationRequest, InferenceRsError, Request, TokenizationRequest,
-    parse_isq_value,
+    CalibrationRequest, DetokenizationRequest, InferenceRsError, RequantizeRequest, Request,
+    TokenizationRequest, parse_isq_value,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -18,6 +18,7 @@ const SESSION_NOT_FOUND: &str = "session_not_found";
 const INVALID_SESSION: &str = "invalid_session";
 const INVALID_ISQ: &str = "invalid_isq";
 const CALIBRATION_FAILED: &str = "calibration_failed";
+const REQUANTIZE_FAILED: &str = "requantize_failed";
 const TOKENIZATION_FAILED: &str = "tokenization_failed";
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -30,7 +31,7 @@ pub struct ReIsqRequest {
     pub model: Option<String>,
 }
 
-/// Answered once the requantization is queued behind the requests already running.
+/// Answered once the model is requantized; a model not loaded with ISQ is a `requantize_failed` error.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ReIsqResponse {
     pub ggml_type: String,
@@ -177,7 +178,13 @@ pub(crate) async fn re_isq(
             Some("ggml_type"),
         )
     })?;
-    send(state, request.model.as_deref(), Request::ReIsq(level)).await?;
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let request_isq = Request::ReIsq(RequantizeRequest {
+        isq: level,
+        response: tx,
+    });
+    send(state, request.model.as_deref(), request_isq).await?;
+    answer(rx, REQUANTIZE_FAILED).await?;
     Ok(ReIsqResponse {
         ggml_type: request.ggml_type,
     })

@@ -191,9 +191,9 @@ pub use request::{
     ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
     DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
     ImageGenerationResponseFormat, LlguidanceGrammar, MessageContent, NormalRequest,
-    ReasoningEffort, Request, RequestCancellation, RequestMessage, SearchContextSize,
-    TokenizationRequest, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
-    WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
+    ReasoningEffort, RequantizeRequest, Request, RequestCancellation, RequestMessage,
+    SearchContextSize, TokenizationRequest, WebSearchContentType, WebSearchFilters,
+    WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
     resolve_reasoning_controls,
 };
 pub use response::*;

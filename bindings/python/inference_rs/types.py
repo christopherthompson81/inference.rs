@@ -2080,7 +2080,7 @@ class ReIsqRequest:
 
 @dataclass(kw_only=True)
 class ReIsqResponse:
-    """Answered once the requantization is queued behind the requests already running."""
+    """Answered once the model is requantized; a model not loaded with ISQ is a `requantize_failed` error."""
 
     ggml_type: str
 

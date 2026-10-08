@@ -405,6 +405,10 @@ class TypedEngine(unittest.TestCase):
         self.assertIsInstance(self.engine.calibration_status(), t.CalibrationStatus)
         with self.assertRaises(ir.InferenceError):
             self.engine.re_isq("no-such-type")
+        with self.assertRaises(ir.InferenceError) as unquantized:
+            self.engine.re_isq("q8_0")
+        self.assertEqual(unquantized.exception.status, ir.Status.INVALID_REQUEST)
+        self.assertIn("requantize_failed", unquantized.exception.detail)
         models = self.engine.list_models().data
         self.assertGreater(next(m for m in models if m.id != "default").max_model_len, 0)
 

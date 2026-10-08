@@ -252,6 +252,8 @@ internal static class Program
         Check("speculative stats stay zero without a proposer", speculativeStats.Count > 0 && (int)speculativeStats[0]!["drafts"]! == 0);
         var badIsq = Throws(() => engine.ReIsq("""{"ggml_type": "no-such-type"}"""));
         Check("an unknown ISQ type is InvalidRequest", badIsq?.Status == InferenceStatus.InvalidRequest);
+        var unquantized = Throws(() => engine.ReIsq("""{"ggml_type": "q8_0"}"""));
+        Check("requantizing a model loaded without ISQ fails", unquantized?.Status == InferenceStatus.InvalidRequest && unquantized.Detail.Contains("requantize_failed"));
     }
 
     private static void ACancelledStreamEndsWithItsUsage(InferenceEngine engine)
