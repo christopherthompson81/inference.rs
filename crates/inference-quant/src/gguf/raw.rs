@@ -4,6 +4,7 @@ use std::sync::{Arc, atomic::AtomicUsize};
 
 use inference_tensor::nn::Linear;
 use inference_tensor::{DType, Device, Result, Shape, Tensor};
+use rayon::prelude::*;
 
 use super::kernel::GgufType;
 use crate::{IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde};
@@ -23,6 +24,8 @@ const IQ4_XS_QS: std::ops::Range<usize> = 8..136;
 // Zeroed blocks past the last row, as Candle pads its CUDA QTensors: mmq reads whole tiles of K
 #[cfg(feature = "cuda")]
 const MATRIX_ROW_PADDING: usize = 512;
+// Blocks per rayon task in the CPU dequantizers; one block is 32 to 256 values, too little work to schedule alone
+const DEQUANT_MIN_BLOCKS_PER_TASK: usize = 64;
 
 #[derive(Debug, Clone)]
 enum RawStorage {
@@ -35,7 +38,7 @@ enum RawStorage {
     },
 }
 
-/// A 2-D weight of ggml blocks, row-major: `rows` rows of `cols / block_size` blocks each.
+/// A weight of ggml blocks, row-major: `[rows, cols]`, or `[experts, rows, cols]` for an MoE expert stack.
 #[derive(Debug, Clone)]
 pub struct RawGgufTensor {
     ty: GgufType,
@@ -45,8 +48,10 @@ pub struct RawGgufTensor {
 
 impl RawGgufTensor {
     pub fn new(ty: GgufType, dims: &[usize], bytes: Vec<u8>, device: &Device) -> Result<Self> {
-        let &[rows, cols] = dims else {
-            inference_tensor::bail!("{ty:?} weights must be rank 2, got {dims:?}");
+        let (rows, cols) = match *dims {
+            [rows, cols] => (rows, cols),
+            [experts, rows, cols] => (experts * rows, cols),
+            _ => inference_tensor::bail!("{ty:?} weights must be rank 2 or 3, got {dims:?}"),
         };
         let Some(row_bytes) = ty.row_bytes(cols) else {
             inference_tensor::bail!(
@@ -57,13 +62,13 @@ impl RawGgufTensor {
         let expected = rows * row_bytes;
         if bytes.len() != expected {
             inference_tensor::bail!(
-                "{ty:?} [{rows}, {cols}] takes {expected} bytes, got {}",
+                "{ty:?} {dims:?} takes {expected} bytes, got {}",
                 bytes.len()
             );
         }
         let cpu = Self {
             ty,
-            shape: Shape::from((rows, cols)),
+            shape: Shape::from(dims),
             storage: RawStorage::Cpu(Arc::new(bytes)),
         };
         cpu.to_device(device)
@@ -71,6 +76,12 @@ impl RawGgufTensor {
 
     pub fn shape(&self) -> &Shape {
         &self.shape
+    }
+
+    // Every row of every expert, and the row length
+    fn flat_dims(&self) -> (usize, usize) {
+        let cols = *self.shape.dims().last().expect("rank 2 or 3");
+        (self.shape.elem_count() / cols, cols)
     }
 
     pub fn device(&self) -> Device {
@@ -105,10 +116,17 @@ impl RawGgufTensor {
             Device::Cpu => RawStorage::Cpu(Arc::new(self.bytes()?)),
             #[cfg(feature = "cuda")]
             Device::Cuda(device) => {
-                let bytes = self.bytes()?;
+                let owned;
+                let bytes = match &self.storage {
+                    RawStorage::Cpu(bytes) => bytes.as_slice(),
+                    _ => {
+                        owned = self.bytes()?;
+                        owned.as_slice()
+                    }
+                };
                 let padding = MATRIX_ROW_PADDING * self.ty.type_size() / self.ty.block_size();
                 let mut blocks = device.alloc_zeros::<u8>(bytes.len() + padding)?;
-                device.memcpy_htod(&bytes, &mut blocks.slice_mut(..bytes.len()))?;
+                device.memcpy_htod(bytes, &mut blocks.slice_mut(..bytes.len()))?;
                 RawStorage::Cuda {
                     blocks: Arc::new(blocks),
                     len: bytes.len(),
@@ -192,7 +210,7 @@ impl RawGgufTensor {
                     ids_ptr as *const std::ffi::c_void,
                     dst_ptr as *mut std::ffi::c_void,
                     row_bytes as i64,
-                    self.shape.dims2()?.0 as i64,
+                    self.flat_dims().0 as i64,
                     n as i64,
                     stream.cu_stream() as *mut std::ffi::c_void,
                 )
@@ -200,7 +218,7 @@ impl RawGgufTensor {
         }
         Ok(Self {
             ty: self.ty,
-            shape: Shape::from((n, self.shape.dims2()?.1)),
+            shape: Shape::from((n, self.flat_dims().1)),
             storage: RawStorage::Cuda {
                 blocks: Arc::new(rows),
                 len,
@@ -211,8 +229,48 @@ impl RawGgufTensor {
 
     /// The weight as an F32 tensor on `device`.
     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
-        let values = dequantize_rows(self.ty, self.shape.dims2()?.1, &self.bytes()?)?;
+        let values = dequantize_rows(self.ty, self.flat_dims().1, &self.bytes()?)?;
         Tensor::from_vec(values, self.shape.clone(), &Device::Cpu)?.to_device(device)
+    }
+
+    /// Experts `ids` of an expert stack, dequantized to `dtype` as `[ids.len(), rows, cols]` on the weight's device.
+    pub fn experts(&self, ids: &[u32], dtype: DType) -> Result<Tensor> {
+        let (experts, rows, cols) = self.shape.dims3()?;
+        if let Some(id) = ids.iter().find(|&&id| id as usize >= experts) {
+            inference_tensor::bail!("expert {id} is out of range for {experts} experts");
+        }
+        let row_bytes = self.ty.row_bytes(cols).expect("validated at construction");
+        let dims = (ids.len(), rows, cols);
+        match &self.storage {
+            RawStorage::Cpu(bytes) => {
+                let expert_bytes = rows * row_bytes;
+                let selected = ids
+                    .iter()
+                    .flat_map(|&id| &bytes[id as usize * expert_bytes..][..expert_bytes])
+                    .copied()
+                    .collect::<Vec<_>>();
+                let values = dequantize_rows(self.ty, cols, &selected)?;
+                Tensor::from_vec(values, dims, &Device::Cpu)?.to_dtype(dtype)
+            }
+            #[cfg(feature = "cuda")]
+            RawStorage::Cuda { device, .. } => {
+                let row_ids = ids
+                    .iter()
+                    .flat_map(|&id| (0..rows as u32).map(move |r| id * rows as u32 + r))
+                    .collect::<Vec<_>>();
+                let n = row_ids.len();
+                let row_ids = Tensor::from_vec(row_ids, n, &Device::Cuda(device.clone()))?;
+                let gathered = self.gather_cuda(&row_ids, row_bytes)?;
+                let compute = if super::fast_mmvq::can_dequantize(self.ty, dtype) {
+                    dtype
+                } else {
+                    DType::F32
+                };
+                super::fast_mmvq::dequantize(&gathered, compute)?
+                    .to_dtype(dtype)?
+                    .reshape(dims)
+            }
+        }
     }
 }
 
@@ -256,37 +314,40 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
             inference_tensor::bail!("{ty:?} data of {} bytes is not whole rows", bytes.len());
         }
         let mut out = vec![0f32; bytes.len() / row_bytes * cols];
-        for (row, values) in bytes
-            .chunks_exact(row_bytes)
-            .zip(out.chunks_exact_mut(cols))
-        {
-            if ty.is_trellis() {
-                super::kt_dequant::dequantize_row(ty, row, values);
-            } else {
-                super::iqk_dequant::dequantize_row(ty, row, values);
-            }
-        }
+        bytes
+            .par_chunks_exact(row_bytes)
+            .zip(out.par_chunks_exact_mut(cols))
+            .for_each(|(row, values)| {
+                if ty.is_trellis() {
+                    super::kt_dequant::dequantize_row(ty, row, values);
+                } else {
+                    super::iqk_dequant::dequantize_row(ty, row, values);
+                }
+            });
         return Ok(out);
     }
     let (block, size) = (ty.block_size(), ty.type_size());
     if !bytes.len().is_multiple_of(size) {
         inference_tensor::bail!("{ty:?} data of {} bytes is not whole blocks", bytes.len());
     }
+    let dequantize_block: fn(&[u8], &mut [f32]) = match ty {
+        GgufType::Iq4Nl => dequantize_iq4_nl,
+        GgufType::Iq4Xs => dequantize_iq4_xs,
+        GgufType::Iq2Xxs => super::iq_dequant::iq2_xxs,
+        GgufType::Iq2Xs => super::iq_dequant::iq2_xs,
+        GgufType::Iq2S => super::iq_dequant::iq2_s,
+        GgufType::Iq3Xxs => super::iq_dequant::iq3_xxs,
+        GgufType::Iq3S => super::iq_dequant::iq3_s,
+        GgufType::Iq1S => super::iq_dequant::iq1_s,
+        GgufType::Iq1M => super::iq_dequant::iq1_m,
+        other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
+    };
     let mut out = vec![0f32; bytes.len() / size * block];
-    for (block_bytes, values) in bytes.chunks_exact(size).zip(out.chunks_exact_mut(block)) {
-        match ty {
-            GgufType::Iq4Nl => dequantize_iq4_nl(block_bytes, values),
-            GgufType::Iq4Xs => dequantize_iq4_xs(block_bytes, values),
-            GgufType::Iq2Xxs => super::iq_dequant::iq2_xxs(block_bytes, values),
-            GgufType::Iq2Xs => super::iq_dequant::iq2_xs(block_bytes, values),
-            GgufType::Iq2S => super::iq_dequant::iq2_s(block_bytes, values),
-            GgufType::Iq3Xxs => super::iq_dequant::iq3_xxs(block_bytes, values),
-            GgufType::Iq3S => super::iq_dequant::iq3_s(block_bytes, values),
-            GgufType::Iq1S => super::iq_dequant::iq1_s(block_bytes, values),
-            GgufType::Iq1M => super::iq_dequant::iq1_m(block_bytes, values),
-            other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
-        }
-    }
+    bytes
+        .par_chunks_exact(size)
+        .zip(out.par_chunks_exact_mut(block))
+        .with_min_len(DEQUANT_MIN_BLOCKS_PER_TASK)
+        .for_each(|(block_bytes, values)| dequantize_block(block_bytes, values));
     Ok(out)
 }
 
@@ -389,6 +450,67 @@ impl QuantMethod for GgufRawMatMul {
 
     fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
         self.w.embedding(ids)
+    }
+
+    // One expert dequantized at a time, then its matmul over the inputs routed to it; `a` is per token or per slot
+    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
+        let (_, rows, cols) = self.w.shape.dims3()?;
+        let slots = indices.elem_count();
+        let k = indices.dim(inference_tensor::D::Minus1)?;
+        let inputs = a.elem_count() / cols;
+        let per_slot = match inputs {
+            n if n == slots => true,
+            n if n * k == slots => false,
+            _ => inference_tensor::bail!(
+                "gguf-raw gather: input {:?} does not fit indices {:?}",
+                a.dims(),
+                indices.dims()
+            ),
+        };
+        let mut out_dims = indices.dims().to_vec();
+        out_dims.push(rows);
+        if slots == 0 {
+            return Tensor::zeros(out_dims, a.dtype(), a.device());
+        }
+        let ids = indices
+            .flatten_all()?
+            .to_dtype(DType::U32)?
+            .to_vec1::<u32>()?;
+        // Slots grouped by expert, so each expert's inputs and outputs are contiguous; `order` maps them back
+        let mut order = (0..slots as u32).collect::<Vec<_>>();
+        order.sort_by_key(|&slot| ids[slot as usize]);
+        let routed = order
+            .iter()
+            .map(|&slot| if per_slot { slot } else { slot / k as u32 })
+            .collect::<Vec<_>>();
+        let routed = Tensor::from_vec(routed, slots, a.device())?;
+        let grouped = a.reshape((inputs, cols))?.index_select(&routed, 0)?;
+        let mut outputs = Vec::new();
+        let mut start = 0;
+        while start < slots {
+            let expert = ids[order[start] as usize];
+            let len = order[start..]
+                .iter()
+                .take_while(|&&slot| ids[slot as usize] == expert)
+                .count();
+            let weight = self.w.experts(&[expert], a.dtype())?.squeeze(0)?;
+            outputs.push(grouped.narrow(0, start, len)?.matmul(&weight.t()?)?);
+            start += len;
+        }
+        let mut inverse = vec![0u32; slots];
+        for (at, &slot) in order.iter().enumerate() {
+            inverse[slot as usize] = at as u32;
+        }
+        let inverse = Tensor::from_vec(inverse, slots, a.device())?;
+        let out = Tensor::cat(&outputs, 0)?.index_select(&inverse, 0)?;
+        let out = match &self.b {
+            Some(b) => {
+                let b = b.index_select(&indices.flatten_all()?.to_device(b.device())?, 0)?;
+                out.broadcast_add(&b.to_device(out.device())?.to_dtype(out.dtype())?)?
+            }
+            None => out,
+        };
+        out.reshape(out_dims)
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
@@ -624,6 +746,71 @@ mod tests {
                     .is_err()
             );
         }
+        Ok(())
+    }
+
+    // Relative to the largest output: IQ6_K's CUDA dequantizer rounds through its tables, the rest match exactly
+    const GATHER_TOLERANCE: f32 = 1e-3;
+
+    // Repeated experts, an unused one, and both input layouts: one input per token, or one per slot
+    #[test]
+    fn expert_gather_matches_the_dequantized_stack() -> Result<()> {
+        const EXPERTS: usize = 5;
+        const ROWS: usize = 16;
+        const COLS: usize = 256;
+        let ids = [[3u32, 0, 3], [1, 4, 0], [4, 4, 1], [0, 1, 3]];
+        let (tokens, k) = (ids.len(), ids[0].len());
+        let devices: Vec<Device> = std::iter::once(Device::Cpu)
+            .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
+            .collect();
+        for ty in GgufType::RAW_BLOCKS {
+            let bytes = random_rows(ty, EXPERTS * ROWS, COLS, 13);
+            let stack =
+                RawGgufTensor::new(ty, &[EXPERTS, ROWS, COLS], bytes.clone(), &Device::Cpu)?
+                    .dequantize(&Device::Cpu)?;
+            let shared = Tensor::randn(0f32, 1f32, (tokens, 1, COLS), &Device::Cpu)?;
+            let per_slot = Tensor::randn(0f32, 1f32, (tokens, k, COLS), &Device::Cpu)?;
+            for device in &devices {
+                let layer = GgufRawMatMul::new(
+                    RawGgufTensor::new(ty, &[EXPERTS, ROWS, COLS], bytes.clone(), device)?,
+                    None,
+                );
+                let indices = Tensor::new(&ids, device)?;
+                for (xs, per) in [(&shared, false), (&per_slot, true)] {
+                    let actual = layer
+                        .gather_forward(&xs.to_device(device)?, &indices)?
+                        .to_device(&Device::Cpu)?;
+                    assert_eq!(actual.dims(), [tokens, k, ROWS]);
+                    for (t, row) in ids.iter().enumerate() {
+                        for (j, &e) in row.iter().enumerate() {
+                            let x = xs.get(t)?.get(if per { j } else { 0 })?;
+                            let want = stack
+                                .get(e as usize)?
+                                .matmul(&x.unsqueeze(1)?)?
+                                .squeeze(1)?;
+                            let peak = want.abs()?.max_all()?.to_scalar::<f32>()?;
+                            let diff = (actual.get(t)?.get(j)? - &want)?
+                                .abs()?
+                                .max_all()?
+                                .to_scalar::<f32>()?;
+                            assert!(
+                                diff <= GATHER_TOLERANCE * peak,
+                                "{ty:?} on {device:?} token {t} slot {j}: {diff} (peak {peak})"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            RawGgufTensor::new(
+                GgufType::Iq4Xs,
+                &[2, 2, 2, 256],
+                vec![0; 4 * 136],
+                &Device::Cpu
+            )
+            .is_err()
+        );
         Ok(())
     }
 

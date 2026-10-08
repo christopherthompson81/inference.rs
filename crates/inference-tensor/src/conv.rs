@@ -381,8 +381,12 @@ impl Tensor {
 mod tests {
     use crate::{DType, Device, Result, Tensor};
 
-    // (dtype, max abs error against the f32 CPU reference)
-    const DTYPES: [(DType, f32); 3] = [(DType::F32, 1e-4), (DType::F16, 2e-2), (DType::BF16, 8e-2)];
+    // (dtype, max error relative to the reference's peak): a few rounding steps of the dtype
+    const DTYPES: [(DType, f32); 3] = [
+        (DType::F32, 1e-5),
+        (DType::F16, 2e-3),
+        (DType::BF16, 1.6e-2),
+    ];
 
     fn max_abs_diff(a: &Tensor, b: &Tensor) -> Result<f32> {
         a.to_dtype(DType::F32)?
@@ -418,7 +422,11 @@ mod tests {
                 let got = xc.conv1d(&wc, padding, stride, dilation, groups)?;
                 assert_eq!(got.dims(), expected.dims());
                 let diff = max_abs_diff(&got, &expected)?;
-                assert!(diff <= tolerance, "{dtype:?} c={c} groups={groups}: {diff}");
+                let peak = expected.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+                assert!(
+                    diff <= tolerance * peak,
+                    "{dtype:?} c={c} groups={groups}: {diff} (peak {peak})"
+                );
             }
         }
         Ok(())
@@ -472,7 +480,11 @@ mod tests {
                 let got = xc.conv2d(&wc, padding, stride, dilation, groups)?;
                 assert_eq!(got.dims(), expected.dims());
                 let diff = max_abs_diff(&got, &expected)?;
-                assert!(diff <= tolerance, "{dtype:?} c={c} groups={groups}: {diff}");
+                let peak = expected.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+                assert!(
+                    diff <= tolerance * peak,
+                    "{dtype:?} c={c} groups={groups}: {diff} (peak {peak})"
+                );
             }
         }
         Ok(())

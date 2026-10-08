@@ -63,6 +63,7 @@ async fn main() -> Result<()> {
             let dir = gguf.parent().context("the GGUF path has no directory")?;
             let name = gguf.file_name().context("the GGUF path has no file name")?;
             GgufModelBuilder::new(dir.to_string_lossy(), vec![name.to_string_lossy()])
+                .with_logging()
                 .build()
                 .await?
         }

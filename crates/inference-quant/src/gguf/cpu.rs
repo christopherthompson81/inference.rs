@@ -71,8 +71,8 @@ pub fn qtensor_indexed_moe_forward(
 
     let device = x.device();
 
-    // Dequantize all weights to f32
-    let weights = qtensor.dequantize(device)?;
+    // CPU QTensors take bf16 activations unconverted, so the weights follow the input's dtype
+    let weights = qtensor.dequantize(device)?.to_dtype(x.dtype())?;
 
     // Create an UnquantLinear and use its gather_forward
     let unquant = UnquantLinear::new(QuantMethodConfig::Unquantized(Linear::new(weights, None)))?;
