@@ -2,7 +2,7 @@ use anyhow::Result;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind_required, bind_required_linear, bind_required_with,
+    TensorInventory, bind_required, bind_required_linears, bind_required_with, bind_siglip_vision,
     validate_architecture, validate_projector,
 };
 
@@ -46,7 +46,12 @@ fn build_gemma3_bindings_from_inventory(inventory: &TensorInventory<'_>) -> Resu
         "multi_modal_projector.mm_soft_emb_norm.weight",
         "mm.soft_emb_norm.weight",
     )?;
-    bind_siglip_vision(inventory, &mut bindings)?;
+    bind_siglip_vision(
+        inventory,
+        &mut bindings,
+        "vision_tower.vision_model",
+        FAMILY,
+    )?;
 
     Ok(bindings)
 }
@@ -106,22 +111,21 @@ fn bind_text_layer(
 ) -> Result<()> {
     let native = format!("{model}.layers.{layer}");
     let source = format!("blk.{layer}");
-    for (target, role) in [
-        ("self_attn.q_proj", "attn_q"),
-        ("self_attn.k_proj", "attn_k"),
-        ("self_attn.v_proj", "attn_v"),
-        ("self_attn.o_proj", "attn_output"),
-        ("mlp.gate_proj", "ffn_gate"),
-        ("mlp.up_proj", "ffn_up"),
-        ("mlp.down_proj", "ffn_down"),
-    ] {
-        bind_required_linear(
-            inventory,
-            bindings,
-            &format!("{native}.{target}"),
-            &format!("{source}.{role}"),
-        )?;
-    }
+    bind_required_linears(
+        inventory,
+        bindings,
+        &native,
+        &source,
+        &[
+            ("self_attn.q_proj", "attn_q"),
+            ("self_attn.k_proj", "attn_k"),
+            ("self_attn.v_proj", "attn_v"),
+            ("self_attn.o_proj", "attn_output"),
+            ("mlp.gate_proj", "ffn_gate"),
+            ("mlp.up_proj", "ffn_up"),
+            ("mlp.down_proj", "ffn_down"),
+        ],
+    )?;
     for (target, role) in [
         ("self_attn.q_norm.weight", "attn_q_norm.weight"),
         ("self_attn.k_norm.weight", "attn_k_norm.weight"),
@@ -143,54 +147,6 @@ fn bind_text_layer(
     Ok(())
 }
 
-fn bind_siglip_vision(
-    inventory: &TensorInventory<'_>,
-    bindings: &mut GgufBindingMap,
-) -> Result<()> {
-    let root = "vision_tower.vision_model";
-    bind_required_linear(
-        inventory,
-        bindings,
-        &format!("{root}.embeddings.patch_embedding"),
-        "v.patch_embd",
-    )?;
-    bind_required(
-        inventory,
-        bindings,
-        format!("{root}.embeddings.position_embedding.weight"),
-        "v.position_embd.weight",
-    )?;
-    bind_required_linear(
-        inventory,
-        bindings,
-        &format!("{root}.post_layernorm"),
-        "v.post_ln",
-    )?;
-
-    for layer in inventory.require_layers("v.blk.", FAMILY)? {
-        let native = format!("{root}.encoder.layers.{layer}");
-        let source = format!("v.blk.{layer}");
-        for (target, role) in [
-            ("self_attn.q_proj", "attn_q"),
-            ("self_attn.k_proj", "attn_k"),
-            ("self_attn.v_proj", "attn_v"),
-            ("self_attn.out_proj", "attn_out"),
-            ("mlp.fc1", "ffn_up"),
-            ("mlp.fc2", "ffn_down"),
-            ("layer_norm1", "ln1"),
-            ("layer_norm2", "ln2"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
-    }
-    Ok(())
-}
-
 fn bind_shifted_norm(
     inventory: &TensorInventory<'_>,
     bindings: &mut GgufBindingMap,
@@ -207,7 +163,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::{binding_sources, siglip_test_tensors};
 
     #[test]
     fn maps_complete_gemma3_inventory() {
@@ -297,11 +253,6 @@ mod tests {
             ("output.weight".to_string(), vec![8, 8]),
             ("mm.input_projection.weight".to_string(), vec![8, 8]),
             ("mm.soft_emb_norm.weight".to_string(), vec![8]),
-            ("v.patch_embd.weight".to_string(), vec![8, 3, 2, 2]),
-            ("v.patch_embd.bias".to_string(), vec![8]),
-            ("v.position_embd.weight".to_string(), vec![16, 8]),
-            ("v.post_ln.weight".to_string(), vec![8]),
-            ("v.post_ln.bias".to_string(), vec![8]),
         ];
         for role in [
             "attn_q",
@@ -324,12 +275,7 @@ mod tests {
         ] {
             tensors.push((format!("blk.0.{role}.weight"), vec![8]));
         }
-        for role in [
-            "attn_q", "attn_k", "attn_v", "attn_out", "ffn_up", "ffn_down", "ln1", "ln2",
-        ] {
-            tensors.push((format!("v.blk.0.{role}.weight"), vec![8, 8]));
-            tensors.push((format!("v.blk.0.{role}.bias"), vec![8]));
-        }
+        tensors.extend(siglip_test_tensors());
         tensors
     }
 }

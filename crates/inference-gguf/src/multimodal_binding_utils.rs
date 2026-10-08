@@ -183,6 +183,81 @@ pub(super) fn bind_required_linear(
     Ok(())
 }
 
+/// Binds each `{native}.{target}` linear from `{source}.{role}`.
+pub(super) fn bind_required_linears(
+    inventory: &TensorInventory<'_>,
+    bindings: &mut GgufBindingMap,
+    native: &str,
+    source: &str,
+    pairs: &[(&str, &str)],
+) -> Result<()> {
+    for (target, role) in pairs {
+        bind_required_linear(
+            inventory,
+            bindings,
+            &format!("{native}.{target}"),
+            &format!("{source}.{role}"),
+        )?;
+    }
+    Ok(())
+}
+
+/// A SigLIP vision tower under `root`, patch embedding included.
+pub(super) fn bind_siglip_vision(
+    inventory: &TensorInventory<'_>,
+    bindings: &mut GgufBindingMap,
+    root: &str,
+    family: &str,
+) -> Result<()> {
+    bind_required_linear(
+        inventory,
+        bindings,
+        &format!("{root}.embeddings.patch_embedding"),
+        "v.patch_embd",
+    )?;
+    bind_siglip_encoder(inventory, bindings, root, family)
+}
+
+/// A SigLIP vision tower under `root` apart from its patch embedding.
+pub(super) fn bind_siglip_encoder(
+    inventory: &TensorInventory<'_>,
+    bindings: &mut GgufBindingMap,
+    root: &str,
+    family: &str,
+) -> Result<()> {
+    bind_required(
+        inventory,
+        bindings,
+        format!("{root}.embeddings.position_embedding.weight"),
+        "v.position_embd.weight",
+    )?;
+    bind_required_linear(
+        inventory,
+        bindings,
+        &format!("{root}.post_layernorm"),
+        "v.post_ln",
+    )?;
+    for layer in inventory.require_layers("v.blk.", family)? {
+        bind_required_linears(
+            inventory,
+            bindings,
+            &format!("{root}.encoder.layers.{layer}"),
+            &format!("v.blk.{layer}"),
+            &[
+                ("self_attn.q_proj", "attn_q"),
+                ("self_attn.k_proj", "attn_k"),
+                ("self_attn.v_proj", "attn_v"),
+                ("self_attn.out_proj", "attn_out"),
+                ("mlp.fc1", "ffn_up"),
+                ("mlp.fc2", "ffn_down"),
+                ("layer_norm1", "ln1"),
+                ("layer_norm2", "ln2"),
+            ],
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn bind_llama_text(
     inventory: &TensorInventory<'_>,
     bindings: &mut GgufBindingMap,
@@ -218,22 +293,21 @@ pub(super) fn bind_llama_text(
     for layer in inventory.require_layers("blk.", family)? {
         let native = format!("{model_prefix}.layers.{layer}");
         let source = format!("blk.{layer}");
-        for (target, role) in [
-            ("self_attn.q_proj", "attn_q"),
-            ("self_attn.k_proj", "attn_k"),
-            ("self_attn.v_proj", "attn_v"),
-            ("self_attn.o_proj", "attn_output"),
-            ("mlp.gate_proj", "ffn_gate"),
-            ("mlp.up_proj", "ffn_up"),
-            ("mlp.down_proj", "ffn_down"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
+        bind_required_linears(
+            inventory,
+            bindings,
+            &native,
+            &source,
+            &[
+                ("self_attn.q_proj", "attn_q"),
+                ("self_attn.k_proj", "attn_k"),
+                ("self_attn.v_proj", "attn_v"),
+                ("self_attn.o_proj", "attn_output"),
+                ("mlp.gate_proj", "ffn_gate"),
+                ("mlp.up_proj", "ffn_up"),
+                ("mlp.down_proj", "ffn_down"),
+            ],
+        )?;
         bind_required(
             inventory,
             bindings,
@@ -269,6 +343,25 @@ pub(super) fn inverse_llama_permute(
         .reshape(reshaped)
         .permute(permutation)
         .reshape(shape.to_vec()))
+}
+
+/// One-layer SigLIP vision tower tensors for binding tests.
+#[cfg(test)]
+pub(super) fn siglip_test_tensors() -> Vec<(String, Vec<usize>)> {
+    let mut tensors = vec![
+        ("v.patch_embd.weight".to_string(), vec![8, 3, 2, 2]),
+        ("v.patch_embd.bias".to_string(), vec![8]),
+        ("v.position_embd.weight".to_string(), vec![16, 8]),
+        ("v.post_ln.weight".to_string(), vec![8]),
+        ("v.post_ln.bias".to_string(), vec![8]),
+    ];
+    for role in [
+        "attn_q", "attn_k", "attn_v", "attn_out", "ffn_up", "ffn_down", "ln1", "ln2",
+    ] {
+        tensors.push((format!("v.blk.0.{role}.weight"), vec![8, 8]));
+        tensors.push((format!("v.blk.0.{role}.bias"), vec![8]));
+    }
+    tensors
 }
 
 #[cfg(test)]

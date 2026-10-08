@@ -4,8 +4,8 @@ use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use inference_nn::loaders::MultimodalLoaderType;
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind_required, bind_required_linear, bind_required_with,
-    validate_architecture, validate_projector,
+    TensorInventory, bind_required, bind_required_linear, bind_required_linears,
+    bind_required_with, validate_architecture, validate_projector,
 };
 
 const FAMILY: &str = "Muse-Glimmer";
@@ -64,23 +64,22 @@ fn bind_text(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -> 
     for layer in inventory.require_layers("blk.", FAMILY)? {
         let native = format!("model.language_model.layers.{layer}");
         let source = format!("blk.{layer}");
-        for (target, role) in [
-            ("self_attn.q_proj", "attn_q"),
-            ("self_attn.k_proj", "attn_k"),
-            ("self_attn.v_proj", "attn_v"),
-            ("self_attn.o_proj", "attn_output"),
-            ("self_attn.gate_proj", "attn_gate"),
-            ("mlp.gate_proj", "ffn_gate"),
-            ("mlp.up_proj", "ffn_up"),
-            ("mlp.down_proj", "ffn_down"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
+        bind_required_linears(
+            inventory,
+            bindings,
+            &native,
+            &source,
+            &[
+                ("self_attn.q_proj", "attn_q"),
+                ("self_attn.k_proj", "attn_k"),
+                ("self_attn.v_proj", "attn_v"),
+                ("self_attn.o_proj", "attn_output"),
+                ("self_attn.gate_proj", "attn_gate"),
+                ("mlp.gate_proj", "ffn_gate"),
+                ("mlp.up_proj", "ffn_up"),
+                ("mlp.down_proj", "ffn_down"),
+            ],
+        )?;
         for (target, role) in [
             ("input_layernorm.weight", "attn_norm.weight"),
             (
@@ -131,23 +130,22 @@ fn bind_vision(inventory: &TensorInventory<'_>, bindings: &mut GgufBindingMap) -
     for layer in inventory.require_layers("v.blk.", FAMILY)? {
         let native = format!("{root}.layers.{layer}");
         let source = format!("v.blk.{layer}");
-        for (target, role) in [
-            ("attn.q_proj", "attn_q"),
-            ("attn.k_proj", "attn_k"),
-            ("attn.v_proj", "attn_v"),
-            ("attn.proj", "attn_out"),
-            ("mlp.fc1", "ffn_up"),
-            ("mlp.fc2", "ffn_down"),
-            ("norm1", "ln1"),
-            ("norm2", "ln2"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
+        bind_required_linears(
+            inventory,
+            bindings,
+            &native,
+            &source,
+            &[
+                ("attn.q_proj", "attn_q"),
+                ("attn.k_proj", "attn_k"),
+                ("attn.v_proj", "attn_v"),
+                ("attn.proj", "attn_out"),
+                ("mlp.fc1", "ffn_up"),
+                ("mlp.fc2", "ffn_down"),
+                ("norm1", "ln1"),
+                ("norm2", "ln2"),
+            ],
+        )?;
     }
     Ok(())
 }

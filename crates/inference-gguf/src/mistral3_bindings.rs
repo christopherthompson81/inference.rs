@@ -2,8 +2,9 @@ use anyhow::Result;
 use inference_quant::{GgufArchive, GgufBindingMap};
 
 use super::multimodal_binding_utils::{
-    TensorInventory, bind_llama_text, bind_required, bind_required_linear, bind_required_with,
-    inverse_llama_permute, metadata_usize, validate_architecture, validate_projector,
+    TensorInventory, bind_llama_text, bind_required, bind_required_linear, bind_required_linears,
+    bind_required_with, inverse_llama_permute, metadata_usize, validate_architecture,
+    validate_projector,
 };
 
 const FAMILY: &str = "Mistral 3/Pixtral";
@@ -93,20 +94,19 @@ fn bind_pixtral_vision(
             &format!("{source}.attn_k"),
             vision_heads,
         )?;
-        for (target, role) in [
-            ("attention.v_proj", "attn_v"),
-            ("attention.o_proj", "attn_out"),
-            ("feed_forward.gate_proj", "ffn_gate"),
-            ("feed_forward.up_proj", "ffn_up"),
-            ("feed_forward.down_proj", "ffn_down"),
-        ] {
-            bind_required_linear(
-                inventory,
-                bindings,
-                &format!("{native}.{target}"),
-                &format!("{source}.{role}"),
-            )?;
-        }
+        bind_required_linears(
+            inventory,
+            bindings,
+            &native,
+            &source,
+            &[
+                ("attention.v_proj", "attn_v"),
+                ("attention.o_proj", "attn_out"),
+                ("feed_forward.gate_proj", "ffn_gate"),
+                ("feed_forward.up_proj", "ffn_up"),
+                ("feed_forward.down_proj", "ffn_down"),
+            ],
+        )?;
         bind_required(
             inventory,
             bindings,

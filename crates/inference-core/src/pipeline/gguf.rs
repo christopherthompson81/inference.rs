@@ -311,6 +311,46 @@ impl GGUFLoader {
             .map(|config| config.adapters.as_slice())
     }
 
+    /// The GGUF weights, tokenizer, generation config and chat template, with no processor configs.
+    fn prepare_source(
+        &self,
+        archive: &Arc<inference_quant::GgufArchive>,
+        bindings: &dyn inference_quant::GgufBindingResolver,
+        paths: &dyn ModelPaths,
+        options: &LoadOptions<'_>,
+        config: String,
+        rope_pairing: RopePairing,
+    ) -> Result<PreparedSource> {
+        let dtype = options.dtype.try_into_dtype(&[options.device])?;
+        let source = Arc::new(inference_quant::GgufWeightSource::new(
+            archive.clone(),
+            bindings,
+            dtype,
+        )?);
+        let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
+        let generation_config = self.resolve_generation_config(paths, &tokenizer);
+        let chat_template =
+            if paths.get_template_filename().is_none() && self.chat_template.is_none() {
+                get_gguf_chat_template_from_metadata(archive.metadata())?
+            } else {
+                None
+            };
+        Ok(PreparedSource {
+            config,
+            weights: source.sharded_var_builder(Device::Cpu),
+            tokenizer: tokenizer.conversion.tokenizer,
+            generation_config,
+            chat_template,
+            bos_token: tokenizer.conversion.bos,
+            eos_token: tokenizer.conversion.eos,
+            unk_token: tokenizer.conversion.unk,
+            processor_config: None,
+            preprocessor_config: None,
+            source_weight_files: paths.get_weight_filenames().to_vec(),
+            rope_pairing,
+        })
+    }
+
     fn resolve_tokenizer(
         &self,
         paths: &dyn ModelPaths,
@@ -474,36 +514,8 @@ impl GGUFLoader {
         };
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         let bindings = build_normal_bindings(&archive, &loader_type, descriptor.architecture)?;
-        let internal_dtype = options.dtype.try_into_dtype(&[options.device])?;
-        let source = Arc::new(inference_quant::GgufWeightSource::new(
-            archive.clone(),
-            &bindings,
-            internal_dtype,
-        )?);
-        let weights = source.sharded_var_builder(Device::Cpu);
-
-        let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
-        let generation_config = self.resolve_generation_config(paths, &tokenizer);
-        let gguf_chat_template =
-            if paths.get_template_filename().is_none() && self.chat_template.is_none() {
-                get_gguf_chat_template_from_metadata(archive.metadata())?
-            } else {
-                None
-            };
-        let source = PreparedSource {
-            config,
-            weights,
-            tokenizer: tokenizer.conversion.tokenizer,
-            generation_config,
-            chat_template: gguf_chat_template,
-            bos_token: tokenizer.conversion.bos,
-            eos_token: tokenizer.conversion.eos,
-            unk_token: tokenizer.conversion.unk,
-            source_weight_files: paths.get_weight_filenames().to_vec(),
-            rope_pairing,
-            processor_config: None,
-            preprocessor_config: None,
-        };
+        let source =
+            self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
         let mut loader = NormalLoaderBuilder::new(
             NormalSpecificConfig {
                 topology: self.config.topology.clone(),
@@ -552,35 +564,14 @@ impl GGUFLoader {
         let config = stamp_qk_rope_layout(&config, RopePairing::HalfSplit)?;
         let use_language_model_prefix = gemma3_text_uses_language_model_prefix(&config)?;
         let bindings = build_gemma3_text_bindings(&archive, use_language_model_prefix)?;
-        let internal_dtype = options.dtype.try_into_dtype(&[options.device])?;
-        let source = Arc::new(inference_quant::GgufWeightSource::new(
-            archive.clone(),
+        let source = self.prepare_source(
+            &archive,
             &bindings,
-            internal_dtype,
-        )?);
-        let weights = source.sharded_var_builder(Device::Cpu);
-        let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
-        let generation_config = self.resolve_generation_config(paths, &tokenizer);
-        let gguf_chat_template =
-            if paths.get_template_filename().is_none() && self.chat_template.is_none() {
-                get_gguf_chat_template_from_metadata(archive.metadata())?
-            } else {
-                None
-            };
-        let source = PreparedSource {
+            paths,
+            &options,
             config,
-            weights,
-            tokenizer: tokenizer.conversion.tokenizer,
-            generation_config,
-            chat_template: gguf_chat_template,
-            bos_token: tokenizer.conversion.bos,
-            eos_token: tokenizer.conversion.eos,
-            unk_token: tokenizer.conversion.unk,
-            processor_config: None,
-            preprocessor_config: None,
-            source_weight_files: paths.get_weight_filenames().to_vec(),
-            rope_pairing: RopePairing::HalfSplit,
-        };
+            RopePairing::HalfSplit,
+        )?;
         let mut loader = MultimodalLoaderBuilder::new(
             self.config.multimodal_config(),
             None,
@@ -659,21 +650,8 @@ impl GGUFLoader {
         if architecture == "gemma3" {
             ensure_gemma3_vision_config(&config)?;
         }
-        let internal_dtype = options.dtype.try_into_dtype(&[options.device])?;
-        let source = Arc::new(inference_quant::GgufWeightSource::new(
-            archive.clone(),
-            &bindings,
-            internal_dtype,
-        )?);
-        let weights = source.sharded_var_builder(Device::Cpu);
-        let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
-        let generation_config = self.resolve_generation_config(paths, &tokenizer);
-        let gguf_chat_template =
-            if paths.get_template_filename().is_none() && self.chat_template.is_none() {
-                get_gguf_chat_template_from_metadata(archive.metadata())?
-            } else {
-                None
-            };
+        let source =
+            self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
         let processor_config = paths
             .get_processor_config()
             .as_ref()
@@ -687,18 +665,10 @@ impl GGUFLoader {
         let mut source_weight_files = paths.get_weight_filenames().to_vec();
         source_weight_files.extend_from_slice(mmproj_paths);
         let source = PreparedSource {
-            config,
-            weights,
-            tokenizer: tokenizer.conversion.tokenizer,
-            generation_config,
-            chat_template: gguf_chat_template,
-            bos_token: tokenizer.conversion.bos,
-            eos_token: tokenizer.conversion.eos,
-            unk_token: tokenizer.conversion.unk,
             processor_config,
             preprocessor_config,
             source_weight_files,
-            rope_pairing,
+            ..source
         };
         let mut loader = MultimodalLoaderBuilder::new(
             self.config.multimodal_config(),
