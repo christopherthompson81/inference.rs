@@ -4,8 +4,7 @@
 use inference::{Model, RequestBuilder, TextMessageRole, TextMessages};
 use metrics_util::debugging::{DebugValue, DebuggingRecorder, Snapshotter};
 
-/// The greedy (token, logprob) per step.
-pub type Trace = Vec<(u32, f32)>;
+pub use super::traces::Trace;
 /// Each prompt's trace, per round of concurrent requests.
 pub type Rounds = Vec<Vec<Trace>>;
 
@@ -28,24 +27,8 @@ const BF16_LOGPROB_TOLERANCE: f32 = 0.06;
 /// The greedy (token, logprob) per step of `max_len` steps for one prompt.
 pub async fn prompt_trace(model: &Model, prompt: &str, max_len: usize) -> anyhow::Result<Trace> {
     let request =
-        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, prompt))
-            .set_sampler_max_len(max_len)
-            .set_sampler_topk(1)
-            .return_logprobs(true)
-            .set_sampler_topn_logprobs(1);
-    let response = model.send_chat_request(request).await?;
-    let trace: Trace = response.choices[0]
-        .logprobs
-        .as_ref()
-        .and_then(|lp| lp.content.as_ref())
-        .map(|toks| {
-            toks.iter()
-                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
-                .collect()
-        })
-        .unwrap_or_default();
-    anyhow::ensure!(!trace.is_empty(), "the model generated nothing");
-    Ok(trace)
+        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, prompt));
+    Ok(super::traces::greedy(model, request, max_len).await?.0)
 }
 
 /// Each prompt's trace, per round of concurrent requests.
@@ -80,14 +63,9 @@ pub fn assert_trace(
     expected: &[(u32, f32)],
     context: &(impl std::fmt::Debug + ?Sized),
 ) {
-    let ids = |t: &[(u32, f32)]| t.iter().map(|(id, _)| *id).collect::<Vec<_>>();
-    assert_eq!(ids(trace), ids(expected), "decode moved: {context:?}");
     assert!(
-        trace
-            .iter()
-            .zip(expected)
-            .all(|(got, want)| (got.1 - want.1).abs() < BF16_LOGPROB_TOLERANCE),
-        "logprob moved: {context:?}"
+        super::traces::close(trace, expected, BF16_LOGPROB_TOLERANCE),
+        "decode moved: {context:?}"
     );
 }
 

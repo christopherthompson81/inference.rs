@@ -1,7 +1,7 @@
-//! The text-model load paths on a tiny random-weight Llama: plain, in-situ quantized, and reloaded from the UQFF it wrote.
+//! A tiny random-weight Llama: its load paths (plain, ISQ, UQFF, LoRA), in-place requantization, prefix cache and graphs.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use inference::{
     IsqType, LoraModelBuilder, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages,
@@ -13,11 +13,17 @@ use inference_tensor::{Device, Tensor};
 mod decode_graphs;
 #[path = "../support/llama_tiny.rs"]
 mod support;
+#[path = "../support/traces.rs"]
+mod traces;
 use support::{tiny_llama_checkpoint, tiny_llama_checkpoint_with};
+use traces::{close, greedy, uqff_files};
 
 const PROMPT: &str = "hello";
+// Long enough to fill whole paged blocks, so the paged prefix cache has something to match.
+const LONG_PROMPT: &str =
+    "tell me everything about the quick brown fox and the lazy dog it jumps over, from the start.";
+const PREFIX_CACHE_SEQS: usize = 16;
 const MAX_LEN: usize = 8;
-const UQFF_EXTENSION: &str = "uqff";
 const ADAPTER: &str = "q-proj-adapter";
 const ADAPTER_RANK: usize = 2;
 // From tests/fixtures/llama_tiny/config.json; q_proj is hidden x hidden there.
@@ -25,6 +31,12 @@ const TINY_LAYERS: usize = 2;
 const TINY_HIDDEN: usize = 32;
 // f32 on both sides: the GPU's summation order moves logprobs ~1e-6, which these large random weights grow to ~3e-3
 const F32_LOGPROB_TOLERANCE: f32 = 1e-2;
+// A CPU run repeats exactly.
+const CPU_PIN_TOLERANCE: f32 = 1e-5;
+// Cached KV comes from a different prefill than a recompute, so logprobs match only to rounding.
+const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;
+// Part of the engine's refusal to requantize a model with no tracked layers.
+const NOT_AN_ISQ_LOAD: &str = "loaded with ISQ";
 
 fn cpu_text_builder(dir: &Path) -> TextModelBuilder {
     TextModelBuilder::new(dir.to_string_lossy())
@@ -32,52 +44,22 @@ fn cpu_text_builder(dir: &Path) -> TextModelBuilder {
         .with_force_cpu()
 }
 
+fn prompt_request() -> RequestBuilder {
+    RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, PROMPT))
+}
+
 async fn greedy_ids(model: &Model) -> anyhow::Result<Vec<u32>> {
-    let request =
-        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, PROMPT))
-            .set_sampler_max_len(MAX_LEN)
-            .set_sampler_topk(1)
-            .return_logprobs(true)
-            .set_sampler_topn_logprobs(1);
-    let response = model.send_chat_request(request).await?;
-    let tokens = response.choices[0]
-        .logprobs
-        .as_ref()
-        .and_then(|lp| lp.content.as_ref())
-        .map(|toks| {
-            toks.iter()
-                .map(|t| t.top_logprobs[0].token)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    anyhow::ensure!(!tokens.is_empty(), "the model generated nothing");
-    Ok(tokens)
+    let (trace, _) = greedy(model, prompt_request(), MAX_LEN).await?;
+    Ok(trace.into_iter().map(|(id, _)| id).collect())
 }
 
 // (token, logprob) per greedy step, so an adapter that moves the logits shows even when the argmax holds.
-async fn greedy_trace(model: &Model, adapter: Option<&str>) -> anyhow::Result<Vec<(u32, f32)>> {
-    let mut request =
-        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, PROMPT))
-            .set_sampler_max_len(MAX_LEN)
-            .set_sampler_topk(1)
-            .return_logprobs(true)
-            .set_sampler_topn_logprobs(1);
-    if let Some(adapter) = adapter {
-        request = request.set_adapter(adapter);
-    }
-    let response = model.send_chat_request(request).await?;
-    let trace = response.choices[0]
-        .logprobs
-        .as_ref()
-        .and_then(|lp| lp.content.as_ref())
-        .map(|toks| {
-            toks.iter()
-                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    anyhow::ensure!(!trace.is_empty(), "the model generated nothing");
-    Ok(trace)
+async fn greedy_trace(model: &Model, adapter: Option<&str>) -> anyhow::Result<traces::Trace> {
+    let request = match adapter {
+        Some(adapter) => prompt_request().set_adapter(adapter),
+        None => prompt_request(),
+    };
+    Ok(greedy(model, request, MAX_LEN).await?.0)
 }
 
 // A rank-2 PEFT adapter on every layer's q_proj, large enough to move the tiny model's logits.
@@ -108,15 +90,6 @@ fn write_q_proj_adapter(dir: &Path) -> anyhow::Result<()> {
     }
     inference_tensor::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
     Ok(())
-}
-
-fn uqff_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut files = std::fs::read_dir(dir)?
-        .map(|entry| entry.map(|e| e.path()))
-        .collect::<std::io::Result<Vec<_>>>()?;
-    files.retain(|path| path.extension().is_some_and(|ext| ext == UQFF_EXTENSION));
-    files.sort();
-    Ok(files)
 }
 
 #[tokio::test]
@@ -155,6 +128,92 @@ async fn an_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<(
     .build()
     .await?;
     assert_eq!(greedy_ids(&reloaded).await?, quantized_ids);
+    Ok(())
+}
+
+// Requantizing an ISQ load in place works from the loaded weights, so Q8_0 then HQQ4 is pinned, not an HQQ4 load.
+#[tokio::test]
+async fn an_isq_load_requantizes_in_place_as_recorded() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_checkpoint()?;
+    let model = cpu_text_builder(checkpoint.path())
+        .with_isq(IsqType::Q8_0)
+        .build()
+        .await?;
+    let before = greedy_trace(&model, None).await?;
+    model.re_isq_model(IsqType::HQQ4).await?;
+    let after = greedy_trace(&model, None).await?;
+    let expected_before: &[(u32, f32)] = &[
+        (155, -2.0968606),
+        (210, -1.9850466),
+        (120, -1.8510517),
+        (18, -3.1753128),
+        (202, -2.1321208),
+        (210, -1.7131561),
+        (120, -1.5091397),
+        (189, -3.0938122),
+    ];
+    let expected_after: &[(u32, f32)] = &[
+        (155, -1.9171935),
+        (210, -2.1728337),
+        (120, -2.0395246),
+        (18, -3.3132489),
+        (202, -2.1687129),
+        (210, -1.8857474),
+        (155, -2.4020855),
+        (210, -1.3533674),
+    ];
+    anyhow::ensure!(
+        close(&before, expected_before, CPU_PIN_TOLERANCE),
+        "Q8_0 decode moved: {before:?}"
+    );
+    anyhow::ensure!(
+        close(&after, expected_after, CPU_PIN_TOLERANCE),
+        "requantized decode moved: {after:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn re_isq_without_an_isq_load_fails() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_checkpoint()?;
+    let model = cpu_text_builder(checkpoint.path()).build().await?;
+    let error = model.re_isq_model(IsqType::Q8_0).await.err();
+    anyhow::ensure!(
+        error
+            .as_ref()
+            .is_some_and(|e| e.to_string().contains(NOT_AN_ISQ_LOAD)),
+        "re-ISQ of an unquantized load: {error:?}"
+    );
+    Ok(())
+}
+
+// The repeat of a prompt reuses the first run's cached prefix and decodes the same.
+#[tokio::test]
+async fn a_repeated_prompt_hits_the_prefix_cache() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_checkpoint()?;
+    let builder = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS));
+    // GPU builds take the paged path, whose prefix cache matches whole blocks
+    let builder = if cfg!(any(feature = "cuda", feature = "metal")) {
+        builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+    } else {
+        builder.with_force_cpu()
+    };
+    let model = builder.build().await?;
+    let request = || {
+        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, LONG_PROMPT))
+    };
+    let (first, first_cached) = greedy(&model, request(), MAX_LEN).await?;
+    let (second, second_cached) = greedy(&model, request(), MAX_LEN).await?;
+    anyhow::ensure!(
+        first_cached == 0 && second_cached > 0,
+        "cached prompt tokens: {first_cached} then {second_cached}"
+    );
+    anyhow::ensure!(
+        close(&first, &second, CACHED_LOGPROB_TOLERANCE),
+        "a prefix hit changed decoding: {first:?} vs {second:?}"
+    );
     Ok(())
 }
 

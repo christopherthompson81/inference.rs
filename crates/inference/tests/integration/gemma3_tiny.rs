@@ -5,14 +5,18 @@ use std::path::Path;
 
 use image::{DynamicImage, Rgb, RgbImage};
 use inference::{
-    Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole,
+    IsqType, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder,
+    TextMessageRole,
 };
 
 #[path = "../support/decode_graphs.rs"]
 mod decode_graphs;
 #[path = "../support/gemma3_tiny.rs"]
 mod support;
+#[path = "../support/traces.rs"]
+mod traces;
 use support::tiny_gemma3;
+use traces::{close, uqff_files};
 
 const PROMPT: &str = "describe";
 // Longer than the sliding window and long enough that a shared prefix runs past the image into whole paged blocks.
@@ -26,6 +30,8 @@ const LOGPROB_TOLERANCE: f32 = 1e-3;
 // A CPU run repeats exactly, so the pins hold to well under the gap between the image and text traces.
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
 const PIN_TOLERANCE: f32 = 1e-5;
+// Part of the engine's refusal to requantize a model with no tracked layers.
+const NOT_AN_ISQ_LOAD: &str = "loaded with ISQ";
 const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 fn builder(dir: &Path) -> MultimodalModelBuilder {
@@ -42,6 +48,13 @@ fn builder(dir: &Path) -> MultimodalModelBuilder {
     } else {
         builder.with_force_cpu()
     }
+}
+
+// A UQFF-writing load keeps the whole model on the host, so a GPU build cannot decode with it.
+fn cpu_builder(dir: &Path) -> MultimodalModelBuilder {
+    MultimodalModelBuilder::new(dir.to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
 }
 
 // A deterministic gradient, so the pixels (and so the image tokens) are the same every run.
@@ -67,38 +80,8 @@ fn text_request(prompt: &str) -> RequestBuilder {
     RequestBuilder::from(MultimodalMessages::new().add_message(TextMessageRole::User, prompt))
 }
 
-// (token, logprob) per greedy step and the prompt tokens served from the prefix cache.
-async fn trace(model: &Model, request: RequestBuilder) -> anyhow::Result<(Vec<(u32, f32)>, usize)> {
-    let request = request
-        .set_sampler_max_len(MAX_LEN)
-        .set_sampler_topk(1)
-        .return_logprobs(true)
-        .set_sampler_topn_logprobs(1);
-    let response = model.send_chat_request(request).await?;
-    let steps = response.choices[0]
-        .logprobs
-        .as_ref()
-        .and_then(|lp| lp.content.as_ref())
-        .map(|toks| {
-            toks.iter()
-                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    anyhow::ensure!(!steps.is_empty(), "the model generated nothing");
-    let cached = response
-        .usage
-        .prompt_tokens_details
-        .as_ref()
-        .map_or(0, |details| details.cached_tokens);
-    Ok((steps, cached))
-}
-
-fn same_decode(a: &[(u32, f32)], b: &[(u32, f32)]) -> bool {
-    a.len() == b.len()
-        && a.iter()
-            .zip(b)
-            .all(|(x, y)| x.0 == y.0 && (x.1 - y.1).abs() < LOGPROB_TOLERANCE)
+async fn trace(model: &Model, request: RequestBuilder) -> anyhow::Result<(traces::Trace, usize)> {
+    traces::greedy(model, request, MAX_LEN).await
 }
 
 #[tokio::test]
@@ -119,7 +102,7 @@ async fn gemma3_prefix_cache_serves_only_the_same_image() -> anyhow::Result<()> 
     trace(&warm, image_request(LONG_PROMPT, 1)).await?;
     let (b, _) = trace(&warm, image_request(LONG_PROMPT, 200)).await?;
     anyhow::ensure!(
-        same_decode(&b, &fresh_b),
+        close(&b, &fresh_b, LOGPROB_TOLERANCE),
         "image b was served image a's blocks: {b:?}"
     );
     let (a, cached) = trace(&warm, image_request(LONG_PROMPT, 1)).await?;
@@ -129,7 +112,7 @@ async fn gemma3_prefix_cache_serves_only_the_same_image() -> anyhow::Result<()> 
         "image a hit {cached} cached tokens, expected a hit only with paged attention"
     );
     anyhow::ensure!(
-        same_decode(&a, &fresh_a),
+        close(&a, &fresh_a, LOGPROB_TOLERANCE),
         "a prefix hit changed image a: {fresh_a:?} vs {a:?}"
     );
     Ok(())
@@ -155,7 +138,7 @@ async fn gemma3_text_in_the_batch_leaves_the_image_unchanged() -> anyhow::Result
     text?;
     let (batched, _) = batched?;
     anyhow::ensure!(
-        same_decode(&batched, &alone),
+        close(&batched, &alone, LOGPROB_TOLERANCE),
         "a text-only request in the batch changed the image output: {alone:?} vs {batched:?}"
     );
     Ok(())
@@ -188,18 +171,131 @@ async fn gemma3_image_and_text_decode_as_recorded() -> anyhow::Result<()> {
         (11, -3.7083218),
         (11, -3.7133746),
     ];
-    let pinned = |actual: &[(u32, f32)], expected: &[(u32, f32)]| {
-        actual.len() == expected.len()
-            && actual
-                .iter()
-                .zip(expected)
-                .all(|(a, e)| a.0 == e.0 && (a.1 - e.1).abs() < PIN_TOLERANCE)
-    };
     anyhow::ensure!(
-        pinned(&image, expected_image),
+        close(&image, expected_image, PIN_TOLERANCE),
         "image decode moved: {image:?}"
     );
-    anyhow::ensure!(pinned(&text, expected_text), "text decode moved: {text:?}");
+    anyhow::ensure!(
+        close(&text, expected_text, PIN_TOLERANCE),
+        "text decode moved: {text:?}"
+    );
+    Ok(())
+}
+
+// The second request for the same image takes its encoder output from the cache and decodes the same.
+#[tokio::test]
+async fn gemma3_repeated_image_hits_the_encoder_cache() -> anyhow::Result<()> {
+    let checkpoint = tiny_gemma3()?;
+    // with the prefix cache on, the repeat would reuse KV blocks and never reach the encoder
+    let model = builder(checkpoint.path())
+        .with_prefix_cache_n(None)
+        .build()
+        .await?;
+    let encoder_cache = |model: &Model| -> anyhow::Result<(usize, usize)> {
+        let stats = model.cache_stats()?;
+        let cache = stats.data[0]
+            .encoder_cache
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("no encoder cache"))?;
+        Ok((cache.hits, cache.misses))
+    };
+    let (first, _) = trace(&model, image_request(PROMPT, 9)).await?;
+    let (hits, misses) = encoder_cache(&model)?;
+    anyhow::ensure!(
+        hits == 0 && misses > 0,
+        "first image: {hits} hits, {misses} misses"
+    );
+    let (second, _) = trace(&model, image_request(PROMPT, 9)).await?;
+    let (repeat_hits, repeat_misses) = encoder_cache(&model)?;
+    anyhow::ensure!(
+        repeat_hits > 0 && repeat_misses == misses,
+        "repeated image: {repeat_hits} hits, {repeat_misses} misses"
+    );
+    anyhow::ensure!(
+        close(&first, &second, LOGPROB_TOLERANCE),
+        "a cached encoder output changed decoding: {first:?} vs {second:?}"
+    );
+    Ok(())
+}
+
+// An in-situ quantized load writes UQFF; reloading it decodes the same image the same way.
+#[tokio::test]
+async fn gemma3_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_gemma3()?;
+    let uqff_dir = tempfile::tempdir()?;
+    let quantized = cpu_builder(checkpoint.path())
+        .with_isq(IsqType::Q8_0)
+        .write_uqff(uqff_dir.path().join("model.uqff"))
+        .build()
+        .await?;
+    let (expected, _) = trace(&quantized, image_request(PROMPT, 4)).await?;
+    drop(quantized);
+
+    let written = uqff_files(uqff_dir.path())?;
+    anyhow::ensure!(!written.is_empty(), "no UQFF written");
+    let reloaded = cpu_builder(checkpoint.path())
+        .from_uqff(vec![written[0].clone()])
+        .build()
+        .await?;
+    let (actual, _) = trace(&reloaded, image_request(PROMPT, 4)).await?;
+    anyhow::ensure!(
+        close(&expected, &actual, LOGPROB_TOLERANCE),
+        "the UQFF reload moved: {actual:?} vs {expected:?}"
+    );
+    Ok(())
+}
+
+// Requantizing an ISQ load in place works from the loaded weights, so Q8_0 then Q4_0 is pinned, not a Q4_0 load.
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+#[tokio::test]
+async fn gemma3_re_isq_decodes_as_recorded() -> anyhow::Result<()> {
+    let checkpoint = tiny_gemma3()?;
+    let model = builder(checkpoint.path())
+        .with_isq(IsqType::Q8_0)
+        .build()
+        .await?;
+    let (before, _) = trace(&model, image_request(PROMPT, 6)).await?;
+    model.re_isq_model(IsqType::Q4_0).await?;
+    let (after, _) = trace(&model, image_request(PROMPT, 6)).await?;
+    let expected_before: &[(u32, f32)] = &[
+        (11, -3.6783395),
+        (11, -3.6765847),
+        (11, -3.6880455),
+        (11, -3.7000399),
+        (11, -3.69746),
+        (11, -3.693663),
+    ];
+    let expected_after: &[(u32, f32)] = &[
+        (11, -3.681465),
+        (11, -3.680488),
+        (11, -3.6885803),
+        (11, -3.7020075),
+        (11, -3.6990685),
+        (11, -3.6988313),
+    ];
+    anyhow::ensure!(
+        close(&before, expected_before, PIN_TOLERANCE),
+        "Q8_0 decode moved: {before:?}"
+    );
+    anyhow::ensure!(
+        close(&after, expected_after, PIN_TOLERANCE),
+        "requantized decode moved: {after:?}"
+    );
+    Ok(())
+}
+
+// A model loaded without ISQ tracks no layers to requantize, and the call says so.
+#[tokio::test]
+async fn gemma3_re_isq_without_an_isq_load_fails() -> anyhow::Result<()> {
+    let checkpoint = tiny_gemma3()?;
+    let model = builder(checkpoint.path()).build().await?;
+    let error = model.re_isq_model(IsqType::Q8_0).await.err();
+    anyhow::ensure!(
+        error
+            .as_ref()
+            .is_some_and(|e| e.to_string().contains(NOT_AN_ISQ_LOAD)),
+        "re-ISQ of an unquantized load: {error:?}"
+    );
     Ok(())
 }
 
