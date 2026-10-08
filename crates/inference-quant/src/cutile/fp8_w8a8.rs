@@ -7,16 +7,17 @@ use cutile::core::f8e4m3fn;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tensor::IntoPartition;
-use cutile::tile_kernel::{CompileOptions, TileKernel};
+use cutile::tile_kernel::TileKernel;
 use float8::F8E4M3;
 use half::{bf16, f16};
 use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, DeviceLocation, Result, Shape, Storage, Tensor,
 };
 
+use super::gemm_tile::{GemmTileConfig, tile_space};
 use super::tune::{
     Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
-    buckets_from_breakpoints, config, cutile_error, tune,
+    buckets_from_breakpoints, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
 use super::{catch_cutile_panic, context, jit_available};
@@ -41,14 +42,15 @@ mod kernels {
             sm_121 = (num_cta_in_cga = 2, occupancy = 2,),
         )
     )]
-    fn fp8_w8a8_bf16<
+    fn fp8_w8a8<
+        E: ElementType,
         const BM: i32,
         const BN: i32,
         const BK: i32,
         const MAP_SHAPE: [i32; 2],
         const LATENCY: i32,
     >(
-        mut y: MappedPartitionMut<bf16, { [BM, BN] }, MAP_SHAPE>,
+        mut y: MappedPartitionMut<E, { [BM, BN] }, MAP_SHAPE>,
         x: &Tensor<f8e4m3fn, { [-1, -1] }>,
         w: &Tensor<f8e4m3fn, { [-1, -1] }>,
         xs: &Tensor<f32, { [-1] }>,
@@ -87,65 +89,7 @@ mod kernels {
             let sw: Tile<f32, { [BM, BN] }> = sw
                 .reshape(const_shape![1, BN])
                 .broadcast(const_shape![BM, BN]);
-            let out: Tile<bf16, { [BM, BN] }> = convert_tile(acc * sx * sw);
-            y.store(out, out_idx);
-        }
-    }
-
-    #[cutile::entry(
-        unchecked_accesses = false,
-        optimization_hints = (
-            sm_120 = (num_cta_in_cga = 2, occupancy = 2,),
-            sm_121 = (num_cta_in_cga = 2, occupancy = 2,),
-        )
-    )]
-    fn fp8_w8a8_f16<
-        const BM: i32,
-        const BN: i32,
-        const BK: i32,
-        const MAP_SHAPE: [i32; 2],
-        const LATENCY: i32,
-    >(
-        mut y: MappedPartitionMut<f16, { [BM, BN] }, MAP_SHAPE>,
-        x: &Tensor<f8e4m3fn, { [-1, -1] }>,
-        w: &Tensor<f8e4m3fn, { [-1, -1] }>,
-        xs: &Tensor<f32, { [-1] }>,
-        ws: &Tensor<f32, { [-1] }>,
-    ) {
-        let px = x.partition(const_shape![BM, BK]);
-        let pw = w.partition(const_shape![BN, BK]);
-        let pxs = xs.partition(const_shape![BM]);
-        let pws = ws.partition(const_shape![BN]);
-        let k = num_tiles(&px, 1);
-        let transpose: Array<{ [1, 0] }> = Array::<{ [1, 0] }> {
-            dims: &[1i32, 0i32],
-        };
-        for out_idx in y.iter_indices() {
-            let (bid_m, bid_n) = out_idx.components();
-            let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-            for kg in 0..k {
-                let xt: Tile<f8e4m3fn, { [BM, BK] }> = if LATENCY > 0 {
-                    px.load_pipelined::<LATENCY>([bid_m, kg])
-                } else {
-                    px.load([bid_m, kg])
-                };
-                let wt: Tile<f8e4m3fn, { [BN, BK] }> = if LATENCY > 0 {
-                    pw.load_pipelined::<LATENCY>([bid_n, kg])
-                } else {
-                    pw.load([bid_n, kg])
-                };
-                let wt: Tile<f8e4m3fn, { [BK, BN] }> = permute(wt, transpose);
-                acc = mmaf(xt, wt, acc);
-            }
-            let sx: Tile<f32, { [BM] }> = pxs.load([bid_m]);
-            let sx: Tile<f32, { [BM, BN] }> = sx
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BN]);
-            let sw: Tile<f32, { [BN] }> = pws.load([bid_n]);
-            let sw: Tile<f32, { [BM, BN] }> = sw
-                .reshape(const_shape![1, BN])
-                .broadcast(const_shape![BM, BN]);
-            let out: Tile<f16, { [BM, BN] }> = convert_tile(acc * sx * sw);
+            let out: Tile<E, { [BM, BN] }> = convert_tile(acc * sx * sw);
             y.store(out, out_idx);
         }
     }
@@ -225,86 +169,13 @@ impl GemmShape {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct CutileFp8W8A8Config {
-    pub bm: i32,
-    pub map_m: i32,
-    pub map_n: i32,
-    pub blocks_per_sm: i32,
-    pub latency: i32,
-    pub warps: i32,
-    pub occupancy: i32,
-    pub cluster: i32,
-}
+const POLICY_SMALL: GemmTileConfig = GemmTileConfig::policy(16, 1, 8);
 
-const POLICY_SMALL: CutileFp8W8A8Config = CutileFp8W8A8Config {
-    bm: 16,
-    map_m: 1,
-    map_n: 8,
-    blocks_per_sm: 2,
-    latency: 0,
-    warps: 0,
-    occupancy: 0,
-    cluster: 0,
-};
+const POLICY_LARGE: GemmTileConfig = GemmTileConfig::policy(128, 8, 1);
 
-const POLICY_LARGE: CutileFp8W8A8Config = CutileFp8W8A8Config {
-    bm: 128,
-    map_m: 8,
-    map_n: 1,
-    blocks_per_sm: 2,
-    latency: 0,
-    warps: 0,
-    occupancy: 0,
-    cluster: 0,
-};
+static TUNED: TunedTable<GemmShape, GemmTileConfig> = TunedTable::new();
 
-impl CutileFp8W8A8Config {
-    fn to_config(self) -> cutile::tune::Config {
-        config([
-            ("bm", i64::from(self.bm)),
-            ("map_m", i64::from(self.map_m)),
-            ("map_n", i64::from(self.map_n)),
-            ("blocks_per_sm", i64::from(self.blocks_per_sm)),
-            ("latency", i64::from(self.latency)),
-            ("warps", i64::from(self.warps)),
-            ("occupancy", i64::from(self.occupancy)),
-            ("cluster", i64::from(self.cluster)),
-        ])
-    }
-
-    fn from_config(config: &cutile::tune::Config) -> Option<Self> {
-        let int = |key: &str| config.int(key).and_then(|value| i32::try_from(value).ok());
-        Some(Self {
-            bm: int("bm")?,
-            map_m: int("map_m")?,
-            map_n: int("map_n")?,
-            blocks_per_sm: int("blocks_per_sm")?,
-            latency: int("latency")?,
-            warps: int("warps")?,
-            occupancy: int("occupancy")?,
-            cluster: int("cluster")?,
-        })
-    }
-
-    fn compile_options(self) -> CompileOptions {
-        let mut options = CompileOptions::new();
-        if self.warps > 0 {
-            options = options.num_worker_warps_per_cta(self.warps);
-        }
-        if self.occupancy > 0 {
-            options = options.occupancy(self.occupancy);
-        }
-        if self.cluster > 0 {
-            options = options.num_cta_in_cga(self.cluster);
-        }
-        options
-    }
-}
-
-static TUNED: TunedTable<GemmShape, CutileFp8W8A8Config> = TunedTable::new();
-
-fn policy(rows: usize) -> CutileFp8W8A8Config {
+fn policy(rows: usize) -> GemmTileConfig {
     if rows <= ROW_BREAKPOINTS[0] {
         POLICY_SMALL
     } else {
@@ -312,20 +183,16 @@ fn policy(rows: usize) -> CutileFp8W8A8Config {
     }
 }
 
-fn gemm_config(shape: GemmShape, rows: usize) -> CutileFp8W8A8Config {
+fn gemm_config(shape: GemmShape, rows: usize) -> GemmTileConfig {
     TUNED.get(shape, rows).unwrap_or_else(|| policy(rows))
 }
 
 fn gemm_space(bucket: Bucket) -> Space {
-    Space::new()
-        .joint(["bm"], [[16], [32], [64], [128]])
-        .joint(["map_m", "map_n"], [[1, 8], [2, 4], [4, 1], [8, 1], [1, 1]])
-        .axis("blocks_per_sm", [2, 1, 4])
-        .axis("latency", [0, 2, 4])
-        .axis("warps", [0, 4, 8])
-        .axis("occupancy", [0, 4])
-        .axis("cluster", [0, 2])
-        .policy(policy(bucket.probe).to_config())
+    tile_space(
+        [[16], [32], [64], [128]],
+        [[1, 8], [2, 4], [4, 1], [8, 1], [1, 1]],
+        policy(bucket.probe),
+    )
 }
 
 fn gemm_buckets() -> Vec<Bucket> {
@@ -510,11 +377,7 @@ fn validate_scale_shapes(operands: &GemmOperands<'_>, rows: usize, n: usize) -> 
     Ok(())
 }
 
-fn launch(
-    operands: &GemmOperands<'_>,
-    cfg: CutileFp8W8A8Config,
-    compile_only: bool,
-) -> Result<Tensor> {
+fn launch(operands: &GemmOperands<'_>, cfg: GemmTileConfig, compile_only: bool) -> Result<Tensor> {
     operands.scheme.validate()?;
     let activation = operands.activation.contiguous()?;
     let activation_scales = operands.activation_scales.contiguous()?;
@@ -655,6 +518,7 @@ fn launch(
     let blocks_per_sm = usize::try_from(cfg.blocks_per_sm).unwrap_or(1).max(1);
     let tile_blocks = (blocks_per_sm * dev.sm_count()).clamp(1, tiles) as u32;
     let generics = vec![
+        super::element_type(operands.scheme.output_dtype)?.to_string(),
         cfg.bm.to_string(),
         TILE_SIZE.to_string(),
         TILE_SIZE.to_string(),
@@ -708,13 +572,7 @@ fn launch(
                 .partition([bm, TILE_SIZE])
                 .map([cfg.map_m as usize, cfg.map_n as usize], tile_blocks);
             run!(
-                kernels::fp8_w8a8_bf16(
-                    mapped,
-                    Arc::new(x),
-                    Arc::new(w),
-                    Arc::new(xs),
-                    Arc::new(ws)
-                ),
+                kernels::fp8_w8a8(mapped, Arc::new(x), Arc::new(w), Arc::new(xs), Arc::new(ws)),
                 "W8A8 BF16 GEMM"
             );
             drop(out_guard);
@@ -739,7 +597,7 @@ fn launch(
                 .partition([bm, TILE_SIZE])
                 .map([cfg.map_m as usize, cfg.map_n as usize], tile_blocks);
             run!(
-                kernels::fp8_w8a8_f16(mapped, Arc::new(x), Arc::new(w), Arc::new(xs), Arc::new(ws)),
+                kernels::fp8_w8a8(mapped, Arc::new(x), Arc::new(w), Arc::new(xs), Arc::new(ws)),
                 "W8A8 F16 GEMM"
             );
             drop(out_guard);
@@ -768,7 +626,7 @@ impl GemmTuner {
         }
     }
 
-    fn prepare(&mut self, rows: usize, cfg: CutileFp8W8A8Config) -> Result<Prepared> {
+    fn prepare(&mut self, rows: usize, cfg: GemmTileConfig) -> Result<Prepared> {
         let dev = self.dev.clone();
         let sets = self.sets.clone();
         let key = sets[0].key;
@@ -856,11 +714,11 @@ impl CutileKernel for Fp8W8A8Kernel {
             };
             let mut tuner = GemmTuner::new(dev, sets);
             let tuned = tune(dev, mode, &request, |rows, candidate| {
-                let cfg = CutileFp8W8A8Config::from_config(candidate)
+                let cfg = GemmTileConfig::from_config(candidate)
                     .ok_or_else(|| inference_tensor::Error::msg("config outside the space"))?;
                 tuner.prepare(rows, cfg)
             });
-            TUNED.set(key, &tuned, CutileFp8W8A8Config::from_config);
+            TUNED.set(key, &tuned, GemmTileConfig::from_config);
         }
         tracing::info!("Warming {} cuTile W8A8 GEMM kernels.", shapes.len());
         for sets in &shapes {
@@ -919,7 +777,35 @@ mod tests {
         CutileFp8W8A8Args, Fp8W8A8Scheme, GemmOperands, cutile_fp8_w8a8, quantize_activation,
         validate_scale_shapes,
     };
+    use crate::cutile::{compile_tile_ir, generics};
     use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        use super::{POLICY_LARGE, POLICY_SMALL, TILE_SIZE, kernels};
+        for dtype in ["bf16", "f16"] {
+            for cfg in [POLICY_SMALL, POLICY_LARGE] {
+                let values = generics(&[
+                    &dtype,
+                    &cfg.bm,
+                    &TILE_SIZE,
+                    &TILE_SIZE,
+                    &cfg.map_m,
+                    &cfg.map_n,
+                    &cfg.latency,
+                ]);
+                let entry = "fp8_w8a8";
+                let tensors = [("y", 2), ("x", 2), ("w", 2), ("xs", 1), ("ws", 1)];
+                compile_tile_ir(
+                    kernels::__module_ast_self,
+                    "kernels",
+                    entry,
+                    values,
+                    &tensors,
+                );
+            }
+        }
+    }
 
     #[test]
     fn scale_shapes_are_validated_by_scheme() -> Result<()> {

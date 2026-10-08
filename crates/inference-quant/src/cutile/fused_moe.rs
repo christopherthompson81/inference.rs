@@ -1057,3 +1057,33 @@ impl CutileKernel for FusedMoeKernel {
         warmup_moe_kernels_uncached(dev)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cutile::{compile_tile_ir, generics};
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        for (m, top_k, mul_routed_weight) in [(1, 8, 0), (4096, 1, 1)] {
+            let cfg = get_default_config(m, 8);
+            let values = generics(&[
+                &cfg.bm,
+                &cfg.bn,
+                &cfg.bk,
+                &cfg.group_m,
+                &top_k,
+                &mul_routed_weight,
+                &cfg.split_k,
+                &cfg.latency,
+            ]);
+            compile_tile_ir(
+                fused_moe::__module_ast_self,
+                "fused_moe",
+                "fused_moe_kernel",
+                values,
+                &[],
+            );
+        }
+    }
+}

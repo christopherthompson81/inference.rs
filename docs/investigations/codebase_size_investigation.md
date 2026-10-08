@@ -2636,3 +2636,70 @@ Change:
 
 Result: 300 insertions, 722 deletions in the crates, test included (-422 net, against ~650 estimated: the macro
 itself is ~110 lines).
+
+## Run 84 - 2026-10-07 21:42
+
+Question: does the ~600-line estimate for cuTile scaffolding (config, registry, tuner, warm per GEMM kind) hold?
+
+Command: a scratch script counting normalized lines (comments and lone braces dropped) that sit in a 6-line window
+repeated elsewhere under `crates/inference-quant/src/cutile/` (15.3k lines).
+
+Raw finding: 2,956 lines sit in repeated windows. Largest regions:
+- `nvfp4_matmul.rs` (658 of 1,602): bf16 and f16 copies of the same entries (`quantize_*`, `matmul_*`,
+  `route_quantize_*`, `routed_matmul_*`), 60-90 line blocks each.
+- `fused_moe.rs` / `fused_moe_fp8.rs` (407 / 435): kernel parameter lists and epilogues (75-81 line blocks), launch
+  plumbing.
+- `fp8_w8a16.rs` / `fp8_w8a8.rs` / `fp8_gemm.rs` (397 / 382 / 132): kernel bodies (34-44 lines), plus host code: the
+  same 8-field tile config with identical `to_config`/`from_config`/`compile_options` three times, `gemm_space`
+  differing only in the candidate lists and policy, and `warm` loops differing in the shape key and probe operands.
+- `nvfp4_gemv.rs`, `nvfp4_glu.rs`: self-repeats (bf16/f16 again) and quantize epilogues shared with nvfp4_matmul.
+
+So the estimate split two ways:
+- Host scaffolding (one GEMM tile config, a shared space builder, a generic tune-and-warm loop): ~150-200 lines.
+  Ordinary Rust, compiled by the CUDA 13.4 clippy check.
+- Kernel bodies: most of the 2,956. cutile 0.3.1 supports `E: ElementType` generics on entries and inlines plain helper
+  functions (its `basics_and_inlining` test), so bf16/f16 twins can be one generic entry and shared epilogues helpers.
+  This box has no Blackwell GPU, so the kernels cannot run here; cutile's test support compiles a module to Tile IR
+  offline (`compile_to_ir`), which would let a merge be checked by IR equality per instantiation.
+
+Next: owner decision on scope (host only vs. kernel merge with IR-equality checks).
+
+## Run 85 - 2026-10-07 22:02
+
+Owner chose: host scaffolding and the kernel merges, checked by Tile IR equality.
+
+Harness: `compile_tile_ir` (test-only, `cutile/mod.rs`) compiles one entry with `cutile::compile_api::KernelCompiler`
+for `sm_120` offline; each kernel file has `kernels_compile_to_tile_ir` covering its entries at the policy configs
+(contiguous strides). Built under CUDA 13.4 in a scratch target (`cargo clippy/nextest -p inference-quant --features
+cuda,cutile`); this box is an RTX 3090 (sm_86), so nothing runs, it only compiles.
+
+Raw findings:
+- `nvfp4_glu` `quantize_*` failed to compile for SiLU/GELU: "Unexpected dense value" at `constant(LOG2_E, ..)`, where
+  `LOG2_E = std::f32::consts::LOG2_E`; the compiler folds only literals. Every non-ReLU fused GLU quantize would fail
+  to JIT on Blackwell. Fixed with the literal (`#[allow(clippy::approx_constant)]`).
+- `routed_lora` (existing test `one_shot_kernel_compiles_to_tile_ir`) fails under cutile 0.3.1: "`return` is only
+  supported at the top level of a function body" (four early returns inside the kernel's `unsafe` block, since the
+  0.3.1 bump). Not fixed here: the rewrite nests ~350 lines under the guards and has no compiling baseline to compare
+  IR against. Seven `nvfp4_glu` tests need a Blackwell device and fail instead of skipping elsewhere. No CI job builds
+  the `cutile` feature, which is how both went unnoticed.
+- The nine bf16/f16 entry pairs (nvfp4 quantize/matmul/route_quantize/routed_matmul/gemv/glu quantize, fp8 w8a8,
+  w8a16 post/block) were identical after `s/bf16|f16/T/`. Each became one entry `<E: ElementType, ...>`; launches pass
+  `element_type(dtype)` as the first generic. All 40 instantiations (both dtypes, the policy configs, the bool/flag
+  variants) produce identical Tile IR before and after, once the entry symbol is normalized (`quantize_bf16_entry` vs
+  `quantize_entry`).
+- Host: the three FP8 GEMMs' identical 8-field tile configs and tuning spaces became `gemm_tile::GemmTileConfig` and
+  `tile_space`; each GEMM keeps its own policies, buckets and candidate lists.
+- Left alone: the fused MoE bf16/FP8 kernels (75-81 line shared parameter and epilogue blocks) and the nvfp4
+  quantize epilogue shared by GLU and matmul. Sharing them needs a const-flag merge or cross-module helpers whose IR
+  cannot be shown identical; ~250 lines.
+
+Result: 650 insertions, 1,272 deletions in `crates/` (-622 net, of which ~260 lines are the new IR tests).
+
+Review (subagent, read-only): every launch passes the element type first and from the dtype `E` binds to (output for
+w8a8, activation for w8a16/nvfp4, gate for GLU); merged bodies match both master variants token for token; policies
+and spaces unchanged; `1.442_695f32 == LOG2_E` (0x3fb8aa3b). Fixed from it: `element_type` returns an error instead
+of `unreachable!` (its call sites run before the old `bail!` arms), one-line docs, one import path for the test
+helpers. Noted, not changed: the IR tests use contiguous strides, so the stride-0 tensor-scale `ws` variant of
+w8a8/w8a16 is not compiled by them. Full local CI passed (2,494 CPU, 2,879 CUDA); the default build does not compile
+`cutile`, which is checked by `cargo clippy -p inference-quant --all-targets --features cuda,cutile -- -D warnings`
+and the IR tests under CUDA 13.4.

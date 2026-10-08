@@ -1191,6 +1191,27 @@ mod tests {
     use crate::GluActivationType;
     use crate::blockwise_fp8::ops;
     use crate::cutile::tune::{Source, Tuned};
+    use crate::cutile::{compile_tile_ir, generics};
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        use super::{DECODE_TOKENS, fp8_policy, fused_moe_fp8};
+        for (m, top_k, mul_routed_weight) in [(DECODE_TOKENS, 8, 0), (4096, 1, 1)] {
+            let cfg = fp8_policy(m);
+            let values = generics(&[
+                &cfg.bm,
+                &cfg.bn,
+                &cfg.bk,
+                &cfg.group_m,
+                &top_k,
+                &mul_routed_weight,
+                &cfg.split_k,
+                &cfg.latency,
+            ]);
+            let ast = fused_moe_fp8::__module_ast_self;
+            compile_tile_ir(ast, "fused_moe_fp8", "fused_moe_fp8_kernel", values, &[]);
+        }
+    }
 
     fn patterned(len: usize, seed: usize, amplitude: f32, offset: f32) -> Vec<f32> {
         (0..len)

@@ -7,6 +7,7 @@ mod fp8_w8a8;
 mod fused_moe;
 mod fused_moe_fp8;
 mod gdn_prefill;
+mod gemm_tile;
 mod nvfp4;
 mod nvfp4_gemv;
 mod nvfp4_glu;
@@ -47,6 +48,17 @@ pub use routed_lora::{
 };
 pub use tune::{TUNE_CACHE_ENV, TUNE_MODE_ENV, TuneMode};
 pub use warmup::warmup_moe_kernels;
+
+/// The element-type generic of the kernels that take bf16 or f16 activations.
+fn element_type(dtype: inference_tensor::DType) -> inference_tensor::Result<&'static str> {
+    match dtype {
+        inference_tensor::DType::BF16 => Ok("bf16"),
+        inference_tensor::DType::F16 => Ok("f16"),
+        dtype => {
+            inference_tensor::bail!("cuTile kernels take bf16 or f16 activations, got {dtype:?}")
+        }
+    }
+}
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {
     if let Some(message) = payload.downcast_ref::<String>() {
@@ -168,6 +180,57 @@ fn tileiras_capabilities() -> Option<&'static TileirasCapabilities> {
 pub fn jit_available(dev: &inference_tensor::CudaDevice) -> bool {
     let target = dev.compute_cap();
     tileiras_capabilities().is_some_and(|capabilities| capabilities.targets.contains(&target))
+}
+
+#[cfg(test)]
+const TILE_IR_TARGET: &str = "sm_120";
+// The Tile IR compiler recurses deeply on the larger kernels.
+#[cfg(test)]
+const TILE_IR_STACK: usize = 64 * 1024 * 1024;
+
+#[cfg(test)]
+fn generics(values: &[&dyn std::fmt::Display]) -> Vec<String> {
+    values.iter().map(ToString::to_string).collect()
+}
+
+/// Compiles one entry to Tile IR offline; `tensors` names each tensor parameter with its rank, taken as contiguous.
+#[cfg(test)]
+fn compile_tile_ir(
+    module_ast: fn() -> cutile::cutile_compiler::ast::Module,
+    module: &str,
+    entry: &str,
+    generics: Vec<String>,
+    tensors: &[(&str, usize)],
+) {
+    let (module, entry) = (module.to_string(), entry.to_string());
+    let strides: Vec<(String, Vec<i32>)> = tensors
+        .iter()
+        .map(|&(name, rank)| {
+            let mut strides = vec![-1; rank];
+            strides[rank - 1] = 1;
+            (name.to_string(), strides)
+        })
+        .collect();
+    std::thread::Builder::new()
+        .stack_size(TILE_IR_STACK)
+        .spawn(move || {
+            let strides: Vec<(&str, &[i32])> = strides
+                .iter()
+                .map(|(name, strides)| (name.as_str(), strides.as_slice()))
+                .collect();
+            if let Err(error) =
+                cutile::compile_api::KernelCompiler::new(module_ast, &module, &entry)
+                    .generics(generics.clone())
+                    .strides(&strides)
+                    .target(TILE_IR_TARGET)
+                    .compile()
+            {
+                panic!("{entry}{generics:?}: {error:?}");
+            }
+        })
+        .expect("spawn Tile IR compiler")
+        .join()
+        .expect("join Tile IR compiler")
 }
 
 #[cfg(test)]
