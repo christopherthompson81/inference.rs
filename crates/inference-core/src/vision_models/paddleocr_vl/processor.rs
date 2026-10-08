@@ -10,15 +10,9 @@ use serde_json::Value;
 
 use crate::{
     MessageContent, Tool,
-    pipeline::{
-        InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor,
-        processing::default_process,
-    },
+    pipeline::{InputsProcessor, MessagesAction, Processor, processing::default_process},
     request::ReasoningEffort,
-    vision_models::{
-        media_host::MediaInputsProcessor, preprocessor_config::PreProcessorConfig,
-        processor_config::ProcessorConfig,
-    },
+    vision_models::media_host::MediaInputsProcessor,
 };
 
 pub struct PaddleOcrVlProcessor;
@@ -80,14 +74,4 @@ impl Processor for PaddleOcrVlProcessor {
     }
 }
 
-impl MultimodalProcessorFactory for PaddleOcrVlLoader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(PaddleOcrVlProcessor)
-    }
-}
+processor_factory!(PaddleOcrVlLoader => |_, _, _, _| Arc::new(PaddleOcrVlProcessor));

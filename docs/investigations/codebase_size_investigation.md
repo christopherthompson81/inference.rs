@@ -2721,3 +2721,30 @@ checked by review only, not by IR equality or a run.
 Review (subagent, read-only): each guard is the exact negation of its exit (NaN and -0.0 keep their old side),
 statement placement and the three closing braces check out, no `return` remains, the whitespace-ignored diff has no
 other token changes. Full local CI passed (2,494 CPU, 2,879 CUDA).
+
+## Run 87 - 2026-10-07 22:34
+
+Question: does the ~480-line estimate for the vision `Processor` wrappers hold?
+
+Measured: 18 `vision_models/<model>/processor.rs` files, 1,390 lines. 15 of them only hold an inputs processor (or
+the config to build one), return fixed special tokens and a fixed `MessagesAction`; every file also spells out a
+10-line `MultimodalProcessorFactory::get_processor` per loader (24 impls). idefics2, mllama and paddleocr_vl override
+`process` or `retain_prefix_cached_images`.
+
+Change:
+- `media_host::media_processor(inputs, special_tokens, template_action)` is the one `Processor` for the 15.
+- `processor_factory!(Loaders.. => |model_config, processor_config, preprocessor_config, max_edge| body)` writes the
+  factory impls (all 18 files).
+- Gemma4's processor copied all 13 fields of `Gemma4ImageProcessor` to rebuild it per call;
+  `Gemma4ProcessorSettings::image_processor()` builds it once. Voxtral's per-call `new_from_processor` copy is gone.
+- Seven processors (gemma3, gemma3n, gemma4, idefics3, llama4, mistral3, voxtral) built a new inputs processor on
+  every `inputs_processor()` call; they now share one.
+
+Result: 331 insertions, 1,021 deletions in `crates/` (-690 net, against ~480 estimated: the factory impls were not in
+the estimate).
+
+Review (subagent, read-only): no correctness findings. None of the seven newly shared inputs processors has interior
+mutability (grep for Mutex, RefCell, Cell, atomics, RwLock, OnceLock, LazyLock, thread_local); every default, token
+list, template action, argument order and unwrap matches HEAD; `IMAGE_TOKEN.repeat(n)` equals the old join. Applied
+its style points: `vision_geometry` takes `Gemma4VisionConfig` (both configs share it), constants for the gemma4
+fallback patch size and template action, a one-line macro doc, CLAUDE.md step 1 wording.

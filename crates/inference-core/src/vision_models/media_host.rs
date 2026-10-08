@@ -24,7 +24,7 @@ use crate::{
         block_hash::{MultiModalFeature, MultimodalKind},
     },
     pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorType,
+        InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
         text_models_inputs_processor::{
             ModelInputs as TextModelInputs, TextInputsProcessor, get_completion_input,
             get_completion_input_windowed, get_prompt_input,
@@ -454,5 +454,38 @@ impl InputsProcessor for MediaInputsProcessor {
 
     fn get_type(&self) -> InputsProcessorType {
         InputsProcessorType::Vision
+    }
+}
+
+/// The `Processor` of a model whose only parts are its inputs processor, special tokens and chat template action.
+pub(crate) fn media_processor(
+    inputs: impl MultimodalInputsProcessor + 'static,
+    special_tokens: &'static [&'static str],
+    template_action: MessagesAction,
+) -> Arc<dyn Processor + Send + Sync> {
+    Arc::new(MediaProcessor {
+        inputs: Arc::new(inputs),
+        special_tokens,
+        template_action,
+    })
+}
+
+struct MediaProcessor {
+    inputs: Arc<dyn MultimodalInputsProcessor>,
+    special_tokens: &'static [&'static str],
+    template_action: MessagesAction,
+}
+
+impl Processor for MediaProcessor {
+    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
+        Arc::new(MediaInputsProcessor(self.inputs.clone()))
+    }
+
+    fn get_special_tokens(&self) -> &[&'static str] {
+        self.special_tokens
+    }
+
+    fn template_action(&self) -> MessagesAction {
+        self.template_action
     }
 }

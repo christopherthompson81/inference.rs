@@ -35,17 +35,6 @@ impl VoxtralAudioProcessor {
         }
     }
 
-    pub fn new_from_processor(other: &Self) -> Self {
-        Self {
-            sampling_rate: other.sampling_rate,
-            frame_rate: other.frame_rate,
-            num_mel_bins: other.num_mel_bins,
-            hop_length: other.hop_length,
-            window_size: other.window_size,
-            global_log_mel_max: other.global_log_mel_max,
-        }
-    }
-
     /// Number of samples per streaming token (sampling_rate / frame_rate).
     fn samples_per_token(&self) -> usize {
         (self.sampling_rate as f32 / self.frame_rate) as usize

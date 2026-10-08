@@ -10,6 +10,7 @@ use inference_protocol::chat_template::{BeginEndUnkPadTok, apply_chat_template_t
 
 use super::{InputsProcessor, text_models_inputs_processor};
 
+#[derive(Clone, Copy)]
 pub enum MessagesAction {
     // For idefics2, others which use the "new" openai format
     Keep,
