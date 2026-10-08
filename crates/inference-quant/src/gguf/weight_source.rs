@@ -162,6 +162,27 @@ impl GgufTensorBinding {
         }
     }
 
+    fn source_tensors<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Self::Tensor(name) | Self::Mxfp4Blocks(name) | Self::Mxfp4Scales(name) => {
+                out.push(name)
+            }
+            Self::Slice { input, .. }
+            | Self::Transpose { input, .. }
+            | Self::Permute { input, .. }
+            | Self::Reshape { input, .. }
+            | Self::Affine { input, .. }
+            | Self::Log { input }
+            | Self::InverseSoftplus { input }
+            | Self::Cast { input, .. } => input.source_tensors(out),
+            Self::Concat { inputs, .. }
+            | Self::Stack { inputs, .. }
+            | Self::Interleave { inputs, .. } => {
+                inputs.iter().for_each(|input| input.source_tensors(out))
+            }
+        }
+    }
+
     fn text_layer_index(&self) -> Option<usize> {
         fn source_layer(name: &str) -> Option<usize> {
             name.strip_prefix("blk.")?.split_once('.')?.0.parse().ok()
@@ -908,6 +929,47 @@ impl QuantizedWeightSource for GgufWeightSource {
             global_factor = Some(global_factor.map_or(factor, |global| global.min(factor)));
         }
         Ok(global_factor.unwrap_or(1))
+    }
+
+    fn layer_resident_bytes(&self, dtype: DType) -> Result<Option<Vec<usize>>> {
+        let mut layers = Vec::<usize>::new();
+        // A fused tensor can back several bindings (whole and sliced); its packed bytes load once
+        let mut counted = std::collections::HashSet::<&str>::new();
+        for (native_name, binding) in &self.bindings {
+            let Some(layer) = binding.text_layer_index() else {
+                continue;
+            };
+            if layers.len() <= layer {
+                layers.resize(layer + 1, 0);
+            }
+            let stays_packed = match binding.direct_tensor() {
+                Some(source) => {
+                    !matches!(self.archive.tensor_info(source)?.dtype().raw(), 0 | 1 | 30)
+                }
+                None => self.structural_quant_dtype(binding)?.is_some(),
+            };
+            let resident = if stays_packed {
+                let mut sources = Vec::new();
+                binding.source_tensors(&mut sources);
+                let mut bytes = 0usize;
+                for source in sources.into_iter().filter(|source| counted.insert(source)) {
+                    bytes += self
+                        .archive
+                        .tensor_info(source)?
+                        .byte_len()
+                        .ok_or_else(|| {
+                            Error::msg(format!("GGUF tensor `{source}` has no byte range"))
+                        })?;
+                }
+                bytes
+            } else {
+                self.binding_storage(native_name, binding, dtype)?.1
+            };
+            layers[layer] = layers[layer]
+                .checked_add(resident)
+                .ok_or_else(|| Error::msg("GGUF resident byte estimate overflow"))?;
+        }
+        Ok((!layers.is_empty() && !layers.contains(&0)).then_some(layers))
     }
 
     fn pack_factor_for(&self, key: &str, dtype: DType) -> Result<Option<usize>> {
@@ -1793,6 +1855,63 @@ mod tests {
         assert_eq!((joined.dims, joined.data), (dims.to_vec(), data.clone()));
         assert!(concat_packed_bindings(vec![half(0..240), half(240..480)], 1).is_err());
         assert_eq!(shard_unit(dtype), ROW_SCALED_SHARD_ALIGNMENT);
+        Ok(())
+    }
+
+    // A Q4_0 layer and a Q8_0 one: each layer's own bytes, where one pack factor would size both at Q8_0's rate
+    #[test]
+    fn layer_resident_bytes_follow_each_layers_own_quantization() -> Result<()> {
+        let weights = Tensor::randn(0f32, 1f32, (8, 64), &Device::Cpu)?;
+        let packed = QTensor::quantize(&weights, GgmlDType::Q4_0)?;
+        let wide = QTensor::quantize(&weights, GgmlDType::Q8_0)?;
+        let mut file = NamedTempFile::new().map_err(Error::wrap)?;
+        gguf_file::write(
+            file.as_file_mut(),
+            &[],
+            &[
+                ("blk.0.ffn.weight", &packed),
+                ("blk.1.ffn.weight", &wide),
+                ("blk.2.ffn.weight", &packed),
+            ],
+        )?;
+        file.as_file_mut().flush().map_err(Error::wrap)?;
+        let bindings = GgufBindingMap::new()
+            .with_binding(
+                "model.layers.0.mlp.weight",
+                GgufTensorBinding::tensor("blk.0.ffn.weight"),
+            )
+            .with_binding(
+                "model.layers.1.mlp.weight",
+                GgufTensorBinding::tensor("blk.1.ffn.weight"),
+            )
+            // A fused tensor bound whole and as two row halves still loads once
+            .with_binding(
+                "model.layers.1.mlp.gate.weight",
+                GgufTensorBinding::tensor("blk.1.ffn.weight").slice(0, 0, 4),
+            )
+            .with_binding(
+                "model.layers.1.mlp.up.weight",
+                GgufTensorBinding::tensor("blk.1.ffn.weight").slice(0, 4, 4),
+            )
+            // An MTP layer past the loader's count still reports; the planner keeps only the loader's layers
+            .with_binding(
+                "model.layers.2.mlp.weight",
+                GgufTensorBinding::tensor("blk.2.ffn.weight"),
+            );
+        let archive = Arc::new(GgufArchive::open_file(file.path())?);
+        let source = GgufWeightSource::new(archive, &bindings, DType::BF16)?;
+        let resident = source.layer_resident_bytes(DType::BF16)?.unwrap();
+        assert_eq!(
+            resident,
+            [
+                packed.storage_size_in_bytes(),
+                wide.storage_size_in_bytes(),
+                packed.storage_size_in_bytes()
+            ]
+        );
+        let one_factor =
+            weights.elem_count() * DType::BF16.size_in_bytes() / source.pack_factor(DType::BF16)?;
+        assert!(one_factor > resident[0]);
         Ok(())
     }
 
