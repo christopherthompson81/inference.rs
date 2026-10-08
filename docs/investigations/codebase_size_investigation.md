@@ -2410,3 +2410,26 @@ chain (three times per pipeline) became `ModelForwardContext::with_recurrent_cac
 
 The size check's +0.16 MiB against `scripts/bundle_size_baseline.json` predates this change (the baseline was
 written several PRs ago); it is within tolerance.
+
+## Run 76 - 2026-10-07 19:19
+
+Question: what does step 2 of the pipeline merge (loader helpers) recover, and do the other loaders share it?
+
+Raw finding: `load_model_from_path` in the text and multimodal loaders already ran through `loading.rs`; 232 of the
+text version's 291 lines still matched multimodal's (difflib blocks >= 4), most of them calls with per-loader
+projections of two identical prepared-source structs. One `PreparedSource` (multimodal's fields; the GGUF text
+constructor sets the processor configs to None) lets `prepare_model_config`, `source_weight_files` and both load
+inputs take it whole. The HF cache, Hub fetch and UQFF shards (`hub_model_paths`, with the fetch as a closure, since
+embeddings return their own paths type), the chat template with prepared tokens, the LoRA runtime match and the UQFF
+residual/generation-config choices became helpers; the embedding, GGUF and GGML loaders use the parts they repeated.
+
+```
+git diff --stat       6 files, 239 insertions, 284 deletions (net -45)
+CI                    2489 CPU, 2873 CUDA tests pass; bindings pass
+```
+
+Negative result: the first cut (two-copy helpers only) was net -19; the gain came from the third and fourth users and
+from taking the struct whole. Kept apart on purpose: the KV cache setup (the text pipeline sizes from the mapper's
+unique devices, multimodal from the per-layer devices it materialized) and pipeline construction are step 3;
+`generation_config` keeps its `Option<Option<_>>` argument, which its unit test builds directly; embeddings' UQFF
+residuals ignore the MoQE organization and stay as they are.

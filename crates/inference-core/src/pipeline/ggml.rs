@@ -15,7 +15,7 @@ use crate::pipeline::ChatTemplate;
 use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{Modalities, SupportedModality, get_chat_template};
+use crate::pipeline::{Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::debug::DEBUG;
@@ -204,14 +204,9 @@ impl Loader for GGMLLoader {
         let gen_conf: Option<GenerationConfig> = paths
             .get_gen_conf_filename()
             .map(|f| serde_json::from_str(&fs::read_to_string(f).unwrap()).unwrap());
-        let chat_template_explicit = paths
-            .get_chat_template_explicit()
-            .as_ref()
-            .map(|x| x.to_string_lossy().to_string());
-        let chat_template = get_chat_template(
+        let chat_template = super::loading::load_chat_template(
             paths,
             self.jinja_explicit.as_ref(),
-            chat_template_explicit.as_ref(),
             self.chat_template.as_ref(),
             None,
         );

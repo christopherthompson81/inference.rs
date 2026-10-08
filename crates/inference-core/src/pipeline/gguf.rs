@@ -29,15 +29,14 @@ use crate::gguf::{
 use crate::pipeline::chat_template::GenerationConfig;
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
 use crate::pipeline::loaders::stamp_qk_rope_layout;
-use crate::pipeline::multimodal::{
-    MultimodalLoaderBuilder, MultimodalSpecificConfig, PreparedMultimodalSource,
-};
-use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig, PreparedNormalSource};
+use crate::pipeline::loading::PreparedSource;
+use crate::pipeline::multimodal::{MultimodalLoaderBuilder, MultimodalSpecificConfig};
+use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig};
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::{
-    DeviceMapSetting, GLOBAL_HF_CACHE, LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig,
-    MultimodalLoaderType, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, UqffWriteConfig,
+    DeviceMapSetting, LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig, MultimodalLoaderType,
+    PagedAttentionConfig, Pipeline, Topology, TryIntoDType, UqffWriteConfig,
 };
 use anyhow::{Context, Result, bail};
 use hf_hub::{Repo, RepoType};
@@ -520,7 +519,7 @@ impl GGUFLoader {
             } else {
                 None
             };
-        let source = PreparedNormalSource {
+        let source = PreparedSource {
             config,
             weights,
             tokenizer: tokenizer.conversion.tokenizer,
@@ -531,6 +530,8 @@ impl GGUFLoader {
             unk_token: tokenizer.conversion.unk,
             source_weight_files: paths.get_weight_filenames().to_vec(),
             rope_pairing,
+            processor_config: None,
+            preprocessor_config: None,
         };
         let mut loader = NormalLoaderBuilder::new(
             NormalSpecificConfig {
@@ -611,7 +612,7 @@ impl GGUFLoader {
             } else {
                 None
             };
-        let source = PreparedMultimodalSource {
+        let source = PreparedSource {
             config,
             weights,
             tokenizer: tokenizer.conversion.tokenizer,
@@ -743,7 +744,7 @@ impl GGUFLoader {
             .transpose()?;
         let mut source_weight_files = paths.get_weight_filenames().to_vec();
         source_weight_files.extend_from_slice(mmproj_paths);
-        let source = PreparedMultimodalSource {
+        let source = PreparedSource {
             config,
             weights,
             tokenizer: tokenizer.conversion.tokenizer,
@@ -955,13 +956,7 @@ impl Loader for GGUFLoader {
         paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let cache = self
-            .config
-            .hf_cache_path
-            .clone()
-            .map(hf_hub::Cache::new)
-            .unwrap_or_default();
-        GLOBAL_HF_CACHE.get_or_init(|| cache);
+        super::loading::install_hf_cache(self.config.hf_cache_path.clone());
         let revision = revision.unwrap_or_else(|| "main".to_string());
         if self.mmproj_filenames.as_ref().is_some_and(|filenames| {
             filenames.is_empty() || filenames.iter().any(|filename| filename.trim().is_empty())

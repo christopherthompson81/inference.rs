@@ -20,13 +20,10 @@ use crate::pipeline::{ChatTemplate, IsqOrganization, Processor};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::{
-    DeviceMapSetting, GLOBAL_HF_CACHE, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
-};
+use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType};
 use anyhow::Context;
 use anyhow::Result;
 use futures::future::BoxFuture;
-use hf_hub::Cache;
 use inference_quant::IsqType;
 use inference_quant::safetensors::MmapedSafetensors;
 use inference_tensor::nn::{Linear, Module};
@@ -162,36 +159,22 @@ impl Loader for EmbeddingLoader {
         paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let cache = self
-            .hf_cache_path
-            .clone()
-            .map(Cache::new)
-            .unwrap_or_default();
-        GLOBAL_HF_CACHE.get_or_init(|| cache);
-
-        let paths = super::paths::get_embedding_paths(super::paths::PathsRequest {
-            model_id: &self.model_id,
-            tokenizer_json: self.tokenizer_json.as_deref(),
-            chat_template: None,
-            token_source: &token_source,
-            revision: revision.clone(),
-            quantized_model_id: None,
-            quantized_filenames: None,
-            silent,
-            loading_uqff: self.config.from_uqff.is_some(),
-        });
-        if let Some(from_uqff) = self.config.from_uqff.as_ref() {
-            let files = super::paths::get_uqff_paths(
-                from_uqff,
-                &self.model_id,
-                &token_source,
-                revision.clone(),
+        let paths = super::loading::hub_model_paths(
+            super::loading::HubPathsRequest {
+                hf_cache_path: self.hf_cache_path.clone(),
+                model_id: &self.model_id,
+                tokenizer_json: self.tokenizer_json.as_deref(),
+                chat_template: None,
+                token_source: &token_source,
+                revision,
                 silent,
-            )?;
-            *self.from_uqff.write().unwrap() = Some(files);
-        }
+                from_uqff: self.config.from_uqff.as_deref(),
+            },
+            &self.from_uqff,
+            super::paths::get_embedding_paths,
+        )?;
         self.load_model_from_path(
-            &paths?,
+            &paths,
             dtype,
             device,
             silent,
@@ -247,7 +230,7 @@ impl Loader for EmbeddingLoader {
                 mapper,
                 in_situ_quant,
                 uqff_files: self.from_uqff.read().unwrap().as_deref(),
-                prepared_weight_source: None,
+                prepared: None,
                 has_lora: false,
                 matformer: None,
                 matformer_sizing: false,
