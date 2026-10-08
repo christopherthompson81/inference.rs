@@ -20,9 +20,9 @@ use rand_isaac::Isaac64Rng;
 use regex_automata::meta::Regex;
 use tracing::{info, warn};
 
+use crate::pipeline::LoadOptions;
 use crate::{
-    DeviceMapSetting, Loader, ModelCategory, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline,
-    Response, TokenSource, TryIntoDType,
+    Loader, ModelCategory, ModelKind, ModelPaths, Pipeline, Response, TokenSource,
     amoe::{AnyMoeConfig, AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingResult},
     device_map::DeviceMapper,
     get_mut_arcmutex,
@@ -57,36 +57,21 @@ pub struct AnyMoePipeline {
 }
 
 impl Loader for AnyMoeLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        mut options: LoadOptions<'_>,
     ) -> anyhow::Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let paged_attn_config = if paged_attn_config.is_some() {
+        if options.paged_attn_config.take().is_some() {
             warn!("AnyMoE does not currently support PagedAttention, running without");
-            None
-        } else {
-            paged_attn_config
-        };
+        }
 
-        let target = self.target.load_model_from_hf(
-            revision.clone(),
-            token_source.clone(),
-            dtype,
-            device,
-            silent,
-            mapper.clone(),
-            in_situ_quant,
-            paged_attn_config,
-        )?;
+        let target =
+            self.target
+                .load_model_from_hf(revision.clone(), token_source.clone(), options)?;
         Ok(Arc::new(tokio::sync::Mutex::new(AnyMoePipeline::new(
             target,
             self.config.clone(),
@@ -101,34 +86,18 @@ impl Loader for AnyMoeLoader {
         )?)))
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_path(
         &self,
         paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        mut options: LoadOptions<'_>,
     ) -> anyhow::Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let paged_attn_config = if paged_attn_config.is_some() {
+        if options.paged_attn_config.take().is_some() {
             warn!("AnyMoE does not currently support PagedAttention, running without");
-            None
-        } else {
-            paged_attn_config
-        };
+        }
 
-        let target = self.target.load_model_from_path(
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper.clone(),
-            in_situ_quant,
-            paged_attn_config,
-        )?;
+        let target = self.target.load_model_from_path(paths, options)?;
         Ok(Arc::new(tokio::sync::Mutex::new(AnyMoePipeline::new(
             target,
             self.config.clone(),

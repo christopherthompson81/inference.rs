@@ -26,6 +26,7 @@ use crate::gguf::{
         prepare_gemma3_text_config,
     },
 };
+use crate::pipeline::LoadOptions;
 use crate::pipeline::chat_template::GenerationConfig;
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
 use crate::pipeline::loaders::stamp_qk_rope_layout;
@@ -35,12 +36,11 @@ use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig};
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::{
-    DeviceMapSetting, LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig, MultimodalLoaderType,
-    PagedAttentionConfig, Pipeline, Topology, TryIntoDType, UqffWriteConfig,
+    LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig, MultimodalLoaderType, Pipeline, Topology,
+    UqffWriteConfig,
 };
 use anyhow::{Context, Result, bail};
 use hf_hub::{Repo, RepoType};
-use inference_quant::IsqType;
 use inference_tensor::Device;
 use std::collections::HashMap;
 use std::fs;
@@ -129,12 +129,7 @@ impl GGUFSpecificConfig {
 struct NativeMultimodalLoadArgs<'a> {
     paths: &'a dyn ModelPaths,
     mmproj_paths: &'a [PathBuf],
-    dtype: &'a dyn TryIntoDType,
-    device: &'a Device,
-    silent: bool,
-    mapper: DeviceMapSetting,
-    in_situ_quant: Option<IsqType>,
-    paged_attn_config: Option<PagedAttentionConfig>,
+    options: LoadOptions<'a>,
 }
 
 fn prepare_native_multimodal_config(
@@ -148,12 +143,7 @@ fn prepare_native_multimodal_config(
 
 struct NativeNormalLoadArgs<'a> {
     paths: &'a dyn ModelPaths,
-    dtype: &'a dyn TryIntoDType,
-    device: &'a Device,
-    silent: bool,
-    mapper: DeviceMapSetting,
-    in_situ_quant: Option<IsqType>,
-    paged_attn_config: Option<PagedAttentionConfig>,
+    options: LoadOptions<'a>,
 }
 
 #[derive(Clone)]
@@ -400,15 +390,7 @@ impl GGUFLoader {
         &self,
         args: NativeNormalLoadArgs<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let NativeNormalLoadArgs {
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        } = args;
+        let NativeNormalLoadArgs { paths, options } = args;
         let archive = Arc::new(inference_quant::GgufArchive::open(
             paths.get_weight_filenames(),
         )?);
@@ -425,18 +407,7 @@ impl GGUFLoader {
         }
         #[cfg(feature = "models-gemma")]
         if architecture.eq_ignore_ascii_case("gemma3") {
-            return self.load_native_gemma3_text(
-                archive,
-                NativeNormalLoadArgs {
-                    paths,
-                    dtype,
-                    device,
-                    silent,
-                    mapper,
-                    in_situ_quant,
-                    paged_attn_config,
-                },
-            );
+            return self.load_native_gemma3_text(archive, NativeNormalLoadArgs { paths, options });
         }
         let metadata_keys = archive
             .metadata()
@@ -503,7 +474,7 @@ impl GGUFLoader {
         };
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
         let bindings = build_normal_bindings(&archive, &loader_type, descriptor.architecture)?;
-        let internal_dtype = dtype.try_into_dtype(&[device])?;
+        let internal_dtype = options.dtype.try_into_dtype(&[options.device])?;
         let source = Arc::new(inference_quant::GgufWeightSource::new(
             archive.clone(),
             &bindings,
@@ -557,15 +528,7 @@ impl GGUFLoader {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }
         let loader = loader.build_with_source(loader_type, source, self.kind.clone())?;
-        loader.load_model_from_path(
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
+        loader.load_model_from_path(paths, options)
     }
 
     #[cfg(feature = "models-gemma")]
@@ -574,15 +537,7 @@ impl GGUFLoader {
         archive: Arc<inference_quant::GgufArchive>,
         args: NativeNormalLoadArgs<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let NativeNormalLoadArgs {
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        } = args;
+        let NativeNormalLoadArgs { paths, options } = args;
         let external_config = if paths.get_config_filename().as_os_str().is_empty() {
             None
         } else {
@@ -597,7 +552,7 @@ impl GGUFLoader {
         let config = stamp_qk_rope_layout(&config, RopePairing::HalfSplit)?;
         let use_language_model_prefix = gemma3_text_uses_language_model_prefix(&config)?;
         let bindings = build_gemma3_text_bindings(&archive, use_language_model_prefix)?;
-        let internal_dtype = dtype.try_into_dtype(&[device])?;
+        let internal_dtype = options.dtype.try_into_dtype(&[options.device])?;
         let source = Arc::new(inference_quant::GgufWeightSource::new(
             archive.clone(),
             &bindings,
@@ -639,15 +594,7 @@ impl GGUFLoader {
         }
         let loader =
             loader.build_with_source(MultimodalLoaderType::Gemma3, source, self.kind.clone())?;
-        loader.load_model_from_path(
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
+        loader.load_model_from_path(paths, options)
     }
 
     fn load_native_multimodal(
@@ -657,12 +604,7 @@ impl GGUFLoader {
         let NativeMultimodalLoadArgs {
             paths,
             mmproj_paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
+            options,
         } = args;
         if !matches!(self.kind, ModelKind::GgufQuantized { .. }) && self.dynamic_lora.is_none() {
             bail!("multimodal GGUF does not support legacy GGUF adapters");
@@ -717,7 +659,7 @@ impl GGUFLoader {
         if architecture == "gemma3" {
             ensure_gemma3_vision_config(&config)?;
         }
-        let internal_dtype = dtype.try_into_dtype(&[device])?;
+        let internal_dtype = options.dtype.try_into_dtype(&[options.device])?;
         let source = Arc::new(inference_quant::GgufWeightSource::new(
             archive.clone(),
             &bindings,
@@ -771,15 +713,7 @@ impl GGUFLoader {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }
         let loader = loader.build_with_source(loader_type, source, self.kind.clone())?;
-        loader.load_model_from_path(
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
+        loader.load_model_from_path(paths, options)
     }
 
     fn infer_multimodal_asset_paths(
@@ -943,18 +877,13 @@ impl GGUFLoader {
 }
 
 impl Loader for GGUFLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         super::loading::install_hf_cache(self.config.hf_cache_path.clone());
         let revision = revision.unwrap_or_else(|| "main".to_string());
@@ -991,47 +920,20 @@ impl Loader for GGUFLoader {
             return self.load_native_multimodal(NativeMultimodalLoadArgs {
                 paths,
                 mmproj_paths: mmproj_paths.get_weight_filenames(),
-                dtype,
-                device,
-                silent,
-                mapper,
-                in_situ_quant,
-                paged_attn_config,
+                options,
             });
         }
 
-        self.load_model_from_path(
-            &paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
+        self.load_model_from_path(&paths, options)
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_path(
         &self,
         paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let _progress_guard = ProgressScopeGuard::new(silent);
-        self.load_native_normal(NativeNormalLoadArgs {
-            paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        })
+        let _progress_guard = ProgressScopeGuard::new(options.silent);
+        self.load_native_normal(NativeNormalLoadArgs { paths, options })
     }
 
     fn get_id(&self) -> String {

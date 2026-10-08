@@ -7,17 +7,14 @@ use super::{
     MultimodalLoaderType, MultimodalSpecificConfig, NormalLoaderBuilder, NormalLoaderType,
     NormalSpecificConfig, SpeechLoader, TokenSource,
 };
+use crate::pipeline::LoadOptions;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::{
-    AutoDeviceMapParams, DeviceMapSetting, IsqType, LoraAdapterSpec, LoraRuntimeConfig,
-    PagedAttentionConfig, Pipeline, TryIntoDType,
-};
+use crate::{AutoDeviceMapParams, DeviceMapSetting, LoraAdapterSpec, LoraRuntimeConfig, Pipeline};
 use anyhow::Result;
 use hf_hub::{
     Cache, Repo, RepoType,
     api::sync::{ApiError, ApiRepo},
 };
-use inference_tensor::Device;
 use serde::Deserialize;
 use std::io;
 use std::path::Path;
@@ -534,70 +531,48 @@ fn device_map_for_detected(mapper: DeviceMapSetting, detected: &Detected) -> Dev
 }
 
 impl Loader for AutoLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let config = self.read_config_from_hf(revision.clone(), &token_source, silent)?;
         let detected = self.detect(&config)?;
-        let mapper = device_map_for_detected(mapper, &detected);
+        let options = LoadOptions {
+            mapper: device_map_for_detected(options.mapper, &detected),
+            ..options
+        };
         self.ensure_loader(detected)?;
         self.loader
             .lock()
             .unwrap()
             .as_ref()
             .unwrap()
-            .load_model_from_hf(
-                revision,
-                token_source,
-                dtype,
-                device,
-                silent,
-                mapper,
-                in_situ_quant,
-                paged_attn_config,
-            )
+            .load_model_from_hf(revision, token_source, options)
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_path(
         &self,
         paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
-        let _progress_guard = ProgressScopeGuard::new(silent);
+        let _progress_guard = ProgressScopeGuard::new(options.silent);
         let config = self.read_config_from_path(paths)?;
         let detected = self.detect(&config)?;
-        let mapper = device_map_for_detected(mapper, &detected);
+        let options = LoadOptions {
+            mapper: device_map_for_detected(options.mapper, &detected),
+            ..options
+        };
         self.ensure_loader(detected)?;
         self.loader
             .lock()
             .unwrap()
             .as_ref()
             .unwrap()
-            .load_model_from_path(
-                paths,
-                dtype,
-                device,
-                silent,
-                mapper,
-                in_situ_quant,
-                paged_attn_config,
-            )
+            .load_model_from_path(paths, options)
     }
 
     fn get_id(&self) -> String {

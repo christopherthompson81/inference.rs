@@ -522,59 +522,54 @@ impl QuantizationConfigShim {
     }
 }
 
+/// How a `Loader` loads: the dtype (the model default when auto), device, device map, ISQ and paged attention.
+pub struct LoadOptions<'a> {
+    pub dtype: &'a dyn TryIntoDType,
+    pub device: &'a Device,
+    pub silent: bool,
+    pub mapper: DeviceMapSetting,
+    pub in_situ_quant: Option<IsqType>,
+    pub paged_attn_config: Option<PagedAttentionConfig>,
+}
+
 /// The `Loader` trait abstracts the loading process. The primary entrypoint is the
 /// `load_model` method.
 ///
 /// # Example
 /// ```no_run
-/// use inference_core::{Loader, TokenSource, DeviceMapSetting, AutoDeviceMapParams, ModelDType};
+/// use inference_core::{AutoDeviceMapParams, DeviceMapSetting, LoadOptions, Loader, ModelDType, TokenSource};
 /// use inference_tensor::Device;
 ///
 /// let loader: Box<dyn Loader> = todo!();
-/// let pipeline = loader.load_model_from_hf(
-///     None,
-///     TokenSource::CacheToken,
-///     &ModelDType::Auto,
-///     &Device::cuda_if_available(0).unwrap(),
-///     false,
-///     DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
-///     None,
-///     None,
-/// ).unwrap();
+/// let device = Device::cuda_if_available(0).unwrap();
+/// let options = LoadOptions {
+///     dtype: &ModelDType::Auto,
+///     device: &device,
+///     silent: false,
+///     mapper: DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
+///     in_situ_quant: None,
+///     paged_attn_config: None,
+/// };
+/// let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options).unwrap();
 /// ```
 pub trait Loader: Send + Sync {
     /// If `revision` is None, then it defaults to `main`.
-    /// If `dtype` is None, then it defaults to the model default (usually BF16).
     /// If model is not found on HF, will attempt to resolve locally.
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    #[allow(clippy::type_complexity)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>>;
 
     /// Load a model from the specified paths.
     /// Also initializes `DEBUG`.
-    #[allow(
-        clippy::type_complexity,
-        clippy::too_many_arguments,
-        clippy::borrowed_box
-    )]
+    #[allow(clippy::type_complexity)]
     fn load_model_from_path(
         &self,
         paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>>;
 
     fn get_id(&self) -> String;

@@ -7,6 +7,7 @@ use super::{
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{WorkerTransferData, use_ring};
 use crate::paged_attention::PagedAttentionMeta;
+use crate::pipeline::LoadOptions;
 use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
@@ -14,10 +15,7 @@ use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::utils::varbuilder_utils::from_mmaped_safetensors;
-use crate::{
-    DeviceMapSetting, MessageContent, PagedAttentionConfig, Pipeline, SpeechGenerationConfig,
-    TryIntoDType, distributed,
-};
+use crate::{DeviceMapSetting, MessageContent, Pipeline, SpeechGenerationConfig, distributed};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
@@ -189,18 +187,13 @@ pub struct SpeechLoader {
 }
 
 impl Loader for SpeechLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let paths: anyhow::Result<Box<dyn ModelPaths>> = {
             // Main weights first, DAC is the final one.
@@ -258,28 +251,22 @@ impl Loader for SpeechLoader {
 
             Ok(Box::new(SpeechModelPaths { weights, config }))
         };
-        self.load_model_from_path(
-            paths?.as_ref(),
+        self.load_model_from_path(paths?.as_ref(), options)
+    }
+
+    fn load_model_from_path(
+        &self,
+        paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let LoadOptions {
             dtype,
             device,
             silent,
             mapper,
             in_situ_quant,
-            paged_attn_config,
-        )
-    }
-
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn load_model_from_path(
-        &self,
-        paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        _paged_attn_config: Option<PagedAttentionConfig>,
-    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+            paged_attn_config: _,
+        } = options;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let paths = paths
             .as_any()

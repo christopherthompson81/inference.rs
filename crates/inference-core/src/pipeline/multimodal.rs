@@ -7,6 +7,7 @@ use super::{
     MultimodalModelLoader, TokenSource,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
+use crate::pipeline::LoadOptions;
 
 use crate::pipeline::IsqOrganization;
 use crate::pipeline::tokenizer::get_tokenizer;
@@ -582,18 +583,13 @@ impl MultimodalLoader {
 }
 
 impl Loader for MultimodalLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
         &self,
         revision: Option<String>,
         token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
+        options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         self.validate_dynamic_lora()?;
         let paths = super::loading::hub_model_paths(
@@ -610,28 +606,22 @@ impl Loader for MultimodalLoader {
             &self.from_uqff,
             |request| super::paths::get_paths(request, self.lora_adapters.as_deref()),
         )?;
-        self.load_model_from_path(
-            &paths,
+        self.load_model_from_path(&paths, options)
+    }
+
+    fn load_model_from_path(
+        &self,
+        paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let LoadOptions {
             dtype,
             device,
             silent,
             mapper,
             in_situ_quant,
             paged_attn_config,
-        )
-    }
-
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn load_model_from_path(
-        &self,
-        paths: &dyn ModelPaths,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
-    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        } = options;
         let uqff = super::loading::UqffLoad::new(
             self.config.from_uqff.is_some(),
             self.config.write_uqff.as_ref(),
