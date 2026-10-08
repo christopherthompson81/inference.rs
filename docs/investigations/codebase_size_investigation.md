@@ -2495,3 +2495,34 @@ forward and a duplicated state-index restore during capture.
 Implication: the pipeline merge's source goal is met (~1,100 duplicated lines estimated in Run 72; steps 1-4 net
 about -850 with the helpers they added). The bundle gains little because LTO had folded the copies; the value is
 one implementation. Optional next: graphed MTP verify steps for text models (plan step 6), now a one-line policy.
+
+## Run 79 - 2026-10-07 20:10
+
+Question: with one pipeline, can text MTP models graph their verify steps (plan step 6), and does anything text
+lacks get in the way?
+
+Change: `DecoderModel::graphs_speculative_verify()` and its two uses are gone, so text models with a drafter capture
+and replay decode graphs for the fixed-width verify steps as multimodal ones did. A model that cannot hand over its
+speculative graph state still skips with `speculative_conflict` (the guard after the shape checks).
+
+Raw findings:
+
+- Tiny Qwen3.5 text with builtin MTP: 29 captures, 30 replays, 49 drafts, greedy traces unchanged. The pin now
+  asserts every skipped dispatch is a prompt (`prefill`), so verify steps themselves replay; `--stress-count 20`:
+  20/20.
+- Found in review, older than the merge: `speculative_prompt_chunk` never ran for text (the old text pipeline used
+  the trait-default no-op; the merged one kept it behind the media state), so the MTP head never got the prompt's
+  KV and DFlash never got its prompt context on text models. The last-prompt attention moved from `MediaState` onto
+  the pipeline, and the drafter prefill now runs for text too.
+- Real Qwen3.5-0.8B (`qwen3_5_mtp::`, deep profile), accepted/proposed draft tokens, with vs without the text prefill:
+
+```
+multimodal view        38/58 (0.66)   38/58 (0.66)   (unaffected, as expected)
+text-only view         38/58 (0.66)   37/60 (0.62)
+GGUF (text path)       37/50 (0.74)   36/50 (0.72)
+```
+
+  Greedy output identical in every case; text now matches the multimodal view. Random-weight tiny model: 1/98 vs
+  0/98 accepted (no signal, as expected).
+
+CI: 2489 CPU, 2873 CUDA tests pass; bindings pass.

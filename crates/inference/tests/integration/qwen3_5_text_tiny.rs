@@ -191,9 +191,9 @@ async fn hybrid_paged_gpu_decode_without_cuda_graphs_matches() -> anyhow::Result
     decode_graphs::assert_rounds_without_graphs(paged_gpu_rounds, &GRAPH_TRACES).await
 }
 
-// With a drafter attached the text pipeline skips graphs on every step (multimodal graphs its verify steps).
+// With a drafter attached, decode graphs capture the fixed-width verify steps and greedy output is unchanged.
 #[tokio::test]
-async fn hybrid_builtin_mtp_verifies_without_cuda_graphs() -> anyhow::Result<()> {
+async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
     if !cfg!(feature = "cuda") {
         return Ok(());
     }
@@ -201,13 +201,13 @@ async fn hybrid_builtin_mtp_verifies_without_cuda_graphs() -> anyhow::Result<()>
     let (_checkpoint, model) = paged_gpu_model(true).await?;
     let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
     let counters = decode_graphs::Counters::take(&snapshotter);
-    assert!(
-        counters.total(
-            decode_graphs::DISPATCH,
-            &[("reason", "speculative_conflict")]
-        ) > 0
-            && counters.total(decode_graphs::EVENTS, &[]) == 0,
-        "MTP verify steps took graphs: {counters:?}"
+    decode_graphs::assert_replayed(&counters);
+    // every step a graph skipped is a prompt: verify steps replay too
+    let skipped = counters.total(decode_graphs::DISPATCH, &[("mode", "skipped")]);
+    let prompts = counters.total(decode_graphs::DISPATCH, &[("reason", "prefill")]);
+    assert_eq!(
+        skipped, prompts,
+        "a decode or verify step skipped graphs: {counters:?}"
     );
     let drafts: usize = model
         .speculative_stats()?

@@ -203,12 +203,6 @@ impl DecoderModel {
         }
     }
 
-    /// Whether decode graphs also capture the fixed-width verify steps of an attached drafter.
-    #[cfg(feature = "cuda")]
-    fn graphs_speculative_verify(&self) -> bool {
-        matches!(self, Self::Multimodal(_))
-    }
-
     fn supports_packed_prefill(&self) -> bool {
         match self {
             Self::Text(model) => model.supports_packed_prefill(),
@@ -244,19 +238,24 @@ pub(crate) struct MediaState {
     pub preprocessor_config: Arc<PreProcessorConfig>,
     pub prefixer: Arc<dyn MultimodalPromptPrefixer>,
     pub video_sampling: crate::VideoFrameSampling,
-    // Attention inputs of the last prompt-chunk forward, so a built-in drafter can prefill with them
-    pub last_prompt_attention: StdMutex<Option<(PagedAttentionInputMetadata, FlashParams)>>,
 }
 
 pub struct DecoderPipeline {
     model: DecoderModel,
     core: DecoderCore,
     media: Option<MediaState>,
+    // Attention inputs of the last prompt-chunk forward, so a built-in drafter can prefill with them
+    last_prompt_attention: StdMutex<Option<(PagedAttentionInputMetadata, FlashParams)>>,
 }
 
 impl DecoderPipeline {
     pub(crate) fn new(model: DecoderModel, core: DecoderCore, media: Option<MediaState>) -> Self {
-        Self { model, core, media }
+        Self {
+            model,
+            core,
+            media,
+            last_prompt_attention: StdMutex::new(None),
+        }
     }
 }
 
@@ -574,14 +573,6 @@ impl DecoderPipeline {
             return Ok(None);
         }
         let speculative = self.model.has_speculative_proposer();
-        if speculative && !self.model.graphs_speculative_verify() {
-            record_cuda_graph_dispatch(
-                CudaGraphComponent::Target,
-                CudaGraphDispatchMode::Skipped,
-                CudaGraphDispatchReason::SpeculativeConflict,
-            );
-            return Ok(None);
-        }
         let Some((kv_cache, metadata)) = paged_attn_meta else {
             record_cuda_graph_dispatch(
                 CudaGraphComponent::Target,
@@ -750,7 +741,6 @@ impl DecoderPipeline {
             || !device.is_cuda()
             || !self.model.supports_cuda_decode_graphs(None)
             || !cuda_decode_graph_supported_for_model(self.core.metadata.model_metadata.as_deref())
-            || (self.model.has_speculative_proposer() && !self.model.graphs_speculative_verify())
         {
             return Ok(());
         }
@@ -1211,10 +1201,8 @@ impl Pipeline for DecoderPipeline {
             paged_attn_meta.as_ref().map(|(_, meta)| *meta),
             recurrent_batch_kind,
         )?;
-        if let Some(media) = self.media.as_ref()
-            && self.model.has_speculative_proposer()
-        {
-            *media
+        if self.model.has_speculative_proposer() {
+            *self
                 .last_prompt_attention
                 .lock()
                 .expect("prompt attention mutex poisoned") = paged_attn_meta
@@ -1413,9 +1401,6 @@ impl Pipeline for DecoderPipeline {
         chunk: &crate::pipeline::SpeculativePromptChunk,
         metadata: &crate::paged_attention::PagedAttentionMeta,
     ) -> inference_tensor::Result<()> {
-        let Some(media) = self.media.as_ref() else {
-            return Ok(());
-        };
         if !self.model.has_speculative_proposer() {
             return Ok(());
         }
@@ -1436,7 +1421,7 @@ impl Pipeline for DecoderPipeline {
             .map(|row| row.tokens.as_slice())
             .collect::<Vec<_>>();
         let chunk_ranges = chunk.rows.iter().map(|row| row.range).collect::<Vec<_>>();
-        let target_attention = media
+        let target_attention = self
             .last_prompt_attention
             .lock()
             .expect("prompt attention mutex poisoned")
