@@ -1,12 +1,13 @@
-//! The image and video input paths of the Qwen-VL models on tiny random-weight checkpoints built at test time.
+//! The image and video input paths of the Qwen-VL models, and a LoRA adapter on one, on tiny random-weight checkpoints.
 
 use std::path::Path;
 
 use image::{DynamicImage, Rgb, RgbImage};
 use inference::{
-    Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole,
-    VideoInput,
+    LoraModelBuilder, Model, ModelDType, MultimodalMessages, MultimodalModelBuilder,
+    RequestBuilder, TextMessageRole, TextModelBuilder, VideoInput,
 };
+use inference_tensor::{Device, Tensor};
 
 #[path = "../support/qwen_vl_tiny.rs"]
 mod support;
@@ -527,6 +528,76 @@ async fn qwen3_vl_ignores_a_configured_sliding_window() -> anyhow::Result<()> {
     anyhow::ensure!(
         same_decode(&expected, &actual),
         "a configured window changed decoding: {actual:?} vs {expected:?}"
+    );
+    Ok(())
+}
+
+const ADAPTER: &str = "q-proj-adapter";
+const ADAPTER_RANK: usize = 2;
+// From qwen2_vl/config.json, written by make_tiny.py.
+const QWEN2_VL_HIDDEN: usize = 128;
+const QWEN2_VL_LAYERS: usize = 2;
+
+// A rank-2 PEFT adapter on every text layer's q_proj, large enough to move the tiny model's logits.
+fn write_q_proj_adapter(dir: &Path) -> anyhow::Result<()> {
+    std::fs::write(
+        dir.join("adapter_config.json"),
+        format!(
+            r#"{{"r":{ADAPTER_RANK},"lora_alpha":{ADAPTER_RANK},"target_modules":["q_proj"]}}"#
+        ),
+    )?;
+    let ramp = |rows: usize, cols: usize, scale: f32| {
+        let data = (0..rows * cols)
+            .map(|i| ((i % 7) as f32 - 3.0) * scale)
+            .collect::<Vec<_>>();
+        Tensor::from_vec(data, (rows, cols), &Device::Cpu)
+    };
+    let mut tensors = std::collections::HashMap::new();
+    for layer in 0..QWEN2_VL_LAYERS {
+        let prefix = format!("base_model.model.model.layers.{layer}.self_attn.q_proj");
+        tensors.insert(
+            format!("{prefix}.lora_A.weight"),
+            ramp(ADAPTER_RANK, QWEN2_VL_HIDDEN, 0.3)?,
+        );
+        tensors.insert(
+            format!("{prefix}.lora_B.weight"),
+            ramp(QWEN2_VL_HIDDEN, ADAPTER_RANK, 0.5)?,
+        );
+    }
+    inference_tensor::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lora_adapter_on_a_multimodal_model_applies_only_when_selected() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen2_vl()?;
+    let adapter = tempfile::tempdir()?;
+    write_q_proj_adapter(adapter.path())?;
+    let base = build(checkpoint.path()).await?;
+    let base_trace = trace(&base, images(&IMAGE_SIDES[..1])).await?;
+    // without an architecture the LoRA load detects the multimodal model, as the CLI does
+    let text =
+        TextModelBuilder::new(checkpoint.path().to_string_lossy()).with_dtype(ModelDType::F32);
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    let text = text.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+    let text = if ON_GPU { text } else { text.with_force_cpu() };
+    let lora = LoraModelBuilder::from_text_model_builder(text)
+        .with_adapter(ADAPTER, adapter.path().to_string_lossy())
+        .build()
+        .await?;
+    let unselected = trace(&lora, images(&IMAGE_SIDES[..1])).await?;
+    assert!(
+        same_decode(&unselected.0, &base_trace.0),
+        "{unselected:?} vs {base_trace:?}"
+    );
+    let adapted = trace(&lora, images(&IMAGE_SIDES[..1]).set_adapter(ADAPTER)).await?;
+    assert!(
+        adapted
+            .0
+            .iter()
+            .map(|s| s.0)
+            .ne(base_trace.0.iter().map(|s| s.0)),
+        "the adapter did not change the image decode"
     );
     Ok(())
 }
