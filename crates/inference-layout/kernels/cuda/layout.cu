@@ -1,31 +1,6 @@
 // Threads per mask_to_box_f32 block; cuda_kernels::MASK_TO_BOX_BLOCK must match (a unit test checks).
 #define MASK_TO_BOX_BLOCK 256
 
-extern "C" __global__ void depthwise_conv2d_f32(
-    const float* __restrict__ x, const float* __restrict__ w, const float* __restrict__ b,
-    float* __restrict__ y, int n, int C, int H, int W, int Ho, int Wo, int K, int S, int P) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    if (i >= n) return;
-    int ox = i % Wo;
-    int oy = (i / Wo) % Ho;
-    int plane = i / (Wo * Ho);
-    int c = plane % C;
-    const float* xp = x + (long)plane * H * W;
-    const float* wk = w + c * K * K;
-    float acc = b[c];
-    int iy0 = oy * S - P;
-    int ix0 = ox * S - P;
-    for (int ky = 0; ky < K; ++ky) {
-        int iy = iy0 + ky;
-        if (iy < 0 || iy >= H) continue;
-        for (int kx = 0; kx < K; ++kx) {
-            int ix = ix0 + kx;
-            if (ix >= 0 && ix < W) acc += xp[iy * W + ix] * wk[ky * K + kx];
-        }
-    }
-    y[i] = acc;
-}
-
 // cols[n][c*K*K + ky*K + kx][oy*Wo + ox], plus a trailing ones row per batch so the GEMM adds the bias
 extern "C" __global__ void im2col_cols_last_f32(
     const float* __restrict__ x, float* __restrict__ cols, int rows_per_b, int n_rows,
