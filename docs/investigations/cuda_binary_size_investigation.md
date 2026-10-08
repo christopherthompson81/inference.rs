@@ -1973,3 +1973,29 @@ device crashed a map that put layer 0 elsewhere; this was latent in Qwen2-VL and
 Next: #324 wrap-up (Mllama and Llama 4 would need mixed layer kinds; Gemma 3n, Gemma 4, Qwen3.5, LFM2, Voxtral stay
 bespoke).
 
+
+## Run 59 - 2026-10-07 18:49
+
+Question (owner): what does the ISQ feature cost in bundle size?
+
+Method: `cargo build --profile release-with-debug -p inference-ffi --features cuda` (unstripped, 3 min). Function
+symbols from `nm -S -C`; each symbol's defining source file from `llvm-symbolizer` over its address, run as 16
+parallel shards (8 s; a single `nm -S -l` was still running after 10 min). ISQ code is the union of: symbols defined
+in the ISQ-only files (`pipeline/isq.rs`, `isq_flow/`, `utils/isq.rs`, `isq_executor`, `pending_layer`, `imatrix`,
+`uqff/tracker`, `topology`, `uqff/report`), symbols named for ISQ wherever they live (`apply_isq`, `IsqModel` hooks,
+calibration, re-ISQ, UQFF writing), the GGML CPU quantizers other than the activation types (Q8_K, Q8_1), and the
+formats only ISQ produces (HQQ, AFQ, F8Q8). GPU code per kernel object from `size -A`.
+
+```
+host, of 58.4 MiB function code   ISQ machinery 0.70, CPU quantizers 0.05, HQQ/AFQ/F8Q8 layers 0.15   = 0.90 MiB
+GPU (.nv_fatbin, sm_86)            afq 21.7 KB + afq_gemm 22.5 KB, hqq 4.6 KB, hqq_bitpack 4.9 KB     = 0.05 MiB
+```
+
+With the bundle's ~0.3 bytes of unwind, relocation and rodata per byte of code, ISQ is ~1.2 MiB of the ~100 MiB
+bundle (~1.2%). Source: ~15,000 lines in the ISQ-only files plus the CLI's `quantize`, and 201 source files that
+mention ISQ (every model's `IsqModel` hooks among them).
+
+Implication: removing ISQ is not a bundle-size lever. The case for or against it is features (quantizing
+safetensors checkpoints at load, producing UQFF, MoQE, online calibration, `tune`'s quant choice) against the
+maintenance and bug surface of its load paths (Run 74 of the codebase-size log: the UQFF-writing load on a GPU,
+re-ISQ's silent failures).
