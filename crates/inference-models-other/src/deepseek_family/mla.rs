@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
 use inference_quant::{
-    ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, LoraSiteKey, QuantMethod, ReplicatedLayer, RowParallelLayer,
+    ShardedVarBuilder,
 };
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
@@ -22,6 +23,9 @@ use crate::paged_attention::{
     AttentionImplementation, ModelConfigMetadata, PagedAttention, PagedAttentionInputMetadata,
 };
 use crate::utils::unvarbuilder::UnVarBuilder;
+
+const KV_B_LORA_EXCLUDED: &str = "the MLA latent paged cache stores no per-head K/V; drop kv_b_proj (or k_b_proj/v_b_proj) \
+     from the adapter, disable paged attention, or set INFERENCE_RS_NO_MLA=1";
 
 #[derive(Clone, Debug)]
 pub struct MlaConfig {
@@ -421,8 +425,23 @@ impl FamilyAttention for MlaAttention {
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("kv_a_layernorm"), false),
         )?;
-        let k_b_vb = vb.pp("k_b_proj");
-        let v_b_vb = vb.pp("v_b_proj");
+        let layer_device = mapper.device_for(layer_idx, false).unwrap_or(vb.device());
+        let kv_b_vb =
+            if crate::mla::uses_mla_paged_cache(paged_attn.is_some(), layer_device.is_cuda()) {
+                if let Some(registry) = vb.lora_registry() {
+                    for name in ["kv_b_proj", "k_b_proj", "v_b_proj"] {
+                        registry.exclude_site(
+                            LoraSiteKey::new(vb.pp(name).prefix()),
+                            KV_B_LORA_EXCLUDED,
+                        );
+                    }
+                }
+                vb.clone().without_lora_registry()
+            } else {
+                vb.clone()
+            };
+        let k_b_vb = kv_b_vb.pp("k_b_proj");
+        let v_b_vb = kv_b_vb.pp("v_b_proj");
         let kv_b_proj = match (
             crate::layers::contains_tensor_or_weight_source(&k_b_vb, "weight"),
             crate::layers::contains_tensor_or_weight_source(&v_b_vb, "weight"),
@@ -451,7 +470,7 @@ impl FamilyAttention for MlaAttention {
                 &cfg.quantization_config,
                 false,
                 comm,
-                mapper.set_device(layer_idx, vb.pp("kv_b_proj"), loading_isq),
+                mapper.set_device(layer_idx, kv_b_vb.pp("kv_b_proj"), loading_isq),
             )?),
             _ => inference_tensor::bail!(
                 "{} layer {layer_idx} has incomplete split MLA weights",
