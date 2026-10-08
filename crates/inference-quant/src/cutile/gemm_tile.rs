@@ -4,8 +4,7 @@ use cutile::tile_kernel::CompileOptions;
 
 use super::tune::{Space, config};
 
-/// Launch config: the row tile, the swizzle map over output tiles, persistent tile blocks per SM,
-/// and the knobs the autotuner sweeps. The column tile is pinned to one weight-scale column.
+/// Row tile, swizzle map, persistent blocks per SM and the tuner's knobs; columns span one weight-scale block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct GemmTileConfig {
     pub bm: i32,

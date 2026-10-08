@@ -110,8 +110,8 @@ pub(super) fn reduce_split_k(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{compile_tile_ir, generics};
     use super::*;
+    use crate::cutile::{compile_tile_ir, generics};
 
     #[test]
     fn kernels_compile_to_tile_ir() {

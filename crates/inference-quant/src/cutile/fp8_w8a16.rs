@@ -420,7 +420,7 @@ fn launch(operands: &GemmOperands<'_>, cfg: GemmTileConfig, compile_only: bool) 
     let blocks_per_sm = usize::try_from(cfg.blocks_per_sm).unwrap_or(1).max(1);
     let tile_blocks = (blocks_per_sm * dev.sm_count()).clamp(1, tiles) as u32;
     let generics = vec![
-        super::element_type(activation.dtype()).to_string(),
+        super::element_type(activation.dtype())?.to_string(),
         cfg.bm.to_string(),
         BLOCK_SIZE.to_string(),
         BLOCK_SIZE.to_string(),
@@ -699,6 +699,7 @@ impl CutileKernel for Fp8W8A16Kernel {
 mod tests {
     use super::{cutile_fp8_w8a16, validate_scale_shape};
     use crate::Fp8WeightScaleLayout;
+    use crate::cutile::{compile_tile_ir, generics};
     use float8::F8E4M3;
     use inference_tensor::{DType, Device, Result, Tensor};
 
@@ -712,7 +713,7 @@ mod tests {
             ("block", "f16"),
         ] {
             for cfg in [POLICY_SMALL, POLICY_LARGE] {
-                let values = super::super::generics(&[
+                let values = generics(&[
                     &dtype,
                     &cfg.bm,
                     &BLOCK_SIZE,
@@ -724,7 +725,7 @@ mod tests {
                 let entry = format!("fp8_w8a16_{scales}");
                 let ws_rank = if scales == "post" { 1 } else { 2 };
                 let tensors = [("y", 2), ("x", 2), ("w", 2), ("ws", ws_rank)];
-                super::super::compile_tile_ir(
+                compile_tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
                     &entry,

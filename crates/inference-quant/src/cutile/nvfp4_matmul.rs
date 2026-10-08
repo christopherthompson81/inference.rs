@@ -637,7 +637,7 @@ pub(super) fn quantize(
     };
     let blocks = (BLOCKS_PER_SM * dev.sm_count()) as u32;
     let generic = vec![
-        super::element_type(x.dtype()).to_string(),
+        super::element_type(x.dtype())?.to_string(),
         QUANT_ROWS.to_string(),
         QUANT_K.to_string(),
         (QUANT_K / 2).to_string(),
@@ -888,7 +888,7 @@ fn launch_inner(
     });
     let blocks = (BLOCKS_PER_SM * dev.sm_count()) as u32;
     let generic = vec![
-        super::element_type(dtype).to_string(),
+        super::element_type(dtype)?.to_string(),
         bm.to_string(),
         bn.to_string(),
         MATMUL_K.to_string(),
@@ -1109,7 +1109,7 @@ pub(super) fn launch_gather(
     let blocks = (BLOCKS_PER_SM * dev.sm_count()) as u32;
     let a4 = args.activation_global_scale.is_some();
     let generic = vec![
-        super::element_type(x.dtype()).to_string(),
+        super::element_type(x.dtype())?.to_string(),
         ROUTED_ROWS.to_string(),
         ROUTED_COLUMNS.to_string(),
         MATMUL_K.to_string(),
@@ -1119,7 +1119,7 @@ pub(super) fn launch_gather(
         LOAD_LATENCY.to_string(),
     ];
     let quant_generic = vec![
-        super::element_type(x.dtype()).to_string(),
+        super::element_type(x.dtype())?.to_string(),
         QUANT_ROWS.to_string(),
         QUANT_K.to_string(),
         (QUANT_K / 2).to_string(),
@@ -1286,16 +1286,16 @@ pub(super) fn launch_gather(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{compile_tile_ir, generics};
     use super::*;
+    use crate::cutile::{compile_tile_ir, generics};
 
     #[test]
     fn kernels_compile_to_tile_ir() {
-        let ir = |entry: String, values, tensors: &[(&str, usize)]| {
+        let ir = |entry: &str, values, tensors: &[(&str, usize)]| {
             compile_tile_ir(
                 kernels::__module_ast_self,
                 "kernels",
-                &entry,
+                entry,
                 values,
                 tensors,
             )
@@ -1326,7 +1326,7 @@ mod tests {
         ];
         for dtype in ["bf16", "f16"] {
             ir(
-                "quantize".to_string(),
+                "quantize",
                 generics(&[
                     &dtype,
                     &QUANT_ROWS,
@@ -1338,7 +1338,7 @@ mod tests {
             );
             for a4 in [false, true] {
                 ir(
-                    "matmul".to_string(),
+                    "matmul",
                     generics(&[
                         &dtype,
                         &MATMUL_ROWS,
@@ -1353,7 +1353,7 @@ mod tests {
                     &matmul,
                 );
                 ir(
-                    "route_quantize".to_string(),
+                    "route_quantize",
                     generics(&[
                         &dtype,
                         &QUANT_ROWS,
@@ -1366,7 +1366,7 @@ mod tests {
                     &route_quantize,
                 );
                 ir(
-                    "routed_matmul".to_string(),
+                    "routed_matmul",
                     generics(&[
                         &dtype,
                         &ROUTED_ROWS,

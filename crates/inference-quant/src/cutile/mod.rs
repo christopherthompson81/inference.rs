@@ -50,11 +50,13 @@ pub use tune::{TUNE_CACHE_ENV, TUNE_MODE_ENV, TuneMode};
 pub use warmup::warmup_moe_kernels;
 
 /// The element-type generic of the kernels that take bf16 or f16 activations.
-fn element_type(dtype: inference_tensor::DType) -> &'static str {
+fn element_type(dtype: inference_tensor::DType) -> inference_tensor::Result<&'static str> {
     match dtype {
-        inference_tensor::DType::BF16 => "bf16",
-        inference_tensor::DType::F16 => "f16",
-        other => unreachable!("cuTile kernels take bf16 or f16, got {other:?}"),
+        inference_tensor::DType::BF16 => Ok("bf16"),
+        inference_tensor::DType::F16 => Ok("f16"),
+        dtype => {
+            inference_tensor::bail!("cuTile kernels take bf16 or f16 activations, got {dtype:?}")
+        }
     }
 }
 
@@ -191,8 +193,7 @@ fn generics(values: &[&dyn std::fmt::Display]) -> Vec<String> {
     values.iter().map(ToString::to_string).collect()
 }
 
-/// Compiles one entry to Tile IR offline (no GPU), so kernels are checked where they cannot run.
-/// `tensors` names each tensor parameter with its rank; all are taken as contiguous.
+/// Compiles one entry to Tile IR offline; `tensors` names each tensor parameter with its rank, taken as contiguous.
 #[cfg(test)]
 fn compile_tile_ir(
     module_ast: fn() -> cutile::cutile_compiler::ast::Module,

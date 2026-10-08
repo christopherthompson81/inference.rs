@@ -270,7 +270,7 @@ pub(super) fn launch(
     let tiles = rows * n.div_ceil(tile_columns);
     let tile_blocks = tiles as u32;
     let generics = vec![
-        super::element_type(x.dtype()).to_string(),
+        super::element_type(x.dtype())?.to_string(),
         tile_columns.to_string(),
         tile_k.to_string(),
         (tile_k / 2).to_string(),
@@ -402,8 +402,8 @@ pub(super) fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{compile_tile_ir, generics};
     use super::*;
+    use crate::cutile::{compile_tile_ir, generics};
 
     #[test]
     fn kernels_compile_to_tile_ir() {

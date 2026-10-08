@@ -481,10 +481,15 @@ impl CutileKernel for Fp8GemmKernel {
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
+    use super::{FP8_GEMM_BLOCK_ROWS, GemmTileConfig, POLICY, TUNED, cutile_fp8_gemm};
+    use crate::blockwise_fp8::{mma, ops};
+    use crate::cutile::tune::{Bucket, Source, Tuned};
+    use crate::cutile::{compile_tile_ir, generics};
+
     #[test]
     fn kernels_compile_to_tile_ir() {
         use super::{BLOCK_COLS, GROUP_SIZE, kernels};
-        let values = crate::cutile::generics(&[
+        let values = generics(&[
             &POLICY.bm,
             &BLOCK_COLS,
             &GROUP_SIZE,
@@ -493,7 +498,7 @@ mod tests {
             &POLICY.latency,
         ]);
         let tensors = [("y", 2), ("x", 2), ("w", 2), ("xs", 2), ("ws", 2)];
-        crate::cutile::compile_tile_ir(
+        compile_tile_ir(
             kernels::__module_ast_self,
             "kernels",
             "fp8_blockwise_gemm",
@@ -501,10 +506,6 @@ mod tests {
             &tensors,
         );
     }
-
-    use super::{FP8_GEMM_BLOCK_ROWS, GemmTileConfig, POLICY, TUNED, cutile_fp8_gemm};
-    use crate::blockwise_fp8::{mma, ops};
-    use crate::cutile::tune::{Bucket, Source, Tuned};
 
     const GROUP_SIZE: usize = 128;
 

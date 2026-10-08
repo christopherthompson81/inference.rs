@@ -1186,12 +1186,19 @@ impl CutileKernel for FusedMoeFp8Kernel {
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
+    use super::{Bucket, MoeTileConfig};
+    use super::{CutileFp8MoeWeights, FP8_MOE_GROUP, cutile_fused_moe_fp8};
+    use crate::GluActivationType;
+    use crate::blockwise_fp8::ops;
+    use crate::cutile::tune::{Source, Tuned};
+    use crate::cutile::{compile_tile_ir, generics};
+
     #[test]
     fn kernels_compile_to_tile_ir() {
         use super::{DECODE_TOKENS, fp8_policy, fused_moe_fp8};
         for (m, top_k, mul_routed_weight) in [(DECODE_TOKENS, 8, 0), (4096, 1, 1)] {
             let cfg = fp8_policy(m);
-            let values = crate::cutile::generics(&[
+            let values = generics(&[
                 &cfg.bm,
                 &cfg.bn,
                 &cfg.bk,
@@ -1202,21 +1209,9 @@ mod tests {
                 &cfg.latency,
             ]);
             let ast = fused_moe_fp8::__module_ast_self;
-            crate::cutile::compile_tile_ir(
-                ast,
-                "fused_moe_fp8",
-                "fused_moe_fp8_kernel",
-                values,
-                &[],
-            );
+            compile_tile_ir(ast, "fused_moe_fp8", "fused_moe_fp8_kernel", values, &[]);
         }
     }
-
-    use super::{Bucket, MoeTileConfig};
-    use super::{CutileFp8MoeWeights, FP8_MOE_GROUP, cutile_fused_moe_fp8};
-    use crate::GluActivationType;
-    use crate::blockwise_fp8::ops;
-    use crate::cutile::tune::{Source, Tuned};
 
     fn patterned(len: usize, seed: usize, amplitude: f32, offset: f32) -> Vec<f32> {
         (0..len)

@@ -518,7 +518,7 @@ fn launch(operands: &GemmOperands<'_>, cfg: GemmTileConfig, compile_only: bool) 
     let blocks_per_sm = usize::try_from(cfg.blocks_per_sm).unwrap_or(1).max(1);
     let tile_blocks = (blocks_per_sm * dev.sm_count()).clamp(1, tiles) as u32;
     let generics = vec![
-        super::element_type(operands.scheme.output_dtype).to_string(),
+        super::element_type(operands.scheme.output_dtype)?.to_string(),
         cfg.bm.to_string(),
         TILE_SIZE.to_string(),
         TILE_SIZE.to_string(),
@@ -773,12 +773,19 @@ impl CutileKernel for Fp8W8A8Kernel {
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
+    use super::{
+        CutileFp8W8A8Args, Fp8W8A8Scheme, GemmOperands, cutile_fp8_w8a8, quantize_activation,
+        validate_scale_shapes,
+    };
+    use crate::cutile::{compile_tile_ir, generics};
+    use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};
+
     #[test]
     fn kernels_compile_to_tile_ir() {
         use super::{POLICY_LARGE, POLICY_SMALL, TILE_SIZE, kernels};
         for dtype in ["bf16", "f16"] {
             for cfg in [POLICY_SMALL, POLICY_LARGE] {
-                let values = super::super::generics(&[
+                let values = generics(&[
                     &dtype,
                     &cfg.bm,
                     &TILE_SIZE,
@@ -787,24 +794,18 @@ mod tests {
                     &cfg.map_n,
                     &cfg.latency,
                 ]);
-                let entry = "fp8_w8a8".to_string();
+                let entry = "fp8_w8a8";
                 let tensors = [("y", 2), ("x", 2), ("w", 2), ("xs", 1), ("ws", 1)];
-                super::super::compile_tile_ir(
+                compile_tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
-                    &entry,
+                    entry,
                     values,
                     &tensors,
                 );
             }
         }
     }
-
-    use super::{
-        CutileFp8W8A8Args, Fp8W8A8Scheme, GemmOperands, cutile_fp8_w8a8, quantize_activation,
-        validate_scale_shapes,
-    };
-    use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};
 
     #[test]
     fn scale_shapes_are_validated_by_scheme() -> Result<()> {

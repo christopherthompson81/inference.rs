@@ -900,9 +900,12 @@ mod tests {
     use half::bf16;
     use inference_tensor::{DType, Device, Result, Tensor};
 
+    use super::{GDN_PREFILL_CHUNK, GDN_PREFILL_HEAD_DIM, GdnPrefillArgs, cutile_gdn_prefill};
+    use crate::cutile::{compile_tile_ir, generics};
+
     #[test]
     fn kernels_compile_to_tile_ir() {
-        let values = || crate::cutile::generics(&[&GDN_PREFILL_CHUNK, &D, &D]);
+        let values = || generics(&[&GDN_PREFILL_CHUNK, &D, &D]);
         let ast = super::kernels::__module_ast_self;
         let wy = [("k", 3), ("v", 3), ("g", 2), ("beta", 2)];
         let state = [("q", 3), ("k", 3), ("w", 2), ("u", 2), ("g", 2)];
@@ -912,11 +915,9 @@ mod tests {
             ("gdn_state", &state[..]),
             ("gdn_out", &out[..]),
         ] {
-            crate::cutile::compile_tile_ir(ast, "kernels", entry, values(), tensors);
+            compile_tile_ir(ast, "kernels", entry, values(), tensors);
         }
     }
-
-    use super::{GDN_PREFILL_CHUNK, GDN_PREFILL_HEAD_DIM, GdnPrefillArgs, cutile_gdn_prefill};
 
     const D: usize = GDN_PREFILL_HEAD_DIM;
 

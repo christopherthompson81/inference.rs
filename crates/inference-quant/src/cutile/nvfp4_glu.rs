@@ -342,7 +342,7 @@ pub(crate) fn launch(
     let blocks = (BLOCKS_PER_SM * dev.sm_count())
         .min(rows.div_ceil(QUANT_ROWS) * columns.div_ceil(QUANT_K)) as u32;
     let generics = vec![
-        super::element_type(args.gate.dtype()).to_string(),
+        super::element_type(args.gate.dtype())?.to_string(),
         QUANT_ROWS.to_string(),
         QUANT_K.to_string(),
         (QUANT_K / 2).to_string(),
@@ -467,12 +467,13 @@ pub(super) fn warm_common(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cutile::{compile_tile_ir, generics};
 
     #[test]
     fn kernels_compile_to_tile_ir() {
         for dtype in ["bf16", "f16"] {
             for activation in WARMUP_ACTIVATIONS {
-                let values = super::super::generics(&[
+                let values = generics(&[
                     &dtype,
                     &QUANT_ROWS,
                     &QUANT_K,
@@ -480,12 +481,12 @@ mod tests {
                     &(QUANT_K / BLOCK_SIZE),
                     &(activation as i32),
                 ]);
-                let entry = "quantize".to_string();
+                let entry = "quantize";
                 let tensors = [("q", 2), ("ag", 1)];
-                super::super::compile_tile_ir(
+                compile_tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
-                    &entry,
+                    entry,
                     values,
                     &tensors,
                 );
