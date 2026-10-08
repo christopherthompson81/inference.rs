@@ -4,7 +4,7 @@ use anyhow::{Context, Error as AnyhowError, Result, anyhow};
 use base64::{Engine, prelude::BASE64_STANDARD};
 use futures::future::{BoxFuture, join_all};
 use inference_core::{
-    Constraint, InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
+    InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
 };
 use tokio::sync::mpsc::Receiver;
 
@@ -236,41 +236,16 @@ async fn fetch_embedding(
     let (tx, mut rx) = create_response_channel(Some(1));
 
     let request = Request::Normal(Box::new(NormalRequest {
-        id: state.next_request_id(),
-        queued_at: None,
-        messages: RequestMessage::Embedding { prompt },
-        sampling_params: SamplingParams::deterministic(),
-        seed: None,
-        response: tx,
-        return_logprobs: false,
-        is_streaming: false,
-        suffix: None,
-        constraint: Constraint::None,
-        tool_choice: None,
-        tools: None,
-        logits_processors: None,
-        host_tools: Vec::new(),
-        sequential_tool_calls: false,
-        return_raw_logits: false,
-        web_search_options: None,
-        enable_code_execution: false,
-        enable_shell: false,
-        shell_options: None,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: None,
-        agent_approval_handler: None,
-        agent_approval_notifier: None,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
         model_id: model_id.map(|m| m.to_string()),
-        adapter: None,
         truncate_sequence,
-        session_id: None,
-        owner: None,
-        files: None,
-        input_files: Vec::new(),
-        cancellation: None,
+        ..NormalRequest::new_simple(
+            RequestMessage::Embedding { prompt },
+            SamplingParams::deterministic(),
+            tx,
+            state.next_request_id(),
+            None,
+            None,
+        )
     }));
 
     send_request_with_model(&state, request, model_id)
@@ -289,41 +264,16 @@ async fn fetch_embedding_tokens(
     let (tx, mut rx) = create_response_channel(Some(1));
 
     let request = Request::Normal(Box::new(NormalRequest {
-        id: state.next_request_id(),
-        queued_at: None,
-        messages: RequestMessage::EmbeddingTokens { prompt: tokens },
-        sampling_params: SamplingParams::deterministic(),
-        seed: None,
-        response: tx,
-        return_logprobs: false,
-        is_streaming: false,
-        suffix: None,
-        constraint: Constraint::None,
-        tool_choice: None,
-        tools: None,
-        logits_processors: None,
-        host_tools: Vec::new(),
-        sequential_tool_calls: false,
-        return_raw_logits: false,
-        web_search_options: None,
-        enable_code_execution: false,
-        enable_shell: false,
-        shell_options: None,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: None,
-        agent_approval_handler: None,
-        agent_approval_notifier: None,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
         model_id: model_id.map(|m| m.to_string()),
-        adapter: None,
         truncate_sequence,
-        session_id: None,
-        owner: None,
-        files: None,
-        input_files: Vec::new(),
-        cancellation: None,
+        ..NormalRequest::new_simple(
+            RequestMessage::EmbeddingTokens { prompt: tokens },
+            SamplingParams::deterministic(),
+            tx,
+            state.next_request_id(),
+            None,
+            None,
+        )
     }));
 
     send_request_with_model(&state, request, model_id)
