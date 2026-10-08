@@ -457,6 +457,45 @@ mod tests {
         Ok(())
     }
 
+    // im2col + GEMM, or cuDNN under its feature; strided input, padding, stride and dilation
+    #[test]
+    fn dense_conv_on_cuda_matches_the_cpu() -> Result<()> {
+        let Ok(cuda) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let x2 = Tensor::randn(0f32, 1., (2, 19, 17, 24), &Device::Cpu)?.permute((0, 3, 1, 2))?;
+        let w2 = Tensor::randn(0f32, 1., (16, 24, 3, 3), &Device::Cpu)?;
+        let x1 = Tensor::randn(0f32, 1., (2, 41, 24), &Device::Cpu)?.transpose(1, 2)?;
+        let w1 = Tensor::randn(0f32, 1., (16, 24, 5), &Device::Cpu)?;
+        for (padding, stride, dilation) in [(1, 1, 1), (2, 2, 1), (2, 1, 2)] {
+            let expected2 = x2.conv2d(&w2, padding, stride, dilation, 1)?;
+            let expected1 = x1.conv1d(&w1, padding, stride, dilation, 1)?;
+            for (dtype, tolerance) in DTYPES {
+                let on = |t: &Tensor| t.to_dtype(dtype)?.to_device(&cuda);
+                for (got, expected) in [
+                    (
+                        on(&x2)?.conv2d(&on(&w2)?, padding, stride, dilation, 1)?,
+                        &expected2,
+                    ),
+                    (
+                        on(&x1)?.conv1d(&on(&w1)?, padding, stride, dilation, 1)?,
+                        &expected1,
+                    ),
+                ] {
+                    assert_eq!(got.dims(), expected.dims());
+                    let diff = max_abs_diff(&got, expected)?;
+                    let peak = expected.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+                    assert!(
+                        diff <= tolerance * peak,
+                        "{dtype:?} {:?} p{padding} s{stride} d{dilation}: {diff} (peak {peak})",
+                        expected.dims()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn grouped_conv2d_on_cuda_matches_the_per_group_split() -> Result<()> {
         let Ok(cuda) = Device::new_cuda(0) else {
@@ -528,6 +567,50 @@ mod tests {
             })?;
             let direct = time_ms(&cuda, ITERS, || xg.conv2d(&wg, 1, 1, 1, groups))?;
             println!("conv2d 3x3 {c}ch groups {groups} 32x32 bf16: split {split:.3} ms, routed {direct:.3} ms");
+        }
+        Ok(())
+    }
+
+    // The dense shapes of the conv-heavy towers; depthwise ones take the direct grouped kernel either way
+    #[test]
+    #[ignore = "benchmark"]
+    fn bench_dense_conv() -> Result<()> {
+        const ITERS: u32 = 20;
+        let cuda = Device::new_cuda(0)?;
+        for dtype in [DType::BF16, DType::F16, DType::F32] {
+            let cases2d = [
+                (
+                    "conv2d 3x3 256->256 @64x64",
+                    (1, 256, 64, 64),
+                    (256, 256, 3, 3),
+                    1,
+                    1,
+                ),
+                (
+                    "conv2d 1x1 640->1280 @32x32",
+                    (1, 640, 32, 32),
+                    (1280, 640, 1, 1),
+                    0,
+                    1,
+                ),
+                (
+                    "conv2d patch14 3->1152 @896",
+                    (1, 3, 896, 896),
+                    (1152, 3, 14, 14),
+                    0,
+                    14,
+                ),
+            ];
+            for (name, x, w, padding, stride) in cases2d {
+                let x = Tensor::randn(0f32, 1., x, &cuda)?.to_dtype(dtype)?;
+                let w = Tensor::randn(0f32, 1., w, &cuda)?.to_dtype(dtype)?;
+                let ms = time_ms(&cuda, ITERS, || x.conv2d(&w, padding, stride, 1, 1))?;
+                println!("{dtype:?} {name}: {ms:.3} ms");
+            }
+            let x = Tensor::randn(0f32, 1., (1, 128, 3000), &cuda)?.to_dtype(dtype)?;
+            let w = Tensor::randn(0f32, 1., (512, 128, 3), &cuda)?.to_dtype(dtype)?;
+            let ms = time_ms(&cuda, ITERS, || x.conv1d(&w, 1, 1, 1, 1))?;
+            println!("{dtype:?} conv1d k3 128->512 L3000: {ms:.3} ms");
         }
         Ok(())
     }
