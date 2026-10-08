@@ -174,13 +174,26 @@ pub(crate) fn auto_device_map_sizes(
                 } else {
                     weight_pack_factor
                 };
-            packed_sizes(
+            let mut sizes = packed_sizes(
                 &inputs,
                 dtype,
                 weight_pack_factor,
                 non_mapped_pack_factor,
                 Some(&quantization),
-            )
+            )?;
+            // One pack factor floors a mixed low-bit file to its least packed layer; the source knows each layer's bytes
+            if matches!(sizing, AutoDeviceMapSizing::PreparedWeightSource)
+                && inputs.topology.is_none()
+                && let Some(mut resident) = source.layer_resident_bytes(dtype)?
+                // Layers past the loader's count (an MTP head) are sized as non-mapped
+                && resident.len() >= sizes.layer_sizes_in_bytes.len()
+            {
+                resident.truncate(sizes.layer_sizes_in_bytes.len());
+                sizes.total_model_size_in_bytes =
+                    resident.iter().sum::<usize>() + sizes.non_mapped_size_in_bytes;
+                sizes.layer_sizes_in_bytes = resident;
+            }
+            Ok(sizes)
         }
         AutoDeviceMapSizing::Isq(isq) => {
             let moqe = matches!(inputs.organization, IsqOrganization::MoeExpertsOnly);

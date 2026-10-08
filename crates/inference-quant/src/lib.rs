@@ -97,6 +97,11 @@ pub trait QuantizedWeightSource: Send + Sync {
     fn pack_factor(&self, dtype: DType) -> Result<usize>;
 
     fn pack_factor_for(&self, key: &str, dtype: DType) -> Result<Option<usize>>;
+
+    /// Bytes each text layer's weights occupy once loaded, indexed by layer; `None` when only a pack factor is known.
+    fn layer_resident_bytes(&self, _dtype: DType) -> Result<Option<Vec<usize>>> {
+        Ok(None)
+    }
 }
 
 impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
@@ -127,6 +132,10 @@ impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
 
     fn pack_factor_for(&self, key: &str, dtype: DType) -> Result<Option<usize>> {
         (**self).pack_factor_for(key, dtype)
+    }
+
+    fn layer_resident_bytes(&self, dtype: DType) -> Result<Option<Vec<usize>>> {
+        (**self).layer_resident_bytes(dtype)
     }
 }
 

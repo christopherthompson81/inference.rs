@@ -54,3 +54,23 @@ routed index in one upload.
 
 So the raw expert path is correct on a real checkpoint but slow. Next: grouped mmq for raw experts on CUDA (the
 compiled `_moe` launchers), and GGUF layer sizing from resident bytes so the layers stay on the GPU.
+
+## Run 3 - 2026-10-08 13:06
+
+Question: with GGUF layers sized from their own bytes, does the checkpoint stay on the GPU, and how fast is it then?
+
+Change: `QuantizedWeightSource::layer_resident_bytes`, which the GGUF source answers per text layer from the bytes its
+pack factor was already derived from; the auto map uses it when no topology requantizes layers.
+
+Command: same perplexity run as Run 2, on master with the raw expert gather (#371) plus this change.
+
+Raw: "Layers 0-39: cuda[0]" (was 0-34 on CUDA, 35-39 on the CPU). PPL = 4.2080 (mainline 4.2256, 0.42%). Wall 11.9 s
+for load and both windows, against mainline's 18 s and 11 min before. The time was the CPU layers, not the gather.
+Remaining from Run 2: decode over the gather has no CUDA graph.
+
+Review of the sizing change, and what changed: Gemma 4 binds `ffn_gate_up_exps` whole and as two slices, so summing
+bindings counted its bytes twice; packed bindings now count each source tensor once. Qwen3.5 GGUFs with nextn tensors
+report MTP layers past the loader's count, which failed the length check and silently fell back to the pack factor;
+the planner now keeps the loader's layers. Known gaps, as before the change: F32-at-runtime vectors (GDN `dt_bias`,
+`A_log`) count at the model dtype, and runtime-only per-layer buffers (MLA's cached `w_uk`/`w_uv_t`) are not counted;
+the old floored pack factor no longer leaves slack for them. Rerun on the 35B: same map, PPL 4.2080, 12.3 s.
