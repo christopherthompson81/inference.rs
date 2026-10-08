@@ -1457,21 +1457,6 @@ pub trait Pipeline:
 
         self.flush_recurrent_speculative_transitions(&[*seq.id()])?;
 
-        let snapshots = self
-            .cache()
-            .hybrid()
-            .snapshot_recurrent_state(*seq.id(), slot_idx)?;
-        if snapshots.is_empty() {
-            return Ok(());
-        }
-        let auxiliary = if self
-            .speculative_prefix_checkpoint_policy()
-            .uses_auxiliary_state(crate::scheduler::modality_signature(seq))
-        {
-            self.capture_paged_auxiliary_prefix_state(*seq.id(), cached_tokens)?
-        } else {
-            None
-        };
         let adapter_key = adapter_generation_key(seq.adapter_generation());
         let block_hashes = compute_block_hashes(
             seq.get_toks(),
@@ -1480,17 +1465,40 @@ pub trait Pipeline:
             adapter_key.as_slice(),
         );
         let n_blocks = cached_tokens / block_size;
-        if block_hashes.len() >= n_blocks {
-            let owner = *block_hashes
-                .last()
-                .expect("recurrent prefix owner requires a full block");
-            prefix_cacher.add_paged_recurrent_prefix(
-                owner,
-                block_hashes[..n_blocks].to_vec(),
-                snapshots,
-                auxiliary,
-            );
+        if block_hashes.len() < n_blocks {
+            return Ok(());
         }
+        // No idle slot, so there is nowhere to keep the state
+        let Some(snapshot) = self
+            .cache()
+            .hybrid()
+            .store_recurrent_snapshot(*seq.id(), slot_idx)?
+        else {
+            return Ok(());
+        };
+        let auxiliary = if self
+            .speculative_prefix_checkpoint_policy()
+            .uses_auxiliary_state(crate::scheduler::modality_signature(seq))
+        {
+            match self.capture_paged_auxiliary_prefix_state(*seq.id(), cached_tokens) {
+                Ok(auxiliary) => auxiliary,
+                Err(err) => {
+                    self.cache().hybrid().release_recurrent_snapshot(snapshot)?;
+                    return Err(err);
+                }
+            }
+        } else {
+            None
+        };
+        let owner = *block_hashes
+            .last()
+            .expect("recurrent prefix owner requires a full block");
+        prefix_cacher.add_paged_recurrent_prefix(
+            owner,
+            block_hashes[..n_blocks].to_vec(),
+            snapshot,
+            auxiliary,
+        );
         Ok(())
     }
 

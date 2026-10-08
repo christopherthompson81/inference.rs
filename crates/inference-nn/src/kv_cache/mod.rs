@@ -22,7 +22,8 @@ pub use hybrid_cache::{
 };
 pub use hybrid_cache::{
     HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
-    RecurrentStateLayout, RecurrentStatePool, RecurrentStateSnapshot, RecurrentStateSpec,
+    RecurrentSnapshotSlot, RecurrentStateLayout, RecurrentStatePool, RecurrentStateSnapshot,
+    RecurrentStateSpec,
 };
 pub use rotating_cache::{RotatingCache, RotatingCacheSnapshot};
 pub use single_cache::{SingleCache, SingleCacheSnapshot};

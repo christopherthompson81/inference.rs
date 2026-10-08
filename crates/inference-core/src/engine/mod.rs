@@ -270,6 +270,32 @@ struct HybridPrefixRestore {
 }
 
 impl HybridPagedPrefixValidator {
+    fn snapshot_held(&self, checkpoint: &PagedPrefixCheckpoint) -> bool {
+        let pipeline = get_mut_arcmutex!(self.pipeline);
+        !pipeline.cache().is_hybrid()
+            || pipeline
+                .cache()
+                .hybrid()
+                .recurrent_snapshot_held(checkpoint.recurrent_snapshot)
+    }
+
+    // Entries whose snapshot slot went back to running sequences are dropped, so the next-longest prefix gets a turn
+    fn longest_held_prefix(
+        &self,
+        block_hashes: &[BlockHash],
+        max_blocks: usize,
+    ) -> Option<(usize, PagedPrefixCheckpoint)> {
+        loop {
+            let (n_blocks, checkpoint) = get_mut_arcmutex!(self.prefix_cacher)
+                .peek_longest_paged_recurrent_prefix(block_hashes, max_blocks)?;
+            if self.snapshot_held(&checkpoint) {
+                return Some((n_blocks, checkpoint));
+            }
+            get_mut_arcmutex!(self.prefix_cacher)
+                .drop_paged_recurrent_prefix(&block_hashes[..n_blocks]);
+        }
+    }
+
     fn stage_recurrent_reset(
         &self,
         sequence_id: usize,
@@ -312,12 +338,16 @@ impl HybridPagedPrefixValidator {
                     auxiliary,
                 )?;
             }
-            if pipeline.cache().is_hybrid() {
-                pipeline.cache().hybrid().restore_recurrent_state(
+            if pipeline.cache().is_hybrid()
+                && !pipeline.cache().hybrid().restore_recurrent_snapshot(
                     restore.sequence_id,
                     restore.slot_idx,
-                    &restore.checkpoint.recurrent_snapshots,
-                )?;
+                    restore.checkpoint.recurrent_snapshot,
+                )?
+            {
+                inference_tensor::bail!(
+                    "recurrent prefix snapshot reclaimed between validation and commit"
+                );
             }
             drop(pipeline);
             get_mut_arcmutex!(prefix_cacher)
@@ -378,7 +408,12 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
                 get_mut_arcmutex!(self.prefix_cacher)
                     .peek_paged_recurrent_prefix(&block_hashes[..n_blocks])
             });
-            if let Some(checkpoint) = checkpoint
+            if let Some(checkpoint) = &checkpoint
+                && !self.snapshot_held(checkpoint)
+            {
+                get_mut_arcmutex!(self.prefix_cacher)
+                    .drop_paged_recurrent_prefix(&block_hashes[..n_blocks]);
+            } else if let Some(checkpoint) = checkpoint
                 && checkpoint.auxiliary.is_some()
             {
                 let replay_tokens = get_mut_arcmutex!(self.pipeline)
@@ -430,8 +465,7 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
         }
 
         let max_blocks = cached_tokens / block_size;
-        let Some((n_blocks, checkpoint)) = get_mut_arcmutex!(self.prefix_cacher)
-            .peek_longest_paged_recurrent_prefix(block_hashes, max_blocks)
+        let Some((n_blocks, checkpoint)) = self.longest_held_prefix(block_hashes, max_blocks)
         else {
             return Ok(self.stage_recurrent_reset(
                 sequence_id,
@@ -760,6 +794,20 @@ impl Engine {
             .is_some_and(PrefixBlockRetentionRevocationMonitor::take_pending)
         {
             get_mut_arcmutex!(self.prefix_cacher).prune_revoked_paged_recurrent_entries();
+        }
+        let released = get_mut_arcmutex!(self.prefix_cacher).take_released_recurrent_snapshots();
+        if released.is_empty() {
+            return;
+        }
+        let pipeline = get_mut_arcmutex!(self.pipeline);
+        if !pipeline.cache().is_hybrid() {
+            return;
+        }
+        let mut hybrid = pipeline.cache().hybrid();
+        for snapshot in released {
+            if let Err(err) = hybrid.release_recurrent_snapshot(snapshot) {
+                tracing::error!("Failed to release a recurrent prefix snapshot: {err}");
+            }
         }
     }
 

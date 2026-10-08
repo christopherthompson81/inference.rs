@@ -500,6 +500,23 @@ const INITIAL_POOL_CAPACITY: usize = 9;
 enum RecurrentSlotOwner {
     Sequence(usize),
     GraphPad,
+    // A prefix-cache snapshot: `id` names the handle, the smallest `last_use` is evicted first
+    PrefixSnapshot { id: u64, last_use: u64 },
+}
+
+/// A recurrent prefix snapshot held in an idle pool slot; the pool may reclaim the slot, which invalidates it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct RecurrentSnapshotSlot {
+    slot: usize,
+    id: u64,
+}
+
+impl RecurrentSnapshotSlot {
+    /// A handle no pool issued, for tests of code that only stores handles.
+    #[doc(hidden)]
+    pub fn detached(slot: usize, id: u64) -> Self {
+        Self { slot, id }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1083,6 +1100,7 @@ pub struct HybridCache {
     fitted_serving_capacity: Option<usize>,
     // Scratch slot CUDA graph pad rows write into; allocated on first use, dropped on reset
     graph_pad_slot: Option<usize>,
+    next_snapshot_id: u64,
 }
 
 impl HybridCache {
@@ -1146,6 +1164,7 @@ impl HybridCache {
             recurrent_storage_locked: false,
             fitted_serving_capacity: None,
             graph_pad_slot: None,
+            next_snapshot_id: 0,
         };
         cache.publish_recurrent_slot_metrics();
         Ok(cache)
@@ -1549,6 +1568,15 @@ impl HybridCache {
             .expect("recurrent state slot capacity exceeds u32");
         metrics::gauge!("inference_recurrent_state_slots_used").set(f64::from(slots_used));
         metrics::gauge!("inference_recurrent_state_slots_total").set(f64::from(slots_total));
+        let snapshot_slots = u32::try_from(
+            self.slot_owners
+                .iter()
+                .filter(|owner| matches!(owner, Some(RecurrentSlotOwner::PrefixSnapshot { .. })))
+                .count(),
+        )
+        .expect("recurrent snapshot slots exceed u32");
+        // Snapshot slots count as used but give way to any sequence
+        metrics::gauge!("inference_recurrent_state_snapshot_slots").set(f64::from(snapshot_slots));
     }
 
     fn resize_recurrent_storage(&mut self, min_capacity: usize) -> Result<bool> {
@@ -1949,7 +1977,7 @@ impl HybridCache {
         if self.recurrent_capacity() == 0 {
             inference_tensor::bail!("hybrid cache has no recurrent state pool");
         }
-        if !self.slot_owners.iter().any(Option::is_none) {
+        if !self.slot_owners.iter().any(Option::is_none) && !self.evict_oldest_snapshot()? {
             let new_capacity = self
                 .recurrent_capacity()
                 .checked_mul(2)
@@ -2053,6 +2081,168 @@ impl HybridCache {
         }
         self.publish_recurrent_slot_metrics();
         Ok(true)
+    }
+
+    fn oldest_snapshot_slot(&self) -> Option<usize> {
+        self.slot_owners
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, owner)| match owner {
+                Some(RecurrentSlotOwner::PrefixSnapshot { last_use, .. }) => {
+                    Some((*last_use, slot))
+                }
+                _ => None,
+            })
+            .min()
+            .map(|(_, slot)| slot)
+    }
+
+    /// Frees the oldest snapshot slot, if any, for a sequence or a newer snapshot.
+    fn evict_oldest_snapshot(&mut self) -> Result<bool> {
+        let Some(slot) = self.oldest_snapshot_slot() else {
+            return Ok(false);
+        };
+        self.free_snapshot_slot(slot)?;
+        Ok(true)
+    }
+
+    fn free_snapshot_slot(&mut self, slot_idx: usize) -> Result<()> {
+        for cache in &mut self.caches {
+            if let HybridLayerCache::Recurrent(pool) = cache {
+                pool.clear_pending_transition_slot(slot_idx)?;
+                pool.clear_deferred_state_slot(slot_idx)?;
+                let released = pool.free(slot_idx);
+                debug_assert!(released);
+            }
+        }
+        self.slot_owners[slot_idx] = None;
+        self.initialized_slots[slot_idx] = false;
+        self.committed_lanes[slot_idx] = 0;
+        self.publish_recurrent_slot_metrics();
+        Ok(())
+    }
+
+    fn copy_recurrent_row(&mut self, from: usize, to: usize) -> Result<()> {
+        let rows = |row: usize, device: &Device| -> Result<Tensor> {
+            let row = u32::try_from(row).map_err(|_| {
+                inference_tensor::Error::msg(format!("recurrent physical slot {row} exceeds u32"))
+            })?;
+            Tensor::from_vec(vec![row], (1,), device)
+        };
+        for cache in &mut self.caches {
+            if let HybridLayerCache::Recurrent(pool) = cache {
+                let source = rows(from, pool.device())?;
+                let target = rows(to, pool.device())?;
+                let conv = pool.gather_conv_state(&source)?;
+                let recurrent = pool.gather_recurrent_state(&source)?;
+                pool.scatter_conv_state(&target, &conv)?;
+                pool.scatter_recurrent_state(&target, &recurrent)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Copies the sequence's committed state into a free or least recently used snapshot slot; `None` if neither exists.
+    pub fn store_recurrent_snapshot(
+        &mut self,
+        sequence_id: usize,
+        slot_idx: usize,
+    ) -> Result<Option<RecurrentSnapshotSlot>> {
+        self.ensure_recurrent_slot_owned(slot_idx, RecurrentSlotOwner::Sequence(sequence_id))?;
+        self.ensure_recurrent_slot_initialized(slot_idx)?;
+        let target = match self.slot_owners.iter().position(Option::is_none) {
+            Some(target) => target,
+            None => match self.oldest_snapshot_slot() {
+                Some(target) => {
+                    self.free_snapshot_slot(target)?;
+                    target
+                }
+                None => return Ok(None),
+            },
+        };
+        for cache in &mut self.caches {
+            if let HybridLayerCache::Recurrent(pool) = cache {
+                pool.reserve_at(target)?;
+            }
+        }
+        let id = self.next_snapshot_id;
+        self.next_snapshot_id += 1;
+        self.slot_owners[target] = Some(RecurrentSlotOwner::PrefixSnapshot { id, last_use: id });
+        self.pristine_zero_slots[target] = false;
+        self.last_released_sequence_owners[target] = None;
+        self.committed_lanes[target] = 0;
+        let (from, to) = (
+            self.active_physical_slot(slot_idx)?,
+            self.physical_slot(target, 0)?,
+        );
+        self.copy_recurrent_row(from, to)?;
+        self.initialized_slots[target] = true;
+        self.publish_recurrent_slot_metrics();
+        Ok(Some(RecurrentSnapshotSlot { slot: target, id }))
+    }
+
+    fn clear_slot_for_restore(&mut self, slot_idx: usize) -> Result<()> {
+        self.initialized_slots[slot_idx] = false;
+        let slot_is_pristine = self.pristine_zero_slots[slot_idx];
+        self.pristine_zero_slots[slot_idx] = false;
+        if !slot_is_pristine {
+            for cache in &mut self.caches {
+                if let HybridLayerCache::Recurrent(pool) = cache {
+                    pool.reset_slot(slot_idx)?;
+                }
+            }
+        }
+        self.committed_lanes[slot_idx] = 0;
+        Ok(())
+    }
+
+    pub fn recurrent_snapshot_held(&self, snapshot: RecurrentSnapshotSlot) -> bool {
+        matches!(
+            self.slot_owners.get(snapshot.slot),
+            Some(Some(RecurrentSlotOwner::PrefixSnapshot { id, .. })) if *id == snapshot.id
+        )
+    }
+
+    /// Marks a held snapshot as the most recently used, so it is the last to give way.
+    pub fn touch_recurrent_snapshot(&mut self, snapshot: RecurrentSnapshotSlot) {
+        if let Some(Some(RecurrentSlotOwner::PrefixSnapshot { id, last_use })) =
+            self.slot_owners.get_mut(snapshot.slot)
+            && *id == snapshot.id
+        {
+            *last_use = self.next_snapshot_id;
+            self.next_snapshot_id += 1;
+        }
+    }
+
+    /// Restores a held snapshot into the sequence's slot; `false`, with the slot untouched, when it was reclaimed.
+    pub fn restore_recurrent_snapshot(
+        &mut self,
+        sequence_id: usize,
+        slot_idx: usize,
+        snapshot: RecurrentSnapshotSlot,
+    ) -> Result<bool> {
+        self.ensure_recurrent_slot_owned(slot_idx, RecurrentSlotOwner::Sequence(sequence_id))?;
+        if !self.recurrent_snapshot_held(snapshot) {
+            return Ok(false);
+        }
+        self.clear_slot_for_restore(slot_idx)?;
+        let (from, to) = (
+            self.physical_slot(snapshot.slot, 0)?,
+            self.physical_slot(slot_idx, 0)?,
+        );
+        self.copy_recurrent_row(from, to)?;
+        self.initialized_slots[slot_idx] = true;
+        self.refresh_current_batch_mapping()?;
+        self.touch_recurrent_snapshot(snapshot);
+        Ok(true)
+    }
+
+    /// Returns a snapshot's slot to the pool; a no-op once the pool reclaimed it.
+    pub fn release_recurrent_snapshot(&mut self, snapshot: RecurrentSnapshotSlot) -> Result<()> {
+        if self.recurrent_snapshot_held(snapshot) {
+            self.free_snapshot_slot(snapshot.slot)?;
+        }
+        Ok(())
     }
 
     /// Reset a specific sequence's state in all recurrent layers.
@@ -3403,19 +3593,13 @@ mod tests {
             )?;
         }
 
-        let snapshots = cache.snapshot_recurrent_state(10, source)?;
-        assert_eq!(
-            snapshots[0].conv_state.to_vec3::<f32>()?,
-            conv.to_vec3::<f32>()?
-        );
-        assert_eq!(
-            snapshots[0].recurrent_state.to_vec3::<f32>()?,
-            recurrent.to_vec3::<f32>()?
-        );
+        let snapshot = cache
+            .store_recurrent_snapshot(10, source)?
+            .expect("a free slot holds the snapshot");
 
         assert!(cache.release_seq(20, destination)?);
         assert_eq!(cache.reserve_seq_uninitialized(30)?, destination);
-        cache.restore_recurrent_state(30, destination, &snapshots)?;
+        assert!(cache.restore_recurrent_snapshot(30, destination, snapshot)?);
         cache.validate_sequence_slots(&[(30, destination)])?;
         assert_eq!(cache.committed_lane(destination)?, 0);
         let HybridLayerCache::Recurrent(pool) = cache.get(0).unwrap() else {
@@ -3510,6 +3694,111 @@ mod tests {
                 .to_scalar::<f32>()?,
             0.0
         );
+        Ok(())
+    }
+
+    fn ones_state(cache: &mut HybridCache, sequence_id: usize, slot: usize) -> Result<()> {
+        let snapshots = vec![RecurrentStateSnapshot {
+            conv_state: Tensor::ones((1, 2, 3), DType::F32, &Device::Cpu)?,
+            recurrent_state: Tensor::ones((1, 2, 2), DType::F32, &Device::Cpu)?,
+            state_layout: RecurrentStateLayout::Opaque,
+        }];
+        cache.restore_recurrent_state(sequence_id, slot, &snapshots)
+    }
+
+    fn slot_sums(cache: &HybridCache, slot: usize) -> Result<(f32, f32)> {
+        let indices = Tensor::from_vec(vec![slot as u32], (1,), &Device::Cpu)?;
+        let HybridLayerCache::Recurrent(pool) = cache.get(0).unwrap() else {
+            unreachable!()
+        };
+        Ok((
+            pool.gather_conv_state(&indices)?
+                .sum_all()?
+                .to_scalar::<f32>()?,
+            pool.gather_recurrent_state(&indices)?
+                .sum_all()?
+                .to_scalar::<f32>()?,
+        ))
+    }
+
+    #[test]
+    fn snapshot_slots_restore_and_give_way_before_the_pool_grows() -> Result<()> {
+        let mut cache = HybridCache::new(
+            config(vec![HybridLayerType::Recurrent]),
+            DType::F32,
+            &[Device::Cpu],
+        )?;
+        let first = cache.allocate_seq(1)?;
+        ones_state(&mut cache, 1, first)?;
+        let snapshot = cache
+            .store_recurrent_snapshot(1, first)?
+            .expect("an idle slot");
+        let second = cache.allocate_seq(2)?;
+        assert!(cache.restore_recurrent_snapshot(2, second, snapshot)?);
+        assert_eq!(slot_sums(&cache, second)?, (6.0, 4.0));
+
+        let capacity = cache.recurrent_capacity();
+        for sequence_id in 3..=capacity {
+            cache.allocate_seq(sequence_id)?;
+        }
+        assert_eq!(
+            cache.recurrent_capacity(),
+            capacity,
+            "a held snapshot must give way first"
+        );
+        assert!(!cache.recurrent_snapshot_held(snapshot));
+        let late = cache.allocate_seq(capacity + 1)?;
+        assert!(!cache.restore_recurrent_snapshot(capacity + 1, late, snapshot)?);
+        assert_eq!(cache.recurrent_capacity(), 2 * capacity);
+        Ok(())
+    }
+
+    #[test]
+    fn the_least_recently_used_snapshot_gives_way() -> Result<()> {
+        let mut cache = HybridCache::new(
+            config(vec![HybridLayerType::Recurrent]),
+            DType::F32,
+            &[Device::Cpu],
+        )?;
+        let first = cache.allocate_seq(1)?;
+        ones_state(&mut cache, 1, first)?;
+        let older = cache
+            .store_recurrent_snapshot(1, first)?
+            .expect("an idle slot");
+        let newer = cache
+            .store_recurrent_snapshot(1, first)?
+            .expect("an idle slot");
+        cache.touch_recurrent_snapshot(older);
+
+        let free_slots = cache.recurrent_capacity() - cache.recurrent_slots_used();
+        for sequence_id in 2..=free_slots + 2 {
+            cache.allocate_seq(sequence_id)?;
+        }
+        assert!(cache.recurrent_snapshot_held(older));
+        assert!(!cache.recurrent_snapshot_held(newer));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshots_never_displace_sequences_and_release_their_slot() -> Result<()> {
+        let mut cache = HybridCache::new(
+            config(vec![HybridLayerType::Recurrent]),
+            DType::F32,
+            &[Device::Cpu],
+        )?;
+        let first = cache.allocate_seq(1)?;
+        ones_state(&mut cache, 1, first)?;
+        let older = cache
+            .store_recurrent_snapshot(1, first)?
+            .expect("an idle slot");
+        cache.release_recurrent_snapshot(older)?;
+        assert!(!cache.recurrent_snapshot_held(older));
+        assert_eq!(cache.recurrent_slots_used(), 1);
+
+        for sequence_id in 2..=cache.recurrent_capacity() {
+            cache.allocate_seq(sequence_id)?;
+        }
+        assert_eq!(cache.store_recurrent_snapshot(1, first)?, None);
         Ok(())
     }
 
@@ -3785,35 +4074,6 @@ mod tests {
     }
 
     #[test]
-    fn recurrent_snapshot_restore_validates_layout_and_count() -> Result<()> {
-        let mut cache = HybridCache::new(
-            gdn_config(vec![HybridLayerType::Recurrent]),
-            DType::BF16,
-            &[Device::Cpu],
-        )?;
-        let source = cache.allocate_seq(10)?;
-        let destination = cache.allocate_seq(20)?;
-        let snapshots = cache.snapshot_recurrent_state(10, source)?;
-        let valid_snapshots = snapshots.clone();
-        assert_eq!(snapshots[0].state_layout, RecurrentStateLayout::GdnKeyMajor);
-        assert!(cache.restore_recurrent_state(20, destination, &[]).is_err());
-
-        let mut wrong_layout = snapshots;
-        wrong_layout[0].state_layout = RecurrentStateLayout::GdnValueMajor;
-        let error = cache
-            .restore_recurrent_state(20, destination, &wrong_layout)
-            .unwrap_err();
-        assert!(error.to_string().contains("layout mismatch"));
-
-        assert!(cache.release_seq(20, destination)?);
-        let error = cache
-            .restore_recurrent_state(20, destination, &valid_snapshots)
-            .unwrap_err();
-        assert!(error.to_string().contains("is not allocated"));
-        Ok(())
-    }
-
-    #[test]
     fn sequence_slot_validation_rejects_missing_stale_and_duplicate_slots() -> Result<()> {
         let mut cache = HybridCache::new(
             config(vec![HybridLayerType::Recurrent, HybridLayerType::Recurrent]),
@@ -3963,82 +4223,15 @@ pub struct RecurrentCheckpointStateSnapshot {
 }
 
 impl HybridCache {
-    /// Snapshot the recurrent state for a sequence at the given slot index.
-    /// Returns one snapshot per recurrent layer, in layer order.
-    pub fn snapshot_recurrent_state(
-        &self,
-        sequence_id: usize,
-        slot_idx: usize,
-    ) -> Result<Vec<RecurrentStateSnapshot>> {
-        self.ensure_recurrent_slot_owned(slot_idx, RecurrentSlotOwner::Sequence(sequence_id))?;
-        self.ensure_recurrent_slot_initialized(slot_idx)?;
-        let physical_slot = self.active_physical_slot(slot_idx)?;
-        let physical_slot = u32::try_from(physical_slot).map_err(|_| {
-            inference_tensor::Error::msg(format!(
-                "recurrent physical slot {physical_slot} exceeds u32"
-            ))
-        })?;
-        let mut snapshots = Vec::new();
-        for cache in &self.caches {
-            if let HybridLayerCache::Recurrent(pool) = cache {
-                let idx_tensor = Tensor::from_vec(vec![physical_slot], (1,), pool.device())?;
-                let conv = pool.gather_conv_state(&idx_tensor)?;
-                let recurrent = pool.gather_recurrent_state(&idx_tensor)?;
-                snapshots.push(RecurrentStateSnapshot {
-                    conv_state: conv,
-                    recurrent_state: recurrent,
-                    state_layout: pool.state_layout(),
-                });
-            }
-        }
-        Ok(snapshots)
-    }
-
-    /// Restore recurrent state snapshots into the pool at the given slot index.
-    /// Snapshots must be in the same layer order as returned by `snapshot_recurrent_state`.
-    pub fn restore_recurrent_state(
+    #[cfg(test)]
+    fn restore_recurrent_state(
         &mut self,
         sequence_id: usize,
         slot_idx: usize,
         snapshots: &[RecurrentStateSnapshot],
     ) -> Result<()> {
         self.ensure_recurrent_slot_owned(slot_idx, RecurrentSlotOwner::Sequence(sequence_id))?;
-        let expected = self
-            .caches
-            .iter()
-            .filter(|cache| matches!(cache, HybridLayerCache::Recurrent(_)))
-            .count();
-        if snapshots.len() != expected {
-            inference_tensor::bail!(
-                "recurrent snapshot count mismatch: got {}, expected {expected}",
-                snapshots.len()
-            );
-        }
-        for (cache, snap) in self
-            .caches
-            .iter()
-            .filter_map(HybridLayerCache::as_recurrent_pool)
-            .zip(snapshots)
-        {
-            if snap.state_layout != cache.state_layout() {
-                inference_tensor::bail!(
-                    "recurrent state layout mismatch: snapshot {:?}, pool {:?}",
-                    snap.state_layout,
-                    cache.state_layout()
-                );
-            }
-        }
-        self.initialized_slots[slot_idx] = false;
-        let slot_is_pristine = self.pristine_zero_slots[slot_idx];
-        self.pristine_zero_slots[slot_idx] = false;
-        if !slot_is_pristine {
-            for cache in &mut self.caches {
-                if let HybridLayerCache::Recurrent(pool) = cache {
-                    pool.reset_slot(slot_idx)?;
-                }
-            }
-        }
-        self.committed_lanes[slot_idx] = 0;
+        self.clear_slot_for_restore(slot_idx)?;
         let physical_slot = self.physical_slot(slot_idx, 0)?;
         let physical_slot = u32::try_from(physical_slot).map_err(|_| {
             inference_tensor::Error::msg(format!(
@@ -4048,7 +4241,7 @@ impl HybridCache {
         let mut snap_iter = snapshots.iter();
         for cache in &mut self.caches {
             if let HybridLayerCache::Recurrent(pool) = cache {
-                let snap = snap_iter.next().expect("snapshot count checked above");
+                let snap = snap_iter.next().expect("one snapshot per recurrent layer");
                 let conv = snap.conv_state.to_device(pool.device())?;
                 let recurrent = snap.recurrent_state.to_device(pool.device())?;
                 let idx_tensor = Tensor::from_vec(vec![physical_slot], (1,), pool.device())?;
