@@ -1,9 +1,7 @@
 mod amoe;
 mod auto;
 pub(crate) mod cache_manager;
-pub(crate) use crate::model::{
-    ModelForwardContext, RecurrentMetadata, recurrent_batch_kind_for_input,
-};
+pub(crate) use crate::model::{ModelForwardContext, recurrent_batch_kind_for_input};
 pub mod chat_template;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda_graph;
