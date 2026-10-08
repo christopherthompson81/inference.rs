@@ -764,8 +764,7 @@ impl InferenceRsForServerBuilder {
             !paged_attn,
         )?
         .map(|config| config.with_serving_capacity(self.max_seqs))
-        .transpose()?
-        .map(|config| config.with_recurrent_prefix_capacity(self.prefix_cache_n));
+        .transpose()?;
         let max_seqs = self.max_seqs;
         Ok(ModelLoadSettings {
             device,
@@ -872,8 +871,7 @@ impl InferenceRsForServerBuilder {
                 !paged_attn,
             )?
             .map(|config| config.with_serving_capacity(self.max_seqs))
-            .transpose()?
-            .map(|config| config.with_recurrent_prefix_capacity(self.prefix_cache_n)),
+            .transpose()?,
             self.mtp_config.as_ref(),
             mtp_runtime,
             &dtype,

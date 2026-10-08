@@ -98,7 +98,10 @@ Timing is measured at the engine's token steps, not at SSE frames, so keep-alive
 | `inference_paged_recurrent_prefix_owners_used` | gauge | - | Logical recurrent prefix owners currently retained. |
 | `inference_paged_recurrent_prefix_owners_capacity` | gauge | - | Configured logical recurrent prefix owner capacity. |
 | `inference_paged_recurrent_prefix_checkpoints_used` | gauge | - | Recurrent prefix checkpoints currently retained. |
-| `inference_paged_recurrent_prefix_bytes_used` | gauge | - | Logical tensor payload bytes retained by recurrent prefix checkpoints. |
+| `inference_paged_recurrent_prefix_bytes_used` | gauge | - | Speculative auxiliary state bytes (DFlash) retained by recurrent prefix checkpoints. The recurrent state itself sits in recurrent pool slots, counted below. |
+| `inference_recurrent_state_slots_used` | gauge | - | Recurrent state pool slots in use (hybrid models): running sequences, graph padding and prefix snapshots. |
+| `inference_recurrent_state_slots_total` | gauge | - | Recurrent state pool capacity. |
+| `inference_recurrent_state_snapshot_slots` | gauge | - | Pool slots holding prefix-cache snapshots. They sit in otherwise idle slots and give way, least recently used first, when a sequence needs one. |
 | `inference_paged_recurrent_prefix_validation_total` | counter | `outcome`, `reason` | Prefix validation outcomes, including attention-only hits and recurrent restore misses. |
 | `inference_paged_recurrent_prefix_owner_evictions_total` | counter | `reason` | Logical recurrent owners evicted by `capacity` or after `block_pressure` revokes their paired blocks. |
 

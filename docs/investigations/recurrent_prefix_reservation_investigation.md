@@ -83,3 +83,26 @@ Review pass on the same change, raw findings and what was done:
   released, and the block-count check moved ahead of the copy.
 - `inference_recurrent_state_slots_used` now includes idle snapshots, so a new gauge
   `inference_recurrent_state_snapshot_slots` tells them apart.
+
+## Run 4 - 2026-10-08 11:25
+
+Step 3: removed the up-front snapshot reservation (`add_recurrent_prefix_memory_reservations`) together with
+`PagedAttentionConfig::recurrent_prefix_capacity`, its only input. Question: does the 27B now fit the full sequence
+count at the default `--prefix-cache-n 16`, and do repeated prompts still hit?
+
+Command: `target/debug/inference serve -p 18234 --no-ui --format gguf -m /mnt/data/models -f Qwen3.8-27B-IQ4_XS.gguf
+--max-seqs 32` (CUDA build, RTX 3090 24 GB, ~1.8 GB already used by the desktop), then the same ~890-token prompt three
+times, then 22 concurrent short prompts, then the long prompt twice more.
+
+Raw:
+- Load: "Reserving 48 MB on the primary device"; "fitted_seqs=22"; pool capacity 23; KV cache 1363 MB (was 7 sequences,
+  2560 MB reserved, 1249 MB KV in Run 1). Run 1's `--prefix-cache-n 0` got 23; one fewer here is the desktop's memory.
+- Repeats: first run prompt 0.506 s, no cached tokens; second and third `cached_tokens: 864`, prompt 0.042 s.
+  `validation{hit,recurrent}=2`, `snapshot_slots=1`.
+- 22 concurrent short prompts: the pool stayed at 23 slots (no growth, no graph re-capture); `snapshot_slots=0` after,
+  so a sequence took the snapshot's slot.
+- Long prompt again: first a cold prefill (0.568 s, no cached tokens), then `cached_tokens: 864` at 0.043 s; the miss
+  stored a fresh snapshot.
+
+So the default config serves 22 sequences instead of 7, prefix hits still land while slots sit idle, and pressure costs
+one miss rather than a pool doubling.
