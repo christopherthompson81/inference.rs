@@ -1,6 +1,8 @@
 //! A tiny random-weight Qwen3.5 text checkpoint: the one text loader whose runtime config differs from the checkpoint's.
 
-use inference::{IsqType, Model, ModelDType, TextModelBuilder};
+use inference::{
+    IsqType, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
+};
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
 
@@ -319,5 +321,44 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
         .sum();
     assert!(drafts > 0, "DFlash never drafted");
     decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+const PREFIX_CACHE_SEQS: usize = 4;
+const PREFIX_MAX_LEN: usize = 6;
+const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;
+// several paged blocks long, so the snapshot boundary falls inside the prompt
+const PREFIX_PROMPT: &str = "a hybrid model keeps a recurrent state beside its attention cache, so a prefix hit has \
+    to restore that state at the cached boundary before the rest of the prompt runs; this sentence is long enough \
+    to fill several blocks of the paged cache and leave a tail after the last full one.";
+
+// The repeat of a prompt restores the paged recurrent snapshot with the cached blocks and decodes the same.
+// A non-paged hybrid prefix only matches where its finished sequence ended, which a repeated prompt never reaches.
+#[tokio::test]
+async fn a_repeated_prompt_restores_the_recurrent_prefix() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    // the CUDA recurrence kernels take f16/bf16
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    let request = || {
+        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, PREFIX_PROMPT))
+    };
+    let (first, first_cached) = traces::greedy(&model, request(), PREFIX_MAX_LEN).await?;
+    let (second, second_cached) = traces::greedy(&model, request(), PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(
+        first_cached == 0 && second_cached > 0,
+        "cached prompt tokens: {first_cached} then {second_cached}"
+    );
+    anyhow::ensure!(
+        traces::close(&first, &second, CACHED_LOGPROB_TOLERANCE),
+        "a prefix hit changed decoding: {first:?} vs {second:?}"
+    );
     Ok(())
 }
