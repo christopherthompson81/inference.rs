@@ -1,5 +1,4 @@
 pub const MODULE: &str = "inference_layout";
-pub const DEPTHWISE: &str = "depthwise_conv2d_f32";
 pub const IM2COL: &str = "im2col_cols_last_f32";
 pub const MASK_TO_BOX: &str = "mask_to_box_f32";
 /// Threads per `mask_to_box_f32` block; also sizes its shared reduction arrays.

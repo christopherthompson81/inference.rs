@@ -748,7 +748,7 @@ impl Map2 for Conv1D<'_> {
         let dims = shape.dims();
         let el = shape.elem_count();
         let l_out = p.l_out();
-        let dst_el = p.c_out * l_out * p.b_size;
+        let dst_el = p.c_out * p.groups * l_out * p.b_size;
         let cfg = LaunchConfig::for_num_elems(dst_el as u32);
         let func = dev.get_or_load_func(&kernel_name::<T>("conv1d"), &kernels::CONV)?;
         // SAFETY: Set later by running the kernel.
@@ -762,7 +762,7 @@ impl Map2 for Conv1D<'_> {
         };
         let ds = SlicePtrOrNull::params_from_vec(dev, ds)?;
         let mut builder = func.builder();
-        barg!(builder, el, l_out, p.stride, p.padding, p.dilation);
+        barg!(builder, el, l_out, p.stride, p.padding, p.dilation, p.groups);
         ds.builder_arg(&mut builder);
         builder.arg(inp);
         builder.arg(k);
@@ -787,7 +787,7 @@ impl Map2 for Conv2D<'_> {
         // Input shape: (b_size, c_in, h_in, w_in)
         let p = &self.0;
         let (out_w, out_h) = (p.out_w(), p.out_h());
-        let dst_el = p.c_out * out_w * out_h * p.b_size;
+        let dst_el = p.c_out * p.groups * out_w * out_h * p.b_size;
         let inp = &inp.slice(inp_l.start_offset()..);
         let k = &k.slice(k_l.start_offset()..);
         let shape = inp_l.shape();
@@ -805,7 +805,7 @@ impl Map2 for Conv2D<'_> {
         };
         let ds = SlicePtrOrNull::params_from_vec(dev, ds)?;
         let mut builder = func.builder();
-        barg!(builder, el, out_w, out_h, p.stride, p.padding, p.dilation);
+        barg!(builder, el, out_w, out_h, p.stride, p.padding, p.dilation, p.groups);
         ds.builder_arg(&mut builder);
         builder.arg(inp);
         builder.arg(k);
@@ -1840,10 +1840,9 @@ impl BackendStorage for CudaStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
-        const USE_IM2COL_CONV1D: bool = true;
-
         let device = self.device().clone();
-        if !USE_IM2COL_CONV1D {
+        // Per group im2col + GEMM would launch once per group, and depthwise convs have hundreds
+        if params.groups > 1 {
             let slice = Conv1D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
             return Ok(Self { slice, device });
         }
@@ -1873,9 +1872,8 @@ impl BackendStorage for CudaStorage {
                     .alloc_uninit(kernel_l.shape(), kernel.dtype())?
             };
             kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
-            let kernel_l =
-                Layout::contiguous_with_offset((n, k), kernel_l.start_offset()).transpose(0, 1)?;
-            col.matmul(kernel, (1, b * m, n, k), &col_l, &kernel_l)?
+            let kernel_l = Layout::contiguous((n, k)).transpose(0, 1)?;
+            col.matmul(&kernel_c, (1, b * m, n, k), &col_l, &kernel_l)?
         };
         let res_l = Layout::contiguous((b, l_out, n)).transpose(1, 2)?;
         let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
@@ -1892,7 +1890,7 @@ impl BackendStorage for CudaStorage {
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
         let device = self.device().clone();
-        if !kernel_l.is_contiguous() {
+        if !kernel_l.is_contiguous() || params.groups > 1 {
             let slice = Conv1D(params).map(&self.slice, inp_l, &kernel.slice, kernel_l, &device)?;
             return Ok(Self { slice, device });
         }
@@ -2021,10 +2019,8 @@ impl BackendStorage for CudaStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
-        const USE_IM2COL_CONV2D: bool = true;
-
         let device = self.device().clone();
-        if !USE_IM2COL_CONV2D {
+        if params.groups > 1 {
             let slice = Conv2D(params).map(&self.slice, l, &kernel.slice, kernel_l, &device)?;
             return Ok(Self { slice, device });
         }
@@ -2078,7 +2074,7 @@ impl BackendStorage for CudaStorage {
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
         let device = self.device().clone();
-        if !kernel_l.is_contiguous() {
+        if !kernel_l.is_contiguous() || params.groups > 1 {
             let slice = Conv2D(params).map(&self.slice, inp_l, &kernel.slice, kernel_l, &device)?;
             return Ok(Self { slice, device });
         }

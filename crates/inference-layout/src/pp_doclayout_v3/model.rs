@@ -32,6 +32,8 @@ pub struct Intermediates {
     pub enc_score: Tensor,
     pub init_ref: Tensor,
     pub hidden: Vec<Tensor>,
+    /// `(b * q)` flat `(b * S)` encoder positions the queries were selected from, best first.
+    pub query_sources: Tensor,
 }
 
 pub struct PPDocLayoutV3 {
@@ -350,6 +352,7 @@ impl PPDocLayoutV3 {
                 enc_score,
                 init_ref: init_ref.clone(),
                 hidden,
+                query_sources: topk,
             });
         }
         Ok(RawOutputs {
@@ -423,18 +426,33 @@ mod tests {
         .expect("test config")
     }
 
+    // Random weights give near-tied encoder scores that batching can rank the other way, so align queries by source
+    fn source_order(inter: &Intermediates, item: usize, q: usize) -> Result<Tensor> {
+        let sources = inter
+            .query_sources
+            .narrow(0, item * q, q)?
+            .to_vec1::<u32>()?;
+        let mut order: Vec<u32> = (0..q as u32).collect();
+        order.sort_by_key(|&i| sources[i as usize]);
+        Tensor::new(order, inter.query_sources.device())
+    }
+
     #[test]
     fn batched_forward_matches_single() -> Result<()> {
         for dev in crate::test_util::devices()? {
             let vb = VarBuilder::from_backend(Box::new(RandomWeights), DType::F32, dev.clone());
             let model = PPDocLayoutV3::new(test_config(), (TEST_INPUT, TEST_INPUT), vb)?;
             let px = Tensor::rand(0f32, 1., (2, 3, TEST_INPUT, TEST_INPUT), &dev)?;
-            let both = model.forward(&px, true)?;
-            let second = model.forward(&px.narrow(0, 1, 1)?, true)?;
+            let (both, both_inter) = model.forward_with_intermediates(&px)?;
+            let (second, second_inter) = model.forward_with_intermediates(&px.narrow(0, 1, 1)?)?;
+            let q = both.logits.dim(1)?;
+            let (perm_b, perm_s) = (
+                source_order(&both_inter, 1, q)?,
+                source_order(&second_inter, 0, q)?,
+            );
             let pairs = [
                 ("logits", &both.logits, &second.logits),
                 ("pred_boxes", &both.pred_boxes, &second.pred_boxes),
-                ("order_logits", &both.order_logits, &second.order_logits),
                 (
                     "masks",
                     both.masks.as_ref().unwrap(),
@@ -442,12 +460,26 @@ mod tests {
                 ),
             ];
             for (name, b, s) in pairs {
-                let err = crate::test_util::rel_err(&b.narrow(0, 1, 1)?, s)?;
+                let b = b.narrow(0, 1, 1)?.index_select(&perm_b, 1)?;
+                let err = crate::test_util::rel_err(&b, &s.index_select(&perm_s, 1)?)?;
                 assert!(
                     err < 1e-4,
                     "{dev:?} {name}: batch item 1 differs, rel err {err}"
                 );
             }
+            let order = |o: &Tensor, perm: &Tensor| o.index_select(perm, 1)?.index_select(perm, 2);
+            let (ob, os) = (
+                order(&both.order_logits.narrow(0, 1, 1)?, &perm_b)?,
+                order(&second.order_logits, &perm_s)?,
+            );
+            // A swap moves one pair across the rank triangle, so only cells kept in both runs compare
+            let kept = |o: &Tensor| o.abs()?.lt(GP_MASK_FILL.abs() / 2.);
+            let both_kept = kept(&ob)?.mul(&kept(&os)?)?.to_dtype(DType::F32)?;
+            let err = crate::test_util::rel_err(&ob.mul(&both_kept)?, &os.mul(&both_kept)?)?;
+            assert!(
+                err < 1e-4,
+                "{dev:?} order_logits: batch item 1 differs, rel err {err}"
+            );
         }
         Ok(())
     }

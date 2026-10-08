@@ -9,6 +9,12 @@ pub fn depthwise_conv2d(
     stride: usize,
     padding: usize,
 ) -> Result<Tensor> {
+    if xs.device().is_cuda() {
+        let c = w.dim(0)?;
+        return xs
+            .conv2d(w, padding, stride, 1, c)?
+            .broadcast_add(&b.reshape((1, c, 1, 1))?);
+    }
     xs.contiguous()?
         .apply_op3_no_bwd(w, b, &DepthwiseConv { stride, padding })
 }
@@ -101,53 +107,5 @@ impl CustomOp3 for DepthwiseConv {
                 }
             });
         Ok((CpuStorage::F32(out), Shape::from((g.b, g.c, g.ho, g.wo))))
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        sx: &inference_tensor::CudaStorage,
-        lx: &Layout,
-        sw: &inference_tensor::CudaStorage,
-        lw: &Layout,
-        sb: &inference_tensor::CudaStorage,
-        lb: &Layout,
-    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
-        use inference_tensor::cuda_backend::{
-            CudaStorageSlice, WrapErr,
-            cudarc::driver::{LaunchConfig, PushKernelArg},
-        };
-
-        let g = self.geom(lx, lw)?;
-        let dev = &sx.device;
-        let x = sx.as_cuda_slice::<f32>()?.slice(lx.start_offset()..);
-        let wt = sw.as_cuda_slice::<f32>()?.slice(lw.start_offset()..);
-        let bias = sb.as_cuda_slice::<f32>()?.slice(lb.start_offset()..);
-        let n = g.b * g.c * g.ho * g.wo;
-        let mut out = unsafe { dev.alloc::<f32>(n)? };
-        let func = dev.get_or_load_custom_image(
-            crate::cuda_kernels::DEPTHWISE,
-            crate::cuda_kernels::MODULE,
-            crate::cuda_kernels::IMAGE,
-        )?;
-        let dims = [g.c, g.h, g.w, g.ho, g.wo, g.k, self.stride, self.padding].map(|v| v as i32);
-        let n_i32 = i32::try_from(n)?;
-        let mut builder = func.builder();
-        builder.arg(&x);
-        builder.arg(&wt);
-        builder.arg(&bias);
-        builder.arg(&mut out);
-        builder.arg(&n_i32);
-        for d in &dims {
-            builder.arg(d);
-        }
-        unsafe { builder.launch(LaunchConfig::for_num_elems(n as u32)) }.w()?;
-        Ok((
-            inference_tensor::CudaStorage {
-                slice: CudaStorageSlice::F32(out),
-                device: dev.clone(),
-            },
-            Shape::from((g.b, g.c, g.ho, g.wo)),
-        ))
     }
 }

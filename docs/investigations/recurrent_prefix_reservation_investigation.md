@@ -84,7 +84,7 @@ Review pass on the same change, raw findings and what was done:
 - `inference_recurrent_state_slots_used` now includes idle snapshots, so a new gauge
   `inference_recurrent_state_snapshot_slots` tells them apart.
 
-## Run 4 - 2026-10-08 11:25
+## Run 4 - 2026-10-08 09:20
 
 Step 3: removed the up-front snapshot reservation (`add_recurrent_prefix_memory_reservations`) together with
 `PagedAttentionConfig::recurrent_prefix_capacity`, its only input. Question: does the 27B now fit the full sequence
