@@ -114,7 +114,7 @@ mod tests {
     }
 
     #[test]
-    fn recurrent_prefix_capacity_defaults_to_zero_and_can_be_configured() -> anyhow::Result<()> {
+    fn recurrent_checkpoint_lanes_default_to_one_fixed_lane() -> anyhow::Result<()> {
         let config = PagedAttentionConfig::new(
             Some(32),
             MemoryGpuConfig::MbAmount(1),
@@ -122,13 +122,6 @@ mod tests {
         )?;
         assert_eq!(config.recurrent_checkpoint_lanes, 1);
         assert!(!config.recurrent_checkpoint_lanes_auto);
-        assert_eq!(config.recurrent_prefix_capacity, 0);
-        assert_eq!(
-            config
-                .with_recurrent_prefix_capacity(7)
-                .recurrent_prefix_capacity,
-            7
-        );
         Ok(())
     }
 
@@ -203,7 +196,6 @@ pub struct PagedAttentionConfig {
     pub mapped_activation_memory_reservation_bytes: usize,
     pub recurrent_checkpoint_lanes: usize,
     pub recurrent_checkpoint_lanes_auto: bool,
-    pub recurrent_prefix_capacity: usize,
     pub resolve_memory_utilization_after_load: bool,
 }
 
@@ -229,7 +221,6 @@ impl PagedAttentionConfig {
             mapped_activation_memory_reservation_bytes: 0,
             recurrent_checkpoint_lanes: 1,
             recurrent_checkpoint_lanes_auto: false,
-            recurrent_prefix_capacity: 0,
             resolve_memory_utilization_after_load: true,
         })
     }
@@ -258,11 +249,6 @@ impl PagedAttentionConfig {
         self.recurrent_checkpoint_lanes = lanes;
         self.recurrent_checkpoint_lanes_auto = false;
         Ok(self)
-    }
-
-    pub fn with_recurrent_prefix_capacity(mut self, capacity: usize) -> Self {
-        self.recurrent_prefix_capacity = capacity;
-        self
     }
 
     pub fn reserve_activation_memory(

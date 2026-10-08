@@ -47,8 +47,7 @@ use crate::kv_cache::{GdnDeferredStateSpec, PagedAuxiliaryPrefixState};
 pub use crate::model::DiffusionGenerationParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{
-    AttentionBackendKind, CacheConfig, CacheEngine, CacheMemoryReservations, MemoryGpuConfig,
-    ModelConfigLike,
+    AttentionBackendKind, CacheConfig, CacheEngine, MemoryGpuConfig, ModelConfigLike,
 };
 use crate::prefix_cacher::PrefixCacheManagerV2;
 pub use amoe::{AnyMoeLoader, AnyMoePipeline};
@@ -171,7 +170,6 @@ pub(crate) use processing::{BasicProcessor, MessagesAction, Processor};
 use rand_isaac::Isaac64Rng;
 pub use speech::{SpeechLoader, SpeechLoaderType, SpeechPipeline};
 use std::any::Any;
-use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
@@ -180,7 +178,7 @@ use std::time::Duration;
 use tokenizers::Tokenizer;
 
 use anyhow::Result;
-use inference_tensor::{DType, Device, DeviceLocation, IndexOp, Tensor, Var};
+use inference_tensor::{DType, Device, IndexOp, Tensor, Var};
 
 use crate::paged_attention::block_hash::{
     MultimodalAttentionPolicy, adapter_generation_key, compute_block_hashes,
@@ -540,8 +538,9 @@ fn recurrent_budgets(
     let current_capacity = hybrid.recurrent_capacity();
     let current_lanes = hybrid.checkpoint_lanes();
     drop(hybrid);
-    let reservations =
-        paged_attention_memory_reservations(cache, paged_attn_config, primary_device)?;
+    let reservations = paged_attn_config
+        .memory_reservations()
+        .map_err(inference_tensor::Error::msg)?;
     let mut budgets = Vec::with_capacity(recurrent_devices.len());
     for device in recurrent_devices {
         #[cfg(feature = "cuda")]
@@ -775,61 +774,6 @@ fn reserve_recurrent_serving_capacity(
 
 fn uses_recurrent_transition_log(cache: &EitherCache) -> bool {
     cache.is_hybrid() && cache.hybrid().uses_recurrent_transition_log()
-}
-
-fn add_recurrent_prefix_memory_reservations(
-    mut reservations: CacheMemoryReservations,
-    bytes_by_device: HashMap<DeviceLocation, usize>,
-    primary_device: DeviceLocation,
-    prefix_capacity: usize,
-) -> Result<CacheMemoryReservations> {
-    if prefix_capacity == 0 {
-        return Ok(reservations);
-    }
-    let peak_snapshots = prefix_capacity
-        .checked_add(1)
-        .ok_or_else(|| inference_tensor::Error::msg("recurrent prefix capacity overflow"))?;
-    let mut secondary_prefix_bytes = 0usize;
-    for (device, bytes_per_snapshot) in bytes_by_device {
-        let bytes = bytes_per_snapshot
-            .checked_mul(peak_snapshots)
-            .ok_or_else(|| inference_tensor::Error::msg("recurrent prefix reservation overflow"))?;
-        if device == primary_device {
-            reservations.primary_device_bytes = reservations
-                .primary_device_bytes
-                .checked_add(bytes)
-                .ok_or_else(|| {
-                    inference_tensor::Error::msg("recurrent prefix reservation overflow")
-                })?;
-        } else {
-            secondary_prefix_bytes = secondary_prefix_bytes.max(bytes);
-        }
-    }
-    reservations.secondary_device_bytes = reservations
-        .secondary_device_bytes
-        .checked_add(secondary_prefix_bytes)
-        .ok_or_else(|| inference_tensor::Error::msg("recurrent prefix reservation overflow"))?;
-    Ok(reservations)
-}
-
-fn paged_attention_memory_reservations(
-    cache: &EitherCache,
-    paged_attn_config: PagedAttentionConfig,
-    primary_device: &Device,
-) -> Result<CacheMemoryReservations> {
-    let reservations = paged_attn_config
-        .memory_reservations()
-        .map_err(inference_tensor::Error::msg)?;
-    if paged_attn_config.recurrent_prefix_capacity == 0 || !cache.is_hybrid() {
-        return Ok(reservations);
-    }
-    let bytes_by_device = cache.hybrid().recurrent_snapshot_bytes_by_device()?;
-    add_recurrent_prefix_memory_reservations(
-        reservations,
-        bytes_by_device,
-        primary_device.location(),
-        paged_attn_config.recurrent_prefix_capacity,
-    )
 }
 
 pub struct GeneralMetadata {
@@ -1566,22 +1510,17 @@ impl dyn Pipeline {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        sync::{Arc, Mutex},
-    };
+    use std::sync::{Arc, Mutex};
 
     use crate::model::decode_positions_tensor;
 
     use super::{
-        CacheMemoryReservations, ModelForwardContext, RECURRENT_GRAPH_PAD_SLOTS,
-        RecurrentCheckpointBudget, RecurrentReservationInputs, RecurrentSlotBytes,
-        add_recurrent_prefix_memory_reservations, automatic_recurrent_capacity_budget,
+        ModelForwardContext, RECURRENT_GRAPH_PAD_SLOTS, RecurrentCheckpointBudget,
+        RecurrentReservationInputs, RecurrentSlotBytes, automatic_recurrent_capacity_budget,
         automatic_recurrent_checkpoint_lane_budget, effective_recurrent_checkpoint_lanes,
-        next_pipeline_prompt_chunk_group, paged_attention_memory_reservations,
-        prompt_chunk_is_final, recurrent_batch_kind_for_input, recurrent_kv_floor_bytes,
-        reserve_recurrent_serving_capacity, resolve_lora_execution, should_sample_step,
-        should_try_speculative_sampling,
+        next_pipeline_prompt_chunk_group, prompt_chunk_is_final, recurrent_batch_kind_for_input,
+        recurrent_kv_floor_bytes, reserve_recurrent_serving_capacity, resolve_lora_execution,
+        should_sample_step, should_try_speculative_sampling,
     };
     use crate::gdn::RecurrentBatchKind;
     use crate::model::{ForwardCache, LogitsSelection};
@@ -1598,7 +1537,7 @@ mod tests {
     };
     use either::Either;
     use indexmap::IndexMap;
-    use inference_tensor::{Device, DeviceLocation, Tensor};
+    use inference_tensor::{Device, Tensor};
 
     fn prompt_chunk(start: usize, end: usize) -> PromptChunkPlan {
         PromptChunkPlan {
@@ -2002,63 +1941,6 @@ mod tests {
         let pool = cache.get(0).unwrap().as_recurrent_pool().unwrap();
         assert_eq!(pool.capacity(), 65);
         assert_eq!(pool.physical_capacity(), 65);
-    }
-
-    #[test]
-    fn recurrent_prefix_reservation_includes_staging_and_device_baselines() {
-        let reservations = add_recurrent_prefix_memory_reservations(
-            CacheMemoryReservations {
-                primary_device_bytes: 100,
-                secondary_device_bytes: 50,
-            },
-            HashMap::from([
-                (DeviceLocation::Cpu, 10),
-                (DeviceLocation::Cuda { gpu_id: 0 }, 20),
-                (DeviceLocation::Cuda { gpu_id: 1 }, 30),
-            ]),
-            DeviceLocation::Cpu,
-            2,
-        )
-        .unwrap();
-
-        assert_eq!(reservations.primary_device_bytes, 130);
-        assert_eq!(reservations.secondary_device_bytes, 140);
-    }
-
-    #[test]
-    fn loaded_hybrid_cache_drives_recurrent_prefix_reservation() {
-        let hybrid = HybridCache::new(
-            HybridCacheConfig {
-                layer_types: vec![HybridLayerType::Recurrent],
-                max_seq_len: 32,
-                recurrent: RecurrentLayerConfig {
-                    conv_dim: 8,
-                    conv_width: 4,
-                    state: RecurrentStateSpec::Gdn {
-                        heads: 2,
-                        key_dim: 4,
-                        value_dim: 4,
-                    },
-                    recurrent_dtype: Some(inference_tensor::DType::F32),
-                },
-            },
-            inference_tensor::DType::BF16,
-            &[Device::Cpu],
-        )
-        .unwrap();
-        let cache = EitherCache::Hybrid(Arc::new(Mutex::new(hybrid)));
-        let config =
-            PagedAttentionConfig::new(None, MemoryGpuConfig::MbAmount(1), PagedCacheType::Auto)
-                .unwrap()
-                .with_base_device_memory_reservation(100)
-                .unwrap()
-                .with_recurrent_prefix_capacity(2);
-
-        let reservations =
-            paged_attention_memory_reservations(&cache, config, &Device::Cpu).unwrap();
-
-        assert_eq!(reservations.primary_device_bytes, 676);
-        assert_eq!(reservations.secondary_device_bytes, 0);
     }
     use serde_json::Value;
 

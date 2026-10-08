@@ -14,10 +14,7 @@ use super::chat_template::{GenerationConfig, calculate_eos_tokens};
 #[cfg(feature = "cuda")]
 use super::cuda_graph::CudaDecodeGraphState;
 use super::llg::build_llg_factory;
-use super::{
-    ChatTemplate, EitherCache, GeneralMetadata, Modalities, ModelKind,
-    paged_attention_memory_reservations,
-};
+use super::{ChatTemplate, EitherCache, GeneralMetadata, Modalities, ModelKind};
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::{CacheEngine, ModelConfigLike, calculate_cache_config};
 use crate::{DynamicLoraRuntime, PagedAttentionConfig};
@@ -101,11 +98,9 @@ impl DecoderCore {
         let (cache_config, cache_engine) = if let Some(paged_attn_config) = args.paged_attn_config {
             let cache_config = calculate_cache_config(
                 paged_attn_config.mem_gpu,
-                paged_attention_memory_reservations(
-                    args.model.cache,
-                    paged_attn_config,
-                    &args.device,
-                )?,
+                paged_attn_config
+                    .memory_reservations()
+                    .map_err(inference_tensor::Error::msg)?,
                 paged_attn_config.block_size,
                 args.dtype,
                 paged_attn_config.cache_type,
