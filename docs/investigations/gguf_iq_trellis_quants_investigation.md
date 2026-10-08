@@ -648,7 +648,7 @@ tokens, the 255 after its midpoint each scored given everything before them), an
 (default 2%). First run, README.md as the text, raw script output (reference, ours, relative drift):
 
 ```
-scripts/gguf_perplexity_parity.sh ~/Programming/llama.cpp/build_cuda/bin/llama-perplexity <iq dir>   (llama.cpp 4617ccc1a)
+scripts/gguf_perplexity_parity.sh ~/Programming/llama.cpp/build_cuda/bin/llama-perplexity <iq dir>   (llama.cpp build d7bd3bfca)
 qwen35-0.8b-IQ1_M.gguf                       290.4072     293.8728   0.0119
 qwen35-0.8b-IQ1_S.gguf                       838.6610     847.2218   0.0102
 qwen35-0.8b-IQ2_S.gguf                        24.4610      24.3750   0.0035

@@ -2,10 +2,11 @@
 # One-off parity check of GGUF weights against a llama.cpp-family reference (mainline or ik_llama.cpp): scores every
 # *.gguf in a directory with the reference's llama-perplexity and with inference.rs, and fails past a relative drift.
 # Not part of local_ci.sh: it needs the reference's build and real checkpoints, and verifies an adoption once.
+# scripts/build_gguf_references.sh builds the references and scripts/make_gguf_test_dirs.sh the scored directories.
 #
 # Usage: scripts/gguf_perplexity_parity.sh <llama-perplexity> <gguf-dir> [text] [tolerance]
 #   text       scored by both sides; default README.md (llama-perplexity needs two 512-token windows)
-#   tolerance  relative perplexity drift allowed; default 0.02 (the IQ and IQK types drift up to ~1.6%)
+#   tolerance  relative perplexity drift allowed; default 0.02 (IQ1_S and IQ1_M need 0.05, their backends spread)
 set -euo pipefail
 shopt -s nullglob
 
@@ -13,7 +14,7 @@ CTX=512
 DEFAULT_TOLERANCE=0.02
 
 if [[ $# -lt 2 ]]; then
-    sed -n '6,8p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '7,9p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 reference=$(command -v "$1" || true)
