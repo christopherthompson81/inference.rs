@@ -8,6 +8,8 @@ use inference::{
     Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole,
 };
 
+#[path = "../support/decode_graphs.rs"]
+mod decode_graphs;
 #[path = "../support/gemma3_tiny.rs"]
 mod support;
 use support::tiny_gemma3;
@@ -198,5 +200,109 @@ async fn gemma3_image_and_text_decode_as_recorded() -> anyhow::Result<()> {
         "image decode moved: {image:?}"
     );
     anyhow::ensure!(pinned(&text, expected_text), "text decode moved: {text:?}");
+    Ok(())
+}
+
+// Random weights settle on one token, so the pins mostly guard the graph path running at all.
+const GRAPH_IMAGE_TRACE: &[(u32, f32)] = &[
+    (11, -3.6849756),
+    (11, -3.6883585),
+    (11, -3.7020524),
+    (11, -3.707307),
+    (11, -3.7069917),
+    (11, -3.7139778),
+];
+const GRAPH_TRACES: [&[(u32, f32)]; decode_graphs::GRAPH_PROMPTS.len()] = [
+    &[
+        (11, -3.6839383),
+        (11, -3.6869273),
+        (11, -3.6875715),
+        (11, -3.6954334),
+        (11, -3.6972377),
+        (11, -3.700204),
+    ],
+    &[
+        (11, -3.68789),
+        (11, -3.687997),
+        (11, -3.6993887),
+        (11, -3.7050138),
+        (11, -3.7048666),
+        (11, -3.7056303),
+    ],
+    &[
+        (11, -3.6786876),
+        (11, -3.678305),
+        (11, -3.6871538),
+        (11, -3.6996465),
+        (11, -3.6990786),
+        (11, -3.7034485),
+    ],
+    &[
+        (11, -3.6857686),
+        (11, -3.6900928),
+        (11, -3.7089043),
+        (11, -3.722483),
+        (11, -3.722449),
+        (11, -3.7166421),
+    ],
+    &[
+        (11, -3.6844528),
+        (11, -3.687066),
+        (11, -3.691625),
+        (11, -3.7050107),
+        (11, -3.70397),
+        (11, -3.6996493),
+    ],
+];
+
+// An image request, then rounds of concurrent text requests, on a bf16 paged build (graphs need both).
+async fn image_then_text_rounds(
+    snapshotter: &metrics_util::debugging::Snapshotter,
+) -> anyhow::Result<(decode_graphs::Counters, decode_graphs::Counters)> {
+    let checkpoint = tiny_gemma3()?;
+    let model = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    let (image, _) = trace(&model, image_request(LONG_PROMPT, 3)).await?;
+    let image_counters = decode_graphs::Counters::take(snapshotter);
+    decode_graphs::assert_trace(&image, GRAPH_IMAGE_TRACE, &image);
+    let rounds = decode_graphs::rounds(&model, MAX_LEN).await?;
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok((image_counters, decode_graphs::Counters::take(snapshotter)))
+}
+
+// The multimodal pipeline's decode steps replay graphs for an image request and for the text requests after it.
+#[tokio::test]
+async fn gemma3_decode_after_an_image_replays_cuda_graphs() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let (image, text) = image_then_text_rounds(&snapshotter).await?;
+    decode_graphs::assert_replayed(&image);
+    let replays = text.total(
+        decode_graphs::EVENTS,
+        &[("event", "replay"), ("outcome", "success")],
+    );
+    assert!(
+        replays > 0,
+        "text decode after the image never replayed: {text:?}"
+    );
+    decode_graphs::assert_no_fallback(&text);
+    Ok(())
+}
+
+#[tokio::test]
+async fn gemma3_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    decode_graphs::disable_graphs();
+    let snapshotter = decode_graphs::recorder();
+    let (image, text) = image_then_text_rounds(&snapshotter).await?;
+    decode_graphs::assert_disabled(&image);
+    decode_graphs::assert_disabled(&text);
     Ok(())
 }

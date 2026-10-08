@@ -4,18 +4,11 @@
 use inference::{
     Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
 };
-use inference_models_llama::llama::{Config, Llama};
-use inference_nn::paged_attention::AttentionImplementation;
+use inference_models_llama::llama::Config;
 
-#[path = "../support/recording.rs"]
-mod recording;
+#[path = "../support/llama_tiny.rs"]
+mod support;
 
-const LLAMA: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/llama_tiny");
-const TOKENIZER: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/tests/fixtures/paddleocr_vl/tiny/tokenizer.json"
-);
-const ROPE_FREQS: &str = "model.rope_freqs.weight";
 // hidden_size 32 over 2 heads would be 16
 const HEAD_DIM: usize = 8;
 const PROMPT: &str = "hello";
@@ -33,34 +26,11 @@ async fn generate(model: &Model) -> anyhow::Result<usize> {
 #[tokio::test]
 async fn a_llama_with_an_explicit_head_dim_loads_its_projections_and_generates()
 -> anyhow::Result<()> {
-    let mut config: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(format!("{LLAMA}/config.json"))?)?;
-    config["head_dim"] = HEAD_DIM.into();
-    let cfg: Config = serde_json::from_value(config.clone())?;
-    let staging = tempfile::tempdir()?;
-    let config_path = staging.path().join("config.json");
-    std::fs::write(&config_path, serde_json::to_string(&config)?)?;
-
-    let mut files = recording::fixture_files(LLAMA)?;
-    files.retain(|path| path.file_name().is_some_and(|name| name != "config.json"));
-    files.push(config_path);
-    files.push(TOKENIZER.into());
-    let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
-    let checkpoint = recording::record_checkpoint(
-        &files,
-        cfg.num_hidden_layers,
-        &[ROPE_FREQS],
-        |vb, metadata| {
-            Llama::new(
-                &cfg.decoder_spec(),
-                vb,
-                true,
-                metadata,
-                AttentionImplementation::Eager,
-            )
-            .map(|_| ())
-        },
-    )?;
+    let checkpoint =
+        support::tiny_llama_checkpoint_with(serde_json::json!({ "head_dim": HEAD_DIM }))?;
+    let cfg: Config = serde_json::from_str(&std::fs::read_to_string(
+        checkpoint.path().join("config.json"),
+    )?)?;
 
     let weights = inference_tensor::safetensors::load(
         checkpoint.path().join("model.safetensors"),
