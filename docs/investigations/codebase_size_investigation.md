@@ -2703,3 +2703,21 @@ helpers. Noted, not changed: the IR tests use contiguous strides, so the stride-
 w8a8/w8a16 is not compiled by them. Full local CI passed (2,494 CPU, 2,879 CUDA); the default build does not compile
 `cutile`, which is checked by `cargo clippy -p inference-quant --all-targets --features cuda,cutile -- -D warnings`
 and the IR tests under CUDA 13.4.
+
+## Run 86 - 2026-10-07 22:16
+
+Question: can the routed LoRA one-shot kernel compile under cutile 0.3.1 again?
+
+Change: its four early `return;`s (index range, naive-assignment route bound, invalid descriptor, zero adapter scale)
+became guards wrapping the rest of the kernel, each the negation of the old exit condition (`adapter_scale != 0.0`
+keeps NaN on the same side as before). `git diff -w` shows only the guards; the rest is re-indentation. The existing
+test now goes through `compile_tile_ir` (sm_120).
+
+Raw finding: `one_shot_kernel_compiles_to_tile_ir` passes for its three generic sets (it failed before with
+"`return` is only supported at the top level of a function body"); all 11 Tile IR tests pass; clippy `cuda,cutile`
+clean. No IR baseline exists (the kernel never compiled under 0.3.1), and no Blackwell GPU here, so the guards are
+checked by review only, not by IR equality or a run.
+
+Review (subagent, read-only): each guard is the exact negation of its exit (NaN and -0.0 keep their old side),
+statement placement and the three closing braces check out, no `return` remains, the whitespace-ignored diff has no
+other token changes. Full local CI passed (2,494 CPU, 2,879 CUDA).
