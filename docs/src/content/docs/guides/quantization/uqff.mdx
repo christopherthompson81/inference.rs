@@ -120,7 +120,10 @@ directory as `-o` in that case. Numeric shorthands expand to all platform varian
 writes both `afq4.uqff` and `q4k.uqff`).
 
 When `write_uqff` is used from the Rust or Python SDK and the session keeps serving, the
-in-memory model runs as the first requested type.
+in-memory model runs as the first requested type. The write builds the model on the CPU; on a GPU
+device the session then loads the written file, so it serves exactly what a later `from_uqff` load
+would (calibration from the source weights is not available on it). A model read from GGUF is
+written but not served this way: load the written file with `from_uqff`.
 
 A [topology](/guides/perf/topology/) can pin specific layers to a different type
 (e.g. keep `lm_head` at `q8_0` in an otherwise Q4K file); pins are preserved in every output

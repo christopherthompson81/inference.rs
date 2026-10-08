@@ -217,48 +217,9 @@ pub(super) fn supports_dynamic_lora_loader(loader: &MultimodalLoaderType) -> boo
     )
 }
 
-impl Loader for MultimodalLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn load_model_from_hf(
-        &self,
-        revision: Option<String>,
-        token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
-    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let _progress_guard = ProgressScopeGuard::new(silent);
-        self.validate_dynamic_lora()?;
-        let paths = super::loading::hub_model_paths(
-            super::loading::HubPathsRequest {
-                hf_cache_path: self.hf_cache_path.clone(),
-                model_id: &self.model_id,
-                tokenizer_json: self.tokenizer_json.as_deref(),
-                chat_template: self.chat_template.as_deref(),
-                token_source: &token_source,
-                revision,
-                silent,
-                from_uqff: self.config.from_uqff.as_deref(),
-            },
-            &self.from_uqff,
-            |request| super::paths::get_paths(request, self.lora_adapters.as_deref()),
-        )?;
-        self.load_model_from_path(
-            &paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
-    }
-
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn load_model_from_path(
+impl MultimodalLoader {
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_paths(
         &self,
         paths: &dyn ModelPaths,
         dtype: &dyn TryIntoDType,
@@ -267,13 +228,26 @@ impl Loader for MultimodalLoader {
         mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
-    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        uqff: super::loading::UqffLoad<'_>,
+    ) -> Result<super::loading::LoadOutcome> {
         let _progress_guard = ProgressScopeGuard::new(silent);
+        let serve_written = uqff.serves_written(device);
+        let in_situ_quant = in_situ_quant.filter(|_| !uqff.is_reload());
+        // a reload reads the written UQFF: the imatrix and calibration were spent writing it
+        let (imatrix, calibration_file) = match uqff {
+            super::loading::UqffLoad::Reload(_) => (None, None),
+            _ => (
+                self.config.imatrix.as_ref(),
+                self.config.calibration_file.as_ref(),
+            ),
+        };
+        let from_uqff_files = self.from_uqff.read().unwrap();
+        let uqff_files = uqff.reload_files().or(from_uqff_files.as_deref());
         self.validate_dynamic_lora()?;
         let config = super::loading::prepare_model_config(
             self.prepared_source.as_ref(),
             paths.get_config_filename(),
-            self.config.from_uqff.is_some(),
+            uqff.reads(),
             self.config.hf_config_overrides.as_ref(),
             self.mtp,
         )?;
@@ -401,17 +375,17 @@ impl Loader for MultimodalLoader {
                 settings: super::loading::LoadSettings {
                     topology: self.config.topology.as_ref(),
                     organization: self.config.organization,
-                    write_uqff: self.config.write_uqff.as_ref(),
-                    from_uqff: self.config.from_uqff.is_some(),
-                    has_imatrix: self.config.imatrix.is_some(),
-                    has_calibration: self.config.calibration_file.is_some(),
+                    write_uqff: uqff.write(),
+                    from_uqff: uqff.reads(),
+                    has_imatrix: imatrix.is_some(),
+                    has_calibration: calibration_file.is_some(),
                 },
                 paths,
                 device,
                 dtype,
                 mapper,
                 in_situ_quant,
-                uqff_files: self.from_uqff.read().unwrap().as_deref(),
+                uqff_files,
                 prepared: self.prepared_source.as_ref(),
                 has_lora: self.lora_adapters.is_some(),
                 matformer,
@@ -432,8 +406,8 @@ impl Loader for MultimodalLoader {
                 paths,
                 silent,
                 organization: self.config.organization,
-                from_uqff: self.config.from_uqff.is_some(),
-                write_uqff: self.config.write_uqff.is_some(),
+                from_uqff: uqff.reads(),
+                write_uqff: uqff.write().is_some(),
                 prepared: self.prepared_source.as_ref(),
                 lora: super::loading::lora_runtime(&self.kind, self.lora_runtime_config),
             },
@@ -510,13 +484,13 @@ impl Loader for MultimodalLoader {
 
         // cloned out so the tracker lock is not held through calibration and the UQFF write
         let tracked = tracker.get().clone();
-        super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
+        let written = super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
             plan: &plan,
             modules: tracked,
             drive: &super::isq_flow::MultimodalCalibrationDrive(&*model),
             in_situ_quant,
-            imatrix: self.config.imatrix.as_ref(),
-            calibration_file: self.config.calibration_file.as_ref(),
+            imatrix,
+            calibration_file,
             calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
                 bos_tok_id: chat_template
@@ -526,38 +500,40 @@ impl Loader for MultimodalLoader {
                 load_device: &load_device,
                 mapper: Some(pipeline_mapper.as_ref()),
             },
-            uqff: self
-                .config
-                .write_uqff
-                .as_ref()
-                .map(|write| super::isq_flow::UqffArtifact {
-                    config: write,
-                    residual: super::loading::uqff_residual_tensors(
-                        self.config.organization,
-                        &*model,
+            uqff: uqff.write().map(|write| super::isq_flow::UqffArtifact {
+                config: write,
+                residual: super::loading::uqff_residual_tensors(self.config.organization, &*model),
+                full_ser: UqffFullSer {
+                    tokenizer: &tokenizer,
+                    template_filename: paths.get_template_filename(),
+                    effective_chat_template: Some(&chat_template),
+                    generation_config: super::loading::uqff_generation_config_file(
+                        paths,
+                        self.prepared_source.as_ref(),
                     ),
-                    full_ser: UqffFullSer {
-                        tokenizer: &tokenizer,
-                        template_filename: paths.get_template_filename(),
-                        effective_chat_template: Some(&chat_template),
-                        generation_config: super::loading::uqff_generation_config_file(
-                            paths,
-                            self.prepared_source.as_ref(),
-                        ),
-                        config: config.clone(),
-                        processor_filename: paths.get_processor_config(),
-                        preprocessor_filename: paths.get_preprocessor_config(),
-                        modules: None,
-                        module_paths: None,
-                    },
-                }),
+                    config: config.clone(),
+                    processor_filename: paths.get_processor_config(),
+                    preprocessor_filename: paths.get_preprocessor_config(),
+                    modules: None,
+                    module_paths: None,
+                },
+            }),
         })?;
+        if serve_written && let Some(files) = written.filter(|files| !files.is_empty()) {
+            if self.prepared_source.is_some() {
+                anyhow::bail!(
+                    "Wrote the UQFF to `{}`; a model read from GGUF serves from it on a GPU only through a load with `from_uqff`.",
+                    files[0].display()
+                );
+            }
+            return Ok(super::loading::LoadOutcome::Written(files));
+        }
 
         let tracked_modules = tracker.get().clone();
         // rank-sliced layers re-slice at source read; inexpressible slices fall back per layer
         let source_weight_files = super::loading::source_weight_files(
             self.prepared_source.as_ref(),
-            self.config.from_uqff.is_some(),
+            uqff.reads(),
             paths.get_weight_filenames(),
         );
         let core = DecoderCore::new(DecoderCoreArgs {
@@ -584,22 +560,94 @@ impl Loader for MultimodalLoader {
             kind: self.kind.clone(),
             model_id: self.model_id.clone(),
             modalities,
-            loaded_for_uqff_write: self.config.write_uqff.is_some(),
+            loaded_for_uqff_write: uqff.write().is_some(),
             tracked_modules,
             source_weight_files,
             source_weight_source: weight_source,
             dynamic_lora,
         })?;
-        Ok(Arc::new(Mutex::new(DecoderPipeline::new(
-            DecoderModel::Multimodal(model),
-            core,
-            Some(MediaState {
-                processor,
-                prefixer: self.inner.prefixer(&config),
-                video_sampling: self.inner.video_frame_sampling(&config),
-                preprocessor_config: Arc::new(preprocessor_config),
-            }),
+        Ok(super::loading::LoadOutcome::Pipeline(Arc::new(Mutex::new(
+            DecoderPipeline::new(
+                DecoderModel::Multimodal(model),
+                core,
+                Some(MediaState {
+                    processor,
+                    prefixer: self.inner.prefixer(&config),
+                    video_sampling: self.inner.video_frame_sampling(&config),
+                    preprocessor_config: Arc::new(preprocessor_config),
+                }),
+            ),
         ))))
+    }
+}
+
+impl Loader for MultimodalLoader {
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn load_model_from_hf(
+        &self,
+        revision: Option<String>,
+        token_source: TokenSource,
+        dtype: &dyn TryIntoDType,
+        device: &Device,
+        silent: bool,
+        mapper: DeviceMapSetting,
+        in_situ_quant: Option<IsqType>,
+        paged_attn_config: Option<PagedAttentionConfig>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(silent);
+        self.validate_dynamic_lora()?;
+        let paths = super::loading::hub_model_paths(
+            super::loading::HubPathsRequest {
+                hf_cache_path: self.hf_cache_path.clone(),
+                model_id: &self.model_id,
+                tokenizer_json: self.tokenizer_json.as_deref(),
+                chat_template: self.chat_template.as_deref(),
+                token_source: &token_source,
+                revision,
+                silent,
+                from_uqff: self.config.from_uqff.as_deref(),
+            },
+            &self.from_uqff,
+            |request| super::paths::get_paths(request, self.lora_adapters.as_deref()),
+        )?;
+        self.load_model_from_path(
+            &paths,
+            dtype,
+            device,
+            silent,
+            mapper,
+            in_situ_quant,
+            paged_attn_config,
+        )
+    }
+
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn load_model_from_path(
+        &self,
+        paths: &dyn ModelPaths,
+        dtype: &dyn TryIntoDType,
+        device: &Device,
+        silent: bool,
+        mapper: DeviceMapSetting,
+        in_situ_quant: Option<IsqType>,
+        paged_attn_config: Option<PagedAttentionConfig>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let uqff = super::loading::UqffLoad::new(
+            self.config.from_uqff.is_some(),
+            self.config.write_uqff.as_ref(),
+        )?;
+        super::loading::load_serving_written(uqff, |uqff| {
+            self.load_from_paths(
+                paths,
+                dtype,
+                device,
+                silent,
+                mapper.clone(),
+                in_situ_quant,
+                paged_attn_config,
+                uqff,
+            )
+        })
     }
 
     fn get_id(&self) -> String {

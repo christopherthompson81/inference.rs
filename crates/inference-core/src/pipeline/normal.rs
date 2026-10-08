@@ -221,6 +221,225 @@ impl NormalLoaderBuilder {
     }
 }
 
+impl NormalLoader {
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_paths(
+        &self,
+        paths: &dyn ModelPaths,
+        dtype: &dyn TryIntoDType,
+        device: &Device,
+        silent: bool,
+        mapper: DeviceMapSetting,
+        in_situ_quant: Option<IsqType>,
+        mut paged_attn_config: Option<PagedAttentionConfig>,
+        uqff: super::loading::UqffLoad<'_>,
+    ) -> Result<super::loading::LoadOutcome> {
+        let _progress_guard = ProgressScopeGuard::new(silent);
+        let serve_written = uqff.serves_written(device);
+        let in_situ_quant = in_situ_quant.filter(|_| !uqff.is_reload());
+        // a reload reads the written UQFF: the imatrix and calibration were spent writing it
+        let (imatrix, calibration_file) = match uqff {
+            super::loading::UqffLoad::Reload(_) => (None, None),
+            _ => (
+                self.config.imatrix.as_ref(),
+                self.config.calibration_file.as_ref(),
+            ),
+        };
+        let from_uqff_files = self.from_uqff.read().unwrap();
+        let uqff_files = uqff.reload_files().or(from_uqff_files.as_deref());
+        let config = super::loading::prepare_model_config(
+            self.prepared_source.as_ref(),
+            paths.get_config_filename(),
+            uqff.reads(),
+            self.config.hf_config_overrides.as_ref(),
+            self.mtp,
+        )?;
+        // The UQFF artifact keeps the checkpoint config; max_model_len and the like apply to this load only.
+        let source_config = config;
+        let config = self
+            .inner
+            .runtime_config(&source_config, self.config.max_model_len)?
+            .into_owned();
+
+        if !self.inner.supports_paged_attention(&config)? {
+            paged_attn_config = None;
+        }
+
+        debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
+
+        let matformer = super::loading::load_matformer_slice(
+            self.config.matformer_config_path.as_deref(),
+            self.config.matformer_slice_name.as_deref(),
+        )?;
+        let (session, mapper) = super::loading::open_load_session(
+            super::loading::LoadSessionInputs {
+                mapped: &*self.inner,
+                isq: &*self.inner,
+                config: &config,
+                settings: super::loading::LoadSettings {
+                    topology: self.config.topology.as_ref(),
+                    organization: self.config.organization,
+                    write_uqff: uqff.write(),
+                    from_uqff: uqff.reads(),
+                    has_imatrix: imatrix.is_some(),
+                    has_calibration: calibration_file.is_some(),
+                },
+                paths,
+                device,
+                dtype,
+                mapper,
+                in_situ_quant,
+                uqff_files,
+                prepared: self.prepared_source.as_ref(),
+                has_lora: self.lora_adapters.is_some(),
+                matformer,
+                matformer_sizing: false,
+                non_mapped_unpacked: false,
+                auto_device_map_params: None,
+                weight_target: "model",
+            },
+            &mut paged_attn_config,
+        )?;
+        trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
+        let (model, tracker, dynamic_lora) = super::loading::load_model(
+            &*self.inner,
+            &session,
+            mapper,
+            super::loading::ModelLoadInputs {
+                config: &config,
+                paths,
+                silent,
+                organization: self.config.organization,
+                from_uqff: uqff.reads(),
+                write_uqff: uqff.write().is_some(),
+                prepared: self.prepared_source.as_ref(),
+                lora: super::loading::lora_runtime(&self.kind, self.lora_runtime_config),
+            },
+        )?;
+        let super::loading::LoadSession {
+            device,
+            weight_source,
+            max_kv_tokens,
+            pipeline_mapper,
+            layer_devices,
+            dtype,
+            plan,
+            ..
+        } = session;
+        let load_device = plan.load_device.clone();
+
+        let tokenizer = match self.prepared_source.as_ref() {
+            Some(source) => source.tokenizer.clone(),
+            None => get_tokenizer(paths.get_tokenizer_filename(), None)?,
+        };
+        let gen_conf = super::loading::generation_config(
+            self.prepared_source
+                .as_ref()
+                .map(|source| source.generation_config.clone()),
+            paths,
+            &config,
+        );
+
+        let chat_template = super::loading::load_chat_template(
+            paths,
+            self.jinja_explicit.as_ref(),
+            self.chat_template.as_ref(),
+            self.prepared_source.as_ref(),
+        );
+
+        // cloned out so the tracker lock is not held through calibration and the UQFF write
+        let tracked = tracker.get().clone();
+        let written = super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
+            plan: &plan,
+            modules: tracked,
+            drive: &super::isq_flow::NormalCalibrationDrive(&*model),
+            in_situ_quant,
+            imatrix,
+            calibration_file,
+            calibration: super::isq_flow::CalibrationCtx {
+                tokenizer: &tokenizer,
+                bos_tok_id: chat_template
+                    .bos_tok()
+                    .as_deref()
+                    .and_then(|tok| tokenizer.token_to_id(tok)),
+                load_device: &load_device,
+                mapper: Some(pipeline_mapper.as_ref()),
+            },
+            uqff: uqff.write().map(|write| super::isq_flow::UqffArtifact {
+                config: write,
+                residual: super::loading::uqff_residual_tensors(self.config.organization, &*model),
+                full_ser: UqffFullSer {
+                    tokenizer: &tokenizer,
+                    template_filename: paths.get_template_filename(),
+                    effective_chat_template: Some(&chat_template),
+                    generation_config: super::loading::uqff_generation_config_file(
+                        paths,
+                        self.prepared_source.as_ref(),
+                    ),
+                    config: source_config.clone(),
+                    processor_filename: &None,
+                    preprocessor_filename: &None,
+                    modules: None,
+                    module_paths: None,
+                },
+            }),
+        })?;
+        if serve_written && let Some(files) = written.filter(|files| !files.is_empty()) {
+            if self.prepared_source.is_some() {
+                anyhow::bail!(
+                    "Wrote the UQFF to `{}`; a model read from GGUF serves from it on a GPU only through a load with `from_uqff`.",
+                    files[0].display()
+                );
+            }
+            return Ok(super::loading::LoadOutcome::Written(files));
+        }
+
+        let tracked_modules = tracker.get().clone();
+        let source_weight_files = super::loading::source_weight_files(
+            self.prepared_source.as_ref(),
+            uqff.reads(),
+            paths.get_weight_filenames(),
+        );
+
+        let core = DecoderCore::new(DecoderCoreArgs {
+            model: LoadedModelView {
+                target: &*model,
+                cache: model.cache(),
+                config: model.model_config(),
+                max_seq_len: model.max_seq_len(),
+                sliding_window: model.config().sliding_window,
+                block_diffusion: false,
+            },
+            tokenizer,
+            chat_template,
+            generation_config: gen_conf,
+            paged_attn_config,
+            dtype,
+            layer_devices,
+            device,
+            mapper: pipeline_mapper,
+            silent,
+            max_kv_tokens,
+            no_kv_cache: self.no_kv_cache,
+            no_prefix_cache: false,
+            kind: self.kind.clone(),
+            model_id: self.model_id.clone(),
+            modalities: Modalities {
+                input: vec![SupportedModality::Text],
+                output: vec![SupportedModality::Text],
+            },
+            loaded_for_uqff_write: uqff.write().is_some(),
+            tracked_modules,
+            source_weight_files,
+            source_weight_source: weight_source,
+            dynamic_lora,
+        })?;
+        Ok(super::loading::LoadOutcome::Pipeline(Arc::new(Mutex::new(
+            DecoderPipeline::new(DecoderModel::Text(model), core, None),
+        ))))
+    }
+}
+
 impl Loader for NormalLoader {
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(
@@ -269,199 +488,24 @@ impl Loader for NormalLoader {
         silent: bool,
         mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
-        mut paged_attn_config: Option<PagedAttentionConfig>,
+        paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let _progress_guard = ProgressScopeGuard::new(silent);
-        let config = super::loading::prepare_model_config(
-            self.prepared_source.as_ref(),
-            paths.get_config_filename(),
+        let uqff = super::loading::UqffLoad::new(
             self.config.from_uqff.is_some(),
-            self.config.hf_config_overrides.as_ref(),
-            self.mtp,
+            self.config.write_uqff.as_ref(),
         )?;
-        // The UQFF artifact keeps the checkpoint config; max_model_len and the like apply to this load only.
-        let source_config = config;
-        let config = self
-            .inner
-            .runtime_config(&source_config, self.config.max_model_len)?
-            .into_owned();
-
-        if !self.inner.supports_paged_attention(&config)? {
-            paged_attn_config = None;
-        }
-
-        debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
-
-        let matformer = super::loading::load_matformer_slice(
-            self.config.matformer_config_path.as_deref(),
-            self.config.matformer_slice_name.as_deref(),
-        )?;
-        let (session, mapper) = super::loading::open_load_session(
-            super::loading::LoadSessionInputs {
-                mapped: &*self.inner,
-                isq: &*self.inner,
-                config: &config,
-                settings: super::loading::LoadSettings {
-                    topology: self.config.topology.as_ref(),
-                    organization: self.config.organization,
-                    write_uqff: self.config.write_uqff.as_ref(),
-                    from_uqff: self.config.from_uqff.is_some(),
-                    has_imatrix: self.config.imatrix.is_some(),
-                    has_calibration: self.config.calibration_file.is_some(),
-                },
+        super::loading::load_serving_written(uqff, |uqff| {
+            self.load_from_paths(
                 paths,
-                device,
                 dtype,
-                mapper,
-                in_situ_quant,
-                uqff_files: self.from_uqff.read().unwrap().as_deref(),
-                prepared: self.prepared_source.as_ref(),
-                has_lora: self.lora_adapters.is_some(),
-                matformer,
-                matformer_sizing: false,
-                non_mapped_unpacked: false,
-                auto_device_map_params: None,
-                weight_target: "model",
-            },
-            &mut paged_attn_config,
-        )?;
-        trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        let (model, tracker, dynamic_lora) = super::loading::load_model(
-            &*self.inner,
-            &session,
-            mapper,
-            super::loading::ModelLoadInputs {
-                config: &config,
-                paths,
+                device,
                 silent,
-                organization: self.config.organization,
-                from_uqff: self.config.from_uqff.is_some(),
-                write_uqff: self.config.write_uqff.is_some(),
-                prepared: self.prepared_source.as_ref(),
-                lora: super::loading::lora_runtime(&self.kind, self.lora_runtime_config),
-            },
-        )?;
-        let super::loading::LoadSession {
-            device,
-            weight_source,
-            max_kv_tokens,
-            pipeline_mapper,
-            layer_devices,
-            dtype,
-            plan,
-            ..
-        } = session;
-        let load_device = plan.load_device.clone();
-
-        let tokenizer = match self.prepared_source.as_ref() {
-            Some(source) => source.tokenizer.clone(),
-            None => get_tokenizer(paths.get_tokenizer_filename(), None)?,
-        };
-        let gen_conf = super::loading::generation_config(
-            self.prepared_source
-                .as_ref()
-                .map(|source| source.generation_config.clone()),
-            paths,
-            &config,
-        );
-
-        let chat_template = super::loading::load_chat_template(
-            paths,
-            self.jinja_explicit.as_ref(),
-            self.chat_template.as_ref(),
-            self.prepared_source.as_ref(),
-        );
-
-        // cloned out so the tracker lock is not held through calibration and the UQFF write
-        let tracked = tracker.get().clone();
-        super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
-            plan: &plan,
-            modules: tracked,
-            drive: &super::isq_flow::NormalCalibrationDrive(&*model),
-            in_situ_quant,
-            imatrix: self.config.imatrix.as_ref(),
-            calibration_file: self.config.calibration_file.as_ref(),
-            calibration: super::isq_flow::CalibrationCtx {
-                tokenizer: &tokenizer,
-                bos_tok_id: chat_template
-                    .bos_tok()
-                    .as_deref()
-                    .and_then(|tok| tokenizer.token_to_id(tok)),
-                load_device: &load_device,
-                mapper: Some(pipeline_mapper.as_ref()),
-            },
-            uqff: self
-                .config
-                .write_uqff
-                .as_ref()
-                .map(|write| super::isq_flow::UqffArtifact {
-                    config: write,
-                    residual: super::loading::uqff_residual_tensors(
-                        self.config.organization,
-                        &*model,
-                    ),
-                    full_ser: UqffFullSer {
-                        tokenizer: &tokenizer,
-                        template_filename: paths.get_template_filename(),
-                        effective_chat_template: Some(&chat_template),
-                        generation_config: super::loading::uqff_generation_config_file(
-                            paths,
-                            self.prepared_source.as_ref(),
-                        ),
-                        config: source_config.clone(),
-                        processor_filename: &None,
-                        preprocessor_filename: &None,
-                        modules: None,
-                        module_paths: None,
-                    },
-                }),
-        })?;
-
-        let tracked_modules = tracker.get().clone();
-        let source_weight_files = super::loading::source_weight_files(
-            self.prepared_source.as_ref(),
-            self.config.from_uqff.is_some(),
-            paths.get_weight_filenames(),
-        );
-
-        let core = DecoderCore::new(DecoderCoreArgs {
-            model: LoadedModelView {
-                target: &*model,
-                cache: model.cache(),
-                config: model.model_config(),
-                max_seq_len: model.max_seq_len(),
-                sliding_window: model.config().sliding_window,
-                block_diffusion: false,
-            },
-            tokenizer,
-            chat_template,
-            generation_config: gen_conf,
-            paged_attn_config,
-            dtype,
-            layer_devices,
-            device,
-            mapper: pipeline_mapper,
-            silent,
-            max_kv_tokens,
-            no_kv_cache: self.no_kv_cache,
-            no_prefix_cache: false,
-            kind: self.kind.clone(),
-            model_id: self.model_id.clone(),
-            modalities: Modalities {
-                input: vec![SupportedModality::Text],
-                output: vec![SupportedModality::Text],
-            },
-            loaded_for_uqff_write: self.config.write_uqff.is_some(),
-            tracked_modules,
-            source_weight_files,
-            source_weight_source: weight_source,
-            dynamic_lora,
-        })?;
-        Ok(Arc::new(Mutex::new(DecoderPipeline::new(
-            DecoderModel::Text(model),
-            core,
-            None,
-        ))))
+                mapper.clone(),
+                in_situ_quant,
+                paged_attn_config,
+                uqff,
+            )
+        })
     }
 
     fn get_id(&self) -> String {

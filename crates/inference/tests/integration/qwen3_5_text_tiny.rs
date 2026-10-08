@@ -14,6 +14,9 @@ mod traces;
 const DECLARED_CONTEXT: u64 = 1024;
 const RUNTIME_LIMIT: usize = 256;
 const NUM_LAYERS: usize = 4;
+const VOCAB: usize = 266;
+// the target's hidden size, which a DFlash drafter must share
+const HIDDEN: usize = 64;
 const HEAD_DIM: usize = 32;
 // 32 decodes through the gather, which a graph cannot capture
 const GRAPH_HEAD_DIM: usize = 64;
@@ -28,8 +31,8 @@ fn tiny_qwen3_5_text(head_dim: usize, mtp: bool) -> anyhow::Result<tempfile::Tem
         "architectures": ["Qwen3_5ForCausalLM"],
         "model_type": "qwen3_5_text",
         "head_dim": head_dim,
-        "vocab_size": 266,
-        "hidden_size": 64,
+        "vocab_size": VOCAB,
+        "hidden_size": HIDDEN,
         "intermediate_size": 128,
         "num_hidden_layers": NUM_LAYERS,
         "num_attention_heads": 2,
@@ -102,6 +105,19 @@ async fn a_uqff_keeps_the_checkpoint_context_when_written_under_max_model_len() 
 
 const GRAPH_MAX_LEN: usize = 8;
 const MTP_N_PREDICT: usize = 2;
+const DFLASH_INTERMEDIATE: usize = 128;
+const DFLASH_HEADS: usize = 2;
+const DFLASH_HEAD_DIM: usize = 64;
+const DFLASH_BLOCK: usize = 4;
+const DFLASH_N_PREDICT: usize = 2;
+// the tokenizer's last id, never produced by the prompts
+const DFLASH_MASK_TOKEN: u32 = VOCAB as u32 - 1;
+const DFLASH_TAPS: [usize; 2] = [1, 3];
+const DFLASH_WEIGHT_SCALE: f32 = 0.05;
+const DFLASH_WEIGHT_STEP: f32 = 0.37;
+// every drafter layer windowed, which its decode graphs need
+const DFLASH_WINDOW: usize = 32;
+const DFLASH_COMPONENT: &str = "dflash";
 
 async fn paged_gpu_model(mtp: bool) -> anyhow::Result<(tempfile::TempDir, Model)> {
     let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, mtp)?;
@@ -202,13 +218,7 @@ async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
     let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
     let counters = decode_graphs::Counters::take(&snapshotter);
     decode_graphs::assert_replayed(&counters);
-    // every step a graph skipped is a prompt: verify steps replay too
-    let skipped = counters.total(decode_graphs::DISPATCH, &[("mode", "skipped")]);
-    let prompts = counters.total(decode_graphs::DISPATCH, &[("reason", "prefill")]);
-    assert_eq!(
-        skipped, prompts,
-        "a decode or verify step skipped graphs: {counters:?}"
-    );
+    decode_graphs::assert_only_prompts_skip(&counters);
     let drafts: usize = model
         .speculative_stats()?
         .data
@@ -216,6 +226,98 @@ async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
         .map(|m| m.drafts)
         .sum();
     assert!(drafts > 0, "MTP never drafted");
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+// A v1 DFlash drafter sized to the graph fixture: it reuses the target's embeddings and head, and taps two layers.
+fn tiny_dflash() -> anyhow::Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    let config = serde_json::json!({
+        "architectures": ["DFlashDraftModel"],
+        "hidden_size": HIDDEN,
+        "intermediate_size": DFLASH_INTERMEDIATE,
+        "num_hidden_layers": 1,
+        "num_attention_heads": DFLASH_HEADS,
+        "num_key_value_heads": 1,
+        "head_dim": DFLASH_HEAD_DIM,
+        "rms_norm_eps": 1e-6,
+        "vocab_size": VOCAB,
+        "rope_theta": 10000,
+        "block_size": DFLASH_BLOCK,
+        "mask_token_id": DFLASH_MASK_TOKEN,
+        "layer_types": ["sliding_attention"],
+        "sliding_window": DFLASH_WINDOW,
+        "dflash_config": { "target_layer_ids": DFLASH_TAPS }
+    });
+    std::fs::write(dir.path().join("config.json"), config.to_string())?;
+    let device = inference_tensor::Device::Cpu;
+    let ramp = |rows: usize, cols: usize| {
+        let data = (0..rows * cols)
+            .map(|i| ((i as f32) * DFLASH_WEIGHT_STEP).sin() * DFLASH_WEIGHT_SCALE)
+            .collect::<Vec<_>>();
+        inference_tensor::Tensor::from_vec(data, (rows, cols), &device)
+    };
+    let ones = |n: usize| inference_tensor::Tensor::ones(n, inference_tensor::DType::F32, &device);
+    let (q, kv) = (DFLASH_HEADS * DFLASH_HEAD_DIM, DFLASH_HEAD_DIM);
+    let mut tensors = std::collections::HashMap::new();
+    let layer = "layers.0";
+    for (name, rows, cols) in [
+        ("self_attn.q_proj", q, HIDDEN),
+        ("self_attn.k_proj", kv, HIDDEN),
+        ("self_attn.v_proj", kv, HIDDEN),
+        ("self_attn.o_proj", HIDDEN, q),
+        ("mlp.gate_proj", DFLASH_INTERMEDIATE, HIDDEN),
+        ("mlp.up_proj", DFLASH_INTERMEDIATE, HIDDEN),
+        ("mlp.down_proj", HIDDEN, DFLASH_INTERMEDIATE),
+    ] {
+        tensors.insert(format!("{layer}.{name}.weight"), ramp(rows, cols)?);
+    }
+    for (name, n) in [
+        ("self_attn.q_norm", DFLASH_HEAD_DIM),
+        ("self_attn.k_norm", DFLASH_HEAD_DIM),
+        ("input_layernorm", HIDDEN),
+        ("post_attention_layernorm", HIDDEN),
+    ] {
+        tensors.insert(format!("{layer}.{name}.weight"), ones(n)?);
+    }
+    tensors.insert(
+        "fc.weight".to_string(),
+        ramp(HIDDEN, DFLASH_TAPS.len() * HIDDEN)?,
+    );
+    tensors.insert("hidden_norm.weight".to_string(), ones(HIDDEN)?);
+    tensors.insert("norm.weight".to_string(), ones(HIDDEN)?);
+    inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
+    Ok(dir)
+}
+
+// An external DFlash drafter on a text model drafts, both its and the target's graphs replay, and greedy output holds.
+#[tokio::test]
+async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let drafter = tiny_dflash()?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_replayed(&counters);
+    decode_graphs::assert_only_prompts_skip(&counters);
+    decode_graphs::assert_component_replayed(&counters, DFLASH_COMPONENT);
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "DFlash never drafted");
     decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
     Ok(())
 }

@@ -46,8 +46,8 @@ pub(crate) struct FinishIsqLoad<'a> {
     pub uqff: Option<UqffArtifact<'a>>,
 }
 
-/// After the weights are read: validate the ISQ selection, calibrate, capture, write the UQFF, then quantize.
-pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<()> {
+/// After the weights are read: validate, calibrate, capture, write the UQFF (returning its shards), then quantize.
+pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<Option<Vec<PathBuf>>> {
     let FinishIsqLoad {
         plan,
         modules,
@@ -80,6 +80,7 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<()> {
                 .expect("CaptureMatches requires imatrix data"),
         )?;
     }
+    let mut written = None;
     if let Some(UqffArtifact {
         config,
         residual,
@@ -91,7 +92,7 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<()> {
             .clone()
             .filter(|types| !types.is_empty())
             .context("UQFF serialization requires at least one ISQ type.")?;
-        write_uqff_artifacts(UqffWriteRequest {
+        written = Some(write_uqff_artifacts(UqffWriteRequest {
             output: config.output.clone(),
             types,
             base_model: config.base_model.clone(),
@@ -101,14 +102,14 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<()> {
             residual,
             full_ser,
             imatrix: imatrix_map.unwrap_or_default(),
-        })?;
+        })?);
     }
     if plan.immediate_isq_installed {
         for module in modules {
             module.ct.resolve()?;
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 /// Runtime re-ISQ: requantizes a model's tracked layers to `dtype`; one loaded without ISQ has none to requantize.

@@ -335,6 +335,79 @@ pub(crate) fn uqff_generation_config_file<'a>(
     }
 }
 
+/// Where a load's weights come from beyond the checkpoint: a UQFF it reads, writes, or reloads after writing.
+#[derive(Clone, Copy)]
+pub(crate) enum UqffLoad<'a> {
+    None,
+    From,
+    Write(&'a super::isq::UqffWriteConfig),
+    Reload(&'a [PathBuf]),
+}
+
+impl<'a> UqffLoad<'a> {
+    pub(crate) fn new(
+        from_uqff: bool,
+        write: Option<&'a super::isq::UqffWriteConfig>,
+    ) -> Result<Self> {
+        Ok(match (from_uqff, write) {
+            (true, Some(_)) => anyhow::bail!(
+                "Writing UQFF (`write_uqff`) while loading from UQFF (`from_uqff`) is not supported."
+            ),
+            (true, None) => Self::From,
+            (false, Some(write)) => Self::Write(write),
+            (false, None) => Self::None,
+        })
+    }
+
+    pub(crate) fn reads(self) -> bool {
+        matches!(self, Self::From | Self::Reload(_))
+    }
+
+    pub(crate) fn is_reload(self) -> bool {
+        matches!(self, Self::Reload(_))
+    }
+
+    pub(crate) fn write(self) -> Option<&'a super::isq::UqffWriteConfig> {
+        match self {
+            Self::Write(write) => Some(write),
+            Self::None | Self::From | Self::Reload(_) => None,
+        }
+    }
+
+    pub(crate) fn reload_files(self) -> Option<&'a [PathBuf]> {
+        match self {
+            Self::Reload(files) => Some(files),
+            Self::None | Self::From | Self::Write(_) => None,
+        }
+    }
+
+    /// The write loads the model unmapped onto the host; a GPU load serves it by reloading the written shards.
+    pub(crate) fn serves_written(self, device: &Device) -> bool {
+        matches!(self, Self::Write(write) if !write.artifact_only && !device.is_cpu())
+    }
+}
+
+pub(crate) enum LoadOutcome {
+    Pipeline(Arc<tokio::sync::Mutex<dyn crate::Pipeline + Send + Sync>>),
+    /// The UQFF was written and is to be served from these runtime-type shards.
+    Written(Vec<PathBuf>),
+}
+
+/// Runs a load and, when it wrote a UQFF to serve on its device, the reload of the written shards.
+pub(crate) fn load_serving_written(
+    uqff: UqffLoad<'_>,
+    load: impl Fn(UqffLoad<'_>) -> Result<LoadOutcome>,
+) -> Result<Arc<tokio::sync::Mutex<dyn crate::Pipeline + Send + Sync>>> {
+    let files = match load(uqff)? {
+        LoadOutcome::Pipeline(pipeline) => return Ok(pipeline),
+        LoadOutcome::Written(files) => files,
+    };
+    match load(UqffLoad::Reload(&files))? {
+        LoadOutcome::Pipeline(pipeline) => Ok(pipeline),
+        LoadOutcome::Written(_) => unreachable!("a reload writes nothing"),
+    }
+}
+
 /// The adapter runtime a LoRA loader was built with; None for other kinds.
 pub(crate) fn lora_runtime(
     kind: &super::ModelKind,
@@ -696,6 +769,8 @@ pub(crate) fn open_load_session(
     if crate::using_flash_attn() {
         inference_quant::log::once_log_info("FlashAttention is enabled.");
     }
+    // a UQFF write builds the model on the host; its dtype still follows the requested device
+    let device = if write_uqff { Device::Cpu } else { device };
 
     let plan = super::isq_flow::resolve_and_install_isq_plan(super::isq_flow::IsqPlanInputs {
         in_situ_quant,

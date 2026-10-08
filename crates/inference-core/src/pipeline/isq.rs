@@ -536,6 +536,9 @@ pub struct UqffWriteConfig {
     pub base_model: Option<String>,
     #[serde(default)]
     pub repo_id: Option<String>,
+    /// Write the files only; a GPU load otherwise reloads the written UQFF onto its device to serve it.
+    #[serde(skip)]
+    pub artifact_only: bool,
 }
 
 /// How a spec names a UQFF to write: an output path, or the path with the ISQ types and report metadata.
@@ -597,6 +600,7 @@ impl UqffWriteConfig {
             types: Vec::new(),
             base_model: None,
             repo_id: None,
+            artifact_only: false,
         }
     }
 
@@ -606,7 +610,13 @@ impl UqffWriteConfig {
             types,
             base_model: None,
             repo_id: None,
+            artifact_only: false,
         }
+    }
+
+    pub fn artifact_only(mut self) -> Self {
+        self.artifact_only = true;
+        self
     }
 
     pub fn with_report_metadata(
@@ -652,7 +662,8 @@ struct UqffShardPaths<'a> {
     file_stem: &'a str,
 }
 
-pub(crate) fn write_uqff_artifacts(request: UqffWriteRequest<'_>) -> Result<()> {
+/// Writes the requested UQFF types; returns the published shards of the runtime (first) type.
+pub(crate) fn write_uqff_artifacts(request: UqffWriteRequest<'_>) -> Result<Vec<PathBuf>> {
     let UqffWriteRequest {
         output,
         types,
@@ -751,6 +762,17 @@ pub(crate) fn write_uqff_artifacts(request: UqffWriteRequest<'_>) -> Result<()> 
         report_outputs.push(output_report);
     }
     write_uqff_metadata(&staging.payload, &final_parent, residual, full_ser)?;
+    // the runtime type is serialized last
+    let runtime_shards = report_outputs
+        .last()
+        .map(|output| {
+            output
+                .shards
+                .iter()
+                .map(|shard| final_parent.join(shard))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let report = inference_quant::UqffReport {
         schema: 1,
         generated_by: inference_quant::UqffGeneratedBy {
@@ -777,7 +799,7 @@ pub(crate) fn write_uqff_artifacts(request: UqffWriteRequest<'_>) -> Result<()> 
             .join(inference_quant::UQFF_REPORT_JSON)
             .display()
     );
-    Ok(())
+    Ok(runtime_shards)
 }
 
 fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<inference_quant::UqffOutputReport> {

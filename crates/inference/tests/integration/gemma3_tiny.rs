@@ -50,13 +50,6 @@ fn builder(dir: &Path) -> MultimodalModelBuilder {
     }
 }
 
-// A UQFF-writing load keeps the whole model on the host, so a GPU build cannot decode with it.
-fn cpu_builder(dir: &Path) -> MultimodalModelBuilder {
-    MultimodalModelBuilder::new(dir.to_string_lossy())
-        .with_dtype(ModelDType::F32)
-        .with_force_cpu()
-}
-
 // A deterministic gradient, so the pixels (and so the image tokens) are the same every run.
 fn image(seed: u8) -> DynamicImage {
     DynamicImage::ImageRgb8(RgbImage::from_fn(IMAGE_SIDE, IMAGE_SIDE, |x, y| {
@@ -218,12 +211,12 @@ async fn gemma3_repeated_image_hits_the_encoder_cache() -> anyhow::Result<()> {
     Ok(())
 }
 
-// An in-situ quantized load writes UQFF; reloading it decodes the same image the same way.
+// An in-situ quantized load writes UQFF and serves it on its device; a later load of the file decodes the same.
 #[tokio::test]
 async fn gemma3_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
     let checkpoint = tiny_gemma3()?;
     let uqff_dir = tempfile::tempdir()?;
-    let quantized = cpu_builder(checkpoint.path())
+    let quantized = builder(checkpoint.path())
         .with_isq(IsqType::Q8_0)
         .write_uqff(uqff_dir.path().join("model.uqff"))
         .build()
@@ -233,7 +226,7 @@ async fn gemma3_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Resu
 
     let written = uqff_files(uqff_dir.path())?;
     anyhow::ensure!(!written.is_empty(), "no UQFF written");
-    let reloaded = cpu_builder(checkpoint.path())
+    let reloaded = builder(checkpoint.path())
         .from_uqff(vec![written[0].clone()])
         .build()
         .await?;

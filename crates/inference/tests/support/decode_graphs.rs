@@ -69,21 +69,24 @@ pub fn assert_trace(
     );
 }
 
-/// No decode step fell back to eager and no capture failed.
-pub fn assert_no_fallback(counters: &Counters) {
-    let failures = counters.total(EVENTS, &[("outcome", "failure")])
-        + counters.total(EVENTS, &[("event", "eager_fallback")])
-        + counters.total(DISPATCH, &[("mode", "eager")]);
-    assert_eq!(failures, 0, "a decode step fell back: {counters:?}");
+const TARGET: &str = "target";
+
+/// No `component` step fell back to eager and no `component` capture failed.
+pub fn assert_component_no_fallback(counters: &Counters, component: &str) {
+    let component = ("component", component);
+    let failures = counters.total(EVENTS, &[component, ("outcome", "failure")])
+        + counters.total(EVENTS, &[component, ("event", "eager_fallback")])
+        + counters.total(DISPATCH, &[component, ("mode", "eager")]);
+    assert_eq!(failures, 0, "a {component:?} step fell back: {counters:?}");
 }
 
-/// Decode graphs were captured and replayed, with no fallback.
-pub fn assert_replayed(counters: &Counters) {
+/// `component` graphs were captured and replayed, with no fallback.
+pub fn assert_component_replayed(counters: &Counters, component: &str) {
     let events = |event| {
         counters.total(
             EVENTS,
             &[
-                ("component", "target"),
+                ("component", component),
                 ("event", event),
                 ("outcome", "success"),
             ],
@@ -91,9 +94,29 @@ pub fn assert_replayed(counters: &Counters) {
     };
     assert!(
         events("capture") > 0 && events("replay") > 0,
-        "no graph captured and replayed: {counters:?}"
+        "no {component} graph captured and replayed: {counters:?}"
     );
-    assert_no_fallback(counters);
+    assert_component_no_fallback(counters, component);
+}
+
+/// No target decode step fell back to eager and no target capture failed.
+pub fn assert_no_fallback(counters: &Counters) {
+    assert_component_no_fallback(counters, TARGET);
+}
+
+/// Target decode graphs were captured and replayed, with no fallback.
+pub fn assert_replayed(counters: &Counters) {
+    assert_component_replayed(counters, TARGET);
+}
+
+/// Every target step that skipped graphs was a prompt, so decode and speculative verify steps all replayed.
+pub fn assert_only_prompts_skip(counters: &Counters) {
+    let skipped = counters.total(DISPATCH, &[("component", TARGET), ("mode", "skipped")]);
+    let prompts = counters.total(DISPATCH, &[("component", TARGET), ("reason", "prefill")]);
+    assert_eq!(
+        skipped, prompts,
+        "a decode or verify step skipped graphs: {counters:?}"
+    );
 }
 
 /// Every dispatch, prefill included, stopped at the disabled check, and no graph ran.

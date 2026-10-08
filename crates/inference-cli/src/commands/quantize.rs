@@ -124,6 +124,7 @@ pub async fn run_quantize(model_type: QuantizeModelType, global: GlobalOptions) 
         base_output.clone()
     };
     let write_uqff = UqffWriteConfig::with_types(effective_output.clone(), expanded_isq.clone())
+        .artifact_only()
         .with_report_metadata(
             Some(flag_base_model.clone().unwrap_or_else(|| model_id.clone())),
             flag_repo_id.clone(),

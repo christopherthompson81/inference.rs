@@ -145,47 +145,9 @@ impl EmbeddingLoaderBuilder {
     }
 }
 
-impl Loader for EmbeddingLoader {
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn load_model_from_hf(
-        &self,
-        revision: Option<String>,
-        token_source: TokenSource,
-        dtype: &dyn TryIntoDType,
-        device: &Device,
-        silent: bool,
-        mapper: DeviceMapSetting,
-        in_situ_quant: Option<IsqType>,
-        paged_attn_config: Option<PagedAttentionConfig>,
-    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
-        let _progress_guard = ProgressScopeGuard::new(silent);
-        let paths = super::loading::hub_model_paths(
-            super::loading::HubPathsRequest {
-                hf_cache_path: self.hf_cache_path.clone(),
-                model_id: &self.model_id,
-                tokenizer_json: self.tokenizer_json.as_deref(),
-                chat_template: None,
-                token_source: &token_source,
-                revision,
-                silent,
-                from_uqff: self.config.from_uqff.as_deref(),
-            },
-            &self.from_uqff,
-            super::paths::get_embedding_paths,
-        )?;
-        self.load_model_from_path(
-            &paths,
-            dtype,
-            device,
-            silent,
-            mapper,
-            in_situ_quant,
-            paged_attn_config,
-        )
-    }
-
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
-    fn load_model_from_path(
+impl EmbeddingLoader {
+    #[allow(clippy::too_many_arguments)]
+    fn load_from_paths(
         &self,
         paths: &dyn ModelPaths,
         dtype: &dyn TryIntoDType,
@@ -194,12 +156,25 @@ impl Loader for EmbeddingLoader {
         mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
-    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        uqff: super::loading::UqffLoad<'_>,
+    ) -> Result<super::loading::LoadOutcome> {
         let _progress_guard = ProgressScopeGuard::new(silent);
+        let serve_written = uqff.serves_written(device);
+        let in_situ_quant = in_situ_quant.filter(|_| !uqff.is_reload());
+        // a reload reads the written UQFF: the imatrix and calibration were spent writing it
+        let (imatrix, calibration_file) = match uqff {
+            super::loading::UqffLoad::Reload(_) => (None, None),
+            _ => (
+                self.config.imatrix.as_ref(),
+                self.config.calibration_file.as_ref(),
+            ),
+        };
+        let from_uqff_files = self.from_uqff.read().unwrap();
+        let uqff_files = uqff.reload_files().or(from_uqff_files.as_deref());
         let config = super::loading::prepare_model_config(
             None,
             paths.get_config_filename(),
-            self.config.from_uqff.is_some(),
+            uqff.reads(),
             None,
             false,
         )?;
@@ -219,17 +194,17 @@ impl Loader for EmbeddingLoader {
                 settings: super::loading::LoadSettings {
                     topology: self.config.topology.as_ref(),
                     organization: IsqOrganization::Default,
-                    write_uqff: self.config.write_uqff.as_ref(),
-                    from_uqff: self.config.from_uqff.is_some(),
-                    has_imatrix: self.config.imatrix.is_some(),
-                    has_calibration: self.config.calibration_file.is_some(),
+                    write_uqff: uqff.write(),
+                    from_uqff: uqff.reads(),
+                    has_imatrix: imatrix.is_some(),
+                    has_calibration: calibration_file.is_some(),
                 },
                 paths,
                 device,
                 dtype,
                 mapper,
                 in_situ_quant,
-                uqff_files: self.from_uqff.read().unwrap().as_deref(),
+                uqff_files,
                 prepared: None,
                 has_lora: false,
                 matformer: None,
@@ -295,8 +270,8 @@ impl Loader for EmbeddingLoader {
                 paths,
                 silent,
                 organization: IsqOrganization::Default,
-                from_uqff: self.config.from_uqff.is_some(),
-                write_uqff: self.config.write_uqff.is_some(),
+                from_uqff: uqff.reads(),
+                write_uqff: uqff.write().is_some(),
                 prepared: None,
                 lora: None,
             },
@@ -314,82 +289,149 @@ impl Loader for EmbeddingLoader {
         let modules_json = EmbeddingModulePaths::serialize_modules(&modules_config);
         // cloned out so the tracker lock is not held through calibration and the UQFF write
         let tracked = tracker.get().clone();
-        super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
+        let written = super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
             plan: &plan,
             modules: tracked,
             drive: &super::isq_flow::EmbeddingCalibrationDrive(&*model),
             in_situ_quant,
-            imatrix: self.config.imatrix.as_ref(),
-            calibration_file: self.config.calibration_file.as_ref(),
+            imatrix,
+            calibration_file,
             calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
                 bos_tok_id: None,
                 load_device: &load_device,
                 mapper: Some(pipeline_mapper.as_ref()),
             },
-            uqff: self
-                .config
-                .write_uqff
-                .as_ref()
-                .map(|write| super::isq_flow::UqffArtifact {
-                    config: write,
-                    residual: model.residual_tensors(),
-                    full_ser: UqffFullSer {
-                        tokenizer: &tokenizer,
-                        template_filename: paths.get_template_filename(),
-                        effective_chat_template: None,
-                        generation_config: paths.get_gen_conf_filename(),
-                        config: config.clone(),
-                        processor_filename: &None,
-                        preprocessor_filename: &None,
-                        modules: Some(&modules_json),
-                        module_paths: Some(&modules_config),
-                    },
-                }),
+            uqff: uqff.write().map(|write| super::isq_flow::UqffArtifact {
+                config: write,
+                residual: model.residual_tensors(),
+                full_ser: UqffFullSer {
+                    tokenizer: &tokenizer,
+                    template_filename: paths.get_template_filename(),
+                    effective_chat_template: None,
+                    generation_config: paths.get_gen_conf_filename(),
+                    config: config.clone(),
+                    processor_filename: &None,
+                    preprocessor_filename: &None,
+                    modules: Some(&modules_json),
+                    module_paths: Some(&modules_config),
+                },
+            }),
         })?;
+        if serve_written && let Some(files) = written.filter(|files| !files.is_empty()) {
+            return Ok(super::loading::LoadOutcome::Written(files));
+        }
 
         let has_causal_attention = self.inner.has_causal_attention(&config)?;
         let max_seq_len = self.inner.model_config(&config)?.max_seq_len();
         let tracked_modules = tracker.get().clone();
         // rank-sliced layers re-slice at source read; inexpressible slices fall back per layer
-        let source_weight_files = super::loading::source_weight_files(
-            None,
-            self.config.from_uqff.is_some(),
-            paths.get_weight_filenames(),
-        );
+        let source_weight_files =
+            super::loading::source_weight_files(None, uqff.reads(), paths.get_weight_filenames());
 
-        Ok(Arc::new(Mutex::new(EmbeddingPipeline {
-            dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0)),
-            model,
-            tracked_modules,
-            source_weight_files,
-            tokenizer: tokenizer.into(),
-            model_id: self.model_id.clone(),
-            metadata: Arc::new(GeneralMetadata {
-                max_seq_len,
-                llg_factory: None,
-                no_prefix_cache: false,
-                num_hidden_layers: 1, // read only to size caches
-                eos_tok: vec![],
-                kind: ModelKind::Normal,
-                no_kv_cache: true, // NOTE(EricLBuehler): no cache for these.
-                activation_dtype: dtype,
-                sliding_window: None,
-                cache_config: None,
-                cache_engine: None,
-                model_metadata: None,
-                modalities: Modalities {
-                    input: vec![SupportedModality::Text],
-                    output: vec![SupportedModality::Embedding],
-                },
-                loaded_for_uqff_write: self.config.write_uqff.is_some(),
-            }),
-            mapper: pipeline_mapper,
-            modules,
-            processor: Arc::new(EmbeddingProcessor {
-                has_causal_attention,
-            }),
-        })))
+        Ok(super::loading::LoadOutcome::Pipeline(Arc::new(Mutex::new(
+            EmbeddingPipeline {
+                dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0)),
+                model,
+                tracked_modules,
+                source_weight_files,
+                tokenizer: tokenizer.into(),
+                model_id: self.model_id.clone(),
+                metadata: Arc::new(GeneralMetadata {
+                    max_seq_len,
+                    llg_factory: None,
+                    no_prefix_cache: false,
+                    num_hidden_layers: 1, // read only to size caches
+                    eos_tok: vec![],
+                    kind: ModelKind::Normal,
+                    no_kv_cache: true, // NOTE(EricLBuehler): no cache for these.
+                    activation_dtype: dtype,
+                    sliding_window: None,
+                    cache_config: None,
+                    cache_engine: None,
+                    model_metadata: None,
+                    modalities: Modalities {
+                        input: vec![SupportedModality::Text],
+                        output: vec![SupportedModality::Embedding],
+                    },
+                    loaded_for_uqff_write: uqff.write().is_some(),
+                }),
+                mapper: pipeline_mapper,
+                modules,
+                processor: Arc::new(EmbeddingProcessor {
+                    has_causal_attention,
+                }),
+            },
+        ))))
+    }
+}
+
+impl Loader for EmbeddingLoader {
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn load_model_from_hf(
+        &self,
+        revision: Option<String>,
+        token_source: TokenSource,
+        dtype: &dyn TryIntoDType,
+        device: &Device,
+        silent: bool,
+        mapper: DeviceMapSetting,
+        in_situ_quant: Option<IsqType>,
+        paged_attn_config: Option<PagedAttentionConfig>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(silent);
+        let paths = super::loading::hub_model_paths(
+            super::loading::HubPathsRequest {
+                hf_cache_path: self.hf_cache_path.clone(),
+                model_id: &self.model_id,
+                tokenizer_json: self.tokenizer_json.as_deref(),
+                chat_template: None,
+                token_source: &token_source,
+                revision,
+                silent,
+                from_uqff: self.config.from_uqff.as_deref(),
+            },
+            &self.from_uqff,
+            super::paths::get_embedding_paths,
+        )?;
+        self.load_model_from_path(
+            &paths,
+            dtype,
+            device,
+            silent,
+            mapper,
+            in_situ_quant,
+            paged_attn_config,
+        )
+    }
+
+    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn load_model_from_path(
+        &self,
+        paths: &dyn ModelPaths,
+        dtype: &dyn TryIntoDType,
+        device: &Device,
+        silent: bool,
+        mapper: DeviceMapSetting,
+        in_situ_quant: Option<IsqType>,
+        paged_attn_config: Option<PagedAttentionConfig>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let uqff = super::loading::UqffLoad::new(
+            self.config.from_uqff.is_some(),
+            self.config.write_uqff.as_ref(),
+        )?;
+        super::loading::load_serving_written(uqff, |uqff| {
+            self.load_from_paths(
+                paths,
+                dtype,
+                device,
+                silent,
+                mapper.clone(),
+                in_situ_quant,
+                paged_attn_config,
+                uqff,
+            )
+        })
     }
 
     fn get_id(&self) -> String {
