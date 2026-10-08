@@ -3,6 +3,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use inference_tensor::Tensor;
 
 use super::{Cache, HybridCache, NormalCache};
+use crate::gdn::RecurrentBatchKind;
+use crate::model::RecurrentMetadata;
 
 pub type LayerCaches = Vec<Option<(Tensor, Tensor)>>;
 
@@ -43,5 +45,17 @@ impl EitherCache {
 
     pub fn is_hybrid(&self) -> bool {
         matches!(self, Self::Hybrid(_))
+    }
+
+    /// The hybrid cache's current state indices for a forward of `batch_kind`; None for an attention-only cache.
+    pub fn recurrent_metadata(&self, batch_kind: RecurrentBatchKind) -> Option<RecurrentMetadata> {
+        if !self.is_hybrid() {
+            return None;
+        }
+        let hybrid_cache = self.hybrid();
+        let state_indices_host = hybrid_cache.state_indices_host().map(ToOwned::to_owned);
+        hybrid_cache.state_indices().cloned().map(|state_indices| {
+            RecurrentMetadata::new(batch_kind, state_indices, state_indices_host)
+        })
     }
 }

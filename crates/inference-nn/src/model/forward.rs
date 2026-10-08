@@ -224,6 +224,16 @@ impl<'a> ModelForwardContext<'a> {
         self
     }
 
+    /// The batch kind and, for a hybrid cache, its state indices for this forward.
+    pub fn with_recurrent_cache(
+        self,
+        cache: &crate::kv_cache::EitherCache,
+        batch_kind: RecurrentBatchKind,
+    ) -> Self {
+        self.with_recurrent_batch_kind(batch_kind)
+            .with_recurrent_metadata(cache.recurrent_metadata(batch_kind))
+    }
+
     pub fn with_recurrent_metadata(
         mut self,
         recurrent_metadata: Option<RecurrentMetadata>,

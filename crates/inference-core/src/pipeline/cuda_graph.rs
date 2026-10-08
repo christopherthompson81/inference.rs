@@ -30,7 +30,7 @@ use crate::{
 
 use crate::cuda::phase_timer::CudaPhaseTimer;
 use crate::device_map::DeviceMapper;
-use crate::kv_cache::HybridCache;
+use crate::kv_cache::{EitherCache, HybridCache, RecurrentCheckpointStateSnapshot};
 use crate::model::decode_positions_tensor;
 use crate::paged_attention::_PAD_SLOT_ID;
 use crate::paged_attention::input_metadata::{
@@ -39,6 +39,7 @@ use crate::paged_attention::input_metadata::{
 use crate::pipeline::DecodeGraphPrecaptureCtx;
 use crate::speculative::SpeculativeGraphState;
 pub(crate) use inference_nn::cuda::graph_capture::*;
+use inference_nn::speculative::SpeculativeTargetMixin;
 
 const TARGET_CUDA_DECODE_GRAPH_CACHE_DEFAULT_CAPACITY: usize = 64;
 const TARGET_CUDA_DECODE_GRAPH_CACHE_MAX_CAPACITY: usize = 96;
@@ -2135,7 +2136,7 @@ fn copy_rope_positions(
 /// Drops a pipeline's captured decode graphs, and the recurrent pad slot they held.
 pub(crate) fn clear_decode_graphs(
     graphs: &std::sync::Mutex<CudaDecodeGraphState>,
-    cache: &crate::pipeline::EitherCache,
+    cache: &EitherCache,
 ) {
     graphs.lock().expect("CUDA graph mutex poisoned").clear();
     if cache.is_hybrid()
@@ -2148,7 +2149,7 @@ pub(crate) fn clear_decode_graphs(
 /// Frees up to `max_entries` captured graphs: decode graphs first, then the model's speculative ones.
 pub(crate) fn reclaim_decode_graphs(
     graphs: &std::sync::Mutex<CudaDecodeGraphState>,
-    model: &dyn inference_nn::speculative::SpeculativeTargetMixin,
+    model: &dyn SpeculativeTargetMixin,
     max_entries: usize,
 ) -> usize {
     reclaim_cuda_graph_entries(
@@ -2161,6 +2162,146 @@ pub(crate) fn reclaim_decode_graphs(
         },
         |limit| model.evict_speculative_cuda_graphs(limit),
     )
+}
+
+type SeqRecurrentCheckpointSnapshots = Vec<(usize, RecurrentCheckpointStateSnapshot)>;
+type HybridStateIndicesSnapshot = (Option<Tensor>, Option<Vec<u32>>);
+
+pub(crate) fn snapshot_hybrid_state_indices(
+    cache: &EitherCache,
+) -> Option<HybridStateIndicesSnapshot> {
+    cache.is_hybrid().then(|| {
+        let cache = cache.hybrid();
+        (
+            cache.state_indices().cloned(),
+            cache.state_indices_host().map(ToOwned::to_owned),
+        )
+    })
+}
+
+pub(crate) fn restore_hybrid_state_indices(
+    cache: &EitherCache,
+    snapshot: Option<&HybridStateIndicesSnapshot>,
+) {
+    if let Some((tensor, host)) = snapshot {
+        cache
+            .hybrid()
+            .set_physical_state_indices_with_host(tensor.clone(), host.clone());
+    }
+}
+
+/// Checkpoints of the batch's recurrent slots for a capture to roll back; None when a speculative decode only logs.
+pub(crate) fn snapshot_hybrid_recurrent_checkpoints(
+    cache: &EitherCache,
+    model: &dyn SpeculativeTargetMixin,
+    batch_kind: RecurrentBatchKind,
+) -> inference_tensor::Result<Option<SeqRecurrentCheckpointSnapshots>> {
+    if !cache.is_hybrid() {
+        return Ok(None);
+    }
+    if speculative_decode_logs_transitions(cache, model, batch_kind) {
+        return Ok(None);
+    }
+    model.flush_recurrent_state_for_current_batch()?;
+    let hybrid_cache = cache.hybrid();
+    let Some(mut indices) = hybrid_cache
+        .logical_state_indices_host()
+        .map(ToOwned::to_owned)
+    else {
+        return Ok(None);
+    };
+    indices.retain(|&idx| idx != u32::MAX);
+    indices.sort_unstable();
+    indices.dedup();
+    let mut snapshots = Vec::with_capacity(indices.len());
+    for idx in indices {
+        let idx = idx as usize;
+        snapshots.push((idx, hybrid_cache.snapshot_recurrent_checkpoint_state(idx)?));
+    }
+    Ok(Some(snapshots))
+}
+
+pub(crate) fn speculative_decode_logs_transitions(
+    cache: &EitherCache,
+    model: &dyn SpeculativeTargetMixin,
+    batch_kind: RecurrentBatchKind,
+) -> bool {
+    batch_kind == RecurrentBatchKind::SpeculativeDecode
+        && model.supports_recurrent_speculative_transitions()
+        && cache.is_hybrid()
+        && cache.hybrid().uses_recurrent_transition_log()
+}
+
+pub(crate) fn restore_hybrid_recurrent_checkpoints(
+    cache: &EitherCache,
+    snapshots: Option<&[(usize, RecurrentCheckpointStateSnapshot)]>,
+) -> inference_tensor::Result<()> {
+    let Some(snapshots) = snapshots else {
+        return Ok(());
+    };
+    let mut hybrid_cache = cache.hybrid();
+    for (idx, snapshot) in snapshots {
+        hybrid_cache.restore_recurrent_checkpoint_state(*idx, snapshot)?;
+    }
+    Ok(())
+}
+
+/// Restores live state indices (and checkpoints on rollback or failure); a failed rollback blocks the eager retry.
+pub(crate) fn finish_cuda_graph_capture_attempt<T>(
+    cache: &EitherCache,
+    state: &mut CudaDecodeGraphState,
+    attempt: inference_tensor::Result<T>,
+    recurrent_snapshots: Option<&[(usize, RecurrentCheckpointStateSnapshot)]>,
+    live_state_indices: Option<&HybridStateIndicesSnapshot>,
+    rollback_live_state: bool,
+) -> inference_tensor::Result<T> {
+    restore_hybrid_state_indices(cache, live_state_indices);
+    match attempt {
+        Ok(value) if !rollback_live_state => Ok(value),
+        Ok(value) => {
+            restore_hybrid_recurrent_checkpoints(cache, recurrent_snapshots).map_err(
+                |restore_err| {
+                    state.block_eager_retry();
+                    inference_tensor::Error::msg(format!(
+                        "CUDA graph captured, but recurrent checkpoint rollback failed: {restore_err}"
+                    ))
+                },
+            )?;
+            Ok(value)
+        }
+        Err(capture_err) => {
+            if let Err(restore_err) =
+                restore_hybrid_recurrent_checkpoints(cache, recurrent_snapshots)
+            {
+                state.block_eager_retry();
+                return Err(inference_tensor::Error::msg(format!(
+                    "CUDA graph capture failed: {capture_err}; recurrent checkpoint rollback failed: {restore_err}"
+                )));
+            }
+            Err(capture_err)
+        }
+    }
+}
+
+/// Turns decode graphs off after a capture or replay error; true when the step may still run eagerly.
+pub(crate) fn disable_cuda_decode_graph(
+    graphs: &std::sync::Mutex<CudaDecodeGraphState>,
+    cache: &EitherCache,
+    err: &inference_tensor::Error,
+) -> bool {
+    let mut state = graphs.lock().expect("CUDA graph mutex poisoned");
+    let eager_retry_allowed = state.take_eager_retry_allowed();
+    if !state.disabled() {
+        tracing::warn!("CUDA decode graphs disabled after capture/replay error: {err}");
+    }
+    state.disable();
+    drop(state);
+    if cache.is_hybrid()
+        && let Err(release_err) = cache.hybrid().release_graph_pad_slot()
+    {
+        tracing::error!("Failed to release recurrent graph pad after graph disable: {release_err}");
+    }
+    eager_retry_allowed
 }
 
 #[cfg(test)]

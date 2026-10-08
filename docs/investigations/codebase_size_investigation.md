@@ -2386,3 +2386,27 @@ Raw findings, including three defects the pins hit on the old code:
   enabled is a throughput question the pins do not cover.
 
 Implication: pins complete for the merge. Next: PR1 (hybrid and graph helpers as free functions).
+
+## Run 75 - 2026-10-07 19:03
+
+Question: what does PR1 of the pipeline merge (the hybrid and graph helpers the two pipelines duplicated, as free
+functions in `cuda_graph.rs`, and `recurrent_metadata` as an `EitherCache` method) recover?
+
+```
+git diff --stat                     5 files, 218 insertions, 324 deletions (net -106)
+bundle (sm_86), parent vs PR1       file 105,469,168 -> 105,461,168 (-8,000); .text 55,252,562 -> 55,245,394 (-7,168)
+```
+
+Raw finding: the eight helpers (state-index snapshot and restore, recurrent checkpoint snapshot and restore, the
+capture-attempt rollback, graph disable, the transition-log check, recurrent metadata) were the same code in both
+files, differing only in `{err}` vs `{err:?}` in one warning. The bundle barely moves: fat LTO had already folded
+most identical bodies, so the value is one copy to maintain. Not merged here, and kept apart on purpose: the text
+pipeline's capture checks the transition log for `Decode`, multimodal's snapshot for `SpeculativeDecode`; and
+only multimodal reclassifies a decode step as prefill from the paged metadata (`recurrent_batch_kind`). PR5
+decides both.
+
+Review follow-up: the repeated `with_recurrent_batch_kind(k).with_recurrent_metadata(cache.recurrent_metadata(k))`
+chain (three times per pipeline) became `ModelForwardContext::with_recurrent_cache`; full CI rerun green.
+
+The size check's +0.16 MiB against `scripts/bundle_size_baseline.json` predates this change (the baseline was
+written several PRs ago); it is within tolerance.

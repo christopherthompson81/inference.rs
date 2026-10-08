@@ -16,12 +16,6 @@ use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::cuda::gdn::GDN_PAD_SLOT;
 use crate::device_map::DeviceMapper;
 #[cfg(feature = "cuda")]
-use crate::kv_cache::RecurrentCheckpointStateSnapshot;
-#[cfg(feature = "cuda")]
-type SeqRecurrentCheckpointSnapshots = Vec<(usize, RecurrentCheckpointStateSnapshot)>;
-#[cfg(feature = "cuda")]
-type HybridStateIndicesSnapshot = (Option<Tensor>, Option<Vec<u32>>);
-#[cfg(feature = "cuda")]
 struct CudaDecodeGraphCaptureInputs<'a> {
     kv_cache: &'a [(Tensor, Tensor)],
     flash_meta: &'a FlashParams,
@@ -39,6 +33,7 @@ struct CudaDecodeGraphForwardInput<'a> {
 }
 #[cfg(feature = "cuda")]
 use crate::attention::FlashParams;
+#[cfg(feature = "cuda")]
 use crate::gdn::RecurrentBatchKind;
 #[cfg(feature = "cuda")]
 use crate::paged_attention::PagedAttentionInputMetadata;
@@ -53,15 +48,14 @@ use crate::pipeline::cuda_graph::{
     CudaGraphEventGuard, CudaGraphPrecaptureInputs, capture_cuda_decode_graph,
     cuda_decode_graph_batch_kind_supported, cuda_decode_graph_supported_for_model,
     cuda_decode_graphs_enabled, cuda_graph_batch_bucket, cuda_graph_precapture_batches,
-    cuda_graph_precapture_max_batch, hybrid_graph_slots, install_hybrid_graph_state_indices,
-    record_cuda_graph_dispatch,
+    cuda_graph_precapture_max_batch, disable_cuda_decode_graph, finish_cuda_graph_capture_attempt,
+    hybrid_graph_slots, install_hybrid_graph_state_indices, record_cuda_graph_dispatch,
+    snapshot_hybrid_recurrent_checkpoints, snapshot_hybrid_state_indices,
 };
 use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{
-    Modalities, ModelForwardContext, RecurrentMetadata, SupportedModality, get_chat_template,
-};
+use crate::pipeline::{Modalities, ModelForwardContext, SupportedModality, get_chat_template};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
@@ -1239,9 +1233,12 @@ impl NormalPipeline {
             );
         }
 
-        let recurrent_snapshots =
-            self.snapshot_hybrid_recurrent_checkpoints(recurrent_batch_kind)?;
-        let live_state_indices = self.snapshot_hybrid_state_indices();
+        let recurrent_snapshots = snapshot_hybrid_recurrent_checkpoints(
+            self.model.cache(),
+            &*self.model,
+            recurrent_batch_kind,
+        )?;
+        let live_state_indices = snapshot_hybrid_state_indices(self.model.cache());
         let capture_attempt: inference_tensor::Result<_> = (|| {
             let state_index_buffers = match &step.state_indices {
                 Some(host) => Some(install_hybrid_graph_state_indices(
@@ -1257,8 +1254,7 @@ impl NormalPipeline {
                 Some((kv_cache, &metadata)),
                 flash_meta,
             )
-            .with_recurrent_batch_kind(recurrent_batch_kind)
-            .with_recurrent_metadata(self.recurrent_metadata(recurrent_batch_kind));
+            .with_recurrent_cache(self.model.cache(), recurrent_batch_kind);
             let warmup_logits = self.model.forward(&step.input_ids, &mut ctx)?;
             step.input_ids.device().synchronize()?;
             let live_logits = step.narrow_rows(&warmup_logits)?;
@@ -1286,14 +1282,14 @@ impl NormalPipeline {
                         Some((kv_cache, graph_metadata)),
                         flash_meta,
                     )
-                    .with_recurrent_batch_kind(recurrent_batch_kind)
-                    .with_recurrent_metadata(self.recurrent_metadata(recurrent_batch_kind));
+                    .with_recurrent_cache(self.model.cache(), recurrent_batch_kind);
                     self.model.forward(graph_input_ids, &mut ctx)
                 },
             )?;
             Ok((live_logits, entry))
         })();
-        let (logits, entry) = self.finish_cuda_graph_capture_attempt(
+        let (logits, entry) = finish_cuda_graph_capture_attempt(
+            self.model.cache(),
             state,
             capture_attempt,
             recurrent_snapshots.as_deref(),
@@ -1303,141 +1299,6 @@ impl NormalPipeline {
         state.insert(entry);
         graph_event.success();
         Ok(logits)
-    }
-
-    fn snapshot_hybrid_state_indices(&self) -> Option<HybridStateIndicesSnapshot> {
-        self.model.cache().is_hybrid().then(|| {
-            let cache = self.model.cache().hybrid();
-            (
-                cache.state_indices().cloned(),
-                cache.state_indices_host().map(ToOwned::to_owned),
-            )
-        })
-    }
-
-    fn restore_hybrid_state_indices(&self, snapshot: Option<&HybridStateIndicesSnapshot>) {
-        if let Some((tensor, host)) = snapshot {
-            self.model
-                .cache()
-                .hybrid()
-                .set_physical_state_indices_with_host(tensor.clone(), host.clone());
-        }
-    }
-
-    fn finish_cuda_graph_capture_attempt<T>(
-        &self,
-        state: &mut CudaDecodeGraphState,
-        attempt: inference_tensor::Result<T>,
-        recurrent_snapshots: Option<&[(usize, RecurrentCheckpointStateSnapshot)]>,
-        live_state_indices: Option<&HybridStateIndicesSnapshot>,
-        rollback_live_state: bool,
-    ) -> inference_tensor::Result<T> {
-        self.restore_hybrid_state_indices(live_state_indices);
-        match attempt {
-            Ok(value) if !rollback_live_state => Ok(value),
-            Ok(value) => {
-                self.restore_hybrid_recurrent_checkpoints(recurrent_snapshots)
-                    .map_err(|restore_err| {
-                        state.block_eager_retry();
-                        inference_tensor::Error::msg(format!(
-                            "CUDA graph captured, but recurrent checkpoint rollback failed: {restore_err}"
-                        ))
-                    })?;
-                Ok(value)
-            }
-            Err(capture_err) => {
-                if let Err(restore_err) =
-                    self.restore_hybrid_recurrent_checkpoints(recurrent_snapshots)
-                {
-                    state.block_eager_retry();
-                    return Err(inference_tensor::Error::msg(format!(
-                        "CUDA graph capture failed: {capture_err}; recurrent checkpoint rollback failed: {restore_err}"
-                    )));
-                }
-                Err(capture_err)
-            }
-        }
-    }
-
-    fn snapshot_hybrid_recurrent_checkpoints(
-        &self,
-        batch_kind: RecurrentBatchKind,
-    ) -> inference_tensor::Result<Option<SeqRecurrentCheckpointSnapshots>> {
-        if !self.model.cache().is_hybrid() {
-            return Ok(None);
-        }
-        let transitions_supported = batch_kind == RecurrentBatchKind::SpeculativeDecode
-            && self.model.supports_recurrent_speculative_transitions();
-        let hybrid_cache = self.model.cache().hybrid();
-        if transitions_supported && hybrid_cache.uses_recurrent_transition_log() {
-            return Ok(None);
-        }
-        drop(hybrid_cache);
-        self.model.flush_recurrent_state_for_current_batch()?;
-        let hybrid_cache = self.model.cache().hybrid();
-        let Some(mut indices) = hybrid_cache
-            .logical_state_indices_host()
-            .map(ToOwned::to_owned)
-        else {
-            return Ok(None);
-        };
-        indices.retain(|&idx| idx != u32::MAX);
-        indices.sort_unstable();
-        indices.dedup();
-        let mut snapshots = Vec::with_capacity(indices.len());
-        for idx in indices {
-            let idx = idx as usize;
-            snapshots.push((idx, hybrid_cache.snapshot_recurrent_checkpoint_state(idx)?));
-        }
-        Ok(Some(snapshots))
-    }
-
-    fn restore_hybrid_recurrent_checkpoints(
-        &self,
-        snapshots: Option<&[(usize, RecurrentCheckpointStateSnapshot)]>,
-    ) -> inference_tensor::Result<()> {
-        let Some(snapshots) = snapshots else {
-            return Ok(());
-        };
-        let mut hybrid_cache = self.model.cache().hybrid();
-        for (idx, snapshot) in snapshots {
-            hybrid_cache.restore_recurrent_checkpoint_state(*idx, snapshot)?;
-        }
-        Ok(())
-    }
-
-    fn disable_cuda_decode_graph(&self, err: &inference_tensor::Error) -> bool {
-        let mut state = self
-            .cuda_decode_graph
-            .lock()
-            .expect("CUDA graph mutex poisoned");
-        let eager_retry_allowed = state.take_eager_retry_allowed();
-        if !state.disabled() {
-            warn!("CUDA decode graphs disabled after capture/replay error: {err}");
-        }
-        state.disable();
-        drop(state);
-        if self.model.cache().is_hybrid()
-            && let Err(release_err) = self.model.cache().hybrid().release_graph_pad_slot()
-        {
-            tracing::error!(
-                "Failed to release recurrent graph pad after graph disable: {release_err}"
-            );
-        }
-        eager_retry_allowed
-    }
-}
-
-impl NormalPipeline {
-    fn recurrent_metadata(&self, batch_kind: RecurrentBatchKind) -> Option<RecurrentMetadata> {
-        if !self.model.cache().is_hybrid() {
-            return None;
-        }
-        let hybrid_cache = self.model.cache().hybrid();
-        let state_indices_host = hybrid_cache.state_indices_host().map(ToOwned::to_owned);
-        hybrid_cache.state_indices().cloned().map(|state_indices| {
-            RecurrentMetadata::new(batch_kind, state_indices, state_indices_host)
-        })
     }
 }
 
@@ -1583,7 +1444,8 @@ impl Pipeline for NormalPipeline {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    if !self.disable_cuda_decode_graph(&err) {
+                    if !disable_cuda_decode_graph(&self.cuda_decode_graph, self.model.cache(), &err)
+                    {
                         return Err(err);
                     }
                     cuda_graph_eager_fallback = Some(CudaGraphEventGuard::new(
@@ -1612,8 +1474,7 @@ impl Pipeline for NormalPipeline {
                 .map(|(kv_cache, meta)| (kv_cache.as_slice(), meta)),
             &flash_meta,
         )
-        .with_recurrent_batch_kind(recurrent_batch_kind)
-        .with_recurrent_metadata(self.recurrent_metadata(recurrent_batch_kind));
+        .with_recurrent_cache(self.model.cache(), recurrent_batch_kind);
         let eager_result = inference_quant::with_lora_execution(lora_execution, || {
             self.model.forward(&input_ids, &mut ctx)
         });
@@ -1656,7 +1517,8 @@ impl Pipeline for NormalPipeline {
             ))),
             Ok(None) => Ok(None),
             Err(err) => {
-                let _ = self.disable_cuda_decode_graph(&err);
+                let _ =
+                    disable_cuda_decode_graph(&self.cuda_decode_graph, self.model.cache(), &err);
                 Err(err)
             }
         }
