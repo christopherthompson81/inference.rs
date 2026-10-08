@@ -4,7 +4,7 @@ use inference_tensor::nn::Linear;
 use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
 use crate::{
-    ActivationQuantizationScheme, ActivationScaleLayout, AfqLayer, BlockwiseFP8Linear, BnbLinear,
+    ActivationQuantizationScheme, ActivationScaleLayout, AfqLayer, BlockwiseFP8Linear,
     DistributedKind, LoraLinearSpec, LoraSiteKey, MXFP4Layer, QuantMethod, QuantMethodConfig,
     QuantizeOntoGuard, QuantizedActivation, QuantizedConfig, QuantizedSerde, Shard,
     ShardedVarBuilder, UnquantLinear,
@@ -12,14 +12,127 @@ use crate::{
         BlockwiseFp8ModuleKind, blockwise_fp8_module_kind, blockwise_fp8_moe,
         scale_shard_from_weight_shard,
     },
-    distributed,
-    gptq::gptq_linear,
+    checkpoint_linear, distributed,
     lora::maybe_wrap_dynamic_lora_with_key,
     make_dummy_or_error, maybe_wrap_dynamic_lora, should_apply_immediate_isq,
     utils::isq::apply_immediate_isq_sharded,
 };
 
 use super::Comm;
+
+// Pass-through `QuantMethod`/`QuantizedSerde` methods for a wrapper over one inner layer at `self.$inner`.
+macro_rules! delegate_to {
+    ($inner:tt: $($method:ident),+ $(,)?) => { $(delegate_to!(@method $inner $method);)+ };
+    (@fn $inner:tt $(#[$attr:meta])* $name:ident($($arg:ident: $ty:ty),*) -> $ret:ty) => {
+        $(#[$attr])* fn $name(&self, $($arg: $ty),*) -> $ret { self.$inner.$name($($arg),*) }
+    };
+    (@method $i:tt tracking) => {
+        delegate_to!($i: dtype_and_device, plan_isq, begin_track_stats, stats_snapshot, process_routed_stats,
+            end_track_stats);
+    };
+    (@method $i:tt activations) => {
+        delegate_to!($i: activation_quantization_scheme, activation_quantization_scheme_for,
+            preferred_activation_scale_layout_for, nvfp4_input_calibration, activation_quantization_global_scale,
+            quantize_activation, try_quantize_glu, quantized_act_type);
+    };
+    (@method $i:tt raw_weights) => {
+        delegate_to!($i: get_qtensor, prepare_gguf_affine_raw, try_gguf_affine_forward_raw, afq_inner);
+    };
+    (@method $i:tt dynamic_lora) => { delegate_to!($i: is_dynamic_lora_active, preserve_dynamic_lora); };
+    (@method $i:tt serde) => { delegate_to!($i: isq_serde_supported, name, uqff_type); };
+    (@method $i:tt apply_isq) => {
+        fn apply_isq(
+            self: Arc<Self>,
+            dtype: Option<crate::IsqType>,
+            device: Device,
+            n_quantized: &std::sync::atomic::AtomicUsize,
+            imatrix_weight: Option<Vec<f32>>,
+            guard: QuantizeOntoGuard,
+        ) -> Result<Arc<dyn QuantMethod>> {
+            self.$i.clone().apply_isq(dtype, device, n_quantized, imatrix_weight, guard)
+        }
+    };
+    (@method $i:tt forward_raw) => { delegate_to!(@fn $i forward_raw(a: &Tensor) -> Result<Tensor>); };
+    (@method $i:tt gather_forward_raw) => {
+        delegate_to!(@fn $i gather_forward_raw(a: &Tensor, indices: &Tensor) -> Result<Tensor>);
+    };
+    (@method $i:tt embedding_forward) => {
+        delegate_to!(@fn $i embedding_forward(ids: &Tensor, output_dtype: DType) -> Result<Tensor>);
+    };
+    (@method $i:tt embedding_forward_raw) => {
+        delegate_to!(@fn $i embedding_forward_raw(ids: &Tensor) -> Result<Tensor>);
+    };
+    (@method $i:tt forward_quantized) => {
+        delegate_to!(@fn $i forward_quantized(a: &QuantizedActivation) -> Result<Tensor>);
+    };
+    (@method $i:tt try_forward_fused_split_glu) => {
+        delegate_to!(@fn $i #[cfg(feature = "cuda")] try_forward_fused_split_glu(
+            input: &Tensor, split_size: usize, activation: crate::GluActivationType) -> Result<Option<Tensor>>);
+    };
+    (@method $i:tt add_delta_w) => {
+        delegate_to!(@fn $i add_delta_w(delta: &Tensor) -> Result<Arc<dyn QuantMethod>>);
+    };
+    (@method $i:tt dequantize_w) => { delegate_to!(@fn $i dequantize_w() -> Result<Tensor>); };
+    (@method $i:tt unquant_weight_bias) => {
+        delegate_to!(@fn $i unquant_weight_bias() -> Option<(Tensor, Option<Tensor>)>);
+    };
+    (@method $i:tt has_bias) => { delegate_to!(@fn $i has_bias() -> bool); };
+    (@method $i:tt dtype_and_device) => { delegate_to!(@fn $i dtype_and_device() -> (DType, Device)); };
+    (@method $i:tt plan_isq) => {
+        delegate_to!(@fn $i plan_isq(request: &crate::IsqRequest) -> Result<crate::IsqPlanParams>);
+    };
+    (@method $i:tt begin_track_stats) => { delegate_to!(@fn $i begin_track_stats() -> Result<()>); };
+    (@method $i:tt stats_snapshot) => { delegate_to!(@fn $i stats_snapshot() -> Option<(usize, usize)>); };
+    (@method $i:tt process_routed_stats) => {
+        delegate_to!(@fn $i process_routed_stats(x: &Tensor, ids: &Tensor) -> Result<()>);
+    };
+    (@method $i:tt end_track_stats) => { delegate_to!(@fn $i end_track_stats() -> Result<Tensor>); };
+    (@method $i:tt activation_quantization_scheme) => {
+        delegate_to!(@fn $i activation_quantization_scheme() -> Option<ActivationQuantizationScheme>);
+    };
+    (@method $i:tt activation_quantization_scheme_for) => {
+        delegate_to!(@fn $i activation_quantization_scheme_for(a: &Tensor) -> Option<ActivationQuantizationScheme>);
+    };
+    (@method $i:tt preferred_activation_scale_layout_for) => {
+        delegate_to!(@fn $i preferred_activation_scale_layout_for(a: &Tensor) -> Option<ActivationScaleLayout>);
+    };
+    (@method $i:tt nvfp4_input_calibration) => {
+        delegate_to!(@fn $i nvfp4_input_calibration() -> Option<crate::Nvfp4InputCalibration<'_>>);
+    };
+    (@method $i:tt activation_quantization_global_scale) => {
+        delegate_to!(@fn $i activation_quantization_global_scale() -> Option<f32>);
+    };
+    (@method $i:tt quantize_activation) => {
+        delegate_to!(@fn $i quantize_activation(a: &Tensor) -> Result<QuantizedActivation>);
+    };
+    (@method $i:tt try_quantize_glu) => {
+        delegate_to!(@fn $i try_quantize_glu(gate: &Tensor, value: &Tensor, activation: crate::GluActivationType)
+            -> Result<Option<QuantizedActivation>>);
+    };
+    (@method $i:tt quantized_act_type) => { delegate_to!(@fn $i quantized_act_type() -> Option<DType>); };
+    (@method $i:tt is_dynamic_lora_active) => { delegate_to!(@fn $i is_dynamic_lora_active() -> bool); };
+    (@method $i:tt preserve_dynamic_lora) => {
+        delegate_to!(@fn $i preserve_dynamic_lora(replacement: Arc<dyn QuantMethod>) -> Arc<dyn QuantMethod>);
+    };
+    (@method $i:tt get_qtensor) => {
+        delegate_to!(@fn $i get_qtensor() -> Option<Arc<inference_tensor::quantized::QTensor>>);
+    };
+    (@method $i:tt prepare_gguf_affine_raw) => {
+        delegate_to!(@fn $i #[cfg(all(feature = "cuda", has_marlin_kernels))] prepare_gguf_affine_raw(
+            flat_batch: usize, dtype: DType, device: &Device) -> Result<bool>);
+    };
+    (@method $i:tt try_gguf_affine_forward_raw) => {
+        delegate_to!(@fn $i #[cfg(all(feature = "cuda", has_marlin_kernels))] try_gguf_affine_forward_raw(
+            a: &Tensor) -> Result<Option<Tensor>>);
+    };
+    (@method $i:tt afq_inner) => { delegate_to!(@fn $i afq_inner() -> Option<crate::AfqInner>); };
+    (@method $i:tt isq_serde_supported) => { delegate_to!(@fn $i isq_serde_supported() -> bool); };
+    (@method $i:tt name) => { delegate_to!(@fn $i name() -> &'static str); };
+    (@method $i:tt uqff_type) => { delegate_to!(@fn $i uqff_type() -> Option<crate::IsqType>); };
+    (@method $i:tt serialize_uqff) => {
+        delegate_to!(@fn $i serialize_uqff(prefix: &str, ty: crate::IsqType) -> Result<Vec<crate::UqffTensor>>);
+    };
+}
 
 fn shard(dim: usize, rank: usize, world_size: usize) -> Shard {
     Shard::Simple {
@@ -63,6 +176,31 @@ fn load_weight_source_dense(
         None
     };
     Ok(Some((weight, bias)))
+}
+
+fn checkpoint_parallel_linear(
+    in_dim: usize,
+    out_dim: usize,
+    quant_conf: &QuantizedConfig,
+    shard: Shard,
+    comm: &Comm,
+    vb: &ShardedVarBuilder,
+) -> Result<Arc<dyn QuantMethod>> {
+    // These formats load whole matrices, never a shard
+    if matches!(
+        quant_conf,
+        QuantizedConfig::GptqAwq { .. }
+            | QuantizedConfig::Bitsandbytes { .. }
+            | QuantizedConfig::Afq { .. }
+            | QuantizedConfig::MXFP4 {}
+    ) && comm.world_size() != 1
+    {
+        inference_tensor::bail!(
+            "GPTQ/AWQ, BNB, AFQ and MXFP4 linears do not support tensor parallelism, but got a world size of {}",
+            comm.world_size()
+        );
+    }
+    checkpoint_linear(in_dim, out_dim, quant_conf, false, shard, vb)
 }
 
 struct PackedWeights {
@@ -261,101 +399,6 @@ impl QuantMethod for RuntimeOutputLinear {
         self.canonical_weight()
     }
 
-    fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
-        self.inner.forward_raw(a)
-    }
-
-    fn gather_forward_raw(&self, a: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        self.inner.gather_forward_raw(a, indices)
-    }
-
-    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
-        self.inner.get_qtensor()
-    }
-
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
-    fn prepare_gguf_affine_raw(
-        &self,
-        flat_batch: usize,
-        dtype: DType,
-        device: &Device,
-    ) -> Result<bool> {
-        self.inner
-            .prepare_gguf_affine_raw(flat_batch, dtype, device)
-    }
-
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
-    fn try_gguf_affine_forward_raw(&self, a: &Tensor) -> Result<Option<Tensor>> {
-        self.inner.try_gguf_affine_forward_raw(a)
-    }
-
-    fn afq_inner(&self) -> Option<crate::AfqInner> {
-        self.inner.afq_inner()
-    }
-
-    fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
-        self.inner.activation_quantization_scheme()
-    }
-
-    fn activation_quantization_scheme_for(
-        &self,
-        a: &Tensor,
-    ) -> Option<ActivationQuantizationScheme> {
-        self.inner.activation_quantization_scheme_for(a)
-    }
-
-    fn preferred_activation_scale_layout_for(&self, a: &Tensor) -> Option<ActivationScaleLayout> {
-        self.inner.preferred_activation_scale_layout_for(a)
-    }
-
-    fn nvfp4_input_calibration(&self) -> Option<crate::Nvfp4InputCalibration<'_>> {
-        self.inner.nvfp4_input_calibration()
-    }
-
-    fn activation_quantization_global_scale(&self) -> Option<f32> {
-        self.inner.activation_quantization_global_scale()
-    }
-
-    fn quantize_activation(&self, a: &Tensor) -> Result<QuantizedActivation> {
-        self.inner.quantize_activation(a)
-    }
-
-    fn try_quantize_glu(
-        &self,
-        gate: &Tensor,
-        value: &Tensor,
-        activation: crate::GluActivationType,
-    ) -> Result<Option<QuantizedActivation>> {
-        self.inner.try_quantize_glu(gate, value, activation)
-    }
-
-    fn forward_quantized(&self, a: &QuantizedActivation) -> Result<Tensor> {
-        self.inner.forward_quantized(a)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn try_forward_fused_split_glu(
-        &self,
-        input: &Tensor,
-        split_size: usize,
-        activation: crate::GluActivationType,
-    ) -> Result<Option<Tensor>> {
-        self.inner
-            .try_forward_fused_split_glu(input, split_size, activation)
-    }
-
-    fn quantized_act_type(&self) -> Option<DType> {
-        self.inner.quantized_act_type()
-    }
-
-    fn dtype_and_device(&self) -> (DType, Device) {
-        self.inner.dtype_and_device()
-    }
-
-    fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
-        self.inner.plan_isq(request)
-    }
-
     fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
         let inner = self.inner.add_delta_w(&self.runtime_weight(delta)?)?;
         Ok(Self::wrap(inner, Some(self.runtime_to_canonical.clone())))
@@ -392,35 +435,19 @@ impl QuantMethod for RuntimeOutputLinear {
         Some((weight, bias))
     }
 
-    fn has_bias(&self) -> bool {
-        self.inner.has_bias()
-    }
-
-    fn begin_track_stats(&self) -> Result<()> {
-        self.inner.begin_track_stats()
-    }
-
-    fn end_track_stats(&self) -> Result<Tensor> {
-        self.inner.end_track_stats()
-    }
-
-    fn stats_snapshot(&self) -> Option<(usize, usize)> {
-        self.inner.stats_snapshot()
-    }
-
-    fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
-        self.inner.process_routed_stats(x, ids)
-    }
+    delegate_to!(
+        inner:
+        forward_raw, gather_forward_raw, raw_weights, activations, forward_quantized,
+        try_forward_fused_split_glu, tracking, has_bias
+    );
 }
 
 impl QuantizedSerde for RuntimeOutputLinear {
-    fn name(&self) -> &'static str {
-        self.inner.name()
-    }
-
     fn isq_serde_supported(&self) -> bool {
         false
     }
+
+    delegate_to!(inner: name);
 }
 
 enum PackedWeightKind {
@@ -854,44 +881,7 @@ impl RowParallelLayer {
         };
 
         let weight = if let Some(quant_conf) = &config {
-            // GPTQ and BNB do not support tensor parallelism
-            if matches!(
-                quant_conf,
-                QuantizedConfig::GptqAwq { .. }
-                    | QuantizedConfig::Bitsandbytes { .. }
-                    | QuantizedConfig::Afq { .. }
-            ) && comm.world_size() != 1
-            {
-                inference_tensor::bail!(
-                    "GPTQ and BNB and AFQ quantization types to not support tensor parallelism, but got a world size of {}",
-                    comm.world_size()
-                );
-            }
-
-            match quant_conf {
-                QuantizedConfig::GptqAwq { .. } => {
-                    gptq_linear(in_dim, out_dim, quant_conf, vb.clone())?
-                }
-                QuantizedConfig::Fp8 { .. }
-                | QuantizedConfig::CompressedTensors { .. }
-                | QuantizedConfig::ModelOpt { .. } => crate::fp8_config::checkpoint_linear_b(
-                    in_dim,
-                    out_dim,
-                    quant_conf,
-                    false,
-                    shard,
-                    vb.clone(),
-                )?,
-                QuantizedConfig::Bitsandbytes { .. } => {
-                    Arc::new(BnbLinear::linear_b(in_dim, out_dim, bias, vb.clone())?) as Arc<_>
-                }
-                QuantizedConfig::Afq { .. } => {
-                    AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-                QuantizedConfig::MXFP4 {} => {
-                    MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-            }
+            checkpoint_parallel_linear(in_dim, out_dim, quant_conf, shard, comm, &vb)?
         } else {
             if !vb.contains_tensor("weight") {
                 make_dummy_or_error("row_parallel_linear", &vb, &["weight"])?
@@ -1052,70 +1042,6 @@ impl QuantMethod for RowParallelLayer {
         }))
     }
 
-    fn dequantize_w(&self) -> Result<Tensor> {
-        self.weight.dequantize_w()
-    }
-
-    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
-        self.weight.dtype_and_device()
-    }
-
-    fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
-        self.weight.plan_isq(request)
-    }
-
-    fn begin_track_stats(&self) -> Result<()> {
-        self.weight.begin_track_stats()
-    }
-
-    fn stats_snapshot(&self) -> Option<(usize, usize)> {
-        self.weight.stats_snapshot()
-    }
-
-    fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
-        self.weight.process_routed_stats(x, ids)
-    }
-
-    fn end_track_stats(&self) -> Result<Tensor> {
-        self.weight.end_track_stats()
-    }
-
-    fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
-        self.weight.activation_quantization_scheme()
-    }
-
-    fn activation_quantization_scheme_for(
-        &self,
-        a: &Tensor,
-    ) -> Option<ActivationQuantizationScheme> {
-        self.weight.activation_quantization_scheme_for(a)
-    }
-
-    fn preferred_activation_scale_layout_for(&self, a: &Tensor) -> Option<ActivationScaleLayout> {
-        self.weight.preferred_activation_scale_layout_for(a)
-    }
-
-    fn nvfp4_input_calibration(&self) -> Option<crate::Nvfp4InputCalibration<'_>> {
-        self.weight.nvfp4_input_calibration()
-    }
-
-    fn activation_quantization_global_scale(&self) -> Option<f32> {
-        self.weight.activation_quantization_global_scale()
-    }
-
-    fn quantize_activation(&self, a: &Tensor) -> Result<QuantizedActivation> {
-        self.weight.quantize_activation(a)
-    }
-
-    fn try_quantize_glu(
-        &self,
-        gate: &Tensor,
-        value: &Tensor,
-        activation: crate::GluActivationType,
-    ) -> Result<Option<QuantizedActivation>> {
-        self.weight.try_quantize_glu(gate, value, activation)
-    }
-
     fn forward_quantized(&self, a: &QuantizedActivation) -> Result<Tensor> {
         let mut xs = self.weight.forward_quantized(a)?;
         if !self.all_reduce.is_noop() {
@@ -1150,24 +1076,12 @@ impl QuantMethod for RowParallelLayer {
         Ok(Some(output))
     }
 
-    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
-        self.weight.quantized_act_type()
-    }
-
     fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
         if self.all_reduce.is_noop() {
             self.weight.unquant_weight_bias()
         } else {
             None
         }
-    }
-
-    fn is_dynamic_lora_active(&self) -> bool {
-        self.weight.is_dynamic_lora_active()
-    }
-
-    fn preserve_dynamic_lora(&self, replacement: Arc<dyn QuantMethod>) -> Arc<dyn QuantMethod> {
-        self.weight.preserve_dynamic_lora(replacement)
     }
 
     fn has_bias(&self) -> bool {
@@ -1243,18 +1157,11 @@ impl QuantMethod for RowParallelLayer {
     fn is_distributed(&self) -> Option<DistributedKind> {
         Some(DistributedKind::RowParallel)
     }
+
+    delegate_to!(weight: dequantize_w, tracking, activations, dynamic_lora);
 }
 
 impl QuantizedSerde for RowParallelLayer {
-    fn isq_serde_supported(&self) -> bool {
-        self.weight.isq_serde_supported()
-    }
-    fn name(&self) -> &'static str {
-        self.weight.name()
-    }
-    fn uqff_type(&self) -> Option<crate::IsqType> {
-        self.weight.uqff_type()
-    }
     fn serialize_uqff(&self, prefix: &str, ty: crate::IsqType) -> Result<Vec<crate::UqffTensor>> {
         let mut tensors = self.weight.serialize_uqff(prefix, ty)?;
         if let Some(bias) = &self.bias {
@@ -1264,6 +1171,8 @@ impl QuantizedSerde for RowParallelLayer {
         }
         Ok(tensors)
     }
+
+    delegate_to!(weight: serde);
 }
 
 #[derive(Debug)]
@@ -1318,44 +1227,7 @@ impl ColumnParallelLayer {
         };
 
         let weight = if let Some(quant_conf) = &config {
-            // GPTQ and BNB do not support tensor parallelism
-            if matches!(
-                quant_conf,
-                QuantizedConfig::GptqAwq { .. }
-                    | QuantizedConfig::Bitsandbytes { .. }
-                    | QuantizedConfig::Afq { .. }
-            ) && comm.world_size() != 1
-            {
-                inference_tensor::bail!(
-                    "GPTQ/AWQ and BNB and AFQ quantization types to not support tensor parallelism, but got a world size of {}",
-                    comm.world_size()
-                );
-            }
-
-            match quant_conf {
-                QuantizedConfig::GptqAwq { .. } => {
-                    gptq_linear(in_dim, out_dim, quant_conf, vb.clone())?
-                }
-                QuantizedConfig::Fp8 { .. }
-                | QuantizedConfig::CompressedTensors { .. }
-                | QuantizedConfig::ModelOpt { .. } => crate::fp8_config::checkpoint_linear_b(
-                    in_dim,
-                    out_dim,
-                    quant_conf,
-                    false,
-                    shard,
-                    vb.clone(),
-                )?,
-                QuantizedConfig::Bitsandbytes { .. } => {
-                    Arc::new(BnbLinear::linear_b(in_dim, out_dim, bias, vb.clone())?) as Arc<_>
-                }
-                QuantizedConfig::Afq { .. } => {
-                    AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-                QuantizedConfig::MXFP4 {} => {
-                    MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-            }
+            checkpoint_parallel_linear(in_dim, out_dim, quant_conf, shard, comm, &vb)?
         } else {
             if !vb.contains_tensor("weight") {
                 make_dummy_or_error("column_parallel_linear", &vb, &["weight"])?
@@ -1733,70 +1605,6 @@ impl QuantMethod for ColumnParallelLayer {
         }))
     }
 
-    fn dequantize_w(&self) -> Result<Tensor> {
-        self.weight.dequantize_w()
-    }
-
-    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
-        self.weight.dtype_and_device()
-    }
-
-    fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
-        self.weight.plan_isq(request)
-    }
-
-    fn begin_track_stats(&self) -> Result<()> {
-        self.weight.begin_track_stats()
-    }
-
-    fn stats_snapshot(&self) -> Option<(usize, usize)> {
-        self.weight.stats_snapshot()
-    }
-
-    fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
-        self.weight.process_routed_stats(x, ids)
-    }
-
-    fn end_track_stats(&self) -> Result<Tensor> {
-        self.weight.end_track_stats()
-    }
-
-    fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
-        self.weight.activation_quantization_scheme()
-    }
-
-    fn activation_quantization_scheme_for(
-        &self,
-        a: &Tensor,
-    ) -> Option<ActivationQuantizationScheme> {
-        self.weight.activation_quantization_scheme_for(a)
-    }
-
-    fn preferred_activation_scale_layout_for(&self, a: &Tensor) -> Option<ActivationScaleLayout> {
-        self.weight.preferred_activation_scale_layout_for(a)
-    }
-
-    fn nvfp4_input_calibration(&self) -> Option<crate::Nvfp4InputCalibration<'_>> {
-        self.weight.nvfp4_input_calibration()
-    }
-
-    fn activation_quantization_global_scale(&self) -> Option<f32> {
-        self.weight.activation_quantization_global_scale()
-    }
-
-    fn quantize_activation(&self, a: &Tensor) -> Result<QuantizedActivation> {
-        self.weight.quantize_activation(a)
-    }
-
-    fn try_quantize_glu(
-        &self,
-        gate: &Tensor,
-        value: &Tensor,
-        activation: crate::GluActivationType,
-    ) -> Result<Option<QuantizedActivation>> {
-        self.weight.try_quantize_glu(gate, value, activation)
-    }
-
     fn forward_quantized(&self, a: &QuantizedActivation) -> Result<Tensor> {
         let mut xs = self.weight.forward_quantized(a)?;
         if let Some(bias) = &self.bias {
@@ -1824,48 +1632,8 @@ impl QuantMethod for ColumnParallelLayer {
         Ok(Some(output))
     }
 
-    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
-        self.weight.quantized_act_type()
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        self.weight.unquant_weight_bias()
-    }
-
-    fn is_dynamic_lora_active(&self) -> bool {
-        self.weight.is_dynamic_lora_active()
-    }
-
-    fn preserve_dynamic_lora(&self, replacement: Arc<dyn QuantMethod>) -> Arc<dyn QuantMethod> {
-        self.weight.preserve_dynamic_lora(replacement)
-    }
-
     fn has_bias(&self) -> bool {
         self.bias.is_some() || self.weight.has_bias()
-    }
-
-    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
-        self.weight.get_qtensor()
-    }
-
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
-    fn prepare_gguf_affine_raw(
-        &self,
-        flat_batch: usize,
-        dtype: DType,
-        device: &Device,
-    ) -> Result<bool> {
-        self.weight
-            .prepare_gguf_affine_raw(flat_batch, dtype, device)
-    }
-
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
-    fn try_gguf_affine_forward_raw(&self, a: &Tensor) -> Result<Option<Tensor>> {
-        self.weight.try_gguf_affine_forward_raw(a)
-    }
-
-    fn afq_inner(&self) -> Option<crate::AfqInner> {
-        self.weight.afq_inner()
     }
 
     fn apply_isq(
@@ -1893,18 +1661,14 @@ impl QuantMethod for ColumnParallelLayer {
     fn is_distributed(&self) -> Option<DistributedKind> {
         Some(DistributedKind::ColumnParallel)
     }
+
+    delegate_to!(
+        weight:
+        dequantize_w, tracking, activations, unquant_weight_bias, dynamic_lora, raw_weights
+    );
 }
 
 impl QuantizedSerde for ColumnParallelLayer {
-    fn isq_serde_supported(&self) -> bool {
-        self.weight.isq_serde_supported()
-    }
-    fn name(&self) -> &'static str {
-        self.weight.name()
-    }
-    fn uqff_type(&self) -> Option<crate::IsqType> {
-        self.weight.uqff_type()
-    }
     fn serialize_uqff(&self, prefix: &str, ty: crate::IsqType) -> Result<Vec<crate::UqffTensor>> {
         let mut tensors = self.weight.serialize_uqff(prefix, ty)?;
         if let Some(bias) = &self.bias {
@@ -1914,6 +1678,8 @@ impl QuantizedSerde for ColumnParallelLayer {
         }
         Ok(tensors)
     }
+
+    delegate_to!(weight: serde);
 }
 
 #[derive(Debug)]
@@ -1991,30 +1757,7 @@ impl ReplicatedLayer {
         };
 
         let layer = if let Some(quant_conf) = &config {
-            match quant_conf {
-                QuantizedConfig::GptqAwq { .. } => {
-                    gptq_linear(in_dim, out_dim, quant_conf, vb.clone())?
-                }
-                QuantizedConfig::Fp8 { .. }
-                | QuantizedConfig::CompressedTensors { .. }
-                | QuantizedConfig::ModelOpt { .. } => crate::fp8_config::checkpoint_linear_b(
-                    in_dim,
-                    out_dim,
-                    quant_conf,
-                    bias,
-                    Default::default(),
-                    vb.clone(),
-                )?,
-                QuantizedConfig::Bitsandbytes { .. } => {
-                    Arc::new(BnbLinear::linear_b(in_dim, out_dim, bias, vb.clone())?) as Arc<_>
-                }
-                QuantizedConfig::Afq { .. } => {
-                    AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-                QuantizedConfig::MXFP4 {} => {
-                    MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-            }
+            checkpoint_linear(in_dim, out_dim, quant_conf, bias, Shard::default(), &vb)?
         } else {
             if !vb.contains_tensor("weight") {
                 make_dummy_or_error("replicated_linear", &vb, &["weight"])?
@@ -2209,30 +1952,7 @@ impl ReplicatedLayer {
                 );
             }
 
-            match quant_conf {
-                QuantizedConfig::GptqAwq { .. } => {
-                    gptq_linear(in_dim, out_dim, quant_conf, vb.clone())?
-                }
-                QuantizedConfig::Fp8 { .. }
-                | QuantizedConfig::CompressedTensors { .. }
-                | QuantizedConfig::ModelOpt { .. } => crate::fp8_config::checkpoint_linear_b(
-                    in_dim,
-                    out_dim,
-                    quant_conf,
-                    bias,
-                    Default::default(),
-                    vb.clone(),
-                )?,
-                QuantizedConfig::Bitsandbytes { .. } => {
-                    Arc::new(BnbLinear::linear_b(in_dim, out_dim, bias, vb.clone())?) as Arc<_>
-                }
-                QuantizedConfig::Afq { .. } => {
-                    AfqLayer::afq_linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-                QuantizedConfig::MXFP4 {} => {
-                    MXFP4Layer::linear_b(in_dim, out_dim, quant_conf, bias, vb.clone())?
-                }
-            }
+            checkpoint_linear(in_dim, out_dim, quant_conf, bias, Shard::default(), &vb)?
         } else {
             if !vb.contains_tensor("weight") {
                 make_dummy_or_error("replicated_matformer_linear", &vb, &["weight"])?
@@ -2281,179 +2001,20 @@ impl QuantMethod for ReplicatedLayer {
         inference_tensor::bail!("ReplicatedLayer should not be constructed with `QuantMethod::new`")
     }
 
-    fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
-        self.0.forward_raw(a)
-    }
-
-    fn embedding_forward(
-        &self,
-        ids: &Tensor,
-        output_dtype: inference_tensor::DType,
-    ) -> Result<Tensor> {
-        self.0.embedding_forward(ids, output_dtype)
-    }
-
-    fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
-        self.0.embedding_forward_raw(ids)
-    }
-
-    fn add_delta_w(&self, delta: &Tensor) -> Result<Arc<dyn QuantMethod>> {
-        self.0.add_delta_w(delta)
-    }
-
-    fn dequantize_w(&self) -> Result<Tensor> {
-        self.0.dequantize_w()
-    }
-
-    fn dtype_and_device(&self) -> (inference_tensor::DType, inference_tensor::Device) {
-        self.0.dtype_and_device()
-    }
-
-    fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
-        self.0.plan_isq(request)
-    }
-
-    fn begin_track_stats(&self) -> Result<()> {
-        self.0.begin_track_stats()
-    }
-
-    fn stats_snapshot(&self) -> Option<(usize, usize)> {
-        self.0.stats_snapshot()
-    }
-
-    fn process_routed_stats(&self, x: &Tensor, ids: &Tensor) -> Result<()> {
-        self.0.process_routed_stats(x, ids)
-    }
-
-    fn end_track_stats(&self) -> Result<Tensor> {
-        self.0.end_track_stats()
-    }
-
-    fn activation_quantization_scheme(&self) -> Option<ActivationQuantizationScheme> {
-        self.0.activation_quantization_scheme()
-    }
-
-    fn activation_quantization_scheme_for(
-        &self,
-        a: &Tensor,
-    ) -> Option<ActivationQuantizationScheme> {
-        self.0.activation_quantization_scheme_for(a)
-    }
-
-    fn preferred_activation_scale_layout_for(&self, a: &Tensor) -> Option<ActivationScaleLayout> {
-        self.0.preferred_activation_scale_layout_for(a)
-    }
-
-    fn nvfp4_input_calibration(&self) -> Option<crate::Nvfp4InputCalibration<'_>> {
-        self.0.nvfp4_input_calibration()
-    }
-
-    fn activation_quantization_global_scale(&self) -> Option<f32> {
-        self.0.activation_quantization_global_scale()
-    }
-
-    fn quantize_activation(&self, a: &Tensor) -> Result<QuantizedActivation> {
-        self.0.quantize_activation(a)
-    }
-
-    fn try_quantize_glu(
-        &self,
-        gate: &Tensor,
-        value: &Tensor,
-        activation: crate::GluActivationType,
-    ) -> Result<Option<QuantizedActivation>> {
-        self.0.try_quantize_glu(gate, value, activation)
-    }
-
-    fn forward_quantized(&self, a: &QuantizedActivation) -> Result<Tensor> {
-        self.0.forward_quantized(a)
-    }
-
-    #[cfg(feature = "cuda")]
-    fn try_forward_fused_split_glu(
-        &self,
-        input: &Tensor,
-        split_size: usize,
-        activation: crate::GluActivationType,
-    ) -> Result<Option<Tensor>> {
-        self.0
-            .try_forward_fused_split_glu(input, split_size, activation)
-    }
-
-    fn quantized_act_type(&self) -> Option<inference_tensor::DType> {
-        self.0.quantized_act_type()
-    }
-
-    fn unquant_weight_bias(&self) -> Option<(Tensor, Option<Tensor>)> {
-        self.0.unquant_weight_bias()
-    }
-
-    fn is_dynamic_lora_active(&self) -> bool {
-        self.0.is_dynamic_lora_active()
-    }
-
-    fn preserve_dynamic_lora(&self, replacement: Arc<dyn QuantMethod>) -> Arc<dyn QuantMethod> {
-        self.0.preserve_dynamic_lora(replacement)
-    }
-
-    fn has_bias(&self) -> bool {
-        self.0.has_bias()
-    }
-
-    fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {
-        self.0.get_qtensor()
-    }
-
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
-    fn prepare_gguf_affine_raw(
-        &self,
-        flat_batch: usize,
-        dtype: DType,
-        device: &Device,
-    ) -> Result<bool> {
-        self.0.prepare_gguf_affine_raw(flat_batch, dtype, device)
-    }
-
-    #[cfg(all(feature = "cuda", has_marlin_kernels))]
-    fn try_gguf_affine_forward_raw(&self, a: &Tensor) -> Result<Option<Tensor>> {
-        self.0.try_gguf_affine_forward_raw(a)
-    }
-
-    fn afq_inner(&self) -> Option<crate::AfqInner> {
-        self.0.afq_inner()
-    }
-
-    fn apply_isq(
-        self: Arc<Self>,
-        dtype: Option<crate::IsqType>,
-        device: inference_tensor::Device,
-        n_quantized: &std::sync::atomic::AtomicUsize,
-        imatrix_weight: Option<Vec<f32>>,
-        guard: QuantizeOntoGuard,
-    ) -> Result<Arc<dyn QuantMethod>> {
-        self.0
-            .clone()
-            .apply_isq(dtype, device, n_quantized, imatrix_weight, guard)
-    }
-
     fn is_distributed(&self) -> Option<DistributedKind> {
         Some(DistributedKind::Replicated)
     }
+
+    delegate_to!(
+        0:
+        forward_raw, embedding_forward, embedding_forward_raw, add_delta_w, dequantize_w, tracking, activations,
+        forward_quantized, try_forward_fused_split_glu, unquant_weight_bias, dynamic_lora, has_bias,
+        raw_weights, apply_isq
+    );
 }
 
 impl QuantizedSerde for ReplicatedLayer {
-    fn isq_serde_supported(&self) -> bool {
-        self.0.isq_serde_supported()
-    }
-    fn name(&self) -> &'static str {
-        self.0.name()
-    }
-    fn uqff_type(&self) -> Option<crate::IsqType> {
-        self.0.uqff_type()
-    }
-    fn serialize_uqff(&self, prefix: &str, ty: crate::IsqType) -> Result<Vec<crate::UqffTensor>> {
-        self.0.serialize_uqff(prefix, ty)
-    }
+    delegate_to!(0: serde, serialize_uqff);
 }
 
 struct CheckpointExpertLoad<'a> {
@@ -3905,6 +3466,71 @@ mod tests {
             )?
             .is_none()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn checkpoint_linears_add_their_bias_once() -> inference_tensor::Result<()> {
+        const IN: usize = 32;
+        const BITS: usize = 8;
+        let device = Device::Cpu;
+        let bias = Tensor::new(&[1f32, 2.], &device)?;
+        // zero codes, scales and biases dequantize to a zero weight, so the output is the bias alone
+        let afq = HashMap::from([
+            (
+                "weight".to_string(),
+                Tensor::zeros((2, IN * BITS / 32), DType::U32, &device)?,
+            ),
+            (
+                "scales".to_string(),
+                Tensor::zeros((2, 1), DType::F32, &device)?,
+            ),
+            (
+                "biases".to_string(),
+                Tensor::zeros((2, 1), DType::F32, &device)?,
+            ),
+            ("bias".to_string(), bias.clone()),
+        ]);
+        let cases = [
+            (
+                QuantizedConfig::Afq {
+                    bits: BITS,
+                    group_size: IN,
+                },
+                afq,
+            ),
+            // the CPU GPTQ loader reads a module left unquantized as a plain linear
+            #[cfg(not(feature = "cuda"))]
+            (
+                QuantizedConfig::GptqAwq {
+                    bits: 4,
+                    group_size: IN,
+                    checkpoint_format: None,
+                    is_awq: false,
+                },
+                HashMap::from([
+                    (
+                        "weight".to_string(),
+                        Tensor::zeros((2, IN), DType::F32, &device)?,
+                    ),
+                    ("bias".to_string(), bias.clone()),
+                ]),
+            ),
+        ];
+        let comm = Arc::new(Comm::from_device(Id::new(), &device, 0, 1)?);
+        let xs = Tensor::ones((1, IN), DType::F32, &device)?;
+        for (config, tensors) in cases {
+            let config = Some(config);
+            let vb = || ShardedSafeTensors::wrap(tensors.clone(), DType::F32, device.clone());
+            for layer in [
+                ColumnParallelLayer::new(IN, 2, &config, true, &comm, vb())?,
+                RowParallelLayer::new(IN, 2, &config, true, &comm, vb())?,
+                ReplicatedLayer::new(IN, 2, &config, true, vb())?,
+            ] {
+                let out = layer.forward_raw(&xs)?.squeeze(0)?.to_vec1::<f32>()?;
+                assert_eq!(out, bias.to_vec1::<f32>()?, "{config:?}");
+            }
+        }
         Ok(())
     }
 

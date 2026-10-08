@@ -2603,3 +2603,36 @@ Raw findings:
 
 Still hand-written and unchecked against the header, as before: the bindings' struct layouts (Python `Structure`s,
 C# `Native*`) and the Python callback `CFUNCTYPE`s; the generator already parses both and could render them next.
+
+## Run 83 - 2026-10-07 21:29
+
+Question: does the ~650-line estimate for inference-quant's distributed layers hold, and what shape removes it?
+
+Measured `crates/inference-quant/src/distributed/layers.rs` (4,304 lines):
+- Four wrappers implement `QuantMethod` by hand over one inner layer: `RuntimeOutputLinear` (`inner`),
+  `RowParallelLayer` and `ColumnParallelLayer` (`weight`), `ReplicatedLayer` (`0`). 92 of their methods (plus 11
+  `QuantizedSerde` ones) are exact pass-throughs; the rest add a bias, all-reduce, remap rows or gate on the reduce.
+- Four copies of the checkpoint quant-config match (GPTQ/FP8/BNB/AFQ/MXFP4), two of them behind the same
+  tensor-parallel rejection, plus two more in `lib.rs` (`linear` and `linear_no_bias`, which differ only in the bias).
+
+Finding while sharing the match: Row/Column passed `bias` to the BNB/AFQ/MXFP4 loaders, which load and add the bias,
+and then loaded and added it again in the wrapper (the FP8 arm already passed `false`). Any BNB or AFQ checkpoint with
+attention bias (Qwen2-style q/k/v) got the bias twice at world size 1. The review found GPTQ/AWQ does the same:
+`gptq_linear` took no bias flag and loaded any bias tensor present, so GPTQ q/k/v (which fall back from the packed
+loader to these layers) were doubled too. Separately, the CPU GPTQ loader's fallback for a module left unquantized
+called `linear_b(.., false, ..)`, dropping a requested bias. MXFP4 also loads whole matrices (no shard), so it
+now joins the tensor-parallel rejection; no model reaches that path today (GPT-OSS passes `&None` for attention).
+
+Change:
+- `delegate_to!(field: methods or groups)` generates the pass-throughs; groups `tracking`, `activations`,
+  `raw_weights`, `dynamic_lora`, `serde`. Methods with logic stay written out.
+- `checkpoint_linear(in, out, conf, bias, shard, vb)` in `lib.rs` is the one match; `checkpoint_parallel_linear`
+  adds the rejection and passes `bias: false`. `linear_b` is the one body, `linear`/`linear_no_bias` call it.
+- `gptq_linear` takes `bias` like the other loaders; its CPU unquantized fallback passes it on.
+- Test `checkpoint_linears_add_their_bias_once`: an all-zero AFQ checkpoint with a bias, and (CPU builds) a GPTQ
+  config over an unquantized module, through each wrapper output the bias once. With the old `bias` pass-through the
+  AFQ case fails; with the old `false` fallback the GPTQ case outputs `[0.0, 0.0]` for `[1.0, 2.0]`. The quantized GPTQ
+  path forwards only on CUDA and is not covered.
+
+Result: 300 insertions, 722 deletions in the crates, test included (-422 net, against ~650 estimated: the macro
+itself is ~110 lines).
