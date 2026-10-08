@@ -123,7 +123,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Key Design Patterns
 
-1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `crates/inference-core/src/pipeline/mod.rs`. Different model types (Plain, GGUF, GGML, Multimodal) have their own pipeline implementations.
+1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `crates/inference-core/src/pipeline/mod.rs`. Text and multimodal decoders (from safetensors, GGUF or UQFF) run in one `DecoderPipeline` (`pipeline/decoder.rs`) over a `DecoderModel` enum, with the state in `DecoderCore`; embedding, speech, diffusion and GGML models have their own pipelines.
 
 2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `crates/inference-core/src/pipeline/loaders/mod.rs` (the `Loader` trait) and `pipeline/loading.rs`.
 

@@ -5,6 +5,7 @@ pub(crate) use crate::model::{ModelForwardContext, recurrent_batch_kind_for_inpu
 pub mod chat_template;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda_graph;
+mod decoder;
 mod decoder_core;
 #[cfg(feature = "cuda")]
 #[doc(hidden)]

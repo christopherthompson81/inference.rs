@@ -2458,3 +2458,40 @@ Behavior found while merging the construction paths (review-verified):
 - Multimodal's llg factory is built from the same final tokenizer, now inside the constructor.
 
 CI: 2489 CPU, 2873 CUDA tests pass; bindings pass.
+
+## Run 78 - 2026-10-07 19:52
+
+Question: with the shared state in `DecoderCore`, can the two pipelines become one type, and does the text path keep
+its behavior exactly?
+
+Per-method comparison before writing it (difflib over each method pair): of 57 methods both pipelines had, 46 were
+identical; the differences sat in the four CUDA-graph functions, `forward_step`, `requires_uniform_prompt_batch`,
+`category`, `set_none_cache` and `get_input_processor_config`, plus eight methods only multimodal overrode (where
+the text pipeline used the trait defaults). Planned steps 4 (one graph implementation) and 5 (one Pipeline impl)
+merged into one: the graph code needs the model enum anyway.
+
+Result: `DecoderPipeline` (`pipeline/decoder.rs`) over `DecoderModel { Text, Multimodal }` (Deref to
+`SpeculativeTargetMixin`; `multimodal()` for the media-only hooks), `DecoderCore` and `Option<MediaState>`. Built from
+the multimodal impls (the superset), with the text behavior kept where it differed: MTP verify steps skip graphs
+with `speculative_conflict` at the same point in the check order, precapture bails with a drafter, no prefill
+reclassification, no last-prompt attention, the text uniform-prompt rule, the trait-default processor, no media
+state resets, no block diffusion. The loaders stay in `normal.rs`/`multimodal.rs` and build it.
+
+```
+git diff --stat                     5 files, 1743 insertions, 2548 deletions (net -805)
+bundle (sm_86), master vs merge     file 105,453,744 -> 105,400,880 (-52,864); .text 55,239,890 -> 55,201,746
+pins                                47 CUDA, 49 CPU tiny-model tests pass (graphs, text MTP skip, Gemma 3 graphs,
+                                    re-ISQ, UQFF, encoder and prefix caches)
+CI                                  2489 CPU, 2873 CUDA tests pass; bindings pass; size check passes
+```
+
+Review-verified: every Text method equals the old `NormalPipeline`'s (or the trait default it used); Multimodal is
+unchanged apart from precapture asking `supports_cuda_decode_graphs()` instead of the same question with default
+args (identical for every current model). Negative result on the expected "intended change": text now runs
+`ensure_capacity(target_cuda_graph_cache_capacity(..))`, but with only q_len 1 shapes that computes 64, the default,
+so graph cache capacity does not change. Removed in passing: a per-step clone of the paged metadata in the text
+forward and a duplicated state-index restore during capture.
+
+Implication: the pipeline merge's source goal is met (~1,100 duplicated lines estimated in Run 72; steps 1-4 net
+about -850 with the helpers they added). The bundle gains little because LTO had folded the copies; the value is
+one implementation. Optional next: graphed MTP verify steps for text models (plan step 6), now a one-line policy.
