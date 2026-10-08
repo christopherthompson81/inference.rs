@@ -55,19 +55,16 @@ use crate::pipeline::cuda_graph::{
 use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{Modalities, ModelForwardContext, SupportedModality, get_chat_template};
+use crate::pipeline::{Modalities, ModelForwardContext, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::{
-    DeviceMapSetting, DynamicLoraRuntime, GLOBAL_HF_CACHE, LoraAdapterSpec, LoraRuntimeConfig,
-    PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
+    DeviceMapSetting, DynamicLoraRuntime, LoraAdapterSpec, LoraRuntimeConfig, PagedAttentionConfig,
+    Pipeline, Topology, TryIntoDType,
 };
 use anyhow::Result;
-use either::Either;
 use futures::{FutureExt, future::BoxFuture};
-use hf_hub::Cache;
-use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
 use inference_tensor::{DType, Device, Tensor, Var};
 use rand_isaac::Isaac64Rng;
@@ -267,22 +264,8 @@ pub struct NormalLoader {
     from_uqff: RwLock<Option<Vec<PathBuf>>>,
     jinja_explicit: Option<String>,
     hf_cache_path: Option<PathBuf>,
-    prepared_source: Option<PreparedNormalSource>,
+    prepared_source: Option<super::loading::PreparedSource>,
     mtp: bool,
-}
-
-#[derive(Clone)]
-pub(crate) struct PreparedNormalSource {
-    pub config: String,
-    pub weights: inference_quant::ShardedVarBuilder,
-    pub tokenizer: Tokenizer,
-    pub generation_config: Option<GenerationConfig>,
-    pub chat_template: Option<String>,
-    pub bos_token: Option<String>,
-    pub eos_token: Option<String>,
-    pub unk_token: Option<String>,
-    pub source_weight_files: Vec<PathBuf>,
-    pub rope_pairing: crate::gguf::normal_registry::RopePairing,
 }
 
 pub(crate) fn new_dynamic_lora_registry(
@@ -422,7 +405,7 @@ impl NormalLoaderBuilder {
     fn build_inner(
         self,
         loader_tp: Option<NormalLoaderType>,
-        prepared_source: Option<PreparedNormalSource>,
+        prepared_source: Option<super::loading::PreparedSource>,
     ) -> anyhow::Result<NormalLoader> {
         super::validate_lora_loader_config(
             self.lora_adapters.as_deref(),
@@ -457,7 +440,7 @@ impl NormalLoaderBuilder {
     pub(crate) fn build_with_source(
         mut self,
         loader_tp: NormalLoaderType,
-        source: PreparedNormalSource,
+        source: super::loading::PreparedSource,
         kind: ModelKind,
     ) -> anyhow::Result<Box<dyn Loader>> {
         self.kind = kind;
@@ -479,39 +462,22 @@ impl Loader for NormalLoader {
         paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let cache = self
-            .hf_cache_path
-            .clone()
-            .map(Cache::new)
-            .unwrap_or_default();
-        GLOBAL_HF_CACHE.get_or_init(|| cache);
-
-        let paths = super::paths::get_paths(
-            super::paths::PathsRequest {
+        let paths = super::loading::hub_model_paths(
+            super::loading::HubPathsRequest {
+                hf_cache_path: self.hf_cache_path.clone(),
                 model_id: &self.model_id,
                 tokenizer_json: self.tokenizer_json.as_deref(),
                 chat_template: self.chat_template.as_deref(),
                 token_source: &token_source,
-                revision: revision.clone(),
-                quantized_model_id: None,
-                quantized_filenames: None,
+                revision,
                 silent,
-                loading_uqff: self.config.from_uqff.is_some(),
+                from_uqff: self.config.from_uqff.as_deref(),
             },
-            self.lora_adapters.as_deref(),
-        );
-        if let Some(from_uqff) = self.config.from_uqff.as_ref() {
-            let files = super::paths::get_uqff_paths(
-                from_uqff,
-                &self.model_id,
-                &token_source,
-                revision.clone(),
-                silent,
-            )?;
-            *self.from_uqff.write().unwrap() = Some(files);
-        }
+            &self.from_uqff,
+            |request| super::paths::get_paths(request, self.lora_adapters.as_deref()),
+        )?;
         self.load_model_from_path(
-            &paths?,
+            &paths,
             dtype,
             device,
             silent,
@@ -534,9 +500,7 @@ impl Loader for NormalLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
         let config = super::loading::prepare_model_config(
-            self.prepared_source
-                .as_ref()
-                .map(|source| source.config.as_str()),
+            self.prepared_source.as_ref(),
             paths.get_config_filename(),
             self.config.from_uqff.is_some(),
             self.config.hf_config_overrides.as_ref(),
@@ -578,10 +542,7 @@ impl Loader for NormalLoader {
                 mapper,
                 in_situ_quant,
                 uqff_files: self.from_uqff.read().unwrap().as_deref(),
-                prepared_weight_source: self
-                    .prepared_source
-                    .as_ref()
-                    .and_then(|source| source.weights.weight_source().cloned()),
+                prepared: self.prepared_source.as_ref(),
                 has_lora: self.lora_adapters.is_some(),
                 matformer,
                 matformer_sizing: false,
@@ -603,17 +564,8 @@ impl Loader for NormalLoader {
                 organization: self.config.organization,
                 from_uqff: self.config.from_uqff.is_some(),
                 write_uqff: self.config.write_uqff.is_some(),
-                prepared: self
-                    .prepared_source
-                    .as_ref()
-                    .map(|source| (&source.weights, source.rope_pairing)),
-                lora: match self.kind {
-                    ModelKind::Lora | ModelKind::GgufLora { .. } => Some(
-                        self.lora_runtime_config
-                            .expect("LoRA loaders have a runtime config"),
-                    ),
-                    _ => None,
-                },
+                prepared: self.prepared_source.as_ref(),
+                lora: super::loading::lora_runtime(&self.kind, self.lora_runtime_config),
             },
         )?;
         let super::loading::LoadSession {
@@ -639,39 +591,12 @@ impl Loader for NormalLoader {
             &config,
         );
 
-        let chat_template_explicit = paths
-            .get_chat_template_explicit()
-            .as_ref()
-            .map(|x| x.to_string_lossy().to_string());
-        let mut chat_template = get_chat_template(
+        let chat_template = super::loading::load_chat_template(
             paths,
             self.jinja_explicit.as_ref(),
-            chat_template_explicit.as_ref(),
             self.chat_template.as_ref(),
-            self.prepared_source
-                .as_ref()
-                .and_then(|source| source.chat_template.clone()),
+            self.prepared_source.as_ref(),
         );
-        if let Some(source) = self.prepared_source.as_ref() {
-            if chat_template.bos_token.is_none() {
-                chat_template.bos_token = source
-                    .bos_token
-                    .clone()
-                    .map(|token| BeginEndUnkPadTok(Either::Left(token)));
-            }
-            if chat_template.eos_token.is_none() {
-                chat_template.eos_token = source
-                    .eos_token
-                    .clone()
-                    .map(|token| BeginEndUnkPadTok(Either::Left(token)));
-            }
-            if chat_template.unk_token.is_none() {
-                chat_template.unk_token = source
-                    .unk_token
-                    .clone()
-                    .map(|token| BeginEndUnkPadTok(Either::Left(token)));
-            }
-        }
 
         // cloned out so the tracker lock is not held through calibration and the UQFF write
         let tracked = tracker.get().clone();
@@ -697,20 +622,18 @@ impl Loader for NormalLoader {
                 .as_ref()
                 .map(|write| super::isq_flow::UqffArtifact {
                     config: write,
-                    residual: match self.config.organization {
-                        IsqOrganization::Default => model.residual_tensors(),
-                        IsqOrganization::MoeExpertsOnly => model
-                            .residual_tensors_moe_experts_only()
-                            .unwrap_or(model.residual_tensors()),
-                    },
+                    residual: super::loading::uqff_residual_tensors(
+                        self.config.organization,
+                        &*model,
+                    ),
                     full_ser: UqffFullSer {
                         tokenizer: &tokenizer,
                         template_filename: paths.get_template_filename(),
                         effective_chat_template: Some(&chat_template),
-                        generation_config: match self.prepared_source.as_ref() {
-                            Some(source) if source.generation_config.is_none() => None,
-                            _ => paths.get_gen_conf_filename(),
-                        },
+                        generation_config: super::loading::uqff_generation_config_file(
+                            paths,
+                            self.prepared_source.as_ref(),
+                        ),
                         config: source_config.clone(),
                         processor_filename: &None,
                         preprocessor_filename: &None,
@@ -725,9 +648,7 @@ impl Loader for NormalLoader {
 
         let tracked_modules = tracker.get().clone();
         let source_weight_files = super::loading::source_weight_files(
-            self.prepared_source
-                .as_ref()
-                .map(|source| source.source_weight_files.as_slice()),
+            self.prepared_source.as_ref(),
             self.config.from_uqff.is_some(),
             paths.get_weight_filenames(),
         );

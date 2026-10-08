@@ -83,13 +83,13 @@ pub(crate) fn materialize_device_mapper(
 
 /// The prepared or on-disk config.json, sanitized for UQFF sources, with HF overrides and the MTP flag applied.
 pub(crate) fn prepare_model_config(
-    prepared_config: Option<&str>,
+    prepared: Option<&PreparedSource>,
     config_filename: &Path,
     from_uqff: bool,
     overrides: Option<&super::HfConfigOverrides>,
     mtp: bool,
 ) -> Result<String> {
-    let config = match prepared_config {
+    let config = match prepared.map(|source| source.config.as_str()) {
         Some(config) => config.to_string(),
         None => super::loaders::load_model_config(config_filename, !from_uqff)?,
     };
@@ -208,14 +208,154 @@ pub(crate) fn load_matformer_slice(
     }
 }
 
+/// A checkpoint already in memory (a GGUF translated to Hugging Face names), loaded without fetching its files.
+pub(crate) struct PreparedSource {
+    pub config: String,
+    pub weights: inference_quant::ShardedVarBuilder,
+    pub tokenizer: tokenizers::Tokenizer,
+    pub generation_config: Option<super::chat_template::GenerationConfig>,
+    pub chat_template: Option<String>,
+    pub bos_token: Option<String>,
+    pub eos_token: Option<String>,
+    pub unk_token: Option<String>,
+    pub processor_config: Option<String>,
+    pub preprocessor_config: Option<String>,
+    pub source_weight_files: Vec<PathBuf>,
+    pub rope_pairing: crate::gguf::normal_registry::RopePairing,
+}
+
+pub(crate) struct HubPathsRequest<'a> {
+    pub hf_cache_path: Option<PathBuf>,
+    pub model_id: &'a str,
+    pub tokenizer_json: Option<&'a str>,
+    pub chat_template: Option<&'a str>,
+    pub token_source: &'a super::TokenSource,
+    pub revision: Option<String>,
+    pub silent: bool,
+    pub from_uqff: Option<&'a [PathBuf]>,
+}
+
+/// Points Hub downloads at `hf_cache_path` (or the default cache); the first load in a process decides.
+pub(crate) fn install_hf_cache(hf_cache_path: Option<PathBuf>) {
+    let cache = hf_cache_path.map(hf_hub::Cache::new).unwrap_or_default();
+    crate::GLOBAL_HF_CACHE.get_or_init(|| cache);
+}
+
+/// A Hub model's files from `fetch`, its UQFF shards (if any) stored in `uqff_files`; installs the HF cache first.
+pub(crate) fn hub_model_paths<P>(
+    request: HubPathsRequest<'_>,
+    uqff_files: &std::sync::RwLock<Option<Vec<PathBuf>>>,
+    fetch: impl FnOnce(super::paths::PathsRequest<'_>) -> Result<P>,
+) -> Result<P> {
+    install_hf_cache(request.hf_cache_path);
+    let paths_request = super::paths::PathsRequest {
+        model_id: request.model_id,
+        tokenizer_json: request.tokenizer_json,
+        chat_template: request.chat_template,
+        token_source: request.token_source,
+        revision: request.revision.clone(),
+        quantized_model_id: None,
+        quantized_filenames: None,
+        silent: request.silent,
+        loading_uqff: request.from_uqff.is_some(),
+    };
+    let paths = fetch(paths_request);
+    if let Some(from_uqff) = request.from_uqff {
+        let files = super::paths::get_uqff_paths(
+            from_uqff,
+            request.model_id,
+            request.token_source,
+            request.revision.clone(),
+            request.silent,
+        )?;
+        *uqff_files.write().unwrap() = Some(files);
+    }
+    paths
+}
+
+/// The model's chat template, with special tokens the files leave unset taken from a prepared source.
+pub(crate) fn load_chat_template(
+    paths: &dyn super::ModelPaths,
+    jinja_explicit: Option<&String>,
+    chat_template: Option<&String>,
+    prepared: Option<&PreparedSource>,
+) -> super::ChatTemplate {
+    use inference_protocol::chat_template::BeginEndUnkPadTok;
+    let chat_template_explicit = paths
+        .get_chat_template_explicit()
+        .as_ref()
+        .map(|x| x.to_string_lossy().to_string());
+    let mut template = super::get_chat_template(
+        paths,
+        jinja_explicit,
+        chat_template_explicit.as_ref(),
+        chat_template,
+        prepared.and_then(|source| source.chat_template.clone()),
+    );
+    if let Some(source) = prepared {
+        let token = |token: &Option<String>| {
+            token
+                .clone()
+                .map(|token| BeginEndUnkPadTok(either::Either::Left(token)))
+        };
+        if template.bos_token.is_none() {
+            template.bos_token = token(&source.bos_token);
+        }
+        if template.eos_token.is_none() {
+            template.eos_token = token(&source.eos_token);
+        }
+        if template.unk_token.is_none() {
+            template.unk_token = token(&source.unk_token);
+        }
+    }
+    template
+}
+
+/// The unquantized tensors a UQFF stores beside the quantized layers; MoQE keeps everything but the experts.
+pub(crate) fn uqff_residual_tensors(
+    organization: super::IsqOrganization,
+    model: &dyn inference_nn::model::IsqModel,
+) -> Vec<(String, inference_tensor::Tensor)> {
+    match organization {
+        super::IsqOrganization::Default => model.residual_tensors(),
+        super::IsqOrganization::MoeExpertsOnly => model
+            .residual_tensors_moe_experts_only()
+            .unwrap_or_else(|| model.residual_tensors()),
+    }
+}
+
+/// The `generation_config.json` a UQFF copies; none when a prepared source had none.
+pub(crate) fn uqff_generation_config_file<'a>(
+    paths: &'a dyn super::ModelPaths,
+    prepared: Option<&PreparedSource>,
+) -> Option<&'a PathBuf> {
+    match prepared {
+        Some(source) if source.generation_config.is_none() => None,
+        _ => paths.get_gen_conf_filename(),
+    }
+}
+
+/// The adapter runtime a LoRA loader was built with; None for other kinds.
+pub(crate) fn lora_runtime(
+    kind: &super::ModelKind,
+    runtime: Option<crate::LoraRuntimeConfig>,
+) -> Option<crate::LoraRuntimeConfig> {
+    match kind {
+        super::ModelKind::Lora | super::ModelKind::GgufLora { .. } => {
+            Some(runtime.expect("LoRA loaders have a runtime config"))
+        }
+        _ => None,
+    }
+}
+
 /// The checkpoint files a pipeline keeps for re-quantizing later; a UQFF load has none.
 pub(crate) fn source_weight_files(
-    prepared: Option<&[PathBuf]>,
+    prepared: Option<&PreparedSource>,
     from_uqff: bool,
     weight_files: &[PathBuf],
 ) -> Vec<PathBuf> {
     match prepared {
-        Some(files) => files.to_vec(),
+        Some(source) => source.source_weight_files.clone(),
         None if from_uqff => Vec::new(),
         None => weight_files.to_vec(),
     }
@@ -434,7 +574,7 @@ pub(crate) struct LoadSessionInputs<'a> {
     pub mapper: DeviceMapSetting,
     pub in_situ_quant: Option<inference_quant::IsqType>,
     pub uqff_files: Option<&'a [PathBuf]>,
-    pub prepared_weight_source: Option<Arc<dyn QuantizedWeightSource>>,
+    pub prepared: Option<&'a PreparedSource>,
     pub has_lora: bool,
     pub matformer: Option<MatformerSliceConfig>,
     // whether the auto device map sizes layers with the matformer slice applied
@@ -476,7 +616,7 @@ pub(crate) fn open_load_session(
         mut mapper,
         in_situ_quant,
         uqff_files,
-        prepared_weight_source,
+        prepared,
         has_lora,
         matformer,
         matformer_sizing,
@@ -484,6 +624,8 @@ pub(crate) fn open_load_session(
         auto_device_map_params,
         weight_target,
     } = inputs;
+    let prepared_weight_source =
+        prepared.and_then(|source| source.weights.weight_source().cloned());
     let write_uqff = settings.write_uqff.is_some();
     let LoadDevices {
         tensor_parallelism,
@@ -683,10 +825,7 @@ pub(crate) struct ModelLoadInputs<'a> {
     pub organization: super::IsqOrganization,
     pub from_uqff: bool,
     pub write_uqff: bool,
-    pub prepared: Option<(
-        &'a inference_quant::ShardedVarBuilder,
-        crate::model::RopePairing,
-    )>,
+    pub prepared: Option<&'a PreparedSource>,
     pub lora: Option<crate::LoraRuntimeConfig>,
 }
 
@@ -707,6 +846,7 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         prepared,
         lora,
     } = inputs;
+    let prepared = prepared.map(|source| (&source.weights, source.rope_pairing));
     let loading_isq = session.plan.loading_isq;
     let distributed = session.tensor_parallelism.is_enabled();
     let weights = WeightFiles {
