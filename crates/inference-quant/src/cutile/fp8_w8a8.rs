@@ -915,6 +915,32 @@ impl CutileKernel for Fp8W8A8Kernel {
 mod tests {
     use inference_tensor::{DType, Device, Result, Tensor};
 
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        use super::{POLICY_LARGE, POLICY_SMALL, TILE_SIZE, kernels};
+        for dtype in ["bf16", "f16"] {
+            for cfg in [POLICY_SMALL, POLICY_LARGE] {
+                let values = super::super::generics(&[
+                    &cfg.bm,
+                    &TILE_SIZE,
+                    &TILE_SIZE,
+                    &cfg.map_m,
+                    &cfg.map_n,
+                    &cfg.latency,
+                ]);
+                let entry = format!("fp8_w8a8_{dtype}");
+                let tensors = [("y", 2), ("x", 2), ("w", 2), ("xs", 1), ("ws", 1)];
+                super::super::tile_ir(
+                    kernels::__module_ast_self,
+                    "kernels",
+                    &entry,
+                    values,
+                    &tensors,
+                );
+            }
+        }
+    }
+
     use super::{
         CutileFp8W8A8Args, Fp8W8A8Scheme, GemmOperands, cutile_fp8_w8a8, quantize_activation,
         validate_scale_shapes,

@@ -881,6 +881,38 @@ mod tests {
     use float8::F8E4M3;
     use inference_tensor::{DType, Device, Result, Tensor};
 
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        use super::{BLOCK_SIZE, POLICY_LARGE, POLICY_SMALL, kernels};
+        for (scales, dtype) in [
+            ("post", "bf16"),
+            ("block", "bf16"),
+            ("post", "f16"),
+            ("block", "f16"),
+        ] {
+            for cfg in [POLICY_SMALL, POLICY_LARGE] {
+                let values = super::super::generics(&[
+                    &cfg.bm,
+                    &BLOCK_SIZE,
+                    &BLOCK_SIZE,
+                    &cfg.map_m,
+                    &cfg.map_n,
+                    &cfg.latency,
+                ]);
+                let entry = format!("fp8_w8a16_{scales}_{dtype}");
+                let ws_rank = if scales == "post" { 1 } else { 2 };
+                let tensors = [("y", 2), ("x", 2), ("w", 2), ("ws", ws_rank)];
+                super::super::tile_ir(
+                    kernels::__module_ast_self,
+                    "kernels",
+                    &entry,
+                    values,
+                    &tensors,
+                );
+            }
+        }
+    }
+
     type ScaleAt = Box<dyn Fn(usize, usize) -> f32>;
 
     #[test]

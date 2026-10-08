@@ -13,7 +13,9 @@ mod kernels {
     const FP8_MAX: f32 = 448.0;
     const SILU: i32 = 0;
     const RELU: i32 = 2;
-    const LOG2_E: f32 = std::f32::consts::LOG2_E;
+    // std::f32::consts::LOG2_E, spelled out: the Tile IR compiler only folds literal constants
+    #[allow(clippy::approx_constant)]
+    const LOG2_E: f32 = 1.442_695;
 
     #[cutile::entry(unchecked_accesses = true)]
     unsafe fn quantize_bf16<
@@ -623,6 +625,30 @@ pub(super) fn warm_common(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        for dtype in ["bf16", "f16"] {
+            for activation in WARMUP_ACTIVATIONS {
+                let values = super::super::generics(&[
+                    &QUANT_ROWS,
+                    &QUANT_K,
+                    &(QUANT_K / 2),
+                    &(QUANT_K / BLOCK_SIZE),
+                    &(activation as i32),
+                ]);
+                let entry = format!("quantize_{dtype}");
+                let tensors = [("q", 2), ("ag", 1)];
+                super::super::tile_ir(
+                    kernels::__module_ast_self,
+                    "kernels",
+                    &entry,
+                    values,
+                    &tensors,
+                );
+            }
+        }
+    }
 
     static CUDA_TEST_LOCK: Mutex<()> = Mutex::new(());
 

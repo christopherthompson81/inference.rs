@@ -171,6 +171,65 @@ pub fn jit_available(dev: &inference_tensor::CudaDevice) -> bool {
 }
 
 #[cfg(test)]
+const TILE_IR_TARGET: &str = "sm_120";
+// The Tile IR compiler recurses deeply on the larger kernels.
+#[cfg(test)]
+const TILE_IR_STACK: usize = 64 * 1024 * 1024;
+
+#[cfg(test)]
+fn generics(values: &[&dyn std::fmt::Display]) -> Vec<String> {
+    values.iter().map(ToString::to_string).collect()
+}
+
+/// Compiles one entry to Tile IR offline (no GPU), so kernels are checked where they cannot run.
+/// `tensors` names each tensor parameter with its rank; all are taken as contiguous.
+#[cfg(test)]
+fn tile_ir(
+    module_ast: fn() -> cutile::cutile_compiler::ast::Module,
+    module: &str,
+    entry: &str,
+    generics: Vec<String>,
+    tensors: &[(&str, usize)],
+) -> String {
+    let (module, entry) = (module.to_string(), entry.to_string());
+    let strides: Vec<(String, Vec<i32>)> = tensors
+        .iter()
+        .map(|&(name, rank)| {
+            let mut strides = vec![-1; rank];
+            strides[rank - 1] = 1;
+            (name.to_string(), strides)
+        })
+        .collect();
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("main")
+        .replace("::", ".");
+    std::thread::Builder::new()
+        .stack_size(TILE_IR_STACK)
+        .spawn(move || {
+            let strides: Vec<(&str, &[i32])> = strides
+                .iter()
+                .map(|(name, strides)| (name.as_str(), strides.as_slice()))
+                .collect();
+            let artifacts = cutile::compile_api::KernelCompiler::new(module_ast, &module, &entry)
+                .generics(generics.clone())
+                .strides(&strides)
+                .target(TILE_IR_TARGET)
+                .compile()
+                .unwrap_or_else(|error| panic!("{entry}{generics:?}: {error:?}"));
+            let ir = artifacts.ir_text();
+            if let Ok(dir) = std::env::var("TILE_IR_DUMP") {
+                let name = format!("{test}.{entry}.{}.ir", generics.join("_"));
+                std::fs::write(std::path::Path::new(&dir).join(name), &ir).unwrap();
+            }
+            ir
+        })
+        .expect("spawn Tile IR compiler")
+        .join()
+        .expect("join Tile IR compiler")
+}
+
+#[cfg(test)]
 mod tests {
     use super::{device_supported_for, parse_tileiras_targets, tileiras_version_supported};
 

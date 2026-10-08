@@ -2636,3 +2636,30 @@ Change:
 
 Result: 300 insertions, 722 deletions in the crates, test included (-422 net, against ~650 estimated: the macro
 itself is ~110 lines).
+
+## Run 84 - 2026-10-07 21:42
+
+Question: does the ~600-line estimate for cuTile scaffolding (config, registry, tuner, warm per GEMM kind) hold?
+
+Command: a scratch script counting normalized lines (comments and lone braces dropped) that sit in a 6-line window
+repeated elsewhere under `crates/inference-quant/src/cutile/` (15.3k lines).
+
+Raw finding: 2,956 lines sit in repeated windows. Largest regions:
+- `nvfp4_matmul.rs` (658 of 1,602): bf16 and f16 copies of the same entries (`quantize_*`, `matmul_*`,
+  `route_quantize_*`, `routed_matmul_*`), 60-90 line blocks each.
+- `fused_moe.rs` / `fused_moe_fp8.rs` (407 / 435): kernel parameter lists and epilogues (75-81 line blocks), launch
+  plumbing.
+- `fp8_w8a16.rs` / `fp8_w8a8.rs` / `fp8_gemm.rs` (397 / 382 / 132): kernel bodies (34-44 lines), plus host code: the
+  same 8-field tile config with identical `to_config`/`from_config`/`compile_options` three times, `gemm_space`
+  differing only in the candidate lists and policy, and `warm` loops differing in the shape key and probe operands.
+- `nvfp4_gemv.rs`, `nvfp4_glu.rs`: self-repeats (bf16/f16 again) and quantize epilogues shared with nvfp4_matmul.
+
+So the estimate split two ways:
+- Host scaffolding (one GEMM tile config, a shared space builder, a generic tune-and-warm loop): ~150-200 lines.
+  Ordinary Rust, compiled by the CUDA 13.4 clippy check.
+- Kernel bodies: most of the 2,956. cutile 0.3.1 supports `E: ElementType` generics on entries and inlines plain helper
+  functions (its `basics_and_inlining` test), so bf16/f16 twins can be one generic entry and shared epilogues helpers.
+  This box has no Blackwell GPU, so the kernels cannot run here; cutile's test support compiles a module to Tile IR
+  offline (`compile_to_ir`), which would let a merge be checked by IR equality per instantiation.
+
+Next: owner decision on scope (host only vs. kernel merge with IR-equality checks).

@@ -1742,3 +1742,99 @@ pub(super) fn launch_gather(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{generics, tile_ir};
+    use super::*;
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        let ir = |entry: String, values, tensors: &[(&str, usize)]| {
+            tile_ir(
+                kernels::__module_ast_self,
+                "kernels",
+                &entry,
+                values,
+                tensors,
+            )
+        };
+        let quantize = [("q", 2), ("x", 2), ("ag", 1)];
+        let matmul = [
+            ("y", 2),
+            ("x", 2),
+            ("q", 2),
+            ("qs", 2),
+            ("w", 2),
+            ("ws", 2),
+            ("wg", 1),
+            ("ag", 1),
+        ];
+        let route_quantize = [("q", 2), ("sids", 1), ("eids", 1), ("ntpp", 1), ("ag", 1)];
+        let routed_matmul = [
+            ("sids", 1),
+            ("eids", 1),
+            ("ntpp", 1),
+            ("x", 2),
+            ("q", 2),
+            ("qs", 2),
+            ("w", 3),
+            ("ws", 3),
+            ("wg", 2),
+            ("ag", 1),
+        ];
+        for dtype in ["bf16", "f16"] {
+            ir(
+                format!("quantize_{dtype}"),
+                generics(&[
+                    &QUANT_ROWS,
+                    &QUANT_K,
+                    &(QUANT_K / 2),
+                    &(QUANT_K / BLOCK_SIZE),
+                ]),
+                &quantize,
+            );
+            for a4 in [false, true] {
+                ir(
+                    format!("matmul_{dtype}"),
+                    generics(&[
+                        &MATMUL_ROWS,
+                        &MATMUL_COLUMNS,
+                        &MATMUL_K,
+                        &(MATMUL_K / 2),
+                        &(MATMUL_K / BLOCK_SIZE),
+                        &a4,
+                        &LOAD_LATENCY,
+                        &GROUPED_MATMUL_ROWS,
+                    ]),
+                    &matmul,
+                );
+                ir(
+                    format!("route_quantize_{dtype}"),
+                    generics(&[
+                        &QUANT_ROWS,
+                        &QUANT_K,
+                        &(QUANT_K / 2),
+                        &(QUANT_K / BLOCK_SIZE),
+                        &ROUTED_ROWS,
+                        &a4,
+                    ]),
+                    &route_quantize,
+                );
+                ir(
+                    format!("routed_matmul_{dtype}"),
+                    generics(&[
+                        &ROUTED_ROWS,
+                        &ROUTED_COLUMNS,
+                        &MATMUL_K,
+                        &(MATMUL_K / 2),
+                        &(MATMUL_K / BLOCK_SIZE),
+                        &a4,
+                        &LOAD_LATENCY,
+                    ]),
+                    &routed_matmul,
+                );
+            }
+        }
+    }
+}

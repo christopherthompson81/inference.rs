@@ -501,3 +501,41 @@ pub(super) fn launch(
         Ok(output)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{generics, tile_ir};
+    use super::*;
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        for dtype in ["bf16", "f16"] {
+            for (a4, routed) in [(false, false), (true, false), (false, true), (true, true)] {
+                let values = generics(&[
+                    &SMALL_MATRIX_COLUMNS,
+                    &SMALL_MATRIX_K,
+                    &(SMALL_MATRIX_K / 2),
+                    &(SMALL_MATRIX_K / BLOCK_SIZE),
+                    &a4,
+                    &routed,
+                ]);
+                let tensors = [
+                    ("y", 2),
+                    ("x", 2),
+                    ("w", 3),
+                    ("ws", 3),
+                    ("wg", 2),
+                    ("ag", 1),
+                    ("ids", 1),
+                ];
+                tile_ir(
+                    kernels::__module_ast_self,
+                    "kernels",
+                    &format!("gemv_{dtype}"),
+                    values,
+                    &tensors,
+                );
+            }
+        }
+    }
+}
