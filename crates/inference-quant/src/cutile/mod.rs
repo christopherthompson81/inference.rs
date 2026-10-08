@@ -7,6 +7,7 @@ mod fp8_w8a8;
 mod fused_moe;
 mod fused_moe_fp8;
 mod gdn_prefill;
+mod gemm_tile;
 mod nvfp4;
 mod nvfp4_gemv;
 mod nvfp4_glu;
@@ -193,13 +194,13 @@ fn generics(values: &[&dyn std::fmt::Display]) -> Vec<String> {
 /// Compiles one entry to Tile IR offline (no GPU), so kernels are checked where they cannot run.
 /// `tensors` names each tensor parameter with its rank; all are taken as contiguous.
 #[cfg(test)]
-fn tile_ir(
+fn compile_tile_ir(
     module_ast: fn() -> cutile::cutile_compiler::ast::Module,
     module: &str,
     entry: &str,
     generics: Vec<String>,
     tensors: &[(&str, usize)],
-) -> String {
+) {
     let (module, entry) = (module.to_string(), entry.to_string());
     let strides: Vec<(String, Vec<i32>)> = tensors
         .iter()
@@ -209,10 +210,6 @@ fn tile_ir(
             (name.to_string(), strides)
         })
         .collect();
-    let test = std::thread::current()
-        .name()
-        .unwrap_or("main")
-        .replace("::", ".");
     std::thread::Builder::new()
         .stack_size(TILE_IR_STACK)
         .spawn(move || {
@@ -220,18 +217,15 @@ fn tile_ir(
                 .iter()
                 .map(|(name, strides)| (name.as_str(), strides.as_slice()))
                 .collect();
-            let artifacts = cutile::compile_api::KernelCompiler::new(module_ast, &module, &entry)
-                .generics(generics.clone())
-                .strides(&strides)
-                .target(TILE_IR_TARGET)
-                .compile()
-                .unwrap_or_else(|error| panic!("{entry}{generics:?}: {error:?}"));
-            let ir = artifacts.ir_text();
-            if let Ok(dir) = std::env::var("TILE_IR_DUMP") {
-                let name = format!("{test}.{entry}.{}.ir", generics.join("_"));
-                std::fs::write(std::path::Path::new(&dir).join(name), &ir).unwrap();
+            if let Err(error) =
+                cutile::compile_api::KernelCompiler::new(module_ast, &module, &entry)
+                    .generics(generics.clone())
+                    .strides(&strides)
+                    .target(TILE_IR_TARGET)
+                    .compile()
+            {
+                panic!("{entry}{generics:?}: {error:?}");
             }
-            ir
         })
         .expect("spawn Tile IR compiler")
         .join()

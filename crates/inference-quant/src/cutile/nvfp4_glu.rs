@@ -482,7 +482,7 @@ mod tests {
                 ]);
                 let entry = "quantize".to_string();
                 let tensors = [("q", 2), ("ag", 1)];
-                super::super::tile_ir(
+                super::super::compile_tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
                     &entry,

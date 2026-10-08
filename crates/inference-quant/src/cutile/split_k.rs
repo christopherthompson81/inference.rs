@@ -107,3 +107,21 @@ pub(super) fn reduce_split_k(
     drop(out_guard);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::{compile_tile_ir, generics};
+    use super::*;
+
+    #[test]
+    fn kernels_compile_to_tile_ir() {
+        let values = generics(&[&REDUCE_BLOCK, &2]);
+        compile_tile_ir(
+            split_k::__module_ast_self,
+            "split_k",
+            "split_k_reduce_kernel",
+            values,
+            &[],
+        );
+    }
+}

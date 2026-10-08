@@ -1286,13 +1286,13 @@ pub(super) fn launch_gather(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{generics, tile_ir};
+    use super::super::{compile_tile_ir, generics};
     use super::*;
 
     #[test]
     fn kernels_compile_to_tile_ir() {
         let ir = |entry: String, values, tensors: &[(&str, usize)]| {
-            tile_ir(
+            compile_tile_ir(
                 kernels::__module_ast_self,
                 "kernels",
                 &entry,

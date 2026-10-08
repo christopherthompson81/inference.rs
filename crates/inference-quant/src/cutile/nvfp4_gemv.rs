@@ -402,7 +402,7 @@ pub(super) fn launch(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{generics, tile_ir};
+    use super::super::{compile_tile_ir, generics};
     use super::*;
 
     #[test]
@@ -427,10 +427,10 @@ mod tests {
                     ("ag", 1),
                     ("ids", 1),
                 ];
-                tile_ir(
+                compile_tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
-                    &"gemv".to_string(),
+                    "gemv",
                     values,
                     &tensors,
                 );

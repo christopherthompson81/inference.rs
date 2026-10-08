@@ -7,16 +7,17 @@ use cutile::core::f8e4m3fn;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tensor::IntoPartition;
-use cutile::tile_kernel::{CompileOptions, TileKernel};
+use cutile::tile_kernel::TileKernel;
 use float8::F8E4M3;
 use half::{bf16, f16};
 use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, DeviceLocation, Result, Shape, Storage, Tensor,
 };
 
+use super::gemm_tile::{GemmTileConfig, tile_space};
 use super::tune::{
     Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
-    buckets_from_breakpoints, config, cutile_error, tune,
+    buckets_from_breakpoints, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
 use super::{catch_cutile_panic, context, jit_available};
@@ -168,86 +169,13 @@ impl TryFrom<DType> for ActivationDType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct Fp8W8A16Config {
-    pub bm: i32,
-    pub map_m: i32,
-    pub map_n: i32,
-    pub blocks_per_sm: i32,
-    pub latency: i32,
-    pub warps: i32,
-    pub occupancy: i32,
-    pub cluster: i32,
-}
+const POLICY_SMALL: GemmTileConfig = GemmTileConfig::policy(16, 1, 8);
 
-const POLICY_SMALL: Fp8W8A16Config = Fp8W8A16Config {
-    bm: 16,
-    map_m: 1,
-    map_n: 8,
-    blocks_per_sm: 2,
-    latency: 0,
-    warps: 0,
-    occupancy: 0,
-    cluster: 0,
-};
+const POLICY_LARGE: GemmTileConfig = GemmTileConfig::policy(64, 4, 1);
 
-const POLICY_LARGE: Fp8W8A16Config = Fp8W8A16Config {
-    bm: 64,
-    map_m: 4,
-    map_n: 1,
-    blocks_per_sm: 2,
-    latency: 0,
-    warps: 0,
-    occupancy: 0,
-    cluster: 0,
-};
+static TUNED: TunedTable<GemmShape, GemmTileConfig> = TunedTable::new();
 
-impl Fp8W8A16Config {
-    fn to_config(self) -> cutile::tune::Config {
-        config([
-            ("bm", i64::from(self.bm)),
-            ("map_m", i64::from(self.map_m)),
-            ("map_n", i64::from(self.map_n)),
-            ("blocks_per_sm", i64::from(self.blocks_per_sm)),
-            ("latency", i64::from(self.latency)),
-            ("warps", i64::from(self.warps)),
-            ("occupancy", i64::from(self.occupancy)),
-            ("cluster", i64::from(self.cluster)),
-        ])
-    }
-
-    fn from_config(config: &cutile::tune::Config) -> Option<Self> {
-        let int = |key: &str| config.int(key).and_then(|value| i32::try_from(value).ok());
-        Some(Self {
-            bm: int("bm")?,
-            map_m: int("map_m")?,
-            map_n: int("map_n")?,
-            blocks_per_sm: int("blocks_per_sm")?,
-            latency: int("latency")?,
-            warps: int("warps")?,
-            occupancy: int("occupancy")?,
-            cluster: int("cluster")?,
-        })
-    }
-
-    fn compile_options(self) -> CompileOptions {
-        let mut options = CompileOptions::new();
-        if self.warps > 0 {
-            options = options.num_worker_warps_per_cta(self.warps);
-        }
-        if self.occupancy > 0 {
-            options = options.occupancy(self.occupancy);
-        }
-        if self.cluster > 0 {
-            options = options.num_cta_in_cga(self.cluster);
-        }
-        options
-    }
-}
-
-static TUNED: TunedTable<GemmShape, Fp8W8A16Config> = TunedTable::new();
-
-fn policy(rows: usize) -> Fp8W8A16Config {
+fn policy(rows: usize) -> GemmTileConfig {
     if rows <= ROW_BREAKPOINTS[0] {
         POLICY_SMALL
     } else {
@@ -255,21 +183,16 @@ fn policy(rows: usize) -> Fp8W8A16Config {
     }
 }
 
-fn gemm_config(shape: GemmShape, rows: usize) -> Fp8W8A16Config {
+fn gemm_config(shape: GemmShape, rows: usize) -> GemmTileConfig {
     TUNED.get(shape, rows).unwrap_or_else(|| policy(rows))
 }
 
 fn gemm_space(bucket: Bucket) -> Space {
-    let policy = policy(bucket.probe);
-    Space::new()
-        .joint(["bm"], [[16], [32], [64], [128]])
-        .joint(["map_m", "map_n"], [[1, 8], [2, 4], [4, 1], [8, 1], [1, 1]])
-        .axis("blocks_per_sm", [2, 1, 4])
-        .axis("latency", [0, 2, 4])
-        .axis("warps", [0, 4, 8])
-        .axis("occupancy", [0, 4])
-        .axis("cluster", [0, 2])
-        .policy(policy.to_config())
+    tile_space(
+        [[16], [32], [64], [128]],
+        [[1, 8], [2, 4], [4, 1], [8, 1], [1, 1]],
+        policy(bucket.probe),
+    )
 }
 
 fn gemm_buckets() -> Vec<Bucket> {
@@ -397,7 +320,7 @@ fn validate_scale_shape(
     Ok(())
 }
 
-fn launch(operands: &GemmOperands<'_>, cfg: Fp8W8A16Config, compile_only: bool) -> Result<Tensor> {
+fn launch(operands: &GemmOperands<'_>, cfg: GemmTileConfig, compile_only: bool) -> Result<Tensor> {
     let activation = operands.activation.contiguous()?;
     let weight = operands.weight.contiguous()?;
     let scales = operands.weight_scales.contiguous()?;
@@ -667,7 +590,7 @@ impl GemmTuner {
         }
     }
 
-    fn prepare(&mut self, rows: usize, cfg: Fp8W8A16Config) -> Result<Prepared> {
+    fn prepare(&mut self, rows: usize, cfg: GemmTileConfig) -> Result<Prepared> {
         let dev = self.dev.clone();
         let sets = self.sets.clone();
         let key = sets[0].key;
@@ -729,11 +652,11 @@ impl CutileKernel for Fp8W8A16Kernel {
             };
             let mut tuner = GemmTuner::new(dev, sets);
             let tuned = tune(dev, mode, &request, |rows, candidate| {
-                let cfg = Fp8W8A16Config::from_config(candidate)
+                let cfg = GemmTileConfig::from_config(candidate)
                     .ok_or_else(|| inference_tensor::Error::msg("config outside the space"))?;
                 tuner.prepare(rows, cfg)
             });
-            TUNED.set(key, &tuned, Fp8W8A16Config::from_config);
+            TUNED.set(key, &tuned, GemmTileConfig::from_config);
         }
         tracing::info!("Warming {} cuTile W8A16 GEMM kernels.", shapes.len());
         for sets in &shapes {
@@ -801,7 +724,7 @@ mod tests {
                 let entry = format!("fp8_w8a16_{scales}");
                 let ws_rank = if scales == "post" { 1 } else { 2 };
                 let tensors = [("y", 2), ("x", 2), ("w", 2), ("ws", ws_rank)];
-                super::super::tile_ir(
+                super::super::compile_tile_ir(
                     kernels::__module_ast_self,
                     "kernels",
                     &entry,
