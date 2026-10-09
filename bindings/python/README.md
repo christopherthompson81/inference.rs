@@ -12,7 +12,7 @@ refusing any other while the ABI is 0.0.x.
   raise `InferenceError`, whose `detail` is the protocol's error JSON and `code` its code.
 - `engine.json` (a `JsonEngine`) serves the same operations as JSON strings.
 - `HostCallbacks` registers host tools and a search backend when an engine loads.
-- `LayoutModel` runs PP-DocLayoutV3 document layout detection. `system_info()` and `system_doctor()` need no engine.
+- `LayoutModel` runs PP-DocLayoutV3 document layout detection, from the HF directory or a GGUF of it. `system_info()` and `system_doctor()` need no engine.
 
 Engine calls release the GIL, so an engine can serve several threads at once.
 

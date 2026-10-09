@@ -35,7 +35,7 @@ versions fix behaviour) start at 0.1.0.
 ## Tests
 
 ```bash
-inference-ffi/tests/run.sh [--features cuda --backend cuda] [model_dir image]
+inference-ffi/tests/run.sh [--features cuda --backend cuda] [model image]
 ```
 
 The script:

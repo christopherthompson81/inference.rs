@@ -133,10 +133,10 @@ fn threshold_arg(threshold: f32) -> FfiResult<f32> {
     Ok(threshold)
 }
 
-/// Safety: `model_dir` is a C string, `backend` NULL or valid, `out_model` valid for a write.
+/// Safety: `path` is a C string, `backend` NULL or valid, `out_model` valid for a write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_layout_model_load(
-    model_dir: *const c_char,
+    path: *const c_char,
     backend: *const inference_backend_config,
     out_model: *mut *mut inference_layout_model,
 ) -> inference_status {
@@ -146,13 +146,13 @@ pub unsafe extern "C" fn inference_layout_model_load(
                 return Err(Failure::invalid("out_model is NULL"));
             }
             out_model.write(std::ptr::null_mut());
-            let dir = arg_str(model_dir, "model_dir")?;
+            let path = arg_str(path, "path")?;
             let backend = backend_from(backend)?;
             let load_failed = |e: inference_tensor::Error| {
-                Failure::new(INFERENCE_ERR_LOAD_FAILED, format!("{dir}: {e}"))
+                Failure::new(INFERENCE_ERR_LOAD_FAILED, format!("{path}: {e}"))
             };
             let mut detector =
-                PPDocLayoutV3Detector::load(dir, &backend.device).map_err(load_failed)?;
+                PPDocLayoutV3Detector::load(path, &backend.device).map_err(load_failed)?;
             if let Some(threads) = backend.cpu_threads {
                 detector = detector.with_cpu_threads(threads).map_err(load_failed)?;
             }

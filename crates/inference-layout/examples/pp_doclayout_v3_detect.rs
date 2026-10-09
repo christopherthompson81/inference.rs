@@ -7,7 +7,7 @@ use inference_tensor::Device;
 
 #[derive(Parser)]
 struct Args {
-    /// HF `PP-DocLayoutV3_safetensors` directory.
+    /// HF `PP-DocLayoutV3_safetensors` directory or a GGUF of it.
     #[arg(long)]
     model: String,
     #[arg(long, default_value_t = DEFAULT_THRESHOLD)]

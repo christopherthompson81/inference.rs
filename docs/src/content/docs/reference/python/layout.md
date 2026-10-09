@@ -39,13 +39,13 @@ __post_init__()
 
 ## `LayoutModel`
 
-A PP-DocLayoutV3 document layout detector. Close it, or use `with`.
+A PP-DocLayoutV3 document layout detector, from an HF directory or a GGUF of it. Close it, or use `with`.
 
 ### `LayoutModel.__init__`
 
 ```text
 __init__(
-    model_dir,
+    path,
     backend: str | None = None,
     device: int = 0,
     threads: int = 0,
