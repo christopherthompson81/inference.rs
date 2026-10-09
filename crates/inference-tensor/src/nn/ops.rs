@@ -1161,3 +1161,29 @@ pub fn sdpa(
         },
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::{DType, Device, Result, Tensor, D};
+
+    // A half-precision running sum of a long row's exponentials stalls once it dwarfs each term
+    #[test]
+    fn half_precision_softmax_and_sum_accumulate_in_f32() -> Result<()> {
+        const COLS: usize = 4096;
+        let xs = (Tensor::arange(0f32, COLS as f32, &Device::Cpu)? * 1e-3)?.reshape((1, COLS))?;
+        for dtype in [DType::BF16, DType::F16] {
+            let x = xs.to_dtype(dtype)?;
+            let rounded = x.to_dtype(DType::F32)?;
+            let want_softmax = super::softmax_last_dim(&rounded)?;
+            let want_sum = rounded.sum_keepdim(D::Minus1)?;
+            let softmax = super::softmax_last_dim(&x)?.to_dtype(DType::F32)?;
+            let err = ((softmax - &want_softmax)?.abs()?.max_all()? / want_softmax.max_all()?)?
+                .to_scalar::<f32>()?;
+            assert!(err < 1e-2, "{dtype:?} softmax off by {err}");
+            let sum = x.sum_keepdim(D::Minus1)?.to_dtype(DType::F32)?;
+            let err = ((sum - &want_sum)? / &want_sum)?.abs()?.to_vec2::<f32>()?[0][0];
+            assert!(err < 1e-2, "{dtype:?} sum off by {err}");
+        }
+        Ok(())
+    }
+}
