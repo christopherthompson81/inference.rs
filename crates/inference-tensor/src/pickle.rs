@@ -726,14 +726,21 @@ pub fn read_pth_tensor_info<P: AsRef<std::path::Path>>(
 
         // If the object is a dict, then we can extract the tensor info from it.
         // NOTE: We are assuming that the `obj` is state_dict by this stage.
-        if let Object::Dict(key_values) = obj {
-            for (name, value) in key_values.into_iter() {
-                match value.into_tensor_info(name, &dir_name) {
-                    Ok(Some(tensor_info)) => tensor_infos.push(tensor_info),
-                    Ok(None) => {}
-                    Err(err) => eprintln!("skipping: {err:?}"),
+        match obj {
+            Object::Dict(key_values) => {
+                for (name, value) in key_values.into_iter() {
+                    match value.into_tensor_info(name, &dir_name) {
+                        Ok(Some(tensor_info)) => tensor_infos.push(tensor_info),
+                        Ok(None) => {}
+                        Err(err) => eprintln!("skipping: {err:?}"),
+                    }
                 }
             }
+            // `torch.save(tensor)` stores a bare tensor, read back under the empty name
+            obj => match obj.into_tensor_info(Object::Unicode(String::new()), &dir_name) {
+                Ok(tensor_info) => tensor_infos.extend(tensor_info),
+                Err(err) => eprintln!("skipping: {err:?}"),
+            },
         }
     }
     Ok(tensor_infos)
@@ -808,5 +815,40 @@ impl PthTensors {
         } else {
             Ok(Some(tensor))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PthTensors;
+    use crate::Result;
+
+    fn fixture(name: &str) -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/fixtures")
+            .join(name)
+    }
+
+    #[test]
+    fn a_bare_tensor_reads_under_the_empty_name() -> Result<()> {
+        let tensors = PthTensors::new(fixture("bare_tensor.pt"), None)?;
+        let t = tensors.get("")?.expect("the bare tensor");
+        assert_eq!(t.to_vec2::<f32>()?, [[0., 1., 2.], [3., 4., 5.]]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_keyed_state_dict_reads_from_a_dict_of_them() -> Result<()> {
+        let tensors = PthTensors::new(fixture("nested_state_dicts.pth"), Some("outer"))?;
+        assert_eq!(
+            tensors.get("module.w")?.expect("w").to_vec1::<f32>()?,
+            [1., -2.]
+        );
+        assert_eq!(
+            tensors.get("module.b")?.expect("b").to_vec1::<f32>()?,
+            [0.5]
+        );
+        assert!(tensors.get("module.missing")?.is_none());
+        Ok(())
     }
 }
