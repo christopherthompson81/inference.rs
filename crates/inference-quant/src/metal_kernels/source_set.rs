@@ -8,6 +8,7 @@ inference_metal_compile::metal_source_set! {
         "bnb_dequantize",
         "flash_attn",
         "fused_glu",
+        "gguf_raw",
         "hqq_dequantize",
         "hqq_bitpack",
         "moe",
@@ -22,5 +23,5 @@ inference_metal_compile::metal_source_set! {
         "topk_logits",
     ],
     header_sources: ["utils", "bf16"],
-    include_only_sources: ["float8", "float4"],
+    include_only_sources: ["float8", "float4", "gguf_iq_tables"],
 }

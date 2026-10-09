@@ -201,3 +201,5 @@ mod rmsnorm;
 pub use rmsnorm::*;
 mod logits;
 pub use logits::*;
+mod gguf_raw;
+pub use gguf_raw::*;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes the IQ lookup tables from llama.cpp's ggml-common.h as a CUDA header and a Rust module.
+"""Writes the IQ lookup tables from llama.cpp's ggml-common.h as CUDA and Metal headers and a Rust module.
 
 Usage: make_iq_tables.py <path to ggml/src/ggml-common.h> <llama.cpp commit>
 """
@@ -9,6 +9,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 CUDA_OUT = ROOT / "kernels/cuda/gguf_iq_tables.cuh"
+METAL_OUT = ROOT / "kernels/metal/gguf_iq_tables.metal"
 RUST_OUT = ROOT / "src/gguf/iq_tables.rs"
 CUDA_TABLES = ["kmask_iq2xs", "ksigns_iq2xs", "ksigns64", "iq2xxs_grid", "iq2xs_grid", "iq2s_grid", "iq3xxs_grid",
                "iq3s_grid", "iq1s_grid_gpu"]
@@ -36,6 +37,12 @@ for name in CUDA_TABLES:
     ty, size, body = tables[name]
     cuda += [f"static const __device__ {ty} {name}[{size}] = {{", body, "};", ""]
 CUDA_OUT.write_text("\n".join(cuda))
+
+metal = [f"// IQ lookup tables from {provenance}.", "#pragma once", "", "#include <metal_stdlib>", ""]
+for name in CUDA_TABLES:
+    ty, size, body = tables[name]
+    metal += [f"constant {ty} {name}[{size}] = {{", body, "};", ""]
+METAL_OUT.write_text("\n".join(metal))
 
 rust = [f"//! IQ lookup tables from {provenance}.", "", "#![allow(clippy::unreadable_literal)]", ""]
 for name in RUST_TABLES:
