@@ -7,7 +7,7 @@ namespace InferenceRs.Native;
 internal static unsafe partial class NativeMethods
 {
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 21;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 22;
 
     [LibraryImport(Library)]
     internal static partial uint inference_abi_version();
@@ -52,6 +52,10 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_layout_result_detection(
         IntPtr result, nuint index, out int outClassId, out IntPtr outLabel, out float outScore, float* outBbox);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_layout_result_polygon(
+        IntPtr result, nuint index, out IntPtr outPoints, out nuint outCount);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_engine_load(byte* spec, nuint specLen, out IntPtr outEngine);

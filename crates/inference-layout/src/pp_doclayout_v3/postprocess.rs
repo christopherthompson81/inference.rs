@@ -10,6 +10,11 @@ pub struct LayoutDetection {
     pub bbox: [f32; 4],
     /// Position in predicted reading order among the kept detections.
     pub reading_order: usize,
+    /// The region's outline in original image pixels, from its mask (the box's corners when the mask gives none).
+    pub polygon: Vec<[f32; 2]>,
+    /// The decoder query this detection came from, whose mask gives `polygon`.
+    #[serde(skip)]
+    pub query: usize,
 }
 
 fn sigmoid(x: f32) -> f32 {
@@ -85,6 +90,8 @@ pub fn postprocess(
                 score,
                 bbox,
                 reading_order: 0,
+                polygon: Vec::new(),
+                query: qi,
             };
             (order[qi], det)
         })
