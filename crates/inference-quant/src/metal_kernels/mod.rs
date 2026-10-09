@@ -7,16 +7,15 @@ use candle_metal_kernels::metal::{
     Buffer, ComputeCommandEncoder, ComputePipeline, ConstantValues, Device, Function, Library,
     MetalDeviceType, Value as ConstantValue,
 };
-use inference_tensor::{DType, MetalDevice};
+use inference_tensor::DType;
 use objc2_metal::{MTLDevice, MTLSize};
 use std::os::raw::c_void;
-use std::sync::{Arc, RwLock};
+use std::sync::RwLock;
 use std::{collections::HashMap, sync::OnceLock};
 
 pub mod utils;
 use utils::{
-    EncoderParam, EncoderProvider, Output, RawBytesEncoder, get_2d_grid_dims,
-    get_2d_grid_dims_divisor, get_block_dims, linear_split,
+    EncoderParam, EncoderProvider, Output, RawBytesEncoder, get_2d_grid_dims, linear_split,
 };
 
 use crate::set_params;
@@ -186,10 +185,6 @@ mod mxfp4;
 pub use mxfp4::*;
 mod blockwise_fp8;
 pub use blockwise_fp8::*;
-mod scan;
-pub use scan::*;
-mod sort;
-pub use sort::*;
 mod hqq;
 pub use hqq::*;
 mod elementwise;

@@ -6,33 +6,6 @@
 use super::*;
 
 #[allow(clippy::too_many_arguments)]
-pub fn call_rotary(
-    device: &Device,
-    ep: impl EncoderProvider,
-    kernels: &Kernels,
-    ty: DType,
-    src: &Buffer,
-    cos: &Buffer,
-    sin: &Buffer,
-    src_offset: usize,
-    cos_offset: usize,
-    sin_offset: usize,
-    batch: usize,
-    heads: usize,
-    seq_len: usize,
-    head_dim: usize,
-    rot_dim: usize,
-    cache_rows: usize,
-    is_neox: bool,
-    output: &Buffer,
-) -> Result<(), MetalKernelError> {
-    call_rotary_q(
-        device, ep, kernels, ty, src, cos, sin, src_offset, cos_offset, sin_offset, batch, heads,
-        seq_len, head_dim, rot_dim, cache_rows, is_neox, output,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn call_rotary_q(
     device: &Device,
     ep: impl EncoderProvider,
