@@ -6,7 +6,8 @@ sidebar:
 ---
 ## `LayoutDetection`
 
-One region, in reading order; `box` is x1, y1, x2, y2 in source-image pixels.
+One region, in reading order; `box` is x1, y1, x2, y2 and `polygon` its outline's (x, y) vertices, in
+source-image pixels (the box's corners when the mask gives no outline).
 
 | Field | Type |
 | --- | --- |
@@ -14,6 +15,7 @@ One region, in reading order; `box` is x1, y1, x2, y2 in source-image pixels.
 | `label` | `str` |
 | `score` | `float` |
 | `box` | `tuple` |
+| `polygon` | `tuple` |
 
 
 ## `LayoutImage`

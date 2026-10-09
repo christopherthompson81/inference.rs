@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 21
+#define INFERENCE_ABI_VERSION_PATCH 22
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -152,6 +152,10 @@ INFERENCE_API size_t inference_layout_result_count(const inference_layout_result
 INFERENCE_API inference_status inference_layout_result_detection(const inference_layout_result *result, size_t index,
                                                                 int32_t *out_class_id, const char **out_label,
                                                                 float *out_score, float *out_bbox);
+/* The region's outline from its mask: *out_count (four or more) vertices as x, y float pairs in source-image pixels, the
+ * box's corners when the mask gives no polygon. *out_points is borrowed until inference_layout_result_free(result). */
+INFERENCE_API inference_status inference_layout_result_polygon(const inference_layout_result *result, size_t index,
+                                                              const float **out_points, size_t *out_count);
 
 /* Engine: a loaded model serving OpenAI-style requests. Requests and responses are the JSON the HTTP server accepts and
  * returns (e.g. POST /v1/chat/completions bodies). Engine calls block; they must not be made from inside a tokio

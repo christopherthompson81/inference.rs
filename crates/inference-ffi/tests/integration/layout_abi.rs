@@ -143,6 +143,10 @@ fn null_handles_are_safe() {
             ),
             INFERENCE_ERR_INVALID_ARGUMENT
         );
+        assert_eq!(
+            inference_layout_result_polygon(null(), 0, null_mut(), null_mut()),
+            INFERENCE_ERR_INVALID_ARGUMENT
+        );
     }
 }
 
@@ -168,6 +172,7 @@ struct Detection {
     label: String,
     score: f32,
     bbox: [f32; 4],
+    polygon: Vec<[f32; 2]>,
 }
 
 unsafe fn collect(result: *const inference_layout_result) -> Vec<Detection> {
@@ -179,6 +184,7 @@ unsafe fn collect(result: *const inference_layout_result) -> Vec<Detection> {
                     label: String::new(),
                     score: 0.,
                     bbox: [0.; 4],
+                    polygon: Vec::new(),
                 };
                 let mut label: *const c_char = null();
                 let st = inference_layout_result_detection(
@@ -191,6 +197,12 @@ unsafe fn collect(result: *const inference_layout_result) -> Vec<Detection> {
                 );
                 assert_eq!(st, INFERENCE_OK);
                 d.label = CStr::from_ptr(label).to_str().unwrap().to_string();
+                let (mut points, mut count): (*const f32, usize) = (null(), 0);
+                assert_eq!(
+                    inference_layout_result_polygon(result, i, &mut points, &mut count),
+                    INFERENCE_OK
+                );
+                d.polygon = std::slice::from_raw_parts(points.cast::<[f32; 2]>(), count).to_vec();
                 d
             })
             .collect()
@@ -264,6 +276,13 @@ fn detections_through_the_abi() {
         assert!(!base.is_empty());
         for d in &base {
             assert!(d.score >= 0.5 && d.bbox[0] < d.bbox[2] && d.bbox[1] < d.bbox[3]);
+            // the box's corners at the least, every vertex a finite pixel coordinate
+            assert!(d.polygon.len() >= 4, "{:?}", d.polygon);
+            assert!(
+                d.polygon.iter().flatten().all(|v| v.is_finite()),
+                "{:?}",
+                d.polygon
+            );
         }
 
         // BGRA with row padding must give the same detections as tight RGB

@@ -78,7 +78,7 @@ out = POINTER(c_void_p)
 buffer = (c_char_p, c_size_t)
 
 # BEGIN GENERATED from inference.h by bindings/scripts/generate_native.py
-ABI_VERSION = (0 << 16) | (0 << 8) | 21
+ABI_VERSION = (0 << 16) | (0 << 8) | 22
 
 # name: (restype, argtypes)
 SIGNATURES = {
@@ -98,6 +98,7 @@ SIGNATURES = {
         status,
         (c_void_p, c_size_t, POINTER(c_int32), out, POINTER(c_float), POINTER(c_float)),
     ),
+    "inference_layout_result_polygon": (status, (c_void_p, c_size_t, out, POINTER(c_size_t))),
     "inference_engine_load": (status, (*buffer, out)),
     "inference_engine_free": (None, (c_void_p,)),
     "inference_engine_for_owner": (status, (c_void_p, *buffer, out)),

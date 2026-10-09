@@ -3,6 +3,7 @@ pub mod config;
 mod decoder;
 mod encoder;
 mod model;
+pub mod outline;
 pub mod postprocess;
 pub mod preprocess;
 
@@ -153,11 +154,12 @@ impl PPDocLayoutV3Detector {
             .par_iter()
             .map(|im| self.preprocessor.preprocess(im, &self.device))
             .collect::<Result<Vec<_>>>()?;
-        let out = self.model.forward(&Tensor::stack(&pixels, 0)?, false)?;
+        let out = self.model.forward(&Tensor::stack(&pixels, 0)?, true)?;
         // one host transfer per output instead of one per image
         let logits = out.logits.to_device(&Device::Cpu)?;
         let boxes = out.pred_boxes.to_device(&Device::Cpu)?;
         let order = out.order_logits.to_device(&Device::Cpu)?;
+        let masks = out.masks.expect("forward was asked for masks");
         images
             .iter()
             .enumerate()
@@ -167,8 +169,52 @@ impl PPDocLayoutV3Detector {
                     labels: &self.labels,
                     orig_size: im.dimensions(),
                 };
-                postprocess::postprocess(&logits.get(i)?, &boxes.get(i)?, &order.get(i)?, &args)
+                let mut dets = postprocess::postprocess(
+                    &logits.get(i)?,
+                    &boxes.get(i)?,
+                    &order.get(i)?,
+                    &args,
+                )?;
+                self.add_outlines(&mut dets, &masks.get(i)?, im.dimensions(), threshold)?;
+                Ok(dets)
             })
             .collect()
+    }
+
+    // Only the kept queries' masks leave the device; each outline is traced at its box's size in original pixels
+    fn add_outlines(
+        &self,
+        dets: &mut [LayoutDetection],
+        masks: &Tensor,
+        (width, height): (u32, u32),
+        threshold: f32,
+    ) -> Result<()> {
+        if dets.is_empty() {
+            return Ok(());
+        }
+        let (_, mask_h, mask_w) = masks.dims3()?;
+        let queries: Vec<u32> = dets.iter().map(|d| d.query as u32).collect();
+        let kept = masks
+            .index_select(&Tensor::new(queries.as_slice(), masks.device())?, 0)?
+            .to_dtype(DType::F32)?
+            .to_device(&Device::Cpu)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        // as transformers computes it from a target_sizes tensor: size * (1 / target) in f32, not size / target
+        let scale = (
+            (1. / width as f32) * self.preprocessor.width as f32,
+            (1. / height as f32) * self.preprocessor.height as f32,
+        );
+        dets.par_iter_mut()
+            .zip(kept.par_chunks(mask_h * mask_w))
+            .for_each(|(det, logits)| {
+                let mask = outline::MaskView {
+                    logits,
+                    height: mask_h,
+                    width: mask_w,
+                };
+                det.polygon = outline::region_outline(&mask, det.bbox, scale, threshold);
+            });
+        Ok(())
     }
 }

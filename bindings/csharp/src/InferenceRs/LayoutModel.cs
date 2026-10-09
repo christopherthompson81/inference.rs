@@ -8,7 +8,9 @@ public sealed record Backend(string? Name = null, int Device = 0, int Threads = 
 
 /// <summary>One detected layout region, in reading order.</summary>
 /// <param name="Box">x1, y1, x2, y2 in source-image pixels.</param>
-public sealed record LayoutDetection(int ClassId, string Label, float Score, float[] Box);
+/// <param name="Polygon">The region's outline as (x, y) vertices in source-image pixels; the box's corners when the
+/// mask gives no outline.</param>
+public sealed record LayoutDetection(int ClassId, string Label, float Score, float[] Box, (float X, float Y)[] Polygon);
 
 /// <summary>An 8-bit image in caller memory, copied during detection.</summary>
 /// <param name="Stride">Bytes per row; 0 means tightly packed.</param>
@@ -116,7 +118,16 @@ public sealed unsafe class LayoutModel : IDisposable
                 var status = NativeMethods.inference_layout_result_detection(
                     result, (nuint)index, out var classId, out var label, out var score, outBox);
                 InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_layout_result_detection));
-                detections[index] = new LayoutDetection(classId, Utf8.ToString(label), score, box);
+                status = NativeMethods.inference_layout_result_polygon(
+                    result, (nuint)index, out var points, out var pointCount);
+                InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_layout_result_polygon));
+                var polygon = new (float X, float Y)[(int)pointCount];
+                var coordinates = (float*)points;
+                for (var vertex = 0; vertex < polygon.Length; vertex++)
+                {
+                    polygon[vertex] = (coordinates[2 * vertex], coordinates[2 * vertex + 1]);
+                }
+                detections[index] = new LayoutDetection(classId, Utf8.ToString(label), score, box, polygon);
             }
         }
         return detections;

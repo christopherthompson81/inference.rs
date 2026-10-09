@@ -343,3 +343,29 @@ pub unsafe extern "C" fn inference_layout_result_detection(
         })
     }
 }
+
+/// Safety: `result` is a live handle; each out-pointer is NULL or valid.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_layout_result_polygon(
+    result: *const inference_layout_result,
+    index: usize,
+    out_points: *mut *const f32,
+    out_count: *mut usize,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            let result = result
+                .as_ref()
+                .ok_or_else(|| Failure::invalid("result is NULL"))?;
+            let d = result.detections.get(index).ok_or_else(|| {
+                Failure::new(
+                    INFERENCE_ERR_OUT_OF_RANGE,
+                    format!("detection {index} of {}", result.detections.len()),
+                )
+            })?;
+            write_opt(out_points, d.polygon.as_ptr().cast::<f32>());
+            write_opt(out_count, d.polygon.len());
+            Ok(())
+        })
+    }
+}

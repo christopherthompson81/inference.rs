@@ -54,12 +54,14 @@ class LayoutImage:
 
 @dataclass(frozen=True)
 class LayoutDetection:
-    """One region, in reading order; `box` is x1, y1, x2, y2 in source-image pixels."""
+    """One region, in reading order; `box` is x1, y1, x2, y2 and `polygon` its outline's (x, y) vertices, in
+    source-image pixels (the box's corners when the mask gives no outline)."""
 
     class_id: int
     label: str
     score: float
     box: tuple
+    polygon: tuple
 
 
 class LayoutModel:
@@ -150,7 +152,15 @@ class LayoutModel:
                 ),
                 "inference_layout_result_detection",
             )
-            detections.append(LayoutDetection(class_id.value, borrowed(label), score.value, tuple(box)))
+            points = ctypes.c_void_p()
+            count = ctypes.c_size_t()
+            check(
+                lib.inference_layout_result_polygon(result, index, ctypes.byref(points), ctypes.byref(count)),
+                "inference_layout_result_polygon",
+            )
+            flat = ctypes.cast(points, ctypes.POINTER(ctypes.c_float))[: 2 * count.value]
+            polygon = tuple((flat[i], flat[i + 1]) for i in range(0, len(flat), 2))
+            detections.append(LayoutDetection(class_id.value, borrowed(label), score.value, tuple(box), polygon))
         return detections
 
     def close(self):
