@@ -101,3 +101,35 @@ Raw:
 
 Prefill now beats mainline; decode is half of it. Decode runs mmq tiles for one token per step, where mainline has
 indexed mmvq (`mul_mat_vec_q` with ids) for these types. Next for decode: an indexed mmvq for raw types.
+
+## Run 5 - 2026-10-08 17:42
+
+Question: with an expert-indexed matvec for raw experts in decode (in place of grouped mmq for one token), does decode
+reach mainline's `mul_mat_vec_q` with ids, and does it still match?
+
+Change: every mmvq type (the ggml block types in `mmvq_gguf.cu`, ik's row types through `mmvq_rows.cuh`) gets a
+`launch_mmvq_gguf_<type>_moe` launcher: `blockIdx.y` is a routed (token, expert) pair, which reads its expert's matrix at
+`id * expert_stride` bytes and activation row `pair / y_div`. Gate and up of one type run in one pass with the GLU
+activation fused and write F32; the result is quantized to Q8_1 and down runs per pair, then the existing weighted
+reduce sums each token's pairs. `forward_cuda` takes it for raw experts at 8 tokens or fewer (single decode and MTP
+verify), keeping grouped mmq past that and for gate/up of different types.
+
+Commands: `target/debug/inference bench --format gguf -m /mnt/data/models -f Qwen3.6-35B-A3B-UD-IQ4_XS.gguf
+--prompt-len 512 --gen-len 128` with the master binary, then this branch; `llama-bench -p 512 -n 128 -ngl 99 -fa 1`
+from the reference build, on the same file (now unsloth's MTP build of the checkpoint).
+
+Raw:
+
+| | prefill 512 tok/s | decode tok/s |
+|---|---|---|
+| master (grouped mmq decode) | 3569 | 104.2 |
+| indexed mmvq decode | 3650 | 158.5 |
+| mainline llama.cpp | 3418 | 146.3 |
+
+Master's decode was 75.4 in Run 4; the file changed since (the MTP build) and so did master, so the before figure is
+re-measured here rather than taken from Run 4. Test: the indexed matvec over every type it reads (the 24 raw types and
+Candle's ten; gate/up/down stacks, one and three tokens, top-2, an IQ3_KT/IQ4_KT down row of 1408 with its tail block)
+matches the dequantized experts at cosine > 0.999. The real-checkpoint MoE MTP test (greedy output
+with drafts equals plain decode) and the IQ4_XS greedy continuation against llama.cpp still pass.
+
+Decode is now 8% ahead of mainline on this checkpoint, prefill 7% ahead.

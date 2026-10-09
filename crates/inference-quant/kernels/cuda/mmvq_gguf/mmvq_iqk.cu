@@ -1205,6 +1205,7 @@ struct iqk_iq2_kl {
   MMVQ_ROWS_LAUNCHER(tag, iqk_##tag, bf16, __nv_bfloat16) \
   MMVQ_ROWS_LAUNCHER(tag, iqk_##tag, f16, half)           \
   MMVQ_ROWS_LAUNCHER(tag, iqk_##tag, f32, float)          \
+  MMVQ_ROWS_MOE_LAUNCHER(tag, iqk_##tag)                  \
   dequantize(tag, bf16, __nv_bfloat16)                    \
   dequantize(tag, f16, half)                              \
   dequantize(tag, f32, float)

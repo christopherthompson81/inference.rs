@@ -85,6 +85,26 @@ macro_rules! declare_dequantize {
     )*};
 }
 
+macro_rules! declare_mmvq_moe {
+    ($($fn_name:ident),* $(,)?) => {$(
+        pub fn $fn_name(
+            vx_gate: *const c_void,
+            vx_up: *const c_void,
+            expert_stride: i64,
+            vy: *const c_void,
+            ids: *const c_void,
+            dst: *mut f32,
+            ncols_x: i32,
+            nrows_x: i32,
+            stride_col_y: i32,
+            y_div: i32,
+            n_pairs: i32,
+            activation: i32,
+            stream: *mut c_void,
+        );
+    )*};
+}
+
 macro_rules! declare_mmq_moe {
     ($($fn_name:ident),* $(,)?) => {$(
         pub fn $fn_name(
@@ -1552,6 +1572,42 @@ unsafe extern "C" {
         warp_size: i32,
         type_dst: i32,
         stream: *mut c_void,
+    );
+    declare_mmvq_moe!(
+        launch_mmvq_gguf_q4_0_moe,
+        launch_mmvq_gguf_q4_1_moe,
+        launch_mmvq_gguf_q5_0_moe,
+        launch_mmvq_gguf_q5_1_moe,
+        launch_mmvq_gguf_q8_0_moe,
+        launch_mmvq_gguf_q2_k_moe,
+        launch_mmvq_gguf_q3_k_moe,
+        launch_mmvq_gguf_q4_k_moe,
+        launch_mmvq_gguf_q5_k_moe,
+        launch_mmvq_gguf_q6_k_moe,
+        launch_mmvq_gguf_iq4_nl_moe,
+        launch_mmvq_gguf_iq4_xs_moe,
+        launch_mmvq_gguf_iq2_xxs_moe,
+        launch_mmvq_gguf_iq2_xs_moe,
+        launch_mmvq_gguf_iq2_s_moe,
+        launch_mmvq_gguf_iq3_xxs_moe,
+        launch_mmvq_gguf_iq3_s_moe,
+        launch_mmvq_gguf_iq1_s_moe,
+        launch_mmvq_gguf_iq1_m_moe,
+        launch_mmvq_gguf_iq1_kt_moe,
+        launch_mmvq_gguf_iq2_kt_moe,
+        launch_mmvq_gguf_iq3_kt_moe,
+        launch_mmvq_gguf_iq4_kt_moe,
+        launch_mmvq_gguf_iq2_k_moe,
+        launch_mmvq_gguf_iq3_k_moe,
+        launch_mmvq_gguf_iq4_k_moe,
+        launch_mmvq_gguf_iq5_k_moe,
+        launch_mmvq_gguf_iq6_k_moe,
+        launch_mmvq_gguf_iq4_ks_moe,
+        launch_mmvq_gguf_iq2_ks_moe,
+        launch_mmvq_gguf_iq4_kss_moe,
+        launch_mmvq_gguf_iq5_ks_moe,
+        launch_mmvq_gguf_iq3_ks_moe,
+        launch_mmvq_gguf_iq2_kl_moe,
     );
     declare_mmq_moe!(
         launch_mmq_gguf_q4_0_moe,

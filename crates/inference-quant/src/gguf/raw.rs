@@ -883,6 +883,119 @@ mod tests {
         Ok(())
     }
 
+    // MoE decode runs the expert-indexed matvec: every type it reads, and a trellis down row with a tail block
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn indexed_mmvq_matches_the_dequantized_experts() -> Result<()> {
+        use super::super::kernel::KernelWeight;
+        use inference_tensor::quantized::{GgmlDType, QTensor};
+        const EXPERTS: usize = 4;
+        const HIDDEN: usize = 512;
+        const INTERMEDIATE: usize = 256;
+        // 5 whole 256-element blocks and a 128-element tail
+        const TAIL_INTERMEDIATE: usize = 1408;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let routes: [&[[u32; 2]]; 2] = [&[[2, 0]], &[[3, 2], [1, 1], [0, 3]]];
+        let check = |label: String, w: [&dyn KernelWeight; 3], dense: [Tensor; 3]| -> Result<()> {
+            assert!(
+                super::super::fast_mmvq::supports_moe(w[0], w[1], w[2]),
+                "{label}"
+            );
+            for ids in routes {
+                let (tokens, k) = (ids.len(), ids[0].len());
+                let indices = Tensor::from_iter(ids.iter().flatten().copied(), &cuda)?
+                    .reshape((tokens, k))?;
+                let xs =
+                    Tensor::randn(0f32, 1f32, (tokens, HIDDEN), &cuda)?.to_dtype(DType::BF16)?;
+                let actual = super::super::fast_mmvq::moe_decode(
+                    w[0],
+                    w[1],
+                    w[2],
+                    &xs,
+                    &indices,
+                    k,
+                    crate::GluActivationType::Silu,
+                )?
+                .to_device(&Device::Cpu)?;
+                let xs = xs.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
+                let mut expected = Vec::new();
+                for (t, row) in ids.iter().enumerate() {
+                    let x = xs.get(t)?.unsqueeze(1)?;
+                    for &e in row {
+                        let project = |m: &Tensor, v: &Tensor| m.get(e as usize)?.matmul(v);
+                        let activated =
+                            (project(&dense[0], &x)?.silu()? * project(&dense[1], &x)?)?;
+                        expected.push(project(&dense[2], &activated)?.squeeze(1)?);
+                    }
+                }
+                let similarity = cosine(&actual, &Tensor::stack(&expected, 0)?)?;
+                assert!(
+                    similarity > 0.999,
+                    "{label} {tokens} tokens: cosine {similarity}"
+                );
+            }
+            Ok(())
+        };
+        for ty in GgufType::RAW_BLOCKS {
+            let intermediate = if ty.row_bytes(TAIL_INTERMEDIATE).is_some() && ty.is_trellis() {
+                TAIL_INTERMEDIATE
+            } else {
+                INTERMEDIATE
+            };
+            let stack = |rows, cols, seed| {
+                RawGgufTensor::new(
+                    ty,
+                    &[EXPERTS, rows, cols],
+                    random_rows(ty, EXPERTS * rows, cols, seed),
+                    &cuda,
+                )
+            };
+            let w = [
+                stack(intermediate, HIDDEN, 23)?,
+                stack(intermediate, HIDDEN, 29)?,
+                stack(HIDDEN, intermediate, 31)?,
+            ];
+            let dense = [0, 1, 2].map(|i| w[i].dequantize(&Device::Cpu));
+            let [g, u, d] = dense;
+            check(
+                format!("{ty:?} x{intermediate}"),
+                [&w[0], &w[1], &w[2]],
+                [g?, u?, d?],
+            )?;
+        }
+        for dtype in [
+            GgmlDType::Q4_0,
+            GgmlDType::Q4_1,
+            GgmlDType::Q5_0,
+            GgmlDType::Q5_1,
+            GgmlDType::Q8_0,
+            GgmlDType::Q2K,
+            GgmlDType::Q3K,
+            GgmlDType::Q4K,
+            GgmlDType::Q5K,
+            GgmlDType::Q6K,
+        ] {
+            let stack = |rows, cols| -> Result<QTensor> {
+                QTensor::quantize(
+                    &Tensor::randn(0f32, 1f32, (EXPERTS, rows, cols), &cuda)?,
+                    dtype,
+                )
+            };
+            let w = [
+                stack(INTERMEDIATE, HIDDEN)?,
+                stack(INTERMEDIATE, HIDDEN)?,
+                stack(HIDDEN, INTERMEDIATE)?,
+            ];
+            let dense = [0, 1, 2].map(|i| w[i].dequantize(&Device::Cpu));
+            let [g, u, d] = dense;
+            check(format!("{dtype:?}"), [&w[0], &w[1], &w[2]], [g?, u?, d?])?;
+        }
+        Ok(())
+    }
+
     // A host dequant in an embedding lookup breaks the decode CUDA graph, so every raw type needs a GPU dequantizer
     #[cfg(feature = "cuda")]
     #[test]

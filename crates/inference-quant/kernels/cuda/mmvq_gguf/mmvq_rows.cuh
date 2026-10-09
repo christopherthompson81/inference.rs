@@ -4,6 +4,7 @@
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
 #include <stdint.h>
+#include "../glu_activation.cuh"
 
 #define WARP_SIZE 32
 #define QK_K 256
@@ -12,6 +13,8 @@
 #define MMVQ_ROWS_VDR 4
 // ik_llama.cpp tail sub-blocks after a row's whole blocks
 #define KT_TAIL_BLOCK 32
+#define MMVQ_ROWS_NWARPS_MOE 4
+#define MMVQ_ROWS_PER_BLOCK_MOE 2
 
 typedef struct {
   half2 ds;
@@ -154,4 +157,121 @@ static void launch_mmvq_rows(const void *vx, const void *vy, void *dst, int ncol
                                                             int stride_col_dst, int b_size, void *stream) {   \
     launch_mmvq_rows<traits, dst_c_type>(vx, vy, dst, ncols_x, nrows_x, stride_col_y, stride_col_dst, b_size,    \
                                          stream);                                                              \
+  }
+
+// Expert-indexed form for MoE decode, as mmvq_moe_impl in mmvq_gguf.cu: blockIdx.y is a routed pair
+template <typename kt, bool glu>
+static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
+    mmvq_rows_moe_kernel(const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,
+                         const void *__restrict__ vy, const uint32_t *__restrict__ ids, float *__restrict__ dst,
+                         const int ncols_x, const int nrows_x, const int stride_col_y, const int y_div,
+                         const int activation) {
+  constexpr int qk = QK_K;
+  constexpr int qi = QI4_XS;
+  constexpr int vdr = MMVQ_ROWS_VDR;
+  constexpr int nwarps = MMVQ_ROWS_NWARPS_MOE;
+  constexpr int rows_per_cuda_block = MMVQ_ROWS_PER_BLOCK_MOE;
+  constexpr int nsums = glu ? 2 : 1;
+
+  const int pair = blockIdx.y;
+  const int64_t expert_offset = (int64_t)ids[pair] * expert_stride;
+  const char *vx[nsums];
+  vx[0] = (const char *)vx_gate + expert_offset;
+  if constexpr (glu) {
+    vx[1] = (const char *)vx_up + expert_offset;
+  }
+  const block_q8_1 *y = (const block_q8_1 *)vy + (int64_t)(pair / y_div) * stride_col_y;
+  dst += (int64_t)pair * nrows_x;
+
+  const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
+  const int row0 = rows_per_cuda_block * blockIdx.x;
+  const int blocks_per_row_x = ncols_x / qk;
+  constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
+  const int64_t row_size = kt::row_size(ncols_x);
+
+  float tmp[nsums][rows_per_cuda_block] = {{0.0f}};
+
+  int kbx = tid / (qi / vdr);
+  for (; kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+    const int kby = kbx * (qk / QK8_1);
+    const int kqs = vdr * (tid % (qi / vdr));
+#pragma unroll
+    for (int i = 0; i < rows_per_cuda_block; ++i) {
+      if (row0 + i < nrows_x) {
+#pragma unroll
+        for (int s = 0; s < nsums; ++s) {
+          kt::vec_dot(vx[s] + (row0 + i) * row_size, &y[kby], kbx, kqs, &tmp[s][i]);
+        }
+      }
+    }
+  }
+  if constexpr (kt::has_tail) {
+    const int nt = (ncols_x % qk) / KT_TAIL_BLOCK;
+    if (nt > 0 && kbx == blocks_per_row_x) {
+      const int kby = kbx * (qk / QK8_1);
+      const int kqs = vdr * (tid % (qi / vdr));
+#pragma unroll
+      for (int i = 0; i < rows_per_cuda_block; ++i) {
+        if (row0 + i < nrows_x) {
+#pragma unroll
+          for (int s = 0; s < nsums; ++s) {
+            kt::vec_dot_tail(vx[s] + (row0 + i) * row_size, &y[kby], kbx, kqs, nt, &tmp[s][i]);
+          }
+        }
+      }
+    }
+  }
+
+  __shared__ float tmp_shared[nwarps - 1 > 0 ? nwarps - 1 : 1][nsums][rows_per_cuda_block][WARP_SIZE];
+  if (threadIdx.y > 0) {
+#pragma unroll
+    for (int s = 0; s < nsums; ++s) {
+#pragma unroll
+      for (int i = 0; i < rows_per_cuda_block; ++i) {
+        tmp_shared[threadIdx.y - 1][s][i][threadIdx.x] = tmp[s][i];
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.y > 0) {
+    return;
+  }
+#pragma unroll
+  for (int s = 0; s < nsums; ++s) {
+#pragma unroll
+    for (int i = 0; i < rows_per_cuda_block; ++i) {
+#pragma unroll
+      for (int l = 0; l < nwarps - 1; ++l) {
+        tmp[s][i] += tmp_shared[l][s][i][threadIdx.x];
+      }
+      tmp[s][i] = warp_reduce_sum(tmp[s][i]);
+    }
+  }
+  if (threadIdx.x < rows_per_cuda_block && row0 + threadIdx.x < nrows_x) {
+    float out = tmp[0][threadIdx.x];
+    if constexpr (glu) {
+      out = apply_glu_activation(out, activation) * tmp[nsums - 1][threadIdx.x];
+    }
+    dst[row0 + threadIdx.x] = out;
+  }
+}
+
+// A null vx_up runs the plain projection; otherwise gate and up fuse with the activation.
+#define MMVQ_ROWS_MOE_LAUNCHER(tag, traits)                                                                      \
+  extern "C" void launch_mmvq_gguf_##tag##_moe(const void *vx_gate, const void *vx_up, int64_t expert_stride,  \
+                                               const void *vy, const void *ids, float *dst, int ncols_x,       \
+                                               int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
+                                               int activation, void *stream) {                                 \
+    const dim3 grid((nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE, n_pairs, 1);            \
+    const dim3 block(WARP_SIZE, MMVQ_ROWS_NWARPS_MOE, 1);                                                      \
+    cudaStream_t s = static_cast<cudaStream_t>(stream);                                                        \
+    if (vx_up) {                                                                                               \
+      mmvq_rows_moe_kernel<traits, true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,             \
+                                                               (const uint32_t *)ids, dst, ncols_x, nrows_x,  \
+                                                               stride_col_y, y_div, activation);              \
+    } else {                                                                                                   \
+      mmvq_rows_moe_kernel<traits, false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,            \
+                                                                (const uint32_t *)ids, dst, ncols_x, nrows_x, \
+                                                                stride_col_y, y_div, activation);             \
+    }                                                                                                          \
   }

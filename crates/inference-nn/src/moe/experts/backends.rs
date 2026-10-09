@@ -21,6 +21,9 @@ use super::forward::{MoEForward, MoEForwardConfig};
 
 #[cfg(feature = "cuda")]
 const GROUPED_PREFILL_MIN_TOKENS: usize = 32;
+// Past this many tokens grouped mmq, which reads each routed expert once, beats a matvec per routed pair
+#[cfg(feature = "cuda")]
+const INDEXED_MMVQ_MAX_TOKENS: usize = 8;
 
 /// Canonical stacked expert weights, ENK [E, N, K] = [E, out, in]. The raw backends (Fused,
 /// Cutile) hold exactly this; nothing else stores a layout.
@@ -1282,10 +1285,18 @@ impl FastExpertsWeights {
                 .forward_decode(forward, config)
                 .map_err(|err| err.context("moe experts fast decode"))?
             {
-                // The indexed decode kernels take Candle's types only; grouped mmq reads raw experts on the device
-                None if self.has_raw_kernel_experts() => self
-                    .forward_grouped(forward, config)
-                    .map_err(|err| err.context("moe experts fast grouped decode")),
+                // The fused decode kernels take Candle's types only; raw experts run the expert-indexed matvec
+                None if self.has_raw_kernel_experts() => {
+                    match self
+                        .forward_indexed_mmvq(forward, config)
+                        .map_err(|err| err.context("moe experts indexed mmvq decode"))?
+                    {
+                        Some(decoded) => Ok(Some(decoded)),
+                        None => self
+                            .forward_grouped(forward, config)
+                            .map_err(|err| err.context("moe experts fast grouped decode")),
+                    }
+                }
                 decoded => Ok(decoded),
             },
             Some(MoECudaFastPath::GroupedPrefill) => self
@@ -1607,6 +1618,42 @@ impl FastExpertsWeights {
         Ok(Some(result.to_dtype(forward.original_dtype)?))
     }
 
+    /// Expert-indexed matvec decode over raw experts. Returns Ok(None) to fall back to grouped mmq.
+    #[cfg(feature = "cuda")]
+    fn forward_indexed_mmvq(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        let (Some(gate), Some(up), Some(down)) = (
+            self.fused_gate_proj.kernel_weight(),
+            self.fused_up_proj.kernel_weight(),
+            self.fused_down_proj.kernel_weight(),
+        ) else {
+            return Ok(None);
+        };
+        let Some(activation) = glu_activation(config.act) else {
+            return Ok(None);
+        };
+        if forward.lora.is_some()
+            || forward.shape.num_tokens > INDEXED_MMVQ_MAX_TOKENS
+            || !inference_quant::supports_indexed_moe_mmvq(gate, up, down)
+        {
+            return Ok(None);
+        }
+        let routed = inference_quant::indexed_moe_mmvq(
+            gate,
+            up,
+            down,
+            forward.xs_flat,
+            forward.topk_ids,
+            config.num_experts_per_tok,
+            activation,
+        )?;
+        let out = weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
+        Ok(Some(out.to_dtype(forward.original_dtype)?))
+    }
+
     /// Grouped MoE forward for CUDA prefill. Returns Ok(Some) on success, Ok(None) to fall back.
     #[cfg(feature = "cuda")]
     pub(super) fn forward_grouped(
@@ -1714,33 +1761,9 @@ impl FastExpertsWeights {
             None
         };
 
-        let glu_activation = match config.act {
-            Activation::Silu | Activation::Swish => Some(inference_quant::GluActivationType::Silu),
-            Activation::NewGelu | Activation::GeluPytorchTanh => {
-                Some(inference_quant::GluActivationType::Gelu)
-            }
-            Activation::Gelu => Some(inference_quant::GluActivationType::GeluErf),
-            Activation::Relu => Some(inference_quant::GluActivationType::Relu),
-            _ => None,
-        };
+        let glu_activation = glu_activation(config.act);
 
         let down = if let (Some(glu_activation), None) = (glu_activation, &lora_activated) {
-            use inference_tensor::cuda::cudarc::driver::DevicePtr;
-            let tw_f32 = forward
-                .topk_weights
-                .flatten_all()?
-                .to_dtype(DType::F32)?
-                .contiguous()?;
-            let (tw_storage, tw_layout) = tw_f32.storage_and_layout();
-            let tw_cuda = match &*tw_storage {
-                inference_tensor::Storage::Cuda(c) => c,
-                _ => return Ok(None),
-            };
-            let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
-            let tw_ptr = tw_slice
-                .slice(tw_layout.start_offset()..)
-                .device_ptr(tw_slice.stream())
-                .0 as *const f32;
             let down_assignments = match &gate_up {
                 GroupedGateUp::Packed(gate_up) => inference_quant::grouped_moe_mmq_from_glu_packed(
                     down_qt,
@@ -1768,27 +1791,7 @@ impl FastExpertsWeights {
                     dev,
                 )?,
             };
-            if forward.original_dtype == DType::BF16 {
-                unsafe {
-                    inference_quant::moe_weighted_reduce_flat_bf16(
-                        &down_assignments,
-                        tw_ptr,
-                        forward.shape.num_tokens,
-                        topk,
-                        dev,
-                    )?
-                }
-            } else {
-                unsafe {
-                    inference_quant::moe_weighted_reduce_flat(
-                        &down_assignments,
-                        tw_ptr,
-                        forward.shape.num_tokens,
-                        topk,
-                        dev,
-                    )?
-                }
-            }
+            weighted_reduce_f32(forward, &down_assignments, topk)?
         } else {
             // LoRA's down delta and activations with no fused GLU kernel take the activated rows explicitly
             let activated = match lora_activated {
@@ -1843,6 +1846,48 @@ impl FastExpertsWeights {
             Ok(Some(down))
         } else {
             Ok(Some(down.to_dtype(forward.original_dtype)?))
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn glu_activation(act: Activation) -> Option<inference_quant::GluActivationType> {
+    match act {
+        Activation::Silu | Activation::Swish => Some(inference_quant::GluActivationType::Silu),
+        Activation::NewGelu | Activation::GeluPytorchTanh => {
+            Some(inference_quant::GluActivationType::Gelu)
+        }
+        Activation::Gelu => Some(inference_quant::GluActivationType::GeluErf),
+        Activation::Relu => Some(inference_quant::GluActivationType::Relu),
+        _ => None,
+    }
+}
+
+// Sums each token's routed rows (F32, `[tokens * topk, hidden]`) by its router weights, in BF16 for a BF16 model
+#[cfg(feature = "cuda")]
+fn weighted_reduce_f32(forward: &MoEForward, routed: &Tensor, topk: usize) -> Result<Tensor> {
+    use inference_tensor::cuda::cudarc::driver::DevicePtr;
+    let dev = forward.xs_flat.device().as_cuda_device()?;
+    let tw_f32 = forward
+        .topk_weights
+        .flatten_all()?
+        .to_dtype(DType::F32)?
+        .contiguous()?;
+    let (tw_storage, tw_layout) = tw_f32.storage_and_layout();
+    let inference_tensor::Storage::Cuda(tw_cuda) = &*tw_storage else {
+        inference_tensor::bail!("moe router weights must live on CUDA");
+    };
+    let tw_slice = tw_cuda.as_cuda_slice::<f32>()?;
+    let tw_view = tw_slice.slice(tw_layout.start_offset()..);
+    let (tw_ptr, _tw_guard) = tw_view.device_ptr(tw_slice.stream());
+    let tw_ptr = tw_ptr as *const f32;
+    let tokens = forward.shape.num_tokens;
+    // SAFETY: tw_ptr covers tokens * topk router weights, kept alive by tw_f32 for the launch
+    unsafe {
+        if forward.original_dtype == DType::BF16 {
+            inference_quant::moe_weighted_reduce_flat_bf16(routed, tw_ptr, tokens, topk, dev)
+        } else {
+            inference_quant::moe_weighted_reduce_flat(routed, tw_ptr, tokens, topk, dev)
         }
     }
 }
