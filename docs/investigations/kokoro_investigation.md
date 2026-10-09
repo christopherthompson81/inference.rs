@@ -254,3 +254,78 @@ Test additions:
 Finding:
 - 8/8 tests pass (Kokoro, speech crate, gguf_file).
 - The real Q8_0 GGUF in auto mode still detects through the peek (audio.cpp writes `general.architecture` first), and its output is byte-identical to the earlier run.
+
+## Run 11 - 2026-10-09 11:44
+
+Question: where does CPU synthesis time go now (sentence case: 3.25 s, against torch's 1.23 s on 8 threads)?
+
+Command: temporary `eprintln!` stage timers (not committed); `kokoro_parity --cpu` on the four dumps.
+
+Finding (sentence case, 4.4 s of audio, CPU dev profile, 8 threads):
+
+| part | time |
+|---|---|
+| pre-decoder (ALBERT, BiLSTMs, predictor, text encoder) | 0.54 s |
+| decoder AdaIN blocks | about 0.2 s |
+| generator stage 0 | 0.75 s |
+| generator stage 1 | 1.58 s |
+| STFT + iSTFT | 0.16 s |
+
+My first reading of the timers blamed the spectral head (0.87 s). That was wrong: the timer was cumulative, and the iSTFT itself is 73 ms.
+
+Micro-benchmarks on one stage-1 activation (128 ch x 21240):
+- conv k3: 20 ms; k7 d3: 44 ms; k11 d5: 66 ms. That totals about 1.2 s over stage 1's 24 convs.
+- AdaIN + Snake as tensor ops: 15.5 ms, about 0.37 s over the stage.
+- torch's conv k11 d5 on the same shape: 23 ms.
+
+The GEMM is the limit:
+- `gemm` 0.19 reaches 160-190 GFLOPS on 8 threads and 47-52 GFLOPS on 1 thread.
+- torch (MKL) reaches 420 GFLOPS on 8 threads and 98 on 1.
+- The i7-10700K's AVX2 FMA peak is about 150 GFLOPS per core.
+
+Dead ends:
+- A conv1d as one GEMM per tap over a padded input, with no im2col buffer: 61 ms against 56 ms for k11. im2col was not the bottleneck. Reverted.
+- `codegen-units=1` for the gemm crates: no change (45-47 GFLOPS per core).
+
+## Run 12 - 2026-10-09 11:53
+
+Change, CPU only:
+- AdaIN fused with its activation, Snake or leaky ReLU, as one `CustomOp1` pass per channel row. That replaces about 14 tensor passes.
+- The LSTM recurrence runs as host loops: one batched input projection, then an axpy row update per step. The two directions run in parallel.
+
+Result:
+
+| case | before | after |
+|---|---|---|
+| sentence | 3.25 s | 2.57 s |
+| question | 1.49 s | 1.13 s |
+| short | 1.23 s | 1.02 s |
+
+- Pre-decoder: 583 ms to 266 ms. Stage-1 residual blocks: 1.58 s to 1.33 s.
+- Parity unchanged: durations exact, SNR 34-42 dB, spectral 42-51 dB.
+- What remains is the convolution GEMM, at about 2.3x MKL's throughput gap.
+
+## Run 13 - 2026-10-09 12:08
+
+Question: does the CPU work leave CUDA untouched?
+
+Command: `scripts/kokoro_parity.sh /mnt/data/models/Kokoro-82M-source` (CUDA).
+
+Finding: no.
+- The parity check failed, differently on every run: durations differed in 1-3 of the 4 cases, and once a case dropped to -2 dB.
+- Cause: `rayon::join` ran the LSTM's two directions on two threads for every device. The forward and reverse tensor ops then raced on the one CUDA device, apparently through its single stream and shared state.
+- Full CI had passed anyway, because the tiny Kokoro tests force the CPU.
+
+Fix:
+- Directions run in parallel only for the host loops on the CPU.
+- New test `kokoro_repeats_exactly_on_the_default_device`: the tiny model on the build's device (the GPU under `cuda`) must give the same waveform 5 times for one seed.
+  - With the race restored it failed 2/2.
+  - With the fix it passes 2/2 on CUDA and also on CPU.
+- CUDA parity is back, identical across two runs (SNR 34.2/44.0/35.9/38.6 dB).
+
+Lesson: inference-tensor's CUDA backend is not safe to drive from two threads at once on one device.
+
+Review fixes:
+- The fused AdaIN falls back to the tensor path when the style batch differs from the input batch.
+- `RES_SLOPE` is now `f32`.
+- The fused test feeds an input at a non-zero offset.

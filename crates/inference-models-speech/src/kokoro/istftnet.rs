@@ -2,14 +2,17 @@ use inference_tensor::nn::{
     Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, Linear, Module, VarBuilder,
     linear, ops,
 };
-use inference_tensor::{D, Device, IndexOp, Result, Tensor};
+use inference_tensor::{
+    CpuStorage, CustomOp1, D, DType, Device, IndexOp, Layout, Result, Shape, Tensor,
+};
+use rayon::prelude::*;
 
 use super::config::IstftNetConfig;
 use super::dsp::{self, SourceNoise};
 use crate::weight_norm::{Snake1d, conv_transpose1d_weight_norm, conv1d, conv1d_weight_norm};
 
 const NORM_EPS: f64 = 1e-5;
-const RES_SLOPE: f64 = 0.2;
+const RES_SLOPE: f32 = 0.2;
 const GENERATOR_SLOPE: f64 = 0.1;
 // F.leaky_relu's default, before conv_post
 const POST_SLOPE: f64 = 0.01;
@@ -36,6 +39,20 @@ impl AdaIn1d {
         })
     }
 
+    /// AdaIN then `act`; on the CPU one pass per channel row instead of a dozen tensor ops.
+    pub fn forward_act(&self, xs: &Tensor, s: &Tensor, act: &Activation) -> Result<Tensor> {
+        // the fused pass needs one style row per batch item; anything else keeps the broadcasting tensor path
+        if !xs.device().is_cpu() || xs.dtype() != DType::F32 || s.dim(0)? != xs.dim(0)? {
+            return act.forward(&self.forward(xs, s)?);
+        }
+        let h = self.fc.forward(s)?.to_dtype(DType::F32)?;
+        let c = self.channels;
+        let scale = (h.narrow(1, 0, c)? + 1.)?.flatten_all()?.to_vec1::<f32>()?;
+        let shift = h.narrow(1, c, c)?.flatten_all()?.to_vec1::<f32>()?;
+        xs.contiguous()?
+            .apply_op1_no_bwd(&FusedAdaIn { scale, shift, act })
+    }
+
     pub fn forward(&self, xs: &Tensor, s: &Tensor) -> Result<Tensor> {
         let h = self.fc.forward(s)?.unsqueeze(2)?;
         let gamma = (h.narrow(1, 0, self.channels)? + 1.)?;
@@ -45,6 +62,95 @@ impl AdaIn1d {
         let var = centered.sqr()?.mean_keepdim(D::Minus1)?;
         let normed = centered.broadcast_div(&(var + NORM_EPS)?.sqrt()?)?;
         normed.broadcast_mul(&gamma)?.broadcast_add(&beta)
+    }
+}
+
+/// What follows an AdaIN: Snake (per-channel alpha) or a leaky ReLU.
+#[derive(Debug, Clone)]
+pub enum Activation {
+    Snake {
+        module: Snake1d,
+        alpha: Vec<f32>,
+        inv_alpha: Vec<f32>,
+    },
+    LeakyRelu(f32),
+}
+
+impl Activation {
+    fn snake(alpha: Tensor) -> Result<Self> {
+        let module = Snake1d::new(alpha.clone(), 0.)?;
+        let alpha = alpha
+            .flatten_all()?
+            .to_dtype(DType::F32)?
+            .to_vec1::<f32>()?;
+        let inv_alpha = alpha.iter().map(|a| a.recip()).collect();
+        Ok(Self::Snake {
+            module,
+            alpha,
+            inv_alpha,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Snake { module, .. } => module.forward(xs),
+            Self::LeakyRelu(slope) => ops::leaky_relu(xs, f64::from(*slope)),
+        }
+    }
+}
+
+/// Instance norm, the per-(batch, channel) affine and the activation over contiguous F32 rows.
+struct FusedAdaIn<'a> {
+    scale: Vec<f32>,
+    shift: Vec<f32>,
+    act: &'a Activation,
+}
+
+impl CustomOp1 for FusedAdaIn<'_> {
+    fn name(&self) -> &'static str {
+        "kokoro-fused-adain"
+    }
+
+    fn cpu_fwd(&self, storage: &CpuStorage, layout: &Layout) -> Result<(CpuStorage, Shape)> {
+        let CpuStorage::F32(data) = storage else {
+            inference_tensor::bail!("fused AdaIN takes F32")
+        };
+        let (_, c, t) = layout.shape().dims3()?;
+        let start = layout.start_offset();
+        let src = &data[start..start + layout.shape().elem_count()];
+        let mut out = vec![0f32; src.len()];
+        out.par_chunks_mut(t)
+            .zip(src.par_chunks(t))
+            .enumerate()
+            .for_each(|(row, (dst, x))| {
+                let mean = x.iter().map(|&v| f64::from(v)).sum::<f64>() / t as f64;
+                let var = x
+                    .iter()
+                    .map(|&v| (f64::from(v) - mean).powi(2))
+                    .sum::<f64>()
+                    / t as f64;
+                let inv_std = (1. / (var + NORM_EPS).sqrt()) as f32;
+                let (mean, scale, shift) = (mean as f32, self.scale[row], self.shift[row]);
+                for (d, &v) in dst.iter_mut().zip(x) {
+                    let y = (v - mean) * inv_std * scale + shift;
+                    *d = match self.act {
+                        Activation::Snake {
+                            alpha, inv_alpha, ..
+                        } => {
+                            let s = (alpha[row % c] * y).sin();
+                            y + inv_alpha[row % c] * s * s
+                        }
+                        Activation::LeakyRelu(slope) => {
+                            if y < 0. {
+                                y * slope
+                            } else {
+                                y
+                            }
+                        }
+                    };
+                }
+            });
+        Ok((CpuStorage::F32(out), layout.shape().clone()))
     }
 }
 
@@ -142,14 +248,14 @@ impl AdainResBlk1d {
     }
 
     pub fn forward(&self, xs: &Tensor, s: &Tensor) -> Result<Tensor> {
-        let mut res = ops::leaky_relu(&self.norm1.forward(xs, s)?, RES_SLOPE)?;
+        let act = Activation::LeakyRelu(RES_SLOPE);
+        let mut res = self.norm1.forward_act(xs, s, &act)?;
         if let Some(pool) = &self.pool {
             res = pool.forward(&res)?;
         }
-        let res = ops::leaky_relu(
-            &self.norm2.forward(&self.conv1.forward(&res)?, s)?,
-            RES_SLOPE,
-        )?;
+        let res = self
+            .norm2
+            .forward_act(&self.conv1.forward(&res)?, s, &act)?;
         let res = self.conv2.forward(&res)?;
         let mut short = if self.pool.is_some() {
             upsample_nearest2(xs)?
@@ -166,7 +272,7 @@ impl AdainResBlk1d {
 /// HiFi-GAN's ResBlock1 with AdaIN and Snake.
 #[derive(Debug, Clone)]
 struct AdaInResBlock1 {
-    layers: Vec<(AdaIn1d, Snake1d, Conv1d, AdaIn1d, Snake1d, Conv1d)>,
+    layers: Vec<(AdaIn1d, Activation, Conv1d, AdaIn1d, Activation, Conv1d)>,
 }
 
 impl AdaInResBlock1 {
@@ -177,8 +283,8 @@ impl AdaInResBlock1 {
         style_dim: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let snake = |name: &str, j: usize| -> Result<Snake1d> {
-            Snake1d::new(vb.pp(name).get((1, channels, 1), &j.to_string())?, 0.)
+        let snake = |name: &str, j: usize| -> Result<Activation> {
+            Activation::snake(vb.pp(name).get((1, channels, 1), &j.to_string())?)
         };
         let layers = dilations
             .iter()
@@ -223,8 +329,8 @@ impl AdaInResBlock1 {
     fn forward(&self, xs: &Tensor, s: &Tensor) -> Result<Tensor> {
         let mut xs = xs.clone();
         for (n1, a1, c1, n2, a2, c2) in &self.layers {
-            let xt = c1.forward(&a1.forward(&n1.forward(&xs, s)?)?)?;
-            let xt = c2.forward(&a2.forward(&n2.forward(&xt, s)?)?)?;
+            let xt = c1.forward(&n1.forward_act(&xs, s, a1)?)?;
+            let xt = c2.forward(&n2.forward_act(&xt, s, a2)?)?;
             xs = (xt + xs)?;
         }
         Ok(xs)
@@ -462,6 +568,43 @@ mod tests {
     use inference_tensor::{DType, Device, Tensor};
 
     use super::*;
+
+    // The CPU's one-pass AdaIN against the tensor ops it stands in for, with both activations and a batch of two
+    #[test]
+    fn fused_adain_matches_the_tensor_path() -> Result<()> {
+        let (batch, channels, len, style) = (2, 4, 9, 3);
+        let dev = Device::Cpu;
+        let weights = HashMap::from([
+            (
+                "fc.weight".to_string(),
+                Tensor::randn(0f32, 1., (2 * channels, style), &dev)?,
+            ),
+            (
+                "fc.bias".to_string(),
+                Tensor::randn(0f32, 1., 2 * channels, &dev)?,
+            ),
+        ]);
+        let ada = AdaIn1d::new(
+            style,
+            channels,
+            VarBuilder::from_tensors(weights, DType::F32, &dev),
+        )?;
+        // narrowed from a larger tensor, so the fused op reads from a non-zero offset
+        let x = Tensor::randn(0f32, 1., (batch + 1, channels, len), &dev)?.narrow(0, 1, batch)?;
+        let s = Tensor::randn(0f32, 1., (batch, style), &dev)?;
+        let alpha = (Tensor::rand(0.5f32, 1.5, (1, channels, 1), &dev)?).contiguous()?;
+        for act in [Activation::snake(alpha)?, Activation::LeakyRelu(RES_SLOPE)] {
+            let want = act.forward(&ada.forward(&x, &s)?)?;
+            let got = ada.forward_act(&x, &s, &act)?;
+            let diff = (got - want)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+            assert!(diff < 1e-5, "{act:?}: {diff}");
+        }
+        Ok(())
+    }
 
     // The two-phase form against the grouped transposed conv it replaces
     #[test]
