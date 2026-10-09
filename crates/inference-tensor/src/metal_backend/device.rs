@@ -227,7 +227,8 @@ impl MetalDevice {
         dtype: DType,
         _name: &str,
     ) -> Result<Arc<Buffer>> {
-        let size = element_count * dtype.size_in_bytes();
+        // Metal makes no zero-length buffer
+        let size = (element_count * dtype.size_in_bytes()).max(1);
         let buffer = self
             .device
             .new_buffer(size, PRIVATE_RESOURCE_OPTIONS)
@@ -243,6 +244,9 @@ impl MetalDevice {
     /// allocates the buffer and copies over the existing data before returning the MTLBuffer.
     pub fn new_buffer_with_data<T>(&self, data: &[T]) -> Result<Arc<Buffer>> {
         let size = core::mem::size_of_val(data);
+        if size == 0 {
+            return self.allocate_buffer(size);
+        }
         let new_buffer = self
             .device
             .new_buffer_with_data(data.as_ptr().cast(), size, RESOURCE_OPTIONS)
@@ -473,5 +477,15 @@ mod tests {
         // BF16 and F16 are 2 bytes per element. A scalar tensor requests
         // a 2-byte buffer. This must not be rounded down to 1.
         assert_eq!(buf_size(2), 2);
+    }
+
+    // A hybrid model's recurrent layers get zero-block paged caches
+    #[test]
+    fn empty_buffers_allocate() -> Result<()> {
+        use crate::backend::BackendDevice;
+        let device = MetalDevice::new(0)?;
+        device.new_private_buffer(0, DType::F32, "empty")?;
+        device.new_buffer_with_data::<f32>(&[])?;
+        Ok(())
     }
 }
