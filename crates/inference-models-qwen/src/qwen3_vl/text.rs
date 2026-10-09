@@ -22,7 +22,6 @@ impl TextConfig {
             && (layer_idx + 1).is_multiple_of(self.decoder_sparse_step)
     }
 
-    // The dense checkpoints normalise layers in F32; the MoE ones have always used the fused RmsNorm.
     #[allow(clippy::cast_possible_truncation)]
     pub fn decoder_spec(&self, tie_word_embeddings: bool) -> DecoderSpec {
         let moe = (self.num_experts > 0).then(|| MoeSpec {
@@ -60,11 +59,8 @@ impl TextConfig {
             layer_windows: vec![None; self.num_hidden_layers],
             tie_word_embeddings,
             quantization_config: self.quantization_config.clone(),
-            norm: if moe.is_some() {
-                NormKind::Rms
-            } else {
-                NormKind::F32Rms
-            },
+            // transformers normalises in F32 and scales after casting back, dense and MoE alike
+            norm: NormKind::F32Rms,
             qk_norm_kind: Some(NormKind::Rms),
             moe,
             ..Default::default()

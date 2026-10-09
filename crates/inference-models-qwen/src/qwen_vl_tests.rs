@@ -272,7 +272,7 @@ fn qwen2_vl_prefill_bf16_sliding() -> Result<()> {
     assert_snapshot(&logits, VOCAB, &expected)
 }
 
-// In BF16 the dense model's F32 norms and the MoE model's fused ones round differently, so these pin which each gets.
+// Both normalise in F32 as transformers does; a fused norm would round these BF16 logits differently.
 #[test]
 fn qwen3_vl_dense_prefill_bf16() -> Result<()> {
     let config = qwen3_vl_config(qwen3_vl_text());
@@ -290,9 +290,9 @@ fn qwen3_vl_moe_prefill_bf16() -> Result<()> {
     let config = qwen3_vl_config(moe_text());
     let (logits, _) = prefill_as(&Qwen3VLMoELoader, &config, moe_shapes(), DType::BF16)?;
     let expected = Snapshot {
-        probes: [1.34375, 0.20703125, 0.28125, -0.68359375],
-        sum: -38.45215,
-        l2: 17.85445,
+        probes: [1.34375, 0.21386719, 0.27929688, -0.66796875],
+        sum: -38.24656,
+        l2: 17.86099,
     };
     assert_snapshot(&logits, VOCAB, &expected)
 }

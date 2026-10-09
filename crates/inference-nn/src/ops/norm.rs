@@ -4,13 +4,26 @@ use super::*;
 pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if x.device().is_cuda() {
-        return cuda_rms_norm(x, weight, eps);
+        return cuda_rms_norm(x, weight, eps, false);
     }
     inference_tensor::nn::ops::rms_norm(&x.contiguous()?, weight, eps)
 }
 
+/// RMSNorm in transformers' order: normalise in F32, cast to the input dtype, then scale by the weight.
+pub fn rms_norm_cast_then_scale(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if x.device().is_cuda() && weight.dtype() == x.dtype() {
+        return cuda_rms_norm(x, weight, eps, true);
+    }
+    let dtype = x.dtype();
+    let xs = x.to_dtype(DType::F32)?;
+    let var = xs.powf(2.)?.mean_keepdim(D::Minus1)?;
+    let xs = xs.broadcast_mul(&(var + f64::from(eps))?.recip()?.sqrt()?)?;
+    xs.to_dtype(dtype)?.broadcast_mul(weight)
+}
+
 #[cfg(feature = "cuda")]
-fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
+fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32, round_normed: bool) -> Result<Tensor> {
     use inference_tensor::backend::BackendStorage;
     use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
@@ -113,6 +126,7 @@ fn cuda_rms_norm(input: &Tensor, weight: &Tensor, eps: f32) -> Result<Tensor> {
                     seq_len_i32,
                     head_dim_i32,
                     eps,
+                    i32::from(round_normed),
                     stream_ptr,
                 );
             }
@@ -147,6 +161,7 @@ pub fn cuda_rms_norm_residual(
     weight: &Tensor,
     scale: Option<&Tensor>,
     eps: f32,
+    round_normed: bool,
 ) -> Result<Tensor> {
     use inference_tensor::backend::BackendStorage;
     use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
@@ -296,6 +311,7 @@ pub fn cuda_rms_norm_residual(
                     nrows_i32,
                     ncols_i32,
                     eps,
+                    i32::from(round_normed),
                     stream_ptr,
                 );
             }
@@ -578,11 +594,10 @@ pub fn metal_rms_norm_residual(
 pub fn cuda_rms_norm_residual_then_rms_norm(
     input: &Tensor,
     residual: &Tensor,
-    residual_weight: &Tensor,
+    (residual_weight, residual_eps): (&Tensor, f32),
     scale: Option<&Tensor>,
-    norm_weight: &Tensor,
-    residual_eps: f32,
-    norm_eps: f32,
+    (norm_weight, norm_eps): (&Tensor, f32),
+    round_normed: bool,
 ) -> Result<(Tensor, Tensor)> {
     use inference_tensor::backend::BackendStorage;
     use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
@@ -786,6 +801,7 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
                     ncols_i32,
                     residual_eps,
                     norm_eps,
+                    i32::from(round_normed),
                     stream_ptr,
                 );
             }

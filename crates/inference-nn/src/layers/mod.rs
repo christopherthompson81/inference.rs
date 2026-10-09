@@ -305,7 +305,7 @@ impl RmsNorm {
     }
 
     pub fn forward_residual(&self, x: &Tensor, residual: &Tensor) -> Result<Tensor> {
-        rms_norm_forward_residual(x, residual, &self.weight, self.eps, None)
+        rms_norm_forward_residual(x, residual, &self.weight, self.eps, None, false)
     }
 
     pub fn forward_residual_scaled(
@@ -314,7 +314,7 @@ impl RmsNorm {
         residual: &Tensor,
         scale: &Tensor,
     ) -> Result<Tensor> {
-        rms_norm_forward_residual(x, residual, &self.weight, self.eps, Some(scale))
+        rms_norm_forward_residual(x, residual, &self.weight, self.eps, Some(scale), false)
     }
 
     pub fn forward_residual_then_rms_norm(
@@ -326,11 +326,10 @@ impl RmsNorm {
         rms_norm_forward_residual_then_rms_norm(
             x,
             residual,
-            &self.weight,
-            self.eps,
+            (&self.weight, self.eps),
             None,
-            &next_norm.weight,
-            next_norm.eps,
+            (&next_norm.weight, next_norm.eps),
+            false,
         )
     }
 
@@ -344,11 +343,10 @@ impl RmsNorm {
         rms_norm_forward_residual_then_rms_norm(
             x,
             residual,
-            &self.weight,
-            self.eps,
+            (&self.weight, self.eps),
             Some(scale),
-            &next_norm.weight,
-            next_norm.eps,
+            (&next_norm.weight, next_norm.eps),
+            false,
         )
     }
 }
@@ -381,12 +379,14 @@ impl Module for RmsNorm {
     }
 }
 
+// `round_normed`: transformers' order, the normalized value cast to the input dtype before the weight scales it
 fn rms_norm_forward_residual(
     x: &Tensor,
     residual: &Tensor,
     weight: &Tensor,
     eps: f64,
     scale: Option<&Tensor>,
+    round_normed: bool,
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if x.device().is_cuda()
@@ -398,11 +398,19 @@ fn rms_norm_forward_residual(
         && scale.is_none_or(|scale| scale.dtype() == x.dtype())
         && matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
     {
-        return crate::ops::cuda_rms_norm_residual(x, residual, weight, scale, eps as f32);
+        return crate::ops::cuda_rms_norm_residual(
+            x,
+            residual,
+            weight,
+            scale,
+            eps as f32,
+            round_normed,
+        );
     }
 
     #[cfg(feature = "metal")]
-    if x.device().is_metal()
+    if !round_normed
+        && x.device().is_metal()
         && residual.device().same_device(x.device())
         && weight.device().same_device(x.device())
         && scale.is_none_or(|scale| scale.device().same_device(x.device()))
@@ -416,7 +424,11 @@ fn rms_norm_forward_residual(
         return Ok(out);
     }
 
-    let normed = crate::ops::rms_norm(x, weight, eps as f32)?;
+    let normed = if round_normed {
+        crate::ops::rms_norm_cast_then_scale(x, weight, eps as f32)?
+    } else {
+        crate::ops::rms_norm(x, weight, eps as f32)?
+    };
     let out = (residual + normed)?;
     if let Some(scale) = scale {
         out.broadcast_mul(scale)
@@ -425,14 +437,14 @@ fn rms_norm_forward_residual(
     }
 }
 
+// each norm as (weight, eps)
 fn rms_norm_forward_residual_then_rms_norm(
     x: &Tensor,
     residual: &Tensor,
-    residual_weight: &Tensor,
-    residual_eps: f64,
+    (residual_weight, residual_eps): (&Tensor, f64),
     scale: Option<&Tensor>,
-    norm_weight: &Tensor,
-    norm_eps: f64,
+    (norm_weight, norm_eps): (&Tensor, f64),
+    round_normed: bool,
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(feature = "cuda")]
     if x.device().is_cuda()
@@ -449,16 +461,26 @@ fn rms_norm_forward_residual_then_rms_norm(
         return crate::ops::cuda_rms_norm_residual_then_rms_norm(
             x,
             residual,
-            residual_weight,
+            (residual_weight, residual_eps as f32),
             scale,
-            norm_weight,
-            residual_eps as f32,
-            norm_eps as f32,
+            (norm_weight, norm_eps as f32),
+            round_normed,
         );
     }
 
-    let xs = rms_norm_forward_residual(x, residual, residual_weight, residual_eps, scale)?;
-    let normed = crate::ops::rms_norm(&xs, norm_weight, norm_eps as f32)?;
+    let xs = rms_norm_forward_residual(
+        x,
+        residual,
+        residual_weight,
+        residual_eps,
+        scale,
+        round_normed,
+    )?;
+    let normed = if round_normed {
+        crate::ops::rms_norm_cast_then_scale(&xs, norm_weight, norm_eps as f32)?
+    } else {
+        crate::ops::rms_norm(&xs, norm_weight, norm_eps as f32)?
+    };
     Ok((xs, normed))
 }
 
@@ -503,7 +525,7 @@ impl GemmaRmsNorm {
     }
 
     pub fn forward_residual(&self, x: &Tensor, residual: &Tensor) -> Result<Tensor> {
-        rms_norm_forward_residual(x, residual, &self.weight, self.eps, None)
+        rms_norm_forward_residual(x, residual, &self.weight, self.eps, None, false)
     }
 
     pub fn forward_residual_scaled(
@@ -512,7 +534,7 @@ impl GemmaRmsNorm {
         residual: &Tensor,
         scale: &Tensor,
     ) -> Result<Tensor> {
-        rms_norm_forward_residual(x, residual, &self.weight, self.eps, Some(scale))
+        rms_norm_forward_residual(x, residual, &self.weight, self.eps, Some(scale), false)
     }
 
     pub fn forward_residual_then_rms_norm(
@@ -524,11 +546,10 @@ impl GemmaRmsNorm {
         rms_norm_forward_residual_then_rms_norm(
             x,
             residual,
-            &self.weight,
-            self.eps,
+            (&self.weight, self.eps),
             None,
-            &next_norm.weight,
-            next_norm.eps,
+            (&next_norm.weight, next_norm.eps),
+            false,
         )
     }
 
@@ -542,11 +563,10 @@ impl GemmaRmsNorm {
         rms_norm_forward_residual_then_rms_norm(
             x,
             residual,
-            &self.weight,
-            self.eps,
+            (&self.weight, self.eps),
             Some(scale),
-            &next_norm.weight,
-            next_norm.eps,
+            (&next_norm.weight, next_norm.eps),
+            false,
         )
     }
 }
@@ -576,13 +596,33 @@ impl F32RmsNorm {
     }
 }
 
+impl F32RmsNorm {
+    /// `self(x) + residual`, fused on CUDA.
+    pub fn forward_residual(&self, x: &Tensor, residual: &Tensor) -> Result<Tensor> {
+        rms_norm_forward_residual(x, residual, &self.w, self.eps, None, true)
+    }
+
+    /// `self(x) + residual` and `next` of it, fused on CUDA.
+    pub fn forward_residual_then_rms_norm(
+        &self,
+        x: &Tensor,
+        residual: &Tensor,
+        next: &Self,
+    ) -> Result<(Tensor, Tensor)> {
+        rms_norm_forward_residual_then_rms_norm(
+            x,
+            residual,
+            (&self.w, self.eps),
+            None,
+            (&next.w, next.eps),
+            true,
+        )
+    }
+}
+
 impl Module for F32RmsNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let initial_type = xs.dtype();
-        let mut xs = xs.to_dtype(DType::F32)?;
-        let var = xs.powf(2.)?.mean_keepdim(D::Minus1)?;
-        xs = xs.broadcast_mul(&(&var + self.eps)?.recip()?.sqrt()?)?;
-        xs.to_dtype(initial_type)?.broadcast_mul(&self.w)
+        crate::ops::rms_norm_cast_then_scale(xs, &self.w, self.eps as f32)
     }
 }
 
