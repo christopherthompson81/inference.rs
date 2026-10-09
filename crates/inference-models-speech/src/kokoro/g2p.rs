@@ -327,7 +327,7 @@ fn place_mandarin_tone(ps: &str) -> String {
             let arrow = tone_arrow(&chars[start..end]);
             let bare = chars
                 .iter()
-                .filter(|c| !TONE_LETTERS.contains(c))
+                .filter(|&&c| !TONE_LETTERS.contains(&c))
                 .copied()
                 .collect::<Vec<_>>();
             if arrow.is_empty() {
