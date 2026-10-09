@@ -5,6 +5,7 @@ use inference_tensor::quantized::gguf_file::Value as GgufValue;
 use serde_json::{Value as JsonValue, json};
 
 use inference_models_gemma::gemma3::config::{Gemma3Config, Gemma3TextConfig};
+use inference_models_gemma::gemma3::inputs_processor::IMAGE_TOKEN;
 use inference_nn::layers::Activation;
 
 const ARCHITECTURE: &str = "gemma3";
@@ -54,6 +55,36 @@ pub fn ensure_gemma3_vision_config(config: &str) -> Result<()> {
     anyhow::ensure!(
         matches!(parsed, Gemma3Config::WithVision { .. }),
         "Gemma 3 with a projector requires a multimodal config containing `text_config` and `vision_config`"
+    );
+    Ok(())
+}
+
+/// Registers Gemma 3's image placeholder at the config's `image_token_index` in a GGUF vocabulary that lacks it.
+pub fn ensure_gemma3_image_token(
+    tokenizer: &mut tokenizers::Tokenizer,
+    config: &str,
+) -> Result<()> {
+    let Gemma3Config::WithVision {
+        image_token_index, ..
+    } = Gemma3Config::from_json(config)?
+    else {
+        bail!("Gemma 3 with a projector requires a multimodal config");
+    };
+    if tokenizer.token_to_id(IMAGE_TOKEN).is_none() {
+        // llama.cpp's converter keeps the text vocabulary only; the placeholder is the first id past it
+        anyhow::ensure!(
+            tokenizer.get_vocab_size(true) == image_token_index,
+            "Gemma 3 `image_token_index` {image_token_index} is not the first id past the GGUF vocabulary of {}",
+            tokenizer.get_vocab_size(true)
+        );
+        tokenizer
+            .add_special_tokens([tokenizers::AddedToken::from(IMAGE_TOKEN, true)])
+            .map_err(anyhow::Error::msg)?;
+    }
+    anyhow::ensure!(
+        tokenizer.token_to_id(IMAGE_TOKEN) == Some(image_token_index as u32),
+        "Gemma 3 tokenizer maps `{IMAGE_TOKEN}` to {:?}, but the config's `image_token_index` is {image_token_index}",
+        tokenizer.token_to_id(IMAGE_TOKEN)
     );
     Ok(())
 }
@@ -606,6 +637,51 @@ mod tests {
 
         assert_eq!(value["query_pre_attn_scalar"], 168);
         assert_eq!(value["_inference_use_language_model_prefix"], true);
+    }
+
+    // llama.cpp's Gemma 3 vocabulary stops before `<image_soft_token>`; the processor needs it at `image_token_index`
+    #[test]
+    fn registers_the_image_token_past_a_gguf_vocabulary() {
+        let config = |image_token_index: usize| {
+            json!({
+                "model_type": "gemma3",
+                "text_config": {
+                    "hidden_size": 1152,
+                    "intermediate_size": 6912,
+                    "num_hidden_layers": 26,
+                    "num_attention_heads": 4,
+                    "num_key_value_heads": 1,
+                    "head_dim": 256,
+                    "max_position_embeddings": 32768,
+                    "sliding_window": 512
+                },
+                "vision_config": {},
+                "image_token_index": image_token_index,
+                "mm_tokens_per_image": 256
+            })
+            .to_string()
+        };
+        let gguf_vocabulary = || {
+            let vocab = [("<pad>", 0), ("<eos>", 1), ("a", 2)]
+                .map(|(token, id)| (token.to_string(), id))
+                .into_iter()
+                .collect();
+            let model = tokenizers::models::wordlevel::WordLevel::builder()
+                .vocab(vocab)
+                .unk_token("<pad>".to_string())
+                .build()
+                .unwrap();
+            tokenizers::Tokenizer::new(model)
+        };
+
+        let mut tokenizer = gguf_vocabulary();
+        ensure_gemma3_image_token(&mut tokenizer, &config(3)).unwrap();
+        assert_eq!(tokenizer.token_to_id(IMAGE_TOKEN), Some(3));
+        // a tokenizer that already has it is left alone
+        ensure_gemma3_image_token(&mut tokenizer, &config(3)).unwrap();
+        assert_eq!(tokenizer.get_vocab_size(true), 4);
+        // an index that is not the next free id would put the token where the model does not look
+        assert!(ensure_gemma3_image_token(&mut gguf_vocabulary(), &config(5)).is_err());
     }
 
     #[test]

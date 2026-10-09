@@ -22,8 +22,8 @@ use crate::gguf::{
 use crate::gguf::{
     gemma3_bindings::build_gemma3_text_bindings,
     gemma3_config::{
-        ensure_gemma3_vision_config, gemma3_text_uses_language_model_prefix,
-        prepare_gemma3_text_config,
+        ensure_gemma3_image_token, ensure_gemma3_vision_config,
+        gemma3_text_uses_language_model_prefix, prepare_gemma3_text_config,
     },
 };
 use crate::pipeline::LoadOptions;
@@ -652,6 +652,14 @@ impl GGUFLoader {
         }
         let source =
             self.prepare_source(&archive, &bindings, paths, &options, config, rope_pairing)?;
+        #[cfg(feature = "models-gemma")]
+        let source = {
+            let mut source = source;
+            if architecture == "gemma3" {
+                ensure_gemma3_image_token(&mut source.tokenizer, &source.config)?;
+            }
+            source
+        };
         let processor_config = paths
             .get_processor_config()
             .as_ref()

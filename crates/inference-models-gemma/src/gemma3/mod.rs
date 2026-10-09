@@ -40,6 +40,8 @@ pub struct Gemma3Model {
     vision_tower: Option<SiglipVisionTransformer>,
     cfg: Gemma3Config,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
+    // the image token id on the device, so remapping it before the embedding copies nothing per step
+    image_token: Option<Tensor>,
 }
 
 impl Gemma3Model {
@@ -70,6 +72,7 @@ impl Gemma3Model {
                     vision_tower: None,
                     cfg: cfg.clone(),
                     encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
+                    image_token: None,
                 })
             }
             Gemma3Config::WithVision {
@@ -80,7 +83,12 @@ impl Gemma3Model {
             } => {
                 assert!(*image_token_index < text_config.vocab_size);
                 let non_text_vb = vb.clone().without_lora_registry();
+                let image_token = Some(Tensor::new(
+                    *image_token_index as u32,
+                    &normal_loading_metadata.real_device,
+                )?);
                 Ok(Self {
+                    image_token,
                     multi_modal_projector: Some(Gemma3MultiModalProjector::new(
                         cfg,
                         non_text_vb
@@ -117,7 +125,14 @@ impl Gemma3Model {
         packed_layout: Option<&PackedMultimodalLayout>,
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let mut input_embeds = self.language_model.embed_tokens(input_ids)?;
+        // a GGUF vocabulary ends before the image token, which only marks where image features go
+        let embed_ids = match &self.image_token {
+            Some(image_token) => input_ids
+                .broadcast_eq(&image_token.to_device(input_ids.device())?)?
+                .where_cond(&input_ids.zeros_like()?, input_ids)?,
+            None => input_ids.clone(),
+        };
+        let mut input_embeds = self.language_model.embed_tokens(&embed_ids)?;
         let has_images = pixel_values.is_some();
         if let Some(pixel_values) = pixel_values {
             let Gemma3Config::WithVision {

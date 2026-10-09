@@ -314,11 +314,12 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                 .expect("Detokenization failed!");
             let ids = toks.get_ids().to_vec();
             if seq.mm_features().is_empty()
-                && let (Some(hashes), Some(img_tok_id)) = (
-                    seq.image_hashes().map(|h| h.to_vec()),
-                    tokenizer.token_to_id(IMAGE_TOKEN),
-                )
+                && let Some(hashes) = seq.image_hashes().map(|h| h.to_vec())
             {
+                // without the placeholder the images would be dropped silently
+                let img_tok_id = tokenizer.token_to_id(IMAGE_TOKEN).ok_or_else(|| {
+                    anyhow::anyhow!("Gemma 3 tokenizer has no `{IMAGE_TOKEN}` to place images at")
+                })?;
                 seq.set_mm_features(gemma3_mm_features(&ids, img_tok_id, &hashes, &num_crops)?);
             }
 
@@ -459,11 +460,14 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                     let ids = toks.get_ids().to_vec();
 
                     if seq.mm_features().is_empty()
-                        && let (Some(hashes), Some(img_tok_id)) = (
-                            seq.image_hashes().map(|h| h.to_vec()),
-                            tokenizer.token_to_id(IMAGE_TOKEN),
-                        )
+                        && let Some(hashes) = seq.image_hashes().map(|h| h.to_vec())
                     {
+                        // without the placeholder the images would be dropped silently
+                        let img_tok_id = tokenizer.token_to_id(IMAGE_TOKEN).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Gemma 3 tokenizer has no `{IMAGE_TOKEN}` to place images at"
+                            )
+                        })?;
                         seq.set_mm_features(gemma3_mm_features(
                             &ids, img_tok_id, &hashes, &num_crops,
                         )?);

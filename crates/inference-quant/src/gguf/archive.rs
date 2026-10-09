@@ -37,6 +37,12 @@ const GENERAL_TYPE: &str = "general.type";
 const GENERAL_PREFIX: &str = "general.";
 const SPLIT_PREFIX: &str = "split.";
 const MMPROJ_TYPE: &str = "mmproj";
+// Older converters wrote this type, or none at all with the clip architecture; llama.cpp loads either
+const CLIP_VISION_TYPE: &str = "clip-vision";
+const GENERAL_ARCHITECTURE: &str = "general.architecture";
+const CLIP_ARCHITECTURE: &str = "clip";
+// an untyped clip archive is a projector only if it names one; a bare text CLIP is not
+const CLIP_PROJECTOR_TYPE: &str = "clip.projector_type";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GgufEndian {
@@ -1417,14 +1423,24 @@ fn values_equal(lhs: &Value, rhs: &Value) -> bool {
 
 fn validate_component_type(component: &GgufArchive) -> Result<()> {
     match component.metadata_value(GENERAL_TYPE) {
-        Some(Value::String(value)) if value == MMPROJ_TYPE => Ok(()),
+        Some(Value::String(value)) if value == MMPROJ_TYPE || value == CLIP_VISION_TYPE => Ok(()),
         Some(Value::String(value)) => {
             inference_tensor::bail!(
-                "GGUF component `{GENERAL_TYPE}` must be `{MMPROJ_TYPE}`, got `{value}`"
+                "GGUF component `{GENERAL_TYPE}` must be `{MMPROJ_TYPE}` or `{CLIP_VISION_TYPE}`, got `{value}`"
             )
         }
         Some(_) => inference_tensor::bail!("GGUF component `{GENERAL_TYPE}` must be a string"),
-        None => inference_tensor::bail!("GGUF component is missing `{GENERAL_TYPE}`"),
+        None => match component.metadata_value(GENERAL_ARCHITECTURE) {
+            Some(Value::String(arch))
+                if arch == CLIP_ARCHITECTURE
+                    && component.metadata_value(CLIP_PROJECTOR_TYPE).is_some() =>
+            {
+                Ok(())
+            }
+            _ => inference_tensor::bail!(
+                "GGUF component is missing `{GENERAL_TYPE}` and is not a `{CLIP_ARCHITECTURE}` projector"
+            ),
+        },
     }
 }
 
@@ -2203,12 +2219,55 @@ mod tests {
         let error = archive
             .merge_component(GgufArchive::open_file(wrong_type_file.path()).unwrap())
             .unwrap_err();
-        assert!(error.to_string().contains("must be `mmproj`"));
+        assert!(
+            error
+                .to_string()
+                .contains("must be `mmproj` or `clip-vision`")
+        );
         let error = archive
             .merge_component(GgufArchive::open_file(duplicate_file.path()).unwrap())
             .unwrap_err();
         assert!(error.to_string().contains("duplicated across components"));
         assert_eq!(archive.shards().len(), 1);
+    }
+
+    // llama.cpp loads the projectors older converters wrote; an untyped archive of another architecture stays out
+    #[test]
+    fn older_mmproj_typings_merge_as_components() {
+        let main_file = write_test_gguf(&base_metadata(), &[], DEFAULT_ALIGNMENT);
+        let typings = [
+            (
+                vec![(GENERAL_TYPE, Value::String(CLIP_VISION_TYPE.to_string()))],
+                true,
+            ),
+            (
+                vec![
+                    (
+                        GENERAL_ARCHITECTURE,
+                        Value::String(CLIP_ARCHITECTURE.to_string()),
+                    ),
+                    (CLIP_PROJECTOR_TYPE, Value::String("gemma3".to_string())),
+                ],
+                true,
+            ),
+            (
+                vec![(
+                    GENERAL_ARCHITECTURE,
+                    Value::String(CLIP_ARCHITECTURE.to_string()),
+                )],
+                false,
+            ),
+            (
+                vec![(GENERAL_ARCHITECTURE, Value::String("llama".to_string()))],
+                false,
+            ),
+        ];
+        for (metadata, merges) in typings {
+            let component = write_test_gguf(&metadata, &[], DEFAULT_ALIGNMENT);
+            let mut archive = GgufArchive::open_file(main_file.path()).unwrap();
+            let merged = archive.merge_component(GgufArchive::open_file(component.path()).unwrap());
+            assert_eq!(merged.is_ok(), merges, "{metadata:?}");
+        }
     }
 
     #[test]
