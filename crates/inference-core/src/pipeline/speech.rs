@@ -20,7 +20,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
-use inference_models_speech::kokoro::{KokoroConfig, KokoroTts};
+use inference_models_speech::kokoro::{GGUF_EXTENSION, KokoroConfig, KokoroTts, is_kokoro_gguf};
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput, SpeechOptions};
 use inference_quant::IsqType;
 use inference_tensor::nn::VarBuilder;
@@ -39,6 +39,7 @@ use tokio::sync::Mutex;
 const DIA_DAC_MODEL: &str = "EricB/dac_44khz";
 const KOKORO_VOICES_DIR: &str = "voices";
 const KOKORO_SAFETENSORS: &str = "model.safetensors";
+const KOKORO_CONFIG: &str = "config.json";
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
@@ -209,7 +210,31 @@ pub struct SpeechLoader {
     pub cfg: Option<SpeechGenerationConfig>,
 }
 
+/// A local Kokoro GGUF: the file itself, or the one `.gguf` in a directory without the release's `config.json`.
+pub(crate) fn local_kokoro_gguf(model_id: &str) -> Option<PathBuf> {
+    let path = std::path::Path::new(model_id);
+    let file = if path.is_dir() {
+        if path.join(KOKORO_CONFIG).exists() {
+            return None;
+        }
+        let mut ggufs = std::fs::read_dir(path)
+            .ok()?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == GGUF_EXTENSION));
+        match (ggufs.next(), ggufs.next()) {
+            (Some(only), None) => only,
+            _ => return None,
+        }
+    } else {
+        path.to_path_buf()
+    };
+    is_kokoro_gguf(&file).then_some(file)
+}
+
 fn detect_arch(config: &std::path::Path) -> Result<SpeechLoaderType> {
+    if is_kokoro_gguf(config) {
+        return Ok(SpeechLoaderType::Kokoro);
+    }
     SpeechLoaderType::auto_detect_from_config(&std::fs::read_to_string(config)?).ok_or_else(|| {
         anyhow::anyhow!(
             "`{}` is not a Dia or Kokoro config; pass the architecture explicitly",
@@ -227,6 +252,17 @@ impl Loader for SpeechLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
+        if let Some(gguf) = local_kokoro_gguf(&self.model_id) {
+            if let Some(arch) = self.arch.filter(|arch| *arch != SpeechLoaderType::Kokoro) {
+                anyhow::bail!("`{}` is a Kokoro GGUF, not {arch:?}", gguf.display())
+            }
+            let paths = SpeechModelPaths {
+                weights: vec![gguf.clone()],
+                config: gguf,
+                voices: Vec::new(),
+            };
+            return self.load_model_from_path(&paths, options);
+        }
         let arch = match self.arch {
             Some(arch) => arch,
             None => {

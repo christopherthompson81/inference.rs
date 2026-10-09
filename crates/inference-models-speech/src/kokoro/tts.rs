@@ -5,6 +5,7 @@ use std::sync::Arc;
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::{DType, Device, Result, bail};
 
+use super::gguf::{GGUF_EXTENSION, read_kokoro_gguf};
 use super::{KokoroConfig, KokoroModel, SAMPLE_RATE, SourceNoise, VoicePack, pth_var_builder};
 use crate::{SpeechGenerationOutput, SpeechOptions};
 
@@ -21,13 +22,17 @@ pub struct KokoroTts {
 }
 
 impl KokoroTts {
-    /// `weights` is the release `.pth` or a safetensors file with the same names; `voices` are `.pt` or raw `.bin` packs.
+    /// From the `.pth` release, same-named safetensors, or a Kokoro GGUF (which brings its own config and voices).
     pub fn load(
         config: &Path,
         weights: &Path,
         voices: &[PathBuf],
         device: &Device,
     ) -> Result<Self> {
+        if weights.extension().is_some_and(|e| e == GGUF_EXTENSION) {
+            let gguf = read_kokoro_gguf(weights, device)?;
+            return Self::new(&gguf.config, gguf.weights, gguf.voices);
+        }
         let cfg: KokoroConfig = serde_json::from_str(&std::fs::read_to_string(config)?)
             .map_err(inference_tensor::Error::wrap)?;
         let vb = if weights.extension().is_some_and(|e| e == "safetensors") {
@@ -51,7 +56,14 @@ impl KokoroTts {
                 bail!("two voice packs are named `{name}`")
             }
         }
-        let voices = packs;
+        Self::new(&cfg, vb, packs)
+    }
+
+    fn new(
+        cfg: &KokoroConfig,
+        vb: VarBuilder,
+        voices: BTreeMap<String, VoicePack>,
+    ) -> Result<Self> {
         let default_voice = if voices.contains_key(DEFAULT_VOICE) {
             DEFAULT_VOICE.to_string()
         } else {
@@ -61,7 +73,7 @@ impl KokoroTts {
             }
         };
         Ok(Self {
-            model: KokoroModel::new(&cfg, vb)?,
+            model: KokoroModel::new(cfg, vb)?,
             voices,
             default_voice,
         })
