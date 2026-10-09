@@ -329,3 +329,107 @@ Review fixes:
 - The fused AdaIN falls back to the tensor path when the style batch differs from the input batch.
 - `RES_SLOPE` is now `f32`.
 - The fused test feeds an input at a non-zero offset.
+
+## Run 14 - 2026-10-09 12:22
+
+Question: can our own AVX2/FMA sgemm close the GEMM gap from Run 11?
+
+Command:
+- A BLIS-style packed sgemm (6x16 FMA tile, KC 256, MC 96, NC 4096) in `inference-tensor`, used by the CPU MatMul for f32. It matched a naive product over edge shapes, transposes and accumulation.
+- GFLOPS benchmarks at 1 and 8 threads.
+
+Finding 1: on the dev profile it was no faster: 48-52 GFLOPS on one thread, the same as `gemm`. Its disassembled micro-kernel had the right shape (12 FMAs on 12 register accumulators), with compare-and-branch noise in the loop.
+
+Finding 2, the real cause: the dev profile is opt-level 3 but keeps `debug-assertions` and `overflow-checks` on, which put checks in every inner loop of both GEMMs. With `--config profile.dev.debug-assertions=false --config profile.dev.overflow-checks=false` (release-like):
+
+| GFLOPS | gemm, 1 thread | gemm, 8 threads | own sgemm, 1 thread | own sgemm, 8 threads | MKL, 8 threads |
+|---|---|---|---|---|---|
+| 2048^3 | 76 | 307 | 92 | 270 | 428 |
+| 128x1408x21240 | 82 | 285 | 58 | 227 | - |
+| 21240x1408x128 | 66 | 290 | 62 | 78 | - |
+
+Runs 11-12 measured `gemm` at "half of MKL" through debug checks. Release-like, it is 70% of MKL, and the first own sgemm is slower on most shapes (tall-M and gemv especially). The own sgemm is dropped.
+
+Finding 3: Kokoro release-like (`gemm`, the fused AdaIN and the host LSTM from Run 12):
+
+| case | time |
+|---|---|
+| sentence | 2.13 s (torch 1.23 s) |
+| question | 1.08 s |
+| short | 0.86 s |
+
+Parity unchanged.
+
+Finding 4: the conv now splits roughly half GEMM, half im2col. For k11 d5 the GEMM is about 27 ms of 48 ms; torch takes 23 ms for the whole conv. A per-tap conv (one GEMM per tap over a padded input, no im2col) beats im2col only for wide kernels:
+
+| kernel | im2col | per-tap |
+|---|---|---|
+| k3 | 13 ms | 18-21 ms |
+| k5 | 22 ms | 25-27 ms |
+| k7 | 31 ms | 27-31 ms |
+| k11 | 47 ms | 36-40 ms |
+
+That is worth about 5% of Kokoro. Not taken yet.
+
+Implications:
+- CPU numbers measured in the dev profile overstate GEMM-bound costs about 1.6x.
+- The remaining Kokoro gap to torch (1.7x) is mostly conv structure (im2col traffic), not GEMM speed.
+
+## Run 15 - 2026-10-09 12:35
+
+Question: does a direct conv1d without the im2col buffer close the conv gap to torch?
+
+Change: `cpu_backend/conv1d_direct.rs`, an AVX2/FMA kernel.
+- A 6-output-channel x 16-step register tile; each (input channel, tap) does 12 FMAs.
+- The padded input is read in place: two 8-wide loads per tap.
+- Weights are packed as [6-channel block][i][k][6] and broadcast.
+- Tasks are 64-step time blocks, each running every channel block, so the input window stays in L2.
+- It handles f32, stride 1, one group, kernels of 5 and up on AVX2+FMA CPUs; everything else keeps im2col.
+
+Command: conv benchmarks on (1, 128, 21240), release-like (debug assertions and overflow checks off), plus torch on 8 threads; then Kokoro parity on CPU.
+
+Finding (ms):
+
+| kernel | direct | im2col | torch |
+|---|---|---|---|
+| k1 | 11-12 | 11-12 | 6.6 |
+| k3 | 15 | 13-14 | 16 |
+| k5 | 17 | 22-24 | 22 |
+| k7 d3 | 20 | 31 | 19 |
+| k11 d5 | 24-25 | 46-48 | 28 |
+
+The direct path only takes kernels of 5 and up, since im2col's single GEMM wins at k3.
+
+Kokoro, release-like:
+
+| case | im2col | direct | torch |
+|---|---|---|---|
+| sentence | 2.06 s | 1.49 s | 1.23 s |
+| short | 0.91 s | 0.70 s | - |
+
+Parity is unchanged: durations exact, the same SNRs.
+
+New test `cpu_wide_kernel_conv1d_matches_a_direct_loop`: k5/k7/k11 with dilation and padding past both ends, partial channel and time tiles, several time blocks, batch 2, and a transposed input and kernel.
+
+## Run 16 - 2026-10-09 12:45
+
+Review fixes:
+- `c_in == 0` falls back to im2col, because rayon rejects a zero chunk size.
+- `Tensor::conv1d` rejects a padded input shorter than the dilated kernel. Before, `l_out` underflowed on both paths.
+- The direct kernel is compiled out under `mkl` and `accelerate`, which keep their own measured GEMM path.
+- The timing figures moved out of the `MIN_KERNEL` comment, which would otherwise go stale.
+- When (batch, time block) tasks are fewer than the pool's threads, each task's channel blocks are split as well, so short outputs parallelize.
+- Tests add a one-step output, an offset input, two groups at k5 (each group's kernel chunk arrives at an offset), and the too-short error.
+
+Finding: Kokoro release-like CPU, after the split.
+
+| case | time |
+|---|---|
+| sentence | 1.28 s (torch 1.23 s) |
+| question | 0.64 s |
+| fast | 0.77 s |
+| short | 0.66 s |
+
+Run 15 had 1.49 s for the sentence. Parity is unchanged.
+
+Overall, on the dev profile with debug checks off: 3.25 s -> 1.28 s, about torch's speed. Most of the original gap was the conv's im2col traffic plus per-op overhead in AdaIN and the LSTM; GEMM speed was secondary.

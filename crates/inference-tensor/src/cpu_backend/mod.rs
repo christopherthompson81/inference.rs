@@ -11,6 +11,8 @@ pub use utils::{
     binary_map, binary_map_vec, binary_map_vec_par, unary_map, unary_map_vec, unary_map_vec_par,
     Map1, Map1Any, Map2, Map2InPlace, Map2U8,
 };
+#[cfg(not(any(feature = "mkl", feature = "accelerate")))]
+mod conv1d_direct;
 mod conv2d;
 use conv2d::Conv2D;
 
@@ -2720,6 +2722,15 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
+        // MKL and Accelerate bring their own GEMM, which the direct kernel was not measured against
+        #[cfg(not(any(feature = "mkl", feature = "accelerate")))]
+        if let (Self::F32(src), Self::F32(w)) = (self, kernel) {
+            if conv1d_direct::applies(params) {
+                return Ok(Self::F32(conv1d_direct::conv1d(
+                    src, l, w, kernel_l, params,
+                )?));
+            }
+        }
         let op = Im2Col1D {
             l_k: params.k_size,
             padding: params.padding,

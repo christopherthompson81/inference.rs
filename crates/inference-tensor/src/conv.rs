@@ -171,6 +171,16 @@ impl Tensor {
         if c_out % groups != 0 {
             crate::bail!("out_channel {c_out} is not divisible by the number of groups {groups}")
         }
+        if l_in + 2 * padding < dilation * k_size.saturating_sub(1) + 1 {
+            Err(Error::Conv1dInvalidArgs {
+                inp_shape: self.shape().clone(),
+                k_shape: kernel.shape().clone(),
+                padding,
+                stride,
+                msg: "the padded input is shorter than the dilated kernel",
+            }
+            .bt())?
+        }
 
         let params = ParamsConv1D {
             b_size,
@@ -561,6 +571,69 @@ mod tests {
                 }
             }
         }
+        Ok(())
+    }
+
+    // The AVX2 direct kernel's range: kernels of 5 and up, partial channel tiles and time steps, several time blocks
+    #[test]
+    fn cpu_wide_kernel_conv1d_matches_a_direct_loop() -> Result<()> {
+        // (k_size, padding, dilation, length): taps past both ends, lengths that leave partial tiles
+        let cases = [
+            (5, 2, 1, 9),
+            (5, 0, 1, 70),
+            (11, 25, 5, 150),
+            (7, 9, 3, 40),
+            (11, 0, 2, 31),
+            (5, 0, 1, 5),
+        ];
+        for (k, padding, dilation, l) in cases {
+            for transposed_kernel in [false, true] {
+                // a transposed input is not contiguous, and narrowing it starts it at an offset
+                let x = Tensor::randn(0f32, 1., (3, l, 4), &Device::Cpu)?
+                    .transpose(1, 2)?
+                    .narrow(0, 1, 2)?;
+                let w = if transposed_kernel {
+                    Tensor::randn(0f32, 1., (13, k, 4), &Device::Cpu)?.transpose(1, 2)?
+                } else {
+                    Tensor::randn(0f32, 1., (13, 4, k), &Device::Cpu)?
+                };
+                let got = x.conv1d(&w, padding, 1, dilation, 1)?.to_vec3::<f32>()?;
+                let want = direct_conv1d(&x.to_vec3()?, &w.to_vec3()?, (padding, 1, dilation));
+                assert_eq!(got[0][0].len(), want[0][0].len());
+                for (g, e) in got
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .zip(want.iter().flatten().flatten())
+                {
+                    assert!(
+                        (g - e).abs() < 1e-4,
+                        "k{k} p{padding} d{dilation} l{l}: {g} vs {e}"
+                    );
+                }
+            }
+        }
+        // two groups: each group's kernel chunk reaches the direct kernel at its own offset
+        let x = Tensor::randn(0f32, 1., (2, 4, 30), &Device::Cpu)?;
+        let w = Tensor::randn(0f32, 1., (6, 2, 5), &Device::Cpu)?;
+        let got = x.conv1d(&w, 2, 1, 1, 2)?.to_vec3::<f32>()?;
+        for g in 0..2 {
+            let want = direct_conv1d(
+                &x.narrow(1, 2 * g, 2)?.to_vec3()?,
+                &w.narrow(0, 3 * g, 3)?.to_vec3()?,
+                (2, 1, 1),
+            );
+            for (bi, batch) in want.iter().enumerate() {
+                for (o, row) in batch.iter().enumerate() {
+                    for (got, want) in got[bi][3 * g + o].iter().zip(row) {
+                        assert!((got - want).abs() < 1e-4, "group {g}: {got} vs {want}");
+                    }
+                }
+            }
+        }
+        let short = Tensor::zeros((1, 4, 3), DType::F32, &Device::Cpu)?;
+        let wide = Tensor::zeros((2, 4, 5), DType::F32, &Device::Cpu)?;
+        assert!(short.conv1d(&wide, 0, 1, 1, 1).is_err());
         Ok(())
     }
 
