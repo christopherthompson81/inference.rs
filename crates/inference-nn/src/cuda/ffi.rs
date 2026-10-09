@@ -155,6 +155,7 @@ unsafe extern "C" {
         nrows: i32,
         ncols: i32,
         eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_residual_f16(
@@ -166,6 +167,7 @@ unsafe extern "C" {
         nrows: i32,
         ncols: i32,
         eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_residual_bf16(
@@ -177,6 +179,7 @@ unsafe extern "C" {
         nrows: i32,
         ncols: i32,
         eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn add_rms_norm_f32(
@@ -224,6 +227,7 @@ unsafe extern "C" {
         ncols: i32,
         residual_eps: f32,
         norm_eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_residual_then_rms_norm_f16(
@@ -238,6 +242,7 @@ unsafe extern "C" {
         ncols: i32,
         residual_eps: f32,
         norm_eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_residual_then_rms_norm_bf16(
@@ -252,6 +257,7 @@ unsafe extern "C" {
         ncols: i32,
         residual_eps: f32,
         norm_eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_strided_4d_f32(
@@ -267,6 +273,7 @@ unsafe extern "C" {
         seq_len: i32,
         head_dim: i32,
         eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_strided_4d_f16(
@@ -282,6 +289,7 @@ unsafe extern "C" {
         seq_len: i32,
         head_dim: i32,
         eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn rms_norm_strided_4d_bf16(
@@ -297,6 +305,7 @@ unsafe extern "C" {
         seq_len: i32,
         head_dim: i32,
         eps: f32,
+        round_normed: i32,
         stream: i64,
     );
     pub fn qk_rms_norm_rope(

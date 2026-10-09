@@ -243,11 +243,29 @@ __device__ __forceinline__ float rms_block_sum(float value,
   return warp_sums[0];
 }
 
+// transformers' RMSNorm casts the normalized value to the activation dtype, then scales by the weight and casts again
+// torch's rsqrt is the correctly rounded 1 / sqrt; rsqrtf's approximation flips some of the casts that order rounds
+__device__ __forceinline__ float rms_inv(const bool round_normed, const float mean_square) {
+  // the _rn intrinsics stay correctly rounded under --use_fast_math
+  return round_normed ? __fdiv_rn(1.0f, __fsqrt_rn(mean_square)) : rsqrtf(mean_square);
+}
+
+template <typename T>
+__device__ __forceinline__ float rms_scaled(const float x, const float inv_rms, const float weight,
+                                            const bool round_normed) {
+  if (!round_normed) {
+    return x * inv_rms * weight;
+  }
+  const float normed = rms_residual_to_float(rms_residual_from_float<T>(x * inv_rms));
+  return rms_residual_to_float(rms_residual_from_float<T>(normed * weight));
+}
+
 template <typename T>
 __global__ void rms_norm_residual_vec8_kernel(
     const T *__restrict__ x, const T *__restrict__ residual,
     const T *__restrict__ weight, const T *__restrict__ scale,
-    T *__restrict__ dst, const int ncols, const float eps) {
+    T *__restrict__ dst, const int ncols, const float eps,
+    const bool round_normed) {
   using Vec = rms_vec8<T>;
   __shared__ float reduce[32];
   const int row = blockIdx.x;
@@ -267,7 +285,7 @@ __global__ void rms_norm_residual_vec8_kernel(
     sum += rms_vec8_sum_squares(x_vec[row_offset + col]);
   }
   const float inv_rms =
-      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
+      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
 
   for (int col = tid; col < vec_cols; col += blockDim.x) {
     const int idx = row_offset + col;
@@ -277,8 +295,8 @@ __global__ void rms_norm_residual_vec8_kernel(
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      const float normed = rms_residual_to_float(x_value.data[i]) * inv_rms *
-                           rms_residual_to_float(weight_value.data[i]);
+      const float normed = rms_scaled<T>(rms_residual_to_float(x_value.data[i]), inv_rms,
+                                         rms_residual_to_float(weight_value.data[i]), round_normed);
       const float value =
           (rms_residual_to_float(residual_value.data[i]) + normed) *
           scale_value;
@@ -294,7 +312,8 @@ __global__ void rms_norm_residual_kernel(const T *__restrict__ x,
                                          const T *__restrict__ weight,
                                          const T *__restrict__ scale,
                                          T *__restrict__ dst, const int ncols,
-                                         const float eps) {
+                                         const float eps,
+                                         const bool round_normed) {
   __shared__ float reduce[32];
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
@@ -308,10 +327,10 @@ __global__ void rms_norm_residual_kernel(const T *__restrict__ x,
     sum += value * value;
   }
   const float inv_rms =
-      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
+      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) + eps);
   for (int col = tid; col < ncols; col += blockDim.x) {
-    const float normed = rms_residual_to_float(x[row_offset + col]) * inv_rms *
-                         rms_residual_to_float(weight[col]);
+    const float normed = rms_scaled<T>(rms_residual_to_float(x[row_offset + col]), inv_rms,
+                                       rms_residual_to_float(weight[col]), round_normed);
     const float value =
         (rms_residual_to_float(residual[row_offset + col]) + normed) *
         scale_value;
@@ -323,7 +342,7 @@ template <typename T>
 void launch_rms_norm_residual(const void *x, const void *residual,
                               const void *weight, const void *scale, void *dst,
                               const int nrows, const int ncols, const float eps,
-                              int64_t stream) {
+                              const bool round_normed, int64_t stream) {
   if (nrows <= 0 || ncols <= 0) {
     return;
   }
@@ -338,7 +357,7 @@ void launch_rms_norm_residual(const void *x, const void *residual,
           reinterpret_cast<const T *>(residual),
           reinterpret_cast<const T *>(weight),
           reinterpret_cast<const T *>(scale), reinterpret_cast<T *>(dst),
-          ncols, eps);
+          ncols, eps, round_normed);
       return;
     }
   }
@@ -347,7 +366,7 @@ void launch_rms_norm_residual(const void *x, const void *residual,
   rms_norm_residual_kernel<T><<<nrows, block, 0, custream>>>(
       reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(residual),
       reinterpret_cast<const T *>(weight), reinterpret_cast<const T *>(scale),
-      reinterpret_cast<T *>(dst), ncols, eps);
+      reinterpret_cast<T *>(dst), ncols, eps, round_normed);
 }
 
 template <typename T>
@@ -468,7 +487,7 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     const T *__restrict__ residual_weight, const T *__restrict__ scale,
     const T *__restrict__ norm_weight, T *__restrict__ residual_dst,
     T *__restrict__ norm_dst, const int ncols, const float residual_eps,
-    const float norm_eps) {
+    const float norm_eps, const bool round_normed) {
   using Vec = rms_vec8<T>;
   __shared__ float reduce[32];
   const int row = blockIdx.x;
@@ -492,7 +511,7 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     sum += rms_vec8_sum_squares(x_vec[row_offset + col]);
   }
   const float inv_rms =
-      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(ncols) +
+      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) +
              residual_eps);
 
   float residual_sum = 0.0f;
@@ -504,19 +523,20 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      const float normed =
-          rms_residual_to_float(x_value.data[i]) * inv_rms *
-          rms_residual_to_float(residual_weight_value.data[i]);
+      const float normed = rms_scaled<T>(rms_residual_to_float(x_value.data[i]), inv_rms,
+                                         rms_residual_to_float(residual_weight_value.data[i]),
+                                         round_normed);
       const float value =
           (rms_residual_to_float(residual_value.data[i]) + normed) *
           scale_value;
       out.data[i] = rms_residual_from_float<T>(value);
-      residual_sum += value * value;
+      const float kept = round_normed ? rms_residual_to_float(out.data[i]) : value;
+      residual_sum += kept * kept;
     }
     residual_dst_vec[idx] = out;
   }
   const float norm_inv_rms =
-      rsqrtf(rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
+      rms_inv(round_normed, rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
              norm_eps);
 
   for (int col = tid; col < vec_cols; col += blockDim.x) {
@@ -526,9 +546,10 @@ __global__ void rms_norm_residual_then_rms_norm_vec8_kernel(
     Vec out;
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
-      const float value = rms_residual_to_float(residual_value.data[i]) *
-                          norm_inv_rms *
-                          rms_residual_to_float(norm_weight_value.data[i]);
+      const float value = rms_scaled<T>(rms_residual_to_float(residual_value.data[i]),
+                                        norm_inv_rms,
+                                        rms_residual_to_float(norm_weight_value.data[i]),
+                                        round_normed);
       out.data[i] = rms_residual_from_float<T>(value);
     }
     norm_dst_vec[idx] = out;
@@ -541,7 +562,7 @@ __global__ void rms_norm_residual_then_rms_norm_kernel(
     const T *__restrict__ residual_weight, const T *__restrict__ scale,
     const T *__restrict__ norm_weight, T *__restrict__ residual_dst,
     T *__restrict__ norm_dst, const int ncols, const float residual_eps,
-    const float norm_eps) {
+    const float norm_eps, const bool round_normed) {
   __shared__ float reduce[32];
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
@@ -555,25 +576,26 @@ __global__ void rms_norm_residual_then_rms_norm_kernel(
     sum += value * value;
   }
   const float inv_rms =
-      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(ncols) +
+      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(ncols) +
              residual_eps);
   float residual_sum = 0.0f;
   for (int col = tid; col < ncols; col += blockDim.x) {
     const int idx = row_offset + col;
-    const float normed = rms_residual_to_float(x[idx]) * inv_rms *
-                         rms_residual_to_float(residual_weight[col]);
+    const float normed = rms_scaled<T>(rms_residual_to_float(x[idx]), inv_rms,
+                                       rms_residual_to_float(residual_weight[col]), round_normed);
     const float value =
         (rms_residual_to_float(residual[idx]) + normed) * scale_value;
     residual_dst[idx] = rms_residual_from_float<T>(value);
-    residual_sum += value * value;
+    const float kept = round_normed ? rms_residual_to_float(residual_dst[idx]) : value;
+    residual_sum += kept * kept;
   }
   const float norm_inv_rms =
-      rsqrtf(rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
+      rms_inv(round_normed, rms_block_sum(residual_sum, reduce) / static_cast<float>(ncols) +
              norm_eps);
   for (int col = tid; col < ncols; col += blockDim.x) {
     const int idx = row_offset + col;
-    const float value = rms_residual_to_float(residual_dst[idx]) *
-                        norm_inv_rms * rms_residual_to_float(norm_weight[col]);
+    const float value = rms_scaled<T>(rms_residual_to_float(residual_dst[idx]), norm_inv_rms,
+                                      rms_residual_to_float(norm_weight[col]), round_normed);
     norm_dst[idx] = rms_residual_from_float<T>(value);
   }
 }
@@ -583,7 +605,8 @@ void launch_rms_norm_residual_then_rms_norm(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
     void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, int64_t stream) {
+    const float residual_eps, const float norm_eps, const bool round_normed,
+    int64_t stream) {
   if (nrows <= 0 || ncols <= 0) {
     return;
   }
@@ -604,7 +627,8 @@ void launch_rms_norm_residual_then_rms_norm(
               reinterpret_cast<const T *>(scale),
               reinterpret_cast<const T *>(norm_weight),
               reinterpret_cast<T *>(residual_dst),
-              reinterpret_cast<T *>(norm_dst), ncols, residual_eps, norm_eps);
+              reinterpret_cast<T *>(norm_dst), ncols, residual_eps, norm_eps,
+              round_normed);
       return;
     }
   }
@@ -615,7 +639,7 @@ void launch_rms_norm_residual_then_rms_norm(
       reinterpret_cast<const T *>(residual_weight),
       reinterpret_cast<const T *>(scale),
       reinterpret_cast<const T *>(norm_weight), reinterpret_cast<T *>(residual_dst),
-      reinterpret_cast<T *>(norm_dst), ncols, residual_eps, norm_eps);
+      reinterpret_cast<T *>(norm_dst), ncols, residual_eps, norm_eps, round_normed);
 }
 
 template <typename T>
@@ -623,7 +647,8 @@ __global__ void rms_norm_strided_4d_kernel(
     const T *__restrict__ x, const T *__restrict__ weight, T *__restrict__ dst,
     const int64_t stride_b, const int64_t stride_h, const int64_t stride_s,
     const int64_t stride_d, const int batch, const int heads,
-    const int seq_len, const int head_dim, const float eps) {
+    const int seq_len, const int head_dim, const float eps,
+    const bool round_normed) {
   __shared__ float reduce[32];
   const int row = blockIdx.x;
   const int tid = threadIdx.x;
@@ -642,10 +667,10 @@ __global__ void rms_norm_strided_4d_kernel(
     sum += value * value;
   }
   const float inv_rms =
-      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
+      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
   for (int col = tid; col < head_dim; col += blockDim.x) {
-    const float value = rms_residual_to_float(x[src_base + col * stride_d]) *
-                        inv_rms * rms_residual_to_float(weight[col]);
+    const float value = rms_scaled<T>(rms_residual_to_float(x[src_base + col * stride_d]), inv_rms,
+                                      rms_residual_to_float(weight[col]), round_normed);
     dst[dst_base + col] = rms_residual_from_float<T>(value);
   }
 }
@@ -655,7 +680,8 @@ template <typename T>
 __global__ void rms_norm_rows_vec8_kernel(
     const T *__restrict__ x, const T *__restrict__ weight, T *__restrict__ dst,
     const int64_t stride_b, const int64_t stride_h, const int64_t stride_s,
-    const int heads, const int seq_len, const int head_dim, const float eps) {
+    const int heads, const int seq_len, const int head_dim, const float eps,
+    const bool round_normed) {
   using Vec = rms_vec8<T>;
   __shared__ float reduce[32];
   const int row = blockIdx.x;
@@ -677,7 +703,7 @@ __global__ void rms_norm_rows_vec8_kernel(
     sum += rms_vec8_sum_squares(x_vec[col]);
   }
   const float inv_rms =
-      rsqrtf(rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
+      rms_inv(round_normed, rms_block_sum(sum, reduce) / static_cast<float>(head_dim) + eps);
   for (int col = tid; col < vec_cols; col += blockDim.x) {
     const Vec x_value = x_vec[col];
     const Vec weight_value = weight_vec[col];
@@ -685,8 +711,8 @@ __global__ void rms_norm_rows_vec8_kernel(
 #pragma unroll
     for (int i = 0; i < 8; ++i) {
       out.data[i] = rms_residual_from_float<T>(
-          rms_residual_to_float(x_value.data[i]) * inv_rms *
-          rms_residual_to_float(weight_value.data[i]));
+          rms_scaled<T>(rms_residual_to_float(x_value.data[i]), inv_rms,
+                        rms_residual_to_float(weight_value.data[i]), round_normed));
     }
     dst_vec[col] = out;
   }
@@ -697,7 +723,7 @@ void launch_rms_norm_strided_4d(
     const void *x, const void *weight, void *dst, const int64_t stride_b,
     const int64_t stride_h, const int64_t stride_s, const int64_t stride_d,
     const int batch, const int heads, const int seq_len, const int head_dim,
-    const float eps, int64_t stream) {
+    const float eps, const bool round_normed, int64_t stream) {
   if (batch <= 0 || heads <= 0 || seq_len <= 0 || head_dim <= 0) {
     return;
   }
@@ -711,7 +737,7 @@ void launch_rms_norm_strided_4d(
         <<<total_rows, rms_vec8_block_size(head_dim / 8), 0, custream>>>(
             reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(weight),
             reinterpret_cast<T *>(dst), stride_b, stride_h, stride_s, heads,
-            seq_len, head_dim, eps);
+            seq_len, head_dim, eps, round_normed);
     return;
   }
 
@@ -722,34 +748,34 @@ void launch_rms_norm_strided_4d(
   rms_norm_strided_4d_kernel<T><<<total_rows, block, 0, custream>>>(
       reinterpret_cast<const T *>(x), reinterpret_cast<const T *>(weight),
       reinterpret_cast<T *>(dst), stride_b, stride_h, stride_s, stride_d, batch,
-      heads, seq_len, head_dim, eps);
+      heads, seq_len, head_dim, eps, round_normed);
 }
 
 extern "C" void rms_norm_residual_f32(const void *x, const void *residual,
                                       const void *weight, const void *scale,
                                       void *dst, const int nrows,
                                       const int ncols, const float eps,
-                                      int64_t stream) {
+                                      const int round_normed, int64_t stream) {
   launch_rms_norm_residual<float>(x, residual, weight, scale, dst, nrows, ncols,
-                                  eps, stream);
+                                  eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_residual_f16(const void *x, const void *residual,
                                       const void *weight, const void *scale,
                                       void *dst, const int nrows,
                                       const int ncols, const float eps,
-                                      int64_t stream) {
+                                      const int round_normed, int64_t stream) {
   launch_rms_norm_residual<__half>(x, residual, weight, scale, dst, nrows,
-                                   ncols, eps, stream);
+                                   ncols, eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_residual_bf16(const void *x, const void *residual,
                                        const void *weight, const void *scale,
                                        void *dst, const int nrows,
                                        const int ncols, const float eps,
-                                       int64_t stream) {
+                                       const int round_normed, int64_t stream) {
   launch_rms_norm_residual<__nv_bfloat16>(x, residual, weight, scale, dst,
-                                          nrows, ncols, eps, stream);
+                                          nrows, ncols, eps, round_normed != 0, stream);
 }
 
 extern "C" void add_rms_norm_f32(const void *x, const void *residual,
@@ -783,60 +809,63 @@ extern "C" void rms_norm_residual_then_rms_norm_f32(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
     void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, int64_t stream) {
+    const float residual_eps, const float norm_eps, const int round_normed,
+    int64_t stream) {
   launch_rms_norm_residual_then_rms_norm<float>(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
-      nrows, ncols, residual_eps, norm_eps, stream);
+      nrows, ncols, residual_eps, norm_eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_residual_then_rms_norm_f16(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
     void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, int64_t stream) {
+    const float residual_eps, const float norm_eps, const int round_normed,
+    int64_t stream) {
   launch_rms_norm_residual_then_rms_norm<__half>(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
-      nrows, ncols, residual_eps, norm_eps, stream);
+      nrows, ncols, residual_eps, norm_eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_residual_then_rms_norm_bf16(
     const void *x, const void *residual, const void *residual_weight,
     const void *scale, const void *norm_weight, void *residual_dst,
     void *norm_dst, const int nrows, const int ncols,
-    const float residual_eps, const float norm_eps, int64_t stream) {
+    const float residual_eps, const float norm_eps, const int round_normed,
+    int64_t stream) {
   launch_rms_norm_residual_then_rms_norm<__nv_bfloat16>(
       x, residual, residual_weight, scale, norm_weight, residual_dst, norm_dst,
-      nrows, ncols, residual_eps, norm_eps, stream);
+      nrows, ncols, residual_eps, norm_eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_strided_4d_f32(
     const void *x, const void *weight, void *dst, const int64_t stride_b,
     const int64_t stride_h, const int64_t stride_s, const int64_t stride_d,
     const int batch, const int heads, const int seq_len, const int head_dim,
-    const float eps, int64_t stream) {
+    const float eps, const int round_normed, int64_t stream) {
   launch_rms_norm_strided_4d<float>(x, weight, dst, stride_b, stride_h,
                                     stride_s, stride_d, batch, heads, seq_len,
-                                    head_dim, eps, stream);
+                                    head_dim, eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_strided_4d_f16(
     const void *x, const void *weight, void *dst, const int64_t stride_b,
     const int64_t stride_h, const int64_t stride_s, const int64_t stride_d,
     const int batch, const int heads, const int seq_len, const int head_dim,
-    const float eps, int64_t stream) {
+    const float eps, const int round_normed, int64_t stream) {
   launch_rms_norm_strided_4d<__half>(x, weight, dst, stride_b, stride_h,
                                      stride_s, stride_d, batch, heads, seq_len,
-                                     head_dim, eps, stream);
+                                     head_dim, eps, round_normed != 0, stream);
 }
 
 extern "C" void rms_norm_strided_4d_bf16(
     const void *x, const void *weight, void *dst, const int64_t stride_b,
     const int64_t stride_h, const int64_t stride_s, const int64_t stride_d,
     const int batch, const int heads, const int seq_len, const int head_dim,
-    const float eps, int64_t stream) {
+    const float eps, const int round_normed, int64_t stream) {
   launch_rms_norm_strided_4d<__nv_bfloat16>(x, weight, dst, stride_b, stride_h,
                                             stride_s, stride_d, batch, heads,
-                                            seq_len, head_dim, eps, stream);
+                                            seq_len, head_dim, eps, round_normed != 0, stream);
 }
 
 template <typename T> inline __device__ void swap(T &a, T &b) {

@@ -1101,7 +1101,8 @@ impl Norm {
         match self {
             Self::Rms(norm) => norm.forward_residual(x, residual),
             Self::Gemma(norm) => norm.forward_residual(x, residual),
-            Self::Layer(_) | Self::F32Rms(_) => self.forward(x)? + residual,
+            Self::F32Rms(norm) => norm.forward_residual(x, residual),
+            Self::Layer(_) => self.forward(x)? + residual,
         }
     }
 
@@ -1119,7 +1120,10 @@ impl Norm {
             (Self::Gemma(norm), Self::Gemma(next)) => {
                 norm.forward_residual_then_rms_norm(x, residual, next)
             }
-            (Self::Layer(_), Self::Layer(_)) | (Self::F32Rms(_), Self::F32Rms(_)) => {
+            (Self::F32Rms(norm), Self::F32Rms(next)) => {
+                norm.forward_residual_then_rms_norm(x, residual, next)
+            }
+            (Self::Layer(_), Self::Layer(_)) => {
                 let xs = self.forward_residual(x, residual)?;
                 let normed = next.forward(&xs)?;
                 Ok((xs, normed))

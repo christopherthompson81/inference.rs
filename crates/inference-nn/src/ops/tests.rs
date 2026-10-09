@@ -1865,3 +1865,98 @@ fn rms_norm_on_cuda_matches_the_cpu_for_every_rank_and_layout() -> inference_ten
     }
     Ok(())
 }
+
+// transformers' order (normalise in F32, cast, then scale) fused on CUDA against the composite ops; a flipped first
+// rounding (rsqrtf against sqrt of the reciprocal) carries through the weight, so two ulps
+#[cfg(feature = "cuda")]
+#[test]
+fn cast_then_scale_rms_norms_on_cuda_match_the_composite() -> inference_tensor::Result<()> {
+    const EPS: f32 = 1e-6;
+    const OPERAND_SCALE: f32 = 1.0;
+    let device = Device::new_cuda(0)?;
+    let to_vec = |t: &Tensor| t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>();
+    // ulps relative to the output: 2^-7 for bf16, 2^-10 for f16
+    let check = |label: &str,
+                 ulp: f32,
+                 actual: &Tensor,
+                 expected: &Tensor|
+     -> inference_tensor::Result<()> {
+        for (a, e) in to_vec(actual)?.iter().zip(to_vec(expected)?) {
+            // sums cancel their operands (about 1 to 5 here), so errors scale with those, not the result
+            assert!(
+                (a - e).abs() <= ulp * e.abs().max(OPERAND_SCALE),
+                "{label}: {a} vs {e}"
+            );
+        }
+        Ok(())
+    };
+    // 36 and 4100 take the scalar kernels, 40 and 8200 the vec8 ones
+    for dim in [36usize, 40, 4100, 8200] {
+        let rows = 6;
+        let values = |phase: f32, scale: f32| {
+            Tensor::arange(0f32, (rows * dim) as f32, &Device::Cpu)?
+                .affine(0.0007, f64::from(phase))?
+                .sin()?
+                .affine(f64::from(scale), 0.)?
+                .reshape((rows, dim))
+        };
+        let weight = |phase: f32| {
+            Tensor::arange(0f32, dim as f32, &Device::Cpu)?.affine(0.001, f64::from(phase))
+        };
+        for (dtype, ulp) in [(DType::BF16, 1.0 / 128.0), (DType::F16, 1.0 / 1024.0)] {
+            let (x, residual) = (
+                values(-1.1, 3.0)?.to_dtype(dtype)?,
+                values(0.4, 2.0)?.to_dtype(dtype)?,
+            );
+            let (w1, w2) = (
+                weight(0.7)?.to_dtype(dtype)?,
+                weight(-0.2)?.to_dtype(dtype)?,
+            );
+            let gpu = |t: &Tensor| t.to_device(&device);
+            let label = format!("{dtype:?} dim {dim}");
+
+            let expected = super::rms_norm_cast_then_scale(&x, &w1, EPS)?;
+            let actual = super::rms_norm_cast_then_scale(&gpu(&x)?, &gpu(&w1)?, EPS)?;
+            check(&format!("{label} norm"), 2.0 * ulp, &actual, &expected)?;
+
+            let expected_sum = (&residual + &expected)?;
+            let actual = super::cuda_rms_norm_residual(
+                &gpu(&x)?,
+                &gpu(&residual)?,
+                &gpu(&w1)?,
+                None,
+                EPS,
+                true,
+            )?;
+            check(
+                &format!("{label} residual"),
+                2.0 * ulp,
+                &actual,
+                &expected_sum,
+            )?;
+
+            let expected_next = super::rms_norm_cast_then_scale(&expected_sum, &w2, EPS)?;
+            let (sum, next) = super::cuda_rms_norm_residual_then_rms_norm(
+                &gpu(&x)?,
+                &gpu(&residual)?,
+                (&gpu(&w1)?, EPS),
+                None,
+                (&gpu(&w2)?, EPS),
+                true,
+            )?;
+            check(
+                &format!("{label} residual then norm, sum"),
+                2.0 * ulp,
+                &sum,
+                &expected_sum,
+            )?;
+            check(
+                &format!("{label} residual then norm, norm"),
+                3.0 * ulp,
+                &next,
+                &expected_next,
+            )?;
+        }
+    }
+    Ok(())
+}
