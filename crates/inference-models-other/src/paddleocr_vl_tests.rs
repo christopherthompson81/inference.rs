@@ -6,7 +6,8 @@ use anyhow::Result;
 use inference_nn::loaders::MultimodalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
-    Snapshot, assert_snapshot, forward_multimodal, load_synthesized, metadata, names_digest,
+    Snapshot, assert_snapshot, by_arch, forward_multimodal, load_synthesized, metadata,
+    names_digest,
 };
 use inference_tensor::DType;
 use serde_json::{Value, json};
@@ -81,10 +82,17 @@ fn paddleocr_vl_prefill_bf16() -> Result<()> {
     prefill(
         DType::BF16,
         0xc6a2_f574_7978_1a94,
-        &Snapshot {
-            probes: [1.1328125, -0.4765625, 0.71484375, -0.5703125],
-            sum: -24.725338,
-            l2: 16.513906,
-        },
+        &by_arch(
+            Snapshot {
+                probes: [1.1328125, -0.4765625, 0.71484375, -0.5703125],
+                sum: -24.725338,
+                l2: 16.513906,
+            },
+            Snapshot {
+                probes: [1.1015625, -0.46679688, 0.6953125, -0.578125],
+                sum: -25.2453,
+                l2: 16.481304,
+            },
+        ),
     )
 }

@@ -6,8 +6,8 @@ use anyhow::Result;
 use inference_nn::loaders::MultimodalModelLoader;
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
-    Snapshot, assert_err_contains, assert_snapshot, forward_multimodal, load_synthesized, metadata,
-    names_digest, patched,
+    Snapshot, assert_err_contains, assert_snapshot, by_arch, forward_multimodal, load_synthesized,
+    metadata, names_digest, patched,
 };
 use inference_tensor::{DType, Tensor};
 use serde_json::{Value, json};
@@ -264,11 +264,18 @@ fn qwen2_vl_prefill_bf16_sliding() -> Result<()> {
         json!({"use_sliding_window": true, "sliding_window": 3, "max_window_layers": 1}),
     );
     let (logits, _) = prefill_as(&Qwen2VLLoader, &config, HashMap::new(), DType::BF16)?;
-    let expected = Snapshot {
-        probes: [0.096191406, 1.5859375, 0.7109375, 0.6484375],
-        sum: 36.21855,
-        l2: 17.498833,
-    };
+    let expected = by_arch(
+        Snapshot {
+            probes: [0.096191406, 1.5859375, 0.7109375, 0.6484375],
+            sum: 36.21855,
+            l2: 17.498833,
+        },
+        Snapshot {
+            probes: [0.09814453, 1.59375, 0.71484375, 0.6953125],
+            sum: 37.24601,
+            l2: 17.465391,
+        },
+    );
     assert_snapshot(&logits, VOCAB, &expected)
 }
 
@@ -277,11 +284,18 @@ fn qwen2_vl_prefill_bf16_sliding() -> Result<()> {
 fn qwen3_vl_dense_prefill_bf16() -> Result<()> {
     let config = qwen3_vl_config(qwen3_vl_text());
     let (logits, _) = prefill_as(&Qwen3VLLoader, &config, HashMap::new(), DType::BF16)?;
-    let expected = Snapshot {
-        probes: [1.2421875, -0.55859375, 0.66015625, -0.29296875],
-        sum: -27.897491,
-        l2: 17.8422,
-    };
+    let expected = by_arch(
+        Snapshot {
+            probes: [1.2421875, -0.55859375, 0.66015625, -0.29296875],
+            sum: -27.897491,
+            l2: 17.8422,
+        },
+        Snapshot {
+            probes: [1.2265625, -0.546875, 0.65625, -0.29882813],
+            sum: -27.53561,
+            l2: 17.78824,
+        },
+    );
     assert_snapshot(&logits, VOCAB, &expected)
 }
 
@@ -289,11 +303,18 @@ fn qwen3_vl_dense_prefill_bf16() -> Result<()> {
 fn qwen3_vl_moe_prefill_bf16() -> Result<()> {
     let config = qwen3_vl_config(moe_text());
     let (logits, _) = prefill_as(&Qwen3VLMoELoader, &config, moe_shapes(), DType::BF16)?;
-    let expected = Snapshot {
-        probes: [1.34375, 0.21386719, 0.27929688, -0.66796875],
-        sum: -38.24656,
-        l2: 17.86099,
-    };
+    let expected = by_arch(
+        Snapshot {
+            probes: [1.34375, 0.21386719, 0.27929688, -0.66796875],
+            sum: -38.24656,
+            l2: 17.86099,
+        },
+        Snapshot {
+            probes: [1.328125, 0.20605469, 0.27148438, -0.671875],
+            sum: -38.04483,
+            l2: 17.813007,
+        },
+    );
     assert_snapshot(&logits, VOCAB, &expected)
 }
 

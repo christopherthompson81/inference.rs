@@ -146,6 +146,13 @@ impl VecOps for half::f16 {
         super::vec_dot_f16(lhs, rhs, &mut res_f32, len);
         *res = half::f16::from_f32(res_f32);
     }
+
+    // A half-precision accumulator stops growing once the sum dwarfs each term (a softmax row's exponentials)
+    #[inline(always)]
+    unsafe fn vec_reduce_sum(xs: *const Self, res: *mut Self, len: usize) {
+        let sum = (0..len).map(|i| (*xs.add(i)).to_f32()).sum::<f32>();
+        *res = half::f16::from_f32(sum);
+    }
 }
 
 impl VecOps for f64 {
@@ -202,6 +209,13 @@ impl VecOps for half::bf16 {
         let mut res_f32 = 0f32;
         super::vec_dot_bf16(lhs, rhs, &mut res_f32, len);
         *res = half::bf16::from_f32(res_f32);
+    }
+
+    // A half-precision accumulator stops growing once the sum dwarfs each term (a softmax row's exponentials)
+    #[inline(always)]
+    unsafe fn vec_reduce_sum(xs: *const Self, res: *mut Self, len: usize) {
+        let sum = (0..len).map(|i| (*xs.add(i)).to_f32()).sum::<f32>();
+        *res = half::bf16::from_f32(sum);
     }
 }
 impl VecOps for u8 {

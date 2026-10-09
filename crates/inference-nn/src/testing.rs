@@ -308,6 +308,15 @@ pub struct Snapshot {
     pub l2: f32,
 }
 
+/// The x86 snapshot, or the arm64 one: BF16 and quantized CPU kernels round in a different order on each.
+pub fn by_arch(x86: Snapshot, aarch64: Snapshot) -> Snapshot {
+    if cfg!(target_arch = "aarch64") {
+        aarch64
+    } else {
+        x86
+    }
+}
+
 fn close(actual: f32, expected: f32, tol: f32) -> bool {
     (actual - expected).abs() <= tol * expected.abs().max(1.0)
 }
