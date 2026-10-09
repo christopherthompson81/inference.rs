@@ -147,20 +147,12 @@ async fn qwen2_vl_images_and_video() -> anyhow::Result<()> {
     let traces = traces(&model).await?;
     // 27 text tokens, a start/end pair per medium; a 56x56 image is 4 merged patches, the 84x56 one resizes to 28x56
     // (2) under max_pixels, the 4-frame video is 2 temporal by 2x2 (8)
-    // CUDA's paged prefill, split at the image, gives other ids than eager; see qwen2vl_paged_media_investigation.md
-    let expected = if cfg!(feature = "cuda") {
-        vec![
-            (vec![5, 74, 169, 46, 249, 213], 33),
-            (vec![243, 212, 200, 20, 6, 237], 37),
-            (vec![5, 74, 256, 166, 220, 237], 37),
-        ]
-    } else {
-        vec![
-            (vec![237, 100, 34, 185, 26, 163], 33),
-            (vec![257, 257, 187, 143, 256, 31], 37),
-            (vec![5, 74, 256, 166, 32, 236], 37),
-        ]
-    };
+    // CUDA's paged prefill splits at the image and must decode as eager does; see qwen2vl_paged_media_investigation.md
+    let expected = vec![
+        (vec![237, 100, 34, 185, 26, 163], 33),
+        (vec![257, 257, 187, 143, 256, 31], 37),
+        (vec![5, 74, 256, 166, 32, 236], 37),
+    ];
     assert_eq!(traces, expected);
     Ok(())
 }
@@ -185,20 +177,12 @@ async fn qwen2_5_vl_images_and_video() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen2_5_vl()?;
     let model = build(checkpoint.path()).await?;
     let traces = traces(&model).await?;
-    // Qwen2-VL's token counts, and the same paged-versus-eager split of ids
-    let expected = if cfg!(feature = "cuda") {
-        vec![
-            (vec![178, 247, 165, 246, 90, 118], 33),
-            (vec![202, 117, 182, 206, 145, 12], 37),
-            (vec![27, 69, 149, 132, 153, 153], 37),
-        ]
-    } else {
-        vec![
-            (vec![17, 158, 154, 184, 90, 248], 33),
-            (vec![68, 152, 192, 133, 101, 133], 37),
-            (vec![3, 244, 153, 27, 31, 153], 37),
-        ]
-    };
+    // Qwen2-VL's token counts; paged and eager agree here too
+    let expected = vec![
+        (vec![17, 158, 154, 184, 90, 248], 33),
+        (vec![68, 152, 192, 133, 101, 133], 37),
+        (vec![3, 244, 153, 27, 31, 153], 37),
+    ];
     assert_eq!(traces, expected);
     Ok(())
 }

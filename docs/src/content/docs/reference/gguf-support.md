@@ -64,6 +64,7 @@ files when the repository and GGUF metadata identify them unambiguously. The dir
 | Llama 4 | `llama4` |
 | LFM2-VL and LFM2.5-VL | `lfm2` |
 | Muse Glimmer | `muse-glimmer` |
+| PaddleOCR-VL (1.5, 1.6) | `paddleocr` |
 | Qwen2-VL and Qwen2.5-VL | `qwen2vl` |
 | Qwen3-VL | `qwen3vl` |
 | Qwen3-VL MoE | `qwen3vlmoe` |

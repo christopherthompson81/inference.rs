@@ -56,6 +56,10 @@ const GPT4O_REGEX: &str = "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))*((?=[\\p
 const TEKKEN_REGEX: &str = "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))*((?=[\\p{L}])([^A-Z]))+|[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))+((?=[\\p{L}])([^A-Z]))*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+";
 const GGML_TOKEN_TYPE_NORMAL: i32 = 1;
 const GGML_TOKEN_TYPE_BYTE: i32 = 6;
+// Matched whole but decoded as text, as transformers and llama.cpp do (Ernie's digits, Qwen's think and tool tags)
+const GGML_TOKEN_TYPE_USER_DEFINED: i32 = 4;
+// llama.cpp makes Gemma 4's channel and tool markers user-defined for its chat parser; transformers keeps them special
+const GEMMA4_TOKENIZER_MODEL: &str = "gemma4";
 const SENTENCEPIECE_UNDERLINE: &str = "\u{2581}";
 // SentencePiece numbers `<unk>` 0 when the GGUF names none
 const SPM_DEFAULT_UNK: u32 = 0;
@@ -235,12 +239,24 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
     // Byte fallback entries are model tokens, not AddedToken specials.
     // Batch them so `AddedVocabulary` refreshes its matchers once.
     let mut special = Vec::new();
+    let mut user_defined = Vec::new();
     if token_types.len() == props.tokens.len() {
-        for (i, ty) in token_types.iter().enumerate() {
-            if *ty != GGML_TOKEN_TYPE_NORMAL && *ty != GGML_TOKEN_TYPE_BYTE {
-                special.push(AddedToken::from(props.tokens[i].clone(), true));
+        for (token, &ty) in props.tokens.iter().zip(&token_types) {
+            match added_token_kind(&props.model, ty) {
+                Some(AddedTokenKind::Text) => {
+                    user_defined.push(AddedToken::from(token.clone(), false).normalized(false))
+                }
+                Some(AddedTokenKind::Special) => {
+                    special.push(AddedToken::from(token.clone(), true))
+                }
+                None => {}
             }
         }
+    }
+    if !user_defined.is_empty() {
+        tokenizer
+            .add_tokens(user_defined)
+            .map_err(anyhow::Error::msg)?;
     }
     let num_special_tokens = special.len();
     if !special.is_empty() {
@@ -278,6 +294,23 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
         eos: Some(props.tokens[props.eos as usize].clone()),
         unk,
     })
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AddedTokenKind {
+    Text,
+    Special,
+}
+
+// How a GGUF token type registers in the tokenizer: model pieces (normal, byte fallback) are not added tokens
+fn added_token_kind(model: &str, ty: i32) -> Option<AddedTokenKind> {
+    match ty {
+        GGML_TOKEN_TYPE_NORMAL | GGML_TOKEN_TYPE_BYTE => None,
+        GGML_TOKEN_TYPE_USER_DEFINED if model != GEMMA4_TOKENIZER_MODEL => {
+            Some(AddedTokenKind::Text)
+        }
+        _ => Some(AddedTokenKind::Special),
+    }
 }
 
 // TODO: Add support for additional tokenizer models: WordPiece, WordLevel
@@ -823,9 +856,10 @@ impl TryFrom<Normalizer<'_>> for NormalizerWrapper {
 #[cfg(test)]
 mod tests {
     use super::{
-        BpePreTokenizerKind, PropsGGUF, SENTENCEPIECE_UNDERLINE, bpe_pre_tokenizer_spec,
-        bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer, gemma4_tokenizer, spm_bpe_tokenizer,
-        validate_external_gguf_tokenizer,
+        AddedTokenKind, BpePreTokenizerKind, GGML_TOKEN_TYPE_BYTE, GGML_TOKEN_TYPE_NORMAL,
+        GGML_TOKEN_TYPE_USER_DEFINED, PropsGGUF, SENTENCEPIECE_UNDERLINE, added_token_kind,
+        bpe_pre_tokenizer_spec, bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer,
+        gemma4_tokenizer, spm_bpe_tokenizer, validate_external_gguf_tokenizer,
     };
     use anyhow::Result;
     use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
@@ -1367,6 +1401,33 @@ mod tests {
         let unknown = bpe_tokenizer(&test_bpe_props(Some("future-tokenizer"))).unwrap_err();
         assert!(unknown.to_string().contains("future-tokenizer"));
         assert!(unknown.to_string().contains("original tokenizer.json"));
+    }
+
+    // decoding skips specials, so user-defined pieces (digits in Ernie's vocabulary) must stay text
+    #[test]
+    fn user_defined_pieces_are_text_except_gemma4_markers() {
+        const CONTROL: i32 = 3;
+        const UNUSED: i32 = 5;
+        for model in ["llama", "gpt2"] {
+            assert_eq!(
+                added_token_kind(model, GGML_TOKEN_TYPE_USER_DEFINED),
+                Some(AddedTokenKind::Text)
+            );
+            assert_eq!(
+                added_token_kind(model, CONTROL),
+                Some(AddedTokenKind::Special)
+            );
+            assert_eq!(
+                added_token_kind(model, UNUSED),
+                Some(AddedTokenKind::Special)
+            );
+            assert_eq!(added_token_kind(model, GGML_TOKEN_TYPE_NORMAL), None);
+            assert_eq!(added_token_kind(model, GGML_TOKEN_TYPE_BYTE), None);
+        }
+        assert_eq!(
+            added_token_kind("gemma4", GGML_TOKEN_TYPE_USER_DEFINED),
+            Some(AddedTokenKind::Special)
+        );
     }
 
     // llama.cpp merges the best-scoring pair first: "bc" (-5) before "ab" (-6), where Unigram's best path is "ab" "c"
