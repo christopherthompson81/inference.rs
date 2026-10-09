@@ -346,35 +346,11 @@ async fn qwen3_5_moe_traces(model: &Model) -> anyhow::Result<[Vec<(u32, f32)>; 2
     Ok([text, image])
 }
 
+// The F32 CPU decode is pinned; a BF16 GPU decode keeps its ids and lands within BF16 rounding of it. A BF16 CPU
+// decode is no reference: at a near-tie step its rounding picks a different id on arm64 than on x86.
 #[tokio::test]
 async fn qwen3_5_moe_text_and_image() -> anyhow::Result<()> {
     let checkpoint = tiny_qwen3_5_moe()?;
-    if ON_GPU {
-        let gpu = builder(checkpoint.path())
-            .with_dtype(ModelDType::BF16)
-            .build()
-            .await?;
-        let cpu = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
-            .with_dtype(ModelDType::BF16)
-            .with_force_cpu()
-            .build()
-            .await?;
-        let (gpu, cpu) = (
-            qwen3_5_moe_traces(&gpu).await?,
-            qwen3_5_moe_traces(&cpu).await?,
-        );
-        for (gpu, cpu) in gpu.iter().zip(&cpu) {
-            let close = gpu.len() == cpu.len()
-                && gpu
-                    .iter()
-                    .zip(cpu)
-                    .all(|(g, c)| g.0 == c.0 && (g.1 - c.1).abs() < BF16_LOGPROB_TOLERANCE);
-            anyhow::ensure!(close, "GPU decode {gpu:?} differs from CPU {cpu:?}");
-        }
-        return Ok(());
-    }
-    let model = build(checkpoint.path()).await?;
-    let [text, image] = qwen3_5_moe_traces(&model).await?;
     let expected_text = [
         (260, -0.91792876),
         (174, -0.0019233831),
@@ -391,14 +367,24 @@ async fn qwen3_5_moe_text_and_image() -> anyhow::Result<()> {
         (79, -0.063517146),
         (244, -0.8995498),
     ];
-    anyhow::ensure!(
-        same_decode(&text, &expected_text),
-        "text decode moved: {text:?}"
-    );
-    anyhow::ensure!(
-        same_decode(&image, &expected_image),
-        "image decode moved: {image:?}"
-    );
+    let (model, tolerance) = if ON_GPU {
+        let model = builder(checkpoint.path())
+            .with_dtype(ModelDType::BF16)
+            .build()
+            .await?;
+        (model, BF16_LOGPROB_TOLERANCE)
+    } else {
+        (build(checkpoint.path()).await?, LOGPROB_TOLERANCE)
+    };
+    let [text, image] = qwen3_5_moe_traces(&model).await?;
+    for (decode, expected) in [(&text, &expected_text), (&image, &expected_image)] {
+        let close = decode.len() == expected.len()
+            && decode
+                .iter()
+                .zip(expected)
+                .all(|(d, e)| d.0 == e.0 && (d.1 - e.1).abs() < tolerance);
+        anyhow::ensure!(close, "decode moved: {decode:?}, pinned {expected:?}");
+    }
     Ok(())
 }
 

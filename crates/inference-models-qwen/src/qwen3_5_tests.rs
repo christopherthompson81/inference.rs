@@ -7,8 +7,8 @@ use anyhow::Result;
 use inference_nn::loaders::{DeviceMappedModelLoader, MultimodalModelLoader};
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
-    Snapshot, assert_snapshot, forward_multimodal, load_synthesized, metadata, names_digest,
-    patched,
+    Snapshot, assert_snapshot, by_arch, forward_multimodal, load_synthesized, metadata,
+    names_digest, patched,
 };
 use inference_tensor::{DType, Tensor};
 use serde_json::{Value, json};
@@ -185,11 +185,18 @@ fn qwen3_5_moe_prefill_bf16() -> Result<()> {
         digest,
         0xdcb1_500e_458e_6eb2,
         // the fused output gate rounds sigmoid(gate) * y to BF16 once
-        Snapshot {
-            probes: [-1.09375, -0.671875, 4.3125, 6.625],
-            sum: 32.894012,
-            l2: 52.16037,
-        },
+        by_arch(
+            Snapshot {
+                probes: [-1.09375, -0.671875, 4.3125, 6.625],
+                sum: 32.894012,
+                l2: 52.16037,
+            },
+            Snapshot {
+                probes: [-1.0546875, -0.61328125, 4.3125, 6.53125],
+                sum: 34.015564,
+                l2: 52.379665,
+            },
+        ),
     )
 }
 

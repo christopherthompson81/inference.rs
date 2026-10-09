@@ -287,14 +287,26 @@ async fn gemma3_re_isq_decodes_as_recorded() -> anyhow::Result<()> {
         (11, -3.6988003),
         (11, -3.6956322),
     ];
-    let expected_after: &[(u32, f32)] = &[
-        (11, -3.681465),
-        (11, -3.6800666),
-        (11, -3.6870623),
-        (11, -3.7020814),
-        (11, -3.6991875),
-        (11, -3.6998081),
-    ];
+    // Q4_0's NEON and AVX dot products sum in a different order
+    let expected_after: &[(u32, f32)] = if cfg!(target_arch = "aarch64") {
+        &[
+            (11, -3.6810696),
+            (11, -3.6798675),
+            (11, -3.687006),
+            (11, -3.701216),
+            (11, -3.6990685),
+            (11, -3.6998081),
+        ]
+    } else {
+        &[
+            (11, -3.681465),
+            (11, -3.6800666),
+            (11, -3.6870623),
+            (11, -3.7020814),
+            (11, -3.6991875),
+            (11, -3.6998081),
+        ]
+    };
     anyhow::ensure!(
         close(&before, expected_before, PIN_TOLERANCE),
         "Q8_0 decode moved: {before:?}"
