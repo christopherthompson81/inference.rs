@@ -7,7 +7,7 @@ use inference::{
 
 #[path = "../support/kokoro_tiny.rs"]
 mod support;
-use support::{VOICES, tiny_kokoro_checkpoint};
+use support::{VOICES, tiny_kokoro_checkpoint, tiny_kokoro_gguf};
 
 // invented phoneme strings over Kokoro's vocabulary
 const PHONEMES: &str = "həlˈoʊ wˈɜːld.";
@@ -141,5 +141,37 @@ async fn kokoro_is_detected_from_its_config() -> anyhow::Result<()> {
             .bytes,
         named.generate_speech(request(Some(PHONEMES))).await?.bytes
     );
+    Ok(())
+}
+
+// An F32 GGUF speaks as its checkpoint, named or auto-detected, alone in a directory or beside the release files
+#[tokio::test]
+async fn a_kokoro_gguf_speaks_as_its_checkpoint() -> anyhow::Result<()> {
+    let checkpoint = tiny_kokoro_checkpoint()?;
+    let speak = |model: inference::Model| async move {
+        anyhow::Ok(model.generate_speech(request(Some(PHONEMES))).await?.bytes)
+    };
+    let named = |path: String| {
+        SpeechModelBuilder::new(path, SpeechLoaderType::Kokoro)
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .build()
+    };
+    let dir = checkpoint.path().to_string_lossy().to_string();
+    let want = speak(named(dir.clone()).await?).await?;
+    let gguf = tiny_kokoro_gguf(checkpoint.path(), checkpoint.path())?;
+    let alone = tempfile::tempdir()?;
+    std::fs::copy(&gguf, alone.path().join(gguf.file_name().unwrap()))?;
+    let gguf = gguf.to_string_lossy().to_string();
+    assert_eq!(speak(named(gguf.clone()).await?).await?, want);
+    for path in [gguf.clone(), alone.path().to_string_lossy().to_string()] {
+        let detected = ModelBuilder::new(&path)
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .build()
+            .await?;
+        assert_eq!(speak(detected).await?, want, "{path}");
+    }
+    assert_eq!(speak(named(dir).await?).await?, want);
     Ok(())
 }

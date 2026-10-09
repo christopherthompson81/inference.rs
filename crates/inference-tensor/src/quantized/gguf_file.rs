@@ -15,6 +15,8 @@ pub const DEFAULT_ALIGNMENT: u64 = 32;
 // overflow the stack with a chain of arrays-of-arrays.
 const GGUF_MAX_STRING_LENGTH: u64 = 1 << 30;
 const GGUF_MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
+// arrays of fixed-size values past this are located, not parsed: a Value per byte of an embedded blob costs 32x
+const INLINE_ARRAY_ELEMENTS: u64 = 1 << 20;
 const GGUF_MAX_TENSOR_DIMS: u32 = 4;
 const GGUF_MAX_VALUE_DEPTH: usize = 64;
 
@@ -119,10 +121,20 @@ impl TensorInfo {
     }
 }
 
+/// A metadata array left in the file: `len` values of `value_type` starting at byte `offset`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LargeArray {
+    pub value_type: ValueType,
+    pub len: u64,
+    pub offset: u64,
+}
+
 #[derive(Debug)]
 pub struct Content {
     pub magic: VersionedMagic,
     pub metadata: HashMap<String, Value>,
+    /// Top-level arrays of fixed-size values too long to parse into `metadata`; read them with `read_large_array`.
+    pub large_arrays: HashMap<String, LargeArray>,
     pub tensor_infos: HashMap<String, TensorInfo>,
     pub tensor_data_offset: u64,
 }
@@ -465,7 +477,80 @@ impl ValueType {
     }
 }
 
+/// Skips past a long array of fixed-size values and returns where it is; any other value is left unread.
+fn large_array<R: std::io::Seek + std::io::Read>(
+    reader: &mut R,
+    value_type: ValueType,
+    magic: &VersionedMagic,
+    file_size: u64,
+) -> Result<Option<LargeArray>> {
+    if value_type != ValueType::Array {
+        return Ok(None);
+    }
+    let start = reader.stream_position()?;
+    let element = ValueType::from_u32(reader.read_u32::<LittleEndian>()?)?;
+    let len = read_length(reader, magic)?;
+    let fixed = !matches!(element, ValueType::String | ValueType::Array);
+    if !fixed || len <= INLINE_ARRAY_ELEMENTS {
+        reader.seek(std::io::SeekFrom::Start(start))?;
+        return Ok(None);
+    }
+    let offset = reader.stream_position()?;
+    let bytes = len.saturating_mul(element.min_disk_size(magic));
+    if bytes > file_size.saturating_sub(offset) {
+        crate::bail!("gguf: array of {len} elements needs {bytes} bytes, past the end of the file")
+    }
+    reader.seek(std::io::SeekFrom::Start(offset + bytes))?;
+    Ok(Some(LargeArray {
+        value_type: element,
+        len,
+        offset,
+    }))
+}
+
+const ARCHITECTURE_KEY: &str = "general.architecture";
+
+/// `general.architecture` when it is the first key, as llama.cpp and gguf-py write it; reads only the header and that key.
+pub fn peek_architecture<R: std::io::Seek + std::io::Read>(
+    reader: &mut R,
+) -> Result<Option<String>> {
+    let start = reader.stream_position()?;
+    let file_size = reader.seek(std::io::SeekFrom::End(0))?;
+    reader.seek(std::io::SeekFrom::Start(start))?;
+    let magic = VersionedMagic::read(reader)?;
+    let _tensor_count = read_length(reader, &magic)?;
+    if read_length(reader, &magic)? == 0
+        || read_string(reader, &magic, file_size)? != ARCHITECTURE_KEY
+    {
+        return Ok(None);
+    }
+    match ValueType::from_u32(reader.read_u32::<LittleEndian>()?)? {
+        ValueType::String => Ok(Some(read_string(reader, &magic, file_size)?)),
+        _ => Ok(None),
+    }
+}
+
 impl Content {
+    /// The raw little-endian bytes of `range` (in elements) of a large array.
+    pub fn read_large_array<R: std::io::Seek + std::io::Read>(
+        &self,
+        reader: &mut R,
+        name: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        let Some(array) = self.large_arrays.get(name) else {
+            crate::bail!("gguf: no large array {name}")
+        };
+        if range.start > range.end || range.end > array.len {
+            crate::bail!("gguf: {range:?} is outside {name}'s {} elements", array.len)
+        }
+        let size = array.value_type.min_disk_size(&self.magic);
+        reader.seek(std::io::SeekFrom::Start(array.offset + range.start * size))?;
+        let mut bytes = vec![0u8; ((range.end - range.start) * size) as usize];
+        reader.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
     pub fn read<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {
         // Capture the file size once so the bounds checks below don't have to
         // seek to the end and back on every length-prefixed read.
@@ -504,10 +589,15 @@ impl Content {
         }
 
         let mut metadata = HashMap::new();
+        let mut large_arrays = HashMap::new();
         for _idx in 0..metadata_kv_count {
             let key = read_string(reader, &magic, file_size)?;
             let value_type = reader.read_u32::<LittleEndian>()?;
             let value_type = ValueType::from_u32(value_type)?;
+            if let Some(array) = large_array(reader, value_type, &magic, file_size)? {
+                large_arrays.insert(key, array);
+                continue;
+            }
             let value = Value::read(reader, value_type, &magic, 0, file_size)?;
             metadata.insert(key, value);
         }
@@ -561,6 +651,7 @@ impl Content {
         Ok(Self {
             magic,
             metadata,
+            large_arrays,
             tensor_infos,
             tensor_data_offset,
         })
@@ -635,4 +726,37 @@ pub fn write<W: std::io::Seek + std::io::Write>(
         w.write_all(&vec![0u8; padding])?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // An embedded blob is located, not parsed, and reads back by element range; a short array still parses
+    #[test]
+    fn long_fixed_size_arrays_are_located_not_parsed() -> Result<()> {
+        let len = INLINE_ARRAY_ELEMENTS as usize + 3;
+        let blob = Value::Array((0..len).map(|i| Value::U8((i % 251) as u8)).collect());
+        let short = Value::Array(vec![Value::U64(7), Value::U64(9)]);
+        let name = Value::String("probe".into());
+        let mut buf = std::io::Cursor::new(Vec::new());
+        write(
+            &mut buf,
+            &[("blob", &blob), ("short", &short), ("name", &name)],
+            &[],
+        )?;
+        buf.set_position(0);
+        let content = Content::read(&mut buf)?;
+        assert!(!content.metadata.contains_key("blob"));
+        assert_eq!(content.large_arrays["blob"].len, len as u64);
+        assert_eq!(content.metadata["short"].to_vec()?.len(), 2);
+        assert_eq!(content.metadata["name"].to_string()?, "probe");
+        let tail = content.read_large_array(&mut buf, "blob", len as u64 - 3..len as u64)?;
+        let want = (len - 3..len).map(|i| (i % 251) as u8).collect::<Vec<_>>();
+        assert_eq!(tail, want);
+        assert!(content
+            .read_large_array(&mut buf, "blob", 0..len as u64 + 1)
+            .is_err());
+        Ok(())
+    }
 }

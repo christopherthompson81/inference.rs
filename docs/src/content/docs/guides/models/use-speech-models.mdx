@@ -197,6 +197,16 @@ Kokoro loads from its PyTorch release: `config.json`, `kokoro-v1_0.pth` (or a `m
 the same tensor names), and every voice pack under `voices/` (`.pt` from the release, or raw
 little-endian f32 `.bin` packs of 510 x 256 values). It speaks at 24 kHz.
 
+It also loads [audio.cpp](https://github.com/0xShug0/audio.cpp)'s Kokoro GGUF (architecture `kokoro_tts`,
+such as the multilingual `kokoro-82m-q8_0.gguf`), which carries its config and all 54 voices:
+
+```bash
+inference serve -m /path/to/kokoro-82m-q8_0.gguf
+```
+
+Pass the file, or a directory holding just that GGUF; the auto loader recognizes it. Its matrices are Q8_0 and its
+convolutions BF16, so its audio differs measurably from the full-precision release, though not in kind.
+
 Kokoro reads phonemes, not text. Until its text front end lands (a Rust port of
 [vernacula-phonemizer](https://github.com/christopherthompson81/vernacula-phonemizer)), a request
 passes Kokoro's own phoneme string in `phonemes`; `input` is still required but not spoken. A request

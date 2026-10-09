@@ -204,3 +204,53 @@ Not changed:
 Finding:
 - 7/7 Kokoro tests pass.
 - Parity on CUDA is unchanged: durations exact, SNR 34.2/44.0/35.9/38.6 dB.
+
+## Run 9 - 2026-10-09 11:19
+
+Question: can we load audio.cpp's multilingual `kokoro-82m-q8_0.gguf`, and how close does it sound to the release?
+
+Change:
+- The shared GGUF reader parsed every metadata array element into a 32-byte `Value`, so the 781 MB embedded-files blob would have cost about 25 GB of memory. Top-level arrays of fixed-size values longer than 1M elements are now located instead (`Content::large_arrays`) and read by element range (`read_large_array`).
+- `kokoro::gguf` maps `kokoro.N` to its `kokoro.tensor_names` entry, dequantizes to F32 in the `kokoro.tensor_shape.*` shape, and reads only `config.json` and `voices/*.bin` from the embedded table.
+- The speech loader takes a `.gguf` file, or a directory holding one GGUF and no `config.json`. The auto loader recognizes it when there is no config.
+
+Commands:
+- The parity example with `--gguf`.
+- A temporary test comparing every GGUF tensor with the `.pth` tensor of the same name (deleted afterwards).
+- Spectral SNR (STFT magnitudes, 512/128) added to the parity example, with the same metric on torch CPU against CUDA.
+- `inference serve` in `speech` and auto modes on the GGUF.
+
+Finding:
+- Loading takes 1.0 s with 600 MB resident.
+- Every tensor shape matches, and the worst relative error is 4.1e-3, all from Q8_0. The loader is exact up to the file's quantization.
+- Quality (spectral SNR, dB):
+
+| case | torch CPU vs CUDA | our F32 vs torch CPU | Q8_0 GGUF vs torch CPU |
+|---|---|---|---|
+| short | 37.7 | 45.8 | 34.8 |
+| question | 43.7 | 51.2 | 24.1 |
+| fast | 37.4 | 42.1 | 22.8 |
+| sentence | 35.7 | 43.1 | durations differ: 945000 samples become 955800 |
+
+- Waveform SNR for the GGUF is 3-24 dB; it is not meaningful under weight quantization because of phase drift.
+- The GGUF therefore sounds different from the release in a measurable way, though it is the same voice. That is the file's quantization (audio.cpp's default package), not our loader.
+- Serving: `serve speech -m <gguf>` and `serve -m <gguf>` (auto) both return 200 `audio/wav` with the `bf_emma` voice read from the GGUF, byte-identical to each other.
+- Tiny test: an F32 audio.cpp-layout GGUF built from the tiny checkpoint speaks byte-identically to that checkpoint, through both the named and the auto loader.
+
+Dead end: the first version of that test wrote the GGUF into the checkpoint directory before generating the reference audio. The "one GGUF in a directory" rule then loaded the GGUF on both sides, and the test passed trivially. Now a directory with `config.json` always loads the release files, and the test generates its reference first.
+
+## Run 10 - 2026-10-09 11:28
+
+Review fixes:
+- `is_kokoro_gguf` peeks at the header and first key (`gguf_file::peek_architecture`) instead of parsing the whole file, so auto mode on a config-less text GGUF no longer reads all its strings first.
+- A Kokoro GGUF given with a different explicit arch is refused by name.
+- A missing numbered tensor names its PyTorch name.
+- One shared `GGUF_EXTENSION` constant.
+
+Test additions:
+- The tiny GGUF now embeds a 1M + 1 byte filler file, so the Kokoro load goes through `read_large_array` and the filter that skips files the model doesn't read.
+- A directory holding just the GGUF is auto-detected.
+
+Finding:
+- 8/8 tests pass (Kokoro, speech crate, gguf_file).
+- The real Q8_0 GGUF in auto mode still detects through the peek (audio.cpp writes `general.architecture` first), and its output is byte-identical to the earlier run.

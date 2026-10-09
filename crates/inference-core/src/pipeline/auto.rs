@@ -411,6 +411,13 @@ impl AutoLoader {
             return Ok(Detected::Multimodal(MultimodalLoaderType::Voxtral));
         }
 
+        if artifacts.contents.is_none()
+            && super::speech::local_kokoro_gguf(&self.model_id).is_some()
+        {
+            info!("Detected a Kokoro GGUF; routing as Kokoro.");
+            return Ok(Detected::Speech(crate::pipeline::SpeechLoaderType::Kokoro));
+        }
+
         let config = artifacts.contents.as_ref().ok_or_else(|| {
             if let Some(issue) = artifacts.remote_access_issue.as_ref() {
                 hf_access_error(Path::new(&self.model_id), issue)

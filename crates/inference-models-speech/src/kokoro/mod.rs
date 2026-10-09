@@ -5,6 +5,7 @@
 mod albert;
 mod config;
 mod dsp;
+mod gguf;
 mod istftnet;
 mod lstm;
 mod prosody;
@@ -19,6 +20,7 @@ use inference_tensor::{Device, Result, Tensor};
 
 pub use config::KokoroConfig;
 pub use dsp::{HARMONICS, SAMPLE_RATE, SourceNoise};
+pub use gguf::{GGUF_EXTENSION, KokoroGguf, is_kokoro_gguf, read_kokoro_gguf};
 pub use tts::KokoroTts;
 pub use weights::{VoicePack, pth_var_builder};
 
