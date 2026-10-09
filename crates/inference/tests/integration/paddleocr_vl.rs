@@ -7,6 +7,10 @@ use inference::{
 };
 
 const MODEL_ENV: &str = "INFERENCE_TEST_PADDLEOCR_VL_MODEL";
+// The official GGUF release (PaddlePaddle/PaddleOCR-VL-1.6-GGUF), a dir holding these two files
+const GGUF_ENV: &str = "INFERENCE_TEST_PADDLEOCR_VL_GGUF";
+const GGUF_FILE: &str = "PaddleOCR-VL-1.6-GGUF.gguf";
+const GGUF_MMPROJ_FILE: &str = "PaddleOCR-VL-1.6-GGUF-mmproj.gguf";
 // Synthetic images from make_fixtures.py; goldens from make_goldens.py on 1.6 (same in f32 and bf16).
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/paddleocr_vl");
 const OCR_PROMPT: &str = "OCR:";
@@ -216,4 +220,38 @@ mod gpu {
         }
         Ok(())
     }
+}
+
+fn gguf_dir() -> Option<String> {
+    std::env::var(GGUF_ENV)
+        .ok()
+        .filter(|d| Path::new(d).join(GGUF_FILE).exists())
+}
+
+// Its own tokenizer, with the safetensors checkpoint's processor and config; digits and table cells are user-defined
+#[tokio::test]
+async fn official_gguf_matches_transformers() -> anyhow::Result<()> {
+    let (Some(gguf), Some(assets)) = (gguf_dir(), model_dir()) else {
+        eprintln!("SKIP GGUF parity: set {GGUF_ENV} and {MODEL_ENV} to local dirs");
+        return Ok(());
+    };
+    let mut builder = inference::GgufModelBuilder::new(&gguf, vec![GGUF_FILE])
+        .with_mmproj_files(vec![GGUF_MMPROJ_FILE])
+        .with_tok_model_id(&assets)
+        .with_dtype(if ON_GPU {
+            ModelDType::BF16
+        } else {
+            ModelDType::F32
+        });
+    if !ON_GPU {
+        builder = builder.with_force_cpu();
+    }
+    let model = builder.build().await?;
+    for &(name, prompt, golden) in TEXT_GOLDENS {
+        let resp = model
+            .send_chat_request(image_request(vec![fixture(name)?], prompt, MAX_LEN))
+            .await?;
+        assert_eq!(text(&resp), golden, "{name} [{prompt}]");
+    }
+    Ok(())
 }

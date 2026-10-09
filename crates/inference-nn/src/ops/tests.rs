@@ -1875,7 +1875,7 @@ fn cast_then_scale_rms_norms_on_cuda_match_the_composite() -> inference_tensor::
     const OPERAND_SCALE: f32 = 1.0;
     let device = Device::new_cuda(0)?;
     let to_vec = |t: &Tensor| t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>();
-    // ulps relative to the output: 2^-7 for bf16, 2^-10 for f16
+    // ulps relative to the output: 2^-7 for bf16, 2^-10 for f16; f32 allows reduction-order noise, ~8 of its ulps
     let check = |label: &str,
                  ulp: f32,
                  actual: &Tensor,
@@ -1903,7 +1903,11 @@ fn cast_then_scale_rms_norms_on_cuda_match_the_composite() -> inference_tensor::
         let weight = |phase: f32| {
             Tensor::arange(0f32, dim as f32, &Device::Cpu)?.affine(0.001, f64::from(phase))
         };
-        for (dtype, ulp) in [(DType::BF16, 1.0 / 128.0), (DType::F16, 1.0 / 1024.0)] {
+        for (dtype, ulp) in [
+            (DType::BF16, 1.0 / 128.0),
+            (DType::F16, 1.0 / 1024.0),
+            (DType::F32, 1e-6),
+        ] {
             let (x, residual) = (
                 values(-1.1, 3.0)?.to_dtype(dtype)?,
                 values(0.4, 2.0)?.to_dtype(dtype)?,

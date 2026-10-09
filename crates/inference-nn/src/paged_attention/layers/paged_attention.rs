@@ -1467,6 +1467,22 @@ impl PagedAttention {
             ctx.dims.head_size,
             device,
         )?;
+        // `simple_full_causal` dropped the mask for the flash branch above; with no flash params the eager kernels
+        // would attend non-causally, so the causal prefix mask comes back
+        let adjusted_mask = if simple_full_causal && prefix_causal {
+            prefix_gather_causal_mask(
+                &query_lens,
+                &kv_lens,
+                None,
+                ctx.dims.seq_len,
+                max_kv,
+                ctx.sdpa_params.sliding_window,
+                tensors.query.dtype(),
+                device,
+            )?
+        } else {
+            adjusted_mask
+        };
         let output = Sdpa.run_attention(
             tensors.query,
             &k_batched,

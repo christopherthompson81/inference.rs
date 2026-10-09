@@ -104,3 +104,15 @@ Conclusion: no visible effect on a real Qwen2-VL; the tiny random-weight checkpo
 difference between the chunked paged prefill and the single eager forward for this text stack, which Qwen3-VL's does
 not show. Not pursued further now. The tiny tests pin both sides (`cfg!(feature = "cuda")`), so any change on either
 path still shows up. A layer-by-layer hidden-state diff (Run 9's next step) would locate the difference if it matters.
+
+## Run 11 - 2026-10-09 07:49
+
+Found while loading PaddleOCR-VL from GGUF (`paddleocr_vl_gguf_investigation.md`, Run 4): the difference was a bug,
+not tiny-weight numerics. In `try_prefix_gather_prefill` a single causal sequence drops its mask for the flash
+branch, and a query dtype or head dim without the packed flash path fell through to `Sdpa::run_attention` with no
+mask and no flash params, which attends non-causally: a later prompt chunk saw its own future rows. The tiny Qwen2-VL
+and Qwen2.5-VL checkpoints run in F32, so their chunks after the image took that fallback; the real Qwen2-VL-2B of
+Run 10 ran BF16 at head dim 128 on fattn and never reached it, and Qwen3-VL's tiny checkpoint took another branch.
+
+Command: `scripts/local_ci.sh --cuda` with the fallback rebuilding the causal prefix mask. Raw: both tests' CUDA
+traces now equal their CPU pins exactly, so each keeps one expectation for every backend.

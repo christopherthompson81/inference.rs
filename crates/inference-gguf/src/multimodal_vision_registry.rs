@@ -13,6 +13,7 @@ use super::{
     multimodal_binding_utils::{metadata_string, projector_type},
     muse_glimmer_bindings::build_muse_glimmer_bindings,
     normal_registry::RopePairing,
+    paddleocr_vl_bindings::{self, build_paddleocr_vl_bindings},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -24,6 +25,7 @@ pub enum NativeMultimodalGgufFamily {
     Llama4,
     Lfm2Vl,
     MuseGlimmer,
+    PaddleOcrVl,
 }
 
 pub struct NativeMultimodalGguf {
@@ -57,12 +59,16 @@ impl NativeMultimodalGgufFamily {
             Self::Llama4 => MultimodalLoaderType::Llama4,
             Self::Lfm2Vl => MultimodalLoaderType::Lfm2Vl,
             Self::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
+            Self::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
         }
     }
 
     fn rope_pairing(self) -> RopePairing {
         match self {
-            Self::Gemma3 | Self::Gemma3n | Self::Lfm2Vl => RopePairing::HalfSplit,
+            // llama.cpp's Ernie 4.5 converter keeps q/k in Hugging Face's half-split order
+            Self::Gemma3 | Self::Gemma3n | Self::Lfm2Vl | Self::PaddleOcrVl => {
+                RopePairing::HalfSplit
+            }
             Self::Idefics3 | Self::Mistral3 | Self::Llama4 | Self::MuseGlimmer => {
                 RopePairing::Adjacent
             }
@@ -84,6 +90,7 @@ impl NativeMultimodalGgufFamily {
             Self::Llama4 => build_llama4_bindings(archive),
             Self::Lfm2Vl => build_lfm2_vl_bindings(archive),
             Self::MuseGlimmer => build_muse_glimmer_bindings(archive),
+            Self::PaddleOcrVl => build_paddleocr_vl_bindings(archive),
         }
     }
 }
@@ -120,6 +127,14 @@ fn family_from_names(
         Some("muse-glimmer") => {
             require_architecture(architecture, "muse-glimmer", "muse-glimmer")?;
             NativeMultimodalGgufFamily::MuseGlimmer
+        }
+        Some(paddleocr_vl_bindings::PROJECTOR) => {
+            require_architecture(
+                architecture,
+                paddleocr_vl_bindings::ARCHITECTURE,
+                paddleocr_vl_bindings::PROJECTOR,
+            )?;
+            NativeMultimodalGgufFamily::PaddleOcrVl
         }
         Some(_) | None => return Ok(None),
     };
@@ -184,6 +199,12 @@ mod tests {
                 "muse-glimmer",
                 NativeMultimodalGgufFamily::MuseGlimmer,
                 RopePairing::Adjacent,
+            ),
+            (
+                "paddleocr",
+                "paddleocr",
+                NativeMultimodalGgufFamily::PaddleOcrVl,
+                RopePairing::HalfSplit,
             ),
         ] {
             let detected = family_from_names(architecture, Some(projector))
