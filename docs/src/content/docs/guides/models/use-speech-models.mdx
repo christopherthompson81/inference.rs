@@ -211,7 +211,7 @@ Kokoro reads plain text: `input` is phonemized by
 [vernacula-phonemizer](https://github.com/christopherthompson81/vernacula-phonemizer) in the language the
 voice's first letter names (`a`: American English, `b`: British English, `e` Spanish, `f` French,
 `h` Hindi, `i` Italian, `p` Brazilian Portuguese, `j` Japanese, `z` Mandarin), then rendered into the
-phoneme alphabet Kokoro was trained on. The phonemizer reads American and British English so far; for
+phoneme alphabet Kokoro was trained on. The phonemizer reads American and British English and Japanese so far; for
 the other languages, pass `phonemes`. It loads its data from `VERNACULA_DATA_DIR` (its `data`
 directory). Long text is split at paragraphs, sentences and clauses so each piece fits the model's
 context.

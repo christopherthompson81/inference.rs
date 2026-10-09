@@ -479,3 +479,27 @@ Review of the text-input change, before the PR.
 - New end-to-end case: 20 copies of the test sentence (past 510 phonemes) synthesize through the multi-piece path.
 
 `kokoro_tiny` 5/5 and the speech crate's kokoro tests pass; full CI rerunning.
+
+## Run 19 - 2026-10-09
+
+Japanese text input, after vernacula-phonemizer #1467 (ja; merge 8211aacf) put `ja` in `LANGUAGES`.
+
+- **Word spans:** ported vernacula's C# `WordSegmentation.FromTrace` as `source_words`/`traced_words`.
+  - ja and cmn take their words from the trace. Every other language keeps whitespace, and so do ja and cmn when the trace yields nothing (the phonemizer's known "pH" defect drops every input span).
+  - ja: one word per token's input span; a token with no spoken group (the trailing full stop) is no word.
+  - cmn: a Han run whose IPA group count equals its hanzi count gets one word per hanzi; otherwise the run stays whole. Digits make the counts disagree.
+  - Tokens that claim the same characters merge into one word.
+  - No new phonemizer API was needed; the peer session made the trace shape a gated requirement of its ports.
+- **Tests:** vernacula's `WordSegmentationTests`, through the real phonemizer.
+  - Phrases: 科学者たちが発表しました。 gives at least 2 words where whitespace gives 1. 。 is no word. The mixed-script PDF sentence gives no overlaps.
+  - Spans are ordered and in bounds; the ja group map is monotonic and covers every group.
+  - The cmn cases skip with a message until cmn lands.
+  - The tiny engine test gains a `q`-prefixed voice (no language) for the rejection case, and a Japanese text case.
+- **Real model over HTTP** (dev build), 52 characters of mixed kana/kanji/latin, seed 1:
+
+| voice | audio | request time |
+|---|---|---|
+| jf_alpha | 10.9 s | 4.9 s (includes the ja data load) |
+| jm_kumo | 11.4 s | 4.6 s |
+
+Samples were sent to the user for a listening check.
