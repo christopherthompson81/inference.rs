@@ -71,7 +71,8 @@ fn greedy_ids(resp: &inference::ChatCompletionResponse) -> Vec<u32> {
         .unwrap_or_default()
 }
 
-// Greedy ids of one image and of two, pinned so the text stack's numerics can't drift unnoticed; GPU runs paged flash.
+// Greedy ids of one image and of two, pinned so the text stack's numerics can't drift unnoticed; CUDA runs paged
+// flash, which moves the first trace, while Metal's paged attention decodes as the CPU does.
 #[tokio::test]
 async fn image_decodes_are_pinned() -> anyhow::Result<()> {
     let checkpoint = tiny_checkpoint()?;
@@ -83,7 +84,7 @@ async fn image_decodes_are_pinned() -> anyhow::Result<()> {
         .send_chat_request(image_request(&["ocr.png", "table.png"])?)
         .await?;
     let traces = (greedy_ids(&one), greedy_ids(&two));
-    let expected: (Vec<u32>, Vec<u32>) = if ON_GPU {
+    let expected: (Vec<u32>, Vec<u32>) = if cfg!(feature = "cuda") {
         (
             vec![135, 219, 156, 129, 129, 129, 175, 129],
             vec![69, 119, 15, 86, 255, 8, 129, 129],
