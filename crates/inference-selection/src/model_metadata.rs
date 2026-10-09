@@ -392,6 +392,11 @@ impl SupportedArch for SpeechLoaderType {
                 modalities: &[Text, Audio],
                 examples: &[ex!("nari-labs/Dia-1.6B")],
             },
+            Self::Kokoro => ArchMetadata {
+                families: &["Kokoro"],
+                modalities: &[Text, Audio],
+                examples: &[ex!("hexgrad/Kokoro-82M")],
+            },
         }
     }
 }

@@ -6,6 +6,7 @@ mod embedding_tiny;
 mod gemma3_tiny;
 mod gguf_iq;
 mod gguf_lora_tiny;
+mod kokoro_tiny;
 mod llama_head_dim_tiny;
 mod llama_tiny;
 mod llava_tiny;

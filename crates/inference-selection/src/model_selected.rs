@@ -22,24 +22,41 @@ pub struct SpeechGenerationSpec {
     pub top_p: Option<f32>,
     #[serde(default)]
     pub top_k: Option<usize>,
+    /// Kokoro's default speaking rate, which a request's `speed` overrides.
+    #[serde(default)]
+    pub speed: Option<f32>,
 }
 
 impl SpeechGenerationSpec {
     pub fn into_config(self, arch: SpeechLoaderType) -> SpeechGenerationConfig {
-        let SpeechLoaderType::Dia = arch;
-        let SpeechGenerationConfig::Dia {
-            max_tokens,
-            cfg_scale,
-            temperature,
-            top_p,
-            top_k,
-        } = SpeechGenerationConfig::dia_default();
-        SpeechGenerationConfig::Dia {
-            max_tokens: self.max_tokens.or(max_tokens),
-            cfg_scale: self.cfg_scale.unwrap_or(cfg_scale),
-            temperature: self.temperature.unwrap_or(temperature),
-            top_p: self.top_p.unwrap_or(top_p),
-            top_k: self.top_k.or(top_k),
+        match (
+            arch,
+            SpeechGenerationConfig::dia_default(),
+            SpeechGenerationConfig::kokoro_default(),
+        ) {
+            (
+                SpeechLoaderType::Dia,
+                SpeechGenerationConfig::Dia {
+                    max_tokens,
+                    cfg_scale,
+                    temperature,
+                    top_p,
+                    top_k,
+                },
+                _,
+            ) => SpeechGenerationConfig::Dia {
+                max_tokens: self.max_tokens.or(max_tokens),
+                cfg_scale: self.cfg_scale.unwrap_or(cfg_scale),
+                temperature: self.temperature.unwrap_or(temperature),
+                top_p: self.top_p.unwrap_or(top_p),
+                top_k: self.top_k.or(top_k),
+            },
+            (SpeechLoaderType::Kokoro, _, SpeechGenerationConfig::Kokoro { speed }) => {
+                SpeechGenerationConfig::Kokoro {
+                    speed: self.speed.unwrap_or(speed),
+                }
+            }
+            (_, dia, kokoro) => unreachable!("defaults are {dia:?} and {kokoro:?}"),
         }
     }
 }
@@ -562,14 +579,16 @@ pub enum ModelSelected {
         /// This may be a HF hub repo or a local path.
         dac_model_id: Option<String>,
 
-        /// The architecture of the model.
-        arch: SpeechLoaderType,
+        /// The architecture of the model; unset reads it from the model's `config.json`.
+        #[serde(default)]
+        arch: Option<SpeechLoaderType>,
 
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_model_dtype")]
         #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
+        /// Load-time sampling for every request; it is specific to an architecture, so it needs `arch` set.
         #[serde(default)]
         generation: Option<SpeechGenerationSpec>,
     },
@@ -744,14 +763,30 @@ mod speech_tests {
             temperature,
             top_k,
             ..
-        } = spec.into_config(SpeechLoaderType::Dia);
+        } = spec.clone().into_config(SpeechLoaderType::Dia)
+        else {
+            panic!("Dia gets a Dia config")
+        };
         let SpeechGenerationConfig::Dia {
             cfg_scale: default_scale,
             top_k: default_top_k,
             ..
-        } = SpeechGenerationConfig::dia_default();
+        } = SpeechGenerationConfig::dia_default()
+        else {
+            panic!("Dia's default is a Dia config")
+        };
         assert_eq!((max_tokens, temperature), (Some(64), 0.5));
         assert_eq!((cfg_scale, top_k), (default_scale, default_top_k));
+        assert!(matches!(
+            spec.into_config(SpeechLoaderType::Kokoro),
+            SpeechGenerationConfig::Kokoro { speed } if speed == 1.
+        ));
+        let fast: SpeechGenerationSpec =
+            serde_json::from_value(serde_json::json!({"speed": 1.25})).unwrap();
+        assert!(matches!(
+            fast.into_config(SpeechLoaderType::Kokoro),
+            SpeechGenerationConfig::Kokoro { speed } if speed == 1.25
+        ));
     }
 }
 

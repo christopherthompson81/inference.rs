@@ -1,18 +1,19 @@
 ---
 title: Speech models
-description: Voxtral Realtime for speech transcription, Dia for text-to-speech.
+description: Voxtral Realtime for speech transcription, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports two speech-related model families:
+inference.rs supports three speech-related model families:
 
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
+- **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
 
-Voxtral Realtime is classified as a multimodal model because audio is an input modality. Dia is a
-dedicated speech model.
+Voxtral Realtime is classified as a multimodal model because audio is an input modality. Dia and
+Kokoro are dedicated speech models.
 
 ## Voxtral Realtime: audio in, text out
 
@@ -135,7 +136,7 @@ curl http://localhost:1234/v1/audio/speech \
 
 - Output: raw audio bytes.
 - `response_format`: only `wav` and `pcm` are read; `mp3`/`opus`/`aac`/`flac` return a validation error.
-- Extra OpenAI fields such as `voice`, `speed`, and `instructions` are silently ignored (the request reads only `model`, `input`, and `response_format`).
+- Dia ignores `voice`, `speed`, `phonemes`, `seed` and `instructions`; Kokoro reads all but `instructions` (below).
 
 </TabItem>
 <TabItem label="Python">
@@ -168,18 +169,116 @@ Path("out.wav").write_bytes(audio.data)
 <TabItem label="Rust">
 
 ```rust
-use inference::{speech_utils, SpeechLoaderType, SpeechModelBuilder};
+use inference::{AudioResponseFormat, SpeechGenerationRequest, SpeechLoaderType, SpeechModelBuilder};
 
 let model = SpeechModelBuilder::new("nari-labs/Dia-1.6B", SpeechLoaderType::Dia)
     .build()
     .await?;
 
-let (pcm, rate, channels) = model
-    .generate_speech("[S1] mistral r s can generate speech locally.")
+let audio = model
+    .generate_speech(SpeechGenerationRequest::new(
+        "[S1] mistral r s can generate speech locally.",
+        AudioResponseFormat::Wav,
+    ))
+    .await?;
+std::fs::write("out.wav", &audio.bytes)?;
+```
+
+</TabItem>
+</Tabs>
+
+## Kokoro: phonemes to speech
+
+```bash
+inference serve -m hexgrad/Kokoro-82M
+```
+
+Kokoro loads from its PyTorch release: `config.json`, `kokoro-v1_0.pth` (or a `model.safetensors` with
+the same tensor names), and every voice pack under `voices/` (`.pt` from the release, or raw
+little-endian f32 `.bin` packs of 510 x 256 values). It speaks at 24 kHz.
+
+Kokoro reads phonemes, not text. Until its text front end lands (a Rust port of
+[vernacula-phonemizer](https://github.com/christopherthompson81/vernacula-phonemizer)), a request
+passes Kokoro's own phoneme string in `phonemes`; `input` is still required but not spoken. A request
+without `phonemes` is rejected.
+
+Request fields Kokoro reads:
+
+- `phonemes`: the phoneme string. Characters outside Kokoro's vocabulary are dropped, and input
+  longer than the model's 510-phoneme context is split at spaces and spoken in pieces.
+- `voice`: a voice the model ships, such as `af_heart` (the default when present). Several,
+  comma-separated, are averaged into one voice. An unknown voice is rejected with the list of
+  available ones.
+- `speed`: the speaking rate; 1.0 is the model's own, higher is faster. The model spec's
+  `generation.speed` sets the default.
+- `seed`: seeds the vocoder's noise, so the same request gives the same audio. Without it each
+  request draws a fresh seed.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+curl http://localhost:1234/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "default",
+    "input": "Hello world.",
+    "phonemes": "həlˈoʊ wˈɜːld.",
+    "voice": "af_heart",
+    "speed": 1.1,
+    "seed": 7,
+    "response_format": "wav"
+  }' \
+  --output out.wav
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+from pathlib import Path
+
+import inference_rs as ir
+from inference_rs import types as t
+
+spec = t.EngineSpec(
+    model=t.ModelSelectedSpeech(
+        model_id="hexgrad/Kokoro-82M",
+        arch=t.SpeechLoaderType.KOKORO,
+    )
+)
+
+with ir.Engine(spec) as engine:
+    audio = engine.speech_generation(
+        t.SpeechGenerationRequest(
+            input="Hello world.",
+            phonemes="həlˈoʊ wˈɜːld.",
+            voice="af_heart",
+            response_format=t.AudioResponseFormat.WAV,
+        )
+    )
+
+Path("out.wav").write_bytes(audio.data)
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{AudioResponseFormat, SpeechGenerationRequest, SpeechLoaderType, SpeechModelBuilder};
+
+let model = SpeechModelBuilder::new("hexgrad/Kokoro-82M", SpeechLoaderType::Kokoro)
+    .build()
     .await?;
 
-let mut output = std::fs::File::create("out.wav")?;
-speech_utils::write_pcm_as_wav(&mut output, &pcm, rate as u32, channels as u16)?;
+let audio = model
+    .generate_speech(SpeechGenerationRequest {
+        phonemes: Some("həlˈoʊ wˈɜːld.".into()),
+        voice: Some("af_heart".into()),
+        ..SpeechGenerationRequest::new("Hello world.", AudioResponseFormat::Wav)
+    })
+    .await?;
+std::fs::write("out.wav", &audio.bytes)?;
 ```
 
 </TabItem>

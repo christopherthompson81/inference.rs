@@ -9,7 +9,7 @@ use crate::VideoInput;
 
 use crate::{
     AdapterSelection, AgentPermission, AgentToolApprovalHandler, CodeExecutionPermission,
-    CustomLogitsProcessor, DiffusionGenerationParams, Tool, ToolCallbackWithTool,
+    CustomLogitsProcessor, DiffusionGenerationParams, SpeechOptions, Tool, ToolCallbackWithTool,
     response::Response, sampler::SamplingParams, tools::ToolChoice,
 };
 use std::{
@@ -57,6 +57,7 @@ pub enum RequestMessage {
     },
     SpeechGeneration {
         prompt: String,
+        options: SpeechOptions,
     },
     Embedding {
         prompt: String,

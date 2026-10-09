@@ -1333,7 +1333,7 @@ class ModelSelectedDiffusionPlain:
 
 @dataclass(kw_only=True)
 class ModelSelectedSpeech:
-    arch: SpeechLoaderType
+    arch: SpeechLoaderType | None = None
     dac_model_id: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
     generation: SpeechGenerationSpec | None = None
@@ -2600,7 +2600,11 @@ class SpeechGenerationRequest:
 
     input: str
     model: str | None = None
+    phonemes: str | None = None
     response_format: AudioResponseFormat
+    seed: int | None = None
+    speed: float | None = None
+    voice: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -2609,6 +2613,7 @@ class SpeechGenerationSpec:
 
     cfg_scale: float | None = None
     max_tokens: int | None = None
+    speed: float | None = None
     temperature: float | None = None
     top_k: int | None = None
     top_p: float | None = None
@@ -2616,6 +2621,7 @@ class SpeechGenerationSpec:
 
 class SpeechLoaderType(str, Enum):
     DIA = "dia"
+    KOKORO = "kokoro"
 
 
 @dataclass(kw_only=True)

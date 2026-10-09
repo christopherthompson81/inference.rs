@@ -1468,6 +1468,11 @@ pub trait Pipeline:
 
     fn category(&self) -> ModelCategory;
 
+    /// Rejects speech options this model refuses, so a bad request fails validation instead of mid-generation.
+    fn validate_speech_options(&self, _options: &crate::SpeechOptions) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Return encoder cache hit/miss counters (hits, misses) if this pipeline has an encoder cache.
     fn encoder_cache_counters(&self) -> Option<(Arc<AtomicUsize>, Arc<AtomicUsize>)> {
         None

@@ -7069,13 +7069,19 @@
               "Speech": {
                 "type": "object",
                 "required": [
-                  "model_id",
-                  "arch"
+                  "model_id"
                 ],
                 "properties": {
                   "arch": {
-                    "$ref": "#/components/schemas/SpeechLoaderType",
-                    "description": "The architecture of the model."
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/SpeechLoaderType",
+                        "description": "The architecture of the model; unset reads it from the model's `config.json`."
+                      }
+                    ]
                   },
                   "dac_model_id": {
                     "type": [
@@ -7099,7 +7105,8 @@
                         "type": "null"
                       },
                       {
-                        "$ref": "#/components/schemas/SpeechGenerationSpec"
+                        "$ref": "#/components/schemas/SpeechGenerationSpec",
+                        "description": "Load-time sampling for every request; it is specific to an architecture, so it needs `arch` set."
                       }
                     ]
                   },
@@ -11628,9 +11635,41 @@
             "description": "The TTS model to use for audio generation.",
             "example": "nari-labs/Dia-1.6B"
           },
+          "phonemes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model's phoneme string, spoken in place of `input` (Kokoro, which reads phonemes rather than text)."
+          },
           "response_format": {
             "$ref": "#/components/schemas/AudioResponseFormat",
             "description": "The desired audio format for the generated speech."
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seeds the model's sampling noise, so a request repeats exactly (Kokoro).",
+            "minimum": 0
+          },
+          "speed": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Speaking rate, 1.0 being the model's own (Kokoro). Dia ignores it."
+          },
+          "voice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A voice the model ships (Kokoro: e.g. `af_heart`; several, comma-separated, are blended). Dia ignores it.",
+            "example": "af_heart"
           }
         }
       },
@@ -11652,6 +11691,14 @@
               "null"
             ],
             "minimum": 0
+          },
+          "speed": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Kokoro's default speaking rate, which a request's `speed` overrides."
           },
           "temperature": {
             "type": [
@@ -11680,7 +11727,8 @@
       "SpeechLoaderType": {
         "type": "string",
         "enum": [
-          "dia"
+          "dia",
+          "kokoro"
         ]
       },
       "StopTokens": {

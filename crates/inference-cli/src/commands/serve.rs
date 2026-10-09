@@ -9,7 +9,7 @@ use inference_api::{
     engine::{
         AdapterSpec, AgenticSpec, AutoDeviceMapParams, DiffusionLoaderType, HfConfigOverrides,
         McpClientConfig, MmprojSelection, ModelSelected, MtpSpec, PagedCacheSpec, PagedCacheType,
-        RuntimeSpec, SandboxLimits, SearchSpec, SkillsSpec, SpeechLoaderType,
+        RuntimeSpec, SandboxLimits, SearchSpec, SkillsSpec,
     },
     initialize_logging,
     lora_adapters::LoraAdapterApiConfig,
@@ -489,11 +489,11 @@ pub(crate) fn convert_to_model_selected(
         }
 
         ModelType::Speech { model, device: _ } => {
-            warn_unused_arch(model, "speech models load as Dia");
+            warn_unused_arch(model, "speech models detect their architecture");
             Ok(ModelSelected::Speech {
                 model_id: model.model_id.clone(),
                 dac_model_id: None,
-                arch: SpeechLoaderType::Dia,
+                arch: None,
                 dtype: model.dtype,
                 generation: None,
             })

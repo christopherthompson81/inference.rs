@@ -1,11 +1,11 @@
 use inference_protocol::chat_template::is_chat_template_request_error;
 
 use crate::{
-    AudioInput, DiffusionGenerationParams, ModelCategory, RequestMessage, Response, VideoInput,
+    AudioInput, ModelCategory, RequestMessage, Response, VideoInput,
     pipeline::{KvCache, NormalCache, is_inputs_processor_validation_error},
     prefix_cacher::MatchingCache,
     request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
-    sequence::{SeqPreallocatedCache, SeqStepType},
+    sequence::{OneShotParams, SeqPreallocatedCache, SeqStepType},
     tools::{ToolCallFormat, ToolCallState, ToolChoice},
 };
 use either::Either;
@@ -57,7 +57,7 @@ struct MessageExtras {
     audios: Option<Vec<AudioInput>>,
     videos: Option<Vec<VideoInput>>,
     seq_step_type: SeqStepType,
-    diffusion_params: Option<DiffusionGenerationParams>,
+    one_shot: Option<OneShotParams>,
 }
 
 impl MessageExtras {
@@ -70,7 +70,7 @@ impl MessageExtras {
             audios: None,
             videos: None,
             seq_step_type: SeqStepType::PromptAndDecode,
-            diffusion_params: None,
+            one_shot: None,
         };
         match messages {
             RequestMessage::Chat { .. } => extras.is_chat = true,
@@ -98,11 +98,15 @@ impl MessageExtras {
                 generation_params, ..
             } => {
                 extras.seq_step_type = SeqStepType::OneShot;
-                extras.diffusion_params = Some(generation_params.clone());
+                extras.one_shot = Some(OneShotParams::Diffusion(generation_params.clone()));
             }
-            RequestMessage::SpeechGeneration { .. }
-            | RequestMessage::Embedding { .. }
-            | RequestMessage::EmbeddingTokens { .. } => extras.seq_step_type = SeqStepType::OneShot,
+            RequestMessage::SpeechGeneration { options, .. } => {
+                extras.seq_step_type = SeqStepType::OneShot;
+                extras.one_shot = Some(OneShotParams::Speech(options.clone()));
+            }
+            RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. } => {
+                extras.seq_step_type = SeqStepType::OneShot
+            }
         }
         extras
     }
@@ -411,7 +415,7 @@ impl Engine {
                 block_size,
                 tool_call_state,
                 extras.seq_step_type,
-                extras.diffusion_params.clone(),
+                extras.one_shot.clone(),
                 seq_preallocated_cache,
                 request.return_raw_logits,
                 request.sampling_params.ignore_eos,
@@ -511,10 +515,16 @@ impl Engine {
                     )));
         }
 
-        match (
-            get_mut_arcmutex!(self.pipeline).category(),
-            &request.messages,
-        ) {
+        let pipeline = get_mut_arcmutex!(self.pipeline);
+        let category = pipeline.category();
+        let speech_check = match &request.messages {
+            RequestMessage::SpeechGeneration { options, .. } => {
+                pipeline.validate_speech_options(options)
+            }
+            _ => Ok(()),
+        };
+        drop(pipeline);
+        match (category, &request.messages) {
             (
                 ModelCategory::Text | ModelCategory::Multimodal { .. },
                 RequestMessage::Chat { .. }
@@ -523,7 +533,9 @@ impl Engine {
                 | RequestMessage::CompletionTokens(_),
             ) => Ok(()),
             (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => Ok(()),
-            (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => Ok(()),
+            (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => {
+                speech_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
+            }
             (
                 ModelCategory::Embedding,
                 RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. },
@@ -599,7 +611,7 @@ impl Engine {
                 ))
             }
             RequestMessage::ImageGeneration { prompt, .. }
-            | RequestMessage::SpeechGeneration { prompt } => Ok((vec![u32::MAX], prompt)),
+            | RequestMessage::SpeechGeneration { prompt, .. } => Ok((vec![u32::MAX], prompt)),
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
