@@ -6,6 +6,8 @@ pub(super) mod naive;
 mod sinks;
 
 #[cfg(feature = "cuda")]
+pub(crate) use flash::fattn_masked;
+#[cfg(feature = "cuda")]
 pub use flash::fattn_sinks;
 pub use flash::{fattn_supports, flash_attn, flash_backend_supports, flash_backend_supports_sdpa};
 pub use naive::naive_sdpa;

@@ -127,6 +127,64 @@ fn try_fattn(
     inference_fattn::flash_attn(q, k, v, &opts).map(Some)
 }
 
+// The mask as fattn takes it, (batch | 1, seq_q, seq_kv) in f16; None when it differs per head or does not fit
+#[cfg(feature = "cuda")]
+fn fattn_mask(mask: &Tensor, b_sz: usize, seq_q: usize, seq_kv: usize) -> Result<Option<Tensor>> {
+    let mask = match mask.rank() {
+        2 => mask.unsqueeze(0)?,
+        3 if mask.dim(0)? == 1 => mask.clone(),
+        4 if mask.dim(1)? == 1 || mask.stride()[1] == 0 => mask.narrow(1, 0, 1)?.squeeze(1)?,
+        _ => return Ok(None),
+    };
+    // a batch broadcast by stride is one mask for every sequence
+    let mask = if mask.dim(0)? > 1 && mask.stride()[0] == 0 {
+        mask.narrow(0, 0, 1)?
+    } else {
+        mask
+    };
+    let (mb, mq, mkv) = mask.dims3()?;
+    if mkv != seq_kv || !(mq == 1 || mq == seq_q) || !(mb == 1 || mb == b_sz) {
+        return Ok(None);
+    }
+    // a key-padding mask (one row for every query) is expanded: fattn reads one row per query
+    let mask = mask
+        .to_dtype(inference_tensor::DType::F16)?
+        .broadcast_as((mb, seq_q, seq_kv))?;
+    // a query seeing no key comes out NaN and spreads via masked keys (0 * NaN); it sees all, as HF's unmask_unattended
+    let unattended = mask
+        .max_keepdim(inference_tensor::D::Minus1)?
+        .eq(f64::NEG_INFINITY)?
+        .broadcast_as(mask.shape())?;
+    let zero = Tensor::zeros((), inference_tensor::DType::F16, mask.device())?
+        .broadcast_as(mask.shape())?;
+    Ok(Some(unattended.where_cond(&zero, &mask)?.contiguous()?))
+}
+
+/// fattn over `(b, seq, heads, head_dim)` with an additive mask carrying all the masking; None for per-head masks.
+#[cfg(feature = "cuda")]
+pub(crate) fn fattn_masked(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: &Tensor,
+    sdpa_params: &SdpaParams,
+) -> Result<Option<Tensor>> {
+    let (b_sz, seq_q, _, _) = q.dims4()?;
+    let Some(mask) = fattn_mask(mask, b_sz, seq_q, k.dim(1)?)? else {
+        return Ok(None);
+    };
+    let opts = inference_fattn::FattnOptions {
+        scale: sdpa_params.softmax_scale,
+        softcap: sdpa_params.softcap.unwrap_or(0.),
+        mask: Some(mask),
+        ..Default::default()
+    };
+    if !inference_fattn::supported(q, k, v, &opts)? {
+        return Ok(None);
+    }
+    inference_fattn::flash_attn(q, k, v, &opts).map(Some)
+}
+
 #[cfg(feature = "flash-attn-v3")]
 fn flash_attn_v3(
     q: &Tensor,

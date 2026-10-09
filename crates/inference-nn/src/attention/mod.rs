@@ -65,6 +65,36 @@ pub use backends::{
     sinks_attn, sinks_backend_is_available, sinks_backend_supports,
 };
 
+// One additive mask for every head runs on fattn; per-head masks, F32 and head dims fattn lacks take the unfused path
+#[cfg(feature = "cuda")]
+fn masked_flash_attn(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    mask: &Tensor,
+    sdpa_params: &SdpaParams,
+) -> Result<Option<Tensor>> {
+    if !q.device().is_cuda()
+        || !crate::utils::using_flash_attn()
+        || q.dtype() == DType::F32
+        || !fattn_supports(q.dim(3)?, sdpa_params.softcap.is_some())
+    {
+        return Ok(None);
+    }
+    let (k, v) = if sdpa_params.n_kv_groups > FLASH_ATTN_NATIVE_MAX_GQA_GROUP {
+        (
+            repeat_kv(k.clone(), sdpa_params.n_kv_groups)?,
+            repeat_kv(v.clone(), sdpa_params.n_kv_groups)?,
+        )
+    } else {
+        (k.clone(), v.clone())
+    };
+    let (q, k, v) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
+    backends::fattn_masked(&q, &k, &v, mask, sdpa_params)?
+        .map(|out| out.transpose(1, 2))
+        .transpose()
+}
+
 /// Chunk size for attention computation to avoid OOM on long sequences
 pub const ATTENTION_CHUNK_SIZE: usize = 1024;
 pub const FLASH_ATTN_NATIVE_MAX_GQA_GROUP: usize = 8;
@@ -259,7 +289,7 @@ impl Sdpa {
     ///
     /// - `AttentionMask::CausalFlash`: flash attention with `is_causal = true`
     /// - `AttentionMask::None`: flash if available (decode), else eager without mask
-    /// - `AttentionMask::Custom`: CPU fused attention or eager attention with the explicit mask tensor
+    /// - `AttentionMask::Custom`: CPU fused attention, fattn on CUDA for one mask over every head, else eager
     #[allow(clippy::too_many_arguments)]
     pub fn run_attention(
         &self,
@@ -333,6 +363,10 @@ impl Sdpa {
                 let k = k.transpose(1, 2)?;
                 let v = v.transpose(1, 2)?;
                 return run_flash_attn_cpu_for_dtype(&q, &k, &v, Some(mask_tensor), sdpa_params);
+            }
+            #[cfg(feature = "cuda")]
+            if let Some(out) = masked_flash_attn(q, k, v, mask_tensor, sdpa_params)? {
+                return Ok(out);
             }
 
             return self.run_attention_noflash(q, k, v, Some(mask_tensor), sdpa_params, do_causal);
@@ -709,7 +743,13 @@ impl Sdpa {
                 inference_tensor::bail!("`cuda` feature is not enabled")
             }
         } else {
-            naive_sdpa(q, &k, &v, mask, sdpa_params)
+            naive_sdpa(
+                &q.contiguous()?,
+                &k.contiguous()?,
+                &v.contiguous()?,
+                mask,
+                sdpa_params,
+            )
         }
     }
 }
@@ -965,6 +1005,178 @@ mod tests {
                 diff < SINKS_BF16_TOLERANCE,
                 "window {window:?} sink {sink}: max abs diff {diff}"
             );
+        }
+        Ok(())
+    }
+
+    // A custom mask on CUDA runs fattn when one mask serves every head; the CPU's fused path is the reference
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn custom_masks_on_cuda_run_fattn_and_match_the_cpu() -> CandleResult<()> {
+        crate::skip_without_cuda!();
+        let dev = Device::new_cuda(0)?;
+        // past several 64-query tiles, GQA at head dim 128
+        let (h, kv_h, len, d) = (8, 2, 300, 128);
+        // a bidirectional span, as Gemma 3 gives an image's tokens
+        let span = 40..120;
+        // the second sequence is left-padded: its first keys are hidden from every query, as expand_mask does
+        let pad = 50;
+        // a prefix-cached prefill: the last queries over every key
+        let suffix = 100;
+        let visible = |b: usize, i: usize, j: usize| {
+            let causal = j <= i || (span.contains(&i) && span.contains(&j));
+            causal && (b == 0 || j >= pad)
+        };
+        // (batch, 1, rows, len) for query positions rows
+        let mask =
+            |batch: usize, fill: f32, rows: std::ops::Range<usize>| -> CandleResult<Tensor> {
+                let n = rows.len();
+                let values: Vec<f32> = (0..batch)
+                    .flat_map(|b| {
+                        rows.clone()
+                            .flat_map(move |i| (0..len).map(move |j| (b, i, j)))
+                    })
+                    .map(|(b, i, j)| if visible(b, i, j) { 0. } else { fill })
+                    .collect();
+                Tensor::from_vec(values, (batch, 1, n, len), &Device::Cpu)
+            };
+        let key_padding = Tensor::from_vec(
+            (0..2 * len)
+                .map(|x| {
+                    if x / len == 1 && x % len < pad {
+                        f32::MIN
+                    } else {
+                        0.
+                    }
+                })
+                .collect::<Vec<f32>>(),
+            (2, 1, 1, len),
+            &Device::Cpu,
+        )?;
+        let sdpa_params = SdpaParams {
+            n_kv_groups: h / kv_h,
+            softcap: None,
+            softmax_scale: 1. / (d as f32).sqrt(),
+            sliding_window: None,
+            sinks: None,
+            chunk: None,
+        };
+        let full = mask(1, f32::NEG_INFINITY, 0..len)?;
+        // label, batch, query rows, mask, dtype, whether fattn takes it, the padded queries to leave out
+        let cases = [
+            (
+                "span, 2d mask",
+                1,
+                len,
+                full.squeeze(0)?.squeeze(0)?,
+                DType::BF16,
+                true,
+                0,
+            ),
+            (
+                "padded batch",
+                2,
+                len,
+                mask(2, f32::MIN, 0..len)?,
+                DType::BF16,
+                true,
+                pad,
+            ),
+            (
+                "prefix-cached suffix",
+                2,
+                suffix,
+                mask(2, f32::MIN, len - suffix..len)?,
+                DType::BF16,
+                true,
+                0,
+            ),
+            ("key padding, f16", 2, len, key_padding, DType::F16, true, 0),
+            (
+                "heads broadcast",
+                1,
+                len,
+                full.clone(),
+                DType::BF16,
+                true,
+                0,
+            ),
+            (
+                "per-head mask",
+                1,
+                len,
+                full.repeat((1, h, 1, 1))?,
+                DType::BF16,
+                false,
+                0,
+            ),
+        ];
+        for (label, batch, q_len, mask, dtype, flash, skipped) in cases {
+            let rand = |rows, heads| {
+                Tensor::randn(0f32, 1., (batch, rows, heads, d), &Device::Cpu)?
+                    .to_dtype(dtype)?
+                    .to_dtype(DType::F32)?
+                    .transpose(1, 2)
+            };
+            let on_gpu = |t: &Tensor| {
+                t.transpose(1, 2)?
+                    .contiguous()?
+                    .to_device(&dev)?
+                    .to_dtype(dtype)?
+                    .transpose(1, 2)
+            };
+            let (q, k, v) = (rand(q_len, h)?, rand(len, kv_h)?, rand(len, kv_h)?);
+            let expected = Sdpa.run_attention(
+                &q.contiguous()?,
+                &k.contiguous()?,
+                &v.contiguous()?,
+                &AttentionMask::Custom(mask.contiguous()?),
+                None,
+                &sdpa_params,
+            )?;
+            let (q, k, v) = (on_gpu(&q)?, on_gpu(&k)?, on_gpu(&v)?);
+            let mut gpu_mask = mask.to_device(&dev)?.to_dtype(dtype)?;
+            // a mask broadcast over heads keeps a zero stride there, as models build it
+            if label == "heads broadcast" {
+                gpu_mask = gpu_mask.broadcast_as((1, h, len, len))?;
+            }
+            assert_eq!(
+                masked_flash_attn(&q, &k, &v, &gpu_mask, &sdpa_params)?.is_some(),
+                flash,
+                "{label}"
+            );
+            let out = Sdpa
+                .run_attention(
+                    &q,
+                    &k,
+                    &v,
+                    &AttentionMask::Custom(gpu_mask),
+                    None,
+                    &sdpa_params,
+                )?
+                .to_dtype(DType::F32)?
+                .to_device(&Device::Cpu)?;
+            // padded queries see no key: fattn's rows stay finite, and only the rows a model keeps are compared
+            assert!(
+                out.flatten_all()?
+                    .to_vec1::<f32>()?
+                    .iter()
+                    .all(|x| x.is_finite()),
+                "{label}"
+            );
+            for b in 0..batch {
+                let rows = if b == 0 { 0 } else { skipped };
+                let diff = (out.get(b)?.narrow(1, rows, q_len - rows)?
+                    - expected.get(b)?.narrow(1, rows, q_len - rows)?)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_scalar::<f32>()?;
+                assert!(
+                    diff < SINKS_BF16_TOLERANCE,
+                    "{label} batch {b}: max abs diff {diff}"
+                );
+            }
         }
         Ok(())
     }
