@@ -439,14 +439,21 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             arch,
             generation,
             ..
-        } => Box::new(SpeechLoader {
-            model_id,
-            dac_model_id,
-            arch,
-            cfg: generation
-                .map(|generation| generation.into_config(arch))
-                .or(args.overrides.speech_cfg),
-        }),
+        } => {
+            let cfg = match (generation, arch) {
+                (Some(generation), Some(arch)) => Some(generation.into_config(arch)),
+                (Some(_), None) => {
+                    anyhow::bail!("speech `generation` settings need an explicit `arch`")
+                }
+                (None, _) => args.overrides.speech_cfg,
+            };
+            Box::new(SpeechLoader {
+                model_id,
+                dac_model_id,
+                arch,
+                cfg,
+            })
+        }
         ModelSelected::Lora {
             model_id,
             quant: _,

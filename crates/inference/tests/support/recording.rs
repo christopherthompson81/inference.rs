@@ -166,6 +166,26 @@ fn record(
     Ok(dir)
 }
 
+/// As [`record_checkpoint`] for a model built on a plain `VarBuilder`, with no loading metadata.
+pub fn record_plain_checkpoint(
+    files: &[&Path],
+    build: impl FnOnce(inference_tensor::nn::VarBuilder) -> CandleResult<()>,
+) -> anyhow::Result<tempfile::TempDir> {
+    let dir = tempfile::tempdir()?;
+    for file in files {
+        std::fs::copy(file, dir.path().join(file.file_name().unwrap()))?;
+    }
+    let weights = RecordingWeights::new(&[], HashMap::new(), true);
+    build(inference_tensor::nn::VarBuilder::from_backend(
+        Box::new(weights.clone()),
+        DType::F32,
+        Device::Cpu,
+    ))?;
+    let tensors = std::mem::take(&mut weights.0.lock().unwrap().1);
+    inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
+    Ok(dir)
+}
+
 /// Every file in a committed fixture directory.
 pub fn fixture_files(dir: &str) -> anyhow::Result<Vec<std::path::PathBuf>> {
     Ok(std::fs::read_dir(dir)?

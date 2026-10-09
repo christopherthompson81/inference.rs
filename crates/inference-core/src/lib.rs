@@ -147,7 +147,7 @@ pub use inference_mcp::{
     sandbox_key,
 };
 pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
-pub use inference_models_speech::{SpeechGenerationConfig, utils as speech_utils};
+pub use inference_models_speech::{SpeechGenerationConfig, SpeechOptions, utils as speech_utils};
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxMode, SandboxPolicy, SandboxProfile};

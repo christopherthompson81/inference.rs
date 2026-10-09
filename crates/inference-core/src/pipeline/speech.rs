@@ -20,7 +20,8 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
-use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput};
+use inference_models_speech::kokoro::{KokoroConfig, KokoroTts};
+use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput, SpeechOptions};
 use inference_quant::IsqType;
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::{Device, Tensor};
@@ -35,11 +36,17 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
+const DIA_DAC_MODEL: &str = "EricB/dac_44khz";
+const KOKORO_VOICES_DIR: &str = "voices";
+const KOKORO_SAFETENSORS: &str = "model.safetensors";
+
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
 pub enum SpeechLoaderType {
     #[serde(rename = "dia")]
     Dia,
+    #[serde(rename = "kokoro")]
+    Kokoro,
 }
 
 impl FromStr for SpeechLoaderType {
@@ -47,8 +54,9 @@ impl FromStr for SpeechLoaderType {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "dia" => Ok(Self::Dia),
+            "kokoro" => Ok(Self::Kokoro),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `dia`."
+                "Unknown architecture `{a}`. Possible architectures: `dia`, `kokoro`."
             )),
         }
     }
@@ -57,6 +65,9 @@ impl FromStr for SpeechLoaderType {
 impl SpeechLoaderType {
     /// Auto-detect speech loader type from a config.json string.
     pub fn auto_detect_from_config(config: &str) -> Option<Self> {
+        if serde_json::from_str::<KokoroConfig>(config).is_ok() {
+            return Some(Self::Kokoro);
+        }
         if DiaConfig::from_json(config).is_ok() {
             return Some(Self::Dia);
         }
@@ -68,6 +79,7 @@ impl SpeechLoaderType {
 pub struct SpeechModelPaths {
     weights: Vec<PathBuf>,
     config: PathBuf,
+    voices: Vec<PathBuf>,
 }
 
 impl ModelPaths for SpeechModelPaths {
@@ -137,6 +149,7 @@ pub struct SpeechInputsProcessor;
 #[derive(Clone)]
 pub struct ModelInputs {
     pub(crate) prompts: Vec<String>,
+    pub(crate) options: Vec<SpeechOptions>,
 }
 
 impl InputsProcessor for SpeechInputsProcessor {
@@ -163,6 +176,10 @@ impl InputsProcessor for SpeechInputsProcessor {
                 .iter()
                 .map(|seq| seq.get_initial_prompt().to_string())
                 .collect(),
+            options: input_seqs
+                .iter()
+                .map(|seq| seq.speech_options().cloned().unwrap_or_default())
+                .collect(),
         };
         Ok(InputProcessorOutput {
             inputs: Box::new(inputs),
@@ -171,9 +188,14 @@ impl InputsProcessor for SpeechInputsProcessor {
     }
 }
 
+enum SpeechModel {
+    Dia(Box<DiaPipeline>),
+    Kokoro(Box<KokoroTts>),
+}
+
 pub struct SpeechPipeline {
     model_id: String,
-    model: DiaPipeline,
+    model: SpeechModel,
     metadata: Arc<GeneralMetadata>,
     dummy_cache: EitherCache,
     cfg: SpeechGenerationConfig,
@@ -182,8 +204,18 @@ pub struct SpeechPipeline {
 pub struct SpeechLoader {
     pub model_id: String,
     pub dac_model_id: Option<String>,
-    pub arch: SpeechLoaderType,
+    /// Unset reads the architecture from the model's `config.json`.
+    pub arch: Option<SpeechLoaderType>,
     pub cfg: Option<SpeechGenerationConfig>,
+}
+
+fn detect_arch(config: &std::path::Path) -> Result<SpeechLoaderType> {
+    SpeechLoaderType::auto_detect_from_config(&std::fs::read_to_string(config)?).ok_or_else(|| {
+        anyhow::anyhow!(
+            "`{}` is not a Dia or Kokoro config; pass the architecture explicitly",
+            config.display()
+        )
+    })
 }
 
 impl Loader for SpeechLoader {
@@ -195,6 +227,32 @@ impl Loader for SpeechLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
+        let arch = match self.arch {
+            Some(arch) => arch,
+            None => {
+                let api = ApiBuilder::new()
+                    .with_progress(!silent)
+                    .with_token(get_token(&token_source)?)
+                    .build()?;
+                let rev = revision.clone().unwrap_or_else(|| "main".to_string());
+                let api = api.repo(Repo::with_revision(
+                    self.model_id.clone(),
+                    RepoType::Model,
+                    rev.clone(),
+                ));
+                let id = std::path::Path::new(&self.model_id);
+                detect_arch(&crate::pipeline::hf::get_file(
+                    &api,
+                    id,
+                    "config.json",
+                    &rev,
+                )?)?
+            }
+        };
+        if arch == SpeechLoaderType::Kokoro {
+            let paths = kokoro_paths(&self.model_id, revision, &token_source, silent)?;
+            return self.load_model_from_path(&paths, options);
+        }
         let paths: anyhow::Result<Box<dyn ModelPaths>> = {
             // Main weights first, DAC is the final one.
             let mut weights = Vec::new();
@@ -233,9 +291,7 @@ impl Loader for SpeechLoader {
                 let dac_model = self
                     .dac_model_id
                     .clone()
-                    .unwrap_or_else(|| match self.arch {
-                        SpeechLoaderType::Dia => "EricB/dac_44khz".to_string(),
-                    });
+                    .unwrap_or_else(|| DIA_DAC_MODEL.to_string());
 
                 let api = api.repo(Repo::with_revision(
                     dac_model.clone(),
@@ -249,7 +305,11 @@ impl Loader for SpeechLoader {
                 weights.push(weight);
             }
 
-            Ok(Box::new(SpeechModelPaths { weights, config }))
+            Ok(Box::new(SpeechModelPaths {
+                weights,
+                config,
+                voices: Vec::new(),
+            }))
         };
         self.load_model_from_path(paths?.as_ref(), options)
     }
@@ -275,6 +335,33 @@ impl Loader for SpeechLoader {
 
         if matches!(mapper, DeviceMapSetting::Map(_)) {
             anyhow::bail!("Device mapping is not supported for speech models.")
+        }
+
+        let arch = match self.arch {
+            Some(arch) => arch,
+            None => detect_arch(&paths.config)?,
+        };
+        if arch == SpeechLoaderType::Kokoro {
+            if in_situ_quant.is_some() {
+                anyhow::bail!("Kokoro does not support in-situ quantization.")
+            }
+            let [weights] = paths.weights.as_slice() else {
+                anyhow::bail!(
+                    "Kokoro loads from one weight file, got {}",
+                    paths.weights.len()
+                )
+            };
+            let model = KokoroTts::load(&paths.config, weights, &paths.voices, device)?;
+            return Ok(Arc::new(Mutex::new(SpeechPipeline::new(
+                self.model_id.clone(),
+                SpeechModel::Kokoro(Box::new(model)),
+                inference_tensor::DType::F32,
+                match self.cfg {
+                    None => SpeechGenerationConfig::kokoro_default(),
+                    Some(cfg @ SpeechGenerationConfig::Kokoro { .. }) => cfg,
+                    Some(cfg) => anyhow::bail!("a Kokoro model was given {cfg:?}"),
+                },
+            ))));
         }
 
         inference_quant::set_immediate_isq(
@@ -321,13 +408,37 @@ impl Loader for SpeechLoader {
             VarBuilder::from_mmaped_safetensors(&[paths.weights.last().unwrap()], dtype, device)?
         };
 
-        // Only Dia is supported for now.
-        assert_eq!(self.arch, SpeechLoaderType::Dia);
-
         let model = DiaPipeline::new(&cfg, vb, dac_vb)?;
+        Ok(Arc::new(Mutex::new(SpeechPipeline::new(
+            self.model_id.clone(),
+            SpeechModel::Dia(Box::new(model)),
+            dtype,
+            match self.cfg {
+                None => SpeechGenerationConfig::dia_default(),
+                Some(cfg @ SpeechGenerationConfig::Dia { .. }) => cfg,
+                Some(cfg) => anyhow::bail!("a Dia model was given {cfg:?}"),
+            },
+        ))))
+    }
 
-        Ok(Arc::new(Mutex::new(SpeechPipeline {
-            model_id: self.model_id.clone(),
+    fn get_id(&self) -> String {
+        self.model_id.clone()
+    }
+
+    fn get_kind(&self) -> ModelKind {
+        ModelKind::Normal
+    }
+}
+
+impl SpeechPipeline {
+    fn new(
+        model_id: String,
+        model: SpeechModel,
+        activation_dtype: inference_tensor::DType,
+        cfg: SpeechGenerationConfig,
+    ) -> Self {
+        Self {
+            model_id,
             model,
             metadata: Arc::new(GeneralMetadata {
                 max_seq_len: 1024,
@@ -337,7 +448,7 @@ impl Loader for SpeechLoader {
                 eos_tok: vec![],
                 kind: ModelKind::Normal,
                 no_kv_cache: true, // NOTE(EricLBuehler): no cache for these.
-                activation_dtype: dtype,
+                activation_dtype,
                 sliding_window: None,
                 cache_config: None,
                 cache_engine: None,
@@ -349,19 +460,69 @@ impl Loader for SpeechLoader {
                 loaded_for_uqff_write: false,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
-            cfg: self.cfg.unwrap_or_else(|| match self.arch {
-                SpeechLoaderType::Dia => SpeechGenerationConfig::dia_default(),
-            }),
-        })))
+            cfg,
+        }
     }
+}
 
-    fn get_id(&self) -> String {
-        self.model_id.clone()
-    }
-
-    fn get_kind(&self) -> ModelKind {
-        ModelKind::Normal
-    }
+/// Kokoro's files: `config.json`, the `.pth` release (or `model.safetensors`), and every voice pack under `voices/`.
+fn kokoro_paths(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    silent: bool,
+) -> Result<SpeechModelPaths> {
+    let revision = revision.unwrap_or_else(|| "main".to_string());
+    let api = ApiBuilder::new()
+        .with_progress(!silent)
+        .with_token(get_token(token_source)?)
+        .build()?
+        .repo(Repo::with_revision(
+            model_id.to_string(),
+            RepoType::Model,
+            revision.clone(),
+        ));
+    let id = std::path::Path::new(model_id);
+    let files: Vec<String> = if id.is_dir() {
+        let mut files = Vec::new();
+        // a missing voices directory falls through to the loader's "needs a voice pack" error
+        let voices = std::fs::read_dir(id.join(KOKORO_VOICES_DIR))
+            .into_iter()
+            .flatten();
+        for entry in std::fs::read_dir(id)?.chain(voices) {
+            let path = entry?.path();
+            if let Ok(rel) = path.strip_prefix(id) {
+                files.push(rel.to_string_lossy().replace('\\', "/"));
+            }
+        }
+        files
+    } else {
+        crate::pipeline::hf::list_repo_files(&api, id, true, &revision)?
+    };
+    let weight = files
+        .iter()
+        .find(|f| f.as_str() == KOKORO_SAFETENSORS)
+        .or_else(|| {
+            files
+                .iter()
+                .find(|f| !f.contains('/') && f.ends_with(".pth"))
+        })
+        .ok_or_else(|| anyhow::anyhow!("{model_id} has no `.pth` or `{KOKORO_SAFETENSORS}`"))?;
+    let mut voices = files
+        .iter()
+        .filter(|f| {
+            f.strip_prefix(KOKORO_VOICES_DIR)
+                .and_then(|f| f.strip_prefix('/'))
+                .is_some_and(|f| f.ends_with(".pt") || f.ends_with(".bin"))
+        })
+        .map(|f| crate::pipeline::hf::get_file(&api, id, f, &revision))
+        .collect::<Result<Vec<_>>>()?;
+    voices.sort();
+    Ok(SpeechModelPaths {
+        weights: vec![crate::pipeline::hf::get_file(&api, id, weight, &revision)?],
+        config: crate::pipeline::hf::get_file(&api, id, "config.json", &revision)?,
+        voices,
+    })
 }
 
 impl PreProcessingMixin for SpeechPipeline {
@@ -402,7 +563,10 @@ impl CacheManagerMixin for SpeechPipeline {
 
 impl MetadataMixin for SpeechPipeline {
     fn device(&self) -> Device {
-        self.model.device().clone()
+        match &self.model {
+            SpeechModel::Dia(model) => model.device().clone(),
+            SpeechModel::Kokoro(model) => model.device().clone(),
+        }
     }
     fn get_metadata(&self) -> Arc<GeneralMetadata> {
         self.metadata.clone()
@@ -426,16 +590,24 @@ impl Pipeline for SpeechPipeline {
     ) -> inference_tensor::Result<ForwardInputsResult> {
         assert!(!return_raw_logits);
 
-        let ModelInputs { prompts } = *inputs.downcast().expect("Downcast failed.");
+        let ModelInputs { prompts, options } = *inputs.downcast().expect("Downcast failed.");
         let mut pcms = Vec::new();
         let mut rates = Vec::new();
         let mut channels_all = Vec::new();
-        for prompt in prompts {
+        for (prompt, options) in prompts.iter().zip(&options) {
             let SpeechGenerationOutput {
                 pcm,
                 rate,
                 channels,
-            } = self.model.generate(&prompt, &self.cfg)?;
+            } = match (&self.model, self.cfg) {
+                (SpeechModel::Dia(model), cfg) => model.generate(prompt, &cfg)?,
+                (SpeechModel::Kokoro(model), SpeechGenerationConfig::Kokoro { speed }) => {
+                    model.generate(options, speed, options.seed.unwrap_or_else(rand::random))?
+                }
+                (SpeechModel::Kokoro(_), _) => {
+                    inference_tensor::bail!("Kokoro was given another model's speech config")
+                }
+            };
             pcms.push(pcm);
             rates.push(rate);
             channels_all.push(channels);
@@ -464,6 +636,17 @@ impl Pipeline for SpeechPipeline {
 
     fn category(&self) -> ModelCategory {
         ModelCategory::Speech
+    }
+
+    fn validate_speech_options(&self, options: &SpeechOptions) -> std::result::Result<(), String> {
+        match &self.model {
+            // OpenAI clients always send a voice, so only a field no client sends by default is refused
+            SpeechModel::Dia(_) if options.phonemes.is_some() => {
+                Err("Dia speaks `input` text; it does not take `phonemes`".to_string())
+            }
+            SpeechModel::Dia(_) => Ok(()),
+            SpeechModel::Kokoro(model) => model.validate(options).map_err(|err| err.to_string()),
+        }
     }
 }
 

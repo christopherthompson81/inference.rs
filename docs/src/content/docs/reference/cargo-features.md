@@ -38,7 +38,7 @@ For Linux CUDA multi-GPU, add `nccl` when NCCL is installed. The Linux installer
 
 ## Model families
 
-Each model family is its own crate (`inference-models-{gemma,llama,other,phi,qwen}`), compiled only when its feature is on. Speech (Dia) and image generation (FLUX) models are always built.
+Each model family is its own crate (`inference-models-{gemma,llama,other,phi,qwen}`), compiled only when its feature is on. Speech (Dia, Kokoro) and image generation (FLUX) models are always built.
 
 | Feature | Crates | Purpose |
 |---|---|---|

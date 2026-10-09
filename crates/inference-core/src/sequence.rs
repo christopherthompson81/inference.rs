@@ -12,6 +12,7 @@ use crate::{
 };
 use crate::{
     CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, GeneratedImages,
+    SpeechOptions,
     pipeline::{DiffusionGenerationParams, KvCache},
     response::CompletionChoice,
     tools::ToolCallState,
@@ -36,9 +37,11 @@ pub(crate) use inference_nn::media_inputs::media::{
     MultimodalData, clamp_prefix_cache_len_for_mm_features,
 };
 
-/// What an image-generation request asked for; the media and input-processor state live in `MultimodalData`.
-pub struct ImageGenerationSettings {
-    pub diffusion_params: Option<DiffusionGenerationParams>,
+/// What a one-shot generation request asked for beyond its prompt; media live in `MultimodalData`.
+#[derive(Clone, Debug)]
+pub enum OneShotParams {
+    Diffusion(DiffusionGenerationParams),
+    Speech(SpeechOptions),
 }
 
 pub type SeqPreallocatedCache = Vec<Option<(Tensor, Tensor)>>;
@@ -215,7 +218,7 @@ pub struct Sequence {
 
     // Multimodal data (images, diffusion settings, pixel caches)
     pub multimodal: MultimodalData,
-    image_generation: ImageGenerationSettings,
+    one_shot: Option<OneShotParams>,
 
     // Completion requests
     suffix: Option<String>,
@@ -316,7 +319,7 @@ impl Sequence {
         //
         tool_call_state: Option<ToolCallState>,
         sequence_stepping_type: SeqStepType,
-        diffusion_params: Option<DiffusionGenerationParams>,
+        one_shot: Option<OneShotParams>,
         // Preallocated KV cache templates, keyed by layer.
         seq_preallocated_cache: Option<SeqPreallocatedCache>,
         //
@@ -386,7 +389,7 @@ impl Sequence {
             scheduling_urgency: 0,
             // Multimodal data
             multimodal: MultimodalData::new(input_images, input_audios, input_videos),
-            image_generation: ImageGenerationSettings { diffusion_params },
+            one_shot,
             tool_call_state,
             sequence_stepping_type,
             return_raw_logits,
@@ -1550,8 +1553,18 @@ impl Sequence {
         &self.sequence_stepping_type
     }
 
-    pub fn get_diffusion_diffusion_params(&self) -> Option<DiffusionGenerationParams> {
-        self.image_generation.diffusion_params.clone()
+    pub fn diffusion_params(&self) -> Option<DiffusionGenerationParams> {
+        match &self.one_shot {
+            Some(OneShotParams::Diffusion(params)) => Some(params.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn speech_options(&self) -> Option<&SpeechOptions> {
+        match &self.one_shot {
+            Some(OneShotParams::Speech(options)) => Some(options),
+            _ => None,
+        }
     }
 
     pub fn eos_tokens(&self) -> &[u32] {

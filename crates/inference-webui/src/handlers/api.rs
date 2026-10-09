@@ -705,8 +705,7 @@ pub async fn generate_speech(
 
     let request = SpeechGenerationRequest {
         model: model_name,
-        input: req.text,
-        response_format: AudioResponseFormat::Wav,
+        ..SpeechGenerationRequest::new(req.text, AudioResponseFormat::Wav)
     };
     let audio = match app.engine.speech_generation(request).await {
         Ok(audio) => audio,

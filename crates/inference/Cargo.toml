@@ -35,6 +35,7 @@ indicatif.workspace = true
 inference-models-gemma.workspace = true
 inference-models-llama.workspace = true
 inference-models-other.workspace = true
+inference-models-speech.workspace = true
 inference-models-qwen.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true

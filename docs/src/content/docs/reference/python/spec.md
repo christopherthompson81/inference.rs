@@ -472,7 +472,7 @@ Select a model for running via auto loader
 
 | Field | Type | Default |
 | --- | --- | --- |
-| `arch` | `SpeechLoaderType` | required |
+| `arch` | `SpeechLoaderType \| None` | optional |
 | `dac_model_id` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `generation` | `SpeechGenerationSpec \| None` | optional |
@@ -768,6 +768,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | Member | Wire/config name |
 | --- | --- |
 | `SpeechLoaderType.DIA` | `'dia'` |
+| `SpeechLoaderType.KOKORO` | `'kokoro'` |
 
 
 ## `UqffWriteSpec`

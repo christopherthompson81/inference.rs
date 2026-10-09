@@ -79,7 +79,7 @@ impl InputsProcessor for DiffusionInputsProcessor {
                 .map(|seq| seq.get_initial_prompt().to_string())
                 .collect::<Vec<_>>(),
             params: input_seqs[0]
-                .get_diffusion_diffusion_params()
+                .diffusion_params()
                 .context("Diffusion model params must be present")?,
         };
         Ok(InputProcessorOutput {

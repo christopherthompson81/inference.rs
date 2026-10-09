@@ -49,7 +49,7 @@ impl SpeechModelBuilder {
         ModelSelected::Speech {
             model_id: self.model_id.clone(),
             dac_model_id: self.dac_model_id.clone(),
-            arch: self.loader_type,
+            arch: Some(self.loader_type),
             dtype: self.dtype,
             generation: self.generation.clone(),
         }

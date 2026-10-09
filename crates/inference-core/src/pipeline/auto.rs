@@ -488,7 +488,7 @@ impl AutoLoader {
                 let loader: Box<dyn Loader> = Box::new(SpeechLoader {
                     model_id: self.model_id.clone(),
                     dac_model_id: None,
-                    arch: tp,
+                    arch: Some(tp),
                     cfg: None,
                 });
                 *guard = Some(loader);

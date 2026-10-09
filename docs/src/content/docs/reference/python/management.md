@@ -607,7 +607,11 @@ Speech generation request
 | --- | --- | --- |
 | `input` | `str` | required |
 | `model` | `str \| None` | optional |
+| `phonemes` | `str \| None` | optional |
 | `response_format` | `AudioResponseFormat` | required |
+| `seed` | `int \| None` | optional |
+| `speed` | `float \| None` | optional |
+| `voice` | `str \| None` | optional |
 
 
 ## `SpeechGenerationSpec`
@@ -618,6 +622,7 @@ Speech sampling for every generation of the loaded model; an unset field keeps t
 | --- | --- | --- |
 | `cfg_scale` | `float \| None` | optional |
 | `max_tokens` | `int \| None` | optional |
+| `speed` | `float \| None` | optional |
 | `temperature` | `float \| None` | optional |
 | `top_k` | `int \| None` | optional |
 | `top_p` | `float \| None` | optional |

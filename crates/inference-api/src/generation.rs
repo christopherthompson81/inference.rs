@@ -3,7 +3,7 @@
 use futures::future::BoxFuture;
 use inference_core::{
     DiffusionGenerationParams, ImageChoice, ImageGenerationResponse, ImageGenerationResponseFormat,
-    InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
+    InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams, SpeechOptions,
     speech_utils::{self, Sample},
 };
 
@@ -185,6 +185,12 @@ async fn generate_speech_inner(
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let messages = RequestMessage::SpeechGeneration {
         prompt: request.input,
+        options: SpeechOptions {
+            voice: request.voice,
+            speed: request.speed,
+            phonemes: request.phonemes,
+            seed: request.seed,
+        },
     };
     match run(state, &request.model, repr, messages).await? {
         Response::Speech {

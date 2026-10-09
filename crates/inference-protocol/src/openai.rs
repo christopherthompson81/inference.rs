@@ -1912,7 +1912,20 @@ pub struct SpeechGenerationRequest {
         example = "[S1] Dia is an open weights text to dialogue model. [S2] You get full control over scripts and voices. [S1] Wow. Amazing. (laughs) [S2] Try it now on Git hub or Hugging Face."
     )]
     pub input: String,
-    // `voice` and `instructions` are ignored.
+    // `instructions` is ignored.
+    /// A voice the model ships (Kokoro: e.g. `af_heart`; several, comma-separated, are blended). Dia ignores it.
+    #[serde(default)]
+    #[schema(example = "af_heart")]
+    pub voice: Option<String>,
+    /// Speaking rate, 1.0 being the model's own (Kokoro). Dia ignores it.
+    #[serde(default)]
+    pub speed: Option<f32>,
+    /// The model's phoneme string, spoken in place of `input` (Kokoro, which reads phonemes rather than text).
+    #[serde(default)]
+    pub phonemes: Option<String>,
+    /// Seeds the model's sampling noise, so a request repeats exactly (Kokoro).
+    #[serde(default)]
+    pub seed: Option<u64>,
     /// The desired audio format for the generated speech.
     #[schema(example = "mp3")]
     pub response_format: AudioResponseFormat,
@@ -1924,6 +1937,10 @@ impl SpeechGenerationRequest {
         Self {
             model: default_model(),
             input: input.into(),
+            voice: None,
+            speed: None,
+            phonemes: None,
+            seed: None,
             response_format,
         }
     }
