@@ -14,8 +14,9 @@ const CONFIG: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/fixtures/kokoro_tiny/config.json"
 );
-// invented voice names; the first sorts first, so it is the default when the reference's default is absent
-pub const VOICES: [&str; 2] = ["tiny_one", "tiny_two"];
+// invented voice names; the first sorts first, so it is the default when the reference's default is absent. Their
+// prefixes pick the language text is read in: American and British English, and Japanese, which has no text input yet.
+pub const VOICES: [&str; 3] = ["af_tiny_one", "bm_tiny_two", "jf_tiny_three"];
 const VOICE_ROWS: usize = 510;
 const VOICE_DIM: usize = 256;
 const VOICE_STD: f32 = 0.3;

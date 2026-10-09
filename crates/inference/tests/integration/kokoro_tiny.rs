@@ -11,6 +11,7 @@ use support::{VOICES, tiny_kokoro_checkpoint, tiny_kokoro_gguf};
 
 // invented phoneme strings over Kokoro's vocabulary
 const PHONEMES: &str = "həlˈoʊ wˈɜːld.";
+const TEXT: &str = "Hello world, this is Kokoro reading text.";
 const SEED: u64 = 7;
 const WAV_HEADER: usize = 44;
 const SAMPLE_RATE: u32 = 24_000;
@@ -18,6 +19,8 @@ const SAMPLE_RATE: u32 = 24_000;
 const LONG_WORDS: usize = 30;
 // enough runs that ops raced across threads on one device would show
 const REPEATS: usize = 4;
+// enough copies of TEXT to pass the 510-phoneme context
+const LONG_REPEATS: usize = 20;
 
 fn request(phonemes: Option<&str>) -> SpeechGenerationRequest {
     SpeechGenerationRequest {
@@ -80,7 +83,7 @@ async fn kokoro_speaks_phonemes_with_voices_speeds_and_seeds() -> anyhow::Result
     };
     assert_ne!(model.generate_speech(second).await?.bytes, base.bytes);
     let blend = SpeechGenerationRequest {
-        voice: Some(VOICES.join(",")),
+        voice: Some(VOICES[..2].join(",")),
         ..request(Some(PHONEMES))
     };
     assert!(samples(&model.generate_speech(blend).await?.bytes) > 0);
@@ -111,7 +114,11 @@ async fn kokoro_speaks_phonemes_with_voices_speeds_and_seeds() -> anyhow::Result
     };
     let err = error_text(model.generate_speech(unknown).await);
     assert!(err.contains("no_such_voice"), "{err}");
-    let err = error_text(model.generate_speech(request(None)).await);
+    let japanese = SpeechGenerationRequest {
+        voice: Some(VOICES[2].into()),
+        ..request(None)
+    };
+    let err = error_text(model.generate_speech(japanese).await);
     assert!(err.contains("phonemes"), "{err}");
     let bad_speed = SpeechGenerationRequest {
         speed: Some(0.),
@@ -197,5 +204,54 @@ async fn kokoro_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
             first
         );
     }
+    Ok(())
+}
+
+// Without `phonemes` the input text is phonemized for the voice's language, and speaks as those phonemes would
+#[tokio::test]
+async fn kokoro_reads_english_text() -> anyhow::Result<()> {
+    use inference_models_speech::kokoro::g2p::{phonemes, voice_language};
+
+    let checkpoint = tiny_kokoro_checkpoint()?;
+    let model = SpeechModelBuilder::new(
+        checkpoint.path().to_string_lossy(),
+        SpeechLoaderType::Kokoro,
+    )
+    .with_dtype(ModelDType::F32)
+    .with_force_cpu()
+    .build()
+    .await?;
+    for voice in &VOICES[..2] {
+        let text = SpeechGenerationRequest {
+            input: TEXT.into(),
+            voice: Some((*voice).into()),
+            ..request(None)
+        };
+        let spoken = model.generate_speech(text).await?.bytes;
+        assert!(samples(&spoken) > 0);
+        // English renders without consulting the vocabulary
+        let ps = phonemes(TEXT, voice_language(voice)?, |_| true)?;
+        let explicit = SpeechGenerationRequest {
+            voice: Some((*voice).into()),
+            ..request(Some(&ps))
+        };
+        assert_eq!(
+            model.generate_speech(explicit).await?.bytes,
+            spoken,
+            "{voice}"
+        );
+    }
+    // text past the model's context is split into pieces that each fit
+    let long = SpeechGenerationRequest {
+        input: TEXT.repeat(LONG_REPEATS),
+        voice: Some(VOICES[0].into()),
+        ..request(None)
+    };
+    assert!(model.generate_speech(long).await.is_ok());
+    let blank = SpeechGenerationRequest {
+        input: "  \n ".into(),
+        ..request(None)
+    };
+    assert!(model.generate_speech(blank).await.is_err());
     Ok(())
 }

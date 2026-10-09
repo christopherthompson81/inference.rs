@@ -11640,7 +11640,7 @@
               "string",
               "null"
             ],
-            "description": "The model's phoneme string, spoken in place of `input` (Kokoro, which reads phonemes rather than text)."
+            "description": "The model's own phoneme string, spoken in place of `input` (Kokoro; without it, `input` is phonemized)."
           },
           "response_format": {
             "$ref": "#/components/schemas/AudioResponseFormat",
