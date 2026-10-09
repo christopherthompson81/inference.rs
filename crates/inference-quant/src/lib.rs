@@ -157,8 +157,7 @@ pub fn gguf_affine_budget_bytes(device: &Device, dtype: DType) -> usize {
 
 #[cfg(feature = "metal")]
 pub use afq::ops::{
-    afq_gather_qmm_rhs_sorted, afq_gather_qmm_rhs_sorted_gate_up, metal_arg_sort_u32_1d,
-    metal_moe_weighted_reduce_flat,
+    afq_gather_qmm_rhs_sorted, afq_gather_qmm_rhs_sorted_gate_up, metal_moe_weighted_reduce_flat,
 };
 pub use afq::{AfqBits, AfqGroupSize, AfqInner, AfqLayer};
 pub use bitsandbytes::{BnbLinear, BnbQuantParams, BnbQuantType};
