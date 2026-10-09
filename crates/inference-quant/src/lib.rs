@@ -202,6 +202,10 @@ pub use gguf::fast_mmq::{
     supports_weight as supports_mmq_weight,
 };
 #[cfg(feature = "cuda")]
+pub use gguf::fast_mmvq::{
+    moe_decode as indexed_moe_mmvq, supports_moe as supports_indexed_moe_mmvq,
+};
+#[cfg(feature = "cuda")]
 pub use gguf::kernel::KernelWeight;
 pub use gguf::{
     GgufBindingMap, GgufBindingResolver, GgufTensorBackend, GgufTensorBinding, GgufWeightSource,

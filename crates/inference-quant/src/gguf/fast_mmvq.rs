@@ -21,6 +21,11 @@ const Q8_1_BLOCK_SIZE: usize = 32;
 const Q8_1_TYPE_SIZE: usize = 36; // 2 halves (4 bytes) + QK8_1 int8 = 4 + 32 = 36
 const MATRIX_ROW_PADDING: usize = 512;
 const QK_K: usize = 256;
+// The second Q8_1 region of the MoE workspace starts on this boundary
+const WORKSPACE_ALIGN: usize = 256;
+// Down reads one activation row per routed pair, and fuses no activation
+const MOE_DOWN_Y_DIV: i32 = 1;
+const MOE_NO_ACTIVATION: i32 = 0;
 
 #[inline]
 fn pad(p: usize, q: usize) -> usize {
@@ -1041,6 +1046,290 @@ pub fn fused_qkv(
         }
         _ => unreachable!(),
     }
+}
+
+type MoeLauncher = unsafe extern "C" fn(
+    vx_gate: *const std::ffi::c_void,
+    vx_up: *const std::ffi::c_void,
+    expert_stride: i64,
+    vy: *const std::ffi::c_void,
+    ids: *const std::ffi::c_void,
+    dst: *mut f32,
+    ncols_x: i32,
+    nrows_x: i32,
+    stride_col_y: i32,
+    y_div: i32,
+    n_pairs: i32,
+    activation: i32,
+    stream: *mut std::ffi::c_void,
+);
+
+fn moe_launcher(dtype: GgufType) -> Option<MoeLauncher> {
+    let f: MoeLauncher = match dtype {
+        GgufType::Q4_0 => ffi::launch_mmvq_gguf_q4_0_moe,
+        GgufType::Q4_1 => ffi::launch_mmvq_gguf_q4_1_moe,
+        GgufType::Q5_0 => ffi::launch_mmvq_gguf_q5_0_moe,
+        GgufType::Q5_1 => ffi::launch_mmvq_gguf_q5_1_moe,
+        GgufType::Q8_0 => ffi::launch_mmvq_gguf_q8_0_moe,
+        GgufType::Q2K => ffi::launch_mmvq_gguf_q2_k_moe,
+        GgufType::Q3K => ffi::launch_mmvq_gguf_q3_k_moe,
+        GgufType::Q4K => ffi::launch_mmvq_gguf_q4_k_moe,
+        GgufType::Q5K => ffi::launch_mmvq_gguf_q5_k_moe,
+        GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_moe,
+        GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_moe,
+        GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_moe,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_moe,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_moe,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_moe,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_moe,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_moe,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_moe,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_moe,
+        GgufType::Iq1Kt => ffi::launch_mmvq_gguf_iq1_kt_moe,
+        GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_moe,
+        GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_moe,
+        GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_moe,
+        GgufType::Iq2K => ffi::launch_mmvq_gguf_iq2_k_moe,
+        GgufType::Iq3K => ffi::launch_mmvq_gguf_iq3_k_moe,
+        GgufType::Iq4K => ffi::launch_mmvq_gguf_iq4_k_moe,
+        GgufType::Iq5K => ffi::launch_mmvq_gguf_iq5_k_moe,
+        GgufType::Iq6K => ffi::launch_mmvq_gguf_iq6_k_moe,
+        GgufType::Iq4Ks => ffi::launch_mmvq_gguf_iq4_ks_moe,
+        GgufType::Iq2Ks => ffi::launch_mmvq_gguf_iq2_ks_moe,
+        GgufType::Iq4Kss => ffi::launch_mmvq_gguf_iq4_kss_moe,
+        GgufType::Iq5Ks => ffi::launch_mmvq_gguf_iq5_ks_moe,
+        GgufType::Iq3Ks => ffi::launch_mmvq_gguf_iq3_ks_moe,
+        GgufType::Iq2Kl => ffi::launch_mmvq_gguf_iq2_kl_moe,
+        _ => return None,
+    };
+    Some(f)
+}
+
+/// Whether `moe_decode` reads these stacked experts: one matvec kernel per type, gate and up of one type.
+pub fn supports_moe(
+    gate: &dyn KernelWeight,
+    up: &dyn KernelWeight,
+    down: &dyn KernelWeight,
+) -> bool {
+    gate.gguf_type() == up.gguf_type()
+        && [gate, up, down]
+            .into_iter()
+            .all(|w| moe_launcher(w.gguf_type()).is_some() && w.kernel_shape().rank() == 3)
+}
+
+// Quantizes `rows` rows of `xs` (row length k) to Q8_1 rows of `k_padded`, as the matvec kernels read them
+fn quantize_rows_q8_1(
+    xs: &Tensor,
+    dst: *mut std::ffi::c_void,
+    k_padded: usize,
+    stream: &CudaStream,
+) -> Result<()> {
+    let xs = xs.contiguous()?;
+    let (rows, k) = xs.dims2()?;
+    let (storage, layout) = xs.storage_and_layout();
+    let Storage::Cuda(cuda) = &*storage else {
+        inference_tensor::bail!("fast_mmvq: input must live on CUDA");
+    };
+    let offset = layout.start_offset();
+    let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
+    let args = (k as i32, k_padded as i32, rows as i32, stream_ptr);
+    match xs.dtype() {
+        DType::BF16 => {
+            let (ptr, _guard) =
+                slice_ptr_on_stream(cuda.as_cuda_slice::<half::bf16>()?, offset, stream);
+            unsafe {
+                ffi::launch_mmvq_gguf_quantize_q8_1_bf16(
+                    ptr as *const _,
+                    dst,
+                    args.0,
+                    args.1,
+                    args.2,
+                    args.3,
+                )
+            };
+        }
+        DType::F16 => {
+            let (ptr, _guard) =
+                slice_ptr_on_stream(cuda.as_cuda_slice::<half::f16>()?, offset, stream);
+            unsafe {
+                ffi::launch_mmvq_gguf_quantize_q8_1_f16(
+                    ptr as *const _,
+                    dst,
+                    args.0,
+                    args.1,
+                    args.2,
+                    args.3,
+                )
+            };
+        }
+        DType::F32 => {
+            let (ptr, _guard) = slice_ptr_on_stream(cuda.as_cuda_slice::<f32>()?, offset, stream);
+            unsafe {
+                ffi::launch_mmvq_gguf_quantize_q8_1_f32(
+                    ptr as *const _,
+                    dst,
+                    args.0,
+                    args.1,
+                    args.2,
+                    args.3,
+                )
+            };
+        }
+        other => inference_tensor::bail!(
+            "fast_mmvq: input dtype must be BF16, F16 or F32, got {other:?}"
+        ),
+    }
+    Ok(())
+}
+
+/// Matvec MoE over stacked `[E, out, in]` experts, `topk` ids per row of `xs`: `[tokens * topk, hidden]` F32 outputs.
+pub fn moe_decode(
+    gate: &dyn KernelWeight,
+    up: &dyn KernelWeight,
+    down: &dyn KernelWeight,
+    xs: &Tensor,
+    ids: &Tensor,
+    topk: usize,
+    activation: GluActivationType,
+) -> Result<Tensor> {
+    if !supports_moe(gate, up, down) {
+        inference_tensor::bail!(
+            "fast_mmvq: no expert-indexed matvec for {:?}/{:?}/{:?}",
+            gate.gguf_type(),
+            up.gguf_type(),
+            down.gguf_type()
+        );
+    }
+    let Device::Cuda(dev) = gate.kernel_device() else {
+        inference_tensor::bail!("fast_mmvq: experts must live on CUDA");
+    };
+    if !xs.device().same_device(&gate.kernel_device())
+        || !ids.device().same_device(&gate.kernel_device())
+    {
+        inference_tensor::bail!(
+            "fast_mmvq: MoE input, expert ids and experts are on different devices"
+        );
+    }
+    let (_, intermediate, hidden) = gate.kernel_shape().dims3()?;
+    let (tokens, k) = xs.dims2()?;
+    if up.kernel_shape().dims3()? != gate.kernel_shape().dims3()?
+        || down.kernel_shape().dims3()?.1 != hidden
+        || down.kernel_shape().dims3()?.2 != intermediate
+        || k != hidden
+    {
+        inference_tensor::bail!(
+            "fast_mmvq: expert shapes gate {:?} up {:?} down {:?} do not fit input {:?}",
+            gate.kernel_shape(),
+            up.kernel_shape(),
+            down.kernel_shape(),
+            xs.shape()
+        );
+    }
+    let pairs = tokens * topk;
+    if ids.elem_count() != pairs || ids.dtype() != DType::U32 {
+        inference_tensor::bail!(
+            "fast_mmvq: expected {pairs} u32 expert ids, got {:?} {:?}",
+            ids.shape(),
+            ids.dtype()
+        );
+    }
+    let expert_bytes = |w: &dyn KernelWeight, rows: usize, cols: usize| -> Result<i64> {
+        let row = w.gguf_type().row_bytes(cols).ok_or_else(|| {
+            inference_tensor::Error::Msg(format!("{:?} rows cannot hold {cols}", w.gguf_type()))
+        })?;
+        Ok((rows * row) as i64)
+    };
+    let gate_stride = expert_bytes(gate, intermediate, hidden)?;
+    let down_stride = expert_bytes(down, hidden, intermediate)?;
+
+    let stream = dev.cuda_stream();
+    let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
+    let x_padded = pad(hidden, MATRIX_ROW_PADDING);
+    let mid_padded = pad(intermediate, MATRIX_ROW_PADDING);
+    // one workspace for both quantized operands: two locked slots could share a key and deadlock
+    let x_bytes = pad(
+        tokens * x_padded / Q8_1_BLOCK_SIZE * Q8_1_TYPE_SIZE,
+        WORKSPACE_ALIGN,
+    );
+    let mid_bytes = pairs * mid_padded / Q8_1_BLOCK_SIZE * Q8_1_TYPE_SIZE;
+    let mut workspace = workspace_ensure(&dev, x_bytes + mid_bytes, &stream)?;
+    let (scratch, _scratch_guard) = workspace.ptr_mut();
+    let x_q8 = scratch as *mut std::ffi::c_void;
+    let mid_q8 = (scratch + x_bytes as u64) as *mut std::ffi::c_void;
+
+    quantize_rows_q8_1(xs, x_q8, x_padded, &stream)?;
+
+    let ids = ids.flatten_all()?.contiguous()?;
+    let (ids_storage, ids_layout) = ids.storage_and_layout();
+    let Storage::Cuda(ids_cuda) = &*ids_storage else {
+        inference_tensor::bail!("fast_mmvq: expert ids must live on CUDA");
+    };
+    let (ids_ptr, _ids_guard) = slice_ptr_on_stream(
+        ids_cuda.as_cuda_slice::<u32>()?,
+        ids_layout.start_offset(),
+        &stream,
+    );
+    let ids_ptr = ids_ptr as *const std::ffi::c_void;
+
+    let mut activated = unsafe { dev.alloc::<f32>(pairs * intermediate)? };
+    let mut out = unsafe { dev.alloc::<f32>(pairs * hidden)? };
+    {
+        let (gate_ptr, _gate_guard) = gate.kernel_ptr(&stream)?;
+        let (up_ptr, _up_guard) = up.kernel_ptr(&stream)?;
+        let (mid_ptr, _mid_guard) = slice_ptr_mut_on_stream(&mut activated, 0, &stream);
+        let launch = moe_launcher(gate.gguf_type()).expect("supports_moe checked");
+        unsafe {
+            launch(
+                gate_ptr as *const _,
+                up_ptr as *const _,
+                gate_stride,
+                x_q8,
+                ids_ptr,
+                mid_ptr as *mut f32,
+                hidden as i32,
+                intermediate as i32,
+                (x_padded / Q8_1_BLOCK_SIZE) as i32,
+                topk as i32,
+                pairs as i32,
+                activation as i32,
+                stream_ptr,
+            );
+            ffi::launch_mmvq_gguf_quantize_q8_1_f32(
+                mid_ptr as *const _,
+                mid_q8,
+                intermediate as i32,
+                mid_padded as i32,
+                pairs as i32,
+                stream_ptr,
+            );
+        }
+    }
+    {
+        let (down_ptr, _down_guard) = down.kernel_ptr(&stream)?;
+        let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+        let launch = moe_launcher(down.gguf_type()).expect("supports_moe checked");
+        unsafe {
+            launch(
+                down_ptr as *const _,
+                std::ptr::null(),
+                down_stride,
+                mid_q8,
+                ids_ptr,
+                out_ptr as *mut f32,
+                intermediate as i32,
+                hidden as i32,
+                (mid_padded / Q8_1_BLOCK_SIZE) as i32,
+                MOE_DOWN_Y_DIV,
+                pairs as i32,
+                MOE_NO_ACTIVATION,
+                stream_ptr,
+            );
+        }
+    }
+    Ok(Tensor::from((
+        Storage::Cuda(CudaStorage::wrap_cuda_slice(out, dev.clone())),
+        Shape::from((pairs, hidden)),
+    )))
 }
 
 type DequantizeLauncher = unsafe extern "C" fn(

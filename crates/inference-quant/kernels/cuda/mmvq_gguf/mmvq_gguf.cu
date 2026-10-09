@@ -4,6 +4,7 @@
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
 #include <stdint.h>
+#include "../glu_activation.cuh"
 
 // Constants, types, and helpers shared with the indexed MoE kernels.
 
@@ -19,6 +20,8 @@
 #define MMVQ_NWARPS_SINGLE_COL_FUSED_QKV 8
 #define MMVQ_ROWS_PER_BLOCK_SINGLE_COL_FUSED_QKV 2
 #define MMVQ_FUSED_QKV_PACKED_MIN_ROW_RATIO 2
+#define MMVQ_NWARPS_MOE 4
+#define MMVQ_ROWS_PER_BLOCK_MOE 2
 
 // Matches candle's MATRIX_ROW_PADDING.
 #define MATRIX_ROW_PADDING 512
@@ -39,51 +42,6 @@ static __device__ __forceinline__ float warp_reduce_max_f32(float x) {
     x = fmaxf(x, __shfl_xor_sync(0xffffffff, x, mask, WARP_SIZE));
   }
   return x;
-}
-
-enum GluActivation {
-  GLU_SILU = 0,
-  GLU_GELU = 1,
-  GLU_RELU = 2,
-  GLU_GELU_ERF = 3,
-  GLU_SIGMOID = 4
-};
-
-static __device__ __forceinline__ float glu_silu(float x) {
-  return x / (1.0f + expf(-x));
-}
-
-static __device__ __forceinline__ float glu_gelu(float x) {
-  const float kSqrt2OverPi = 0.7978845608f;
-  const float kCoeff = 0.044715f;
-  const float x3 = x * x * x;
-  const float inner = kSqrt2OverPi * (x + kCoeff * x3);
-  return 0.5f * x * (1.0f + tanhf(inner));
-}
-
-static __device__ __forceinline__ float glu_relu(float x) {
-  return fmaxf(x, 0.0f);
-}
-
-static __device__ __forceinline__ float glu_gelu_erf(float x) {
-  return x * normcdff(x);
-}
-
-static __device__ __forceinline__ float apply_glu_activation(float x, int act) {
-  switch (act) {
-  case GLU_SILU:
-    return glu_silu(x);
-  case GLU_GELU:
-    return glu_gelu(x);
-  case GLU_RELU:
-    return glu_relu(x);
-  case GLU_GELU_ERF:
-    return glu_gelu_erf(x);
-  case GLU_SIGMOID:
-    return 1.0f / (1.0f + expf(-x));
-  default:
-    return glu_silu(x);
-  }
 }
 
 static __device__ __forceinline__ int get_int_from_int8(const int8_t *x8,
@@ -991,6 +949,83 @@ static __device__ void mmvq_core_fused_qkv_impl(
   }
 }
 
+// MoE decode: blockIdx.y is a routed pair, reading expert ids[pair] (expert_stride bytes each) and row pair / y_div
+template <int qk, int qi, typename block_q_t, int vdr, vec_dot_q_cuda_t vec_dot_q_cuda, bool glu>
+static __device__ void mmvq_moe_impl(const void *__restrict__ vx_gate, const void *__restrict__ vx_up,
+                                     const int64_t expert_stride, const block_q8_1 *__restrict__ y,
+                                     const uint32_t *__restrict__ ids, float *__restrict__ dst, const int ncols_x,
+                                     const int nrows_x, const int stride_col_y, const int y_div,
+                                     const int activation) {
+  constexpr int nwarps = MMVQ_NWARPS_MOE;
+  constexpr int rows_per_cuda_block = MMVQ_ROWS_PER_BLOCK_MOE;
+  constexpr int nsums = glu ? 2 : 1;
+
+  const int pair = blockIdx.y;
+  const int64_t expert_offset = (int64_t)ids[pair] * expert_stride;
+  const void *vx[nsums];
+  vx[0] = (const char *)vx_gate + expert_offset;
+  if constexpr (glu) {
+    vx[1] = (const char *)vx_up + expert_offset;
+  }
+  y += (int64_t)(pair / y_div) * stride_col_y;
+  dst += (int64_t)pair * nrows_x;
+
+  const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
+  const int row0 = rows_per_cuda_block * blockIdx.x;
+  const int blocks_per_row_x = ncols_x / qk;
+  constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
+
+  float tmp[nsums][rows_per_cuda_block] = {{0.0f}};
+
+  for (int kbx = tid / (qi / vdr); kbx < blocks_per_row_x; kbx += blocks_per_iter) {
+    const int kby = kbx * (qk / QK8_1);
+    const int kqs = vdr * (tid % (qi / vdr));
+#pragma unroll
+    for (int i = 0; i < rows_per_cuda_block; ++i) {
+      if (row0 + i < nrows_x) {
+#pragma unroll
+        for (int s = 0; s < nsums; ++s) {
+          tmp[s][i] += vec_dot_q_cuda(vx[s], &y[kby], (row0 + i) * blocks_per_row_x + kbx, kqs);
+        }
+      }
+    }
+  }
+
+  __shared__ float tmp_shared[nwarps - 1 > 0 ? nwarps - 1 : 1][nsums][rows_per_cuda_block][WARP_SIZE];
+  if (threadIdx.y > 0) {
+#pragma unroll
+    for (int s = 0; s < nsums; ++s) {
+#pragma unroll
+      for (int i = 0; i < rows_per_cuda_block; ++i) {
+        tmp_shared[threadIdx.y - 1][s][i][threadIdx.x] = tmp[s][i];
+      }
+    }
+  }
+  __syncthreads();
+  if (threadIdx.y > 0) {
+    return;
+  }
+
+#pragma unroll
+  for (int s = 0; s < nsums; ++s) {
+#pragma unroll
+    for (int i = 0; i < rows_per_cuda_block; ++i) {
+#pragma unroll
+      for (int l = 0; l < nwarps - 1; ++l) {
+        tmp[s][i] += tmp_shared[l][s][i][threadIdx.x];
+      }
+      tmp[s][i] = warp_reduce_sum_f32(tmp[s][i]);
+    }
+  }
+  if (threadIdx.x < rows_per_cuda_block && row0 + threadIdx.x < nrows_x) {
+    float out = tmp[0][threadIdx.x];
+    if constexpr (glu) {
+      out = apply_glu_activation(out, activation) * tmp[nsums - 1][threadIdx.x];
+    }
+    dst[row0 + threadIdx.x] = out;
+  }
+}
+
 // IQ1 / IQ2 / IQ3: grid codebooks with packed signs, from ggml-cuda's vecdotq.cuh and ggml-common.h.
 #include "../gguf_iq_tables.cuh"
 #define QR2_XXS 4
@@ -1487,6 +1522,35 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
         ncols_x, nrows_q, nrows_k, nrows_v, stride_col_y);                     \
   }
 
+// A null vx_up runs the plain projection; otherwise gate and up fuse with the activation.
+#define MMVQ_MOE_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot)                                         \
+  template <bool glu>                                                                                          \
+  static __global__ void __launch_bounds__(MMVQ_NWARPS_MOE *WARP_SIZE, 1) mmvq_gguf_##tag##_moe_cuda(         \
+      const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,            \
+      const void *__restrict__ vy, const uint32_t *__restrict__ ids, float *__restrict__ dst, const int ncols_x, \
+      const int nrows_x, const int stride_col_y, const int y_div, const int activation) {                      \
+    mmvq_moe_impl<qk_val, qi_val, block_q_t, vdr_val, vec_dot, glu>(vx_gate, vx_up, expert_stride,             \
+                                                                     (const block_q8_1 *)vy, ids, dst, ncols_x, \
+                                                                     nrows_x, stride_col_y, y_div, activation); \
+  }                                                                                                            \
+  extern "C" void launch_mmvq_gguf_##tag##_moe(const void *vx_gate, const void *vx_up, int64_t expert_stride,  \
+                                               const void *vy, const void *ids, float *dst, int ncols_x,       \
+                                               int nrows_x, int stride_col_y, int y_div, int n_pairs,          \
+                                               int activation, void *stream) {                                 \
+    const dim3 grid((nrows_x + MMVQ_ROWS_PER_BLOCK_MOE - 1) / MMVQ_ROWS_PER_BLOCK_MOE, n_pairs, 1);            \
+    const dim3 block(WARP_SIZE, MMVQ_NWARPS_MOE, 1);                                                           \
+    cudaStream_t s = static_cast<cudaStream_t>(stream);                                                        \
+    if (vx_up) {                                                                                               \
+      mmvq_gguf_##tag##_moe_cuda<true><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,               \
+                                                             (const uint32_t *)ids, dst, ncols_x, nrows_x,    \
+                                                             stride_col_y, y_div, activation);                \
+    } else {                                                                                                   \
+      mmvq_gguf_##tag##_moe_cuda<false><<<grid, block, 0, s>>>(vx_gate, vx_up, expert_stride, vy,              \
+                                                              (const uint32_t *)ids, dst, ncols_x, nrows_x,   \
+                                                              stride_col_y, y_div, activation);               \
+    }                                                                                                          \
+  }
+
 // -- plain entries for all 10 supported quant types, batch sizes 1..8, bf16 +
 // f16 + f32 --
 #define MMVQ_PLAIN_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot) \
@@ -1537,7 +1601,8 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
   MMVQ_PLAIN_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot, f32,      \
                    float, 7)                                                   \
   MMVQ_PLAIN_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot, f32,      \
-                   float, 8)
+                   float, 8)                                                   \
+  MMVQ_MOE_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot)
 
 #define MMVQ_FUSED_QKV_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val,      \
                                  vec_dot, dst_tag, dst_c_type)                 \

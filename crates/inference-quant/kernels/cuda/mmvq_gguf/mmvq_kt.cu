@@ -321,6 +321,7 @@ static __global__ void dequantize_iq4_kt(const void *__restrict__ vx, dst_t *__r
   MMVQ_ROWS_LAUNCHER(tag, kt, bf16, __nv_bfloat16)      \
   MMVQ_ROWS_LAUNCHER(tag, kt, f16, half)                \
   MMVQ_ROWS_LAUNCHER(tag, kt, f32, float)               \
+  MMVQ_ROWS_MOE_LAUNCHER(tag, kt)                       \
   DEQUANTIZE_KT_LAUNCHER(tag, bf16, __nv_bfloat16)    \
   DEQUANTIZE_KT_LAUNCHER(tag, f16, half)              \
   DEQUANTIZE_KT_LAUNCHER(tag, f32, float)

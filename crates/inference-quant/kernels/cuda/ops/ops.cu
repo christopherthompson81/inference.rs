@@ -692,53 +692,7 @@ extern "C" void softmax_with_sinks_f32(const float *logits, const float *sinks,
 // a single kernel pass, eliminating intermediate tensor allocation.
 // ============================================================================
 
-// Activation type enum - must match Rust GluActivationType
-enum GluActivation {
-  GLU_SILU = 0,
-  GLU_GELU = 1,
-  GLU_RELU = 2,
-  GLU_GELU_ERF = 3,
-  GLU_SIGMOID = 4
-};
-
-// SiLU activation: x * sigmoid(x)
-__device__ __forceinline__ float glu_silu(float x) {
-  return x / (1.0f + expf(-x));
-}
-
-// GELU approximation: 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
-__device__ __forceinline__ float glu_gelu(float x) {
-  const float kSqrt2OverPi = 0.7978845608f;
-  const float kCoeff = 0.044715f;
-  float x3 = x * x * x;
-  float inner = kSqrt2OverPi * (x + kCoeff * x3);
-  return 0.5f * x * (1.0f + tanhf(inner));
-}
-
-// ReLU activation: max(0, x)
-__device__ __forceinline__ float glu_relu(float x) { return fmaxf(x, 0.0f); }
-
-// GELU (exact ERF version): x * normcdf(x), matching candle's CUDA impl
-__device__ __forceinline__ float glu_gelu_erf(float x) {
-  return x * normcdff(x);
-}
-
-__device__ __forceinline__ float apply_glu_activation(float x, int act) {
-  switch (act) {
-  case GLU_SILU:
-    return glu_silu(x);
-  case GLU_GELU:
-    return glu_gelu(x);
-  case GLU_RELU:
-    return glu_relu(x);
-  case GLU_GELU_ERF:
-    return glu_gelu_erf(x);
-  case GLU_SIGMOID:
-    return 1.0f / (1.0f + expf(-x));
-  default:
-    return glu_silu(x);
-  }
-}
+#include "../glu_activation.cuh"
 
 // Scalar kernel for general case
 template <typename T>
