@@ -16,6 +16,8 @@ const WAV_HEADER: usize = 44;
 const SAMPLE_RATE: u32 = 24_000;
 // the tiny config's context is 64 tokens, so this splits into several chunks
 const LONG_WORDS: usize = 30;
+// enough runs that ops raced across threads on one device would show
+const REPEATS: usize = 4;
 
 fn request(phonemes: Option<&str>) -> SpeechGenerationRequest {
     SpeechGenerationRequest {
@@ -173,5 +175,27 @@ async fn a_kokoro_gguf_speaks_as_its_checkpoint() -> anyhow::Result<()> {
         assert_eq!(speak(detected).await?, want, "{path}");
     }
     assert_eq!(speak(named(dir).await?).await?, want);
+    Ok(())
+}
+
+// On the build's default device (the GPU under `cuda`), one seed gives one waveform, request after request
+#[tokio::test]
+async fn kokoro_repeats_exactly_on_the_default_device() -> anyhow::Result<()> {
+    let checkpoint = tiny_kokoro_checkpoint()?;
+    let model = SpeechModelBuilder::new(
+        checkpoint.path().to_string_lossy(),
+        SpeechLoaderType::Kokoro,
+    )
+    .with_dtype(ModelDType::F32)
+    .build()
+    .await?;
+    let long = vec![PHONEMES; LONG_WORDS].join(" ");
+    let first = model.generate_speech(request(Some(&long))).await?.bytes;
+    for _ in 0..REPEATS {
+        assert_eq!(
+            model.generate_speech(request(Some(&long))).await?.bytes,
+            first
+        );
+    }
     Ok(())
 }

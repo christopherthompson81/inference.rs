@@ -2925,6 +2925,7 @@ dependencies = [
  "rand 0.9.4",
  "rand_distr",
  "rand_isaac",
+ "rayon",
  "serde",
  "serde_json",
  "tracing",

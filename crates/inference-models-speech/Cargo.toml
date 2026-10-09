@@ -17,6 +17,7 @@ inference-tensor.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 rand.workspace = true
+rayon.workspace = true
 rand_distr.workspace = true
 rand_isaac.workspace = true
 serde.workspace = true
