@@ -999,6 +999,7 @@ impl Im2Col1D {
 }
 
 impl Map1 for Im2Col1D {
+    // Rows are (batch, channel, tap) and columns output positions, so `kernel @ col` lands in (c_out, l_out) order
     fn f<T: WithDType>(&self, vs: &[T], layout: &Layout) -> Result<Vec<T>> {
         let &Self {
             l_k,
@@ -1009,37 +1010,26 @@ impl Map1 for Im2Col1D {
         let (b, c, l) = layout.shape().dims3()?;
         let l_out = self.l_out(l);
         let src = &vs[layout.start_offset()..];
-        let mut dst = vec![T::zero(); b * l_out * c * l_k];
         let (src_s0, src_s1, src_s2) = {
             let s = layout.stride();
             (s[0], s[1], s[2])
         };
-        // TODO: provide specialized kernels for the common use cases.
-        // - l_k = 1
-        // - padding = 0
-        // - stride = 1
-        // - dilation = 1
-        for b_idx in 0..b {
-            let src_idx = b_idx * src_s0;
-            let dst_idx = b_idx * l_out * c * l_k;
-            for l_idx in 0..l_out {
-                let dst_idx = dst_idx + l_idx * c * l_k;
-                for c_idx in 0..c {
-                    let dst_idx = dst_idx + c_idx * l_k;
-                    let src_idx = c_idx * src_s1 + src_idx;
-                    for l_k_idx in 0..l_k {
-                        let src_l = l_idx * stride + l_k_idx * dilation;
-                        if padding != 0 && (src_l < padding || src_l >= l + padding) {
-                            continue;
-                        }
-                        let src_l = src_l - padding;
-                        let src_idx = src_idx + src_l * src_s2;
-                        let dst_idx = dst_idx + l_k_idx;
-                        dst[dst_idx] = src[src_idx]
-                    }
+        let mut dst = vec![T::zero(); b * c * l_k * l_out];
+        dst.par_chunks_mut(l_out)
+            .enumerate()
+            .for_each(|(row, dst)| {
+                let (b_idx, c_idx, l_k_idx) = (row / (c * l_k), row / l_k % c, row % l_k);
+                let base = b_idx * src_s0 + c_idx * src_s1;
+                let offset = l_k_idx * dilation;
+                // output positions whose input index l_idx * stride + offset - padding falls inside [0, l)
+                let first = padding.saturating_sub(offset).div_ceil(stride);
+                let last = (l + padding)
+                    .checked_sub(offset + 1)
+                    .map_or(0, |hi| (hi / stride + 1).min(l_out));
+                for (l_idx, d) in dst.iter_mut().enumerate().take(last).skip(first) {
+                    *d = src[base + (l_idx * stride + offset - padding) * src_s2];
                 }
-            }
-        }
+            });
         Ok(dst)
     }
 }
@@ -1390,11 +1380,12 @@ impl Map2 for MatMul {
         } else {
             Parallelism::None
         };
-        let (b, m, n, k) = if b_skip == 0 && a_skip == m * k {
+        // Batches fold into one GEMM only where their rows (or, for a single output row, columns) are evenly spaced
+        let (b, m, n, k) = if b_skip == 0 && lhs_rs * m == a_skip {
             // a_skip and c_skip should be updated but step is always 0 so
             // it wouldn't matter.
             (1, b * m, n, k)
-        } else if a_skip == 0 && b_skip == n * k {
+        } else if a_skip == 0 && m == 1 && rhs_cs * n == b_skip {
             (1, m, b * n, k)
         } else {
             (b, m, n, k)
@@ -2740,29 +2731,21 @@ impl BackendStorage for CpuStorage {
         let n = params.c_out;
         let l_out = params.l_out();
         let k = op.l_k * params.c_in;
-        let m = l_out;
-        let col_l = Layout::contiguous((b, m, k));
-        let res = if kernel_l.is_contiguous() {
-            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
-                .transpose(1, 2)?
-                .broadcast_as((b, k, n))?;
-            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+        let col_l = Layout::contiguous((b, k, l_out));
+        let kernel_c;
+        let (kernel, offset) = if kernel_l.is_contiguous() {
+            (kernel, kernel_l.start_offset())
         } else {
-            // Make the kernel contiguous if not already the case.
-            let mut kernel_c = unsafe {
+            let mut c = unsafe {
                 self.device()
                     .alloc_uninit(kernel_l.shape(), kernel.dtype())?
             };
-            kernel.copy_strided_src(&mut kernel_c, 0, kernel_l)?;
-            let kernel_l = Layout::contiguous_with_offset((1, n, k), kernel_l.start_offset())
-                .transpose(1, 2)?
-                .broadcast_as((b, k, n))?;
-            col.matmul(kernel, (b, m, n, k), &col_l, &kernel_l)?
+            kernel.copy_strided_src(&mut c, 0, kernel_l)?;
+            kernel_c = c;
+            (&kernel_c, 0)
         };
-        let res_l = Layout::contiguous((b, l_out, params.c_out)).transpose(1, 2)?;
-        let mut res_t = unsafe { self.device().alloc_uninit(res_l.shape(), res.dtype())? };
-        res.copy_strided_src(&mut res_t, 0, &res_l)?;
-        Ok(res_t)
+        let kernel_l = Layout::contiguous_with_offset((1, n, k), offset).broadcast_as((b, n, k))?;
+        kernel.matmul(&col, (b, n, l_out, k), &kernel_l, &col_l)
     }
 
     fn conv_transpose1d(
@@ -3303,4 +3286,49 @@ macro_rules! map_dtype {
             s => Err(Error::UnsupportedDTypeForOp(s.dtype(), $name).bt())?,
         }
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Device, IndexOp, Result, Tensor};
+
+    // Each batch on its own against the batched call, for the layouts the GEMM batch folding looks at
+    #[test]
+    fn batched_matmul_with_broadcast_or_transposed_operands() -> Result<()> {
+        let dev = Device::Cpu;
+        let (b, m, n, k) = (3, 4, 5, 6);
+        let shared_lhs = Tensor::randn(0f32, 1., (m, k), &dev)?;
+        let shared_rhs = Tensor::randn(0f32, 1., (k, n), &dev)?;
+        let cases = [
+            (
+                shared_lhs.broadcast_left(b)?,
+                Tensor::randn(0f32, 1., (b, k, n), &dev)?,
+            ),
+            (
+                Tensor::randn(0f32, 1., (b, k, m), &dev)?.transpose(1, 2)?,
+                shared_rhs.broadcast_left(b)?,
+            ),
+            (
+                shared_lhs.narrow(0, 0, 1)?.broadcast_left(b)?,
+                Tensor::randn(0f32, 1., (b, k, n), &dev)?,
+            ),
+            (
+                shared_lhs.narrow(0, 0, 1)?.broadcast_left(b)?,
+                Tensor::randn(0f32, 1., (b, n, k), &dev)?.transpose(1, 2)?,
+            ),
+        ];
+        for (i, (lhs, rhs)) in cases.iter().enumerate() {
+            let got = lhs.matmul(rhs)?;
+            for s in 0..b {
+                let want = lhs.i(s)?.contiguous()?.matmul(&rhs.i(s)?.contiguous()?)?;
+                let diff = (got.i(s)? - want)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                assert!(diff < 1e-5, "case {i} batch {s}: {diff}");
+            }
+        }
+        Ok(())
+    }
 }

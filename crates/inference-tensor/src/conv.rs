@@ -432,6 +432,138 @@ mod tests {
         Ok(())
     }
 
+    fn direct_conv1d(
+        x: &[Vec<Vec<f32>>],
+        w: &[Vec<Vec<f32>>],
+        (padding, stride, dilation): (usize, usize, usize),
+    ) -> Vec<Vec<Vec<f32>>> {
+        let (l, k) = (x[0][0].len(), w[0][0].len());
+        let l_out = (l + 2 * padding - dilation * (k - 1) - 1) / stride + 1;
+        x.iter()
+            .map(|xb| {
+                w.iter()
+                    .map(|wo| {
+                        (0..l_out)
+                            .map(|o| {
+                                let mut acc = 0f32;
+                                for (xc, wc) in xb.iter().zip(wo) {
+                                    for (t, wt) in wc.iter().enumerate() {
+                                        let i =
+                                            (o * stride + t * dilation) as isize - padding as isize;
+                                        if (0..l as isize).contains(&i) {
+                                            acc += xc[i as usize] * wt;
+                                        }
+                                    }
+                                }
+                                acc
+                            })
+                            .collect()
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cpu_conv1d_matches_a_direct_loop() -> Result<()> {
+        // (padding, stride, dilation, length): taps reaching past both ends, strides that skip the tail
+        let cases = [
+            (0, 1, 1, 9),
+            (2, 1, 1, 9),
+            (5, 2, 3, 23),
+            (3, 3, 1, 10),
+            (7, 1, 5, 6),
+            (0, 4, 2, 31),
+        ];
+        for (padding, stride, dilation, l) in cases {
+            // a transposed input is not contiguous
+            let x = Tensor::randn(0f32, 1., (2, l, 3), &Device::Cpu)?.transpose(1, 2)?;
+            let w = Tensor::randn(0f32, 1., (4, 3, 3), &Device::Cpu)?;
+            let got = x
+                .conv1d(&w, padding, stride, dilation, 1)?
+                .to_vec3::<f32>()?;
+            let want = direct_conv1d(&x.to_vec3()?, &w.to_vec3()?, (padding, stride, dilation));
+            assert_eq!(got.len(), want.len());
+            for (g, e) in got
+                .iter()
+                .flatten()
+                .flatten()
+                .zip(want.iter().flatten().flatten())
+            {
+                assert!(
+                    (g - e).abs() < 1e-5,
+                    "p{padding} s{stride} d{dilation} l{l}: {g} vs {e}"
+                );
+            }
+            assert_eq!(got[0][0].len(), want[0][0].len());
+        }
+        Ok(())
+    }
+
+    // The direct loop per group, then concatenated: the grouped split hands each chunk a kernel with a start offset
+    #[test]
+    fn cpu_conv1d_with_strided_or_grouped_kernels_matches_a_direct_loop() -> Result<()> {
+        let x = Tensor::randn(0f32, 1., (2, 4, 11), &Device::Cpu)?;
+        let w = Tensor::randn(0f32, 1., (6, 3, 4), &Device::Cpu)?.transpose(1, 2)?;
+        let got = x.conv1d(&w, 1, 2, 1, 1)?.to_vec3::<f32>()?;
+        let want = direct_conv1d(&x.to_vec3()?, &w.to_vec3()?, (1, 2, 1));
+        for (g, e) in got
+            .iter()
+            .flatten()
+            .flatten()
+            .zip(want.iter().flatten().flatten())
+        {
+            assert!((g - e).abs() < 1e-5, "strided kernel: {g} vs {e}");
+        }
+        let wg = Tensor::randn(0f32, 1., (6, 2, 3), &Device::Cpu)?;
+        let got = x.conv1d(&wg, 1, 1, 1, 2)?;
+        let halves = (0..2)
+            .map(|g| {
+                let xs = x.narrow(1, 2 * g, 2)?.to_vec3::<f32>()?;
+                let ws = wg.narrow(0, 3 * g, 3)?.to_vec3::<f32>()?;
+                Ok(direct_conv1d(&xs, &ws, (1, 1, 1)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let got = got.to_vec3::<f32>()?;
+        for (bi, batch) in got.iter().enumerate() {
+            for (o, row) in batch.iter().enumerate() {
+                for (g, e) in row.iter().zip(&halves[o / 3][bi][o % 3]) {
+                    assert!((g - e).abs() < 1e-5, "grouped: {g} vs {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // Batches and several input channels: the col2im path multiplies a transposed input by a broadcast kernel
+    #[test]
+    fn cpu_conv_transpose1d_matches_a_direct_loop() -> Result<()> {
+        let (b, c_in, c_out, l, k, stride) = (2, 3, 4, 7, 5, 2);
+        let x = Tensor::randn(0f32, 1., (b, c_in, l), &Device::Cpu)?;
+        let w = Tensor::randn(0f32, 1., (c_in, c_out, k), &Device::Cpu)?;
+        let got = x
+            .conv_transpose1d(&w, 0, 0, stride, 1, 1)?
+            .to_vec3::<f32>()?;
+        let (xv, wv) = (x.to_vec3::<f32>()?, w.to_vec3::<f32>()?);
+        let l_out = (l - 1) * stride + k;
+        for bi in 0..b {
+            for o in 0..c_out {
+                let mut want = vec![0f32; l_out];
+                for i in 0..c_in {
+                    for (t, xt) in xv[bi][i].iter().enumerate() {
+                        for (j, wj) in wv[i][o].iter().enumerate() {
+                            want[t * stride + j] += xt * wj;
+                        }
+                    }
+                }
+                for (g, e) in got[bi][o].iter().zip(&want) {
+                    assert!((g - e).abs() < 1e-5, "batch {bi} out {o}: {g} vs {e}");
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn grouped_conv_rejects_out_channels_that_do_not_split_into_groups() -> Result<()> {
         let x = Tensor::zeros((1, 4, 8), DType::F32, &Device::Cpu)?;
