@@ -629,64 +629,6 @@ pub(crate) fn afq_mm_op(
     )
 }
 
-/// Stable wrapper around candle's `call_mlx_arg_sort` for u32 keys. Candle's
-/// `Tensor::arg_sort_last_dim` uses a single-threadgroup bitonic sort that
-/// silently returns garbage for n > 1024 on Metal; this routes around it by
-/// calling the multi-block sort directly. Returns u32 perm of shape [n].
-/// `Kernels` is cached process-wide so the metallib only compiles once.
-#[cfg(feature = "metal")]
-pub fn metal_arg_sort_u32_1d(keys: &Tensor) -> Result<Tensor> {
-    use std::sync::OnceLock;
-    static KERNELS: OnceLock<candle_metal_kernels::Kernels> = OnceLock::new();
-
-    if keys.rank() != 1 {
-        inference_tensor::bail!(
-            "metal_arg_sort_u32_1d expects rank 1; got {:?}",
-            keys.dims()
-        );
-    }
-    if keys.dtype() != DType::U32 {
-        inference_tensor::bail!("metal_arg_sort_u32_1d expects u32; got {:?}", keys.dtype());
-    }
-    if !keys.is_contiguous() {
-        inference_tensor::bail!("metal_arg_sort_u32_1d expects contiguous input");
-    }
-
-    let n = keys.dim(0)?;
-    let storage = keys.storage_and_layout().0;
-    let Storage::Metal(s) = &*storage else {
-        inference_tensor::bail!("expected metal storage");
-    };
-    let device = s.device();
-    let dst = device.new_buffer(n, DType::U32, "argsort-perm")?;
-
-    let cmk_device: &candle_metal_kernels::metal::Device = device.device();
-    let kernels = KERNELS.get_or_init(candle_metal_kernels::Kernels::new);
-    let encoder = device.command_encoder()?;
-    encoder.set_label("mlx-argsort");
-    let src_offset = keys.layout().start_offset() * DType::U32.size_in_bytes();
-    let src = candle_metal_kernels::BufferOffset {
-        buffer: s.buffer(),
-        offset_in_bytes: src_offset,
-    };
-    candle_metal_kernels::call_mlx_arg_sort(
-        cmk_device,
-        &encoder,
-        kernels,
-        candle_metal_kernels::DType::U32,
-        /* nrows */ 1,
-        /* ncols */ n,
-        src,
-        &dst,
-    )
-    .map_err(inference_tensor::Error::wrap)?;
-
-    Ok(Tensor::from((
-        Storage::Metal(MetalStorage::new(dst, device.clone(), n, DType::U32)),
-        Shape::from(vec![n]),
-    )))
-}
-
 /// Fused topk-weighted reduce: collapses `[num_tokens * topk, hidden]`
 /// per-assignment outputs into `[num_tokens, hidden]` by topk-weighted sum.
 /// One Metal launch replaces the `reshape -> to_dtype(F32) -> broadcast_mul ->
@@ -1319,31 +1261,6 @@ mod metal_tests {
             }
         }
 
-        Ok(())
-    }
-
-    #[test]
-    fn test_metal_arg_sort_u32_1d() -> Result<()> {
-        use crate::afq::ops::metal_arg_sort_u32_1d;
-        let device = Device::new_metal(0)?;
-        for n in [1024usize, 4096, 8192, 32768] {
-            let data: Vec<u32> = (0..n as u32).rev().collect();
-            let t = Tensor::from_vec(data.clone(), (n,), &device)?;
-            let perm = metal_arg_sort_u32_1d(&t)?;
-            let p = perm.to_vec1::<u32>()?;
-            for (i, v) in p.iter().enumerate() {
-                assert_eq!(
-                    *v,
-                    (n - 1 - i) as u32,
-                    "n={n} idx={i}: perm[{i}]={v} expected {}",
-                    n - 1 - i
-                );
-            }
-            let sorted_keys = t.gather(&perm, 0)?.to_vec1::<u32>()?;
-            for (i, v) in sorted_keys.iter().enumerate() {
-                assert_eq!(*v, i as u32, "n={n} sorted[{i}]={v} expected {i}");
-            }
-        }
         Ok(())
     }
 

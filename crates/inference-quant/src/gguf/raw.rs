@@ -36,6 +36,9 @@ enum RawStorage {
         len: usize,
         device: inference_tensor::CudaDevice,
     },
+    // The blocks as a flat U8 tensor
+    #[cfg(feature = "metal")]
+    Metal(Tensor),
 }
 
 /// A weight of ggml blocks, row-major: `[rows, cols]`, or `[experts, rows, cols]` for an MoE expert stack.
@@ -89,6 +92,8 @@ impl RawGgufTensor {
             RawStorage::Cpu(_) => Device::Cpu,
             #[cfg(feature = "cuda")]
             RawStorage::Cuda { device, .. } => Device::Cuda(device.clone()),
+            #[cfg(feature = "metal")]
+            RawStorage::Metal(blocks) => blocks.device().clone(),
         }
     }
 
@@ -105,6 +110,8 @@ impl RawGgufTensor {
                 bytes.truncate(*len);
                 Ok(bytes)
             }
+            #[cfg(feature = "metal")]
+            RawStorage::Metal(blocks) => blocks.to_vec1::<u8>(),
         }
     }
 
@@ -133,6 +140,16 @@ impl RawGgufTensor {
                     device: device.clone(),
                 }
             }
+            #[cfg(feature = "metal")]
+            Device::Metal(_) => {
+                let bytes = match &self.storage {
+                    RawStorage::Cpu(bytes) => bytes.as_ref().clone(),
+                    _ => self.bytes()?,
+                };
+                let len = bytes.len();
+                RawStorage::Metal(Tensor::from_vec(bytes, len, device)?)
+            }
+            #[allow(unreachable_patterns)]
             other => {
                 inference_tensor::bail!("{:?} weights are not supported on {other:?}", self.ty)
             }
@@ -172,6 +189,11 @@ impl RawGgufTensor {
             }
             #[cfg(feature = "cuda")]
             RawStorage::Cuda { .. } => self.gather_cuda(&flat, row_bytes)?,
+            #[cfg(feature = "metal")]
+            RawStorage::Metal(_) => {
+                let ids = flat.to_device(&self.device())?;
+                return self.metal_dequantize(DType::F32, Some(&ids))?.reshape(dims);
+            }
         };
         #[cfg(feature = "cuda")]
         if gathered.device().is_cuda() && super::fast_mmvq::can_dequantize(self.ty, DType::F32) {
@@ -229,6 +251,12 @@ impl RawGgufTensor {
 
     /// The weight as an F32 tensor on `device`.
     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
+        #[cfg(feature = "metal")]
+        if matches!(self.storage, RawStorage::Metal(_)) && device.same_device(&self.device()) {
+            return self
+                .metal_dequantize(DType::F32, None)?
+                .reshape(self.shape.clone());
+        }
         let values = dequantize_rows(self.ty, self.flat_dims().1, &self.bytes()?)?;
         Tensor::from_vec(values, self.shape.clone(), &Device::Cpu)?.to_device(device)
     }
@@ -270,8 +298,164 @@ impl RawGgufTensor {
                     .to_dtype(dtype)?
                     .reshape(dims)
             }
+            #[cfg(feature = "metal")]
+            RawStorage::Metal(_) => {
+                let row_ids = ids
+                    .iter()
+                    .flat_map(|&id| (0..rows as u32).map(move |r| id * rows as u32 + r))
+                    .collect::<Vec<_>>();
+                let n = row_ids.len();
+                let row_ids = Tensor::from_vec(row_ids, n, &self.device())?;
+                let compute = if matches!(dtype, DType::F32 | DType::F16 | DType::BF16) {
+                    dtype
+                } else {
+                    DType::F32
+                };
+                self.metal_dequantize(compute, Some(&row_ids))?
+                    .to_dtype(dtype)?
+                    .reshape(dims)
+            }
         }
     }
+
+    // Rows `ids` (u32, on the weight's Metal device) or every row, dequantized on the GPU as `[rows, cols]`
+    #[cfg(feature = "metal")]
+    fn metal_dequantize(&self, dtype: DType, ids: Option<&Tensor>) -> Result<Tensor> {
+        use inference_tensor::{MetalStorage, Storage};
+        let (rows, cols) = self.flat_dims();
+        let n = ids.map_or(rows, Tensor::elem_count);
+        let ids = ids.map(Tensor::contiguous).transpose()?;
+        let ids_guard = ids.as_ref().map(Tensor::storage_and_layout);
+        let ids = match &ids_guard {
+            Some((storage, layout)) => {
+                let Storage::Metal(storage) = &**storage else {
+                    inference_tensor::bail!("{:?} row ids must be on Metal", self.ty);
+                };
+                let offset = layout.start_offset() * DType::U32.size_in_bytes();
+                Some((storage.buffer(), offset, n))
+            }
+            None => None,
+        };
+        self.with_metal_blocks(|device, blocks| {
+            let out = device.new_buffer(n * cols, dtype, "gguf-raw-dequantize")?;
+            let encoder = device.command_encoder()?;
+            encoder.set_label("gguf-raw-dequantize");
+            crate::metal_kernels::call_gguf_raw_dequant(
+                device.device(),
+                &encoder,
+                crate::metal_kernels::Kernels::global(),
+                blocks,
+                dtype,
+                ids,
+                &out,
+            )
+            .map_err(inference_tensor::Error::wrap)?;
+            Ok(Tensor::from((
+                Storage::Metal(MetalStorage::new(out, device.clone(), n * cols, dtype)),
+                Shape::from((n, cols)),
+            )))
+        })
+    }
+
+    // `f` over the blocks' Metal buffer
+    #[cfg(feature = "metal")]
+    fn with_metal_blocks<T>(
+        &self,
+        f: impl FnOnce(
+            &inference_tensor::MetalDevice,
+            &crate::metal_kernels::GgufRawBlocks,
+        ) -> Result<T>,
+    ) -> Result<T> {
+        let RawStorage::Metal(blocks) = &self.storage else {
+            inference_tensor::bail!("{:?} Metal kernels need the weight on Metal", self.ty);
+        };
+        let (rows, cols) = self.flat_dims();
+        let (storage, layout) = blocks.storage_and_layout();
+        let inference_tensor::Storage::Metal(storage) = &*storage else {
+            inference_tensor::bail!("{:?} blocks are not on Metal", self.ty);
+        };
+        let raw = crate::metal_kernels::GgufRawBlocks {
+            ty: metal_tag(self.ty)?,
+            buffer: storage.buffer(),
+            offset: layout.start_offset(),
+            rows,
+            cols,
+            row_bytes: self.ty.row_bytes(cols).expect("validated at construction"),
+        };
+        f(
+            inference_tensor::backend::BackendStorage::device(storage),
+            &raw,
+        )
+    }
+
+    // x @ w^T for at most GGUF_RAW_MV_MAX_BATCH rows of `x`, read straight from the blocks
+    #[cfg(feature = "metal")]
+    fn metal_matvec(&self, x: &Tensor) -> Result<Tensor> {
+        use inference_tensor::{MetalStorage, Storage};
+        let (rows, cols) = self.shape.dims2()?;
+        let x = x.contiguous()?;
+        let batch = x.elem_count() / cols;
+        let mut dims = x.dims().to_vec();
+        *dims.last_mut().expect("rank 1 or more") = rows;
+        let (x_storage, x_layout) = x.storage_and_layout();
+        let Storage::Metal(x_storage) = &*x_storage else {
+            inference_tensor::bail!("{:?} matvec input must be on Metal", self.ty);
+        };
+        let dtype = x.dtype();
+        self.with_metal_blocks(|device, blocks| {
+            let out = device.new_buffer(batch * rows, dtype, "gguf-raw-matvec")?;
+            let encoder = device.command_encoder()?;
+            encoder.set_label("gguf-raw-matvec");
+            crate::metal_kernels::call_gguf_raw_mv(
+                device.device(),
+                &encoder,
+                crate::metal_kernels::Kernels::global(),
+                blocks,
+                dtype,
+                x_storage.buffer(),
+                x_layout.start_offset() * dtype.size_in_bytes(),
+                batch,
+                &out,
+            )
+            .map_err(inference_tensor::Error::wrap)?;
+            Ok(Tensor::from((
+                Storage::Metal(MetalStorage::new(out, device.clone(), batch * rows, dtype)),
+                Shape::from(dims),
+            )))
+        })
+    }
+}
+
+// The decoder each raw type's Metal kernels are instantiated with (gguf_raw.metal)
+#[cfg(feature = "metal")]
+fn metal_tag(ty: GgufType) -> Result<&'static str> {
+    Ok(match ty {
+        GgufType::Iq4Nl => "iq4_nl",
+        GgufType::Iq4Xs => "iq4_xs",
+        GgufType::Iq2Xxs => "iq2_xxs",
+        GgufType::Iq2Xs => "iq2_xs",
+        GgufType::Iq2S => "iq2_s",
+        GgufType::Iq3Xxs => "iq3_xxs",
+        GgufType::Iq3S => "iq3_s",
+        GgufType::Iq1S => "iq1_s",
+        GgufType::Iq1M => "iq1_m",
+        GgufType::Iq1Kt => "iq1_kt",
+        GgufType::Iq2Kt => "iq2_kt",
+        GgufType::Iq3Kt => "iq3_kt",
+        GgufType::Iq4Kt => "iq4_kt",
+        GgufType::Iq2K => "iq2_k",
+        GgufType::Iq3K => "iq3_k",
+        GgufType::Iq4K => "iq4_k",
+        GgufType::Iq5K => "iq5_k",
+        GgufType::Iq6K => "iq6_k",
+        GgufType::Iq4Ks => "iq4_ks",
+        GgufType::Iq2Ks => "iq2_ks",
+        GgufType::Iq4Kss => "iq4_kss",
+        GgufType::Iq5Ks => "iq5_ks",
+        GgufType::Iq3Ks => "iq3_ks",
+        GgufType::Iq2Kl => "iq2_kl",
+        other => inference_tensor::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
+    })
 }
 
 #[cfg(feature = "cuda")]
@@ -439,6 +623,30 @@ impl GgufRawMatMul {
     }
 }
 
+#[cfg(feature = "metal")]
+impl GgufRawMatMul {
+    // Decode batches read the blocks in place; larger ones dequantize on the GPU for a dense matmul, as ggml does
+    fn metal_forward(&self, a: &Tensor) -> Result<Option<Tensor>> {
+        if !matches!(self.w.storage, RawStorage::Metal(_))
+            || !a.device().is_metal()
+            || !matches!(a.dtype(), DType::BF16 | DType::F16 | DType::F32)
+        {
+            return Ok(None);
+        }
+        let flat_batch = a.dims()[..a.rank().saturating_sub(1)]
+            .iter()
+            .product::<usize>();
+        if flat_batch == 0 {
+            return Ok(None);
+        }
+        if flat_batch <= crate::metal_kernels::GGUF_RAW_MV_MAX_BATCH {
+            return self.w.metal_matvec(a).map(Some);
+        }
+        let w = self.w.metal_dequantize(a.dtype(), None)?;
+        inference_tensor::nn::Module::forward(&Linear::new(w, None), a).map(Some)
+    }
+}
+
 impl QuantMethod for GgufRawMatMul {
     fn new(_method: QuantMethodConfig) -> Result<Self> {
         inference_tensor::bail!("raw GGUF layers are built by the GGUF weight source")
@@ -521,6 +729,10 @@ impl QuantMethod for GgufRawMatMul {
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         if let Some(out) = self.cuda_forward(a)? {
+            return self.add_bias(out);
+        }
+        #[cfg(feature = "metal")]
+        if let Some(out) = self.metal_forward(a)? {
             return self.add_bias(out);
         }
         let w = self.w.dequantize(a.device())?.to_dtype(a.dtype())?;
@@ -658,7 +870,19 @@ mod tests {
             .collect()
     }
 
-    #[cfg(feature = "cuda")]
+    // The CPU and whichever GPUs this build and machine have
+    fn devices() -> Vec<Device> {
+        std::iter::once(Device::Cpu)
+            .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
+            .chain(
+                Device::new_metal(0)
+                    .ok()
+                    .filter(|_| cfg!(feature = "metal")),
+            )
+            .collect()
+    }
+
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     fn cosine(a: &Tensor, b: &Tensor) -> Result<f32> {
         let (a, b) = (
             a.flatten_all()?.to_dtype(DType::F32)?,
@@ -717,9 +941,7 @@ mod tests {
         const COLS: usize = 512;
         const NL_COLS: usize = 288;
         let ids = Tensor::new(&[[3u32, 0, 39], [17, 17, 8]], &Device::Cpu)?;
-        let devices: Vec<Device> = std::iter::once(Device::Cpu)
-            .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
-            .collect();
+        let devices = devices();
         // 6 x 288 IQ4_NL elements leave the last of its 256-element super-blocks partly filled
         let cases = GgufType::RAW_BLOCKS
             .map(|ty| (ty, COLS))
@@ -765,9 +987,7 @@ mod tests {
         const COLS: usize = 256;
         let ids = [[3u32, 0, 3], [1, 4, 0], [4, 4, 1], [0, 1, 3]];
         let (tokens, k) = (ids.len(), ids[0].len());
-        let devices: Vec<Device> = std::iter::once(Device::Cpu)
-            .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
-            .collect();
+        let devices = devices();
         for ty in GgufType::RAW_BLOCKS {
             let bytes = random_rows(ty, EXPERTS * ROWS, COLS, 13);
             let stack =
@@ -1040,6 +1260,96 @@ mod tests {
                     "{ty:?} [{ROWS}, {cols}] CUDA dequantization to {dtype:?} differs by {diff} (peak {peak})"
                 );
             }
+        }
+        Ok(())
+    }
+
+    // Batches up to 8 take the matvec, larger ones a dequantized dense matmul; activations stay in their dtype
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_kernels_match_the_dequantized_weight() -> Result<()> {
+        const ROWS: usize = 63;
+        const NL_COLS: usize = 288;
+        const COLS: usize = 512;
+        // F32 sums the same products in another order
+        const F32_TOLERANCE: f32 = 1e-4;
+        let metal = Device::new_metal(0)?;
+        for (ty, cols) in GgufType::RAW_BLOCKS
+            .into_iter()
+            .map(|ty| (ty, COLS))
+            .chain([(GgufType::Iq4Nl, NL_COLS)])
+            .chain([GgufType::Iq3Kt, GgufType::Iq4Kt].map(|ty| (ty, 480)))
+        {
+            let bytes = random_rows(ty, ROWS, cols, 7);
+            let cpu = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), &Device::Cpu)?;
+            let gpu =
+                GgufRawMatMul::new(RawGgufTensor::new(ty, &[ROWS, cols], bytes, &metal)?, None);
+            let weight = cpu.dequantize(&Device::Cpu)?;
+            for batch in [1, 3, 8, 33] {
+                let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
+                let expected = xs.matmul(&weight.t()?)?;
+                let peak = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+                for dtype in [DType::F32, DType::BF16, DType::F16] {
+                    let actual = gpu
+                        .forward(&xs.to_dtype(dtype)?.to_device(&metal)?)?
+                        .to_device(&Device::Cpu)?
+                        .to_dtype(DType::F32)?;
+                    if dtype == DType::F32 {
+                        let diff = (&actual - &expected)?
+                            .abs()?
+                            .max_all()?
+                            .to_scalar::<f32>()?;
+                        assert!(
+                            diff <= F32_TOLERANCE * peak,
+                            "{ty:?} batch {batch}: differs by {diff} (peak {peak})"
+                        );
+                    }
+                    let similarity = cosine(&actual, &expected)?;
+                    assert!(
+                        similarity > 0.999,
+                        "{ty:?} batch {batch} {dtype:?}: cosine {similarity}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_dequantization_matches_the_cpu() -> Result<()> {
+        const ROWS: usize = 16;
+        const COLS: usize = 512;
+        let metal = Device::new_metal(0)?;
+        let cases = GgufType::RAW_BLOCKS
+            .into_iter()
+            .map(|ty| (ty, COLS))
+            .chain([GgufType::Iq3Kt, GgufType::Iq4Kt].map(|ty| (ty, 480)));
+        for (ty, cols) in cases {
+            let bytes = random_rows(ty, ROWS, cols, 11);
+            let expected = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), &Device::Cpu)?
+                .dequantize(&Device::Cpu)?;
+            let peak = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+            let gpu = RawGgufTensor::new(ty, &[ROWS, cols], bytes, &metal)?;
+            // One rounding step of the target dtype, relative to the largest value
+            for (dtype, tolerance) in [(DType::F32, 1e-6), (DType::F16, 1e-3), (DType::BF16, 8e-3)]
+            {
+                let actual = gpu
+                    .metal_dequantize(dtype, None)?
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(DType::F32)?;
+                let rounded = expected.to_dtype(dtype)?.to_dtype(DType::F32)?;
+                let diff = (actual - rounded)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    diff <= tolerance * peak,
+                    "{ty:?} [{ROWS}, {cols}] Metal dequantization to {dtype:?} differs by {diff} (peak {peak})"
+                );
+            }
+            assert_eq!(gpu.bytes()?, gpu.to_device(&Device::Cpu)?.bytes()?);
+            // as CUDA's gather: an id past the last row reads as zeros
+            let past = gpu.embedding(&Tensor::new(&[0u32, ROWS as u32], &metal)?)?;
+            let past = past.get(1)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert_eq!(past, 0.0, "{ty:?}");
         }
         Ok(())
     }

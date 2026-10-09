@@ -324,6 +324,35 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
     Ok(())
 }
 
+// On Metal the drafter's RoPE runs through the Metal rotary kernels, with per-batch caches.
+#[cfg(feature = "metal")]
+#[tokio::test]
+async fn metal_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    let drafter = tiny_dflash()?;
+    let (_checkpoint, plain) = paged_gpu_model(false).await?;
+    let expected = decode_graphs::rounds(&plain, GRAPH_MAX_LEN).await?;
+    drop(plain);
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "DFlash never drafted");
+    // the last round decodes every prompt
+    let expected: Vec<&[(u32, f32)]> = expected.last().unwrap().iter().map(Vec::as_slice).collect();
+    decode_graphs::assert_traces(&rounds, &expected);
+    Ok(())
+}
+
 const PREFIX_CACHE_SEQS: usize = 4;
 const PREFIX_MAX_LEN: usize = 6;
 const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;

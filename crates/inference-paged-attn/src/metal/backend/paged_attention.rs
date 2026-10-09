@@ -121,17 +121,10 @@ impl inference_tensor::CustomOp1 for PagedAttention {
         };
 
         let (num_seqs, num_heads, head_size) = q_l.shape().dims3()?;
-        if !(head_size == 64
-            || head_size == 80
-            || head_size == 96
-            || head_size == 112
-            || head_size == 128
-            || head_size == 192
-            || head_size == 256
-            || head_size == 512)
-        {
+        if !crate::METAL_PAGED_HEAD_SIZES.contains(&head_size) {
             inference_tensor::bail!(
-                "`head_size` must be one of 64, 80, 96, 112, 128, 192, 256 or 512"
+                "`head_size` must be one of {:?}, got {head_size}",
+                crate::METAL_PAGED_HEAD_SIZES
             );
         }
 

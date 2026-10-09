@@ -37,24 +37,6 @@ kernel void dtype_to_fp8_kernel(device const InT *input [[buffer(0)]],
 }
 
 // ============================================================================
-// Per-tensor FP8 dequantization: output = fp8_weight * scale_inv
-// ============================================================================
-
-template <typename OutT>
-kernel void
-fp8_pertensor_dequant_kernel(device const uchar *weight [[buffer(0)]],
-                             device const float *scale_inv [[buffer(1)]],
-                             device OutT *output [[buffer(2)]],
-                             constant uint &num_elements [[buffer(3)]],
-                             uint idx [[thread_position_in_grid]]) {
-  if (idx >= num_elements)
-    return;
-  float w_val = fp8_e4m3_to_float(weight[idx]);
-  float scaled = w_val * scale_inv[0];
-  output[idx] = OutT(scaled);
-}
-
-// ============================================================================
 // Instantiate kernels for all supported output types
 // ============================================================================
 
@@ -79,16 +61,3 @@ instantiate_fp8_to_dtype(bfloat16_t);
 instantiate_dtype_to_fp8(float);
 instantiate_dtype_to_fp8(half);
 instantiate_dtype_to_fp8(bfloat16_t);
-
-#define instantiate_fp8_pertensor_dequant(type)                                \
-  template [[host_name("fp8_pertensor_dequant_" #type)]] [[kernel]] void       \
-  fp8_pertensor_dequant_kernel<type>(                                          \
-      device const uchar *weight [[buffer(0)]],                                \
-      device const float *scale_inv [[buffer(1)]],                             \
-      device type *output [[buffer(2)]],                                       \
-      constant uint &num_elements [[buffer(3)]],                               \
-      uint idx [[thread_position_in_grid]]);
-
-instantiate_fp8_pertensor_dequant(float);
-instantiate_fp8_pertensor_dequant(half);
-instantiate_fp8_pertensor_dequant(bfloat16_t);

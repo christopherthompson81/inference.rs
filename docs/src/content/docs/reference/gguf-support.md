@@ -103,7 +103,7 @@ inference.rs accepts GGUF files using the following storage types. A file can mi
 | ik_llama.cpp IQK quants | `IQ2_K`, `IQ3_K`, `IQ4_K`, `IQ5_K`, `IQ6_K`, `IQ2_KS`, `IQ3_KS`, `IQ4_KS`, `IQ5_KS`, `IQ4_KSS`, `IQ2_KL` |
 | GPT-OSS | The GPT-OSS MXFP4 representation |
 
-The IQ, trellis and IQK types run on CUDA; on other devices they are dequantized for each matmul. They are
+The IQ, trellis and IQK types run on CUDA and Metal; on the CPU they are dequantized for each matmul. They are
 supported for dense linear weights, not for MoE expert stacks. Tensor parallelism cannot split the rows of
 the trellis and `_KS` / `_KSS` / `_KL` types, since each of their rows keeps one scale. llama-quantize's IQ mixes (`IQ2_M`,
 `IQ3_XS`, `IQ3_M`) and ik_llama.cpp's default mixes use only the types above. ik_llama.cpp's bitnet types

@@ -546,8 +546,8 @@ impl Sdpa {
                 && sdpa_params.softcap.is_none_or(|x| x == 1.0)
         });
         let valid_head_dims: &[usize] = &[32, 64, 72, 80, 96, 128, 256, 512];
-        // Metal SDPA full kernel requires q_seq <= k_seq when a mask is present.
-        let metal_supports_mask = mask.is_none() || seq_len <= k.dim(2)?;
+        // A mask needs Metal's full kernel, which takes q_seq <= k_seq and more than one query; the vector one has none.
+        let metal_supports_mask = mask.is_none() || (seq_len > 1 && seq_len <= k.dim(2)?);
 
         // Metal FA path for DK=512 BF16 with a mask. Two specializations:
         // prefill (seq_len > 8) goes through the BlockMMA kernel; decode
@@ -1216,6 +1216,51 @@ mod tests {
             }
         }
         Ok(())
+    }
+
+    // A single query takes Metal's vector kernel, which has no mask input: a masked one must not reach it
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_masked_single_query_matches_cpu() -> CandleResult<()> {
+        const KV_LEN: usize = 16;
+        const VISIBLE: usize = 4;
+        let metal = Device::new_metal(0)?;
+        let (q, k, v) = (
+            Tensor::randn(0f32, 1f32, (1, 2, 1, 64), &Device::Cpu)?,
+            Tensor::randn(0f32, 1f32, (1, 2, KV_LEN, 64), &Device::Cpu)?,
+            Tensor::randn(0f32, 1f32, (1, 2, KV_LEN, 64), &Device::Cpu)?,
+        );
+        let mask = (0..KV_LEN)
+            .map(|i| {
+                if i + VISIBLE < KV_LEN {
+                    f32::NEG_INFINITY
+                } else {
+                    0.0
+                }
+            })
+            .collect::<Vec<_>>();
+        let mask = Tensor::from_vec(mask, (1, 1, 1, KV_LEN), &Device::Cpu)?;
+        let params = SdpaParams {
+            n_kv_groups: 1,
+            softcap: None,
+            softmax_scale: 0.125,
+            sliding_window: None,
+            sinks: None,
+            chunk: None,
+        };
+        let run = |device: &Device| -> CandleResult<Tensor> {
+            let mask = AttentionMask::Custom(mask.to_device(device)?);
+            Sdpa.run_attention(
+                &q.to_device(device)?,
+                &k.to_device(device)?,
+                &v.to_device(device)?,
+                &mask,
+                None,
+                &params,
+            )?
+            .to_device(&Device::Cpu)
+        };
+        assert_close(&run(&metal)?, &run(&Device::Cpu)?)
     }
 
     #[test]

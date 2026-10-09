@@ -25,30 +25,6 @@ instantiate_bitwise_or(int64_t);
 instantiate_bitwise_or(int);
 
 template <typename T>
-[[kernel]] void bitwise_xor(const device T *a [[buffer(0)]],
-                            const device T *b [[buffer(1)]],
-                            device T *output [[buffer(2)]],
-                            device const uint &length [[buffer(3)]],
-                            uint tid [[thread_position_in_grid]]) {
-  if (tid >= length) {
-    return;
-  }
-  output[tid] = a[tid] ^ b[tid];
-}
-
-#define instantiate_bitwise_xor(type)                                          \
-  template [[host_name("bitwise_xor_" #type)]] [[kernel]] void                 \
-  bitwise_xor<type>(                                                           \
-      const device type *a [[buffer(0)]], const device type *b [[buffer(1)]],  \
-      device type *out [[buffer(2)]], device const uint &length [[buffer(3)]], \
-      uint tid [[thread_position_in_grid]]);
-
-instantiate_bitwise_xor(uint8_t);
-instantiate_bitwise_xor(uint32_t);
-instantiate_bitwise_xor(int64_t);
-instantiate_bitwise_xor(int);
-
-template <typename T>
 [[kernel]] void bitwise_and(const device T *a [[buffer(0)]],
                             const device T *b [[buffer(1)]],
                             device T *output [[buffer(2)]],
@@ -96,26 +72,3 @@ instantiate_bitwise_leftshift(uint8_t);
 instantiate_bitwise_leftshift(uint32_t);
 instantiate_bitwise_leftshift(int64_t);
 instantiate_bitwise_leftshift(int);
-
-template <typename T>
-[[kernel]] void bitwise_not(const device T *a [[buffer(0)]],
-                            device T *output [[buffer(1)]],
-                            device const uint &length [[buffer(2)]],
-                            uint tid [[thread_position_in_grid]]) {
-  if (tid >= length) {
-    return;
-  }
-  output[tid] = ~a[tid];
-}
-
-#define instantiate_bitwise_not(type)                                          \
-  template [[host_name("bitwise_not_" #type)]] [[kernel]] void                 \
-  bitwise_not<type>(const device type *a [[buffer(0)]],                        \
-                    device type *out [[buffer(1)]],                            \
-                    device const uint &length [[buffer(2)]],                   \
-                    uint tid [[thread_position_in_grid]]);
-
-instantiate_bitwise_not(uint8_t);
-instantiate_bitwise_not(uint32_t);
-instantiate_bitwise_not(int64_t);
-instantiate_bitwise_not(int);

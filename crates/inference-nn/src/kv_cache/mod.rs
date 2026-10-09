@@ -544,8 +544,8 @@ fn try_kv_append_rotating_metal(
 ) -> Result<Option<(Tensor, Tensor)>> {
     use inference_tensor::{Storage, backend::BackendStorage};
 
-    // Decode steady-state only: window is already full, one new token at a time.
-    // Anything else falls back so the existing shift-based code handles it.
+    // One token into the slack past the window, as the generic append would write it; relocating the window when
+    // the buffer is full, and everything else, falls back.
     if kc.dim != 2 || vc.dim != 2 {
         return Ok(None);
     }
@@ -566,15 +566,14 @@ fn try_kv_append_rotating_metal(
     if b != 1 || src_seq != 1 {
         return Ok(None);
     }
-    // Window must be allocated and already full so we can use the buffer as a
-    // circular window without breaking shared-KV / prefill paths.
     if kc.all_data.is_none() || vc.all_data.is_none() {
         return Ok(None);
     }
-    if kc.current_seq_len < kc.max_seq_len || vc.current_seq_len < vc.max_seq_len {
-        return Ok(None);
-    }
-    if kc.current_seq_len != vc.current_seq_len {
+    if kc.current_seq_len != vc.current_seq_len
+        || kc.write_pos != vc.write_pos
+        || kc.capacity_seq_len != vc.capacity_seq_len
+        || kc.write_pos >= kc.capacity_seq_len
+    {
         return Ok(None);
     }
     let k_dst = kc.all_data.as_ref().unwrap().clone();
@@ -582,15 +581,13 @@ fn try_kv_append_rotating_metal(
     if !k_dst.is_contiguous() || !v_dst.is_contiguous() {
         return Ok(None);
     }
-    let max_seq = kc.max_seq_len;
-    if k_dst.dims4()? != (b, n_kv, max_seq, head_dim) {
+    let capacity = kc.capacity_seq_len;
+    if k_dst.dims4()? != (b, n_kv, capacity, head_dim)
+        || v_dst.dims4()? != (b, n_kv, capacity, head_dim)
+    {
         return Ok(None);
     }
-
-    // Write the new token to slot (current_seq_len) % max_seq, overwriting the
-    // oldest entry. The attention math is order-invariant (RoPE is in K), and
-    // the returned buffer is just the full window.
-    let slot = kc.current_seq_len % max_seq;
+    let slot = kc.write_pos;
 
     {
         let (k_src_s, k_src_l) = k_src.storage_and_layout();
@@ -625,15 +622,64 @@ fn try_kv_append_rotating_metal(
             head_dim,
             n_kv,
             src_seq,
-            max_seq,
+            capacity,
             slot,
         )
         .map_err(inference_tensor::Error::wrap)?;
     }
 
-    kc.current_seq_len += src_seq;
-    vc.current_seq_len += src_seq;
-    kc.last_append_result = Some(k_dst.clone());
-    vc.last_append_result = Some(v_dst.clone());
-    Ok(Some((k_dst, v_dst)))
+    for cache in [&mut *kc, &mut *vc] {
+        cache.current_seq_len += src_seq;
+        cache.write_pos += src_seq;
+    }
+    let k_out = kc.current_data()?.expect("allocated above");
+    let v_out = vc.current_data()?.expect("allocated above");
+    kc.last_append_result = Some(k_out.clone());
+    vc.last_append_result = Some(v_out.clone());
+    Ok(Some((k_out, v_out)))
+}
+
+#[cfg(all(test, feature = "metal"))]
+#[allow(clippy::cast_precision_loss)]
+mod metal_tests {
+    use inference_tensor::{Device, Tensor};
+
+    use super::{KvCache, NormalCache};
+
+    const WINDOW: usize = 4;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 8;
+    // not a multiple of the window, so the window's oldest token is not at a slot `position % WINDOW` would name
+    const PROMPT: usize = 6;
+
+    // Each position's value is the position itself
+    fn tokens(start: usize, len: usize, device: &Device) -> inference_tensor::Result<Tensor> {
+        Tensor::arange(start as f32, (start + len) as f32, device)?
+            .reshape((1, 1, len, 1))?
+            .broadcast_as((1, KV_HEADS, len, HEAD_DIM))?
+            .contiguous()
+    }
+
+    // Decode steps past the slack, so the window relocates as well as taking the fused append
+    #[test]
+    fn metal_rotating_decode_keeps_the_last_window_in_order() -> inference_tensor::Result<()> {
+        let metal = Device::new_metal(0)?;
+        let mut cache = KvCache::new_rotating(2, WINDOW, WINDOW);
+        cache.append(&tokens(0, PROMPT, &metal)?, &tokens(0, PROMPT, &metal)?)?;
+        for pos in PROMPT..PROMPT + 3 * NormalCache::CACHE_GROW_SIZE {
+            let (k, v) = cache.append(&tokens(pos, 1, &metal)?, &tokens(pos, 1, &metal)?)?;
+            let want = ((pos + 1 - WINDOW)..=pos)
+                .map(|p| p as f32)
+                .collect::<Vec<_>>();
+            for kv in [k, v] {
+                let got = kv
+                    .narrow(1, 0, 1)?
+                    .narrow(3, 0, 1)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?;
+                assert_eq!(got, want, "window after position {pos}");
+            }
+        }
+        Ok(())
+    }
 }

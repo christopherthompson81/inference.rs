@@ -6,6 +6,9 @@ pub struct KvCacheScales {
 
 pub const DEFAULT_FP8_KV_CACHE_SCALES: KvCacheScales = KvCacheScales { k: 1.0, v: 1.0 };
 
+/// Head sizes Metal's paged decode kernel is instantiated for.
+pub const METAL_PAGED_HEAD_SIZES: [usize; 8] = [64, 80, 96, 112, 128, 192, 256, 512];
+
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 mod cuda;
 #[cfg(all(feature = "cuda", target_family = "unix"))]

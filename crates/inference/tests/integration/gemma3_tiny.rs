@@ -137,6 +137,35 @@ async fn gemma3_text_in_the_batch_leaves_the_image_unchanged() -> anyhow::Result
     Ok(())
 }
 
+// The paged sliding layers take the sliding mask, so a prompt past the window decodes as the non-paged model does.
+#[cfg(any(feature = "cuda", feature = "metal"))]
+#[tokio::test]
+async fn gemma3_paged_prompt_past_the_window_matches_the_non_paged_one() -> anyhow::Result<()> {
+    let checkpoint = tiny_gemma3()?;
+    let paged = builder(checkpoint.path())
+        .with_prefix_cache_n(None)
+        .build()
+        .await?;
+    let plain = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_prefix_cache_n(None)
+        .build()
+        .await?;
+    let requests: [fn() -> RequestBuilder; 2] = [
+        || text_request(LONG_PROMPT),
+        || image_request(LONG_PROMPT, 3),
+    ];
+    for request in requests {
+        let (want, _) = trace(&plain, request()).await?;
+        let (got, _) = trace(&paged, request()).await?;
+        anyhow::ensure!(
+            close(&got, &want, LOGPROB_TOLERANCE),
+            "paged decode left the non-paged one: {want:?} vs {got:?}"
+        );
+    }
+    Ok(())
+}
+
 // Pins CPU decoding of an image and a text prompt: image tokens attend both ways, sliding layers use the local RoPE.
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
 #[tokio::test]

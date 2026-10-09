@@ -660,6 +660,19 @@ pub struct DecodePlanInput {
     pub has_sliding_window: bool,
 }
 
+// Whether the Standard layout's paged decode kernel is built for this head size
+#[cfg(not(all(feature = "cuda", target_family = "unix")))]
+fn paged_kernel_takes(head_dim: usize) -> bool {
+    #[cfg(feature = "metal")]
+    let takes = inference_paged_attn::METAL_PAGED_HEAD_SIZES.contains(&head_dim);
+    #[cfg(not(feature = "metal"))]
+    let takes = {
+        let _ = head_dim;
+        true
+    };
+    takes
+}
+
 #[derive(Clone, Copy, Debug)]
 pub enum DecodePlan {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -710,7 +723,11 @@ impl DecodePlan {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
             AttentionBackendKind::Standard => Ok(Self::GatherSdpa),
             #[cfg(not(all(feature = "cuda", target_family = "unix")))]
-            AttentionBackendKind::Standard if input.has_sliding_window => Ok(Self::GatherSdpa),
+            AttentionBackendKind::Standard
+                if input.has_sliding_window || !paged_kernel_takes(input.spec.k_head_dim) =>
+            {
+                Ok(Self::GatherSdpa)
+            }
             #[cfg(not(all(feature = "cuda", target_family = "unix")))]
             AttentionBackendKind::Standard => Ok(Self::PagedAttention),
         }
@@ -1310,5 +1327,11 @@ mod tests {
         }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         assert!(matches!(standard, DecodePlan::PagedAttention));
+        // Metal's paged kernel has no instance at this head dim
+        #[cfg(feature = "metal")]
+        assert!(matches!(
+            plan(AttentionBackendKind::Standard, spec((2, 1), 16)),
+            DecodePlan::GatherSdpa
+        ));
     }
 }
