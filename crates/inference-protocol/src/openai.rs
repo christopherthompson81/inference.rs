@@ -1920,7 +1920,7 @@ pub struct SpeechGenerationRequest {
     /// Speaking rate, 1.0 being the model's own (Kokoro). Dia ignores it.
     #[serde(default)]
     pub speed: Option<f32>,
-    /// The model's phoneme string, spoken in place of `input` (Kokoro, which reads phonemes rather than text).
+    /// The model's own phoneme string, spoken in place of `input` (Kokoro; without it, `input` is phonemized).
     #[serde(default)]
     pub phonemes: Option<String>,
     /// Seeds the model's sampling noise, so a request repeats exactly (Kokoro).

@@ -433,3 +433,49 @@ Finding: Kokoro release-like CPU, after the split.
 Run 15 had 1.49 s for the sentence. Parity is unchanged.
 
 Overall, on the dev profile with debug checks off: 3.25 s -> 1.28 s, about torch's speed. Most of the original gap was the conv's im2col traffic plus per-op overhead in AdaIN and the LSTM; GEMM speed was secondary.
+
+## Run 17 - 2026-10-09 14:54
+
+Question: can Kokoro read plain text through the Rust vernacula-phonemizer (local branch `rust-port-scaffold`; en and en-GB, byte-identical to the TS goldens per that session)?
+
+Steps and findings:
+1. **A first mapping of my own** (canonical IPA to misaki), scored against misaki's `us_gold`/`gb_gold` lexicons over 3,000 words each: US 58.6% exact (CER 7.8%), GB 44.8% (11.9%) after two GB heuristics (drop secondary stress; small schwa before final -n/-l/-m).
+   - Most residuals were the two dictionaries disagreeing (ɪ/ə reduction, secondary stress), not notation.
+   - One useful finding: Kokoro v1.0 runs misaki without its 2.0 version setting, so the flap is `T`.
+2. **The user pointed to vernacula's own translator** (/mnt/data/Programming/vernacula, `Vernacula.Tts.Base`): `KokoroFormat`, `KokoroPhonemizer`, `KokoroChunker`. These are measured, listener-tested and verified against goldens.
+   - Differences from mine:
+     - a word-final unstressed flap becomes the tap `ɾ` (Kokoro's duration predictor over-allocates `T` there);
+     - GB keeps æ and secondary stress;
+     - the de-/re- prefix ᵻ becomes ə, keyed on the source word through the trace;
+     - non-English arms that keep phonemic contrasts English collapses;
+     - Mandarin tone placement, and NFD decomposition (Portuguese nasals).
+   - My mapping was replaced by a faithful port:
+     - `kokoro/g2p.rs`: the renderer, the voice-prefix language table, the group-to-word map over the trace's UTF-16 spans, and the prefix rule;
+     - `kokoro/chunker.rs`: paragraph, sentence, clause and word packing at 460/508 Kokoro tokens.
+   - My GB heuristics were dropped.
+3. **Tests:** vernacula's `KokoroFormatTests` vectors (every language arm) and `KokoroPhonemizerTests` (end to end through the real phonemizer) pass byte for byte.
+   - The tiny engine test's voices are now af_/bm_/jf_-prefixed, and text and its own phonemes give identical audio for both English voices.
+4. **The real model over HTTP**, a 186-character passage with a date and money, seed 1:
+
+| voice | audio | first-request time |
+|---|---|---|
+| af_heart | 15.5 s | 1.7 s (about 1 s of it the phonemizer's data load) |
+| bf_emma | 14.7 s | 1.1 s |
+
+   The user listened to both: correctly phonemized and rendered.
+
+Open: `vernacula-phonemizer` is a path dependency on the local, unpushed branch. A pushable PR needs a git dependency, which needs that branch pushed.
+
+## Run 18 - 2026-10-09
+
+Review of the text-input change, before the PR.
+
+- Phoneme-string packer (`tts.rs` `chunks`): after cutting at the last pause, the carried words plus the next word could still pass `max`. `chunks("a, bcdefg hijklmn", 9)` gave `["a,", "bcdefg hijklmn"]` (14 > 9), so a caller's `phonemes` with an early comma in a long stretch could exceed 510 and fail in synthesis. Fixed: the carry is flushed too when it still doesn't fit; the case is pinned in the unit test.
+- Text chunker cut an over-long single word (a digit run, URL) into characters and rejoined them with spaces, so it was read character by character. vernacula's C# `PackToBudget` does the same; changed here so character-level packing rejoins with no separator (and the separator costs nothing). New test: 1200 digits split into pieces that concatenate back to the input.
+- vernacula's per-language `WordSegmentation` is not ported; whitespace words are right for en/en-GB, the only languages the phonemizer reads. Noted at `whitespace_words`; needed before ja/cmn turn on.
+- Each piece is phonemized several times while chunking (as in C#). Dropped the per-call `readable` probe (validate already checks once per request); count caching left out.
+- Dropped defensive code that couldn't fire (a span clamp, a word-index bound), and moved non-ASCII regex paraphrases in comments to words.
+- Engine finding: a generation-time error (for example blank text, "nothing to speak") reaches the client only as "The model failed to process the request."; only `validate_speech_options` errors keep their text. The blank-text test asserts the error only.
+- New end-to-end case: 20 copies of the test sentence (past 510 phonemes) synthesize through the multi-piece path.
+
+`kokoro_tiny` 5/5 and the speech crate's kokoro tests pass; full CI rerunning.

@@ -637,9 +637,13 @@ impl Pipeline for SpeechPipeline {
                 channels,
             } = match (&self.model, self.cfg) {
                 (SpeechModel::Dia(model), cfg) => model.generate(prompt, &cfg)?,
-                (SpeechModel::Kokoro(model), SpeechGenerationConfig::Kokoro { speed }) => {
-                    model.generate(options, speed, options.seed.unwrap_or_else(rand::random))?
-                }
+                (SpeechModel::Kokoro(model), SpeechGenerationConfig::Kokoro { speed }) => model
+                    .generate(
+                        prompt,
+                        options,
+                        speed,
+                        options.seed.unwrap_or_else(rand::random),
+                    )?,
                 (SpeechModel::Kokoro(_), _) => {
                     inference_tensor::bail!("Kokoro was given another model's speech config")
                 }

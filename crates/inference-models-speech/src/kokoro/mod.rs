@@ -3,8 +3,10 @@
 //! See: [Kokoro-82M](https://huggingface.co/hexgrad/Kokoro-82M) and its reference [kokoro](https://github.com/hexgrad/kokoro).
 
 mod albert;
+mod chunker;
 mod config;
 mod dsp;
+pub mod g2p;
 mod gguf;
 mod istftnet;
 mod lstm;
@@ -107,6 +109,11 @@ impl KokoroModel {
     /// The most phonemes one call takes: the context minus the two bracketing pads.
     pub fn max_phonemes(&self) -> usize {
         self.context_length - 2
+    }
+
+    /// Whether `c` is one of Kokoro's phoneme symbols; others are dropped on the way in.
+    pub fn in_vocab(&self, c: char) -> bool {
+        self.vocab.contains_key(&c)
     }
 
     /// Kokoro's ids for `phonemes`; characters outside its vocabulary are dropped, as the reference does.

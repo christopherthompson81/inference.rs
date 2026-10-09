@@ -175,6 +175,7 @@ galil-seiferas = "0.1.5"
 bytemuck = "1.24.0"
 tokio-rayon = "2.1.0"
 rand_isaac = "0.4.0"
+unicode-normalization = "0.1"
 indicatif = { version = "0.18.3", features = ["rayon"] }
 async-trait = "0.1.89"
 strum = { version = "0.28.0", features = ["derive"] }

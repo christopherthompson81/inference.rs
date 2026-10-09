@@ -18,6 +18,8 @@ inference-nn.workspace = true
 inference-quant.workspace = true
 rand.workspace = true
 rayon.workspace = true
+unicode-normalization.workspace = true
+vernacula-phonemizer = { git = "https://github.com/christopherthompson81/vernacula-phonemizer", rev = "a89692b1" }
 rand_distr.workspace = true
 rand_isaac.workspace = true
 serde.workspace = true

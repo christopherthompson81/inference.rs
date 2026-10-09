@@ -187,7 +187,7 @@ std::fs::write("out.wav", &audio.bytes)?;
 </TabItem>
 </Tabs>
 
-## Kokoro: phonemes to speech
+## Kokoro: text to speech
 
 ```bash
 inference serve -m hexgrad/Kokoro-82M
@@ -207,15 +207,19 @@ inference serve -m /path/to/kokoro-82m-q8_0.gguf
 Pass the file, or a directory holding just that GGUF; the auto loader recognizes it. Its matrices are Q8_0 and its
 convolutions BF16, so its audio differs measurably from the full-precision release, though not in kind.
 
-Kokoro reads phonemes, not text. Until its text front end lands (a Rust port of
-[vernacula-phonemizer](https://github.com/christopherthompson81/vernacula-phonemizer)), a request
-passes Kokoro's own phoneme string in `phonemes`; `input` is still required but not spoken. A request
-without `phonemes` is rejected.
+Kokoro reads plain text: `input` is phonemized by
+[vernacula-phonemizer](https://github.com/christopherthompson81/vernacula-phonemizer) in the language the
+voice's first letter names (`a`: American English, `b`: British English, `e` Spanish, `f` French,
+`h` Hindi, `i` Italian, `p` Brazilian Portuguese, `j` Japanese, `z` Mandarin), then rendered into the
+phoneme alphabet Kokoro was trained on. The phonemizer reads American and British English so far; for
+the other languages, pass `phonemes`. It loads its data from `VERNACULA_DATA_DIR` (its `data`
+directory). Long text is split at paragraphs, sentences and clauses so each piece fits the model's
+context.
 
 Request fields Kokoro reads:
 
-- `phonemes`: the phoneme string. Characters outside Kokoro's vocabulary are dropped, and input
-  longer than the model's 510-phoneme context is split at spaces and spoken in pieces.
+- `phonemes`: Kokoro's own phoneme string, spoken in place of `input`. Characters outside Kokoro's
+  vocabulary are dropped, and a string longer than the model's 510-phoneme context is split at spaces.
 - `voice`: a voice the model ships, such as `af_heart` (the default when present). Several,
   comma-separated, are averaged into one voice. An unknown voice is rejected with the list of
   available ones.
@@ -233,7 +237,6 @@ curl http://localhost:1234/v1/audio/speech \
   -d '{
     "model": "default",
     "input": "Hello world.",
-    "phonemes": "həlˈoʊ wˈɜːld.",
     "voice": "af_heart",
     "speed": 1.1,
     "seed": 7,
@@ -262,7 +265,6 @@ with ir.Engine(spec) as engine:
     audio = engine.speech_generation(
         t.SpeechGenerationRequest(
             input="Hello world.",
-            phonemes="həlˈoʊ wˈɜːld.",
             voice="af_heart",
             response_format=t.AudioResponseFormat.WAV,
         )
@@ -283,7 +285,6 @@ let model = SpeechModelBuilder::new("hexgrad/Kokoro-82M", SpeechLoaderType::Koko
 
 let audio = model
     .generate_speech(SpeechGenerationRequest {
-        phonemes: Some("həlˈoʊ wˈɜːld.".into()),
         voice: Some("af_heart".into()),
         ..SpeechGenerationRequest::new("Hello world.", AudioResponseFormat::Wav)
     })

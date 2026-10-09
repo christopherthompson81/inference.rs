@@ -23,6 +23,10 @@ ignore-hidden = false
 
 [default]
 extend-ignore-re = [
+    # Kokoro g2p: the ded- spelling the de-/re- prefix rule carves out, and misaki phoneme strings
+    'starts_with\("ded"\)',
+    "ded- is the deduce family",
+    "ˌIz",
     "cudaDevAttrMaxSharedMemoryPerBlockOptin",
     "sharedMemPerBlockOptin",
     '"tese"',
