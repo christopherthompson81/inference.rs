@@ -57,6 +57,8 @@ const TEKKEN_REGEX: &str = "[^\\r\\n\\p{L}\\p{N}]?((?=[\\p{L}])([^a-z]))*((?=[\\
 const GGML_TOKEN_TYPE_NORMAL: i32 = 1;
 const GGML_TOKEN_TYPE_BYTE: i32 = 6;
 const SENTENCEPIECE_UNDERLINE: &str = "\u{2581}";
+// SentencePiece numbers `<unk>` 0 when the GGUF names none
+const SPM_DEFAULT_UNK: u32 = 0;
 
 pub struct GgufTokenizerConversion {
     pub tokenizer: Tokenizer,
@@ -149,7 +151,7 @@ struct PropsGGUF {
     bos: Option<u32>,
     eos: u32,
     add_bos: bool,
-    add_space_prefix: bool,
+    add_space_prefix: Option<bool>,
 }
 
 impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
@@ -170,7 +172,7 @@ impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
             eos: c.get_value("eos_token_id")?,
             bos: c.get_value("bos_token_id").ok(),
             add_bos: c.get_option_value("add_bos_token")?.unwrap_or(false),
-            add_space_prefix: c.get_option_value("add_space_prefix")?.unwrap_or(false),
+            add_space_prefix: c.get_option_value("add_space_prefix")?,
         };
 
         // Special token ids come from untrusted GGUF metadata; reject out-of-range ids
@@ -221,7 +223,8 @@ pub fn convert_gguf_metadata_to_hf_tokenizer(
     let props = PropsGGUF::try_from(metadata)?;
 
     let (mut tokenizer, kind) = match props.model.as_str() {
-        "llama" | "replit" | "gemma" => unigram_tokenizer(&props)?,
+        "llama" | "gemma" => spm_bpe_tokenizer(&props)?,
+        "replit" => unigram_tokenizer(&props)?,
         "gemma4" => gemma4_tokenizer(&props)?,
         "gpt2" => bpe_tokenizer(&props)?,
         other => {
@@ -405,14 +408,14 @@ fn bpe_pre_tokenizer_spec(pre: Option<&str>) -> Result<BpePreTokenizerSpec> {
 fn unigram_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     let PropsGGUF { unk, eos, bos, .. } = *p;
     // Unigram (SentencePiece) default UNK is 0
-    let unk = unk.unwrap_or(0);
+    let unk = unk.unwrap_or(SPM_DEFAULT_UNK);
 
     // Create the Tokenizer model:
     let model = {
         let vocab: Vec<(String, f64)> = {
             let Some(s) = p.scores.as_ref() else {
                 anyhow::bail!(
-                    "`llama` unigram tokenizer is missing required metadata `tokenizer.ggml.scores`"
+                    "`replit` unigram tokenizer is missing required metadata `tokenizer.ggml.scores`"
                 );
             };
             let scores = s.iter().cloned().map(|f_32| f_32 as f64);
@@ -451,6 +454,91 @@ fn unigram_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
             .map_err(anyhow::Error::msg)?;
     }
     Ok((tokenizer, TokenizerKind::Unigram))
+}
+
+// SentencePiece BPE merges from piece scores, as transformers' SentencePieceExtractor recovers them (stable on ties)
+fn spm_merges(p: &PropsGGUF, vocab: &BpeVocab) -> Result<BpeMerges> {
+    let Some(scores) = p.scores.as_ref() else {
+        anyhow::bail!(
+            "`{}` tokenizer is missing required metadata `tokenizer.ggml.scores`",
+            p.model
+        );
+    };
+    anyhow::ensure!(
+        scores.len() == p.tokens.len(),
+        "`{}` tokenizer has {} scores for {} tokens",
+        p.model,
+        scores.len(),
+        p.tokens.len()
+    );
+    let mut merges = Vec::new();
+    for (piece, &score) in p.tokens.iter().zip(scores) {
+        let mut local = piece
+            .char_indices()
+            .skip(1)
+            .filter_map(|(at, _)| {
+                let (left, right) = piece.split_at(at);
+                Some((vocab.get(left)?, vocab.get(right)?, left, right))
+            })
+            .collect::<Vec<_>>();
+        local.sort_by_key(|&(left, right, _, _)| (*left, *right));
+        merges.extend(
+            local
+                .into_iter()
+                .map(|(_, _, left, right)| (score, left.to_string(), right.to_string())),
+        );
+    }
+    // + 0.0 folds -0.0 into 0.0, which Python's sort treats as equal
+    merges.sort_by(|a, b| (b.0 + 0.0).total_cmp(&(a.0 + 0.0)));
+    Ok(merges
+        .into_iter()
+        .map(|(_, left, right)| (left, right))
+        .collect())
+}
+
+// llama.cpp's SPM tokenizer merges the best-scoring adjacent pair first, which is BPE over the recovered merges
+fn spm_bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
+    let mut vocab = AHashMap::new();
+    for (i, token) in p.tokens.iter().enumerate() {
+        #[allow(clippy::cast_possible_truncation)]
+        vocab.insert(token.clone(), i as u32);
+    }
+    let merges = spm_merges(p, &vocab)?;
+    let unk = p.unk.unwrap_or(SPM_DEFAULT_UNK);
+    let bpe = BpeBuilder::new()
+        .vocab_and_merges(vocab, merges)
+        .unk_token(p.tokens[unk as usize].clone())
+        .fuse_unk(true)
+        .byte_fallback(true)
+        .build()
+        .map_err(anyhow::Error::msg)?;
+    // llama.cpp prepends a space unless the GGUF says not to
+    let prefix = p.add_space_prefix.unwrap_or(true);
+    let mut decoders = vec![
+        Decoder::Replace(SENTENCEPIECE_UNDERLINE, " "),
+        Decoder::ByteFallback,
+        Decoder::Fuse,
+    ];
+    let normalizer = if prefix {
+        decoders.push(Decoder::Strip(' ', 1, 0));
+        Normalizer::Sequence(vec![
+            Normalizer::Prepend(SENTENCEPIECE_UNDERLINE),
+            Normalizer::Replace(" ", SENTENCEPIECE_UNDERLINE),
+        ])
+    } else {
+        Normalizer::Replace(" ", SENTENCEPIECE_UNDERLINE)
+    };
+    let mut tokenizer = TokenizerX::new(
+        ModelWrapper::BPE(bpe),
+        Some(Decoder::Sequence(decoders)),
+        Some(normalizer),
+    )?;
+    for id in [p.bos, Some(p.eos), Some(unk)].into_iter().flatten() {
+        tokenizer
+            .add_special_tokens([AddedToken::from(p.tokens[id as usize].clone(), true)])
+            .map_err(anyhow::Error::msg)?;
+    }
+    Ok((tokenizer, TokenizerKind::Bpe))
 }
 
 fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
@@ -566,7 +654,7 @@ fn gemma4_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
         .build()
         .map_err(anyhow::Error::msg)?;
 
-    let normalizer = if p.add_space_prefix {
+    let normalizer = if p.add_space_prefix.unwrap_or(false) {
         Normalizer::Sequence(vec![
             Normalizer::Prepend(SENTENCEPIECE_UNDERLINE),
             Normalizer::Replace(" ", SENTENCEPIECE_UNDERLINE),
@@ -736,7 +824,7 @@ impl TryFrom<Normalizer<'_>> for NormalizerWrapper {
 mod tests {
     use super::{
         BpePreTokenizerKind, PropsGGUF, SENTENCEPIECE_UNDERLINE, bpe_pre_tokenizer_spec,
-        bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer, gemma4_tokenizer,
+        bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer, gemma4_tokenizer, spm_bpe_tokenizer,
         validate_external_gguf_tokenizer,
     };
     use anyhow::Result;
@@ -855,7 +943,7 @@ mod tests {
             bos: None,
             eos: 0,
             add_bos: false,
-            add_space_prefix: false,
+            add_space_prefix: Some(false),
         }
     }
 
@@ -991,7 +1079,7 @@ mod tests {
             bos: Some(2),
             eos: 1,
             add_bos,
-            add_space_prefix,
+            add_space_prefix: Some(add_space_prefix),
         }
     }
 
@@ -1069,6 +1157,40 @@ mod tests {
             .encode_fast("hello", false)
             .map_err(anyhow::Error::msg)?;
         assert_eq!(encoding.get_ids(), &[8, 15]);
+        Ok(())
+    }
+
+    // Exact for a GGUF with ranked scores (Gemma 3); constant-score vocabularies (Llama 2 converts) can split ties apart
+    #[test]
+    #[ignore = "requires local SentencePiece tokenizer.json and GGUF paths"]
+    fn sentencepiece_local_gguf_matches_hf_tokenizer() -> Result<()> {
+        let hf_path = std::env::var("INFERENCE_RS_SPM_TOKENIZER_JSON")
+            .map_err(|_| anyhow::anyhow!("INFERENCE_RS_SPM_TOKENIZER_JSON is not set"))?;
+        let gguf_path = std::env::var("INFERENCE_RS_SPM_GGUF")
+            .map_err(|_| anyhow::anyhow!("INFERENCE_RS_SPM_GGUF is not set"))?;
+        let hf = tokenizer_from_file(hf_path.as_ref())?;
+        let archive = inference_quant::GgufArchive::open_file(gguf_path)?;
+        let gguf = convert_gguf_metadata_to_hf_tokenizer(archive.metadata())?.tokenizer;
+        let readme = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../README.md"),
+        )?;
+        let passages = [
+            "hello world",
+            "hello  world",
+            " leading and trailing ",
+            get_test_passage().as_str(),
+            readme.as_str(),
+        ]
+        .map(str::to_string);
+        for passage in passages {
+            let expected = hf
+                .encode_fast(passage.as_str(), false)
+                .map_err(anyhow::Error::msg)?;
+            let actual = gguf
+                .encode_fast(passage.as_str(), false)
+                .map_err(anyhow::Error::msg)?;
+            assert_eq!(actual.get_ids(), expected.get_ids(), "{passage:.40?}");
+        }
         Ok(())
     }
 
@@ -1247,6 +1369,51 @@ mod tests {
         assert!(unknown.to_string().contains("original tokenizer.json"));
     }
 
+    // llama.cpp merges the best-scoring pair first: "bc" (-5) before "ab" (-6), where Unigram's best path is "ab" "c"
+    #[test]
+    fn sentencepiece_vocabularies_merge_by_score_with_llama_cpp_space_prefix() -> Result<()> {
+        let pieces = [
+            ("<unk>", 0.),
+            ("<s>", 0.),
+            ("</s>", 0.),
+            ("\u{2581}", -1.),
+            ("a", -20.),
+            ("b", -3.),
+            ("c", -1.),
+            ("ab", -6.),
+            ("bc", -5.),
+            ("\u{2581}a", -10.),
+        ];
+        let props = |add_space_prefix| PropsGGUF {
+            model: "llama".to_string(),
+            pre: None,
+            tokens: pieces.iter().map(|(piece, _)| piece.to_string()).collect(),
+            added_tokens: None,
+            scores: Some(pieces.iter().map(|&(_, score)| score).collect()),
+            merges: None,
+            unk: Some(0),
+            bos: Some(1),
+            eos: 2,
+            add_bos: false,
+            add_space_prefix,
+        };
+        let pieces_of = |tokenizer: &Tokenizer, text: &str| -> Result<Vec<String>> {
+            let encoding = tokenizer.encode(text, false).map_err(anyhow::Error::msg)?;
+            Ok(encoding.get_tokens().to_vec())
+        };
+        let unprefixed = spm_bpe_tokenizer(&props(Some(false)))?.0;
+        assert_eq!(pieces_of(&unprefixed, "abc")?, ["a", "bc"]);
+        assert_eq!(pieces_of(&unprefixed, "a")?, ["a"]);
+        // a GGUF that names no prefix gets llama.cpp's default, a leading space
+        let prefixed = spm_bpe_tokenizer(&props(None))?.0;
+        assert_eq!(pieces_of(&prefixed, "a")?, ["\u{2581}a"]);
+        assert_eq!(
+            prefixed.decode(&[9], false).map_err(anyhow::Error::msg)?,
+            "a"
+        );
+        Ok(())
+    }
+
     #[test]
     fn test_encode_decode_llama() -> Result<()> {
         use rand::rng;
@@ -1265,7 +1432,6 @@ mod tests {
         // With special tokens added
         // SKIPPED:
         // - Bugged the GGUF tokenizer does not prepend `<s> `
-        // - Due to HF tokenizer using BPE (tokenizer.json) while GGUF tokenizer uses Unigram (metadata)?
         /*
         let hf_decoded = codec_roundtrip(&hf_tokenizer, passage.as_str(), true)?;
         let gguf_decoded = codec_roundtrip(&gguf_tokenizer, passage.as_str(), true)?;
@@ -1307,7 +1473,6 @@ mod tests {
         // With special tokens added
         // SKIPPED:
         // - Bugged the GGUF tokenizer does not prepend `<s> `
-        // - Due to HF tokenizer using BPE (tokenizer.json) while GGUF tokenizer uses Unigram (metadata)?
         /*
         let hf_decoded = codec_roundtrip(&hf_tokenizer, passage.as_str(), true)?;
         let gguf_decoded = codec_roundtrip(&gguf_tokenizer, passage.as_str(), true)?;
