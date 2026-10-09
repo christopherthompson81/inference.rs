@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 22
+#define INFERENCE_ABI_VERSION_PATCH 23
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -123,8 +123,9 @@ typedef struct inference_layout_result inference_layout_result;
 /* Pass as `threshold` to use the model's default score threshold (0.5). */
 #define INFERENCE_LAYOUT_DEFAULT_THRESHOLD (-1.0f)
 
-/* Loads an HF-format PP-DocLayoutV3 directory (config.json, preprocessor_config.json, model.safetensors). */
-INFERENCE_API inference_status inference_layout_model_load(const char *model_dir,
+/* Loads PP-DocLayoutV3 from an HF-format directory (config.json, preprocessor_config.json, model.safetensors) or
+ * from a GGUF file of it (`examples/pp_doclayout_v3_gguf.rs` in inference-layout writes one). */
+INFERENCE_API inference_status inference_layout_model_load(const char *path,
                                                           const inference_backend_config *backend,
                                                           inference_layout_model **out_model);
 INFERENCE_API void inference_layout_model_free(inference_layout_model *model);

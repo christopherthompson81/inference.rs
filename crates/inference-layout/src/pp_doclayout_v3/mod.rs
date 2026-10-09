@@ -2,6 +2,7 @@ mod backbone;
 pub mod config;
 mod decoder;
 mod encoder;
+pub mod gguf;
 mod model;
 pub mod outline;
 pub mod postprocess;
@@ -23,9 +24,12 @@ pub use preprocess::Preprocessor;
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
 const RAYON_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
+fn parse_json<T: serde::de::DeserializeOwned>(s: &str) -> Result<T> {
+    serde_json::from_str(s).map_err(inference_tensor::Error::wrap)
+}
+
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
-    let s = std::fs::read_to_string(path).map_err(inference_tensor::Error::wrap)?;
-    serde_json::from_str(&s).map_err(inference_tensor::Error::wrap)
+    parse_json(&std::fs::read_to_string(path).map_err(inference_tensor::Error::wrap)?)
 }
 
 static CPU_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
@@ -47,7 +51,7 @@ fn cpu_pool() -> Option<&'static rayon::ThreadPool> {
         .as_ref()
 }
 
-/// Loads an HF-format `PP-DocLayoutV3_safetensors` directory and runs detection end to end.
+/// Loads an HF-format `PP-DocLayoutV3_safetensors` directory or a GGUF of it and runs detection end to end.
 pub struct PPDocLayoutV3Detector {
     model: PPDocLayoutV3,
     preprocessor: Preprocessor,
@@ -64,20 +68,42 @@ enum Pool {
 }
 
 impl PPDocLayoutV3Detector {
-    pub fn load(dir: impl AsRef<Path>, device: &Device) -> Result<Self> {
-        let dir = dir.as_ref();
-        let cfg: PPDocLayoutV3Config = read_json(&dir.join("config.json"))?;
-        let pp_cfg: PPDocLayoutV3PreprocessorConfig =
-            read_json(&dir.join("preprocessor_config.json"))?;
-        let preprocessor = Preprocessor::new(&pp_cfg);
+    /// `path` is the HF directory or a GGUF file `gguf::write_gguf` made.
+    pub fn load(path: impl AsRef<Path>, device: &Device) -> Result<Self> {
+        let path = path.as_ref();
+        if !path.exists() {
+            inference_tensor::bail!("{} does not exist", path.display())
+        }
+        if path.is_file() {
+            let file = std::fs::File::open(path).map_err(inference_tensor::Error::wrap)?;
+            let ckpt = gguf::read_gguf(&mut std::io::BufReader::new(file), device)?;
+            return Self::from_parts(
+                parse_json(&ckpt.config)?,
+                &parse_json(&ckpt.preprocessor_config)?,
+                ckpt.weights,
+                device,
+            );
+        }
+        let cfg = read_json(&path.join("config.json"))?;
+        let pp_cfg = read_json(&path.join("preprocessor_config.json"))?;
         // SAFETY: the weight file is mmapped read-only and not modified while the model is alive.
         let vb = unsafe {
             VarBuilder::from_mmaped_safetensors(
-                &[dir.join("model.safetensors")],
+                &[path.join("model.safetensors")],
                 DType::F32,
                 device,
             )?
         };
+        Self::from_parts(cfg, &pp_cfg, vb, device)
+    }
+
+    fn from_parts(
+        cfg: PPDocLayoutV3Config,
+        pp_cfg: &PPDocLayoutV3PreprocessorConfig,
+        vb: VarBuilder,
+        device: &Device,
+    ) -> Result<Self> {
+        let preprocessor = Preprocessor::new(pp_cfg);
         let labels = cfg.labels();
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
         let pool = if device.is_cpu() {

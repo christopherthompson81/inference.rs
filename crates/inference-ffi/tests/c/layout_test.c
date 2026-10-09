@@ -1,4 +1,4 @@
-/* C99 consumer of inference.h; usage: layout_test <model_dir> <image.ppm (P6)> [backend]; exits 0/1, 77 = skip. */
+/* C99 consumer of inference.h; usage: layout_test <model dir or .gguf> <image.ppm (P6)> [backend]; exits 0/1, 77 = skip. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
     inference_layout_result_free(NULL);
 
     if (argc < 3) {
-        fprintf(stderr, "skip: usage %s <model_dir> <image.ppm> [backend]\n", argv[0]);
+        fprintf(stderr, "skip: usage %s <model> <image.ppm> [backend]\n", argv[0]);
         return 77;
     }
     uint32_t w = 0, h = 0;

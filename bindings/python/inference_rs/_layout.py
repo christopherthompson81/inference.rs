@@ -65,14 +65,14 @@ class LayoutDetection:
 
 
 class LayoutModel:
-    """A PP-DocLayoutV3 document layout detector. Close it, or use `with`."""
+    """A PP-DocLayoutV3 document layout detector, from an HF directory or a GGUF of it. Close it, or use `with`."""
 
-    def __init__(self, model_dir, backend: str | None = None, device: int = 0, threads: int = 0):
+    def __init__(self, path, backend: str | None = None, device: int = 0, threads: int = 0):
         config = _native.BackendConfig(c_string_arg(backend, "backend"), device, threads)
         model = ctypes.c_void_p()
         check(
             lib.inference_layout_model_load(
-                c_string_arg(model_dir, "model_dir"),
+                c_string_arg(path, "path"),
                 ctypes.byref(config),
                 ctypes.byref(model),
             ),

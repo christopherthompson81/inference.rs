@@ -28,8 +28,8 @@ public sealed unsafe class LayoutModel : IDisposable
 
     private LayoutModel(IntPtr model) => _model = new LayoutHandle(model);
 
-    /// <summary>Loads an HF-format directory (config.json, preprocessor_config.json, model.safetensors).</summary>
-    public static LayoutModel Load(string modelDir, Backend? backend = null)
+    /// <summary>Loads an HF-format directory (config.json, preprocessor_config.json, model.safetensors) or a GGUF of it.</summary>
+    public static LayoutModel Load(string path, Backend? backend = null)
     {
         NativeMethods.EnsureAbi();
         backend ??= new Backend();
@@ -37,7 +37,7 @@ public sealed unsafe class LayoutModel : IDisposable
         try
         {
             var config = new NativeBackendConfig { Backend = name, Device = backend.Device, Threads = backend.Threads };
-            var status = NativeMethods.inference_layout_model_load(modelDir, &config, out var model);
+            var status = NativeMethods.inference_layout_model_load(path, &config, out var model);
             InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_layout_model_load));
             return new LayoutModel(model);
         }

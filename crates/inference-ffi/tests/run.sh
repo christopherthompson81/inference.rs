@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Usage: tests/run.sh [--features cuda] [--backend cpu|cuda] [model_dir image]  (C consumer vs Rust detector parity)
+# Usage: tests/run.sh [--features cuda] [--backend cpu|cuda] [model image]  (C consumer vs Rust detector parity)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 crate="$(dirname "$here")"
@@ -36,7 +36,7 @@ cc -std=c99 -Wall -Wextra -Werror -pedantic -I "$crate/include" "$here/c/layout_
 
 if [[ -z $model || -z $image ]]; then
     "$work/layout_test" || [[ $? -eq 77 ]]
-    echo "C consumer: ABI checks passed; model tests skipped (pass model_dir and image)"
+    echo "C consumer: ABI checks passed; model tests skipped (pass a model dir or .gguf and an image)"
     exit 0
 fi
 convert "$image" -depth 8 "ppm:$work/page.ppm"
