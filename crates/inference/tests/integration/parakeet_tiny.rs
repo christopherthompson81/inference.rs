@@ -9,7 +9,9 @@ use inference::{
 
 #[path = "../support/parakeet_tiny.rs"]
 mod support;
-use support::{HEADS, LANGUAGES, PROMPTED, tiny_parakeet_checkpoint, tiny_parakeet_nemo};
+use support::{
+    HEADS, LANGUAGES, PROMPTED, tiny_parakeet_checkpoint, tiny_parakeet_gguf, tiny_parakeet_nemo,
+};
 
 // off the model's 16 kHz, so the request is resampled
 const RATE: u32 = 22_050;
@@ -243,6 +245,29 @@ async fn a_nemo_checkpoint_transcribes_as_its_transformers_layout() -> anyhow::R
         let (dir, nemo) = tiny_parakeet_nemo(head)?;
         let mut bodies = Vec::new();
         for model_id in [dir.path().to_path_buf(), nemo] {
+            let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_force_cpu()
+                .build()
+                .await?;
+            let out = model
+                .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
+                .await?;
+            bodies.push(out.body);
+        }
+        assert_eq!(bodies[0], bodies[1], "{head}");
+    }
+    Ok(())
+}
+
+// NVIDIA's `asr` GGUF of the same weights (here in F32) transcribes as the transformers layout does
+#[tokio::test]
+async fn an_asr_gguf_transcribes_as_its_transformers_layout() -> anyhow::Result<()> {
+    let wav = chirp_wav();
+    for head in ["parakeet_tdt", "parakeet_rnnt", "nemotron_asr_streaming"] {
+        let (dir, gguf) = tiny_parakeet_gguf(head)?;
+        let mut bodies = Vec::new();
+        for model_id in [dir.path().to_path_buf(), gguf] {
             let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
                 .with_dtype(ModelDType::F32)
                 .with_force_cpu()

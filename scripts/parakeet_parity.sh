@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
 # One-off parity check of our Parakeet (and the streaming Nemotron ASR, offline) against transformers' on fixed audio: the features and encoder output must
-# reach a minimum cosine, and the emitted tokens, their frames and the transcript must match exactly.
+# reach a minimum cosine, and the emitted tokens, their frames and the transcript must match exactly; a quantized
+# GGUF passes on the cosine and a word error rate bound instead.
 # Not part of local_ci.sh: it needs torch, transformers (5.x, with Parakeet) and librosa.
 #
-# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file>]
+# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file> | --gguf <file>] [--min-cosine <x>] [--max-wer <x>]
 #   dir   holds config.json, processor_config.json, tokenizer.json and model.safetensors (e.g. parakeet-tdt-0.6b-v3)
 #   wav   16-bit PCM wav files (mono, any rate: both sides resample to 16 kHz)
 set -euo pipefail
 
 if [[ $# -lt 2 ]]; then
-    sed -n '6,8p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '7,9p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 model=$(realpath "$1")
@@ -17,11 +18,14 @@ shift
 wavs=()
 cpu=()
 nemo=()
+tolerance=()
 while [[ $# -gt 0 ]]; do
     case $1 in
         --cpu) cpu=(--cpu) ;;
-        # ours from the checkpoint's `.nemo`, against the same transformers reference
+        # ours from the checkpoint's `.nemo` or `asr` GGUF, against the same transformers reference
         --nemo) nemo=(--nemo "$(realpath "$2")"); shift ;;
+        --gguf) nemo=(--gguf "$(realpath "$2")"); shift ;;
+        --min-cosine | --max-wer) tolerance+=("$1" "$2"); shift ;;
         *) wavs+=("$(realpath "$1")") ;;
     esac
     shift
@@ -101,4 +105,4 @@ if [[ ${#cpu[@]} -eq 0 ]] && command -v nvcc >/dev/null 2>&1; then
     features=(--features cuda)
 fi
 cargo run --manifest-path "$root/Cargo.toml" -q -p inference-models-speech --example parakeet_parity "${features[@]}" -- \
-    --model "$model" --dumps "$dumps" "${cpu[@]}" "${nemo[@]}"
+    --model "$model" --dumps "$dumps" "${cpu[@]}" "${nemo[@]}" "${tolerance[@]}"

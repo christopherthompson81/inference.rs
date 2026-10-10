@@ -227,3 +227,184 @@ pub fn tiny_parakeet_nemo(head: &str) -> anyhow::Result<(tempfile::TempDir, std:
     )?;
     Ok((dir, nemo))
 }
+
+const GGUF_CHECKPOINT: &str = "tiny_parakeet.gguf";
+const GGUF_LSTM_PREFIX: &str = "decoder.prediction.dec_rnn.lstm.";
+
+// a NeMo name in the converter's own forms: the LSTM's `ih_l0.weight` for PyTorch's `weight_ih_l0`
+fn converter_name(nemo: &str) -> String {
+    let Some(rest) = nemo.strip_prefix(GGUF_LSTM_PREFIX) else {
+        return nemo.to_string();
+    };
+    let (param, gate_layer) = rest.split_once('_').expect("an LSTM parameter");
+    format!("{GGUF_LSTM_PREFIX}{gate_layer}.{param}")
+}
+
+/// The tiny checkpoint for an RNN-T or TDT `head` and the same model as NVIDIA's `asr` GGUF beside it: the config
+/// as `asr.*` keys, the weights in F32 under the converter's names and shapes, the tokenizer's pieces.
+pub fn tiny_parakeet_gguf(head: &str) -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
+    use inference_tensor::quantized::{GgmlDType, QTensor, gguf_file::Value};
+    let dir = tiny_parakeet_checkpoint(head)?;
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(CONFIG))?)?;
+    let tokenizer: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(TOKENIZER))?)?;
+    let mut vocab: Vec<(String, u64)> = tokenizer["model"]["vocab"]
+        .as_object()
+        .expect("a BPE vocab")
+        .iter()
+        .map(|(piece, id)| (piece.clone(), id.as_u64().expect("an id")))
+        .collect();
+    vocab.sort_by_key(|(_, id)| *id);
+    let enc = &config["encoder_config"];
+    let num = |v: &serde_json::Value| v.as_u64().expect("a number") as u32;
+    let streaming = head.starts_with("nemotron");
+    let (left, right) = if streaming {
+        (STREAMING_WINDOW as i32 - 1, STREAMING_LOOKAHEAD as i32)
+    } else {
+        (-1, -1)
+    };
+    let mut metadata: Vec<(&str, Value)> = vec![
+        ("general.architecture", Value::String("asr".into())),
+        (
+            "asr.head_type",
+            Value::String(
+                if head == "parakeet_tdt" {
+                    "tdt"
+                } else {
+                    "rnnt"
+                }
+                .into(),
+            ),
+        ),
+        ("asr.encoder.d_model", Value::U32(num(&enc["hidden_size"]))),
+        (
+            "asr.encoder.n_layers",
+            Value::U32(num(&enc["num_hidden_layers"])),
+        ),
+        (
+            "asr.encoder.n_heads",
+            Value::U32(num(&enc["num_attention_heads"])),
+        ),
+        (
+            "asr.encoder.d_ff",
+            Value::U32(num(&enc["intermediate_size"])),
+        ),
+        (
+            "asr.encoder.conv_kernel_size",
+            Value::U32(num(&enc["conv_kernel_size"])),
+        ),
+        (
+            "asr.encoder.subsampling_factor",
+            Value::U32(num(&enc["subsampling_factor"])),
+        ),
+        (
+            "asr.encoder.subsampling_conv_channels",
+            Value::U32(num(&enc["subsampling_conv_channels"])),
+        ),
+        ("asr.encoder.feat_in", Value::U32(num(&enc["num_mel_bins"]))),
+        ("asr.encoder.xscaling", Value::Bool(false)),
+        ("asr.encoder.use_bias", Value::Bool(false)),
+        ("asr.encoder.pos_emb_max_len", Value::U32(5000)),
+        ("asr.encoder.offline_left_ctx", Value::I32(left)),
+        ("asr.encoder.offline_right_ctx", Value::I32(right)),
+        (
+            "asr.encoder.conv_norm",
+            Value::String(
+                if streaming {
+                    "layer_norm"
+                } else {
+                    "batch_norm"
+                }
+                .into(),
+            ),
+        ),
+        (
+            "asr.encoder.conv_context",
+            Value::String(if streaming { "causal" } else { "None" }.into()),
+        ),
+        (
+            "asr.encoder.att_context_style",
+            Value::String(
+                if streaming {
+                    "chunked_limited"
+                } else {
+                    "regular"
+                }
+                .into(),
+            ),
+        ),
+        ("asr.preprocessor.sample_rate", Value::U32(16_000)),
+        ("asr.preprocessor.window_size", Value::F32(0.025)),
+        ("asr.preprocessor.window_stride", Value::F32(0.01)),
+        ("asr.preprocessor.n_fft", Value::U32(512)),
+        (
+            "asr.preprocessor.features",
+            Value::U32(num(&enc["num_mel_bins"])),
+        ),
+        (
+            "asr.preprocessor.normalize",
+            Value::String(if streaming { "NA" } else { "per_feature" }.into()),
+        ),
+        ("asr.preprocessor.preemph", Value::F32(0.97)),
+        (
+            "asr.rnnt.vocab_size",
+            Value::U32(num(&config["vocab_size"])),
+        ),
+        (
+            "asr.rnnt.blank_id",
+            Value::U32(num(&config["blank_token_id"])),
+        ),
+        (
+            "asr.rnnt.pred_hidden",
+            Value::U32(num(&config["decoder_hidden_size"])),
+        ),
+        (
+            "asr.rnnt.pred_num_layers",
+            Value::U32(num(&config["num_decoder_layers"])),
+        ),
+        (
+            "asr.rnnt.max_symbols_per_step",
+            Value::U32(num(&config["max_symbols_per_step"])),
+        ),
+        ("asr.rnnt.num_prompts", Value::U32(0)),
+        (
+            "asr.tokenizer.type",
+            Value::String("sentencepiece_bpe".into()),
+        ),
+        (
+            "asr.tokenizer.vocab",
+            Value::Array(vocab.into_iter().map(|(p, _)| Value::String(p)).collect()),
+        ),
+    ];
+    if head == "parakeet_tdt" {
+        let durations = config["durations"].as_array().expect("TDT durations");
+        metadata.push((
+            "asr.tdt.durations",
+            Value::Array(
+                durations
+                    .iter()
+                    .map(|d| Value::I32(num(d) as i32))
+                    .collect(),
+            ),
+        ));
+    }
+    let tensors = inference_tensor::safetensors::load(dir.path().join(WEIGHTS), &Device::Cpu)?;
+    let mut quantized = Vec::new();
+    for (name, t) in tensors {
+        let name = converter_name(&inference_models_speech::nemo::nemo_name(&name, streaming));
+        let t = if name.contains(".conv.pointwise_conv") {
+            t.squeeze(2)?
+        } else {
+            t
+        };
+        quantized.push((name, QTensor::quantize(&t, GgmlDType::F32)?));
+    }
+    quantized.sort_by(|a, b| a.0.cmp(&b.0));
+    let gguf = dir.path().join(GGUF_CHECKPOINT);
+    let mut file = std::fs::File::create(&gguf)?;
+    let metadata: Vec<(&str, &Value)> = metadata.iter().map(|(k, v)| (*k, v)).collect();
+    let tensors: Vec<(&str, &QTensor)> = quantized.iter().map(|(n, q)| (n.as_str(), q)).collect();
+    inference_tensor::quantized::gguf_file::write(&mut file, &metadata, &tensors)?;
+    Ok((dir, gguf))
+}
