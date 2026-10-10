@@ -7521,7 +7521,7 @@
                   },
                   "model_id": {
                     "type": "string",
-                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                    "description": "Model ID to load from: a HF hub repo or a local path, in the transformers layout or a `.nemo`."
                   },
                   "vad_model_id": {
                     "type": [

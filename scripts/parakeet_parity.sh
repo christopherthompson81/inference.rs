@@ -3,7 +3,7 @@
 # reach a minimum cosine, and the emitted tokens, their frames and the transcript must match exactly.
 # Not part of local_ci.sh: it needs torch, transformers (5.x, with Parakeet) and librosa.
 #
-# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu]
+# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file>]
 #   dir   holds config.json, processor_config.json, tokenizer.json and model.safetensors (e.g. parakeet-tdt-0.6b-v3)
 #   wav   16-bit PCM wav files (mono, any rate: both sides resample to 16 kHz)
 set -euo pipefail
@@ -16,8 +16,15 @@ model=$(realpath "$1")
 shift
 wavs=()
 cpu=()
-for arg in "$@"; do
-    if [[ $arg == --cpu ]]; then cpu=(--cpu); else wavs+=("$(realpath "$arg")"); fi
+nemo=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --cpu) cpu=(--cpu) ;;
+        # ours from the checkpoint's `.nemo`, against the same transformers reference
+        --nemo) nemo=(--nemo "$(realpath "$2")"); shift ;;
+        *) wavs+=("$(realpath "$1")") ;;
+    esac
+    shift
 done
 root=$(cd "$(dirname "$0")/.." && pwd)
 dumps=$(mktemp -d)
@@ -94,4 +101,4 @@ if [[ ${#cpu[@]} -eq 0 ]] && command -v nvcc >/dev/null 2>&1; then
     features=(--features cuda)
 fi
 cargo run --manifest-path "$root/Cargo.toml" -q -p inference-models-speech --example parakeet_parity "${features[@]}" -- \
-    --model "$model" --dumps "$dumps" "${cpu[@]}"
+    --model "$model" --dumps "$dumps" "${cpu[@]}" "${nemo[@]}"

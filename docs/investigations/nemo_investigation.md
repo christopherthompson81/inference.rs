@@ -527,3 +527,86 @@ Left for the next PR:
 - **A streaming encoder config without `sliding_window` or `default_num_lookahead_tokens` is an error.** It used to fall back silently to full attention over causal convs.
 - **Unit test:** an unaligned case, a chunk of 3 that neither the 512-row block nor the 5-frame left context divides. The real English model's chunk of 14 does not divide 512 either.
 - **Follow-up, not done:** a chunked encoder reads only offsets within about +/-(512 + left + chunk), yet the full `(2T - 1, hidden)` position table is still projected in every layer.
+
+## Run 19 - 2026-10-10
+
+**Parakeet family from `.nemo`.**
+
+The `.nemo` configs come from ranged reads of the archives' first 1.5 MB (`model_config.yaml` follows the tokenizer members):
+
+| checkpoint | class | encoder | head |
+|---|---|---|---|
+| `parakeet-tdt-0.6b-v3` | `EncDecRNNTBPEModel` | per_feature mel, `use_bias: false` | TDT (`decoding.model_type: tdt`, durations in `model_defaults`) |
+| `stt_en_fastconformer_hybrid_large_pc` | `EncDecHybridRNNTCTCBPEModel` | 17 x d512, 80 mels, xscaling, biases | RNN-T plus `ctc_decoder`; only ships as a `.nemo` |
+| `nemotron-speech-streaming-en-0.6b` | `EncDecRNNTBPEModel` | `chunked_limited`, `causal_downsampling`, `conv_context_size: causal`, `layer_norm` | RNN-T; `att_context_size` lists `[70,13] [70,6] [70,1] [70,0]` (first is the default) |
+| `nemotron-3.5-asr-streaming-0.6b` | `EncDecRNNTBPEModelWithPrompt` | | prompt weights not mapped: refused, pointing to the transformers layout |
+
+Mapping:
+- **Encoder renames:** the Sortformer table, plus the streaming pre-encode. NeMo keeps dw_striding's `conv.{0,2,3,5,6}` indices there, while transformers names them `conv_in` and `layers.N.{depthwise,pointwise}_conv`.
+- **Head renames:**
+  - `decoder.prediction.{embed,dec_rnn.lstm}` -> `decoder.{embedding,lstm}`
+  - `joint.pred` -> `decoder.decoder_projector`
+  - `joint.enc` -> `encoder_projector`
+  - `joint.joint_net.2` -> `joint.head`
+  - `(ctc_)decoder.decoder_layers.0` -> `ctc_head`
+- **Vocabulary:** NeMo's `vocab_size` plus the blank. CTC models read `num_classes`.
+- **Tokenizer:** the archive's SentencePiece `tokenizer.model` is read by a minimal protobuf walk (field 1 = pieces, field 1 within = text). A decode-only BPE is built over the pieces: Metaspace decoder, byte fallback, `<...>` pieces special. That is transformers' conversion: its added tokens are the 264 angled pieces (special) plus the 10 digits (not special).
+- **Weights:** read in place through `PthTensors::in_range`, as for Sortformer.
+
+`scripts/parakeet_parity.sh <hf dir> <wavs> --cpu --nemo <the repo's .nemo>` keeps the transformers reference and loads ours from the `.nemo`, on parakeet-tdt-0.6b-v3:
+```
+ok librispeech clean 0000: features cos 1.000000, encoder cos 1.000000, emissions 15/15, text matches
+ok librispeech other 0001: 1.000000 / 1.000000, 17/17, text matches
+ok synthetic Spanish:      1.000000 / 1.000000, 44/44, text matches
+ok 97.6 s meeting:         1.000000 / 1.000000, 619/619, text matches
+```
+The tokenizer built from the SentencePiece pieces decodes every transcript identically to `tokenizer.json`.
+
+## Run 20 - 2026-10-10
+
+**`.nemo` recognisers through the engine; hybrid against NeMo itself.**
+
+`scripts/nemo_asr_parity.sh <.nemo> <wavs> [--cpu]` (with `NEMO_PYTHON` set to the Vernacula NeMo 2.7.1 venv) handles checkpoints with no transformers port. It dumps NeMo's preprocessor mel, its `encoder()` output, and its greedy RNN-T hypothesis: `rnnt_decoder_predictions_tensor(..., return_hypotheses=True)`, whose `y_sequence` and `timestamp` give tokens and frames. The parity example replays them, loading ours with `--nemo`.
+
+`nvidia/stt_en_fastconformer_hybrid_large_pc`: 17 x d512, 80 mels, xscaling, biases, RNN-T + CTC, decoded with its RNN-T head:
+
+| clip | CPU | CUDA |
+|---|---|---|
+| LibriSpeech clean 0000 | 1.000000 / 1.000000, 18/18, text matches | same |
+| LibriSpeech other 0000 | 1.000000 / 1.000000, 16/16 | - |
+| LibriSpeech other 0001 | 1.000000 / 1.000000, 19/19 | same |
+| 97.6 s meeting | 1.000000 / 1.000000, 641/641 | same, 1.29 s |
+
+(features cos / encoder cos, emissions with frames, text)
+
+`nemotron-speech-streaming-en-0.6b.nemo` against the transformers reference, CUDA: 1.000000 / 1.000000; emissions 18/18, 21/21, 53/53 and 639/639; every text matches. This confirms the streaming pre-encode renames (`pre_encode.conv.{0,2,3,5,6}` -> `conv_in` and `layers.N.*`).
+
+Engine:
+- `TranscriptionLoader` takes the transformers layout where a `config.json` resolves, else the one `.nemo` (checked by `is_asr`: an `EncDec*` class over a Conformer with an RNN-T or CTC decoder).
+- Auto-detection, for a local `.nemo`: Sortformer -> diarization, recogniser -> transcription. For a Hub repo with only a `.nemo`: a "sortformer" name -> diarization, any other -> transcription; the loader then checks the class.
+
+Tests:
+- The tiny Parakeet checkpoint is rebuilt as a `.nemo`: NeMo YAML, weights under NeMo names (`nemo_name`, the inverse rename), and a SentencePiece model of its pieces. For each of TDT, RNN-T, CTC and streaming, the `.nemo` and the transformers layout give byte-identical `verbose_json`.
+- Unit tests: head and streaming renames round-trip; the auto-detect routes.
+
+## Run 21 - 2026-10-10
+
+**Review fixes for `.nemo` recognisers.**
+
+- **Silently wrong output:** a regular (non-streaming) encoder with a finite `att_context_size` is refused. NeMo bands its attention there, and the loader ran full attention.
+- **TDT:** detected as NeMo's decoder detects it, from a non-empty `decoding.durations`, not `decoding.model_type`. A multi-blank RNN-T (`big_blank_durations`) is refused.
+- **Tokenizer:** the protobuf walk now keeps varint fields, so it reads each piece's type. Special = UNKNOWN or CONTROL. Data, parakeet-tdt-0.6b-v3's SentencePiece model against its `tokenizer.json` (read with the NeMo venv's `sentencepiece_model_pb2`):
+  - 7918 normal, 273 user-defined and 1 unknown piece, `byte_fallback` false;
+  - transformers marks 272 of the user-defined pieces non-special (`<|pnc|>` and the like stay text), and `<unk>` special.
+
+  So the `<...>` rule from Run 19 would have stripped user-defined pieces that transformers keeps. A byte piece (byte fallback) is refused rather than stripped. A tokenizer other than `bpe` (SentencePiece) gets a clear error, and `is_asr` needs a `tokenizer:` section.
+- **Config:** `normalize` must be `per_feature` or `NA`; the conv context causal or centred; `reduction` unset.
+- **Loader:** takes the transformers layout only for a `config.json` that is a Parakeet config. When neither layout loads, the error carries both causes.
+- **Hub auto-detect:** a lone `.nemo` routes to transcription only when its name or the repo's says parakeet, `stt_`, fastconformer, asr or speech. A TTS or speaker-ID `.nemo` is not downloaded only to be refused.
+
+The three real checkpoints rerun on CUDA after the fixes, all exact:
+- parakeet-tdt-0.6b-v3 `.nemo`: 15/15, 17/17, 619/619;
+- streaming English `.nemo`: 18/18, 21/21, 639/639;
+- the hybrid against NeMo: 18/18, 19/19, 641/641.
+
+Environment: a reboot cleared the scratchpad under `/tmp`, taking the Kokoro-made synthetic clips and the CI memory wrapper. The wrapper was restored from the session record; the clips are not needed for these runs.

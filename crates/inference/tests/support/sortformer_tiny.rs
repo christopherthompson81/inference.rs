@@ -37,7 +37,7 @@ pub fn tiny_sortformer() -> anyhow::Result<tempfile::TempDir> {
     renamed.sort_by(|a, b| a.0.cmp(&b.0));
     let named: Vec<(&str, &Tensor)> = renamed.iter().map(|(n, t)| (n.as_str(), t)).collect();
     let dir = tempfile::tempdir()?;
-    inference_models_speech::nemo::write_nemo(&dir.path().join(CHECKPOINT), &yaml, &named)?;
+    inference_models_speech::nemo::write_nemo(&dir.path().join(CHECKPOINT), &yaml, &named, &[])?;
     Ok(dir)
 }
 
