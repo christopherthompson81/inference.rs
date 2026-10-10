@@ -6454,7 +6454,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "vernacula-phonemizer"
 version = "0.1.0"
-source = "git+https://github.com/christopherthompson81/vernacula-phonemizer?rev=8211aacf#8211aacf2bd0f60e8a634deb77874e9cef78bd31"
+source = "git+https://github.com/christopherthompson81/vernacula-phonemizer?rev=5acc6b73#5acc6b73ca570410aa26aee5a7ceae95c7ed41af"
 dependencies = [
  "indexmap",
  "regress",

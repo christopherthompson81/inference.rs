@@ -137,6 +137,7 @@ fn phonemizer_error(e: vernacula_phonemizer::PhonemizeError) -> Error {
             format!("Kokoro's text input needs vernacula-phonemizer's data ({DATA_ENV}): {why}")
         }
         Neural(why) => format!("the phonemizer's neural reader failed: {why}"),
+        Input(why) => format!("the phonemizer cannot read this input: {why}"),
     })
 }
 
@@ -412,7 +413,7 @@ fn source_words(text: &[u16], lang: &str, trace: &Trace, ipa: &[u16]) -> Vec<Wor
     }
 }
 
-// ja: a token per phrase; cmn: a Han run's syllables go onto its hanzi only when counts agree (11 says two)
+// ja: a token per phrase; cmn: a Han run's syllables map onto its hanzi only when counts agree (digits break it)
 fn traced_words(text: &[u16], trace: &Trace, ipa: &[u16]) -> Vec<WordSpan> {
     if !trace.traced {
         return Vec::new();
@@ -525,9 +526,6 @@ fn group_source_words(
     let mut last_word = 0usize;
     for tok in &trace.tokens {
         let input = tok.input_span?;
-        if input.0 >= text.len() {
-            return None;
-        }
         let groups = if let Some(span) = tok.ipa_span.as_ref() {
             count_word_groups(&String::from_utf16_lossy(&ipa[span.0..span.1]))
         } else if !tok.emitted.is_empty() {
