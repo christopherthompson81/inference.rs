@@ -180,6 +180,7 @@ GROUPS = [
                 "TimestampGranularity",
                 "VoiceActivity",
                 "SpeechSegment",
+                "Diarization",
                 "Calibration",
                 "CacheStats",
                 "EncoderCacheStats",

@@ -9,10 +9,10 @@ use std::fmt::Write as _;
 use strum::IntoEnumIterator;
 
 use inference_core::SupportedModality;
+use inference_core::{DiarizationLoaderType, SpeechLoaderType, TranscriptionLoaderType};
 use inference_core::{
     DiffusionLoaderType, EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType,
 };
-use inference_core::{SpeechLoaderType, TranscriptionLoaderType};
 
 use SupportedModality::{Audio, Embedding, Text, Video, Vision};
 
@@ -396,6 +396,18 @@ impl SupportedArch for TranscriptionLoaderType {
     }
 }
 
+impl SupportedArch for DiarizationLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
+        match self {
+            Self::Nemotron3 => ArchMetadata {
+                families: &["Nemotron-3 Diarization (streaming Sortformer)"],
+                modalities: &[Audio, Text],
+                examples: &[ex!("nvidia/Nemotron-3-Diarization")],
+            },
+        }
+    }
+}
+
 impl SupportedArch for SpeechLoaderType {
     fn arch_metadata(&self) -> ArchMetadata {
         match self {
@@ -538,6 +550,12 @@ pub fn render_supported_models_markdown() -> String {
     simple_table(
         &mut md,
         TranscriptionLoaderType::iter().map(|t| (variant_name(&t), t.arch_metadata())),
+    );
+
+    md.push_str("## Diarization\n\n");
+    simple_table(
+        &mut md,
+        DiarizationLoaderType::iter().map(|t| (variant_name(&t), t.arch_metadata())),
     );
 
     md.push_str("## Embedding\n\n");

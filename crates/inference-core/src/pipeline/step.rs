@@ -887,6 +887,18 @@ impl dyn Pipeline {
                     .collect::<Vec<_>>();
                 response::send_voice_activity_responses(input_seqs, results).await?;
             }
+            ForwardInputsResult::Diarization { .. } => {
+                let results = results
+                    .into_iter()
+                    .flat_map(|r| {
+                        let ForwardInputsResult::Diarization { results } = r else {
+                            unreachable!("All results must have same type, `Diarization`")
+                        };
+                        results
+                    })
+                    .collect::<Vec<_>>();
+                response::send_diarization_responses(input_seqs, results).await?;
+            }
             ForwardInputsResult::BlockGeneration { .. } => {
                 let mut denoise_times = Vec::with_capacity(results.len());
                 let token_blocks = results

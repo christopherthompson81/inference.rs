@@ -659,6 +659,41 @@ class DetokenizeResponse:
     text: str
 
 
+@dataclass(kw_only=True)
+class DiarizationRequest:
+    """Speaker diarization request; the audio travels beside it (a multipart `file` over HTTP)."""
+
+    model: str | None = None
+    response_format: DiarizationResponseFormat | None = None
+    return_probabilities: bool | None = None
+    threshold: float | None = None
+
+
+@dataclass(kw_only=True)
+class DiarizationResponse:
+    duration: float
+    frame_seconds: float
+    num_speakers: int
+    probabilities: list[list[float]] | None = None
+    segments: list[DiarizationSegment]
+
+
+class DiarizationResponseFormat(str, Enum):
+    """What a diarization answers with."""
+
+    JSON = "json"
+    RTTM = "rttm"
+
+
+@dataclass(kw_only=True)
+class DiarizationSegment:
+    """One speaker's turn, in seconds from the start of the audio; speakers are the model's output slots."""
+
+    end: float
+    speaker: int
+    start: float
+
+
 class DiffusionLoaderType(str, Enum):
     """The architecture to load the diffusion model as."""
 
@@ -1112,6 +1147,7 @@ class ModelCategory(str, Enum):
     DIFFUSION = "diffusion"
     TRANSCRIPTION = "transcription"
     VOICE_ACTIVITY = "voice_activity"
+    DIARIZATION = "diarization"
     SPEECH = "speech"
     EMBEDDING = "embedding"
 
@@ -1351,6 +1387,15 @@ class ModelSelectedTranscription:
     model_id: str
     vad_model_id: str | None = None
     _external = 'Transcription'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedDiarization:
+    """Select a speaker diarization model (Nemotron-3 Diarization)"""
+
+    dtype: ModelDType | None = ModelDType.AUTO
+    model_id: str
+    _external = 'Diarization'
 
 
 @dataclass(kw_only=True)
@@ -2917,7 +2962,7 @@ Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
-ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedVoiceActivity, ModelSelectedEmbedding]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedDiarization, ModelSelectedVoiceActivity, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]

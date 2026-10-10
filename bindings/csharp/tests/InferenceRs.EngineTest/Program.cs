@@ -22,6 +22,7 @@ internal static class Program
     // the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
     private const string ParakeetDir = "parakeet";
     private const string SileroDir = "silero";
+    private const string DiarizationDir = "diarization";
     private const int ToneRate = 16000;
     private const double ToneHz = 440.0;
 
@@ -57,6 +58,7 @@ internal static class Program
         HostToolsLoadAndBadOnesAreRefused(model);
         AudioTranscribes(Path.Combine(model, ParakeetDir));
         VoiceActivityFindsTheSpeech(Path.Combine(model, SileroDir));
+        DiarizationNamesWhoSpeaks(Path.Combine(model, DiarizationDir));
 
         Console.WriteLine(failures == 0 ? "all engine checks passed" : $"{failures} engine checks failed");
         return failures == 0 ? 0 : 1;
@@ -451,6 +453,21 @@ internal static class Program
         // a zero threshold makes every chunk speech, so the clip is one segment whatever the weights
         var activity = JsonNode.Parse(engine.VoiceActivity("""{"threshold": 0.0, "neg_threshold": -1.0}""", ToneWav()))!;
         Check("voice activity finds one segment", (activity["segments"] as JsonArray)?.Count == 1);
+    }
+
+    private static void DiarizationNamesWhoSpeaks(string diarization)
+    {
+        var spec = new JsonObject
+        {
+            ["model"] = new JsonObject { ["Diarization"] = new JsonObject { ["model_id"] = diarization, ["dtype"] = "f32" } },
+            ["runtime"] = new JsonObject { ["device"] = "cpu" },
+        }.ToJsonString();
+        using var engine = InferenceEngine.Load(spec);
+        // a zero threshold makes every speaker speak throughout, so each has one segment whatever the weights
+        var blob = engine.Diarization("""{"threshold": 0.0}""", ToneWav());
+        var parsed = JsonNode.Parse(blob.Data)!;
+        Check("diarization gives each speaker a segment",
+            (parsed["segments"] as JsonArray)?.Count == (int?)parsed["num_speakers"]);
     }
 
     private static InferenceException? Throws(Action action)

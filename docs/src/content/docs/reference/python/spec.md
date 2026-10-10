@@ -280,7 +280,17 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelSelected`
 
-One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedVoiceActivity, ModelSelectedEmbedding]`.
+One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedDiarization, ModelSelectedVoiceActivity, ModelSelectedEmbedding]`.
+
+
+## `ModelSelectedDiarization`
+
+Select a speaker diarization model (Nemotron-3 Diarization)
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
+| `model_id` | `str` | required |
 
 
 ## `ModelSelectedDiffusionPlain`

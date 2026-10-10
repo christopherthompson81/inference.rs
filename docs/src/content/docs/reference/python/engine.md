@@ -425,6 +425,17 @@ transcription(
 
 The transcript of encoded audio, in the request's response_format (the blob's MIME type names it).
 
+### `Engine.diarization`
+
+```text
+diarization(
+    audio: bytes,
+    request: types.DiarizationRequest | str = '{}',
+) -> Blob
+```
+
+Who speaks when in encoded audio, in the request's response_format (the blob's MIME type names it).
+
 ### `Engine.voice_activity`
 
 ```text
@@ -889,6 +900,14 @@ transcription(request_json: str, audio: bytes) -> Blob
 ```
 
 Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format.
+
+### `JsonEngine.diarization`
+
+```text
+diarization(request_json: str, audio: bytes) -> Blob
+```
+
+Who speaks when in encoded audio; the blob's MIME type names the response format (JSON or RTTM).
 
 ### `JsonEngine.voice_activity`
 

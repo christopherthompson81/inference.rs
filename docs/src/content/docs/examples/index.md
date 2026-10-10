@@ -9,6 +9,6 @@ Every page in this section is generated from a runnable example in the repositor
 
 | Tree | Source | Pages |
 | --- | --- | --- |
-| Rust SDK | [`examples/rust`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust) | 60 |
+| Rust SDK | [`examples/rust`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust) | 61 |
 | Python SDK | [`examples/python`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python) | 71 |
 | HTTP server | [`examples/server`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server) | 56 |

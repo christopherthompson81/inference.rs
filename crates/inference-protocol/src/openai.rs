@@ -1362,6 +1362,8 @@ pub enum ModelCategory {
     Transcription,
     /// Voice activity detection
     VoiceActivity,
+    /// Speaker diarization
+    Diarization,
     /// Speech synthesis
     Speech,
     Embedding,
@@ -2179,6 +2181,108 @@ pub struct VoiceActivityResponse {
     /// Speech probability per chunk, when asked for.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probabilities: Option<Vec<f32>>,
+}
+
+/// What a diarization answers with.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DiarizationResponseFormat {
+    /// The segments (and, when asked, the probabilities) as JSON.
+    #[default]
+    Json,
+    /// NIST RTTM, one `SPEAKER` line per segment, as scoring tools read.
+    Rttm,
+}
+
+impl DiarizationResponseFormat {
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Json => "application/json",
+            Self::Rttm => "text/plain; charset=utf-8",
+        }
+    }
+}
+
+/// Speaker diarization request; the audio travels beside it (a multipart `file` over HTTP).
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct DiarizationRequest {
+    /// The diarization model to use.
+    #[serde(default = "default_model")]
+    #[schema(example = "default")]
+    pub model: String,
+    /// Probability at which a speaker counts as speaking, from 0 to 1 (0.5).
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    #[serde(default)]
+    pub response_format: DiarizationResponseFormat,
+    /// Also return every speaker's probability for every frame (JSON only).
+    #[serde(default)]
+    pub return_probabilities: bool,
+}
+
+impl DiarizationRequest {
+    /// A request for the default model's segments as JSON.
+    pub fn new() -> Self {
+        Self {
+            model: default_model(),
+            threshold: None,
+            response_format: DiarizationResponseFormat::Json,
+            return_probabilities: false,
+        }
+    }
+}
+
+impl Default for DiarizationRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// One speaker's turn, in seconds from the start of the audio; speakers are the model's output slots.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct DiarizationSegment {
+    pub speaker: usize,
+    pub start: f64,
+    pub end: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct DiarizationResponse {
+    /// Seconds of audio.
+    pub duration: f64,
+    /// The speakers the model tracks; segments name them by index.
+    pub num_speakers: usize,
+    /// Ordered by start, then speaker.
+    pub segments: Vec<DiarizationSegment>,
+    /// Seconds each row of probabilities covers.
+    pub frame_seconds: f64,
+    /// Per frame, every speaker's speech probability, when asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probabilities: Option<Vec<Vec<f32>>>,
+}
+
+/// A diarization rendered in its requested format.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DiarizationOutput {
+    pub body: String,
+    pub content_type: &'static str,
+}
+
+const RTTM_FILE_ID: &str = "audio";
+
+/// Segments as NIST RTTM `SPEAKER` lines, the file named `audio` and speakers `speaker_<n>`.
+pub fn diarization_rttm(segments: &[DiarizationSegment]) -> String {
+    segments
+        .iter()
+        .map(|s| {
+            format!(
+                "SPEAKER {RTTM_FILE_ID} 1 {:.3} {:.3} <NA> <NA> speaker_{} <NA> <NA>\n",
+                s.start,
+                s.end - s.start,
+                s.speaker
+            )
+        })
+        .collect()
 }
 
 /// Helper type for messages field in ResponsesCreateRequest

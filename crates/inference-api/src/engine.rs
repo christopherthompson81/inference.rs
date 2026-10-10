@@ -28,7 +28,9 @@ use crate::{
         self, ContainerFileListObject, ContainerFileMetadata, FileBody, FileDeleted,
         FileListObject, FileMetadata, FileUpload,
     },
-    generation::{SpeechAudio, detect_voice_activity, generate_image, generate_speech, transcribe},
+    generation::{
+        SpeechAudio, detect_voice_activity, diarize, generate_image, generate_speech, transcribe,
+    },
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
     },
@@ -47,9 +49,10 @@ use crate::{
         speculative_stats, unload_model,
     },
     openai::{
-        ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
-        ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
-        TranscriptionOutput, TranscriptionRequest, VoiceActivityRequest, VoiceActivityResponse,
+        ChatCompletionRequest, CompletionRequest, DiarizationOutput, DiarizationRequest,
+        EmbeddingRequest, EmbeddingResponse, ImageGenerationRequest, ModelObjects,
+        OpenAiToolSurface, SpeechGenerationRequest, TranscriptionOutput, TranscriptionRequest,
+        VoiceActivityRequest, VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -1609,6 +1612,23 @@ impl Engine {
         audio: &[u8],
     ) -> Result<String, ApiError> {
         to_json(&self.voice_activity(parse_json(request)?, audio).await?)
+    }
+
+    /// Who speaks when in encoded audio, from a diarization model.
+    pub async fn diarization(
+        &self,
+        request: DiarizationRequest,
+        audio: &[u8],
+    ) -> Result<DiarizationOutput, ApiError> {
+        diarize(self.state(), request, audio).await
+    }
+
+    pub async fn diarization_json(
+        &self,
+        request: &[u8],
+        audio: &[u8],
+    ) -> Result<DiarizationOutput, ApiError> {
+        self.diarization(parse_json(request)?, audio).await
     }
 
     pub async fn transcription_json(

@@ -359,6 +359,18 @@ class JsonEngine:
             )
         return take_blob(blob)
 
+    def diarization(self, request_json: str, audio: bytes) -> Blob:
+        """Who speaks when in encoded audio; the blob's MIME type names the response format (JSON or RTTM)."""
+        request = text_arg(request_json)
+        audio = bytes_arg(audio)
+        blob = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_diarization(engine, request, len(request), audio, len(audio), ctypes.byref(blob)),
+                "inference_diarization",
+            )
+        return take_blob(blob)
+
     def voice_activity(self, request_json: str, audio: bytes) -> str:
         """The speech segments of encoded audio, from a voice activity model."""
         request = text_arg(request_json)

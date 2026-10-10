@@ -613,6 +613,17 @@ pub enum ModelSelected {
         dtype: ModelDType,
     },
 
+    /// Select a speaker diarization model (Nemotron-3 Diarization)
+    Diarization {
+        /// Model ID to load from. This may be a HF hub repo or a local path.
+        model_id: String,
+
+        /// Model data type. Defaults to `auto`, which is F32 here.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
+        dtype: ModelDType,
+    },
+
     /// Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one
     VoiceActivity {
         /// Model ID to load from. This may be a HF hub repo or a local path.
@@ -684,6 +695,12 @@ impl ModelSelected {
             | Self::Speech { dtype, .. }
             | Self::Transcription { dtype, .. }
             | Self::Embedding { dtype, .. } => *dtype,
+            // an F32 checkpoint whose speaker decisions move in BF16, for no speedup
+            Self::Diarization {
+                dtype: ModelDType::Auto,
+                ..
+            } => ModelDType::F32,
+            Self::Diarization { dtype, .. } => *dtype,
             // the VAD runs in F32 whatever is asked
             Self::VoiceActivity { .. } => ModelDType::F32,
         }
@@ -702,7 +719,8 @@ impl ModelSelected {
             | Self::DiffusionPlain { .. }
             | Self::Speech { .. }
             | Self::Transcription { .. }
-            | Self::VoiceActivity { .. } => None,
+            | Self::VoiceActivity { .. }
+            | Self::Diarization { .. } => None,
         }
     }
 
@@ -743,6 +761,7 @@ impl ModelSelected {
             | Self::Speech { .. }
             | Self::Transcription { .. }
             | Self::VoiceActivity { .. }
+            | Self::Diarization { .. }
             | Self::Embedding { .. } => None,
         }
     }
@@ -760,7 +779,8 @@ impl ModelSelected {
             | Self::DiffusionPlain { .. }
             | Self::Speech { .. }
             | Self::Transcription { .. }
-            | Self::VoiceActivity { .. } => None,
+            | Self::VoiceActivity { .. }
+            | Self::Diarization { .. } => None,
         }
     }
 
@@ -837,8 +857,8 @@ mod tests {
     use strum::IntoEnumIterator;
 
     use inference_core::{
-        DiffusionLoaderType, EmbeddingLoaderType, ModelDType, MultimodalLoaderType,
-        NormalLoaderType, SpeechLoaderType, TranscriptionLoaderType,
+        DiarizationLoaderType, DiffusionLoaderType, EmbeddingLoaderType, ModelDType,
+        MultimodalLoaderType, NormalLoaderType, SpeechLoaderType, TranscriptionLoaderType,
     };
 
     // The names a schema publishes must be the ones serde writes, and each must parse back.
@@ -865,6 +885,7 @@ mod tests {
         assert_schema_names_are_serde_names::<DiffusionLoaderType>();
         assert_schema_names_are_serde_names::<SpeechLoaderType>();
         assert_schema_names_are_serde_names::<TranscriptionLoaderType>();
+        assert_schema_names_are_serde_names::<DiarizationLoaderType>();
         let dtype = serde_json::to_value(<ModelDType as utoipa::PartialSchema>::schema()).unwrap();
         for name in dtype["enum"].as_array().unwrap() {
             serde_json::from_value::<ModelDType>(name.clone()).unwrap();

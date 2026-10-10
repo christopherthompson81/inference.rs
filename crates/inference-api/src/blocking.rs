@@ -11,7 +11,7 @@ use crate::{
     engine::{Engine, EngineCallbacks, EngineLoadError},
     generation::SpeechAudio,
     media_source::MediaAttachments,
-    openai::TranscriptionOutput,
+    openai::{DiarizationOutput, TranscriptionOutput},
 };
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -194,6 +194,17 @@ impl BlockingEngine {
         let audio = audio.to_vec();
         self.call(request, |engine, request| async move {
             engine.voice_activity_json(&request, &audio).await
+        })
+    }
+
+    pub fn diarization_json(
+        &self,
+        request: &[u8],
+        audio: &[u8],
+    ) -> Result<DiarizationOutput, ApiError> {
+        let audio = audio.to_vec();
+        self.call(request, |engine, request| async move {
+            engine.diarization_json(&request, &audio).await
         })
     }
 

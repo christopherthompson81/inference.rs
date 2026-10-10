@@ -245,3 +245,101 @@ Tests:
 - Long form with an always-speech VAD: a 301 s clip transcribes in windows, and words after 120 s carry their offset.
 - Segment-cutting unit cases pinned to the reference function's own outputs. (I first wrote one expecting a 96 ms gap to split; the reference bridges it, being under 100 ms.)
 - The mlx-layout GGUF round trip, the `/v1/audio/vad` form (including a field-level 400), and the Python and C# wrappers.
+
+## Run 8 - 2026-10-10
+
+**Diarization survey.** The user pointed to `nvidia/Nemotron-3-Diarization`, the newer replacement for Sortformer v2.1, and asked to do both.
+
+- Both are NeMo `SortformerEncLabelModel`s with the same streaming modules: an arrival-order speaker cache (AOSC) plus a FIFO.
+- The encoders differ:
+  - Nemotron-3: feature stacking x8, then a 31-layer RoPE transformer (d512), a subpixel upsampler and an 8-speaker head (tf 192).
+  - v2.1: a FastConformer (NEST) plus a transformer, 4 speakers.
+- References:
+  - transformers 5.19 has `nemotron3_diarization` (`Nemotron3DiarizationForAudioFrameClassification`, about 820 lines plus a 267-line processor). The HF repo ships the transformers layout (`config.json`, `processor_config.json`, `model.safetensors`), plus `.nemo` and q8_0 GGUF. License: openmdw-1.1.
+  - transformers also has `nemotron_asr_streaming` and `nemotron3_5_asr`, which bear on #391's last part.
+  - v2.1 has no transformers port; it exists only as a `.nemo` (in the HF cache).
+- Local material (`/mnt/data/models/nemotron3_diarization`):
+  - NeMo prediction dumps for 6 clips (`ref/`, `ref_vmel/`);
+  - ground-truth RTTMs for AMI and VoxConverse clips;
+  - an earlier C# implementation's predictions for both models.
+
+Plan: Nemotron-3 first, against transformers, with the diarization API surface. Then Sortformer v2.1 from `.nemo`, reusing the surface and the speaker cache.
+
+## Run 9 - 2026-10-10
+
+**Nemotron-3 Diarization port, parity against transformers.** `scripts/nemotron_diarization_parity.sh <ckpt> <wavs> --cpu`, F32, on 6 clips (a 97.6 s demo clip, three 300 s VoxConverse dev clips, two 300 s AMI SDM clips).
+
+Implementation (`diarization::{nemotron3, cache}`):
+- Features are `NemoMel` without normalisation, and the masked trailing frame is dropped.
+- 8x frame stacking, then 31 pre-norm layers with half-split RoPE, using cos/sin tables built at load.
+- `proj`, then the subpixel upsampler conv (192 to 1536, k3) and the relu-dense-relu head.
+- The speaker cache ported from transformers: scores and selection on the host in f32, embeddings gathered on the device.
+- Offline runs use the top-level chunking: 340 + 40 lookahead, FIFO 40, update period 300.
+
+**First run:** every segment exact, but probabilities off by up to 0.027 and 0.094. Locating the first frame past 1e-4 put it at 9752 and 29992: the final 8 frames, the last encoder group, only.
+- Cause: transformers keeps the masked trailing feature frame. That gives one extra, all-padding encoder group, masked as a key but still computed. Its upsampler (k3) then reads that group's hidden state for the last real group's frames, where ours sees zero padding.
+- Kept ours (zero padding past the audio). The parity report shows the final 80 ms apart.
+
+**Second run:** four clips within 2.4e-5 before the final group. Two diverged mid-stream (from frames 5440 and 19040; frame 5440 is encoder frame 680, a chunk boundary).
+- The first update already pops 300 frames into the 264-slot cache, so it compresses from the start, and its top-k keeps whichever of two near-equal frames the float noise favours.
+- **Check:** transformers on CPU against transformers on CUDA, the same F32 weights. It parts the same way on the same clips (max diffs 5.76e-2 and 9.24e-2; first past 1e-4 at frames 764 and 16328). This is the model's sensitivity, not a port bug.
+- Such clips are judged on speaking-decision agreement (at least 99.5% of frame x speaker decisions).
+
+| clip | max prob diff (before last group) | decisions agree | segments exact | ours, CPU dev |
+|---|---|---|---|---|
+| demo 97.6 s | 1.56e-5 | 100.000% | 29/29 | 6.7 s |
+| VoxConverse c | 2.09e-6 | 100.000% | 13/13 | 19.8 s |
+| AMI a | 5.76e-2 (cache flip) | 99.983% | 229/250 | 20.3 s |
+| AMI b | 2.42e-5 | 99.999% | 128/129 | 19.2 s |
+| VoxConverse a | 2.04e-5 | 100.000% | 70/70 | 19.8 s |
+| VoxConverse b | 9.61e-2 (cache flip) | 99.997% | 14/18 | 19.7 s |
+
+- The NeMo dumps in `ref/` differ from transformers by up to 0.13. NeMo ran its own chunking (264 frames, FIFO 0) and dither, so they are not a parity target.
+- **Timing:** CPU takes 19.5 s for 300 s, against 5.2 s in torch. A follow-up.
+
+## Run 10 - 2026-10-10
+
+**Nemotron-3 Diarization in the engine; CUDA parity.**
+
+Surface:
+- `ModelSelected::Diarization`, auto-detected from `model_type: nemotron3_diarization`.
+- `ModelCategory::Diarization`, with per-sequence results.
+- `Engine::diarization(_json)` and `POST /v1/audio/diarization` (multipart: `threshold`, `return_probabilities`, `response_format` json or rttm).
+- `inference_diarization` in the C ABI (a blob carrying JSON or RTTM), with Python and C# wrappers.
+- `DiarizationModelBuilder` in the SDK, and a CLI interactive mode that prints RTTM.
+
+The tiny checkpoint (fixture configs: cache 16, chunk 10 + 2, FIFO 4) fills and compresses the cache within a 6 s clip. Tests cover:
+- frame counts, and thresholds 0 and 1.01 (one segment per speaker, and none);
+- RTTM lines;
+- repeats on the default device;
+- the HTTP form;
+- the Python and C# wrappers.
+
+CUDA parity, same 6 clips as Run 9:
+- Every result matches the CPU run: the same two cache flips, and the same agreement (99.983% and 99.997%).
+- Max probability diff 1.2e-5 to 3.6e-5 where the cache stays in step.
+- 300 s in 1.47 s (about 200x real time), against 19.5 s on CPU in a dev build.
+
+## Run 11 - 2026-10-10
+
+**Review fixes, and BF16 measured.**
+
+The review found that a BF16 load failed every request, because the cache read F32 out of BF16 logits. Auto picks BF16 on sm80+ GPUs, so `serve -m nvidia/Nemotron-3-Diarization` would have failed. The cache now scores in F32 whatever the model dtype.
+
+`scripts/nemotron_diarization_parity.sh ... --bf16` on CUDA, the same 6 clips (the reference stays F32):
+- Speaking decisions agree on 99.986%, 99.997%, 99.922%, 99.968%, **99.399% (FAIL)** and 99.994%.
+- Only 7/13 to 160/250 of segments match exactly, against nearly all in F32.
+- Max probability diff is up to 0.95.
+- Speed: 1.39-1.44 s per 300 s, against 1.50-1.57 s in F32.
+
+BF16 moves speaker decisions for no real speedup, so `ModelSelected::Diarization` resolves `auto` to F32, as the VAD does. An explicit `bf16` still loads.
+
+Other fixes:
+- Embeddings are built per step from the features slice, instead of one `(1, groups, hidden)` tensor for the whole clip. That drops the full copy of the features and the clip-sized device tensor; F32 parity is unchanged.
+- `threshold` must be within [0, 1]; NaN is rejected too.
+- The cache-budget rates are parsed as f64, as Python floors them.
+
+Left as follow-ups:
+- Mel features are still computed for the whole clip (about 9 GB of f64 at 24 h).
+- `return_probabilities` JSON grows with audio length (about 30 MB per hour).
+- The RTTM file ID is fixed as `audio`.

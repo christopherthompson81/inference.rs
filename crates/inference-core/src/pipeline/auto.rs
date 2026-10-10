@@ -208,6 +208,7 @@ enum Detected {
     Speech(crate::pipeline::SpeechLoaderType),
     Transcription(crate::pipeline::TranscriptionLoaderType),
     VoiceActivity,
+    Diarization,
 }
 
 fn supports_dynamic_lora(detected: &Detected) -> bool {
@@ -390,6 +391,12 @@ impl AutoLoader {
             return Ok(Detected::Transcription(tp));
         }
 
+        if let Some(ref config) = artifacts.contents
+            && crate::pipeline::DiarizationLoaderType::auto_detect_from_config(config).is_some()
+        {
+            return Ok(Detected::Diarization);
+        }
+
         if artifacts.sentence_transformers_present {
             if let Some(ref config) = artifacts.contents {
                 let cfg: AutoConfig = serde_json::from_str(config)?;
@@ -529,6 +536,12 @@ impl AutoLoader {
             }
             Detected::VoiceActivity => {
                 let loader: Box<dyn Loader> = Box::new(super::VoiceActivityLoader {
+                    model_id: self.model_id.clone(),
+                });
+                *guard = Some(loader);
+            }
+            Detected::Diarization => {
+                let loader: Box<dyn Loader> = Box::new(super::DiarizationLoader {
                     model_id: self.model_id.clone(),
                 });
                 *guard = Some(loader);

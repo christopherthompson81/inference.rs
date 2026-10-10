@@ -11,6 +11,7 @@ mod llama_head_dim_tiny;
 mod llama_tiny;
 mod llava_tiny;
 mod local_attention_tiny;
+mod nemotron3_diarization_tiny;
 mod paddleocr_vl;
 mod paddleocr_vl_tiny;
 mod parakeet_tiny;

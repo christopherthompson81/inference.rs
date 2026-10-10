@@ -33,6 +33,7 @@
 //! | Speech synthesis | [`SpeechModelBuilder`] | `examples/rust/models/speech/` |
 //! | Speech recognition | [`TranscriptionModelBuilder`] | `examples/rust/models/transcription/` |
 //! | Voice activity detection | [`VoiceActivityModelBuilder`] | `examples/rust/models/voice_activity/` |
+//! | Speaker diarization | [`DiarizationModelBuilder`] | `examples/rust/models/diarization/` |
 //! | Embeddings | [`EmbeddingModelBuilder`] | `examples/rust/getting_started/embedding/` |
 //! | Structured output | [`Model::generate_structured`] | `examples/rust/advanced/json_schema/` |
 //! | Tool calling | [`Tool`], [`ToolChoice`] | `examples/rust/advanced/tools/` |
@@ -206,6 +207,7 @@ mod load;
 mod anymoe;
 mod auto_model;
 pub mod blocking;
+mod diarization_model;
 mod diffusion_model;
 mod embedding;
 mod embedding_model;
@@ -223,6 +225,7 @@ mod voice_activity_model;
 
 pub use anymoe::AnyMoeModelBuilder;
 pub use auto_model::ModelBuilder;
+pub use diarization_model::DiarizationModelBuilder;
 pub use diffusion_model::DiffusionModelBuilder;
 pub use embedding::EmbeddingRequestBuilder;
 pub use embedding_model::{EmbeddingModelBuilder, UqffEmbeddingModelBuilder};
@@ -265,9 +268,10 @@ pub use inference_api::{
     media_source::MediaAttachment,
     models::{ModelOperationRequest, ModelStatus},
     openai::{
-        AdapterSelection, AudioResponseFormat, ChatCompletionRequest, EmbeddingRequest,
-        EmbeddingResponse, EmbeddingVector, Grammar, ImageGenerationRequest, OpenAiTool,
-        SpeechGenerationRequest, SpeechSegment, StopTokens, TimestampGranularity,
+        AdapterSelection, AudioResponseFormat, ChatCompletionRequest, DiarizationOutput,
+        DiarizationRequest, DiarizationResponse, DiarizationResponseFormat, DiarizationSegment,
+        EmbeddingRequest, EmbeddingResponse, EmbeddingVector, Grammar, ImageGenerationRequest,
+        OpenAiTool, SpeechGenerationRequest, SpeechSegment, StopTokens, TimestampGranularity,
         TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
         TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
         VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,

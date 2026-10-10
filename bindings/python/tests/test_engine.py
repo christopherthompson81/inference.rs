@@ -228,6 +228,7 @@ class EngineTest(unittest.TestCase):
 # the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
 PARAKEET_DIR = "parakeet"
 SILERO_DIR = "silero"
+DIARIZATION_DIR = "diarization"
 TONE_RATE = 16000
 TONE_HZ = 440.0
 
@@ -288,6 +289,25 @@ class TranscriptionTest(unittest.TestCase):
             activity = json.loads(engine.voice_activity(request, tone_wav()))
             self.assertEqual(len(activity["segments"]), 1)
             self.assertEqual(len(activity["probabilities"]), TONE_RATE // 512 + 1)
+
+    def test_diarization_names_who_speaks(self):
+        model = os.environ.get(MODEL_VARIABLE)
+        if not model:
+            self.skipTest(f"{MODEL_VARIABLE} is not set")
+        spec = json.dumps(
+            {
+                "model": {"Diarization": {"model_id": os.path.join(model, DIARIZATION_DIR), "dtype": "f32"}},
+                "runtime": {"device": "cpu"},
+            }
+        )
+        with ir.JsonEngine(spec) as engine:
+            # a zero threshold makes every speaker speak throughout, so each has one segment whatever the weights
+            blob = engine.diarization(json.dumps({"threshold": 0.0}), tone_wav())
+            self.assertEqual(blob.mime_type, "application/json")
+            diarization = json.loads(blob.data)
+            self.assertEqual(len(diarization["segments"]), diarization["num_speakers"])
+            rttm = engine.diarization(json.dumps({"threshold": 0.0, "response_format": "rttm"}), tone_wav())
+            self.assertEqual(len(rttm.data.decode().splitlines()), diarization["num_speakers"])
 
 
 if __name__ == "__main__":

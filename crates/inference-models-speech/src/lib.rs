@@ -7,6 +7,7 @@ use inference_nn::{attention, layers, ops, utils as nn_utils};
 
 mod bs1770;
 mod dia;
+pub mod diarization;
 pub mod kokoro;
 pub mod parakeet;
 pub mod silero;

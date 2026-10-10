@@ -7,6 +7,10 @@ use std::path::Path;
 #[path = "../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
+#[path = "../../inference/tests/support/nemotron3_diarization_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod diarization_support;
+
 #[path = "../../inference/tests/support/silero_tiny.rs"]
 #[allow(clippy::duplicate_mod)]
 mod silero_support;
@@ -18,6 +22,7 @@ mod parakeet_support;
 
 const PARAKEET_DIR: &str = "parakeet";
 const SILERO_DIR: &str = "silero";
+const DIARIZATION_DIR: &str = "diarization";
 
 fn copy_files(from: &Path, to: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(to)?;
@@ -38,6 +43,11 @@ fn main() -> anyhow::Result<()> {
     copy_files(parakeet.path(), &Path::new(&target).join(PARAKEET_DIR))?;
     let silero = silero_support::tiny_silero_gguf(false)?;
     copy_files(silero.path(), &Path::new(&target).join(SILERO_DIR))?;
+    let diarization = diarization_support::tiny_nemotron3_diarization()?;
+    copy_files(
+        diarization.path(),
+        &Path::new(&target).join(DIARIZATION_DIR),
+    )?;
     println!("{target}");
     Ok(())
 }

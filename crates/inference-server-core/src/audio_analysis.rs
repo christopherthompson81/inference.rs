@@ -13,7 +13,7 @@ use serde_json::{Map, Value};
 
 use crate::{
     handler_core::openai_error_response,
-    openai::{TranscriptionRequest, VoiceActivityRequest},
+    openai::{DiarizationRequest, TranscriptionRequest, VoiceActivityRequest},
     types::OwnedEngine,
 };
 
@@ -70,6 +70,10 @@ const VOICE_ACTIVITY_FIELDS: &[(&str, Field)] = &[
     ("max_speech_duration_s", Field::Number),
     ("min_silence_duration_ms", Field::Number),
     ("speech_pad_ms", Field::Number),
+    ("return_probabilities", Field::Flag),
+];
+const DIARIZATION_FIELDS: &[(&str, Field)] = &[
+    ("threshold", Field::Number),
     ("return_probabilities", Field::Flag),
 ];
 const LIST_SUFFIX: &str = "[]";
@@ -214,6 +218,53 @@ pub async fn voice_activity(
         };
     match engine.voice_activity(request, &audio).await {
         Ok(activity) => (StatusCode::OK, axum::Json(activity)).into_response(),
+        Err(error) => openai_error_response(error),
+    }
+}
+
+/// The multipart form `/v1/audio/diarization` takes.
+#[cfg(test)]
+#[derive(utoipa::ToSchema)]
+#[allow(dead_code)]
+pub struct DiarizationForm {
+    /// The audio to diarize: WAV, MP3, FLAC, OGG and the other formats symphonia decodes.
+    #[schema(value_type = String, format = Binary)]
+    file: Vec<u8>,
+    #[schema(inline)]
+    request: DiarizationRequest,
+}
+
+/// Diarization endpoint handler: who speaks when, as JSON segments or RTTM.
+#[cfg_attr(test, utoipa::path(
+    post,
+    tag = "inference.rs",
+    path = "/v1/audio/diarization",
+    request_body(content = inline(DiarizationForm), content_type = "multipart/form-data"),
+    responses((status = 200, description = "Speaker segments", body = crate::openai::DiarizationResponse))
+))]
+pub async fn diarization(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<Multipart, MultipartRejection>,
+) -> Response {
+    let multipart = match multipart_payload(payload) {
+        Ok(multipart) => multipart,
+        Err(error) => return openai_error_response(error),
+    };
+    let (request, audio) =
+        match read_form::<DiarizationRequest>(multipart, DIARIZATION_FIELDS).await {
+            Ok(form) => form,
+            Err(error) => return openai_error_response(error),
+        };
+    match engine.diarization(request, &audio).await {
+        Ok(output) => (
+            StatusCode::OK,
+            [(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static(output.content_type),
+            )],
+            output.body,
+        )
+            .into_response(),
         Err(error) => openai_error_response(error),
     }
 }
