@@ -602,3 +602,11 @@ Phonemizer 65637ee3: the hi/pt/cmn/es/fr fix batch. The data tag was published w
 
 - Bumped the Cargo rev and `DATA_REVISION` together. 37 Kokoro and data tests pass.
 - Live, with the checkout hidden and a fresh cache: the cache's ref is `65637ee3`. ef_dora ("Tengo veintiún libros.") and ff_siwis ("Un fichier de trois kilooctets.") both returned 200.
+
+## Run 26 - 2026-10-09
+
+Phonemizer 224339e8, published with the user's approval. One data file changed: `languages/portuguese/portuguese.jsonc` gains `numbers.dotConnector`, which the new pt code reads, so the rev and the tag must move together.
+- Bumped the Cargo rev and `DATA_REVISION`. 37 Kokoro and data tests pass, and clippy is clean.
+- Live, with the checkout hidden and a fresh cache (ref `224339e8`):
+  - pf_dora on "O padrão 802.11 e a versão 5.0 custam 1.500 reais." returned 200.
+  - ff_siwis on "Mmes et Mlles, bienvenue." returned 200.
