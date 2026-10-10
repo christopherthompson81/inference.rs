@@ -5,15 +5,16 @@ mod config;
 mod decoder;
 mod encoder;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use inference_audio::nemo::{NemoMel, NemoMelConfig};
-use inference_tensor::nn::VarBuilder;
+use inference_tensor::nn::{Linear, Module, VarBuilder, linear};
 use inference_tensor::{DType, Device, Error, Result, Tensor};
 use tokenizers::Tokenizer;
 
 use crate::silero::{SegmentOptions, SileroVad, speech_segments};
-use crate::{TimedText, Transcription};
+use crate::{TimedText, Transcription, TranscriptionOptions};
 pub use config::{EncoderConfig, HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig};
 pub use decoder::Emission;
 use decoder::Head;
@@ -40,9 +41,78 @@ pub struct ParakeetFiles {
     pub weights: Vec<PathBuf>,
 }
 
+// Nemotron-3.5's language conditioning: a one-hot prompt joins each encoder frame, through a two-layer projector
+struct Prompts {
+    linear_1: Linear,
+    linear_2: Linear,
+    slots: usize,
+    default: usize,
+    ids: HashMap<String, usize>,
+    // the tag tokens the model emits for the language it identifies, as `<de-DE>`
+    tags: HashMap<u32, String>,
+}
+
+impl Prompts {
+    fn new(
+        config: &ParakeetConfig,
+        processor: &ProcessorConfig,
+        tokenizer: &Tokenizer,
+        vb: VarBuilder,
+    ) -> Result<Option<Self>> {
+        let (Some(slots), Some(inner), Some(default)) = (
+            config.num_prompts,
+            config.prompt_intermediate_size,
+            config.default_prompt_id,
+        ) else {
+            return Ok(None);
+        };
+        let h = config.encoder_config.hidden_size;
+        Ok(Some(Self {
+            linear_1: linear(h + slots, inner, vb.pp("linear_1"))?,
+            linear_2: linear(inner, h, vb.pp("linear_2"))?,
+            slots,
+            default,
+            ids: processor.prompt_dictionary.clone(),
+            tags: processor
+                .prompt_dictionary
+                .keys()
+                .filter_map(|l| Some((tokenizer.token_to_id(&format!("<{l}>"))?, l.clone())))
+                .collect(),
+        }))
+    }
+
+    fn id(&self, language: Option<&str>) -> Result<usize> {
+        let Some(language) = language else {
+            return Ok(self.default);
+        };
+        self.ids.get(language).copied().ok_or_else(|| {
+            let mut known: Vec<&str> = self.ids.keys().map(String::as_str).collect();
+            known.sort_unstable();
+            msg(format!(
+                "`{language}` is not a language this model takes; it takes {}",
+                known.join(", ")
+            ))
+        })
+    }
+
+    // `(1, T, hidden)` encoder frames, each joined by the language's one-hot
+    fn forward(&self, encoded: &Tensor, id: usize) -> Result<Tensor> {
+        let t = encoded.dim(1)?;
+        let mut one_hot = vec![0f32; self.slots];
+        one_hot[id] = 1.;
+        let one_hot = Tensor::from_vec(one_hot, (1, 1, self.slots), encoded.device())?
+            .to_dtype(encoded.dtype())?
+            .broadcast_as((1, t, self.slots))?;
+        let joined = Tensor::cat(&[encoded, &one_hot], 2)?;
+        self.linear_2
+            .forward(&self.linear_1.forward(&joined)?.relu()?)
+    }
+}
+
 pub struct Parakeet {
     mel: NemoMel,
     encoder: Encoder,
+    prompts: Option<Prompts>,
     head: Head,
     tokenizer: Tokenizer,
     kind: HeadKind,
@@ -102,12 +172,14 @@ impl Parakeet {
             hop_length: fe.hop_length,
             n_mels: fe.feature_size,
             preemphasis: fe.preemphasis,
-            normalize: true,
+            // streaming checkpoints see each chunk's raw log-mel, so offline ones normalize alone
+            normalize: !enc.is_streaming(),
         });
         let frame_seconds =
             (fe.hop_length * enc.subsampling_factor) as f64 / f64::from(fe.sampling_rate);
         Ok(Self {
             encoder: Encoder::new(enc, vb.pp("encoder"))?,
+            prompts: Prompts::new(&config, &processor, &tokenizer, vb.pp("prompt_projector"))?,
             head: Head::new(&config, kind, enc.hidden_size, vb.clone())?,
             mel,
             tokenizer,
@@ -127,7 +199,13 @@ impl Parakeet {
     }
 
     /// Transcribes mono `pcm` at `sample_rate`, resampling to the model's rate first.
-    pub fn transcribe(&self, pcm: &[f32], sample_rate: u32) -> Result<Transcription> {
+    pub fn transcribe(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        options: &TranscriptionOptions,
+    ) -> Result<Transcription> {
+        let language = self.language(options)?;
         // checked before resampling, which would copy hours of audio the model then refuses
         let seconds = pcm.len() as f64 / f64::from(sample_rate);
         if seconds > MAX_SECONDS {
@@ -138,7 +216,23 @@ impl Parakeet {
         }
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        self.transcribe_samples(&pcm)
+        self.transcribe_samples(&pcm, language)
+    }
+
+    fn identifies(&self, language: &str) -> bool {
+        self.prompts
+            .as_ref()
+            .is_some_and(|p| p.id(Some(language)).ok() == Some(p.default))
+    }
+
+    // the request's language for a model that takes one, checked before any audio is touched
+    fn language<'a>(&self, options: &'a TranscriptionOptions) -> Result<Option<&'a str>> {
+        let Some(prompts) = &self.prompts else {
+            return Ok(None);
+        };
+        let language = options.language.as_deref();
+        prompts.id(language)?;
+        Ok(language)
     }
 
     /// As `transcribe`, but audio past `LONG_FORM_SECONDS` is cut at the VAD's silences into windows of at most
@@ -148,7 +242,9 @@ impl Parakeet {
         pcm: &[f32],
         sample_rate: u32,
         vad: &SileroVad,
+        options: &TranscriptionOptions,
     ) -> Result<Transcription> {
+        let language = self.language(options)?;
         let rate = self.sample_rate();
         if vad.config().sample_rate != rate {
             return Err(msg(format!(
@@ -159,7 +255,7 @@ impl Parakeet {
         let pcm = inference_audio::mel::resample(pcm, sample_rate, rate).map_err(msg)?;
         let duration = pcm.len() as f64 / f64::from(rate);
         if duration <= LONG_FORM_SECONDS {
-            return self.transcribe_samples(&pcm);
+            return self.transcribe_samples(&pcm, language);
         }
         let options = SegmentOptions {
             max_speech_duration_s: Some(WINDOW_SECONDS),
@@ -179,11 +275,13 @@ impl Parakeet {
             tokens: Vec::new(),
             words: Vec::new(),
             duration,
+            language: None,
         };
         let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
         for (start, end) in widen(&windows(&speech, window_samples), pcm.len(), edge) {
             let offset = start as f64 / f64::from(rate);
-            let part = self.transcribe_samples(&pcm[start..end])?;
+            let part = self.transcribe_samples(&pcm[start..end], language)?;
+            merged.language = merged.language.or(part.language);
             let shift = |t: TimedText| TimedText {
                 start: t.start + offset,
                 end: t.end + offset,
@@ -201,11 +299,22 @@ impl Parakeet {
         Ok(merged)
     }
 
-    fn transcribe_samples(&self, pcm: &[f32]) -> Result<Transcription> {
+    fn transcribe_samples(&self, pcm: &[f32], language: Option<&str>) -> Result<Transcription> {
         let duration = pcm.len() as f64 / f64::from(self.sample_rate());
-        let encoded = self.encode(pcm)?;
+        let encoded = self.encode(pcm, language)?;
         let emissions = self.head.decode(&encoded)?;
-        self.text(&emissions, duration)
+        let mut transcription = self.text(&emissions, duration)?;
+        let identified = self.prompts.as_ref().and_then(|prompts| {
+            emissions
+                .iter()
+                .find_map(|e| prompts.tags.get(&e.token).cloned())
+        });
+        // a model left to its default prompt (`auto`) reports the language it identified, not the prompt's name
+        transcription.language = match language {
+            Some(l) if !self.identifies(l) => Some(l.to_string()),
+            _ => identified,
+        };
+        Ok(transcription)
     }
 
     /// `(frames, mels)` row-major log-mel features of mono `pcm` at the model's rate, and the frame count.
@@ -213,13 +322,18 @@ impl Parakeet {
         self.mel.features(pcm).map_err(msg)
     }
 
-    /// `(1, frames, hidden)` encoder output for mono `pcm` at the model's rate.
-    pub fn encode(&self, pcm: &[f32]) -> Result<Tensor> {
+    /// `(1, frames, hidden)` encoder output for mono `pcm` at the model's rate, conditioned on the language for a
+    /// model that takes one (`None` lets it identify the language).
+    pub fn encode(&self, pcm: &[f32], language: Option<&str>) -> Result<Tensor> {
         let (features, frames) = self.features(pcm)?;
         let n_mels = self.mel.config().n_mels;
         let features =
             Tensor::from_vec(features, (1, frames, n_mels), &self.device)?.to_dtype(self.dtype)?;
-        self.encoder.forward(&features)
+        let encoded = self.encoder.forward(&features)?;
+        match &self.prompts {
+            Some(prompts) => prompts.forward(&encoded, prompts.id(language)?),
+            None => Ok(encoded),
+        }
     }
 
     /// Token ids and their frames, before detokenisation.
@@ -258,6 +372,7 @@ impl Parakeet {
             text: text.trim().to_string(),
             tokens,
             duration,
+            language: None,
         })
     }
 }

@@ -101,7 +101,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 
 | Architecture | Model families | Example |
 |---|---|---|
-| `Parakeet` | Parakeet (CTC, RNN-T, TDT) | <details><summary><code>nvidia/parakeet-tdt-0.6b-v3</code></summary><code>inference run -m nvidia/parakeet-tdt-0.6b-v3</code></details> |
+| `Parakeet` | Parakeet (CTC, RNN-T, TDT), Nemotron streaming ASR (English, and 3.5 multilingual) | <details><summary><code>nvidia/parakeet-tdt-0.6b-v3</code>, <code>nvidia/nemotron-speech-streaming-en-0.6b</code>, <code>nvidia/nemotron-3.5-asr-streaming-0.6b</code></summary><code>inference run -m nvidia/parakeet-tdt-0.6b-v3</code><br><code>inference run -m nvidia/nemotron-speech-streaming-en-0.6b</code><br><code>inference run -m nvidia/nemotron-3.5-asr-streaming-0.6b</code></details> |
 
 ## Diarization
 

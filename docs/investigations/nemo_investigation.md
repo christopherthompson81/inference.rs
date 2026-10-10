@@ -453,3 +453,77 @@ Review found no streaming-math defects. Fixed:
 Not taken: opening the torch zip once per load instead of once per tensor. `ZipArchive` clones only over a `Clone` reader, and loading the 990 tensors already takes well under a second next to inference.
 
 CUDA parity after the fixes is identical to Run 13 (2.43e-5 max, all 503 segments exact).
+
+## Run 16 - 2026-10-10
+
+**Nemotron streaming ASR: what is on disk.**
+
+Remaining #391 scope: the cache-aware streaming Nemotron ASR; Parakeet from `.nemo`, including the hybrid TDT/CTC (`nvidia/stt_en_fastconformer_hybrid_large_pc`, only its refs dir is cached); GGUF where converters write it; beam search.
+
+The local GGUF, `nemotron-3.5-asr-streaming-0.6b-q8_0.gguf` (931 MB), was read with `gguf-py`'s `GGUFReader`:
+- Written by audio.cpp, not llama.cpp: `general.architecture = audiocpp`, `audiocpp.model_spec.family = nemotron_asr`.
+- It embeds `config.json`, `processor_config.json` and `tokenizer.json`, and keeps transformers' tensor names (`audiocpp.tensor_name_format = native`).
+- 655 tensors:
+  - Q8_0: the large linears;
+  - F16: the 13088-token embedding;
+  - F32: norms, convs and the LSTM.
+- Layout against Parakeet:
+  - `encoder.subsampling.conv_in` plus `layers.N.{depthwise,pointwise}_conv`, where Parakeet has `layers.N` indices;
+  - the subsampling linear takes 4352 = 256 x 17 inputs, which suggests causal padding over 128 mels (128 -> 65 -> 33 -> 17);
+  - a `prompt_projector` (1152 -> 2048 -> 1024) that Parakeet lacks;
+  - the decoder and joint are the RNN-T shape Parakeet has, with 2 LSTM layers.
+
+Next: map transformers' `nemotron_asr_streaming` and `nemotron3_5_asr` against our Parakeet port; that comparison is running.
+
+## Run 17 - 2026-10-10
+
+**Nemotron streaming ASR, offline, parity against transformers.**
+
+Checkpoints (HF, transformers layout, F32):
+- `nvidia/nemotron-speech-streaming-en-0.6b`: `nemotron_asr_streaming`, vocab 1025, window 71, lookahead 13.
+- `nvidia/nemotron-3.5-asr-streaming-0.6b`: `nemotron3_5_asr`, vocab 13088, window 57, lookahead 3, and 128 language prompts.
+
+Both use a `nemotron_asr_streaming_encoder`: 24 layers, d1024, 128 mels, no biases, no xscaling. NVIDIA's repos also ship a `.nemo` and a q8_0 GGUF. That GGUF (`general.architecture = asr`) uses NeMo tensor names and the NeMo config as `asr.*` metadata, unlike audio.cpp's `audiocpp` GGUF from Run 16.
+
+Encoder against Parakeet's:
+- **Causal subsampling:** convs padded `(k-1, s-1)` in time and frequency (128 -> 65 -> 33 -> 17 bins); names `conv_in` and `layers.N.{depthwise,pointwise}_conv`.
+- **Causal depthwise conv:** padded `k-1` on the left only, followed by a LayerNorm in place of the folded BatchNorm.
+- **Chunked-limited attention:** chunk = lookahead + 1, and a query sees its own chunk plus `left // chunk` chunks behind.
+- **Attention over a block plan:** each 512-row query block reads only its key window, the rel-shift sliced as `T - b + c`, with an additive mask. Full attention is the same plan with every key and no mask. That makes attention linear in length for these models.
+- **The mel is not normalized.**
+
+Nemotron-3.5 joins a one-hot language prompt (128 slots) to every encoder frame, through `prompt_projector` (linear, ReLU, linear), before the encoder projector:
+- The request's `language` maps through `processor_config.json`'s `prompt_dictionary`; a language outside it is refused per request.
+- With no language, the model emits a `<xx-XX>` tag (an added special token, stripped from the text), which is reported as the transcript's language.
+
+`scripts/parakeet_parity.sh` gains both classes. For 3.5 it compares the prompt-fused encoder output under the auto prompt. Results, CPU and CUDA:
+
+| model | clips | features / encoder cos | emissions | text |
+|---|---|---|---|---|
+| en-0.6b | 3 LibriSpeech, 97.6 s meeting, 7 s synthetic Spanish | 1.000000 / 1.000000 | 694/694 (CPU), 731/731 (CUDA) | all match |
+| 3.5-0.6b | 2-3 LibriSpeech, synthetic Spanish and French, meeting | 1.000000 / 1.000000 | 953/953 (CPU), 892/892 (CUDA) | all match |
+| parakeet-tdt-0.6b-v3 (regression) | the 4 CUDA clips | 1.000000 / 1.000000 | 695/695 | all match |
+
+In auto mode, 3.5 identifies the synthetic clips as `es-ES`, `fr-FR` and `en-US` (the last is British-voiced English).
+
+Speed: the 97.6 s clip takes about 2.0 s on CUDA, about 16 s (en) and 21 s (3.5) on CPU in a dev build.
+
+Tests:
+- The tiny Parakeet set gains both streaming variants (window 5, chunk 2) across every format and the repeat test.
+- A 3.5 language test: the named language is reported, it changes the transcript, and an unknown one is refused.
+- A unit test pins the query-block windows and masks, including a block past the first.
+
+Left for the next PR:
+- true chunked streaming (K/V and conv caches, an incremental API);
+- `.nemo` and NVIDIA `asr` GGUF loading for the whole family;
+- the hybrid TDT/CTC checkpoint;
+- beam search.
+
+## Run 18 - 2026-10-10
+
+**Review fixes.**
+- **The 24-minute cap stays for streaming models.** Attention is linear now, but the causal subsampling's first stage alone holds a `(1, 256, T_mel/2, 65)` activation: about 12 GB per hour in F32. A 64 MiB compressed upload holds hours of audio, so uncapped it could take a CPU server out through the OOM killer. Longer audio goes through the VAD long-form path, as for Parakeet.
+- **`language: auto`** (the 3.5 default prompt) is identify mode: the response reports the identified tag, not "auto".
+- **A streaming encoder config without `sliding_window` or `default_num_lookahead_tokens` is an error.** It used to fall back silently to full attention over causal convs.
+- **Unit test:** an unaligned case, a chunk of 3 that neither the 512-row block nor the 5-frame left context divides. The real English model's chunk of 14 does not divide 512 either.
+- **Follow-up, not done:** a chunked encoder reads only offsets within about +/-(512 + left + chunk), yet the full `(2T - 1, hidden)` position table is still projected in every layer.

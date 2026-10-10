@@ -62,6 +62,7 @@ pub enum RequestMessage {
     Transcription {
         #[serde(skip)]
         audio: AudioInput,
+        options: inference_models_speech::TranscriptionOptions,
     },
     VoiceActivity {
         #[serde(skip)]

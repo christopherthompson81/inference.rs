@@ -17,7 +17,7 @@ pub mod utils;
 mod weight_norm;
 
 pub use dia::{DiaConfig, DiaPipeline};
-pub use transcript::{TimedText, Transcription};
+pub use transcript::{TimedText, Transcription, TranscriptionOptions};
 
 #[derive(Clone, Copy, Debug)]
 pub enum SpeechGenerationConfig {
