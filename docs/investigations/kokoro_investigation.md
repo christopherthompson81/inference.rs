@@ -540,3 +540,65 @@ French (#1474) and a formatting pass (#1475) close out the phonemizer's Kokoro l
   - English is unaffected.
   - Applied: a clearer comment, the re-wrapped guide paragraph, and dropped the `input.0 >= text.len()` guard in `group_source_words`, which the span guarantee rules out.
   - Noted, not changed: within an all-Han run, two count errors that cancel out (erhua plus a two-syllable character) would pass the count check. C# shares this.
+
+## Run 22 - 2026-10-09
+
+How binaries get the phonemizer data. The user chose an HF repo, downloaded lazily, with `VERNACULA_DATA_DIR` as the override.
+
+- **Data size:** `data/` is 149 MB (62 MB gzipped) over about 60 languages. Kokoro's nine take about 33 MB: English 17, Japanese 8.9, French 4.8, Mandarin 1.7 MB, and under 100 KB each for es, it, pt, hi and en-GB. `core/` adds 15 MB.
+- **Seam:** the crate reads every file through `core::data_source::DataSource::read(key)`, which can be replaced with `set_data_source`. Its default is `VERNACULA_DATA_DIR`, else the `data/` beside its own checkout (`CARGO_MANIFEST_DIR`, so it exists on a build machine only).
+- **Implementation:** `pipeline/phonemizer_data.rs` (`HubData`).
+  - It lists the repo once, then fetches each key with `hf::get_file` at `DATA_REVISION`. Keys outside the listing are answered as missing without a request, since the phonemizer probes optional files.
+  - It is installed at Kokoro load only when `resolve_data_root()` finds nothing, so dev checkouts and tests never touch the network.
+  - `KokoroTts::prepare_text_input` loads the default voice's language at load. A failure only warns, because `phonemes` requests don't need the data.
+  - `DATA_REVISION` must equal the Cargo `rev`; a unit test reads the manifest to check.
+- **End to end with the release binary path:** the cargo checkout was hidden (renamed) for the run so the binary couldn't fall back to it, and restored after.
+  - **Fake offline cache** (`HF_HUB_OFFLINE=1`, a snapshot of `data/` tagged `5acc6b73`): af_heart and jf_alpha text requests both returned 200, with no warnings.
+  - **Empty offline cache:**
+    - Load warns: "Kokoro's text input is unavailable until its data loads: ... data key `languages/english/english.jsonc` not readable: christopherthompson81/vernacula-phonemizer-data@5acc6b73: `HF_HUB_OFFLINE` is set...".
+    - A text request returns that message as a 400.
+    - A `phonemes` request returns 200.
+- **Blocked on publishing:** the HF repo does not exist yet. The phonemizer session will add a publish script, and the upload waits on the user's approval. Merging this before the repo exists would leave release binaries without text input until it does.
+
+## Run 23 - 2026-10-09
+
+The data repo went live: `christopherthompson81/vernacula-phonemizer-data`, tag `03fa865d`. 375 files, 154 MB, public.
+
+- The user chose to publish at the merge commit of the publish-script PR rather than 5acc6b73, whose NOTICE.md had a wrong licence link. The crate at 03fa865d equals b6629d83 (it and ja fixes) plus the script.
+- Pinned the Cargo rev and `DATA_REVISION` to `03fa865d`. 37 Kokoro and data tests pass.
+- **Live end to end:** the cargo checkout was hidden for the run (and restored), with a fresh empty `HF_HUB_CACHE`, online.
+  - Server ready in 16 s, including English fetched at load.
+  - af_heart, jf_alpha and ff_siwis on mixed French, English and Japanese text all returned 200, taking 14.7, 6.4 and 10.4 s.
+  - Most likely the kana in the sentence pulled Japanese into the first request (not confirmed).
+  - Downloaded 30 MB: 10 English, 5 French and 5 Japanese files. Nothing else was fetched.
+- **Unrelated flake:** in the full CUDA run, `tool_loop::every_call_of_a_round_runs_at_once` failed: "the calls ran one at a time, left 1, right 2". The test took 21.8 s under load, against 4 s alone, and passed 3 of 3 alone.
+  - Cause: the test relied on a 300 ms sleep for two tool calls to overlap.
+  - Fix: each call now waits until the round's others have started, with a per-test deadline: 10 s where the test asserts overlap (used up only on failure), 300 ms for the one-at-a-time test (which still catches calls wrongly run together), none elsewhere.
+  - The file runs in 2 to 4 s per test, as before.
+
+## Run 24 - 2026-10-09
+
+Review of the Hub data source. Two high findings, both fixed.
+
+- **A failed listing was cached for the process.** It sat in a `OnceLock<Result<..>>`, so a network blip at load broke text input until restart; the phonemizer's own contract is that failures are retried. Now only a successful listing is kept.
+- **A first request in a language not prefetched downloaded inside validation.** That ran in `admit_request`, holding the pipeline lock, on a runtime worker. Validation now does no I/O: `g2p::supported` only checks `LANGUAGES`.
+  - The data load is a new `Pipeline::speech_preparation`, a closure taken under the lock. The engine's `add_request` runs it with `spawn_blocking`, lock released, before admission. A failure is still a 400 with the phonemizer's message.
+- **Others fixed:**
+  - `install` failing (for example, an uncreatable cache directory) no longer fails the Kokoro load; it warns, as the prefetch does.
+  - A doc comment had been displaced onto the wrong function.
+  - `INSTALLED.set(())`.
+  - A redundant field comment in the tool-loop test.
+- **Noted, not changed:**
+  - The prefetch warms the language's tables, not the English/French neural tagger, which still loads on the first real request. If that download fails, the phonemizer falls back to the non-neural reading.
+  - `install` replaces a `DataSource` an embedder set directly, when there is no `VERNACULA_DATA_DIR`; the crate offers no getter to detect one.
+  - `list_repo_files` takes a local-directory branch if the working directory happens to contain the repo id as a path.
+- **End to end again**, checkout hidden:
+  - Live, fresh cache: af_heart 200 (6.1 s); first zf_xiaobei 200 (4.2 s, Mandarin downloaded in preparation); second 200 (1.7 s).
+  - Offline, empty cache: text gives a 400 in 8 ms with the data message; `phonemes` gives 200.
+
+## Run 25 - 2026-10-09
+
+Phonemizer 65637ee3: the hi/pt/cmn/es/fr fix batch. The data tag was published with the user's approval; only `languages/french/supplement.tsv` and `languages/spanish/spanish.jsonc` differ from 03fa865d.
+
+- Bumped the Cargo rev and `DATA_REVISION` together. 37 Kokoro and data tests pass.
+- Live, with the checkout hidden and a fresh cache: the cache's ref is `65637ee3`. ef_dora ("Tengo veintiún libros.") and ff_siwis ("Un fichier de trois kilooctets.") both returned 200.

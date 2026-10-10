@@ -4,9 +4,16 @@
 
 use inference_tensor::{Error, Result, bail};
 use unicode_normalization::UnicodeNormalization;
+pub use vernacula_phonemizer::core::data_source::{
+    DataError, DataSource, resolve_data_root, set_data_source,
+};
 use vernacula_phonemizer::core::trace::Trace;
 
 const DATA_ENV: &str = "VERNACULA_DATA_DIR";
+/// The Hugging Face repo holding the phonemizer's `data/` tree, laid out so a data key is a repo path.
+pub const DATA_REPO: &str = "christopherthompson81/vernacula-phonemizer-data";
+/// The data's tag, which is the phonemizer commit this crate is pinned to; the two must move together.
+pub const DATA_REVISION: &str = "65637ee3";
 // Kokoro's voice prefixes (its lang_code) and the phonemizer's codes for the same languages
 const VOICE_LANGUAGES: [(char, &str); 9] = [
     ('a', "en"),
@@ -115,14 +122,20 @@ pub fn voice_language(voice: &str) -> Result<&'static str> {
     }
 }
 
-/// Whether the phonemizer reads `lang` yet, and can find its data.
-pub fn readable(lang: &str) -> Result<()> {
+/// Whether the phonemizer reads `lang`, without loading anything.
+pub fn supported(lang: &str) -> Result<()> {
     if !vernacula_phonemizer::LANGUAGES.contains(&lang) {
         bail!(
             "the phonemizer reads {} so far, not `{lang}`; pass `phonemes`",
             vernacula_phonemizer::LANGUAGES.join(", ")
         )
     }
+    Ok(())
+}
+
+/// Whether the phonemizer reads `lang` and can load its data.
+pub fn readable(lang: &str) -> Result<()> {
+    supported(lang)?;
     // the engine is built once per process, so this pays the data load on the first request only
     vernacula_phonemizer::phonemize("", lang)
         .map(|_| ())
@@ -133,9 +146,9 @@ fn phonemizer_error(e: vernacula_phonemizer::PhonemizeError) -> Error {
     use vernacula_phonemizer::PhonemizeError::*;
     Error::Msg(match e {
         UnknownLanguage(code) => format!("the phonemizer has no `{code}`; pass `phonemes`"),
-        Data(why) => {
-            format!("Kokoro's text input needs vernacula-phonemizer's data ({DATA_ENV}): {why}")
-        }
+        Data(why) => format!(
+            "Kokoro's text input needs vernacula-phonemizer's data ({DATA_REPO}, or {DATA_ENV}): {why}"
+        ),
         Neural(why) => format!("the phonemizer's neural reader failed: {why}"),
         Input(why) => format!("the phonemizer cannot read this input: {why}"),
     })
@@ -1019,6 +1032,15 @@ mod tests {
         assert!(
             map.windows(2).all(|w| w[0] <= w[1]) && map.last() > Some(&0),
             "{map:?}"
+        );
+    }
+
+    #[test]
+    fn data_revision_is_the_pinned_phonemizer_commit() {
+        let manifest = include_str!("../../Cargo.toml");
+        assert!(
+            manifest.contains(&format!("rev = \"{DATA_REVISION}\"")),
+            "Cargo.toml's vernacula-phonemizer rev and DATA_REVISION differ"
         );
     }
 }
