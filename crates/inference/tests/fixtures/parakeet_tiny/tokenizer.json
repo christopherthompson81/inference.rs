@@ -1,0 +1,93 @@
+{
+ "version": "1.0",
+ "truncation": null,
+ "padding": null,
+ "added_tokens": [
+  {
+   "id": 0,
+   "content": "<unk>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 1,
+   "content": "<pad>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  },
+  {
+   "id": 32,
+   "content": "<blank>",
+   "single_word": false,
+   "lstrip": false,
+   "rstrip": false,
+   "normalized": false,
+   "special": true
+  }
+ ],
+ "normalizer": null,
+ "pre_tokenizer": {
+  "type": "Metaspace",
+  "replacement": "▁",
+  "prepend_scheme": "always",
+  "split": true
+ },
+ "post_processor": null,
+ "decoder": {
+  "type": "Metaspace",
+  "replacement": "▁",
+  "prepend_scheme": "always",
+  "split": true
+ },
+ "model": {
+  "type": "BPE",
+  "dropout": null,
+  "unk_token": "<unk>",
+  "continuing_subword_prefix": null,
+  "end_of_word_suffix": null,
+  "fuse_unk": true,
+  "byte_fallback": false,
+  "ignore_merges": false,
+  "vocab": {
+   "<unk>": 0,
+   "<pad>": 1,
+   "▁the": 2,
+   "▁a": 3,
+   "▁cat": 4,
+   "▁sat": 5,
+   "▁on": 6,
+   "▁mat": 7,
+   "s": 8,
+   "ed": 9,
+   "ing": 10,
+   ",": 11,
+   ".": 12,
+   "?": 13,
+   "▁I": 14,
+   "▁you": 15,
+   "t": 16,
+   "e": 17,
+   "▁h": 18,
+   "o": 19,
+   "▁w": 20,
+   "r": 21,
+   "l": 22,
+   "d": 23,
+   "n": 24,
+   "▁g": 25,
+   "▁b": 26,
+   "▁c": 27,
+   "▁m": 28,
+   "▁p": 29,
+   "▁s": 30,
+   "▁f": 31
+  },
+  "merges": []
+ }
+}

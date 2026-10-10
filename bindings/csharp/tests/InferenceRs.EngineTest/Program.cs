@@ -19,6 +19,11 @@ internal static class Program
     private static readonly TimeSpan PollTimeout = TimeSpan.FromSeconds(60);
     private const string ImageFixture = "crates/inference/tests/fixtures/paddleocr_vl/page_00.png";
 
+    // the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
+    private const string ParakeetDir = "parakeet";
+    private const int ToneRate = 16000;
+    private const double ToneHz = 440.0;
+
     private static int failures;
 
     private static int Main()
@@ -49,6 +54,7 @@ internal static class Program
         ModelsAreManagedAtRuntime(model);
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
+        AudioTranscribes(Path.Combine(model, ParakeetDir));
 
         Console.WriteLine(failures == 0 ? "all engine checks passed" : $"{failures} engine checks failed");
         return failures == 0 ? 0 : 1;
@@ -386,6 +392,50 @@ internal static class Program
         bad.Tools.Add(new HostTool("not json", call => ""));
         var refused = Throws(() => InferenceEngine.Load(Spec(model), bad));
         Check("a malformed tool definition is InvalidArgument", refused?.Status == InferenceStatus.InvalidArgument);
+    }
+
+    private static byte[] ToneWav()
+    {
+        using var buffer = new MemoryStream();
+        using var writer = new BinaryWriter(buffer);
+        var samples = ToneRate;
+        writer.Write("RIFF"u8.ToArray());
+        writer.Write(36 + samples * 2);
+        writer.Write("WAVEfmt "u8.ToArray());
+        writer.Write(16);
+        writer.Write((short)1);
+        writer.Write((short)1);
+        writer.Write(ToneRate);
+        writer.Write(ToneRate * 2);
+        writer.Write((short)2);
+        writer.Write((short)16);
+        writer.Write("data"u8.ToArray());
+        writer.Write(samples * 2);
+        for (var i = 0; i < samples; i++)
+        {
+            writer.Write((short)(0.3 * short.MaxValue * Math.Sin(2 * Math.PI * ToneHz * i / ToneRate)));
+        }
+        writer.Flush();
+        return buffer.ToArray();
+    }
+
+    private static void AudioTranscribes(string parakeet)
+    {
+        var spec = new JsonObject
+        {
+            ["model"] = new JsonObject { ["Transcription"] = new JsonObject { ["model_id"] = parakeet, ["dtype"] = "f32" } },
+            ["runtime"] = new JsonObject { ["device"] = "cpu" },
+        }.ToJsonString();
+        using var engine = InferenceEngine.Load(spec);
+        var verbose = engine.Transcription("""{"response_format": "verbose_json", "timestamp_granularities": ["word"]}""", ToneWav());
+        Check("a verbose transcript is JSON", verbose.MimeType == "application/json");
+        var parsed = JsonNode.Parse(verbose.Data)!;
+        Check("a verbose transcript carries its words", parsed["words"] is JsonArray);
+        var text = engine.Transcription("""{"response_format": "text"}""", ToneWav());
+        Check("the text transcript is the verbose one's text",
+            System.Text.Encoding.UTF8.GetString(text.Data) == (string?)parsed["text"]);
+        var bad = Throws(() => engine.Transcription("{}", "not audio"u8.ToArray()));
+        Check("audio that does not decode is InvalidRequest", bad?.Status == InferenceStatus.InvalidRequest);
     }
 
     private static InferenceException? Throws(Action action)

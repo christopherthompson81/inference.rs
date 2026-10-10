@@ -42,6 +42,7 @@ inference-quant.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 tempfile.workspace = true
+tokenizers.workspace = true
 
 [package.metadata.docs.rs]
 no-default-features = true

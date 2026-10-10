@@ -1358,7 +1358,8 @@ pub enum ModelCategory {
     Multimodal,
     /// Image generation
     Diffusion,
-    Audio,
+    /// Speech recognition
+    Transcription,
     /// Speech synthesis
     Speech,
     Embedding,
@@ -1944,6 +1945,166 @@ impl SpeechGenerationRequest {
             response_format,
         }
     }
+}
+
+/// What a transcription answers with: OpenAI's formats.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TranscriptionResponseFormat {
+    /// `{"text": ...}`
+    #[default]
+    Json,
+    /// The transcript alone, as plain text.
+    Text,
+    Srt,
+    /// The transcript with its duration, segments and (when asked) words, each timed.
+    VerboseJson,
+    Vtt,
+}
+
+impl TranscriptionResponseFormat {
+    pub fn content_type(self) -> &'static str {
+        match self {
+            Self::Json | Self::VerboseJson => "application/json",
+            Self::Text => "text/plain; charset=utf-8",
+            Self::Srt => "application/x-subrip; charset=utf-8",
+            Self::Vtt => "text/vtt; charset=utf-8",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum TimestampGranularity {
+    Word,
+    Segment,
+}
+
+/// Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct TranscriptionRequest {
+    /// The speech recognition model to use.
+    #[schema(example = "nvidia/parakeet-tdt-0.6b-v3")]
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// The audio's language. Parakeet identifies the language itself and ignores it.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// Text to steer the transcript; Parakeet ignores it.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    #[serde(default)]
+    pub response_format: TranscriptionResponseFormat,
+    /// Parakeet decodes greedily and ignores it.
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    /// Timestamps `verbose_json` carries; segments are always given, words only when asked for.
+    #[serde(default)]
+    pub timestamp_granularities: Vec<TimestampGranularity>,
+}
+
+impl TranscriptionRequest {
+    /// A request for the default model's transcript in `response_format`.
+    pub fn new(response_format: TranscriptionResponseFormat) -> Self {
+        Self {
+            model: default_model(),
+            language: None,
+            prompt: None,
+            response_format,
+            temperature: None,
+            timestamp_granularities: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct TranscriptionResponse {
+    pub text: String,
+}
+
+/// A timed word of a transcript, in seconds from the start of the audio.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct TranscriptionWord {
+    pub word: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// A timed span of a transcript, about a sentence.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct TranscriptionSegment {
+    pub id: usize,
+    pub start: f64,
+    pub end: f64,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct VerboseTranscriptionResponse {
+    /// Always `transcribe`.
+    pub task: String,
+    /// The request's `language`, echoed; the model reports none.
+    pub language: Option<String>,
+    /// Seconds of audio.
+    pub duration: f64,
+    pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub words: Option<Vec<TranscriptionWord>>,
+    pub segments: Vec<TranscriptionSegment>,
+}
+
+/// A transcript rendered in its requested format.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TranscriptionOutput {
+    pub body: String,
+    pub content_type: &'static str,
+}
+
+// SubRip's `HH:MM:SS,mmm`, or WebVTT's with a full stop
+fn subtitle_time(seconds: f64, separator: char) -> String {
+    let millis = (seconds.max(0.0) * 1000.0).round() as u64;
+    let (h, m, s, ms) = (
+        millis / 3_600_000,
+        millis / 60_000 % 60,
+        millis / 1000 % 60,
+        millis % 1000,
+    );
+    format!("{h:02}:{m:02}:{s:02}{separator}{ms:03}")
+}
+
+/// Segments as SubRip subtitles.
+pub fn transcript_srt(segments: &[TranscriptionSegment]) -> String {
+    segments
+        .iter()
+        .enumerate()
+        .map(|(i, s)| {
+            format!(
+                "{}\n{} --> {}\n{}\n",
+                i + 1,
+                subtitle_time(s.start, ','),
+                subtitle_time(s.end, ','),
+                s.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Segments as WebVTT subtitles.
+pub fn transcript_vtt(segments: &[TranscriptionSegment]) -> String {
+    let cues = segments
+        .iter()
+        .map(|s| {
+            format!(
+                "{} --> {}\n{}\n",
+                subtitle_time(s.start, '.'),
+                subtitle_time(s.end, '.'),
+                s.text
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("WEBVTT\n\n{cues}")
 }
 
 /// Helper type for messages field in ResponsesCreateRequest
@@ -2816,5 +2977,31 @@ mod tests {
             serde_json::from_value(json!([{ "type": "web_search" }])).unwrap();
 
         assert!(normalize_chat_completion_tools(Some(tools), None).is_err());
+    }
+
+    #[test]
+    fn subtitles_time_their_segments_in_each_format() {
+        let segments = [
+            super::TranscriptionSegment {
+                id: 0,
+                start: 0.32,
+                end: 3_725.5,
+                text: "Well, I don't.".into(),
+            },
+            super::TranscriptionSegment {
+                id: 1,
+                start: 3_726.0,
+                end: 3_727.04,
+                text: "It is.".into(),
+            },
+        ];
+        assert_eq!(
+            super::transcript_srt(&segments),
+            "1\n00:00:00,320 --> 01:02:05,500\nWell, I don't.\n\n2\n01:02:06,000 --> 01:02:07,040\nIt is.\n"
+        );
+        assert_eq!(
+            super::transcript_vtt(&segments),
+            "WEBVTT\n\n00:00:00.320 --> 01:02:05.500\nWell, I don't.\n\n01:02:06.000 --> 01:02:07.040\nIt is.\n"
+        );
     }
 }

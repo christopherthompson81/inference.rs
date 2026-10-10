@@ -47,11 +47,12 @@ use crate::{
         MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE,
         RE_ISQ_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE,
         ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
-        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
-        UNLOAD_MODEL_ROUTE,
+        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE,
+        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
+    transcription::transcription,
 };
 use inference_api::Engine;
 
@@ -349,6 +350,7 @@ fn init_router(
             get(get_container_file_content),
         )
         .route(SPEECH_GENERATION_ROUTE.path, post(speech_generation))
+        .route(TRANSCRIPTION_ROUTE.path, post(transcription))
         .route(AGENT_APPROVAL_ROUTE.path, post(resolve_agent_approval))
         .route(RESPONSES_ROUTE.path, post(create_response))
         .route(SKILLS_ROUTE.path, get(list_skills).post(upload_skill))

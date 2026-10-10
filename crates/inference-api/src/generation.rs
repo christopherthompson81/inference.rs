@@ -2,8 +2,9 @@
 
 use futures::future::BoxFuture;
 use inference_core::{
-    DiffusionGenerationParams, ImageChoice, ImageGenerationResponse, ImageGenerationResponseFormat,
-    InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams, SpeechOptions,
+    AudioInput, DiffusionGenerationParams, ImageChoice, ImageGenerationResponse,
+    ImageGenerationResponseFormat, InferenceRs, NormalRequest, Request, RequestMessage, Response,
+    SamplingParams, SpeechOptions, TimedText, Transcription,
     speech_utils::{self, Sample},
 };
 
@@ -14,10 +15,22 @@ use crate::{
     dispatch::{base_process_non_streaming_response, create_response_channel, send_request},
     files::store_generated_image,
     lora_routing::DEFAULT_MODEL_ID,
-    openai::{AudioResponseFormat, ImageGenerationRequest, SpeechGenerationRequest},
+    openai::{
+        AudioResponseFormat, ImageGenerationRequest, SpeechGenerationRequest, TimestampGranularity,
+        TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
+        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
+        VerboseTranscriptionResponse, transcript_srt, transcript_vtt,
+    },
     types::SharedInferenceRsState,
     util::validate_model_name,
 };
+
+const TRANSCRIBE_TASK: &str = "transcribe";
+const SENTENCE_ENDS: [char; 4] = ['.', '?', '!', '\u{3002}'];
+// a silence this long starts a new subtitle even mid-sentence
+const SEGMENT_PAUSE_SECONDS: f64 = 1.5;
+// unpunctuated transcripts (the English CTC and RNN-T checkpoints) still break into subtitle-sized segments
+const MAX_SEGMENT_SECONDS: f64 = 30.0;
 
 // Speech models emit f32 samples; PCM output is signed 16-bit little-endian.
 const PCM_SAMPLE_FORMAT: &str = "s16le";
@@ -205,6 +218,115 @@ async fn generate_speech_inner(
     }
 }
 
+/// Transcribes encoded `audio` (WAV, MP3, FLAC, ...) with a speech recognition model, in the request's format.
+pub(crate) fn transcribe<'a>(
+    state: &'a SharedInferenceRsState,
+    request: TranscriptionRequest,
+    audio: &'a [u8],
+) -> BoxFuture<'a, Result<TranscriptionOutput, ApiError>> {
+    Box::pin(transcribe_inner(state, request, audio))
+}
+
+async fn transcribe_inner(
+    state: &SharedInferenceRsState,
+    request: TranscriptionRequest,
+    audio: &[u8],
+) -> Result<TranscriptionOutput, ApiError> {
+    let audio = AudioInput::from_bytes(audio).map_err(|e| {
+        ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("The audio could not be decoded: {e}"),
+            Some("invalid_audio"),
+            Some("file"),
+        )
+    })?;
+    let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    match run(
+        state,
+        &request.model,
+        repr,
+        RequestMessage::Transcription { audio },
+    )
+    .await?
+    {
+        Response::Transcription(transcript) => render_transcript(&request, transcript),
+        _ => Err(unexpected(state)),
+    }
+}
+
+fn render_transcript(
+    request: &TranscriptionRequest,
+    transcript: Transcription,
+) -> Result<TranscriptionOutput, ApiError> {
+    let format = request.response_format;
+    let segments = transcript_segments(&transcript.words);
+    let body = match format {
+        TranscriptionResponseFormat::Json => serde_json::to_string(&TranscriptionResponse {
+            text: transcript.text,
+        })
+        .map_err(|_| ApiError::internal())?,
+        TranscriptionResponseFormat::Text => transcript.text,
+        TranscriptionResponseFormat::Srt => transcript_srt(&segments),
+        TranscriptionResponseFormat::Vtt => transcript_vtt(&segments),
+        TranscriptionResponseFormat::VerboseJson => {
+            let words = request
+                .timestamp_granularities
+                .contains(&TimestampGranularity::Word)
+                .then(|| {
+                    transcript
+                        .words
+                        .iter()
+                        .map(|w| TranscriptionWord {
+                            word: w.text.clone(),
+                            start: w.start,
+                            end: w.end,
+                        })
+                        .collect()
+                });
+            serde_json::to_string(&VerboseTranscriptionResponse {
+                task: TRANSCRIBE_TASK.to_string(),
+                // the model reports none, so a language the client named is echoed back
+                language: request.language.clone(),
+                duration: transcript.duration,
+                text: transcript.text,
+                words,
+                segments,
+            })
+            .map_err(|_| ApiError::internal())?
+        }
+    };
+    Ok(TranscriptionOutput {
+        body,
+        content_type: format.content_type(),
+    })
+}
+
+// a segment ends after a word closing a sentence, or before a pause long enough to be one
+fn transcript_segments(words: &[TimedText]) -> Vec<TranscriptionSegment> {
+    let mut segments: Vec<TranscriptionSegment> = Vec::new();
+    let mut open = false;
+    for word in words {
+        let pause = segments.last().is_some_and(|s| {
+            word.start - s.end >= SEGMENT_PAUSE_SECONDS || word.end - s.start > MAX_SEGMENT_SECONDS
+        });
+        match segments.last_mut() {
+            Some(segment) if open && !pause => {
+                segment.text.push(' ');
+                segment.text.push_str(&word.text);
+                segment.end = word.end;
+            }
+            _ => segments.push(TranscriptionSegment {
+                id: segments.len(),
+                start: word.start,
+                end: word.end,
+                text: word.text.clone(),
+            }),
+        }
+        open = !word.text.ends_with(SENTENCE_ENDS);
+    }
+    segments
+}
+
 fn encode_speech(
     format: AudioResponseFormat,
     pcm: &[f32],
@@ -245,5 +367,55 @@ mod tests {
         let wav = encode_speech(AudioResponseFormat::Wav, &pcm, 24_000, 1).unwrap();
         assert_eq!(&wav[..4], b"RIFF");
         assert_eq!(&wav[8..12], b"WAVE");
+    }
+
+    fn word(text: &str, start: f64, end: f64) -> TimedText {
+        TimedText {
+            text: text.into(),
+            start,
+            end,
+        }
+    }
+
+    // a sentence end closes a segment, and so does a pause of SEGMENT_PAUSE_SECONDS mid-sentence
+    #[test]
+    fn segments_close_at_sentence_ends_and_long_pauses() {
+        let words = [
+            word("Well,", 0.32, 0.56),
+            word("hello.", 0.64, 1.0),
+            word("Then", 1.1, 1.3),
+            word("after", 3.0, 3.2),
+            word("a", 3.2, 3.3),
+            word("pause?", 3.3, 3.6),
+        ];
+        let segments = transcript_segments(&words);
+        let spans: Vec<(&str, f64, f64)> = segments
+            .iter()
+            .map(|s| (s.text.as_str(), s.start, s.end))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("Well, hello.", 0.32, 1.0),
+                ("Then", 1.1, 1.3),
+                ("after a pause?", 3.0, 3.6)
+            ]
+        );
+        assert_eq!(segments.iter().map(|s| s.id).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+
+    // unpunctuated speech with no pause still breaks into segments of at most MAX_SEGMENT_SECONDS
+    #[test]
+    fn unpunctuated_speech_is_cut_into_bounded_segments() {
+        let words: Vec<TimedText> = (0..100)
+            .map(|i| word("word", i as f64, i as f64 + 0.9))
+            .collect();
+        let segments = transcript_segments(&words);
+        assert!(segments.len() > 1);
+        assert!(
+            segments
+                .iter()
+                .all(|s| s.end - s.start <= MAX_SEGMENT_SECONDS)
+        );
     }
 }

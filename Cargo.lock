@@ -2428,6 +2428,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokenizers",
  "tokio",
  "uuid",
 ]
@@ -2501,6 +2502,7 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "hound",
+ "rubato",
  "rustfft",
  "symphonia",
 ]
@@ -2665,6 +2667,7 @@ dependencies = [
  "inference-api",
  "inference-layout",
  "inference-models-other",
+ "inference-models-speech",
  "inference-nn",
  "inference-quant",
  "inference-tensor",
@@ -2672,6 +2675,7 @@ dependencies = [
  "rand_distr",
  "serde_json",
  "tempfile",
+ "tokenizers",
 ]
 
 [[package]]
@@ -2919,6 +2923,7 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "clap",
+ "inference-audio",
  "inference-nn",
  "inference-quant",
  "inference-tensor",
@@ -2928,6 +2933,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "tokenizers",
  "tracing",
  "unicode-normalization",
  "vernacula-phonemizer",
@@ -3112,6 +3118,7 @@ dependencies = [
  "inference-api",
  "inference-core",
  "inference-models-other",
+ "inference-models-speech",
  "inference-nn",
  "inference-quant",
  "inference-tensor",
@@ -3125,6 +3132,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tempfile",
+ "tokenizers",
  "tokio",
  "tower",
  "tower-http",

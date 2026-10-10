@@ -300,7 +300,7 @@ fn category(category: &CoreModelCategory) -> ModelCategory {
         CoreModelCategory::Text => ModelCategory::Text,
         CoreModelCategory::Multimodal { .. } => ModelCategory::Multimodal,
         CoreModelCategory::Diffusion => ModelCategory::Diffusion,
-        CoreModelCategory::Audio => ModelCategory::Audio,
+        CoreModelCategory::Transcription => ModelCategory::Transcription,
         CoreModelCategory::Speech => ModelCategory::Speech,
         CoreModelCategory::Embedding => ModelCategory::Embedding,
     }

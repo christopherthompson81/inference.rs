@@ -328,6 +328,7 @@ impl CompletionStream {
             | Response::ImageGeneration(_)
             | Response::ModelError(_, _)
             | Response::Speech { .. }
+            | Response::Transcription(_)
             | Response::Raw { .. }
             | Response::Embeddings { .. } => unreachable!("not a completion stream response"),
         })

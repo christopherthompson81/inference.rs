@@ -17,3 +17,4 @@ anyhow.workspace = true
 hound.workspace = true
 symphonia.workspace = true
 rustfft.workspace = true
+rubato.workspace = true

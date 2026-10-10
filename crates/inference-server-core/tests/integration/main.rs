@@ -4,8 +4,15 @@
 #[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
+// The tiny random-weight Parakeet the transcription route loads.
+#[path = "../../../inference/tests/support/parakeet_tiny.rs"]
+// each support file includes the recorder it needs, so both bring a copy
+#[allow(clippy::duplicate_mod)]
+mod parakeet_support;
+
 mod cancel;
 mod chat_route;
 mod flux;
 mod keyed;
 mod mcp;
+mod transcription_route;

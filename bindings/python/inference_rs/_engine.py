@@ -347,6 +347,18 @@ class JsonEngine:
         """Speaks text; the blob's MIME type carries the sample rate and channel count."""
         return self._blob("inference_speech_generation", request_json)
 
+    def transcription(self, request_json: str, audio: bytes) -> Blob:
+        """Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format."""
+        request = text_arg(request_json)
+        audio = bytes_arg(audio)
+        blob = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_transcription(engine, request, len(request), audio, len(audio), ctypes.byref(blob)),
+                "inference_transcription",
+            )
+        return take_blob(blob)
+
     def _call2(self, name: str, first: str, second: str) -> str:
         return take_string(self._pair(name, first, second))
 

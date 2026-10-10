@@ -863,6 +863,18 @@ impl dyn Pipeline {
                 }
                 response::send_speech_responses(input_seqs, &pcms, &rates, &channels).await?;
             }
+            ForwardInputsResult::Transcription { .. } => {
+                let transcripts = results
+                    .into_iter()
+                    .flat_map(|r| {
+                        let ForwardInputsResult::Transcription { transcripts } = r else {
+                            unreachable!("All results must have same type, `Transcription`")
+                        };
+                        transcripts
+                    })
+                    .collect::<Vec<_>>();
+                response::send_transcription_responses(input_seqs, transcripts).await?;
+            }
             ForwardInputsResult::BlockGeneration { .. } => {
                 let mut denoise_times = Vec::with_capacity(results.len());
                 let token_blocks = results

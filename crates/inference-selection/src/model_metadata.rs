@@ -8,11 +8,11 @@ use std::fmt::Write as _;
 
 use strum::IntoEnumIterator;
 
-use inference_core::SpeechLoaderType;
 use inference_core::SupportedModality;
 use inference_core::{
     DiffusionLoaderType, EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType,
 };
+use inference_core::{SpeechLoaderType, TranscriptionLoaderType};
 
 use SupportedModality::{Audio, Embedding, Text, Video, Vision};
 
@@ -384,6 +384,18 @@ impl SupportedArch for DiffusionLoaderType {
     }
 }
 
+impl SupportedArch for TranscriptionLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
+        match self {
+            Self::Parakeet => ArchMetadata {
+                families: &["Parakeet (CTC, RNN-T, TDT)"],
+                modalities: &[Audio, Text],
+                examples: &[ex!("nvidia/parakeet-tdt-0.6b-v3")],
+            },
+        }
+    }
+}
+
 impl SupportedArch for SpeechLoaderType {
     fn arch_metadata(&self) -> ArchMetadata {
         match self {
@@ -520,6 +532,12 @@ pub fn render_supported_models_markdown() -> String {
     simple_table(
         &mut md,
         SpeechLoaderType::iter().map(|t| (variant_name(&t), t.arch_metadata())),
+    );
+
+    md.push_str("## Transcription\n\n");
+    simple_table(
+        &mut md,
+        TranscriptionLoaderType::iter().map(|t| (variant_name(&t), t.arch_metadata())),
     );
 
     md.push_str("## Embedding\n\n");

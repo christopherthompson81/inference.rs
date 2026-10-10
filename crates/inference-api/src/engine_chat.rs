@@ -1263,6 +1263,7 @@ impl ChatStream {
             | Response::CompletionChunk(_)
             | Response::ImageGeneration(_)
             | Response::Speech { .. }
+            | Response::Transcription(_)
             | Response::Raw { .. }
             | Response::Embeddings { .. } => unreachable!("not a chat stream response"),
         })

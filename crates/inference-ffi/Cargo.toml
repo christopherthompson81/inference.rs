@@ -34,6 +34,8 @@ inference-quant.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 tempfile.workspace = true
+inference-models-speech.workspace = true
+tokenizers.workspace = true
 
 [features]
 default = ["all-models", "code-execution"]

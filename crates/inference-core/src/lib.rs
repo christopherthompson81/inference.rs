@@ -147,7 +147,9 @@ pub use inference_mcp::{
     sandbox_key,
 };
 pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
-pub use inference_models_speech::{SpeechGenerationConfig, SpeechOptions, utils as speech_utils};
+pub use inference_models_speech::{
+    SpeechGenerationConfig, SpeechOptions, TimedText, Transcription, utils as speech_utils,
+};
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxMode, SandboxPolicy, SandboxProfile};
@@ -177,9 +179,10 @@ pub use pipeline::{
     LocalModelPaths, Modalities, ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder,
     MultimodalLoaderType, MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader,
     NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader,
-    SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, UQFF_MULTI_FILE_DELIMITER,
-    UqffWriteConfig, expand_isq_value, expand_uqff_shards, parse_uqff_shard,
-    resolve_uqff_report_output, resolve_uqff_shorthand,
+    SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, TranscriptionLoader,
+    TranscriptionLoaderType, TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
+    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
+    resolve_uqff_shorthand,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{

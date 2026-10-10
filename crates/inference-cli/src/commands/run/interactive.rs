@@ -8,7 +8,10 @@ use inference_api::{
     engine::AgentPermission,
     engine_chat::ReasoningEffort,
     lora_adapters::ListLoraAdaptersQuery,
-    openai::{ImageGenerationRequest, ModelCategory, SpeechGenerationRequest},
+    openai::{
+        ImageGenerationRequest, ModelCategory, SpeechGenerationRequest, TranscriptionRequest,
+        TranscriptionResponseFormat,
+    },
 };
 use regex::Regex;
 use rustyline::{DefaultEditor, Editor, Helper, error::ReadlineError, history::History};
@@ -58,6 +61,15 @@ Commands:
 
 const SPEECH_INTERACTIVE_HELP: &str = r#"
 Welcome to interactive mode! Because this model is a speech generation model, you can enter prompts and the model will generate audio.
+
+Commands:
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
+"#;
+
+const TRANSCRIPTION_INTERACTIVE_HELP: &str = r#"
+Welcome to interactive mode! Because this model is a speech recognition model, you can enter the path of an audio
+file (WAV, MP3, FLAC, ...) and the model will transcribe it.
 
 Commands:
 - `/help`: Display this message.
@@ -233,9 +245,7 @@ pub async fn interactive_mode(engine: &Engine, config: InteractiveConfig) {
         }
         Some(ModelCategory::Diffusion) => diffusion_interactive_mode(engine).await,
         Some(ModelCategory::Speech) => speech_interactive_mode(engine).await,
-        Some(ModelCategory::Audio) => error!(
-            "Audio models are not supported in `inference run`. Use `inference serve` and the OpenAI-compatible /v1/chat/completions endpoint instead."
-        ),
+        Some(ModelCategory::Transcription) => transcription_interactive_mode(engine).await,
         Some(ModelCategory::Embedding) => error!(
             "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
         ),
@@ -551,6 +561,39 @@ async fn generate_speech(engine: &Engine, prompt: &str, out_file: &str) -> anyho
     let duration = start.elapsed().as_secs_f32();
     fs::write(out_file, audio.bytes)?;
     Ok(duration)
+}
+
+async fn transcription_interactive_mode(engine: &Engine) {
+    println!("{BANNER}{TRANSCRIPTION_INTERACTIVE_HELP}{BANNER}");
+    let mut editor = open_editor();
+    loop {
+        let path = match read_line(&mut editor, "audio file> ").trim() {
+            "" => continue,
+            HELP_CMD => {
+                println!("{BANNER}{TRANSCRIPTION_INTERACTIVE_HELP}{BANNER}");
+                continue;
+            }
+            EXIT_CMD => break,
+            path => path.to_string(),
+        };
+        match transcribe(engine, &path).await {
+            Ok((text, duration)) => println!("{text}\n(took {duration:.2}s)"),
+            Err(e) => error!("{e}"),
+        }
+        println!();
+    }
+    editor.save_history(&history_file_path()).unwrap();
+}
+
+async fn transcribe(engine: &Engine, path: &str) -> anyhow::Result<(String, f32)> {
+    let audio = fs::read(path)?;
+    let request = TranscriptionRequest::new(TranscriptionResponseFormat::Text);
+    let start = Instant::now();
+    let output = engine
+        .transcription(request, &audio)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok((output.body, start.elapsed().as_secs_f32()))
 }
 
 #[cfg(test)]

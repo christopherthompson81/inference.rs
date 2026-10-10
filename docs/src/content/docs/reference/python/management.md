@@ -351,7 +351,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ModelCategory.TEXT` | `'text'` |
 | `ModelCategory.MULTIMODAL` | `'multimodal'` |
 | `ModelCategory.DIFFUSION` | `'diffusion'` |
-| `ModelCategory.AUDIO` | `'audio'` |
+| `ModelCategory.TRANSCRIPTION` | `'transcription'` |
 | `ModelCategory.SPEECH` | `'speech'` |
 | `ModelCategory.EMBEDDING` | `'embedding'` |
 
@@ -628,6 +628,16 @@ Speech sampling for every generation of the loaded model; an unset field keeps t
 | `top_p` | `float \| None` | optional |
 
 
+## `TimestampGranularity`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `TimestampGranularity.WORD` | `'word'` |
+| `TimestampGranularity.SEGMENT` | `'segment'` |
+
+
 ## `TokenizeRequest`
 
 | Field | Type | Default |
@@ -642,6 +652,65 @@ Speech sampling for every generation of the loaded model; an unset field keeps t
 | Field | Type |
 | --- | --- |
 | `tokens` | `list[int]` |
+
+
+## `TranscriptionRequest`
+
+Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `language` | `str \| None` | optional |
+| `model` | `str \| None` | optional |
+| `prompt` | `str \| None` | optional |
+| `response_format` | `TranscriptionResponseFormat \| None` | optional |
+| `temperature` | `float \| None` | optional |
+| `timestamp_granularities` | `list[TimestampGranularity] \| None` | optional |
+
+
+## `TranscriptionResponse`
+
+| Field | Type |
+| --- | --- |
+| `text` | `str` |
+
+
+## `TranscriptionResponseFormat`
+
+What a transcription answers with: OpenAI's formats.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `TranscriptionResponseFormat.JSON` | `'json'` |
+| `TranscriptionResponseFormat.TEXT` | `'text'` |
+| `TranscriptionResponseFormat.SRT` | `'srt'` |
+| `TranscriptionResponseFormat.VERBOSE_JSON` | `'verbose_json'` |
+| `TranscriptionResponseFormat.VTT` | `'vtt'` |
+
+
+## `TranscriptionSegment`
+
+A timed span of a transcript, about a sentence.
+
+| Field | Type |
+| --- | --- |
+| `end` | `float` |
+| `id` | `int` |
+| `start` | `float` |
+| `text` | `str` |
+
+
+## `TranscriptionWord`
+
+A timed word of a transcript, in seconds from the start of the audio.
+
+| Field | Type |
+| --- | --- |
+| `end` | `float` |
+| `start` | `float` |
+| `word` | `str` |
 
 
 ## `TuneModelRequest`
@@ -680,6 +749,18 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `lora_int_id` | `int \| None` | optional |
 | `lora_name` | `str` | required |
 | `model` | `str \| None` | optional |
+
+
+## `VerboseTranscriptionResponse`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `duration` | `float` | required |
+| `language` | `str \| None` | optional |
+| `segments` | `list[TranscriptionSegment]` | required |
+| `task` | `str` | required |
+| `text` | `str` | required |
+| `words` | `list[TranscriptionWord] \| None` | optional |
 
 ---
 

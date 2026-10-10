@@ -573,7 +573,8 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                         .to_string()
                 }
                 crate::sequence::StopReason::GeneratedImage
-                | crate::sequence::StopReason::GeneratedSpeech => {
+                | crate::sequence::StopReason::GeneratedSpeech
+                | crate::sequence::StopReason::Transcribed => {
                     inference_tensor::bail!("Stop reason was `GeneratedImage`.")
                 }
             };

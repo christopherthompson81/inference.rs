@@ -99,6 +99,7 @@ pub mod serve;
 pub mod skills;
 pub mod speech_generation;
 pub mod streaming;
+pub mod transcription;
 pub mod types;
 use inference_api::{
     agentic, anthropic as anthropic_api, api_error, engine_chat, engine_completion,

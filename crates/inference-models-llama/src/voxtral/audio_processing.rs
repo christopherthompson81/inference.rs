@@ -4,7 +4,6 @@ use anyhow::Result;
 use inference_audio::AudioInput;
 use inference_audio::fft::{Complex32, plan_forward_f32};
 use inference_tensor::{Device, Tensor};
-use rubato::Resampler;
 
 use super::config::AudioEncodingArgs;
 
@@ -49,7 +48,7 @@ impl VoxtralAudioProcessor {
 
         // Resample if necessary
         let samples = if audio.sample_rate != self.sampling_rate {
-            self.resample(&mono, audio.sample_rate, self.sampling_rate)?
+            inference_audio::mel::resample(&mono, audio.sample_rate, self.sampling_rate)?
         } else {
             mono
         };
@@ -71,28 +70,6 @@ impl VoxtralAudioProcessor {
 
         let tensor = Tensor::from_vec(data, (1, num_frames, self.num_mel_bins), device)?;
         Ok(tensor)
-    }
-
-    fn resample(&self, samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
-        if from_rate == to_rate {
-            return Ok(samples.to_vec());
-        }
-        let sinc = rubato::SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: rubato::SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: rubato::WindowFunction::BlackmanHarris2,
-        };
-        let mut resampler = rubato::SincFixedIn::<f32>::new(
-            to_rate as f64 / from_rate as f64,
-            2.0,
-            sinc,
-            samples.len(),
-            1,
-        )?;
-        let result = resampler.process(&[samples.to_vec()], None)?;
-        Ok(result[0].clone())
     }
 
     /// Centered STFT mel spectrogram matching `torch.stft(center=True)`.
@@ -132,7 +109,8 @@ impl VoxtralAudioProcessor {
             .map(|n| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * n as f32 / n_fft as f32).cos()))
             .collect();
 
-        let mel_filters = self.create_mel_filterbank(n_fft)?;
+        let mel_filters =
+            inference_audio::mel::slaney_filterbank(self.sampling_rate, n_fft, self.num_mel_bins);
 
         let fft = plan_forward_f32(n_fft);
 
@@ -169,77 +147,5 @@ impl VoxtralAudioProcessor {
         }
 
         Ok(mel_features)
-    }
-
-    /// Slaney mel scale: Hz to mel.
-    fn hertz_to_mel(freq: f32) -> f32 {
-        const MIN_LOG_HERTZ: f32 = 1000.0;
-        const MIN_LOG_MEL: f32 = 15.0;
-        const LOGSTEP: f32 = 27.0 / 1.856_298; // 27.0 / ln(6.4)
-        if freq >= MIN_LOG_HERTZ {
-            MIN_LOG_MEL + (freq / MIN_LOG_HERTZ).ln() * LOGSTEP
-        } else {
-            3.0 * freq / 200.0
-        }
-    }
-
-    /// Slaney mel scale: mel to Hz.
-    fn mel_to_hertz(mel: f32) -> f32 {
-        const MIN_LOG_HERTZ: f32 = 1000.0;
-        const MIN_LOG_MEL: f32 = 15.0;
-        const LOGSTEP: f32 = 1.856_298 / 27.0; // ln(6.4) / 27.0
-        if mel >= MIN_LOG_MEL {
-            MIN_LOG_HERTZ * (LOGSTEP * (mel - MIN_LOG_MEL)).exp()
-        } else {
-            200.0 * mel / 3.0
-        }
-    }
-
-    /// Create Slaney-style mel filterbank matching `mistral_common.audio.mel_filter_bank`.
-    /// Returns `[n_mels][n_freqs]` with Slaney energy normalization.
-    fn create_mel_filterbank(&self, n_fft: usize) -> Result<Vec<Vec<f32>>> {
-        let n_freqs = n_fft / 2 + 1;
-        let sr = self.sampling_rate as f32;
-        let n_mels = self.num_mel_bins;
-
-        // FFT bin frequencies: linspace(0, sr/2, n_freqs)
-        let fft_freqs: Vec<f32> = (0..n_freqs)
-            .map(|i| i as f32 * (sr / 2.0) / (n_freqs - 1) as f32)
-            .collect();
-
-        // Mel filter center frequencies (n_mels + 2 points)
-        let mel_min = Self::hertz_to_mel(0.0);
-        let mel_max = Self::hertz_to_mel(sr / 2.0);
-        let filter_freqs: Vec<f32> = (0..n_mels + 2)
-            .map(|i| {
-                let mel = mel_min + (mel_max - mel_min) * i as f32 / (n_mels + 1) as f32;
-                Self::mel_to_hertz(mel)
-            })
-            .collect();
-
-        // Differences between adjacent filter frequencies
-        let filter_diff: Vec<f32> = filter_freqs.windows(2).map(|w| w[1] - w[0]).collect();
-
-        // Triangular filterbank (matching _create_triangular_filter_bank)
-        let mut filterbank = vec![vec![0.0f32; n_freqs]; n_mels];
-        for m in 0..n_mels {
-            for (j, &fft_f) in fft_freqs.iter().enumerate() {
-                let slope_left = fft_f - filter_freqs[m];
-                let slope_right = filter_freqs[m + 2] - fft_f;
-                let down = slope_left / filter_diff[m]; // rising slope
-                let up = slope_right / filter_diff[m + 1]; // falling slope
-                filterbank[m][j] = 0.0f32.max(down.min(up));
-            }
-        }
-
-        // Slaney energy normalization: constant energy per channel
-        for m in 0..n_mels {
-            let enorm = 2.0 / (filter_freqs[m + 2] - filter_freqs[m]);
-            for val in filterbank[m].iter_mut().take(n_freqs) {
-                *val *= enorm;
-            }
-        }
-
-        Ok(filterbank)
     }
 }

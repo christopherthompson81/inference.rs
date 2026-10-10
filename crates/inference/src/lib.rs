@@ -31,6 +31,7 @@
 //! | GGUF quantized models | [`GgufModelBuilder`] | `examples/rust/getting_started/gguf/` |
 //! | Image generation | [`DiffusionModelBuilder`] | `examples/rust/models/diffusion/` |
 //! | Speech synthesis | [`SpeechModelBuilder`] | `examples/rust/models/speech/` |
+//! | Speech recognition | [`TranscriptionModelBuilder`] | `examples/rust/models/transcription/` |
 //! | Embeddings | [`EmbeddingModelBuilder`] | `examples/rust/getting_started/embedding/` |
 //! | Structured output | [`Model::generate_structured`] | `examples/rust/advanced/json_schema/` |
 //! | Tool calling | [`Tool`], [`ToolChoice`] | `examples/rust/advanced/tools/` |
@@ -216,6 +217,7 @@ mod multimodal_model;
 mod request;
 mod speech_model;
 mod text_model;
+mod transcription_model;
 
 pub use anymoe::AnyMoeModelBuilder;
 pub use auto_model::ModelBuilder;
@@ -234,6 +236,7 @@ pub use request::{
 };
 pub use speech_model::SpeechModelBuilder;
 pub use text_model::{TextModelBuilder, UqffTextModelBuilder};
+pub use transcription_model::TranscriptionModelBuilder;
 
 pub use image::DynamicImage;
 /// The engine surface the SDK builds on, for its request and response types by their own paths.
@@ -248,7 +251,7 @@ pub use inference_api::{
         McpClientConfig, ModelDType, ModelSelected, ModelSpec, MtpDraftSampling, NormalLoaderType,
         PagedCacheSpec, PagedCacheType, SearchCallback, SearchEmbeddingModel, SearchResult,
         ShellConfig, SpeechGenerationSpec, SpeechLoaderType, TokenSource, Tool, ToolCallContext,
-        ToolCallbackKind, ToolCallbackWithTool, UqffWriteConfig,
+        ToolCallbackKind, ToolCallbackWithTool, TranscriptionLoaderType, UqffWriteConfig,
     },
     engine::{expand_isq_value, parse_isq_value},
     engine_chat::{AgenticToolCallData, AgenticToolCallPhase, ChatStreamEvent, Usage},
@@ -261,7 +264,9 @@ pub use inference_api::{
     openai::{
         AdapterSelection, AudioResponseFormat, ChatCompletionRequest, EmbeddingRequest,
         EmbeddingResponse, EmbeddingVector, Grammar, ImageGenerationRequest, OpenAiTool,
-        SpeechGenerationRequest, StopTokens,
+        SpeechGenerationRequest, StopTokens, TimestampGranularity, TranscriptionOutput,
+        TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
+        TranscriptionSegment, TranscriptionWord, VerboseTranscriptionResponse,
     },
     response::{
         ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,
