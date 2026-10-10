@@ -12,6 +12,7 @@ use support::{VOICES, tiny_kokoro_checkpoint, tiny_kokoro_gguf};
 // invented phoneme strings over Kokoro's vocabulary
 const PHONEMES: &str = "həlˈoʊ wˈɜːld.";
 const TEXT: &str = "Hello world, this is Kokoro reading text.";
+const JAPANESE_TEXT: &str = "科学者たちが発表しました。";
 const SEED: u64 = 7;
 const WAV_HEADER: usize = 44;
 const SAMPLE_RATE: u32 = 24_000;
@@ -114,11 +115,11 @@ async fn kokoro_speaks_phonemes_with_voices_speeds_and_seeds() -> anyhow::Result
     };
     let err = error_text(model.generate_speech(unknown).await);
     assert!(err.contains("no_such_voice"), "{err}");
-    let japanese = SpeechGenerationRequest {
-        voice: Some(VOICES[2].into()),
+    let no_language = SpeechGenerationRequest {
+        voice: Some(VOICES[3].into()),
         ..request(None)
     };
-    let err = error_text(model.generate_speech(japanese).await);
+    let err = error_text(model.generate_speech(no_language).await);
     assert!(err.contains("phonemes"), "{err}");
     let bad_speed = SpeechGenerationRequest {
         speed: Some(0.),
@@ -241,6 +242,12 @@ async fn kokoro_reads_english_text() -> anyhow::Result<()> {
             "{voice}"
         );
     }
+    let japanese = SpeechGenerationRequest {
+        input: JAPANESE_TEXT.into(),
+        voice: Some(VOICES[2].into()),
+        ..request(None)
+    };
+    assert!(samples(&model.generate_speech(japanese).await?.bytes) > 0);
     // text past the model's context is split into pieces that each fit
     let long = SpeechGenerationRequest {
         input: TEXT.repeat(LONG_REPEATS),

@@ -98,6 +98,10 @@ const WORD_END: &str = " ,.;:!?…—";
 // clause marks Kokoro reads as pauses; the phonemizer spaces them out, Kokoro's data attaches them
 const DETACHED_PUNCTUATION: &str = ",.;:!?…—";
 const MANDARIN_NUCLEI: &str = "aeiouyɛɤəɨʊɔɚ";
+// languages without spaces between words, whose trace segments them
+const TRACED_WORD_LANGUAGES: [&str; 2] = ["ja", "cmn"];
+// CJK unified ideographs and extension A, as UTF-16 units
+const HAN: [std::ops::RangeInclusive<u16>; 2] = [0x4e00..=0x9fff, 0x3400..=0x4dbf];
 const TONE_LETTERS: std::ops::RangeInclusive<char> = '\u{2e5}'..='\u{2e9}';
 const KOKORO_VOWELS: &str = "əɐaeiouɑɔɛɪʊʌæɜAIOWYᵻᵊ";
 const WORD_TRIM: &[char] = &['.', ',', ';', ':', '!', '?', '"', '\'', '(', ')', '—', '-'];
@@ -133,6 +137,7 @@ fn phonemizer_error(e: vernacula_phonemizer::PhonemizeError) -> Error {
             format!("Kokoro's text input needs vernacula-phonemizer's data ({DATA_ENV}): {why}")
         }
         Neural(why) => format!("the phonemizer's neural reader failed: {why}"),
+        Input(why) => format!("the phonemizer cannot read this input: {why}"),
     })
 }
 
@@ -395,13 +400,85 @@ struct WordSpan {
     end: usize,
 }
 
-// vernacula segments words per language; whitespace is right for every language the phonemizer reads so far
+// languages that don't space take their words from the trace; whitespace stays the fallback when it can't segment
+fn source_words(text: &[u16], lang: &str, trace: &Trace, ipa: &[u16]) -> Vec<WordSpan> {
+    if !TRACED_WORD_LANGUAGES.contains(&lang) {
+        return whitespace_words(text);
+    }
+    let traced = traced_words(text, trace, ipa);
+    if traced.is_empty() {
+        whitespace_words(text)
+    } else {
+        traced
+    }
+}
+
+// ja: a token per phrase; cmn: a Han run's syllables map onto its hanzi only when counts agree (digits break it)
+fn traced_words(text: &[u16], trace: &Trace, ipa: &[u16]) -> Vec<WordSpan> {
+    if !trace.traced {
+        return Vec::new();
+    }
+    let mut words = Vec::new();
+    for tok in &trace.tokens {
+        let Some((from, to)) = tok.input_span else {
+            continue;
+        };
+        let groups = tok.ipa_span.as_ref().map_or(0, |span| {
+            count_word_groups(&String::from_utf16_lossy(&ipa[span.0..span.1]))
+        });
+        // a token that says nothing is punctuation (Japanese trailing full stop), not a word
+        if to <= from || groups == 0 {
+            continue;
+        }
+        let body = &text[from..to];
+        let han = body.iter().filter(|&&u| is_han(u)).count();
+        if groups > 1 && groups == han && body.iter().all(|&u| is_han(u) || is_space(u)) {
+            for k in (from..to).filter(|&k| is_han(text[k])) {
+                append_word(
+                    &mut words,
+                    WordSpan {
+                        start: k,
+                        end: k + 1,
+                    },
+                );
+            }
+        } else {
+            append_word(
+                &mut words,
+                WordSpan {
+                    start: from,
+                    end: to,
+                },
+            );
+        }
+    }
+    words
+}
+
+// tokens claiming the same characters (a rewrite stamps its whole match on each token it makes) are one word
+fn append_word(words: &mut Vec<WordSpan>, span: WordSpan) {
+    match words.last_mut() {
+        Some(last) if span.start < last.end => {
+            last.start = last.start.min(span.start);
+            last.end = last.end.max(span.end);
+        }
+        _ => words.push(span),
+    }
+}
+
+fn is_han(u: u16) -> bool {
+    HAN.iter().any(|r| r.contains(&u))
+}
+
+fn is_space(u: u16) -> bool {
+    char::from_u32(u32::from(u)).is_some_and(char::is_whitespace)
+}
+
 fn whitespace_words(text: &[u16]) -> Vec<WordSpan> {
     let mut words = Vec::new();
     let mut start = None;
     for (i, &u) in text.iter().enumerate() {
-        let space = char::from_u32(u32::from(u)).is_some_and(char::is_whitespace);
-        match (space, start) {
+        match (is_space(u), start) {
             (false, None) => start = Some(i),
             (true, Some(s)) => {
                 words.push(WordSpan { start: s, end: i });
@@ -449,9 +526,6 @@ fn group_source_words(
     let mut last_word = 0usize;
     for tok in &trace.tokens {
         let input = tok.input_span?;
-        if input.0 >= text.len() {
-            return None;
-        }
         let groups = if let Some(span) = tok.ipa_span.as_ref() {
             count_word_groups(&String::from_utf16_lossy(&ipa[span.0..span.1]))
         } else if !tok.emitted.is_empty() {
@@ -560,7 +634,7 @@ fn phonemize(
     let traced = vernacula_phonemizer::phonemize_trace(text, lang).map_err(phonemizer_error)?;
     let text16 = text.encode_utf16().collect::<Vec<_>>();
     let traced16 = traced.ipa.encode_utf16().collect::<Vec<_>>();
-    let words = whitespace_words(&text16);
+    let words = source_words(&text16, lang, &traced.trace, &traced16);
     let map = group_source_words(&traced.trace, &traced16, &text16, &words);
     // the best reading routes unknown English words through the BiLSTM; the trace's reading is the fallback
     let mut ipa =
@@ -861,5 +935,90 @@ mod tests {
         assert_eq!(with_prefix_schwa("dᵻdˈus", "deduce"), "dᵻdˈus");
         assert_eq!(with_prefix_schwa("ɹˌɛpɹᵻzˈɛnt", "represent"), "ɹˌɛpɹᵻzˈɛnt");
         assert_eq!(with_prefix_schwa("pɹᵻfˈɜɹ", "prefer"), "pɹᵻfˈɜɹ");
+    }
+
+    // vernacula's WordSegmentationTests: the words a language without spaces takes from its trace
+    fn words(text: &str, l: &str) -> Option<Vec<String>> {
+        if let Err(e) = readable(l) {
+            eprintln!("skipped: {e}");
+            return None;
+        }
+        let traced = vernacula_phonemizer::phonemize_trace(text, l).unwrap();
+        let text16 = text.encode_utf16().collect::<Vec<_>>();
+        let ipa16 = traced.ipa.encode_utf16().collect::<Vec<_>>();
+        let spans = source_words(&text16, l, &traced.trace, &ipa16);
+        assert!(spans.windows(2).all(|w| w[1].start >= w[0].end), "{text}");
+        assert!(
+            spans
+                .iter()
+                .all(|w| w.start < w.end && w.end <= text16.len()),
+            "{text}"
+        );
+        Some(
+            spans
+                .iter()
+                .map(|w| String::from_utf16_lossy(&text16[w.start..w.end]))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn japanese_splits_into_phrases_where_whitespace_sees_one_word() {
+        let text = "科学者たちが発表しました。";
+        let Some(found) = words(text, "ja") else {
+            return;
+        };
+        assert!(found.len() >= 2, "{found:?}");
+        assert_eq!(
+            whitespace_words(&text.encode_utf16().collect::<Vec<_>>()).len(),
+            1
+        );
+        // the trailing full stop says nothing, so it is no word
+        assert!(found.iter().all(|w| w != "。"), "{found:?}");
+        let other = words("彼女は新しい本を読んでいます。", "ja").unwrap();
+        assert!(other.len() >= 2, "{other:?}");
+    }
+
+    // PDF reads as a katakana expansion whose tokens all claim the whole sentence; they merge, never repeat
+    #[test]
+    fn mixed_script_japanese_offers_no_two_words_over_the_same_characters() {
+        let Some(found) = words("PDFファイルを開いてください。", "ja") else {
+            return;
+        };
+        assert!(!found.is_empty());
+    }
+
+    #[test]
+    fn mandarin_walks_syllables_onto_hanzi() {
+        let Some(found) = words("今天天气很好。", "cmn") else {
+            return;
+        };
+        assert_eq!(found, ["今", "天", "天", "气", "很", "好"]);
+    }
+
+    // 11 speaks two syllables, so a walk would shift every hanzi after it; the token stays whole instead
+    #[test]
+    fn mandarin_with_digits_keeps_the_token_whole() {
+        let text = "11点20分警察要求。";
+        let Some(found) = words(text, "cmn") else {
+            return;
+        };
+        let han = text.encode_utf16().filter(|&u| is_han(u)).count();
+        assert!(!found.is_empty() && found.len() < han, "{found:?}");
+    }
+
+    #[test]
+    fn japanese_maps_each_group_to_a_phrase() {
+        let text = "科学者たちが発表しました。";
+        let Some((ps, map)) = read(text, "ja") else {
+            return;
+        };
+        assert!(ps.chars().all(|c| c == ' ' || VOCAB.contains(c)), "{ps}");
+        let map = map.expect("the trace accounts for every group");
+        assert_eq!(map.len(), count_word_groups(&ps), "{ps}");
+        assert!(
+            map.windows(2).all(|w| w[0] <= w[1]) && map.last() > Some(&0),
+            "{map:?}"
+        );
     }
 }

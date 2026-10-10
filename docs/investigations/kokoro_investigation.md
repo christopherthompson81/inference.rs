@@ -479,3 +479,64 @@ Review of the text-input change, before the PR.
 - New end-to-end case: 20 copies of the test sentence (past 510 phonemes) synthesize through the multi-piece path.
 
 `kokoro_tiny` 5/5 and the speech crate's kokoro tests pass; full CI rerunning.
+
+## Run 19 - 2026-10-09
+
+Japanese text input, after vernacula-phonemizer #1467 (ja; merge 8211aacf) put `ja` in `LANGUAGES`.
+
+- **Word spans:** ported vernacula's C# `WordSegmentation.FromTrace` as `source_words`/`traced_words`.
+  - ja and cmn take their words from the trace. Every other language keeps whitespace, and so do ja and cmn when the trace yields nothing (the phonemizer's known "pH" defect drops every input span).
+  - ja: one word per token's input span; a token with no spoken group (the trailing full stop) is no word.
+  - cmn: a Han run whose IPA group count equals its hanzi count gets one word per hanzi; otherwise the run stays whole. Digits make the counts disagree.
+  - Tokens that claim the same characters merge into one word.
+  - No new phonemizer API was needed; the peer session made the trace shape a gated requirement of its ports.
+- **Tests:** vernacula's `WordSegmentationTests`, through the real phonemizer.
+  - Phrases: 科学者たちが発表しました。 gives at least 2 words where whitespace gives 1. 。 is no word. The mixed-script PDF sentence gives no overlaps.
+  - Spans are ordered and in bounds; the ja group map is monotonic and covers every group.
+  - The cmn cases skip with a message until cmn lands.
+  - The tiny engine test gains a `q`-prefixed voice (no language) for the rejection case, and a Japanese text case.
+- **Real model over HTTP** (dev build), 52 characters of mixed kana/kanji/latin, seed 1:
+
+| voice | audio | request time |
+|---|---|---|
+| jf_alpha | 10.9 s | 4.9 s (includes the ja data load) |
+| jm_kumo | 11.4 s | 4.6 s |
+
+Samples were sent to the user for a listening check.
+
+## Run 20 - 2026-10-09
+
+The phonemizer's languages landing in quick succession: it (#1469), es (#1470), pt/pt-BR (#1471), hi (#1472), cmn (#1473). Local pin moved to 5dd93a1c.
+
+- **hi** added `PhonemizeError::Input` ("the TS throws on this input"). It is mapped in `phonemizer_error`.
+- **cmn:** the segmentation tests that skipped in Run 19 now run against real traces and pass.
+  - 今天天气很好。 gives one word per hanzi.
+  - 11点20分警察要求。 keeps the run whole, because the digits make the syllable count disagree with the hanzi count.
+- All 35 Kokoro tests pass. No front-end changes were needed for it/es/pt-BR/hi beyond the bump; vernacula's `KokoroFormat` arms were already ported in Run 17.
+- **Real model over HTTP** (dev build), seed 1. Each sentence has a greeting, a date and a time:
+
+| voice | audio | request time |
+|---|---|---|
+| if_sara / im_nicola | 7.8 / 8.4 s | 3.2 / 3.3 s |
+| ef_dora / em_alex | 7.0 / 7.0 s | 2.9 / 2.9 s |
+| pf_dora / pm_alex | 7.6 / 7.6 s | 3.2 / 3.2 s |
+| hf_alpha / hm_omega | 8.5 / 8.8 s | 3.5 / 3.5 s |
+| zf_xiaobei / zm_yunxi | 8.9 / 6.9 s | 3.7 / 4.2 s |
+
+- A first sample pass returned 400 "unknown voice" for every request. It was hitting a server left over from Run 19, started before these voices were downloaded; the voice list is read at load.
+
+Samples were sent to the user for listening. French is the last language still to land.
+
+## Run 21 - 2026-10-09
+
+French (#1474) and a formatting pass (#1475) close out the phonemizer's Kokoro languages. Pinned to 5acc6b73: en, en-GB, ja, it, es, pt, pt-BR, hi, cmn, fr.
+
+- **Docs:** the speech guide no longer lists which languages read so far. Only a voice prefix outside Kokoro's nine needs `phonemes`.
+- **ff_siwis**, the same sentence as Run 20: 6.8 s of audio in 2.8 s. Sample sent to the user.
+- **Full CI** (`--lint --tests --cuda --slim --bindings --docs --sweep`) passed: 2563 CPU and 2954 CUDA tests.
+- **Review of the FromTrace port:** no bugs.
+  - It matches the C# on language gating, token skipping, the hanzi-walk condition, union merging and the whitespace fallback.
+  - The spans can't panic. `input_span` is a min/max union of in-bounds provenance entries over the same UTF-16 text; `ipa_span` is set only when the assembled reading equals the returned IPA.
+  - English is unaffected.
+  - Applied: a clearer comment, the re-wrapped guide paragraph, and dropped the `input.0 >= text.len()` guard in `group_source_words`, which the span guarantee rules out.
+  - Noted, not changed: within an all-Han run, two count errors that cancel out (erhua plus a two-syllable character) would pass the count check. C# shares this.
