@@ -17,8 +17,11 @@ use crate::{
 };
 
 const TOOLS: [&str; 2] = ["first_lookup", "second_lookup"];
-// Long enough that two calls run one after the other could not overlap by accident.
-const TOOL_TIME: Duration = Duration::from_millis(300);
+// How long a call waits for the round's other calls to start; only calls run one at a time use all of it.
+const OVERLAP_WAIT: Duration = Duration::from_secs(10);
+// Long enough that calls wrongly run together would overlap.
+const SERIAL_PROBE: Duration = Duration::from_millis(300);
+const OVERLAP_POLL: Duration = Duration::from_millis(5);
 // The tiny tokenizer's `</s>`.
 const EOS: u32 = 2;
 const SCRIPT: &str = "script";
@@ -30,9 +33,19 @@ const SANDBOX_SCRIPT_TOKENS: usize = 512;
 
 #[derive(Default)]
 struct Concurrency {
+    wait: Duration,
     running: AtomicUsize,
     most: AtomicUsize,
     calls: AtomicUsize,
+}
+
+impl Concurrency {
+    fn waiting(wait: Duration) -> Self {
+        Self {
+            wait,
+            ..Self::default()
+        }
+    }
 }
 
 fn host_tool(name: &str, seen: Arc<Concurrency>) -> anyhow::Result<ToolCallbackWithTool> {
@@ -43,7 +56,12 @@ fn host_tool(name: &str, seen: Arc<Concurrency>) -> anyhow::Result<ToolCallbackW
     let run = move |_: &crate::engine::CalledFunction, _: &crate::engine::ToolCallContext| {
         let now = seen.running.fetch_add(1, Ordering::SeqCst) + 1;
         seen.most.fetch_max(now, Ordering::SeqCst);
-        std::thread::sleep(TOOL_TIME);
+        // waiting for the others, not sleeping a fixed time, keeps a loaded machine from serializing the calls
+        let deadline = std::time::Instant::now() + seen.wait;
+        while seen.most.load(Ordering::SeqCst) < TOOLS.len() && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(OVERLAP_POLL);
+        }
         seen.running.fetch_sub(1, Ordering::SeqCst);
         seen.calls.fetch_add(1, Ordering::SeqCst);
         Ok("found".to_string())
@@ -114,7 +132,7 @@ fn request(stream: bool) -> Value {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn every_call_of_a_round_runs_at_once_and_reports_its_own_id() -> anyhow::Result<()> {
-    let seen = Arc::new(Concurrency::default());
+    let seen = Arc::new(Concurrency::waiting(OVERLAP_WAIT));
     let (_dir, engine) = calling_both(&seen).await?;
     let request = request(false).to_string();
     let response = engine
@@ -154,7 +172,7 @@ async fn every_call_of_a_round_runs_at_once_and_reports_its_own_id() -> anyhow::
 async fn a_streamed_round_pairs_each_calls_phases_by_its_id() -> anyhow::Result<()> {
     use futures::StreamExt;
 
-    let seen = Arc::new(Concurrency::default());
+    let seen = Arc::new(Concurrency::waiting(OVERLAP_WAIT));
     let (_dir, engine) = calling_both(&seen).await?;
     let request = serde_json::from_value(request(true))?;
     let mut stream = engine
@@ -272,7 +290,7 @@ async fn a_tool_registered_after_load_answers_the_requests_that_name_it() -> any
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_request_that_turns_parallel_calls_off_runs_them_one_at_a_time() -> anyhow::Result<()> {
-    let seen = Arc::new(Concurrency::default());
+    let seen = Arc::new(Concurrency::waiting(SERIAL_PROBE));
     let (_dir, engine) = calling_both(&seen).await?;
     let mut sequential = request(false);
     sequential["parallel_tool_calls"] = json!(false);
