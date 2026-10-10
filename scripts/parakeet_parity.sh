@@ -4,7 +4,7 @@
 # GGUF passes on the cosine and a word error rate bound instead.
 # Not part of local_ci.sh: it needs torch, transformers (5.x, with Parakeet) and librosa.
 #
-# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file> | --gguf <file>] [--min-cosine <x>] [--max-wer <x>]
+# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file> | --gguf <file>] [--min-cosine <x>] [--max-wer <x>] [--keep-dumps <dir>]
 #   dir   holds config.json, processor_config.json, tokenizer.json and model.safetensors (e.g. parakeet-tdt-0.6b-v3)
 #   wav   16-bit PCM wav files (mono, any rate: both sides resample to 16 kHz)
 set -euo pipefail
@@ -18,6 +18,7 @@ shift
 wavs=()
 cpu=()
 nemo=()
+keep=
 tolerance=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -26,15 +27,30 @@ while [[ $# -gt 0 ]]; do
         --nemo) nemo=(--nemo "$(realpath "$2")"); shift ;;
         --gguf) nemo=(--gguf "$(realpath "$2")"); shift ;;
         --min-cosine | --max-wer) tolerance+=("$1" "$2"); shift ;;
+        # reuse (or fill) this directory's reference dumps, so a sweep pays for the reference once
+        --keep-dumps) keep=$(realpath -m "$2"); shift ;;
         *) wavs+=("$(realpath "$1")") ;;
     esac
     shift
 done
 root=$(cd "$(dirname "$0")/.." && pwd)
-dumps=$(mktemp -d)
-trap 'rm -rf "$dumps"' EXIT
+if [[ -n $keep ]]; then
+    dumps=$keep
+    mkdir -p "$dumps"
+else
+    dumps=$(mktemp -d)
+    trap 'rm -rf "$dumps"' EXIT
+fi
 
-python3 -P -W ignore - "$model" "$dumps" "${wavs[@]}" <<'PY'
+# a kept directory is reused only for the same model and the same clips in order; otherwise it is refilled
+manifest=$(printf '%s\n' "$model" "${wavs[@]}")
+if [[ -n $keep && -f $dumps/manifest && $(cat "$dumps/manifest") == "$manifest" ]]; then
+    reference=(true)
+else
+    rm -f "$dumps"/*.safetensors "$dumps"/*.json "$dumps/manifest"
+    reference=(python3 -P -W ignore - "$model" "$dumps" "${wavs[@]}")
+fi
+"${reference[@]}" <<'PY'
 import json, sys, wave
 import librosa, numpy as np, torch
 from safetensors.torch import save_file
@@ -99,6 +115,7 @@ for n, path in enumerate(wavs):
         json.dump({"wav": path, "text": text.strip()}, f)
 print(f"reference: {len(wavs)} clips")
 PY
+[[ -n $keep && ${reference[0]} != true ]] && printf '%s\n' "$manifest" > "$dumps/manifest"
 
 features=()
 if [[ ${#cpu[@]} -eq 0 ]] && command -v nvcc >/dev/null 2>&1; then

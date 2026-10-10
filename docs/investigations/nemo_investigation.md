@@ -681,3 +681,164 @@ Fixed:
 Both GGUFs rerun on CUDA: identical to Run 22.
 
 Left: one Hub repo holding several `asr` GGUFs (q8_0 and f16) needs the file path. NVIDIA's repos ship transformers files, which win, so their GGUF loads by its path.
+
+## Run 24 - 2026-10-10
+
+**A mixed-precision `asr` GGUF: the writer, and a sensitivity sweep.** Raised by the user: keep the sensitive tensors finer than Q8_0.
+
+The writer: `parakeet::write_asr_gguf(nemo, out, policy)`, driven by `examples/asr_quantize.rs`, writes NVIDIA's layout from a `.nemo`:
+- the same `asr.*` keys and value types;
+- NeMo names with the converter's LSTM naming, and flattened pointwise convs;
+- NVIDIA's precision defaults: norms, biases and `pos_bias_*` F32; convs and the embedding F16;
+- the matrices in `--matrices`, unless a `--keep fragment=type` names them. A row that doesn't fill whole blocks drops to Q8_0, then F16.
+
+`load_nemo` was split so the writer reads the same parsed config (`read_recogniser`).
+
+Check, `--matrices q8_0` on parakeet-tdt-0.6b-v3: all 699 tensors are byte-identical to NVIDIA's `q8_0.gguf` (272 Q8_0, 30 F16, 397 F32). The file is 642 MiB, against NVIDIA's 681 MiB, which adds its own `pos_enc.pe` and `preprocessor.fb` tables. The NVIDIA-only keys (`pos_emb_max_len`, train contexts, frontend flags, joint and embed dims, `file_type`) are now written too.
+
+The sweep:
+- **Clips:** 8 English clips, 3 LibriSpeech plus the 97.6 s demo, two 300 s AMI and two 300 s VoxConverse.
+- **Reference:** transformers F32 once, kept with `parakeet_parity.sh --keep-dumps`.
+- **Metric:** total WER (edits over reference words, all clips), plus encoder cosine min and mean.
+- **Policies:** uniform Q8_0, then one group at a time at F16 over Q8_0 (attention, position projection, feed-forward, conv pointwise, pre-encode out, LSTM, joint, `joint.pred`, first and last layer), then uniform F16, Q6_K, Q5_K and Q4_K for size.
+
+## Run 25 - 2026-10-10
+
+**Sweep 1, parakeet-tdt-0.6b-v3.** One group at F16, the rest Q8_0, scored against transformers F32 on the 8 clips (2928 reference words):
+
+| policy | size | WER | encoder cos min / mean |
+|---|---|---|---|
+| Q8_0 (= NVIDIA's file) | 642 MiB | 1.195% | 0.97150 / 0.99609 |
+| attention q,k,v,o,pos F16 | 754 | 1.400% | 0.96871 / 0.99581 |
+| position projection F16 | 664 | 1.195% | 0.97214 / 0.99618 |
+| **feed-forward F16** | 1002 | **0.478%** | **0.99609 / 0.99935** |
+| conv pointwise F16 | 709 | 1.298% | 0.98962 / 0.99837 |
+| pre-encode out F16 | 646 | 1.195% | 0.97437 / 0.99645 |
+| LSTM F16 | 648 | 1.195% | 0.97150 / 0.99609 |
+| joint F16 | 647 | 11.100% | (encoder unchanged) |
+| `joint.pred` F16 | 642 | 18.955% | (encoder unchanged) |
+| layer 0 F16 | 664 | 1.195% | 0.97426 / 0.99639 |
+| layer 23 F16 | 664 | 1.161% | 0.97149 / 0.99611 |
+| F16 everywhere | 1197 | 0.000% | 0.99988 / 0.99998 |
+| Q6_K | 501 | 4.850% | 0.96997 / 0.99201 |
+| Q5_K | 424 | 16.325% | 0.95658 / 0.98622 |
+| Q4_K | 351 | 20.014% | 0.94742 / 0.97047 |
+
+**The joint rows are not a precision effect.**
+- With `joint.pred` F16, two 300 s clips (AMI b, VoxConverse a) lose half their emissions. On AMI b, 204 words are dropped in one stretch before decoding resumes: TDT's blank attractor, where the predictor reaches a state that scores blank on every frame.
+- Is it ours? In transformers, with the F32 model's matrices rounded through Q8_0 as NVIDIA's converter stores them (2-D weights and pointwise convs) and `decoder_projector` through F16 instead:
+
+  | transformers configuration | words on AMI b (of 420) |
+  |---|---|
+  | all Q8_0 | 419 |
+  | all Q8_0, projector F16 | 214 |
+  | projector F16 alone | 420 |
+
+  This reproduces our 214 words exactly. Our implementation matches the reference even in this failure; the attractor is the model's.
+- So WER on long unsegmented clips is chaotic in the decoder's weights, and the decoder rows say nothing about precision. The encoder cosine is the smooth measure of what each group costs.
+
+Reading the encoder:
+- The feed-forward matrices carry most of the 8-bit error (min cos 0.9715 -> 0.9961, mean 0.9961 -> 0.9994), at +360 MiB. They are 2 x 2 x 4M parameters per layer, the bulk of the model.
+- The other groups barely move it.
+- Uniform K-quants fall off fast.
+
+Next round:
+- split the feed-forward (macaron halves 1 and 2, `linear1` and `linear2`);
+- keep the small decoder at F16 to take the chaotic path out of comparisons;
+- try K-quant bases with the sensitive matrices at Q8_0, for a smaller file.
+
+## Run 26 - 2026-10-10
+
+**Sweep 2 (full clips), and sweep 3 (20 s pieces).**
+
+Sweep 2, on the full 8 clips: WER was chaos again. A full-precision decoder alone read 11.1%, and every K-quant base 13-16%, whatever its encoder quality. The 300 s clips fall into the TDT blank attractor depending on exact weights (Run 25). The encoder cosine localized the error:
+
+| policy | size | encoder cos min / mean |
+|---|---|---|
+| Q8_0 | 642 MiB | 0.97150 / 0.99609 |
+| `feed_forward1` F16 | 833 | 0.99860 / 0.99950 |
+| `feed_forward2` F16 | 833 | 0.96874 / 0.99581 |
+| `linear1` (both halves' up-projections) F16 | 833 | 0.99895 / 0.99959 |
+| `linear2` F16 | 833 | 0.96857 / 0.99578 |
+
+So the encoder's 8-bit error sits in the up-projections, mostly the first macaron half's.
+
+A WER protocol that measures precision rather than chaos: the 8 clips cut into 68 pieces of 20 s at fixed points, with a transformers F32 reference per piece. Production transcription windows long audio (VAD, at most 2 min) anyway. A deletion now stays within its piece.
+
+Sweep 3, on 68 pieces (3200 reference words):
+
+| policy | size | WER (edits) | encoder cos min / mean |
+|---|---|---|---|
+| Q8_0 (= NVIDIA's) | 642 MiB | 0.781% (25) | 0.97150 / 0.99865 |
+| **decoder + joint F16** | **653** | **0.281% (9)** | 0.97150 / 0.99865 |
+| `linear1` F16 | 822 | 1.156% (37) | 0.99184 / 0.99968 |
+| `feed_forward1.linear1` F16 | 732 | 1.062% (34) | 0.99163 / 0.99953 |
+| `feed_forward1` F16 | 822 | 0.906% (29) | 0.99155 / 0.99955 |
+| feed-forward F16 | 1002 | 1.219% (39) | 0.99165 / 0.99958 |
+| `linear1` + decoder F16 | 833 | 0.344% (11) | 0.99184 / 0.99968 |
+| Q6_K, `linear1` Q8_0 | 548 | 1.031% (33) | 0.93801 / 0.99672 |
+| Q6_K, `linear1` F16 | 728 | 0.969% (31) | 0.94193 / 0.99687 |
+| Q6_K, feed-forward Q8_0 | 594 | 0.969% (31) | 0.95568 / 0.99727 |
+| Q5_K, feed-forward Q8_0 | 568 | 3.594% (115) | 0.91117 / 0.99462 |
+| Q6_K | 501 | 2.875% (92) | 0.93358 / 0.99510 |
+| F16 everywhere | 1197 | 0.000% (0) | 0.99878 / 0.99998 |
+
+Reading:
+- **The decoder sets WER.** Keeping the predictor (embedding already F16, LSTM, projector) and joint at F16 costs 11.5 MiB (1.8%) and removes about two thirds of the 8-bit word errors. The joint's logits decide the close calls between tokens, so its quantization error lands straight in the transcript.
+- **Encoder precision barely moves WER at this level.** `linear1` F16 lifts the cosine (min 0.9715 -> 0.9918) without fewer edits. The counts here (9-39) are small: a few edits either way is noise. The decoder effect (25 -> 9, and 37 -> 11 with `linear1`) holds across both bases.
+- **Q6_K with the feed-forward at Q8_0** is smaller than NVIDIA's file (594 MiB) at near its WER. Plain K-quants are worse.
+
+Next: K-quant bases with an F16 decoder, and the same policies on the streaming English model (its own reference over the pieces), to see whether the decoder effect generalizes.
+
+## Run 27 - 2026-10-10
+
+**Sweep 4, and the streaming model: the decoder effect holds.**
+
+parakeet-tdt-0.6b-v3, 68 pieces (3200 words):
+
+| policy | size | WER (edits) |
+|---|---|---|
+| Q6_K, decoder F16 | 513 MiB | 2.938% (94) |
+| **Q6_K, feed-forward Q8_0, decoder F16** | **606** | **0.531% (17)** |
+| Q6_K, `linear1` Q8_0, decoder F16 | 559 | 0.688% (22) |
+| Q5_K, feed-forward Q8_0, decoder F16 | 580 | 3.375% (108) |
+| Q4_K, feed-forward Q8_0, decoder F16 | 555 | 8.812% (282) |
+
+nemotron-speech-streaming-en-0.6b, same 68 pieces, its own transformers reference (3188 words):
+
+| policy | size | WER (edits) | encoder cos min / mean |
+|---|---|---|---|
+| Q8_0 (= NVIDIA's) | 628 MiB | 1.694% (54) | 0.99868 / 0.99970 |
+| **decoder F16** | **636** | **1.098% (35)** | 0.99868 / 0.99970 |
+| Q6_K, feed-forward Q8_0, decoder F16 | 588 | 1.192% (38) | 0.99703 / 0.99889 |
+| F16 everywhere | 1180 | 0.000% (0) | 0.99987 / 0.99998 |
+
+Conclusions:
+- **Decoder at F16.** Keeping the decoder (predictor LSTM and projector) and joint at F16 is the best use of bytes: +1.2 to 1.8% in size, removing a third (streaming) to two thirds (Parakeet) of the 8-bit word errors.
+- **Feed-forward at Q8_0.** Of the encoder, it is the part that needs 8 bits: with it at Q8_0 and the rest at Q6_K, both models come out smaller than NVIDIA's files (-6%) and more accurate. Below Q6_K the rest of the encoder falls apart.
+- **Q8_0 and below.** The streaming model's encoder is far less sensitive to Q8_0 than Parakeet's (min cos 0.9987 against 0.9715); its words are lost in the decoder.
+
+The presets on `QuantPolicy`, exposed as `asr_quantize --preset`:
+- `q8_0`: uniform, NVIDIA's file byte for byte;
+- `q8_0-decoder`: `q8_0` with the decoder and joint at F16;
+- `q6_k-mix`: Q6_K, feed-forward Q8_0, decoder F16. Its file reproduces sweep 4's 605.7 MiB.
+
+Tests:
+- a unit test pins the per-tensor precision rules, including the fallback for rows that fill no K-block (640-wide to Q8_0);
+- a tiny `.nemo` written as an `asr` GGUF (F32 matrices, F16 convs) transcribes byte-identically to the `.nemo`, for TDT, RNN-T and streaming.
+
+Caveat: the edit counts are small (9 to 54 per policy). The decoder effect is consistent across both models and every base, but single-digit differences between neighbouring policies are within noise.
+
+## Run 28 - 2026-10-10
+
+**Review fixes for the writer and the sweep tooling.**
+
+- **`parakeet_parity.sh --keep-dumps`:** reuse was keyed on the dump count, so the same clips under another model would have been scored against the first model's reference.
+  - This sweep's results stand: each model and clip set had its own directory (`v3_ref`, `v3_pieces_ref`, `stream_pieces_ref`), and the two subset copies matched their clip lists.
+  - The directory now records a manifest (model directory and ordered clip list). It is reused only on an exact match and cleared and refilled otherwise.
+- **`general.file_type`:** an exhaustive llama.cpp mapping (BF16 32, Q4_1 3, Q5_1 9, Q2_K 10, and so on).
+- **`asr.rnnt.joint_dim`:** read off `joint.pred.weight` (NeMo's own `joint_hidden`), not taken as the predictor width. The missing-predictor case is an error instead of a zero default.
+- **Writer rules:** rank-0 tensors go to F32 (no underflow); the decoder fragment is `decoder.prediction.`, so a hybrid's `ctc_decoder` cannot match it.
+- **Round-trip test:** also loads a `q6_k_mix` file.
+
+Rechecked: `--preset q8_0` is still byte-identical to NVIDIA's file for all 699 tensors. Every key NVIDIA writes is now present (`joint_dim` 640).

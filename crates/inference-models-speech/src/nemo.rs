@@ -116,6 +116,19 @@ impl NemoArchive {
         Ok(self.config::<Target>()?.target)
     }
 
+    /// Every tensor under its NeMo name, on the CPU in its stored dtype.
+    pub fn tensors(&self) -> Result<HashMap<String, Tensor>> {
+        let (offset, len) = self.weights;
+        let tensors = PthTensors::in_range(&self.path, offset, len, None)?;
+        let mut out = HashMap::new();
+        for name in tensors.tensor_infos().keys() {
+            if let Some(t) = tensors.get(name)? {
+                out.insert(name.clone(), t);
+            }
+        }
+        Ok(out)
+    }
+
     /// Every tensor, each name passed through `rename`, as a builder on `device` in `dtype`.
     pub fn var_builder(
         &self,
@@ -123,14 +136,11 @@ impl NemoArchive {
         dtype: DType,
         device: &Device,
     ) -> Result<VarBuilder<'static>> {
-        let (offset, len) = self.weights;
-        let tensors = PthTensors::in_range(&self.path, offset, len, None)?;
-        let mut renamed: HashMap<String, Tensor> = HashMap::new();
-        for name in tensors.tensor_infos().keys() {
-            if let Some(t) = tensors.get(name)? {
-                renamed.insert(rename(name), t);
-            }
-        }
+        let renamed = self
+            .tensors()?
+            .into_iter()
+            .map(|(name, t)| (rename(&name), t))
+            .collect();
         Ok(VarBuilder::from_tensors(renamed, dtype, device))
     }
 }

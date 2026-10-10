@@ -282,3 +282,40 @@ async fn an_asr_gguf_transcribes_as_its_transformers_layout() -> anyhow::Result<
     }
     Ok(())
 }
+
+// a `.nemo` written as an `asr` GGUF with full-precision matrices loads and transcribes as the `.nemo` does
+#[tokio::test]
+async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
+    use inference_models_speech::parakeet::{QuantPolicy, write_asr_gguf};
+    use inference_tensor::quantized::GgmlDType;
+    let wav = chirp_wav();
+    for head in ["parakeet_tdt", "parakeet_rnnt", "nemotron_asr_streaming"] {
+        let (dir, nemo) = tiny_parakeet_nemo(head)?;
+        let gguf = dir.path().join("written.gguf");
+        write_asr_gguf(&nemo, &gguf, &QuantPolicy::uniform(GgmlDType::F32))?;
+        let mut bodies = Vec::new();
+        for model_id in [nemo.clone(), gguf] {
+            let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_force_cpu()
+                .build()
+                .await?;
+            let out = model
+                .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
+                .await?;
+            bodies.push(out.body);
+        }
+        assert_eq!(bodies[0], bodies[1], "{head}");
+        // a mixed policy's file loads too: its K-quant rows fall back, its decoder overrides apply
+        let mixed = dir.path().join("mixed.gguf");
+        write_asr_gguf(&nemo, &mixed, &QuantPolicy::q6_k_mix())?;
+        TranscriptionModelBuilder::new(mixed.to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .build()
+            .await?
+            .transcription(request(TranscriptionResponseFormat::Text), &wav)
+            .await?;
+    }
+    Ok(())
+}

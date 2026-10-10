@@ -5,9 +5,11 @@ mod config;
 mod decoder;
 mod encoder;
 mod gguf_checkpoint;
+mod gguf_writer;
 mod nemo_checkpoint;
 
 pub use gguf_checkpoint::is_asr_gguf;
+pub use gguf_writer::{QuantPolicy, write_asr_gguf};
 pub use nemo_checkpoint::is_asr;
 
 use std::collections::HashMap;

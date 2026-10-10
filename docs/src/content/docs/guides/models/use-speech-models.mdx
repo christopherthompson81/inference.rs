@@ -34,7 +34,13 @@ FastConformers (`nvidia/stt_en_fastconformer_hybrid_large_pc`, decoded with its 
 English streaming model; Nemotron-3.5 loads from its transformers files. NVIDIA's own `q8_0.gguf` of
 these models (`general.architecture = asr`) loads too, its 8-bit weights dequantized at load: transcripts track
 the full-precision model's to within a few words on hard audio, where the `.nemo` matches it exactly. A repo's
-transformers files win over the GGUF beside them, so pass the downloaded `.gguf` path to load it. `parakeet-tdt-0.6b-v3` transcribes 25 European languages and identifies the language
+transformers files win over the GGUF beside them, so pass the downloaded `.gguf` path to load it.
+
+A finer GGUF can be written from a `.nemo` with `cargo run -p inference-models-speech --example asr_quantize --
+--nemo <file> --out <file> --preset <name>`. `q8_0` reproduces NVIDIA's file byte for byte. `q8_0-decoder` keeps
+the decoder and joint at F16, about 2% larger, which removed a third to two thirds of the 8-bit word errors in
+our measurements. `q6_k-mix` (Q6_K, the feed-forward at Q8_0, the decoder at F16) is about 6% smaller than
+NVIDIA's file and still more accurate. `--keep <name fragment>=<type>` sets the type of any other matrices. `parakeet-tdt-0.6b-v3` transcribes 25 European languages and identifies the language
 itself. Audio in any format the decoder reads (WAV, MP3, FLAC, OGG, ...) at any sample rate is resampled to
 16 kHz; recordings up to 24 minutes are transcribed in one pass, the bound NeMo gives for these models' full
 attention.

@@ -4,13 +4,14 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use inference_audio::nemo::NemoMelConfig;
 use inference_tensor::{DType, Device, Error, Result};
 use serde::Deserialize;
 
 use super::Parakeet;
 use super::config::{FeatureConfig, ParakeetConfig, ProcessorConfig};
 use crate::nemo::{
-    NemoArchive, NemoEncoderConfig, NemoPreprocessorConfig, parakeet_name, piece_tokenizer,
+    NemoArchive, NemoEncoderConfig, NemoPreprocessorConfig, Piece, parakeet_name, piece_tokenizer,
     sentencepiece_pieces,
 };
 
@@ -142,65 +143,90 @@ pub fn is_asr(archive: &NemoArchive) -> Result<bool> {
         && (decoder.ends_with(RNNT_DECODER) || decoder.ends_with(CTC_DECODER)))
 }
 
+/// A recogniser `.nemo`'s configs and tokenizer pieces, as the model and a GGUF writer read them.
+pub(super) struct NemoRecogniser {
+    pub config: ParakeetConfig,
+    pub processor: ProcessorConfig,
+    pub mel: NemoMelConfig,
+    pub pieces: Vec<Piece>,
+    pub streaming: bool,
+}
+
+pub(super) fn read_recogniser(archive: &NemoArchive) -> Result<NemoRecogniser> {
+    let nemo: AsrConfig = archive.config()?;
+    if nemo.target.contains(PROMPTED_CLASS) {
+        return Err(msg(
+            "a prompted `.nemo` (Nemotron-3.5) loads from its transformers layout instead",
+        ));
+    }
+    let (model_type, vocab_size, durations) = nemo.head()?;
+    let encoder_config = nemo.encoder.parakeet()?;
+    let streaming = encoder_config.is_streaming();
+    let mel = nemo.preprocessor.mel()?;
+    if mel.normalize == streaming {
+        return Err(msg(
+            "a streaming encoder takes raw log-mel features and an offline one normalized ones",
+        ));
+    }
+    let prednet = nemo.decoder.prednet.as_ref();
+    let max_symbols = nemo
+        .decoding
+        .as_ref()
+        .and_then(|d| d.greedy.as_ref()?.max_symbols)
+        .unwrap_or(DEFAULT_MAX_SYMBOLS);
+    let config = ParakeetConfig {
+        model_type: model_type.to_string(),
+        encoder_config,
+        vocab_size,
+        pad_token_id: None,
+        blank_token_id: None,
+        decoder_hidden_size: prednet.map(|p| p.pred_hidden),
+        num_decoder_layers: prednet.map(|p| p.pred_rnn_layers),
+        durations,
+        max_symbols_per_step: max_symbols,
+        num_prompts: None,
+        prompt_intermediate_size: None,
+        default_prompt_id: None,
+    };
+    let processor = ProcessorConfig {
+        feature_extractor: FeatureConfig {
+            feature_size: mel.n_mels,
+            sampling_rate: mel.sample_rate,
+            n_fft: mel.n_fft,
+            win_length: mel.win_length,
+            hop_length: mel.hop_length,
+            preemphasis: mel.preemphasis,
+        },
+        prompt_dictionary: HashMap::new(),
+    };
+    let model_path = match (&nemo.tokenizer.kind, &nemo.tokenizer.model_path) {
+        (kind, Some(path)) if kind == SENTENCEPIECE => path,
+        (kind, _) => {
+            return Err(msg(format!(
+                "a `{kind}` tokenizer is not one this decodes; SentencePiece BPE is"
+            )));
+        }
+    };
+    Ok(NemoRecogniser {
+        config,
+        processor,
+        mel,
+        pieces: sentencepiece_pieces(&archive.member(model_path)?)?,
+        streaming,
+    })
+}
+
 impl Parakeet {
     /// A Parakeet, hybrid or streaming recogniser from its `.nemo`.
     pub fn load_nemo(path: &Path, device: &Device, dtype: DType) -> Result<Self> {
         let archive = NemoArchive::open(path)?;
-        let nemo: AsrConfig = archive.config()?;
-        if nemo.target.contains(PROMPTED_CLASS) {
-            return Err(msg(
-                "a prompted `.nemo` (Nemotron-3.5) loads from its transformers layout instead",
-            ));
-        }
-        let (model_type, vocab_size, durations) = nemo.head()?;
-        let encoder_config = nemo.encoder.parakeet()?;
-        let streaming = encoder_config.is_streaming();
-        let mel = nemo.preprocessor.mel()?;
-        if mel.normalize == streaming {
-            return Err(msg(
-                "a streaming encoder takes raw log-mel features and an offline one normalized ones",
-            ));
-        }
-        let prednet = nemo.decoder.prednet.as_ref();
-        let max_symbols = nemo
-            .decoding
-            .as_ref()
-            .and_then(|d| d.greedy.as_ref()?.max_symbols)
-            .unwrap_or(DEFAULT_MAX_SYMBOLS);
-        let config = ParakeetConfig {
-            model_type: model_type.to_string(),
-            encoder_config,
-            vocab_size,
-            pad_token_id: None,
-            blank_token_id: None,
-            decoder_hidden_size: prednet.map(|p| p.pred_hidden),
-            num_decoder_layers: prednet.map(|p| p.pred_rnn_layers),
-            durations,
-            max_symbols_per_step: max_symbols,
-            num_prompts: None,
-            prompt_intermediate_size: None,
-            default_prompt_id: None,
-        };
-        let processor = ProcessorConfig {
-            feature_extractor: FeatureConfig {
-                feature_size: mel.n_mels,
-                sampling_rate: mel.sample_rate,
-                n_fft: mel.n_fft,
-                win_length: mel.win_length,
-                hop_length: mel.hop_length,
-                preemphasis: mel.preemphasis,
-            },
-            prompt_dictionary: HashMap::new(),
-        };
-        let model_path = match (&nemo.tokenizer.kind, &nemo.tokenizer.model_path) {
-            (kind, Some(path)) if kind == SENTENCEPIECE => path,
-            (kind, _) => {
-                return Err(msg(format!(
-                    "a `{kind}` tokenizer is not one this decodes; SentencePiece BPE is"
-                )));
-            }
-        };
-        let pieces = sentencepiece_pieces(&archive.member(model_path)?)?;
+        let NemoRecogniser {
+            config,
+            processor,
+            pieces,
+            streaming,
+            ..
+        } = read_recogniser(&archive)?;
         let tokenizer = piece_tokenizer(&pieces)?;
         let vb = archive.var_builder(|name| parakeet_name(name, streaming), dtype, device)?;
         Self::new(config, processor, tokenizer, vb)

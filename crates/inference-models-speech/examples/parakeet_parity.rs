@@ -42,8 +42,8 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
     dot / (norm(a) * norm(b))
 }
 
-// word-level edit distance over the reference's word count
-fn word_error_rate(ours: &str, reference: &str) -> f64 {
+// word-level edit distance, and the reference's word count
+fn word_edits(ours: &str, reference: &str) -> (usize, usize) {
     let (a, b): (Vec<&str>, Vec<&str>) = (
         ours.split_whitespace().collect(),
         reference.split_whitespace().collect(),
@@ -60,7 +60,7 @@ fn word_error_rate(ours: &str, reference: &str) -> f64 {
             row[j + 1] = next;
         }
     }
-    row[b.len()] as f64 / b.len().max(1) as f64
+    (row[b.len()], b.len())
 }
 
 fn main() -> Result<()> {
@@ -87,6 +87,8 @@ fn main() -> Result<()> {
     dumps.retain(|p| p.extension().is_some_and(|e| e == "safetensors"));
     dumps.sort();
     let mut failed = false;
+    // across the clips: word edits and reference words, and each clip's encoder cosine
+    let (mut edits, mut words, mut cosines) = (0, 0, Vec::new());
     for path in &dumps {
         let t = inference_tensor::safetensors::load(path, &Device::Cpu)?;
         let get = |name: &str| {
@@ -132,13 +134,16 @@ fn main() -> Result<()> {
         } else {
             0.0
         };
+        cosines.push(encoded_cos);
         let same_emissions = emissions == want_emissions;
         let first_diff = emissions
             .iter()
             .zip(&want_emissions)
             .position(|(a, b)| a != b);
         let same_text = meta["text"].as_str() == Some(text.as_str());
-        let wer = word_error_rate(&text, meta["text"].as_str().unwrap_or_default());
+        let (clip_edits, clip_words) = word_edits(&text, meta["text"].as_str().unwrap_or_default());
+        let wer = clip_edits as f64 / clip_words.max(1) as f64;
+        (edits, words) = (edits + clip_edits, words + clip_words);
         let matches = if args.gguf.is_some() {
             wer <= args.max_wer
         } else {
@@ -176,6 +181,12 @@ fn main() -> Result<()> {
             },
         );
     }
+    let mean = cosines.iter().sum::<f64>() / cosines.len().max(1) as f64;
+    let min = cosines.iter().copied().fold(f64::INFINITY, f64::min);
+    println!(
+        "summary: WER {:.3}% ({edits} edits over {words} words), encoder cos min {min:.6} mean {mean:.6}",
+        edits as f64 / words.max(1) as f64 * 100.0
+    );
     anyhow::ensure!(!failed, "parity failed");
     Ok(())
 }
