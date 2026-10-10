@@ -352,6 +352,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ModelCategory.MULTIMODAL` | `'multimodal'` |
 | `ModelCategory.DIFFUSION` | `'diffusion'` |
 | `ModelCategory.TRANSCRIPTION` | `'transcription'` |
+| `ModelCategory.VOICE_ACTIVITY` | `'voice_activity'` |
 | `ModelCategory.SPEECH` | `'speech'` |
 | `ModelCategory.EMBEDDING` | `'embedding'` |
 
@@ -628,6 +629,16 @@ Speech sampling for every generation of the loaded model; an unset field keeps t
 | `top_p` | `float \| None` | optional |
 
 
+## `SpeechSegment`
+
+A span of speech, in seconds from the start of the audio.
+
+| Field | Type |
+| --- | --- |
+| `end` | `float` |
+| `start` | `float` |
+
+
 ## `TimestampGranularity`
 
 Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
@@ -761,6 +772,32 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `task` | `str` | required |
 | `text` | `str` | required |
 | `words` | `list[TranscriptionWord] \| None` | optional |
+
+
+## `VoiceActivityRequest`
+
+Voice activity request; the audio travels beside it (a multipart `file` over HTTP). An unset field keeps the reference `get_speech_timestamps` default.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `max_speech_duration_s` | `float \| None` | optional |
+| `min_silence_duration_ms` | `float \| None` | optional |
+| `min_speech_duration_ms` | `float \| None` | optional |
+| `model` | `str \| None` | optional |
+| `neg_threshold` | `float \| None` | optional |
+| `return_probabilities` | `bool \| None` | optional |
+| `speech_pad_ms` | `float \| None` | optional |
+| `threshold` | `float \| None` | optional |
+
+
+## `VoiceActivityResponse`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `chunk_seconds` | `float` | required |
+| `duration` | `float` | required |
+| `probabilities` | `list[float] \| None` | optional |
+| `segments` | `list[SpeechSegment]` | required |
 
 ---
 

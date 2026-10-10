@@ -58,6 +58,31 @@ pub async fn send_transcription_responses(
     Ok(())
 }
 
+pub async fn send_voice_activity_responses(
+    input_seqs: &mut [&mut Sequence],
+    results: Vec<Result<inference_models_speech::silero::VoiceActivity, String>>,
+) -> inference_tensor::Result<()> {
+    if input_seqs.len() != results.len() {
+        inference_tensor::bail!(
+            "Input seqs len ({}) does not match voice activity results len ({})",
+            input_seqs.len(),
+            results.len()
+        );
+    }
+    for (seq, result) in input_seqs.iter_mut().zip(results) {
+        let response = match result {
+            Ok(activity) => Response::VoiceActivity(activity),
+            Err(error) => Response::ValidationError(error.into()),
+        };
+        // a client gone before its answer must not cost the rest of the batch theirs
+        if seq.responder().send(response).await.is_err() {
+            tracing::warn!("a voice activity result's receiver disconnected");
+        }
+        seq.set_state(SequenceState::Done(StopReason::DetectedSpeech));
+    }
+    Ok(())
+}
+
 pub async fn send_speech_responses(
     input_seqs: &mut [&mut Sequence],
     pcms: &[Arc<Vec<f32>>],

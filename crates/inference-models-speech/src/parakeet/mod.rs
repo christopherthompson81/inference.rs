@@ -12,6 +12,7 @@ use inference_tensor::nn::VarBuilder;
 use inference_tensor::{DType, Device, Error, Result, Tensor};
 use tokenizers::Tokenizer;
 
+use crate::silero::{SegmentOptions, SileroVad, speech_segments};
 use crate::{TimedText, Transcription};
 pub use config::{HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig};
 pub use decoder::Emission;
@@ -20,6 +21,11 @@ use encoder::Encoder;
 
 // NeMo's bound for full attention on these models, which attend over the whole recording at once
 const MAX_SECONDS: f64 = 24.0 * 60.0;
+// with a VAD, longer audio is windowed: full attention is quadratic in length, and silence costs as much as speech
+const LONG_FORM_SECONDS: f64 = 5.0 * 60.0;
+const WINDOW_SECONDS: f64 = 2.0 * 60.0;
+// how far a window reaches into the gaps around it, for speech the VAD scored just under its threshold
+const WINDOW_EDGE_SECONDS: f64 = 1.0;
 // tokens transformers' processor pins to the end of the token before them, as NeMo does for TDT
 const ATTACHED_PUNCTUATION: [&str; 11] = [
     "?", "'", "\u{a1}", "\u{bf}", "-", ":", ",", "%", "/", ".", "!",
@@ -126,13 +132,78 @@ impl Parakeet {
         let seconds = pcm.len() as f64 / f64::from(sample_rate);
         if seconds > MAX_SECONDS {
             return Err(msg(format!(
-                "the audio is {seconds:.0} s; Parakeet's full attention takes at most {MAX_SECONDS:.0} s"
+                "the audio is {seconds:.0} s; Parakeet's full attention takes at most {MAX_SECONDS:.0} s \
+                 (a transcription model loaded with a VAD transcribes longer audio)"
             )));
         }
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
+        self.transcribe_samples(&pcm)
+    }
+
+    /// As `transcribe`, but audio past `LONG_FORM_SECONDS` is cut at the VAD's silences into windows of at most
+    /// `WINDOW_SECONDS`, each transcribed alone; stretches without speech are skipped.
+    pub fn transcribe_with_vad(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        vad: &SileroVad,
+    ) -> Result<Transcription> {
+        let rate = self.sample_rate();
+        if vad.config().sample_rate != rate {
+            return Err(msg(format!(
+                "the VAD runs at {} Hz and Parakeet at {rate} Hz",
+                vad.config().sample_rate
+            )));
+        }
+        let pcm = inference_audio::mel::resample(pcm, sample_rate, rate).map_err(msg)?;
+        let duration = pcm.len() as f64 / f64::from(rate);
+        if duration <= LONG_FORM_SECONDS {
+            return self.transcribe_samples(&pcm);
+        }
+        let options = SegmentOptions {
+            max_speech_duration_s: Some(WINDOW_SECONDS),
+            ..SegmentOptions::default()
+        };
+        let probabilities = vad.probabilities(&pcm)?;
+        let speech = speech_segments(
+            &probabilities,
+            pcm.len(),
+            rate,
+            vad.config().chunk_size,
+            &options,
+        );
+        let window_samples = (WINDOW_SECONDS * f64::from(rate)) as usize;
+        let mut merged = Transcription {
+            text: String::new(),
+            tokens: Vec::new(),
+            words: Vec::new(),
+            duration,
+        };
+        let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
+        for (start, end) in widen(&windows(&speech, window_samples), pcm.len(), edge) {
+            let offset = start as f64 / f64::from(rate);
+            let part = self.transcribe_samples(&pcm[start..end])?;
+            let shift = |t: TimedText| TimedText {
+                start: t.start + offset,
+                end: t.end + offset,
+                ..t
+            };
+            merged.tokens.extend(part.tokens.into_iter().map(shift));
+            merged.words.extend(part.words.into_iter().map(shift));
+            if !part.text.is_empty() {
+                if !merged.text.is_empty() {
+                    merged.text.push(' ');
+                }
+                merged.text.push_str(&part.text);
+            }
+        }
+        Ok(merged)
+    }
+
+    fn transcribe_samples(&self, pcm: &[f32]) -> Result<Transcription> {
         let duration = pcm.len() as f64 / f64::from(self.sample_rate());
-        let encoded = self.encode(&pcm)?;
+        let encoded = self.encode(pcm)?;
         let emissions = self.head.decode(&encoded)?;
         self.text(&emissions, duration)
     }
@@ -191,6 +262,34 @@ impl Parakeet {
     }
 }
 
+// consecutive segments grouped into ranges of at most `max` samples; a longer segment is a window of its own
+fn windows(speech: &[(usize, usize)], max: usize) -> Vec<(usize, usize)> {
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for &(start, end) in speech {
+        match out.last_mut() {
+            Some(window) if end - window.0 <= max => window.1 = end,
+            _ => out.push((start, end)),
+        }
+    }
+    out
+}
+
+// each window reaches up to `edge` samples into the gaps around it, never past a gap's midpoint or the audio
+fn widen(windows: &[(usize, usize)], len: usize, edge: usize) -> Vec<(usize, usize)> {
+    windows
+        .iter()
+        .enumerate()
+        .map(|(i, &(start, end))| {
+            let before = i.checked_sub(1).map_or(0, |p| windows[p].1.midpoint(start));
+            let after = windows.get(i + 1).map_or(len, |n| end.midpoint(n.0));
+            (
+                start.saturating_sub(edge).max(before),
+                (end + edge).min(after),
+            )
+        })
+        .collect()
+}
+
 // a piece opening with whitespace starts a word; any other joins the word before it
 fn words(tokens: &[TimedText]) -> Vec<TimedText> {
     let mut words: Vec<TimedText> = Vec::new();
@@ -225,6 +324,22 @@ mod tests {
             start,
             end,
         }
+    }
+
+    #[test]
+    fn speech_groups_into_bounded_windows() {
+        let speech = [(0, 10), (20, 40), (45, 90), (95, 300), (310, 320)];
+        assert_eq!(windows(&speech, 100), [(0, 90), (95, 300), (310, 320)]);
+        assert_eq!(windows(&[], 100), Vec::<(usize, usize)>::new());
+    }
+
+    #[test]
+    fn windows_reach_into_their_gaps_up_to_the_midpoint() {
+        let windows = [(100, 200), (210, 400), (1000, 1100)];
+        assert_eq!(
+            widen(&windows, 1150, 50),
+            [(50, 205), (205, 450), (950, 1150)]
+        );
     }
 
     #[test]

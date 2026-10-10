@@ -18,6 +18,7 @@ use crate::openapi_doc::get_openapi_doc;
 use crate::{
     anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
     approvals::resolve_agent_approval,
+    audio_analysis::{transcription, voice_activity},
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::embeddings,
@@ -48,11 +49,10 @@ use crate::{
         RE_ISQ_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE,
         ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
         SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE,
-        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE,
+        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
-    transcription::transcription,
 };
 use inference_api::Engine;
 
@@ -351,6 +351,7 @@ fn init_router(
         )
         .route(SPEECH_GENERATION_ROUTE.path, post(speech_generation))
         .route(TRANSCRIPTION_ROUTE.path, post(transcription))
+        .route(VOICE_ACTIVITY_ROUTE.path, post(voice_activity))
         .route(AGENT_APPROVAL_ROUTE.path, post(resolve_agent_approval))
         .route(RESPONSES_ROUTE.path, post(create_response))
         .route(SKILLS_ROUTE.path, get(list_skills).post(upload_skill))

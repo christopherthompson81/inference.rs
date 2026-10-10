@@ -359,6 +359,18 @@ class JsonEngine:
             )
         return take_blob(blob)
 
+    def voice_activity(self, request_json: str, audio: bytes) -> str:
+        """The speech segments of encoded audio, from a voice activity model."""
+        request = text_arg(request_json)
+        audio = bytes_arg(audio)
+        response = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_voice_activity(engine, request, len(request), audio, len(audio), ctypes.byref(response)),
+                "inference_voice_activity",
+            )
+        return take_string(response)
+
     def _call2(self, name: str, first: str, second: str) -> str:
         return take_string(self._pair(name, first, second))
 

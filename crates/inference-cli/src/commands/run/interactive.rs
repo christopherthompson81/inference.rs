@@ -10,7 +10,7 @@ use inference_api::{
     lora_adapters::ListLoraAdaptersQuery,
     openai::{
         ImageGenerationRequest, ModelCategory, SpeechGenerationRequest, TranscriptionRequest,
-        TranscriptionResponseFormat,
+        TranscriptionResponseFormat, VoiceActivityRequest,
     },
 };
 use regex::Regex;
@@ -70,6 +70,15 @@ Commands:
 const TRANSCRIPTION_INTERACTIVE_HELP: &str = r#"
 Welcome to interactive mode! Because this model is a speech recognition model, you can enter the path of an audio
 file (WAV, MP3, FLAC, ...) and the model will transcribe it.
+
+Commands:
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
+"#;
+
+const VOICE_ACTIVITY_INTERACTIVE_HELP: &str = r#"
+Welcome to interactive mode! Because this model is a voice activity model, you can enter the path of an audio
+file (WAV, MP3, FLAC, ...) and the model will list where it speaks.
 
 Commands:
 - `/help`: Display this message.
@@ -246,6 +255,7 @@ pub async fn interactive_mode(engine: &Engine, config: InteractiveConfig) {
         Some(ModelCategory::Diffusion) => diffusion_interactive_mode(engine).await,
         Some(ModelCategory::Speech) => speech_interactive_mode(engine).await,
         Some(ModelCategory::Transcription) => transcription_interactive_mode(engine).await,
+        Some(ModelCategory::VoiceActivity) => voice_activity_interactive_mode(engine).await,
         Some(ModelCategory::Embedding) => error!(
             "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
         ),
@@ -578,6 +588,44 @@ async fn transcription_interactive_mode(engine: &Engine) {
         };
         match transcribe(engine, &path).await {
             Ok((text, duration)) => println!("{text}\n(took {duration:.2}s)"),
+            Err(e) => error!("{e}"),
+        }
+        println!();
+    }
+    editor.save_history(&history_file_path()).unwrap();
+}
+
+async fn voice_activity_interactive_mode(engine: &Engine) {
+    println!("{BANNER}{VOICE_ACTIVITY_INTERACTIVE_HELP}{BANNER}");
+    let mut editor = open_editor();
+    loop {
+        let path = match read_line(&mut editor, "audio file> ").trim() {
+            "" => continue,
+            HELP_CMD => {
+                println!("{BANNER}{VOICE_ACTIVITY_INTERACTIVE_HELP}{BANNER}");
+                continue;
+            }
+            EXIT_CMD => break,
+            path => path.to_string(),
+        };
+        let detected = async {
+            let audio = fs::read(&path)?;
+            engine
+                .voice_activity(VoiceActivityRequest::new(), &audio)
+                .await
+                .map_err(anyhow::Error::msg)
+        };
+        match detected.await {
+            Ok(activity) => {
+                for s in &activity.segments {
+                    println!("{:>9.2}s - {:>9.2}s", s.start, s.end);
+                }
+                println!(
+                    "({} speech segments in {:.2}s)",
+                    activity.segments.len(),
+                    activity.duration
+                );
+            }
             Err(e) => error!("{e}"),
         }
         println!();

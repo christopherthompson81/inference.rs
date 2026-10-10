@@ -108,6 +108,11 @@ impl MessageExtras {
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.audios = Some(vec![audio.clone()]);
             }
+            RequestMessage::VoiceActivity { audio, options } => {
+                extras.seq_step_type = SeqStepType::OneShot;
+                extras.audios = Some(vec![audio.clone()]);
+                extras.one_shot = Some(OneShotParams::VoiceActivity(options.clone()));
+            }
             RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. } => {
                 extras.seq_step_type = SeqStepType::OneShot
             }
@@ -560,6 +565,7 @@ impl Engine {
             ) => Ok(()),
             (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => Ok(()),
             (ModelCategory::Transcription, RequestMessage::Transcription { .. }) => Ok(()),
+            (ModelCategory::VoiceActivity, RequestMessage::VoiceActivity { .. }) => Ok(()),
             (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => {
                 speech_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
             }
@@ -639,7 +645,9 @@ impl Engine {
             }
             RequestMessage::ImageGeneration { prompt, .. }
             | RequestMessage::SpeechGeneration { prompt, .. } => Ok((vec![u32::MAX], prompt)),
-            RequestMessage::Transcription { .. } => Ok((vec![u32::MAX], String::new())),
+            RequestMessage::Transcription { .. } | RequestMessage::VoiceActivity { .. } => {
+                Ok((vec![u32::MAX], String::new()))
+            }
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {

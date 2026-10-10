@@ -10,6 +10,11 @@ mod support;
 #[allow(clippy::duplicate_mod)]
 mod parakeet_support;
 
+// The tiny random-weight Silero VAD the voice activity route loads.
+#[path = "../../../inference/tests/support/silero_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod silero_support;
+
 mod cancel;
 mod chat_route;
 mod flux;

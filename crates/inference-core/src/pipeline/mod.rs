@@ -176,7 +176,9 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
-pub use transcription::{TranscriptionLoader, TranscriptionLoaderType, TranscriptionPipeline};
+pub use transcription::{
+    TranscriptionLoader, TranscriptionLoaderType, TranscriptionPipeline, VoiceActivityLoader,
+};
 
 pub type SpeechPreparation = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
 
@@ -968,6 +970,7 @@ pub enum ModelCategory {
     },
     Diffusion,
     Transcription,
+    VoiceActivity,
     Speech,
     Embedding,
 }
@@ -981,6 +984,7 @@ impl std::fmt::Debug for ModelCategory {
             }
             ModelCategory::Diffusion => write!(f, "ModelCategory::Diffusion"),
             ModelCategory::Transcription => write!(f, "ModelCategory::Transcription"),
+            ModelCategory::VoiceActivity => write!(f, "ModelCategory::VoiceActivity"),
             ModelCategory::Speech => write!(f, "ModelCategory::Speech"),
             ModelCategory::Embedding => write!(f, "ModelCategory::Embedding"),
         }
@@ -993,6 +997,7 @@ impl PartialEq for ModelCategory {
             (Self::Text, Self::Text) => true,
             (Self::Multimodal { .. }, Self::Multimodal { .. }) => true,
             (Self::Transcription, Self::Transcription) => true,
+            (Self::VoiceActivity, Self::VoiceActivity) => true,
             (Self::Speech, Self::Speech) => true,
             (Self::Diffusion, Self::Diffusion) => true,
             (Self::Embedding, Self::Embedding) => true,
@@ -1001,6 +1006,7 @@ impl PartialEq for ModelCategory {
                 | Self::Multimodal { .. }
                 | Self::Diffusion
                 | Self::Transcription
+                | Self::VoiceActivity
                 | Self::Speech
                 | Self::Embedding,
                 _,
@@ -1059,6 +1065,10 @@ pub enum ForwardInputsResult {
     Transcription {
         transcripts: Vec<Result<inference_models_speech::Transcription, String>>,
     },
+    /// One result per sequence, as for transcripts.
+    VoiceActivity {
+        results: Vec<Result<inference_models_speech::silero::VoiceActivity, String>>,
+    },
 }
 
 impl ForwardInputsResult {
@@ -1095,6 +1105,9 @@ impl ForwardInputsResult {
             Self::Transcription { transcripts } => Ok(Self::Transcription {
                 transcripts: vec![transcripts[bs_idx].clone()],
             }),
+            Self::VoiceActivity { results } => Ok(Self::VoiceActivity {
+                results: vec![results[bs_idx].clone()],
+            }),
         }
     }
 
@@ -1111,7 +1124,9 @@ impl ForwardInputsResult {
             }),
             Self::Image { .. } => Ok(self.clone()),
             Self::Speech { .. } => Ok(self.clone()),
-            Self::BlockGeneration { .. } | Self::Transcription { .. } => Ok(self.clone()),
+            Self::BlockGeneration { .. }
+            | Self::Transcription { .. }
+            | Self::VoiceActivity { .. } => Ok(self.clone()),
         }
     }
 

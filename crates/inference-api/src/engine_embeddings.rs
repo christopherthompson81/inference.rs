@@ -320,6 +320,7 @@ async fn process_embedding_response(
             | Response::ImageGeneration(_)
             | Response::Speech { .. }
             | Response::Transcription(_)
+            | Response::VoiceActivity(_)
             | Response::Raw { .. }
             | Response::AgenticToolCallProgress { .. }
             | Response::BlockDenoisingProgress(_)

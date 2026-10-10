@@ -1111,6 +1111,7 @@ class ModelCategory(str, Enum):
     MULTIMODAL = "multimodal"
     DIFFUSION = "diffusion"
     TRANSCRIPTION = "transcription"
+    VOICE_ACTIVITY = "voice_activity"
     SPEECH = "speech"
     EMBEDDING = "embedding"
 
@@ -1348,7 +1349,16 @@ class ModelSelectedTranscription:
     arch: TranscriptionLoaderType | None = None
     dtype: ModelDType | None = ModelDType.AUTO
     model_id: str
+    vad_model_id: str | None = None
     _external = 'Transcription'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedVoiceActivity:
+    """Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one"""
+
+    model_id: str
+    _external = 'VoiceActivity'
 
 
 @dataclass(kw_only=True)
@@ -2635,6 +2645,14 @@ class SpeechLoaderType(str, Enum):
 
 
 @dataclass(kw_only=True)
+class SpeechSegment:
+    """A span of speech, in seconds from the start of the audio."""
+
+    end: float
+    start: float
+
+
+@dataclass(kw_only=True)
 class StreamOptions:
     """Stream options configuration"""
 
@@ -2824,6 +2842,28 @@ class VerboseTranscriptionResponse:
     words: list[TranscriptionWord] | None = None
 
 
+@dataclass(kw_only=True)
+class VoiceActivityRequest:
+    """Voice activity request; the audio travels beside it (a multipart `file` over HTTP). An unset field keeps the reference `get_speech_timestamps` default."""
+
+    max_speech_duration_s: float | None = None
+    min_silence_duration_ms: float | None = None
+    min_speech_duration_ms: float | None = None
+    model: str | None = None
+    neg_threshold: float | None = None
+    return_probabilities: bool | None = None
+    speech_pad_ms: float | None = None
+    threshold: float | None = None
+
+
+@dataclass(kw_only=True)
+class VoiceActivityResponse:
+    chunk_seconds: float
+    duration: float
+    probabilities: list[float] | None = None
+    segments: list[SpeechSegment]
+
+
 class WebSearchContentType(str, Enum):
     TEXT = "text"
     IMAGE = "image"
@@ -2877,7 +2917,7 @@ Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
-ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedEmbedding]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedVoiceActivity, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]

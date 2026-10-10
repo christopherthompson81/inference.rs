@@ -190,6 +190,13 @@ impl BlockingEngine {
         })
     }
 
+    pub fn voice_activity_json(&self, request: &[u8], audio: &[u8]) -> Result<String, ApiError> {
+        let audio = audio.to_vec();
+        self.call(request, |engine, request| async move {
+            engine.voice_activity_json(&request, &audio).await
+        })
+    }
+
     pub fn transcription_json(
         &self,
         request: &[u8],

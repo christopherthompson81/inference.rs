@@ -691,6 +691,36 @@ pub unsafe extern "C" fn inference_transcription(
     }
 }
 
+/// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `audio` for `audio_len` bytes and
+/// `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_voice_activity(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    audio: *const u8,
+    audio_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                if audio_len > MAX_FILE_UPLOAD_BYTES {
+                    return Err(api_failure(file_too_large()));
+                }
+                let audio = arg_bytes(audio.cast::<c_char>(), audio_len, "audio")?;
+                engine
+                    .voice_activity_json(request, audio)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
 /// Safety: `engine` is a live handle, `approval_id` valid for `approval_id_len` bytes, `request` for `request_len`
 /// bytes and `out_response` for a write.
 #[unsafe(no_mangle)]

@@ -243,6 +243,12 @@ class Engine:
         """The transcript of encoded audio, in the request's response_format (the blob's MIME type names it)."""
         return self.json.transcription(to_json(request), audio)
 
+    def voice_activity(
+        self, audio: bytes, request: types.VoiceActivityRequest | str = "{}"
+    ) -> types.VoiceActivityResponse:
+        """The speech segments of encoded audio; unset request fields keep the reference defaults."""
+        return from_json(types.VoiceActivityResponse, self.json.voice_activity(to_json(request), audio))
+
     def resolve_approval(
         self, approval_id: str, decision: types.ApprovalDecisionRequest | str
     ) -> types.ApprovalDecisionResponse:

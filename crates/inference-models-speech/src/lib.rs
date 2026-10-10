@@ -9,6 +9,7 @@ mod bs1770;
 mod dia;
 pub mod kokoro;
 pub mod parakeet;
+pub mod silero;
 mod transcript;
 pub mod utils;
 mod weight_norm;

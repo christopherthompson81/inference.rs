@@ -188,9 +188,9 @@ fn model_id_from_selected(model: &ModelSelected) -> String {
             quantized_model_id, ..
         } => quantized_model_id.clone(),
         ModelSelected::DiffusionPlain { model_id, .. } => model_id.clone(),
-        ModelSelected::Speech { model_id, .. } | ModelSelected::Transcription { model_id, .. } => {
-            model_id.clone()
-        }
+        ModelSelected::Speech { model_id, .. }
+        | ModelSelected::Transcription { model_id, .. }
+        | ModelSelected::VoiceActivity { model_id } => model_id.clone(),
     }
 }
 
@@ -471,7 +471,8 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
         }
         ModelSelected::DiffusionPlain { .. }
         | ModelSelected::Speech { .. }
-        | ModelSelected::Transcription { .. } => {
+        | ModelSelected::Transcription { .. }
+        | ModelSelected::VoiceActivity { .. } => {
             anyhow::bail!("Auto-tuning is not supported for diffusion or speech models.");
         }
         _ => {}

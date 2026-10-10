@@ -21,6 +21,7 @@ internal static class Program
 
     // the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
     private const string ParakeetDir = "parakeet";
+    private const string SileroDir = "silero";
     private const int ToneRate = 16000;
     private const double ToneHz = 440.0;
 
@@ -55,6 +56,7 @@ internal static class Program
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
         AudioTranscribes(Path.Combine(model, ParakeetDir));
+        VoiceActivityFindsTheSpeech(Path.Combine(model, SileroDir));
 
         Console.WriteLine(failures == 0 ? "all engine checks passed" : $"{failures} engine checks failed");
         return failures == 0 ? 0 : 1;
@@ -436,6 +438,19 @@ internal static class Program
             System.Text.Encoding.UTF8.GetString(text.Data) == (string?)parsed["text"]);
         var bad = Throws(() => engine.Transcription("{}", "not audio"u8.ToArray()));
         Check("audio that does not decode is InvalidRequest", bad?.Status == InferenceStatus.InvalidRequest);
+    }
+
+    private static void VoiceActivityFindsTheSpeech(string silero)
+    {
+        var spec = new JsonObject
+        {
+            ["model"] = new JsonObject { ["VoiceActivity"] = new JsonObject { ["model_id"] = silero } },
+            ["runtime"] = new JsonObject { ["device"] = "cpu" },
+        }.ToJsonString();
+        using var engine = InferenceEngine.Load(spec);
+        // a zero threshold makes every chunk speech, so the clip is one segment whatever the weights
+        var activity = JsonNode.Parse(engine.VoiceActivity("""{"threshold": 0.0, "neg_threshold": -1.0}""", ToneWav()))!;
+        Check("voice activity finds one segment", (activity["segments"] as JsonArray)?.Count == 1);
     }
 
     private static InferenceException? Throws(Action action)

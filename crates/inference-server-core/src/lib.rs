@@ -90,6 +90,7 @@ pub mod image_generation;
 pub mod lora_adapters;
 pub mod mcp_server;
 pub use media_source::configure_ui_upload_dir;
+pub mod audio_analysis;
 pub mod inference_server_router_builder;
 pub mod metrics;
 pub mod openapi_doc;
@@ -99,7 +100,6 @@ pub mod serve;
 pub mod skills;
 pub mod speech_generation;
 pub mod streaming;
-pub mod transcription;
 pub mod types;
 use inference_api::{
     agentic, anthropic as anthropic_api, api_error, engine_chat, engine_completion,

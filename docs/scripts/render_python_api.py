@@ -178,6 +178,8 @@ GROUPS = [
                 "Transcription",
                 "VerboseTranscription",
                 "TimestampGranularity",
+                "VoiceActivity",
+                "SpeechSegment",
                 "Calibration",
                 "CacheStats",
                 "EncoderCacheStats",

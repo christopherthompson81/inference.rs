@@ -1360,6 +1360,8 @@ pub enum ModelCategory {
     Diffusion,
     /// Speech recognition
     Transcription,
+    /// Voice activity detection
+    VoiceActivity,
     /// Speech synthesis
     Speech,
     Embedding,
@@ -2105,6 +2107,78 @@ pub fn transcript_vtt(segments: &[TranscriptionSegment]) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!("WEBVTT\n\n{cues}")
+}
+
+/// Voice activity request; the audio travels beside it (a multipart `file` over HTTP). An unset field keeps the
+/// reference `get_speech_timestamps` default.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct VoiceActivityRequest {
+    /// The voice activity model to use.
+    #[serde(default = "default_model")]
+    #[schema(example = "default")]
+    pub model: String,
+    /// Probability at which speech starts (0.5).
+    #[serde(default)]
+    pub threshold: Option<f32>,
+    /// Probability under which speech may end (`threshold - 0.15`, at least 0.01).
+    #[serde(default)]
+    pub neg_threshold: Option<f32>,
+    /// Shorter speech is dropped (250).
+    #[serde(default)]
+    pub min_speech_duration_ms: Option<f64>,
+    /// Longer speech is split at its longest silence (unbounded).
+    #[serde(default)]
+    pub max_speech_duration_s: Option<f64>,
+    /// Silence shorter than this does not end speech (100).
+    #[serde(default)]
+    pub min_silence_duration_ms: Option<f64>,
+    /// Padding on each side of a segment (30).
+    #[serde(default)]
+    pub speech_pad_ms: Option<f64>,
+    /// Also return the speech probability of every chunk.
+    #[serde(default)]
+    pub return_probabilities: bool,
+}
+
+impl VoiceActivityRequest {
+    /// A request for the default model's segments, with the reference defaults.
+    pub fn new() -> Self {
+        Self {
+            model: default_model(),
+            threshold: None,
+            neg_threshold: None,
+            min_speech_duration_ms: None,
+            max_speech_duration_s: None,
+            min_silence_duration_ms: None,
+            speech_pad_ms: None,
+            return_probabilities: false,
+        }
+    }
+}
+
+impl Default for VoiceActivityRequest {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A span of speech, in seconds from the start of the audio.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct SpeechSegment {
+    pub start: f64,
+    pub end: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct VoiceActivityResponse {
+    /// Seconds of audio.
+    pub duration: f64,
+    pub segments: Vec<SpeechSegment>,
+    /// Seconds each probability covers.
+    pub chunk_seconds: f64,
+    /// Speech probability per chunk, when asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probabilities: Option<Vec<f32>>,
 }
 
 /// Helper type for messages field in ResponsesCreateRequest

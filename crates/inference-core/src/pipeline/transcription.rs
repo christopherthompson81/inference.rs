@@ -19,6 +19,7 @@ use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
 use inference_models_speech::parakeet::{MODEL_TYPES, Parakeet, ParakeetFiles};
+use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
 use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
@@ -34,6 +35,7 @@ const CONFIG: &str = "config.json";
 const PROCESSOR_CONFIG: &str = "processor_config.json";
 const TOKENIZER: &str = "tokenizer.json";
 const WEIGHTS: &str = "model.safetensors";
+const GGUF_EXTENSION: &str = "gguf";
 // the engine's sequence bookkeeping wants a length; one-shot audio requests never reach it
 const METADATA_MAX_SEQ_LEN: usize = 1024;
 
@@ -71,6 +73,8 @@ impl TranscriptionLoaderType {
 #[derive(Clone, Debug)]
 pub struct TranscriptionModelPaths {
     files: ParakeetFiles,
+    // the VAD's GGUF, resolved with the loader's token when the recogniser came from the Hub
+    vad: Option<PathBuf>,
 }
 
 impl ModelPaths for TranscriptionModelPaths {
@@ -136,6 +140,7 @@ pub struct TranscriptionInputsProcessor;
 
 struct ModelInputs {
     audios: Vec<AudioInput>,
+    options: Vec<SegmentOptions>,
 }
 
 impl InputsProcessor for TranscriptionInputsProcessor {
@@ -165,16 +170,38 @@ impl InputsProcessor for TranscriptionInputsProcessor {
                     .ok_or_else(|| anyhow::anyhow!("a transcription request carries no audio"))
             })
             .collect::<Result<Vec<_>>>()?;
+        let options = input_seqs
+            .iter()
+            .map(|seq| seq.segment_options().cloned().unwrap_or_default())
+            .collect();
         Ok(InputProcessorOutput {
-            inputs: Box::new(ModelInputs { audios }),
+            inputs: Box::new(ModelInputs { audios, options }),
             seq_indices: (0..input_seqs.len()).collect::<Vec<_>>(),
         })
     }
 }
 
+// the speech analysis models one pipeline hosts: a recogniser (with a VAD for long audio), or a VAD alone
+enum AudioModel {
+    Parakeet {
+        asr: Box<Parakeet>,
+        vad: Option<SileroVad>,
+    },
+    Silero(SileroVad),
+}
+
+impl AudioModel {
+    fn device(&self) -> &Device {
+        match self {
+            Self::Parakeet { asr, .. } => asr.device(),
+            Self::Silero(vad) => vad.device(),
+        }
+    }
+}
+
 pub struct TranscriptionPipeline {
     model_id: String,
-    model: Parakeet,
+    model: AudioModel,
     metadata: Arc<GeneralMetadata>,
     dummy_cache: EitherCache,
 }
@@ -183,6 +210,105 @@ pub struct TranscriptionLoader {
     pub model_id: String,
     /// Unset reads the architecture from the model's `config.json`.
     pub arch: Option<TranscriptionLoaderType>,
+    /// A Silero VAD to cut long recordings at their silences; without one Parakeet takes at most 24 minutes.
+    pub vad_model_id: Option<String>,
+}
+
+/// Loads a Silero VAD GGUF: a file, a directory holding one, or a Hugging Face repo holding one.
+pub struct VoiceActivityLoader {
+    pub model_id: String,
+}
+
+/// The Silero GGUF `model_id` names: the file itself, the one in a local directory, or the one in a Hugging Face repo.
+pub(crate) fn silero_gguf(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    silent: bool,
+) -> Result<PathBuf> {
+    let path = std::path::Path::new(model_id);
+    let is_gguf = |p: &std::path::Path| p.extension().is_some_and(|e| e == GGUF_EXTENSION);
+    let only = |files: Vec<String>| -> Result<String> {
+        let mut ggufs = files
+            .into_iter()
+            .filter(|f| is_gguf(std::path::Path::new(f)));
+        match (ggufs.next(), ggufs.next()) {
+            (Some(only), None) => Ok(only),
+            _ => anyhow::bail!("`{model_id}` should hold exactly one Silero VAD `.gguf`"),
+        }
+    };
+    let file = if path.is_file() {
+        path.to_path_buf()
+    } else if path.is_dir() {
+        // only Silero's GGUFs count, so other models' files beside it do not make the choice ambiguous
+        let names = std::fs::read_dir(path)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| is_silero_gguf(p))
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        PathBuf::from(only(names)?)
+    } else {
+        let revision = revision.unwrap_or_else(|| "main".to_string());
+        let api = ApiBuilder::new()
+            .with_progress(!silent)
+            .with_token(get_token(token_source)?)
+            .build()?
+            .repo(Repo::with_revision(
+                model_id.to_string(),
+                RepoType::Model,
+                revision.clone(),
+            ));
+        let name = only(crate::pipeline::hf::list_repo_files(
+            &api, path, true, &revision,
+        )?)?;
+        crate::pipeline::hf::get_file(&api, path, &name, &revision)?
+    };
+    if !is_silero_gguf(&file) {
+        anyhow::bail!("`{}` is not a Silero VAD GGUF", file.display())
+    }
+    Ok(file)
+}
+
+fn read_silero(file: &std::path::Path, device: &Device) -> Result<SileroVad> {
+    let (config, vb) = read_gguf(
+        &mut std::io::BufReader::new(std::fs::File::open(file)?),
+        device,
+    )?;
+    Ok(SileroVad::new(config, vb)?)
+}
+
+impl Loader for VoiceActivityLoader {
+    fn load_model_from_hf(
+        &self,
+        revision: Option<String>,
+        token_source: TokenSource,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(options.silent);
+        let file = silero_gguf(&self.model_id, revision, &token_source, options.silent)?;
+        let vad = read_silero(&file, options.device)?;
+        Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
+            self.model_id.clone(),
+            AudioModel::Silero(vad),
+            inference_tensor::DType::F32,
+        ))))
+    }
+
+    fn load_model_from_path(
+        &self,
+        _paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        self.load_model_from_hf(None, TokenSource::None, options)
+    }
+
+    fn get_id(&self) -> String {
+        self.model_id.clone()
+    }
+
+    fn get_kind(&self) -> ModelKind {
+        ModelKind::Normal
+    }
 }
 
 impl Loader for TranscriptionLoader {
@@ -212,6 +338,11 @@ impl Loader for TranscriptionLoader {
                 tokenizer: get(TOKENIZER)?,
                 weights: vec![get(WEIGHTS)?],
             },
+            vad: self
+                .vad_model_id
+                .as_deref()
+                .map(|id| silero_gguf(id, None, &token_source, options.silent))
+                .transpose()?,
         };
         self.load_model_from_path(&paths, options)
     }
@@ -247,8 +378,19 @@ impl Loader for TranscriptionLoader {
             })?,
         };
         let dtype = dtype.try_into_dtype(&[device])?;
+        let vad = match (&paths.vad, self.vad_model_id.as_deref()) {
+            (Some(file), _) => Some(read_silero(file, device)?),
+            (None, Some(id)) => Some(read_silero(
+                &silero_gguf(id, None, &TokenSource::CacheToken, silent)?,
+                device,
+            )?),
+            (None, None) => None,
+        };
         let model = match arch {
-            TranscriptionLoaderType::Parakeet => Parakeet::load(&paths.files, device, dtype)?,
+            TranscriptionLoaderType::Parakeet => AudioModel::Parakeet {
+                asr: Box::new(Parakeet::load(&paths.files, device, dtype)?),
+                vad,
+            },
         };
         Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
             self.model_id.clone(),
@@ -267,7 +409,12 @@ impl Loader for TranscriptionLoader {
 }
 
 impl TranscriptionPipeline {
-    fn new(model_id: String, model: Parakeet, activation_dtype: inference_tensor::DType) -> Self {
+    fn new(model_id: String, model: AudioModel, activation_dtype: inference_tensor::DType) -> Self {
+        // a VAD answers with times, not text
+        let output = match model {
+            AudioModel::Parakeet { .. } => vec![SupportedModality::Text],
+            AudioModel::Silero(_) => Vec::new(),
+        };
         Self {
             model_id,
             model,
@@ -286,7 +433,7 @@ impl TranscriptionPipeline {
                 model_metadata: None,
                 modalities: Modalities {
                     input: vec![SupportedModality::Audio],
-                    output: vec![SupportedModality::Text],
+                    output,
                 },
                 loaded_for_uqff_write: false,
             }),
@@ -356,16 +503,32 @@ impl Pipeline for TranscriptionPipeline {
         return_raw_logits: bool,
     ) -> inference_tensor::Result<ForwardInputsResult> {
         assert!(!return_raw_logits);
-        let ModelInputs { audios } = *inputs.downcast().expect("Downcast failed.");
-        let transcripts = audios
-            .iter()
-            .map(|audio| {
-                self.model
-                    .transcribe(&audio.to_mono(), audio.sample_rate)
-                    .map_err(|e| e.to_string())
-            })
-            .collect();
-        Ok(ForwardInputsResult::Transcription { transcripts })
+        let ModelInputs { audios, options } = *inputs.downcast().expect("Downcast failed.");
+        Ok(match &self.model {
+            AudioModel::Parakeet { asr, vad } => ForwardInputsResult::Transcription {
+                transcripts: audios
+                    .iter()
+                    .map(|audio| {
+                        let pcm = audio.to_mono();
+                        match vad {
+                            Some(vad) => asr.transcribe_with_vad(&pcm, audio.sample_rate, vad),
+                            None => asr.transcribe(&pcm, audio.sample_rate),
+                        }
+                        .map_err(|e| e.to_string())
+                    })
+                    .collect(),
+            },
+            AudioModel::Silero(vad) => ForwardInputsResult::VoiceActivity {
+                results: audios
+                    .iter()
+                    .zip(&options)
+                    .map(|(audio, options)| {
+                        vad.detect(&audio.to_mono(), audio.sample_rate, options)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect(),
+            },
+        })
     }
 
     fn sample_causal_gen<'a>(
@@ -383,7 +546,10 @@ impl Pipeline for TranscriptionPipeline {
     }
 
     fn category(&self) -> ModelCategory {
-        ModelCategory::Transcription
+        match self.model {
+            AudioModel::Parakeet { .. } => ModelCategory::Transcription,
+            AudioModel::Silero(_) => ModelCategory::VoiceActivity,
+        }
     }
 }
 

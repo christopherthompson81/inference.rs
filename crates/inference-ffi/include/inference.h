@@ -457,11 +457,21 @@ INFERENCE_API inference_status inference_speech_generation(const inference_engin
  * JSON ({"model"?, "response_format"?: "json" | "text" | "srt" | "verbose_json" | "vtt", "timestamp_granularities"?:
  * ["word", "segment"]}; "language", "prompt" and "temperature" are accepted and ignored by Parakeet); audio is
  * audio_len bytes of an encoded file (WAV, MP3, FLAC, OGG, ..., at most 64 MiB). out_blob receives the transcript in
- * that format, its MIME type naming it, e.g. "application/json". Audio that does not decode is
- * INFERENCE_ERR_INVALID_REQUEST. */
+ * that format, its MIME type naming it, e.g. "application/json". Audio that does not decode, or a recording past 24
+ * minutes on a model loaded without a VAD ("vad_model_id" in its spec), is INFERENCE_ERR_INVALID_REQUEST. */
 INFERENCE_API inference_status inference_transcription(const inference_engine *engine, const char *request,
                                                       size_t request_len, const uint8_t *audio, size_t audio_len,
                                                       inference_blob **out_blob);
+/* Finds the speech in audio with a voice activity model (Silero VAD). request holds the POST /v1/audio/vad form
+ * fields as JSON ({"model"?, "threshold"?, "neg_threshold"?, "min_speech_duration_ms"?, "max_speech_duration_s"?,
+ * "min_silence_duration_ms"?, "speech_pad_ms"?, "return_probabilities"?}, unset fields keeping the reference
+ * get_speech_timestamps defaults); audio is audio_len bytes of an encoded file (at most 64 MiB). out_response receives
+ * {"duration", "segments": [{"start", "end"}], "chunk_seconds", "probabilities"?}, times in seconds. Audio that does
+ * not decode, a negative duration or pad, or a model that is not a voice activity one is
+ * INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_voice_activity(const inference_engine *engine, const char *request,
+                                                       size_t request_len, const uint8_t *audio, size_t audio_len,
+                                                       inference_string **out_response);
 /* Answers the approval an "agentic_tool_approval_required" stream event named (its "approval_id"); the request is
  * {"decision": "approve" | "deny", "remember_for_session"?, "message"?} and out_response receives {"status":
  * "resolved" | "queued"}. An unknown approval is INFERENCE_ERR_NOT_FOUND. Approvals only arise on streamed requests

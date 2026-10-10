@@ -227,6 +227,7 @@ class EngineTest(unittest.TestCase):
 
 # the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
 PARAKEET_DIR = "parakeet"
+SILERO_DIR = "silero"
 TONE_RATE = 16000
 TONE_HZ = 440.0
 
@@ -273,6 +274,20 @@ class TranscriptionTest(unittest.TestCase):
             with self.assertRaises(ir.InferenceError) as bad:
                 engine.transcription("{}", b"not audio")
             self.assertEqual(bad.exception.status, ir.Status.INVALID_REQUEST)
+
+    def test_voice_activity_finds_the_speech(self):
+        model = os.environ.get(MODEL_VARIABLE)
+        if not model:
+            self.skipTest(f"{MODEL_VARIABLE} is not set")
+        vad_spec = json.dumps(
+            {"model": {"VoiceActivity": {"model_id": os.path.join(model, SILERO_DIR)}}, "runtime": {"device": "cpu"}}
+        )
+        with ir.JsonEngine(vad_spec) as engine:
+            # a zero threshold makes every chunk speech, so the clip is one segment whatever the weights
+            request = json.dumps({"threshold": 0.0, "neg_threshold": -1.0, "return_probabilities": True})
+            activity = json.loads(engine.voice_activity(request, tone_wav()))
+            self.assertEqual(len(activity["segments"]), 1)
+            self.assertEqual(len(activity["probabilities"]), TONE_RATE // 512 + 1)
 
 
 if __name__ == "__main__":

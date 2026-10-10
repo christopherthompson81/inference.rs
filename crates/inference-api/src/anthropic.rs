@@ -1742,6 +1742,7 @@ impl AnthropicStream {
             | Response::ImageGeneration(_)
             | Response::Speech { .. }
             | Response::Transcription(_)
+            | Response::VoiceActivity(_)
             | Response::Raw { .. }
             | Response::Embeddings { .. } => unreachable!("not a chat stream response"),
         }
