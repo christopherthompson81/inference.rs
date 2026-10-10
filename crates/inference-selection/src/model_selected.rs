@@ -613,7 +613,7 @@ pub enum ModelSelected {
         dtype: ModelDType,
     },
 
-    /// Select a speaker diarization model (Nemotron-3 Diarization)
+    /// Select a speaker diarization model (Nemotron-3 Diarization, or a Streaming Sortformer `.nemo`)
     Diarization {
         /// Model ID to load from. This may be a HF hub repo or a local path.
         model_id: String,

@@ -12,7 +12,7 @@ pub struct DiarizationModelBuilder {
 }
 
 impl DiarizationModelBuilder {
-    /// A Hugging Face repo or local directory in the transformers layout (e.g. `nvidia/Nemotron-3-Diarization`).
+    /// A Hugging Face repo or local path: Nemotron-3 in the transformers layout, or a Streaming Sortformer `.nemo`.
     pub fn new(model_id: impl ToString) -> Self {
         Self {
             model_id: model_id.to_string(),

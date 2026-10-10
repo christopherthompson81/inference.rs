@@ -472,7 +472,7 @@ INFERENCE_API inference_status inference_transcription(const inference_engine *e
 INFERENCE_API inference_status inference_voice_activity(const inference_engine *engine, const char *request,
                                                        size_t request_len, const uint8_t *audio, size_t audio_len,
                                                        inference_string **out_response);
-/* Who speaks when in audio, from a speaker diarization model (Nemotron-3 Diarization). request holds the POST
+/* Who speaks when in audio, from a speaker diarization model (Nemotron-3 or Sortformer). request holds the POST
  * /v1/audio/diarization form fields as JSON ({"model"?, "threshold"? (0.5), "response_format"?: "json" | "rttm",
  * "return_probabilities"?}); audio is audio_len bytes of an encoded file (at most 64 MiB). out_blob receives, as JSON,
  * {"duration", "num_speakers", "segments": [{"speaker", "start", "end"}], "frame_seconds", "probabilities"?: one row of

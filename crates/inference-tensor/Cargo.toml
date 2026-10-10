@@ -49,6 +49,9 @@ zerocopy = "0.8"
 zip = { version = "8.6.0", default-features = false }
 parking_lot = "0.12.5"
 
+[dev-dependencies]
+tempfile = "3"
+
 [features]
 default = []
 cuda = ["cudarc", "dep:inference-tensor-kernels", "inference-tensor-kernels/cuda"]

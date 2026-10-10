@@ -175,15 +175,22 @@ pub fn record_plain_checkpoint(
     for file in files {
         std::fs::copy(file, dir.path().join(file.file_name().unwrap()))?;
     }
+    let tensors = record_tensors(build)?;
+    inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
+    Ok(dir)
+}
+
+/// Random weights, seeded by name, for every tensor `build` asks the var builder for.
+pub fn record_tensors(
+    build: impl FnOnce(inference_tensor::nn::VarBuilder) -> CandleResult<()>,
+) -> anyhow::Result<HashMap<String, Tensor>> {
     let weights = RecordingWeights::new(&[], HashMap::new(), true);
     build(inference_tensor::nn::VarBuilder::from_backend(
         Box::new(weights.clone()),
         DType::F32,
         Device::Cpu,
     ))?;
-    let tensors = std::mem::take(&mut weights.0.lock().unwrap().1);
-    inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
-    Ok(dir)
+    Ok(std::mem::take(&mut weights.0.lock().unwrap().1))
 }
 
 /// Every file in a committed fixture directory.

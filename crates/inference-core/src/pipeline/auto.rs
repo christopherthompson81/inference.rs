@@ -23,6 +23,8 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
+const SORTFORMER_NAME: &str = "sortformer";
+
 /// Automatically selects the appropriate loader based on repository/config metadata.
 pub struct AutoLoader {
     model_id: String,
@@ -437,6 +439,31 @@ impl AutoLoader {
             return Ok(Detected::VoiceActivity);
         }
 
+        // a Hub repo's `.nemo` is taken at its listing only when it names Sortformer, so another NeMo model is not
+        // downloaded to be refused; the loader then checks the archive
+        let names_sortformer = |s: &str| s.to_ascii_lowercase().contains(SORTFORMER_NAME);
+        let is_nemo = |f: &String| {
+            Path::new(f)
+                .extension()
+                .is_some_and(|e| e == inference_models_speech::nemo::EXTENSION)
+                && (names_sortformer(f) || names_sortformer(&self.model_id))
+        };
+        let local = Path::new(&self.model_id).exists();
+        if artifacts.contents.is_none()
+            && ((local
+                && super::transcription::sortformer_nemo(
+                    &self.model_id,
+                    None,
+                    &TokenSource::None,
+                    true,
+                )
+                .is_ok())
+                || (!local && artifacts.repo_files.iter().any(is_nemo)))
+        {
+            info!("Detected a Streaming Sortformer `.nemo`; routing as speaker diarization.");
+            return Ok(Detected::Diarization);
+        }
+
         if artifacts.contents.is_none()
             && super::speech::local_kokoro_gguf(&self.model_id).is_some()
         {
@@ -658,6 +685,51 @@ mod tests {
             max_model_len: None,
             dynamic_lora_enabled: true,
         }
+    }
+
+    fn without_config(model_id: &str, repo_files: &[&str]) -> Result<Detected> {
+        let detector = AutoLoader {
+            model_id: model_id.to_string(),
+            ..detector()
+        };
+        detector.detect(&ConfigArtifacts {
+            contents: None,
+            sentence_transformers_present: false,
+            repo_files: repo_files.iter().map(|f| f.to_string()).collect(),
+            remote_access_issue: None,
+        })
+    }
+
+    #[test]
+    fn a_sortformer_nemo_routes_as_diarization_and_a_transformer_one_does_not() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let weight = inference_tensor::Tensor::zeros(
+            1,
+            inference_tensor::DType::F32,
+            &inference_tensor::Device::Cpu,
+        )?;
+        let target =
+            "target: nemo.collections.asr.models.sortformer_diar_models.SortformerEncLabelModel";
+        let write = |name: &str, encoder: &str| -> Result<std::path::PathBuf> {
+            let path = dir.path().join(name);
+            let yaml =
+                format!("{target}\nencoder:\n  _target_: nemo.collections.asr.modules.{encoder}\n");
+            inference_models_speech::nemo::write_nemo(&path, &yaml, &[("w", &weight)])?;
+            Ok(path)
+        };
+        let sortformer = write("sortformer.nemo", "ConformerEncoder")?;
+        let plain = write("plain.nemo", "TransformerEncoder")?;
+        assert!(matches!(
+            without_config(&sortformer.to_string_lossy(), &[])?,
+            Detected::Diarization
+        ));
+        assert!(without_config(&plain.to_string_lossy(), &[]).is_err());
+        assert!(matches!(
+            without_config("org/sortformer-repo", &["README.md", "diar.nemo"])?,
+            Detected::Diarization
+        ));
+        assert!(without_config("org/speech-recognizer", &["README.md", "asr.nemo"]).is_err());
+        Ok(())
     }
 
     #[test]

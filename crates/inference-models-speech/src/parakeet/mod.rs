@@ -14,10 +14,10 @@ use tokenizers::Tokenizer;
 
 use crate::silero::{SegmentOptions, SileroVad, speech_segments};
 use crate::{TimedText, Transcription};
-pub use config::{HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig};
+pub use config::{EncoderConfig, HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig};
 pub use decoder::Emission;
 use decoder::Head;
-use encoder::Encoder;
+pub use encoder::{Encoder, relative_positions};
 
 // NeMo's bound for full attention on these models, which attend over the whole recording at once
 const MAX_SECONDS: f64 = 24.0 * 60.0;

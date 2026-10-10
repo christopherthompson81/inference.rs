@@ -343,3 +343,113 @@ Left as follow-ups:
 - Mel features are still computed for the whole clip (about 9 GB of f64 at 24 h).
 - `return_probabilities` JSON grows with audio length (about 30 MB per hour).
 - The RTTM file ID is fixed as `audio`.
+
+## Run 12 - 2026-10-10
+
+**Sortformer v2.1: what the checkpoint holds, and where a reference comes from.**
+
+The `.nemo` (`nvidia/diar_streaming_sortformer_4spk-v2.1`) is a plain tar holding `model_config.yaml` and `model_weights.ckpt`, a torch zip of 990 tensors, all F32 apart from batch-norm counters.
+
+Architecture, from the config and the weight names:
+- **Mel:** 128 mels, n_fft 512, window 400, hop 160, no normalization. The filterbank ships in the checkpoint.
+- **FastConformer:** 17 layers, d512, 8 heads, conv kernel 9, dw_striding x8, xscaling, rel_pos with biases. It is Parakeet's encoder under NeMo names:
+  - `pre_encode.conv.N` -> `subsampling.layers.N`, `pre_encode.out` -> `subsampling.linear`
+  - `linear_{q,k,v,out}` -> `{q,k,v,o}_proj`, `linear_pos` -> `relative_k_proj`
+  - `pos_bias_{u,v}` -> `bias_{u,v}`, `conv.batch_norm` -> `conv.norm`
+- **Projection:** `encoder_proj` 512 -> 192.
+- **Transformer:** 18 post-LN layers (d192, FF 768, ReLU), no positional encoding.
+- **Head:** relu, `first_hidden_to_hidden`, relu, then `single_hidden_to_spks` (4). `hidden_to_spks` is unused.
+- **Checkpoint schedule:** chunk 188, left and right context 1, FIFO 0, cache 188, period 188, 3 silence frames.
+- **Silence embedding:** a running mean of low-probability popped frames, not a learned parameter (it is learned in Nemotron-3).
+
+Sources compared:
+- **audio.cpp-fork's C++ port:** no NeMo dumps for v2.1; only synthetic tests.
+- **The Vernacula ONNX work** (`/mnt/data/Programming/vernacula`, `scripts/nemo_export/`, `docs/investigations/sortformer_*`) is the useful one:
+  - `.venv-nemo-export` has NeMo 2.7.1 working.
+  - `sortformer_fidelity_der.py` takes the reference from NeMo's own `forward_streaming`. Its rule: never take the reference from a transcription of the loop. A wrong-signed boost survived three rounds of checking against one.
+  - A different schedule needs `SortformerModules` rebuilt from the cfg; mutating attributes doesn't reconfigure it.
+  - `sortformer_topk_ties_investigation.md`: torch's top-k tie order is a quickselect artifact. It differs across torch builds, so tie-driven divergence (saturated sigmoid rows) is not a defect to drive to zero. That matches what Nemotron-3 showed in Runs 9-10.
+  - The `.v21.preds.f32` files are from the ONNX model at Vernacula's 124/124/124 schedule, with no context and a whole-clip mel. They are a sanity check, not a parity target.
+- A scratch venv built here with NeMo 2.6 imported, but was deleted in favour of Vernacula's.
+
+Next: a `scripts/sortformer_parity.sh` that dumps NeMo `forward_streaming` at the checkpoint's own schedule, and the port: Parakeet's encoder under a key rename, plus the transformer and head, and the cache with left context and the running silence mean.
+
+## Run 13 - 2026-10-10
+
+**Sortformer v2.1 port, parity against NeMo's `forward_streaming`.**
+
+Command: `NEMO_PYTHON=<vernacula .venv-nemo-export>/bin/python scripts/sortformer_parity.sh <.nemo> <6 wavs> [--cpu]`. NeMo 2.7.1 runs on CPU with the checkpoint's own schedule (chunk 188, context 1/1, FIFO 0, cache 188). Its dumps hold the preprocessor's mel and the streaming probabilities, trimmed to `ceil(mel/8)` frames.
+
+The port:
+- `.nemo` read in place: a tar member is a byte range of the file, and `PthTensors::in_range` opens the torch zip there.
+- NeMo FastConformer names renamed to the Parakeet encoder's, so that encoder loads unchanged. It is split into `subsample` and `encode` so the cache and FIFO go in between, before the xscale.
+- New: the 18 post-LN layers and the head.
+- The shared cache gains a left-context offset, encoder-rate probabilities, and a running-mean silence slot (`Silence::Popped`).
+
+Results, CPU and CUDA (same 6 clips as Run 9; the reference is NeMo on CPU both times):
+
+| clip | mel max diff | prob max diff CPU / CUDA | decisions | segments |
+|---|---|---|---|---|
+| 97.6 s demo | 1.35e-3 | 5.96e-6 / 4.08e-6 | 100% | 29/29 |
+| VoxConverse c | 4.74e-4 | 4.17e-6 / 3.68e-6 | 100% | 14/14 |
+| AMI a | 1.94e-4 | 1.77e-5 / 2.43e-5 | 100% | 261/261 |
+| AMI b | 1.24e-4 | 1.14e-5 / 1.03e-5 | 100% | 126/126 |
+| VoxConverse a | 4.99e-4 | 5.60e-6 / 3.78e-6 | 100% | 54/54 |
+| VoxConverse b | 3.53e-4 | 6.29e-6 / 5.81e-6 | 100% | 19/19 |
+
+The mel differs by up to 1.35e-3 in the log domain: NeMo's preprocessor is f32 and ours f64, and quiet frames magnify it. The probabilities show the difference does not matter. The tolerance is 5e-3.
+
+No cache flips: unlike Nemotron-3 (Runs 9-10), no clip reaches a top-k near-tie.
+
+Speed for 300 s: about 1.75 s on CUDA (about 170x real time), and about 29 s on CPU in a dev build.
+
+Nemotron-3, rerun on CUDA after the cache refactor: identical to Run 10 (1.93e-5; 99.983% and 99.997% on the flip clips).
+
+## Run 14 - 2026-10-10
+
+**Sortformer v2.1 in the engine.**
+
+Loading:
+- `DiarizationLoader` takes the transformers layout where a `config.json` is present (Nemotron-3). Otherwise it takes the one `.nemo` the id names (the file, a directory, or a Hub repo), which must be a Streaming Sortformer.
+- The test: `target: ...SortformerEncLabelModel` over an `encoder._target_` ending in `ConformerEncoder`. Nemotron-3's own `.nemo` has the same target over a `TransformerEncoder`, so it is refused rather than misread.
+- Auto-detection takes a local `.nemo` after that check, and a Hub repo of a lone `.nemo` from its listing; the loader then checks it.
+
+End to end with the debug CLI, `inference run -m nvidia/diar_streaming_sortformer_4spk-v2.1` given the 97.6 s demo clip:
+- logs "Detected a Streaming Sortformer `.nemo`";
+- prints 29 RTTM lines, the 29 segments of Run 13.
+
+Tests:
+- A tiny random-weight `.nemo` is built at test time. Its config is a committed `model_config.yaml`, and its weights are written by a new `inference_tensor::pickle::write_pth`, read back by `PthTensors`. Its schedule (chunk 6 + 1/1, FIFO 4, cache 16) compresses within a 6 s clip. The engine output is 75 frames of 80 ms, the same from the file and from its directory.
+- Unit tests:
+  - a torch zip read in place inside a larger file;
+  - `write_pth` round-trip;
+  - NeMo-to-Parakeet name renames;
+  - archive config and weights;
+  - the running-mean silence: popped silent frames average into the slots compression fills;
+  - auto-detection: Sortformer `.nemo`, transformer `.nemo` refused, Hub listing.
+
+Dependencies:
+- `tar` 0.4 (default features off) is now direct; it was already in the lockfile.
+- YAML through the workspace's existing `serde-saphyr` 0.0.16, which topology parsing already uses.
+
+## Run 15 - 2026-10-10
+
+**Review fixes.**
+
+Review found no streaming-math defects. Fixed:
+- **Auto-detection:** a Hub `.nemo` routes to diarization only when its name or the repo id says "sortformer". Otherwise any `.nemo`-only repo (an ASR model) would download several GB and then be refused.
+- **Silence mean:** kept in F32, as NeMo's float32 zeros keep it. In BF16, `mean * frames` over thousands of silent frames outruns the mantissa.
+- **Loader layout test:** now "`config.json` resolves" instead of "the listing names it". A listing that failed with the network down sent a cached Nemotron-3 down the `.nemo` path.
+- **Small fixes:**
+  - `FileWindow::read` saturates past the window end;
+  - `write_nemo` builds the zip in memory, with no temp file;
+  - the class is matched by suffix, so aliases of the module path pass;
+  - a gzipped (old) `.nemo` gets a clear error.
+- **Tests:**
+  - tiny weights carry NeMo names, so the rename runs end to end;
+  - the fixture's silence threshold makes every popped frame silent, so the mean is non-zero;
+  - the cache test's second batch has a silent frame, pinning observe-before-compress.
+
+Not taken: opening the torch zip once per load instead of once per tensor. `ZipArchive` clones only over a `Clone` reader, and loading the 990 tensors already takes well under a second next to inference.
+
+CUDA parity after the fixes is identical to Run 13 (2.43e-5 max, all 503 segments exact).

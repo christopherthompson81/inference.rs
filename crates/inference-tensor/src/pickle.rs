@@ -672,9 +672,77 @@ pub fn read_pth_tensor_info<P: AsRef<std::path::Path>>(
     verbose: bool,
     key: Option<&str>,
 ) -> Result<Vec<TensorInfo>> {
-    let file = std::fs::File::open(file)?;
-    let zip_reader = std::io::BufReader::new(file);
-    let mut zip = zip::ZipArchive::new(zip_reader)?;
+    tensor_infos(&PthSource::whole(file.as_ref())?, verbose, key)
+}
+
+// a torch zip as a byte range of a file, so one stored inside an uncompressed archive (a `.nemo` tar) reads in place
+#[derive(Debug, Clone)]
+struct PthSource {
+    path: std::path::PathBuf,
+    offset: u64,
+    len: u64,
+}
+
+impl PthSource {
+    fn whole(path: &std::path::Path) -> Result<Self> {
+        Ok(Self {
+            path: path.to_owned(),
+            offset: 0,
+            len: std::fs::metadata(path)?.len(),
+        })
+    }
+
+    fn open(&self) -> Result<zip::ZipArchive<std::io::BufReader<FileWindow>>> {
+        let mut file = std::fs::File::open(&self.path)?;
+        std::io::Seek::seek(&mut file, std::io::SeekFrom::Start(self.offset))?;
+        let window = FileWindow {
+            file,
+            offset: self.offset,
+            len: self.len,
+            pos: 0,
+        };
+        Ok(zip::ZipArchive::new(std::io::BufReader::new(window))?)
+    }
+}
+
+struct FileWindow {
+    file: std::fs::File,
+    offset: u64,
+    len: u64,
+    pos: u64,
+}
+
+impl std::io::Read for FileWindow {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let left = self.len.saturating_sub(self.pos).min(buf.len() as u64) as usize;
+        let n = self.file.read(&mut buf[..left])?;
+        self.pos += n as u64;
+        Ok(n)
+    }
+}
+
+impl std::io::Seek for FileWindow {
+    fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> {
+        let pos = match to {
+            std::io::SeekFrom::Start(p) => p as i128,
+            std::io::SeekFrom::End(d) => self.len as i128 + d as i128,
+            std::io::SeekFrom::Current(d) => self.pos as i128 + d as i128,
+        };
+        if pos < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before the start of the window",
+            ));
+        }
+        self.pos = pos as u64;
+        self.file
+            .seek(std::io::SeekFrom::Start(self.offset + self.pos))?;
+        Ok(self.pos)
+    }
+}
+
+fn tensor_infos(source: &PthSource, verbose: bool, key: Option<&str>) -> Result<Vec<TensorInfo>> {
+    let mut zip = source.open()?;
     let zip_file_names = zip
         .file_names()
         .map(|f| f.to_string())
@@ -749,20 +817,40 @@ pub fn read_pth_tensor_info<P: AsRef<std::path::Path>>(
 /// Lazy tensor loader.
 pub struct PthTensors {
     tensor_infos: HashMap<String, TensorInfo>,
-    path: std::path::PathBuf,
+    source: PthSource,
     // We do not store a zip reader as it needs mutable access to extract data. Instead we
     // re-create a zip reader for each tensor.
 }
 
 impl PthTensors {
     pub fn new<P: AsRef<std::path::Path>>(path: P, key: Option<&str>) -> Result<Self> {
-        let tensor_infos = read_pth_tensor_info(path.as_ref(), false, key)?;
-        let tensor_infos = tensor_infos
+        Self::from_source(PthSource::whole(path.as_ref())?, key)
+    }
+
+    /// The torch zip stored at `offset..offset + len` of `path`.
+    pub fn in_range<P: AsRef<std::path::Path>>(
+        path: P,
+        offset: u64,
+        len: u64,
+        key: Option<&str>,
+    ) -> Result<Self> {
+        let source = PthSource {
+            path: path.as_ref().to_owned(),
+            offset,
+            len,
+        };
+        Self::from_source(source, key)
+    }
+
+    fn from_source(source: PthSource, key: Option<&str>) -> Result<Self> {
+        let tensor_infos = tensor_infos(&source, false, key)?
             .into_iter()
             .map(|ti| (ti.name.to_string(), ti))
             .collect();
-        let path = path.as_ref().to_owned();
-        Ok(Self { tensor_infos, path })
+        Ok(Self {
+            tensor_infos,
+            source,
+        })
     }
 
     pub fn tensor_infos(&self) -> &HashMap<String, TensorInfo> {
@@ -776,8 +864,7 @@ impl PthTensors {
             Some(tensor_info) => tensor_info,
         };
         // We hope that the file has not changed since first reading it.
-        let zip_reader = std::io::BufReader::new(std::fs::File::open(&self.path)?);
-        let mut zip = zip::ZipArchive::new(zip_reader)?;
+        let mut zip = self.source.open()?;
         let mut reader = zip.by_name(&tensor_info.path)?;
         let is_fortran_contiguous = tensor_info.layout.is_fortran_contiguous();
         let rank = tensor_info.layout.shape().rank();
@@ -818,6 +905,93 @@ impl PthTensors {
     }
 }
 
+// the pickle `torch.save` writes for a dict of tensors, each `_rebuild_tensor_v2` over its own storage
+fn state_dict_pickle(tensors: &[(&str, Vec<usize>)]) -> Vec<u8> {
+    fn unicode(out: &mut Vec<u8>, s: &str) {
+        out.push(OpCode::BinUnicode as u8);
+        out.extend_from_slice(&(s.len() as u32).to_le_bytes());
+        out.extend_from_slice(s.as_bytes());
+    }
+    fn int(out: &mut Vec<u8>, v: usize) {
+        out.push(OpCode::BinInt as u8);
+        out.extend_from_slice(&(v as i32).to_le_bytes());
+    }
+    fn global(out: &mut Vec<u8>, module: &str, name: &str) {
+        out.push(OpCode::Global as u8);
+        out.extend_from_slice(format!("{module}\n{name}\n").as_bytes());
+    }
+    fn ints(out: &mut Vec<u8>, values: &[usize]) {
+        out.push(OpCode::Mark as u8);
+        for &v in values {
+            int(out, v);
+        }
+        out.push(OpCode::Tuple as u8);
+    }
+    let mut out = vec![
+        OpCode::Proto as u8,
+        2,
+        OpCode::EmptyDict as u8,
+        OpCode::Mark as u8,
+    ];
+    for (key, (name, dims)) in tensors.iter().enumerate() {
+        let numel = dims.iter().product::<usize>();
+        let mut stride = vec![1; dims.len()];
+        for i in (0..dims.len().saturating_sub(1)).rev() {
+            stride[i] = stride[i + 1] * dims[i + 1];
+        }
+        unicode(&mut out, name);
+        global(&mut out, "torch._utils", "_rebuild_tensor_v2");
+        out.push(OpCode::Mark as u8);
+        out.push(OpCode::Mark as u8);
+        unicode(&mut out, "storage");
+        global(&mut out, "torch", "FloatStorage");
+        unicode(&mut out, &key.to_string());
+        unicode(&mut out, "cpu");
+        int(&mut out, numel);
+        out.push(OpCode::Tuple as u8);
+        out.push(OpCode::BinPersId as u8);
+        int(&mut out, 0);
+        ints(&mut out, dims);
+        ints(&mut out, &stride);
+        out.push(OpCode::NewFalse as u8);
+        global(&mut out, "collections", "OrderedDict");
+        out.push(OpCode::EmptyTuple as u8);
+        out.push(OpCode::Reduce as u8);
+        out.push(OpCode::Tuple as u8);
+        out.push(OpCode::Reduce as u8);
+    }
+    out.push(OpCode::SetItems as u8);
+    out.push(OpCode::Stop as u8);
+    out
+}
+
+/// Writes `tensors` as a state dict in the layout `torch.save` uses, each as F32, for `PthTensors` to read.
+pub fn write_pth<W: std::io::Write + std::io::Seek>(
+    out: W,
+    tensors: &[(&str, &Tensor)],
+) -> Result<()> {
+    use std::io::Write;
+    let shapes: Vec<(&str, Vec<usize>)> = tensors
+        .iter()
+        .map(|(name, t)| (*name, t.dims().to_vec()))
+        .collect();
+    let mut zip = zip::ZipWriter::new(out);
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    zip.start_file("archive/data.pkl", options)?;
+    zip.write_all(&state_dict_pickle(&shapes))?;
+    for (key, (_, t)) in tensors.iter().enumerate() {
+        zip.start_file(format!("archive/data/{key}"), options)?;
+        let values = t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let bytes: Vec<u8> = values.iter().flat_map(|v| v.to_le_bytes()).collect();
+        zip.write_all(&bytes)?;
+    }
+    zip.start_file("archive/version", options)?;
+    zip.write_all(b"3\n")?;
+    zip.finish()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::PthTensors;
@@ -834,6 +1008,41 @@ mod tests {
         let tensors = PthTensors::new(fixture("bare_tensor.pt"), None)?;
         let t = tensors.get("")?.expect("the bare tensor");
         assert_eq!(t.to_vec2::<f32>()?, [[0., 1., 2.], [3., 4., 5.]]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_torch_zip_reads_in_place_from_inside_a_larger_file() -> Result<()> {
+        let zip = std::fs::read(fixture("bare_tensor.pt"))?;
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("archive");
+        let lead = vec![7u8; 1000];
+        std::fs::write(&path, [lead.as_slice(), &zip, &[9u8; 300]].concat())?;
+        let tensors = PthTensors::in_range(&path, lead.len() as u64, zip.len() as u64, None)?;
+        let t = tensors.get("")?.expect("the bare tensor");
+        assert_eq!(t.to_vec2::<f32>()?, [[0., 1., 2.], [3., 4., 5.]]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_written_state_dict_reads_back() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("weights.pt");
+        let w = crate::Tensor::new(&[[1f32, 2., 3.], [4., 5., 6.]], &crate::Device::Cpu)?;
+        let b = crate::Tensor::new(&[0.25f32], &crate::Device::Cpu)?;
+        super::write_pth(
+            std::fs::File::create(&path)?,
+            &[("layer.weight", &w), ("layer.bias", &b)],
+        )?;
+        let tensors = PthTensors::new(&path, None)?;
+        assert_eq!(
+            tensors.get("layer.weight")?.expect("w").to_vec2::<f32>()?,
+            [[1., 2., 3.], [4., 5., 6.]]
+        );
+        assert_eq!(
+            tensors.get("layer.bias")?.expect("b").to_vec1::<f32>()?,
+            [0.25]
+        );
         Ok(())
     }
 

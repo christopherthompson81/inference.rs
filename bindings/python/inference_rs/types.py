@@ -1391,7 +1391,7 @@ class ModelSelectedTranscription:
 
 @dataclass(kw_only=True)
 class ModelSelectedDiarization:
-    """Select a speaker diarization model (Nemotron-3 Diarization)"""
+    """Select a speaker diarization model (Nemotron-3 Diarization, or a Streaming Sortformer `.nemo`)"""
 
     dtype: ModelDType | None = ModelDType.AUTO
     model_id: str
