@@ -18,7 +18,11 @@ use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
-use inference_models_speech::diarization::{DiarizationOptions, Nemotron3Diarizer, Nemotron3Files};
+use inference_models_speech::diarization::{
+    DiarizationOptions, Diarizer, Nemotron3Diarizer, Nemotron3Files, SortformerDiarizer,
+    is_sortformer,
+};
+use inference_models_speech::nemo;
 use inference_models_speech::parakeet::{MODEL_TYPES, Parakeet, ParakeetFiles};
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
@@ -198,7 +202,7 @@ enum AudioModel {
         vad: Option<SileroVad>,
     },
     Silero(SileroVad),
-    Nemotron3(Box<Nemotron3Diarizer>),
+    Diarizer(Diarizer),
 }
 
 impl AudioModel {
@@ -206,7 +210,7 @@ impl AudioModel {
         match self {
             Self::Parakeet { asr, .. } => asr.device(),
             Self::Silero(vad) => vad.device(),
-            Self::Nemotron3(diarizer) => diarizer.device(),
+            Self::Diarizer(diarizer) => diarizer.device(),
         }
     }
 }
@@ -231,6 +235,8 @@ pub struct TranscriptionLoader {
 pub enum DiarizationLoaderType {
     #[serde(rename = "nemotron3")]
     Nemotron3,
+    #[serde(rename = "sortformer")]
+    Sortformer,
 }
 
 impl DiarizationLoaderType {
@@ -242,7 +248,7 @@ impl DiarizationLoaderType {
     }
 }
 
-/// Loads a speaker diarization model from the transformers layout.
+/// Loads a speaker diarization model: Nemotron-3 from the transformers layout, or a Streaming Sortformer `.nemo`.
 pub struct DiarizationLoader {
     pub model_id: String,
 }
@@ -266,24 +272,44 @@ impl Loader for DiarizationLoader {
                 revision.clone(),
             ));
         let id = std::path::Path::new(&self.model_id);
-        let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
-        let files = Nemotron3Files {
-            config: get(CONFIG)?,
-            processor_config: get(PROCESSOR_CONFIG)?,
-            weights: vec![get(WEIGHTS)?],
-        };
         let dtype = options.dtype.try_into_dtype(&[options.device])?;
-        let config = std::fs::read_to_string(&files.config)?;
-        if DiarizationLoaderType::auto_detect_from_config(&config).is_none() {
-            anyhow::bail!(
-                "`{}` is not a Nemotron-3 Diarization config",
-                files.config.display()
-            )
-        }
-        let diarizer = Nemotron3Diarizer::load(&files, options.device, dtype)?;
+        let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
+        // Nemotron-3's repo carries a `.nemo` beside its transformers files; those win where a config resolves
+        let transformers_config = (!id.is_file()).then(|| get(CONFIG).ok()).flatten();
+        let diarizer = if let Some(config) = transformers_config {
+            let files = Nemotron3Files {
+                config,
+                processor_config: get(PROCESSOR_CONFIG)?,
+                weights: vec![get(WEIGHTS)?],
+            };
+            let config = std::fs::read_to_string(&files.config)?;
+            if DiarizationLoaderType::auto_detect_from_config(&config).is_none() {
+                anyhow::bail!(
+                    "`{}` is not a Nemotron-3 Diarization config",
+                    files.config.display()
+                )
+            }
+            Diarizer::Nemotron3(Box::new(Nemotron3Diarizer::load(
+                &files,
+                options.device,
+                dtype,
+            )?))
+        } else {
+            let file = sortformer_nemo(
+                &self.model_id,
+                Some(revision),
+                &token_source,
+                options.silent,
+            )?;
+            Diarizer::Sortformer(Box::new(SortformerDiarizer::load(
+                &file,
+                options.device,
+                dtype,
+            )?))
+        };
         Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
             self.model_id.clone(),
-            AudioModel::Nemotron3(Box::new(diarizer)),
+            AudioModel::Diarizer(diarizer),
             dtype,
         ))))
     }
@@ -310,6 +336,66 @@ pub struct VoiceActivityLoader {
     pub model_id: String,
 }
 
+// where a model id's files come from on the Hub
+struct HubSource<'a> {
+    revision: Option<String>,
+    token_source: &'a TokenSource,
+    silent: bool,
+}
+
+/// The one file `model_id` names with `extension`: the file itself, the one in a local directory `counts` keeps,
+/// or the one in a Hugging Face repo.
+fn single_file(
+    model_id: &str,
+    source: HubSource<'_>,
+    extension: &str,
+    what: &str,
+    counts: impl Fn(&std::path::Path) -> bool,
+) -> Result<PathBuf> {
+    let HubSource {
+        revision,
+        token_source,
+        silent,
+    } = source;
+    let path = std::path::Path::new(model_id);
+    let has_extension = |p: &std::path::Path| p.extension().is_some_and(|e| e == extension);
+    let only = |files: Vec<String>| -> Result<String> {
+        let mut matching = files
+            .into_iter()
+            .filter(|f| has_extension(std::path::Path::new(f)));
+        match (matching.next(), matching.next()) {
+            (Some(only), None) => Ok(only),
+            _ => anyhow::bail!("`{model_id}` should hold exactly one {what}"),
+        }
+    };
+    if path.is_file() {
+        return Ok(path.to_path_buf());
+    }
+    if path.is_dir() {
+        // only files `counts` keeps, so other models' files beside one do not make the choice ambiguous
+        let names = std::fs::read_dir(path)?
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| counts(p))
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        return Ok(PathBuf::from(only(names)?));
+    }
+    let revision = revision.unwrap_or_else(|| "main".to_string());
+    let api = ApiBuilder::new()
+        .with_progress(!silent)
+        .with_token(get_token(token_source)?)
+        .build()?
+        .repo(Repo::with_revision(
+            model_id.to_string(),
+            RepoType::Model,
+            revision.clone(),
+        ));
+    let name = only(crate::pipeline::hf::list_repo_files(
+        &api, path, true, &revision,
+    )?)?;
+    crate::pipeline::hf::get_file(&api, path, &name, &revision)
+}
+
 /// The Silero GGUF `model_id` names: the file itself, the one in a local directory, or the one in a Hugging Face repo.
 pub(crate) fn silero_gguf(
     model_id: &str,
@@ -317,45 +403,44 @@ pub(crate) fn silero_gguf(
     token_source: &TokenSource,
     silent: bool,
 ) -> Result<PathBuf> {
-    let path = std::path::Path::new(model_id);
-    let is_gguf = |p: &std::path::Path| p.extension().is_some_and(|e| e == GGUF_EXTENSION);
-    let only = |files: Vec<String>| -> Result<String> {
-        let mut ggufs = files
-            .into_iter()
-            .filter(|f| is_gguf(std::path::Path::new(f)));
-        match (ggufs.next(), ggufs.next()) {
-            (Some(only), None) => Ok(only),
-            _ => anyhow::bail!("`{model_id}` should hold exactly one Silero VAD `.gguf`"),
-        }
-    };
-    let file = if path.is_file() {
-        path.to_path_buf()
-    } else if path.is_dir() {
-        // only Silero's GGUFs count, so other models' files beside it do not make the choice ambiguous
-        let names = std::fs::read_dir(path)?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| is_silero_gguf(p))
-            .map(|p| p.to_string_lossy().to_string())
-            .collect();
-        PathBuf::from(only(names)?)
-    } else {
-        let revision = revision.unwrap_or_else(|| "main".to_string());
-        let api = ApiBuilder::new()
-            .with_progress(!silent)
-            .with_token(get_token(token_source)?)
-            .build()?
-            .repo(Repo::with_revision(
-                model_id.to_string(),
-                RepoType::Model,
-                revision.clone(),
-            ));
-        let name = only(crate::pipeline::hf::list_repo_files(
-            &api, path, true, &revision,
-        )?)?;
-        crate::pipeline::hf::get_file(&api, path, &name, &revision)?
-    };
+    let file = single_file(
+        model_id,
+        HubSource {
+            revision,
+            token_source,
+            silent,
+        },
+        GGUF_EXTENSION,
+        "Silero VAD `.gguf`",
+        is_silero_gguf,
+    )?;
     if !is_silero_gguf(&file) {
         anyhow::bail!("`{}` is not a Silero VAD GGUF", file.display())
+    }
+    Ok(file)
+}
+
+/// The Streaming Sortformer `.nemo` `model_id` names, found as `silero_gguf` finds its file.
+pub(crate) fn sortformer_nemo(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    silent: bool,
+) -> Result<PathBuf> {
+    let is_nemo = |p: &std::path::Path| p.extension().is_some_and(|e| e == nemo::EXTENSION);
+    let file = single_file(
+        model_id,
+        HubSource {
+            revision,
+            token_source,
+            silent,
+        },
+        nemo::EXTENSION,
+        "`.nemo`",
+        is_nemo,
+    )?;
+    if !is_sortformer(&nemo::NemoArchive::open(&file)?)? {
+        anyhow::bail!("`{}` is not a Streaming Sortformer `.nemo`", file.display())
     }
     Ok(file)
 }
@@ -504,7 +589,7 @@ impl TranscriptionPipeline {
         // a VAD answers with times, not text
         let output = match model {
             AudioModel::Parakeet { .. } => vec![SupportedModality::Text],
-            AudioModel::Silero(_) | AudioModel::Nemotron3(_) => Vec::new(),
+            AudioModel::Silero(_) | AudioModel::Diarizer(_) => Vec::new(),
         };
         Self {
             model_id,
@@ -623,7 +708,7 @@ impl Pipeline for TranscriptionPipeline {
                     })
                     .collect(),
             },
-            AudioModel::Nemotron3(diarizer) => ForwardInputsResult::Diarization {
+            AudioModel::Diarizer(diarizer) => ForwardInputsResult::Diarization {
                 results: audios
                     .iter()
                     .zip(&diarization)
@@ -655,7 +740,7 @@ impl Pipeline for TranscriptionPipeline {
         match self.model {
             AudioModel::Parakeet { .. } => ModelCategory::Transcription,
             AudioModel::Silero(_) => ModelCategory::VoiceActivity,
-            AudioModel::Nemotron3(_) => ModelCategory::Diarization,
+            AudioModel::Diarizer(_) => ModelCategory::Diarization,
         }
     }
 }

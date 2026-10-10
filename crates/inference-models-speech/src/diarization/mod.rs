@@ -1,10 +1,40 @@
 //! Speaker diarization: who speaks when, as a speech probability per speaker per 10 ms frame and the segments
-//! cut from them. Nemotron-3 Diarization, a streaming Sortformer with an arrival-order speaker cache.
+//! cut from them. Streaming Sortformer v2 and Nemotron-3 Diarization, both behind an arrival-order speaker cache.
 
 mod cache;
 mod nemotron3;
+mod sortformer;
 
 pub use nemotron3::{Nemotron3Config, Nemotron3Diarizer, Nemotron3Files};
+pub use sortformer::{SortformerConfig, SortformerDiarizer, is_sortformer};
+
+/// A loaded diarization model.
+pub enum Diarizer {
+    Nemotron3(Box<Nemotron3Diarizer>),
+    Sortformer(Box<SortformerDiarizer>),
+}
+
+impl Diarizer {
+    pub fn device(&self) -> &inference_tensor::Device {
+        match self {
+            Self::Nemotron3(d) => d.device(),
+            Self::Sortformer(d) => d.device(),
+        }
+    }
+
+    /// Who speaks when in mono `pcm` at `sample_rate`.
+    pub fn diarize(
+        &self,
+        pcm: &[f32],
+        sample_rate: u32,
+        threshold: Option<f32>,
+    ) -> inference_tensor::Result<Diarization> {
+        match self {
+            Self::Nemotron3(d) => d.diarize(pcm, sample_rate, threshold),
+            Self::Sortformer(d) => d.diarize(pcm, sample_rate, threshold),
+        }
+    }
+}
 
 // a speaker counts as speaking in a frame once its probability passes this, as transformers' processor cuts them
 pub const DEFAULT_THRESHOLD: f32 = 0.5;

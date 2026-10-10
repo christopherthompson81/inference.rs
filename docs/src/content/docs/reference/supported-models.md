@@ -108,6 +108,7 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | Architecture | Model families | Example |
 |---|---|---|
 | `Nemotron3` | Nemotron-3 Diarization (streaming Sortformer) | <details><summary><code>nvidia/Nemotron-3-Diarization</code></summary><code>inference run -m nvidia/Nemotron-3-Diarization</code></details> |
+| `Sortformer` | Streaming Sortformer v2 (`.nemo`) | <details><summary><code>nvidia/diar_streaming_sortformer_4spk-v2.1</code></summary><code>inference run -m nvidia/diar_streaming_sortformer_4spk-v2.1</code></details> |
 
 ## Embedding
 

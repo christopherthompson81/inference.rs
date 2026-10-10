@@ -31,7 +31,7 @@ The request `model` field selects among loaded models. `"default"` (or omitting 
 
 ## Speaker diarization
 
-`POST /v1/audio/diarization` takes a multipart form with the audio as `file` and returns who speaks when, from a diarization model such as Nemotron-3 Diarization: `{"duration", "num_speakers", "segments": [{"speaker", "start", "end"}], "frame_seconds"}`, times in seconds and speakers numbered by the model's output slots. `threshold` (0.5) is the probability, from 0 to 1, at which a speaker counts as speaking; `return_probabilities=true` adds `probabilities`, one row of every speaker's probability per `frame_seconds` (10 ms); `response_format=rttm` answers with NIST RTTM `SPEAKER` lines instead. See [speech models](/guides/models/use-speech-models/).
+`POST /v1/audio/diarization` takes a multipart form with the audio as `file` and returns who speaks when, from a diarization model such as Nemotron-3 Diarization or Streaming Sortformer: `{"duration", "num_speakers", "segments": [{"speaker", "start", "end"}], "frame_seconds"}`, times in seconds and speakers numbered by the model's output slots. `threshold` (0.5) is the probability, from 0 to 1, at which a speaker counts as speaking; `return_probabilities=true` adds `probabilities`, one row of every speaker's probability per `frame_seconds` (10 ms); `response_format=rttm` answers with NIST RTTM `SPEAKER` lines instead. See [speech models](/guides/models/use-speech-models/).
 
 ## LoRA adapter routing and management
 

@@ -20,3 +20,4 @@ mod qwen3_5_text_tiny;
 mod qwen3_sliding_window_tiny;
 mod qwen_vl_tiny;
 mod silero_tiny;
+mod sortformer_tiny;

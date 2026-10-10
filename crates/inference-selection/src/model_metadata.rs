@@ -404,6 +404,11 @@ impl SupportedArch for DiarizationLoaderType {
                 modalities: &[Audio, Text],
                 examples: &[ex!("nvidia/Nemotron-3-Diarization")],
             },
+            Self::Sortformer => ArchMetadata {
+                families: &["Streaming Sortformer v2 (`.nemo`)"],
+                modalities: &[Audio, Text],
+                examples: &[ex!("nvidia/diar_streaming_sortformer_4spk-v2.1")],
+            },
         }
     }
 }

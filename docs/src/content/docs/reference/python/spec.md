@@ -285,7 +285,7 @@ One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSel
 
 ## `ModelSelectedDiarization`
 
-Select a speaker diarization model (Nemotron-3 Diarization)
+Select a speaker diarization model (Nemotron-3 Diarization, or a Streaming Sortformer `.nemo`)
 
 | Field | Type | Default |
 | --- | --- | --- |

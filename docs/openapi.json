@@ -7536,14 +7536,14 @@
           },
           {
             "type": "object",
-            "description": "Select a speaker diarization model (Nemotron-3 Diarization)",
+            "description": "Select a speaker diarization model (Nemotron-3 Diarization, or a Streaming Sortformer `.nemo`)",
             "required": [
               "Diarization"
             ],
             "properties": {
               "Diarization": {
                 "type": "object",
-                "description": "Select a speaker diarization model (Nemotron-3 Diarization)",
+                "description": "Select a speaker diarization model (Nemotron-3 Diarization, or a Streaming Sortformer `.nemo`)",
                 "required": [
                   "model_id"
                 ],

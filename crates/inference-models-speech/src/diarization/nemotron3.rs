@@ -9,7 +9,7 @@ use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, li
 use inference_tensor::{D, DType, Device, Error, Result, Tensor};
 use serde::Deserialize;
 
-use super::cache::{CacheConfig, SpeakerCache};
+use super::cache::{CacheConfig, Silence, SpeakerCache};
 use super::{DEFAULT_THRESHOLD, Diarization, speaker_segments};
 
 const LAYER_NORM_EPS: f64 = 1e-5;
@@ -297,7 +297,6 @@ impl Nemotron3Diarizer {
             score_threshold: s.prediction_score_threshold,
             latest_boost: s.latest_frames_score_boost,
             num_speakers: speakers,
-            subsampling: self.config.audio_config.subsampling_factor,
             min_positive_scores: (budget * s.min_positive_scores_rate).floor() as usize,
             strong_boosted: (budget * s.strong_boost_rate).floor() as usize,
             weak_boosted: (budget * s.weak_boost_rate).floor() as usize,
@@ -348,7 +347,8 @@ impl Nemotron3Diarizer {
         let factor = self.config.audio_config.subsampling_factor;
         let total = frames.div_ceil(factor);
         let (chunk, context) = (self.config.chunk_length, self.config.chunk_right_context);
-        let mut cache = SpeakerCache::new(self.cache_config());
+        let mut cache =
+            SpeakerCache::new(self.cache_config(), Silence::Learned(self.silence.clone()));
         let mut out = Vec::new();
         for start in (0..total).step_by(chunk) {
             let frames_here = chunk.min(total - start);
@@ -361,7 +361,13 @@ impl Nemotron3Diarizer {
                 None => chunk_embeds,
             };
             let logits = self.step(&input)?;
-            cache.update(&input.squeeze(0)?, &logits, &self.silence, frames_here)?;
+            // the cache scores encoder frames: each one's 10 ms sigmoids, averaged
+            let probs = ops::sigmoid(&logits.to_dtype(DType::F32)?)?
+                .reshape((logits.dim(0)? / factor, factor, self.num_speakers()))?
+                .mean(1)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            cache.update(&input.squeeze(0)?, &probs, 0, frames_here)?;
             out.push(logits.narrow(0, cached_len * factor, frames_here * factor)?);
         }
         Tensor::cat(&out, 0)?.narrow(0, 0, frames)

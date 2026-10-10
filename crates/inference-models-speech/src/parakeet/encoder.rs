@@ -323,18 +323,38 @@ impl Encoder {
     }
 
     pub fn forward(&self, features: &Tensor) -> Result<Tensor> {
-        let xs = (self.subsampling.forward(features)? * self.input_scale)?;
+        let xs = self.subsample(features)?;
         let positions = relative_positions(xs.dim(1)?, self.hidden, xs.dtype(), xs.device())?;
-        let mut xs = xs;
+        self.encode(&xs, &positions)
+    }
+
+    /// The pre-encode alone: `(1, frames, mels)` features to `(1, frames / factor, hidden)`, before input scaling.
+    pub fn subsample(&self, features: &Tensor) -> Result<Tensor> {
+        self.subsampling.forward(features)
+    }
+
+    /// The conformer blocks over `subsample`'s output, `positions` being `relative_positions` for its length.
+    pub fn encode(&self, xs: &Tensor, positions: &Tensor) -> Result<Tensor> {
+        let mut xs = (xs * self.input_scale)?;
         for block in &self.blocks {
-            xs = block.forward(&xs, &positions)?;
+            xs = block.forward(&xs, positions)?;
         }
         Ok(xs)
     }
+
+    pub fn hidden_size(&self) -> usize {
+        self.hidden
+    }
 }
 
-// sinusoids over offsets T-1 down to -(T-1), sin and cos interleaved per frequency
-fn relative_positions(t: usize, hidden: usize, dtype: DType, device: &Device) -> Result<Tensor> {
+/// `(1, 2T - 1, hidden)` sinusoids over offsets T-1 down to -(T-1), sin and cos interleaved per frequency; the
+/// table for a shorter length is this one's middle `2t - 1` rows.
+pub fn relative_positions(
+    t: usize,
+    hidden: usize,
+    dtype: DType,
+    device: &Device,
+) -> Result<Tensor> {
     let half = hidden / 2;
     let mut table = Vec::with_capacity((2 * t - 1) * hidden);
     for i in 0..2 * t - 1 {

@@ -9,6 +9,7 @@ mod bs1770;
 mod dia;
 pub mod diarization;
 pub mod kokoro;
+pub mod nemo;
 pub mod parakeet;
 pub mod silero;
 mod transcript;

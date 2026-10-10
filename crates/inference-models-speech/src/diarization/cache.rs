@@ -1,7 +1,6 @@
-//! The arrival-order speaker cache and FIFO of Streaming Sortformer, ported from transformers'
-//! `Nemotron3DiarizationSpeakerCache` for one stream: the frames each chunk sees before its own.
+//! The arrival-order speaker cache and FIFO of Streaming Sortformer, ported from NeMo's `SortformerModules` and
+//! transformers' `Nemotron3DiarizationSpeakerCache` for one stream: the frames each chunk sees before its own.
 
-use inference_tensor::nn::ops::sigmoid;
 use inference_tensor::{DType, Result, Tensor};
 
 const LN_HALF: f32 = -std::f32::consts::LN_2;
@@ -17,14 +16,61 @@ pub struct CacheConfig {
     pub score_threshold: f32,
     pub latest_boost: f32,
     pub num_speakers: usize,
-    pub subsampling: usize,
     pub min_positive_scores: usize,
     pub strong_boosted: usize,
     pub weak_boosted: usize,
 }
 
+/// What fills the cache slots no frame earns.
+pub enum Silence {
+    /// A trained embedding (Nemotron-3).
+    Learned(Tensor),
+    /// The running mean of popped frames whose speaker probabilities sum below `threshold` (Sortformer v2).
+    Popped {
+        threshold: f32,
+        mean: Tensor,
+        frames: usize,
+    },
+}
+
+impl Silence {
+    fn embedding(&self) -> &Tensor {
+        match self {
+            Self::Learned(t) | Self::Popped { mean: t, .. } => t,
+        }
+    }
+
+    // NeMo's `_get_silence_profile`, over the frames leaving the FIFO
+    fn observe(&mut self, popped: &Tensor, probs: &[f32], speakers: usize) -> Result<()> {
+        let Self::Popped {
+            threshold,
+            mean,
+            frames,
+        } = self
+        else {
+            return Ok(());
+        };
+        let is_silent: Vec<f32> = probs
+            .chunks(speakers)
+            .map(|row| f32::from(row.iter().sum::<f32>() < *threshold))
+            .collect();
+        let count = is_silent.iter().filter(|&&s| s > 0.).count();
+        if count == 0 {
+            return Ok(());
+        }
+        // in F32 whatever the model dtype, as NeMo's float32 zeros keep it: a long mean outruns BF16's mantissa
+        let mask = Tensor::new(is_silent.as_slice(), popped.device())?.unsqueeze(0)?;
+        let sum = mask.matmul(&popped.to_dtype(DType::F32)?)?.squeeze(0)?;
+        let total = *frames + count;
+        *mean = ((((&*mean * *frames as f64)? + sum)?) / total as f64)?;
+        *frames = total;
+        Ok(())
+    }
+}
+
 pub struct SpeakerCache {
     config: CacheConfig,
+    silence: Silence,
     // (frames, hidden) on the device, or none while empty
     embeds: Option<Tensor>,
     // (frames, speakers) row-major, the probabilities stored beside a compressed cache's frames
@@ -47,9 +93,10 @@ fn rows(t: &Option<Tensor>) -> usize {
 }
 
 impl SpeakerCache {
-    pub fn new(config: CacheConfig) -> Self {
+    pub fn new(config: CacheConfig, silence: Silence) -> Self {
         Self {
             config,
+            silence,
             embeds: None,
             probs: Vec::new(),
             fifo: None,
@@ -72,40 +119,40 @@ impl SpeakerCache {
             .min(fifo_frames)
     }
 
-    /// Files a step's `chunk_frames` into the FIFO and its overflow into the cache, scored by the step's logits.
+    /// Files `chunk_frames` of the step's `input` (cache, FIFO, then context-wrapped chunk), scored by `probs`.
     pub fn update(
         &mut self,
         input: &Tensor,
-        logits: &Tensor,
-        silence: &Tensor,
+        probs: &[f32],
+        left: usize,
         chunk_frames: usize,
     ) -> Result<()> {
         let s = self.config.num_speakers;
         let (cache_frames, fifo_frames) = (rows(&self.embeds), rows(&self.fifo));
-        let steps = logits.dim(0)? / self.config.subsampling;
-        let probs = sigmoid(&logits.to_dtype(DType::F32)?)?
-            .reshape((steps, self.config.subsampling, s))?
-            .mean(1)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let chunk = Some(input.narrow(0, cache_frames + fifo_frames, chunk_frames)?);
+        let chunk_start = cache_frames + fifo_frames + left;
+        let chunk = Some(input.narrow(0, chunk_start, chunk_frames)?);
+        // the FIFO's frames re-scored by this step, then the chunk's
+        let mut fifo_probs = probs[cache_frames * s..(cache_frames + fifo_frames) * s].to_vec();
+        fifo_probs.extend_from_slice(&probs[chunk_start * s..(chunk_start + chunk_frames) * s]);
         let fifo = cat(&[&self.fifo, &chunk])?;
         let fifo_len = rows(&fifo);
         let popped = self.popped(fifo_len);
         let fifo = if popped > 0 {
             let fifo = fifo.expect("the FIFO holds the chunk");
-            let fifo_probs = &probs[cache_frames * s..(cache_frames + fifo_len) * s];
+            let popped_embeds = fifo.narrow(0, 0, popped)?;
+            let popped_probs = &fifo_probs[..popped * s];
+            self.silence.observe(&popped_embeds, popped_probs, s)?;
             // an uncompressed cache is plain chunk frames this step re-scored; a compressed one keeps its own
             let mut cache_probs = if self.compressed {
                 self.probs[..cache_frames * s].to_vec()
             } else {
                 probs[..cache_frames * s].to_vec()
             };
-            cache_probs.extend_from_slice(&fifo_probs[..popped * s]);
-            let mut cache = cat(&[&self.embeds, &Some(fifo.narrow(0, 0, popped)?)])?
+            cache_probs.extend_from_slice(popped_probs);
+            let mut cache = cat(&[&self.embeds, &Some(popped_embeds)])?
                 .expect("the cache gains the popped frames");
             if cache.dim(0)? > self.config.cache_length {
-                (cache, cache_probs) = self.compress(&cache, &cache_probs, silence)?;
+                (cache, cache_probs) = self.compress(&cache, &cache_probs)?;
                 self.compressed = true;
             }
             self.embeds = Some(cache);
@@ -170,12 +217,8 @@ impl SpeakerCache {
 
     // keeps `cache_length` (speaker, frame) choices, speaker by speaker in frame order, the silence embedding
     // standing in for slots no frame earns
-    fn compress(
-        &self,
-        embeds: &Tensor,
-        probs: &[f32],
-        silence: &Tensor,
-    ) -> Result<(Tensor, Vec<f32>)> {
+    fn compress(&self, embeds: &Tensor, probs: &[f32]) -> Result<(Tensor, Vec<f32>)> {
+        let silence = self.silence.embedding().to_dtype(embeds.dtype())?;
         let c = &self.config;
         let s = c.num_speakers;
         let frames = embeds.dim(0)?;
@@ -229,5 +272,70 @@ impl SpeakerCache {
             }
         }
         Ok((kept, kept_probs))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use inference_tensor::Device;
+
+    const SPEAKERS: usize = 2;
+
+    fn config() -> CacheConfig {
+        CacheConfig {
+            cache_length: 8,
+            fifo_length: 0,
+            update_period: 1,
+            silence_frames: 1,
+            score_threshold: 0.25,
+            latest_boost: 0.05,
+            num_speakers: SPEAKERS,
+            min_positive_scores: 1,
+            strong_boosted: 1,
+            weak_boosted: 2,
+        }
+    }
+
+    fn frames(rows: &[f32]) -> Result<Tensor> {
+        let pairs: Vec<f32> = rows.iter().flat_map(|&v| [v, v]).collect();
+        Tensor::from_vec(pairs, (rows.len(), 2), &Device::Cpu)
+    }
+
+    #[test]
+    fn popped_silence_averages_into_the_slots_compression_fills() -> Result<()> {
+        let silence = Silence::Popped {
+            threshold: 0.2,
+            mean: Tensor::zeros(2, DType::F32, &Device::Cpu)?,
+            frames: 0,
+        };
+        let mut cache = SpeakerCache::new(config(), silence);
+        // frames 0 and 2 sum below the threshold, so the mean is theirs: 3
+        cache.update(
+            &frames(&[1., 7., 5.])?,
+            &[0.05, 0.05, 0.9, 0.0, 0.0, 0.1],
+            0,
+            3,
+        )?;
+        assert_eq!(cache.silence.embedding().to_vec1::<f32>()?, [3., 3.]);
+
+        // a silent frame of 6 then five speaking ones overflow the 8-frame cache; the mean takes the silent frame
+        // (to 4) before compression fills each speaker's silence slot with it
+        let chunk: Vec<f32> = (0..6).map(|i| 6. + 4. * i as f32).collect();
+        let input = Tensor::cat(&[&cache.embeds()?.expect("cached"), &frames(&chunk)?], 0)?;
+        let mut probs = vec![0.05, 0.05, 0.9, 0.0, 0.0, 0.1, 0.05, 0.05];
+        for i in 1..6 {
+            probs.extend_from_slice(if i % 2 == 0 {
+                &[0.9, 0.05]
+            } else {
+                &[0.05, 0.9]
+            });
+        }
+        cache.update(&input, &probs, 0, 6)?;
+        assert_eq!(cache.silence.embedding().to_vec1::<f32>()?, [4., 4.]);
+        let kept = cache.embeds()?.expect("cached").to_vec2::<f32>()?;
+        assert_eq!(kept.len(), 8);
+        assert_eq!(kept.iter().filter(|row| row[0] == 4.).count(), SPEAKERS);
+        Ok(())
     }
 }

@@ -1,15 +1,16 @@
 ---
 title: Speech models
-description: Parakeet and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 for speaker diarization, Dia and Kokoro for text-to-speech.
+description: Parakeet and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 and Sortformer for speaker diarization, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports six speech-related model families:
+inference.rs supports seven speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), served via
   `/v1/audio/transcriptions` with word and segment timestamps.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
+- **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
@@ -143,6 +144,22 @@ print!("{}", model.diarization(request, &std::fs::read("meeting.wav")?).await?.b
 
 </TabItem>
 </Tabs>
+
+## Streaming Sortformer v2: who speaks when, from a `.nemo`
+
+```bash
+inference serve -m nvidia/diar_streaming_sortformer_4spk-v2.1
+```
+
+Streaming Sortformer v2.1 tracks up to 4 speakers, giving each a speech probability for every 80 ms of audio.
+It loads straight from NVIDIA's `.nemo` checkpoint (the file, a directory holding one, or a Hugging Face repo)
+and runs the schedule the checkpoint ships: chunks of 188 encoder frames (15 s) with one frame of context each
+side, behind a 188-frame speaker cache. Requests and responses are those of Nemotron-3 above; only
+`frame_seconds` differs.
+
+```python
+spec = t.EngineSpec(model=t.ModelSelectedDiarization(model_id="nvidia/diar_streaming_sortformer_4spk-v2.1"))
+```
 
 ## Silero VAD: voice activity
 
