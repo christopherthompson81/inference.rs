@@ -13,7 +13,7 @@ const DATA_ENV: &str = "VERNACULA_DATA_DIR";
 /// The Hugging Face repo holding the phonemizer's `data/` tree, laid out so a data key is a repo path.
 pub const DATA_REPO: &str = "christopherthompson81/vernacula-phonemizer-data";
 /// The data's tag, which is the phonemizer commit this crate is pinned to; the two must move together.
-pub const DATA_REVISION: &str = "03fa865d";
+pub const DATA_REVISION: &str = "65637ee3";
 // Kokoro's voice prefixes (its lang_code) and the phonemizer's codes for the same languages
 const VOICE_LANGUAGES: [(char, &str); 9] = [
     ('a', "en"),

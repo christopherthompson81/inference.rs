@@ -595,3 +595,10 @@ Review of the Hub data source. Two high findings, both fixed.
 - **End to end again**, checkout hidden:
   - Live, fresh cache: af_heart 200 (6.1 s); first zf_xiaobei 200 (4.2 s, Mandarin downloaded in preparation); second 200 (1.7 s).
   - Offline, empty cache: text gives a 400 in 8 ms with the data message; `phonemes` gives 200.
+
+## Run 25 - 2026-10-09
+
+Phonemizer 65637ee3: the hi/pt/cmn/es/fr fix batch. The data tag was published with the user's approval; only `languages/french/supplement.tsv` and `languages/spanish/spanish.jsonc` differ from 03fa865d.
+
+- Bumped the Cargo rev and `DATA_REVISION` together. 37 Kokoro and data tests pass.
+- Live, with the checkout hidden and a fresh cache: the cache's ref is `65637ee3`. ef_dora ("Tengo veintiún libros.") and ff_siwis ("Un fichier de trois kilooctets.") both returned 200.
