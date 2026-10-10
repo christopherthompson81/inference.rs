@@ -2,7 +2,6 @@ use anyhow::Result;
 use inference_audio::AudioInput;
 use inference_audio::fft::{Complex32, plan_forward_f32};
 use inference_tensor::{Device, Tensor};
-use rubato::Resampler;
 
 use crate::media_inputs::preprocessor_config::PreProcessorConfig;
 
@@ -76,7 +75,7 @@ impl AudioProcessor {
 
         // Resample if necessary
         let resampled = if audio_input.sample_rate != self.target_sample_rate {
-            self.resample(
+            inference_audio::mel::resample(
                 &dithered_samples,
                 audio_input.sample_rate,
                 self.target_sample_rate,
@@ -114,32 +113,6 @@ impl AudioProcessor {
         let mask = Tensor::zeros((1, num_frames), inference_tensor::DType::F32, device)?;
 
         Ok((mel_tensor, mask))
-    }
-
-    fn resample(&self, samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
-        if from_rate == to_rate {
-            return Ok(samples.to_vec());
-        }
-
-        let sinc = rubato::SincInterpolationParameters {
-            sinc_len: 256,
-            f_cutoff: 0.95,
-            interpolation: rubato::SincInterpolationType::Linear,
-            oversampling_factor: 256,
-            window: rubato::WindowFunction::BlackmanHarris2,
-        };
-
-        let mut resampler = rubato::SincFixedIn::<f32>::new(
-            to_rate as f64 / from_rate as f64,
-            2.0,
-            sinc,
-            samples.len(),
-            1,
-        )?;
-
-        let samples_vec = vec![samples.to_vec()];
-        let result = resampler.process(&samples_vec, None)?;
-        Ok(result[0].clone())
     }
 
     fn compute_mel_spectrogram(

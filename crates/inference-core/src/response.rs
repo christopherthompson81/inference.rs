@@ -34,6 +34,7 @@ pub enum Response {
         rate: usize,
         channels: usize,
     },
+    Transcription(inference_models_speech::Transcription),
     // Raw
     Raw {
         logits_chunks: Vec<Tensor>,

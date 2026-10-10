@@ -319,6 +319,7 @@ async fn process_embedding_response(
             | Response::CompletionModelError(_, _)
             | Response::ImageGeneration(_)
             | Response::Speech { .. }
+            | Response::Transcription(_)
             | Response::Raw { .. }
             | Response::AgenticToolCallProgress { .. }
             | Response::BlockDenoisingProgress(_)

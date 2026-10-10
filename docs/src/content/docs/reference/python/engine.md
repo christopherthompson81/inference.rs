@@ -414,6 +414,17 @@ speech_generation(
 
 The audio; its MIME type carries the sample rate and channel count.
 
+### `Engine.transcription`
+
+```text
+transcription(
+    audio: bytes,
+    request: types.TranscriptionRequest | str = '{}',
+) -> Blob
+```
+
+The transcript of encoded audio, in the request's response_format (the blob's MIME type names it).
+
 ### `Engine.resolve_approval`
 
 ```text
@@ -859,6 +870,14 @@ speech_generation(request_json: str) -> Blob
 ```
 
 Speaks text; the blob's MIME type carries the sample rate and channel count.
+
+### `JsonEngine.transcription`
+
+```text
+transcription(request_json: str, audio: bytes) -> Blob
+```
+
+Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format.
 
 ### `JsonEngine._call2`
 

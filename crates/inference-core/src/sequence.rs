@@ -86,6 +86,7 @@ pub enum StopReason {
     Canceled,
     GeneratedImage,
     GeneratedSpeech,
+    Transcribed,
     ToolCalls,
 }
 
@@ -100,6 +101,7 @@ impl Display for StopReason {
             StopReason::Canceled => write!(f, "{FINISH_REASON_CANCELED}"),
             StopReason::GeneratedImage => write!(f, "generated_image"),
             StopReason::GeneratedSpeech => write!(f, "generated_speech"),
+            StopReason::Transcribed => write!(f, "transcribed"),
             StopReason::ToolCalls => write!(f, "tool_calls"),
         }
     }
@@ -114,6 +116,7 @@ impl StopReason {
             StopReason::Canceled => FINISH_REASON_CANCELED,
             StopReason::GeneratedImage => "generated_image",
             StopReason::GeneratedSpeech => "generated_speech",
+            StopReason::Transcribed => "transcribed",
             StopReason::ToolCalls => "tool_calls",
         }
     }

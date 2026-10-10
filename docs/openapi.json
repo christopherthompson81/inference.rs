@@ -289,6 +289,92 @@
         }
       }
     },
+    "/v1/audio/transcriptions": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Transcription endpoint handler.",
+        "operationId": "transcription",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/audio/transcriptions` takes.",
+                "required": [
+                  "file",
+                  "request"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to transcribe: WAV, MP3, FLAC, OGG and the other formats symphonia decodes."
+                  },
+                  "request": {
+                    "type": "object",
+                    "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
+                    "properties": {
+                      "language": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "The audio's language. Parakeet identifies the language itself and ignores it."
+                      },
+                      "model": {
+                        "type": "string",
+                        "description": "The speech recognition model to use.",
+                        "example": "nvidia/parakeet-tdt-0.6b-v3"
+                      },
+                      "prompt": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "Text to steer the transcript; Parakeet ignores it."
+                      },
+                      "response_format": {
+                        "$ref": "#/components/schemas/TranscriptionResponseFormat"
+                      },
+                      "temperature": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Parakeet decodes greedily and ignores it."
+                      },
+                      "timestamp_granularities": {
+                        "type": "array",
+                        "items": {
+                          "$ref": "#/components/schemas/TimestampGranularity"
+                        },
+                        "description": "Timestamps `verbose_json` carries; segments are always given, words only when asked for."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The transcript, in the requested format",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TranscriptionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/chat/completions": {
       "post": {
         "tags": [
@@ -5929,7 +6015,7 @@
           "text",
           "multimodal",
           "diffusion",
-          "audio",
+          "transcription",
           "speech",
           "embedding"
         ]
@@ -7109,6 +7195,48 @@
                         "description": "Load-time sampling for every request; it is specific to an architecture, so it needs `arch` set."
                       }
                     ]
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a speech recognition model",
+            "required": [
+              "Transcription"
+            ],
+            "properties": {
+              "Transcription": {
+                "type": "object",
+                "description": "Select a speech recognition model",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "arch": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/TranscriptionLoaderType",
+                        "description": "The architecture of the model; unset reads it from the model's `config.json`."
+                      }
+                    ]
+                  },
+                  "dtype": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "model_id": {
                     "type": "string",
@@ -11842,6 +11970,13 @@
         ],
         "description": "Text format configuration"
       },
+      "TimestampGranularity": {
+        "type": "string",
+        "enum": [
+          "word",
+          "segment"
+        ]
+      },
       "TokenizeRequest": {
         "type": "object",
         "required": [
@@ -11964,6 +12099,126 @@
         "enum": [
           "function"
         ]
+      },
+      "TranscriptionLoaderType": {
+        "type": "string",
+        "enum": [
+          "parakeet"
+        ]
+      },
+      "TranscriptionRequest": {
+        "type": "object",
+        "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
+        "properties": {
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The audio's language. Parakeet identifies the language itself and ignores it."
+          },
+          "model": {
+            "type": "string",
+            "description": "The speech recognition model to use.",
+            "example": "nvidia/parakeet-tdt-0.6b-v3"
+          },
+          "prompt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Text to steer the transcript; Parakeet ignores it."
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/TranscriptionResponseFormat"
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Parakeet decodes greedily and ignores it."
+          },
+          "timestamp_granularities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimestampGranularity"
+            },
+            "description": "Timestamps `verbose_json` carries; segments are always given, words only when asked for."
+          }
+        }
+      },
+      "TranscriptionResponse": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TranscriptionResponseFormat": {
+        "type": "string",
+        "description": "What a transcription answers with: OpenAI's formats.",
+        "enum": [
+          "json",
+          "text",
+          "srt",
+          "verbose_json",
+          "vtt"
+        ]
+      },
+      "TranscriptionSegment": {
+        "type": "object",
+        "description": "A timed span of a transcript, about a sentence.",
+        "required": [
+          "id",
+          "start",
+          "end",
+          "text"
+        ],
+        "properties": {
+          "end": {
+            "type": "number",
+            "format": "double"
+          },
+          "id": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "start": {
+            "type": "number",
+            "format": "double"
+          },
+          "text": {
+            "type": "string"
+          }
+        }
+      },
+      "TranscriptionWord": {
+        "type": "object",
+        "description": "A timed word of a transcript, in seconds from the start of the audio.",
+        "required": [
+          "word",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "number",
+            "format": "double"
+          },
+          "start": {
+            "type": "number",
+            "format": "double"
+          },
+          "word": {
+            "type": "string"
+          }
+        }
       },
       "TruncationStrategy": {
         "type": "string",
@@ -12161,6 +12416,51 @@
           "url": {
             "type": "string",
             "description": "The URL"
+          }
+        }
+      },
+      "VerboseTranscriptionResponse": {
+        "type": "object",
+        "required": [
+          "task",
+          "duration",
+          "text",
+          "segments"
+        ],
+        "properties": {
+          "duration": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds of audio."
+          },
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The request's `language`, echoed; the model reports none."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TranscriptionSegment"
+            }
+          },
+          "task": {
+            "type": "string",
+            "description": "Always `transcribe`."
+          },
+          "text": {
+            "type": "string"
+          },
+          "words": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "$ref": "#/components/schemas/TranscriptionWord"
+            }
           }
         }
       },

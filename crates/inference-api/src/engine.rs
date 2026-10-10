@@ -28,7 +28,7 @@ use crate::{
         self, ContainerFileListObject, ContainerFileMetadata, FileBody, FileDeleted,
         FileListObject, FileMetadata, FileUpload,
     },
-    generation::{SpeechAudio, generate_image, generate_speech},
+    generation::{SpeechAudio, generate_image, generate_speech, transcribe},
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
     },
@@ -49,6 +49,7 @@ use crate::{
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
         ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
+        TranscriptionOutput, TranscriptionRequest,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -79,7 +80,8 @@ pub use inference_core::{
     DiffusionLoaderType, HfConfigOverrides, IsqOrganization, IsqType, LoraAdapterSpec,
     LoraRuntimeConfig, MAX_LORA_ALIAS_BYTES, McpClientConfig, ModelDType, NetworkMode,
     NormalLoaderType, PagedCacheType, SandboxMode, SandboxProfile, SearchEmbeddingModel,
-    ShellConfig, SpeechLoaderType, TokenSource, UqffWriteConfig, expand_isq_value, parse_isq_value,
+    ShellConfig, SpeechLoaderType, TokenSource, TranscriptionLoaderType, UqffWriteConfig,
+    expand_isq_value, parse_isq_value,
 };
 pub use inference_selection::{
     MmprojSelection, ModelSelected, SpeechGenerationSpec, get_auto_device_map_params,
@@ -1581,6 +1583,23 @@ impl Engine {
 
     pub async fn speech_generation_json(&self, request: &[u8]) -> Result<SpeechAudio, ApiError> {
         self.speech_generation(parse_json(request)?).await
+    }
+
+    /// Transcribes encoded audio (WAV, MP3, FLAC, ...) with a speech recognition model.
+    pub async fn transcription(
+        &self,
+        request: TranscriptionRequest,
+        audio: &[u8],
+    ) -> Result<TranscriptionOutput, ApiError> {
+        transcribe(self.state(), request, audio).await
+    }
+
+    pub async fn transcription_json(
+        &self,
+        request: &[u8],
+        audio: &[u8],
+    ) -> Result<TranscriptionOutput, ApiError> {
+        self.transcription(parse_json(request)?, audio).await
     }
 
     /// Answers the approval an `agentic_tool_approval_required` stream event named.

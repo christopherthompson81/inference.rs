@@ -1,4 +1,5 @@
-//! Speech generation models: Dia, with its DAC decoder and BS.1770 loudness normalization, and Kokoro.
+//! Speech models: Dia, with its DAC decoder and BS.1770 loudness normalization, and Kokoro to speak; Parakeet to
+//! transcribe.
 
 use std::sync::Arc;
 
@@ -7,10 +8,13 @@ use inference_nn::{attention, layers, ops, utils as nn_utils};
 mod bs1770;
 mod dia;
 pub mod kokoro;
+pub mod parakeet;
+mod transcript;
 pub mod utils;
 mod weight_norm;
 
 pub use dia::{DiaConfig, DiaPipeline};
+pub use transcript::{TimedText, Transcription};
 
 #[derive(Clone, Copy, Debug)]
 pub enum SpeechGenerationConfig {

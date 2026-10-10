@@ -5,6 +5,8 @@
 //! mel spectrogram features.
 
 pub mod fft;
+pub mod mel;
+pub mod nemo;
 
 use anyhow::Result;
 use symphonia::core::{
@@ -16,7 +18,7 @@ use symphonia::core::{
 const MAX_DECODED_AUDIO_SAMPLES: usize = 48_000 * 2 * 30 * 60;
 
 /// Raw audio input consisting of PCM samples and a sample rate.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioInput {
     pub samples: Vec<f32>,
     pub sample_rate: u32,

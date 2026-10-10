@@ -1,0 +1,13 @@
+{
+  "blank_token": "<blank>",
+  "feature_extractor": {
+    "feature_extractor_type": "ParakeetFeatureExtractor",
+    "feature_size": 32,
+    "hop_length": 160,
+    "n_fft": 512,
+    "preemphasis": 0.97,
+    "sampling_rate": 16000,
+    "win_length": 400
+  },
+  "processor_class": "ParakeetProcessor"
+}

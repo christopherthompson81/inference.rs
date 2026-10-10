@@ -38,6 +38,7 @@ mod step;
 mod tiktoken;
 pub(crate) mod tokenizer;
 mod tokens;
+mod transcription;
 
 use crate::IntervalLogger;
 use crate::PagedAttentionConfig;
@@ -175,6 +176,7 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
+pub use transcription::{TranscriptionLoader, TranscriptionLoaderType, TranscriptionPipeline};
 
 pub type SpeechPreparation = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
 
@@ -965,7 +967,7 @@ pub enum ModelCategory {
         video_sampling: crate::VideoFrameSampling,
     },
     Diffusion,
-    Audio,
+    Transcription,
     Speech,
     Embedding,
 }
@@ -978,7 +980,7 @@ impl std::fmt::Debug for ModelCategory {
                 write!(f, "ModelCategory::Multimodal {{ prefixer: .. }}")
             }
             ModelCategory::Diffusion => write!(f, "ModelCategory::Diffusion"),
-            ModelCategory::Audio => write!(f, "ModelCategory::Audio"),
+            ModelCategory::Transcription => write!(f, "ModelCategory::Transcription"),
             ModelCategory::Speech => write!(f, "ModelCategory::Speech"),
             ModelCategory::Embedding => write!(f, "ModelCategory::Embedding"),
         }
@@ -990,7 +992,7 @@ impl PartialEq for ModelCategory {
         match (self, other) {
             (Self::Text, Self::Text) => true,
             (Self::Multimodal { .. }, Self::Multimodal { .. }) => true,
-            (Self::Audio, Self::Audio) => true,
+            (Self::Transcription, Self::Transcription) => true,
             (Self::Speech, Self::Speech) => true,
             (Self::Diffusion, Self::Diffusion) => true,
             (Self::Embedding, Self::Embedding) => true,
@@ -998,7 +1000,7 @@ impl PartialEq for ModelCategory {
                 Self::Text
                 | Self::Multimodal { .. }
                 | Self::Diffusion
-                | Self::Audio
+                | Self::Transcription
                 | Self::Speech
                 | Self::Embedding,
                 _,
@@ -1053,6 +1055,10 @@ pub enum ForwardInputsResult {
         token_blocks: Vec<Vec<u32>>,
         denoise_time: std::time::Duration,
     },
+    /// One result per sequence: audio a model refuses fails only its own request.
+    Transcription {
+        transcripts: Vec<Result<inference_models_speech::Transcription, String>>,
+    },
 }
 
 impl ForwardInputsResult {
@@ -1086,6 +1092,9 @@ impl ForwardInputsResult {
                 token_blocks: vec![token_blocks[bs_idx].clone()],
                 denoise_time: *denoise_time,
             }),
+            Self::Transcription { transcripts } => Ok(Self::Transcription {
+                transcripts: vec![transcripts[bs_idx].clone()],
+            }),
         }
     }
 
@@ -1102,7 +1111,7 @@ impl ForwardInputsResult {
             }),
             Self::Image { .. } => Ok(self.clone()),
             Self::Speech { .. } => Ok(self.clone()),
-            Self::BlockGeneration { .. } => Ok(self.clone()),
+            Self::BlockGeneration { .. } | Self::Transcription { .. } => Ok(self.clone()),
         }
     }
 

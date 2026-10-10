@@ -59,6 +59,10 @@ pub enum RequestMessage {
         prompt: String,
         options: SpeechOptions,
     },
+    Transcription {
+        #[serde(skip)]
+        audio: AudioInput,
+    },
     Embedding {
         prompt: String,
     },

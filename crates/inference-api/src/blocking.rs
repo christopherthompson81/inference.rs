@@ -11,6 +11,7 @@ use crate::{
     engine::{Engine, EngineCallbacks, EngineLoadError},
     generation::SpeechAudio,
     media_source::MediaAttachments,
+    openai::TranscriptionOutput,
 };
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -186,6 +187,17 @@ impl BlockingEngine {
     pub fn speech_generation_json(&self, request: &[u8]) -> Result<SpeechAudio, ApiError> {
         self.call(request, |engine, request| async move {
             engine.speech_generation_json(&request).await
+        })
+    }
+
+    pub fn transcription_json(
+        &self,
+        request: &[u8],
+        audio: &[u8],
+    ) -> Result<TranscriptionOutput, ApiError> {
+        let audio = audio.to_vec();
+        self.call(request, |engine, request| async move {
+            engine.transcription_json(&request, &audio).await
         })
     }
 

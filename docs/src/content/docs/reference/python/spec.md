@@ -280,7 +280,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelSelected`
 
-One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]`.
+One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedEmbedding]`.
 
 
 ## `ModelSelectedDiffusionPlain`
@@ -476,6 +476,17 @@ Select a model for running via auto loader
 | `dac_model_id` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `generation` | `SpeechGenerationSpec \| None` | optional |
+| `model_id` | `str` | required |
+
+
+## `ModelSelectedTranscription`
+
+Select a speech recognition model
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `arch` | `TranscriptionLoaderType \| None` | optional |
+| `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `model_id` | `str` | required |
 
 
@@ -769,6 +780,15 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `SpeechLoaderType.DIA` | `'dia'` |
 | `SpeechLoaderType.KOKORO` | `'kokoro'` |
+
+
+## `TranscriptionLoaderType`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `TranscriptionLoaderType.PARAKEET` | `'parakeet'` |
 
 
 ## `UqffWriteSpec`

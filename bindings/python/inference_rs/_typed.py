@@ -239,6 +239,10 @@ class Engine:
         """The audio; its MIME type carries the sample rate and channel count."""
         return self.json.speech_generation(to_json(request))
 
+    def transcription(self, audio: bytes, request: types.TranscriptionRequest | str = "{}") -> Blob:
+        """The transcript of encoded audio, in the request's response_format (the blob's MIME type names it)."""
+        return self.json.transcription(to_json(request), audio)
+
     def resolve_approval(
         self, approval_id: str, decision: types.ApprovalDecisionRequest | str
     ) -> types.ApprovalDecisionResponse:

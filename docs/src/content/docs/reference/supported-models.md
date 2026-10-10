@@ -97,6 +97,12 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 | `Dia` | Dia | <details><summary><code>nari-labs/Dia-1.6B</code></summary><code>inference run -m nari-labs/Dia-1.6B</code></details> |
 | `Kokoro` | Kokoro | <details><summary><code>hexgrad/Kokoro-82M</code></summary><code>inference run -m hexgrad/Kokoro-82M</code></details> |
 
+## Transcription
+
+| Architecture | Model families | Example |
+|---|---|---|
+| `Parakeet` | Parakeet (CTC, RNN-T, TDT) | <details><summary><code>nvidia/parakeet-tdt-0.6b-v3</code></summary><code>inference run -m nvidia/parakeet-tdt-0.6b-v3</code></details> |
+
 ## Embedding
 
 | Architecture | Model families | Example |

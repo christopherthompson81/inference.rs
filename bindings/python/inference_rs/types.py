@@ -1110,7 +1110,7 @@ class ModelCategory(str, Enum):
     TEXT = "text"
     MULTIMODAL = "multimodal"
     DIFFUSION = "diffusion"
-    AUDIO = "audio"
+    TRANSCRIPTION = "transcription"
     SPEECH = "speech"
     EMBEDDING = "embedding"
 
@@ -1339,6 +1339,16 @@ class ModelSelectedSpeech:
     generation: SpeechGenerationSpec | None = None
     model_id: str
     _external = 'Speech'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedTranscription:
+    """Select a speech recognition model"""
+
+    arch: TranscriptionLoaderType | None = None
+    dtype: ModelDType | None = ModelDType.AUTO
+    model_id: str
+    _external = 'Transcription'
 
 
 @dataclass(kw_only=True)
@@ -2662,6 +2672,11 @@ class TextFormatJsonObject:
     type: Literal["json_object"] = "json_object"
 
 
+class TimestampGranularity(str, Enum):
+    WORD = "word"
+    SEGMENT = "segment"
+
+
 @dataclass(kw_only=True)
 class TokenizeRequest:
     add_special_tokens: bool | None = True
@@ -2695,6 +2710,56 @@ class ToolType(str, Enum):
     """Type of tool"""
 
     FUNCTION = "function"
+
+
+class TranscriptionLoaderType(str, Enum):
+    PARAKEET = "parakeet"
+
+
+@dataclass(kw_only=True)
+class TranscriptionRequest:
+    """Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP)."""
+
+    language: str | None = None
+    model: str | None = None
+    prompt: str | None = None
+    response_format: TranscriptionResponseFormat | None = None
+    temperature: float | None = None
+    timestamp_granularities: list[TimestampGranularity] | None = None
+
+
+@dataclass(kw_only=True)
+class TranscriptionResponse:
+    text: str
+
+
+class TranscriptionResponseFormat(str, Enum):
+    """What a transcription answers with: OpenAI's formats."""
+
+    JSON = "json"
+    TEXT = "text"
+    SRT = "srt"
+    VERBOSE_JSON = "verbose_json"
+    VTT = "vtt"
+
+
+@dataclass(kw_only=True)
+class TranscriptionSegment:
+    """A timed span of a transcript, about a sentence."""
+
+    end: float
+    id: int
+    start: float
+    text: str
+
+
+@dataclass(kw_only=True)
+class TranscriptionWord:
+    """A timed word of a transcript, in seconds from the start of the audio."""
+
+    end: float
+    start: float
+    word: str
 
 
 class TruncationStrategy(str, Enum):
@@ -2747,6 +2812,16 @@ class UrlCitation:
 
     title: str | None = None
     url: str
+
+
+@dataclass(kw_only=True)
+class VerboseTranscriptionResponse:
+    duration: float
+    language: str | None = None
+    segments: list[TranscriptionSegment]
+    task: str
+    text: str
+    words: list[TranscriptionWord] | None = None
 
 
 class WebSearchContentType(str, Enum):
@@ -2802,7 +2877,7 @@ Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
-ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]

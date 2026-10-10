@@ -206,6 +206,7 @@ enum Detected {
     Embedding(Option<EmbeddingLoaderType>),
     Diffusion(DiffusionLoaderType),
     Speech(crate::pipeline::SpeechLoaderType),
+    Transcription(crate::pipeline::TranscriptionLoaderType),
 }
 
 fn supports_dynamic_lora(detected: &Detected) -> bool {
@@ -381,6 +382,13 @@ impl AutoLoader {
             return Ok(Detected::Speech(tp));
         }
 
+        if let Some(ref config) = artifacts.contents
+            && let Some(tp) =
+                crate::pipeline::TranscriptionLoaderType::auto_detect_from_config(config)
+        {
+            return Ok(Detected::Transcription(tp));
+        }
+
         if artifacts.sentence_transformers_present {
             if let Some(ref config) = artifacts.contents {
                 let cfg: AutoConfig = serde_json::from_str(config)?;
@@ -497,6 +505,13 @@ impl AutoLoader {
                     dac_model_id: None,
                     arch: Some(tp),
                     cfg: None,
+                });
+                *guard = Some(loader);
+            }
+            Detected::Transcription(tp) => {
+                let loader: Box<dyn Loader> = Box::new(super::TranscriptionLoader {
+                    model_id: self.model_id.clone(),
+                    arch: Some(tp),
                 });
                 *guard = Some(loader);
             }

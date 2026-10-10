@@ -1,19 +1,87 @@
 ---
 title: Speech models
-description: Voxtral Realtime for speech transcription, Dia and Kokoro for text-to-speech.
+description: Parakeet and Voxtral Realtime for speech transcription, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports three speech-related model families:
+inference.rs supports four speech-related model families:
 
+- **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), served via
+  `/v1/audio/transcriptions` with word and segment timestamps.
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
 - **Kokoro**: an 82M-parameter text-to-speech model with preset voices, also served via `/v1/audio/speech`.
 
-Voxtral Realtime is classified as a multimodal model because audio is an input modality. Dia and
-Kokoro are dedicated speech models.
+Voxtral Realtime is classified as a multimodal model because audio is an input modality. Parakeet is a
+dedicated transcription model, and Dia and Kokoro are dedicated speech models.
+
+## Parakeet: speech recognition
+
+```bash
+inference serve -m nvidia/parakeet-tdt-0.6b-v3
+```
+
+The auto-loader recognizes Parakeet from the transformers layout (`config.json` with `model_type`
+`parakeet_tdt`, `parakeet_rnnt` or `parakeet_ctc`, `processor_config.json`, `tokenizer.json`,
+`model.safetensors`). `parakeet-tdt-0.6b-v3` transcribes 25 European languages and identifies the language
+itself. Audio in any format the decoder reads (WAV, MP3, FLAC, OGG, ...) at any sample rate is resampled to
+16 kHz; recordings up to 24 minutes are transcribed in one pass, the bound NeMo gives for these models' full
+attention.
+
+`/v1/audio/transcriptions` takes OpenAI's multipart form. `response_format` is `json` (the default),
+`text`, `srt`, `vtt` or `verbose_json`; `verbose_json` carries the duration and segments, and words too
+when `timestamp_granularities[]` includes `word`. Timestamps are on the encoder's 80 ms grid. `language`,
+`prompt` and `temperature` are accepted and ignored: decoding is greedy.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions \
+  -F file=@clip.wav \
+  -F response_format=verbose_json \
+  -F "timestamp_granularities[]=word"
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+import inference_rs as ir
+from inference_rs import types as t
+
+spec = t.EngineSpec(model=t.ModelSelectedTranscription(model_id="nvidia/parakeet-tdt-0.6b-v3"))
+
+with ir.Engine(spec) as engine:
+    with open("clip.wav", "rb") as f:
+        audio = f.read()
+    transcript = engine.transcription(audio, t.TranscriptionRequest(response_format=t.TranscriptionResponseFormat.SRT))
+    print(transcript.data.decode())
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{
+    TimestampGranularity, TranscriptionModelBuilder, TranscriptionRequest, TranscriptionResponseFormat,
+};
+
+let model = TranscriptionModelBuilder::new("nvidia/parakeet-tdt-0.6b-v3").build().await?;
+
+let mut request = TranscriptionRequest::new(TranscriptionResponseFormat::VerboseJson);
+request.timestamp_granularities = vec![TimestampGranularity::Word];
+let transcript = model.transcription(request, &std::fs::read("clip.wav")?).await?;
+println!("{}", transcript.body);
+```
+
+</TabItem>
+</Tabs>
+
+`inference run -m nvidia/parakeet-tdt-0.6b-v3` opens an interactive mode that transcribes the audio files
+you name.
 
 ## Voxtral Realtime: audio in, text out
 

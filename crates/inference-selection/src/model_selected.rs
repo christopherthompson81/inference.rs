@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use inference_core::{
     AutoDeviceMapParams, DiffusionLoaderType, EmbeddingLoaderType, IsqOrganization,
     LoraAdapterSpec, LoraRuntimeConfig, ModelDType, MultimodalLoaderType, NormalLoaderType,
-    SpeechGenerationConfig, SpeechLoaderType, UqffWriteConfig,
+    SpeechGenerationConfig, SpeechLoaderType, TranscriptionLoaderType, UqffWriteConfig,
 };
 
 /// Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default.
@@ -593,6 +593,21 @@ pub enum ModelSelected {
         generation: Option<SpeechGenerationSpec>,
     },
 
+    /// Select a speech recognition model
+    Transcription {
+        /// Model ID to load from. This may be a HF hub repo or a local path.
+        model_id: String,
+
+        /// The architecture of the model; unset reads it from the model's `config.json`.
+        #[serde(default)]
+        arch: Option<TranscriptionLoaderType>,
+
+        /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
+        dtype: ModelDType,
+    },
+
     /// Select an embedding model, without quantization or adapters
     Embedding {
         /// Model ID to load from. This may be a HF hub repo or a local path.
@@ -656,6 +671,7 @@ impl ModelSelected {
             | Self::MultimodalPlain { dtype, .. }
             | Self::DiffusionPlain { dtype, .. }
             | Self::Speech { dtype, .. }
+            | Self::Transcription { dtype, .. }
             | Self::Embedding { dtype, .. } => *dtype,
         }
     }
@@ -669,7 +685,10 @@ impl ModelSelected {
             | Self::MultimodalPlain { hf_cache_path, .. }
             | Self::Embedding { hf_cache_path, .. }
             | Self::GGUF { hf_cache_path, .. } => hf_cache_path.as_ref(),
-            Self::GGML { .. } | Self::DiffusionPlain { .. } | Self::Speech { .. } => None,
+            Self::GGML { .. }
+            | Self::DiffusionPlain { .. }
+            | Self::Speech { .. }
+            | Self::Transcription { .. } => None,
         }
     }
 
@@ -706,7 +725,10 @@ impl ModelSelected {
                 max_batch_size,
                 ..
             } => Some((*max_seq_len, *max_batch_size)),
-            Self::DiffusionPlain { .. } | Self::Speech { .. } | Self::Embedding { .. } => None,
+            Self::DiffusionPlain { .. }
+            | Self::Speech { .. }
+            | Self::Transcription { .. }
+            | Self::Embedding { .. } => None,
         }
     }
 
@@ -719,7 +741,10 @@ impl ModelSelected {
             | Self::GGUF { write_uqff, .. }
             | Self::MultimodalPlain { write_uqff, .. }
             | Self::Embedding { write_uqff, .. } => Some(write_uqff),
-            Self::GGML { .. } | Self::DiffusionPlain { .. } | Self::Speech { .. } => None,
+            Self::GGML { .. }
+            | Self::DiffusionPlain { .. }
+            | Self::Speech { .. }
+            | Self::Transcription { .. } => None,
         }
     }
 
@@ -797,7 +822,7 @@ mod tests {
 
     use inference_core::{
         DiffusionLoaderType, EmbeddingLoaderType, ModelDType, MultimodalLoaderType,
-        NormalLoaderType, SpeechLoaderType,
+        NormalLoaderType, SpeechLoaderType, TranscriptionLoaderType,
     };
 
     // The names a schema publishes must be the ones serde writes, and each must parse back.
@@ -823,6 +848,7 @@ mod tests {
         assert_schema_names_are_serde_names::<EmbeddingLoaderType>();
         assert_schema_names_are_serde_names::<DiffusionLoaderType>();
         assert_schema_names_are_serde_names::<SpeechLoaderType>();
+        assert_schema_names_are_serde_names::<TranscriptionLoaderType>();
         let dtype = serde_json::to_value(<ModelDType as utoipa::PartialSchema>::schema()).unwrap();
         for name in dtype["enum"].as_array().unwrap() {
             serde_json::from_value::<ModelDType>(name.clone()).unwrap();

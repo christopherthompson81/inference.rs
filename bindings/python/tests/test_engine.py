@@ -225,5 +225,55 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(refused.exception.status, ir.Status.INVALID_ARGUMENT)
 
 
+# the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
+PARAKEET_DIR = "parakeet"
+TONE_RATE = 16000
+TONE_HZ = 440.0
+
+
+def tone_wav(seconds: float = 1.0) -> bytes:
+    import io
+    import math
+    import struct
+    import wave
+
+    frames = b"".join(
+        struct.pack("<h", int(0.3 * 32767 * math.sin(2 * math.pi * TONE_HZ * i / TONE_RATE)))
+        for i in range(int(seconds * TONE_RATE))
+    )
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as w:
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(TONE_RATE)
+        w.writeframes(frames)
+    return buffer.getvalue()
+
+
+class TranscriptionTest(unittest.TestCase):
+    def test_audio_transcribes_in_the_requested_format(self):
+        model = os.environ.get(MODEL_VARIABLE)
+        if not model:
+            self.skipTest(f"{MODEL_VARIABLE} is not set")
+        transcription_spec = json.dumps(
+            {
+                "model": {"Transcription": {"model_id": os.path.join(model, PARAKEET_DIR), "dtype": "f32"}},
+                "runtime": {"device": "cpu"},
+            }
+        )
+        with ir.JsonEngine(transcription_spec) as engine:
+            request = json.dumps({"response_format": "verbose_json", "timestamp_granularities": ["word"]})
+            blob = engine.transcription(request, tone_wav())
+            self.assertEqual(blob.mime_type, "application/json")
+            verbose = json.loads(blob.data)
+            self.assertEqual(verbose["task"], "transcribe")
+            self.assertIsInstance(verbose["words"], list)
+            text = engine.transcription(json.dumps({"response_format": "text"}), tone_wav())
+            self.assertEqual(text.data.decode(), verbose["text"])
+            with self.assertRaises(ir.InferenceError) as bad:
+                engine.transcription("{}", b"not audio")
+            self.assertEqual(bad.exception.status, ir.Status.INVALID_REQUEST)
+
+
 if __name__ == "__main__":
     unittest.main()

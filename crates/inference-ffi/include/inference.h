@@ -453,6 +453,15 @@ INFERENCE_API inference_status inference_prompt_logits(const inference_engine *e
  * "audio/pcm; codecs=1; format=s16le; rate=44100; channels=1". */
 INFERENCE_API inference_status inference_speech_generation(const inference_engine *engine, const char *request,
                                                           size_t request_len, inference_blob **out_blob);
+/* Transcribes audio with a speech recognition model. request holds the POST /v1/audio/transcriptions form fields as
+ * JSON ({"model"?, "response_format"?: "json" | "text" | "srt" | "verbose_json" | "vtt", "timestamp_granularities"?:
+ * ["word", "segment"]}; "language", "prompt" and "temperature" are accepted and ignored by Parakeet); audio is
+ * audio_len bytes of an encoded file (WAV, MP3, FLAC, OGG, ..., at most 64 MiB). out_blob receives the transcript in
+ * that format, its MIME type naming it, e.g. "application/json". Audio that does not decode is
+ * INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_transcription(const inference_engine *engine, const char *request,
+                                                      size_t request_len, const uint8_t *audio, size_t audio_len,
+                                                      inference_blob **out_blob);
 /* Answers the approval an "agentic_tool_approval_required" stream event named (its "approval_id"); the request is
  * {"decision": "approve" | "deny", "remember_for_session"?, "message"?} and out_response receives {"status":
  * "resolved" | "queued"}. An unknown approval is INFERENCE_ERR_NOT_FOUND. Approvals only arise on streamed requests
