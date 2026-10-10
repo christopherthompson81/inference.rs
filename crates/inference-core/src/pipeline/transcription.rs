@@ -23,7 +23,9 @@ use inference_models_speech::diarization::{
     is_sortformer,
 };
 use inference_models_speech::nemo;
-use inference_models_speech::parakeet::{MODEL_TYPES, Parakeet, ParakeetFiles, is_asr};
+use inference_models_speech::parakeet::{
+    MODEL_TYPES, Parakeet, ParakeetFiles, is_asr, is_asr_gguf,
+};
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
 use inference_tensor::{Device, Tensor};
@@ -76,11 +78,12 @@ impl TranscriptionLoaderType {
     }
 }
 
-// a recogniser in the transformers layout, or one `.nemo`
+// a recogniser in the transformers layout, one `.nemo`, or one NVIDIA `asr` GGUF
 #[derive(Clone, Debug)]
 enum AsrCheckpoint {
     Transformers(ParakeetFiles),
     Nemo(PathBuf),
+    Gguf(PathBuf),
 }
 
 #[derive(Clone, Debug)]
@@ -94,19 +97,19 @@ impl ModelPaths for TranscriptionModelPaths {
     fn get_config_filename(&self) -> &PathBuf {
         match &self.checkpoint {
             AsrCheckpoint::Transformers(files) => &files.config,
-            AsrCheckpoint::Nemo(nemo) => nemo,
+            AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => file,
         }
     }
     fn get_tokenizer_filename(&self) -> &PathBuf {
         match &self.checkpoint {
             AsrCheckpoint::Transformers(files) => &files.tokenizer,
-            AsrCheckpoint::Nemo(nemo) => nemo,
+            AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => file,
         }
     }
     fn get_weight_filenames(&self) -> &[PathBuf] {
         match &self.checkpoint {
             AsrCheckpoint::Transformers(files) => &files.weights,
-            AsrCheckpoint::Nemo(nemo) => std::slice::from_ref(nemo),
+            AsrCheckpoint::Nemo(file) | AsrCheckpoint::Gguf(file) => std::slice::from_ref(file),
         }
     }
     fn get_template_filename(&self) -> &Option<PathBuf> {
@@ -471,6 +474,25 @@ pub(crate) fn asr_nemo(
     nemo_of_kind(model_id, source, is_asr, "speech recognition")
 }
 
+/// The NVIDIA `asr` GGUF `model_id` names (Parakeet, streaming), found as `silero_gguf` finds its file.
+pub(crate) fn asr_gguf(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    silent: bool,
+) -> Result<PathBuf> {
+    let source = HubSource {
+        revision,
+        token_source,
+        silent,
+    };
+    let file = single_file(model_id, source, GGUF_EXTENSION, "`asr` GGUF", is_asr_gguf)?;
+    if !is_asr_gguf(&file) {
+        anyhow::bail!("`{}` is not an `asr` GGUF", file.display())
+    }
+    Ok(file)
+}
+
 /// The Streaming Sortformer `.nemo` `model_id` names.
 pub(crate) fn sortformer_nemo(
     model_id: &str,
@@ -568,25 +590,32 @@ impl Loader for TranscriptionLoader {
                 })
             })
             .transpose();
-        let checkpoint = match transformers {
-            Ok(Some(files)) => AsrCheckpoint::Transformers(files),
-            Ok(None) => AsrCheckpoint::Nemo(asr_nemo(
+        // past the transformers files, the `.nemo` (its F32 weights) before the 8-bit `asr` GGUF
+        let packed = || -> Result<AsrCheckpoint> {
+            let nemo = asr_nemo(
                 &self.model_id,
                 Some(revision.clone()),
                 &token_source,
                 options.silent,
-            )?),
-            Err(layout) => AsrCheckpoint::Nemo(
-                asr_nemo(
+            );
+            nemo.map(AsrCheckpoint::Nemo).or_else(|nemo| {
+                asr_gguf(
                     &self.model_id,
                     Some(revision.clone()),
                     &token_source,
                     options.silent,
                 )
-                .map_err(|nemo| {
-                    anyhow::anyhow!("no transformers layout ({layout}) and no `.nemo` ({nemo})")
-                })?,
-            ),
+                .map(AsrCheckpoint::Gguf)
+                .map_err(|gguf| anyhow::anyhow!("no `.nemo` ({nemo}) and no `asr` GGUF ({gguf})"))
+            })
+        };
+        let checkpoint = match transformers {
+            // a GGUF named outright loads as one, its own errors reported
+            Ok(None) if is_asr_gguf(id) => AsrCheckpoint::Gguf(id.to_path_buf()),
+            Ok(Some(files)) => AsrCheckpoint::Transformers(files),
+            Ok(None) => packed()?,
+            Err(layout) => packed()
+                .map_err(|packed| anyhow::anyhow!("no transformers layout ({layout}), {packed}"))?,
         };
         let paths = TranscriptionModelPaths {
             checkpoint,
@@ -643,6 +672,7 @@ impl Loader for TranscriptionLoader {
         let asr = match &paths.checkpoint {
             AsrCheckpoint::Transformers(files) => Parakeet::load(files, device, dtype)?,
             AsrCheckpoint::Nemo(nemo) => Parakeet::load_nemo(nemo, device, dtype)?,
+            AsrCheckpoint::Gguf(gguf) => Parakeet::load_gguf(gguf, device, dtype)?,
         };
         let model = AudioModel::Parakeet {
             asr: Box::new(asr),

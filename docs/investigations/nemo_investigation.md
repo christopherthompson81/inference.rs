@@ -610,3 +610,74 @@ The three real checkpoints rerun on CUDA after the fixes, all exact:
 - the hybrid against NeMo: 18/18, 19/19, 641/641.
 
 Environment: a reboot cleared the scratchpad under `/tmp`, taking the Kokoro-made synthetic clips and the CI memory wrapper. The wrapper was restored from the session record; the clips are not needed for these runs.
+
+## Run 22 - 2026-10-10
+
+**NVIDIA's `asr` GGUF.**
+
+The format, from `parakeet-tdt-0.6b-v3.q8_0.gguf` (714 MB, 701 tensors, 47 keys):
+- `general.architecture = asr`.
+- The NeMo config as `asr.encoder.*`, `asr.preprocessor.*`, `asr.rnnt.*` and `asr.tdt.durations`. The streaming context is in `asr.encoder.{att_context_style, offline_left_ctx, offline_right_ctx, conv_context, conv_norm}`; there is no `causal_downsampling` key.
+- The tokenizer as `asr.tokenizer.vocab`: pieces only, no piece types.
+- Tensors keep NeMo names, apart from:
+  - the LSTM, as `lstm.ih_l0.weight` against PyTorch's `lstm.weight_ih_l0`;
+  - the conformer's pointwise convs, stored as matrices without the kernel axis.
+- The converter's own `encoder.pos_enc.pe` and `preprocessor.fb` are skipped.
+- Precision: Q8_0 for every large matrix, F16 for the convs and embedding, F32 for norms and biases.
+
+Is the converter's quantization the only difference? Checked with the NeMo venv's `torch` and `gguf-py`, against each model's `.nemo`:
+- **parakeet-tdt-0.6b-v3:** all 272 Q8_0 tensors are byte-identical to `gguf.quants.quantize(F32, Q8_0)` of the `.nemo` weights.
+- **nemotron-speech-streaming-en-0.6b:** all 651 tensors match their source (Q8_0 byte-exact, F16 within F16 rounding).
+- **Worst per-tensor dequantization error:** `joint.pred.weight` at 1.06% relative; the encoder matrices are around 0.6%.
+
+So the loader is right by construction, and every difference from the F32 reference is the 8-bit weights.
+
+`scripts/parakeet_parity.sh <hf dir> <wavs> --gguf <file> --min-cosine 0.95`, CUDA, against the transformers F32 reference:
+
+| model | LibriSpeech clean 0000 | other 0000 | other 0001 | 97.6 s meeting |
+|---|---|---|---|---|
+| tdt-0.6b-v3 | 0.99991, text exact | 0.97150, text exact (emissions move from token 11) | 0.99982, text exact | 0.99987, WER 2.08% |
+| streaming-en | 0.99975, text exact | 0.99991, text exact | 0.99984, text exact | 0.99954, WER 3.18% |
+
+(encoder cosine, then the transcript)
+
+The meeting clip's differences are 8-bit drift on the hardest audio:
+- Parakeet: a proper-noun spelling, a British/American spelling, and a contraction written out (two words);
+- the streaming model: one casing change, one homophone swap, and a few words gained or lost in the deliberately overlapped crosstalk.
+
+So GGUF mode passes on cosine plus a WER bound (5% by default) rather than identical emissions.
+
+Engine:
+- `TranscriptionLoader` tries transformers, then `.nemo` (its F32 weights), then `asr` GGUF.
+- Auto-detection takes a local `asr` GGUF.
+
+Tokenizer rule refined: transformers' specials are `<unk>` and `<pad>` (the pad token it registers), plus control pieces (3.5's language tags); `<blank>` lies past the vocabulary. So `<pad>` is special by name in both readers. The GGUF reader marks `<unk>` and `<pad>`, having no types. The tiny equivalence test caught this: an F32 `asr` GGUF of the tiny streaming model emitted `<pad>` into its text.
+
+Test: an F32 `asr` GGUF of the tiny checkpoint (converter names, flattened pointwise convs, `asr.*` metadata) transcribes byte-identically to the transformers layout, for TDT, RNN-T and streaming.
+
+Follow-up, raised by the user: a better quantization, keeping the sensitive tensors at higher precision. The plan:
+- a per-tensor precision policy in our own `asr` GGUF writer;
+- a sensitivity sweep: one tensor group at F32 at a time, the rest Q8_0, measuring encoder cosine and WER against F32.
+- `joint.pred` (largest error, tiny) is the first candidate.
+
+## Run 23 - 2026-10-10
+
+**Review fixes for the `asr` GGUF.**
+
+Confirmed against both real files:
+- **Value types:** `u32` ints, `i32` contexts, `f32` floats, `bool` flags, an `i32` durations array.
+- **Head sizes:** the TDT joint has 8198 rows = 8193 + 5 durations. The vocab includes the blank, `blank_id = vocab - 1`, and the piece lists hold `vocab - 1`.
+- **Streaming context:** `offline_*` is 70/13, the `.nemo`'s first `att_context_size` pair; `train_*` is unset (0/0) for Parakeet.
+- **Shapes:** only `pointwise_conv{1,2}` are flattened.
+
+Fixed:
+- **Causal pre-encode:** inferred from `encoder.pre_encode.out.weight`'s input width (channels x bins: 4352 causal against 4096 centred for 128 mels), not assumed from the attention style. A mismatched file now fails the `parakeet()` checks instead of a shape mismatch.
+- **Defaults:** `pos_emb_max_len`, `preemph` and `max_symbols_per_step` default as on the `.nemo` path, and the contexts accept any integer type.
+- **Loader:** a `.gguf` path loads as the GGUF directly, so its errors are its own.
+- **Hub auto-detect:** a repo whose ASR-named checkpoint is a `.gguf` now counts too.
+- **Parity tooling:** `--nemo` and `--gguf` conflict, and the script forwards `--max-wer`.
+- **This log:** Run 22 described the clip's differing words concretely; they are now abstracted.
+
+Both GGUFs rerun on CUDA: identical to Run 22.
+
+Left: one Hub repo holding several `asr` GGUFs (q8_0 and f16) needs the file path. NVIDIA's repos ship transformers files, which win, so their GGUF loads by its path.

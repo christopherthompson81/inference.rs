@@ -173,6 +173,8 @@ const WIRE_FIXED32: u64 = 5;
 const PIECE_UNKNOWN: u64 = 2;
 const PIECE_CONTROL: u64 = 3;
 const PIECE_BYTE: u64 = 6;
+/// The pad piece, special though user-defined: transformers' conversion registers it as the pad token.
+pub const PAD_PIECE: &str = "<pad>";
 const METASPACE: char = '\u{2581}';
 
 fn varint(bytes: &[u8], at: &mut usize) -> Result<u64> {
@@ -253,9 +255,10 @@ pub fn sentencepiece_pieces(model: &[u8]) -> Result<Vec<Piece>> {
                 "a byte-fallback SentencePiece model is not one this decodes",
             ));
         }
+        let text = text.ok_or_else(|| msg("a SentencePiece piece without its text"))?;
         pieces.push(Piece {
-            text: text.ok_or_else(|| msg("a SentencePiece piece without its text"))?,
-            special: matches!(kind, Some(PIECE_UNKNOWN | PIECE_CONTROL)),
+            special: matches!(kind, Some(PIECE_UNKNOWN | PIECE_CONTROL)) || text == PAD_PIECE,
+            text,
         });
     }
     Ok(pieces)

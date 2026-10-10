@@ -24,6 +24,7 @@ use std::sync::Mutex;
 use tracing::{debug, info, warn};
 
 const SORTFORMER_NAME: &str = "sortformer";
+const GGUF_EXTENSION: &str = "gguf";
 // what a Hub recogniser's `.nemo` or repo is named for: Parakeet, the `stt_*` FastConformers, Nemotron ASR
 const ASR_NAMES: [&str; 5] = ["parakeet", "stt_", "fastconformer", "asr", "speech"];
 
@@ -445,15 +446,15 @@ impl AutoLoader {
         if artifacts.contents.is_none() {
             let local = Path::new(&self.model_id).exists();
             let names_sortformer = |s: &str| s.to_ascii_lowercase().contains(SORTFORMER_NAME);
-            let nemos: Vec<&String> = artifacts
-                .repo_files
-                .iter()
-                .filter(|f| {
-                    Path::new(f)
-                        .extension()
-                        .is_some_and(|e| e == inference_models_speech::nemo::EXTENSION)
-                })
-                .collect();
+            let with_extension = |ext: &str| -> Vec<&String> {
+                artifacts
+                    .repo_files
+                    .iter()
+                    .filter(|f| Path::new(f).extension().is_some_and(|e| e == ext))
+                    .collect()
+            };
+            let nemos = with_extension(inference_models_speech::nemo::EXTENSION);
+            let ggufs = with_extension(GGUF_EXTENSION);
             let probe = |find: fn(&str, Option<String>, &TokenSource, bool) -> Result<PathBuf>| {
                 local && find(&self.model_id, None, &TokenSource::None, true).is_ok()
             };
@@ -472,9 +473,15 @@ impl AutoLoader {
             let hub_asr = !local
                 && nemos
                     .iter()
+                    .chain(&ggufs)
                     .any(|f| names_asr(f) || names_asr(&self.model_id));
-            if probe(super::transcription::asr_nemo) || hub_asr {
-                info!("Detected a speech recognition `.nemo`; routing as transcription.");
+            if probe(super::transcription::asr_nemo)
+                || probe(super::transcription::asr_gguf)
+                || hub_asr
+            {
+                info!(
+                    "Detected a speech recognition `.nemo` or `asr` GGUF; routing as transcription."
+                );
                 return Ok(Detected::Transcription(
                     crate::pipeline::TranscriptionLoaderType::Parakeet,
                 ));

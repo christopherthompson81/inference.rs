@@ -23,6 +23,13 @@ struct Args {
     /// Load ours from this `.nemo` instead, against the same transformers reference.
     #[arg(long)]
     nemo: Option<PathBuf>,
+    /// Load ours from this `asr` GGUF instead. Its 8-bit weights move the encoder and the odd word, so a clip
+    /// passes on `--min-cosine` and `--max-wer` rather than on identical emissions.
+    #[arg(long, conflicts_with = "nemo")]
+    gguf: Option<PathBuf>,
+    /// The WER a quantized checkpoint may reach: 8-bit weights swap a spelling and flip words where voices overlap.
+    #[arg(long, default_value_t = 0.05)]
+    max_wer: f64,
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -33,6 +40,27 @@ fn cosine(a: &[f32], b: &[f32]) -> f64 {
         .sum();
     let norm = |v: &[f32]| v.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>().sqrt();
     dot / (norm(a) * norm(b))
+}
+
+// word-level edit distance over the reference's word count
+fn word_error_rate(ours: &str, reference: &str) -> f64 {
+    let (a, b): (Vec<&str>, Vec<&str>) = (
+        ours.split_whitespace().collect(),
+        reference.split_whitespace().collect(),
+    );
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for x in &a {
+        let mut diagonal = row[0];
+        row[0] += 1;
+        for (j, y) in b.iter().enumerate() {
+            let next = (diagonal + usize::from(x != y))
+                .min(row[j] + 1)
+                .min(row[j + 1] + 1);
+            diagonal = row[j + 1];
+            row[j + 1] = next;
+        }
+    }
+    row[b.len()] as f64 / b.len().max(1) as f64
 }
 
 fn main() -> Result<()> {
@@ -48,9 +76,10 @@ fn main() -> Result<()> {
         tokenizer: args.model.join("tokenizer.json"),
         weights: vec![args.model.join("model.safetensors")],
     };
-    let model = match &args.nemo {
-        Some(nemo) => Parakeet::load_nemo(nemo, &device, DType::F32)?,
-        None => Parakeet::load(&files, &device, DType::F32)?,
+    let model = match (&args.nemo, &args.gguf) {
+        (Some(nemo), _) => Parakeet::load_nemo(nemo, &device, DType::F32)?,
+        (None, Some(gguf)) => Parakeet::load_gguf(gguf, &device, DType::F32)?,
+        (None, None) => Parakeet::load(&files, &device, DType::F32)?,
     };
     let mut dumps = std::fs::read_dir(&args.dumps)?
         .map(|e| e.map(|e| e.path()))
@@ -109,10 +138,13 @@ fn main() -> Result<()> {
             .zip(&want_emissions)
             .position(|(a, b)| a != b);
         let same_text = meta["text"].as_str() == Some(text.as_str());
-        let ok = feature_cos >= args.min_cosine
-            && encoded_cos >= args.min_cosine
-            && same_emissions
-            && same_text;
+        let wer = word_error_rate(&text, meta["text"].as_str().unwrap_or_default());
+        let matches = if args.gguf.is_some() {
+            wer <= args.max_wer
+        } else {
+            same_emissions && same_text
+        };
+        let ok = feature_cos >= args.min_cosine && encoded_cos >= args.min_cosine && matches;
         failed |= !ok;
         println!(
             "{} {}: features cos {feature_cos:.6} ({} vs {}), encoder cos {encoded_cos:.6}, emissions {}/{}{} {}, text {}, {elapsed:.2}s (one warm transcribe {warm:.2}s)",
@@ -133,6 +165,12 @@ fn main() -> Result<()> {
             if same_emissions { "match" } else { "differ" },
             if same_text {
                 "matches".to_string()
+            } else if args.gguf.is_some() {
+                format!(
+                    "WER {:.2}%:\n  ours {text:?}\n  want {:?}",
+                    wer * 100.0,
+                    meta["text"]
+                )
             } else {
                 format!("differs:\n  ours {text:?}\n  want {:?}", meta["text"])
             },
