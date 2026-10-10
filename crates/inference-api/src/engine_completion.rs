@@ -330,6 +330,7 @@ impl CompletionStream {
             | Response::Speech { .. }
             | Response::Transcription(_)
             | Response::VoiceActivity(_)
+            | Response::Diarization(_)
             | Response::Raw { .. }
             | Response::Embeddings { .. } => unreachable!("not a completion stream response"),
         })

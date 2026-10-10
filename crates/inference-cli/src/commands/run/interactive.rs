@@ -9,8 +9,9 @@ use inference_api::{
     engine_chat::ReasoningEffort,
     lora_adapters::ListLoraAdaptersQuery,
     openai::{
-        ImageGenerationRequest, ModelCategory, SpeechGenerationRequest, TranscriptionRequest,
-        TranscriptionResponseFormat, VoiceActivityRequest,
+        DiarizationRequest, DiarizationResponseFormat, ImageGenerationRequest, ModelCategory,
+        SpeechGenerationRequest, TranscriptionRequest, TranscriptionResponseFormat,
+        VoiceActivityRequest,
     },
 };
 use regex::Regex;
@@ -79,6 +80,15 @@ Commands:
 const VOICE_ACTIVITY_INTERACTIVE_HELP: &str = r#"
 Welcome to interactive mode! Because this model is a voice activity model, you can enter the path of an audio
 file (WAV, MP3, FLAC, ...) and the model will list where it speaks.
+
+Commands:
+- `/help`: Display this message.
+- `/exit`: Quit interactive mode.
+"#;
+
+const DIARIZATION_INTERACTIVE_HELP: &str = r#"
+Welcome to interactive mode! Because this model is a speaker diarization model, you can enter the path of an
+audio file (WAV, MP3, FLAC, ...) and the model will list who speaks when.
 
 Commands:
 - `/help`: Display this message.
@@ -256,6 +266,7 @@ pub async fn interactive_mode(engine: &Engine, config: InteractiveConfig) {
         Some(ModelCategory::Speech) => speech_interactive_mode(engine).await,
         Some(ModelCategory::Transcription) => transcription_interactive_mode(engine).await,
         Some(ModelCategory::VoiceActivity) => voice_activity_interactive_mode(engine).await,
+        Some(ModelCategory::Diarization) => diarization_interactive_mode(engine).await,
         Some(ModelCategory::Embedding) => error!(
             "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
         ),
@@ -588,6 +599,37 @@ async fn transcription_interactive_mode(engine: &Engine) {
         };
         match transcribe(engine, &path).await {
             Ok((text, duration)) => println!("{text}\n(took {duration:.2}s)"),
+            Err(e) => error!("{e}"),
+        }
+        println!();
+    }
+    editor.save_history(&history_file_path()).unwrap();
+}
+
+async fn diarization_interactive_mode(engine: &Engine) {
+    println!("{BANNER}{DIARIZATION_INTERACTIVE_HELP}{BANNER}");
+    let mut editor = open_editor();
+    loop {
+        let path = match read_line(&mut editor, "audio file> ").trim() {
+            "" => continue,
+            HELP_CMD => {
+                println!("{BANNER}{DIARIZATION_INTERACTIVE_HELP}{BANNER}");
+                continue;
+            }
+            EXIT_CMD => break,
+            path => path.to_string(),
+        };
+        let diarized = async {
+            let audio = fs::read(&path)?;
+            let mut request = DiarizationRequest::new();
+            request.response_format = DiarizationResponseFormat::Rttm;
+            engine
+                .diarization(request, &audio)
+                .await
+                .map_err(anyhow::Error::msg)
+        };
+        match diarized.await {
+            Ok(output) => print!("{}", output.body),
             Err(e) => error!("{e}"),
         }
         println!();

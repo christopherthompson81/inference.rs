@@ -472,6 +472,15 @@ INFERENCE_API inference_status inference_transcription(const inference_engine *e
 INFERENCE_API inference_status inference_voice_activity(const inference_engine *engine, const char *request,
                                                        size_t request_len, const uint8_t *audio, size_t audio_len,
                                                        inference_string **out_response);
+/* Who speaks when in audio, from a speaker diarization model (Nemotron-3 Diarization). request holds the POST
+ * /v1/audio/diarization form fields as JSON ({"model"?, "threshold"? (0.5), "response_format"?: "json" | "rttm",
+ * "return_probabilities"?}); audio is audio_len bytes of an encoded file (at most 64 MiB). out_blob receives, as JSON,
+ * {"duration", "num_speakers", "segments": [{"speaker", "start", "end"}], "frame_seconds", "probabilities"?: one row of
+ * per-speaker probabilities per frame}, or RTTM SPEAKER lines; its MIME type names which. Audio that does not decode,
+ * a threshold outside 0 to 1, or a model that is not a diarization one, is INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_diarization(const inference_engine *engine, const char *request,
+                                                    size_t request_len, const uint8_t *audio, size_t audio_len,
+                                                    inference_blob **out_blob);
 /* Answers the approval an "agentic_tool_approval_required" stream event named (its "approval_id"); the request is
  * {"decision": "approve" | "deny", "remember_for_session"?, "message"?} and out_response receives {"status":
  * "resolved" | "queued"}. An unknown approval is INFERENCE_ERR_NOT_FOUND. Approvals only arise on streamed requests

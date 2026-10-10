@@ -128,6 +128,52 @@ The model a request without `model`, or naming `default`, goes to.
 | `text` | `str` |
 
 
+## `DiarizationRequest`
+
+Speaker diarization request; the audio travels beside it (a multipart `file` over HTTP).
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `model` | `str \| None` | optional |
+| `response_format` | `DiarizationResponseFormat \| None` | optional |
+| `return_probabilities` | `bool \| None` | optional |
+| `threshold` | `float \| None` | optional |
+
+
+## `DiarizationResponse`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `duration` | `float` | required |
+| `frame_seconds` | `float` | required |
+| `num_speakers` | `int` | required |
+| `probabilities` | `list[list[float]] \| None` | optional |
+| `segments` | `list[DiarizationSegment]` | required |
+
+
+## `DiarizationResponseFormat`
+
+What a diarization answers with.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `DiarizationResponseFormat.JSON` | `'json'` |
+| `DiarizationResponseFormat.RTTM` | `'rttm'` |
+
+
+## `DiarizationSegment`
+
+One speaker's turn, in seconds from the start of the audio; speakers are the model's output slots.
+
+| Field | Type |
+| --- | --- |
+| `end` | `float` |
+| `speaker` | `int` |
+| `start` | `float` |
+
+
 ## `EncoderCacheStats`
 
 | Field | Type |
@@ -353,6 +399,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ModelCategory.DIFFUSION` | `'diffusion'` |
 | `ModelCategory.TRANSCRIPTION` | `'transcription'` |
 | `ModelCategory.VOICE_ACTIVITY` | `'voice_activity'` |
+| `ModelCategory.DIARIZATION` | `'diarization'` |
 | `ModelCategory.SPEECH` | `'speech'` |
 | `ModelCategory.EMBEDDING` | `'embedding'` |
 

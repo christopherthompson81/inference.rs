@@ -40,7 +40,7 @@ mod generated {
             __path_resolve_agent_approval, ApprovalDecision, ApprovalDecisionRequest,
             ApprovalDecisionResponse,
         },
-        audio_analysis::{__path_transcription, __path_voice_activity},
+        audio_analysis::{__path_diarization, __path_transcription, __path_voice_activity},
         auth::{__path_sign_in, __path_sign_out, SignInRequest},
         chat_completion::__path_chatcompletions,
         completions::__path_completions,
@@ -68,7 +68,8 @@ mod generated {
         metrics::__path_metrics,
         openai::{
             AdapterGenerationSelection, AdapterSelection, AudioResponseFormat,
-            ChatCompletionRequest, CompletionRequest, EmbeddingData, EmbeddingEncodingFormat,
+            ChatCompletionRequest, CompletionRequest, DiarizationRequest, DiarizationResponse,
+            DiarizationResponseFormat, DiarizationSegment, EmbeddingData, EmbeddingEncodingFormat,
             EmbeddingInput, EmbeddingRequest, EmbeddingResponse, EmbeddingUsage, EmbeddingVector,
             FunctionCalled, Grammar, ImageGenerationRequest, JsonSchemaResponseFormat, Message,
             MessageContent, MessageInnerContent, ModelObject, ModelObjects,
@@ -111,7 +112,7 @@ mod generated {
     pub(super) fn doc() -> utoipa::openapi::OpenApi {
         #[derive(OpenApi)]
         #[openapi(
-            paths(models, model_cache_stats, model_speculative_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, transcription, voice_activity, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, add_model, remove_model, set_default_model, add_model_alias, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, sign_in, sign_out, metrics),
+            paths(models, model_cache_stats, model_speculative_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, transcription, voice_activity, diarization, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, add_model, remove_model, set_default_model, add_model_alias, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, sign_in, sign_out, metrics),
             components(schemas(
                 // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
                 inference_api::EngineSpec,
@@ -254,6 +255,10 @@ mod generated {
                 VoiceActivityRequest,
                 VoiceActivityResponse,
                 SpeechSegment,
+                DiarizationRequest,
+                DiarizationResponse,
+                DiarizationResponseFormat,
+                DiarizationSegment,
                 Tool,
                 ToolCall,
                 ToolChoice,

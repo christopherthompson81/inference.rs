@@ -36,6 +36,7 @@ pub enum Response {
     },
     Transcription(inference_models_speech::Transcription),
     VoiceActivity(inference_models_speech::silero::VoiceActivity),
+    Diarization(inference_models_speech::diarization::Diarization),
     // Raw
     Raw {
         logits_chunks: Vec<Tensor>,

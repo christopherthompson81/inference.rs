@@ -43,6 +43,7 @@ pub enum OneShotParams {
     Diffusion(DiffusionGenerationParams),
     Speech(SpeechOptions),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
+    Diarization(inference_models_speech::diarization::DiarizationOptions),
 }
 
 pub type SeqPreallocatedCache = Vec<Option<(Tensor, Tensor)>>;
@@ -89,6 +90,7 @@ pub enum StopReason {
     GeneratedSpeech,
     Transcribed,
     DetectedSpeech,
+    Diarized,
     ToolCalls,
 }
 
@@ -105,6 +107,7 @@ impl Display for StopReason {
             StopReason::GeneratedSpeech => write!(f, "generated_speech"),
             StopReason::Transcribed => write!(f, "transcribed"),
             StopReason::DetectedSpeech => write!(f, "detected_speech"),
+            StopReason::Diarized => write!(f, "diarized"),
             StopReason::ToolCalls => write!(f, "tool_calls"),
         }
     }
@@ -121,6 +124,7 @@ impl StopReason {
             StopReason::GeneratedSpeech => "generated_speech",
             StopReason::Transcribed => "transcribed",
             StopReason::DetectedSpeech => "detected_speech",
+            StopReason::Diarized => "diarized",
             StopReason::ToolCalls => "tool_calls",
         }
     }
@@ -1570,6 +1574,15 @@ impl Sequence {
     pub fn speech_options(&self) -> Option<&SpeechOptions> {
         match &self.one_shot {
             Some(OneShotParams::Speech(options)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn diarization_options(
+        &self,
+    ) -> Option<&inference_models_speech::diarization::DiarizationOptions> {
+        match &self.one_shot {
+            Some(OneShotParams::Diarization(options)) => Some(options),
             _ => None,
         }
     }

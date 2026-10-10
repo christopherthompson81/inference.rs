@@ -3,12 +3,13 @@ use std::path::PathBuf;
 use crate::ModelSelected;
 
 use inference_core::{
-    AutoDeviceMapParams, AutoLoaderBuilder, DiffusionLoaderBuilder, EmbeddingLoaderBuilder,
-    EmbeddingSpecificConfig, GGMLLoaderBuilder, GGMLSpecificConfig, GGUF_MULTI_FILE_DELIMITER,
-    GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOverrides,
-    Loader, LoaderSource, ModelDType, ModelLoaderConfig, MtpConfig, MultimodalLoaderBuilder,
-    MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig, SpeechLoader, Topology,
-    TranscriptionLoader, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, VoiceActivityLoader,
+    AutoDeviceMapParams, AutoLoaderBuilder, DiarizationLoader, DiffusionLoaderBuilder,
+    EmbeddingLoaderBuilder, EmbeddingSpecificConfig, GGMLLoaderBuilder, GGMLSpecificConfig,
+    GGUF_MULTI_FILE_DELIMITER, GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides,
+    IsqOrganization, LoadOverrides, Loader, LoaderSource, ModelDType, ModelLoaderConfig, MtpConfig,
+    MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig,
+    SpeechLoader, Topology, TranscriptionLoader, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
+    VoiceActivityLoader,
 };
 
 const UNRESOLVED_SOURCE: &str = "the spec's `quant`, empty GGUF filename or projector choice has to be resolved before loading; \
@@ -465,6 +466,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             vad_model_id,
         }),
         ModelSelected::VoiceActivity { model_id } => Box::new(VoiceActivityLoader { model_id }),
+        ModelSelected::Diarization { model_id, .. } => Box::new(DiarizationLoader { model_id }),
         ModelSelected::Lora {
             model_id,
             quant: _,

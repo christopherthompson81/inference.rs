@@ -103,6 +103,12 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 |---|---|---|
 | `Parakeet` | Parakeet (CTC, RNN-T, TDT) | <details><summary><code>nvidia/parakeet-tdt-0.6b-v3</code></summary><code>inference run -m nvidia/parakeet-tdt-0.6b-v3</code></details> |
 
+## Diarization
+
+| Architecture | Model families | Example |
+|---|---|---|
+| `Nemotron3` | Nemotron-3 Diarization (streaming Sortformer) | <details><summary><code>nvidia/Nemotron-3-Diarization</code></summary><code>inference run -m nvidia/Nemotron-3-Diarization</code></details> |
+
 ## Embedding
 
 | Architecture | Model families | Example |

@@ -487,6 +487,18 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Owned.TakeBlob(blob);
     }
 
+    /// <summary>Who speaks when in encoded audio; the blob's MIME type names the response format (JSON or RTTM).</summary>
+    public Blob Diarization(string requestJson, byte[] audio)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        using var bytes = new PinnedBytes(audio);
+        var status = NativeMethods.inference_diarization(
+            engine.Handle, request.Pointer, request.Length, bytes.Pointer, bytes.Length, out var blob);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_diarization));
+        return Owned.TakeBlob(blob);
+    }
+
     /// <summary>The speech segments of encoded audio, from a voice activity model.</summary>
     public string VoiceActivity(string requestJson, byte[] audio)
     {

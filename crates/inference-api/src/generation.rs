@@ -2,9 +2,10 @@
 
 use futures::future::BoxFuture;
 use inference_core::{
-    AudioInput, DiffusionGenerationParams, ImageChoice, ImageGenerationResponse,
-    ImageGenerationResponseFormat, InferenceRs, NormalRequest, Request, RequestMessage, Response,
-    SamplingParams, SegmentOptions, SpeechOptions, TimedText, Transcription, VoiceActivity,
+    AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
+    ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, NormalRequest, Request,
+    RequestMessage, Response, SamplingParams, SegmentOptions, SpeechOptions, TimedText,
+    Transcription, VoiceActivity,
     speech_utils::{self, Sample},
 };
 
@@ -16,10 +17,12 @@ use crate::{
     files::store_generated_image,
     lora_routing::DEFAULT_MODEL_ID,
     openai::{
-        AudioResponseFormat, ImageGenerationRequest, SpeechGenerationRequest, SpeechSegment,
-        TimestampGranularity, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
-        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
-        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse, transcript_srt,
+        AudioResponseFormat, DiarizationOutput, DiarizationRequest, DiarizationResponse,
+        DiarizationResponseFormat, DiarizationSegment, ImageGenerationRequest,
+        SpeechGenerationRequest, SpeechSegment, TimestampGranularity, TranscriptionOutput,
+        TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
+        TranscriptionSegment, TranscriptionWord, VerboseTranscriptionResponse,
+        VoiceActivityRequest, VoiceActivityResponse, diarization_rttm, transcript_srt,
         transcript_vtt,
     },
     types::SharedInferenceRsState,
@@ -406,6 +409,82 @@ fn voice_activity_response(activity: VoiceActivity, probabilities: bool) -> Voic
         chunk_seconds: activity.chunk_seconds,
         probabilities: probabilities.then_some(activity.probabilities),
     }
+}
+
+/// Who speaks when in encoded `audio`, from a diarization model, as JSON or RTTM.
+pub(crate) fn diarize<'a>(
+    state: &'a SharedInferenceRsState,
+    request: DiarizationRequest,
+    audio: &'a [u8],
+) -> BoxFuture<'a, Result<DiarizationOutput, ApiError>> {
+    Box::pin(diarize_inner(state, request, audio))
+}
+
+async fn diarize_inner(
+    state: &SharedInferenceRsState,
+    request: DiarizationRequest,
+    audio: &[u8],
+) -> Result<DiarizationOutput, ApiError> {
+    if request.threshold.is_some_and(|t| !(0.0..=1.0).contains(&t)) {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            "`threshold` must be a probability, from 0 to 1",
+            Some("invalid_threshold"),
+            Some("threshold"),
+        ));
+    }
+    let audio = decode_audio(audio)?;
+    let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let messages = RequestMessage::Diarization {
+        audio,
+        options: DiarizationOptions {
+            threshold: request.threshold,
+        },
+    };
+    match run(state, &request.model, repr, messages).await? {
+        Response::Diarization(diarization) => render_diarization(&request, diarization),
+        _ => Err(unexpected(state)),
+    }
+}
+
+fn render_diarization(
+    request: &DiarizationRequest,
+    diarization: Diarization,
+) -> Result<DiarizationOutput, ApiError> {
+    let segments: Vec<DiarizationSegment> = diarization
+        .segments
+        .iter()
+        .map(|s| DiarizationSegment {
+            speaker: s.speaker,
+            start: s.start,
+            end: s.end,
+        })
+        .collect();
+    let format = request.response_format;
+    let body = match format {
+        DiarizationResponseFormat::Rttm => diarization_rttm(&segments),
+        DiarizationResponseFormat::Json => {
+            let probabilities = request.return_probabilities.then(|| {
+                diarization
+                    .probabilities
+                    .chunks(diarization.num_speakers)
+                    .map(<[f32]>::to_vec)
+                    .collect()
+            });
+            serde_json::to_string(&DiarizationResponse {
+                duration: diarization.duration,
+                num_speakers: diarization.num_speakers,
+                segments,
+                frame_seconds: diarization.frame_seconds,
+                probabilities,
+            })
+            .map_err(|_| ApiError::internal())?
+        }
+    };
+    Ok(DiarizationOutput {
+        body,
+        content_type: format.content_type(),
+    })
 }
 
 fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {

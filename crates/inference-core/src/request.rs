@@ -68,6 +68,11 @@ pub enum RequestMessage {
         audio: AudioInput,
         options: inference_models_speech::silero::SegmentOptions,
     },
+    Diarization {
+        #[serde(skip)]
+        audio: AudioInput,
+        options: inference_models_speech::diarization::DiarizationOptions,
+    },
     Embedding {
         prompt: String,
     },

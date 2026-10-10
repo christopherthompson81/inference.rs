@@ -1,14 +1,15 @@
 ---
 title: Speech models
-description: Parakeet and Voxtral Realtime for speech transcription, Silero for voice activity, Dia and Kokoro for text-to-speech.
+description: Parakeet and Voxtral Realtime for speech transcription, Silero for voice activity, Nemotron-3 for speaker diarization, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports five speech-related model families:
+inference.rs supports six speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), served via
   `/v1/audio/transcriptions` with word and segment timestamps.
+- **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
@@ -96,6 +97,52 @@ spec = t.EngineSpec(
     model=t.ModelSelectedTranscription(model_id="nvidia/parakeet-tdt-0.6b-v3", vad_model_id="silero-vad-v6.gguf")
 )
 ```
+
+## Nemotron-3 Diarization: who speaks when
+
+```bash
+inference serve -m nvidia/Nemotron-3-Diarization
+```
+
+Nemotron-3 Diarization (a streaming Sortformer) tracks up to 8 speakers, giving each a speech probability for
+every 10 ms of audio. It runs its offline configuration: chunks of 340 encoder frames (2.72 s) with 40 frames of
+lookahead, an arrival-order speaker cache carrying who has spoken across chunks. A speaker's segments are its
+runs of frames past `threshold` (0.5); `response_format=rttm` gives NIST RTTM lines for scoring tools.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+curl http://localhost:1234/v1/audio/diarization -F file=@meeting.wav -F response_format=rttm
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+spec = t.EngineSpec(model=t.ModelSelectedDiarization(model_id="nvidia/Nemotron-3-Diarization"))
+
+with ir.Engine(spec) as engine:
+    with open("meeting.wav", "rb") as f:
+        result = engine.diarization(f.read())
+    for segment in json.loads(result.data)["segments"]:
+        print(segment["speaker"], segment["start"], segment["end"])
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{DiarizationModelBuilder, DiarizationRequest, DiarizationResponseFormat};
+
+let model = DiarizationModelBuilder::new("nvidia/Nemotron-3-Diarization").build().await?;
+let mut request = DiarizationRequest::new();
+request.response_format = DiarizationResponseFormat::Rttm;
+print!("{}", model.diarization(request, &std::fs::read("meeting.wav")?).await?.body);
+```
+
+</TabItem>
+</Tabs>
 
 ## Silero VAD: voice activity
 

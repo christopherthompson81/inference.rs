@@ -18,7 +18,7 @@ use crate::openapi_doc::get_openapi_doc;
 use crate::{
     anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
     approvals::resolve_agent_approval,
-    audio_analysis::{transcription, voice_activity},
+    audio_analysis::{diarization, transcription, voice_activity},
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::embeddings,
@@ -42,14 +42,15 @@ use crate::{
         ANTHROPIC_MESSAGES_ROUTE, AUTH_SESSION_ROUTE, CALIBRATION_APPLY_ROUTE,
         CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE, CANCEL_RESPONSE_ROUTE,
         CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE, CONTAINER_FILE_CONTENT_ROUTE,
-        CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DEFAULT_MODEL_ROUTE, EMBEDDINGS_ROUTE,
-        FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE, IMAGE_GENERATION_ROUTE,
-        LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE, MODEL_ALIAS_ROUTE,
-        MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE,
-        RE_ISQ_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE,
-        ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
-        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE,
-        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
+        CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DEFAULT_MODEL_ROUTE, DIARIZATION_ROUTE,
+        EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
+        IMAGE_GENERATION_ROUTE, LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE,
+        MODEL_ALIAS_ROUTE, MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE,
+        MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE,
+        RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE,
+        SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE,
+        TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE,
+        VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -352,6 +353,7 @@ fn init_router(
         .route(SPEECH_GENERATION_ROUTE.path, post(speech_generation))
         .route(TRANSCRIPTION_ROUTE.path, post(transcription))
         .route(VOICE_ACTIVITY_ROUTE.path, post(voice_activity))
+        .route(DIARIZATION_ROUTE.path, post(diarization))
         .route(AGENT_APPROVAL_ROUTE.path, post(resolve_agent_approval))
         .route(RESPONSES_ROUTE.path, post(create_response))
         .route(SKILLS_ROUTE.path, get(list_skills).post(upload_skill))

@@ -18,6 +18,7 @@ use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
+use inference_models_speech::diarization::{DiarizationOptions, Nemotron3Diarizer, Nemotron3Files};
 use inference_models_speech::parakeet::{MODEL_TYPES, Parakeet, ParakeetFiles};
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
@@ -36,6 +37,7 @@ const PROCESSOR_CONFIG: &str = "processor_config.json";
 const TOKENIZER: &str = "tokenizer.json";
 const WEIGHTS: &str = "model.safetensors";
 const GGUF_EXTENSION: &str = "gguf";
+const NEMOTRON3_DIARIZATION_TYPE: &str = "nemotron3_diarization";
 // the engine's sequence bookkeeping wants a length; one-shot audio requests never reach it
 const METADATA_MAX_SEQ_LEN: usize = 1024;
 
@@ -141,6 +143,7 @@ pub struct TranscriptionInputsProcessor;
 struct ModelInputs {
     audios: Vec<AudioInput>,
     options: Vec<SegmentOptions>,
+    diarization: Vec<DiarizationOptions>,
 }
 
 impl InputsProcessor for TranscriptionInputsProcessor {
@@ -175,7 +178,14 @@ impl InputsProcessor for TranscriptionInputsProcessor {
             .map(|seq| seq.segment_options().cloned().unwrap_or_default())
             .collect();
         Ok(InputProcessorOutput {
-            inputs: Box::new(ModelInputs { audios, options }),
+            inputs: Box::new(ModelInputs {
+                audios,
+                options,
+                diarization: input_seqs
+                    .iter()
+                    .map(|seq| seq.diarization_options().cloned().unwrap_or_default())
+                    .collect(),
+            }),
             seq_indices: (0..input_seqs.len()).collect::<Vec<_>>(),
         })
     }
@@ -188,6 +198,7 @@ enum AudioModel {
         vad: Option<SileroVad>,
     },
     Silero(SileroVad),
+    Nemotron3(Box<Nemotron3Diarizer>),
 }
 
 impl AudioModel {
@@ -195,6 +206,7 @@ impl AudioModel {
         match self {
             Self::Parakeet { asr, .. } => asr.device(),
             Self::Silero(vad) => vad.device(),
+            Self::Nemotron3(diarizer) => diarizer.device(),
         }
     }
 }
@@ -212,6 +224,85 @@ pub struct TranscriptionLoader {
     pub arch: Option<TranscriptionLoaderType>,
     /// A Silero VAD to cut long recordings at their silences; without one Parakeet takes at most 24 minutes.
     pub vad_model_id: Option<String>,
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
+pub enum DiarizationLoaderType {
+    #[serde(rename = "nemotron3")]
+    Nemotron3,
+}
+
+impl DiarizationLoaderType {
+    /// Detects the architecture from a `config.json`'s `model_type`.
+    pub fn auto_detect_from_config(config: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(config).ok()?;
+        (value.get("model_type")?.as_str()? == NEMOTRON3_DIARIZATION_TYPE)
+            .then_some(Self::Nemotron3)
+    }
+}
+
+/// Loads a speaker diarization model from the transformers layout.
+pub struct DiarizationLoader {
+    pub model_id: String,
+}
+
+impl Loader for DiarizationLoader {
+    fn load_model_from_hf(
+        &self,
+        revision: Option<String>,
+        token_source: TokenSource,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        let _progress_guard = ProgressScopeGuard::new(options.silent);
+        let revision = revision.unwrap_or_else(|| "main".to_string());
+        let api = ApiBuilder::new()
+            .with_progress(!options.silent)
+            .with_token(get_token(&token_source)?)
+            .build()?
+            .repo(Repo::with_revision(
+                self.model_id.clone(),
+                RepoType::Model,
+                revision.clone(),
+            ));
+        let id = std::path::Path::new(&self.model_id);
+        let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
+        let files = Nemotron3Files {
+            config: get(CONFIG)?,
+            processor_config: get(PROCESSOR_CONFIG)?,
+            weights: vec![get(WEIGHTS)?],
+        };
+        let dtype = options.dtype.try_into_dtype(&[options.device])?;
+        let config = std::fs::read_to_string(&files.config)?;
+        if DiarizationLoaderType::auto_detect_from_config(&config).is_none() {
+            anyhow::bail!(
+                "`{}` is not a Nemotron-3 Diarization config",
+                files.config.display()
+            )
+        }
+        let diarizer = Nemotron3Diarizer::load(&files, options.device, dtype)?;
+        Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
+            self.model_id.clone(),
+            AudioModel::Nemotron3(Box::new(diarizer)),
+            dtype,
+        ))))
+    }
+
+    fn load_model_from_path(
+        &self,
+        _paths: &dyn ModelPaths,
+        options: LoadOptions<'_>,
+    ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        self.load_model_from_hf(None, TokenSource::None, options)
+    }
+
+    fn get_id(&self) -> String {
+        self.model_id.clone()
+    }
+
+    fn get_kind(&self) -> ModelKind {
+        ModelKind::Normal
+    }
 }
 
 /// Loads a Silero VAD GGUF: a file, a directory holding one, or a Hugging Face repo holding one.
@@ -413,7 +504,7 @@ impl TranscriptionPipeline {
         // a VAD answers with times, not text
         let output = match model {
             AudioModel::Parakeet { .. } => vec![SupportedModality::Text],
-            AudioModel::Silero(_) => Vec::new(),
+            AudioModel::Silero(_) | AudioModel::Nemotron3(_) => Vec::new(),
         };
         Self {
             model_id,
@@ -503,7 +594,11 @@ impl Pipeline for TranscriptionPipeline {
         return_raw_logits: bool,
     ) -> inference_tensor::Result<ForwardInputsResult> {
         assert!(!return_raw_logits);
-        let ModelInputs { audios, options } = *inputs.downcast().expect("Downcast failed.");
+        let ModelInputs {
+            audios,
+            options,
+            diarization,
+        } = *inputs.downcast().expect("Downcast failed.");
         Ok(match &self.model {
             AudioModel::Parakeet { asr, vad } => ForwardInputsResult::Transcription {
                 transcripts: audios
@@ -524,6 +619,17 @@ impl Pipeline for TranscriptionPipeline {
                     .zip(&options)
                     .map(|(audio, options)| {
                         vad.detect(&audio.to_mono(), audio.sample_rate, options)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect(),
+            },
+            AudioModel::Nemotron3(diarizer) => ForwardInputsResult::Diarization {
+                results: audios
+                    .iter()
+                    .zip(&diarization)
+                    .map(|(audio, options)| {
+                        diarizer
+                            .diarize(&audio.to_mono(), audio.sample_rate, options.threshold)
                             .map_err(|e| e.to_string())
                     })
                     .collect(),
@@ -549,6 +655,7 @@ impl Pipeline for TranscriptionPipeline {
         match self.model {
             AudioModel::Parakeet { .. } => ModelCategory::Transcription,
             AudioModel::Silero(_) => ModelCategory::VoiceActivity,
+            AudioModel::Nemotron3(_) => ModelCategory::Diarization,
         }
     }
 }

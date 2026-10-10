@@ -265,6 +265,75 @@
         }
       }
     },
+    "/v1/audio/diarization": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Diarization endpoint handler: who speaks when, as JSON segments or RTTM.",
+        "operationId": "diarization",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/audio/diarization` takes.",
+                "required": [
+                  "file",
+                  "request"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to diarize: WAV, MP3, FLAC, OGG and the other formats symphonia decodes."
+                  },
+                  "request": {
+                    "type": "object",
+                    "description": "Speaker diarization request; the audio travels beside it (a multipart `file` over HTTP).",
+                    "properties": {
+                      "model": {
+                        "type": "string",
+                        "description": "The diarization model to use.",
+                        "example": "default"
+                      },
+                      "response_format": {
+                        "$ref": "#/components/schemas/DiarizationResponseFormat"
+                      },
+                      "return_probabilities": {
+                        "type": "boolean",
+                        "description": "Also return every speaker's probability for every frame (JSON only)."
+                      },
+                      "threshold": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Probability at which a speaker counts as speaking, from 0 to 1 (0.5)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Speaker segments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DiarizationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/audio/speech": {
       "post": {
         "tags": [
@@ -4648,6 +4717,110 @@
           }
         }
       },
+      "DiarizationRequest": {
+        "type": "object",
+        "description": "Speaker diarization request; the audio travels beside it (a multipart `file` over HTTP).",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "The diarization model to use.",
+            "example": "default"
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/DiarizationResponseFormat"
+          },
+          "return_probabilities": {
+            "type": "boolean",
+            "description": "Also return every speaker's probability for every frame (JSON only)."
+          },
+          "threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Probability at which a speaker counts as speaking, from 0 to 1 (0.5)."
+          }
+        }
+      },
+      "DiarizationResponse": {
+        "type": "object",
+        "required": [
+          "duration",
+          "num_speakers",
+          "segments",
+          "frame_seconds"
+        ],
+        "properties": {
+          "duration": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds of audio."
+          },
+          "frame_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds each row of probabilities covers."
+          },
+          "num_speakers": {
+            "type": "integer",
+            "description": "The speakers the model tracks; segments name them by index.",
+            "minimum": 0
+          },
+          "probabilities": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              }
+            },
+            "description": "Per frame, every speaker's speech probability, when asked for."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiarizationSegment"
+            },
+            "description": "Ordered by start, then speaker."
+          }
+        }
+      },
+      "DiarizationResponseFormat": {
+        "type": "string",
+        "description": "What a diarization answers with.",
+        "enum": [
+          "json",
+          "rttm"
+        ]
+      },
+      "DiarizationSegment": {
+        "type": "object",
+        "description": "One speaker's turn, in seconds from the start of the audio; speakers are the model's output slots.",
+        "required": [
+          "speaker",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "number",
+            "format": "double"
+          },
+          "speaker": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "start": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "DiffusionLoaderType": {
         "type": "string",
         "description": "The architecture to load the diffusion model as.",
@@ -6123,6 +6296,7 @@
           "diffusion",
           "transcription",
           "voice_activity",
+          "diarization",
           "speech",
           "embedding"
         ]
@@ -7355,6 +7529,37 @@
                       "null"
                     ],
                     "description": "A Silero VAD GGUF (file, directory or HF repo) that cuts long recordings at their silences; without it\nParakeet transcribes at most 24 minutes."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a speaker diarization model (Nemotron-3 Diarization)",
+            "required": [
+              "Diarization"
+            ],
+            "properties": {
+              "Diarization": {
+                "type": "object",
+                "description": "Select a speaker diarization model (Nemotron-3 Diarization)",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "dtype": {
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`, which is F32 here."
+                      }
+                    ],
+                    "default": "auto"
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
                   }
                 }
               }

@@ -15,6 +15,11 @@ mod parakeet_support;
 #[allow(clippy::duplicate_mod)]
 mod silero_support;
 
+// The tiny random-weight Nemotron-3 Diarization the diarization route loads.
+#[path = "../../../inference/tests/support/nemotron3_diarization_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod diarization_support;
+
 mod cancel;
 mod chat_route;
 mod flux;

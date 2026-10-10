@@ -243,6 +243,10 @@ class Engine:
         """The transcript of encoded audio, in the request's response_format (the blob's MIME type names it)."""
         return self.json.transcription(to_json(request), audio)
 
+    def diarization(self, audio: bytes, request: types.DiarizationRequest | str = "{}") -> Blob:
+        """Who speaks when in encoded audio, in the request's response_format (the blob's MIME type names it)."""
+        return self.json.diarization(to_json(request), audio)
+
     def voice_activity(
         self, audio: bytes, request: types.VoiceActivityRequest | str = "{}"
     ) -> types.VoiceActivityResponse:

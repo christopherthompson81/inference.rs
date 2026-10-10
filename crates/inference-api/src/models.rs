@@ -302,6 +302,7 @@ fn category(category: &CoreModelCategory) -> ModelCategory {
         CoreModelCategory::Diffusion => ModelCategory::Diffusion,
         CoreModelCategory::Transcription => ModelCategory::Transcription,
         CoreModelCategory::VoiceActivity => ModelCategory::VoiceActivity,
+        CoreModelCategory::Diarization => ModelCategory::Diarization,
         CoreModelCategory::Speech => ModelCategory::Speech,
         CoreModelCategory::Embedding => ModelCategory::Embedding,
     }
