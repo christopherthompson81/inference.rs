@@ -234,11 +234,33 @@ impl Engine {
 
     pub(super) async fn add_request(&self, request: NormalRequest) {
         let response = request.response.clone();
-        if let Err(rejection) = self.admit_request(request) {
+        let prepared = match self.speech_preparation(&request) {
+            // data loading may download, so it runs off the pipeline lock and the runtime's workers
+            Some(prepare) => tokio::task::spawn_blocking(prepare)
+                .await
+                .unwrap_or_else(|err| Err(err.to_string())),
+            None => Ok(()),
+        };
+        let admitted = prepared
+            .map_err(|err| Box::new(Response::ValidationError(err.into())))
+            .and_then(|()| self.admit_request(request));
+        if let Err(rejection) = admitted {
             response
                 .send(*rejection)
                 .await
                 .unwrap_or_else(|_| warn!("Receiver disconnected"));
+        }
+    }
+
+    fn speech_preparation(
+        &self,
+        request: &NormalRequest,
+    ) -> Option<crate::pipeline::SpeechPreparation> {
+        match &request.messages {
+            RequestMessage::SpeechGeneration { options, .. } => {
+                get_mut_arcmutex!(self.pipeline).speech_preparation(options)
+            }
+            _ => None,
         }
     }
 

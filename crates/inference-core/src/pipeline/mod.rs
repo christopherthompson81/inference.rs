@@ -28,6 +28,7 @@ mod loading;
 mod multimodal;
 mod normal;
 mod paths;
+mod phonemizer_data;
 pub(crate) mod processing;
 pub(crate) mod prompt_chunks;
 mod response;
@@ -174,6 +175,8 @@ use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
+
+pub type SpeechPreparation = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;
 
 use tokenizers::Tokenizer;
 
@@ -1471,6 +1474,11 @@ pub trait Pipeline:
     /// Rejects speech options this model refuses, so a bad request fails validation instead of mid-generation.
     fn validate_speech_options(&self, _options: &crate::SpeechOptions) -> Result<(), String> {
         Ok(())
+    }
+
+    /// Slow setup a speech request needs first (data that may download), run off the pipeline lock before admission.
+    fn speech_preparation(&self, _options: &crate::SpeechOptions) -> Option<SpeechPreparation> {
+        None
     }
 
     /// Return encoder cache hit/miss counters (hits, misses) if this pipeline has an encoder cache.

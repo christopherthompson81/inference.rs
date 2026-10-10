@@ -123,7 +123,27 @@ impl KokoroTts {
             .collect()
     }
 
-    /// The request errors `generate` would hit, found before any synthesis.
+    /// Loads the phonemizer's data for the default voice's language, so the first request doesn't wait on it.
+    pub fn prepare_text_input(&self) -> Result<()> {
+        Self::prepare_language(g2p::voice_language(&self.default_voice)?)
+    }
+
+    /// Loads a language's phonemizer data, which may download; slow the first time per process.
+    pub fn prepare_language(lang: &str) -> Result<()> {
+        g2p::readable(lang)
+    }
+
+    /// The language a request's text is read in, when it has text to phonemize in a language the phonemizer reads.
+    pub fn text_language(&self, options: &SpeechOptions) -> Option<&'static str> {
+        if options.phonemes.is_some() {
+            return None;
+        }
+        g2p::voice_language(self.first_voice(options))
+            .ok()
+            .filter(|lang| g2p::supported(lang).is_ok())
+    }
+
+    /// The request errors `generate` would hit, found before any synthesis and without loading data.
     pub fn validate(&self, options: &SpeechOptions) -> Result<()> {
         if let Some(speed) = options.speed
             && !(speed.is_finite() && speed > 0.)
@@ -132,7 +152,7 @@ impl KokoroTts {
         }
         self.voice(options.voice.as_deref())?;
         if options.phonemes.is_none() {
-            g2p::readable(g2p::voice_language(self.first_voice(options))?)?;
+            g2p::supported(g2p::voice_language(self.first_voice(options))?)?;
         }
         Ok(())
     }

@@ -388,6 +388,12 @@ impl Loader for SpeechLoader {
                 )
             };
             let model = KokoroTts::load(&paths.config, weights, &paths.voices, device)?;
+            // the data repo is public, and text input is optional: a failure here leaves `phonemes` requests working
+            if let Err(err) = super::phonemizer_data::install(&TokenSource::None, !silent)
+                .and_then(|()| Ok(model.prepare_text_input()?))
+            {
+                tracing::warn!("Kokoro's text input is unavailable until its data loads: {err}");
+            }
             return Ok(Arc::new(Mutex::new(SpeechPipeline::new(
                 self.model_id.clone(),
                 SpeechModel::Kokoro(Box::new(model)),
@@ -687,6 +693,16 @@ impl Pipeline for SpeechPipeline {
             SpeechModel::Dia(_) => Ok(()),
             SpeechModel::Kokoro(model) => model.validate(options).map_err(|err| err.to_string()),
         }
+    }
+
+    fn speech_preparation(&self, options: &SpeechOptions) -> Option<super::SpeechPreparation> {
+        let SpeechModel::Kokoro(model) = &self.model else {
+            return None;
+        };
+        let lang = model.text_language(options)?;
+        Some(Box::new(move || {
+            KokoroTts::prepare_language(lang).map_err(|err| err.to_string())
+        }))
     }
 }
 
