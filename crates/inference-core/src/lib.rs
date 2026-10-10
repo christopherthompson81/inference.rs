@@ -148,7 +148,9 @@ pub use inference_mcp::{
 };
 pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
 pub use inference_models_speech::{
-    SpeechGenerationConfig, SpeechOptions, TimedText, Transcription, utils as speech_utils,
+    SpeechGenerationConfig, SpeechOptions, TimedText, Transcription,
+    silero::{SegmentOptions, VoiceActivity},
+    utils as speech_utils,
 };
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
@@ -181,8 +183,8 @@ pub use pipeline::{
     NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader,
     SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, TranscriptionLoader,
     TranscriptionLoaderType, TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
-    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand,
+    VoiceActivityLoader, expand_isq_value, expand_uqff_shards, parse_uqff_shard,
+    resolve_uqff_report_output, resolve_uqff_shorthand,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{

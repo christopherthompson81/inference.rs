@@ -487,6 +487,17 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Owned.TakeBlob(blob);
     }
 
+    /// <summary>The speech segments of encoded audio, from a voice activity model.</summary>
+    public string VoiceActivity(string requestJson, byte[] audio)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        using var bytes = new PinnedBytes(audio);
+        var status = NativeMethods.inference_voice_activity(
+            engine.Handle, request.Pointer, request.Length, bytes.Pointer, bytes.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_voice_activity));
+    }
+
     /// <summary>Answers the approval an <c>agentic_tool_approval_required</c> stream event named.</summary>
     public string ResolveApproval(string approvalId, string decisionJson)
     {

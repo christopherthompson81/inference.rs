@@ -602,10 +602,21 @@ pub enum ModelSelected {
         #[serde(default)]
         arch: Option<TranscriptionLoaderType>,
 
+        /// A Silero VAD GGUF (file, directory or HF repo) that cuts long recordings at their silences; without it
+        /// Parakeet transcribes at most 24 minutes.
+        #[serde(default)]
+        vad_model_id: Option<String>,
+
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_model_dtype")]
         #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
+    },
+
+    /// Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one
+    VoiceActivity {
+        /// Model ID to load from. This may be a HF hub repo or a local path.
+        model_id: String,
     },
 
     /// Select an embedding model, without quantization or adapters
@@ -673,6 +684,8 @@ impl ModelSelected {
             | Self::Speech { dtype, .. }
             | Self::Transcription { dtype, .. }
             | Self::Embedding { dtype, .. } => *dtype,
+            // the VAD runs in F32 whatever is asked
+            Self::VoiceActivity { .. } => ModelDType::F32,
         }
     }
 
@@ -688,7 +701,8 @@ impl ModelSelected {
             Self::GGML { .. }
             | Self::DiffusionPlain { .. }
             | Self::Speech { .. }
-            | Self::Transcription { .. } => None,
+            | Self::Transcription { .. }
+            | Self::VoiceActivity { .. } => None,
         }
     }
 
@@ -728,6 +742,7 @@ impl ModelSelected {
             Self::DiffusionPlain { .. }
             | Self::Speech { .. }
             | Self::Transcription { .. }
+            | Self::VoiceActivity { .. }
             | Self::Embedding { .. } => None,
         }
     }
@@ -744,7 +759,8 @@ impl ModelSelected {
             Self::GGML { .. }
             | Self::DiffusionPlain { .. }
             | Self::Speech { .. }
-            | Self::Transcription { .. } => None,
+            | Self::Transcription { .. }
+            | Self::VoiceActivity { .. } => None,
         }
     }
 

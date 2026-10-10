@@ -1,14 +1,15 @@
 ---
 title: Speech models
-description: Parakeet and Voxtral Realtime for speech transcription, Dia and Kokoro for text-to-speech.
+description: Parakeet and Voxtral Realtime for speech transcription, Silero for voice activity, Dia and Kokoro for text-to-speech.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs supports four speech-related model families:
+inference.rs supports five speech-related model families:
 
 - **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), served via
   `/v1/audio/transcriptions` with word and segment timestamps.
+- **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
 - **Dia**: dedicated text-to-speech model served via `/v1/audio/speech`.
@@ -82,6 +83,71 @@ println!("{}", transcript.body);
 
 `inference run -m nvidia/parakeet-tdt-0.6b-v3` opens an interactive mode that transcribes the audio files
 you name.
+
+### Long recordings
+
+Loaded with a Silero VAD (`vad_model_id` in the engine spec, or `TranscriptionModelBuilder::with_vad_model_id`),
+Parakeet cuts a recording longer than 5 minutes at its silences into windows of at most 2 minutes, transcribes
+each, and joins them with their timestamps in place; stretches without speech are skipped, and the 24-minute
+bound no longer applies.
+
+```python
+spec = t.EngineSpec(
+    model=t.ModelSelectedTranscription(model_id="nvidia/parakeet-tdt-0.6b-v3", vad_model_id="silero-vad-v6.gguf")
+)
+```
+
+## Silero VAD: voice activity
+
+Silero VAD (v6, 16 kHz) gives a speech probability for every 32 ms of audio and cuts speech segments from
+them exactly as the reference `get_speech_timestamps` does. It loads from a small GGUF (about 1.2 MB, F32)
+made from the official weights, which `mlx-community/silero-vad-v6` republishes:
+
+```bash
+hf download mlx-community/silero-vad-v6 model.safetensors --local-dir silero
+cargo run -p inference-models-speech --example silero_vad_gguf -- --weights silero/model.safetensors silero-vad-v6.gguf
+inference serve -m silero-vad-v6.gguf
+```
+
+A GGUF file, a directory holding one, or a Hugging Face repo holding one all load. Audio at other rates is
+resampled to 16 kHz, where the reference runs its separate 8 kHz model or decimates 48 kHz, so segments at
+those rates can differ slightly from the reference's.
+
+<Tabs>
+<TabItem label="HTTP">
+
+```bash
+curl http://localhost:1234/v1/audio/vad -F file=@clip.wav -F min_silence_duration_ms=300
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+spec = t.EngineSpec(model=t.ModelSelectedVoiceActivity(model_id="silero-vad-v6.gguf"))
+
+with ir.Engine(spec) as engine:
+    with open("clip.wav", "rb") as f:
+        activity = engine.voice_activity(f.read(), t.VoiceActivityRequest(threshold=0.6))
+    for segment in activity.segments:
+        print(f"{segment.start:.2f}-{segment.end:.2f}")
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{VoiceActivityModelBuilder, VoiceActivityRequest};
+
+let model = VoiceActivityModelBuilder::new("silero-vad-v6.gguf").build().await?;
+let activity = model.voice_activity(VoiceActivityRequest::new(), &std::fs::read("clip.wav")?).await?;
+for segment in &activity.segments {
+    println!("{:.2}-{:.2}", segment.start, segment.end);
+}
+```
+
+</TabItem>
+</Tabs>
 
 ## Voxtral Realtime: audio in, text out
 

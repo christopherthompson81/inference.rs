@@ -146,6 +146,7 @@ SIGNATURES = {
     "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
     "inference_speech_generation": (status, (c_void_p, *buffer, out)),
     "inference_transcription": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_voice_activity": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_approval_resolve": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_file_upload": (status, (c_void_p, *buffer, c_char_p, c_char_p, c_char_p, out)),
     "inference_files_list": (status, (c_void_p, out)),

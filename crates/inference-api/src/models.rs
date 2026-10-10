@@ -301,6 +301,7 @@ fn category(category: &CoreModelCategory) -> ModelCategory {
         CoreModelCategory::Multimodal { .. } => ModelCategory::Multimodal,
         CoreModelCategory::Diffusion => ModelCategory::Diffusion,
         CoreModelCategory::Transcription => ModelCategory::Transcription,
+        CoreModelCategory::VoiceActivity => ModelCategory::VoiceActivity,
         CoreModelCategory::Speech => ModelCategory::Speech,
         CoreModelCategory::Embedding => ModelCategory::Embedding,
     }

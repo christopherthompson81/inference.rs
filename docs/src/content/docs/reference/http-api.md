@@ -23,7 +23,11 @@ A browser signs in once: `POST /auth/session` with `{"key": "..."}` sets an `Htt
 
 ## Model routing
 
-The request `model` field selects among loaded models. `"default"` (or omitting the field) targets the configured default model; with a single `-m` model that is the only model. `GET /v1/models` lists real ids plus per-model `status` (`loaded`, `unloaded`, `reloading`), `tools_available`, `mcp_tools_count`, `mcp_servers_connected`, and, for a loaded model (and the `default` entry), `max_model_len`, `category` (`text`, `multimodal`, `diffusion`, `audio`, `speech`, `embedding`), `modalities` (`{"input": [...], "output": [...]}`) and `generation_defaults` (from its `generation_config.json`; its temperature, top-k, top-p, min-p and repetition penalty fill a request's unset sampling fields). See [multiple models](/guides/serve/multiple-models/).
+The request `model` field selects among loaded models. `"default"` (or omitting the field) targets the configured default model; with a single `-m` model that is the only model. `GET /v1/models` lists real ids plus per-model `status` (`loaded`, `unloaded`, `reloading`), `tools_available`, `mcp_tools_count`, `mcp_servers_connected`, and, for a loaded model (and the `default` entry), `max_model_len`, `category` (`text`, `multimodal`, `diffusion`, `transcription`, `voice_activity`, `speech`, `embedding`), `modalities` (`{"input": [...], "output": [...]}`) and `generation_defaults` (from its `generation_config.json`; its temperature, top-k, top-p, min-p and repetition penalty fill a request's unset sampling fields). See [multiple models](/guides/serve/multiple-models/).
+
+## Voice activity detection
+
+`POST /v1/audio/vad` takes a multipart form with the audio as `file` (WAV, MP3, FLAC, OGG, ...) and returns `{"duration", "segments": [{"start", "end"}], "chunk_seconds"}`, times in seconds, from a voice activity model such as Silero VAD. The optional fields are the reference `get_speech_timestamps` parameters: `threshold` (0.5), `neg_threshold` (`threshold - 0.15`), `min_speech_duration_ms` (250), `max_speech_duration_s` (unbounded), `min_silence_duration_ms` (100) and `speech_pad_ms` (30). `return_probabilities=true` adds `probabilities`, one speech probability per `chunk_seconds` (32 ms). See [speech models](/guides/models/use-speech-models/).
 
 ## LoRA adapter routing and management
 

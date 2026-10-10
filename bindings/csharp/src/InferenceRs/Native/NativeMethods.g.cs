@@ -238,6 +238,10 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, byte* audio, nuint audioLen, out IntPtr outBlob);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_voice_activity(
+        IntPtr engine, byte* request, nuint requestLen, byte* audio, nuint audioLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_approval_resolve(
         IntPtr engine, byte* approvalId, nuint approvalIdLen, byte* request, nuint requestLen, out IntPtr outResponse);
 

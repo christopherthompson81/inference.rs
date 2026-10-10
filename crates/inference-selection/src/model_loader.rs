@@ -8,7 +8,7 @@ use inference_core::{
     GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOverrides,
     Loader, LoaderSource, ModelDType, ModelLoaderConfig, MtpConfig, MultimodalLoaderBuilder,
     MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig, SpeechLoader, Topology,
-    TranscriptionLoader, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
+    TranscriptionLoader, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, VoiceActivityLoader,
 };
 
 const UNRESOLVED_SOURCE: &str = "the spec's `quant`, empty GGUF filename or projector choice has to be resolved before loading; \
@@ -454,9 +454,17 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                 cfg,
             })
         }
-        ModelSelected::Transcription { model_id, arch, .. } => {
-            Box::new(TranscriptionLoader { model_id, arch })
-        }
+        ModelSelected::Transcription {
+            model_id,
+            arch,
+            vad_model_id,
+            ..
+        } => Box::new(TranscriptionLoader {
+            model_id,
+            arch,
+            vad_model_id,
+        }),
+        ModelSelected::VoiceActivity { model_id } => Box::new(VoiceActivityLoader { model_id }),
         ModelSelected::Lora {
             model_id,
             quant: _,

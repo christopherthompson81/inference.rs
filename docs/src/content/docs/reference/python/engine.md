@@ -425,6 +425,17 @@ transcription(
 
 The transcript of encoded audio, in the request's response_format (the blob's MIME type names it).
 
+### `Engine.voice_activity`
+
+```text
+voice_activity(
+    audio: bytes,
+    request: types.VoiceActivityRequest | str = '{}',
+) -> types.VoiceActivityResponse
+```
+
+The speech segments of encoded audio; unset request fields keep the reference defaults.
+
 ### `Engine.resolve_approval`
 
 ```text
@@ -878,6 +889,14 @@ transcription(request_json: str, audio: bytes) -> Blob
 ```
 
 Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format.
+
+### `JsonEngine.voice_activity`
+
+```text
+voice_activity(request_json: str, audio: bytes) -> str
+```
+
+The speech segments of encoded audio, from a voice activity model.
 
 ### `JsonEngine._call2`
 

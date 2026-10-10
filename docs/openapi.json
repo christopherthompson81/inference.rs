@@ -375,6 +375,112 @@
         }
       }
     },
+    "/v1/audio/vad": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Voice activity endpoint handler: the speech segments (and optionally the per-chunk probabilities) of an upload.",
+        "operationId": "voice_activity",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/audio/vad` takes.",
+                "required": [
+                  "file",
+                  "request"
+                ],
+                "properties": {
+                  "file": {
+                    "type": "string",
+                    "format": "binary",
+                    "description": "The audio to analyse: WAV, MP3, FLAC, OGG and the other formats symphonia decodes."
+                  },
+                  "request": {
+                    "type": "object",
+                    "description": "Voice activity request; the audio travels beside it (a multipart `file` over HTTP). An unset field keeps the\nreference `get_speech_timestamps` default.",
+                    "properties": {
+                      "max_speech_duration_s": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "double",
+                        "description": "Longer speech is split at its longest silence (unbounded)."
+                      },
+                      "min_silence_duration_ms": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "double",
+                        "description": "Silence shorter than this does not end speech (100)."
+                      },
+                      "min_speech_duration_ms": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "double",
+                        "description": "Shorter speech is dropped (250)."
+                      },
+                      "model": {
+                        "type": "string",
+                        "description": "The voice activity model to use.",
+                        "example": "default"
+                      },
+                      "neg_threshold": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Probability under which speech may end (`threshold - 0.15`, at least 0.01)."
+                      },
+                      "return_probabilities": {
+                        "type": "boolean",
+                        "description": "Also return the speech probability of every chunk."
+                      },
+                      "speech_pad_ms": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "double",
+                        "description": "Padding on each side of a segment (30)."
+                      },
+                      "threshold": {
+                        "type": [
+                          "number",
+                          "null"
+                        ],
+                        "format": "float",
+                        "description": "Probability at which speech starts (0.5)."
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Speech segments",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/VoiceActivityResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/chat/completions": {
       "post": {
         "tags": [
@@ -6016,6 +6122,7 @@
           "multimodal",
           "diffusion",
           "transcription",
+          "voice_activity",
           "speech",
           "embedding"
         ]
@@ -7238,6 +7345,35 @@
                     ],
                     "default": "auto"
                   },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  },
+                  "vad_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A Silero VAD GGUF (file, directory or HF repo) that cuts long recordings at their silences; without it\nParakeet transcribes at most 24 minutes."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one",
+            "required": [
+              "VoiceActivity"
+            ],
+            "properties": {
+              "VoiceActivity": {
+                "type": "object",
+                "description": "Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
                   "model_id": {
                     "type": "string",
                     "description": "Model ID to load from. This may be a HF hub repo or a local path."
@@ -11859,6 +11995,24 @@
           "kokoro"
         ]
       },
+      "SpeechSegment": {
+        "type": "object",
+        "description": "A span of speech, in seconds from the start of the audio.",
+        "required": [
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "number",
+            "format": "double"
+          },
+          "start": {
+            "type": "number",
+            "format": "double"
+          }
+        }
+      },
       "StopTokens": {
         "oneOf": [
           {
@@ -12460,6 +12614,106 @@
             ],
             "items": {
               "$ref": "#/components/schemas/TranscriptionWord"
+            }
+          }
+        }
+      },
+      "VoiceActivityRequest": {
+        "type": "object",
+        "description": "Voice activity request; the audio travels beside it (a multipart `file` over HTTP). An unset field keeps the\nreference `get_speech_timestamps` default.",
+        "properties": {
+          "max_speech_duration_s": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Longer speech is split at its longest silence (unbounded)."
+          },
+          "min_silence_duration_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Silence shorter than this does not end speech (100)."
+          },
+          "min_speech_duration_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Shorter speech is dropped (250)."
+          },
+          "model": {
+            "type": "string",
+            "description": "The voice activity model to use.",
+            "example": "default"
+          },
+          "neg_threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Probability under which speech may end (`threshold - 0.15`, at least 0.01)."
+          },
+          "return_probabilities": {
+            "type": "boolean",
+            "description": "Also return the speech probability of every chunk."
+          },
+          "speech_pad_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Padding on each side of a segment (30)."
+          },
+          "threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Probability at which speech starts (0.5)."
+          }
+        }
+      },
+      "VoiceActivityResponse": {
+        "type": "object",
+        "required": [
+          "duration",
+          "segments",
+          "chunk_seconds"
+        ],
+        "properties": {
+          "chunk_seconds": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds each probability covers."
+          },
+          "duration": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds of audio."
+          },
+          "probabilities": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "Speech probability per chunk, when asked for."
+          },
+          "segments": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpeechSegment"
             }
           }
         }

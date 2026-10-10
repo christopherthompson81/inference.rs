@@ -28,7 +28,7 @@ use crate::{
         self, ContainerFileListObject, ContainerFileMetadata, FileBody, FileDeleted,
         FileListObject, FileMetadata, FileUpload,
     },
-    generation::{SpeechAudio, generate_image, generate_speech, transcribe},
+    generation::{SpeechAudio, detect_voice_activity, generate_image, generate_speech, transcribe},
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
     },
@@ -49,7 +49,7 @@ use crate::{
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
         ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
-        TranscriptionOutput, TranscriptionRequest,
+        TranscriptionOutput, TranscriptionRequest, VoiceActivityRequest, VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -1592,6 +1592,23 @@ impl Engine {
         audio: &[u8],
     ) -> Result<TranscriptionOutput, ApiError> {
         transcribe(self.state(), request, audio).await
+    }
+
+    /// Speech segments of encoded audio from a voice activity model.
+    pub async fn voice_activity(
+        &self,
+        request: VoiceActivityRequest,
+        audio: &[u8],
+    ) -> Result<VoiceActivityResponse, ApiError> {
+        detect_voice_activity(self.state(), request, audio).await
+    }
+
+    pub async fn voice_activity_json(
+        &self,
+        request: &[u8],
+        audio: &[u8],
+    ) -> Result<String, ApiError> {
+        to_json(&self.voice_activity(parse_json(request)?, audio).await?)
     }
 
     pub async fn transcription_json(

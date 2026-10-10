@@ -329,6 +329,7 @@ impl CompletionStream {
             | Response::ModelError(_, _)
             | Response::Speech { .. }
             | Response::Transcription(_)
+            | Response::VoiceActivity(_)
             | Response::Raw { .. }
             | Response::Embeddings { .. } => unreachable!("not a completion stream response"),
         })

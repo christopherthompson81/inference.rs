@@ -42,6 +42,7 @@ pub(crate) use inference_nn::media_inputs::media::{
 pub enum OneShotParams {
     Diffusion(DiffusionGenerationParams),
     Speech(SpeechOptions),
+    VoiceActivity(inference_models_speech::silero::SegmentOptions),
 }
 
 pub type SeqPreallocatedCache = Vec<Option<(Tensor, Tensor)>>;
@@ -87,6 +88,7 @@ pub enum StopReason {
     GeneratedImage,
     GeneratedSpeech,
     Transcribed,
+    DetectedSpeech,
     ToolCalls,
 }
 
@@ -102,6 +104,7 @@ impl Display for StopReason {
             StopReason::GeneratedImage => write!(f, "generated_image"),
             StopReason::GeneratedSpeech => write!(f, "generated_speech"),
             StopReason::Transcribed => write!(f, "transcribed"),
+            StopReason::DetectedSpeech => write!(f, "detected_speech"),
             StopReason::ToolCalls => write!(f, "tool_calls"),
         }
     }
@@ -117,6 +120,7 @@ impl StopReason {
             StopReason::GeneratedImage => "generated_image",
             StopReason::GeneratedSpeech => "generated_speech",
             StopReason::Transcribed => "transcribed",
+            StopReason::DetectedSpeech => "detected_speech",
             StopReason::ToolCalls => "tool_calls",
         }
     }
@@ -1566,6 +1570,13 @@ impl Sequence {
     pub fn speech_options(&self) -> Option<&SpeechOptions> {
         match &self.one_shot {
             Some(OneShotParams::Speech(options)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn segment_options(&self) -> Option<&inference_models_speech::silero::SegmentOptions> {
+        match &self.one_shot {
+            Some(OneShotParams::VoiceActivity(options)) => Some(options),
             _ => None,
         }
     }

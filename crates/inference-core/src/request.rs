@@ -63,6 +63,11 @@ pub enum RequestMessage {
         #[serde(skip)]
         audio: AudioInput,
     },
+    VoiceActivity {
+        #[serde(skip)]
+        audio: AudioInput,
+        options: inference_models_speech::silero::SegmentOptions,
+    },
     Embedding {
         prompt: String,
     },

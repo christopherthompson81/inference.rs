@@ -171,3 +171,77 @@ Noted, not changed:
 - Cargo gives path crates the same artifact names in either checkout, and judged master's newer artifacts fresh against the branch's older sources.
 - The branch's bundle then compiled `inference-api` against master's `inference-protocol` ("no `TranscriptionRequest` in `openai`").
 - Fixed by deleting `target/bundle`. Never build another checkout into this `target/`.
+
+## Run 6 - 2026-10-10
+
+**Silero VAD: weights, architecture, parity.**
+
+Weights:
+- The `silero-vad` PyPI package (6.2.3, MIT) ships `silero_vad.jit` (TorchScript, archive "VADr_v6_10_25") and `silero_vad_16k.safetensors`.
+- They are different weight sets. The STFT basis is equal; conv1, the LSTM and the final conv are not.
+- Over the 7.4 s LibriSpeech clip, the safetensors differs from the jit by up to 0.33 in probability (178 vs 179 frames over 0.5). It is most likely the v5 weights, kept for the package's tinygrad port.
+- audio.cpp's bundled `silero_vad_16k.safetensors` is byte-equal to the package's, so it is v5.
+- `mlx-community/silero-vad-v6` (MIT, "silero_vad PyPI 6.2.1") holds the jit's v6 weights: kernels transposed to (out, k, in), and the LSTM biases summed (`bias == bias_ih + bias_hh`, checked).
+
+Architecture:
+- A torch port of the package's tinygrad model with the jit's weights matches the jit exactly (max diff 0.0 over 233 chunks).
+- Per 512-sample chunk with 64 samples of context: reflect pad 64, STFT conv (258, 256, stride 128, so 4 frames), magnitude, conv1-4 (strides 1, 2, 2, 1, so 1 frame), an LSTM cell (128), ReLU, a 1x1 conv, sigmoid.
+
+Distribution:
+- The user asked for a small GGUF, as a separate model.
+- `examples/silero_vad_gguf.rs` converts either layout to `silero_vad`: F32, PyTorch names, 1.24 MB, with the framing and `SegmentOptions` defaults as metadata.
+
+Implementation:
+- The encoder is batched over all chunks; the LSTM and head run as a host loop on every device, one step per chunk.
+- `speech_segments` ports `get_speech_timestamps_from_probs`, including the max-duration split at the longest silence and the padding pass's int truncation.
+- **Dead end:** `max_speech_duration_s = inf` serialized to JSON `null`, which did not read back ("invalid type: null, expected f64"). It is now `Option`, where unset means unbounded.
+
+Parity (`scripts/silero_vad_parity.sh <gguf> <wavs> --cpu`) against the jit plus `get_speech_timestamps`:
+
+| clip | chunks | max prob diff | segments (default / 5 s cap / 2 s cap) | ours, CPU dev |
+|---|---|---|---|---|
+| LibriSpeech 7.4 s | 233 | 2.0e-6 | 3 / 3 / 4, exact | 0.04 s |
+| German 20 s | 625 | 6.9e-6 | 4 / 6 / 11, exact | 0.09 s |
+| Spanish 15 s | 469 | 3.3e-6 | 2, exact | 0.07 s |
+| German 60 s | 1875 | 3.4e-6 | 12 / 16 / 34, exact | 0.27 s |
+
+Both sides' cuts of the reference's own probabilities match too, so the cutting port is verified apart from the model.
+
+## Run 7 - 2026-10-10
+
+**Silero VAD in the engine, and Parakeet's long form.**
+
+Surface:
+- `ModelSelected::VoiceActivity` (a GGUF file, a directory holding one, or an HF repo holding one); local GGUFs are auto-detected.
+- `ModelCategory::VoiceActivity`, with per-sequence results as for transcription.
+- `Engine::voice_activity(_json)` and `POST /v1/audio/vad` (multipart; the reference parameters, plus `return_probabilities`).
+- `inference_voice_activity` in the C ABI, with Python and C# wrappers.
+- `VoiceActivityModelBuilder` in the SDK, and a CLI interactive mode.
+- The multipart reader is now shared by both audio routes. Each route declares its number, flag and list fields, so a text field is never coerced.
+
+Segmentation defaults moved out of the GGUF: they are the reference's constants, and requests override them field by field.
+
+Long form:
+- `ModelSelected::Transcription { vad_model_id }` loads the VAD beside Parakeet.
+- Audio over 5 minutes is cut with `max_speech_duration_s = 120` into windows of at most 2 minutes, from a run of segments' first start to its last end. Each window is transcribed alone and its tokens and words are shifted by the window's offset.
+- Stretches without speech are skipped, and the 24-minute cap does not apply.
+
+Silero parity on CUDA, same clips as Run 6: max probability diff 3.34e-6 to 6.85e-6, and segments exact both with defaults and with the 5 s cap.
+
+**Long form on a real recording** (a 10-minute conversational German recording, CUDA F32, `examples/parakeet_transcribe.rs`):
+
+| run | time | words |
+|---|---|---|
+| full context, no VAD | 6.52 s | 1452 |
+| windowed with the VAD | 6.05 s | 1472 |
+
+- 1280 words are in common (88.2% of the full-context transcript).
+- The differences are mostly filler words, both ways.
+- One clause the full-context run has is missing from the windowed run, consistent with quiet speech the VAD classed as silence between windows. Unconfirmed: there is no reference transcript for this file, so neither run is known to be the more accurate.
+- Follow-up: measure on audio with a reference transcript, and consider padding windows past the VAD's edges.
+
+Tests:
+- `silero_tiny`: thresholds 0 and 1.1 give one segment and none whatever the weights; chunk counts and probability ranges; undecodable audio is a 400.
+- Long form with an always-speech VAD: a 301 s clip transcribes in windows, and words after 120 s carry their offset.
+- Segment-cutting unit cases pinned to the reference function's own outputs. (I first wrote one expecting a 96 ms gap to split; the reference bridges it, being under 100 ms.)
+- The mlx-layout GGUF round trip, the `/v1/audio/vad` form (including a field-level 400), and the Python and C# wrappers.

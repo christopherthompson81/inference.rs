@@ -4,7 +4,7 @@ use futures::future::BoxFuture;
 use inference_core::{
     AudioInput, DiffusionGenerationParams, ImageChoice, ImageGenerationResponse,
     ImageGenerationResponseFormat, InferenceRs, NormalRequest, Request, RequestMessage, Response,
-    SamplingParams, SpeechOptions, TimedText, Transcription,
+    SamplingParams, SegmentOptions, SpeechOptions, TimedText, Transcription, VoiceActivity,
     speech_utils::{self, Sample},
 };
 
@@ -16,10 +16,11 @@ use crate::{
     files::store_generated_image,
     lora_routing::DEFAULT_MODEL_ID,
     openai::{
-        AudioResponseFormat, ImageGenerationRequest, SpeechGenerationRequest, TimestampGranularity,
-        TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
+        AudioResponseFormat, ImageGenerationRequest, SpeechGenerationRequest, SpeechSegment,
+        TimestampGranularity, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
         TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
-        VerboseTranscriptionResponse, transcript_srt, transcript_vtt,
+        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse, transcript_srt,
+        transcript_vtt,
     },
     types::SharedInferenceRsState,
     util::validate_model_name,
@@ -232,14 +233,7 @@ async fn transcribe_inner(
     request: TranscriptionRequest,
     audio: &[u8],
 ) -> Result<TranscriptionOutput, ApiError> {
-    let audio = AudioInput::from_bytes(audio).map_err(|e| {
-        ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            format!("The audio could not be decoded: {e}"),
-            Some("invalid_audio"),
-            Some("file"),
-        )
-    })?;
+    let audio = decode_audio(audio)?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     match run(
         state,
@@ -325,6 +319,104 @@ fn transcript_segments(words: &[TimedText]) -> Vec<TranscriptionSegment> {
         open = !word.text.ends_with(SENTENCE_ENDS);
     }
     segments
+}
+
+/// Speech segments of encoded `audio` from a voice activity model.
+pub(crate) fn detect_voice_activity<'a>(
+    state: &'a SharedInferenceRsState,
+    request: VoiceActivityRequest,
+    audio: &'a [u8],
+) -> BoxFuture<'a, Result<VoiceActivityResponse, ApiError>> {
+    Box::pin(detect_voice_activity_inner(state, request, audio))
+}
+
+async fn detect_voice_activity_inner(
+    state: &SharedInferenceRsState,
+    request: VoiceActivityRequest,
+    audio: &[u8],
+) -> Result<VoiceActivityResponse, ApiError> {
+    validate_segment_request(&request)?;
+    let audio = decode_audio(audio)?;
+    let defaults = SegmentOptions::default();
+    let options = SegmentOptions {
+        threshold: request.threshold.unwrap_or(defaults.threshold),
+        neg_threshold: request.neg_threshold.or(defaults.neg_threshold),
+        min_speech_duration_ms: request
+            .min_speech_duration_ms
+            .unwrap_or(defaults.min_speech_duration_ms),
+        max_speech_duration_s: request
+            .max_speech_duration_s
+            .or(defaults.max_speech_duration_s),
+        min_silence_duration_ms: request
+            .min_silence_duration_ms
+            .unwrap_or(defaults.min_silence_duration_ms),
+        speech_pad_ms: request.speech_pad_ms.unwrap_or(defaults.speech_pad_ms),
+        ..defaults
+    };
+    let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let messages = RequestMessage::VoiceActivity { audio, options };
+    match run(state, &request.model, repr, messages).await? {
+        Response::VoiceActivity(activity) => Ok(voice_activity_response(
+            activity,
+            request.return_probabilities,
+        )),
+        _ => Err(unexpected(state)),
+    }
+}
+
+// durations and pads are lengths of time; a negative one would invert segments the reference never produces
+fn validate_segment_request(request: &VoiceActivityRequest) -> Result<(), ApiError> {
+    let lengths = [
+        ("min_speech_duration_ms", request.min_speech_duration_ms),
+        ("min_silence_duration_ms", request.min_silence_duration_ms),
+        ("speech_pad_ms", request.speech_pad_ms),
+    ];
+    for (param, value) in lengths {
+        if value.is_some_and(|v| v < 0.0) {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                format!("`{param}` must be zero or more"),
+                Some("invalid_segment_option"),
+                Some(param),
+            ));
+        }
+    }
+    if request.max_speech_duration_s.is_some_and(|v| v <= 0.0) {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            "`max_speech_duration_s` must be more than zero",
+            Some("invalid_segment_option"),
+            Some("max_speech_duration_s"),
+        ));
+    }
+    Ok(())
+}
+
+fn voice_activity_response(activity: VoiceActivity, probabilities: bool) -> VoiceActivityResponse {
+    VoiceActivityResponse {
+        duration: activity.duration,
+        segments: activity
+            .segments
+            .iter()
+            .map(|s| SpeechSegment {
+                start: s.start,
+                end: s.end,
+            })
+            .collect(),
+        chunk_seconds: activity.chunk_seconds,
+        probabilities: probabilities.then_some(activity.probabilities),
+    }
+}
+
+fn decode_audio(audio: &[u8]) -> Result<AudioInput, ApiError> {
+    AudioInput::from_bytes(audio).map_err(|e| {
+        ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("The audio could not be decoded: {e}"),
+            Some("invalid_audio"),
+            Some("file"),
+        )
+    })
 }
 
 fn encode_speech(

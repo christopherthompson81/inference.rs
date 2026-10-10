@@ -61,6 +61,7 @@ json_requests!(
     inference_protocol::openai::ImageGenerationRequest,
     inference_protocol::openai::SpeechGenerationRequest,
     inference_protocol::openai::TranscriptionRequest,
+    inference_protocol::openai::VoiceActivityRequest,
     inference_core::SerializedSession,
     crate::anthropic::AnthropicMessagesRequest,
     crate::responses::OpenResponsesCreateRequest,

@@ -35,6 +35,7 @@ pub enum Response {
         channels: usize,
     },
     Transcription(inference_models_speech::Transcription),
+    VoiceActivity(inference_models_speech::silero::VoiceActivity),
     // Raw
     Raw {
         logits_chunks: Vec<Tensor>,

@@ -207,6 +207,7 @@ enum Detected {
     Diffusion(DiffusionLoaderType),
     Speech(crate::pipeline::SpeechLoaderType),
     Transcription(crate::pipeline::TranscriptionLoaderType),
+    VoiceActivity,
 }
 
 fn supports_dynamic_lora(detected: &Detected) -> bool {
@@ -419,6 +420,16 @@ impl AutoLoader {
             return Ok(Detected::Multimodal(MultimodalLoaderType::Voxtral));
         }
 
+        // a local path only: a Hub id would be listed here, before the loader runs
+        if artifacts.contents.is_none()
+            && std::path::Path::new(&self.model_id).exists()
+            && super::transcription::silero_gguf(&self.model_id, None, &TokenSource::None, true)
+                .is_ok()
+        {
+            info!("Detected a Silero VAD GGUF; routing as voice activity detection.");
+            return Ok(Detected::VoiceActivity);
+        }
+
         if artifacts.contents.is_none()
             && super::speech::local_kokoro_gguf(&self.model_id).is_some()
         {
@@ -512,6 +523,13 @@ impl AutoLoader {
                 let loader: Box<dyn Loader> = Box::new(super::TranscriptionLoader {
                     model_id: self.model_id.clone(),
                     arch: Some(tp),
+                    vad_model_id: None,
+                });
+                *guard = Some(loader);
+            }
+            Detected::VoiceActivity => {
+                let loader: Box<dyn Loader> = Box::new(super::VoiceActivityLoader {
+                    model_id: self.model_id.clone(),
                 });
                 *guard = Some(loader);
             }

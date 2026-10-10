@@ -280,7 +280,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelSelected`
 
-One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedEmbedding]`.
+One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedTranscription, ModelSelectedVoiceActivity, ModelSelectedEmbedding]`.
 
 
 ## `ModelSelectedDiffusionPlain`
@@ -488,6 +488,16 @@ Select a speech recognition model
 | `arch` | `TranscriptionLoaderType \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
 | `model_id` | `str` | required |
+| `vad_model_id` | `str \| None` | optional |
+
+
+## `ModelSelectedVoiceActivity`
+
+Select a voice activity detection model: a Silero VAD GGUF file, a directory or HF repo holding one
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str` |
 
 
 ## `ModelSpec`

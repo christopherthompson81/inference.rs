@@ -8,10 +8,11 @@ use inference_server_core::inference_server_router_builder::InferenceRsServerRou
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-use crate::{chat_route::body_text, parakeet_support};
+use crate::{chat_route::body_text, parakeet_support, silero_support};
 
 const BOUNDARY: &str = "inference-transcription-boundary";
 const ROUTE: &str = "/v1/audio/transcriptions";
+const VAD_ROUTE: &str = "/v1/audio/vad";
 const RATE: u32 = 16_000;
 const SECONDS: usize = 1;
 const TONE_HZ: f32 = 440.0;
@@ -142,5 +143,45 @@ async fn a_form_without_audio_or_with_an_unknown_format_is_refused() -> anyhow::
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     let error: Value = serde_json::from_str(&body_text(response).await?)?;
     assert_eq!(error["error"]["param"], "stream", "{error}");
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_vad_form_returns_segments_and_probabilities() -> anyhow::Result<()> {
+    let dir = silero_support::tiny_silero_gguf(false)?;
+    let spec = serde_json::from_value(json!({
+        "model": {"VoiceActivity": {"model_id": dir.path().to_string_lossy()}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .build()
+        .await?;
+    let mut request = form(
+        &[
+            ("threshold", "0"),
+            ("neg_threshold", "-1"),
+            ("return_probabilities", "true"),
+        ],
+        Some(&tone_wav()),
+    );
+    *request.uri_mut() = VAD_ROUTE.parse()?;
+    let response = app.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let activity: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(
+        activity["segments"].as_array().map(Vec::len),
+        Some(1),
+        "{activity}"
+    );
+    assert!(activity["probabilities"].is_array(), "{activity}");
+
+    let mut bad = form(&[("threshold", "high")], Some(&tone_wav()));
+    *bad.uri_mut() = VAD_ROUTE.parse()?;
+    let response = app.clone().oneshot(bad).await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let error: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(error["error"]["param"], "threshold", "{error}");
     Ok(())
 }

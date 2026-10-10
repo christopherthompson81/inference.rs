@@ -7,12 +7,17 @@ use std::path::Path;
 #[path = "../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
+#[path = "../../inference/tests/support/silero_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod silero_support;
+
 #[path = "../../inference/tests/support/parakeet_tiny.rs"]
 // each support file includes the recorder it needs, so both bring a copy
 #[allow(clippy::duplicate_mod)]
 mod parakeet_support;
 
 const PARAKEET_DIR: &str = "parakeet";
+const SILERO_DIR: &str = "silero";
 
 fn copy_files(from: &Path, to: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(to)?;
@@ -31,6 +36,8 @@ fn main() -> anyhow::Result<()> {
     copy_files(checkpoint.path(), Path::new(&target))?;
     let parakeet = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
     copy_files(parakeet.path(), &Path::new(&target).join(PARAKEET_DIR))?;
+    let silero = silero_support::tiny_silero_gguf(false)?;
+    copy_files(silero.path(), &Path::new(&target).join(SILERO_DIR))?;
     println!("{target}");
     Ok(())
 }

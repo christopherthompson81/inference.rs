@@ -8,6 +8,7 @@ use crate::{Model, error::Result, load::LoadOptions};
 pub struct TranscriptionModelBuilder {
     pub(crate) model_id: String,
     pub(crate) loader_type: Option<TranscriptionLoaderType>,
+    pub(crate) vad_model_id: Option<String>,
     pub(crate) dtype: ModelDType,
     pub(crate) options: LoadOptions,
 }
@@ -18,6 +19,7 @@ impl TranscriptionModelBuilder {
         Self {
             model_id: model_id.to_string(),
             loader_type: None,
+            vad_model_id: None,
             dtype: ModelDType::Auto,
             options: LoadOptions::new(),
         }
@@ -30,6 +32,12 @@ impl TranscriptionModelBuilder {
         self
     }
 
+    /// A Silero VAD GGUF (file, directory or HF repo) to cut long recordings at their silences.
+    pub fn with_vad_model_id(mut self, vad_model_id: impl ToString) -> Self {
+        self.vad_model_id = Some(vad_model_id.to_string());
+        self
+    }
+
     pub fn with_dtype(mut self, dtype: ModelDType) -> Self {
         self.dtype = dtype;
         self
@@ -39,6 +47,7 @@ impl TranscriptionModelBuilder {
         ModelSelected::Transcription {
             model_id: self.model_id.clone(),
             arch: self.loader_type,
+            vad_model_id: self.vad_model_id.clone(),
             dtype: self.dtype,
         }
     }
