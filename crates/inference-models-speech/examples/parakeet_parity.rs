@@ -20,6 +20,9 @@ struct Args {
     min_cosine: f64,
     #[arg(long)]
     cpu: bool,
+    /// Load ours from this `.nemo` instead, against the same transformers reference.
+    #[arg(long)]
+    nemo: Option<PathBuf>,
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -45,7 +48,10 @@ fn main() -> Result<()> {
         tokenizer: args.model.join("tokenizer.json"),
         weights: vec![args.model.join("model.safetensors")],
     };
-    let model = Parakeet::load(&files, &device, DType::F32)?;
+    let model = match &args.nemo {
+        Some(nemo) => Parakeet::load_nemo(nemo, &device, DType::F32)?,
+        None => Parakeet::load(&files, &device, DType::F32)?,
+    };
     let mut dumps = std::fs::read_dir(&args.dumps)?
         .map(|e| e.map(|e| e.path()))
         .collect::<std::io::Result<Vec<_>>>()?;

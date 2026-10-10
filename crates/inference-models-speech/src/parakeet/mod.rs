@@ -4,6 +4,9 @@
 mod config;
 mod decoder;
 mod encoder;
+mod nemo_checkpoint;
+
+pub use nemo_checkpoint::is_asr;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -15,7 +18,10 @@ use tokenizers::Tokenizer;
 
 use crate::silero::{SegmentOptions, SileroVad, speech_segments};
 use crate::{TimedText, Transcription, TranscriptionOptions};
-pub use config::{EncoderConfig, HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig};
+pub use config::{
+    EncoderConfig, FeatureConfig, HeadKind, MODEL_TYPES, ParakeetConfig, ProcessorConfig,
+    STREAMING_ENCODER_TYPE,
+};
 pub use decoder::Emission;
 use decoder::Head;
 pub use encoder::{Encoder, relative_positions};

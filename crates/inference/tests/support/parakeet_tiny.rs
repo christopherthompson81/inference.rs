@@ -102,3 +102,128 @@ pub fn tiny_parakeet_checkpoint(head: &str) -> anyhow::Result<tempfile::TempDir>
     inference_tensor::safetensors::save(&tensors, &weights)?;
     Ok(dir)
 }
+
+const NEMO_CHECKPOINT: &str = "tiny_parakeet.nemo";
+const NEMO_TOKENIZER: &str = "tiny_tokenizer.model";
+
+// SentencePiece's unknown and control piece types, as the tiny tokenizer's `<unk>` and `<pad>` are special
+const PIECE_TYPES: [(&str, u8); 2] = [("<unk>", 2), ("<pad>", 3)];
+const PIECE_NORMAL: u8 = 1;
+
+// a SentencePiece ModelProto holding `pieces`: field 1 per piece, its text in field 1 and its type in field 3
+fn sentencepiece_model(pieces: &[String]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for piece in pieces {
+        let kind = PIECE_TYPES
+            .iter()
+            .find(|(p, _)| p == piece)
+            .map_or(PIECE_NORMAL, |(_, k)| *k);
+        let mut inner = vec![0x0a, piece.len() as u8];
+        inner.extend_from_slice(piece.as_bytes());
+        inner.extend_from_slice(&[0x18, kind]);
+        out.extend_from_slice(&[0x0a, inner.len() as u8]);
+        out.extend(inner);
+    }
+    out
+}
+
+// the tiny transformers config as NeMo's `model_config.yaml` lays it out
+fn nemo_yaml(config: &serde_json::Value, head: &str) -> String {
+    let enc = &config["encoder_config"];
+    let num = |v: &serde_json::Value| v.as_u64().expect("a number");
+    let streaming = head.starts_with("nemotron");
+    let (target, decoder) = if head == "parakeet_ctc" {
+        (
+            "ctc_bpe_models.EncDecCTCModelBPE",
+            format!(
+                "  _target_: nemo.collections.asr.modules.ConvASRDecoder\n  num_classes: {}\n",
+                num(&config["vocab_size"]) - 1
+            ),
+        )
+    } else {
+        (
+            "rnnt_bpe_models.EncDecRNNTBPEModel",
+            format!(
+                "  _target_: nemo.collections.asr.modules.RNNTDecoder\n  vocab_size: {}\n  prednet:\n    \
+                 pred_hidden: {}\n    pred_rnn_layers: {}\n",
+                num(&config["vocab_size"]) - 1,
+                num(&config["decoder_hidden_size"]),
+                num(&config["num_decoder_layers"])
+            ),
+        )
+    };
+    let decoding = if head == "parakeet_tdt" {
+        format!(
+            "decoding:\n  model_type: tdt\n  durations: {}\n",
+            config["durations"]
+        )
+    } else {
+        String::new()
+    };
+    let streaming_encoder = if streaming {
+        format!(
+            "  causal_downsampling: true\n  att_context_style: chunked_limited\n  att_context_size:\n  - - {}\n    - {}\n  \
+             conv_norm_type: layer_norm\n  conv_context_size: causal\n",
+            STREAMING_WINDOW - 1,
+            STREAMING_LOOKAHEAD
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "target: nemo.collections.asr.models.{target}\n\
+         tokenizer:\n  type: bpe\n  model_path: nemo:{NEMO_TOKENIZER}\n\
+         preprocessor:\n  sample_rate: 16000\n  window_size: 0.025\n  window_stride: 0.01\n  features: {mels}\n  \
+         n_fft: 512\n  normalize: {normalize}\n\
+         encoder:\n  _target_: nemo.collections.asr.modules.ConformerEncoder\n  feat_in: {mels}\n  n_layers: {layers}\n  \
+         d_model: {hidden}\n  n_heads: {heads}\n  ff_expansion_factor: {ff}\n  subsampling: dw_striding\n  \
+         subsampling_factor: {factor}\n  subsampling_conv_channels: {channels}\n  self_attention_model: rel_pos\n  \
+         conv_kernel_size: {kernel}\n  xscaling: false\n  use_bias: false\n{streaming_encoder}\
+         decoder:\n{decoder}{decoding}",
+        mels = num(&enc["num_mel_bins"]),
+        normalize = if streaming { "NA" } else { "per_feature" },
+        layers = num(&enc["num_hidden_layers"]),
+        hidden = num(&enc["hidden_size"]),
+        heads = num(&enc["num_attention_heads"]),
+        ff = num(&enc["intermediate_size"]) / num(&enc["hidden_size"]),
+        factor = num(&enc["subsampling_factor"]),
+        channels = num(&enc["subsampling_conv_channels"]),
+        kernel = num(&enc["conv_kernel_size"]),
+    )
+}
+
+/// The tiny checkpoint for `head` (not the prompted one) and the same model as a `.nemo` beside it: NeMo's config,
+/// its weights under NeMo's names, and a SentencePiece model of the tokenizer's pieces.
+pub fn tiny_parakeet_nemo(head: &str) -> anyhow::Result<(tempfile::TempDir, std::path::PathBuf)> {
+    let dir = tiny_parakeet_checkpoint(head)?;
+    let config: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(CONFIG))?)?;
+    let tokenizer: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(TOKENIZER))?)?;
+    let mut vocab: Vec<(String, u64)> = tokenizer["model"]["vocab"]
+        .as_object()
+        .expect("a BPE vocab")
+        .iter()
+        .map(|(piece, id)| (piece.clone(), id.as_u64().expect("an id")))
+        .collect();
+    vocab.sort_by_key(|(_, id)| *id);
+    let pieces: Vec<String> = vocab.into_iter().map(|(piece, _)| piece).collect();
+    let streaming = head.starts_with("nemotron");
+    let tensors = inference_tensor::safetensors::load(dir.path().join(WEIGHTS), &Device::Cpu)?;
+    let mut renamed: Vec<(String, inference_tensor::Tensor)> = tensors
+        .into_iter()
+        .map(|(n, t)| (inference_models_speech::nemo::nemo_name(&n, streaming), t))
+        .collect();
+    renamed.sort_by(|a, b| a.0.cmp(&b.0));
+    let named: Vec<(&str, &inference_tensor::Tensor)> =
+        renamed.iter().map(|(n, t)| (n.as_str(), t)).collect();
+    let nemo = dir.path().join(NEMO_CHECKPOINT);
+    let model = sentencepiece_model(&pieces);
+    inference_models_speech::nemo::write_nemo(
+        &nemo,
+        &nemo_yaml(&config, head),
+        &named,
+        &[(NEMO_TOKENIZER, model.as_slice())],
+    )?;
+    Ok((dir, nemo))
+}

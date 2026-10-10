@@ -595,7 +595,7 @@ pub enum ModelSelected {
 
     /// Select a speech recognition model
     Transcription {
-        /// Model ID to load from. This may be a HF hub repo or a local path.
+        /// Model ID to load from: a HF hub repo or a local path, in the transformers layout or a `.nemo`.
         model_id: String,
 
         /// The architecture of the model; unset reads it from the model's `config.json`.

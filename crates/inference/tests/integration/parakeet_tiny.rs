@@ -9,7 +9,7 @@ use inference::{
 
 #[path = "../support/parakeet_tiny.rs"]
 mod support;
-use support::{HEADS, LANGUAGES, PROMPTED, tiny_parakeet_checkpoint};
+use support::{HEADS, LANGUAGES, PROMPTED, tiny_parakeet_checkpoint, tiny_parakeet_nemo};
 
 // off the model's 16 kHz, so the request is resampled
 const RATE: u32 = 22_050;
@@ -232,5 +232,28 @@ async fn a_prompted_model_takes_the_requested_language() -> anyhow::Result<()> {
         .expect_err("a language outside the dictionary transcribed");
     assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
     assert!(err.message.contains("de-DE"), "{err}");
+    Ok(())
+}
+
+// a `.nemo` of the same weights transcribes as the transformers layout does, for every head it carries
+#[tokio::test]
+async fn a_nemo_checkpoint_transcribes_as_its_transformers_layout() -> anyhow::Result<()> {
+    let wav = chirp_wav();
+    for head in HEADS.iter().filter(|h| **h != PROMPTED) {
+        let (dir, nemo) = tiny_parakeet_nemo(head)?;
+        let mut bodies = Vec::new();
+        for model_id in [dir.path().to_path_buf(), nemo] {
+            let model = TranscriptionModelBuilder::new(model_id.to_string_lossy())
+                .with_dtype(ModelDType::F32)
+                .with_force_cpu()
+                .build()
+                .await?;
+            let out = model
+                .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
+                .await?;
+            bodies.push(out.body);
+        }
+        assert_eq!(bodies[0], bodies[1], "{head}");
+    }
     Ok(())
 }

@@ -3,14 +3,14 @@
 
 use std::path::Path;
 
-use inference_audio::nemo::{NemoMel, NemoMelConfig};
+use inference_audio::nemo::NemoMel;
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder, layer_norm, linear, ops};
 use inference_tensor::{DType, Device, Error, Result, Tensor};
 use serde::Deserialize;
 
 use super::cache::{CacheConfig, Silence, SpeakerCache};
 use super::{DEFAULT_THRESHOLD, Diarization, speaker_segments};
-use crate::nemo::{NemoArchive, NemoEncoderConfig, parakeet_encoder_name};
+use crate::nemo::{NemoArchive, NemoEncoderConfig, NemoPreprocessorConfig, parakeet_encoder_name};
 use crate::parakeet::{Encoder, relative_positions};
 
 // the class a Sortformer `.nemo` restores to, by any module path; Nemotron-3's does too, over a transformer encoder
@@ -18,29 +18,9 @@ const SORTFORMER_CLASS: &str = ".SortformerEncLabelModel";
 const ACTIVATION: &str = "relu";
 const FASTCONFORMER_TARGET: &str = "ConformerEncoder";
 const LAYER_NORM_EPS: f64 = 1e-5;
-// NeMo's preprocessor default when the config leaves it out
-const DEFAULT_PREEMPHASIS: f32 = 0.97;
-const NO_NORMALIZATION: &str = "NA";
 
 fn msg(e: impl std::fmt::Display) -> Error {
     Error::Msg(e.to_string())
-}
-
-fn default_preemphasis() -> f32 {
-    DEFAULT_PREEMPHASIS
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct PreprocessorConfig {
-    sample_rate: u32,
-    window_size: f64,
-    window_stride: f64,
-    features: usize,
-    n_fft: usize,
-    #[serde(default)]
-    normalize: Option<String>,
-    #[serde(default = "default_preemphasis")]
-    preemph: f32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -76,7 +56,7 @@ struct ModulesConfig {
 /// The parts of a Sortformer `model_config.yaml` inference reads.
 #[derive(Debug, Clone, Deserialize)]
 pub struct SortformerConfig {
-    preprocessor: PreprocessorConfig,
+    preprocessor: NemoPreprocessorConfig,
     encoder: NemoEncoderConfig,
     transformer_encoder: TransformerConfig,
     sortformer_modules: ModulesConfig,
@@ -212,20 +192,8 @@ impl SortformerDiarizer {
                 p.features, config.encoder.feat_in
             )));
         }
-        let win_length = (p.window_size * f64::from(p.sample_rate)).round() as usize;
-        let hop_length = (p.window_stride * f64::from(p.sample_rate)).round() as usize;
-        let mel = NemoMel::new(NemoMelConfig {
-            sample_rate: p.sample_rate,
-            n_fft: p.n_fft,
-            win_length,
-            hop_length,
-            n_mels: p.features,
-            preemphasis: Some(p.preemph),
-            normalize: p
-                .normalize
-                .as_deref()
-                .is_some_and(|n| n != NO_NORMALIZATION),
-        });
+        let hop_length = p.hop_length();
+        let mel = NemoMel::new(p.mel()?);
         let encoder = Encoder::new(&config.encoder.parakeet()?, vb.pp("encoder"))?;
         let modules = vb.pp("sortformer_modules");
         let layers = (0..t.num_layers)

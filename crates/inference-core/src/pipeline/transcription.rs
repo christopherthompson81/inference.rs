@@ -23,7 +23,7 @@ use inference_models_speech::diarization::{
     is_sortformer,
 };
 use inference_models_speech::nemo;
-use inference_models_speech::parakeet::{MODEL_TYPES, Parakeet, ParakeetFiles};
+use inference_models_speech::parakeet::{MODEL_TYPES, Parakeet, ParakeetFiles, is_asr};
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
 use inference_tensor::{Device, Tensor};
@@ -76,22 +76,38 @@ impl TranscriptionLoaderType {
     }
 }
 
+// a recogniser in the transformers layout, or one `.nemo`
+#[derive(Clone, Debug)]
+enum AsrCheckpoint {
+    Transformers(ParakeetFiles),
+    Nemo(PathBuf),
+}
+
 #[derive(Clone, Debug)]
 pub struct TranscriptionModelPaths {
-    files: ParakeetFiles,
+    checkpoint: AsrCheckpoint,
     // the VAD's GGUF, resolved with the loader's token when the recogniser came from the Hub
     vad: Option<PathBuf>,
 }
 
 impl ModelPaths for TranscriptionModelPaths {
     fn get_config_filename(&self) -> &PathBuf {
-        &self.files.config
+        match &self.checkpoint {
+            AsrCheckpoint::Transformers(files) => &files.config,
+            AsrCheckpoint::Nemo(nemo) => nemo,
+        }
     }
     fn get_tokenizer_filename(&self) -> &PathBuf {
-        &self.files.tokenizer
+        match &self.checkpoint {
+            AsrCheckpoint::Transformers(files) => &files.tokenizer,
+            AsrCheckpoint::Nemo(nemo) => nemo,
+        }
     }
     fn get_weight_filenames(&self) -> &[PathBuf] {
-        &self.files.weights
+        match &self.checkpoint {
+            AsrCheckpoint::Transformers(files) => &files.weights,
+            AsrCheckpoint::Nemo(nemo) => std::slice::from_ref(nemo),
+        }
     }
     fn get_template_filename(&self) -> &Option<PathBuf> {
         unreachable!("Use `std::any::Any`.")
@@ -425,29 +441,49 @@ pub(crate) fn silero_gguf(
     Ok(file)
 }
 
-/// The Streaming Sortformer `.nemo` `model_id` names, found as `silero_gguf` finds its file.
+// the one `.nemo` `model_id` names, found as `silero_gguf` finds its file, which `is` must accept
+fn nemo_of_kind(
+    model_id: &str,
+    source: HubSource<'_>,
+    is: fn(&nemo::NemoArchive) -> inference_tensor::Result<bool>,
+    what: &str,
+) -> Result<PathBuf> {
+    let is_nemo = |p: &std::path::Path| p.extension().is_some_and(|e| e == nemo::EXTENSION);
+    let file = single_file(model_id, source, nemo::EXTENSION, "`.nemo`", is_nemo)?;
+    if !is(&nemo::NemoArchive::open(&file)?)? {
+        anyhow::bail!("`{}` is not a {what} `.nemo`", file.display())
+    }
+    Ok(file)
+}
+
+/// The recogniser `.nemo` `model_id` names (Parakeet, hybrid, streaming).
+pub(crate) fn asr_nemo(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    silent: bool,
+) -> Result<PathBuf> {
+    let source = HubSource {
+        revision,
+        token_source,
+        silent,
+    };
+    nemo_of_kind(model_id, source, is_asr, "speech recognition")
+}
+
+/// The Streaming Sortformer `.nemo` `model_id` names.
 pub(crate) fn sortformer_nemo(
     model_id: &str,
     revision: Option<String>,
     token_source: &TokenSource,
     silent: bool,
 ) -> Result<PathBuf> {
-    let is_nemo = |p: &std::path::Path| p.extension().is_some_and(|e| e == nemo::EXTENSION);
-    let file = single_file(
-        model_id,
-        HubSource {
-            revision,
-            token_source,
-            silent,
-        },
-        nemo::EXTENSION,
-        "`.nemo`",
-        is_nemo,
-    )?;
-    if !is_sortformer(&nemo::NemoArchive::open(&file)?)? {
-        anyhow::bail!("`{}` is not a Streaming Sortformer `.nemo`", file.display())
-    }
-    Ok(file)
+    let source = HubSource {
+        revision,
+        token_source,
+        silent,
+    };
+    nemo_of_kind(model_id, source, is_sortformer, "Streaming Sortformer")
 }
 
 fn read_silero(file: &std::path::Path, device: &Device) -> Result<SileroVad> {
@@ -512,13 +548,48 @@ impl Loader for TranscriptionLoader {
             ));
         let id = std::path::Path::new(&self.model_id);
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
+        // a repo's transformers Parakeet files win over a `.nemo` beside them; neither loading reports both causes
+        let transformers = (!id.is_file())
+            .then(|| -> Result<ParakeetFiles> {
+                let config = get(CONFIG)?;
+                if self.arch.is_none()
+                    && TranscriptionLoaderType::auto_detect_from_config(&std::fs::read_to_string(
+                        &config,
+                    )?)
+                    .is_none()
+                {
+                    anyhow::bail!("`{}` is not a Parakeet config", config.display())
+                }
+                Ok(ParakeetFiles {
+                    config,
+                    processor_config: get(PROCESSOR_CONFIG)?,
+                    tokenizer: get(TOKENIZER)?,
+                    weights: vec![get(WEIGHTS)?],
+                })
+            })
+            .transpose();
+        let checkpoint = match transformers {
+            Ok(Some(files)) => AsrCheckpoint::Transformers(files),
+            Ok(None) => AsrCheckpoint::Nemo(asr_nemo(
+                &self.model_id,
+                Some(revision.clone()),
+                &token_source,
+                options.silent,
+            )?),
+            Err(layout) => AsrCheckpoint::Nemo(
+                asr_nemo(
+                    &self.model_id,
+                    Some(revision.clone()),
+                    &token_source,
+                    options.silent,
+                )
+                .map_err(|nemo| {
+                    anyhow::anyhow!("no transformers layout ({layout}) and no `.nemo` ({nemo})")
+                })?,
+            ),
+        };
         let paths = TranscriptionModelPaths {
-            files: ParakeetFiles {
-                config: get(CONFIG)?,
-                processor_config: get(PROCESSOR_CONFIG)?,
-                tokenizer: get(TOKENIZER)?,
-                weights: vec![get(WEIGHTS)?],
-            },
+            checkpoint,
             vad: self
                 .vad_model_id
                 .as_deref()
@@ -548,16 +619,18 @@ impl Loader for TranscriptionLoader {
             .as_any()
             .downcast_ref::<TranscriptionModelPaths>()
             .expect("Path downcast failed.");
-        let config = std::fs::read_to_string(&paths.files.config)?;
-        let arch = match self.arch {
-            Some(arch) => arch,
-            None => TranscriptionLoaderType::auto_detect_from_config(&config).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "`{}` is not a Parakeet config; pass the architecture explicitly",
-                    paths.files.config.display()
-                )
-            })?,
-        };
+        if let AsrCheckpoint::Transformers(files) = &paths.checkpoint
+            && self.arch.is_none()
+            && TranscriptionLoaderType::auto_detect_from_config(&std::fs::read_to_string(
+                &files.config,
+            )?)
+            .is_none()
+        {
+            anyhow::bail!(
+                "`{}` is not a Parakeet config; pass the architecture explicitly",
+                files.config.display()
+            )
+        }
         let dtype = dtype.try_into_dtype(&[device])?;
         let vad = match (&paths.vad, self.vad_model_id.as_deref()) {
             (Some(file), _) => Some(read_silero(file, device)?),
@@ -567,11 +640,13 @@ impl Loader for TranscriptionLoader {
             )?),
             (None, None) => None,
         };
-        let model = match arch {
-            TranscriptionLoaderType::Parakeet => AudioModel::Parakeet {
-                asr: Box::new(Parakeet::load(&paths.files, device, dtype)?),
-                vad,
-            },
+        let asr = match &paths.checkpoint {
+            AsrCheckpoint::Transformers(files) => Parakeet::load(files, device, dtype)?,
+            AsrCheckpoint::Nemo(nemo) => Parakeet::load_nemo(nemo, device, dtype)?,
+        };
+        let model = AudioModel::Parakeet {
+            asr: Box::new(asr),
+            vad,
         };
         Ok(Arc::new(Mutex::new(TranscriptionPipeline::new(
             self.model_id.clone(),

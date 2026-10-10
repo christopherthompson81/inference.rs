@@ -28,7 +28,10 @@ inference serve -m nvidia/parakeet-tdt-0.6b-v3
 
 The auto-loader recognizes Parakeet from the transformers layout (`config.json` with `model_type`
 `parakeet_tdt`, `parakeet_rnnt` or `parakeet_ctc`, `processor_config.json`, `tokenizer.json`,
-`model.safetensors`). `parakeet-tdt-0.6b-v3` transcribes 25 European languages and identifies the language
+`model.safetensors`), or from NVIDIA's `.nemo` (the file, a directory holding one, or a Hugging Face repo whose
+only checkpoint it is). A `.nemo` also loads the models with no transformers port, such as the hybrid RNN-T/CTC
+FastConformers (`nvidia/stt_en_fastconformer_hybrid_large_pc`, decoded with its RNN-T head), and the
+English streaming model; Nemotron-3.5 loads from its transformers files. `parakeet-tdt-0.6b-v3` transcribes 25 European languages and identifies the language
 itself. Audio in any format the decoder reads (WAV, MP3, FLAC, OGG, ...) at any sample rate is resampled to
 16 kHz; recordings up to 24 minutes are transcribed in one pass, the bound NeMo gives for these models' full
 attention.

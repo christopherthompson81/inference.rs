@@ -391,12 +391,14 @@ impl SupportedArch for TranscriptionLoaderType {
                 families: &[
                     "Parakeet (CTC, RNN-T, TDT)",
                     "Nemotron streaming ASR (English, and 3.5 multilingual)",
+                    "FastConformer hybrid RNN-T/CTC (`.nemo`)",
                 ],
                 modalities: &[Audio, Text],
                 examples: &[
                     ex!("nvidia/parakeet-tdt-0.6b-v3"),
                     ex!("nvidia/nemotron-speech-streaming-en-0.6b"),
                     ex!("nvidia/nemotron-3.5-asr-streaming-0.6b"),
+                    ex!("nvidia/stt_en_fastconformer_hybrid_large_pc"),
                 ],
             },
         }
