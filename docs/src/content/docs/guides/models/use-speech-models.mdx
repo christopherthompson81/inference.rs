@@ -7,8 +7,8 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 inference.rs supports seven speech-related model families:
 
-- **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), served via
-  `/v1/audio/transcriptions` with word and segment timestamps.
+- **Parakeet**: NVIDIA's FastConformer speech recognisers (CTC, RNN-T and TDT heads), and the cache-aware
+  Nemotron streaming ASR, served via `/v1/audio/transcriptions` with word and segment timestamps.
 - **Nemotron-3 Diarization**: who speaks when (up to 8 speakers), served via `/v1/audio/diarization`.
 - **Streaming Sortformer v2**: who speaks when (up to 4 speakers), from its `.nemo`, also via `/v1/audio/diarization`.
 - **Silero VAD**: voice activity detection, served via `/v1/audio/vad`; it also cuts long recordings for Parakeet.
@@ -35,8 +35,9 @@ attention.
 
 `/v1/audio/transcriptions` takes OpenAI's multipart form. `response_format` is `json` (the default),
 `text`, `srt`, `vtt` or `verbose_json`; `verbose_json` carries the duration and segments, and words too
-when `timestamp_granularities[]` includes `word`. Timestamps are on the encoder's 80 ms grid. `language`,
-`prompt` and `temperature` are accepted and ignored: decoding is greedy.
+when `timestamp_granularities[]` includes `word`. Timestamps are on the encoder's 80 ms grid. Parakeet
+accepts and ignores `language`, `prompt` and `temperature`: it identifies the language itself, and decoding is
+greedy.
 
 <Tabs>
 <TabItem label="HTTP">
@@ -159,6 +160,24 @@ side, behind a 188-frame speaker cache. Requests and responses are those of Nemo
 
 ```python
 spec = t.EngineSpec(model=t.ModelSelectedDiarization(model_id="nvidia/diar_streaming_sortformer_4spk-v2.1"))
+```
+
+## Nemotron streaming ASR
+
+```bash
+inference serve -m nvidia/nemotron-3.5-asr-streaming-0.6b
+```
+
+`nemotron-speech-streaming-en-0.6b` (English) and `nemotron-3.5-asr-streaming-0.6b` (multilingual) are
+FastConformer RNN-T recognisers trained for cache-aware streaming: causal convolutions and attention limited
+to a window of chunks. They load from the transformers layout like Parakeet and are transcribed over the whole
+recording with the attention window they were trained with, which gives the streaming result; like Parakeet,
+they take 24 minutes in one pass, and longer recordings with a VAD. Nemotron-3.5 takes the request's `language` (`de-DE`, `de`, ... from its
+`processor_config.json`) as a prompt, or identifies the language itself when none is given, and
+`verbose_json` reports it either way. A language outside its list is refused.
+
+```bash
+curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F language=de-DE -F response_format=verbose_json
 ```
 
 ## Silero VAD: voice activity

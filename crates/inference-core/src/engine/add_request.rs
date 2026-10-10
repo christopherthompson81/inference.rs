@@ -104,9 +104,10 @@ impl MessageExtras {
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.one_shot = Some(OneShotParams::Speech(options.clone()));
             }
-            RequestMessage::Transcription { audio } => {
+            RequestMessage::Transcription { audio, options } => {
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.audios = Some(vec![audio.clone()]);
+                extras.one_shot = Some(OneShotParams::Transcription(options.clone()));
             }
             RequestMessage::VoiceActivity { audio, options } => {
                 extras.seq_step_type = SeqStepType::OneShot;

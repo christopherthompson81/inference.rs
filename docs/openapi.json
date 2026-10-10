@@ -390,7 +390,7 @@
                           "string",
                           "null"
                         ],
-                        "description": "The audio's language. Parakeet identifies the language itself and ignores it."
+                        "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
                       },
                       "model": {
                         "type": "string",
@@ -12474,7 +12474,7 @@
               "string",
               "null"
             ],
-            "description": "The audio's language. Parakeet identifies the language itself and ignores it."
+            "description": "The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it."
           },
           "model": {
             "type": "string",
@@ -12797,7 +12797,7 @@
               "string",
               "null"
             ],
-            "description": "The request's `language`, echoed; the model reports none."
+            "description": "The language the model was told or identified (Nemotron-3.5, as `de-DE`); otherwise the request's, echoed."
           },
           "segments": {
             "type": "array",

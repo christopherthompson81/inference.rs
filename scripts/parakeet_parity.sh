@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-off parity check of our Parakeet against transformers' on fixed audio: the features and encoder output must
+# One-off parity check of our Parakeet (and the streaming Nemotron ASR, offline) against transformers' on fixed audio: the features and encoder output must
 # reach a minimum cosine, and the emitted tokens, their frames and the transcript must match exactly.
 # Not part of local_ci.sh: it needs torch, transformers (5.x, with Parakeet) and librosa.
 #
@@ -27,11 +27,17 @@ python3 -P -W ignore - "$model" "$dumps" "${wavs[@]}" <<'PY'
 import json, sys, wave
 import librosa, numpy as np, torch
 from safetensors.torch import save_file
-from transformers import AutoConfig, AutoProcessor, ParakeetForCTC, ParakeetForRNNT, ParakeetForTDT
+import transformers
+from transformers import AutoConfig, AutoProcessor
 
 model_dir, out, *wavs = sys.argv[1:]
 config = AutoConfig.from_pretrained(model_dir)
-cls = {"parakeet_ctc": ParakeetForCTC, "parakeet_rnnt": ParakeetForRNNT, "parakeet_tdt": ParakeetForTDT}[config.model_type]
+classes = {
+    "parakeet_ctc": "ParakeetForCTC", "parakeet_rnnt": "ParakeetForRNNT", "parakeet_tdt": "ParakeetForTDT",
+    "nemotron_asr_streaming": "NemotronAsrStreamingForRNNT", "nemotron3_5_asr": "Nemotron3_5AsrForRNNT",
+}
+cls = getattr(transformers, classes[config.model_type])
+prompted = config.model_type == "nemotron3_5_asr"
 proc = AutoProcessor.from_pretrained(model_dir)
 model = cls.from_pretrained(model_dir, torch_dtype=torch.float32).eval()
 rate = proc.feature_extractor.sampling_rate
@@ -46,7 +52,13 @@ for n, path in enumerate(wavs):
     with torch.no_grad():
         enc = model.encoder(input_features=inputs["input_features"], attention_mask=inputs["attention_mask"])
         frames = int(enc.attention_mask.sum())
-        hidden = enc.last_hidden_state[0, :frames]
+        hidden = enc.last_hidden_state[:, :frames]
+        if prompted:
+            # the language prompt (auto) joins each frame, as our encoder output carries it
+            one_hot = torch.nn.functional.one_hot(torch.tensor([config.default_prompt_id]), config.num_prompts)
+            one_hot = one_hot.to(hidden.dtype)[:, None, :].expand(-1, hidden.shape[1], -1)
+            hidden = model.prompt_projector(torch.cat([hidden, one_hot], dim=-1))
+        hidden = hidden[0]
         gen = model.generate(**inputs)
     emissions = []
     if config.model_type == "parakeet_ctc":

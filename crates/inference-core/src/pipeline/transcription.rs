@@ -148,6 +148,7 @@ struct ModelInputs {
     audios: Vec<AudioInput>,
     options: Vec<SegmentOptions>,
     diarization: Vec<DiarizationOptions>,
+    transcription: Vec<inference_models_speech::TranscriptionOptions>,
 }
 
 impl InputsProcessor for TranscriptionInputsProcessor {
@@ -188,6 +189,10 @@ impl InputsProcessor for TranscriptionInputsProcessor {
                 diarization: input_seqs
                     .iter()
                     .map(|seq| seq.diarization_options().cloned().unwrap_or_default())
+                    .collect(),
+                transcription: input_seqs
+                    .iter()
+                    .map(|seq| seq.transcription_options().cloned().unwrap_or_default())
                     .collect(),
             }),
             seq_indices: (0..input_seqs.len()).collect::<Vec<_>>(),
@@ -683,16 +688,20 @@ impl Pipeline for TranscriptionPipeline {
             audios,
             options,
             diarization,
+            transcription,
         } = *inputs.downcast().expect("Downcast failed.");
         Ok(match &self.model {
             AudioModel::Parakeet { asr, vad } => ForwardInputsResult::Transcription {
                 transcripts: audios
                     .iter()
-                    .map(|audio| {
+                    .zip(&transcription)
+                    .map(|(audio, request)| {
                         let pcm = audio.to_mono();
                         match vad {
-                            Some(vad) => asr.transcribe_with_vad(&pcm, audio.sample_rate, vad),
-                            None => asr.transcribe(&pcm, audio.sample_rate),
+                            Some(vad) => {
+                                asr.transcribe_with_vad(&pcm, audio.sample_rate, vad, request)
+                            }
+                            None => asr.transcribe(&pcm, audio.sample_rate, request),
                         }
                         .map_err(|e| e.to_string())
                     })

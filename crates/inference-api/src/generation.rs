@@ -5,7 +5,7 @@ use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
     ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, NormalRequest, Request,
     RequestMessage, Response, SamplingParams, SegmentOptions, SpeechOptions, TimedText,
-    Transcription, VoiceActivity,
+    Transcription, TranscriptionOptions, VoiceActivity,
     speech_utils::{self, Sample},
 };
 
@@ -242,7 +242,12 @@ async fn transcribe_inner(
         state,
         &request.model,
         repr,
-        RequestMessage::Transcription { audio },
+        RequestMessage::Transcription {
+            audio,
+            options: TranscriptionOptions {
+                language: request.language.clone(),
+            },
+        },
     )
     .await?
     {
@@ -282,8 +287,11 @@ fn render_transcript(
                 });
             serde_json::to_string(&VerboseTranscriptionResponse {
                 task: TRANSCRIBE_TASK.to_string(),
-                // the model reports none, so a language the client named is echoed back
-                language: request.language.clone(),
+                // the model's own, where it identifies one; otherwise a language the client named, echoed
+                language: transcript
+                    .language
+                    .clone()
+                    .or_else(|| request.language.clone()),
                 duration: transcript.duration,
                 text: transcript.text,
                 words,

@@ -1,4 +1,5 @@
-//! Parakeet through the engine on tiny random-weight checkpoints: each head, each response format, request errors.
+//! Parakeet and the streaming Nemotron ASR through the engine on tiny random-weight checkpoints: each head, each
+//! response format, the language prompt, request errors.
 
 use inference::{
     ApiErrorKind, ModelDType, TimestampGranularity, TranscriptionModelBuilder,
@@ -8,7 +9,7 @@ use inference::{
 
 #[path = "../support/parakeet_tiny.rs"]
 mod support;
-use support::{HEADS, tiny_parakeet_checkpoint};
+use support::{HEADS, LANGUAGES, PROMPTED, tiny_parakeet_checkpoint};
 
 // off the model's 16 kHz, so the request is resampled
 const RATE: u32 = 22_050;
@@ -195,5 +196,41 @@ async fn too_short_audio_fails_only_its_own_request() -> anyhow::Result<()> {
     let err = b.expect_err("a clip shorter than two feature frames transcribed");
     assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
     assert!(err.message.contains("too short"), "{err}");
+    Ok(())
+}
+
+// Nemotron-3.5 takes the request's language as its prompt: it is reported back, it conditions the encoder, and a
+// language outside the checkpoint's dictionary is refused for its own request alone
+#[tokio::test]
+async fn a_prompted_model_takes_the_requested_language() -> anyhow::Result<()> {
+    let checkpoint = tiny_parakeet_checkpoint(PROMPTED)?;
+    let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let wav = chirp_wav();
+    let mut transcribed = Vec::new();
+    for (language, _) in &LANGUAGES[..2] {
+        let mut asked = request(TranscriptionResponseFormat::VerboseJson);
+        asked.language = Some(language.to_string());
+        let out = model.transcription(asked, &wav).await?;
+        let parsed: VerboseTranscriptionResponse = serde_json::from_str(&out.body)?;
+        assert_eq!(parsed.language.as_deref(), Some(*language));
+        transcribed.push(parsed.text);
+    }
+    assert_ne!(
+        transcribed[0], transcribed[1],
+        "the prompt does not reach the encoder"
+    );
+
+    let mut unknown = request(TranscriptionResponseFormat::Text);
+    unknown.language = Some("tlh".to_string());
+    let err = model
+        .transcription(unknown, &wav)
+        .await
+        .expect_err("a language outside the dictionary transcribed");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    assert!(err.message.contains("de-DE"), "{err}");
     Ok(())
 }

@@ -1991,7 +1991,7 @@ pub struct TranscriptionRequest {
     #[schema(example = "nvidia/parakeet-tdt-0.6b-v3")]
     #[serde(default = "default_model")]
     pub model: String,
-    /// The audio's language. Parakeet identifies the language itself and ignores it.
+    /// The audio's language (`de-DE`, `de`), for Nemotron-3.5; unset lets it identify the language. Parakeet ignores it.
     #[serde(default)]
     pub language: Option<String>,
     /// Text to steer the transcript; Parakeet ignores it.
@@ -2047,7 +2047,7 @@ pub struct TranscriptionSegment {
 pub struct VerboseTranscriptionResponse {
     /// Always `transcribe`.
     pub task: String,
-    /// The request's `language`, echoed; the model reports none.
+    /// The language the model was told or identified (Nemotron-3.5, as `de-DE`); otherwise the request's, echoed.
     pub language: Option<String>,
     /// Seconds of audio.
     pub duration: f64,

@@ -71,17 +71,19 @@ fn main() -> Result<()> {
 
         let start = std::time::Instant::now();
         let (features, _) = model.features(&pcm)?;
-        let encoded = model.encode(&pcm)?;
+        let encoded = model.encode(&pcm, None)?;
         let emissions: Vec<[i64; 3]> = model
             .emissions(&encoded)?
             .iter()
             .map(|e| [i64::from(e.token), e.frame as i64, e.frames as i64])
             .collect();
-        let text = model.transcribe(&pcm, model.sample_rate())?.text;
+        let text = model
+            .transcribe(&pcm, model.sample_rate(), &Default::default())?
+            .text;
         let elapsed = start.elapsed().as_secs_f64();
         // warm: the weights are paged in and the kernels loaded by the run above
         let warm = std::time::Instant::now();
-        model.transcribe(&pcm, model.sample_rate())?;
+        model.transcribe(&pcm, model.sample_rate(), &Default::default())?;
         let warm = warm.elapsed().as_secs_f64();
 
         let encoded = encoded.squeeze(0)?.flatten_all()?.to_vec1::<f32>()?;

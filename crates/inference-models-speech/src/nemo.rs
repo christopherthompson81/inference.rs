@@ -163,6 +163,9 @@ impl NemoEncoderConfig {
             attention_bias: true,
             convolution_bias: true,
             scale_input: self.xscaling,
+            model_type: None,
+            sliding_window: None,
+            default_num_lookahead_tokens: None,
         })
     }
 }

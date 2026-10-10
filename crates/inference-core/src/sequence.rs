@@ -42,6 +42,7 @@ pub(crate) use inference_nn::media_inputs::media::{
 pub enum OneShotParams {
     Diffusion(DiffusionGenerationParams),
     Speech(SpeechOptions),
+    Transcription(inference_models_speech::TranscriptionOptions),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
     Diarization(inference_models_speech::diarization::DiarizationOptions),
 }
@@ -1574,6 +1575,13 @@ impl Sequence {
     pub fn speech_options(&self) -> Option<&SpeechOptions> {
         match &self.one_shot {
             Some(OneShotParams::Speech(options)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn transcription_options(&self) -> Option<&inference_models_speech::TranscriptionOptions> {
+        match &self.one_shot {
+            Some(OneShotParams::Transcription(options)) => Some(options),
             _ => None,
         }
     }

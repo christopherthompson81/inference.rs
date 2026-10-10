@@ -148,7 +148,7 @@ pub use inference_mcp::{
 };
 pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
 pub use inference_models_speech::{
-    SpeechGenerationConfig, SpeechOptions, TimedText, Transcription,
+    SpeechGenerationConfig, SpeechOptions, TimedText, Transcription, TranscriptionOptions,
     diarization::{Diarization, DiarizationOptions, SpeakerSegment},
     silero::{SegmentOptions, VoiceActivity},
     utils as speech_utils,

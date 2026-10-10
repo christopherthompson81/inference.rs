@@ -46,14 +46,20 @@ fn main() -> Result<()> {
     let pcm = audio.to_mono();
     let start = std::time::Instant::now();
     let transcript = match &vad {
-        Some(vad) => model.transcribe_with_vad(&pcm, audio.sample_rate, vad)?,
-        None => model.transcribe(&pcm, audio.sample_rate)?,
+        Some(vad) => {
+            model.transcribe_with_vad(&pcm, audio.sample_rate, vad, &Default::default())?
+        }
+        None => model.transcribe(&pcm, audio.sample_rate, &Default::default())?,
     };
     eprintln!(
-        "{:.1}s of audio in {:.2}s, {} words",
+        "{:.1}s of audio in {:.2}s, {} words{}",
         transcript.duration,
         start.elapsed().as_secs_f64(),
-        transcript.words.len()
+        transcript.words.len(),
+        transcript
+            .language
+            .as_deref()
+            .map_or(String::new(), |l| format!(", language {l}"))
     );
     println!("{}", transcript.text);
     Ok(())
