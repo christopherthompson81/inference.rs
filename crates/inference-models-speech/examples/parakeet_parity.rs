@@ -34,6 +34,9 @@ struct Args {
     /// The WER a quantized checkpoint may reach: 8-bit weights swap a spelling and flip words where voices overlap.
     #[arg(long, default_value_t = 0.05)]
     max_wer: f64,
+    /// Also stream each clip in pieces of this many milliseconds; the streamed transcription must equal the offline one.
+    #[arg(long)]
+    stream_ms: Option<f64>,
 }
 
 fn cosine(a: &[f32], b: &[f32]) -> f64 {
@@ -85,6 +88,10 @@ fn main() -> Result<()> {
         (None, Some(gguf)) => Parakeet::load_gguf(gguf, &device, DType::F32)?,
         (None, None) => Parakeet::load(&files, &device, DType::F32)?,
     };
+    anyhow::ensure!(
+        args.stream_ms.is_none() || model.can_stream(),
+        "--stream-ms needs a cache-aware streaming checkpoint"
+    );
     let mut dumps = std::fs::read_dir(&args.dumps)?
         .map(|e| e.map(|e| e.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -168,7 +175,37 @@ fn main() -> Result<()> {
         } else {
             same_emissions && same_text
         };
-        let ok = feature_cos >= args.min_cosine && encoded_cos >= args.min_cosine && matches;
+        let mut streamed_ok = true;
+        if let Some(ms) = args.stream_ms {
+            let piece = ((ms / 1000.0) * f64::from(model.sample_rate())).max(1.0) as usize;
+            let offline = model.transcribe(&pcm, model.sample_rate(), &options)?;
+            let start = std::time::Instant::now();
+            let mut stream = model.stream(&options)?;
+            let (mut deltas, mut slowest) = (String::new(), 0f64);
+            for chunk in pcm.chunks(piece) {
+                let push = std::time::Instant::now();
+                deltas.push_str(&model.stream_push(&mut stream, chunk)?);
+                slowest = slowest.max(push.elapsed().as_secs_f64());
+            }
+            let (last, streamed) = model.stream_finish(stream)?;
+            deltas.push_str(&last);
+            let audio = pcm.len() as f64 / f64::from(model.sample_rate());
+            streamed_ok = streamed == offline && deltas.trim_end() == offline.text;
+            println!(
+                "     streamed in {ms} ms pieces: {}, {:.2}x real time, slowest push {:.0} ms",
+                if streamed_ok {
+                    "equals offline"
+                } else {
+                    "DIFFERS from offline"
+                },
+                audio / start.elapsed().as_secs_f64(),
+                slowest * 1000.0
+            );
+        }
+        let ok = feature_cos >= args.min_cosine
+            && encoded_cos >= args.min_cosine
+            && matches
+            && streamed_ok;
         failed |= !ok;
         println!(
             "{} {}: features cos {feature_cos:.6} ({} vs {}), encoder cos {encoded_cos:.6}, emissions {}/{}{} {}, text {}, {elapsed:.2}s (one warm transcribe {warm:.2}s)",

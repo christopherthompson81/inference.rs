@@ -105,14 +105,23 @@ impl Prompts {
         })
     }
 
-    // `(1, T, hidden)` encoder frames, each joined by the language's one-hot
-    fn forward(&self, encoded: &Tensor, id: usize) -> Result<Tensor> {
-        let t = encoded.dim(1)?;
+    fn one_hot(&self, id: usize, dtype: DType, device: &Device) -> Result<Tensor> {
         let mut one_hot = vec![0f32; self.slots];
         one_hot[id] = 1.;
-        let one_hot = Tensor::from_vec(one_hot, (1, 1, self.slots), encoded.device())?
-            .to_dtype(encoded.dtype())?
-            .broadcast_as((1, t, self.slots))?;
+        Tensor::from_vec(one_hot, (1, 1, self.slots), device)?.to_dtype(dtype)
+    }
+
+    // `(1, T, hidden)` encoder frames, each joined by the language's one-hot
+    fn forward(&self, encoded: &Tensor, id: usize) -> Result<Tensor> {
+        self.forward_with(
+            encoded,
+            &self.one_hot(id, encoded.dtype(), encoded.device())?,
+        )
+    }
+
+    fn forward_with(&self, encoded: &Tensor, one_hot: &Tensor) -> Result<Tensor> {
+        let t = encoded.dim(1)?;
+        let one_hot = one_hot.broadcast_as((1, t, self.slots))?;
         let joined = Tensor::cat(&[encoded, &one_hot], 2)?;
         self.linear_2
             .forward(&self.linear_1.forward(&joined)?.relu()?)
@@ -328,7 +337,16 @@ impl Parakeet {
         let duration = pcm.len() as f64 / f64::from(self.sample_rate());
         let encoded = self.encode(pcm, language)?;
         let emissions = self.head.decode(&encoded, beam)?;
-        let mut transcription = self.text(&emissions, duration)?;
+        self.transcription(&emissions, duration, language)
+    }
+
+    fn transcription(
+        &self,
+        emissions: &[Emission],
+        duration: f64,
+        language: Option<&str>,
+    ) -> Result<Transcription> {
+        let mut transcription = self.text(emissions, duration)?;
         let identified = self.prompts.as_ref().and_then(|prompts| {
             emissions
                 .iter()
@@ -340,6 +358,88 @@ impl Parakeet {
             _ => identified,
         };
         Ok(transcription)
+    }
+
+    /// Whether the checkpoint is a cache-aware streaming one, which [`Parakeet::stream`] transcribes as audio
+    /// arrives.
+    pub fn can_stream(&self) -> bool {
+        self.encoder.can_stream()
+    }
+
+    /// A transcription fed audio as it arrives, chunk by chunk, making the offline pass's decisions over the same
+    /// audio. Greedy only; the language is a Nemotron-3.5 prompt as in `transcribe`.
+    pub fn stream(&self, options: &TranscriptionOptions) -> Result<ParakeetStream> {
+        if options.beam_size.is_some_and(|b| b > 1) {
+            return Err(msg(
+                "a streamed transcription decodes greedily; it takes no beam",
+            ));
+        }
+        let language = self.language(options)?.map(str::to_string);
+        let prompt = self
+            .prompts
+            .as_ref()
+            .map(|p| p.one_hot(p.id(language.as_deref())?, self.dtype, &self.device))
+            .transpose()?;
+        Ok(ParakeetStream {
+            mel: self.mel.stream().map_err(msg)?,
+            encoder: self.encoder.stream(self.dtype, &self.device)?,
+            decoder: self.head.stream(),
+            prompt,
+            language,
+            emissions: Vec::new(),
+            samples: 0,
+            text: TextStream::default(),
+        })
+    }
+
+    /// Feeds mono `pcm` at the model's rate to `stream`; returns the text the chunks it completes add.
+    pub fn stream_push(&self, stream: &mut ParakeetStream, pcm: &[f32]) -> Result<String> {
+        stream.samples += pcm.len();
+        let mel = stream.mel.push(&self.mel, pcm);
+        let n_mels = self.mel.config().n_mels;
+        let chunks = self
+            .encoder
+            .stream_push(&mut stream.encoder, &mel, n_mels)?;
+        self.stream_decode(stream, chunks)
+    }
+
+    /// Ends `stream`: the text its last frames add, and the whole transcription, as `transcribe` gives it.
+    pub fn stream_finish(&self, mut stream: ParakeetStream) -> Result<(String, Transcription)> {
+        let n_mels = self.mel.config().n_mels;
+        let mel = stream.mel.finish(&self.mel);
+        let chunks = self
+            .encoder
+            .stream_push(&mut stream.encoder, &mel, n_mels)?;
+        let mut delta = self.stream_decode(&mut stream, chunks)?;
+        let chunks = self.encoder.stream_finish(&mut stream.encoder, n_mels)?;
+        delta.push_str(&self.stream_decode(&mut stream, chunks)?);
+        let duration = stream.samples as f64 / f64::from(self.sample_rate());
+        let transcription =
+            self.transcription(&stream.emissions, duration, stream.language.as_deref())?;
+        Ok((delta, transcription))
+    }
+
+    // decodes encoder chunks, each with its first frame's index, into the text they add to the stream's transcript
+    fn stream_decode(
+        &self,
+        stream: &mut ParakeetStream,
+        chunks: Vec<(usize, Tensor)>,
+    ) -> Result<String> {
+        let mut delta = String::new();
+        for (offset, encoded) in chunks {
+            let encoded = match (&self.prompts, &stream.prompt) {
+                (Some(prompts), Some(one_hot)) => prompts.forward_with(&encoded, one_hot)?,
+                _ => encoded,
+            };
+            for e in self
+                .head
+                .decode_chunk(&encoded, offset, &mut stream.decoder)?
+            {
+                stream.emissions.push(e);
+                delta.push_str(&stream.text.step(&self.tokenizer, e.token)?);
+            }
+        }
+        Ok(delta)
     }
 
     /// `(frames, mels)` row-major log-mel features of mono `pcm` at the model's rate, and the frame count.
@@ -399,6 +499,56 @@ impl Parakeet {
             duration,
             language: None,
         })
+    }
+}
+
+/// A transcription in progress, fed through [`Parakeet::stream_push`]; it holds no borrow of the model, so an
+/// engine can keep it between requests.
+pub struct ParakeetStream {
+    mel: inference_audio::nemo::NemoMelStream,
+    encoder: encoder::EncoderStream,
+    decoder: decoder::DecodeStream,
+    // Nemotron-3.5's language one-hot, `(1, 1, slots)`
+    prompt: Option<Tensor>,
+    language: Option<String>,
+    emissions: Vec<Emission>,
+    samples: usize,
+    text: TextStream,
+}
+
+// tokenizers' `DecodeStream` without its borrow of the tokenizer: each token's new text from a short prefix
+// window, so a stream's cost per token stays flat; the transcript's leading whitespace is trimmed, as offline
+#[derive(Default)]
+struct TextStream {
+    ids: Vec<u32>,
+    prefix: String,
+    prefix_index: usize,
+    started: bool,
+}
+
+impl TextStream {
+    fn step(&mut self, tokenizer: &Tokenizer, id: u32) -> Result<String> {
+        self.ids.push(id);
+        let text = tokenizer.decode(&self.ids, true).map_err(msg)?;
+        // a partial UTF-8 sequence decodes to the replacement character until the rest arrives
+        if text.len() <= self.prefix.len() || text.ends_with(char::REPLACEMENT_CHARACTER) {
+            return Ok(String::new());
+        }
+        let Some(new) = text.strip_prefix(self.prefix.as_str()) else {
+            return Err(msg(
+                "the tokenizer's decoding of a longer sequence changed its prefix",
+            ));
+        };
+        let mut new = new.to_string();
+        let new_prefix_index = self.ids.len() - self.prefix_index;
+        self.ids.drain(..self.prefix_index);
+        self.prefix = tokenizer.decode(&self.ids, true).map_err(msg)?;
+        self.prefix_index = new_prefix_index;
+        if !self.started {
+            new = new.trim_start().to_string();
+            self.started = !new.is_empty();
+        }
+        Ok(new)
     }
 }
 

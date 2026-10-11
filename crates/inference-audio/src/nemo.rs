@@ -51,6 +51,21 @@ impl NemoMel {
         }
     }
 
+    // one STFT frame of `n_fft` padded samples to its `n_mels` log-mel energies
+    fn frame(&self, frame: &[f64], out: &mut [f64], scratch: &mut FrameScratch) {
+        for ((b, &x), &w) in scratch.buffer.iter_mut().zip(frame).zip(&self.window) {
+            *b = Complex64::new(x * w, 0.0);
+        }
+        self.fft.process(&mut scratch.buffer);
+        for (p, b) in scratch.power.iter_mut().zip(&scratch.buffer) {
+            *p = b.norm_sqr();
+        }
+        for (o, filter) in out.iter_mut().zip(&self.filters) {
+            let energy: f64 = filter.iter().zip(&scratch.power).map(|(f, p)| f * p).sum();
+            *o = (energy + LOG_GUARD).ln();
+        }
+    }
+
     pub fn config(&self) -> &NemoMelConfig {
         &self.config
     }
@@ -85,21 +100,13 @@ impl NemoMel {
             previous = s;
         }
         let mut features = vec![0f64; frames * n_mels];
-        let mut buffer = vec![Complex64::default(); n_fft];
-        let mut power = vec![0f64; half + 1];
+        let mut scratch = FrameScratch::new(n_fft);
         for t in 0..frames {
-            let frame = &padded[t * hop_length..t * hop_length + n_fft];
-            for ((b, &x), &w) in buffer.iter_mut().zip(frame).zip(&self.window) {
-                *b = Complex64::new(x * w, 0.0);
-            }
-            self.fft.process(&mut buffer);
-            for (p, b) in power.iter_mut().zip(&buffer) {
-                *p = b.norm_sqr();
-            }
-            for (m, filter) in self.filters.iter().enumerate() {
-                let energy: f64 = filter.iter().zip(&power).map(|(f, p)| f * p).sum();
-                features[t * n_mels + m] = (energy + LOG_GUARD).ln();
-            }
+            self.frame(
+                &padded[t * hop_length..t * hop_length + n_fft],
+                &mut features[t * n_mels..(t + 1) * n_mels],
+                &mut scratch,
+            );
         }
         if self.config.normalize {
             for m in 0..n_mels {
@@ -115,6 +122,109 @@ impl NemoMel {
             }
         }
         Ok((features.into_iter().map(|v| v as f32).collect(), frames))
+    }
+}
+
+struct FrameScratch {
+    buffer: Vec<Complex64>,
+    power: Vec<f64>,
+}
+
+impl FrameScratch {
+    fn new(n_fft: usize) -> Self {
+        Self {
+            buffer: vec![Complex64::default(); n_fft],
+            power: vec![0f64; n_fft / 2 + 1],
+        }
+    }
+}
+
+/// [`NemoMel::features`] over audio that arrives in pieces: each frame is emitted once its samples are all in, and
+/// the frames together equal the offline features of the whole audio. Normalisation needs the whole utterance, so
+/// a normalising config is refused.
+pub struct NemoMelStream {
+    // preemphasised samples with the leading zero pad, from padded index `base` on
+    padded: Vec<f64>,
+    base: usize,
+    previous: Option<f64>,
+    samples: usize,
+    next_frame: usize,
+    scratch: FrameScratch,
+}
+
+impl NemoMel {
+    pub fn stream(&self) -> Result<NemoMelStream> {
+        if self.config.normalize {
+            bail!("normalised features need the whole utterance; they cannot be streamed");
+        }
+        Ok(NemoMelStream {
+            padded: vec![0f64; self.config.n_fft / 2],
+            base: 0,
+            previous: None,
+            samples: 0,
+            next_frame: 0,
+            scratch: FrameScratch::new(self.config.n_fft),
+        })
+    }
+}
+
+impl NemoMelStream {
+    /// Appends `samples` and returns the `(frames, n_mels)` features they complete, row-major; `mel` is the
+    /// extractor the stream came from.
+    pub fn push(&mut self, mel: &NemoMel, samples: &[f32]) -> Vec<f32> {
+        let coefficient = f64::from(mel.config.preemphasis.unwrap_or(0.0));
+        for &s in samples {
+            let s = f64::from(s);
+            self.padded.push(match self.previous {
+                None => s,
+                Some(previous) => s - coefficient * previous,
+            });
+            self.previous = Some(s);
+        }
+        self.samples += samples.len();
+        let NemoMelConfig {
+            n_fft, hop_length, ..
+        } = mel.config;
+        let available = self.base + self.padded.len();
+        let ready = (available + 1).saturating_sub(n_fft).div_ceil(hop_length);
+        // never past the frames the offline count keeps for the audio so far
+        let kept = (self.samples + 2 * (n_fft / 2)).saturating_sub(n_fft) / hop_length;
+        self.emit(mel, ready.min(kept))
+    }
+
+    /// The features of the frames the end of the audio completes; the stream is done after this.
+    pub fn finish(&mut self, mel: &NemoMel) -> Vec<f32> {
+        let NemoMelConfig {
+            n_fft, hop_length, ..
+        } = mel.config;
+        self.padded.extend(std::iter::repeat_n(0f64, n_fft / 2));
+        let total = (self.samples + 2 * (n_fft / 2)).saturating_sub(n_fft) / hop_length;
+        self.emit(mel, total)
+    }
+
+    pub fn frames(&self) -> usize {
+        self.next_frame
+    }
+
+    fn emit(&mut self, mel: &NemoMel, until: usize) -> Vec<f32> {
+        let NemoMelConfig {
+            n_fft,
+            hop_length,
+            n_mels,
+            ..
+        } = mel.config;
+        let count = until.saturating_sub(self.next_frame);
+        let mut features = vec![0f64; count * n_mels];
+        for (i, out) in features.chunks_mut(n_mels).enumerate() {
+            let start = (self.next_frame + i) * hop_length - self.base;
+            mel.frame(&self.padded[start..start + n_fft], out, &mut self.scratch);
+        }
+        self.next_frame += count;
+        // samples before the next frame's start are never read again
+        let keep_from = (self.next_frame * hop_length - self.base).min(self.padded.len());
+        self.padded.drain(..keep_from);
+        self.base += keep_from;
+        features.into_iter().map(|v| v as f32).collect()
     }
 }
 
@@ -141,6 +251,30 @@ mod tests {
         assert_eq!(frames, 100);
         assert_eq!(features.len(), 100 * 128);
         assert!(mel.features(&[0.0; 200]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn streamed_features_equal_the_offline_ones_in_any_pieces() -> Result<()> {
+        let mel = NemoMel::new(NemoMelConfig {
+            normalize: false,
+            ..parakeet().config().clone()
+        });
+        let samples: Vec<f32> = (0..16_337)
+            .map(|i| (i as f32 * 0.0137).sin() * 0.3 + (i as f32 * 0.31).sin() * 0.05)
+            .collect();
+        let (offline, frames) = mel.features(&samples)?;
+        for piece in [1, 159, 160, 1000, 16_337] {
+            let mut stream = mel.stream()?;
+            let mut streamed = Vec::new();
+            for chunk in samples.chunks(piece) {
+                streamed.extend(stream.push(&mel, chunk));
+            }
+            streamed.extend(stream.finish(&mel));
+            assert_eq!(stream.frames(), frames, "{piece}");
+            assert_eq!(streamed, offline, "{piece}");
+        }
+        assert!(parakeet().stream().is_err());
         Ok(())
     }
 

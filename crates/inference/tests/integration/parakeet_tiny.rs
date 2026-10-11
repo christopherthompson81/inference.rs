@@ -372,3 +372,94 @@ async fn beam_search_decodes_transducers_and_refuses_the_rest() -> anyhow::Resul
     assert!(err.message.contains("CTC"), "{err}");
     Ok(())
 }
+
+// pieces off and on the 160-sample hop and the 2-frame chunk, up to the whole clip at once
+const STREAM_PIECES: [usize; 5] = [13, 997, 1280, 16_000, usize::MAX];
+const STREAM_RATE: u32 = 16_000;
+// 50 encoder frames: 25 of the tiny model's chunks
+const STREAM_SECONDS: f64 = 4.0;
+
+fn tiny_parakeet(
+    dir: &std::path::Path,
+) -> anyhow::Result<inference_models_speech::parakeet::Parakeet> {
+    let files = inference_models_speech::parakeet::ParakeetFiles {
+        config: dir.join("config.json"),
+        processor_config: dir.join("processor_config.json"),
+        tokenizer: dir.join("tokenizer.json"),
+        weights: vec![dir.join("model.safetensors")],
+    };
+    Ok(inference_models_speech::parakeet::Parakeet::load(
+        &files,
+        &inference_tensor::Device::Cpu,
+        inference_tensor::DType::F32,
+    )?)
+}
+
+// a streamed transcription, fed in any pieces, emits the offline pass's tokens at its frames, its deltas add up to its
+// text, and too little audio fails as offline
+#[test]
+fn a_streamed_transcription_equals_the_offline_one() -> anyhow::Result<()> {
+    let n = (STREAM_SECONDS * f64::from(STREAM_RATE)) as usize;
+    let pcm: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 / f64::from(STREAM_RATE);
+            let phase =
+                2.0 * std::f64::consts::PI * (CHIRP_START_HZ * t + CHIRP_RISE_HZ * t * t / 2.0);
+            (AMPLITUDE * phase.sin() * (1.0 + (3.0 * t).sin()) / 2.0) as f32
+        })
+        .collect();
+    // the 3.5 checkpoint also streams with no lookahead: one-frame chunks, shorter than the subsampling's drop
+    for (head, lookahead) in [
+        ("nemotron_asr_streaming", None),
+        (PROMPTED, None),
+        (PROMPTED, Some(0)),
+    ] {
+        let dir = tiny_parakeet_checkpoint(head)?;
+        if let Some(lookahead) = lookahead {
+            let path = dir.path().join("config.json");
+            let mut config: serde_json::Value =
+                serde_json::from_str(&std::fs::read_to_string(&path)?)?;
+            config["encoder_config"]["default_num_lookahead_tokens"] = lookahead.into();
+            std::fs::write(&path, config.to_string())?;
+        }
+        let model = tiny_parakeet(dir.path())?;
+        assert!(model.can_stream());
+        let options = inference_models_speech::TranscriptionOptions::default();
+        let offline = model.transcribe(&pcm, STREAM_RATE, &options)?;
+        assert!(
+            !offline.tokens.is_empty(),
+            "{head}: the tiny model emits tokens"
+        );
+        for piece in STREAM_PIECES {
+            let mut stream = model.stream(&options)?;
+            let mut deltas = String::new();
+            for chunk in pcm.chunks(piece.min(pcm.len())) {
+                deltas.push_str(&model.stream_push(&mut stream, chunk)?);
+            }
+            let (last, streamed) = model.stream_finish(stream)?;
+            deltas.push_str(&last);
+            assert_eq!(streamed, offline, "{head}, pieces of {piece}");
+            assert_eq!(deltas.trim_end(), offline.text, "{head}, pieces of {piece}");
+        }
+    }
+    let dir = tiny_parakeet_checkpoint("nemotron_asr_streaming")?;
+    let model = tiny_parakeet(dir.path())?;
+    let options = inference_models_speech::TranscriptionOptions::default();
+    let mut short = model.stream(&options)?;
+    model.stream_push(&mut short, &pcm[..100])?;
+    assert!(
+        model
+            .transcribe(&pcm[..100], STREAM_RATE, &options)
+            .is_err()
+    );
+    assert!(model.stream_finish(short).is_err());
+    let dir = tiny_parakeet_checkpoint("parakeet_tdt")?;
+    let offline_only = tiny_parakeet(dir.path())?;
+    assert!(!offline_only.can_stream());
+    assert!(
+        offline_only
+            .stream(&inference_models_speech::TranscriptionOptions::default())
+            .is_err()
+    );
+    Ok(())
+}

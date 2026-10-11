@@ -208,24 +208,102 @@ impl Head {
 }
 
 fn ctc_greedy(projection: &Linear, blank: u32, encoded: &Tensor) -> Result<Vec<Emission>> {
+    let mut previous = None;
+    ctc_greedy_from(projection, blank, encoded, 0, &mut previous)
+}
+
+// CTC collapse over frames numbered from `offset`, `previous` the label of the frame before them
+fn ctc_greedy_from(
+    projection: &Linear,
+    blank: u32,
+    encoded: &Tensor,
+    offset: usize,
+    previous: &mut Option<u32>,
+) -> Result<Vec<Emission>> {
     let best = projection
         .forward(encoded)?
         .squeeze(0)?
         .argmax(D::Minus1)?
         .to_vec1::<u32>()?;
     let mut out: Vec<Emission> = Vec::new();
-    let mut previous = None;
     for (frame, &token) in best.iter().enumerate() {
-        if token != blank && previous != Some(token) {
+        if token != blank && *previous != Some(token) {
             out.push(Emission {
                 token,
-                frame,
+                frame: offset + frame,
                 frames: 1,
             });
         }
-        previous = Some(token);
+        *previous = Some(token);
     }
     Ok(out)
+}
+
+/// Greedy decoding carried from one streamed chunk of encoder frames to the next.
+pub(super) enum DecodeStream {
+    Ctc { previous: Option<u32> },
+    Transducer { greedy: Option<Greedy> },
+}
+
+// a transducer's greedy search between chunks: the predictor state, the absolute frame it stands at (a TDT
+// duration may land it past the chunk) and the symbols emitted there
+pub(super) struct Greedy {
+    state: PredictorState,
+    frame: usize,
+    symbols: usize,
+}
+
+impl Head {
+    pub(super) fn stream(&self) -> DecodeStream {
+        match self {
+            Self::Ctc { .. } => DecodeStream::Ctc { previous: None },
+            Self::Transducer { .. } => DecodeStream::Transducer { greedy: None },
+        }
+    }
+
+    /// Greedy emissions of `(1, frames, hidden)` encoder output numbered from `offset`, continuing `stream`.
+    pub(super) fn decode_chunk(
+        &self,
+        encoded: &Tensor,
+        offset: usize,
+        stream: &mut DecodeStream,
+    ) -> Result<Vec<Emission>> {
+        match (self, stream) {
+            (Self::Ctc { projection, blank }, DecodeStream::Ctc { previous }) => {
+                ctc_greedy_from(projection, *blank, encoded, offset, previous)
+            }
+            (
+                Self::Transducer {
+                    encoder_projector,
+                    predictor,
+                    joint,
+                    vocab,
+                    blank,
+                    durations,
+                    max_symbols_per_step,
+                },
+                DecodeStream::Transducer { greedy },
+            ) => {
+                let frames = encoder_projector.forward(encoded)?.squeeze(0)?;
+                let search = Transducer {
+                    predictor,
+                    joint,
+                    vocab: *vocab,
+                    blank: *blank,
+                    durations,
+                    max_symbols_per_step: *max_symbols_per_step,
+                };
+                let mut g = match greedy.take() {
+                    Some(g) => g,
+                    None => search.greedy_start(&frames)?,
+                };
+                let out = search.greedy_from(&frames, offset, &mut g)?;
+                *greedy = Some(g);
+                Ok(out)
+            }
+            _ => Err(Error::Msg("a decode stream from another head".into())),
+        }
+    }
 }
 
 struct Transducer<'a> {
@@ -238,20 +316,31 @@ struct Transducer<'a> {
 }
 
 impl Transducer<'_> {
-    // RNN-T advances a frame on blank; TDT by the predicted duration (a blank's 0 taken as 1). Either way, too many
-    // symbols at one frame force a step, as NeMo's greedy search does
     fn greedy(&self, frames: &Tensor) -> Result<Vec<Emission>> {
-        let total = frames.dim(0)?;
-        let mut state = self.predictor.start(&[self.blank], frames)?;
+        let mut g = self.greedy_start(frames)?;
+        self.greedy_from(frames, 0, &mut g)
+    }
+
+    fn greedy_start(&self, like: &Tensor) -> Result<Greedy> {
+        Ok(Greedy {
+            state: self.predictor.start(&[self.blank], like)?,
+            frame: 0,
+            symbols: 0,
+        })
+    }
+
+    // RNN-T advances a frame on blank; TDT by the predicted duration (a blank's 0 taken as 1). Either way, too many
+    // symbols at one frame force a step, as NeMo's greedy search does. `frames` are numbered from `offset`
+    fn greedy_from(&self, frames: &Tensor, offset: usize, g: &mut Greedy) -> Result<Vec<Emission>> {
+        let total = offset + frames.dim(0)?;
         let mut out = Vec::new();
-        let (mut frame, mut symbols) = (0usize, 0usize);
-        while frame < total {
+        while g.frame < total {
             let logits = self
                 .joint
                 .forward(
                     &frames
-                        .i(frame..frame + 1)?
-                        .broadcast_add(&state.output)?
+                        .i(g.frame - offset..g.frame - offset + 1)?
+                        .broadcast_add(&g.state.output)?
                         .relu()?,
                 )?
                 .squeeze(0)?;
@@ -275,19 +364,19 @@ impl Transducer<'_> {
                 let frames = if self.durations.is_empty() { 1 } else { step };
                 out.push(Emission {
                     token,
-                    frame,
+                    frame: g.frame,
                     frames,
                 });
-                state = self.predictor.advance(&[token], state)?;
-                symbols += 1;
-                if step == 0 && symbols >= self.max_symbols_per_step {
+                g.state = self.predictor.advance(&[token], g.state.clone())?;
+                g.symbols += 1;
+                if step == 0 && g.symbols >= self.max_symbols_per_step {
                     step = 1;
                 }
             }
             if step > 0 {
-                symbols = 0;
+                g.symbols = 0;
             }
-            frame += step;
+            g.frame += step;
         }
         Ok(out)
     }
