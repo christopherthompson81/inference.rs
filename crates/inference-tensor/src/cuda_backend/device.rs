@@ -44,6 +44,11 @@ impl std::ops::Deref for RngGuard<'_> {
 
 const CUDA_GRAPH_HTOD_CACHE_MAX_BYTES: usize = 4096;
 
+/// The archs this build's kernels were compiled for, as cuobjdump names them (`86`, `90a`).
+pub fn built_archs() -> &'static [&'static str] {
+    kernels::ARCHS
+}
+
 /// The built arch whose SASS a device of compute capability `cc` (86 for 8.6) runs, if any.
 pub fn kernel_arch(cc: usize) -> Option<usize> {
     kernel_arch_among(kernels::ARCHS, cc)
@@ -53,16 +58,8 @@ pub fn kernel_arch(cc: usize) -> Option<usize> {
 pub fn kernel_arch_among(archs: &[&str], cc: usize) -> Option<usize> {
     archs
         .iter()
-        .filter_map(|arch| {
-            let number = arch.trim_end_matches(['a', 'f']).parse::<usize>().ok()?;
-            // plain and family (121f) SASS run on later minors of their major; arch-specific (120a) only on its own
-            let runs = if arch.ends_with('a') {
-                number == cc
-            } else {
-                number / 10 == cc / 10 && number <= cc
-            };
-            runs.then_some(number)
-        })
+        .filter(|arch| crate::kernel_library::runs_on(arch, cc))
+        .filter_map(|arch| arch.trim_end_matches(['a', 'f']).parse::<usize>().ok())
         .max()
 }
 

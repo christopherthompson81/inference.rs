@@ -21,9 +21,9 @@ TRACKED_MIN = 1 << 20
 CHANGE_FRACTION = 0.01
 CHANGE_BYTES = 256 << 10
 MIB = 1 << 20
-# Each `cuda-kernels/<name>.lib` beside the library names a kernel library its build made, shipped with it.
-KERNEL_POINTERS = "cuda-kernels"
-POINTER_SUFFIX = ".lib"
+
+sys.path.insert(0, str(Path(__file__).parent / "release"))
+from kernel_libraries import MissingKernels, built_kernels
 
 
 def sections(size_output: str) -> dict[str, int]:
@@ -85,21 +85,19 @@ def main(argv: list[str]) -> int:
     if not BASELINE.exists() and "--update" not in argv:
         print(f"no {BASELINE.name}: run local_ci.sh --size-update first", file=sys.stderr)
         return 2
-    # the kernel libraries this build made: pointer files whose path the library itself records
-    data = library.read_bytes()
-    named = [Path(p.read_text().strip()) for p in sorted((library.parent / KERNEL_POINTERS).glob(f"*{POINTER_SUFFIX}"))]
-    kernels = [path for path in named if str(path).encode() in data]
-    if missing := [str(path) for path in kernels if not path.is_file()]:
-        print(f"kernel libraries {library.name} was built with are gone: {missing}", file=sys.stderr)
+    try:
+        files = [library] + [kernel.path for kernel in built_kernels(library)]
+    except MissingKernels as error:
+        print(error, file=sys.stderr)
         return 2
-    files = [library] + kernels
-    # what ships: the sections summed over every file, the total, and each file on its own
+    # what ships: the sections summed over every file, the total, and each library summed over its archs
     sizes: dict[str, int] = {}
     for path in files:
         out = subprocess.run(["size", "-A", str(path)], check=True, capture_output=True, text=True).stdout
         for name, size in sections(out).items():
             sizes[name] = sizes.get(name, 0) + size
-        sizes[f"{FILE}:{path.name}"] = path.stat().st_size
+        key = f"{FILE}:{path.name}"
+        sizes[key] = sizes.get(key, 0) + path.stat().st_size
     sizes[FILE] = sum(path.stat().st_size for path in files)
     if "--update" in argv:
         BASELINE.write_text(json.dumps({**key, "sizes": sizes}, indent=2, sort_keys=True) + "\n")

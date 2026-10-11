@@ -71,9 +71,13 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 
 CUDA builds load their kernels at runtime from separate shared libraries (`libinferencequant.so`, `libinferencefattn.so`,
 `libinferencenn.so`, `libinferencepagedattention.so`), plus one per GGUF quantization type (`libinferencequant_q4_k.so`,
-`libinferencequant_iq2_xs.so`, ...), opened only when a model holds weights of that type. They are looked for in
-`$INFERENCE_KERNEL_DIR`, then beside the binary or library that loads them, then in its `kernels/` directory, then where
-the build put them. A missing one fails model loading with an error naming it.
+`libinferencequant_iq2_xs.so`, ...), opened only when a model holds weights of that type. Each GPU architecture has its
+own copy, in an `sm<arch>/` directory (`sm86/`, `sm90a/`). The loader opens the copy of the architecture this build
+compiled for the GPU (`sm86` for an RTX 30, and also for an RTX 40 in a build without `89`), looking in
+`$INFERENCE_KERNEL_DIR`, the directory of the binary or library that loads them, its `kernels/` directory and the
+directory the build put them in, in that order. A missing one fails model loading with an error naming it. A process
+loads one copy, so the visible GPUs must need the same architecture; on a machine with mixed GPUs, set
+`CUDA_VISIBLE_DEVICES` to GPUs of one architecture.
 
 | Variable | Purpose |
 |---|---|
