@@ -126,10 +126,10 @@ pub enum Command {
         shell: Shell,
     },
 
-    /// Generate UQFF quantized model file
+    /// Generate a UQFF quantized model file, or an `asr` GGUF of a speech recogniser
     Quantize {
         #[command(subcommand)]
-        model_type: Option<QuantizeModelType>,
+        model_type: Option<QuantizeCommand>,
 
         /// Default quantize options (used when model type is not specified)
         #[command(flatten)]

@@ -286,6 +286,7 @@ async fn an_asr_gguf_transcribes_as_its_transformers_layout() -> anyhow::Result<
 // a `.nemo` written as an `asr` GGUF with full-precision matrices loads and transcribes as the `.nemo` does
 #[tokio::test]
 async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
+    use inference_api::{asr_gguf, engine::TokenSource};
     use inference_models_speech::parakeet::{QuantPolicy, write_asr_gguf};
     use inference_tensor::quantized::GgmlDType;
     let wav = chirp_wav();
@@ -306,9 +307,21 @@ async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
             bodies.push(out.body);
         }
         assert_eq!(bodies[0], bodies[1], "{head}");
-        // a mixed policy's file loads too: its K-quant rows fall back, its decoder overrides apply
+        // a mixed policy's file, written from the `.nemo`'s directory, loads too: K-quant rows fall back
         let mixed = dir.path().join("mixed.gguf");
-        write_asr_gguf(&nemo, &mixed, &QuantPolicy::q6_k_mix())?;
+        let policy = asr_gguf::QuantPolicy::parse("q6_k-mix", &["joint.=q8_0".to_string()])?;
+        let summary = asr_gguf::write_asr_gguf(
+            &dir.path().to_string_lossy(),
+            None,
+            &TokenSource::None,
+            &mixed,
+            &policy,
+        )?;
+        assert_eq!(summary.bytes, std::fs::metadata(&mixed)?.len());
+        assert!(
+            summary.types.iter().any(|(name, _)| name == "q8_0"),
+            "{head}"
+        );
         TranscriptionModelBuilder::new(mixed.to_string_lossy())
             .with_dtype(ModelDType::F32)
             .with_force_cpu()

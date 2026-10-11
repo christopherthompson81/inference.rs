@@ -8,7 +8,7 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use inference_api::{
-    Engine, EngineSpec,
+    Engine, EngineSpec, asr_gguf,
     engine::{
         IsqType, ModelSelected, NormalLoaderType, RuntimeSpec, UqffWriteConfig, expand_isq_value,
     },
@@ -18,11 +18,13 @@ use inference_api::{
 
 use super::serve::{self, extract_device_settings};
 use crate::args::{
-    AdapterOptions, CacheOptions, DeviceOptions, FormatOptions, GlobalOptions, MatformerSelection,
-    ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
+    AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions, GlobalOptions,
+    MatformerSelection, ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
     QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
     QuantizeMultimodalOptions, QuantizeQuantizationOptions,
 };
+
+const MIB: f64 = (1u64 << 20) as f64;
 
 /// Extract ISQ values from the QuantizeModelType
 fn get_isq_values(model_type: &QuantizeModelType) -> &[String] {
@@ -77,6 +79,31 @@ fn get_readme_overrides(model_type: &QuantizeModelType) -> (Option<String>, Opti
             (output.uqff_base_model.clone(), output.uqff_repo_id.clone())
         }
     }
+}
+
+/// Writes a speech recogniser's `.nemo` as an `asr` GGUF.
+pub fn run_asr_quantize(options: AsrQuantizeOptions, global: GlobalOptions) -> Result<()> {
+    initialize_logging();
+    let policy = asr_gguf::QuantPolicy::parse(&options.policy, &options.keep)?;
+    let summary = asr_gguf::write_asr_gguf(
+        &options.model_id,
+        options.revision,
+        &global.token_source,
+        &options.output_path,
+        &policy,
+    )?;
+    let types = summary
+        .types
+        .iter()
+        .map(|(name, count)| format!("{count} {name}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    info!(
+        "Wrote {} ({:.1} MiB): {types}",
+        options.output_path.display(),
+        summary.bytes as f64 / MIB
+    );
+    Ok(())
 }
 
 /// Run UQFF quantization and generation, supporting multiple ISQ types.
@@ -512,7 +539,7 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::args::{Cli, Command, ModelType, resolve_quantize_model_type};
+    use crate::args::{Cli, Command, ModelType, QuantizeCommand, resolve_quantize_command};
 
     fn parse(args: &[&str]) -> QuantizeModelType {
         let cli = Cli::try_parse_from(
@@ -528,7 +555,10 @@ mod tests {
         else {
             unreachable!()
         };
-        resolve_quantize_model_type(model_type, default_quantize).unwrap()
+        match resolve_quantize_command(model_type, default_quantize).unwrap() {
+            QuantizeCommand::Uqff(model_type) => *model_type,
+            QuantizeCommand::Asr(_) => unreachable!("these tests quantize UQFF"),
+        }
     }
 
     #[test]

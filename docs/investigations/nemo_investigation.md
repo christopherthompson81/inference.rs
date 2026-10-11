@@ -686,7 +686,7 @@ Left: one Hub repo holding several `asr` GGUFs (q8_0 and f16) needs the file pat
 
 **A mixed-precision `asr` GGUF: the writer, and a sensitivity sweep.** Raised by the user: keep the sensitive tensors finer than Q8_0.
 
-The writer: `parakeet::write_asr_gguf(nemo, out, policy)`, driven by `examples/asr_quantize.rs`, writes NVIDIA's layout from a `.nemo`:
+The writer: `parakeet::write_asr_gguf(nemo, out, policy)`, driven by `examples/asr_quantize.rs` (since Run 40, `inference quantize asr`), writes NVIDIA's layout from a `.nemo`:
 - the same `asr.*` keys and value types;
 - NeMo names with the converter's LSTM naming, and flattened pointwise convs;
 - NVIDIA's precision defaults: norms, biases and `pos_bias_*` F32; convs and the embedding F16;
@@ -818,7 +818,7 @@ Conclusions:
 - **Feed-forward at Q8_0.** Of the encoder, it is the part that needs 8 bits: with it at Q8_0 and the rest at Q6_K, both models come out smaller than NVIDIA's files (-6%) and more accurate. Below Q6_K the rest of the encoder falls apart.
 - **Q8_0 and below.** The streaming model's encoder is far less sensitive to Q8_0 than Parakeet's (min cos 0.9987 against 0.9715); its words are lost in the decoder.
 
-The presets on `QuantPolicy`, exposed as `asr_quantize --preset`:
+The presets on `QuantPolicy`, exposed as `asr_quantize --preset` (since Run 40, `inference quantize asr --policy`):
 - `q8_0`: uniform, NVIDIA's file byte for byte;
 - `q8_0-decoder`: `q8_0` with the decoder and joint at F16;
 - `q6_k-mix`: Q6_K, feed-forward Q8_0, decoder F16. Its file reproduces sweep 4's 605.7 MiB.
@@ -1134,3 +1134,18 @@ The official OpenAI Python SDK (`openai[realtime]` 3.28, venv on `/mnt/data/venv
 - **Model substitution** is logged.
 - **Subprotocol keys** are read only on upgrade requests, and the 401 message names that option.
 - **Constants:** the shared constants come from inference-api: `DEFAULT_MODEL_ID`, `PCM16_BYTES` and `PCM16_SCALE`.
+
+## Run 40 - 2026-10-11
+
+The `asr` GGUF writer moved from the example into the CLI as `inference quantize asr` (#391).
+
+- **Flags:**
+  - `-m` takes a `.nemo` path, a directory or a Hub repo, resolved like the loader's `.nemo`;
+  - `--policy` takes a preset or the uniform type, and `--revision` pins a Hub repo. `--policy` replaces `--preset` and `--matrices`: preset `q8_0` and uniform `q8_0` were the same policy.
+  - `--keep fragment=type` still wins over the preset's overrides.
+- **Check 1:** `inference quantize asr -m nvidia/parakeet-tdt-0.6b-v3 -o tdt-q8.gguf` took 4 s on a dev build.
+  - It wrote 641.7 MiB: 397 F32, 272 Q8_0, 30 F16.
+  - gguf-py comparison: all 699 tensors are byte-identical to NVIDIA's `q8_0.gguf`.
+  - NVIDIA's file adds `encoder.pos_enc.pe` and `preprocessor.fb`, as in Run 24.
+- **Check 2:** `--quant q6_k-mix` from the `.nemo` path wrote 605.7 MiB: 397 F32, 37 F16, 169 Q6_K, 96 Q8_0.
+- **Errors:** `--policy q7` lists the presets and types; `--keep joint` is refused as not `fragment=type`.

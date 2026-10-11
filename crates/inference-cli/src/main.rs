@@ -16,11 +16,13 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 
-use args::{CacheCommand, Cli, Command, resolve_model_type, resolve_quantize_model_type};
+use args::{
+    CacheCommand, Cli, Command, QuantizeCommand, resolve_model_type, resolve_quantize_command,
+};
 use commands::{
-    BenchRunConfig, run_bench, run_cache_delete, run_cache_list, run_doctor, run_from_config,
-    run_interactive, run_login, run_quantize, run_server, run_tune, run_uninstall, run_update,
-    run_uqff,
+    BenchRunConfig, run_asr_quantize, run_bench, run_cache_delete, run_cache_list, run_doctor,
+    run_from_config, run_interactive, run_login, run_quantize, run_server, run_tune, run_uninstall,
+    run_update, run_uqff,
 };
 use inference_api::{LogVerbosity, initialize_inference_logging};
 
@@ -97,10 +99,10 @@ async fn main() -> Result<()> {
         Command::Quantize {
             model_type,
             default_quantize,
-        } => {
-            let model_type = resolve_quantize_model_type(model_type, default_quantize)?;
-            run_quantize(model_type, cli.global).await?;
-        }
+        } => match resolve_quantize_command(model_type, default_quantize)? {
+            QuantizeCommand::Uqff(model_type) => run_quantize(*model_type, cli.global).await?,
+            QuantizeCommand::Asr(options) => run_asr_quantize(options, cli.global)?,
+        },
 
         Command::Uqff { command } => {
             run_uqff(command, cli.global).await?;

@@ -30,6 +30,40 @@ const NO_CONTEXT: i32 = -1;
 const POSITIONS: u32 = 5000;
 const DITHER: f32 = 1e-5;
 const Q8_LAYOUT: &str = "block_q8_0";
+const OVERRIDE_SEPARATOR: char = '=';
+
+/// The tensor types a policy names, by their llama.cpp names.
+pub const TYPE_NAMES: [(&str, GgmlDType); 9] = [
+    ("f32", GgmlDType::F32),
+    ("f16", GgmlDType::F16),
+    ("q8_0", GgmlDType::Q8_0),
+    ("q6_k", GgmlDType::Q6K),
+    ("q5_k", GgmlDType::Q5K),
+    ("q5_0", GgmlDType::Q5_0),
+    ("q4_k", GgmlDType::Q4K),
+    ("q4_0", GgmlDType::Q4_0),
+    ("q3_k", GgmlDType::Q3K),
+];
+type Preset = (&'static str, fn() -> QuantPolicy);
+
+/// The named policies [`QuantPolicy::parse`] takes besides a type name.
+pub const PRESETS: [Preset; 2] = [
+    ("q8_0-decoder", QuantPolicy::q8_0_decoder),
+    ("q6_k-mix", QuantPolicy::q6_k_mix),
+];
+
+fn type_named(name: &str) -> Result<GgmlDType> {
+    TYPE_NAMES
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, d)| *d)
+        .ok_or_else(|| {
+            msg(format!(
+                "`{name}` is not one of {:?}",
+                TYPE_NAMES.map(|(n, _)| n)
+            ))
+        })
+}
 
 // llama.cpp's `general.file_type`: the "mostly" type the large matrices take
 fn file_type(matrices: GgmlDType) -> u32 {
@@ -71,6 +105,31 @@ impl QuantPolicy {
             matrices,
             overrides: Vec::new(),
         }
+    }
+
+    /// A preset or uniform type, `policy`, with `keep`'s `fragment=type` overrides ahead of its own.
+    pub fn parse(policy: &str, keep: &[String]) -> Result<Self> {
+        let mut policy = match PRESETS.iter().find(|(name, _)| *name == policy) {
+            Some((_, preset)) => preset(),
+            None => Self::uniform(type_named(policy).map_err(|_| {
+                msg(format!(
+                    "`{policy}` is not a preset {:?} or a type {:?}",
+                    PRESETS.map(|(n, _)| n),
+                    TYPE_NAMES.map(|(n, _)| n)
+                ))
+            })?),
+        };
+        let keep = keep
+            .iter()
+            .map(|k| match k.split_once(OVERRIDE_SEPARATOR) {
+                Some((fragment, d)) => Ok((fragment.to_string(), type_named(d)?)),
+                None => Err(msg(format!(
+                    "`{k}` is not fragment{OVERRIDE_SEPARATOR}type"
+                ))),
+            })
+            .collect::<Result<Vec<_>>>()?;
+        policy.overrides.splice(0..0, keep);
+        Ok(policy)
     }
 
     /// Q8_0 with the decoder and joint at F16: NVIDIA's size plus 2%, about a third of its word errors.
@@ -302,6 +361,25 @@ mod tests {
 
     fn zeros(dims: &[usize]) -> Tensor {
         Tensor::zeros(dims, DType::F32, &Device::Cpu).unwrap()
+    }
+
+    #[test]
+    fn a_parsed_policy_puts_its_overrides_ahead_of_the_presets() -> Result<()> {
+        let q = "encoder.layers.0.self_attn.linear_q.weight";
+        let ff = "encoder.layers.0.feed_forward1.linear1.weight";
+        let matrix = zeros(&[1024, 1024]);
+        let keep = vec!["self_attn=q4_k".to_string(), "feed_forward=f16".to_string()];
+        let policy = QuantPolicy::parse("q6_k-mix", &keep)?;
+        assert_eq!(policy.dtype(q, &matrix), GgmlDType::Q4K);
+        assert_eq!(policy.dtype(ff, &matrix), GgmlDType::F16);
+        assert_eq!(
+            QuantPolicy::parse("q5_k", &[])?.dtype(q, &matrix),
+            GgmlDType::Q5K
+        );
+        assert!(QuantPolicy::parse("q7_x", &[]).is_err());
+        assert!(QuantPolicy::parse("q8_0", &["self_attn".to_string()]).is_err());
+        assert!(QuantPolicy::parse("q8_0", &["self_attn=q7_x".to_string()]).is_err());
+        Ok(())
     }
 
     #[test]
