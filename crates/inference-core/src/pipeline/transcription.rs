@@ -28,7 +28,8 @@ use inference_models_speech::diarization::{
 };
 use inference_models_speech::nemo;
 use inference_models_speech::parakeet::{
-    MODEL_TYPES, Parakeet, ParakeetFiles, ParakeetStream, is_asr, is_asr_gguf,
+    self, MODEL_TYPES, Parakeet, ParakeetFiles, ParakeetStream, QuantPolicy, TYPE_NAMES, is_asr,
+    is_asr_gguf,
 };
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
@@ -513,6 +514,40 @@ pub(crate) fn asr_nemo(
         silent,
     };
     nemo_of_kind(model_id, source, is_asr, "speech recognition")
+}
+
+/// An `asr` GGUF written from a `.nemo`: its size, and how many tensors took each type.
+#[derive(Debug, Clone)]
+pub struct AsrGgufSummary {
+    pub bytes: u64,
+    pub types: Vec<(String, usize)>,
+}
+
+/// Writes the recogniser `.nemo` `model_id` names to `out` as an `asr` GGUF under `policy`.
+pub fn write_asr_gguf(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &TokenSource,
+    out: &std::path::Path,
+    policy: &QuantPolicy,
+) -> Result<AsrGgufSummary> {
+    let nemo = asr_nemo(model_id, revision, token_source, false)?;
+    let chosen = parakeet::write_asr_gguf(&nemo, out, policy)?;
+    let mut types: Vec<(String, usize)> = Vec::new();
+    for (_, dtype) in chosen {
+        let name = TYPE_NAMES
+            .iter()
+            .find(|(_, d)| *d == dtype)
+            .map_or_else(|| format!("{dtype:?}"), |(n, _)| n.to_string());
+        match types.iter_mut().find(|(n, _)| *n == name) {
+            Some((_, count)) => *count += 1,
+            None => types.push((name, 1)),
+        }
+    }
+    Ok(AsrGgufSummary {
+        bytes: std::fs::metadata(out)?.len(),
+        types,
+    })
 }
 
 /// The NVIDIA `asr` GGUF `model_id` names (Parakeet, streaming), found as `silero_gguf` finds its file.

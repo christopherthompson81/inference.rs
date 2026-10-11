@@ -3,6 +3,7 @@
 pub mod agentic;
 pub mod anthropic;
 pub mod api_error;
+pub mod asr_gguf;
 pub mod background_tasks;
 pub mod blocking;
 pub mod cached_responses;

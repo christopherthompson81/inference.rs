@@ -36,8 +36,9 @@ these models (`general.architecture = asr`) loads too, its 8-bit weights dequant
 the full-precision model's to within a few words on hard audio, where the `.nemo` matches it exactly. A repo's
 transformers files win over the GGUF beside them, so pass the downloaded `.gguf` path to load it.
 
-A finer GGUF can be written from a `.nemo` with `cargo run -p inference-models-speech --example asr_quantize --
---nemo <file> --out <file> --preset <name>`. `q8_0` reproduces NVIDIA's file byte for byte. `q8_0-decoder` keeps
+A finer GGUF can be written from a `.nemo` with `inference quantize asr -m <.nemo, directory or repo> -o <file>
+--policy <name>`. `--policy` takes a preset or the type every matrix takes; `q8_0`, the default, reproduces
+NVIDIA's file byte for byte. `q8_0-decoder` keeps
 the decoder and joint at F16, about 2% larger, which removed a third to two thirds of the 8-bit word errors in
 our measurements. `q6_k-mix` (Q6_K, the feed-forward at Q8_0, the decoder at F16) is about 6% smaller than
 NVIDIA's file and still more accurate. `--keep <name fragment>=<type>` sets the type of any other matrices. `parakeet-tdt-0.6b-v3` transcribes 25 European languages and identifies the language

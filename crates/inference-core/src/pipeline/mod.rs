@@ -177,8 +177,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 pub use transcription::{
-    DiarizationLoader, DiarizationLoaderType, TranscriptionLoader, TranscriptionLoaderType,
-    TranscriptionPipeline, VoiceActivityLoader,
+    AsrGgufSummary, DiarizationLoader, DiarizationLoaderType, TranscriptionLoader,
+    TranscriptionLoaderType, TranscriptionPipeline, VoiceActivityLoader, write_asr_gguf,
 };
 
 pub type SpeechPreparation = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;

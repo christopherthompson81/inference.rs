@@ -7,6 +7,39 @@ use std::path::PathBuf;
 
 use super::{FormatOptions, ModelFormat};
 
+/// What `quantize` writes: a UQFF of a model, or an `asr` GGUF of a speech recogniser
+#[derive(Subcommand, Clone)]
+pub enum QuantizeCommand {
+    #[command(flatten)]
+    Uqff(Box<QuantizeModelType>),
+
+    /// Speech recogniser `.nemo` to an `asr` GGUF (Parakeet, hybrid and streaming FastConformers)
+    Asr(AsrQuantizeOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct AsrQuantizeOptions {
+    /// A `.nemo` file, a directory holding one, or a Hugging Face repo whose only checkpoint it is
+    #[arg(short = 'm', long)]
+    pub model_id: String,
+
+    /// Hub revision (branch, tag or commit) of a repo `--model-id`
+    #[arg(long)]
+    pub revision: Option<String>,
+
+    /// Output `.gguf` path
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// A preset (`q8_0-decoder`, `q6_k-mix`) or the type every matrix takes; `q8_0` writes NVIDIA's own file
+    #[arg(long, default_value = "q8_0")]
+    pub policy: String,
+
+    /// `<name fragment>=<type>`, repeatable: the first fragment a tensor's name contains sets its type
+    #[arg(long)]
+    pub keep: Vec<String>,
+}
+
 /// Quantize model type selection (base models only, no adapter support)
 #[derive(Subcommand, Clone)]
 pub enum QuantizeModelType {
@@ -433,16 +466,21 @@ impl QuantizeDefaultOptions {
 
 /// Get the effective QuantizeModelType, using default options if no subcommand was provided.
 /// Returns an error if no subcommand is provided and required fields are missing.
-pub fn resolve_quantize_model_type(
-    model_type: Option<QuantizeModelType>,
+pub fn resolve_quantize_command(
+    command: Option<QuantizeCommand>,
     default_options: QuantizeDefaultOptions,
-) -> anyhow::Result<QuantizeModelType> {
-    let mut model_type = match model_type {
-        Some(model_type) => model_type,
-        None => return default_options.into_quantize_model_type(),
+) -> anyhow::Result<QuantizeCommand> {
+    let mut model_type = match command {
+        Some(QuantizeCommand::Uqff(model_type)) => *model_type,
+        Some(asr @ QuantizeCommand::Asr(_)) => return Ok(asr),
+        None => {
+            return default_options
+                .into_quantize_model_type()
+                .map(|m| QuantizeCommand::Uqff(Box::new(m)));
+        }
     };
     normalize_quantize_model_type(&mut model_type)?;
-    Ok(model_type)
+    Ok(QuantizeCommand::Uqff(Box::new(model_type)))
 }
 
 fn normalize_quantize_model_type(model_type: &mut QuantizeModelType) -> anyhow::Result<()> {
@@ -490,7 +528,47 @@ mod tests {
         else {
             unreachable!()
         };
-        resolve_quantize_model_type(model_type, default_quantize)
+        match resolve_quantize_command(model_type, default_quantize)? {
+            QuantizeCommand::Uqff(model_type) => Ok(*model_type),
+            QuantizeCommand::Asr(_) => unreachable!("these tests quantize UQFF"),
+        }
+    }
+
+    #[test]
+    fn asr_takes_a_policy_and_repeated_overrides() {
+        let cli = Cli::try_parse_from([
+            "inference",
+            "quantize",
+            "asr",
+            "-m",
+            "org/recogniser",
+            "-o",
+            "out.gguf",
+            "--policy",
+            "q6_k-mix",
+            "--keep",
+            "joint.=f16",
+            "--keep",
+            "self_attn=q8_0",
+        ])
+        .unwrap();
+        let Command::Quantize {
+            model_type,
+            default_quantize,
+        } = cli.command
+        else {
+            unreachable!()
+        };
+        let Ok(QuantizeCommand::Asr(options)) =
+            resolve_quantize_command(model_type, default_quantize)
+        else {
+            panic!("`quantize asr` resolved to a UQFF job")
+        };
+        assert_eq!(options.model_id, "org/recogniser");
+        assert_eq!(options.output_path, PathBuf::from("out.gguf"));
+        assert_eq!(options.policy, "q6_k-mix");
+        assert_eq!(options.revision, None);
+        assert_eq!(options.keep, ["joint.=f16", "self_attn=q8_0"]);
     }
 
     #[test]
