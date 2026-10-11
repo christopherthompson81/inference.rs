@@ -124,7 +124,7 @@ pub fn open(name: &str, built: &str, id: &str) -> Result<Library, String> {
 #[macro_export]
 macro_rules! kernel_library {
     (
-        library = $lib:literal;
+        library = $lib:expr;
         path = $path:expr;
         id = $id:expr;
         unsafe extern "C" {
@@ -191,7 +191,7 @@ macro_rules! kernel_library {
 #[macro_export]
 macro_rules! kernel_library {
     (
-        library = $lib:literal;
+        library = $lib:expr;
         path = $path:expr;
         id = $id:expr;
         unsafe extern "C" { $($body:tt)* }

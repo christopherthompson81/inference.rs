@@ -178,7 +178,7 @@ pub fn quantize_expert_stack_with_bias(
         let bias = bias
             .map(|bias| bias.to_dtype(DType::F32)?.to_device(device))
             .transpose()?;
-        return Ok(Arc::new(crate::GgufMatMul::from_qtensor(w, bias)));
+        return Ok(Arc::new(crate::GgufMatMul::from_qtensor(w, bias)?));
     }
     let unquant = Arc::new(crate::UnquantLinear::new(
         crate::QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(stack, bias)),

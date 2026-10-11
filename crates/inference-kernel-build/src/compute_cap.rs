@@ -298,7 +298,7 @@ fn parse_nvidia_smi_output(output: &str) -> Result<Vec<GpuArch>> {
 }
 
 /// Match filename against pattern (simple glob matching)
-fn matches_pattern(filename: &str, pattern: &str) -> bool {
+pub(crate) fn matches_pattern(filename: &str, pattern: &str) -> bool {
     // Handle exact match
     if filename == pattern {
         return true;

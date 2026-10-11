@@ -607,7 +607,7 @@ impl GgufWeightSource {
         } else {
             let weight = self.archive.load_qtensor(source_name, device)?;
             let bias = self.load_bias(key, device, range, dims.len())?;
-            return Ok(Arc::new(GgufMatMul::from_qtensor(weight, bias)));
+            return Ok(Arc::new(GgufMatMul::from_qtensor(weight, bias)?));
         };
         let bias = self.load_bias(key, device, range, dims.len())?;
         quant_linear(weight, bias, device)
@@ -1089,7 +1089,7 @@ fn quant_linear(
         Some(dtype) => Arc::new(GgufMatMul::from_qtensor(
             qtensor_from_gguf_data(dtype, &weight.data, weight.dims, device)?,
             bias,
-        )),
+        )?),
         None => Arc::new(GgufRawMatMul::new(
             RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?,
             bias,

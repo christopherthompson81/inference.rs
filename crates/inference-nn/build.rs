@@ -142,13 +142,13 @@ fn main() {
         // https://github.com/EricLBuehler/mistral.rs/issues/588
         let out_file = if target.contains("msvc") {
             // Windows case
-            out_dir.join("inferencecuda.lib")
+            out_dir.join("inferencenn.lib")
         } else {
-            out_dir.join("libinferencecuda.a")
+            out_dir.join("libinferencenn.a")
         };
 
         builder
-            .build_loadable_lib("inferencecuda", prepare_cuda_archive(out_file))
+            .build_loadable_lib("inferencenn", prepare_cuda_archive(out_file))
             .expect("Build inference-nn CUDA kernels failed!");
         println!("cargo:rustc-link-lib=dylib=cudart");
 

@@ -1,11 +1,11 @@
 // Matvec and dequantize kernels for ik_llama.cpp's IQ*_K GGUF types, with Q8_1 activations.
 // Vec dots, dequantizers, value tables and helpers are copied from ik_llama.cpp (MIT, Iwan Kawrakow):
 // mmvq-instance-iq*_k*.cu, convert.cu, ggml-common.h, iqk_cuda_common.h and iqk_mmvq_templates.cuh.
+#pragma once
 #include "mmvq_rows.cuh"
 #include <type_traits>
 
 typedef half ggml_half;
-
 
 typedef struct { ggml_half d; uint16_t extra; uint8_t scales[QK_K/32]; uint8_t qs[QK_K/4]; } block_iq2_k;
 
@@ -114,8 +114,6 @@ __device__ __forceinline__ int int_from_table_4(const uint32_t idx, const int * 
     return values[ggml_cuda_dp4a(idx, 0x40100401, 0)];
 }
 
-
-
 #ifdef __CUDA_ARCH__
 static __device__ __forceinline__ int2 get_int_from_table_8(const int & q4, const int8_t * values) {
     const uint32_t * values32 = (const uint32_t *)values;
@@ -164,8 +162,6 @@ static __device__ __forceinline__ int int_from_table(const uint8_t * a8, const u
     uint16_t v2 = values[a8[2]] | (values[a8[3]] << 8);
     return v1 | (v2 << 16);
 }
-
-
 
 // mmvq-instance-iq2_k.cu
 __device__ __forceinline__ void vec_dot_iq2_k_q8_1(
@@ -1086,7 +1082,6 @@ static __global__ void dequantize_block_iq2_kl(const void * __restrict__ vx, dst
     }
 }
 
-
 struct iqk_iq2_k {
   static constexpr bool has_tail = false;
   static __host__ __device__ int64_t row_size(int ncols) { return 0 + (int64_t)sizeof(block_iq2_k) * (ncols / QK_K); }
@@ -1209,26 +1204,3 @@ struct iqk_iq2_kl {
   dequantize(tag, bf16, __nv_bfloat16)                    \
   dequantize(tag, f16, half)                              \
   dequantize(tag, f32, float)
-
-
-IQK_LAUNCHERS(iq2_k, DEQUANTIZE_IQK_LAUNCHER)
-
-IQK_LAUNCHERS(iq3_k, DEQUANTIZE_IQK_LAUNCHER)
-
-IQK_LAUNCHERS(iq4_k, DEQUANTIZE_IQK_LAUNCHER)
-
-IQK_LAUNCHERS(iq5_k, DEQUANTIZE_IQK_LAUNCHER)
-
-IQK_LAUNCHERS(iq6_k, DEQUANTIZE_IQK_LAUNCHER)
-
-IQK_LAUNCHERS(iq4_ks, DEQUANTIZE_IQK_ROWS_LAUNCHER)
-
-IQK_LAUNCHERS(iq2_ks, DEQUANTIZE_IQK_ROWS_LAUNCHER)
-
-IQK_LAUNCHERS(iq4_kss, DEQUANTIZE_IQK_ROWS_LAUNCHER)
-
-IQK_LAUNCHERS(iq5_ks, DEQUANTIZE_IQK_ROWS_LAUNCHER)
-
-IQK_LAUNCHERS(iq3_ks, DEQUANTIZE_IQK_ROWS_LAUNCHER)
-
-IQK_LAUNCHERS(iq2_kl, DEQUANTIZE_IQK_ROWS_LAUNCHER)

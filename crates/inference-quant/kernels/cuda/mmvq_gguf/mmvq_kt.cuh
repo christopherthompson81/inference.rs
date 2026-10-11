@@ -1,5 +1,6 @@
 // Matvec and dequantize kernels for ik_llama.cpp's trellis GGUF types (IQ1_KT through IQ4_KT), Q8_1 activations.
 // Adapted from ik_llama.cpp (MIT, Iwan Kawrakow): iqk_mmvq_templates.cuh, mmvq-instance-iq*_kt.cu and convert.cu.
+#pragma once
 #include "mmvq_rows.cuh"
 
 #define KT_ROW_META 4
@@ -325,8 +326,3 @@ static __global__ void dequantize_iq4_kt(const void *__restrict__ vx, dst_t *__r
   DEQUANTIZE_KT_LAUNCHER(tag, bf16, __nv_bfloat16)    \
   DEQUANTIZE_KT_LAUNCHER(tag, f16, half)              \
   DEQUANTIZE_KT_LAUNCHER(tag, f32, float)
-
-KT_LAUNCHERS(iq1_kt, kt_iq1)
-KT_LAUNCHERS(iq2_kt, kt_iq2)
-KT_LAUNCHERS(iq3_kt, kt_iq3)
-KT_LAUNCHERS(iq4_kt, kt_iq4)

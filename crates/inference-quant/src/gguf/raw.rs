@@ -123,6 +123,7 @@ impl RawGgufTensor {
             Device::Cpu => RawStorage::Cpu(Arc::new(self.bytes()?)),
             #[cfg(feature = "cuda")]
             Device::Cuda(device) => {
+                super::ffi::ensure_type_loaded(self.ty).map_err(inference_tensor::Error::msg)?;
                 let owned;
                 let bytes = match &self.storage {
                     RawStorage::Cpu(bytes) => bytes.as_slice(),

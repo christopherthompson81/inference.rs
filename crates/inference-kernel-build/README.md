@@ -20,14 +20,17 @@ so existing caches and settings still apply.
 - `src/parallel.rs`: the default pool size is raised from half to all cores, since the jobserver now bounds
   concurrency. `CUDAFORGE_THREADS` still caps it, and its test is updated to match.
 - `Cargo.toml`: adds the `jobserver` dependency.
-- `src/builder.rs`: `build_and_link` builds a kernel library as `lib{name}.so` in Linux dev builds and as a static
-  archive otherwise. `build_shared_lib` keys the shared library by its compile inputs under
-  `<target>/<profile>/cuda-kernels`, so every cargo variant maps one copy. `build_lib` shares `compile_objects` with
-  it, which removes a stale output when a compile fails, and links through `run_link`.
+- `src/builder.rs`: `build_loadable_lib` builds a kernel library as `lib{name}.so` for `inference_tensor::kernel_library!`
+  to open at runtime (a static archive on targets without dlopen). It keys the library by its compile inputs, under
+  `<target>/<profile>/cuda-kernels` in dev builds (every cargo variant maps one copy) and under
+  `~/.cache/inference-rs/kernels/built` otherwise, links in a build id the loader checks, and writes a
+  `cuda-kernels/<name>.lib` pointer for packaging. `split_lib` links the sources matching a pattern into a library of
+  their own from the same compile pass. `build_lib` shares `compile_objects` with it, which removes a stale output when
+  a compile fails, and links through `run_link`.
 - `src/builder.rs`: `build_fatbin` builds one fatbin per source with the incremental, parallel path of `build_ptx`
   (both now pass `-o`), and `PtxOutput` writes `include_bytes!` consts for fatbins and lists the built `images()`.
   Sources inside the builder's own out dir (generated PTX) get no `rerun-if-changed`, which would rerun every build.
-- `src/builder.rs`: `build_lib` and `build_shared_lib` print the toolkit's library directory as a link search path,
+- `src/builder.rs`: `build_lib` and `build_loadable_lib` print the toolkit's library directory as a link search path,
   since the kernel libraries link `cudart` and cudarc no longer adds it when it loads its libraries at runtime.
 - `src/builder.rs`: adds `KernelBuilder::compress_fatbin`, which passes `-compress-mode=size` from CUDA 12.8 and
   `-Xfatbin=-compress-all` before it, with a unit test for the version threshold.

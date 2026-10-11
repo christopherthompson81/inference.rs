@@ -9,6 +9,13 @@ const CUTLASS_COMMIT_ENV: &str = "INFERENCE_RS_CUTLASS_COMMIT";
 #[cfg(feature = "cuda")]
 const CUDA_BUILD_ROOT_ENV: &str = "INFERENCE_RS_CUDA_BUILD_ROOT";
 #[cfg(feature = "cuda")]
+const KERNEL_LIB: &str = "inferencequant";
+#[cfg(feature = "cuda")]
+const CUDA_KERNEL_DIR: &str = "kernels/cuda";
+/// `kernels/cuda/<dir>/<kind>_instance_<type>.cu` holds one GGUF type's kernels, linked into `inferencequant_<type>`.
+#[cfg(feature = "cuda")]
+const TYPE_INSTANCE_MARKER: &str = "_instance_";
+#[cfg(feature = "cuda")]
 const SUPPORTED_CUDA_TOOLKIT_VERSIONS: &[(usize, usize)] = &[
     (13, 4),
     (13, 3),
@@ -140,6 +147,28 @@ fn nvfp4_cutlass_supported_for_build(
     target: &str,
 ) -> bool {
     cuda_version == (13, 3) && sm121_listed && cutile && target.contains("linux")
+}
+
+// the GGUF types with instance files, each of which gets its own kernel library
+#[cfg(feature = "cuda")]
+fn gguf_type_instances() -> Result<std::collections::BTreeSet<String>, String> {
+    let mut types = std::collections::BTreeSet::new();
+    for dir in std::fs::read_dir(CUDA_KERNEL_DIR).map_err(|e| e.to_string())? {
+        let dir = dir.map_err(|e| e.to_string())?.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        for file in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let path = file.map_err(|e| e.to_string())?.path();
+            if path.extension().is_some_and(|e| e == "cu")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && let Some((_, gguf_type)) = stem.split_once(TYPE_INSTANCE_MARKER)
+            {
+                types.insert(gguf_type.to_string());
+            }
+        }
+    }
+    Ok(types)
 }
 
 fn main() -> Result<(), String> {
@@ -280,12 +309,18 @@ fn main() -> Result<(), String> {
         // https://github.com/EricLBuehler/mistral.rs/issues/588
         let out_file = if target.contains("msvc") {
             // Windows case
-            out_dir.join("inferencequant.lib")
+            out_dir.join(format!("{KERNEL_LIB}.lib"))
         } else {
-            out_dir.join("libinferencequant.a")
+            out_dir.join(format!("lib{KERNEL_LIB}.a"))
         };
+        for gguf_type in gguf_type_instances()? {
+            builder = builder.split_lib(
+                &format!("{KERNEL_LIB}_{gguf_type}"),
+                &format!("*{TYPE_INSTANCE_MARKER}{gguf_type}.cu"),
+            );
+        }
         builder
-            .build_loadable_lib("inferencequant", prepare_cuda_archive(out_file))
+            .build_loadable_lib(KERNEL_LIB, prepare_cuda_archive(out_file))
             .expect("Build mistral quant lib failed!");
         if deepgemm_fp8_sm90 {
             let deepgemm_source_hash_arg =

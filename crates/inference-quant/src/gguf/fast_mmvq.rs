@@ -39,7 +39,7 @@ fn output_shape(xs: &Tensor, nrows: usize) -> Shape {
     Shape::from(out_dims)
 }
 
-/// Quant types supported by `mmvq_gguf.cu`.
+/// Quant types with matvec kernels (`mmvq_instance_<type>.cu`).
 pub fn supports(dtype: impl Into<GgufType>) -> bool {
     let dtype = dtype.into();
     matches!(
