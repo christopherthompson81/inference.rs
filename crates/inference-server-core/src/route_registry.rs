@@ -111,6 +111,7 @@ pub const SPEECH_GENERATION_ROUTE: RouteInfo =
     RouteInfo::new("/v1/audio/speech", "POST", RouteKind::OpenAi);
 pub const TRANSCRIPTION_ROUTE: RouteInfo =
     RouteInfo::new("/v1/audio/transcriptions", "POST", RouteKind::OpenAi);
+pub const REALTIME_ROUTE: RouteInfo = RouteInfo::new("/v1/realtime", "GET", RouteKind::OpenAi);
 pub const VOICE_ACTIVITY_ROUTE: RouteInfo =
     RouteInfo::new("/v1/audio/vad", "POST", RouteKind::InferenceRs);
 pub const DIARIZATION_ROUTE: RouteInfo =
@@ -170,6 +171,7 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     IMAGE_GENERATION_ROUTE,
     SPEECH_GENERATION_ROUTE,
     TRANSCRIPTION_ROUTE,
+    REALTIME_ROUTE,
     VOICE_ACTIVITY_ROUTE,
     DIARIZATION_ROUTE,
     FILES_ROUTE,

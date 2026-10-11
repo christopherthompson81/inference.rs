@@ -31,6 +31,8 @@ pub const API_KEY_ENV: &str = "INFERENCE_RS_API_KEY";
 pub const ENV_KEY_OWNER: &str = "default";
 pub(crate) const API_KEY_HEADER: &str = "x-api-key";
 const BEARER_SCHEME: &str = "bearer";
+const WEBSOCKET_KEY_PREFIX: &str = "openai-insecure-api-key.";
+const WEBSOCKET: &str = "websocket";
 const KEY_SEPARATOR: char = '=';
 const COMMENT_PREFIX: char = '#';
 /// The cookie a signed-in browser carries; it names a server-side session, never the key.
@@ -215,8 +217,9 @@ impl Auth {
         if let Some(owner) = presented_key(headers).and_then(|key| self.keys.owner_of(key)) {
             return Some(owner.to_string());
         }
-        // SameSite stops other sites, not other ports or subdomains of this one: a change must come from this origin
-        let reads = matches!(*method, Method::GET | Method::HEAD);
+        // SameSite stops other sites, not other ports or subdomains of this one: a change must come from this origin,
+        // and so must a WebSocket, a GET whose replies CORS does not keep from the page that opened it
+        let reads = matches!(*method, Method::GET | Method::HEAD) && !is_upgrade(headers);
         if !cookies || !(reads || same_origin(headers)) {
             return None;
         }
@@ -231,11 +234,33 @@ fn presented_key(headers: &HeaderMap) -> Option<&str> {
         .and_then(|value| value.split_once(' '))
         .filter(|(scheme, _)| scheme.eq_ignore_ascii_case(BEARER_SCHEME))
         .map(|(_, key)| key.trim());
-    bearer.or_else(|| {
-        headers
-            .get(API_KEY_HEADER)
-            .and_then(|value| value.to_str().ok())
-    })
+    bearer
+        .or_else(|| {
+            headers
+                .get(API_KEY_HEADER)
+                .and_then(|value| value.to_str().ok())
+        })
+        .or_else(|| subprotocol_key(headers))
+}
+
+fn is_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(axum::http::header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case(WEBSOCKET))
+}
+
+// a browser cannot set headers on a WebSocket, so Realtime clients offer the key as a subprotocol
+fn subprotocol_key(headers: &HeaderMap) -> Option<&str> {
+    if !is_upgrade(headers) {
+        return None;
+    }
+    headers
+        .get(axum::http::header::SEC_WEBSOCKET_PROTOCOL)?
+        .to_str()
+        .ok()?
+        .split(',')
+        .find_map(|protocol| protocol.trim().strip_prefix(WEBSOCKET_KEY_PREFIX))
 }
 
 // Two session cookies means one was planted beside ours (say with a narrower Path), so neither is trusted.
@@ -274,7 +299,7 @@ fn same_origin(headers: &HeaderMap) -> bool {
 fn unauthorized(path: &str) -> Response {
     let error = ApiError::new(
         ApiErrorKind::Unauthorized,
-        "Missing or unknown API key. Send it as `Authorization: Bearer <key>` or `x-api-key`.",
+        "Missing or unknown API key. Send it as `Authorization: Bearer <key>` or `x-api-key` (a WebSocket may offer it as the `openai-insecure-api-key.<key>` subprotocol).",
         Some("invalid_api_key"),
         None,
     );

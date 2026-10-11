@@ -249,7 +249,7 @@ fn with_cookie(mut request: Request<Body>, cookie: &str) -> Request<Body> {
 }
 
 /// Signs a browser in with `key` and returns the cookie it then carries.
-async fn sign_in(app: &Router, key: &str) -> anyhow::Result<String> {
+pub(crate) async fn sign_in(app: &Router, key: &str) -> anyhow::Result<String> {
     let request = Request::post("/auth/session")
         .header("content-type", "application/json")
         .body(Body::from(json!({"key": key}).to_string()))?;

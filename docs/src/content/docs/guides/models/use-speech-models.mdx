@@ -262,6 +262,25 @@ inference_transcription_session_free(session);
 </TabItem>
 </Tabs>
 
+Over HTTP, `GET /v1/realtime?intent=transcription` serves these sessions as OpenAI's Realtime transcription
+sessions. The OpenAI SDKs connect unchanged:
+
+```python
+from openai import AsyncOpenAI
+
+client = AsyncOpenAI(base_url="http://localhost:1234/v1", api_key="unused")
+async with client.realtime.connect(extra_query={"intent": "transcription"}) as conn:
+    await conn.session.update(session={"type": "transcription", "audio": {"input": {
+        "format": {"type": "audio/pcm", "rate": 24000}, "turn_detection": {"type": "server_vad"}}}})
+    await conn.input_audio_buffer.append(audio=base64_pcm16)  # as the microphone fills
+    async for event in conn:
+        if event.type == "conversation.item.input_audio_transcription.delta":
+            print(event.delta, end="", flush=True)
+```
+
+See [OpenAI compatibility](/reference/openai-compatibility/#realtime-transcription-sessions) for the events and the
+energy-based server VAD.
+
 Other notes:
 - **Models:** sessions take a cache-aware streaming checkpoint only. A model that transcribes whole recordings (Parakeet TDT, RNN-T, CTC) refuses one. A session stays on the model it opened on.
 - **Decoding:** sessions decode greedily, and audio is taken at 8 to 192 kHz.

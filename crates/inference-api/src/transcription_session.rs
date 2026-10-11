@@ -17,9 +17,10 @@ use crate::{
 };
 
 static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
-// bytes per little-endian PCM16 sample
-const PCM16_BYTES: usize = 2;
-const PCM16_SCALE: f32 = 32768.0;
+/// Bytes per little-endian PCM16 sample.
+pub const PCM16_BYTES: usize = 2;
+/// A PCM16 sample's full scale.
+pub const PCM16_SCALE: f32 = 32768.0;
 // telephone audio to studio audio; outside it a resampling ratio turns a few bytes into minutes of audio
 const MIN_SAMPLE_RATE: u32 = 8_000;
 const MAX_SAMPLE_RATE: u32 = 192_000;

@@ -94,6 +94,7 @@ pub mod audio_analysis;
 pub mod inference_server_router_builder;
 pub mod metrics;
 pub mod openapi_doc;
+pub mod realtime;
 pub mod responses;
 pub mod route_registry;
 pub mod serve;

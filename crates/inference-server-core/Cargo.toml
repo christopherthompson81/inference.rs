@@ -14,7 +14,8 @@ homepage.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-axum = { workspace = true, features = ["tokio", "multipart"] }
+axum = { workspace = true, features = ["tokio", "multipart", "ws"] }
+base64.workspace = true
 mime.workspace = true
 http-body = { workspace = true }
 http-body-util.workspace = true
@@ -37,7 +38,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 inference-core.workspace = true
-base64.workspace = true
+tokio-tungstenite.workspace = true
 inference-tensor.workspace = true
 tempfile.workspace = true
 indicatif.workspace = true

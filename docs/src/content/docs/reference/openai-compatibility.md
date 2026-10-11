@@ -192,6 +192,36 @@ Served by transcription models such as Parakeet. See [speech models guide](/guid
 
 Not exposed. Voxtral and similar audio-understanding models also go through `/v1/chat/completions` with audio content parts.
 
+## Realtime (transcription sessions)
+
+`GET /v1/realtime?intent=transcription` is a WebSocket speaking the Realtime API's transcription sessions, on a cache-aware streaming recogniser such as Nemotron streaming ASR. The official SDKs' `client.realtime.connect(extra_query={"intent": "transcription"})` connect as they do to OpenAI.
+
+- **Connecting:**
+  - The server sends `session.created`, or `transcription_session.created` for a client that announces the beta (an `OpenAI-Beta: realtime=v1` header or the `openai-beta.realtime-v1` subprotocol).
+  - A browser may pass its key as the `openai-insecure-api-key.<key>` subprotocol. The key must then be a valid subprotocol token, with no `=`, `/` or spaces. Like a header key, it reaches anything that logs the handshake.
+  - A browser signed in by cookie may open a socket only from the server's own origin.
+- **Configuring:** `session.update` (`session.type: "transcription"`, `audio.input.{format, transcription, turn_detection}`) or the beta's `transcription_session.update` (`input_audio_format: "pcm16"`, `input_audio_transcription`, `turn_detection`).
+  - Each is answered by `session.updated` or `transcription_session.updated`. An update is checked whole: a refused one changes nothing.
+  - Audio is 16-bit mono PCM. `audio/pcm` takes its `rate`, 8 to 192 kHz; OpenAI documents only 24 kHz. `pcm16` is 24 kHz, and G.711 is refused.
+  - A `transcription.model` the server does not serve (such as `gpt-4o-transcribe`) uses the default model; the server logs the substitution. `language` conditions Nemotron-3.5, and `prompt` is accepted and ignored.
+- **Turns:**
+  - `turn_detection: null` leaves commits to the client.
+  - `server_vad`, the default as on OpenAI, is an energy detector here.
+  - Speech starts on a 20 ms frame louder than a level set by `threshold` (0 is -60 dBFS, 1 is -20 dBFS, default 0.5). An item opens then, starting `prefix_padding_ms` (default 300) before.
+  - The turn ends, and commits, after `silence_duration_ms` (default 500) without a loud frame.
+  - A turn ending mid-append keeps its own audio; the next turn starts its own item. `semantic_vad` is refused.
+- **Client events:** `input_audio_buffer.append` (base64 PCM16, non-empty), `.commit` and `.clear`. An empty commit is `input_audio_buffer_commit_empty`; any other client event is an `unknown_event` error. Conversation and response events are not served.
+- **Server events:**
+  - `conversation.item.added` (beta: `conversation.item.created`) when an item opens.
+  - `conversation.item.input_audio_transcription.delta` as audio arrives, a model chunk (about a second) at a time. Unlike OpenAI, deltas come before the item's `input_audio_buffer.committed`, not after.
+  - On commit, `input_audio_buffer.committed`, then `conversation.item.input_audio_transcription.completed` with `usage: {"type": "duration", "seconds"}`, or `.failed`.
+  - With server VAD, `input_audio_buffer.speech_started` and `.speech_stopped`, with times in milliseconds of the connection's audio.
+  - Each item is a fresh engine transcription session, so its first words are decoded without the item before as context.
+- **Limits:**
+  - a message is at most 16 MiB;
+  - a connection silent for 10 minutes, or not reading its events for 30 s, is closed;
+  - a model holds 64 sessions.
+
 ## Moderation
 
 Not supported. inference.rs has no built-in moderation model; run one as a separate service if needed.
