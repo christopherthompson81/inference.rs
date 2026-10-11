@@ -274,17 +274,22 @@ impl RelPositionAttention {
         let q = self.heads(&self.q.forward(xs)?)?;
         let k = self.heads(&self.k.forward(xs)?)?;
         let v = self.heads(&self.v.forward(xs)?)?;
-        let p = self.heads(&self.pos.forward(positions)?)?;
+        // rows a..b over keys c..c+K read position rows from T - b + c: offsets b-1-c down to a-(c+K-1)
+        let first = |b: &QueryBlock| t - b.start - b.rows + b.keys_from;
+        let band = |b: &QueryBlock| first(b)..first(b) + b.rows + b.keys - 1;
+        // only the rows some block reads: all 2T-1 for full attention, a band set by the context when chunked
+        let lo = blocks.iter().map(|b| band(b).start).min().unwrap_or(0);
+        let hi = blocks.iter().map(|b| band(b).end).max().unwrap_or(0);
+        let p = self.heads(&self.pos.forward(&positions.narrow(1, lo, hi - lo)?)?)?;
         // scaled before the products, so the (rows, keys) scores take no extra pass
         let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
         let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
-        // rows a..b over keys c..c+K read position rows from T - b + c: offsets b-1-c down to a-(c+K-1)
         let mut outs = Vec::with_capacity(blocks.len());
         for b in blocks {
             let keys = k.narrow(2, b.keys_from, b.keys)?;
             let values = v.narrow(2, b.keys_from, b.keys)?;
             let content = q_content.narrow(2, b.start, b.rows)?.matmul(&keys.t()?)?;
-            let window = p.narrow(2, t - b.start - b.rows + b.keys_from, b.rows + b.keys - 1)?;
+            let window = p.narrow(2, first(b) - lo, b.rows + b.keys - 1)?;
             let position = q_position
                 .narrow(2, b.start, b.rows)?
                 .matmul(&window.t()?)?;
