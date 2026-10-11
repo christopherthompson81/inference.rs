@@ -5,7 +5,8 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::Parser;
-use inference_models_speech::parakeet::{Parakeet, ParakeetFiles};
+use inference_models_speech::TranscriptionOptions;
+use inference_models_speech::parakeet::{HeadKind, Parakeet, ParakeetFiles};
 use inference_tensor::{DType, Device};
 
 #[derive(Parser)]
@@ -27,6 +28,9 @@ struct Args {
     /// passes on `--min-cosine` and `--max-wer` rather than on identical emissions.
     #[arg(long, conflicts_with = "nemo")]
     gguf: Option<PathBuf>,
+    /// Beam-search over this many hypotheses instead of greedily: MALSD for TDT, the default search for RNN-T.
+    #[arg(long)]
+    beam: Option<usize>,
     /// The WER a quantized checkpoint may reach: 8-bit weights swap a spelling and flip words where voices overlap.
     #[arg(long, default_value_t = 0.05)]
     max_wer: f64,
@@ -86,6 +90,10 @@ fn main() -> Result<()> {
         .collect::<std::io::Result<Vec<_>>>()?;
     dumps.retain(|p| p.extension().is_some_and(|e| e == "safetensors"));
     dumps.sort();
+    let options = TranscriptionOptions {
+        beam_size: args.beam,
+        ..Default::default()
+    };
     let mut failed = false;
     // across the clips: word edits and reference words, and each clip's encoder cosine
     let (mut edits, mut words, mut cosines) = (0, 0, Vec::new());
@@ -110,17 +118,15 @@ fn main() -> Result<()> {
         let (features, _) = model.features(&pcm)?;
         let encoded = model.encode(&pcm, None)?;
         let emissions: Vec<[i64; 3]> = model
-            .emissions(&encoded)?
+            .emissions(&encoded, args.beam)?
             .iter()
             .map(|e| [i64::from(e.token), e.frame as i64, e.frames as i64])
             .collect();
-        let text = model
-            .transcribe(&pcm, model.sample_rate(), &Default::default())?
-            .text;
+        let text = model.transcribe(&pcm, model.sample_rate(), &options)?.text;
         let elapsed = start.elapsed().as_secs_f64();
         // warm: the weights are paged in and the kernels loaded by the run above
         let warm = std::time::Instant::now();
-        model.transcribe(&pcm, model.sample_rate(), &Default::default())?;
+        model.transcribe(&pcm, model.sample_rate(), &options)?;
         let warm = warm.elapsed().as_secs_f64();
 
         let encoded = encoded.squeeze(0)?.flatten_all()?.to_vec1::<f32>()?;
@@ -135,7 +141,20 @@ fn main() -> Result<()> {
             0.0
         };
         cosines.push(encoded_cos);
-        let same_emissions = emissions == want_emissions;
+        // NeMo's TDT MALSD stamps a token at its frame plus its duration, its RNN-T beam at its frame
+        let same_emissions = if args.beam.is_some() {
+            let stamp = |e: &[i64; 3]| match model.head() {
+                HeadKind::Tdt => e[1] + e[2],
+                _ => e[1],
+            };
+            emissions.len() == want_emissions.len()
+                && emissions
+                    .iter()
+                    .zip(&want_emissions)
+                    .all(|(e, w)| e[0] == w[0] && stamp(e) == w[1])
+        } else {
+            emissions == want_emissions
+        };
         let first_diff = emissions
             .iter()
             .zip(&want_emissions)

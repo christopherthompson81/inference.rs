@@ -4,7 +4,7 @@
 # Not part of local_ci.sh: it needs nemo_toolkit (2.6+) with torch, so NEMO_PYTHON names the interpreter that has
 # them (default python3).
 #
-# Usage: scripts/nemo_asr_parity.sh <.nemo> <wav>... [--cpu]
+# Usage: scripts/nemo_asr_parity.sh <.nemo> <wav>... [--cpu] [--beam <n>]
 #   .nemo  e.g. nvidia/stt_en_fastconformer_hybrid_large_pc's checkpoint
 #   wav    16-bit PCM wav files, mono, 16 kHz
 set -euo pipefail
@@ -17,22 +17,41 @@ nemo=$(realpath "$1")
 shift
 wavs=()
 cpu=()
-for arg in "$@"; do
-    if [[ $arg == --cpu ]]; then cpu=(--cpu); else wavs+=("$(realpath "$arg")"); fi
+beam=()
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --cpu) cpu=(--cpu) ;;
+        # NeMo's beam searches, score-normalised: MALSD for TDT, the default search for RNN-T
+        --beam) beam=(--beam "$2"); shift ;;
+        *) wavs+=("$(realpath "$1")") ;;
+    esac
+    shift
 done
 root=$(cd "$(dirname "$0")/.." && pwd)
 dumps=$(mktemp -d)
 trap 'rm -rf "$dumps"' EXIT
 
-"${NEMO_PYTHON:-python3}" -P -W ignore - "$nemo" "$dumps" "${wavs[@]}" <<'PY'
+"${NEMO_PYTHON:-python3}" -P -W ignore - "$nemo" "$dumps" "${beam[1]:-0}" "${wavs[@]}" <<'PY'
 import json, logging, sys, wave
 import numpy as np, torch
 from safetensors.torch import save_file
 logging.disable(logging.WARNING)
 from nemo.collections.asr.models import ASRModel
 
-nemo, out, *wavs = sys.argv[1:]
+nemo, out, beam, *wavs = sys.argv[1:]
 model = ASRModel.restore_from(nemo, map_location="cpu").eval()
+if int(beam) > 1:
+    from omegaconf import open_dict
+    cfg = model.cfg.decoding
+    # TDT takes the batched MALSD search, RNN-T the default one, as ours does
+    tdt = bool(cfg.get("durations"))
+    with open_dict(cfg):
+        cfg.strategy = "malsd_batch" if tdt else "beam"
+        cfg.beam.beam_size = int(beam)
+        cfg.beam.search_type = "default"
+        cfg.beam.score_norm = True
+        cfg.beam.return_best_hypothesis = True
+    model.change_decoding_strategy(cfg, verbose=False)
 for n, path in enumerate(wavs):
     w = wave.open(path)
     assert w.getframerate() == 16000 and w.getnchannels() == 1, f"{path}: 16 kHz mono only"
@@ -44,9 +63,12 @@ for n, path in enumerate(wavs):
         hyp = model.decoding.rnnt_decoder_predictions_tensor(
             encoder_output=encoded, encoded_lengths=enc_len, return_hypotheses=True
         )[0]
-    tokens = hyp.y_sequence.tolist() if torch.is_tensor(hyp.y_sequence) else list(hyp.y_sequence)
-    frames = hyp.timestamp.tolist() if torch.is_tensor(hyp.timestamp) else list(hyp.timestamp)
-    emissions = [(t, f, 1) for t, f in zip(tokens, frames)]
+    # tensors from the greedy search, numpy arrays from the batched beam
+    tokens = [int(t) for t in hyp.y_sequence]
+    frames = [int(f) for f in hyp.timestamp]
+    # a beam hypothesis opens with the blank it started from
+    emissions = [(t, f, 1) for t, f in zip(tokens, frames) if t != model.decoder.blank_idx]
+    tokens = [t for t, _, _ in emissions]
     save_file({
         "pcm": torch.from_numpy(np.ascontiguousarray(pcm)),
         "features": mel[0, :, : int(mel_len[0])].T.contiguous(),
@@ -64,4 +86,4 @@ if [[ ${#cpu[@]} -eq 0 ]] && command -v nvcc >/dev/null 2>&1; then
 fi
 # the example's `--model` directory goes unread when `--nemo` names the checkpoint
 cargo run --manifest-path "$root/Cargo.toml" -q -p inference-models-speech --example parakeet_parity "${features[@]}" -- \
-    --model "$dumps" --dumps "$dumps" --nemo "$nemo" "${cpu[@]}"
+    --model "$dumps" --dumps "$dumps" --nemo "$nemo" "${cpu[@]}" "${beam[@]}"

@@ -29,6 +29,9 @@ use crate::{
     util::validate_model_name,
 };
 
+// a transducer beam search costs a joint evaluation per hypothesis per frame; past this it buys nothing
+const MAX_BEAM_SIZE: usize = 16;
+
 const TRANSCRIBE_TASK: &str = "transcribe";
 const SENTENCE_ENDS: [char; 4] = ['.', '?', '!', '\u{3002}'];
 // a silence this long starts a new subtitle even mid-sentence
@@ -236,6 +239,17 @@ async fn transcribe_inner(
     request: TranscriptionRequest,
     audio: &[u8],
 ) -> Result<TranscriptionOutput, ApiError> {
+    if request
+        .beam_size
+        .is_some_and(|b| !(1..=MAX_BEAM_SIZE).contains(&b))
+    {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("`beam_size` must be 1 to {MAX_BEAM_SIZE}"),
+            Some("invalid_beam_size"),
+            Some("beam_size"),
+        ));
+    }
     let audio = decode_audio(audio)?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     match run(
@@ -246,6 +260,7 @@ async fn transcribe_inner(
             audio,
             options: TranscriptionOptions {
                 language: request.language.clone(),
+                beam_size: request.beam_size,
             },
         },
     )

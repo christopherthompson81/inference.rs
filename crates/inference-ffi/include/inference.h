@@ -455,11 +455,12 @@ INFERENCE_API inference_status inference_speech_generation(const inference_engin
                                                           size_t request_len, inference_blob **out_blob);
 /* Transcribes audio with a speech recognition model. request holds the POST /v1/audio/transcriptions form fields as
  * JSON ({"model"?, "response_format"?: "json" | "text" | "srt" | "verbose_json" | "vtt", "timestamp_granularities"?:
- * ["word", "segment"], "language"?}; "language" conditions Nemotron-3.5 and is ignored by Parakeet, as are "prompt"
- * and "temperature"); audio is audio_len bytes of an encoded file (WAV, MP3, FLAC, OGG, ..., at most 64 MiB). out_blob
- * receives the transcript in that format, its MIME type naming it, e.g. "application/json". Audio that does not
- * decode, a language the model does not take, or a recording past 24 minutes on a full-attention model loaded without
- * a VAD ("vad_model_id" in its spec), is INFERENCE_ERR_INVALID_REQUEST. */
+ * ["word", "segment"], "language"?, "beam_size"?}; "language" conditions Nemotron-3.5 and is ignored by Parakeet, as
+ * are "prompt" and "temperature"; "beam_size" (1 to 16) beam-searches an RNN-T or TDT head); audio is audio_len bytes
+ * of an encoded file (WAV, MP3, FLAC, OGG, ..., at most 64 MiB). out_blob receives the transcript in that format, its
+ * MIME type naming it, e.g. "application/json". Audio that does not decode, a language the model does not take, a
+ * beam out of range or on a CTC head, or a recording past 24 minutes on a full-attention model loaded without a VAD
+ * ("vad_model_id" in its spec), is INFERENCE_ERR_INVALID_REQUEST. */
 INFERENCE_API inference_status inference_transcription(const inference_engine *engine, const char *request,
                                                       size_t request_len, const uint8_t *audio, size_t audio_len,
                                                       inference_blob **out_blob);

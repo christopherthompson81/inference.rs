@@ -319,3 +319,56 @@ async fn a_written_asr_gguf_transcribes_as_its_nemo() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+// a beam decodes each transducer head, repeating exactly; a CTC head and a beam out of range are refused
+#[tokio::test]
+async fn beam_search_decodes_transducers_and_refuses_the_rest() -> anyhow::Result<()> {
+    let wav = chirp_wav();
+    let beamed = |beam: usize| {
+        let mut r = request(TranscriptionResponseFormat::VerboseJson);
+        r.beam_size = Some(beam);
+        r
+    };
+    for head in ["parakeet_tdt", "parakeet_rnnt", "nemotron_asr_streaming"] {
+        let checkpoint = tiny_parakeet_checkpoint(head)?;
+        let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu()
+            .build()
+            .await?;
+        let first = model.transcription(beamed(4), &wav).await?.body;
+        let parsed: VerboseTranscriptionResponse = serde_json::from_str(&first)?;
+        assert!(
+            parsed
+                .words
+                .as_deref()
+                .unwrap_or_default()
+                .windows(2)
+                .all(|w| w[0].start <= w[1].start),
+            "{head}"
+        );
+        assert_eq!(
+            model.transcription(beamed(4), &wav).await?.body,
+            first,
+            "{head}"
+        );
+        let err = model
+            .transcription(beamed(17), &wav)
+            .await
+            .expect_err("a beam past the limit decoded");
+        assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    }
+    let ctc = tiny_parakeet_checkpoint("parakeet_ctc")?;
+    let model = TranscriptionModelBuilder::new(ctc.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let err = model
+        .transcription(beamed(4), &wav)
+        .await
+        .expect_err("a CTC head beam-searched");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    assert!(err.message.contains("CTC"), "{err}");
+    Ok(())
+}

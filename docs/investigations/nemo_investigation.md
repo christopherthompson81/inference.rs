@@ -842,3 +842,97 @@ Caveat: the edit counts are small (9 to 54 per policy). The decoder effect is co
 - **Round-trip test:** also loads a `q6_k_mix` file.
 
 Rechecked: `--preset q8_0` is still byte-identical to NVIDIA's file for all 699 tensors. Every key NVIDIA writes is now present (`joint_dim` 640).
+
+## Run 29 - 2026-10-10
+
+**Beam search: a port of NeMo's default algorithm, and what beam search is worth.**
+
+Ported NeMo's `default` beam searches:
+- `BeamRNNTInfer.default_beam_search`: scores as Python floats;
+- `BeamTDTInfer.default_beam_search`: scores in float32, `(duration, token)` pairs taken from torch's `cartesian_prod` order, duplicate merging by log-add, a lone zero duration replaced by the shortest non-zero one.
+
+Both rank the n-best by score per symbol (`score_norm`). The beam size reaches them as `TranscriptionOptions.beam_size`, exposed as the `beam_size` request field (1 to 16).
+
+Parity, `scripts/nemo_asr_parity.sh <.nemo> <wavs> --beam 4` against NeMo 2.7.1 on CPU, tokens and text:
+- **hybrid RNN-T:**
+  - 3 LibriSpeech clips exact;
+  - 97.6 s demo exact (639 tokens; greedy gives 641);
+  - 300 s AMI exact (998; greedy gives 1023).
+
+  So the beam is exercised and matches.
+- **parakeet-tdt-0.6b-v3 TDT:** exact as well (16, 505 and 2 tokens). But 2 tokens on 300 s, against 1207 greedy: NeMo's own default TDT beam collapses on long audio, and we reproduce it.
+
+How NeMo's TDT strategies behave on long audio (beam 4, words):
+
+| strategy | 300 s AMI | 97.6 s demo |
+|---|---|---|
+| greedy | 681 | 289 |
+| `beam` / `default` | 1 | 233 |
+| `maes` | 161 | 237 |
+| `malsd_batch` | 633 | 279 |
+
+Quality against ground truth: `libri_dummy.parquet` (73 LibriSpeech utterances with references), lowercase, punctuation stripped, jiwer WER, in NeMo:
+
+| model | greedy | default beam | `malsd_batch` |
+|---|---|---|---|
+| hybrid (RNN-T) | 2.26% | 2.35% | - |
+| parakeet-tdt-0.6b-v3 (TDT) | 3.83% | 3.65% | 3.48% |
+
+Conclusions:
+- Without an LM, beam search buys little on these models.
+- The RNN-T default beam is not better than greedy here.
+- For TDT, only `malsd_batch` both helps (9% relative) and survives long audio. The default and `maes` searches drop speech.
+- So shipping the ported TDT default beam would be harmful.
+
+Options:
+1. Ship the RNN-T beam and refuse TDT beam.
+2. Port `malsd_batch` for TDT.
+3. Drop beam search.
+
+## Run 30 - 2026-10-10
+
+**Beam search: MALSD for TDT, the default search for RNN-T.** The user chose to port `malsd_batch` for TDT, keep the RNN-T default beam, and refuse the default TDT beam.
+
+The MALSD port (`Transducer::malsd`) follows NeMo's `ModifiedALSDBatchedTDTComputer.modified_alsd_torch` without fusion models.
+- `beam` slots step together, each at its own frame.
+- Per step, each active slot scores its top `beam` (label, duration) pairs over all labels with blank, flattened label-major. A blank with duration 0 is forced to the shortest non-zero duration.
+- A finished slot carries over at its score in its first candidate.
+- A slot past `max_symbols` at one frame gets only a forced blank, scored with the best duration.
+- All `beam x beam` candidates are pruned to `beam`, and slots on one path recombine by log-sum-exp, the first best keeping the score. A path is the same transcript hash, last label, token count and next frame.
+- The predictor runs batched over the slots, keeping a source's state where the label is blank.
+- Scores are float32, and the best slot is chosen by score over (tokens + 1).
+- NeMo uses the duration index as the duration; with v3's durations `[0..4]` that is the same, and ours uses the value.
+
+The predictor now runs `n` rows at once (`start`/`advance` over a token slice). The RNN-T default beam and greedy decoding use one row.
+
+Parity, `nemo_asr_parity.sh --beam 4` (MALSD for TDT, default for RNN-T), NeMo 2.7.1, tokens and text:
+- **parakeet-tdt-0.6b-v3:** exact on 3 LibriSpeech clips (15/15, 16/16, 17/17), on the 97.6 s demo (612/612) and on the 300 s AMI clip (1135/1135; greedy gives 1207, NeMo's default TDT beam gives 2).
+- **hybrid RNN-T, rerun after the predictor change:** exact (16/16, 639/639, 998/998).
+
+Speed, CUDA: the 300 s clip takes 42 s with MALSD (beam 4), against about 6 s greedy. One host round trip per step: joint logits to the host for the top-k, then the predictor. A follow-up could keep the top-k on the device.
+
+API:
+- `beam_size` on the transcription request (form field, integer kind), 1 to 16, validated in inference-api;
+- carried in `TranscriptionOptions`;
+- a CTC head refuses a beam over 1 per request.
+
+Tests:
+- an engine test: beam 4 on the tiny TDT, RNN-T and streaming heads decodes and repeats exactly; 17 is refused; CTC is refused;
+- a unit test pins recombination: log-sum-exp into the first best, other frames and transcripts kept apart.
+
+## Run 31 - 2026-10-10
+
+**Review fixes for beam search.**
+- MALSD returns no emissions for an empty encoder output, instead of underflowing.
+- RNN-T's state cache is trimmed after each frame to sequences at least as long as the shortest kept hypothesis. Hypotheses only lengthen, so no evicted state is asked for again, and the output is unchanged. On 300 s it no longer holds every state ever expanded.
+- A beam on a CTC head is refused before the encoder runs.
+- MALSD's transcript hash is NeMo's `hash_text` (`h * 6364136223846793005 + 1 + label`, wrapping).
+- The final pick takes the first best slot, as Python's `max` does.
+- Constants hoisted, comments one line, and kept hypotheses cloned only on a break.
+- Beam parity now compares frames too: our frame plus span for TDT against MALSD's stamp, and the frame for RNN-T against the default beam's. Exact on both models:
+  - TDT: 16/16, 612/612, 1135/1135;
+  - RNN-T: 16/16, 639/639, 998/998.
+
+The user's read of Runs 29-30: greedy performs best, and segmentation by VAD or diarization plus greedy gives reasonable WER. So greedy stays the default, `beam_size` stays opt-in, and MALSD's speed (42 s per 300 s on CUDA) is not worth optimizing.
+
+A follow-up worth doing: speaker-attributed transcription, with diarization turns segmenting greedy recognition.

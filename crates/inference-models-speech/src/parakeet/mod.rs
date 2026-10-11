@@ -200,6 +200,10 @@ impl Parakeet {
         })
     }
 
+    pub fn head(&self) -> HeadKind {
+        self.kind
+    }
+
     pub fn sample_rate(&self) -> u32 {
         self.mel.config().sample_rate
     }
@@ -226,7 +230,7 @@ impl Parakeet {
         }
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        self.transcribe_samples(&pcm, language)
+        self.transcribe_samples(&pcm, language, options.beam_size)
     }
 
     fn identifies(&self, language: &str) -> bool {
@@ -235,8 +239,13 @@ impl Parakeet {
             .is_some_and(|p| p.id(Some(language)).ok() == Some(p.default))
     }
 
-    // the request's language for a model that takes one, checked before any audio is touched
+    // the request's language for a model that takes one, and its beam, checked before any audio is touched
     fn language<'a>(&self, options: &'a TranscriptionOptions) -> Result<Option<&'a str>> {
+        if self.kind == HeadKind::Ctc && options.beam_size.is_some_and(|b| b > 1) {
+            return Err(msg(
+                "beam search decodes transducer (RNN-T, TDT) heads; this one is CTC",
+            ));
+        }
         let Some(prompts) = &self.prompts else {
             return Ok(None);
         };
@@ -255,6 +264,7 @@ impl Parakeet {
         options: &TranscriptionOptions,
     ) -> Result<Transcription> {
         let language = self.language(options)?;
+        let beam = options.beam_size;
         let rate = self.sample_rate();
         if vad.config().sample_rate != rate {
             return Err(msg(format!(
@@ -265,7 +275,7 @@ impl Parakeet {
         let pcm = inference_audio::mel::resample(pcm, sample_rate, rate).map_err(msg)?;
         let duration = pcm.len() as f64 / f64::from(rate);
         if duration <= LONG_FORM_SECONDS {
-            return self.transcribe_samples(&pcm, language);
+            return self.transcribe_samples(&pcm, language, beam);
         }
         let options = SegmentOptions {
             max_speech_duration_s: Some(WINDOW_SECONDS),
@@ -290,7 +300,7 @@ impl Parakeet {
         let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
         for (start, end) in widen(&windows(&speech, window_samples), pcm.len(), edge) {
             let offset = start as f64 / f64::from(rate);
-            let part = self.transcribe_samples(&pcm[start..end], language)?;
+            let part = self.transcribe_samples(&pcm[start..end], language, beam)?;
             merged.language = merged.language.or(part.language);
             let shift = |t: TimedText| TimedText {
                 start: t.start + offset,
@@ -309,10 +319,15 @@ impl Parakeet {
         Ok(merged)
     }
 
-    fn transcribe_samples(&self, pcm: &[f32], language: Option<&str>) -> Result<Transcription> {
+    fn transcribe_samples(
+        &self,
+        pcm: &[f32],
+        language: Option<&str>,
+        beam: Option<usize>,
+    ) -> Result<Transcription> {
         let duration = pcm.len() as f64 / f64::from(self.sample_rate());
         let encoded = self.encode(pcm, language)?;
-        let emissions = self.head.decode(&encoded)?;
+        let emissions = self.head.decode(&encoded, beam)?;
         let mut transcription = self.text(&emissions, duration)?;
         let identified = self.prompts.as_ref().and_then(|prompts| {
             emissions
@@ -346,9 +361,9 @@ impl Parakeet {
         }
     }
 
-    /// Token ids and their frames, before detokenisation.
-    pub fn emissions(&self, encoded: &Tensor) -> Result<Vec<Emission>> {
-        self.head.decode(encoded)
+    /// Token ids and their frames, before detokenisation: greedy, or a beam of `beam` hypotheses.
+    pub fn emissions(&self, encoded: &Tensor, beam: Option<usize>) -> Result<Vec<Emission>> {
+        self.head.decode(encoded, beam)
     }
 
     fn text(&self, emissions: &[Emission], duration: f64) -> Result<Transcription> {
