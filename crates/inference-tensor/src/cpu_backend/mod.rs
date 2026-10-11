@@ -14,7 +14,9 @@ pub use utils::{
 #[cfg(not(any(feature = "mkl", feature = "accelerate")))]
 mod conv1d_direct;
 mod conv2d;
+mod conv_grouped;
 use conv2d::Conv2D;
+use conv_grouped::GroupedConv;
 
 // TODO: Maybe we should not implement [Clone] here and instead have an explicit allocator +
 // intercept the oom errors to avoid panicking and provide a proper error.
@@ -2722,6 +2724,9 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv1D,
     ) -> Result<Self> {
+        if params.groups > 1 {
+            return GroupedConv::conv1d(params).map(self, l, kernel, kernel_l);
+        }
         // MKL and Accelerate bring their own GEMM, which the direct kernel was not measured against
         #[cfg(not(any(feature = "mkl", feature = "accelerate")))]
         if let (Self::F32(src), Self::F32(w)) = (self, kernel) {
@@ -2821,6 +2826,9 @@ impl BackendStorage for CpuStorage {
         kernel_l: &Layout,
         params: &crate::conv::ParamsConv2D,
     ) -> Result<Self> {
+        if params.groups > 1 {
+            return GroupedConv::conv2d(params).map(self, l, kernel, kernel_l);
+        }
         Conv2D(params).map(self, l, kernel, kernel_l)
     }
 

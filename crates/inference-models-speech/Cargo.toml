@@ -35,6 +35,7 @@ cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda"]
 metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]
 
 [dev-dependencies]
+mimalloc.workspace = true
 tempfile.workspace = true
 anyhow.workspace = true
 clap.workspace = true

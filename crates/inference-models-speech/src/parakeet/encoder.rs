@@ -275,8 +275,9 @@ impl RelPositionAttention {
         let k = self.heads(&self.k.forward(xs)?)?;
         let v = self.heads(&self.v.forward(xs)?)?;
         let p = self.heads(&self.pos.forward(positions)?)?;
-        let q_content = q.broadcast_add(&self.bias_u)?;
-        let q_position = q.broadcast_add(&self.bias_v)?;
+        // scaled before the products, so the (rows, keys) scores take no extra pass
+        let q_content = (q.broadcast_add(&self.bias_u)? * scale)?;
+        let q_position = (q.broadcast_add(&self.bias_v)? * scale)?;
         // rows a..b over keys c..c+K read position rows from T - b + c: offsets b-1-c down to a-(c+K-1)
         let mut outs = Vec::with_capacity(blocks.len());
         for b in blocks {
@@ -287,7 +288,7 @@ impl RelPositionAttention {
             let position = q_position
                 .narrow(2, b.start, b.rows)?
                 .matmul(&window.t()?)?;
-            let mut scores = ((content + rel_shift(&position, b.keys)?)? * scale)?;
+            let mut scores = (content + rel_shift(&position, b.keys)?)?;
             if let Some(mask) = &b.mask {
                 scores = scores.broadcast_add(mask)?;
             }
@@ -333,12 +334,12 @@ impl RelPositionAttention {
             v = Tensor::cat(&[past_v, &v], 2)?;
         }
         let keys = k.dim(2)?;
-        let content = q.broadcast_add(&self.bias_u)?.matmul(&k.t()?)?;
+        let content = (q.broadcast_add(&self.bias_u)? * scale)?.matmul(&k.t()?)?;
         // the table's rows run from offset W-1 down; this window needs keys-1 down to -(rows-1)
         let w = positions.dim(2)?.div_ceil(2);
         let window = positions.narrow(2, w - keys, keys + rows - 1)?;
-        let position = q.broadcast_add(&self.bias_v)?.matmul(&window.t()?)?;
-        let scores = ((content + rel_shift(&position, keys)?)? * scale)?;
+        let position = (q.broadcast_add(&self.bias_v)? * scale)?.matmul(&window.t()?)?;
+        let scores = (content + rel_shift(&position, keys)?)?;
         let attn = ops::softmax_last_dim(&scores)?.matmul(&v)?;
         let kept = keep.min(keys);
         *cache = Some((
@@ -352,14 +353,17 @@ impl RelPositionAttention {
     }
 }
 
-// a block's (Q, T+Q-1) offset scores to (Q, T) key scores, row r at column Q-1-r+j: Transformer-XL's pad-and-reshape
+// (Q, T+Q-1) offset scores to (Q, T) key scores: (r, j) is flat element Q-1 + r(P-1) + j, a view plus one copy
 fn rel_shift(scores: &Tensor, t: usize) -> Result<Tensor> {
     let (b, h, q, p) = scores.dims4()?;
+    // a lone row reads columns 0..T, one wider than the (P-1)-wide rows of the view
+    if q == 1 {
+        return scores.narrow(3, 0, t);
+    }
     scores
-        .pad_with_zeros(D::Minus1, 1, 0)?
-        .reshape((b, h, p + 1, q))?
-        .narrow(2, 1, p)?
-        .reshape((b, h, q, p))?
+        .flatten_from(2)?
+        .narrow(2, q - 1, q * (p - 1))?
+        .reshape((b, h, q, p - 1))?
         .narrow(3, 0, t)
 }
 
@@ -465,7 +469,7 @@ impl ConvModule {
     fn depthwise_tail(&self, padded: &Tensor, t: usize) -> Result<Tensor> {
         let c = padded.dim(D::Minus1)?;
         let xs_shape = (padded.dim(0)?, t, c);
-        // a depthwise conv as kernel-many shifted products: one grouped conv per channel is slow off CUDA
+        // a depthwise conv as kernel-many shifted products, reading (B, T, C) as it lies rather than channel-major
         let mut acc = self
             .depthwise_bias
             .reshape((1, 1, c))?
@@ -784,6 +788,24 @@ mod tests {
             .filter(|(_, m)| **m == 0.)
             .map(|(i, _)| block.keys_from + i)
             .collect())
+    }
+
+    #[test]
+    fn rel_shift_reads_row_r_from_column_q_minus_one_minus_r() -> Result<()> {
+        let (q, t) = (5, 7);
+        let p = q + t - 1;
+        let scores =
+            Tensor::arange(0f32, (2 * q * p) as f32, &Device::Cpu)?.reshape((1, 2, q, p))?;
+        let shifted = rel_shift(&scores, t)?.squeeze(0)?.to_vec3::<f32>()?;
+        let scores = scores.squeeze(0)?.to_vec3::<f32>()?;
+        for (h, rows) in shifted.iter().enumerate() {
+            for (r, row) in rows.iter().enumerate() {
+                for (j, v) in row.iter().enumerate() {
+                    assert_eq!(*v, scores[h][r][q - 1 - r + j], "head {h} ({r}, {j})");
+                }
+            }
+        }
+        Ok(())
     }
 
     #[test]

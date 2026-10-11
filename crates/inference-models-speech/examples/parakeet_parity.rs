@@ -9,6 +9,10 @@ use inference_models_speech::TranscriptionOptions;
 use inference_models_speech::parakeet::{HeadKind, Parakeet, ParakeetFiles};
 use inference_tensor::{DType, Device};
 
+// the `inference` binary's allocator, so CPU timings match it
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 #[derive(Parser)]
 struct Args {
     /// Directory with `config.json`, `processor_config.json`, `tokenizer.json` and `model.safetensors`.
@@ -123,7 +127,9 @@ fn main() -> Result<()> {
 
         let start = std::time::Instant::now();
         let (features, _) = model.features(&pcm)?;
+        let encode_start = std::time::Instant::now();
         let encoded = model.encode(&pcm, None)?;
+        let encode_seconds = encode_start.elapsed().as_secs_f64();
         let emissions: Vec<[i64; 3]> = model
             .emissions(&encoded, args.beam)?
             .iter()
@@ -208,7 +214,7 @@ fn main() -> Result<()> {
             && streamed_ok;
         failed |= !ok;
         println!(
-            "{} {}: features cos {feature_cos:.6} ({} vs {}), encoder cos {encoded_cos:.6}, emissions {}/{}{} {}, text {}, {elapsed:.2}s (one warm transcribe {warm:.2}s)",
+            "{} {}: features cos {feature_cos:.6} ({} vs {}), encoder cos {encoded_cos:.6}, emissions {}/{}{} {}, text {}, {elapsed:.2}s (one warm transcribe {warm:.2}s, first encode {encode_seconds:.2}s)",
             if ok { "ok  " } else { "FAIL" },
             meta["wav"]
                 .as_str()

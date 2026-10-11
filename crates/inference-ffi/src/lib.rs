@@ -8,6 +8,10 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use inference_tensor::Device;
 
+// as the `inference` binary: tensor ops allocate fresh buffers constantly, and the system allocator faults them in
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 pub mod callbacks;
 pub mod engine;
 pub mod layout;
