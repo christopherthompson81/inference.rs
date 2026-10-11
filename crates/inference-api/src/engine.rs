@@ -12,6 +12,7 @@ use inference_selection::quant;
 use inference_tensor::Device;
 use serde::Deserialize;
 
+use crate::transcription_session::TranscriptionSession;
 use crate::{
     agentic::AgenticDefaults,
     agentic::{ApprovalDecisionRequest, ApprovalDecisionResponse, resolve_approval},
@@ -52,7 +53,7 @@ use crate::{
         ChatCompletionRequest, CompletionRequest, DiarizationOutput, DiarizationRequest,
         EmbeddingRequest, EmbeddingResponse, ImageGenerationRequest, ModelObjects,
         OpenAiToolSurface, SpeechGenerationRequest, TranscriptionOutput, TranscriptionRequest,
-        VoiceActivityRequest, VoiceActivityResponse,
+        TranscriptionSessionRequest, VoiceActivityRequest, VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -1637,6 +1638,21 @@ impl Engine {
         audio: &[u8],
     ) -> Result<TranscriptionOutput, ApiError> {
         self.transcription(parse_json(request)?, audio).await
+    }
+
+    /// Opens a streamed transcription on a cache-aware streaming model, fed audio as it arrives.
+    pub async fn transcription_session(
+        &self,
+        request: TranscriptionSessionRequest,
+    ) -> Result<TranscriptionSession, ApiError> {
+        crate::transcription_session::open(self.state(), request).await
+    }
+
+    pub async fn transcription_session_json(
+        &self,
+        request: &[u8],
+    ) -> Result<TranscriptionSession, ApiError> {
+        self.transcription_session(parse_json(request)?).await
     }
 
     /// Answers the approval an `agentic_tool_approval_required` stream event named.

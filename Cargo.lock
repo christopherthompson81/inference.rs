@@ -2411,6 +2411,7 @@ dependencies = [
  "image",
  "indicatif 0.18.3",
  "inference-api",
+ "inference-audio",
  "inference-macros",
  "inference-models-gemma",
  "inference-models-llama",

@@ -1266,6 +1266,7 @@ impl ChatStream {
             | Response::Transcription(_)
             | Response::VoiceActivity(_)
             | Response::Diarization(_)
+            | Response::TranscriptionStream(_)
             | Response::Raw { .. }
             | Response::Embeddings { .. } => unreachable!("not a chat stream response"),
         })

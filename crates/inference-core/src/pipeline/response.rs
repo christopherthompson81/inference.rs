@@ -35,7 +35,7 @@ pub async fn send_image_responses(
 
 pub async fn send_transcription_responses(
     input_seqs: &mut [&mut Sequence],
-    transcripts: Vec<Result<inference_models_speech::Transcription, String>>,
+    transcripts: Vec<Result<super::TranscriptionOutcome, String>>,
 ) -> inference_tensor::Result<()> {
     if input_seqs.len() != transcripts.len() {
         inference_tensor::bail!(
@@ -46,7 +46,12 @@ pub async fn send_transcription_responses(
     }
     for (seq, transcript) in input_seqs.iter_mut().zip(transcripts) {
         let response = match transcript {
-            Ok(transcript) => Response::Transcription(transcript),
+            Ok(super::TranscriptionOutcome::Whole(transcript)) => {
+                Response::Transcription(transcript)
+            }
+            Ok(super::TranscriptionOutcome::Stream(update)) => {
+                Response::TranscriptionStream(update)
+            }
             Err(error) => Response::ValidationError(error.into()),
         };
         // a client gone before its answer must not cost the rest of the batch theirs

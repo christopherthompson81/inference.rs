@@ -227,22 +227,32 @@ class EngineTest(unittest.TestCase):
 
 # the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
 PARAKEET_DIR = "parakeet"
+STREAMING_DIR = "parakeet_streaming"
 SILERO_DIR = "silero"
 DIARIZATION_DIR = "diarization"
 TONE_RATE = 16000
 TONE_HZ = 440.0
 
 
-def tone_wav(seconds: float = 1.0) -> bytes:
-    import io
+# a streamed session's pieces: 100 ms, across the tiny model's chunks
+PCM_PIECE = 3200
+
+
+def tone_pcm16(seconds: float = 1.0) -> bytes:
     import math
     import struct
-    import wave
 
-    frames = b"".join(
+    return b"".join(
         struct.pack("<h", int(0.3 * 32767 * math.sin(2 * math.pi * TONE_HZ * i / TONE_RATE)))
         for i in range(int(seconds * TONE_RATE))
     )
+
+
+def tone_wav(seconds: float = 1.0) -> bytes:
+    import io
+    import wave
+
+    frames = tone_pcm16(seconds)
     buffer = io.BytesIO()
     with wave.open(buffer, "wb") as w:
         w.setnchannels(1)
@@ -275,6 +285,39 @@ class TranscriptionTest(unittest.TestCase):
             with self.assertRaises(ir.InferenceError) as bad:
                 engine.transcription("{}", b"not audio")
             self.assertEqual(bad.exception.status, ir.Status.INVALID_REQUEST)
+
+    def test_a_streamed_transcription_matches_the_whole_one(self):
+        model = os.environ.get(MODEL_VARIABLE)
+        if not model:
+            self.skipTest(f"{MODEL_VARIABLE} is not set")
+        spec = json.dumps(
+            {
+                "model": {"Transcription": {"model_id": os.path.join(model, STREAMING_DIR), "dtype": "f32"}},
+                "runtime": {"device": "cpu"},
+            }
+        )
+        with ir.JsonEngine(spec) as engine:
+            whole = json.loads(engine.transcription(json.dumps({"response_format": "json"}), tone_wav()).data)
+            pcm = tone_pcm16()
+            with engine.transcription_session(json.dumps({"sample_rate": TONE_RATE})) as session:
+                deltas = "".join(session.push(pcm[i : i + PCM_PIECE]) for i in range(0, len(pcm), PCM_PIECE))
+                last, transcript = session.finish()
+            self.assertEqual(transcript.mime_type, "application/json")
+            self.assertEqual(json.loads(transcript.data)["text"], whole["text"])
+            self.assertEqual((deltas + last).strip(), whole["text"])
+            with self.assertRaises(ir.InferenceError) as odd:
+                engine.transcription_session("{}").push(b"\x00")
+            self.assertEqual(odd.exception.status, ir.Status.INVALID_REQUEST)
+        offline_spec = json.dumps(
+            {
+                "model": {"Transcription": {"model_id": os.path.join(model, PARAKEET_DIR), "dtype": "f32"}},
+                "runtime": {"device": "cpu"},
+            }
+        )
+        with ir.JsonEngine(offline_spec) as engine:
+            with self.assertRaises(ir.InferenceError) as refused:
+                engine.transcription_session("{}")
+            self.assertEqual(refused.exception.status, ir.Status.INVALID_REQUEST)
 
     def test_voice_activity_finds_the_speech(self):
         model = os.environ.get(MODEL_VARIABLE)

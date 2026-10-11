@@ -79,6 +79,38 @@ internal sealed class StreamHandle : SafeHandle
     }
 }
 
+/// <summary>A native transcription session holding a reference on its engine, released when the session is freed.</summary>
+internal sealed class TranscriptionSessionHandle : SafeHandle
+{
+    private readonly EngineHandle _engine;
+
+    /// <summary>Takes a new reference on <paramref name="engine"/>; frees <paramref name="session"/> if it cannot.</summary>
+    internal TranscriptionSessionHandle(IntPtr session, EngineHandle engine)
+        : base(IntPtr.Zero, ownsHandle: true)
+    {
+        var added = false;
+        try
+        {
+            engine.DangerousAddRef(ref added);
+        }
+        finally
+        {
+            if (!added) NativeMethods.inference_transcription_session_free(session);
+        }
+        SetHandle(session);
+        _engine = engine;
+    }
+
+    public override bool IsInvalid => handle == IntPtr.Zero;
+
+    protected override bool ReleaseHandle()
+    {
+        NativeMethods.inference_transcription_session_free(handle);
+        _engine.DangerousRelease();
+        return true;
+    }
+}
+
 /// <summary>A native layout model.</summary>
 internal sealed class LayoutHandle : SafeHandle
 {

@@ -1043,6 +1043,13 @@ pub enum CacheBackendMetadata {
     },
 }
 
+/// A transcription sequence's result: a whole recording's transcript, or one step of a streamed session.
+#[derive(Clone, Debug)]
+pub enum TranscriptionOutcome {
+    Whole(inference_models_speech::Transcription),
+    Stream(crate::TranscriptionStreamUpdate),
+}
+
 #[derive(Clone, Debug)]
 pub enum ForwardInputsResult {
     RawLogits {
@@ -1068,7 +1075,7 @@ pub enum ForwardInputsResult {
     },
     /// One result per sequence: audio a model refuses fails only its own request.
     Transcription {
-        transcripts: Vec<Result<inference_models_speech::Transcription, String>>,
+        transcripts: Vec<Result<TranscriptionOutcome, String>>,
     },
     /// One result per sequence, as for transcripts.
     VoiceActivity {

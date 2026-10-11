@@ -70,13 +70,22 @@ fn generation_request(
 }
 
 // Sends a generation request and waits for its one final response.
-async fn run(
+pub(crate) async fn run(
     state: &SharedInferenceRsState,
     model: &str,
     repr: String,
     messages: RequestMessage,
 ) -> Result<Response, ApiError> {
     InferenceRs::maybe_log_request(state.clone(), repr);
+    run_unlogged(state, model, messages).await
+}
+
+// As `run`, for a request too frequent to log, as a streamed session's pushes are
+pub(crate) async fn run_unlogged(
+    state: &SharedInferenceRsState,
+    model: &str,
+    messages: RequestMessage,
+) -> Result<Response, ApiError> {
     validate_model_name(model, state.clone())
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::InvalidRequest))?;
     let (tx, mut rx) = create_response_channel(None);
@@ -112,7 +121,7 @@ async fn run(
     .await
 }
 
-fn unexpected(state: &SharedInferenceRsState) -> ApiError {
+pub(crate) fn unexpected(state: &SharedInferenceRsState) -> ApiError {
     InferenceRs::maybe_log_error(
         state.clone(),
         &ModelErrorMessage(UNEXPECTED_RESPONSE.to_string()),
@@ -271,7 +280,7 @@ async fn transcribe_inner(
     }
 }
 
-fn render_transcript(
+pub(crate) fn render_transcript(
     request: &TranscriptionRequest,
     transcript: Transcription,
 ) -> Result<TranscriptionOutput, ApiError> {

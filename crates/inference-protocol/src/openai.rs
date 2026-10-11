@@ -1984,6 +1984,60 @@ pub enum TimestampGranularity {
     Segment,
 }
 
+/// Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push
+/// returns the text it adds; an inference.rs extension.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct TranscriptionSessionRequest {
+    #[schema(example = "nvidia/nemotron-speech-streaming-en-0.6b")]
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// As for [`TranscriptionRequest`]: a Nemotron-3.5 language, unset to identify it.
+    #[serde(default)]
+    pub language: Option<String>,
+    /// The sample rate of the mono audio pushed; it is resampled to the model's.
+    #[serde(default = "default_session_sample_rate")]
+    #[schema(example = 24000)]
+    pub sample_rate: u32,
+    /// How the finished session's whole transcript is rendered.
+    #[serde(default)]
+    pub response_format: TranscriptionResponseFormat,
+    #[serde(default)]
+    pub timestamp_granularities: Vec<TimestampGranularity>,
+}
+
+fn default_session_sample_rate() -> u32 {
+    16_000
+}
+
+impl TranscriptionSessionRequest {
+    /// A session for the default model with audio at `sample_rate`.
+    pub fn new(sample_rate: u32) -> Self {
+        Self {
+            model: default_model(),
+            language: None,
+            sample_rate,
+            response_format: TranscriptionResponseFormat::default(),
+            timestamp_granularities: Vec::new(),
+        }
+    }
+
+    /// The upload request a finished session renders its transcript as.
+    pub fn as_transcription_request(&self) -> TranscriptionRequest {
+        TranscriptionRequest {
+            model: self.model.clone(),
+            language: self.language.clone(),
+            timestamp_granularities: self.timestamp_granularities.clone(),
+            ..TranscriptionRequest::new(self.response_format)
+        }
+    }
+}
+
+/// The text one push to a streamed transcription adds.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct TranscriptionDelta {
+    pub delta: String,
+}
+
 /// Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct TranscriptionRequest {

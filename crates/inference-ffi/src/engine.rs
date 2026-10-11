@@ -9,7 +9,7 @@ use inference_api::{
     Engine, EngineLoadError,
     anthropic::anthropic_error_body,
     api_error::{ApiError, ApiErrorKind},
-    blocking::{BlockingEngine, BlockingStream, StreamPoll},
+    blocking::{BlockingEngine, BlockingStream, BlockingTranscriptionSession, StreamPoll},
     engine_chat::RequestCancellation,
     files::{FileUpload, MAX_FILE_UPLOAD_BYTES, file_too_large},
     media_source::{MediaAttachment, MediaAttachments},
@@ -116,6 +116,12 @@ pub struct inference_stream {
     done: bool,
     // Apart from `stream` so a cancel on another thread never borrows what a blocked poll holds.
     cancellation: RequestCancellation,
+}
+
+/// Opaque; mirrors `inference_transcription_session`.
+#[allow(non_camel_case_types)]
+pub struct inference_transcription_session {
+    session: BlockingTranscriptionSession,
 }
 
 /// Opaque; mirrors `inference_string`.
@@ -655,6 +661,105 @@ pub unsafe extern "C" fn inference_speech_generation(
                 Ok(blob_handle(audio.bytes, audio.content_type))
             },
         )
+    }
+}
+
+/// Safety: as for `inference_chat`; `out_session` receives a handle the caller frees with
+/// `inference_transcription_session_free`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_transcription_session_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_session: *mut *mut inference_transcription_session,
+) -> inference_status {
+    unsafe {
+        engine_call(
+            engine,
+            (request, request_len, "request"),
+            (out_session, "out_session"),
+            |engine, request| {
+                let session = engine
+                    .transcription_session_json(request)
+                    .map_err(api_failure)?;
+                Ok(Box::into_raw(Box::new(inference_transcription_session {
+                    session,
+                })))
+            },
+        )
+    }
+}
+
+// a session in, mutably; one thread at a time, as the header says
+unsafe fn live_session<'a>(
+    session: *mut inference_transcription_session,
+) -> FfiResult<&'a mut BlockingTranscriptionSession> {
+    unsafe {
+        session
+            .as_mut()
+            .map(|session| &mut session.session)
+            .ok_or_else(|| Failure::invalid("session is NULL"))
+    }
+}
+
+fn delta_json(delta: String) -> FfiResult<*mut inference_string> {
+    let json = serde_json::to_string(&inference_api::openai::TranscriptionDelta { delta })
+        .map_err(|e| Failure::invalid(e.to_string()))?;
+    Ok(string_handle(json))
+}
+
+/// Safety: `session` is a live handle used by one thread at a time, `audio` valid for `audio_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_transcription_session_push(
+    session: *mut inference_transcription_session,
+    audio: *const u8,
+    audio_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            out_arg(out_response, "out_response")?;
+            let session = live_session(session)?;
+            let audio = arg_bytes(audio.cast::<c_char>(), audio_len, "audio")?;
+            let delta = session.push_pcm16(audio).map_err(api_failure)?;
+            out_response.write(delta_json(delta)?);
+            Ok(())
+        })
+    }
+}
+
+/// Safety: `session` is a live handle used by one thread at a time.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_transcription_session_finish(
+    session: *mut inference_transcription_session,
+    out_delta: *mut *mut inference_string,
+    out_blob: *mut *mut inference_blob,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            out_arg(out_delta, "out_delta")?;
+            out_arg(out_blob, "out_blob")?;
+            let session = live_session(session)?;
+            let (delta, transcript) = session.finish().map_err(api_failure)?;
+            out_delta.write(delta_json(delta)?);
+            out_blob.write(blob_handle(
+                transcript.body.into_bytes(),
+                transcript.content_type.to_string(),
+            ));
+            Ok(())
+        })
+    }
+}
+
+/// Safety: `session` is NULL or a handle from `inference_transcription_session_open` that is not used again.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_transcription_session_free(
+    session: *mut inference_transcription_session,
+) {
+    unsafe {
+        if !session.is_null() {
+            guard_value((), || drop(Box::from_raw(session)));
+        }
     }
 }
 

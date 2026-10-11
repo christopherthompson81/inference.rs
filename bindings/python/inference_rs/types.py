@@ -2775,6 +2775,13 @@ class ToolType(str, Enum):
     FUNCTION = "function"
 
 
+@dataclass(kw_only=True)
+class TranscriptionDelta:
+    """The text one push to a streamed transcription adds."""
+
+    delta: str
+
+
 class TranscriptionLoaderType(str, Enum):
     PARAKEET = "parakeet"
 
@@ -2815,6 +2822,17 @@ class TranscriptionSegment:
     id: int
     start: float
     text: str
+
+
+@dataclass(kw_only=True)
+class TranscriptionSessionRequest:
+    """Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push returns the text it adds; an inference.rs extension."""
+
+    language: str | None = None
+    model: str | None = None
+    response_format: TranscriptionResponseFormat | None = None
+    sample_rate: int | None = None
+    timestamp_granularities: list[TimestampGranularity] | None = None
 
 
 @dataclass(kw_only=True)

@@ -1,6 +1,7 @@
 import array
 import ctypes
 import json
+import threading
 import weakref
 from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
@@ -78,6 +79,51 @@ class Stream:
     def __iter__(self) -> Iterator[StreamEvent]:
         while (event := self.next()) is not None:
             yield event
+
+    def close(self):
+        self._finalizer()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+
+class TranscriptionSession:
+    """A streamed transcription: push 16-bit mono PCM as it arrives, then finish; close (or `with`) abandons it."""
+
+    def __init__(self, engine: Handle, pointer):
+        def free(session):
+            lib.inference_transcription_session_free(session)
+            engine.release()
+
+        self._session = Handle(pointer, free)
+        self._finalizer = weakref.finalize(self, self._session.close)
+        # the native session takes one call at a time; an audio thread and a caller may share it
+        self._lock = threading.Lock()
+
+    def push(self, audio: bytes) -> str:
+        """Little-endian 16-bit mono PCM at the session's rate; the text it adds, often none for a short piece."""
+        data = bytes_arg(audio)
+        response = ctypes.c_void_p()
+        with self._lock, Lease(self._session) as session:
+            check(
+                lib.inference_transcription_session_push(session, data, len(data), ctypes.byref(response)),
+                "inference_transcription_session_push",
+            )
+        return json.loads(take_string(response))["delta"]
+
+    def finish(self) -> tuple[str, Blob]:
+        """The text the last audio adds, and the whole transcript in the session's response_format."""
+        delta = ctypes.c_void_p()
+        blob = ctypes.c_void_p()
+        with self._lock, Lease(self._session) as session:
+            check(
+                lib.inference_transcription_session_finish(session, ctypes.byref(delta), ctypes.byref(blob)),
+                "inference_transcription_session_finish",
+            )
+        return json.loads(take_string(delta))["delta"], take_blob(blob)
 
     def close(self):
         self._finalizer()
@@ -358,6 +404,22 @@ class JsonEngine:
                 "inference_transcription",
             )
         return take_blob(blob)
+
+    def transcription_session(self, request_json: str = "{}") -> TranscriptionSession:
+        """Opens a streamed transcription on a cache-aware streaming recogniser; it keeps the engine open."""
+        data = text_arg(request_json)
+        session = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_transcription_session_open(engine, data, len(data), ctypes.byref(session)),
+                "inference_transcription_session_open",
+            )
+            try:
+                self._handle.acquire()
+            except ValueError:
+                lib.inference_transcription_session_free(session)
+                raise
+        return TranscriptionSession(self._handle, session.value)
 
     def diarization(self, request_json: str, audio: bytes) -> Blob:
         """Who speaks when in encoded audio; the blob's MIME type names the response format (JSON or RTTM)."""

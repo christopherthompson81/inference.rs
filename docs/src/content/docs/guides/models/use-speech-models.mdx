@@ -196,6 +196,79 @@ they take 24 minutes in one pass, and longer recordings with a VAD. Nemotron-3.5
 curl http://localhost:1234/v1/audio/transcriptions -F file=@clip.wav -F language=de-DE -F response_format=verbose_json
 ```
 
+### Streamed transcription
+
+These checkpoints can also transcribe audio as it arrives. A session takes mono audio in pieces of any size, and
+each push returns the text the audio so far completes. The model emits text a chunk at a time:
+- the English model's chunk is 14 frames, 1.12 s;
+- 3.5's is 4 frames, 0.32 s.
+
+So a short push often adds nothing. Finishing returns the rest and the whole transcript in the session's
+`response_format`. That transcript is the one the upload endpoint gives for the same audio: the model makes the
+same decisions chunk by chunk as over the whole recording. Audio at another `sample_rate` is resampled to the
+model's 16 kHz.
+
+On CUDA a session runs at about 50x real time with the English model, so live audio keeps well ahead. On CPU it
+runs at about real time.
+
+<Tabs>
+<TabItem label="Python">
+
+```python
+import inference_rs as ir
+
+with ir.Engine(spec) as engine:
+    with engine.transcription_session('{"sample_rate": 24000, "language": "en-US"}') as session:
+        for pcm16 in microphone_chunks():  # little-endian 16-bit mono at 24 kHz
+            print(session.push(pcm16), end="", flush=True)
+        last, transcript = session.finish()
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{TranscriptionModelBuilder, TranscriptionSessionRequest};
+
+let model = TranscriptionModelBuilder::new("nvidia/nemotron-speech-streaming-en-0.6b").build().await?;
+let session = model.transcription_session(TranscriptionSessionRequest::new(24_000)).await?;
+for chunk in microphone_chunks() {
+    print!("{}", session.push(&chunk).await?); // f32 samples, or push_pcm16 for bytes
+}
+let (last, transcript) = session.finish().await?;
+```
+
+</TabItem>
+<TabItem label="C">
+
+```c
+inference_transcription_session *session;
+if (inference_transcription_session_open(engine, "{\"sample_rate\": 24000}", 22, &session) != INFERENCE_OK) {
+    /* inference_last_error() holds the error JSON */
+}
+inference_string *delta;
+if (inference_transcription_session_push(session, pcm16, pcm16_len, &delta) == INFERENCE_OK) {
+    /* inference_string_data(delta) is {"delta": "..."} */
+    inference_string_free(delta);
+}
+inference_blob *transcript;
+if (inference_transcription_session_finish(session, &delta, &transcript) == INFERENCE_OK) {
+    inference_string_free(delta);
+    inference_blob_free(transcript);
+}
+inference_transcription_session_free(session);
+```
+
+</TabItem>
+</Tabs>
+
+Other notes:
+- **Models:** sessions take a cache-aware streaming checkpoint only. A model that transcribes whole recordings (Parakeet TDT, RNN-T, CTC) refuses one. A session stays on the model it opened on.
+- **Decoding:** sessions decode greedily, and audio is taken at 8 to 192 kHz.
+- **Limits:** a model holds up to 64 open sessions, shared by every API key. Each holds about 15 MB of caches and is released when it finishes, when it is closed (dropped, freed or disposed), when a push fails, or after 10 minutes without a push. So a live client pushes its silence too.
+- **Timing:** resampled audio reaches the model about 2 ms late, as an upload's does.
+- **Uploads:** sessions share the model with uploads, so a push waits behind any whole recording the model is transcribing. Give live audio a model of its own.
+
 ## Silero VAD: voice activity
 
 Silero VAD (v6, 16 kHz) gives a speech probability for every 32 ms of audio and cuts speech segments from
