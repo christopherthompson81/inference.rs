@@ -109,6 +109,10 @@ impl MessageExtras {
                 extras.audios = Some(vec![audio.clone()]);
                 extras.one_shot = Some(OneShotParams::Transcription(options.clone()));
             }
+            RequestMessage::TranscriptionStream { request } => {
+                extras.seq_step_type = SeqStepType::OneShot;
+                extras.one_shot = Some(OneShotParams::TranscriptionStream(request.clone()));
+            }
             RequestMessage::VoiceActivity { audio, options } => {
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.audios = Some(vec![audio.clone()]);
@@ -570,7 +574,10 @@ impl Engine {
                 | RequestMessage::CompletionTokens(_),
             ) => Ok(()),
             (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => Ok(()),
-            (ModelCategory::Transcription, RequestMessage::Transcription { .. }) => Ok(()),
+            (
+                ModelCategory::Transcription,
+                RequestMessage::Transcription { .. } | RequestMessage::TranscriptionStream { .. },
+            ) => Ok(()),
             (ModelCategory::VoiceActivity, RequestMessage::VoiceActivity { .. }) => Ok(()),
             (ModelCategory::Diarization, RequestMessage::Diarization { .. }) => Ok(()),
             (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => {
@@ -653,6 +660,7 @@ impl Engine {
             RequestMessage::ImageGeneration { prompt, .. }
             | RequestMessage::SpeechGeneration { prompt, .. } => Ok((vec![u32::MAX], prompt)),
             RequestMessage::Transcription { .. }
+            | RequestMessage::TranscriptionStream { .. }
             | RequestMessage::VoiceActivity { .. }
             | RequestMessage::Diarization { .. } => Ok((vec![u32::MAX], String::new())),
             RequestMessage::CompletionTokens(it)

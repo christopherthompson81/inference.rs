@@ -37,6 +37,7 @@ pub mod sampling;
 pub mod sdk;
 pub mod skill_store;
 pub mod system;
+pub mod transcription_session;
 pub mod types;
 pub mod uqff;
 pub mod util;

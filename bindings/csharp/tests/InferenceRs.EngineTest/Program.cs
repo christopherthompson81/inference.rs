@@ -21,6 +21,9 @@ internal static class Program
 
     // the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
     private const string ParakeetDir = "parakeet";
+    private const string StreamingDir = "parakeet_streaming";
+    // a streamed session's pieces: 100 ms of 16-bit samples, across the tiny model's chunks
+    private const int PcmPiece = 3200;
     private const string SileroDir = "silero";
     private const string DiarizationDir = "diarization";
     private const int ToneRate = 16000;
@@ -57,6 +60,7 @@ internal static class Program
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
         AudioTranscribes(Path.Combine(model, ParakeetDir));
+        StreamedAudioTranscribes(Path.Combine(model, StreamingDir), Path.Combine(model, ParakeetDir));
         VoiceActivityFindsTheSpeech(Path.Combine(model, SileroDir));
         DiarizationNamesWhoSpeaks(Path.Combine(model, DiarizationDir));
 
@@ -440,6 +444,41 @@ internal static class Program
             System.Text.Encoding.UTF8.GetString(text.Data) == (string?)parsed["text"]);
         var bad = Throws(() => engine.Transcription("{}", "not audio"u8.ToArray()));
         Check("audio that does not decode is InvalidRequest", bad?.Status == InferenceStatus.InvalidRequest);
+    }
+
+    private static void StreamedAudioTranscribes(string streaming, string offline)
+    {
+        static string Spec(string modelId) => new JsonObject
+        {
+            ["model"] = new JsonObject { ["Transcription"] = new JsonObject { ["model_id"] = modelId, ["dtype"] = "f32" } },
+            ["runtime"] = new JsonObject { ["device"] = "cpu" },
+        }.ToJsonString();
+        using (var engine = InferenceEngine.Load(Spec(streaming)))
+        {
+            var whole = (string?)JsonNode.Parse(engine.Transcription("""{"response_format": "json"}""", ToneWav()).Data)!["text"];
+            // the WAV's samples after its 44-byte header
+            var pcm = ToneWav()[44..];
+            var deltas = new System.Text.StringBuilder();
+            using (var session = engine.OpenTranscriptionSession($$"""{"sample_rate": {{ToneRate}}}"""))
+            {
+                for (var at = 0; at < pcm.Length; at += PcmPiece)
+                {
+                    deltas.Append(session.Push(pcm[at..Math.Min(at + PcmPiece, pcm.Length)]));
+                }
+                var (last, transcript) = session.Finish();
+                deltas.Append(last);
+                Check("a streamed transcript is JSON", transcript.MimeType == "application/json");
+                Check("a streamed transcript is the whole one's",
+                    (string?)JsonNode.Parse(transcript.Data)!["text"] == whole);
+            }
+            Check("streamed deltas add up to the transcript", deltas.ToString().Trim() == whole);
+            using var odd = engine.OpenTranscriptionSession();
+            Check("an odd PCM16 byte count is InvalidRequest",
+                Throws(() => odd.Push(new byte[1]))?.Status == InferenceStatus.InvalidRequest);
+        }
+        using var wholeOnly = InferenceEngine.Load(Spec(offline));
+        Check("a model that transcribes whole recordings refuses a session",
+            Throws(() => wholeOnly.OpenTranscriptionSession())?.Status == InferenceStatus.InvalidRequest);
     }
 
     private static void VoiceActivityFindsTheSpeech(string silero)

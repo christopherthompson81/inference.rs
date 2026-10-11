@@ -2,7 +2,7 @@ use super::{
     AdapterPaths, AnyMoePipelineMixin, Cache, CacheManagerMixin, EitherCache, ForwardInputsResult,
     GeneralMetadata, InputProcessorOutput, InputsProcessor, InputsProcessorType, IsqPipelineMixin,
     Loader, MessagesAction, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
-    PreProcessingMixin, Processor, TokenSource,
+    PreProcessingMixin, Processor, TokenSource, TranscriptionOutcome,
 };
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::PagedAttentionMeta;
@@ -12,19 +12,23 @@ use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedM
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::{MessageContent, Pipeline};
+use crate::{
+    MessageContent, Pipeline, TranscriptionStreamOp, TranscriptionStreamRequest,
+    TranscriptionStreamUpdate,
+};
 use anyhow::Result;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
+use inference_audio::mel::StreamResampler;
 use inference_models_speech::diarization::{
     DiarizationOptions, Diarizer, Nemotron3Diarizer, Nemotron3Files, SortformerDiarizer,
     is_sortformer,
 };
 use inference_models_speech::nemo;
 use inference_models_speech::parakeet::{
-    MODEL_TYPES, Parakeet, ParakeetFiles, is_asr, is_asr_gguf,
+    MODEL_TYPES, Parakeet, ParakeetFiles, ParakeetStream, is_asr, is_asr_gguf,
 };
 use inference_models_speech::silero::{SegmentOptions, SileroVad, is_silero_gguf, read_gguf};
 use inference_quant::IsqType;
@@ -32,9 +36,11 @@ use inference_tensor::{Device, Tensor};
 use rand_isaac::Isaac64Rng;
 use serde::{Deserialize, Serialize};
 use std::any::Any;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
@@ -46,6 +52,9 @@ const GGUF_EXTENSION: &str = "gguf";
 const NEMOTRON3_DIARIZATION_TYPE: &str = "nemotron3_diarization";
 // the engine's sequence bookkeeping wants a length; one-shot audio requests never reach it
 const METADATA_MAX_SEQ_LEN: usize = 1024;
+// an open session holds its caches (about 15 MB for a 0.6B model) until it finishes, closes or idles this long
+const STREAM_SESSION_IDLE: Duration = Duration::from_secs(10 * 60);
+const MAX_STREAM_SESSIONS: usize = 64;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
@@ -163,8 +172,25 @@ impl Processor for TranscriptionProcessor {
 
 pub struct TranscriptionInputsProcessor;
 
+// a sequence's audio, or a streamed session's step, whose samples ride in its request
+enum AudioRequest {
+    Audio(AudioInput),
+    Stream(TranscriptionStreamRequest),
+}
+
+impl AudioRequest {
+    fn audio(&self) -> &AudioInput {
+        match self {
+            Self::Audio(audio) => audio,
+            Self::Stream(_) => {
+                unreachable!("the category check sends streams only to a recogniser")
+            }
+        }
+    }
+}
+
 struct ModelInputs {
-    audios: Vec<AudioInput>,
+    audios: Vec<AudioRequest>,
     options: Vec<SegmentOptions>,
     diarization: Vec<DiarizationOptions>,
     transcription: Vec<inference_models_speech::TranscriptionOptions>,
@@ -192,9 +218,16 @@ impl InputsProcessor for TranscriptionInputsProcessor {
         let audios = input_seqs
             .iter()
             .map(|seq| {
-                seq.audios()
-                    .and_then(|a| a.first().cloned())
-                    .ok_or_else(|| anyhow::anyhow!("a transcription request carries no audio"))
+                match (
+                    seq.audios().and_then(|a| a.first().cloned()),
+                    seq.transcription_stream(),
+                ) {
+                    (Some(audio), _) => Ok(AudioRequest::Audio(audio)),
+                    (None, Some(stream)) => Ok(AudioRequest::Stream(stream.clone())),
+                    (None, None) => {
+                        Err(anyhow::anyhow!("a transcription request carries no audio"))
+                    }
+                }
             })
             .collect::<Result<Vec<_>>>()?;
         let options = input_seqs
@@ -244,6 +277,14 @@ pub struct TranscriptionPipeline {
     model: AudioModel,
     metadata: Arc<GeneralMetadata>,
     dummy_cache: EitherCache,
+    sessions: HashMap<u64, StreamSession>,
+}
+
+// a streamed transcription between its client's requests
+struct StreamSession {
+    stream: ParakeetStream,
+    resampler: StreamResampler,
+    last_used: Instant,
 }
 
 pub struct TranscriptionLoader {
@@ -724,8 +765,82 @@ impl TranscriptionPipeline {
                 loaded_for_uqff_write: false,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0)),
+            sessions: HashMap::new(),
         }
     }
+}
+
+// one op of a streamed session on recogniser `asr`; a session whose push fails is dropped, as its state may have moved
+fn stream_step(
+    asr: &Parakeet,
+    sessions: &mut HashMap<u64, StreamSession>,
+    request: &TranscriptionStreamRequest,
+) -> std::result::Result<TranscriptionStreamUpdate, String> {
+    // a client that vanished without closing its session releases it after a while
+    sessions.retain(|_, s| s.last_used.elapsed() < STREAM_SESSION_IDLE);
+    let update = |delta, transcription| TranscriptionStreamUpdate {
+        delta,
+        transcription,
+    };
+    let id = request.session;
+    match &request.op {
+        TranscriptionStreamOp::Open {
+            options,
+            sample_rate,
+        } => {
+            if !asr.can_stream() {
+                return Err(
+                    "this checkpoint transcribes whole recordings; only a cache-aware streaming one (Nemotron streaming ASR) streams"
+                        .into(),
+                );
+            }
+            if sessions.len() >= MAX_STREAM_SESSIONS {
+                return Err(format!(
+                    "{MAX_STREAM_SESSIONS} streamed transcriptions are open on this model; finish or close one first"
+                ));
+            }
+            let session = StreamSession {
+                stream: asr.stream(options).map_err(|e| e.to_string())?,
+                resampler: StreamResampler::new(*sample_rate, asr.sample_rate())
+                    .map_err(|e| e.to_string())?,
+                last_used: Instant::now(),
+            };
+            sessions.insert(id, session);
+            Ok(update(String::new(), None))
+        }
+        TranscriptionStreamOp::Push(pcm) => {
+            let session = sessions.get_mut(&id).ok_or_else(|| unknown_session(id))?;
+            session.last_used = Instant::now();
+            let delta = session
+                .resampler
+                .push(pcm)
+                .and_then(|pcm| Ok(asr.stream_push(&mut session.stream, &pcm)?));
+            if delta.is_err() {
+                sessions.remove(&id);
+            }
+            Ok(update(delta.map_err(|e| e.to_string())?, None))
+        }
+        TranscriptionStreamOp::Finish => {
+            let mut session = sessions.remove(&id).ok_or_else(|| unknown_session(id))?;
+            let tail = session.resampler.finish().map_err(|e| e.to_string())?;
+            let mut delta = asr
+                .stream_push(&mut session.stream, &tail)
+                .map_err(|e| e.to_string())?;
+            let (last, transcription) = asr
+                .stream_finish(session.stream)
+                .map_err(|e| e.to_string())?;
+            delta.push_str(&last);
+            Ok(update(delta, Some(transcription)))
+        }
+        TranscriptionStreamOp::Close => {
+            sessions.remove(&id);
+            Ok(update(String::new(), None))
+        }
+    }
+}
+
+fn unknown_session(id: u64) -> String {
+    format!("streamed transcription {id} is not open: it finished, closed or sat idle too long")
 }
 
 impl PreProcessingMixin for TranscriptionPipeline {
@@ -795,20 +910,29 @@ impl Pipeline for TranscriptionPipeline {
             diarization,
             transcription,
         } = *inputs.downcast().expect("Downcast failed.");
-        Ok(match &self.model {
+        let Self {
+            model, sessions, ..
+        } = self;
+        Ok(match model {
             AudioModel::Parakeet { asr, vad } => ForwardInputsResult::Transcription {
                 transcripts: audios
                     .iter()
                     .zip(&transcription)
-                    .map(|(audio, request)| {
-                        let pcm = audio.to_mono();
-                        match vad {
-                            Some(vad) => {
-                                asr.transcribe_with_vad(&pcm, audio.sample_rate, vad, request)
-                            }
-                            None => asr.transcribe(&pcm, audio.sample_rate, request),
+                    .map(|(input, request)| match input {
+                        AudioRequest::Stream(stream) => {
+                            stream_step(asr, sessions, stream).map(TranscriptionOutcome::Stream)
                         }
-                        .map_err(|e| e.to_string())
+                        AudioRequest::Audio(audio) => {
+                            let pcm = audio.to_mono();
+                            match vad {
+                                Some(vad) => {
+                                    asr.transcribe_with_vad(&pcm, audio.sample_rate, vad, request)
+                                }
+                                None => asr.transcribe(&pcm, audio.sample_rate, request),
+                            }
+                            .map(TranscriptionOutcome::Whole)
+                            .map_err(|e| e.to_string())
+                        }
                     })
                     .collect(),
             },
@@ -816,7 +940,8 @@ impl Pipeline for TranscriptionPipeline {
                 results: audios
                     .iter()
                     .zip(&options)
-                    .map(|(audio, options)| {
+                    .map(|(input, options)| {
+                        let audio = input.audio();
                         vad.detect(&audio.to_mono(), audio.sample_rate, options)
                             .map_err(|e| e.to_string())
                     })
@@ -826,7 +951,8 @@ impl Pipeline for TranscriptionPipeline {
                 results: audios
                     .iter()
                     .zip(&diarization)
-                    .map(|(audio, options)| {
+                    .map(|(input, options)| {
+                        let audio = input.audio();
                         diarizer
                             .diarize(&audio.to_mono(), audio.sample_rate, options.threshold)
                             .map_err(|e| e.to_string())

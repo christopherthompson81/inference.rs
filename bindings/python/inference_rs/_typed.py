@@ -7,7 +7,7 @@ from collections.abc import Sequence
 from . import types
 from ._callbacks import HostCallbacks, HostRegistration, HostTool
 from ._codec import from_data, from_json, to_json
-from ._engine import JsonEngine, MediaAttachment, SkillFile, Stream
+from ._engine import JsonEngine, MediaAttachment, SkillFile, Stream, TranscriptionSession
 from ._owned import Blob
 
 
@@ -242,6 +242,12 @@ class Engine:
     def transcription(self, audio: bytes, request: types.TranscriptionRequest | str = "{}") -> Blob:
         """The transcript of encoded audio, in the request's response_format (the blob's MIME type names it)."""
         return self.json.transcription(to_json(request), audio)
+
+    def transcription_session(
+        self, request: types.TranscriptionSessionRequest | str = "{}"
+    ) -> TranscriptionSession:
+        """A streamed transcription of 16-bit mono PCM pushed as it arrives, on a cache-aware streaming model."""
+        return self.json.transcription_session(to_json(request))
 
     def diarization(self, audio: bytes, request: types.DiarizationRequest | str = "{}") -> Blob:
         """Who speaks when in encoded audio, in the request's response_format (the blob's MIME type names it)."""

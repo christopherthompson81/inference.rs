@@ -12,6 +12,7 @@ use crate::{
     generation::SpeechAudio,
     media_source::MediaAttachments,
     openai::{DiarizationOutput, TranscriptionOutput},
+    transcription_session::TranscriptionSession,
 };
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -219,6 +220,18 @@ impl BlockingEngine {
         })
     }
 
+    pub fn transcription_session_json(
+        &self,
+        request: &[u8],
+    ) -> Result<BlockingTranscriptionSession, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.transcription_session_json(&request).await
+        })
+        .map(|session| BlockingTranscriptionSession {
+            session: Some(session),
+        })
+    }
+
     pub fn reload_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.reload_model_json(&request).await
@@ -368,5 +381,67 @@ impl BlockingStream {
             Ok(None) => StreamPoll::Done,
             Err(_) => StreamPoll::Timeout,
         }
+    }
+}
+
+/// A [`TranscriptionSession`] behind blocking calls; dropped unfinished, it still closes its session.
+pub struct BlockingTranscriptionSession {
+    // out only while a call runs on the runtime, which owns it then
+    session: Option<TranscriptionSession>,
+}
+
+impl BlockingTranscriptionSession {
+    fn with<T: Send + 'static, Fut>(
+        &mut self,
+        op: impl FnOnce(TranscriptionSession) -> Fut,
+    ) -> Result<T, ApiError>
+    where
+        Fut: Future<Output = (TranscriptionSession, Result<T, ApiError>)> + Send + 'static,
+    {
+        let session = self.session.take().ok_or_else(finished)?;
+        let (session, result) = run(op(session));
+        self.session = Some(session);
+        result
+    }
+
+    /// Feeds little-endian 16-bit mono PCM; returns the text it adds.
+    pub fn push_pcm16(&mut self, audio: &[u8]) -> Result<String, ApiError> {
+        let audio = audio.to_vec();
+        self.with(|mut session| async move {
+            let delta = session.push_pcm16(&audio).await;
+            (session, delta)
+        })
+    }
+
+    /// Feeds mono samples in [-1, 1]; returns the text they add.
+    pub fn push(&mut self, pcm: &[f32]) -> Result<String, ApiError> {
+        let pcm = pcm.to_vec();
+        self.with(|mut session| async move {
+            let delta = session.push(&pcm).await;
+            (session, delta)
+        })
+    }
+
+    /// Ends the session: the text its last audio adds, and the whole transcript.
+    pub fn finish(&mut self) -> Result<(String, TranscriptionOutput), ApiError> {
+        let session = self.session.take().ok_or_else(finished)?;
+        run(session.finish())
+    }
+}
+
+fn finished() -> ApiError {
+    ApiError::new(
+        crate::api_error::ApiErrorKind::InvalidRequest,
+        "the transcription session has finished".to_string(),
+        Some("session_finished"),
+        None,
+    )
+}
+
+impl Drop for BlockingTranscriptionSession {
+    fn drop(&mut self) {
+        // its close is spawned on the runtime the session opened on
+        let _runtime = runtime().enter();
+        self.session.take();
     }
 }

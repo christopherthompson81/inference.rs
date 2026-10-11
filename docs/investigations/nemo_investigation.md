@@ -1018,3 +1018,53 @@ After the fixes, `scripts/parakeet_parity.sh <streaming-en> <98 s demo> <300 s m
 - 639/639 and 1251/1251 emissions against transformers;
 - streamed equals offline;
 - 50.1x and 53.7x real time, slowest push 19-22 ms (40x and 35 ms before the flat detokenisation).
+
+## Run 35 - 2026-10-10
+
+**Streamed transcription as an engine session.** The user chose the OpenAI Realtime WebSocket as the HTTP surface; the engine session, C ABI and bindings come first.
+
+Design:
+- **Core:** `RequestMessage::TranscriptionStream` carries `{session, op}`, where op is `Open {options, sample_rate}`, `Push(pcm)`, `Finish` or `Close`. Each op is a one-shot sequence like a transcription, and the transcription pipeline keeps a `session -> ParakeetStream + StreamResampler` map between them.
+  - An engine step's results must share one type, so `ForwardInputsResult::Transcription` now holds per-sequence `TranscriptionOutcome::{Whole, Stream}`. A batch can therefore mix uploads and session steps.
+  - Limits: 64 open sessions; a session idle for 10 minutes is evicted on the next op.
+- **`inference_audio::mel::StreamResampler`:** rubato's sinc resampler fed fixed 1024-frame chunks. At finish it flushes the delay tail and trims to `round(len * ratio)`. The batch `resample` drops that tail (87 samples short on a 3 s clip at 24 to 16 kHz). rubato's tables are `Send` but not `Sync`, so the resampler holds them in a `Mutex`, as a pipeline must be `Sync`.
+- **`inference_api`:**
+  - `Engine::transcription_session(TranscriptionSessionRequest {model, language, sample_rate, response_format, timestamp_granularities})` returns a `TranscriptionSession` with `push(&[f32])`, `push_pcm16(&[u8])` and `finish()`. Finish returns the last delta and the transcript, rendered by the upload endpoint's `render_transcript`.
+  - Dropping an unfinished session spawns its `Close`.
+  - `BlockingTranscriptionSession` moves the session into the runtime per call, and drops it there, so the close still runs.
+- **C ABI:** `inference_transcription_session_{open, push (PCM16), finish (delta JSON + transcript blob), free}`, regenerated into the Python ctypes table and the C# P/Invoke file. Python's `TranscriptionSession` and C#'s `InferenceEngine.OpenTranscriptionSession` keep their engine alive like a stream.
+
+Tests:
+- `a_transcription_session_streams_through_the_engine` (tiny streaming checkpoint, CPU):
+  - at 16 kHz the session's `verbose_json` equals the upload's byte for byte, and the deltas concatenate to its text;
+  - a 22.05 kHz session resamples and finishes;
+  - an odd PCM16 byte count is refused;
+  - 70 open/push/drop cycles succeed past the 64-session cap, so the drops close;
+  - a whole-recording (TDT) checkpoint refuses a session.
+- `tiny_checkpoint` writes a streaming `parakeet_streaming/` beside the others. The Python and C# binding tests stream 100 ms PCM16 pieces and compare the transcript with the upload. `scripts/local_ci.sh --bindings`: Python 47 OK, C# engine checks passed.
+
+Next: review, full CI; then the `/v1/realtime` WebSocket.
+
+## Run 36 - 2026-10-10
+
+**Review of the session layer; fixes.**
+
+- **Ordering:** `push` and `push_pcm16` took `&self`, so two concurrent pushes could reach the engine out of order. They take `&mut self` now. A push is not cancel-safe: dropped mid-flight, its audio may or may not have been applied; this is documented.
+- **Session pinned to its model:** a session now keeps the concrete model it opened on, resolving an alias or `default` at open; before, it re-sent the name each step. Its drop-time close skips a model that is no longer loaded, where the close would have reloaded it.
+- **Sample-rate bounds:** `sample_rate` is limited to 8-192 kHz. At 1 Hz, rubato's ratio of 16000 turned 2 KB of PCM into about 17 minutes of audio for the encoder, and allocated about 64 MB per call.
+- **Failed pushes:** a push that fails removes its session, since its resampler, mel and encoder state may already have advanced.
+- **Close outside a runtime:** the close on drop runs on the runtime handle captured at open. A session dropped outside any runtime used to skip it and hold its slot for 10 minutes. The blocking wrapper drops inside its runtime.
+- **Logging:** pushes are not logged; open is.
+- **Resampler delay:** the review suggested skipping rubato's reported `output_delay()` of 85 output samples. Measured on a 440 Hz tone at 24 to 16 kHz, the true lag is 36 samples (about 2 ms), and skipping 85 misaligned the output (max error 0.89). The skip was reverted. The stream keeps the batch resampler's 2 ms delay, so streamed and uploaded audio agree, and the test pins the 36-sample alignment for 7-, 480- and 4096-sample pieces.
+- **Pipeline:** a per-sequence `AudioRequest::{Audio, Stream}`, and `stream_step` as a free function over the split borrow of `model` and `sessions`. This removes the defensive branches and two `unreachable!`s.
+- **Bindings:** Python and C# serialize a session's native calls (`threading.Lock`, `lock`), so an audio thread and a caller can share one.
+- **Docs and header:**
+  - the 64-session cap is per model and shared by every API key;
+  - a live client must push silence, or the session is released after 10 minutes without a push;
+  - pushes wait behind any whole-recording upload on the same model;
+  - the C example checks statuses and frees each handle.
+- **New tests:**
+  - the 65th open on a model is refused;
+  - finishing an empty session is refused;
+  - a 1 Hz session is refused;
+  - dropping 64 held sessions frees their slots.

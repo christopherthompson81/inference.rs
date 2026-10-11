@@ -712,6 +712,15 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `tokens` | `list[int]` |
 
 
+## `TranscriptionDelta`
+
+The text one push to a streamed transcription adds.
+
+| Field | Type |
+| --- | --- |
+| `delta` | `str` |
+
+
 ## `TranscriptionRequest`
 
 Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).
@@ -759,6 +768,64 @@ A timed span of a transcript, about a sentence.
 | `id` | `int` |
 | `start` | `float` |
 | `text` | `str` |
+
+
+## `TranscriptionSession`
+
+A streamed transcription: push 16-bit mono PCM as it arrives, then finish; close (or `with`) abandons it.
+
+### `TranscriptionSession.__init__`
+
+```text
+__init__(engine: Handle, pointer)
+```
+
+### `TranscriptionSession.push`
+
+```text
+push(audio: bytes) -> str
+```
+
+Little-endian 16-bit mono PCM at the session's rate; the text it adds, often none for a short piece.
+
+### `TranscriptionSession.finish`
+
+```text
+finish() -> tuple[str, Blob]
+```
+
+The text the last audio adds, and the whole transcript in the session's response_format.
+
+### `TranscriptionSession.close`
+
+```text
+close()
+```
+
+### `TranscriptionSession.__enter__`
+
+```text
+__enter__()
+```
+
+### `TranscriptionSession.__exit__`
+
+```text
+__exit__()
+```
+
+
+## `TranscriptionSessionRequest`
+
+Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push returns the text it adds; an inference.rs extension.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `language` | `str \| None` | optional |
+| `model` | `str \| None` | optional |
+| `response_format` | `TranscriptionResponseFormat \| None` | optional |
+| `sample_rate` | `int \| None` | optional |
+| `timestamp_granularities` | `list[TimestampGranularity] \| None` | optional |
 
 
 ## `TranscriptionWord`

@@ -32,6 +32,7 @@ inference-tensor.workspace = true
 futures.workspace = true
 metrics-util.workspace = true
 indicatif.workspace = true
+inference-audio.workspace = true
 inference-models-gemma.workspace = true
 inference-models-llama.workspace = true
 inference-models-other.workspace = true

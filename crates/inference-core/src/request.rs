@@ -24,6 +24,36 @@ use tokio::sync::mpsc::Sender;
 
 pub use inference_protocol::request::*;
 
+/// A step of the streamed transcription `session`, which its `Open` starts and its `Finish` or `Close` ends.
+#[derive(Clone, Debug, Default)]
+pub struct TranscriptionStreamRequest {
+    pub session: u64,
+    pub op: TranscriptionStreamOp,
+}
+
+#[derive(Clone, Debug, Default)]
+pub enum TranscriptionStreamOp {
+    /// Starts the session, for mono audio at `sample_rate`.
+    Open {
+        options: inference_models_speech::TranscriptionOptions,
+        sample_rate: u32,
+    },
+    /// Mono samples at the session's rate.
+    Push(Arc<Vec<f32>>),
+    /// Ends the session with its whole transcription.
+    Finish,
+    /// Drops the session without a transcription, as a client gone away does.
+    #[default]
+    Close,
+}
+
+/// A session step's result: the text it adds, and the whole transcription once the session finishes.
+#[derive(Clone, Debug)]
+pub struct TranscriptionStreamUpdate {
+    pub delta: String,
+    pub transcription: Option<inference_models_speech::Transcription>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 /// Message or messages for a [`Request`].
 pub enum RequestMessage {
@@ -73,6 +103,11 @@ pub enum RequestMessage {
         #[serde(skip)]
         audio: AudioInput,
         options: inference_models_speech::diarization::DiarizationOptions,
+    },
+    /// One step of a streamed transcription the transcription pipeline keeps between requests.
+    TranscriptionStream {
+        #[serde(skip)]
+        request: TranscriptionStreamRequest,
     },
     Embedding {
         prompt: String,

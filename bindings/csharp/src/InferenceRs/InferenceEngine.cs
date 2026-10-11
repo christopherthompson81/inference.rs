@@ -487,6 +487,19 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Owned.TakeBlob(blob);
     }
 
+    /// <summary>Opens a streamed transcription on a cache-aware streaming recogniser (Nemotron streaming ASR).</summary>
+    /// <param name="requestJson"><c>{"model"?, "language"?, "sample_rate"?, "response_format"?, "timestamp_granularities"?}</c>;
+    /// the pushed audio is at <c>sample_rate</c> (default 16000).</param>
+    public TranscriptionSession OpenTranscriptionSession(string requestJson = "{}")
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_transcription_session_open(
+            engine.Handle, request.Pointer, request.Length, out var session);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_transcription_session_open));
+        return new TranscriptionSession(new TranscriptionSessionHandle(session, _handle));
+    }
+
     /// <summary>Who speaks when in encoded audio; the blob's MIME type names the response format (JSON or RTTM).</summary>
     public Blob Diarization(string requestJson, byte[] audio)
     {

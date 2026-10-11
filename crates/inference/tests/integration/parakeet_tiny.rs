@@ -4,7 +4,7 @@
 use inference::{
     ApiErrorKind, ModelDType, TimestampGranularity, TranscriptionModelBuilder,
     TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
-    VerboseTranscriptionResponse,
+    TranscriptionSessionRequest, VerboseTranscriptionResponse,
 };
 
 #[path = "../support/parakeet_tiny.rs"]
@@ -461,5 +461,130 @@ fn a_streamed_transcription_equals_the_offline_one() -> anyhow::Result<()> {
             .stream(&inference_models_speech::TranscriptionOptions::default())
             .is_err()
     );
+    Ok(())
+}
+
+// an open session holds caches, so a model caps them; drop releases a slot, finish another
+const MAX_OPEN_SESSIONS: usize = 64;
+const SESSIONS_PAST_THE_CAP: usize = 70;
+
+fn pcm16(pcm: &[f32]) -> Vec<u8> {
+    pcm.iter()
+        .flat_map(|s| ((s.clamp(-1.0, 1.0) * f32::from(i16::MAX)) as i16).to_le_bytes())
+        .collect()
+}
+
+// through the engine: a session at the model's rate transcribes as the upload does, one at another rate resamples,
+// and sessions are refused or released as the model and the client decide
+#[tokio::test]
+async fn a_transcription_session_streams_through_the_engine() -> anyhow::Result<()> {
+    let checkpoint = tiny_parakeet_checkpoint("nemotron_asr_streaming")?;
+    let model = TranscriptionModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let n = (STREAM_SECONDS * f64::from(STREAM_RATE)) as usize;
+    let pcm: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f64 / f64::from(STREAM_RATE);
+            let phase =
+                2.0 * std::f64::consts::PI * (CHIRP_START_HZ * t + CHIRP_RISE_HZ * t * t / 2.0);
+            (AMPLITUDE * phase.sin()) as f32
+        })
+        .collect();
+    let mut wav = Vec::new();
+    inference_models_speech::utils::write_pcm_as_wav(&mut wav, &pcm, STREAM_RATE, 1)?;
+    let whole = model
+        .transcription(request(TranscriptionResponseFormat::VerboseJson), &wav)
+        .await?;
+
+    let mut session = model
+        .transcription_session(TranscriptionSessionRequest {
+            response_format: TranscriptionResponseFormat::VerboseJson,
+            timestamp_granularities: vec![
+                TimestampGranularity::Word,
+                TimestampGranularity::Segment,
+            ],
+            ..TranscriptionSessionRequest::new(STREAM_RATE)
+        })
+        .await?;
+    let mut deltas = String::new();
+    for chunk in pcm16(&pcm).chunks(STREAM_PIECES[2]) {
+        deltas.push_str(&session.push_pcm16(chunk).await?);
+    }
+    let (last, streamed) = session.finish().await?;
+    deltas.push_str(&last);
+    assert_eq!(streamed.body, whole.body);
+    let text: VerboseTranscriptionResponse = serde_json::from_str(&streamed.body)?;
+    assert_eq!(deltas.trim_end(), text.text);
+
+    let mut resampled = model
+        .transcription_session(TranscriptionSessionRequest::new(RATE))
+        .await?;
+    let other_rate = inference_audio::mel::resample(&pcm, STREAM_RATE, RATE)?;
+    resampled.push(&other_rate).await?;
+    let (_, output) = resampled.finish().await?;
+    assert_eq!(output.content_type, "application/json");
+
+    let empty = model
+        .transcription_session(TranscriptionSessionRequest::new(STREAM_RATE))
+        .await?;
+    let err = empty.finish().await.expect_err("an empty session finished");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    let err = model
+        .transcription_session(TranscriptionSessionRequest::new(1))
+        .await
+        .err()
+        .expect("a 1 Hz session opened");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    let mut held = Vec::new();
+    for _ in 0..MAX_OPEN_SESSIONS {
+        held.push(
+            model
+                .transcription_session(TranscriptionSessionRequest::new(STREAM_RATE))
+                .await?,
+        );
+    }
+    let err = model
+        .transcription_session(TranscriptionSessionRequest::new(STREAM_RATE))
+        .await
+        .err()
+        .expect("a session past the cap opened");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    drop(held);
+    tokio::task::yield_now().await;
+    let mut odd = model
+        .transcription_session(TranscriptionSessionRequest::new(STREAM_RATE))
+        .await?;
+    let err = odd
+        .push_pcm16(&[0])
+        .await
+        .expect_err("an odd byte count pushed");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    drop(odd);
+    for _ in 0..SESSIONS_PAST_THE_CAP {
+        let mut session = model
+            .transcription_session(TranscriptionSessionRequest::new(STREAM_RATE))
+            .await?;
+        session.push(&pcm[..1600]).await?;
+        drop(session);
+        // the close runs on the runtime after the drop
+        tokio::task::yield_now().await;
+    }
+
+    let offline = tiny_parakeet_checkpoint("parakeet_tdt")?;
+    let model = TranscriptionModelBuilder::new(offline.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .build()
+        .await?;
+    let err = model
+        .transcription_session(TranscriptionSessionRequest::new(STREAM_RATE))
+        .await
+        .err()
+        .expect("a whole-recording model opened a session");
+    assert_eq!(err.kind, ApiErrorKind::InvalidRequest, "{err}");
+    assert!(err.message.contains("streaming"), "{err}");
     Ok(())
 }

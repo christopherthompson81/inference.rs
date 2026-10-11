@@ -230,6 +230,7 @@ pub use diffusion_model::DiffusionModelBuilder;
 pub use embedding::EmbeddingRequestBuilder;
 pub use embedding_model::{EmbeddingModelBuilder, UqffEmbeddingModelBuilder};
 pub use gguf::GgufModelBuilder;
+pub use inference_api::transcription_session::TranscriptionSession;
 pub use load::{IsqBits, MemoryGpuConfig, PagedAttentionMetaBuilder, ToolCallback};
 pub use lora_model::LoraModelBuilder;
 pub use model::{ChatEventStream, Model};
@@ -272,9 +273,10 @@ pub use inference_api::{
         DiarizationRequest, DiarizationResponse, DiarizationResponseFormat, DiarizationSegment,
         EmbeddingRequest, EmbeddingResponse, EmbeddingVector, Grammar, ImageGenerationRequest,
         OpenAiTool, SpeechGenerationRequest, SpeechSegment, StopTokens, TimestampGranularity,
-        TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
-        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
-        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
+        TranscriptionDelta, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
+        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionSessionRequest,
+        TranscriptionWord, VerboseTranscriptionResponse, VoiceActivityRequest,
+        VoiceActivityResponse,
     },
     response::{
         ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,

@@ -43,6 +43,7 @@ pub enum OneShotParams {
     Diffusion(DiffusionGenerationParams),
     Speech(SpeechOptions),
     Transcription(inference_models_speech::TranscriptionOptions),
+    TranscriptionStream(crate::TranscriptionStreamRequest),
     VoiceActivity(inference_models_speech::silero::SegmentOptions),
     Diarization(inference_models_speech::diarization::DiarizationOptions),
 }
@@ -1582,6 +1583,13 @@ impl Sequence {
     pub fn transcription_options(&self) -> Option<&inference_models_speech::TranscriptionOptions> {
         match &self.one_shot {
             Some(OneShotParams::Transcription(options)) => Some(options),
+            _ => None,
+        }
+    }
+
+    pub fn transcription_stream(&self) -> Option<&crate::TranscriptionStreamRequest> {
+        match &self.one_shot {
+            Some(OneShotParams::TranscriptionStream(request)) => Some(request),
             _ => None,
         }
     }

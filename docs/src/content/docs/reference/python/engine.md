@@ -425,6 +425,16 @@ transcription(
 
 The transcript of encoded audio, in the request's response_format (the blob's MIME type names it).
 
+### `Engine.transcription_session`
+
+```text
+transcription_session(
+    request: types.TranscriptionSessionRequest | str = '{}',
+) -> TranscriptionSession
+```
+
+A streamed transcription of 16-bit mono PCM pushed as it arrives, on a cache-aware streaming model.
+
 ### `Engine.diarization`
 
 ```text
@@ -900,6 +910,16 @@ transcription(request_json: str, audio: bytes) -> Blob
 ```
 
 Transcribes encoded audio (WAV, MP3, FLAC, ...); the blob's MIME type names the response format.
+
+### `JsonEngine.transcription_session`
+
+```text
+transcription_session(
+    request_json: str = '{}',
+) -> TranscriptionSession
+```
+
+Opens a streamed transcription on a cache-aware streaming recogniser; it keeps the engine open.
 
 ### `JsonEngine.diarization`
 

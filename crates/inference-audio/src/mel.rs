@@ -57,6 +57,8 @@ const SINC_LEN: usize = 256;
 const SINC_CUTOFF: f32 = 0.95;
 const SINC_OVERSAMPLING: usize = 256;
 const MAX_RATIO_RELATIVE: f64 = 2.0;
+// input frames per resampler call when streaming
+const STREAM_CHUNK: usize = 1024;
 
 /// Band-limited sinc resampling of mono `samples`; returns them unchanged at the same rate.
 pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32>> {
@@ -64,26 +66,148 @@ pub fn resample(samples: &[f32], from_rate: u32, to_rate: u32) -> Result<Vec<f32
     if from_rate == to_rate {
         return Ok(samples.to_vec());
     }
-    let sinc = rubato::SincInterpolationParameters {
-        sinc_len: SINC_LEN,
-        f_cutoff: SINC_CUTOFF,
-        interpolation: rubato::SincInterpolationType::Linear,
-        oversampling_factor: SINC_OVERSAMPLING,
-        window: rubato::WindowFunction::BlackmanHarris2,
-    };
     let mut resampler = rubato::SincFixedIn::<f32>::new(
         to_rate as f64 / from_rate as f64,
         MAX_RATIO_RELATIVE,
-        sinc,
+        sinc_parameters(),
         samples.len(),
         1,
     )?;
     Ok(resampler.process(&[samples], None)?.swap_remove(0))
 }
 
+/// [`resample`] over audio that arrives in pieces: rubato's sinc resampler fed fixed chunks, its state carried
+/// across pushes, so a stream at another rate reaches a model at its own.
+pub struct StreamResampler {
+    // rubato's sinc tables are not Sync; a resampler is used by one stream at a time
+    inner: Option<std::sync::Mutex<rubato::SincFixedIn<f32>>>,
+    pending: Vec<f32>,
+    ratio: f64,
+    taken: usize,
+    given: usize,
+}
+
+impl StreamResampler {
+    pub fn new(from_rate: u32, to_rate: u32) -> Result<Self> {
+        let ratio = to_rate as f64 / from_rate as f64;
+        let inner = (from_rate != to_rate)
+            .then(|| {
+                rubato::SincFixedIn::<f32>::new(
+                    ratio,
+                    MAX_RATIO_RELATIVE,
+                    sinc_parameters(),
+                    STREAM_CHUNK,
+                    1,
+                )
+                .map(std::sync::Mutex::new)
+            })
+            .transpose()?;
+        Ok(Self {
+            inner,
+            pending: Vec::new(),
+            ratio,
+            taken: 0,
+            given: 0,
+        })
+    }
+
+    /// The resampled audio `samples` complete; the rest waits for the next push or `finish`.
+    pub fn push(&mut self, samples: &[f32]) -> Result<Vec<f32>> {
+        use rubato::Resampler;
+        self.taken += samples.len();
+        let Some(inner) = self.inner.as_mut() else {
+            self.given += samples.len();
+            return Ok(samples.to_vec());
+        };
+        let inner = inner.get_mut().expect("get_mut takes no lock to poison");
+        self.pending.extend_from_slice(samples);
+        let mut out = Vec::new();
+        while self.pending.len() >= inner.input_frames_next() {
+            let n = inner.input_frames_next();
+            out.extend(inner.process(&[&self.pending[..n]], None)?.swap_remove(0));
+            self.pending.drain(..n);
+        }
+        Ok(self.deliver(out))
+    }
+
+    /// The rest of the audio, its length rounded to the whole stream's at the new rate.
+    pub fn finish(&mut self) -> Result<Vec<f32>> {
+        use rubato::Resampler;
+        let Some(inner) = self.inner.as_mut() else {
+            return Ok(Vec::new());
+        };
+        let inner = inner.get_mut().expect("get_mut takes no lock to poison");
+        let mut out = inner
+            .process_partial(Some(&[&self.pending]), None)?
+            .swap_remove(0);
+        self.pending.clear();
+        // the input still inside the filter comes out with the silence pushed after it
+        out.extend(inner.process_partial::<&[f32]>(None, None)?.swap_remove(0));
+        let before = self.given;
+        let mut out = self.deliver(out);
+        let total = (self.taken as f64 * self.ratio).round() as usize;
+        out.truncate(total.saturating_sub(before));
+        self.given = before + out.len();
+        Ok(out)
+    }
+
+    fn deliver(&mut self, out: Vec<f32>) -> Vec<f32> {
+        self.given += out.len();
+        out
+    }
+}
+
+fn sinc_parameters() -> rubato::SincInterpolationParameters {
+    rubato::SincInterpolationParameters {
+        sinc_len: SINC_LEN,
+        f_cutoff: SINC_CUTOFF,
+        interpolation: rubato::SincInterpolationType::Linear,
+        oversampling_factor: SINC_OVERSAMPLING,
+        window: rubato::WindowFunction::BlackmanHarris2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // output samples at 16 kHz by which the sinc filter lags its 24 kHz input
+    const FILTER_DELAY: f32 = 36.0;
+
+    #[test]
+    fn a_streamed_resample_lasts_as_long_as_its_input_and_keeps_its_tone() -> Result<()> {
+        let tone: Vec<f32> = (0..24_000 * 3 + 17)
+            .map(|i| (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 24_000.0).sin() * 0.5)
+            .collect();
+        for piece in [7, 480, 4096] {
+            let mut stream = StreamResampler::new(24_000, 16_000)?;
+            let mut out = Vec::new();
+            for chunk in tone.chunks(piece) {
+                out.extend(stream.push(chunk)?);
+            }
+            out.extend(stream.finish()?);
+            assert_eq!(
+                out.len(),
+                (tone.len() as f64 * 2.0 / 3.0).round() as usize,
+                "{piece}"
+            );
+            // past the sinc's warm-up, a 440 Hz tone at 16 kHz still peaks near its amplitude
+            let peak = out[4000..40_000].iter().fold(0f32, |m, v| m.max(v.abs()));
+            assert!((peak - 0.5).abs() < 0.02, "{piece}: {peak}");
+            // the filter delays the output about 2 ms, 36 samples at 16 kHz, as the batch resample does
+            let drift = (4000..40_000)
+                .map(|i| {
+                    let t = (i as f32 - FILTER_DELAY) * 1.5 / 24_000.0;
+                    (out[i] - (2.0 * std::f32::consts::PI * 440.0 * t).sin() * 0.5).abs()
+                })
+                .fold(0f32, f32::max);
+            assert!(drift < 0.02, "{piece}: {drift}");
+        }
+        let mut same = StreamResampler::new(16_000, 16_000)?;
+        assert_eq!(same.push(&tone[..100])?, tone[..100]);
+        assert!(same.finish()?.is_empty());
+        Ok(())
+    }
 
     #[test]
     fn slaney_scale_round_trips_and_is_linear_below_one_kilohertz() {

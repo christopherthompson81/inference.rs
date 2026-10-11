@@ -322,6 +322,7 @@ async fn process_embedding_response(
             | Response::Transcription(_)
             | Response::VoiceActivity(_)
             | Response::Diarization(_)
+            | Response::TranscriptionStream(_)
             | Response::Raw { .. }
             | Response::AgenticToolCallProgress { .. }
             | Response::BlockDenoisingProgress(_)

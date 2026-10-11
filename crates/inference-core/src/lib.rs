@@ -199,8 +199,9 @@ pub use request::{
     DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
     ImageGenerationResponseFormat, LlguidanceGrammar, MessageContent, NormalRequest,
     ReasoningEffort, RequantizeRequest, Request, RequestCancellation, RequestMessage,
-    SearchContextSize, TokenizationRequest, WebSearchContentType, WebSearchFilters,
-    WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
+    SearchContextSize, TokenizationRequest, TranscriptionStreamOp, TranscriptionStreamRequest,
+    TranscriptionStreamUpdate, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
+    WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
     resolve_reasoning_controls,
 };
 pub use response::*;

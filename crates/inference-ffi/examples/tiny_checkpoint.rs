@@ -1,5 +1,5 @@
-//! Writes the tiny random-weight PaddleOCR-VL checkpoint the ABI tests use, and a tiny Parakeet under `parakeet/`,
-//! for binding tests in other languages.
+//! Writes the tiny random-weight PaddleOCR-VL checkpoint the ABI tests use, and tiny speech models beside it
+//! (`parakeet/`, the streaming `parakeet_streaming/`, `silero/`, `diarization/`), for binding tests in other languages.
 //! Usage: cargo run -p inference-ffi --example tiny_checkpoint -- <directory>
 
 use std::path::Path;
@@ -21,6 +21,8 @@ mod silero_support;
 mod parakeet_support;
 
 const PARAKEET_DIR: &str = "parakeet";
+const STREAMING_DIR: &str = "parakeet_streaming";
+const STREAMING_HEAD: &str = "nemotron_asr_streaming";
 const SILERO_DIR: &str = "silero";
 const DIARIZATION_DIR: &str = "diarization";
 
@@ -41,6 +43,8 @@ fn main() -> anyhow::Result<()> {
     copy_files(checkpoint.path(), Path::new(&target))?;
     let parakeet = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
     copy_files(parakeet.path(), &Path::new(&target).join(PARAKEET_DIR))?;
+    let streaming = parakeet_support::tiny_parakeet_checkpoint(STREAMING_HEAD)?;
+    copy_files(streaming.path(), &Path::new(&target).join(STREAMING_DIR))?;
     let silero = silero_support::tiny_silero_gguf(false)?;
     copy_files(silero.path(), &Path::new(&target).join(SILERO_DIR))?;
     let diarization = diarization_support::tiny_nemotron3_diarization()?;

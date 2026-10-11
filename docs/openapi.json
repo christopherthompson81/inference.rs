@@ -12467,6 +12467,18 @@
           "function"
         ]
       },
+      "TranscriptionDelta": {
+        "type": "object",
+        "description": "The text one push to a streamed transcription adds.",
+        "required": [
+          "delta"
+        ],
+        "properties": {
+          "delta": {
+            "type": "string"
+          }
+        }
+      },
       "TranscriptionLoaderType": {
         "type": "string",
         "enum": [
@@ -12570,6 +12582,40 @@
           },
           "text": {
             "type": "string"
+          }
+        }
+      },
+      "TranscriptionSessionRequest": {
+        "type": "object",
+        "description": "Opens a streamed transcription on a cache-aware streaming model: mono audio is pushed as it arrives and each push\nreturns the text it adds; an inference.rs extension.",
+        "properties": {
+          "language": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "As for [`TranscriptionRequest`]: a Nemotron-3.5 language, unset to identify it."
+          },
+          "model": {
+            "type": "string",
+            "example": "nvidia/nemotron-speech-streaming-en-0.6b"
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/TranscriptionResponseFormat",
+            "description": "How the finished session's whole transcript is rendered."
+          },
+          "sample_rate": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The sample rate of the mono audio pushed; it is resampled to the model's.",
+            "example": 24000,
+            "minimum": 0
+          },
+          "timestamp_granularities": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TimestampGranularity"
+            }
           }
         }
       },

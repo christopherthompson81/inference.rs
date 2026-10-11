@@ -173,6 +173,7 @@ typedef struct inference_stream inference_stream;
 typedef struct inference_string inference_string;
 /* Owned bytes (audio, a file's content) and their MIME type. */
 typedef struct inference_blob inference_blob;
+typedef struct inference_transcription_session inference_transcription_session;
 
 /* Loads an engine from a JSON spec, the EngineSpec schema in docs/openapi.json: {"model": <model selection>,
  * "model_id"?, "runtime"?, "agentic"?, "adapters"?, "skills"?, "anymoe"?}, or several models as "models": [{"model",
@@ -464,6 +465,33 @@ INFERENCE_API inference_status inference_speech_generation(const inference_engin
 INFERENCE_API inference_status inference_transcription(const inference_engine *engine, const char *request,
                                                       size_t request_len, const uint8_t *audio, size_t audio_len,
                                                       inference_blob **out_blob);
+/* Opens a streamed transcription on a cache-aware streaming recogniser (Nemotron streaming ASR): audio is pushed as it
+ * arrives and each push returns the text it completes, the model deciding as it would over the whole recording.
+ * request is {"model"?, "language"?, "sample_rate"? (of the pushed audio, default 16000; resampled to the model's),
+ * "response_format"?, "timestamp_granularities"?}, the last two shaping the finished transcript as for
+ * inference_transcription. A sample_rate outside 8000 to 192000, a model that only transcribes whole recordings, a
+ * language it does not take, or a model already holding 64 open sessions (from any owner) is
+ * INFERENCE_ERR_INVALID_REQUEST. The session stays on the model it opened on, even if "model" was an alias or the
+ * default. A session is used by one thread at a time; it may move between threads. A session that gets no push for
+ * 10 minutes is released, so a live client pushes its silence too; pushes wait behind any whole-recording upload the
+ * same model is transcribing. */
+INFERENCE_API inference_status inference_transcription_session_open(const inference_engine *engine,
+                                                                   const char *request, size_t request_len,
+                                                                   inference_transcription_session **out_session);
+/* Pushes audio_len bytes of little-endian 16-bit mono PCM at the session's rate (an even count). out_response
+ * receives {"delta"}, the text the audio so far completes; the model emits it a chunk (about a second) at a time, so
+ * a short push often adds none. A push that fails ends the session; later calls report it not open. */
+INFERENCE_API inference_status inference_transcription_session_push(inference_transcription_session *session,
+                                                                   const uint8_t *audio, size_t audio_len,
+                                                                   inference_string **out_response);
+/* Ends the session: out_delta receives {"delta"} with the text its last audio adds, out_blob the whole transcript in
+ * the session's response_format, its MIME type naming it. Audio too short to transcribe is
+ * INFERENCE_ERR_INVALID_REQUEST. The session takes no pushes after this; free it. */
+INFERENCE_API inference_status inference_transcription_session_finish(inference_transcription_session *session,
+                                                                     inference_string **out_delta,
+                                                                     inference_blob **out_blob);
+/* Frees a session, closing it if unfinished. */
+INFERENCE_API void inference_transcription_session_free(inference_transcription_session *session);
 /* Finds the speech in audio with a voice activity model (Silero VAD). request holds the POST /v1/audio/vad form
  * fields as JSON ({"model"?, "threshold"?, "neg_threshold"?, "min_speech_duration_ms"?, "max_speech_duration_s"?,
  * "min_silence_duration_ms"?, "speech_pad_ms"?, "return_probabilities"?}, unset fields keeping the reference
