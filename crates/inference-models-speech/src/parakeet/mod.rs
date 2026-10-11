@@ -9,7 +9,7 @@ mod gguf_writer;
 mod nemo_checkpoint;
 
 pub use gguf_checkpoint::is_asr_gguf;
-pub use gguf_writer::{PRESETS, QuantPolicy, TYPE_NAMES, write_asr_gguf};
+pub use gguf_writer::{PRESETS, QuantPolicy, write_asr_gguf};
 pub use nemo_checkpoint::is_asr;
 
 use std::collections::HashMap;

@@ -232,3 +232,124 @@ Parity after the fixes:
   - The forwards without F32 reach min 0.996626 (forward 8). That is inside the spread Run 5 measured between two BF16 runs of the reference that differ only in the SDPA kernel: 0.9917 at forward 0, 0.9960 at forward 7.
 - **Gate:** the script defaults Dev's `--min-cosine` to 0.99, the measured kernel spread. Full keeps 0.999.
 - **Result:** Dev passes with the full F32 list.
+
+## Run 8 - 2026-10-11
+
+Question: what HiDream-O1 GGUFs exist, and what would loading them take?
+
+- **Hub search:** the only HiDream-O1 GGUFs are in `smthem/HiDream-O1-Image-Dev`: Full, Dev and Dev-2604, each at Q8_0 (10.3 GiB) and Q6_K (9.2 GiB).
+  - The other quantized releases are safetensors: ComfyUI fp8 and mxfp8, nvfp4, SDNQ, int8, and MLX.
+  - `calcuis/hidream-gguf` and `city96/HiDream-I1-*-gguf` are the older HiDream-I1/E1, a different model.
+- **Header, read with a 32 MiB HTTP range** (`gguf_header.py`, scratchpad):
+  - GGUF v3 with three keys only: `general.architecture = qwen`, `general.type = diffusion`, `general.file_type` (7 = Q8_0, 18 = Q6_K).
+  - So it is the ComfyUI-GGUF (city96) convention: no config, no tokenizer.
+- **Tensors:** 759 under the original Hugging Face names, including the vision tower (`model.visual.*`) and `lm_head`, which text-to-image never reads.
+  - Q8_0 file: 306 Q8_0 (all text-stack matrices), 56 F16 (embedding, `lm_head`, part of the vision tower), 11 BF16 (`x_embedder`, vision merger), 386 F32 (norms, biases, `final_layer2`).
+  - Q6_K file: 180 Q6_K plus 126 Q8_0 matrices; the rest as in Q8_0.
+- **Config and tokenizer:** `HiDream-O1-Image` and `-Dev` have byte-identical `config.json` and `tokenizer.json`, so either repo serves any of the GGUFs.
+- **Existing support:**
+  - The diffusion crate's `gguf::var_builder` maps GGUF names onto a `ShardedVarBuilder` over a `GgufWeightSource`, as FLUX's GGUF path does.
+  - The shared decoder's linears take quantized weights straight from such a source (`distributed/layers.rs` checks `weight_source()`), so the text stack runs Q8_0/Q6_K without dequantizing.
+
+Plan:
+- Bind every tensor except `lm_head` and `model.visual.*`.
+- Detect a HiDream GGUF by `general.type = diffusion` plus `model.x_embedder.proj1.weight`.
+- Take the variant from the filename (`-dev`, as for repo names), overridable with `--diffusion-arch`.
+- Read the config and tokenizer from beside the file, else from the HiDream-ai repo.
+- Next: download Dev Q8_0 and Full Q6_K to `/mnt/data/models/hidream-o1-gguf`, implement, and run parity against the reference dumps of Runs 6 and 7.
+
+## Run 9 - 2026-10-11
+
+Question: does a HiDream-O1 GGUF load, ours or the published one, and how much do the quantized types cost?
+
+Implementation:
+- **Loading:**
+  - `gguf::hidream_native_name` binds every tensor but `lm_head` and `model.visual.*`.
+  - `hidream::local_gguf` finds the file by contents, not name: `general.type = diffusion` plus the patch embedder.
+  - Diffusion loaders now name their GGUF tensor mapping (`gguf_native_name`); FLUX's was hardcoded.
+  - The auto loader probes a local path, and `HiDreamO1Loader::local_paths` takes the GGUF.
+  - The config and tokenizer come from beside the file, else from `HiDream-ai/HiDream-O1-Image`.
+- **Writing:** `inference quantize hidream-o1 -m <dir|repo> -o <file> --type <t> [--keep fragment=type]` (`hidream::gguf_writer`).
+  - Types: text-stack matrices quantized; embedding F16; other rank-2 BF16; rank-1 and `final_layer2` F32.
+  - `GgmlDType::{from_name, name}` over `WRITABLE_TYPES` moved to inference-tensor, shared with the `asr` writer.
+  - `GgufWriteSummary` is shared too.
+- **Conversion versus download:** the user asked whether converting would beat downloading.
+  - The download ran at 3.5-6.7 MiB/s, ~45 min for the two files.
+  - Converting Dev to Q8_0 from the local F32 shards, already in the page cache, took 9.2 s: 8.1 GiB, 252 Q8_0, 150 F32, 4 BF16, 1 F16.
+  - Peak RSS 41 GB, mostly the mmapped shards.
+- **Byte comparison** against `smthem`'s Dev Q8_0, with a custom header parser:
+  - llama.cpp's gguf-py refuses their file: `model.visual.patch_embed.proj.weight` has 5 dimensions.
+  - 405 of our 407 tensors are byte-identical, including all 252 Q8_0 matrices.
+  - Two differ only in type: their `t_embedder1.mlp.0.weight` is F32 (ours BF16), and one more is F16 where ours is F32.
+  - They carry 352 more tensors: the vision tower and `lm_head`.
+- **The 5-dimension cap:** our GGUF reader also refused their file, with GGML's 4-dimension cap, even though that tensor is never bound. The cap is now 8 in both readers; the element-count overflow check remains.
+
+Dev at 1024x1024, cosine to F32 at forwards 0-7 and 14, against the Run 7 dumps:
+
+| file | size | F32 cos 1-7 | gated min | image PSNR | 28 steps | GPU peak (less 0.9 GiB idle) |
+|---|---|---|---|---|---|---|
+| BF16 safetensors (Run 7) | 16 GB | 0.9964-0.9978 | 0.9966 | 24.87 dB | 8.4 s | |
+| ours Q8_0 | 8.1 GiB | 0.9823-0.9896 | 0.9891 | 22.92 dB | 6.6 s | 8.6 GiB |
+| smthem Q8_0 | 10.3 GiB | identical to ours | 0.9891 | 22.30 dB | 6.6 s | |
+| Q6_K + `down_proj` and `o_proj` Q8_0 (smthem's Q6_K mix) | 7.1 GiB | 0.9712-0.9760 | 0.9825 | 20.89 dB | 7.3 s | |
+| Q6_K + `down_proj` Q8_0 | 7.0 GiB | 0.9714-0.9755 | 0.9820 | 20.54 dB | 7.4 s | 7.5 GiB |
+| Q6_K + `o_proj` Q8_0 | 6.7 GiB | 0.9440-0.9649 | 0.9679 | 18.80 dB | 7.6 s | |
+| Q6_K | 6.6 GiB | 0.9472-0.9618 | 0.9691 | 17.57 dB | 7.7 s | 7.1 GiB |
+| Q4_K | 4.9 GiB | NaN | NaN | 4.5 dB | | 5.5 GiB |
+
+- **Images:** Q8_0 Dev's is the same fox, pose and light as the reference, with the twigs shifted like BF16's.
+- **Q4_K NaN:** a CUDA probe in inference-quant used 512x4096 BF16 activations and a 512x4096 weight.
+  - Plain outliers up to 3e4: all of Q8_0/Q6_K/Q4_K stay at cos 0.9999+.
+  - Three 3e4 outliers inside one 32-value block: Q4_K gives NaN.
+  - The cause: MMQ quantizes activations to Q8_1, and the DS4 layout stores each block's sum as F16 (`make_half2(d, sum)`, as upstream llama.cpp does), so a sum past 65504 is inf.
+  - Layouts: Q4_0, Q4_1, Q5_1, Q4_K and Q5_K read DS4; Q8_0, Q5_0, Q3_K and Q6_K store the scale only (D4); Q2_K keeps float sums (D2S6).
+  - The diffusion var builder holds no packed-affine reservation, so every prompt-sized matmul here goes through MMQ.
+  - The writer refuses DS4 types for HiDream. The kernel fix (float sums, or sums stored in units of d) is shared-kernel work and should get its own issue: any GGUF model with clustered outlier activations is exposed.
+- **Q6_K:** its matmul matches the dequantized one (probe), so the loss is the weights. `down_proj`, whose input carries the outlier channels, is the sensitive matrix; `o_proj` adds nothing over it.
+- **Bar for a quantized file** (script default with `--gguf`):
+  - cosine to the BF16 reference at least 0.98 on forwards without F32;
+  - at most 0.03 further from F32 than the reference.
+  - Ours Q8_0, smthem's Q8_0 and our Q6_K + `down_proj` pass; plain Q6_K fails 8 forwards.
+
+Full at 1024x1024, our Q8_0 against the Run 6 dumps:
+- **F32 cos, ours vs reference BF16:** 0.997023 vs 0.996440 (forward 0), 0.999877 vs 0.999796 (1), 0.999455 vs 0.998302 (50), 0.999863 vs 0.999940 (98).
+- **Teacher forced:** min 0.990039, mean 0.998056.
+- **Free running:** 21.74 dB PSNR in 22.3 s (BF16: 28.5 s).
+- **Image:** the same fox, pose and framing.
+- **Reading:** the undistilled model is as robust to Q8_0 as to BF16; Dev's distilled noisy steps are where quantization shows.
+
+Next:
+- smthem's Full Q6_K, once downloaded;
+- full CI;
+- an issue for the DS4 F16-sum overflow.
+
+## Run 10 - 2026-10-11
+
+Questions:
+- does the published Full Q6_K load and pass?
+- does the F16 activation-sum overflow reproduce in upstream llama.cpp?
+- what did the GGUF review change?
+
+- **`smthem/HiDream-O1-Image-Q6_K.gguf`** (9.2 GiB; Q6_K with `down_proj` and `o_proj` at Q8_0) against the Run 6 dumps:
+  - F32 cos, ours vs reference BF16: 0.993718 vs 0.996440 (forward 0), 0.999721 vs 0.999796 (1), 0.997743 vs 0.998302 (50), 0.999834 vs 0.999940 (98).
+  - Teacher forced: min 0.992568, mean 0.999318. Free running: 21.61 dB, 24.8 s. It passes the quantized bar.
+- **Upstream reproduction** on llama.cpp `5c8854fd8` (2026-10-11), built in the user's checkout (`build_cuda`, CUDA 12.8, RTX 3090).
+  - A standalone ggml program (`q81_repro.cpp`, scratchpad) runs one `MUL_MAT`: K=4096, N=512, weights 0.02*randn quantized by `ggml_quantize_chunk`.
+  - Activations are randn, with every other row carrying 3 adjacent channels (7, 8, 9) set to the outlier value. CUDA is compared with CPU.
+  - M=512, outlier 3e4:
+    - Q4_K and Q5_K are non-finite in 131072 of 262144 outputs, i.e. every outlier row; the clean rows match CPU.
+    - Q8_0, Q6_K and Q4_0 match CPU (cos 1.000000).
+  - M=1, outlier 3e4: Q4_0 is non-finite in all 512 outputs; Q8_0, Q6_K, Q4_K and Q5_K match.
+  - M=512, outlier 1e4 (block sum 3e4, under F16's 65504): Q4_K matches CPU (0.999999).
+  - Upstream still writes `make_half2(d, sum)` in `quantize.cu` (the MMVQ `block_q8_1` at line 100, the MMQ DS4 layout at line 548).
+  - CPU is unaffected.
+- **The report:** the user files llama.cpp reports themselves, since that project forbids AI-written issues. The facts above are for that report.
+- **Review fixes:**
+  - A checkpoint directory (`config.json` plus shards) always loads its own weights; a GGUF beside it is ignored.
+  - A directory is probed only when it holds exactly one `.gguf`.
+  - The variant rule also reads the directory's name.
+  - Both GGUF writers flush explicitly, so a failed final write is reported.
+  - `write_hidream_gguf` fetches through the loader's offline-aware `get_model_paths` and `hf::get_file`.
+  - `GgmlDType::from_name` returns the error, `GgufWriteSummary` is re-exported at the `inference_api` root, and the help lists only allowed types.
+  - The guard covers exactly the writable DS4 types (Q4_0, Q4_K, Q5_K); the upstream run confirms Q4_0 on the MMVQ path.
+  - The engine test writes its Q8_0 and Dev files with the real writer.

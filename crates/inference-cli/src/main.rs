@@ -21,8 +21,8 @@ use args::{
 };
 use commands::{
     BenchRunConfig, run_asr_quantize, run_bench, run_cache_delete, run_cache_list, run_doctor,
-    run_from_config, run_interactive, run_login, run_quantize, run_server, run_tune, run_uninstall,
-    run_update, run_uqff,
+    run_from_config, run_hidream_quantize, run_interactive, run_login, run_quantize, run_server,
+    run_tune, run_uninstall, run_update, run_uqff,
 };
 use inference_api::{LogVerbosity, initialize_inference_logging};
 
@@ -102,6 +102,7 @@ async fn main() -> Result<()> {
         } => match resolve_quantize_command(model_type, default_quantize)? {
             QuantizeCommand::Uqff(model_type) => run_quantize(*model_type, cli.global).await?,
             QuantizeCommand::Asr(options) => run_asr_quantize(options, cli.global)?,
+            QuantizeCommand::HiDreamO1(options) => run_hidream_quantize(options, cli.global)?,
         },
 
         Command::Uqff { command } => {

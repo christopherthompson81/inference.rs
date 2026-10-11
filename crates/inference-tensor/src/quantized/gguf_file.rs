@@ -10,14 +10,15 @@ use std::collections::HashMap;
 pub const DEFAULT_ALIGNMENT: u64 = 32;
 
 // Caps mirror ggml-org/llama.cpp#19856 (GGUF_MAX_STRING_LENGTH,
-// GGUF_MAX_ARRAY_ELEMENTS) and GGML_MAX_DIMS from ggml.h. The depth cap
+// GGUF_MAX_ARRAY_ELEMENTS); the dims cap is set below. The depth cap
 // bounds recursion through nested `Value::Array` so a crafted file cannot
 // overflow the stack with a chain of arrays-of-arrays.
 const GGUF_MAX_STRING_LENGTH: u64 = 1 << 30;
 const GGUF_MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
 // arrays of fixed-size values past this are located, not parsed: a Value per byte of an embedded blob costs 32x
 const INLINE_ARRAY_ELEMENTS: u64 = 1 << 20;
-const GGUF_MAX_TENSOR_DIMS: u32 = 4;
+// past GGML_MAX_DIMS (4): ComfyUI-GGUF keeps a 3D conv at its 5-dim shape
+const GGUF_MAX_TENSOR_DIMS: u32 = 8;
 const GGUF_MAX_VALUE_DEPTH: usize = 64;
 
 // `file_size` is the byte length captured once up front, so this avoids

@@ -27,7 +27,8 @@ use super::repack;
 const DEFAULT_ALIGNMENT: usize = 32;
 const MAX_STRING_LENGTH: u64 = 1 << 30;
 const MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
-const MAX_TENSOR_DIMS: u32 = 4;
+// GGML stops at 4; ComfyUI-GGUF keeps a 3D conv at its 5-dim shape, and the cap only bounds a crafted header
+const MAX_TENSOR_DIMS: u32 = 8;
 const MAX_VALUE_DEPTH: usize = 64;
 const SPLIT_NO: &str = "split.no";
 const SPLIT_COUNT: &str = "split.count";

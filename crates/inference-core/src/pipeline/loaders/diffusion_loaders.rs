@@ -21,7 +21,7 @@ use inference_models_diffusion::flux::{
         FluxStepper, FluxStepperConfig, FluxStepperLoad, LocalTextEncoders, RepoFileFetcher,
     },
 };
-use inference_models_diffusion::hidream;
+use inference_models_diffusion::{gguf, hidream};
 
 use crate::pipeline::{EmbeddingModulePaths, hf, paths::AdapterPaths};
 
@@ -33,8 +33,12 @@ const FLUX_SAFETENSORS_PATTERN: &str = r"^flux\d+-(schnell|dev)\.safetensors$";
 const FLUX_GGUF_PATTERN: &str = r"^flux\d+-(dev|schnell).*\.gguf$";
 const T5_GGUF_PATTERN: &str = r"^t5.*\.gguf$";
 const HIDREAM_ARCHITECTURE: &str = "Qwen3VLForConditionalGeneration";
-const HIDREAM_PATCH_EMBED: &str = "model.x_embedder.proj1.weight";
 const HIDREAM_DEV_MARKER: &str = "-dev";
+// where a GGUF that ships no config or tokenizer takes them from
+const HIDREAM_CONFIG_REPO: &str = "HiDream-ai/HiDream-O1-Image";
+const HIDREAM_CONFIG_REVISION: &str = "main";
+// a repo the caller names without a revision
+const DEFAULT_REVISION: &str = "main";
 // a hub cache snapshot sits under `models--<org>--<name>/snapshots/<sha>`
 const HUB_CACHE_PREFIX: &str = "models--";
 
@@ -92,6 +96,8 @@ pub trait DiffusionModelLoader: Send + Sync {
         Ok(None)
     }
     fn force_cpu_vb(&self) -> Vec<bool>;
+    /// The model's name for each tensor of a GGUF weight group, `None` to skip it.
+    fn gguf_native_name(&self) -> fn(&str) -> Option<String>;
     fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>>;
 }
 
@@ -197,15 +203,30 @@ impl DiffusionLoaderType {
     /// HiDream-O1 from its pixel heads in the safetensors index; the Dev variant is told only by its name.
     pub fn auto_detect_from_weight_index(index: &str, model_id: &str) -> Option<Self> {
         let index: WeightIndex = serde_json::from_str(index).ok()?;
-        if !index.weight_map.contains_key(HIDREAM_PATCH_EMBED) {
+        if !index.weight_map.contains_key(hidream::PATCH_EMBED_TENSOR) {
             return None;
         }
-        let path = Path::new(model_id);
-        let names = path.file_name().into_iter().chain(
-            path.components()
-                .map(|c| c.as_os_str())
-                .filter(|c| c.to_string_lossy().starts_with(HUB_CACHE_PREFIX)),
-        );
+        Some(Self::hidream_variant(&[Path::new(model_id)], model_id))
+    }
+
+    /// HiDream-O1 when `model_id` is a HiDream GGUF or a directory holding one; the file's name joins the variant rule.
+    pub fn auto_detect_hidream_gguf(model_id: &str) -> Option<Self> {
+        let gguf = hidream::local_gguf(Path::new(model_id))?;
+        Some(Self::hidream_variant(
+            &[&gguf, Path::new(model_id)],
+            model_id,
+        ))
+    }
+
+    // Dev when the last part of one of `paths`, or the hub cache entry it sits in, names `-dev`
+    fn hidream_variant(paths: &[&Path], model_id: &str) -> Self {
+        let names = paths.iter().flat_map(|path| {
+            path.file_name().into_iter().chain(
+                path.components()
+                    .map(|c| c.as_os_str())
+                    .filter(|c| c.to_string_lossy().starts_with(HUB_CACHE_PREFIX)),
+            )
+        });
         let dev = names
             .map(|n| n.to_string_lossy().to_lowercase())
             .any(|n| n.contains(HIDREAM_DEV_MARKER));
@@ -217,7 +238,7 @@ impl DiffusionLoaderType {
         tracing::info!(
             "Detected HiDream-O1 from its weights; loading `{model_id}` as `{name}` (choose with `hidream-o1` or `hidream-o1-dev`)"
         );
-        Some(tp)
+        tp
     }
 
     /// Auto-detect diffusion loader type from a repo file listing.
@@ -344,6 +365,9 @@ impl DiffusionModelLoader for FluxLoader {
     fn force_cpu_vb(&self) -> Vec<bool> {
         vec![self.offload, false]
     }
+    fn gguf_native_name(&self) -> fn(&str) -> Option<String> {
+        gguf::flux_native_name
+    }
     fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>> {
         let DiffusionLoad {
             configs,
@@ -414,6 +438,20 @@ fn hidream_shards(names: impl IntoIterator<Item = String>) -> Result<Vec<String>
     Ok(shards)
 }
 
+// the config and tokenizer beside a GGUF, else the base repo's: the full and Dev repos ship identical ones
+fn hidream_gguf_configs(gguf: &Path) -> Result<Vec<PathBuf>> {
+    let dir = gguf.parent().unwrap_or(Path::new("."));
+    let local = [hidream::CONFIG_FILE, hidream::TOKENIZER_FILE].map(|name| dir.join(name));
+    if local.iter().all(|p| p.is_file()) {
+        return Ok(local.to_vec());
+    }
+    let fetch = hub_file_fetcher()?;
+    [hidream::CONFIG_FILE, hidream::TOKENIZER_FILE]
+        .iter()
+        .map(|name| Ok(fetch(HIDREAM_CONFIG_REPO, HIDREAM_CONFIG_REVISION, name)?))
+        .collect()
+}
+
 impl DiffusionModelLoader for HiDreamO1Loader {
     fn get_model_paths(
         &self,
@@ -440,6 +478,13 @@ impl DiffusionModelLoader for HiDreamO1Loader {
             .collect()
     }
     fn local_paths(&self, model_id: &Path) -> Result<Option<DiffusionModelPathsInner>> {
+        if let Some(gguf) = hidream::local_gguf(model_id) {
+            return Ok(Some(DiffusionModelPathsInner {
+                config_filenames: hidream_gguf_configs(&gguf)?,
+                filenames: vec![vec![gguf]],
+                text_encoders: LocalTextEncoders::default(),
+            }));
+        }
         if !model_id.join(hidream::CONFIG_FILE).is_file() {
             return Ok(None);
         }
@@ -462,6 +507,9 @@ impl DiffusionModelLoader for HiDreamO1Loader {
     fn force_cpu_vb(&self) -> Vec<bool> {
         vec![false]
     }
+    fn gguf_native_name(&self) -> fn(&str) -> Option<String> {
+        gguf::hidream_native_name
+    }
     fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>> {
         let DiffusionLoad {
             configs,
@@ -481,6 +529,60 @@ impl DiffusionModelLoader for HiDreamO1Loader {
             self.variant,
         )))
     }
+}
+
+fn ggml_type(name: &str) -> Result<inference_tensor::quantized::GgmlDType> {
+    Ok(inference_tensor::quantized::GgmlDType::from_name(name)?)
+}
+
+/// Writes the HiDream-O1 checkpoint `model_id` names (a directory or a Hub repo) to `out` as a ComfyUI-GGUF
+/// file: its text stack's matrices in the type named `matrices`, each `fragment=type` of `keep` taking precedence.
+pub fn write_hidream_gguf(
+    model_id: &str,
+    revision: Option<String>,
+    token_source: &crate::pipeline::TokenSource,
+    out: &Path,
+    matrices: &str,
+    keep: &[String],
+) -> Result<crate::GgufWriteSummary> {
+    let overrides = keep
+        .iter()
+        .map(|k| {
+            let (fragment, dtype) = k
+                .split_once('=')
+                .with_context(|| format!("`{k}` is not fragment=type"))?;
+            Ok((fragment.to_string(), ggml_type(dtype)?))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let policy = hidream::gguf_writer::Policy {
+        matrices: ggml_type(matrices)?,
+        overrides,
+    };
+    let local = Path::new(model_id);
+    let dir = if local.join(hidream::CONFIG_FILE).is_file() {
+        local.to_path_buf()
+    } else {
+        let revision = revision.unwrap_or_else(|| DEFAULT_REVISION.to_string());
+        let api = hf_hub::api::sync::ApiBuilder::from_env()
+            .with_token(crate::pipeline::tokens::get_token(token_source)?)
+            .build()?
+            .repo(hf_hub::Repo::with_revision(
+                model_id.to_string(),
+                hf_hub::RepoType::Model,
+                revision.clone(),
+            ));
+        // the loader's own fetch, offline cache included; the hub cache keeps a revision's files in one directory
+        HiDreamO1Loader {
+            variant: hidream::Variant::Full,
+        }
+        .get_model_paths(&api, local, &revision)?;
+        hf::get_file(&api, local, hidream::CONFIG_FILE, &revision)?
+            .parent()
+            .context("a snapshot file has a directory")?
+            .to_path_buf()
+    };
+    let chosen = hidream::gguf_writer::write_gguf(&dir, out, &policy)?;
+    crate::GgufWriteSummary::of(out, chosen.into_iter().map(|(_, d)| d))
 }
 
 #[cfg(test)]

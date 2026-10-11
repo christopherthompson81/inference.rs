@@ -191,8 +191,13 @@ impl Loader for DiffusionLoader {
                                 .extension()
                                 .is_some_and(|ext| ext == gguf::GGUF_EXTENSION)
                         {
-                            return gguf::var_builder(path, gguf::flux_native_name, dtype, dev)
-                                .map(|(vb, shapes)| (vb, Some(shapes)));
+                            return gguf::var_builder(
+                                path,
+                                self.inner.gguf_native_name(),
+                                dtype,
+                                dev,
+                            )
+                            .map(|(vb, shapes)| (vb, Some(shapes)));
                         }
                         from_mmaped_safetensors(
                             group.clone(),

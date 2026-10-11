@@ -1,5 +1,6 @@
 //! HiDream-O1-Image text-to-image: one Qwen3-VL transformer that denoises 32 px RGB patches directly, no VAE.
 
+pub mod gguf_writer;
 pub mod model;
 pub mod sampling;
 
@@ -115,6 +116,52 @@ impl Noise for SeededNoise {
 
 pub const CONFIG_FILE: &str = "config.json";
 pub const TOKENIZER_FILE: &str = "tokenizer.json";
+// ComfyUI-GGUF's marker for a diffusion model, which these files carry with `general.architecture = qwen`
+pub(crate) const GGUF_TYPE_KEY: &str = "general.type";
+const GGUF_DIFFUSION: &str = "diffusion";
+/// HiDream's patch embedder, which no Qwen3-VL checkpoint has.
+pub const PATCH_EMBED_TENSOR: &str = "model.x_embedder.proj1.weight";
+
+/// Whether `path` is a HiDream-O1 GGUF: ComfyUI-GGUF's diffusion marker over HiDream's patch embedder.
+pub fn is_gguf(path: &Path) -> bool {
+    let Ok(archive) = inference_quant::GgufArchive::open_file(path) else {
+        return false;
+    };
+    let diffusion = archive
+        .metadata()
+        .get(GGUF_TYPE_KEY)
+        .and_then(|v| v.to_string().ok())
+        .is_some_and(|t| t == GGUF_DIFFUSION);
+    diffusion && archive.tensors().contains_key(PATCH_EMBED_TENSOR)
+}
+
+/// The HiDream-O1 GGUF `model_id` names: the file itself, or a directory's only GGUF when it holds no checkpoint.
+pub fn local_gguf(model_id: &Path) -> Option<PathBuf> {
+    let is_gguf_file = |p: &Path| {
+        p.extension()
+            .is_some_and(|e| e == crate::gguf::GGUF_EXTENSION)
+    };
+    if model_id.is_file() {
+        return (is_gguf_file(model_id) && is_gguf(model_id)).then(|| model_id.to_path_buf());
+    }
+    let names: Vec<String> = std::fs::read_dir(model_id)
+        .ok()?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .collect();
+    // a checkpoint's own weights win over a GGUF written beside them
+    if names.iter().any(|n| n == CONFIG_FILE) && !weight_shards(names.clone()).is_empty() {
+        return None;
+    }
+    // several GGUFs could be anything, and probing each costs a header parse: the caller names the file
+    let mut ggufs = names
+        .iter()
+        .map(|n| model_id.join(n))
+        .filter(|p| is_gguf_file(p));
+    match (ggufs.next(), ggufs.next()) {
+        (Some(one), None) if is_gguf(&one) => Some(one),
+        _ => None,
+    }
+}
 
 /// The checkpoint's weight files among `names`, in shard order.
 pub fn weight_shards(names: impl IntoIterator<Item = String>) -> Vec<String> {
@@ -174,20 +221,41 @@ impl HiDreamO1Pipeline {
 
     /// The model from a checkpoint directory (`config.json`, `tokenizer.json`, `model*.safetensors`), outside the engine.
     pub fn load(dir: &Path, variant: Variant, device: &Device, dtype: DType) -> Result<Self> {
-        let msg = |e: &dyn std::fmt::Display| {
-            inference_tensor::Error::msg(format!("{}: {e}", dir.display()))
-        };
-        let config = std::fs::read_to_string(dir.join(CONFIG_FILE)).map_err(|e| msg(&e))?;
-        let config = model::Config::from_json(&config).map_err(|e| msg(&e))?;
-        let tokenizer = Tokenizer::from_file(dir.join(TOKENIZER_FILE)).map_err(|e| msg(&e))?;
         let names = std::fs::read_dir(dir)
-            .map_err(|e| msg(&e))?
+            .map_err(|e| path_error(dir, &e))?
             .filter_map(|entry| entry.ok()?.file_name().into_string().ok());
         let shards: Vec<PathBuf> = weight_shards(names).iter().map(|n| dir.join(n)).collect();
         // SAFETY: the weights are read-only for the model's life; a file changed underneath it is undefined
         let vb = unsafe {
             ShardedSafeTensors::sharded(&shards, dtype, device, None, Arc::new(|_| true))?
         };
+        Self::from_parts(dir, vb, variant, device)
+    }
+
+    /// As [`HiDreamO1Pipeline::load`], with the weights from a GGUF and the config and tokenizer from `dir`.
+    pub fn load_gguf(
+        gguf: &Path,
+        dir: &Path,
+        variant: Variant,
+        device: &Device,
+        dtype: DType,
+    ) -> Result<Self> {
+        let (vb, _) =
+            crate::gguf::var_builder(gguf, crate::gguf::hidream_native_name, dtype, device)?;
+        Self::from_parts(dir, vb, variant, device)
+    }
+
+    fn from_parts(
+        dir: &Path,
+        vb: inference_quant::ShardedVarBuilder,
+        variant: Variant,
+        device: &Device,
+    ) -> Result<Self> {
+        let config =
+            std::fs::read_to_string(dir.join(CONFIG_FILE)).map_err(|e| path_error(dir, &e))?;
+        let config = model::Config::from_json(&config).map_err(|e| path_error(dir, &e))?;
+        let tokenizer =
+            Tokenizer::from_file(dir.join(TOKENIZER_FILE)).map_err(|e| path_error(dir, &*e))?;
         let metadata = NormalLoadingMetadata {
             mapper: Box::new(DummyDeviceMapper {
                 nm_device: device.clone(),
@@ -294,6 +362,10 @@ impl HiDreamO1Pipeline {
         }
         Ok(z)
     }
+}
+
+fn path_error(dir: &Path, e: &dyn std::fmt::Display) -> inference_tensor::Error {
+    inference_tensor::Error::msg(format!("{}: {e}", dir.display()))
 }
 
 /// Patches (1, rows * cols, 3072) in [-1, 1] as an image (1, 3, height, width) in [0, 255].

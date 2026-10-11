@@ -520,6 +520,12 @@ impl AutoLoader {
         }
 
         if artifacts.contents.is_none()
+            && let Some(tp) = DiffusionLoaderType::auto_detect_hidream_gguf(&self.model_id)
+        {
+            return Ok(Detected::Diffusion(tp));
+        }
+
+        if artifacts.contents.is_none()
             && super::speech::local_kokoro_gguf(&self.model_id).is_some()
         {
             info!("Detected a Kokoro GGUF; routing as Kokoro.");

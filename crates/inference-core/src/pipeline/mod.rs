@@ -90,7 +90,7 @@ pub use loaders::{
     EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, HiDreamO1Loader,
     LoadOptions, Loader, LocalModelPaths, ModelKind, ModelPaths, MultimodalLoaderType,
     MultimodalModel, MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel,
-    NormalModelLoader, QuantizationKind, TokenSource,
+    NormalModelLoader, QuantizationKind, TokenSource, write_hidream_gguf,
 };
 #[cfg(feature = "models-llama")]
 pub use loaders::{
@@ -177,8 +177,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 pub use transcription::{
-    AsrGgufSummary, DiarizationLoader, DiarizationLoaderType, TranscriptionLoader,
-    TranscriptionLoaderType, TranscriptionPipeline, VoiceActivityLoader, write_asr_gguf,
+    DiarizationLoader, DiarizationLoaderType, TranscriptionLoader, TranscriptionLoaderType,
+    TranscriptionPipeline, VoiceActivityLoader, write_asr_gguf,
 };
 
 pub type SpeechPreparation = Box<dyn FnOnce() -> std::result::Result<(), String> + Send>;

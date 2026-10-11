@@ -68,6 +68,35 @@ snap to the one of 2048x2048, 2304x1728, 2560x1440, 2496x1664, 3104x1312, 2304x1
 with the closest aspect ratio, and the response image has that size. Image editing and subject references
 (conditioning on input images) are not supported yet.
 
+### HiDream-O1 from GGUF
+
+A HiDream-O1 GGUF in ComfyUI-GGUF's layout (the original tensor names, `general.type = diffusion`) loads from its path, or
+from a directory holding exactly one, with its text stack's matrices staying quantized on the GPU:
+
+```bash
+inference serve -m /path/to/HiDream-O1-Image-Dev-Q8_0.gguf
+```
+
+The file is recognized by its contents; the variant comes from its name as from a repo's (`-dev` loads Dev), or choose it
+with `inference serve diffusion --diffusion-arch`. These files ship no config or tokenizer: a `config.json` and
+`tokenizer.json` beside the GGUF are used, else the base repo's (the full and Dev repos share them).
+
+`inference quantize hidream-o1 -m <checkpoint dir or repo> -o <file>.gguf --type q8_0` writes one from the checkpoint in
+seconds. It quantizes the text stack's matrices, keeps the embedding at F16, the patch and timestep embedders at BF16,
+and norms, biases and the prediction head at F32, and leaves out the vision tower and `lm_head`, which text-to-image never
+reads. Its Q8_0 matrices are byte-identical to the published `smthem/HiDream-O1-Image-Dev` ones.
+
+| Weights | File | GPU memory at 1024x1024 | Dev, 28 steps | Full, 50 steps |
+|---|---|---|---|---|
+| BF16 (from the repos) | 16 GB | about 18 GB | 8.4 s | 28.5 s |
+| Q8_0 | 8.1 GiB | 8.6 GiB | 6.6 s | 22.3 s |
+| Q6_K, `--keep down_proj=q8_0` | 7.0 GiB | 7.5 GiB | 7.4 s | |
+
+Measured on an RTX 3090 at 1024x1024. Q8_0 is the recommended type: the full model's predictions stay as close to F32 as BF16's,
+and Dev's distilled noisy steps lose a little detail. Plain Q6_K is noticeably worse; keeping `down_proj` at Q8_0, which
+reads the model's outlier channels, recovers most of it. Q4_0, Q4_K and Q5_K are refused: their CUDA kernels hold each
+activation block's sum in F16, which this model's outlier activations overflow.
+
 ## Generating an image
 
 <Tabs>

@@ -17,6 +17,7 @@ pub mod engine_logits;
 mod engine_tests;
 pub mod files;
 pub mod generation;
+pub mod hidream_gguf;
 pub(crate) mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;
@@ -45,6 +46,8 @@ pub mod util;
 pub mod video;
 
 pub use engine::{Engine, EngineLoadError, EngineSpec};
+/// What a GGUF writer (`asr_gguf`, `hidream_gguf`) reports.
+pub use inference_core::GgufWriteSummary;
 pub use inference_core::{
     INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION, LogVerbosity, initialize_inference_logging,
     initialize_logging,

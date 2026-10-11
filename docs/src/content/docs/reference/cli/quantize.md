@@ -191,3 +191,19 @@ inference quantize asr [OPTIONS] --model-id <MODEL_ID> --output <OUTPUT_PATH>
 | `--policy <POLICY>` | `q8_0` | A preset (`q8_0-decoder`, `q6_k-mix`) or the type every matrix takes; `q8_0` writes NVIDIA's own file |
 | `--keep <KEEP>` |  | `<name fragment>=<type>`, repeatable: the first fragment a tensor's name contains sets its type |
 
+## inference quantize hidream-o1
+
+HiDream-O1-Image (or -Dev) checkpoint to a GGUF, its text stack quantized
+
+```
+inference quantize hidream-o1 [OPTIONS] --model-id <MODEL_ID> --output <OUTPUT_PATH>
+```
+
+| Option | Default | Description |
+|---|---|---|
+| `-m, --model-id <MODEL_ID>` | required | A checkpoint directory (`config.json`, `model*.safetensors`) or a Hugging Face repo |
+| `--revision <REVISION>` |  | Hub revision (branch, tag or commit) of a repo `--model-id` |
+| `-o, --output <OUTPUT_PATH>` | required | Output `.gguf` path; a name containing `-dev` loads as the Dev variant |
+| `--type <MATRICES>` | `q8_0` | The text stack's matrix type (`q8_0`, `q6_k`, `q5_0`, `q3_k`); norms, biases and the head stay finer |
+| `--keep <KEEP>` |  | `<name fragment>=<type>`, repeatable: the first fragment a matrix's name contains sets its type |
+

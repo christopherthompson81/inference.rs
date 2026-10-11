@@ -5,15 +5,16 @@
 # Not part of local_ci.sh: it needs a CUDA GPU, the reference checkout and a Python with its requirements
 # (transformers 4.57, diffusers, torch).
 #
-# Usage: scripts/hidream_o1_parity.sh <checkpoint dir> [--dev] [--prompt <text>] [--size <w>x<h>] [--steps <n>] [--seed <n>] [--min-cosine <x>] [--f32 <k,...>] [--keep-dumps <dir>]
+# Usage: scripts/hidream_o1_parity.sh <checkpoint dir> [--dev] [--prompt <text>] [--size <w>x<h>] [--steps <n>] [--seed <n>] [--min-cosine <x>] [--slack <x>] [--f32 <k,...>] [--gguf <file>] [--keep-dumps <dir>]
 #   dir   holds config.json, tokenizer.json and the model*.safetensors shards (HiDream-O1-Image or -Dev)
 #   f32   reruns those forwards of the reference in F32 on CPU (~40 GB RAM, minutes each); ours must then be at least
 #         as close to F32 as the reference's BF16 is, the bar at noisy steps where BF16 itself drifts
+#   gguf  ours from that GGUF instead of the checkpoint's shards, held to the quantized bar unless the bars are given
 #   env   HIDREAM_REPO is the reference checkout, HIDREAM_PYTHON its interpreter (default python3)
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    sed -n '8,12p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '8,13p' "$0" | sed 's/^# \{0,1\}//'
     exit 2
 fi
 : "${HIDREAM_REPO:?set HIDREAM_REPO to the HiDream-O1-Image checkout}"
@@ -27,6 +28,7 @@ steps=
 seed=7
 keep=
 f32=
+gguf=()
 tolerance=()
 while [[ $# -gt 0 ]]; do
     case $1 in
@@ -35,16 +37,21 @@ while [[ $# -gt 0 ]]; do
         --size) size=$2; shift ;;
         --steps) steps=$2; shift ;;
         --seed) seed=$2; shift ;;
-        --min-cosine) tolerance+=("$1" "$2"); shift ;;
+        --min-cosine | --slack) tolerance+=("$1" "$2"); shift ;;
         --f32) f32=$2; shift ;;
+        # ours from a GGUF of the checkpoint, against the same reference
+        --gguf) gguf=(--gguf "$(realpath "$2")"); shift ;;
         # reuse (or fill) this directory's reference dumps, so a rerun pays for the reference once
         --keep-dumps) keep=$(realpath -m "$2"); shift ;;
         *) echo "unknown argument $1" >&2; exit 2 ;;
     esac
     shift
 done
-# Dev's noisy steps move ~0.008 between two valid BF16 runs (swapping only the SDPA kernel), so 0.999 is out of reach
-if [[ $variant == dev && ${#tolerance[@]} -eq 0 ]]; then
+# Dev's noisy steps move ~0.008 between two valid BF16 runs (swapping only the SDPA kernel), so 0.999 is out of reach;
+# a quantized GGUF's bar admits Q8_0 (0.989, 0.014 behind F32) and Q6_K with down_proj at Q8_0, not plain Q6_K
+if [[ ${#gguf[@]} -gt 0 && ${#tolerance[@]} -eq 0 ]]; then
+    tolerance=(--min-cosine 0.98 --slack 0.03)
+elif [[ $variant == dev && ${#tolerance[@]} -eq 0 ]]; then
     tolerance=(--min-cosine 0.99)
 fi
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -190,4 +197,4 @@ PY
 fi
 
 cargo run --manifest-path "$root/Cargo.toml" -q -p inference-models-diffusion --features cuda --example hidream_o1_parity -- \
-    --model "$model" --dumps "$dumps" "${tolerance[@]}" "${against[@]}"
+    --model "$model" --dumps "$dumps" "${tolerance[@]}" "${against[@]}" "${gguf[@]}"

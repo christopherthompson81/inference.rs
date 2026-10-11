@@ -1,9 +1,11 @@
 //! Builds a tiny random-weight HiDream-O1 checkpoint at test time, under a name that selects the full or Dev variant.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use inference_models_diffusion::hidream::model::{Config, HiDreamO1};
+use inference_tensor::quantized::gguf_file::{self, Value};
+use inference_tensor::quantized::{GgmlDType, QTensor};
 
 #[path = "recording.rs"]
 mod recording;
@@ -12,6 +14,7 @@ const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hidre
 const TEXT_LAYERS: usize = 2;
 const WEIGHTS: &str = "model.safetensors";
 const INDEX: &str = "model.safetensors.index.json";
+const COPIED: [&str; 2] = ["config.json", "tokenizer.json"];
 
 /// The checkpoint in a temporary directory, and its path, named `name` (a `-dev` suffix selects Dev).
 pub fn tiny_hidream_o1(name: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf)> {
@@ -39,4 +42,39 @@ pub fn tiny_hidream_o1(name: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf
         serde_json::json!({ "weight_map": names }).to_string(),
     )?;
     Ok((parent, dir))
+}
+
+/// `checkpoint` as a ComfyUI-GGUF HiDream file at `gguf`, every tensor in F32, config and tokenizer beside it.
+pub fn tiny_hidream_o1_f32_gguf(checkpoint: &Path, gguf: &Path) -> anyhow::Result<()> {
+    copy_configs(checkpoint, gguf)?;
+    let weights = inference_tensor::safetensors::load(
+        checkpoint.join(WEIGHTS),
+        &inference_tensor::Device::Cpu,
+    )?;
+    let mut tensors = Vec::with_capacity(weights.len());
+    for (name, t) in weights {
+        let t = t.to_dtype(inference_tensor::DType::F32)?;
+        tensors.push((name, QTensor::quantize(&t, GgmlDType::F32)?));
+    }
+    let metadata = [
+        ("general.architecture", Value::String("qwen".to_string())),
+        ("general.type", Value::String("diffusion".to_string())),
+    ];
+    let metadata: Vec<(&str, &Value)> = metadata.iter().map(|(k, v)| (*k, v)).collect();
+    let refs: Vec<(&str, &QTensor)> = tensors.iter().map(|(n, q)| (n.as_str(), q)).collect();
+    gguf_file::write(
+        &mut std::io::BufWriter::new(std::fs::File::create(gguf)?),
+        &metadata,
+        &refs,
+    )?;
+    Ok(())
+}
+
+/// The config and tokenizer the GGUF `gguf` loads with, copied beside it from `checkpoint`.
+pub fn copy_configs(checkpoint: &Path, gguf: &Path) -> anyhow::Result<()> {
+    let dir = gguf.parent().expect("the GGUF has a directory");
+    for name in COPIED {
+        std::fs::copy(checkpoint.join(name), dir.join(name))?;
+    }
+    Ok(())
 }

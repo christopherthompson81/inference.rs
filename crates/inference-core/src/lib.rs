@@ -88,6 +88,8 @@ mod adapter;
 mod agent_approval;
 mod chat_collector;
 mod engine;
+mod gguf_write;
+pub use gguf_write::GgufWriteSummary;
 use inference_nn::media_inputs::video as video_input;
 pub use video_input::{VideoFrameSampling, VideoInput, sample_frame_indices};
 mod embedding_models;
@@ -150,9 +152,7 @@ pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSo
 pub use inference_models_speech::{
     SpeechGenerationConfig, SpeechOptions, TimedText, Transcription, TranscriptionOptions,
     diarization::{Diarization, DiarizationOptions, SpeakerSegment},
-    parakeet::{
-        PRESETS as ASR_QUANT_PRESETS, QuantPolicy as AsrQuantPolicy, TYPE_NAMES as ASR_QUANT_TYPES,
-    },
+    parakeet::{PRESETS as ASR_QUANT_PRESETS, QuantPolicy as AsrQuantPolicy},
     silero::{SegmentOptions, VoiceActivity},
     utils as speech_utils,
 };
@@ -176,20 +176,20 @@ pub use pipeline::hf::{
 #[cfg(feature = "utoipa")]
 pub use pipeline::UqffWriteSpec;
 pub use pipeline::{
-    AdapterPaths, AnyMoeLoader, AnyMoePipeline, AsrGgufSummary, AutoDeviceMapParams,
-    AutoEmbeddingLoader, AutoLoader, AutoLoaderBuilder, AutoMultimodalLoader, AutoNormalLoader,
-    DiarizationLoader, DiarizationLoaderType, DiffusionGenerationParams, DiffusionLoader,
-    DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
-    EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
-    GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
-    HfConfigOverrides, IsqOrganization, LoadOptions, Loader, LocalModelPaths, Modalities,
-    ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
-    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
-    NormalLoaderType, NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType,
-    SpeechPipeline, SupportedModality, TokenSource, TranscriptionLoader, TranscriptionLoaderType,
+    AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams, AutoEmbeddingLoader,
+    AutoLoader, AutoLoaderBuilder, AutoMultimodalLoader, AutoNormalLoader, DiarizationLoader,
+    DiarizationLoaderType, DiffusionGenerationParams, DiffusionLoader, DiffusionLoaderBuilder,
+    DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingLoaderType,
+    EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader, GGMLLoaderBuilder,
+    GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides,
+    IsqOrganization, LoadOptions, Loader, LocalModelPaths, Modalities, ModelKind, ModelPaths,
+    MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
+    MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
+    NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType, SpeechPipeline,
+    SupportedModality, TokenSource, TranscriptionLoader, TranscriptionLoaderType,
     TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, VoiceActivityLoader,
     expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand, write_asr_gguf,
+    resolve_uqff_shorthand, write_asr_gguf, write_hidream_gguf,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{
