@@ -18,8 +18,30 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const SIZE_COMPRESSION_SINCE: (u32, u32) = (12, 8);
 
-// a kernel source and the object compiled from it
-type SourceObject = (PathBuf, PathBuf);
+/// Each GPU arch's copy of a loadable library sits in `sm<arch>/`; `inference_tensor::kernel_library` matches it.
+pub const ARCH_DIR_PREFIX: &str = "sm";
+
+/// The directory a per-arch build links `arch`'s libraries into: `sm86`, `sm90a`.
+pub fn arch_dir(arch: &GpuArch) -> String {
+    format!(
+        "{ARCH_DIR_PREFIX}{}",
+        arch.to_nvcc_arch().trim_start_matches("sm_")
+    )
+}
+
+// a kernel source and the object compiled from it, for one arch dir (`sm86`) in a per-arch build
+struct Compiled {
+    source: PathBuf,
+    arch: Option<String>,
+    object: PathBuf,
+}
+
+// one loadable library: the nominal `<dir>/lib<name>.so` the crate records, and its per-arch copies
+struct LoadableLib {
+    name: String,
+    nominal: PathBuf,
+    copies: Vec<PathBuf>,
+}
 
 /// Main builder for CUDA kernel compilation
 #[derive(Debug)]
@@ -335,7 +357,8 @@ impl KernelBuilder {
     pub fn build_lib<P: Into<PathBuf>>(&self, out_file: P) -> Result<()> {
         let out_file = out_file.into();
         self.emit_cuda_link_search()?;
-        let Some((toolkit, objects)) = self.compile_objects(std::slice::from_ref(&out_file))?
+        let Some((toolkit, objects)) =
+            self.compile_objects(std::slice::from_ref(&out_file), None)?
         else {
             return Ok(());
         };
@@ -344,7 +367,7 @@ impl KernelBuilder {
             .arg("--lib")
             .arg("-o")
             .arg(&out_file)
-            .args(objects.iter().map(|(_, object)| object));
+            .args(objects.iter().map(|c| &c.object));
         run_link(command)
     }
 
@@ -368,7 +391,12 @@ impl KernelBuilder {
         };
         let pointers = shared_lib_root()?;
         std::fs::create_dir_all(&pointers)?;
-        for (lib, out_file) in self.build_shared_objects(name, &root, !dev_shared_libs())? {
+        for LoadableLib {
+            name: lib,
+            nominal: out_file,
+            copies: variants,
+        } in self.build_shared_objects(name, &root, !dev_shared_libs())?
+        {
             println!(
                 "cargo:rustc-env={}={}",
                 loadable_lib_env(&lib),
@@ -380,7 +408,9 @@ impl KernelBuilder {
                 Self::built_id(&out_file)?
             );
             // a deleted library must be rebuilt, or the path baked into the crate would point at nothing
-            println!("cargo:rerun-if-changed={}", out_file.display());
+            for variant in &variants {
+                println!("cargo:rerun-if-changed={}", variant.display());
+            }
             // packaging reads which library this build made, among the variants a target dir accumulates
             let pointer = pointers.join(format!("{lib}.{LIB_POINTER_EXTENSION}"));
             let tmp = pointers.join(format!("{lib}.{LIB_POINTER_EXTENSION}.tmp"));
@@ -399,13 +429,14 @@ impl KernelBuilder {
             .map_or(name, |(lib, _)| lib)
     }
 
+    // Each library's nominal `<dir>/lib<name>.so` (the path the crate records), with the per-arch files linked for it.
     // `strip` drops the static symbol table; the dynamic one the loader resolves through stays
     fn build_shared_objects(
         mut self,
         name: &str,
         root: &Path,
         strip: bool,
-    ) -> Result<Vec<(String, PathBuf)>> {
+    ) -> Result<Vec<LoadableLib>> {
         let toolkit = match self.toolkit.take() {
             Some(t) => t,
             None => CudaToolkit::detect()?,
@@ -444,47 +475,77 @@ impl KernelBuilder {
                 libs.push(lib.to_string());
             }
         }
-        let out_files: Vec<PathBuf> = libs
+        let archs: Vec<GpuArch> = self.compute_cap.get_defaults()?;
+        let variant_path =
+            |lib: &str, arch: &GpuArch| dir.join(arch_dir(arch)).join(format!("lib{lib}.so"));
+        let nominal: Vec<PathBuf> = libs
             .iter()
             .map(|lib| dir.join(format!("lib{lib}.so")))
             .collect();
-        for out_file in &out_files {
+        let variants: Vec<Vec<PathBuf>> = libs
+            .iter()
+            .map(|lib| archs.iter().map(|arch| variant_path(lib, arch)).collect())
+            .collect();
+        for (out_file, lib_variants) in nominal.iter().zip(&variants) {
+            // a single-arch library from an older layout; the loader opens only the per-arch copies
+            let _ = std::fs::remove_file(out_file);
             // a library from before ids were linked in is rebuilt
             if !PathBuf::from(format!("{}.{BUILD_ID_EXTENSION}", out_file.display())).is_file() {
-                let _ = std::fs::remove_file(out_file);
+                for variant in lib_variants {
+                    let _ = std::fs::remove_file(variant);
+                }
             }
         }
-        if let Some((toolkit, objects)) = self.compile_objects(&out_files)? {
-            for (lib, out_file) in libs.iter().zip(&out_files) {
-                let mut own: Vec<PathBuf> = objects
+        let all_variants: Vec<PathBuf> = variants.iter().flatten().cloned().collect();
+        if let Some((toolkit, objects)) = self.compile_objects(&all_variants, Some(&archs))? {
+            for (lib, out_file) in libs.iter().zip(&nominal) {
+                let own: Vec<&Compiled> = objects
                     .iter()
-                    .filter(|(source, _)| self.library_of(name, source) == lib)
-                    .map(|(_, object)| object.clone())
+                    .filter(|c| self.library_of(name, &c.source) == lib)
                     .collect();
-                let id = build_id(&own)?;
-                own.push(compile_build_id(&toolkit, &dir, lib, &id)?);
-                // Link aside and rename, so binaries that already map the old library keep working.
-                let tmp = dir.join(format!("lib{lib}.so.tmp"));
-                let mut command = Command::new(&toolkit.nvcc_path);
-                command
-                    .arg("-shared")
-                    // nothing builds relocatable device code, and the device link would add an empty default-arch cubin
-                    .arg("--no-device-link")
-                    .args(["--cudart", "shared"])
-                    .arg("-o")
-                    .arg(&tmp)
-                    .arg(format!("-Xlinker=-soname={}", out_file.display()))
-                    .arg("-Xlinker=--no-undefined")
-                    .args(&own);
-                if strip {
-                    command.arg("-Xlinker=-s");
+                // one id over every arch's objects, so each arch's copy matches the one crate build
+                let id = build_id(&own.iter().map(|c| c.object.clone()).collect::<Vec<_>>())?;
+                let id_object = compile_build_id(&toolkit, &dir, lib, &id)?;
+                for arch in &archs {
+                    let target = variant_path(lib, arch);
+                    std::fs::create_dir_all(target.parent().expect("variant has a dir"))?;
+                    // Link aside and rename, so binaries that already map the old library keep working.
+                    let tmp = PathBuf::from(format!("{}.tmp", target.display()));
+                    let mut command = Command::new(&toolkit.nvcc_path);
+                    command
+                        .arg("-shared")
+                        // nothing builds relocatable device code, and the device link would add an empty default-arch cubin
+                        .arg("--no-device-link")
+                        .args(["--cudart", "shared"])
+                        .arg("-o")
+                        .arg(&tmp)
+                        .arg(format!("-Xlinker=-soname=lib{lib}.so"))
+                        .arg("-Xlinker=--no-undefined")
+                        .args(
+                            own.iter()
+                                .filter(|c| c.arch.as_deref() == Some(arch_dir(arch).as_str()))
+                                .map(|c| &c.object),
+                        )
+                        .arg(&id_object);
+                    if strip {
+                        command.arg("-Xlinker=-s");
+                    }
+                    run_link(command)?;
+                    std::fs::rename(&tmp, &target)?;
                 }
-                run_link(command)?;
-                std::fs::rename(&tmp, out_file)?;
                 std::fs::write(format!("{}.{BUILD_ID_EXTENSION}", out_file.display()), &id)?;
             }
         }
-        Ok(libs.into_iter().zip(out_files).collect())
+        Ok(libs
+            .into_iter()
+            .zip(nominal)
+            .zip(variants)
+            .map(|((name, nominal), copies)| LoadableLib {
+                name,
+                nominal,
+                copies,
+            })
+            .collect())
     }
 
     // the build id linked into the library at `out_file`
@@ -503,11 +564,12 @@ impl KernelBuilder {
         Ok(())
     }
 
-    /// Compile every out-of-date kernel into `out_dir`; `None` when every one of `out_files` is already current.
+    /// Compile every out-of-date kernel into `out_dir`, once per arch in `per_arch`; `None` when `out_files` are current.
     fn compile_objects(
         &self,
         out_files: &[PathBuf],
-    ) -> Result<Option<(CudaToolkit, Vec<SourceObject>)>> {
+        per_arch: Option<&[GpuArch]>,
+    ) -> Result<Option<(CudaToolkit, Vec<Compiled>)>> {
         crate::jobserver::init();
 
         // Detect toolkit if not set
@@ -565,18 +627,53 @@ impl KernelBuilder {
 
         // Determine which files need compilation
         let mut compile_jobs: Vec<(PathBuf, PathBuf, Vec<GpuArch>)> = Vec::new();
-        let mut all_obj_files: Vec<SourceObject> = Vec::new();
-
+        let mut all_obj_files: Vec<Compiled> = Vec::new();
+        let mut units: Vec<(PathBuf, Option<String>, Vec<GpuArch>)> = Vec::new();
         for kernel_file in &kernel_files {
             let filename = kernel_file
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("");
             let gpu_arch = self.compute_cap.get_for_file(filename)?;
+            let Some(variants) = per_arch else {
+                units.push((kernel_file.clone(), None, gpu_arch));
+                continue;
+            };
+            let before = units.len();
+            for variant in variants {
+                // the variant itself, or an override of the same arch (`90a` for a listed `90`)
+                let chosen = gpu_arch
+                    .iter()
+                    .find(|a| *a == variant)
+                    .or_else(|| gpu_arch.iter().find(|a| a.base == variant.base));
+                if let Some(arch) = chosen {
+                    units.push((
+                        kernel_file.clone(),
+                        Some(arch_dir(variant)),
+                        vec![arch.clone()],
+                    ));
+                }
+            }
+            if units.len() == before {
+                return Err(Error::CompilationFailed {
+                    path: kernel_file.clone(),
+                    message: format!(
+                        "builds only for {}, none of the listed archs ({})",
+                        arch_key(&gpu_arch),
+                        arch_key(variants)
+                    ),
+                });
+            }
+        }
 
-            // Generate unique object file name
-            let obj_file = self.object_file_path(kernel_file);
-            all_obj_files.push((kernel_file.clone(), obj_file.clone()));
+        for (kernel_file, arch, gpu_arch) in units {
+            let kernel_file = &kernel_file;
+            let obj_file = self.object_file_path(kernel_file, arch.as_deref());
+            all_obj_files.push(Compiled {
+                source: kernel_file.clone(),
+                arch,
+                object: obj_file.clone(),
+            });
 
             if self.incremental
                 && !cache.needs_rebuild(
@@ -593,6 +690,9 @@ impl KernelBuilder {
             compile_jobs.push((kernel_file.clone(), obj_file, gpu_arch));
         }
 
+        if per_arch.is_some() {
+            remove_stale_objects(&self.out_dir, &all_obj_files)?;
+        }
         if compile_jobs.is_empty() && out_files.iter().all(|f| f.exists()) {
             println!("cargo:warning=All library kernels up-to-date, skipping compilation");
             return Ok(None);
@@ -916,7 +1016,7 @@ impl KernelBuilder {
     }
 
     /// Generate unique object file path for a kernel
-    fn object_file_path(&self, kernel_file: &Path) -> PathBuf {
+    fn object_file_path(&self, kernel_file: &Path, arch: Option<&str>) -> PathBuf {
         let mut hasher = DefaultHasher::new();
         kernel_file.display().to_string().hash(&mut hasher);
         let hash = hasher.finish();
@@ -926,7 +1026,10 @@ impl KernelBuilder {
             .and_then(|s| s.to_str())
             .unwrap_or("kernel");
 
-        self.out_dir.join(format!("{}-{:x}.o", stem, hash))
+        match arch {
+            Some(arch) => self.out_dir.join(format!("{stem}-{hash:x}-{arch}.o")),
+            None => self.out_dir.join(format!("{}-{:x}.o", stem, hash)),
+        }
     }
 }
 
@@ -964,6 +1067,26 @@ pub fn loadable_id_env(name: &str) -> String {
 /// The symbol a kernel library exports its build id under; `inference_tensor::kernel_library::BUILD_ID_SYMBOL` matches.
 pub const BUILD_ID_SYMBOL: &str = "inference_kernel_build_id";
 const BUILD_ID_EXTENSION: &str = "id";
+const BUILD_ID_OBJECT_SUFFIX: &str = "_build_id.o";
+
+// objects of an older layout or a removed source, which nothing links any more
+fn remove_stale_objects(dir: &Path, objects: &[Compiled]) -> Result<()> {
+    let current: std::collections::HashSet<&Path> =
+        objects.iter().map(|c| c.object.as_path()).collect();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let id_object = path
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().ends_with(BUILD_ID_OBJECT_SUFFIX));
+        if path.extension().is_some_and(|e| e == "o")
+            && !id_object
+            && !current.contains(path.as_path())
+        {
+            std::fs::remove_file(&path)?;
+        }
+    }
+    Ok(())
+}
 
 // a hash of the objects' contents: what changes when any kernel does
 fn build_id(objects: &[PathBuf]) -> Result<String> {
@@ -979,7 +1102,7 @@ fn build_id(objects: &[PathBuf]) -> Result<String> {
 // a one-line C object carrying `id`, so the loader can tell this build's library from another's
 fn compile_build_id(toolkit: &CudaToolkit, dir: &Path, lib: &str, id: &str) -> Result<PathBuf> {
     let source = dir.join(format!("{lib}_build_id.c"));
-    let object = dir.join(format!("{lib}_build_id.o"));
+    let object = dir.join(format!("{lib}{BUILD_ID_OBJECT_SUFFIX}"));
     std::fs::write(
         &source,
         format!(

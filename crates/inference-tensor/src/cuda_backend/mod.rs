@@ -19,7 +19,8 @@ mod device;
 mod error;
 mod utils;
 pub use device::{
-    device_compute_cap, device_count, kernel_arch, kernel_arch_among, CudaDevice, DeviceId,
+    built_archs, device_compute_cap, device_count, kernel_arch, kernel_arch_among, CudaDevice,
+    DeviceId,
 };
 pub use error::{CudaError, WrapErr};
 pub use utils::{Map1, Map1Any, Map2, Map2Any, Map2InPlace, Map3, S};

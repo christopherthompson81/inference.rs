@@ -15,7 +15,7 @@ packages = ["inference_rs"]
 
 [tool.setuptools.package-data]
 # A release wheel bundles libinference_ffi here; a source install has none and loads it from the checkout.
-inference_rs = ["_lib/*", "_lib/kernels/*"]
+inference_rs = ["_lib/*", "_lib/kernels/*/*"]
 
 [tool.ruff]
 line-length = 120

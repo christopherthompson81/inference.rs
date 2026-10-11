@@ -162,3 +162,73 @@ Question: do the split libraries cost speed, fail clearly when one is missing, a
   - Both builds are below Run 4's 18.3k/385 tok/s, so the machine is slower today (a browser holds the GPU at ~29% utilization).
 - **Missing type library:** with `libinferencequant_q6_k.so` moved aside, the bench fails at model load with exit 1: "CUDA kernel library `libinferencequant_q6_k.so` is not installed (looked in ...); set INFERENCE_KERNEL_DIR to its directory".
 - **What a model loads:** `LD_DEBUG=files` on that model shows the base plus `libinferencequant_{iq4_xs,q4_k,q5_k,q6_k}.so` and no other type. These are the four types the UD-Q4_K_XL file holds: 7.3 MiB of quant kernels instead of 28.9 MiB.
+
+## Run 8 - 2026-10-11 15:30
+
+Question (phase 3): can one host build load kernels packaged per GPU arch, and what does a two-arch build produce?
+
+Design:
+- Every loadable build compiles each source once per listed arch and links one copy of each library per arch into `<dir>/sm<arch>/` (`sm86`, `sm90a`). A source whose override leaves an arch out (`*_cutlass_sm90.cu`, 90a only) is linked only into its own arch's copy.
+- The build id hashes every arch's objects, so all copies of a library carry the one id the host records. A host built with the full list accepts any arch's package.
+- The host still records the nominal `<dir>/lib<name>.so`, now never a file itself. Packaging finds the copies beside it.
+- The loader looks in each candidate dir for the highest `sm<arch>/` that every visible GPU runs, then a plain `lib<name>.so`. It uses the rule `kernel_arch_among` already used: plain SASS runs on later minors of its major, `a` only on its own. That function now calls the loader's `runs_on`, so there is one copy.
+- A kernel missing from one arch's copy (built only for another arch) no longer fails the whole library. The table entry is empty, and calling it panics with "CUDA kernel `x` is not in `<path>`: it is not built for this GPU's architecture".
+- Packaging: `scripts/release/kernel_libraries.py` holds the discovery that `build_wheels.py` and `bundle_size.py` each had a copy of. `build_wheels.py` bundles `_lib/kernels/sm<arch>/`, takes its `+cu12.sm86` tag from the copies it ships, and has `--kernels base` to leave out the per-type libraries. `scripts/release/package_kernels.py` writes `target/kernels/<version>/sm<arch>/...`, `kernels-cu<major>.json` (each file's library, arch, size, SHA-256, flat asset name, and each library's build id), and `assets/` with flat names for a GitHub release.
+
+Two-arch check: `CUDA_COMPUTE_CAP=86,90 cargo build -p inference-quant --features cuda` in a scratch target dir.
+- Both `sm86/` and `sm90a/` have 35 libraries. The base library is 4.23 MB on sm86 and 4.49 MB on sm90a.
+- Only `sm90a/` exports the CUTLASS FP8 sm90 entry points: 29 symbols matching "cutlass", against 8 on sm86 (shared helpers). The sm86 copy still links with `--no-undefined`, so nothing else calls into the left-out file.
+- `cuobjdump --list-elf` on `libinferencequant_q4_k.so`: `sm86/` holds only sm_86 ELF, `sm90a/` only sm_90a.
+- Both copies carry build id `eed5066252038664`, which equals `libinferencequant_q4_k.so.id`.
+
+## Run 9 - 2026-10-11 15:55
+
+Question: do the packaged layouts load end to end?
+
+- **Full local CI** (`--lint --tests --cuda --slim --bindings --docs --size`): 3,029 tests passed. `--size` passes: the host library is +0.18 MiB (the optional function tables and their panic messages) and the kernel libraries are unchanged.
+- **`package_kernels.py target/bundle/libinference_ffi.so`:**
+  - Writes `target/kernels/0.9.3/sm86/`: 38 libraries, 47 MiB.
+  - Writes `kernels-cu12.json`: schema 1, 38 libraries with build ids, 38 files with arch, size, SHA-256 and an asset name like `cu12-sm86-libinferencefattn.so`.
+  - Writes `assets/`: 38 libraries plus the manifest.
+- **From the package tree alone:**
+  - Setup: `~/.cache/inference-rs/kernels/built` renamed away, `INFERENCE_KERNEL_DIR=target/kernels/0.9.3`, Python `JsonEngine` over the bundle library.
+  - Qwen3-1.7B-UD-Q4_K_XL.gguf on `cuda:0` generates 8 tokens.
+  - `LD_DEBUG=files` shows every library loaded from `.../0.9.3/sm86/`, including just the four quant types the file holds.
+- **Wheels** (`build_wheels.py --library target/bundle/libinference_ffi.so`):
+  - `--kernels all`: `inference_rs-0.9.3+cu12.sm86-...whl`, 58 MB, 38 files under `_lib/kernels/sm86/`.
+  - `--kernels base`: 41 MB, the 4 base libraries only.
+  - Unzipped and run with the build cache renamed away:
+    - The full wheel generates.
+    - The base wheel fails at engine load: "CUDA kernel library `libinferencequant_q6_k.so` is not installed for this GPU (compute capability [86]; looked in ...)". This is the gap phase 4's fetch fills.
+
+## Run 10 - 2026-10-11 16:40
+
+Question: what did the phase 3 review find, and do the fixes hold?
+
+Findings and fixes:
+- **A lower arch's copy could run with its bodies compiled out (high).**
+  - Code that gates on a device's compute capability (`fp8_tensor_cores` via `kernel_arch`) assumes the kernels were compiled for exactly the arch this build picks for that device.
+  - The loader took any compatible copy, so an sm_89 GPU could open `sm86/`. There, `blockwise_fp8_mma.cu`'s `#if __CUDA_ARCH__ >= 890` bodies are empty, and the result would be silent garbage. Before the split it was one fat library, so this could not happen.
+  - Fix: `pick_arch` now takes the build's own arch list (`cuda_backend::built_archs`, the `ARCHS` cuobjdump read) and returns the arch each GPU runs best, the same answer as `kernel_arch`. The loader opens only `sm<that arch>/`, and drops the plain-file fallback.
+- **Mixed-arch machines (high).**
+  - A process loads one copy, so GPUs that need different archs (sm86 + sm90, or sm86 + sm89 on a build listing both) cannot share it.
+  - This was intended, but nothing said what to do. `pick_arch` now errors with "the visible GPUs (compute capabilities [...]) need kernels for different archs, and a process loads one; set CUDA_VISIBLE_DEVICES to GPUs of one arch". The environment-variables page says the same.
+- **Phase-2 leftovers in reused build dirs:**
+  - Old flat `lib<name>.so` files sat beside `sm86/`. They are now deleted.
+  - Objects no current unit produces are removed on every per-arch build, including up-to-date ones. On the dev dir, 136 old objects went; 101 `-sm86.o` plus 35 build-id objects remain.
+- **Two listed archs with one base (`100a,100f`):** units are now keyed on the full arch dir, so the objects and copies stay separate.
+- **A source no listed arch takes** is now a build error instead of a silent drop.
+- **Scripts:**
+  - `package_kernels.py` copies out of the build cache, and hard-links only the tree to `assets/`.
+  - A `--kernels base` wheel is versioned `+cu12.sm86.base`, so it no longer overwrites the full wheel.
+  - Shared constants moved into `kernel_libraries.py`.
+  - `MissingKernels` keeps `bundle_size.py`'s exit code 2.
+  - Each copy must carry the `.id` it is recorded with.
+- **Docs and style:** the kernel-build README describes the per-arch layout. The two-line `///` comments are now one line. The tuple return type is now a `LoadableLib` struct.
+
+Re-checks:
+- **Dev rebuild:** no flat libraries, no stale objects; `sm86/` has 35 libraries.
+- **`CUDA_COMPUTE_CAP=86,90` scratch build:** `sm86` and `sm90a` with 35 libraries each.
+  - Objects: 101 `-sm86`, 102 `-sm90a` (the extra is `blockwise_fp8_cutlass_sm90`), 35 build-id objects.
+  - CUTLASS symbols: 8 on sm86, 29 on sm90a.
+  - The q4_k copies hold only sm_86 and only sm_90a ELF respectively.

@@ -20,12 +20,15 @@ so existing caches and settings still apply.
 - `src/parallel.rs`: the default pool size is raised from half to all cores, since the jobserver now bounds
   concurrency. `CUDAFORGE_THREADS` still caps it, and its test is updated to match.
 - `Cargo.toml`: adds the `jobserver` dependency.
-- `src/builder.rs`: `build_loadable_lib` builds a kernel library as `lib{name}.so` for `inference_tensor::kernel_library!`
-  to open at runtime (a static archive on targets without dlopen). It keys the library by its compile inputs, under
+- `src/builder.rs`: `build_loadable_lib` builds kernel libraries for `inference_tensor::kernel_library!` to open at
+  runtime (a static archive on targets without dlopen). It keys the build dir by its compile inputs, under
   `<target>/<profile>/cuda-kernels` in dev builds (every cargo variant maps one copy) and under
-  `~/.cache/inference-rs/kernels/built` otherwise, links in a build id the loader checks, and writes a
-  `cuda-kernels/<name>.lib` pointer for packaging. `split_lib` links the sources matching a pattern into a library of
-  their own from the same compile pass. `build_lib` shares `compile_objects` with it, which removes a stale output when
+  `~/.cache/inference-rs/kernels/built` otherwise. Each source compiles once per listed arch (objects named
+  `<stem>-<hash>-sm<arch>.o`), and each library links once per arch into `sm<arch>/lib{name}.so` (soname
+  `lib{name}.so`); a source whose override leaves an arch out links only into the archs it builds for. Every copy
+  carries one build id, hashed over all archs' objects and written to `lib{name}.so.id`, which the loader checks; a
+  `cuda-kernels/<name>.lib` pointer names the library for packaging. `split_lib` links the sources matching a pattern
+  into a library of their own from the same compile pass. `build_lib` shares `compile_objects` with it, which removes a stale output when
   a compile fails, and links through `run_link`.
 - `src/builder.rs`: `build_fatbin` builds one fatbin per source with the incremental, parallel path of `build_ptx`
   (both now pass `-o`), and `PtxOutput` writes `include_bytes!` consts for fatbins and lists the built `images()`.

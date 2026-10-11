@@ -6,6 +6,8 @@ pub const KERNEL_SUBDIR: &str = "kernels";
 pub const KERNEL_DIR_ENV: &str = "INFERENCE_KERNEL_DIR";
 /// The string every kernel library exports with its build's id; `inference_kernel_build::BUILD_ID_SYMBOL` matches.
 pub const BUILD_ID_SYMBOL: &std::ffi::CStr = c"inference_kernel_build_id";
+/// Each GPU arch's libraries sit in `sm<arch>/` (`sm86`, `sm90a`); `inference_kernel_build::ARCH_DIR_PREFIX` matches.
+pub const ARCH_DIR_PREFIX: &str = "sm";
 
 /// A kernel library kept open for the life of the process.
 #[cfg(unix)]
@@ -22,6 +24,11 @@ unsafe impl Sync for Library {}
 
 #[cfg(unix)]
 impl Library {
+    /// Where this library was opened from.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
     /// The address of `symbol`.
     pub fn symbol(&self, symbol: &std::ffi::CStr) -> Result<*mut libc::c_void, String> {
         // SAFETY: the handle is open, and `symbol` is NUL-terminated
@@ -61,31 +68,132 @@ fn own_dir() -> Option<std::path::PathBuf> {
     path.parent().map(std::path::Path::to_path_buf)
 }
 
-/// The places `lib<name>.so` is looked for, in order: the override, beside this code, its `kernels/`, the build's.
+// compute capabilities of the visible GPUs (86 for 8.6), none without CUDA
 #[cfg(unix)]
-pub fn candidates(name: &str, built: &str) -> Vec<std::path::PathBuf> {
+fn device_caps() -> &'static [usize] {
+    static CAPS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+    CAPS.get_or_init(|| {
+        #[cfg(feature = "cuda")]
+        {
+            let count = crate::cuda_backend::device_count().unwrap_or(0);
+            (0..count)
+                .filter_map(|ordinal| crate::cuda_backend::device_compute_cap(ordinal).ok())
+                .collect()
+        }
+        #[cfg(not(feature = "cuda"))]
+        Vec::new()
+    })
+}
+
+// the archs this build compiled its kernels for (`86`, `90a`), which the kernel libraries were built with too
+#[cfg(unix)]
+fn built_archs() -> &'static [&'static str] {
+    #[cfg(feature = "cuda")]
+    {
+        crate::cuda_backend::built_archs()
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        &[]
+    }
+}
+
+fn arch_number(arch: &str) -> usize {
+    arch.trim_end_matches(['a', 'f']).parse().unwrap_or(0)
+}
+
+/// The arch among `archs` each of `caps` runs best, which all must agree on; the highest when there is no GPU.
+// code gated on a device's compute capability assumes its kernels were compiled for exactly this arch
+pub fn pick_arch<'a>(archs: &[&'a str], caps: &[usize]) -> Result<&'a str, String> {
+    let best = |cc: usize| {
+        archs
+            .iter()
+            .copied()
+            .filter(|&arch| runs_on(arch, cc))
+            .max_by_key(|arch| arch_number(arch))
+    };
+    let Some(&first) = caps.first() else {
+        return archs
+            .iter()
+            .copied()
+            .max_by_key(|arch| arch_number(arch))
+            .ok_or_else(|| "this build has no CUDA kernels".to_string());
+    };
+    let wanted = best(first);
+    for &cc in caps {
+        match (best(cc), wanted) {
+            (Some(arch), Some(want)) if arch == want => {}
+            (None, _) | (_, None) => {
+                return Err(format!(
+                    "a GPU of compute capability {cc} has no kernels in this build (built for sm_{})",
+                    archs.join(", sm_")
+                ));
+            }
+            _ => {
+                return Err(format!(
+                    "the visible GPUs (compute capabilities {caps:?}) need kernels for different archs, and a \
+                     process loads one; set CUDA_VISIBLE_DEVICES to GPUs of one arch"
+                ));
+            }
+        }
+    }
+    wanted.ok_or_else(|| "no GPU".to_string())
+}
+
+/// Whether SASS built for `arch` (`86`, `90a`, `121f`) runs on a device of compute capability `cc`.
+// plain and family SASS run on later minors of their major; arch-specific only on its own
+pub(crate) fn runs_on(arch: &str, cc: usize) -> bool {
+    let number = arch_number(arch);
+    if arch.ends_with('a') {
+        number == cc
+    } else {
+        number / 10 == cc / 10 && number <= cc
+    }
+}
+
+// the arch dir this process opens kernel copies from, `sm86`
+#[cfg(unix)]
+fn arch_dir() -> Result<&'static str, String> {
+    static DIR: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| {
+        pick_arch(built_archs(), device_caps()).map(|arch| format!("{ARCH_DIR_PREFIX}{arch}"))
+    })
+    .as_deref()
+    .map_err(Clone::clone)
+}
+
+/// Where `lib<name>.so` is looked for, under `arch_dir` (`sm86`) of: the override, this code's dir, its `kernels/`, the build's.
+#[cfg(unix)]
+pub fn candidates(name: &str, built: &str, arch_dir: &str) -> Vec<std::path::PathBuf> {
     let file = format!("lib{name}.so");
-    let mut paths = Vec::new();
+    let mut dirs = Vec::new();
     if let Some(dir) = std::env::var_os(KERNEL_DIR_ENV) {
-        paths.push(std::path::PathBuf::from(dir).join(&file));
+        dirs.push(std::path::PathBuf::from(dir));
     }
     if let Some(dir) = own_dir() {
-        paths.push(dir.join(&file));
-        paths.push(dir.join(KERNEL_SUBDIR).join(&file));
+        let kernels = dir.join(KERNEL_SUBDIR);
+        dirs.extend([dir, kernels]);
     }
-    paths.push(std::path::PathBuf::from(built));
-    paths
+    if let Some(dir) = std::path::Path::new(built).parent() {
+        dirs.push(dir.to_path_buf());
+    }
+    dirs.into_iter()
+        .map(|dir| dir.join(arch_dir).join(&file))
+        .collect()
 }
 
 /// Opens kernel library `name`, from the first of [`candidates`] that exists, refusing one whose build id is not
 /// `id` (empty when this build made no kernels).
 #[cfg(unix)]
 pub fn open(name: &str, built: &str, id: &str) -> Result<Library, String> {
-    let tried = candidates(name, built);
+    let arch_dir =
+        arch_dir().map_err(|error| format!("CUDA kernel library `lib{name}.so`: {error}"))?;
+    let tried = candidates(name, built, arch_dir);
     let Some(path) = tried.iter().find(|p| p.is_file()) else {
         let tried: Vec<_> = tried.iter().map(|p| p.display().to_string()).collect();
         return Err(format!(
-            "CUDA kernel library `lib{name}.so` is not installed (looked in {}); set {KERNEL_DIR_ENV} to its directory",
+            "CUDA kernel library `lib{name}.so` is not installed for this GPU's arch ({arch_dir}; looked in {}); set \
+             {KERNEL_DIR_ENV} to a directory holding `{arch_dir}/lib{name}.so`",
             tried.join(", ")
         ));
     };
@@ -134,9 +242,11 @@ macro_rules! kernel_library {
             )*
         }
     ) => {
+        // a kernel only some archs build is missing from the other archs' copies of the library
         #[allow(non_snake_case)]
         struct KernelTable {
-            $( $(#[$attr])* $name: unsafe extern "C" fn( $( $ty ),* ) $( -> $ret )?, )*
+            kernel_library_path: ::std::path::PathBuf,
+            $( $(#[$attr])* $name: ::std::option::Option<unsafe extern "C" fn( $( $ty ),* ) $( -> $ret )?>, )*
         }
 
         static KERNEL_TABLE: ::std::sync::OnceLock<::std::result::Result<KernelTable, ::std::string::String>> =
@@ -148,18 +258,22 @@ macro_rules! kernel_library {
                 .get_or_init(|| {
                     let library = $crate::kernel_library::open($lib, $path, $id)?;
                     ::std::result::Result::Ok(KernelTable {
+                        kernel_library_path: library.path().to_path_buf(),
                         $(
                             $(#[$attr])*
                             // SAFETY: `open` checked the library is this binary's own build, from the same header
-                            $name: unsafe {
-                                ::std::mem::transmute::<
-                                    *mut ::std::ffi::c_void,
-                                    unsafe extern "C" fn( $( $ty ),* ) $( -> $ret )?,
-                                >(library.symbol(
+                            $name: library
+                                .symbol(
                                     ::std::ffi::CStr::from_bytes_with_nul(concat!(stringify!($name), "\0").as_bytes())
                                         .map_err(|error| error.to_string())?,
-                                )?)
-                            },
+                                )
+                                .ok()
+                                .map(|address| unsafe {
+                                    ::std::mem::transmute::<
+                                        *mut ::std::ffi::c_void,
+                                        unsafe extern "C" fn( $( $ty ),* ) $( -> $ret )?,
+                                    >(address)
+                                }),
                         )*
                     })
                 })
@@ -179,8 +293,15 @@ macro_rules! kernel_library {
             #[allow(clippy::too_many_arguments, non_snake_case)]
             $vis unsafe extern "C" fn $name( $( $arg : $ty ),* ) $( -> $ret )? {
                 let table = kernel_table().unwrap_or_else(|error| panic!("{error}"));
+                let ::std::option::Option::Some(function) = table.$name else {
+                    panic!(
+                        "CUDA kernel `{}` is not in `{}`: it is not built for this GPU's architecture",
+                        stringify!($name),
+                        table.kernel_library_path.display()
+                    );
+                };
                 // SAFETY: the caller upholds the C function's contract, as with a direct extern call
-                unsafe { (table.$name)( $( $arg ),* ) }
+                unsafe { function( $( $arg ),* ) }
             }
         )*
     };
@@ -218,21 +339,35 @@ mod tests {
         ) else {
             panic!("a library that is nowhere opened");
         };
-        assert!(
-            error.contains("libnonexistentkernels.so") && error.contains(KERNEL_DIR_ENV),
-            "{error}"
-        );
+        assert!(error.contains("libnonexistentkernels.so"), "{error}");
+    }
+
+    #[test]
+    fn the_arch_picked_is_the_one_each_gpu_runs_best() {
+        let archs = ["80", "86", "90a", "121f"];
+        assert_eq!(pick_arch(&archs, &[86]), Ok("86"));
+        assert_eq!(pick_arch(&archs, &[89]), Ok("86"));
+        assert_eq!(pick_arch(&archs, &[86, 89]), Ok("86"));
+        assert_eq!(pick_arch(&archs, &[90]), Ok("90a"));
+        assert_eq!(pick_arch(&archs, &[121]), Ok("121f"));
+        assert_eq!(pick_arch(&archs, &[]), Ok("121f"));
+        // an 8.0 copy would run on 8.9 too, but kernels gated on 8.6 features would find their bodies compiled out
+        let mixed = pick_arch(&archs, &[80, 89]).unwrap_err();
+        assert!(mixed.contains("CUDA_VISIBLE_DEVICES"), "{mixed}");
+        assert!(pick_arch(&archs, &[86, 90]).is_err());
+        assert!(pick_arch(&archs, &[75]).is_err());
+        assert!(pick_arch(&["90a"], &[100]).is_err());
     }
 
     #[test]
     fn the_build_path_is_looked_in_last() {
-        let paths = candidates("somekernels", "/built/libsomekernels.so");
+        let paths = candidates("somekernels", "/built/libsomekernels.so", "sm86");
         assert_eq!(
             paths
                 .last()
                 .map(|p| p.to_string_lossy().into_owned())
                 .as_deref(),
-            Some("/built/libsomekernels.so")
+            Some("/built/sm86/libsomekernels.so")
         );
         let beside = paths
             .iter()
@@ -246,7 +381,7 @@ mod tests {
 mod location_tests {
     #[test]
     fn libraries_are_only_looked_for_at_absolute_paths() {
-        let paths = super::candidates("somekernels", "/built/libsomekernels.so");
+        let paths = super::candidates("somekernels", "/built/libsomekernels.so", "sm86");
         let relative: Vec<_> = paths.iter().filter(|p| !p.is_absolute()).collect();
         assert!(
             relative.is_empty() || std::env::var_os(super::KERNEL_DIR_ENV).is_some(),
