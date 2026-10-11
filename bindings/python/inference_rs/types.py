@@ -699,6 +699,8 @@ class DiffusionLoaderType(str, Enum):
 
     FLUX = "flux"
     FLUX_OFFLOADED = "flux-offloaded"
+    HIDREAM_O1 = "hidream-o1"
+    HIDREAM_O1_DEV = "hidream-o1-dev"
 
 
 @dataclass(kw_only=True)
@@ -891,11 +893,14 @@ class ImageChoice:
 class ImageGenerationRequest:
     """Image generation request"""
 
+    guidance_scale: float | None = None
     height: int | None = None
     model: str | None = None
     n: int | None = None
     prompt: str
     response_format: ImageGenerationResponseFormat | None = None
+    seed: int | None = None
+    steps: int | None = None
     width: int | None = None
 
 

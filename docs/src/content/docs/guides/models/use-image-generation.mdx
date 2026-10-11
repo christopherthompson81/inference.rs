@@ -1,11 +1,11 @@
 ---
 title: Generate images with diffusion models
-description: Running FLUX and similar image-generation models through the inference OpenAI-compatible API.
+description: Running FLUX and HiDream-O1-Image through the inference OpenAI-compatible API.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs serves diffusion models through `POST /v1/images/generations`. The main supported model is FLUX; see the [supported models reference](/reference/supported-models/).
+inference.rs serves diffusion models through `POST /v1/images/generations`: FLUX and HiDream-O1-Image; see the [supported models reference](/reference/supported-models/).
 
 ## Running FLUX
 
@@ -15,12 +15,12 @@ inference serve -m black-forest-labs/FLUX.1-schnell
 
 `FLUX.1-schnell` is permissively licensed. `FLUX.1-dev` requires Hugging Face license acceptance: accept on the model page, then authenticate with `inference login`.
 
-The CLI and server always load the fully-resident `Flux` path. To trade speed for a much smaller GPU footprint, use the `FluxOffloaded` loader, which is only selectable from the Python and Rust SDKs shown below:
+A FLUX repo auto-detects as the fully-resident `Flux` path. To trade speed for a much smaller GPU footprint, use the `FluxOffloaded` loader: `inference serve diffusion -m <repo> --diffusion-arch flux-offloaded`, or from the Python and Rust SDKs shown below:
 
-| Loader | GPU footprint | Availability | Notes |
-|---|---|---|---|
-| `Flux` | Full model resident | CLI, server, SDK | Fully loaded path. Fastest. |
-| `FluxOffloaded` | Much smaller | SDK only | Offloads components to CPU; useful when the full model does not fit. |
+| Loader | GPU footprint | Notes |
+|---|---|---|
+| `Flux` | Full model resident | Fully loaded path. Fastest. |
+| `FluxOffloaded` | Much smaller | Offloads components to CPU; useful when the full model does not fit. |
 
 ### From GGUF files
 
@@ -42,7 +42,33 @@ transformer config is read off the GGUF's tensors. The T5 and CLIP configs and t
 Face Hub. FLUX.1-dev at Q8_0 with a Q8_0 T5 needs roughly 18 GB of GPU memory; quantized weights cannot be offloaded,
 so the GGUF layout loads with `Flux`, not `FluxOffloaded`.
 
-Generating an image:
+## Running HiDream-O1-Image
+
+```bash
+inference serve -m HiDream-ai/HiDream-O1-Image-Dev
+```
+
+HiDream-O1-Image is one 8B Qwen3-VL transformer that reads the prompt and denoises the image's RGB pixels directly,
+in 32-pixel patches, with no separate text encoder or VAE. Both checkpoints load from their Hugging Face repos:
+
+| Checkpoint | Loader | Sampling |
+|---|---|---|
+| `HiDream-ai/HiDream-O1-Image` | `hidream-o1` | 50 UniPC steps with classifier-free guidance 5.0 (two forwards a step); `steps` and `guidance_scale` override them |
+| `HiDream-ai/HiDream-O1-Image-Dev` | `hidream-o1-dev` | Distilled: its fixed 28-step schedule, no guidance; a `steps` other than 28 or a `guidance_scale` above 1 is refused |
+
+The two repos have the same config and file layout, so the variant comes from the name: a model id whose last
+part contains `-dev` (any case), or a hub cache snapshot of such a repo, loads as Dev, and anything else as the full
+model. This detection belongs to plain `inference serve -m <repo>`: the `serve diffusion` subcommand defaults to
+FLUX, so it needs the architecture named, as in `inference serve diffusion -m <dir> --diffusion-arch hidream-o1-dev`;
+the SDKs take the loader type. The repos store F32 weights (35 GB); they load
+in BF16 by default, about 18 GB of GPU memory.
+
+The model generates at its trained resolutions only, about 4.2 megapixels each: a request's `width` and `height`
+snap to the one of 2048x2048, 2304x1728, 2560x1440, 2496x1664, 3104x1312, 2304x1792 (or their portrait forms)
+with the closest aspect ratio, and the response image has that size. Image editing and subject references
+(conditioning on input images) are not supported yet.
+
+## Generating an image
 
 <Tabs>
 <TabItem label="HTTP">
@@ -89,10 +115,7 @@ with ir.Engine(spec) as engine:
 <TabItem label="Rust">
 
 ```rust
-use inference::{
-    DiffusionGenerationParams, DiffusionLoaderType, DiffusionModelBuilder,
-    ImageGenerationResponseFormat,
-};
+use inference::{DiffusionLoaderType, DiffusionModelBuilder, ImageGenerationRequest};
 
 let model = DiffusionModelBuilder::new(
     "black-forest-labs/FLUX.1-schnell",
@@ -102,12 +125,10 @@ let model = DiffusionModelBuilder::new(
 .await?;
 
 let response = model
-    .generate_image(
-        "A vibrant sunset in the mountains, high quality.".to_string(),
-        ImageGenerationResponseFormat::Url,
-        DiffusionGenerationParams::default(),
-        None,
-    )
+    .generate_image(ImageGenerationRequest {
+        seed: Some(7),
+        ..ImageGenerationRequest::new("A vibrant sunset in the mountains, high quality.")
+    })
     .await?;
 println!("{}", response.data[0].url.as_ref().unwrap());
 ```
@@ -120,18 +141,23 @@ println!("{}", response.data[0].url.as_ref().unwrap());
 | Field | Default | Notes |
 |---|---|---|
 | `prompt` | required | Text prompt. |
-| `n` | 1 | Number of images. |
+| `n` | 1 | Number of images, 1 to 10. |
 | `height` | 720 | Output height in pixels. |
 | `width` | 1280 | Output width in pixels. |
 | `response_format` | `"url"` | `"url"` (response carries the path that serves the PNG from the file store in `url`) or `"b64_json"` (response carries the base64-encoded PNG in `b64_json`). |
+| `steps` | the model's | Denoising steps, 1 to 1000. An inference.rs extension. |
+| `guidance_scale` | the model's | Guidance scale: FLUX.1-dev's distilled guidance, HiDream-O1-Image's classifier-free guidance. An inference.rs extension. |
+| `seed` | random | Seeds the noise: the same request and seed give the same image on the same device and dtype; with `n` above 1, choice `i` takes `seed + i`. An inference.rs extension. |
 
 `size` (the OpenAI string form) is not supported. Use `height` and `width`.
 
 ## Memory notes
 
-FLUX is memory-hungry at native precision: the model is roughly 12B parameters, and the T5 XXL text encoder adds a large memory footprint. For low-memory hosts, use the `FluxOffloaded` loader (SDK only) from the [Running FLUX](#running-flux) table.
+FLUX is memory-hungry at native precision: the model is roughly 12B parameters, and the T5 XXL text encoder adds a large memory footprint. For low-memory hosts, use the `FluxOffloaded` loader from the [Running FLUX](#running-flux) table.
 
 For a smaller footprint without offloading, load FLUX and T5 from GGUF ([From GGUF files](#from-gguf-files)).
+
+HiDream-O1-Image in BF16 needs about 18 GB of GPU memory for its weights.
 
 Diffusion models do not support [ISQ (in-situ quantization)](/reference/quantization-types/). Load them at native precision instead of passing `--quant` or `--isq`; they are generally more sensitive to quantization than language models.
 
@@ -152,8 +178,13 @@ with open("out.png", "wb") as f:
     f.write(engine.file_content(file_id).data)
 ```
 
-The Rust SDK (`generate_image`) has no server to serve from, so with `url` it writes the PNG to its `save_file`
-argument, or to `image-generation-<uuid>.png` in the working directory, and returns that path.
+The Rust SDK keeps the image in the same store; read it by id through the model, which derefs to the engine:
+
+```rust
+let url = response.data[0].url.as_deref().unwrap();
+let file_id = url.rsplit('/').nth(1).unwrap();
+std::fs::write("out.png", model.file_content(file_id)?.bytes)?;
+```
 
 With `b64_json`, `b64_json` is the base64-encoded PNG, as in OpenAI's API:
 

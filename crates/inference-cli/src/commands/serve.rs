@@ -7,9 +7,9 @@ use tracing::{info, warn};
 use inference_api::{
     Engine, EngineSpec,
     engine::{
-        AdapterSpec, AgenticSpec, AutoDeviceMapParams, DiffusionLoaderType, HfConfigOverrides,
-        McpClientConfig, MmprojSelection, ModelSelected, MtpSpec, PagedCacheSpec, PagedCacheType,
-        RuntimeSpec, SandboxLimits, SearchSpec, SkillsSpec,
+        AdapterSpec, AgenticSpec, AutoDeviceMapParams, HfConfigOverrides, McpClientConfig,
+        MmprojSelection, ModelSelected, MtpSpec, PagedCacheSpec, PagedCacheType, RuntimeSpec,
+        SandboxLimits, SearchSpec, SkillsSpec,
     },
     initialize_logging,
     lora_adapters::LoraAdapterApiConfig,
@@ -479,11 +479,15 @@ pub(crate) fn convert_to_model_selected(
             }
         }
 
-        ModelType::Diffusion { model, device: _ } => {
-            warn_unused_arch(model, "diffusion models load as FLUX");
+        ModelType::Diffusion {
+            model,
+            diffusion_arch,
+            device: _,
+        } => {
+            warn_unused_arch(model, "diffusion models take `--diffusion-arch`");
             Ok(ModelSelected::DiffusionPlain {
                 model_id: model.model_id.clone(),
-                arch: DiffusionLoaderType::Flux,
+                arch: diffusion_arch.clone(),
                 dtype: model.dtype,
             })
         }

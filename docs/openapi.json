@@ -4834,7 +4834,9 @@
         "description": "The architecture to load the diffusion model as.",
         "enum": [
           "flux",
-          "flux-offloaded"
+          "flux-offloaded",
+          "hidream-o1",
+          "hidream-o1-dev"
         ]
       },
       "EmbeddingData": {
@@ -5486,6 +5488,14 @@
           "prompt"
         ],
         "properties": {
+          "guidance_scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Classifier-free guidance scale when not the model's own; an inference.rs extension."
+          },
           "height": {
             "type": "integer",
             "description": "Image height in pixels",
@@ -5510,6 +5520,23 @@
           "response_format": {
             "$ref": "#/components/schemas/ImageGenerationResponseFormat",
             "description": "Return generated images as URLs or base64 data."
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seeds the noise, so a request repeats its image; an inference.rs extension.",
+            "minimum": 0
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Denoising steps (1 to 1000) when not the model's own; an inference.rs extension.",
+            "minimum": 0
           },
           "width": {
             "type": "integer",

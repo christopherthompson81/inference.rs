@@ -454,6 +454,10 @@ fn parse_arch(s: &str) -> Result<inference_api::engine::NormalLoaderType, String
     s.parse()
 }
 
+fn parse_diffusion_arch(s: &str) -> Result<inference_api::engine::DiffusionLoaderType, String> {
+    s.parse()
+}
+
 fn parse_dtype(s: &str) -> Result<inference_api::engine::ModelDType, String> {
     s.parse()
 }
@@ -534,6 +538,10 @@ pub enum ModelType {
     Diffusion {
         #[command(flatten)]
         model: ModelSourceOptions,
+
+        /// Diffusion architecture: flux, flux-offloaded, hidream-o1 or hidream-o1-dev
+        #[arg(long, value_parser = parse_diffusion_arch, default_value = "flux")]
+        diffusion_arch: inference_api::engine::DiffusionLoaderType,
 
         #[command(flatten)]
         device: DeviceOptions,

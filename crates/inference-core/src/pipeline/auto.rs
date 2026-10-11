@@ -203,6 +203,8 @@ struct ConfigArtifacts {
     sentence_transformers_present: bool,
     repo_files: Vec<String>,
     remote_access_issue: Option<RemoteAccessIssue>,
+    /// The safetensors index, read only for a config whose architecture an image generator shares.
+    weight_index: Option<String>,
 }
 
 enum Detected {
@@ -279,11 +281,20 @@ impl AutoLoader {
             || repo_files
                 .iter()
                 .any(|f| f == "config_sentence_transformers.json");
+        let weight_index = contents
+            .as_deref()
+            .is_some_and(DiffusionLoaderType::needs_weight_index)
+            .then(|| {
+                let dir = config_path.parent()?;
+                std::fs::read_to_string(dir.join(DiffusionLoaderType::WEIGHT_INDEX)).ok()
+            })
+            .flatten();
         Ok(ConfigArtifacts {
             contents,
             sentence_transformers_present,
             repo_files,
             remote_access_issue: None,
+            weight_index,
         })
     }
 
@@ -337,11 +348,26 @@ impl AutoLoader {
                 &revision,
             )?
         };
+        let weight_index = if contents
+            .as_deref()
+            .is_some_and(DiffusionLoaderType::needs_weight_index)
+            && repo_files
+                .iter()
+                .any(|f| f == DiffusionLoaderType::WEIGHT_INDEX)
+        {
+            match Self::try_get_file(&api, model_id, DiffusionLoaderType::WEIGHT_INDEX, &revision) {
+                Ok(Some(path)) => std::fs::read_to_string(path).ok(),
+                _ => None,
+            }
+        } else {
+            None
+        };
         Ok(ConfigArtifacts {
             contents,
             sentence_transformers_present,
             repo_files,
             remote_access_issue,
+            weight_index,
         })
     }
 
@@ -380,6 +406,11 @@ impl AutoLoader {
 
     fn detect(&self, artifacts: &ConfigArtifacts) -> Result<Detected> {
         if let Some(tp) = DiffusionLoaderType::auto_detect_from_files(&artifacts.repo_files) {
+            return Ok(Detected::Diffusion(tp));
+        }
+        if let Some(tp) = artifacts.weight_index.as_deref().and_then(|index| {
+            DiffusionLoaderType::auto_detect_from_weight_index(index, &self.model_id)
+        }) {
             return Ok(Detected::Diffusion(tp));
         }
 
@@ -721,6 +752,7 @@ mod tests {
             sentence_transformers_present: false,
             repo_files: repo_files.iter().map(|f| f.to_string()).collect(),
             remote_access_issue: None,
+            weight_index: None,
         })
     }
 
@@ -780,6 +812,7 @@ mod tests {
                 sentence_transformers_present: false,
                 repo_files: Vec::new(),
                 remote_access_issue: None,
+                weight_index: None,
             })
             .unwrap();
 

@@ -117,6 +117,8 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `DiffusionLoaderType.FLUX` | `'flux'` |
 | `DiffusionLoaderType.FLUX_OFFLOADED` | `'flux-offloaded'` |
+| `DiffusionLoaderType.HIDREAM_O1` | `'hidream-o1'` |
+| `DiffusionLoaderType.HIDREAM_O1_DEV` | `'hidream-o1-dev'` |
 
 
 ## `EmbeddingLoaderType`

@@ -273,13 +273,14 @@ impl DiffusionModel for FluxStepper {
             t5_embed.dim(0)?,
             params.height,
             params.width,
+            params.seed,
             self.device(),
         )?
         .to_dtype(self.dtype)?;
 
         let state = flux::sampling::State::new(&t5_embed, &clip_embed, &img)?;
         let timesteps = flux::sampling::get_schedule(
-            self.cfg.num_steps,
+            params.steps.unwrap_or(self.cfg.num_steps),
             self.cfg
                 .guidance_config
                 .map(|s| (state.img.dims()[1], s.base_shift, s.max_shift)),
@@ -294,7 +295,7 @@ impl DiffusionModel for FluxStepper {
                 &state.txt_ids,
                 &state.vec,
                 &timesteps,
-                guidance_cfg.guidance_scale,
+                params.guidance_scale.unwrap_or(guidance_cfg.guidance_scale),
             )?
         } else {
             flux::sampling::denoise_no_guidance(
@@ -319,6 +320,15 @@ impl DiffusionModel for FluxStepper {
 
     fn device(&self) -> &Device {
         &self.device
+    }
+
+    fn validate(&self, params: &DiffusionGenerationParams) -> std::result::Result<(), String> {
+        if params.guidance_scale.is_some() && self.cfg.guidance_config.is_none() {
+            return Err(
+                "FLUX schnell is not guidance distilled; it takes no guidance scale".to_string(),
+            );
+        }
+        Ok(())
     }
 
     fn max_seq_len(&self) -> usize {

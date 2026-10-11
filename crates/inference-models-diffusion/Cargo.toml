@@ -14,9 +14,13 @@ homepage.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+indicatif.workspace = true
 inference-tensor.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+rand_isaac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_plain.workspace = true
@@ -26,3 +30,6 @@ tracing.workspace = true
 [features]
 cuda = ["inference-tensor/cuda", "inference-quant/cuda", "inference-nn/cuda"]
 metal = ["inference-tensor/metal", "inference-quant/metal", "inference-nn/metal"]
+
+[dev-dependencies]
+clap.workspace = true

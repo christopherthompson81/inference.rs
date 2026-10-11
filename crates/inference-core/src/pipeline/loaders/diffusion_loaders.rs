@@ -21,6 +21,7 @@ use inference_models_diffusion::flux::{
         FluxStepper, FluxStepperConfig, FluxStepperLoad, LocalTextEncoders, RepoFileFetcher,
     },
 };
+use inference_models_diffusion::hidream;
 
 use crate::pipeline::{EmbeddingModulePaths, hf, paths::AdapterPaths};
 
@@ -31,6 +32,22 @@ const FLUX_WEIGHTS_MISSING: &str =
 const FLUX_SAFETENSORS_PATTERN: &str = r"^flux\d+-(schnell|dev)\.safetensors$";
 const FLUX_GGUF_PATTERN: &str = r"^flux\d+-(dev|schnell).*\.gguf$";
 const T5_GGUF_PATTERN: &str = r"^t5.*\.gguf$";
+const HIDREAM_ARCHITECTURE: &str = "Qwen3VLForConditionalGeneration";
+const HIDREAM_PATCH_EMBED: &str = "model.x_embedder.proj1.weight";
+const HIDREAM_DEV_MARKER: &str = "-dev";
+// a hub cache snapshot sits under `models--<org>--<name>/snapshots/<sha>`
+const HUB_CACHE_PREFIX: &str = "models--";
+
+#[derive(Deserialize)]
+struct ArchitecturesOnly {
+    #[serde(default)]
+    architectures: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct WeightIndex {
+    weight_map: HashMap<String, String>,
+}
 
 fn hub_file_fetcher() -> Result<RepoFileFetcher> {
     let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
@@ -56,13 +73,13 @@ fn hub_file_fetcher() -> Result<RepoFileFetcher> {
 }
 
 pub trait DiffusionModelLoader: Send + Sync {
-    /// If the model is being loaded with `load_model_from_hf` (so manual paths not provided), this will be called.
+    /// The weight files, one group per var builder; called when no local layout gives them.
     fn get_model_paths(
         &self,
         api: &ApiRepo,
         model_id: &Path,
         revision: &str,
-    ) -> Result<Vec<PathBuf>>;
+    ) -> Result<Vec<Vec<PathBuf>>>;
     /// If the model is being loaded with `load_model_from_hf` (so manual paths not provided), this will be called.
     fn get_config_filenames(
         &self,
@@ -78,7 +95,7 @@ pub trait DiffusionModelLoader: Send + Sync {
     fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>>;
 }
 
-/// Per weight file: `vbs`, `shapes` (GGUF files only) and `configs` (empty when the layout ships none).
+/// Per weight group: `vbs` and `shapes` (GGUF files only); `configs` is empty when the layout ships none.
 pub struct DiffusionLoad {
     pub configs: Vec<String>,
     pub vbs: Vec<ShardedVarBuilder>,
@@ -145,6 +162,12 @@ pub enum DiffusionLoaderType {
     Flux,
     #[serde(rename = "flux-offloaded")]
     FluxOffloaded,
+    /// HiDream-O1-Image, sampled with UniPC and guidance.
+    #[serde(rename = "hidream-o1")]
+    HiDreamO1,
+    /// HiDream-O1-Image-Dev, the distilled variant with its fixed schedule.
+    #[serde(rename = "hidream-o1-dev")]
+    HiDreamO1Dev,
 }
 
 impl FromStr for DiffusionLoaderType {
@@ -153,14 +176,50 @@ impl FromStr for DiffusionLoaderType {
         match s {
             "flux" => Ok(Self::Flux),
             "flux-offloaded" => Ok(Self::FluxOffloaded),
+            "hidream-o1" => Ok(Self::HiDreamO1),
+            "hidream-o1-dev" => Ok(Self::HiDreamO1Dev),
             a => Err(format!(
-                "Unknown architecture `{a}`. Possible architectures: `flux`."
+                "Unknown architecture `{a}`. Possible architectures: `flux`, `flux-offloaded`, `hidream-o1`, `hidream-o1-dev`."
             )),
         }
     }
 }
 
 impl DiffusionLoaderType {
+    pub const WEIGHT_INDEX: &str = "model.safetensors.index.json";
+
+    /// Whether `config` names an architecture an image generator shares, so only its weights tell them apart.
+    pub fn needs_weight_index(config: &str) -> bool {
+        serde_json::from_str::<ArchitecturesOnly>(config)
+            .is_ok_and(|c| c.architectures.iter().any(|a| a == HIDREAM_ARCHITECTURE))
+    }
+
+    /// HiDream-O1 from its pixel heads in the safetensors index; the Dev variant is told only by its name.
+    pub fn auto_detect_from_weight_index(index: &str, model_id: &str) -> Option<Self> {
+        let index: WeightIndex = serde_json::from_str(index).ok()?;
+        if !index.weight_map.contains_key(HIDREAM_PATCH_EMBED) {
+            return None;
+        }
+        let path = Path::new(model_id);
+        let names = path.file_name().into_iter().chain(
+            path.components()
+                .map(|c| c.as_os_str())
+                .filter(|c| c.to_string_lossy().starts_with(HUB_CACHE_PREFIX)),
+        );
+        let dev = names
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .any(|n| n.contains(HIDREAM_DEV_MARKER));
+        let (tp, name) = if dev {
+            (Self::HiDreamO1Dev, "hidream-o1-dev")
+        } else {
+            (Self::HiDreamO1, "hidream-o1")
+        };
+        tracing::info!(
+            "Detected HiDream-O1 from its weights; loading `{model_id}` as `{name}` (choose with `hidream-o1` or `hidream-o1-dev`)"
+        );
+        Some(tp)
+    }
+
     /// Auto-detect diffusion loader type from a repo file listing.
     /// Extend this when adding new diffusion pipelines.
     pub fn auto_detect_from_files(files: &[String]) -> Option<Self> {
@@ -192,7 +251,8 @@ impl DiffusionLoaderType {
 #[derive(Clone, Debug)]
 pub struct DiffusionModelPathsInner {
     pub config_filenames: Vec<PathBuf>,
-    pub filenames: Vec<PathBuf>,
+    /// One group of weight files per var builder.
+    pub filenames: Vec<Vec<PathBuf>>,
     pub text_encoders: LocalTextEncoders,
 }
 
@@ -247,7 +307,7 @@ impl DiffusionModelLoader for FluxLoader {
         api: &ApiRepo,
         model_id: &Path,
         revision: &str,
-    ) -> Result<Vec<PathBuf>> {
+    ) -> Result<Vec<Vec<PathBuf>>> {
         let regex = Regex::new(FLUX_SAFETENSORS_PATTERN)?;
         let flux_name = crate::pipeline::hf::list_repo_files(api, model_id, true, revision)?
             .into_iter()
@@ -257,7 +317,7 @@ impl DiffusionModelLoader for FluxLoader {
         let ae_file = crate::pipeline::hf::get_file(api, model_id, "ae.safetensors", revision)?;
 
         // NOTE(EricLBuehler): disgusting way of doing this but the 0th path is the flux, 1 is ae
-        Ok(vec![flux_file, ae_file])
+        Ok(vec![vec![flux_file], vec![ae_file]])
     }
     fn get_config_filenames(
         &self,
@@ -276,7 +336,7 @@ impl DiffusionModelLoader for FluxLoader {
         Ok(
             flux_local_files(model_id)?.map(|files| DiffusionModelPathsInner {
                 config_filenames: Vec::new(),
-                filenames: vec![files.transformer, files.ae],
+                filenames: vec![vec![files.transformer], vec![files.ae]],
                 text_encoders: files.text_encoders,
             }),
         )
@@ -337,6 +397,89 @@ impl DiffusionModelLoader for FluxLoader {
                 text_encoders,
             },
         )?))
+    }
+}
+
+/// [`DiffusionModelLoader`] for HiDream-O1-Image: one Qwen3-VL checkpoint, its config and its tokenizer.
+pub struct HiDreamO1Loader {
+    pub(crate) variant: hidream::Variant,
+}
+
+fn hidream_shards(names: impl IntoIterator<Item = String>) -> Result<Vec<String>> {
+    let shards = hidream::weight_shards(names);
+    anyhow::ensure!(
+        !shards.is_empty(),
+        "no `model*.safetensors` weights for HiDream-O1"
+    );
+    Ok(shards)
+}
+
+impl DiffusionModelLoader for HiDreamO1Loader {
+    fn get_model_paths(
+        &self,
+        api: &ApiRepo,
+        model_id: &Path,
+        revision: &str,
+    ) -> Result<Vec<Vec<PathBuf>>> {
+        let names = crate::pipeline::hf::list_repo_files(api, model_id, true, revision)?;
+        let shards = hidream_shards(names)?
+            .iter()
+            .map(|name| crate::pipeline::hf::get_file(api, model_id, name, revision))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(vec![shards])
+    }
+    fn get_config_filenames(
+        &self,
+        api: &ApiRepo,
+        model_id: &Path,
+        revision: &str,
+    ) -> Result<Vec<PathBuf>> {
+        [hidream::CONFIG_FILE, hidream::TOKENIZER_FILE]
+            .iter()
+            .map(|name| crate::pipeline::hf::get_file(api, model_id, name, revision))
+            .collect()
+    }
+    fn local_paths(&self, model_id: &Path) -> Result<Option<DiffusionModelPathsInner>> {
+        if !model_id.join(hidream::CONFIG_FILE).is_file() {
+            return Ok(None);
+        }
+        let names = std::fs::read_dir(model_id)?
+            .filter_map(|entry| entry.ok()?.file_name().into_string().ok());
+        Ok(Some(DiffusionModelPathsInner {
+            config_filenames: vec![
+                model_id.join(hidream::CONFIG_FILE),
+                model_id.join(hidream::TOKENIZER_FILE),
+            ],
+            filenames: vec![
+                hidream_shards(names)?
+                    .iter()
+                    .map(|name| model_id.join(name))
+                    .collect(),
+            ],
+            text_encoders: LocalTextEncoders::default(),
+        }))
+    }
+    fn force_cpu_vb(&self) -> Vec<bool> {
+        vec![false]
+    }
+    fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>> {
+        let DiffusionLoad {
+            configs,
+            mut vbs,
+            metadata,
+            ..
+        } = inputs;
+        let [config, tokenizer] = configs.as_slice() else {
+            anyhow::bail!("HiDream-O1 needs its config and tokenizer");
+        };
+        let config = hidream::model::Config::from_json(config)?;
+        let tokenizer = tokenizers::Tokenizer::from_str(tokenizer).map_err(anyhow::Error::msg)?;
+        let model = hidream::model::HiDreamO1::new(&config, vbs.remove(0), metadata)?;
+        Ok(Box::new(hidream::HiDreamO1Pipeline::new(
+            model,
+            tokenizer,
+            self.variant,
+        )))
     }
 }
 
@@ -420,5 +563,39 @@ mod tests {
             Some(DiffusionLoaderType::Flux)
         ));
         assert!(DiffusionLoaderType::auto_detect_from_files(&gguf[..1]).is_none());
+    }
+
+    #[test]
+    fn hidream_is_told_from_qwen3_vl_by_its_patch_embedding() {
+        let config = r#"{"architectures": ["Qwen3VLForConditionalGeneration"]}"#;
+        assert!(DiffusionLoaderType::needs_weight_index(config));
+        assert!(!DiffusionLoaderType::needs_weight_index(
+            r#"{"architectures": ["Qwen3ForCausalLM"]}"#
+        ));
+        let hidream = r#"{"weight_map": {"model.x_embedder.proj1.weight": "model-00001-of-00008.safetensors"}}"#;
+        let chat = r#"{"weight_map": {"model.language_model.norm.weight": "model.safetensors"}}"#;
+        assert_eq!(
+            DiffusionLoaderType::auto_detect_from_weight_index(hidream, "org/Pixel-Model"),
+            Some(DiffusionLoaderType::HiDreamO1)
+        );
+        assert_eq!(
+            DiffusionLoaderType::auto_detect_from_weight_index(hidream, "/models/Pixel-Model-Dev"),
+            Some(DiffusionLoaderType::HiDreamO1Dev)
+        );
+        assert_eq!(
+            DiffusionLoaderType::auto_detect_from_weight_index(
+                hidream,
+                "/cache/models--org--Pixel-Model-Dev/snapshots/abc123"
+            ),
+            Some(DiffusionLoaderType::HiDreamO1Dev)
+        );
+        assert_eq!(
+            DiffusionLoaderType::auto_detect_from_weight_index(hidream, "/home/my-dev/Pixel-Model"),
+            Some(DiffusionLoaderType::HiDreamO1)
+        );
+        assert_eq!(
+            DiffusionLoaderType::auto_detect_from_weight_index(chat, "org/Chat-Model"),
+            None
+        );
     }
 }

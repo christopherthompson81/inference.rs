@@ -134,6 +134,7 @@ Each entry defines one loaded model.
 | `model_id` | string | yes | Hugging Face id or local path. |
 | `tokenizer` | path | no | Local tokenizer.json. |
 | `arch` | enum | no | Architecture override (text models). |
+| `diffusion_arch` | enum | no | With `kind = "diffusion"`: `flux` (default), `flux-offloaded`, `hidream-o1` or `hidream-o1-dev`. |
 | `dtype` | enum | no | `auto`, `f16`, `bf16`, `f32`. |
 | `hf_overrides` | JSON object | no | Recursively merged Hugging Face config overrides. |
 | `max_model_len` | integer | no | Runtime prompt-plus-output context limit. |

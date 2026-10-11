@@ -254,6 +254,7 @@ inference run diffusion [OPTIONS] --model-id <MODEL_ID>
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
+| `--diffusion-arch <DIFFUSION_ARCH>` | `flux` | Diffusion architecture: flux, flux-offloaded, hidream-o1 or hidream-o1-dev |
 | `--cpu` | `false` | Force CPU-only execution |
 | `-n, --device-layers <DEVICE_LAYERS>` |  | Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20") Omit for automatic device mapping |
 | `--topology <TOPOLOGY>` |  | Topology YAML file for device mapping |

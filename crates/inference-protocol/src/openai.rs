@@ -1855,6 +1855,15 @@ pub struct ImageGenerationRequest {
     #[serde(default = "default_1280usize")]
     #[schema(example = 1280)]
     pub width: usize,
+    /// Denoising steps (1 to 1000) when not the model's own; an inference.rs extension.
+    #[serde(default)]
+    pub steps: Option<usize>,
+    /// Classifier-free guidance scale when not the model's own; an inference.rs extension.
+    #[serde(default)]
+    pub guidance_scale: Option<f64>,
+    /// Seeds the noise, so a request repeats its image; an inference.rs extension.
+    #[serde(default)]
+    pub seed: Option<u64>,
 }
 
 impl ImageGenerationRequest {
