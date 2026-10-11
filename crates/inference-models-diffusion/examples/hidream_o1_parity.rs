@@ -21,6 +21,12 @@ struct Args {
     /// Directory with `config.json`, `tokenizer.json` and the `model*.safetensors` shards.
     #[arg(long)]
     model: PathBuf,
+    /// Our weights from this GGUF instead, the config and tokenizer still from `--model`.
+    #[arg(long)]
+    gguf: Option<PathBuf>,
+    /// How much further from the F32 run than the reference a forward may land.
+    #[arg(long, default_value_t = AGAINST_SLACK)]
+    slack: f64,
     /// `reference.safetensors` and `reference.json` from the reference.
     #[arg(long)]
     dumps: PathBuf,
@@ -90,7 +96,12 @@ fn main() -> Result<()> {
     let calls = meta["calls"].as_array().context("no calls")?;
 
     let start = std::time::Instant::now();
-    let pipeline = HiDreamO1Pipeline::load(&args.model, variant, &device, DType::BF16)?;
+    let pipeline = match &args.gguf {
+        Some(gguf) => {
+            HiDreamO1Pipeline::load_gguf(gguf, &args.model, variant, &device, DType::BF16)?
+        }
+        None => HiDreamO1Pipeline::load(&args.model, variant, &device, DType::BF16)?,
+    };
     println!("loaded in {:.1}s", start.elapsed().as_secs_f64());
     let model = pipeline.model();
     let (rows, cols) = (height / PATCH_SIZE, width / PATCH_SIZE);
@@ -139,7 +150,7 @@ fn main() -> Result<()> {
             Some(truth) => {
                 let (ours_cos, reference_cos) = (cosine(&ours, truth)?, cosine(want, truth)?);
                 // the reference's own BF16 noise sets the bar: ours must sit at least as close to the truth
-                let closer = ours_cos >= reference_cos - AGAINST_SLACK;
+                let closer = ours_cos >= reference_cos - args.slack;
                 failed |= !closer;
                 println!(
                     "{} forward {k}: ours vs f32 {ours_cos:.6}, reference vs f32 {reference_cos:.6}",

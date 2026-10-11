@@ -8,11 +8,13 @@ use inference::{
 
 #[path = "../support/hidream_o1_tiny.rs"]
 mod support;
-use support::tiny_hidream_o1;
+use support::{copy_configs, tiny_hidream_o1, tiny_hidream_o1_f32_gguf};
 
 const PROMPT: &str = "a small red cube on a table";
 const SEED: u64 = 7;
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
+// mean per-channel distance (of 255) of a Q8_0 GGUF's image from the checkpoint's; measured 0.79
+const Q8_0_MEAN_DIFF: f64 = 4.0;
 
 fn request(steps: Option<usize>, seed: u64) -> ImageGenerationRequest {
     ImageGenerationRequest {
@@ -75,6 +77,62 @@ async fn hidream_o1_is_detected_and_seeds_repeat_at_the_snapped_size() -> anyhow
         "choice i should take seed + i"
     );
     assert!(error_text(model.generate_image(request(Some(0), SEED)).await).contains("steps"));
+    Ok(())
+}
+
+async fn build(model_id: &std::path::Path) -> anyhow::Result<Model> {
+    let mut builder = ModelBuilder::new(model_id.to_string_lossy()).with_dtype(ModelDType::F32);
+    if !ON_GPU {
+        builder = builder.with_force_cpu();
+    }
+    Ok(builder.build().await?)
+}
+
+// a ComfyUI-GGUF file loads by itself, detected from its metadata; at F32 it samples the checkpoint's image exactly,
+// and the writer's own Q8_0 file stays close
+#[tokio::test]
+async fn a_hidream_o1_gguf_samples_as_its_checkpoint() -> anyhow::Result<()> {
+    use inference_models_diffusion::hidream::gguf_writer::{Policy, write_gguf};
+    use inference_tensor::quantized::GgmlDType;
+    let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1")?;
+    let want = image(&build(&path).await?, request(Some(2), SEED)).await?;
+    let out = tempfile::tempdir()?;
+    let exact = out.path().join("tiny-hidream-o1-f32.gguf");
+    tiny_hidream_o1_f32_gguf(&path, &exact)?;
+    assert_eq!(
+        image(&build(&exact).await?, request(Some(2), SEED)).await?,
+        want
+    );
+    std::fs::remove_file(&exact)?;
+    let q8 = Policy {
+        matrices: GgmlDType::Q8_0,
+        overrides: Vec::new(),
+    };
+    let written = out.path().join("tiny-hidream-o1-q8_0.gguf");
+    write_gguf(&path, &written, &q8)?;
+    let got = image(&build(&written).await?, request(Some(2), SEED)).await?;
+    let diff = got
+        .as_raw()
+        .iter()
+        .zip(want.as_raw())
+        .map(|(a, b)| f64::from(a.abs_diff(*b)))
+        .sum::<f64>()
+        / want.as_raw().len() as f64;
+    assert!(diff < Q8_0_MEAN_DIFF, "mean |diff| {diff}");
+    std::fs::remove_file(&written)?;
+    // the variant comes from the file's name, as from a repo's
+    let dev = out.path().join("tiny-hidream-o1-dev-q8_0.gguf");
+    copy_configs(&path, &dev)?;
+    write_gguf(&path, &dev, &q8)?;
+    assert!(
+        error_text(
+            build(&dev)
+                .await?
+                .generate_image(request(Some(2), SEED))
+                .await
+        )
+        .contains("28-step")
+    );
     Ok(())
 }
 

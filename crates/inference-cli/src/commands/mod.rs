@@ -23,7 +23,7 @@ pub use config::run_from_config;
 pub use doctor::run_doctor;
 pub use login::run_login;
 pub use manage::{run_uninstall, run_update};
-pub use quantize::{run_asr_quantize, run_quantize};
+pub use quantize::{run_asr_quantize, run_hidream_quantize, run_quantize};
 pub use run::run_interactive;
 pub use serve::run_server;
 pub use tune::run_tune;

@@ -15,6 +15,33 @@ pub enum QuantizeCommand {
 
     /// Speech recogniser `.nemo` to an `asr` GGUF (Parakeet, hybrid and streaming FastConformers)
     Asr(AsrQuantizeOptions),
+
+    /// HiDream-O1-Image (or -Dev) checkpoint to a GGUF, its text stack quantized
+    #[command(name = "hidream-o1")]
+    HiDreamO1(HiDreamQuantizeOptions),
+}
+
+#[derive(Args, Clone)]
+pub struct HiDreamQuantizeOptions {
+    /// A checkpoint directory (`config.json`, `model*.safetensors`) or a Hugging Face repo
+    #[arg(short = 'm', long)]
+    pub model_id: String,
+
+    /// Hub revision (branch, tag or commit) of a repo `--model-id`
+    #[arg(long)]
+    pub revision: Option<String>,
+
+    /// Output `.gguf` path; a name containing `-dev` loads as the Dev variant
+    #[arg(short = 'o', long = "output")]
+    pub output_path: PathBuf,
+
+    /// The text stack's matrix type (`q8_0`, `q6_k`, `q5_0`, `q3_k`); norms, biases and the head stay finer
+    #[arg(long = "type", default_value = "q8_0")]
+    pub matrices: String,
+
+    /// `<name fragment>=<type>`, repeatable: the first fragment a matrix's name contains sets its type
+    #[arg(long)]
+    pub keep: Vec<String>,
 }
 
 #[derive(Args, Clone)]
@@ -472,7 +499,9 @@ pub fn resolve_quantize_command(
 ) -> anyhow::Result<QuantizeCommand> {
     let mut model_type = match command {
         Some(QuantizeCommand::Uqff(model_type)) => *model_type,
-        Some(asr @ QuantizeCommand::Asr(_)) => return Ok(asr),
+        Some(other @ (QuantizeCommand::Asr(_) | QuantizeCommand::HiDreamO1(_))) => {
+            return Ok(other);
+        }
         None => {
             return default_options
                 .into_quantize_model_type()
@@ -530,7 +559,9 @@ mod tests {
         };
         match resolve_quantize_command(model_type, default_quantize)? {
             QuantizeCommand::Uqff(model_type) => Ok(*model_type),
-            QuantizeCommand::Asr(_) => unreachable!("these tests quantize UQFF"),
+            QuantizeCommand::Asr(_) | QuantizeCommand::HiDreamO1(_) => {
+                unreachable!("these tests quantize UQFF")
+            }
         }
     }
 

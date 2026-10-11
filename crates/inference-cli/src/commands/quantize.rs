@@ -12,16 +12,17 @@ use inference_api::{
     engine::{
         IsqType, ModelSelected, NormalLoaderType, RuntimeSpec, UqffWriteConfig, expand_isq_value,
     },
-    initialize_logging,
+    hidream_gguf, initialize_logging,
     uqff::{QuantPolicy, resolve_model_source},
 };
 
 use super::serve::{self, extract_device_settings};
 use crate::args::{
     AdapterOptions, AsrQuantizeOptions, CacheOptions, DeviceOptions, FormatOptions, GlobalOptions,
-    MatformerSelection, ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
-    QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
-    QuantizeMultimodalOptions, QuantizeQuantizationOptions,
+    HiDreamQuantizeOptions, MatformerSelection, ModelSourceOptions, ModelType,
+    MultimodalAdapterOptions, MultimodalOptions, QuantizationOptions, QuantizeDeviceOptions,
+    QuantizeModelSourceOptions, QuantizeModelType, QuantizeMultimodalOptions,
+    QuantizeQuantizationOptions,
 };
 
 const MIB: f64 = (1u64 << 20) as f64;
@@ -92,6 +93,26 @@ pub fn run_asr_quantize(options: AsrQuantizeOptions, global: GlobalOptions) -> R
         &options.output_path,
         &policy,
     )?;
+    report_gguf(&options.output_path, &summary);
+    Ok(())
+}
+
+/// Writes a HiDream-O1 checkpoint as a GGUF.
+pub fn run_hidream_quantize(options: HiDreamQuantizeOptions, global: GlobalOptions) -> Result<()> {
+    initialize_logging();
+    let summary = hidream_gguf::write_hidream_gguf(
+        &options.model_id,
+        options.revision,
+        &global.token_source,
+        &options.output_path,
+        &options.matrices,
+        &options.keep,
+    )?;
+    report_gguf(&options.output_path, &summary);
+    Ok(())
+}
+
+fn report_gguf(path: &Path, summary: &inference_api::GgufWriteSummary) {
     let types = summary
         .types
         .iter()
@@ -100,10 +121,9 @@ pub fn run_asr_quantize(options: AsrQuantizeOptions, global: GlobalOptions) -> R
         .join(", ");
     info!(
         "Wrote {} ({:.1} MiB): {types}",
-        options.output_path.display(),
+        path.display(),
         summary.bytes as f64 / MIB
     );
-    Ok(())
 }
 
 /// Run UQFF quantization and generation, supporting multiple ISQ types.
@@ -557,7 +577,9 @@ mod tests {
         };
         match resolve_quantize_command(model_type, default_quantize).unwrap() {
             QuantizeCommand::Uqff(model_type) => *model_type,
-            QuantizeCommand::Asr(_) => unreachable!("these tests quantize UQFF"),
+            QuantizeCommand::Asr(_) | QuantizeCommand::HiDreamO1(_) => {
+                unreachable!("these tests quantize UQFF")
+            }
         }
     }
 

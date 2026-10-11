@@ -55,7 +55,7 @@ pub use embedding_loaders::{
 
 pub use diffusion_loaders::{
     DiffusionLoad, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader, DiffusionModelPaths,
-    DiffusionModelPathsInner, FluxLoader, HiDreamO1Loader,
+    DiffusionModelPathsInner, FluxLoader, HiDreamO1Loader, write_hidream_gguf,
 };
 
 use crate::{DeviceMapSetting, PagedAttentionConfig, TryIntoDType};

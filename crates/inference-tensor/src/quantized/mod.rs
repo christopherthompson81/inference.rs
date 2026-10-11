@@ -271,7 +271,40 @@ pub enum GgmlDType {
     Q8K,
 }
 
+/// The types a GGUF writer offers, by llama.cpp's lowercase names.
+pub const WRITABLE_TYPES: [(&str, GgmlDType); 10] = [
+    ("f32", GgmlDType::F32),
+    ("f16", GgmlDType::F16),
+    ("bf16", GgmlDType::BF16),
+    ("q8_0", GgmlDType::Q8_0),
+    ("q6_k", GgmlDType::Q6K),
+    ("q5_k", GgmlDType::Q5K),
+    ("q5_0", GgmlDType::Q5_0),
+    ("q4_k", GgmlDType::Q4K),
+    ("q4_0", GgmlDType::Q4_0),
+    ("q3_k", GgmlDType::Q3K),
+];
+
 impl GgmlDType {
+    /// One of [`WRITABLE_TYPES`] by its name.
+    pub fn from_name(name: &str) -> Result<Self> {
+        match WRITABLE_TYPES.iter().find(|(n, _)| *n == name) {
+            Some((_, d)) => Ok(*d),
+            None => crate::bail!(
+                "`{name}` is not one of {:?}",
+                WRITABLE_TYPES.map(|(n, _)| n)
+            ),
+        }
+    }
+
+    /// The type's name in [`WRITABLE_TYPES`], if it is one.
+    pub fn name(self) -> Option<&'static str> {
+        WRITABLE_TYPES
+            .iter()
+            .find(|(_, d)| *d == self)
+            .map(|(n, _)| *n)
+    }
+
     pub(crate) fn from_u32(u: u32) -> Result<Self> {
         let dtype = match u {
             0 => Self::F32,

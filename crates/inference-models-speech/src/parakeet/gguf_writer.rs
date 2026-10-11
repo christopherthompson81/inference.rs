@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use inference_tensor::quantized::gguf_file::{self, Value};
-use inference_tensor::quantized::{GgmlDType, QTensor};
+use inference_tensor::quantized::{GgmlDType, QTensor, WRITABLE_TYPES};
 use inference_tensor::{Error, Result, Tensor};
 
 use super::config::HeadKind;
@@ -32,18 +32,6 @@ const DITHER: f32 = 1e-5;
 const Q8_LAYOUT: &str = "block_q8_0";
 const OVERRIDE_SEPARATOR: char = '=';
 
-/// The tensor types a policy names, by their llama.cpp names.
-pub const TYPE_NAMES: [(&str, GgmlDType); 9] = [
-    ("f32", GgmlDType::F32),
-    ("f16", GgmlDType::F16),
-    ("q8_0", GgmlDType::Q8_0),
-    ("q6_k", GgmlDType::Q6K),
-    ("q5_k", GgmlDType::Q5K),
-    ("q5_0", GgmlDType::Q5_0),
-    ("q4_k", GgmlDType::Q4K),
-    ("q4_0", GgmlDType::Q4_0),
-    ("q3_k", GgmlDType::Q3K),
-];
 type Preset = (&'static str, fn() -> QuantPolicy);
 
 /// The named policies [`QuantPolicy::parse`] takes besides a type name.
@@ -53,16 +41,7 @@ pub const PRESETS: [Preset; 2] = [
 ];
 
 fn type_named(name: &str) -> Result<GgmlDType> {
-    TYPE_NAMES
-        .iter()
-        .find(|(n, _)| *n == name)
-        .map(|(_, d)| *d)
-        .ok_or_else(|| {
-            msg(format!(
-                "`{name}` is not one of {:?}",
-                TYPE_NAMES.map(|(n, _)| n)
-            ))
-        })
+    GgmlDType::from_name(name)
 }
 
 // llama.cpp's `general.file_type`: the "mostly" type the large matrices take
@@ -115,7 +94,7 @@ impl QuantPolicy {
                 msg(format!(
                     "`{policy}` is not a preset {:?} or a type {:?}",
                     PRESETS.map(|(n, _)| n),
-                    TYPE_NAMES.map(|(n, _)| n)
+                    WRITABLE_TYPES.map(|(n, _)| n)
                 ))
             })?),
         };
@@ -351,6 +330,8 @@ pub fn write_asr_gguf(
     let metadata: Vec<(&str, &Value)> = metadata.iter().map(|(k, v)| (k.as_str(), v)).collect();
     let refs: Vec<(&str, &QTensor)> = tensors.iter().map(|(n, q, _)| (n.as_str(), q)).collect();
     gguf_file::write(&mut file, &metadata, &refs)?;
+    // dropping a BufWriter would lose a failed final write, as on a full disk
+    std::io::Write::flush(&mut file)?;
     Ok(tensors.into_iter().map(|(n, _, d)| (n, d)).collect())
 }
 
