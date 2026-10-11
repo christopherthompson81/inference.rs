@@ -4,7 +4,7 @@
 # GGUF passes on the cosine and a word error rate bound instead.
 # Not part of local_ci.sh: it needs torch, transformers (5.x, with Parakeet) and librosa.
 #
-# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file> | --gguf <file>] [--min-cosine <x>] [--max-wer <x>] [--keep-dumps <dir>]
+# Usage: scripts/parakeet_parity.sh <checkpoint dir> <wav>... [--cpu] [--nemo <file> | --gguf <file>] [--min-cosine <x>] [--max-wer <x>] [--stream-ms <ms>] [--keep-dumps <dir>]
 #   dir   holds config.json, processor_config.json, tokenizer.json and model.safetensors (e.g. parakeet-tdt-0.6b-v3)
 #   wav   16-bit PCM wav files (mono, any rate: both sides resample to 16 kHz)
 set -euo pipefail
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
         # ours from the checkpoint's `.nemo` or `asr` GGUF, against the same transformers reference
         --nemo) nemo=(--nemo "$(realpath "$2")"); shift ;;
         --gguf) nemo=(--gguf "$(realpath "$2")"); shift ;;
-        --min-cosine | --max-wer) tolerance+=("$1" "$2"); shift ;;
+        --min-cosine | --max-wer | --stream-ms) tolerance+=("$1" "$2"); shift ;;
         # reuse (or fill) this directory's reference dumps, so a sweep pays for the reference once
         --keep-dumps) keep=$(realpath -m "$2"); shift ;;
         *) wavs+=("$(realpath "$1")") ;;

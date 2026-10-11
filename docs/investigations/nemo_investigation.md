@@ -936,3 +936,85 @@ Tests:
 The user's read of Runs 29-30: greedy performs best, and segmentation by VAD or diarization plus greedy gives reasonable WER. So greedy stays the default, `beam_size` stays opt-in, and MALSD's speed (42 s per 300 s on CUDA) is not worth optimizing.
 
 A follow-up worth doing: speaker-attributed transcription, with diarization turns segmenting greedy recognition.
+
+## Run 32 - 2026-10-10
+
+**Does NeMo's cache-aware streaming reproduce its offline encoder?** True chunked streaming is the last #391 item. The question decides what our streaming must match.
+
+Command: `nemo_stream_vs_offline.py` (scratchpad), in the NeMo 2.7.1 venv on CUDA, over the 98 s demo clip with `nemotron-speech-streaming-en-0.6b.nemo`. It compares:
+- the encoder over the whole mel (chunked-limited mask);
+- `CacheAwareStreamingAudioBuffer` + `encoder.cache_aware_stream_step`, chunk by chunk, with `get_initial_cache_state`.
+
+Raw:
+- **The model's own schedule** (`setup_streaming_params`):
+  - `att_context [70, 13]`, `chunked_limited`, `conv_context [8, 0]`;
+  - `chunk_size [105, 112]` mel frames, `pre_encode_cache_size [0, 9]`, `drop_extra_pre_encoded 2`;
+  - `last_channel_cache_size 70`, `valid_out_len 14`.
+  
+  So the first chunk is 105 mel frames, and each later chunk is 112 new frames after 9 cached ones. Every chunk gives 14 encoder frames (1.12 s).
+- **Caches:**
+  - each layer caches its last 70 frames of normed attention input (`cache_last_channel`);
+  - each layer caches the 8 depthwise-conv input frames (`cache_last_time`);
+  - the buffer works on the whole utterance's mel. `normalize: NA`, so features are per frame.
+- **Result:** 1221 frames both ways, max abs diff 0.0042, minimum frame cosine 0.99948 (three frames below 0.9999). NeMo's streaming equals its offline pass up to float noise.
+
+Implication: our streaming must reproduce our offline encoder, which already matches transformers and NeMo exactly. Each piece is exact:
+- **Mel:** our centred STFT zero-pads (`frames = len / hop`), so frame t is final once samples up to `t * hop + n_fft/2` arrive. Flushing at the end gives the offline frames.
+- **Subsampling:** each causal stride-2 stage obeys `f(8k + x) = 4k + f(x)`. So a window from mel frame `8 * (f0 - 2)`, with its first 2 outputs dropped, gives offline frames `f0..`. A kept output never reads the window's left zero pad. NeMo's odd window sizes (105, 121) never read the right pad either.
+- **Attention:** a chunk sees itself and exactly `70 / 14 = 5` whole chunks behind, with no mask inside the window. The cache can be projected K and V rather than the normed input.
+- **Conv:** the causal depthwise kernel reads 8 frames back; the cache starts at zeros, as the offline pad does.
+- **Decoding:** the greedy loop reads one frame at a time, so carrying the predictor state and the absolute frame across chunks reproduces it.
+
+## Run 33 - 2026-10-10
+
+**The streaming port, against offline and against transformers.**
+
+What was built:
+- **`inference_audio::nemo::NemoMelStream`:** push and finish, borrowing nothing, so an engine can keep it between requests.
+- **`Encoder::stream` / `stream_push` / `stream_finish`:**
+  - per layer: K/V of the last `left // chunk * chunk` frames, and the conv's `kernel - 1` gated frames;
+  - one projected relative-position table per layer for the largest window (84 frames), sliced per chunk;
+  - the subsampling window and drop are derived from the conv geometry: `streaming_drop` is 2 here.
+- **Resumable greedy decoding:** `Head::stream` / `decode_chunk` for CTC, RNN-T and TDT. A TDT duration may land past a chunk.
+- **`Parakeet::stream` / `stream_push` / `stream_finish`:** each push returns the text delta, and finish returns the whole `Transcription`. A beam is refused (greedy only), as is a non-streaming checkpoint.
+
+Commands:
+- `cargo nextest run -p inference-audio nemo`: the streamed mel equals the offline mel bit for bit, in pieces of 1, 159, 160, 1000 and all samples.
+- `cargo nextest run -p inference a_streamed_transcription_equals_the_offline_one`, on both tiny streaming heads (English, and 3.5 with prompts), 4 s of audio across 25 chunks. In pieces of 13, 997, 1280, 16000 samples and the whole clip, the streamed `Transcription` (tokens, spans, words, text) equals the offline one, and the deltas concatenate to its text.
+- `scripts/parakeet_parity.sh <model dir> <clips> --stream-ms 80`, the new flag, pushing 80 ms pieces. Dev build:
+
+| model | clip | emissions vs transformers | streamed vs offline | speed | slowest push |
+|---|---|---|---|---|---|
+| streaming-en, CUDA | 98 s demo | 639/639 | equal | 40.6x real time | 34 ms |
+| streaming-en, CUDA | 300 s meeting | 1251/1251 | equal | 38.9x | 35 ms |
+| 3.5 multilingual, CUDA | 98 s demo | 774/774 | equal | 11.0x | 42 ms |
+| streaming-en, CPU | 98 s demo | 639/639 | equal | 1.07x | 2024 ms |
+
+- **3.5's chunk** is 4 frames (lookahead 3), so it pays the per-chunk overhead three and a half times as often.
+- **CPU breakdown** (temporary timers, removed), per 1.12 s chunk:
+  - subsampling 176 ms: a 121-frame window through grouped (depthwise) conv2d;
+  - the 24 blocks 553 ms: 14-row matmuls against about 2.4 GB of F32 weights.
+  
+  Offline, the same frames cost about 236 ms in all. Both are CPU kernel shapes, not streaming logic, so they belong to the CPU-speed follow-up, measured without debug assertions (`perf-measure-profile`).
+
+Next: the engine streaming session (inference-api, C ABI, bindings), then the `/v1/realtime` WebSocket.
+
+## Run 34 - 2026-10-10
+
+**Review of the streaming port; fixes.**
+
+- **Bug: lookahead 0 underflowed.** With a 1-frame chunk (the English checkpoint lists `[70, 0]`), the second chunk computed `f0 - drop` = 1 - 2. A window that reaches frame 0 reads the same zero pad as the offline pass, so the drop is now `min(drop, f0)`. The tiny test gains the 3.5 checkpoint at lookahead 0; streamed equals offline.
+- **Latent bug: frame offsets at finish.** `stream_finish` decoded two encoder outputs after both were computed, with offsets taken from the final frame count. That could only fire where `n_fft/2 >= 2 * hop`. Encoder chunks now carry their first frame's index.
+- **Mel stream:**
+  - `push` is capped at the frame count the offline features keep for the audio so far (it mattered only when `n_fft/2 < hop`);
+  - the trim adds exactly what it drains to `base`.
+- **Text deltas:** the running-transcript prefix check, with its fallback that re-sent the whole text, is replaced by tokenizers' `DecodeStream` step algorithm, held without a borrow. Each token's text now comes from a short prefix window, so per-token cost is flat over long streams.
+- **Language one-hot:** built once per stream.
+- **Short audio:** `stream_finish` on fewer than 2 feature frames fails as the offline pass does. Before, it returned an empty transcription.
+- **Subsampling factor** is now `stride^steps`, not `1 << steps`.
+- **Wording:** "streamed equals offline" means the same decisions: tokens, frames, spans, words, text. The floats agree only up to rounding (different matmul shapes, a 2W-1 position table rather than 2T-1), so a near-tie argmax could in principle flip. None has in any run.
+
+After the fixes, `scripts/parakeet_parity.sh <streaming-en> <98 s demo> <300 s meeting> --stream-ms 80` on CUDA:
+- 639/639 and 1251/1251 emissions against transformers;
+- streamed equals offline;
+- 50.1x and 53.7x real time, slowest push 19-22 ms (40x and 35 ms before the flat detokenisation).

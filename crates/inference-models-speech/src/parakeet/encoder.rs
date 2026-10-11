@@ -10,6 +10,8 @@ const BATCH_NORM_EPS: f64 = 1e-5;
 const POSITION_BASE: f64 = 10000.0;
 // the conformer's macaron feed-forwards each contribute half a residual
 const FEED_FORWARD_WEIGHT: f64 = 0.5;
+// the offline features refuse shorter audio
+const MIN_FEATURE_FRAMES: usize = 2;
 // attention rows per block, about 40 s of audio at 80 ms a frame
 const QUERY_BLOCK: usize = 512;
 
@@ -27,6 +29,8 @@ struct Subsampling {
     pairs: Vec<(Conv2d, Conv2d)>,
     linear: Linear,
     causal_pad: Option<(usize, usize)>,
+    kernel: usize,
+    stride: usize,
 }
 
 impl Subsampling {
@@ -84,7 +88,27 @@ impl Subsampling {
             pairs,
             linear,
             causal_pad,
+            kernel: k,
+            stride: s,
         })
+    }
+
+    // a streaming (causal) stride step's frames out for `x` frames in, as `forward` pads them
+    fn step_frames(&self, x: usize, (before, after): (usize, usize)) -> usize {
+        (x + before + after - self.kernel) / self.stride + 1
+    }
+
+    fn steps(&self) -> usize {
+        self.pairs.len() + 1
+    }
+
+    fn factor(&self) -> usize {
+        self.stride.pow(self.steps() as u32)
+    }
+
+    // the leading outputs of a window that read its zero padding where the audio before it had frames
+    fn streaming_drop(&self, (before, _): (usize, usize)) -> usize {
+        (0..self.steps()).fold(0, |valid, _| (valid + before).div_ceil(self.stride))
     }
 
     fn pad(&self, xs: Tensor) -> Result<Tensor> {
@@ -277,6 +301,57 @@ impl RelPositionAttention {
     }
 }
 
+impl RelPositionAttention {
+    /// `(1, heads, 2W - 1, head_dim)` projected positions for a streaming window of `w` frames.
+    fn window_positions(
+        &self,
+        w: usize,
+        hidden: usize,
+        dtype: DType,
+        device: &Device,
+    ) -> Result<Tensor> {
+        let table = relative_positions(w, hidden, dtype, device)?;
+        self.heads(&self.pos.forward(&table)?)
+    }
+
+    /// One streamed chunk: its rows attend to themselves and the cached keys, all in reach, and the cache keeps
+    /// the last `keep` frames.
+    fn step(
+        &self,
+        xs: &Tensor,
+        cache: &mut Option<(Tensor, Tensor)>,
+        positions: &Tensor,
+        keep: usize,
+    ) -> Result<Tensor> {
+        let (b, rows, _) = xs.dims3()?;
+        let scale = (self.head_dim as f64).powf(-0.5);
+        let q = self.heads(&self.q.forward(xs)?)?;
+        let mut k = self.heads(&self.k.forward(xs)?)?;
+        let mut v = self.heads(&self.v.forward(xs)?)?;
+        if let Some((past_k, past_v)) = cache.as_ref() {
+            k = Tensor::cat(&[past_k, &k], 2)?;
+            v = Tensor::cat(&[past_v, &v], 2)?;
+        }
+        let keys = k.dim(2)?;
+        let content = q.broadcast_add(&self.bias_u)?.matmul(&k.t()?)?;
+        // the table's rows run from offset W-1 down; this window needs keys-1 down to -(rows-1)
+        let w = positions.dim(2)?.div_ceil(2);
+        let window = positions.narrow(2, w - keys, keys + rows - 1)?;
+        let position = q.broadcast_add(&self.bias_v)?.matmul(&window.t()?)?;
+        let scores = ((content + rel_shift(&position, keys)?)? * scale)?;
+        let attn = ops::softmax_last_dim(&scores)?.matmul(&v)?;
+        let kept = keep.min(keys);
+        *cache = Some((
+            k.narrow(2, keys - kept, kept)?.contiguous()?,
+            v.narrow(2, keys - kept, kept)?.contiguous()?,
+        ));
+        let attn = attn
+            .transpose(1, 2)?
+            .reshape((b, rows, self.heads * self.head_dim))?;
+        self.o.forward(&attn)
+    }
+}
+
 // a block's (Q, T+Q-1) offset scores to (Q, T) key scores, row r at column Q-1-r+j: Transformer-XL's pad-and-reshape
 fn rel_shift(scores: &Tensor, t: usize) -> Result<Tensor> {
     let (b, h, q, p) = scores.dims4()?;
@@ -349,25 +424,52 @@ impl ConvModule {
         })
     }
 
-    /// `(B, T, C)` in and out.
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+    fn gate(&self, xs: &Tensor) -> Result<Tensor> {
         let gated = self.pointwise1.forward(xs)?;
         let c = gated.dim(D::Minus1)? / 2;
-        let xs =
-            (gated.narrow(D::Minus1, 0, c)? * ops::sigmoid(&gated.narrow(D::Minus1, c, c)?)?)?;
-        let t = xs.dim(1)?;
+        gated.narrow(D::Minus1, 0, c)? * ops::sigmoid(&gated.narrow(D::Minus1, c, c)?)?
+    }
+
+    /// `(B, T, C)` in and out.
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = self.gate(xs)?;
         let (before, after) = if self.causal {
             (self.kernel - 1, 0)
         } else {
             let half = (self.kernel - 1) / 2;
             (half, half)
         };
-        let padded = xs.pad_with_zeros(1, before, after)?;
+        let t = xs.dim(1)?;
+        self.depthwise_tail(&xs.pad_with_zeros(1, before, after)?, t)
+    }
+
+    /// A causal module over one streamed chunk: `cache` holds the last `kernel - 1` gated frames before it,
+    /// zeros at the start as the offline pass pads.
+    fn step(&self, xs: &Tensor, cache: &mut Option<Tensor>) -> Result<Tensor> {
+        let xs = self.gate(xs)?;
+        let t = xs.dim(1)?;
+        let past = match cache.take() {
+            Some(past) => past,
+            None => Tensor::zeros(
+                (xs.dim(0)?, self.kernel - 1, xs.dim(2)?),
+                xs.dtype(),
+                xs.device(),
+            )?,
+        };
+        let padded = Tensor::cat(&[&past, &xs], 1)?;
+        *cache = Some(padded.narrow(1, t, self.kernel - 1)?.contiguous()?);
+        self.depthwise_tail(&padded, t)
+    }
+
+    // the depthwise conv over `padded` (`t + kernel - 1` frames), then norm, SiLU and the last pointwise
+    fn depthwise_tail(&self, padded: &Tensor, t: usize) -> Result<Tensor> {
+        let c = padded.dim(D::Minus1)?;
+        let xs_shape = (padded.dim(0)?, t, c);
         // a depthwise conv as kernel-many shifted products: one grouped conv per channel is slow off CUDA
         let mut acc = self
             .depthwise_bias
             .reshape((1, 1, c))?
-            .broadcast_as(xs.shape())?
+            .broadcast_as(xs_shape)?
             .contiguous()?;
         for k in 0..self.kernel {
             let tap = self.depthwise.narrow(1, k, 1)?.reshape((1, 1, c))?;
@@ -418,6 +520,49 @@ impl Block {
         let xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
         self.norm_out.forward(&xs)
     }
+}
+
+impl Block {
+    fn step(
+        &self,
+        xs: &Tensor,
+        state: &mut LayerState,
+        positions: &Tensor,
+        keep: usize,
+    ) -> Result<Tensor> {
+        let xs = (xs + (self.ff1.forward(&self.norm_ff1.forward(xs)?)? * FEED_FORWARD_WEIGHT)?)?;
+        let xs = (&xs
+            + self.attn.step(
+                &self.norm_attn.forward(&xs)?,
+                &mut state.attention,
+                positions,
+                keep,
+            )?)?;
+        let xs = (&xs
+            + self
+                .conv
+                .step(&self.norm_conv.forward(&xs)?, &mut state.conv)?)?;
+        let xs = (&xs + (self.ff2.forward(&self.norm_ff2.forward(&xs)?)? * FEED_FORWARD_WEIGHT)?)?;
+        self.norm_out.forward(&xs)
+    }
+}
+
+#[derive(Default)]
+struct LayerState {
+    attention: Option<(Tensor, Tensor)>,
+    conv: Option<Tensor>,
+}
+
+/// A streamed encoder's carried state: each layer's cached keys, values and conv frames, the mel frames the next
+/// chunk's subsampling window reaches back over, and how far the stream has got.
+pub struct EncoderStream {
+    layers: Vec<LayerState>,
+    positions: Vec<Tensor>,
+    // row-major mel frames from global frame `mel_start` on
+    mel: Vec<f32>,
+    mel_start: usize,
+    mel_frames: usize,
+    emitted: usize,
 }
 
 /// The FastConformer encoder: `(1, frames, mels)` features to `(1, frames / factor, hidden)`.
@@ -475,6 +620,125 @@ impl Encoder {
 
     pub fn hidden_size(&self) -> usize {
         self.hidden
+    }
+
+    pub fn can_stream(&self) -> bool {
+        self.context.is_some()
+    }
+
+    // the streaming chunk and the left context it keeps, in encoder frames, and the causal subsampling pad
+    fn stream_geometry(&self) -> Result<(usize, usize, (usize, usize))> {
+        let (Some(ctx), Some(pad)) = (self.context, self.subsampling.causal_pad) else {
+            return Err(inference_tensor::Error::Msg(
+                "only a cache-aware streaming encoder (chunked-limited attention) can stream"
+                    .into(),
+            ));
+        };
+        let chunk = ctx.right + 1;
+        Ok((chunk, ctx.left / chunk * chunk, pad))
+    }
+
+    /// A fresh stream, its encoder frames equal to `forward`'s over the whole audio.
+    pub fn stream(&self, dtype: DType, device: &Device) -> Result<EncoderStream> {
+        let (chunk, keep, _) = self.stream_geometry()?;
+        let positions = self
+            .blocks
+            .iter()
+            .map(|b| {
+                b.attn
+                    .window_positions(keep + chunk, self.hidden, dtype, device)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(EncoderStream {
+            layers: self.blocks.iter().map(|_| LayerState::default()).collect(),
+            positions,
+            mel: Vec::new(),
+            mel_start: 0,
+            mel_frames: 0,
+            emitted: 0,
+        })
+    }
+
+    /// Appends `(frames, mels)` row-major features; returns each whole chunk they complete, `(1, frames, hidden)`,
+    /// with the index of its first frame.
+    pub fn stream_push(
+        &self,
+        stream: &mut EncoderStream,
+        mel: &[f32],
+        mels: usize,
+    ) -> Result<Vec<(usize, Tensor)>> {
+        stream.mel.extend_from_slice(mel);
+        stream.mel_frames += mel.len() / mels;
+        let (chunk, _, _) = self.stream_geometry()?;
+        let factor = self.subsampling.factor();
+        let mut outs = Vec::new();
+        // a chunk's last frame reads mel frames up to `factor` times its index
+        while stream.mel_frames > factor * (stream.emitted + chunk - 1) {
+            let end = factor * (stream.emitted + chunk - 1) + 1;
+            outs.push(self.stream_chunk(stream, end, chunk, mels)?);
+        }
+        Ok(outs)
+    }
+
+    /// The chunks left once the audio ends, as `stream_push` returns them; too little audio fails as offline.
+    pub fn stream_finish(
+        &self,
+        stream: &mut EncoderStream,
+        mels: usize,
+    ) -> Result<Vec<(usize, Tensor)>> {
+        let (chunk, _, pad) = self.stream_geometry()?;
+        if stream.mel_frames < MIN_FEATURE_FRAMES {
+            return Err(inference_tensor::Error::Msg(format!(
+                "audio is too short: it gives {} feature frames",
+                stream.mel_frames
+            )));
+        }
+        let total = (0..self.subsampling.steps()).fold(stream.mel_frames, |x, _| {
+            self.subsampling.step_frames(x, pad)
+        });
+        let mut outs = Vec::new();
+        while stream.emitted < total {
+            let rows = chunk.min(total - stream.emitted);
+            outs.push(self.stream_chunk(stream, stream.mel_frames, rows, mels)?);
+        }
+        Ok(outs)
+    }
+
+    // the next chunk's `rows` frames from a subsampling window of mel frames up to (not including) `end`
+    fn stream_chunk(
+        &self,
+        stream: &mut EncoderStream,
+        end: usize,
+        rows: usize,
+        mels: usize,
+    ) -> Result<(usize, Tensor)> {
+        let (_, keep, pad) = self.stream_geometry()?;
+        let factor = self.subsampling.factor();
+        let f0 = stream.emitted;
+        // a window from frame 0 reads the same zero pad the offline pass does, so needs no drop
+        let drop = self.subsampling.streaming_drop(pad).min(f0);
+        let start = factor * (f0 - drop);
+        let window =
+            &stream.mel[(start - stream.mel_start) * mels..(end - stream.mel_start) * mels];
+        let device = stream.positions[0].device();
+        let features = Tensor::from_slice(window, (1, end - start, mels), device)?
+            .to_dtype(stream.positions[0].dtype())?;
+        let mut xs = (self.subsample(&features)?.narrow(1, drop, rows)? * self.input_scale)?;
+        for ((block, state), positions) in self
+            .blocks
+            .iter()
+            .zip(stream.layers.iter_mut())
+            .zip(&stream.positions)
+        {
+            xs = block.step(&xs, state, positions, keep)?;
+        }
+        stream.emitted += rows;
+        let next = stream.emitted;
+        let next_start = factor * (next - self.subsampling.streaming_drop(pad).min(next));
+        let cut = next_start - stream.mel_start;
+        stream.mel.drain(..cut * mels);
+        stream.mel_start = next_start;
+        Ok((f0, xs))
     }
 }
 
