@@ -16,9 +16,9 @@ unsafe extern "C" {
 }
 
 inference_tensor::kernel_library! {
-    library = "inferencecuda";
-    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCECUDA").unwrap_or("");
-    id = option_env!("INFERENCE_KERNEL_ID_INFERENCECUDA").unwrap_or("");
+    library = "inferencenn";
+    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCENN").unwrap_or("");
+    id = option_env!("INFERENCE_KERNEL_ID_INFERENCENN").unwrap_or("");
     unsafe extern "C" {
         pub fn cuda_graph_copy_bytes(src: *const c_void, dst: *mut c_void, n: i64, stream: i64) -> i32;
         pub fn cuda_graph_copy_2d_bytes(

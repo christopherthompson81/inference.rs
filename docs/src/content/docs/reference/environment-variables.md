@@ -70,9 +70,10 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 ## CUDA kernel libraries
 
 CUDA builds load their kernels at runtime from separate shared libraries (`libinferencequant.so`, `libinferencefattn.so`,
-`libinferencecuda.so`, `libinferencepagedattention.so`). They are looked for in `$INFERENCE_KERNEL_DIR`, then beside
-the binary or library that loads them, then in its `kernels/` directory, then where the build put them. A missing one
-fails model loading with an error naming it.
+`libinferencenn.so`, `libinferencepagedattention.so`), plus one per GGUF quantization type (`libinferencequant_q4_k.so`,
+`libinferencequant_iq2_xs.so`, ...), opened only when a model holds weights of that type. They are looked for in
+`$INFERENCE_KERNEL_DIR`, then beside the binary or library that loads them, then in its `kernels/` directory, then where
+the build put them. A missing one fails model loading with an error naming it.
 
 | Variable | Purpose |
 |---|---|

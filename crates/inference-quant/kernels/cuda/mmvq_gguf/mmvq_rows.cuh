@@ -159,7 +159,7 @@ static void launch_mmvq_rows(const void *vx, const void *vy, void *dst, int ncol
                                          stream);                                                              \
   }
 
-// Expert-indexed form for MoE decode, as mmvq_moe_impl in mmvq_gguf.cu: blockIdx.y is a routed pair
+// Expert-indexed form for MoE decode, as mmvq_moe_impl in mmvq_gguf.cuh: blockIdx.y is a routed pair
 template <typename kt, bool glu>
 static __global__ void __launch_bounds__(MMVQ_ROWS_NWARPS_MOE *WARP_SIZE, 1)
     mmvq_rows_moe_kernel(const void *__restrict__ vx_gate, const void *__restrict__ vx_up, const int64_t expert_stride,

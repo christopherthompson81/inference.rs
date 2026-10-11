@@ -1016,7 +1016,7 @@ mod tests {
             .reshape(N)?
             .to_dtype(DType::BF16)?
             .to_device(&cuda)?;
-        let layer = GgufMatMul::from_qtensor(weight, Some(bias.clone()));
+        let layer = GgufMatMul::from_qtensor(weight, Some(bias.clone()))?;
         let xs = patterned(K, M, 67, 0.1)?
             .reshape((1, K, M))?
             .transpose(1, 2)?
@@ -1062,7 +1062,7 @@ mod tests {
             let weight = QTensor::quantize_onto(&patterned(N, K, 59, 0.04)?, source_dtype, &cuda)?;
             let dequantized_f32 = weight.dequantize(&cuda)?;
             let dequantized = dequantized_f32.to_dtype(DType::BF16)?;
-            let layer = GgufMatMul::from_qtensor(weight, None);
+            let layer = GgufMatMul::from_qtensor(weight, None)?;
             if source_dtype == GgmlDType::Q8_1 {
                 assert_close(
                     &QuantMethod::dequantize_w(&layer)?,
@@ -1111,7 +1111,7 @@ mod tests {
         for source_dtype in [GgmlDType::Q8_1, GgmlDType::Q8K] {
             let weight = QTensor::quantize_onto(&patterned(N, K, 71, 0.04)?, source_dtype, &cuda)?;
             let dequantized = weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
-            let layer = GgufMatMul::from_qtensor(weight, None);
+            let layer = GgufMatMul::from_qtensor(weight, None)?;
             let actual = QuantMethod::forward(&layer, &xs)?;
             let expected = xs
                 .reshape((M, K))?
@@ -1132,7 +1132,7 @@ mod tests {
         let cuda = Device::new_cuda(0)?;
         let weight = QTensor::quantize_onto(&patterned(N, K, 73, 0.04)?, GgmlDType::Q4_0, &cuda)?;
         let dequantized = weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
-        let layer = GgufMatMul::from_qtensor(weight, None);
+        let layer = GgufMatMul::from_qtensor(weight, None)?;
         let xs = patterned(M, K, 77, 0.1)?
             .to_dtype(DType::BF16)?
             .to_device(&cuda)?;
@@ -1151,7 +1151,7 @@ mod tests {
 
         let cuda = Device::new_cuda(0)?;
         let weight = QTensor::quantize_onto(&patterned(N, K, 75, 0.04)?, GgmlDType::Q8_1, &cuda)?;
-        let layer = GgufMatMul::from_qtensor(weight, None);
+        let layer = GgufMatMul::from_qtensor(weight, None)?;
         let xs = patterned(M, K, 77, 0.1)?
             .to_dtype(DType::BF16)?
             .to_device(&cuda)?;
@@ -1173,7 +1173,7 @@ mod tests {
 
         let cuda = Device::new_cuda(0)?;
         let weight = QTensor::quantize_onto(&patterned(N, K, 79, 0.04)?, GgmlDType::Q4K, &cuda)?;
-        let layer = GgufMatMul::from_qtensor(weight, None);
+        let layer = GgufMatMul::from_qtensor(weight, None)?;
 
         let small = patterned(GGUF_AFFINE_MIN_BATCH - 1, K, 81, 0.1)?
             .to_dtype(DType::BF16)?
@@ -1201,7 +1201,7 @@ mod tests {
             (GgmlDType::Q6K, Q6K_MIN_BATCH),
         ] {
             let weight = QTensor::quantize_onto(&patterned(N, K, 85, 0.04)?, source_dtype, &cuda)?;
-            let layer = GgufMatMul::from_qtensor(weight, None);
+            let layer = GgufMatMul::from_qtensor(weight, None)?;
 
             let below = patterned(min_batch - 1, K, 87, 0.1)?
                 .to_dtype(DType::BF16)?
@@ -1250,7 +1250,7 @@ mod tests {
         let source_weight = patterned(N, K, 109, 0.04)?;
         let reference_weight = QTensor::quantize(&source_weight, GgmlDType::Q4K)?;
         let weight = QTensor::quantize_onto(&source_weight, GgmlDType::Q4K, &cuda)?;
-        let layer = Arc::new(GgufMatMul::from_qtensor(weight, None));
+        let layer = Arc::new(GgufMatMul::from_qtensor(weight, None)?);
         let xs = Arc::new(patterned(M, K, 113, 0.1)?.to_dtype(DType::BF16)?);
         let expected = Arc::new(
             xs.to_dtype(DType::F32)?
@@ -1305,7 +1305,7 @@ mod tests {
 
         let cuda = Device::new_cuda(0)?;
         let weight = QTensor::quantize_onto(&patterned(N, K, 127, 0.04)?, GgmlDType::Q8K, &cuda)?;
-        let layer = GgufMatMul::from_qtensor(weight, None);
+        let layer = GgufMatMul::from_qtensor(weight, None)?;
         let reservation = layer
             ._gguf_affine_reservation
             .as_ref()
@@ -1353,9 +1353,9 @@ mod tests {
         let gate_dequantized = gate_weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
         let up_dequantized = up_weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
         let down_dequantized = down_weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
-        let gate = GgufMatMul::from_qtensor(gate_weight, None);
-        let up = GgufMatMul::from_qtensor(up_weight, None);
-        let down = GgufMatMul::from_qtensor(down_weight, None);
+        let gate = GgufMatMul::from_qtensor(gate_weight, None)?;
+        let up = GgufMatMul::from_qtensor(up_weight, None)?;
+        let down = GgufMatMul::from_qtensor(down_weight, None)?;
         let xs = patterned(M, HIDDEN, 107, 0.1)?
             .to_dtype(DType::BF16)?
             .to_device(&cuda)?;
@@ -1391,9 +1391,9 @@ mod tests {
         let q_dequantized = q_weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
         let k_dequantized = k_weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
         let v_dequantized = v_weight.dequantize(&cuda)?.to_dtype(DType::BF16)?;
-        let q = GgufMatMul::from_qtensor(q_weight, None);
-        let k = GgufMatMul::from_qtensor(k_weight, None);
-        let v = GgufMatMul::from_qtensor(v_weight, None);
+        let q = GgufMatMul::from_qtensor(q_weight, None)?;
+        let k = GgufMatMul::from_qtensor(k_weight, None)?;
+        let v = GgufMatMul::from_qtensor(v_weight, None)?;
         let xs = patterned(M, K, 151, 0.1)?
             .to_dtype(DType::BF16)?
             .to_device(&cuda)?;

@@ -116,3 +116,49 @@ Findings and fixes:
   - Removed `build_and_link` and `build_shared_lib`, which nothing calls now.
   - Removed a redundant `strip` hash input, a stale comment, a misplaced doc line, and an empty AFQ extern block.
 - **Open:** the build cache under `~/.cache/inference-rs/kernels/built` is never pruned. A later phase (the download cache) should own its cleanup.
+
+## Run 6 - 2026-10-11 14:20
+
+Question (phase 2): how much of `libinferencequant.so` is per-GGUF-type code, and what does splitting it into one library per type leave in the base?
+
+Before the split (dev build, sm_86 only), objects by size:
+- `mmvq_gguf.o` 2.45 MiB, `mmvq_iqk.o` 0.98 MiB, `mmvq_kt.o` 0.50 MiB: every type's matvecs in three files.
+- 33 `mmq_instance_<type>.o` at 0.54-0.78 MiB each.
+- Everything else (Marlin, ops, LoRA, GEMV, AFQ, indexed MoE, ...) about 4 MiB.
+- The library: 28.9 MiB, 3,730 exported symbols.
+
+Change:
+- The three MMVQ sources became headers (`mmvq_gguf.cuh`, `mmvq_iqk.cuh`, `mmvq_kt.cuh`) plus one `mmvq_instance_<type>.cu` per type, holding its instantiation lines moved verbatim (34 types: IQ1_M has a matvec but no MMQ). The Q8_1 quantize kernels moved to `mmvq_quantize.cu`, which stays in the base.
+- `KernelBuilder::split_lib(name, pattern)`: one compile pass over every source, then the objects matching a pattern link into their own `lib<name>.so` with its own build id and pointer file. The quant build adds `inferencequant_<type>` for each `*_instance_<type>.cu`, so a type's MMQ, MMVQ and (for IQ types) dequantize kernels share one library.
+- Windows still links one static archive of everything.
+- Rust: `gguf_type_library!` declares each type's functions in a `kernel_library!` of its own. `GgufMatMul::from_parts`/`from_qtensor` (now fallible) and `RawGgufTensor::to_device` open the type's library when a layer lands on a CUDA device, so a missing type fails at model load.
+- Renamed `inferencecuda` to `inferencenn`: it holds only inference-nn's ops.
+
+After (same dev build):
+- Base `libinferencequant.so`: 4.03 MiB.
+- Per type: 0.60-1.02 MiB (IQ1_M 0.12 MiB). Standard K-quants are 0.87-1.02 MiB, since they also carry the fused gate/up and Q/K/V matvecs.
+- Total 29.1 MiB, against 28.9 MiB before: each library carries its own copy of the shared tables and headers.
+- A Q4_K_M model (Q4_K, Q6_K) needs about 5.8 MiB of quant kernels instead of 28.9 MiB.
+
+Not split: the indexed-MoE and MoE GEMV kernels (per standard type, ~0.4 MiB in all) and LoRA stay in the base.
+
+## Run 7 - 2026-10-11 14:50
+
+Question: do the split libraries cost speed, fail clearly when one is missing, and load only what a model needs?
+
+- **Full local CI** (`--lint --tests --cuda --slim --bindings --docs --size-update --sweep`): 3,027 tests passed, 40 skipped.
+- **Bundle (`--size-update`):**
+  - `libinferencequant.so` 27.77 MB to 3.99 MB.
+  - The 34 type libraries are 0.12-1.04 MB each.
+  - Bundle total 114.98 MB to 116.56 MB (+1.4%): each library has its own copy of the shared tables, plus its own dynamic symbol table and cudart registration.
+- **Speed:** `inference bench -f Qwen3-1.7B-UD-Q4_K_XL.gguf --prompt-len 512 --gen-len 128 --iterations 3`, dev CUDA builds of master and this change, alternated three times:
+
+| build | prefill tok/s | decode tok/s |
+|---|---|---|
+| master | 15954, 16026, 15965 | 349.3, 351.1, 350.2 |
+| split | 16087, 16877, 16899 | 352.9, 365.7, 360.2 |
+
+  - No regression.
+  - Both builds are below Run 4's 18.3k/385 tok/s, so the machine is slower today (a browser holds the GPU at ~29% utilization).
+- **Missing type library:** with `libinferencequant_q6_k.so` moved aside, the bench fails at model load with exit 1: "CUDA kernel library `libinferencequant_q6_k.so` is not installed (looked in ...); set INFERENCE_KERNEL_DIR to its directory".
+- **What a model loads:** `LD_DEBUG=files` on that model shows the base plus `libinferencequant_{iq4_xs,q4_k,q5_k,q6_k}.so` and no other type. These are the four types the UD-Q4_K_XL file holds: 7.3 MiB of quant kernels instead of 28.9 MiB.

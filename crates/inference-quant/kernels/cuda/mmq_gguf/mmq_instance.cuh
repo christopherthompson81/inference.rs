@@ -3,7 +3,7 @@
 #include "mmq_common.cuh"
 #include "mmq_gguf.cuh"
 
-// One .cu per quant type keeps the kernel build parallel.
+// One .cu per quant type keeps the kernel build parallel, and links into that type's own kernel library.
 template <ggml_type type, int mmq_x>
 static void instantiate_mmq(float *tmp_fixup, const mmq_args &args,
                             cudaStream_t stream, int cc, int nsm, size_t smpbo,

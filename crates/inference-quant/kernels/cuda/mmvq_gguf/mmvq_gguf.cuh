@@ -1,5 +1,7 @@
 // GGUF matvec kernels with Q8_1-quantized activations.
 // Adapted from llama.cpp's CUDA mmvq path for the GGUF types used here.
+// Instantiated per type by mmvq_instance_<type>.cu, which links into that type's own kernel library.
+#pragma once
 
 #include "cuda_bf16.h"
 #include "cuda_fp16.h"
@@ -1642,45 +1644,6 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
   MMVQ_FUSED_GLU_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,       \
                        dst_tag, dst_c_type, 8)
 
-MMVQ_PLAIN_BATCH_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ,
-                     vec_dot_q4_0_q8_1)
-MMVQ_PLAIN_BATCH_SET(q4_1, block_q4_1, QK4_1, QI4_1, VDR_Q4_1_Q8_1_MMVQ,
-                     vec_dot_q4_1_q8_1)
-MMVQ_PLAIN_BATCH_SET(q5_0, block_q5_0, QK5_0, QI5_0, VDR_Q5_0_Q8_1_MMVQ,
-                     vec_dot_q5_0_q8_1)
-MMVQ_PLAIN_BATCH_SET(q5_1, block_q5_1, QK5_1, QI5_1, VDR_Q5_1_Q8_1_MMVQ,
-                     vec_dot_q5_1_q8_1)
-MMVQ_PLAIN_BATCH_SET(q8_0, block_q8_0, QK8_0, QI8_0, VDR_Q8_0_Q8_1_MMVQ,
-                     vec_dot_q8_0_q8_1)
-MMVQ_PLAIN_BATCH_SET(q2_k, block_q2_K, QK_K, QI2_K, VDR_Q2_K_Q8_1_MMVQ,
-                     vec_dot_q2_K_q8_1)
-MMVQ_PLAIN_BATCH_SET(q3_k, block_q3_K, QK_K, QI3_K, VDR_Q3_K_Q8_1_MMVQ,
-                     vec_dot_q3_K_q8_1)
-MMVQ_PLAIN_BATCH_SET(q4_k, block_q4_K, QK_K, QI4_K, VDR_Q4_K_Q8_1_MMVQ,
-                     vec_dot_q4_K_q8_1)
-MMVQ_PLAIN_BATCH_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ,
-                     vec_dot_q5_K_q8_1)
-MMVQ_PLAIN_BATCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
-                     vec_dot_q6_K_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq4_nl, block_iq4_nl, QK4_NL, QI4_NL, VDR_IQ4_NL_Q8_1_MMVQ,
-                     vec_dot_iq4_nl_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq4_xs, block_iq4_xs, QK_K, QI4_XS, VDR_IQ4_XS_Q8_1_MMVQ,
-                     vec_dot_iq4_xs_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq2_xxs, block_iq2_xxs, QK_K, QI2_XXS, VDR_IQ2_XXS_Q8_1_MMVQ,
-                     vec_dot_iq2_xxs_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq2_xs, block_iq2_xs, QK_K, QI2_XS, VDR_IQ2_XS_Q8_1_MMVQ,
-                     vec_dot_iq2_xs_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq2_s, block_iq2_s, QK_K, QI2_S, VDR_IQ2_S_Q8_1_MMVQ,
-                     vec_dot_iq2_s_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq3_xxs, block_iq3_xxs, QK_K, QI3_XXS, VDR_IQ3_XXS_Q8_1_MMVQ,
-                     vec_dot_iq3_xxs_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq3_s, block_iq3_s, QK_K, QI3_S, VDR_IQ3_S_Q8_1_MMVQ,
-                     vec_dot_iq3_s_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq1_s, block_iq1_s, QK_K, QI1_S, VDR_IQ1_S_Q8_1_MMVQ,
-                     vec_dot_iq1_s_q8_1)
-MMVQ_PLAIN_BATCH_SET(iq1_m, block_iq1_m, QK_K, QI1_M, VDR_IQ1_M_Q8_1_MMVQ,
-                     vec_dot_iq1_m_q8_1)
-
 #define MMVQ_FUSED_GLU_TYPE_SET(tag, block_q_t, qk_val, qi_val, vdr_val,       \
                                 vec_dot)                                       \
   MMVQ_FUSED_GLU_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,   \
@@ -1690,27 +1653,6 @@ MMVQ_PLAIN_BATCH_SET(iq1_m, block_iq1_m, QK_K, QI1_M, VDR_IQ1_M_Q8_1_MMVQ,
   MMVQ_FUSED_GLU_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,   \
                            f32, float)
 
-MMVQ_FUSED_GLU_TYPE_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ,
-                        vec_dot_q4_0_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q4_1, block_q4_1, QK4_1, QI4_1, VDR_Q4_1_Q8_1_MMVQ,
-                        vec_dot_q4_1_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q5_0, block_q5_0, QK5_0, QI5_0, VDR_Q5_0_Q8_1_MMVQ,
-                        vec_dot_q5_0_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q5_1, block_q5_1, QK5_1, QI5_1, VDR_Q5_1_Q8_1_MMVQ,
-                        vec_dot_q5_1_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q8_0, block_q8_0, QK8_0, QI8_0, VDR_Q8_0_Q8_1_MMVQ,
-                        vec_dot_q8_0_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q2_k, block_q2_K, QK_K, QI2_K, VDR_Q2_K_Q8_1_MMVQ,
-                        vec_dot_q2_K_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q3_k, block_q3_K, QK_K, QI3_K, VDR_Q3_K_Q8_1_MMVQ,
-                        vec_dot_q3_K_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q4_k, block_q4_K, QK_K, QI4_K, VDR_Q4_K_Q8_1_MMVQ,
-                        vec_dot_q4_K_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ,
-                        vec_dot_q5_K_q8_1)
-MMVQ_FUSED_GLU_TYPE_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
-                        vec_dot_q6_K_q8_1)
-
 #define MMVQ_FUSED_QKV_TYPE_SET(tag, block_q_t, qk_val, qi_val, vdr_val,       \
                                 vec_dot)                                       \
   MMVQ_FUSED_QKV_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,   \
@@ -1719,129 +1661,6 @@ MMVQ_FUSED_GLU_TYPE_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
                            f16, half)                                          \
   MMVQ_FUSED_QKV_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,   \
                            f32, float)
-
-MMVQ_FUSED_QKV_TYPE_SET(q4_0, block_q4_0, QK4_0, QI4_0, VDR_Q4_0_Q8_1_MMVQ,
-                        vec_dot_q4_0_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q4_1, block_q4_1, QK4_1, QI4_1, VDR_Q4_1_Q8_1_MMVQ,
-                        vec_dot_q4_1_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q5_0, block_q5_0, QK5_0, QI5_0, VDR_Q5_0_Q8_1_MMVQ,
-                        vec_dot_q5_0_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q5_1, block_q5_1, QK5_1, QI5_1, VDR_Q5_1_Q8_1_MMVQ,
-                        vec_dot_q5_1_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q8_0, block_q8_0, QK8_0, QI8_0, VDR_Q8_0_Q8_1_MMVQ,
-                        vec_dot_q8_0_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q2_k, block_q2_K, QK_K, QI2_K, VDR_Q2_K_Q8_1_MMVQ,
-                        vec_dot_q2_K_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q3_k, block_q3_K, QK_K, QI3_K, VDR_Q3_K_Q8_1_MMVQ,
-                        vec_dot_q3_K_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q4_k, block_q4_K, QK_K, QI4_K, VDR_Q4_K_Q8_1_MMVQ,
-                        vec_dot_q4_K_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ,
-                        vec_dot_q5_K_q8_1)
-MMVQ_FUSED_QKV_TYPE_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
-                        vec_dot_q6_K_q8_1)
-
-// Padding-aware BF16/F16/F32 -> Q8_1 quantize kernels.
-
-extern "C" __global__ void
-mmvq_gguf_quantize_q8_1_bf16(const __nv_bfloat16 *__restrict__ x,
-                             void *__restrict__ vy, const int kx,
-                             const int kx_padded) {
-  const int ix = blockDim.x * blockIdx.x + threadIdx.x;
-  if (ix >= kx_padded) {
-    return;
-  }
-  const int iy = blockDim.y * blockIdx.y + threadIdx.y;
-  const int i_padded = iy * kx_padded + ix;
-
-  block_q8_1 *y = (block_q8_1 *)vy;
-  const int ib = i_padded / QK8_1;
-  const int iqs = i_padded % QK8_1;
-
-  const float xi = (ix < kx) ? __bfloat162float(x[iy * kx + ix]) : 0.0f;
-  float amax = fabsf(xi);
-  float sum = xi;
-
-  amax = warp_reduce_max_f32(amax);
-  sum = warp_reduce_sum_f32(sum);
-
-  const float d = amax / 127.0f;
-  const int8_t q = (amax == 0.0f) ? 0 : (int8_t)roundf(xi / d);
-
-  y[ib].qs[iqs] = q;
-
-  if (iqs > 0) {
-    return;
-  }
-  reinterpret_cast<half &>(y[ib].ds.x) = (half)d;
-  reinterpret_cast<half &>(y[ib].ds.y) = (half)sum;
-}
-
-extern "C" __global__ void
-mmvq_gguf_quantize_q8_1_f16(const half *__restrict__ x, void *__restrict__ vy,
-                            const int kx, const int kx_padded) {
-  const int ix = blockDim.x * blockIdx.x + threadIdx.x;
-  if (ix >= kx_padded) {
-    return;
-  }
-  const int iy = blockDim.y * blockIdx.y + threadIdx.y;
-  const int i_padded = iy * kx_padded + ix;
-
-  block_q8_1 *y = (block_q8_1 *)vy;
-  const int ib = i_padded / QK8_1;
-  const int iqs = i_padded % QK8_1;
-
-  const float xi = (ix < kx) ? __half2float(x[iy * kx + ix]) : 0.0f;
-  float amax = fabsf(xi);
-  float sum = xi;
-
-  amax = warp_reduce_max_f32(amax);
-  sum = warp_reduce_sum_f32(sum);
-
-  const float d = amax / 127.0f;
-  const int8_t q = (amax == 0.0f) ? 0 : (int8_t)roundf(xi / d);
-
-  y[ib].qs[iqs] = q;
-
-  if (iqs > 0) {
-    return;
-  }
-  reinterpret_cast<half &>(y[ib].ds.x) = (half)d;
-  reinterpret_cast<half &>(y[ib].ds.y) = (half)sum;
-}
-
-extern "C" __global__ void
-mmvq_gguf_quantize_q8_1_f32(const float *__restrict__ x, void *__restrict__ vy,
-                            const int kx, const int kx_padded) {
-  const int ix = blockDim.x * blockIdx.x + threadIdx.x;
-  if (ix >= kx_padded) {
-    return;
-  }
-  const int iy = blockDim.y * blockIdx.y + threadIdx.y;
-  const int i_padded = iy * kx_padded + ix;
-
-  block_q8_1 *y = (block_q8_1 *)vy;
-  const int ib = i_padded / QK8_1;
-  const int iqs = i_padded % QK8_1;
-
-  const float xi = (ix < kx) ? x[iy * kx + ix] : 0.0f;
-  float amax = fabsf(xi);
-  float sum = xi;
-
-  amax = warp_reduce_max_f32(amax);
-  sum = warp_reduce_sum_f32(sum);
-
-  const float d = amax / 127.0f;
-  const int8_t q = (amax == 0.0f) ? 0 : (int8_t)roundf(xi / d);
-
-  y[ib].qs[iqs] = q;
-
-  if (iqs > 0) {
-    return;
-  }
-  reinterpret_cast<half &>(y[ib].ds.x) = (half)d;
-  reinterpret_cast<half &>(y[ib].ds.y) = (half)sum;
-}
 
 // Host-side launchers used by `inference-quant/src/gguf/ffi.rs`.
 
@@ -2062,136 +1881,15 @@ mmvq_gguf_quantize_q8_1_f32(const float *__restrict__ x, void *__restrict__ vy,
     }                                                                          \
   }
 
-MMVQ_LAUNCHER_PLAIN(q4_0, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q4_1, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q5_0, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q5_1, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q8_0, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q2_k, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q3_k, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q4_k, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q5_k, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(q6_k, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq4_nl, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq4_xs, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq2_xxs, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq2_xs, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq2_s, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq3_xxs, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq3_s, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq1_s, bf16, __nv_bfloat16)
-MMVQ_LAUNCHER_PLAIN(iq1_m, bf16, __nv_bfloat16)
-
-MMVQ_LAUNCHER_PLAIN(q4_0, f16, half)
-MMVQ_LAUNCHER_PLAIN(q4_1, f16, half)
-MMVQ_LAUNCHER_PLAIN(q5_0, f16, half)
-MMVQ_LAUNCHER_PLAIN(q5_1, f16, half)
-MMVQ_LAUNCHER_PLAIN(q8_0, f16, half)
-MMVQ_LAUNCHER_PLAIN(q2_k, f16, half)
-MMVQ_LAUNCHER_PLAIN(q3_k, f16, half)
-MMVQ_LAUNCHER_PLAIN(q4_k, f16, half)
-MMVQ_LAUNCHER_PLAIN(q5_k, f16, half)
-MMVQ_LAUNCHER_PLAIN(q6_k, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq4_nl, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq4_xs, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq2_xxs, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq2_xs, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq2_s, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq3_xxs, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq3_s, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq1_s, f16, half)
-MMVQ_LAUNCHER_PLAIN(iq1_m, f16, half)
-
-MMVQ_LAUNCHER_PLAIN(q4_0, f32, float)
-MMVQ_LAUNCHER_PLAIN(q4_1, f32, float)
-MMVQ_LAUNCHER_PLAIN(q5_0, f32, float)
-MMVQ_LAUNCHER_PLAIN(q5_1, f32, float)
-MMVQ_LAUNCHER_PLAIN(q8_0, f32, float)
-MMVQ_LAUNCHER_PLAIN(q2_k, f32, float)
-MMVQ_LAUNCHER_PLAIN(q3_k, f32, float)
-MMVQ_LAUNCHER_PLAIN(q4_k, f32, float)
-MMVQ_LAUNCHER_PLAIN(q5_k, f32, float)
-MMVQ_LAUNCHER_PLAIN(q6_k, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq4_nl, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq4_xs, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq2_xxs, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq2_xs, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq2_s, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq3_xxs, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq3_s, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq1_s, f32, float)
-MMVQ_LAUNCHER_PLAIN(iq1_m, f32, float)
-
 #define MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(tag)                                  \
   MMVQ_LAUNCHER_FUSED_GLU(tag, bf16, __nv_bfloat16)                            \
   MMVQ_LAUNCHER_FUSED_GLU(tag, f16, half)                                      \
   MMVQ_LAUNCHER_FUSED_GLU(tag, f32, float)
 
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q4_0)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q4_1)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q5_0)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q5_1)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q8_0)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q2_k)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q3_k)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q4_k)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q5_k)
-MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(q6_k)
-
 #define MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(tag)                                  \
   MMVQ_LAUNCHER_FUSED_QKV(tag, bf16, __nv_bfloat16)                            \
   MMVQ_LAUNCHER_FUSED_QKV(tag, f16, half)                                      \
   MMVQ_LAUNCHER_FUSED_QKV(tag, f32, float)
-
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q4_0)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q4_1)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q5_0)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q5_1)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q8_0)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q2_k)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q3_k)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q4_k)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q5_k)
-MMVQ_LAUNCHER_FUSED_QKV_TYPE_SET(q6_k)
-
-// Quantize launchers.
-
-extern "C" void launch_mmvq_gguf_quantize_q8_1_bf16(const void *x, void *vy,
-                                                    int kx, int kx_padded,
-                                                    int num_rows,
-                                                    void *stream) {
-  const int num_blocks_x =
-      (kx_padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
-  dim3 grid(num_blocks_x, num_rows, 1);
-  dim3 block(CUDA_QUANTIZE_BLOCK_SIZE, 1, 1);
-  cudaStream_t s = static_cast<cudaStream_t>(stream);
-  mmvq_gguf_quantize_q8_1_bf16<<<grid, block, 0, s>>>((const __nv_bfloat16 *)x,
-                                                      vy, kx, kx_padded);
-}
-
-extern "C" void launch_mmvq_gguf_quantize_q8_1_f16(const void *x, void *vy,
-                                                   int kx, int kx_padded,
-                                                   int num_rows, void *stream) {
-  const int num_blocks_x =
-      (kx_padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
-  dim3 grid(num_blocks_x, num_rows, 1);
-  dim3 block(CUDA_QUANTIZE_BLOCK_SIZE, 1, 1);
-  cudaStream_t s = static_cast<cudaStream_t>(stream);
-  mmvq_gguf_quantize_q8_1_f16<<<grid, block, 0, s>>>((const half *)x, vy, kx,
-                                                     kx_padded);
-}
-
-extern "C" void launch_mmvq_gguf_quantize_q8_1_f32(const void *x, void *vy,
-                                                   int kx, int kx_padded,
-                                                   int num_rows, void *stream) {
-  const int num_blocks_x =
-      (kx_padded + CUDA_QUANTIZE_BLOCK_SIZE - 1) / CUDA_QUANTIZE_BLOCK_SIZE;
-  dim3 grid(num_blocks_x, num_rows, 1);
-  dim3 block(CUDA_QUANTIZE_BLOCK_SIZE, 1, 1);
-  cudaStream_t s = static_cast<cudaStream_t>(stream);
-  mmvq_gguf_quantize_q8_1_f32<<<grid, block, 0, s>>>((const float *)x, vy, kx,
-                                                     kx_padded);
-}
 
 // ggml-cuda dequantize.cuh `dequantize_iq*`, for embedding rows of these types gathered on the GPU
 template <typename dst_t> static __device__ __forceinline__ dst_t ggml_cuda_cast(float x) { return dst_t(x); }
@@ -2351,38 +2049,9 @@ static __global__ void dequantize_superblocks(const void *__restrict__ vx, dst_t
             vx, (dst_c_type *)dst);                                                                           \
   }
 
-DEQUANTIZE_IQ_LAUNCHER(iq2_xxs, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq2_xxs, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq2_xxs, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq2_xs, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq2_xs, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq2_xs, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq2_s, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq2_s, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq2_s, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq3_xxs, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq3_xxs, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq3_xxs, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq3_s, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq3_s, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq3_s, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq1_s, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq1_s, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq1_s, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq4_nl, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq4_nl, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq4_nl, f32, float)
-DEQUANTIZE_IQ_LAUNCHER(iq4_xs, bf16, __nv_bfloat16)
-DEQUANTIZE_IQ_LAUNCHER(iq4_xs, f16, half)
-DEQUANTIZE_IQ_LAUNCHER(iq4_xs, f32, float)
-
 #define DEQUANTIZE_IQ1_M_LAUNCHER(dst_tag, dst_c_type)                                                  \
   extern "C" void launch_dequantize_iq1_m_##dst_tag(const void *vx, void *dst, int64_t nrows, int64_t ncols, void *stream) { \
     const int64_t nblocks = nrows * ncols / QK_K;                                                      \
     dequantize_block_iq1_m<dst_c_type>                                                                 \
         <<<(unsigned int)nblocks, WARP_SIZE, 0, static_cast<cudaStream_t>(stream)>>>(vx, (dst_c_type *)dst); \
   }
-
-DEQUANTIZE_IQ1_M_LAUNCHER(bf16, __nv_bfloat16)
-DEQUANTIZE_IQ1_M_LAUNCHER(f16, half)
-DEQUANTIZE_IQ1_M_LAUNCHER(f32, float)

@@ -471,7 +471,7 @@ impl QuantMethod for UnquantLinear {
                         Some(b) => Some(b.to_dtype(DType::F32)?.to_device(&device)?),
                         None => None,
                     };
-                    return Ok(Arc::new(GgufMatMul::from_qtensor(w, b)));
+                    return Ok(Arc::new(GgufMatMul::from_qtensor(w, b)?));
                 }
                 let dtype: GgmlDType = ty.try_into()?;
                 let res = if let Some(imatrix_weight) = imatrix_weight {

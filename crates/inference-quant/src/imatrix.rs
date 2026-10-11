@@ -426,7 +426,7 @@ mod tests {
         let q = Arc::new(crate::GgufMatMul::from_qtensor(
             QTensor::quantize(&stack, GgmlDType::Q8_0)?,
             None,
-        )) as Arc<dyn QuantMethod>;
+        )?) as Arc<dyn QuantMethod>;
         let q2 = q.apply_isq(
             Some(crate::IsqType::Q4K),
             device,

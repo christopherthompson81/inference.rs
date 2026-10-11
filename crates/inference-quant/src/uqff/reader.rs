@@ -627,7 +627,7 @@ mod tests {
     fn write_gguf_quant_layer(tensors: &mut Vec<UqffTensor>, prefix: &str, dtype: GgmlDType) {
         let weight = Tensor::zeros((1, dtype.block_size()), DType::F32, &Device::Cpu).unwrap();
         let weight = QTensor::quantize(&weight, dtype).unwrap();
-        let layer = GgufMatMul::from_qtensor(weight, None);
+        let layer = GgufMatMul::from_qtensor(weight, None).unwrap();
         tensors.extend(
             layer
                 .serialize_uqff(prefix, IsqType::try_from(dtype).unwrap())

@@ -259,7 +259,7 @@ impl QuantMethod for MXFP4Layer {
                 let bias = bias
                     .map(|bias| bias.to_dtype(DType::F32)?.to_device(&device))
                     .transpose()?;
-                return Ok(Arc::new(crate::GgufMatMul::from_qtensor(weight, bias)));
+                return Ok(Arc::new(crate::GgufMatMul::from_qtensor(weight, bias)?));
             }
 
             if !Self::supports_stacked_isq(dtype) {

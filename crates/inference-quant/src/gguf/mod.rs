@@ -124,10 +124,16 @@ fn gguf_dtype_label(dtype: u32) -> String {
 }
 
 impl GgufMatMul {
-    fn from_parts(w: QMatMul, b: Option<Tensor>, stats: crate::ImatrixLayerStats) -> Self {
+    fn from_parts(w: QMatMul, b: Option<Tensor>, stats: crate::ImatrixLayerStats) -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        if let QMatMul::QTensor(q) = &w
+            && q.device().is_cuda()
+        {
+            ffi::ensure_type_loaded(q.dtype().into()).map_err(inference_tensor::Error::msg)?;
+        }
         #[cfg(all(feature = "cuda", has_marlin_kernels))]
         let reservation = packed_affine::Reservation::new(&w);
-        Self {
+        Ok(Self {
             w,
             b,
             stats,
@@ -135,7 +141,7 @@ impl GgufMatMul {
             packed_affine: OnceLock::new(),
             #[cfg(all(feature = "cuda", has_marlin_kernels))]
             _gguf_affine_reservation: reservation,
-        }
+        })
     }
 
     fn qtensor_to_device(q: &Arc<QTensor>, device: &Device) -> Result<Arc<QTensor>> {
@@ -189,16 +195,16 @@ impl GgufMatMul {
         let dtype = ggml_dtype_from_uqff_code(dtype)?;
         let w = qtensor_from_ggml(dtype, &tensor_data, dims, device)?;
         // from_arc densifies float fallback entries, matching what ISQ produces at load
-        Ok(Self::from_parts(
+        Self::from_parts(
             QMatMul::from_arc(w.into())?,
             b,
             crate::ImatrixLayerStats::empty(),
-        ))
+        )
     }
 
     /// Construct without `QMatMul::from_arc`: densifying would bypass the gather kernels
     /// expert stacks rely on.
-    pub(crate) fn from_qtensor(w: QTensor, b: Option<Tensor>) -> Self {
+    pub(crate) fn from_qtensor(w: QTensor, b: Option<Tensor>) -> Result<Self> {
         Self::from_parts(
             QMatMul::QTensor(Arc::new(w)),
             b,
@@ -435,11 +441,11 @@ impl QuantMethod for GgufMatMul {
         Self: Sized,
     {
         match method {
-            QuantMethodConfig::Gguf { q_weight, b } => Ok(Self::from_parts(
+            QuantMethodConfig::Gguf { q_weight, b } => Self::from_parts(
                 QMatMul::from_arc(q_weight)?,
                 b,
                 crate::ImatrixLayerStats::empty(),
-            )),
+            ),
             QuantMethodConfig::GptqAwq { .. }
             | QuantMethodConfig::Unquantized(_)
             | QuantMethodConfig::Hqq { .. }
@@ -589,7 +595,7 @@ impl QuantMethod for GgufMatMul {
                 QMatMul::Tensor((w + delta)?),
                 b.clone(),
                 stats.clone(),
-            ))),
+            )?)),
             Self {
                 w: QMatMul::TensorF16(w),
                 b,
@@ -599,7 +605,7 @@ impl QuantMethod for GgufMatMul {
                 QMatMul::TensorF16((w + delta)?),
                 b.clone(),
                 stats.clone(),
-            ))),
+            )?)),
             Self {
                 w: QMatMul::QTensor(w),
                 b,
@@ -610,7 +616,7 @@ impl QuantMethod for GgufMatMul {
                 let w = QMatMul::QTensor(std::sync::Arc::new(
                     inference_tensor::quantized::QTensor::quantize(&(w + delta)?, dtype)?,
                 ));
-                Ok(Arc::new(Self::from_parts(w, b.clone(), stats.clone())))
+                Ok(Arc::new(Self::from_parts(w, b.clone(), stats.clone())?))
             }
         }
     }
@@ -657,7 +663,7 @@ impl QuantMethod for GgufMatMul {
                     .as_ref()
                     .map(|bias| bias.to_device(&device))
                     .transpose()?;
-                return Ok(Arc::new(GgufMatMul::from_parts(w, b, self.stats.clone())));
+                return Ok(Arc::new(GgufMatMul::from_parts(w, b, self.stats.clone())?));
             }
 
             let t = match &self.w {
@@ -710,7 +716,7 @@ impl QuantMethod for GgufMatMul {
             } else {
                 None
             };
-            Ok(Arc::new(GgufMatMul::from_parts(w, b, self.stats.clone())))
+            Ok(Arc::new(GgufMatMul::from_parts(w, b, self.stats.clone())?))
         }
     }
 
@@ -833,7 +839,7 @@ mod tests {
             .dequantize(device)?
             .index_select(&ids.flatten_all()?, 0)?
             .reshape((2, 3, TEST_EMBEDDING_DIM))?;
-        let layer = GgufMatMul::from_qtensor(weight, None);
+        let layer = GgufMatMul::from_qtensor(weight, None)?;
         let actual = layer.embedding_forward_raw(&ids)?;
 
         assert_eq!(actual.dims(), &[2, 3, TEST_EMBEDDING_DIM]);
@@ -937,7 +943,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q8_0)?,
             None,
-        ));
+        )?);
         let before = layer.get_qtensor().unwrap();
         let captured = layer.apply_isq(
             None,
@@ -959,7 +965,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q4K)?,
             Some(bias),
-        ));
+        )?);
         let before = layer.get_qtensor().unwrap();
         let before_data = before.data()?.into_owned();
         let n_quantized = AtomicUsize::new(0);
@@ -990,7 +996,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q4K)?,
             Some(bias),
-        ));
+        )?);
         let before = layer.get_qtensor().unwrap();
         let before_data = before.data()?.into_owned();
         let n_quantized = AtomicUsize::new(0);
@@ -1023,7 +1029,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q4K)?,
             None,
-        ));
+        )?);
         let before = layer.get_qtensor().unwrap();
         let before_data = before.data()?.into_owned();
         let n_quantized = AtomicUsize::new(0);
@@ -1063,7 +1069,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q8_0)?,
             Some(bias),
-        ));
+        )?);
         let n_quantized = AtomicUsize::new(0);
         let quantized = layer.apply_isq(
             Some(IsqType::AFQ4),
@@ -1087,7 +1093,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q8_0)?,
             Some(bias),
-        ));
+        )?);
         let n_quantized = AtomicUsize::new(0);
         let quantized = layer.apply_isq(
             Some(IsqType::AFQ4),
@@ -1110,7 +1116,7 @@ mod tests {
         let layer = Arc::new(GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q8_0)?,
             None,
-        ));
+        )?);
         let n_quantized = AtomicUsize::new(0);
         let quantized = layer.apply_isq(
             Some(IsqType::Q4_0),
@@ -1133,7 +1139,7 @@ mod tests {
             let layer = Arc::new(GgufMatMul::from_qtensor(
                 QTensor::quantize(&weight, GgmlDType::Q8_0)?,
                 None,
-            ));
+            )?);
             let request = crate::IsqRequest {
                 ty: Some(ty),
                 device: Device::Cpu,
@@ -1179,7 +1185,7 @@ mod tests {
         let layer = GgufMatMul::from_qtensor(
             QTensor::quantize(&weight, GgmlDType::Q8_0)?,
             Some(bias.clone()),
-        );
+        )?;
         let mut tensors = crate::uqff_version_tensors();
         tensors.extend(layer.serialize_uqff("experts.gate", IsqType::Q8_0)?);
         let dir = tempfile::tempdir().map_err(inference_tensor::Error::wrap)?;

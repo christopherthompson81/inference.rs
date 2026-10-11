@@ -8,9 +8,9 @@ use inference_tensor::{DType, Result, Shape, Tensor};
 const MAX_DFLASH_CONTEXT_TAPS: usize = 64;
 
 inference_tensor::kernel_library! {
-    library = "inferencecuda";
-    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCECUDA").unwrap_or("");
-    id = option_env!("INFERENCE_KERNEL_ID_INFERENCECUDA").unwrap_or("");
+    library = "inferencenn";
+    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCENN").unwrap_or("");
+    id = option_env!("INFERENCE_KERNEL_ID_INFERENCENN").unwrap_or("");
     unsafe extern "C" {
         fn dflash_pack_taps_f16(
             inputs: *const *const c_void,
