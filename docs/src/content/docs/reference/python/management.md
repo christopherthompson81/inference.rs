@@ -718,6 +718,7 @@ Speech recognition request; the audio itself travels beside it (a multipart `fil
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `beam_size` | `int \| None` | optional |
 | `language` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
 | `prompt` | `str \| None` | optional |

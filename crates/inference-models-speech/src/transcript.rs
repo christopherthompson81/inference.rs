@@ -24,4 +24,6 @@ pub struct Transcription {
 pub struct TranscriptionOptions {
     /// The audio's language, for a model that takes one; others identify it themselves.
     pub language: Option<String>,
+    /// Beam search over this many hypotheses for a transducer (RNN-T, TDT); unset or 1 decodes greedily.
+    pub beam_size: Option<usize>,
 }

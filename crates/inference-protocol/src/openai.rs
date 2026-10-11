@@ -2005,6 +2005,9 @@ pub struct TranscriptionRequest {
     /// Timestamps `verbose_json` carries; segments are always given, words only when asked for.
     #[serde(default)]
     pub timestamp_granularities: Vec<TimestampGranularity>,
+    /// Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.
+    #[serde(default)]
+    pub beam_size: Option<usize>,
 }
 
 impl TranscriptionRequest {
@@ -2017,6 +2020,7 @@ impl TranscriptionRequest {
             response_format,
             temperature: None,
             timestamp_granularities: Vec::new(),
+            beam_size: None,
         }
     }
 }

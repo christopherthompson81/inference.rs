@@ -385,6 +385,14 @@
                     "type": "object",
                     "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
                     "properties": {
+                      "beam_size": {
+                        "type": [
+                          "integer",
+                          "null"
+                        ],
+                        "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
+                        "minimum": 0
+                      },
                       "language": {
                         "type": [
                           "string",
@@ -12469,6 +12477,14 @@
         "type": "object",
         "description": "Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP).",
         "properties": {
+          "beam_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
+            "minimum": 0
+          },
           "language": {
             "type": [
               "string",

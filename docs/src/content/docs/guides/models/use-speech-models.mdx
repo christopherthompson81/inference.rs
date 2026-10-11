@@ -48,8 +48,12 @@ attention.
 `/v1/audio/transcriptions` takes OpenAI's multipart form. `response_format` is `json` (the default),
 `text`, `srt`, `vtt` or `verbose_json`; `verbose_json` carries the duration and segments, and words too
 when `timestamp_granularities[]` includes `word`. Timestamps are on the encoder's 80 ms grid. Parakeet
-accepts and ignores `language`, `prompt` and `temperature`: it identifies the language itself, and decoding is
-greedy.
+accepts and ignores `language`, `prompt` and `temperature`: it identifies the language itself.
+
+Decoding is greedy unless `beam_size` (1 to 16, an inference.rs field) asks for a beam: NeMo's batched MALSD
+search for TDT heads, its default beam search for RNN-T ones, matching NeMo token for token. Without a language
+model a beam gains little; on clean LibriSpeech, TDT's MALSD cut the word error rate by about a tenth and RNN-T's
+beam not at all, at several times greedy's decoding time. CTC heads decode greedily only.
 
 <Tabs>
 <TabItem label="HTTP">

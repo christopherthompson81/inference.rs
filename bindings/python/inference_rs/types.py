@@ -2783,6 +2783,7 @@ class TranscriptionLoaderType(str, Enum):
 class TranscriptionRequest:
     """Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP)."""
 
+    beam_size: int | None = None
     language: str | None = None
     model: str | None = None
     prompt: str | None = None

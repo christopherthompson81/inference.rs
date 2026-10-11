@@ -54,6 +54,7 @@ fn multipart_error(error: MultipartError, field: &str) -> ApiError {
 #[derive(Clone, Copy, PartialEq)]
 enum Field {
     Number,
+    Integer,
     Flag,
     // OpenAI's form repeats an array field, with or without brackets
     List,
@@ -62,6 +63,7 @@ enum Field {
 const TRANSCRIPTION_FIELDS: &[(&str, Field)] = &[
     ("temperature", Field::Number),
     ("timestamp_granularities", Field::List),
+    ("beam_size", Field::Integer),
 ];
 const VOICE_ACTIVITY_FIELDS: &[(&str, Field)] = &[
     ("threshold", Field::Number),
@@ -114,6 +116,10 @@ async fn read_form<T: serde::de::DeserializeOwned>(
             Some(Field::Number) => Value::from(
                 text.parse::<f64>()
                     .map_err(|_| invalid(format!("`{text}` is not a number"), &name))?,
+            ),
+            Some(Field::Integer) => Value::from(
+                text.parse::<u64>()
+                    .map_err(|_| invalid(format!("`{text}` is not a whole number"), &name))?,
             ),
             Some(Field::Flag) => Value::Bool(
                 text.parse::<bool>()
