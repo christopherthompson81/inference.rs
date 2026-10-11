@@ -1228,3 +1228,24 @@ CPU speed (#391), on a quiet CPU: an i7-10700K, 8 cores with AVX2, about 1.1 TFL
 - **Feature unification:** in a workspace build, `local_dynamic_tls` reaches the CLI's mimalloc too, since resolver 2 unifies features.
   - The parity example, with and without `--features mimalloc/local_dynamic_tls`, 3 runs each: warm 8.73-8.99 s and 8.72-8.85 s.
   - No measurable cost, so the CLI keeps the unified feature.
+
+## Run 42 - 2026-10-11
+
+The position table in chunked mode (#391).
+
+- **The waste:** each attention layer projected the whole relative-position table, 2T-1 rows, through `linear_pos`. A chunked-limited block only reads rows+keys-1 rows, starting at T - start - rows + keys_from.
+  - With chunked context, `keys_from` trails `start` by the left context, so every block's band sits near T.
+  - The union is about 2 x (512 + left + chunk) rows, about 1.2k for streaming-en, whatever the length.
+  - Full attention's union is still the whole table.
+- **Change:** project only the union of the blocks' bands; each window then narrows at `first - lo`.
+- **Timing:** streaming-en, CPU, mimalloc, a build without debug assertions. Reference dumps were made with `parakeet_parity.sh --keep-dumps`.
+
+| clip | master warm / encode | band warm / encode |
+|---|---|---|
+| 98 s clip (T 1220, 3 blocks) | 7.85-7.88 / 6.05-6.28 s | 7.65-7.73 / 5.96-5.97 s |
+| 300 s meeting (T 3750) | 23.13-23.15 / 19.70-19.74 s | 22.37-22.54 / 18.81-18.96 s |
+
+- **Output:** encoder cos 1.000000; emissions 639/639 and 1251/1251; text matches.
+- **TDT v3 (full attention), unchanged:** warm 8.60-8.65 s, 619/619 emissions.
+- **Assessment:** the saving is ~0.8 s at 300 s, as the arithmetic predicts. The full table is 7.5k rows, about 7.7 GMAC per layer; the band is 1.2k. It grows linearly with length, so the 24-minute bound saves about 4x that.
+- **Build matters:** the script's own run of ours, in the dev build with debug assertions, took 32.2 s to encode the 300 s clip, against 18.9 s without them.
