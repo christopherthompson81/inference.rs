@@ -25,4 +25,5 @@ mod chat_route;
 mod flux;
 mod keyed;
 mod mcp;
+mod realtime_route;
 mod transcription_route;

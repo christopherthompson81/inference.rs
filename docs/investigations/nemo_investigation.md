@@ -1068,3 +1068,69 @@ Next: review, full CI; then the `/v1/realtime` WebSocket.
   - finishing an empty session is refused;
   - a 1 Hz session is refused;
   - dropping 64 held sessions frees their slots.
+
+## Run 37 - 2026-10-11
+
+**`/v1/realtime?intent=transcription`, the OpenAI Realtime WebSocket for transcription sessions.**
+
+Protocol, from OpenAI's Realtime guides and server-events reference:
+- **Configuration:** the GA `session.update` (`session.type: "transcription"`, `audio.input.{format: {type: "audio/pcm", rate}, transcription, turn_detection}`) and the beta `transcription_session.update` (`input_audio_format: "pcm16"` at 24 kHz). Each is answered in its own dialect.
+- **Client events:** `input_audio_buffer.{append, commit, clear}`.
+- **Server events:**
+  - `input_audio_buffer.{committed, cleared, speech_started, speech_stopped}`;
+  - `conversation.item.input_audio_transcription.{delta, completed (usage {type: duration, seconds}), failed}`;
+  - `error {type, code, message, param, event_id}`.
+
+Server (`inference_server_core::realtime`):
+- **Items:** each audio item is one engine transcription session. Deltas go out as pushes return text; commit sends `committed`, then finishes the session into `completed`.
+- **Turns:** `server_vad`, the default as on OpenAI, is an energy detector over 20 ms frames.
+  - `threshold` maps 0..1 to -60..-20 dBFS;
+  - a turn ends after `silence_duration_ms` (default 500) without a loud frame, and commits itself;
+  - `null` leaves commits to the client.
+- **Model:** a transcription model the server does not serve (OpenAI's names) falls back to the default model, so the SDKs work unchanged.
+- **Auth:** the usual headers, or the browser subprotocol `openai-insecure-api-key.<key>`. The server answers the `realtime` subprotocol.
+
+Tests (`realtime_route`, tiny streaming checkpoint, a real socket via tokio-tungstenite):
+- a manually committed 2 s item: `completed.transcript` equals the upload's text for the same audio, the deltas concatenate to it, `usage.seconds` is 2.0, and `committed` and `completed` share an item id;
+- an empty commit is `input_audio_buffer_commit_empty`, echoing the client's `event_id`; an unknown event is `unknown_event`; clear is `cleared`;
+- beta `transcription_session.update` with `server_vad`: 2 s of chirp then 1 s of silence at 24 kHz gives `speech_started`, `speech_stopped` at 2.4-2.7 s, `committed` and `completed`, in that order;
+- `?intent=conversation` is refused (HTTP 400) before the upgrade.
+
+The official OpenAI Python SDK (`openai[realtime]` 3.28, venv on `/mnt/data/venvs/realtime`), unchanged:
+- **Setup:** `client.realtime.connect(extra_query={"intent": "transcription"})` against `inference serve -m nemotron-speech-streaming-en-0.6b` on CUDA. The 98 s demo clip is resampled to 24 kHz PCM16 by the client and sent in 100 ms appends as fast as the socket takes them, with `transcription.model: "gpt-4o-transcribe"`.
+
+| mode | wall | first delta | items | deltas | words vs the upload's 284 |
+|---|---|---|---|---|---|
+| manual commit | 2.1 s | 0.11 s | 1 | 85 | 7 edits (2.5%) |
+| server_vad 500 ms | 2.9 s (+3 s client drain) | 0.13 s | 11 (10 turns + final commit) | 86 | 18 edits (6.3%) |
+
+- **Manual mode** differs from the upload only through the client's 16 to 24 kHz resample, and ours back.
+- **VAD mode** loses context at each turn: a turn's session starts fresh.
+- **The first VAD run reported 2 items.** That was the client: it stopped reading once sending finished. It now drains until 3 s of quiet.
+
+## Run 38 - 2026-10-11
+
+**Review of the Realtime socket; fixes.**
+
+- **Security:** a cookie-signed-in browser's WebSocket upgrade passed the "reads skip the origin check" rule.
+  - An upgrade is a GET, and CORS does not keep a socket's replies from the page that opened it. So any page on another port or subdomain of the host could open an authenticated session.
+  - Upgrades now need the same-origin check that writes already need.
+  - Test: a signed-in cookie from a foreign `Origin` is refused, and the same cookie from the server's origin connects. With the fix reverted, the test fails.
+- **VAD rewrite:**
+  - **Bug:** a turn ending mid-append left the rest of the append in the committed item, including the next turn's first words, unscanned. Several turns in one append collapsed into one item.
+  - **Order of work:** the detector now scans 20 ms frames before pushing. It keeps the partial frame for the next append, buffers `prefix_padding_ms` of pre-speech audio, opens the item on speech with that padding, and pushes each turn's audio to its own item.
+  - **Stream time** is kept in milliseconds, so it survives rate changes. A rate change clears the detector.
+  - **Test:** one append holding 0.5 s silence, 1 s chirp, 0.6 s silence, 1 s chirp and 0.6 s silence (400 ms VAD, no padding) gives two items. Speech starts at 500 and 2100 ms, each item lasts 1.40 s, and the second's `previous_item_id` is the first.
+- **Robustness:**
+  - messages are capped at 16 MiB (OpenAI documents 15 MiB appends), where tungstenite's default was 64;
+  - sends time out after 30 s, and receives after 10 min of silence;
+  - the server closes the socket when it is done;
+  - an empty append is an error.
+- **`session.update` validation:** an update is validated whole before any of it applies: a refused update changed the rate or dialect before. A present but invalid `rate`, a rate outside 8-192 kHz, and a `threshold` outside 0-1 are refused.
+- **Compatibility:**
+  - `conversation.item.added` (beta: `.created`) is sent when an item opens;
+  - the beta dialect is chosen at connect from `OpenAI-Beta: realtime=v1` or the `openai-beta.realtime-v1` subprotocol;
+  - the delta-before-commit order is documented.
+- **Model substitution** is logged.
+- **Subprotocol keys** are read only on upgrade requests, and the 401 message names that option.
+- **Constants:** the shared constants come from inference-api: `DEFAULT_MODEL_ID`, `PCM16_BYTES` and `PCM16_SCALE`.
