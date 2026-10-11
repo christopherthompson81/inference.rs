@@ -36,6 +36,11 @@ const FP8_MAX_SCALE: f32 = 146.;
 // FATTN_KQ_STRIDE: a paged call's K/V length is padded to it, which the GQA-batched kernels and tile skipping need
 const PAGED_KV_PAD: usize = 256;
 
+/// Opens this crate's CUDA kernel library now, so a missing one fails at model load rather than at a launch.
+pub fn ensure_kernels_loaded() -> std::result::Result<(), String> {
+    ffi::ensure_loaded()
+}
+
 mod ffi {
     #[repr(C)]
     #[derive(Clone, Copy)]
@@ -84,9 +89,14 @@ mod ffi {
         pub lay: *const FattnLayout,
     }
 
-    unsafe extern "C" {
-        pub fn inference_fattn_supported(args: *const Args) -> bool;
-        pub fn inference_fattn_forward(args: *const Args) -> i32;
+    inference_tensor::kernel_library! {
+        library = "inferencefattn";
+        path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEFATTN").unwrap_or("");
+        id = option_env!("INFERENCE_KERNEL_ID_INFERENCEFATTN").unwrap_or("");
+        unsafe extern "C" {
+            pub fn inference_fattn_supported(args: *const Args) -> bool;
+            pub fn inference_fattn_forward(args: *const Args) -> i32;
+        }
     }
 }
 

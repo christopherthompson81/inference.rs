@@ -8,6 +8,8 @@ pub mod fast_mmq;
 pub mod fast_mmvq;
 #[cfg(feature = "cuda")]
 mod ffi;
+#[cfg(feature = "cuda")]
+pub(crate) use ffi::ensure_loaded as ensure_kernels_loaded;
 mod iq_dequant;
 mod iq_tables;
 mod iqk_dequant;

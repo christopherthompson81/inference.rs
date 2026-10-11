@@ -1015,3 +1015,14 @@ Review follow-ups:
   - The last unit is still the CLI test binary, which follows the inference-api lib test.
 - Implication: wall time is now set by the inference-api to CLI chain, not by core.
 
+
+## Run 51 - 2026-10-11
+
+- Question: after the speech (#407-#422) and HiDream (#423, #424) series, are build times still reasonable?
+- Machine: quiet, load 0.05 at the start.
+- **Cold:** the Run 39 command (`cargo test --no-run --features cuda --workspace --lib --bins --tests --timings`) in a scratch target on /mnt/data took 213 s wall. Run 49's quiet rerun took 227.2 s.
+- **Incremental:** `cargo build -p inference-cli --features cuda` in the main target, dev profile.
+  - Warm-up 76.1 s, then no-op 0.23 s.
+  - `touch` only: qwen family 6.6 s, diffusion 6.3 s, inference-nn 8.4 s, core 6.0 s, inference-api 3.8 s, CLI 1.8 s.
+  - A real edit (a new `pub const`, which changes the crate's metadata so dependents recompile): qwen family 7.8 s, inference-nn 10.0 s, core 10.7 s, inference-api 7.1 s.
+- Implication: build time needs no work now. The cold build is faster than before the two series, and an edit anywhere rebuilds the binary in about 11 s or less.

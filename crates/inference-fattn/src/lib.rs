@@ -4,6 +4,8 @@
 mod cuda;
 
 #[cfg(feature = "cuda")]
+pub use cuda::ensure_kernels_loaded;
+#[cfg(feature = "cuda")]
 pub use cuda::{
     causal_mask, flash_attn, flash_attn_paged, flash_attn_paged_varlen, flash_attn_varlen,
     mma_available, paged_causal_mask, paged_kv_len, paged_shape_supported, supported,

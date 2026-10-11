@@ -285,7 +285,7 @@ fn main() -> Result<(), String> {
             out_dir.join("libinferencequant.a")
         };
         builder
-            .build_and_link("inferencequant", prepare_cuda_archive(out_file))
+            .build_loadable_lib("inferencequant", prepare_cuda_archive(out_file))
             .expect("Build mistral quant lib failed!");
         if deepgemm_fp8_sm90 {
             let deepgemm_source_hash_arg =

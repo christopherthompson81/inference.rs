@@ -130,6 +130,7 @@ impl Loader for GGMLLoader {
         paths: &dyn ModelPaths,
         options: LoadOptions<'_>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
+        crate::pipeline::loading::ensure_cuda_kernels(std::slice::from_ref(options.device))?;
         let LoadOptions {
             dtype,
             device,

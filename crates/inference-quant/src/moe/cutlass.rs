@@ -14,84 +14,89 @@ mod ffi {
     use core::ffi::c_void;
     use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
-    unsafe extern "C" {
-        pub fn launch_cutlass_moe_problem_sizes(
-            topk_ids: *const i32,
-            problem_sizes1: *mut i32,
-            problem_sizes2: *mut i32,
-            atomic_buffer: *mut i32,
-            num_experts: i32,
-            topk_length: i32,
-            n: i32,
-            k: i32,
-            is_gated: bool,
-            stream: CUstream,
-        );
-        pub fn launch_cutlass_moe_expert_offsets(
-            problem_sizes1: *const i32,
-            expert_offsets: *mut i32,
-            atomic_buffer: *mut i32,
-            num_experts: i32,
-            stream: CUstream,
-        );
-        pub fn launch_cutlass_moe_arg_sorts(
-            topk_ids: *const i32,
-            input_permutation: *mut i32,
-            output_permutation: *mut i32,
-            atomic_buffer: *mut i32,
-            num_experts: i32,
-            topk_length: i32,
-            topk: i32,
-            stream: CUstream,
-        );
-        pub fn launch_cutlass_moe_gather_rows_bf16(
-            dst: *mut c_void,
-            src: *const c_void,
-            map: *const i32,
-            num_rows: i32,
-            k: i32,
-            stream: CUstream,
-        );
-        pub fn launch_cutlass_moe_gather_weighted_bf16(
-            out: *mut c_void,
-            input: *const c_void,
-            out_perm: *const i32,
-            weights: *const f32,
-            num_rows: i32,
-            k: i32,
-            stream: CUstream,
-        );
-        pub fn launch_cutlass_moe_group_starts_bf16(
-            expert_offsets: *const i32,
-            a_base: *const c_void,
-            b_base: *const c_void,
-            d_base: *mut c_void,
-            a_ptrs: *const *const c_void,
-            b_ptrs: *const *const c_void,
-            d_ptrs: *mut *mut c_void,
-            lda: *mut i64,
-            ldb: *mut i64,
-            ldd: *mut i64,
-            num_experts: i32,
-            n: i64,
-            k: i64,
-            stream: CUstream,
-        );
-        pub fn launch_cutlass_moe_grouped_gemm_2x_bf16(
-            a_ptrs: *const *const c_void,
-            b_ptrs: *const *const c_void,
-            d_ptrs: *mut *mut c_void,
-            problem_sizes: *const i32,
-            problem_count: i32,
-            lda: *mut i64,
-            ldb: *mut i64,
-            ldd: *mut i64,
-            workspace: *mut c_void,
-            workspace_size: usize,
-            tile_cfg: i32,
-            stream: CUstream,
-        ) -> i32;
-        pub fn cutlass_moe_grouped_gemm_2x_workspace_size(problem_count: i32) -> usize;
+    inference_tensor::kernel_library! {
+        library = "inferencequant";
+        path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT").unwrap_or("");
+        id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT").unwrap_or("");
+        unsafe extern "C" {
+            pub fn launch_cutlass_moe_problem_sizes(
+                topk_ids: *const i32,
+                problem_sizes1: *mut i32,
+                problem_sizes2: *mut i32,
+                atomic_buffer: *mut i32,
+                num_experts: i32,
+                topk_length: i32,
+                n: i32,
+                k: i32,
+                is_gated: bool,
+                stream: CUstream,
+            );
+            pub fn launch_cutlass_moe_expert_offsets(
+                problem_sizes1: *const i32,
+                expert_offsets: *mut i32,
+                atomic_buffer: *mut i32,
+                num_experts: i32,
+                stream: CUstream,
+            );
+            pub fn launch_cutlass_moe_arg_sorts(
+                topk_ids: *const i32,
+                input_permutation: *mut i32,
+                output_permutation: *mut i32,
+                atomic_buffer: *mut i32,
+                num_experts: i32,
+                topk_length: i32,
+                topk: i32,
+                stream: CUstream,
+            );
+            pub fn launch_cutlass_moe_gather_rows_bf16(
+                dst: *mut c_void,
+                src: *const c_void,
+                map: *const i32,
+                num_rows: i32,
+                k: i32,
+                stream: CUstream,
+            );
+            pub fn launch_cutlass_moe_gather_weighted_bf16(
+                out: *mut c_void,
+                input: *const c_void,
+                out_perm: *const i32,
+                weights: *const f32,
+                num_rows: i32,
+                k: i32,
+                stream: CUstream,
+            );
+            pub fn launch_cutlass_moe_group_starts_bf16(
+                expert_offsets: *const i32,
+                a_base: *const c_void,
+                b_base: *const c_void,
+                d_base: *mut c_void,
+                a_ptrs: *const *const c_void,
+                b_ptrs: *const *const c_void,
+                d_ptrs: *mut *mut c_void,
+                lda: *mut i64,
+                ldb: *mut i64,
+                ldd: *mut i64,
+                num_experts: i32,
+                n: i64,
+                k: i64,
+                stream: CUstream,
+            );
+            pub fn launch_cutlass_moe_grouped_gemm_2x_bf16(
+                a_ptrs: *const *const c_void,
+                b_ptrs: *const *const c_void,
+                d_ptrs: *mut *mut c_void,
+                problem_sizes: *const i32,
+                problem_count: i32,
+                lda: *mut i64,
+                ldb: *mut i64,
+                ldd: *mut i64,
+                workspace: *mut c_void,
+                workspace_size: usize,
+                tile_cfg: i32,
+                stream: CUstream,
+            ) -> i32;
+            pub fn cutlass_moe_grouped_gemm_2x_workspace_size(problem_count: i32) -> usize;
+        }
     }
 }
 

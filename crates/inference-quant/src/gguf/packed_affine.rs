@@ -1421,80 +1421,85 @@ mod tests {
 mod ffi {
     use std::ffi::c_void;
 
-    unsafe extern "C" {
-        pub fn mrs_gguf_affine_repack_f16(
-            format: i32,
-            source: *const c_void,
-            payload: *mut c_void,
-            scales: *mut c_void,
-            offsets: *mut c_void,
-            k: i32,
-            n: i32,
-            padded_n: i32,
-            stream: usize,
-        ) -> i32;
-        pub fn mrs_gguf_affine_repack_bf16(
-            format: i32,
-            source: *const c_void,
-            payload: *mut c_void,
-            scales: *mut c_void,
-            offsets: *mut c_void,
-            k: i32,
-            n: i32,
-            padded_n: i32,
-            stream: usize,
-        ) -> i32;
-        pub fn marlin_affine_u4_f16(
-            input: *const c_void,
-            weight: *const c_void,
-            scales: *mut c_void,
-            offsets: *mut c_void,
-            output: *mut c_void,
-            m: i32,
-            k: i32,
-            n: i32,
-            group_size: i32,
-            workspace: *mut c_void,
-            stream: i64,
-        ) -> i32;
-        pub fn marlin_affine_u4_bf16(
-            input: *const c_void,
-            weight: *const c_void,
-            scales: *mut c_void,
-            offsets: *mut c_void,
-            output: *mut c_void,
-            m: i32,
-            k: i32,
-            n: i32,
-            group_size: i32,
-            workspace: *mut c_void,
-            stream: i64,
-        ) -> i32;
-        pub fn marlin_affine_u8_f16(
-            input: *const c_void,
-            weight: *const c_void,
-            scales: *mut c_void,
-            offsets: *mut c_void,
-            output: *mut c_void,
-            m: i32,
-            k: i32,
-            n: i32,
-            group_size: i32,
-            workspace: *mut c_void,
-            stream: i64,
-        ) -> i32;
-        pub fn marlin_affine_u8_bf16(
-            input: *const c_void,
-            weight: *const c_void,
-            scales: *mut c_void,
-            offsets: *mut c_void,
-            output: *mut c_void,
-            m: i32,
-            k: i32,
-            n: i32,
-            group_size: i32,
-            workspace: *mut c_void,
-            stream: i64,
-        ) -> i32;
+    inference_tensor::kernel_library! {
+        library = "inferencequant";
+        path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT").unwrap_or("");
+        id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT").unwrap_or("");
+        unsafe extern "C" {
+            pub fn mrs_gguf_affine_repack_f16(
+                format: i32,
+                source: *const c_void,
+                payload: *mut c_void,
+                scales: *mut c_void,
+                offsets: *mut c_void,
+                k: i32,
+                n: i32,
+                padded_n: i32,
+                stream: usize,
+            ) -> i32;
+            pub fn mrs_gguf_affine_repack_bf16(
+                format: i32,
+                source: *const c_void,
+                payload: *mut c_void,
+                scales: *mut c_void,
+                offsets: *mut c_void,
+                k: i32,
+                n: i32,
+                padded_n: i32,
+                stream: usize,
+            ) -> i32;
+            pub fn marlin_affine_u4_f16(
+                input: *const c_void,
+                weight: *const c_void,
+                scales: *mut c_void,
+                offsets: *mut c_void,
+                output: *mut c_void,
+                m: i32,
+                k: i32,
+                n: i32,
+                group_size: i32,
+                workspace: *mut c_void,
+                stream: i64,
+            ) -> i32;
+            pub fn marlin_affine_u4_bf16(
+                input: *const c_void,
+                weight: *const c_void,
+                scales: *mut c_void,
+                offsets: *mut c_void,
+                output: *mut c_void,
+                m: i32,
+                k: i32,
+                n: i32,
+                group_size: i32,
+                workspace: *mut c_void,
+                stream: i64,
+            ) -> i32;
+            pub fn marlin_affine_u8_f16(
+                input: *const c_void,
+                weight: *const c_void,
+                scales: *mut c_void,
+                offsets: *mut c_void,
+                output: *mut c_void,
+                m: i32,
+                k: i32,
+                n: i32,
+                group_size: i32,
+                workspace: *mut c_void,
+                stream: i64,
+            ) -> i32;
+            pub fn marlin_affine_u8_bf16(
+                input: *const c_void,
+                weight: *const c_void,
+                scales: *mut c_void,
+                offsets: *mut c_void,
+                output: *mut c_void,
+                m: i32,
+                k: i32,
+                n: i32,
+                group_size: i32,
+                workspace: *mut c_void,
+                stream: i64,
+            ) -> i32;
+        }
     }
 }

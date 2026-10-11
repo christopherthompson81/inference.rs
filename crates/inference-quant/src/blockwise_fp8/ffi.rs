@@ -9,56 +9,316 @@ pub(crate) const HAVE_CUTLASS_FP8_SM90_KERNELS: bool = cfg!(has_cutlass_fp8_sm90
 #[cfg(has_deepgemm_fp8_sm90_provider)]
 pub(crate) const HAVE_DEEPGEMM_FP8_SM90_PROVIDER: bool = cfg!(has_deepgemm_fp8_sm90_provider);
 
-#[cfg(has_blockwise_fp8_kernels)]
-unsafe extern "C" {
-    pub(crate) fn inference_fused_rms_norm_fp8_error_string(
-        status: i32,
-    ) -> *const core::ffi::c_char;
+inference_tensor::kernel_library! {
+    library = "inferencequant";
+    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT").unwrap_or("");
+    id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT").unwrap_or("");
+    unsafe extern "C" {
+        #[cfg(has_blockwise_fp8_kernels)]
+        pub(crate) fn inference_fused_rms_norm_fp8_error_string(
+            status: i32,
+        ) -> *const core::ffi::c_char;
 
-    pub(crate) fn inference_fused_add_rms_norm_quantize_bf16(
-        input: *const bf16,
-        residual: *const bf16,
-        weight: *const bf16,
-        residual_output: *mut bf16,
-        normalized_output: *mut bf16,
-        quantized_output: *mut F8E4M3,
-        scales: *mut f32,
-        inverse_rms: *mut f32,
-        rows: i32,
-        columns: i32,
-        scale_stride_m: i32,
-        epsilon: f32,
-        stream: *mut core::ffi::c_void,
-    ) -> i32;
-}
+        #[cfg(has_blockwise_fp8_kernels)]
+        pub(crate) fn inference_fused_add_rms_norm_quantize_bf16(
+            input: *const bf16,
+            residual: *const bf16,
+            weight: *const bf16,
+            residual_output: *mut bf16,
+            normalized_output: *mut bf16,
+            quantized_output: *mut F8E4M3,
+            scales: *mut f32,
+            inverse_rms: *mut f32,
+            rows: i32,
+            columns: i32,
+            scale_stride_m: i32,
+            epsilon: f32,
+            stream: *mut core::ffi::c_void,
+        ) -> i32;
+        #[cfg(has_blockwise_fp8_kernels)]
+        pub(crate) fn inference_fp8_mma_error_string(status: i32) -> *const core::ffi::c_char;
+        #[cfg(has_blockwise_fp8_kernels)]
+        pub(crate) fn inference_fp8_mma_gemv(
+            weight: *const F8E4M3,
+            activation: *const F8E4M3,
+            activation_scales: *const f32,
+            weight_scales: *const f32,
+            output: *mut bf16,
+            rows: i32,
+            output_features: i32,
+            input_features: i32,
+            weight_scale_stride: i32,
+            activation_scale_stride_m: i32,
+            activation_scale_stride_g: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+        #[cfg(has_blockwise_fp8_kernels)]
+        pub(crate) fn inference_fp8_mma_quantize_bf16(
+            input: *const bf16,
+            quantized: *mut F8E4M3,
+            scales: *mut f32,
+            rows: i32,
+            columns: i32,
+            scale_stride_m: i32,
+            scale_stride_g: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+        #[cfg(has_cutlass_fp8_sm90_kernels)]
+        pub(crate) fn inference_cutlass_fp8_error_string(status: i32) -> *const core::ffi::c_char;
 
-#[cfg(has_blockwise_fp8_kernels)]
-unsafe extern "C" {
-    pub(crate) fn inference_fp8_mma_error_string(status: i32) -> *const core::ffi::c_char;
-    pub(crate) fn inference_fp8_mma_gemv(
-        weight: *const F8E4M3,
-        activation: *const F8E4M3,
-        activation_scales: *const f32,
-        weight_scales: *const f32,
-        output: *mut bf16,
-        rows: i32,
-        output_features: i32,
-        input_features: i32,
-        weight_scale_stride: i32,
-        activation_scale_stride_m: i32,
-        activation_scale_stride_g: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-    pub(crate) fn inference_fp8_mma_quantize_bf16(
-        input: *const bf16,
-        quantized: *mut F8E4M3,
-        scales: *mut f32,
-        rows: i32,
-        columns: i32,
-        scale_stride_m: i32,
-        scale_stride_g: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
+        #[cfg(has_cutlass_fp8_sm90_kernels)]
+        pub(crate) fn inference_cutlass_fp8_blockwise_prepare() -> i32;
+
+        #[cfg(has_cutlass_fp8_sm90_kernels)]
+        pub(crate) fn inference_cutlass_fp8_blockwise_workspace_size(
+            m: i32,
+            n: i32,
+            k: i32,
+            output_dtype: i32,
+            sm_count: i32,
+            bytes: *mut usize,
+        ) -> i32;
+
+        #[cfg(has_cutlass_fp8_sm90_kernels)]
+        pub(crate) fn inference_cutlass_fp8_blockwise_gemm(
+            activation: *const core::ffi::c_void,
+            weight: *const core::ffi::c_void,
+            activation_scales: *const f32,
+            weight_scales: *const f32,
+            output: *mut core::ffi::c_void,
+            m: i32,
+            n: i32,
+            k: i32,
+            output_dtype: i32,
+            workspace: *mut core::ffi::c_void,
+            workspace_bytes: usize,
+            sm_count: i32,
+            stream: *mut core::ffi::c_void,
+        ) -> i32;
+
+        #[cfg(has_cutlass_fp8_sm90_kernels)]
+        pub(crate) fn inference_fp8_quantize_activation_f16(
+            input: *const f16,
+            output: *mut F8E4M3,
+            scales: *mut f32,
+            rows: i32,
+            cols: i32,
+            stream: *mut core::ffi::c_void,
+        ) -> i32;
+
+        #[cfg(has_cutlass_fp8_sm90_kernels)]
+        pub(crate) fn inference_fp8_quantize_activation_bf16(
+            input: *const bf16,
+            output: *mut F8E4M3,
+            scales: *mut f32,
+            rows: i32,
+            cols: i32,
+            stream: *mut core::ffi::c_void,
+        ) -> i32;
+        pub(crate) fn launch_dequant_fp8_blockwise_kernel_f32(
+            d_weight: *const F8E4M3,
+            d_scale: *const f32,
+            d_output: *mut f32,
+            weight_height: i32,
+            weight_width: i32,
+            weight_row_stride: i32,
+            scale_stride: i32,
+            weight_block_size_y: i32,
+            weight_block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_dequant_fp8_blockwise_kernel_f16(
+            d_weight: *const F8E4M3,
+            d_scale: *const f32,
+            d_output: *mut f16,
+            weight_height: i32,
+            weight_width: i32,
+            weight_row_stride: i32,
+            scale_stride: i32,
+            weight_block_size_y: i32,
+            weight_block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_dequant_fp8_blockwise_kernel_bf16(
+            d_weight: *const F8E4M3,
+            d_scale: *const f32,
+            d_output: *mut bf16,
+            weight_height: i32,
+            weight_width: i32,
+            weight_row_stride: i32,
+            scale_stride: i32,
+            weight_block_size_y: i32,
+            weight_block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_quant_fp8_blockwise_kernel_f32(
+            d_input: *const f32,
+            d_weight: *mut F8E4M3,
+            d_scale: *mut f32,
+            weight_height: i32,
+            weight_width: i32,
+            weight_row_stride: i32,
+            scale_stride: i32,
+            weight_block_size_y: i32,
+            weight_block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_quant_fp8_blockwise_kernel_f16(
+            d_input: *const f16,
+            d_weight: *mut F8E4M3,
+            d_scale: *mut f32,
+            weight_height: i32,
+            weight_width: i32,
+            weight_row_stride: i32,
+            scale_stride: i32,
+            weight_block_size_y: i32,
+            weight_block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_quant_fp8_blockwise_kernel_bf16(
+            d_input: *const bf16,
+            d_weight: *mut F8E4M3,
+            d_scale: *mut f32,
+            weight_height: i32,
+            weight_width: i32,
+            weight_row_stride: i32,
+            scale_stride: i32,
+            weight_block_size_y: i32,
+            weight_block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        #[cfg(feature = "cutile")]
+        pub(crate) fn launch_quant_fp8_rowwise_kernel_f32(
+            input: *const f32,
+            output: *mut F8E4M3,
+            scales: *mut f32,
+            rows: i32,
+            columns: i32,
+            row_stride: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        #[cfg(feature = "cutile")]
+        pub(crate) fn launch_quant_fp8_rowwise_kernel_f16(
+            input: *const f16,
+            output: *mut F8E4M3,
+            scales: *mut f32,
+            rows: i32,
+            columns: i32,
+            row_stride: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        #[cfg(feature = "cutile")]
+        pub(crate) fn launch_quant_fp8_rowwise_kernel_bf16(
+            input: *const bf16,
+            output: *mut F8E4M3,
+            scales: *mut f32,
+            rows: i32,
+            columns: i32,
+            row_stride: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        #[cfg(feature = "cutile")]
+        pub(crate) fn launch_quant_fp8_static_kernel_f32(
+            input: *const f32,
+            scale: *const f32,
+            output: *mut F8E4M3,
+            elements: usize,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        #[cfg(feature = "cutile")]
+        pub(crate) fn launch_quant_fp8_static_kernel_f16(
+            input: *const f16,
+            scale: *const f32,
+            output: *mut F8E4M3,
+            elements: usize,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        #[cfg(feature = "cutile")]
+        pub(crate) fn launch_quant_fp8_static_kernel_bf16(
+            input: *const bf16,
+            scale: *const f32,
+            output: *mut F8E4M3,
+            elements: usize,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        ) -> i32;
+
+        // FP8 Matmul kernels (for forward method)
+        pub(crate) fn launch_fp8_matmul_f16(
+            input: *const f16,
+            weight: *const F8E4M3,
+            weight_scale: *const f32,
+            output: *mut f16,
+            m: i32,
+            n: i32,
+            k: i32,
+            scale_row_stride: i32,
+            block_size_y: i32,
+            block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_fp8_matmul_bf16(
+            input: *const bf16,
+            weight: *const F8E4M3,
+            weight_scale: *const f32,
+            output: *mut bf16,
+            m: i32,
+            n: i32,
+            k: i32,
+            scale_row_stride: i32,
+            block_size_y: i32,
+            block_size_x: i32,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        // FP8 Indexed MoE GEMM kernels (for gather_forward method)
+        pub(crate) fn launch_fp8_indexed_moe_gemm_f16(
+            input: *const f16,
+            weights: *const F8E4M3,
+            weight_scales: *const f32,
+            indices: *const u32,
+            output: *mut f16,
+            num_tokens: i32,
+            topk: i32,
+            num_experts: i32,
+            n: i32,
+            k: i32,
+            scale_row_stride: i32,
+            block_size_y: i32,
+            block_size_x: i32,
+            input_has_topk_dim: bool,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+
+        pub(crate) fn launch_fp8_indexed_moe_gemm_bf16(
+            input: *const bf16,
+            weights: *const F8E4M3,
+            weight_scales: *const f32,
+            indices: *const u32,
+            output: *mut bf16,
+            num_tokens: i32,
+            topk: i32,
+            num_experts: i32,
+            n: i32,
+            k: i32,
+            scale_row_stride: i32,
+            block_size_y: i32,
+            block_size_x: i32,
+            input_has_topk_dim: bool,
+            stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
+        );
+    }
 }
 
 #[cfg(has_deepgemm_fp8_sm90_provider)]
@@ -96,6 +356,7 @@ pub(crate) struct DeepGemmPrepared {
     pub(crate) function: usize,
 }
 
+// DeepGEMM links as its own archive
 #[cfg(has_deepgemm_fp8_sm90_provider)]
 unsafe extern "C" {
     pub(crate) fn inference_deepgemm_sm90_error_string(status: i32) -> *const core::ffi::c_char;
@@ -139,260 +400,4 @@ unsafe extern "C" {
         output_bf16: *mut core::ffi::c_void,
         stream: *mut core::ffi::c_void,
     ) -> i32;
-}
-
-#[cfg(has_cutlass_fp8_sm90_kernels)]
-unsafe extern "C" {
-    pub(crate) fn inference_cutlass_fp8_error_string(status: i32) -> *const core::ffi::c_char;
-
-    pub(crate) fn inference_cutlass_fp8_blockwise_prepare() -> i32;
-
-    pub(crate) fn inference_cutlass_fp8_blockwise_workspace_size(
-        m: i32,
-        n: i32,
-        k: i32,
-        output_dtype: i32,
-        sm_count: i32,
-        bytes: *mut usize,
-    ) -> i32;
-
-    pub(crate) fn inference_cutlass_fp8_blockwise_gemm(
-        activation: *const core::ffi::c_void,
-        weight: *const core::ffi::c_void,
-        activation_scales: *const f32,
-        weight_scales: *const f32,
-        output: *mut core::ffi::c_void,
-        m: i32,
-        n: i32,
-        k: i32,
-        output_dtype: i32,
-        workspace: *mut core::ffi::c_void,
-        workspace_bytes: usize,
-        sm_count: i32,
-        stream: *mut core::ffi::c_void,
-    ) -> i32;
-
-    pub(crate) fn inference_fp8_quantize_activation_f16(
-        input: *const f16,
-        output: *mut F8E4M3,
-        scales: *mut f32,
-        rows: i32,
-        cols: i32,
-        stream: *mut core::ffi::c_void,
-    ) -> i32;
-
-    pub(crate) fn inference_fp8_quantize_activation_bf16(
-        input: *const bf16,
-        output: *mut F8E4M3,
-        scales: *mut f32,
-        rows: i32,
-        cols: i32,
-        stream: *mut core::ffi::c_void,
-    ) -> i32;
-}
-
-unsafe extern "C" {
-    pub(crate) fn launch_dequant_fp8_blockwise_kernel_f32(
-        d_weight: *const F8E4M3,
-        d_scale: *const f32,
-        d_output: *mut f32,
-        weight_height: i32,
-        weight_width: i32,
-        weight_row_stride: i32,
-        scale_stride: i32,
-        weight_block_size_y: i32,
-        weight_block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_dequant_fp8_blockwise_kernel_f16(
-        d_weight: *const F8E4M3,
-        d_scale: *const f32,
-        d_output: *mut f16,
-        weight_height: i32,
-        weight_width: i32,
-        weight_row_stride: i32,
-        scale_stride: i32,
-        weight_block_size_y: i32,
-        weight_block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_dequant_fp8_blockwise_kernel_bf16(
-        d_weight: *const F8E4M3,
-        d_scale: *const f32,
-        d_output: *mut bf16,
-        weight_height: i32,
-        weight_width: i32,
-        weight_row_stride: i32,
-        scale_stride: i32,
-        weight_block_size_y: i32,
-        weight_block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_quant_fp8_blockwise_kernel_f32(
-        d_input: *const f32,
-        d_weight: *mut F8E4M3,
-        d_scale: *mut f32,
-        weight_height: i32,
-        weight_width: i32,
-        weight_row_stride: i32,
-        scale_stride: i32,
-        weight_block_size_y: i32,
-        weight_block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_quant_fp8_blockwise_kernel_f16(
-        d_input: *const f16,
-        d_weight: *mut F8E4M3,
-        d_scale: *mut f32,
-        weight_height: i32,
-        weight_width: i32,
-        weight_row_stride: i32,
-        scale_stride: i32,
-        weight_block_size_y: i32,
-        weight_block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_quant_fp8_blockwise_kernel_bf16(
-        d_input: *const bf16,
-        d_weight: *mut F8E4M3,
-        d_scale: *mut f32,
-        weight_height: i32,
-        weight_width: i32,
-        weight_row_stride: i32,
-        scale_stride: i32,
-        weight_block_size_y: i32,
-        weight_block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    #[cfg(feature = "cutile")]
-    pub(crate) fn launch_quant_fp8_rowwise_kernel_f32(
-        input: *const f32,
-        output: *mut F8E4M3,
-        scales: *mut f32,
-        rows: i32,
-        columns: i32,
-        row_stride: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-
-    #[cfg(feature = "cutile")]
-    pub(crate) fn launch_quant_fp8_rowwise_kernel_f16(
-        input: *const f16,
-        output: *mut F8E4M3,
-        scales: *mut f32,
-        rows: i32,
-        columns: i32,
-        row_stride: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-
-    #[cfg(feature = "cutile")]
-    pub(crate) fn launch_quant_fp8_rowwise_kernel_bf16(
-        input: *const bf16,
-        output: *mut F8E4M3,
-        scales: *mut f32,
-        rows: i32,
-        columns: i32,
-        row_stride: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-
-    #[cfg(feature = "cutile")]
-    pub(crate) fn launch_quant_fp8_static_kernel_f32(
-        input: *const f32,
-        scale: *const f32,
-        output: *mut F8E4M3,
-        elements: usize,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-
-    #[cfg(feature = "cutile")]
-    pub(crate) fn launch_quant_fp8_static_kernel_f16(
-        input: *const f16,
-        scale: *const f32,
-        output: *mut F8E4M3,
-        elements: usize,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-
-    #[cfg(feature = "cutile")]
-    pub(crate) fn launch_quant_fp8_static_kernel_bf16(
-        input: *const bf16,
-        scale: *const f32,
-        output: *mut F8E4M3,
-        elements: usize,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    ) -> i32;
-
-    // FP8 Matmul kernels (for forward method)
-    pub(crate) fn launch_fp8_matmul_f16(
-        input: *const f16,
-        weight: *const F8E4M3,
-        weight_scale: *const f32,
-        output: *mut f16,
-        m: i32,
-        n: i32,
-        k: i32,
-        scale_row_stride: i32,
-        block_size_y: i32,
-        block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_fp8_matmul_bf16(
-        input: *const bf16,
-        weight: *const F8E4M3,
-        weight_scale: *const f32,
-        output: *mut bf16,
-        m: i32,
-        n: i32,
-        k: i32,
-        scale_row_stride: i32,
-        block_size_y: i32,
-        block_size_x: i32,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    // FP8 Indexed MoE GEMM kernels (for gather_forward method)
-    pub(crate) fn launch_fp8_indexed_moe_gemm_f16(
-        input: *const f16,
-        weights: *const F8E4M3,
-        weight_scales: *const f32,
-        indices: *const u32,
-        output: *mut f16,
-        num_tokens: i32,
-        topk: i32,
-        num_experts: i32,
-        n: i32,
-        k: i32,
-        scale_row_stride: i32,
-        block_size_y: i32,
-        block_size_x: i32,
-        input_has_topk_dim: bool,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
-
-    pub(crate) fn launch_fp8_indexed_moe_gemm_bf16(
-        input: *const bf16,
-        weights: *const F8E4M3,
-        weight_scales: *const f32,
-        indices: *const u32,
-        output: *mut bf16,
-        num_tokens: i32,
-        topk: i32,
-        num_experts: i32,
-        n: i32,
-        k: i32,
-        scale_row_stride: i32,
-        block_size_y: i32,
-        block_size_x: i32,
-        input_has_topk_dim: bool,
-        stream: inference_tensor::cuda::cudarc::driver::sys::CUstream,
-    );
 }

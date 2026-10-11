@@ -330,28 +330,49 @@ impl KernelBuilder {
         run_link(command)
     }
 
-    /// Build kernel library `name` and emit its cargo link directives: shared in dev builds on Linux, else `archive`.
-    pub fn build_and_link(self, name: &str, archive: PathBuf) -> Result<()> {
-        if dev_shared_libs() {
-            // an archive left in OUT_DIR by an earlier static build would compete with the .so for `-l{name}`
-            match std::fs::remove_file(&archive) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
-                _ => {}
+    /// Build `lib{name}.so` for `inference_tensor::kernel_library!` to open at runtime, linking nothing, and record
+    /// its path in the crate's [`loadable_lib_env`]; targets without dlopen build and link `archive` instead.
+    pub fn build_loadable_lib(self, name: &str, archive: PathBuf) -> Result<()> {
+        let dlopen = std::env::var("TARGET").is_ok_and(|t| !t.contains("windows"));
+        if !dlopen {
+            self.build_lib(&archive)?;
+            if let Some(dir) = archive.parent() {
+                println!("cargo:rustc-link-search={}", dir.display());
             }
-            return self.build_shared_lib(name);
+            println!("cargo:rustc-link-lib={name}");
+            return Ok(());
         }
-        self.build_lib(&archive)?;
-        if let Some(dir) = archive.parent() {
-            println!("cargo:rustc-link-search={}", dir.display());
-        }
-        println!("cargo:rustc-link-lib={name}");
+        // a release-type build may be `cargo install`, whose target dir is deleted: its libraries live on beside it
+        let root = if dev_shared_libs() {
+            shared_lib_root()?
+        } else {
+            persistent_lib_root()?
+        };
+        let out_file = self.build_shared_object(name, &root, !dev_shared_libs())?;
+        println!(
+            "cargo:rustc-env={}={}",
+            loadable_lib_env(name),
+            out_file.display()
+        );
+        println!(
+            "cargo:rustc-env={}={}",
+            loadable_id_env(name),
+            Self::built_id(&out_file)?
+        );
+        // a deleted library must be rebuilt, or the path baked into the crate would point at nothing
+        println!("cargo:rerun-if-changed={}", out_file.display());
+        // packaging reads which library this build made, among the variants a target dir accumulates
+        let pointers = shared_lib_root()?;
+        std::fs::create_dir_all(&pointers)?;
+        let pointer = pointers.join(format!("{name}.{LIB_POINTER_EXTENSION}"));
+        let tmp = pointers.join(format!("{name}.{LIB_POINTER_EXTENSION}.tmp"));
+        std::fs::write(&tmp, out_file.display().to_string())?;
+        std::fs::rename(&tmp, &pointer)?;
         Ok(())
     }
 
-    /// Build `lib{name}.so` under `<target>/<profile>/cuda-kernels`, keyed by compile inputs so every cargo variant
-    /// shares one copy and binaries map it instead of embedding the fatbin. SONAME is the absolute path (no rpath).
-    pub fn build_shared_lib(mut self, name: &str) -> Result<()> {
-        let root = shared_lib_root()?;
+    // `strip` drops the static symbol table; the dynamic one the loader resolves through stays
+    fn build_shared_object(mut self, name: &str, root: &Path, strip: bool) -> Result<PathBuf> {
         let toolkit = match self.toolkit.take() {
             Some(t) => t,
             None => CudaToolkit::detect()?,
@@ -382,7 +403,14 @@ impl KernelBuilder {
 
         self.out_dir = dir.clone();
         let out_file = dir.join(format!("lib{name}.so"));
-        if let Some((toolkit, objects)) = self.compile_objects(&out_file)? {
+        let id_file = dir.join(format!("lib{name}.so.{BUILD_ID_EXTENSION}"));
+        // a library from before ids were linked in is rebuilt
+        if !id_file.is_file() {
+            let _ = std::fs::remove_file(&out_file);
+        }
+        if let Some((toolkit, mut objects)) = self.compile_objects(&out_file)? {
+            let id = build_id(&objects)?;
+            objects.push(compile_build_id(&toolkit, &dir, &id)?);
             // Link aside and rename, so binaries that already map the old library keep working.
             let tmp = dir.join(format!("lib{name}.so.tmp"));
             let mut command = Command::new(&toolkit.nvcc_path);
@@ -396,12 +424,20 @@ impl KernelBuilder {
                 .arg(format!("-Xlinker=-soname={}", out_file.display()))
                 .arg("-Xlinker=--no-undefined")
                 .args(&objects);
+            if strip {
+                command.arg("-Xlinker=-s");
+            }
             run_link(command)?;
             std::fs::rename(&tmp, &out_file)?;
+            std::fs::write(&id_file, &id)?;
         }
-        println!("cargo:rustc-link-search=native={}", dir.display());
-        println!("cargo:rustc-link-lib=dylib={name}");
-        Ok(())
+        Ok(out_file)
+    }
+
+    // the build id linked into the library at `out_file`
+    fn built_id(out_file: &Path) -> Result<String> {
+        let id_file = PathBuf::from(format!("{}.{BUILD_ID_EXTENSION}", out_file.display()));
+        Ok(std::fs::read_to_string(id_file)?)
     }
 
     /// Kernel libraries link cudart, whose directory nothing else puts on the search path once cudarc loads at runtime.
@@ -857,10 +893,80 @@ fn run_link(mut command: Command) -> Result<()> {
     Ok(())
 }
 
-// Dev builds rebuild kernels per cargo variant and link them into many test binaries; release stays self-contained.
+/// The environment variable a crate reads for the built path of loadable kernel library `name`.
+pub fn loadable_lib_env(name: &str) -> String {
+    format!("INFERENCE_KERNEL_LIB_{}", name.to_uppercase())
+}
+
+/// The environment variable a crate reads for the build id loadable kernel library `name` must report.
+pub fn loadable_id_env(name: &str) -> String {
+    format!("INFERENCE_KERNEL_ID_{}", name.to_uppercase())
+}
+
+/// The symbol a kernel library exports its build id under; `inference_tensor::kernel_library::BUILD_ID_SYMBOL` matches.
+pub const BUILD_ID_SYMBOL: &str = "inference_kernel_build_id";
+const BUILD_ID_EXTENSION: &str = "id";
+
+// a hash of the objects' contents: what changes when any kernel does
+fn build_id(objects: &[PathBuf]) -> Result<String> {
+    let mut key = DefaultHasher::new();
+    let mut sorted = objects.to_vec();
+    sorted.sort();
+    for object in &sorted {
+        std::fs::read(object)?.hash(&mut key);
+    }
+    Ok(format!("{:016x}", key.finish()))
+}
+
+// a one-line C object carrying `id`, so the loader can tell this build's library from another's
+fn compile_build_id(toolkit: &CudaToolkit, dir: &Path, id: &str) -> Result<PathBuf> {
+    let source = dir.join("build_id.c");
+    let object = dir.join("build_id.o");
+    std::fs::write(
+        &source,
+        format!(
+            "__attribute__((visibility(\"default\"))) const char {BUILD_ID_SYMBOL}[] = \"{id}\";\n"
+        ),
+    )?;
+    let mut command = Command::new(&toolkit.nvcc_path);
+    command
+        .arg("-c")
+        .arg(&source)
+        .arg("-o")
+        .arg(&object)
+        .args(["-Xcompiler", "-fPIC"]);
+    run_link(command)?;
+    Ok(object)
+}
+
+// dev builds rebuild kernels per cargo variant, so their libraries stay in the target dir with them
 fn dev_shared_libs() -> bool {
     std::env::var("PROFILE").is_ok_and(|p| p == "debug")
         && std::env::var("TARGET").is_ok_and(|t| t.contains("linux"))
+}
+
+/// The extension of the file naming the library a build made, `cuda-kernels/<name>.lib`.
+pub const LIB_POINTER_EXTENSION: &str = "lib";
+/// Overrides where release-type builds keep their kernel libraries.
+pub const LIB_CACHE_ENV: &str = "INFERENCE_KERNEL_BUILD_CACHE";
+
+/// Where release-type builds keep kernel libraries: `$INFERENCE_KERNEL_BUILD_CACHE`, else the user cache.
+fn persistent_lib_root() -> Result<PathBuf> {
+    for var in [LIB_CACHE_ENV, "XDG_CACHE_HOME", "HOME"] {
+        println!("cargo:rerun-if-env-changed={var}");
+    }
+    if let Some(dir) = std::env::var_os(LIB_CACHE_ENV) {
+        return Ok(PathBuf::from(dir));
+    }
+    let cache = std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .ok_or_else(|| {
+            Error::LinkingFailed(format!(
+                "no HOME or {LIB_CACHE_ENV} for the kernel library cache"
+            ))
+        })?;
+    Ok(cache.join("inference-rs").join("kernels").join("built"))
 }
 
 /// `<target>/<profile>/cuda-kernels`, derived from `OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out`.

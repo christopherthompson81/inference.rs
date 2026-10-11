@@ -67,6 +67,18 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 | `XDG_CACHE_HOME` | Base cache directory for web UI state. The UI uses `$XDG_CACHE_HOME/inference`. |
 | `HOME` | Fallback for web UI cache path when `XDG_CACHE_HOME` is not set. |
 
+## CUDA kernel libraries
+
+CUDA builds load their kernels at runtime from separate shared libraries (`libinferencequant.so`, `libinferencefattn.so`,
+`libinferencecuda.so`, `libinferencepagedattention.so`). They are looked for in `$INFERENCE_KERNEL_DIR`, then beside
+the binary or library that loads them, then in its `kernels/` directory, then where the build put them. A missing one
+fails model loading with an error naming it.
+
+| Variable | Purpose |
+|---|---|
+| `INFERENCE_KERNEL_DIR` | Directory holding the kernel libraries; searched first. |
+| `INFERENCE_KERNEL_BUILD_CACHE` | Build time. Where release-type builds (`cargo install`, wheels) keep the kernel libraries they build. Default `$XDG_CACHE_HOME/inference-rs/kernels/built`, else `~/.cache/inference-rs/kernels/built`. Dev builds use `target/debug/cuda-kernels`. |
+
 ## CUDA acceleration
 
 | Variable | Purpose |

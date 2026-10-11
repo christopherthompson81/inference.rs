@@ -27,6 +27,12 @@ pub mod cutile;
 pub mod distributed;
 mod dummy;
 mod f8q8;
+#[cfg(feature = "cuda")]
+/// Opens this crate's CUDA kernel library now, so a missing one fails at model load rather than at a launch.
+pub fn ensure_kernels_loaded() -> std::result::Result<(), String> {
+    gguf::ensure_kernels_loaded()
+}
+
 mod fp8;
 mod fp8_config;
 mod gemv;

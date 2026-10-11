@@ -34,6 +34,7 @@ pub mod dummy_dtype;
 mod dummy_metal_backend;
 pub mod error;
 mod indexer;
+pub mod kernel_library;
 pub mod layout;
 #[cfg(feature = "metal")]
 pub mod metal_backend;
