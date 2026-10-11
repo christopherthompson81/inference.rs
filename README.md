@@ -10,12 +10,12 @@
 Serve it over OpenAI- and Anthropic-compatible HTTP, or embed it from Rust, Python, C# or C.</p>
 
 <p align="center">
-  <a href="docs/src/content/docs/quickstart.mdx"><b>Quickstart</b></a> |
-  <a href="docs/src/content/docs/index.mdx"><b>Documentation</b></a> |
-  <a href="docs/src/content/docs/reference/supported-models.md"><b>Supported models</b></a> |
-  <a href="docs/src/content/docs/reference/http-api.md"><b>HTTP API</b></a> |
-  <a href="docs/src/content/docs/guides/python/getting-started.mdx"><b>Python</b></a> |
-  <a href="docs/src/content/docs/guides/rust/getting-started.mdx"><b>Rust</b></a> |
+  <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx"><b>Quickstart</b></a> |
+  <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/index.mdx"><b>Documentation</b></a> |
+  <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md"><b>Supported models</b></a> |
+  <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/http-api.md"><b>HTTP API</b></a> |
+  <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/python/getting-started.mdx"><b>Python</b></a> |
+  <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/rust/getting-started.mdx"><b>Rust</b></a> |
   <a href="bindings/csharp/README.md"><b>C#</b></a>
 </p>
 
@@ -44,7 +44,7 @@ bindings over that ABI, so every surface does the same things.
 | **Image generation** | FLUX.1, from safetensors or GGUF |
 | **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding; PP-DocLayoutV3 document layout detection |
 
-The **[supported models reference](docs/src/content/docs/reference/supported-models.md)** lists every architecture
+The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** lists every architecture
 with a copy-paste command. It is generated from the engine's loader registry.
 
 ## Quick start
@@ -60,7 +60,7 @@ irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/
 ```
 
 The installer falls back to a source build when no binary matches. Standard acceleration needs neither Rust nor the
-CUDA toolkit. [Manual installation and other platforms](docs/src/content/docs/quickstart.mdx).
+CUDA toolkit. [Manual installation and other platforms](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx).
 
 **Chat**, interactively or with one prompt:
 
@@ -117,16 +117,16 @@ models at runtime.
 
 - **API keys:** keyed mode gives each client its own sessions and files.
 - **MCP:** the server can expose itself as an MCP server, and it can call out to MCP tools.
-- **Details:** the [HTTP API reference](docs/src/content/docs/reference/http-api.md) and the
-  [OpenAI compatibility notes](docs/src/content/docs/reference/openai-compatibility.md) say what each endpoint
+- **Details:** the [HTTP API reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/http-api.md) and the
+  [OpenAI compatibility notes](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/openai-compatibility.md) say what each endpoint
   accepts.
 
 ## Embedding the engine
 
 | | |
 |---|---|
-| **Rust** | `cargo add inference --git https://github.com/christopherthompson81/inference.rs`. Builders for every model kind and typed requests. [Get started](docs/src/content/docs/guides/rust/getting-started.mdx), [examples](examples/rust) |
-| **Python** | A pure-Python package (`inference_rs`) over the C ABI; the wheel bundles the engine for CPU, CUDA or Metal. [Get started](docs/src/content/docs/guides/python/getting-started.mdx), [examples](examples/python) |
+| **Rust** | `cargo add inference --git https://github.com/christopherthompson81/inference.rs`. Builders for every model kind and typed requests. [Get started](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/rust/getting-started.mdx), [examples](examples/rust) |
+| **Python** | A pure-Python package (`inference_rs`) over the C ABI; the wheel bundles the engine for CPU, CUDA or Metal. [Get started](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/python/getting-started.mdx), [examples](examples/python) |
 | **C#** | .NET bindings with streaming, host tools and the document layout model. [README](bindings/csharp/README.md) |
 | **C** | `libinference_ffi` with [`include/inference.h`](crates/inference-ffi/include/inference.h): JSON in, JSON out, for any language with a C FFI |
 
@@ -135,24 +135,24 @@ another language gets everything the HTTP server can do.
 
 ## Performance and quantization
 
-- **Batching and caching:** continuous batching everywhere. [PagedAttention](docs/src/content/docs/guides/perf/paged-attention.mdx) and prefix caching (multimodal included) on CUDA and Apple Silicon.
+- **Batching and caching:** continuous batching everywhere. [PagedAttention](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/paged-attention.mdx) and prefix caching (multimodal included) on CUDA and Apple Silicon.
 - **Attention kernels:** FlashAttention on CUDA, including FP8 and paged variants; Metal kernels on macOS.
-- **Scaling and decoding:** [multi-GPU and distributed inference](docs/src/content/docs/guides/perf/distributed-inference.mdx) (tensor parallel, layer mapping, multi-node), and [speculative decoding](docs/src/content/docs/guides/perf/speculative-decoding.mdx).
+- **Scaling and decoding:** [multi-GPU and distributed inference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/distributed-inference.mdx) (tensor parallel, layer mapping, multi-node), and [speculative decoding](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/speculative-decoding.mdx).
 - **Quantization:**
-  - [GGUF](docs/src/content/docs/reference/gguf-support.md) at 2-8 bits, including the IQ and trellis types;
+  - [GGUF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/gguf-support.md) at 2-8 bits, including the IQ and trellis types;
   - GPTQ, AWQ, HQQ, FP8 and bitsandbytes checkpoints;
-  - [in-situ quantization](docs/src/content/docs/guides/quantization/quantize-a-model.mdx) of any Hugging Face model at load;
-  - prebuilt [UQFF](docs/src/content/docs/reference/uqff-format.md) files.
+  - [in-situ quantization](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/quantization/quantize-a-model.mdx) of any Hugging Face model at load;
+  - prebuilt [UQFF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/uqff-format.md) files.
   
-  `--quant` picks the right one for a repo. [Per-layer topology](docs/src/content/docs/guides/perf/topology.mdx) sets the quantization layer by layer.
+  `--quant` picks the right one for a repo. [Per-layer topology](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/topology.mdx) sets the quantization layer by layer.
 - **Tuning:** `inference tune` recommends quantization and device mapping for your model and hardware, and `inference bench` measures it.
 
 ## Agents and tools
 
-- **Tool calls:** [tool calling](docs/src/content/docs/guides/agents/tool-calling-basics.mdx) with grammar-constrained arguments and strict schemas. Structured output through JSON Schema, regex or Lark grammars.
-- **Agentic loop:** a server-side [agentic loop](docs/src/content/docs/guides/agents/index.md) that runs tools and feeds results back. It comes with sandboxed [Python](docs/src/content/docs/guides/agents/enable-code-execution.mdx) and [shell](docs/src/content/docs/guides/agents/enable-shell.mdx) sessions, [web search](docs/src/content/docs/guides/agents/web-search.mdx), approvals and persistent sessions.
-- **Compatible features:** OpenAI-compatible [Skills](docs/src/content/docs/guides/agents/skills.mdx) and [file inputs](docs/src/content/docs/guides/agents/file-inputs.mdx), and an [MCP client](docs/src/content/docs/guides/agents/connect-mcp-server.mdx).
-- **Adapters:** [LoRA adapters](docs/src/content/docs/guides/customize/lora-adapters.mdx), chosen per request and hot-swapped live.
+- **Tool calls:** [tool calling](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/tool-calling-basics.mdx) with grammar-constrained arguments and strict schemas. Structured output through JSON Schema, regex or Lark grammars.
+- **Agentic loop:** a server-side [agentic loop](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/index.md) that runs tools and feeds results back. It comes with sandboxed [Python](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/enable-code-execution.mdx) and [shell](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/enable-shell.mdx) sessions, [web search](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/web-search.mdx), approvals and persistent sessions.
+- **Compatible features:** OpenAI-compatible [Skills](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/skills.mdx) and [file inputs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/file-inputs.mdx), and an [MCP client](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx).
+- **Adapters:** [LoRA adapters](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/customize/lora-adapters.mdx), chosen per request and hot-swapped live.
 
 ## Building from source
 
@@ -161,17 +161,17 @@ cargo build --release --features cuda      # or: --features metal, or neither fo
 cargo install --path crates/inference-cli --features cuda
 ```
 
-[Building from source](docs/src/content/docs/developer/from-source.md) covers feature flags, toolchains and the
-CUDA build. [Architecture](docs/src/content/docs/developer/architecture.md) maps the crates. A
-[Docker guide](docs/src/content/docs/guides/deploy/docker.md) covers containers.
+[Building from source](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/developer/from-source.md) covers feature flags, toolchains and the
+CUDA build. [Architecture](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/developer/architecture.md) maps the crates. A
+[Docker guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/deploy/docker.md) covers containers.
 
 ## Documentation
 
-- [Quickstart](docs/src/content/docs/quickstart.mdx): install, first run, first server
-- [CLI reference](docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `bench`, `tune`, `quantize`, `doctor` and the rest
-- [Speech models](docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings](docs/src/content/docs/guides/models/use-embeddings.mdx)
-- [Quantization types](docs/src/content/docs/reference/quantization-types.md) and [hardware support](docs/src/content/docs/reference/hardware-support.md)
-- [Troubleshooting](docs/src/content/docs/reference/troubleshooting.md) and [environment variables](docs/src/content/docs/reference/environment-variables.md)
+- [Quickstart](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx): install, first run, first server
+- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `bench`, `tune`, `quantize`, `doctor` and the rest
+- [Speech models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-embeddings.mdx)
+- [Quantization types](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md) and [hardware support](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/hardware-support.md)
+- [Troubleshooting](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/troubleshooting.md) and [environment variables](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/environment-variables.md)
 
 ## Origins and credits
 
