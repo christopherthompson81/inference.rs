@@ -1,6 +1,6 @@
 //! 1D and 2D Convolutions
 //!
-use crate::{op::BackpropOp, op::Op, Error, Result, Tensor};
+use crate::{op::BackpropOp, op::Op, Device, Error, Result, Tensor};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamsConv1D {
@@ -124,12 +124,15 @@ impl ParamsConvTranspose2D {
 
 impl Tensor {
     // CUDA runs many small groups in one direct kernel (few wide groups are faster as per-group GEMMs, 3090: 2x256 ch
-    // 10x slower direct, 32x16 7x faster); the conv backprop ops carry no group count, so tracked graphs split
+    // 10x slower direct, 32x16 7x faster); CPU only depthwise (256 ch 36x faster, 8x8 ch 3x slower); the conv
+    // backprop ops carry no group count, so tracked graphs split
     fn native_grouped_conv(&self, kernel: &Self, groups: usize, c_in_per_group: usize) -> bool {
-        groups >= c_in_per_group
-            && self.device().is_cuda()
-            && !self.track_op()
-            && !kernel.track_op()
+        let native = match self.device() {
+            Device::Cuda(_) => groups >= c_in_per_group,
+            Device::Cpu => c_in_per_group == 1,
+            _ => false,
+        };
+        native && !self.track_op() && !kernel.track_op()
     }
 
     fn conv1d_single_group(&self, kernel: &Self, params: &ParamsConv1D) -> Result<Self> {
@@ -729,6 +732,52 @@ mod tests {
                     diff <= tolerance * peak,
                     "{dtype:?} c={c} groups={groups}: {diff} (peak {peak})"
                 );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn depthwise_conv_on_cpu_matches_the_per_group_split() -> Result<()> {
+        // (channels, out per group, kernel, padding, stride, dilation)
+        let cases = [(8, 1, 3, 1, 2, 1), (6, 2, 5, 3, 1, 2), (4, 1, 3, 0, 3, 1)];
+        for (c, m, k, padding, stride, dilation) in cases {
+            let x2 =
+                Tensor::randn(0f32, 1., (2, 13, 11, c), &Device::Cpu)?.permute((0, 3, 1, 2))?;
+            let w2 = Tensor::randn(0f32, 1., (c * m, 1, k, k), &Device::Cpu)?;
+            let x1 = Tensor::randn(0f32, 1., (2, 37, c), &Device::Cpu)?.transpose(1, 2)?;
+            let w1 = Tensor::randn(0f32, 1., (c * m, 1, k), &Device::Cpu)?;
+            for (dtype, tolerance) in DTYPES {
+                let [x2, w2, x1, w1] = [&x2, &w2, &x1, &w1].map(|t| t.to_dtype(dtype));
+                let (x2, w2, x1, w1) = (x2?, w2?, x1?, w1?);
+                // A tracked input takes the per-group split, in f32 since CPU matmul has no bf16
+                let f32_var = |t: &Tensor| crate::Var::from_tensor(&t.to_dtype(DType::F32)?);
+                let (x2v, x1v, w2f, w1f) = (
+                    f32_var(&x2)?,
+                    f32_var(&x1)?,
+                    w2.to_dtype(DType::F32)?,
+                    w1.to_dtype(DType::F32)?,
+                );
+                let pairs = [
+                    (
+                        x2.conv2d(&w2, padding, stride, dilation, c)?,
+                        x2v.as_tensor().conv2d(&w2f, padding, stride, dilation, c)?,
+                    ),
+                    (
+                        x1.conv1d(&w1, padding, stride, dilation, c)?,
+                        x1v.as_tensor().conv1d(&w1f, padding, stride, dilation, c)?,
+                    ),
+                ];
+                for (got, split) in pairs {
+                    assert_eq!(got.dims(), split.dims());
+                    let diff = max_abs_diff(&got, &split)?;
+                    let peak = split.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+                    assert!(
+                        diff <= tolerance * peak,
+                        "{dtype:?} {:?} c={c}: {diff} (peak {peak})",
+                        got.dims()
+                    );
+                }
             }
         }
         Ok(())

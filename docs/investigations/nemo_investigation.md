@@ -1135,6 +1135,36 @@ The official OpenAI Python SDK (`openai[realtime]` 3.28, venv on `/mnt/data/venv
 - **Subprotocol keys** are read only on upgrade requests, and the 401 message names that option.
 - **Constants:** the shared constants come from inference-api: `DEFAULT_MODEL_ID`, `PCM16_BYTES` and `PCM16_SCALE`.
 
+## Run 39 - 2026-10-11
+
+CPU speed (#391). The CPU was shared with another build (load average ~21), so the timings are rough.
+
+- **Command:** the parakeet parity example (TDT v3, 98 s clip) and transformers' CPU generate, on a build without debug assertions.
+- **End to end:**
+  - ours: warm transcribe 19.6-24.7 s, first encode 11.7 s;
+  - transformers: generate 57-69 s, encoder alone 14.6 s.
+  - Ours is already ~2.3x faster end to end, and its encoder is faster too. The old "2x slower than torch" note is stale.
+- **Greedy decode, ~7-8 s:**
+  - An m=1 matvec kernel in inference-tensor beat gemm by ~1.4x on 1-row products (1.45 vs 2.07 ms min).
+  - It was dropped: the gain is small, and it would change numerics for every f32 CPU decode.
+  - gemm at m=14 is fine: 1.65 ms, 71 GFLOP/s.
+- **Subsampling depthwise conv2d:**
+  - On CPU, a grouped conv was split into one conv per group, then a cat. For 256 channels that is 256 tiled GEMMs plus copies.
+  - Timings (3x3, stride 2):
+    - 256 ch at 60x64: 86 ms;
+    - 30x32: 56 ms;
+    - 600x64: 251 ms.
+- **Direct grouped kernel** (`cpu_backend/conv_grouped.rs`): each output plane sums its group's taps in place, with f64 accumulation.
+  - Same shapes: 1.5 ms, 0.42 ms and 18 ms (36-56x faster).
+  - Max diff from the split: 3e-6.
+- **Wider groups are slower direct** (3x3, 60x64):
+  - 2x256 ch: 109 ms vs 45 ms split;
+  - 32x16 ch: 277 ms vs 39 ms;
+  - 8x8 ch: 21 ms vs 6.5 ms.
+  - So CPU takes the direct path only for depthwise (one input channel per group). CUDA keeps its own rule.
+- **Side effect:** BF16 depthwise convs now run on CPU; the split needed a BF16 matmul, which CPU lacks.
+- **Next:** measure the end-to-end change once the CPU is quiet; then work on the position table and the asr_quantize CLI.
+
 ## Run 40 - 2026-10-11
 
 The `asr` GGUF writer moved from the example into the CLI as `inference quantize asr` (#391).
@@ -1149,3 +1179,52 @@ The `asr` GGUF writer moved from the example into the CLI as `inference quantize
   - NVIDIA's file adds `encoder.pos_enc.pe` and `preprocessor.fb`, as in Run 24.
 - **Check 2:** `--quant q6_k-mix` from the `.nemo` path wrote 605.7 MiB: 397 F32, 37 F16, 169 Q6_K, 96 Q8_0.
 - **Errors:** `--policy q7` lists the presets and types; `--keep joint` is refused as not `fragment=type`.
+
+## Run 41 - 2026-10-11
+
+CPU speed (#391), on a quiet CPU: an i7-10700K, 8 cores with AVX2, about 1.1 TFLOP/s f32 peak. The model is TDT v3 on the 98 s clip, on a build without debug assertions.
+
+- **Depthwise conv (Run 39) alone, glibc malloc:**
+  - master: first encode 10.3 s, warm transcribe 12.3 s;
+  - branch: 9.1 s and 11.1 s.
+- **Per-stage timers** (temporary `Instant`s in `Block::forward` and the attention, since removed), first encode with glibc:
+  - attention 4.0 s;
+  - feed-forward 1.3 + 1.3 s;
+  - conv module 0.8 s;
+  - subsampling 0.58 s;
+  - position projection 0.36 s.
+- **Inside attention** (24 layers):
+  - rel_shift plus the score add, scale and mask: 1.52 s;
+  - qkv projections 0.38 s;
+  - position matmul 0.39 s;
+  - value matmul 0.36 s;
+  - content matmul 0.32 s;
+  - softmax 0.18 s.
+- **rel_shift:**
+  - The old Transformer-XL pad-and-reshape made three copies of each (heads, rows, 2T) block.
+  - Row r reads column Q-1-r+j, which is flat element Q-1 + r(P-1) + j. So `flatten_from` + `narrow` + `reshape` to (Q, P-1) is one copy: 1.52 s down to 0.93 s.
+  - Folding the scale into the two query sums removed another full pass: 0.65 s.
+  - A one-row block (streamed single frame) needs P columns, so it narrows directly. The tiny stream-vs-offline tests caught this.
+- **Parallel copy2d_ (dead end):**
+  - The remaining 0.5 s copy looked single-threaded, so I split it across the barrier pool.
+  - No change. A probe showed the copy takes 1.9 ms on warm memory and 7 ms on a fresh buffer.
+  - The cost is glibc returning each 21 MB buffer to the OS and faulting it back in. Reverted.
+- **Allocator:**
+  - The `inference` binary already uses mimalloc. The parity example used glibc, so the earlier numbers overstate the CLI's time.
+  - The example now uses mimalloc too.
+  - With mimalloc: shift copy 147 ms, first encode 6.75 s.
+- **A/B, both with mimalloc, 3 runs each:**
+  - master: warm 10.47-10.61 s, encode 8.36-8.72 s;
+  - branch: 8.69-8.85 s and 6.65-6.84 s;
+  - so ~17% end to end, with output identical (619/619 emissions, text matches).
+- **C ABI library:**
+  - `libinference_ffi` had no global allocator, so Python and C# ran on glibc.
+  - Python `JsonEngine.transcription`, 3 calls: 10.45, 10.37, 9.63 s.
+  - With mimalloc, it failed to load: `cannot allocate memory in static TLS block`. This is mimalloc's initial-exec TLS in a dlopen'ed library; the crate's `local_dynamic_tls` feature fixes it.
+  - Then: 9.27, 8.26, 8.27 s.
+- **What's left:**
+  - The feed-forward GEMMs run at ~385 GFLOP/s, about a third of peak; that is the `gemm` crate's own efficiency.
+  - Greedy decoding takes the ~2 s gap between encode and transcribe.
+- **Feature unification:** in a workspace build, `local_dynamic_tls` reaches the CLI's mimalloc too, since resolver 2 unifies features.
+  - The parity example, with and without `--features mimalloc/local_dynamic_tls`, 3 runs each: warm 8.73-8.99 s and 8.72-8.85 s.
+  - No measurable cost, so the CLI keeps the unified feature.
