@@ -59,7 +59,9 @@ thread_local! {
 }
 
 unsafe fn call_trampoline<F: Fn(usize)>(data: *const (), tid: usize) {
-    (*(data as *const F))(tid);
+    unsafe {
+        (*(data as *const F))(tid);
+    }
 }
 
 /// Build the two-level fan-out tree. First worker in each cluster is leader.
@@ -145,15 +147,15 @@ impl BarrierPool {
                         set_thread_affinity();
                         let inner = unsafe { &*(inner_ptr as *const BarrierPoolInner) };
                         let slot = &inner.slots[tid];
-                        let mut gen = 0usize;
+                        let mut generation = 0usize;
 
                         loop {
                             // Spin briefly then park, waiting for next work item.
                             let mut spins = 0u32;
                             loop {
                                 let g = slot.go.load(Ordering::Acquire);
-                                if g != gen {
-                                    gen = g;
+                                if g != generation {
+                                    generation = g;
                                     break;
                                 }
                                 if inner.stop.load(Ordering::Relaxed) {
@@ -175,7 +177,7 @@ impl BarrierPool {
                             // Fan work out to children.
                             let handles = inner.handles.get().unwrap();
                             for &child in &children {
-                                inner.slots[child].go.store(gen, Ordering::Release);
+                                inner.slots[child].go.store(generation, Ordering::Release);
                                 handles[child].unpark();
                             }
 
@@ -194,13 +196,14 @@ impl BarrierPool {
 
                             // Reduce: wait for all children before signalling parent.
                             for &child in &children {
-                                while inner.slots[child].done.load(Ordering::Acquire) != gen {
+                                while inner.slots[child].done.load(Ordering::Acquire) != generation
+                                {
                                     spin_loop();
                                 }
                             }
 
                             // Signal done unconditionally so main/parent never deadlocks.
-                            slot.done.store(gen, Ordering::Release);
+                            slot.done.store(generation, Ordering::Release);
                         }
                     })
                     .expect("failed to spawn candle barrier pool worker")
@@ -235,22 +238,22 @@ impl BarrierPool {
 struct BarrierGuard<'a> {
     inner: &'a BarrierPoolInner,
     roots: &'a [usize],
-    gen: usize,
+    generation: usize,
 }
 
 impl Drop for BarrierGuard<'_> {
     fn drop(&mut self) {
         for &root in self.roots {
-            while self.inner.slots[root].done.load(Ordering::Acquire) != self.gen {
+            while self.inner.slots[root].done.load(Ordering::Acquire) != self.generation {
                 spin_loop();
             }
         }
         // Always clear any stored panic. Propagate unless main is not already unwinding.
         let payload = self.inner.panic_payload.lock().unwrap().take();
-        if !std::thread::panicking() {
-            if let Some(p) = payload {
-                std::panic::resume_unwind(p);
-            }
+        if !std::thread::panicking()
+            && let Some(p) = payload
+        {
+            std::panic::resume_unwind(p);
         }
     }
 }
@@ -283,7 +286,7 @@ impl BarrierPool {
         let _guard = BarrierGuard {
             inner: &self.inner,
             roots: &self.root_workers,
-            gen: new_gen,
+            generation: new_gen,
         };
 
         // Main thread participates as worker n (workers are 0..n-1).
@@ -329,12 +332,14 @@ impl BarrierPool {
         // ~8 grabs per thread amortizes cursor contention while keeping tail imbalance small
         let chunk = n_items.div_ceil(n_threads * 8).max(1);
         let cursor = AtomicUsize::new(0);
-        self.execute(|_| loop {
-            let start = cursor.fetch_add(chunk, Ordering::Relaxed);
-            if start >= n_items {
-                break;
+        self.execute(|_| {
+            loop {
+                let start = cursor.fetch_add(chunk, Ordering::Relaxed);
+                if start >= n_items {
+                    break;
+                }
+                f(start..n_items.min(start + chunk));
             }
-            f(start..n_items.min(start + chunk));
         });
     }
 }

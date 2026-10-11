@@ -1,5 +1,5 @@
 use crate::{
-    backend::BackendStorage, CpuStorage, DType, Device, Result, Shape, Storage, Tensor, D,
+    CpuStorage, D, DType, Device, Result, Shape, Storage, Tensor, backend::BackendStorage,
 };
 use k_quants::*;
 use std::borrow::Cow;

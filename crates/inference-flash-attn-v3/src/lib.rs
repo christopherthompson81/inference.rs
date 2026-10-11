@@ -105,7 +105,9 @@ impl FlashAttn {
             )
         }
         if num_heads % num_heads_k != 0 {
-            inference_tensor::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
+            inference_tensor::bail!(
+                "number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}"
+            )
         }
         let use_gqa_packing = match num_heads / num_heads_k {
             2 | 4 | 8 | 16 | 32 => self.use_gqa_packing as i32,
@@ -544,7 +546,9 @@ impl FlashAttnVarLen {
             )
         }
         if num_heads % num_heads_k != 0 {
-            inference_tensor::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
+            inference_tensor::bail!(
+                "number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}"
+            )
         }
         let use_gqa_packing = match num_heads / num_heads_k {
             2 | 4 | 8 | 16 | 32 => self.use_gqa_packing as i32,
@@ -557,7 +561,9 @@ impl FlashAttnVarLen {
         }
         let nseqlens_k = seqlens_k_layout.shape().dims1()?;
         if nseqlens_k != nseqlens_q {
-            inference_tensor::bail!("seqlens_q and seqlens_k should have the same number of elements {nseqlens_q} <> {nseqlens_k}")
+            inference_tensor::bail!(
+                "seqlens_q and seqlens_k should have the same number of elements {nseqlens_q} <> {nseqlens_k}"
+            )
         }
 
         let batch_size = nseqlens_q - 1;

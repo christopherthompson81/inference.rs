@@ -1,7 +1,7 @@
 [package]
 name = "inference-flash-attn-v3"
 version = "0.9.3"
-edition = "2021"
+edition = "2024"
 description = "FlashAttention-3 (Hopper) for inference-tensor, derived from candle-flash-attn-v3."
 repository = "https://github.com/christopherthompson81/inference.rs"
 license = "MIT OR Apache-2.0"

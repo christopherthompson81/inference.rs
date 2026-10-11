@@ -1,8 +1,7 @@
 [package]
 name = "inference-kernel-build"
 version.workspace = true
-# cudaforge's edition
-edition = "2021"
+edition.workspace = true
 rust-version.workspace = true
 
 description = "Build-time CUDA kernel compilation for inference.rs's kernel crates, derived from cudaforge."

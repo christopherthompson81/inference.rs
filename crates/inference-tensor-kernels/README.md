@@ -36,3 +36,4 @@ Apache-2.0, see `LICENSE-MIT` and `LICENSE-APACHE`), and maintained here; upstre
   `unormcdf_*`, `copy2d_f8_e4m3` (E4M3 copies run `copy2d_u8`), and `restrided`/`chunk_sum` in `cuda_utils.cuh`.
 - `src/unary.cu`: adds `ucopy_i16`/`ucopy_i32`, which the backend requested for strided I16/I32 copies but upstream
   never defined.
+- Rust edition 2024 (upstream is 2021), inherited from the workspace; the code needed no change.

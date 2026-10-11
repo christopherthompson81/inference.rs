@@ -1,11 +1,11 @@
 use crate::{DType, Result};
 
 use candle_metal_kernels::{
+    Kernels,
     metal::{
         BlitCommandsGuard, Buffer, BufferMap, Commands, CommandsGuard, Device, MTLResourceOptions,
         ResidencySet,
     },
-    Kernels,
 };
 use objc2_foundation::NSURL;
 use objc2_metal::{MTLCaptureDescriptor, MTLCaptureDestination, MTLCaptureManager};

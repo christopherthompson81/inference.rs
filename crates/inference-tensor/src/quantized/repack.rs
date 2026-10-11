@@ -5,7 +5,7 @@ use crate::Result;
 use std::sync::OnceLock;
 
 #[cfg(target_arch = "aarch64")]
-use super::k_quants::{BlockQ4K, BlockQ4_0, QK4_0};
+use super::k_quants::{BlockQ4_0, BlockQ4K, QK4_0};
 #[cfg(target_arch = "aarch64")]
 use super::k_quants::{BlockQ5K, BlockQ6K, QK_K};
 #[cfg(target_arch = "aarch64")]

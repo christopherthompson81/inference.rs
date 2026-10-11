@@ -98,8 +98,8 @@ impl TensorInfo {
         let block_size = self.ggml_dtype.block_size();
         if !tensor_elems.is_multiple_of(block_size) {
             crate::bail!(
-            "the number of elements {tensor_elems} is not divisible by the block size {block_size}"
-        )
+                "the number of elements {tensor_elems} is not divisible by the block size {block_size}"
+            )
         }
         let size_in_bytes = tensor_elems / block_size * self.ggml_dtype.type_size();
         let tensor_start = tensor_data_offset.saturating_add(self.offset);
@@ -755,9 +755,11 @@ mod tests {
         let tail = content.read_large_array(&mut buf, "blob", len as u64 - 3..len as u64)?;
         let want = (len - 3..len).map(|i| (i % 251) as u8).collect::<Vec<_>>();
         assert_eq!(tail, want);
-        assert!(content
-            .read_large_array(&mut buf, "blob", 0..len as u64 + 1)
-            .is_err());
+        assert!(
+            content
+                .read_large_array(&mut buf, "blob", 0..len as u64 + 1)
+                .is_err()
+        );
         Ok(())
     }
 }

@@ -3,10 +3,10 @@ use std::borrow::Cow;
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 
 use crate::{
-    conv::ParamsConv2D,
-    cpu_backend::{copy_strided_src_, Im2Col, Map1, Map2, MatMul},
-    shape::dims4,
     Layout, Result, WithDType,
+    conv::ParamsConv2D,
+    cpu_backend::{Im2Col, Map1, Map2, MatMul, copy_strided_src_},
+    shape::dims4,
 };
 
 pub(super) struct Conv2D<'a>(pub(super) &'a crate::conv::ParamsConv2D);

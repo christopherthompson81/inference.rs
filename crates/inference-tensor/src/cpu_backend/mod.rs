@@ -8,15 +8,15 @@ use rayon::prelude::*;
 
 mod utils;
 pub use utils::{
-    binary_map, binary_map_vec, binary_map_vec_par, unary_map, unary_map_vec, unary_map_vec_par,
-    Map1, Map1Any, Map2, Map2InPlace, Map2U8,
+    Map1, Map1Any, Map2, Map2InPlace, Map2U8, binary_map, binary_map_vec, binary_map_vec_par,
+    unary_map, unary_map_vec, unary_map_vec_par,
 };
 #[cfg(not(any(feature = "mkl", feature = "accelerate")))]
 mod conv1d_direct;
 mod conv2d;
 mod conv_grouped;
-use conv2d::Conv2D;
 use conv_grouped::GroupedConv;
+use conv2d::Conv2D;
 
 // TODO: Maybe we should not implement [Clone] here and instead have an explicit allocator +
 // intercept the oom errors to avoid panicking and provide a proper error.
@@ -1349,7 +1349,7 @@ impl Map2 for MatMul {
         rhs: &[T],
         rhs_l: &Layout,
     ) -> Result<Vec<T>> {
-        use gemm::{gemm, Parallelism};
+        use gemm::{Parallelism, gemm};
 
         match T::DTYPE {
             DType::F16 | DType::F32 | DType::F64 => {}
@@ -2729,12 +2729,12 @@ impl BackendStorage for CpuStorage {
         }
         // MKL and Accelerate bring their own GEMM, which the direct kernel was not measured against
         #[cfg(not(any(feature = "mkl", feature = "accelerate")))]
-        if let (Self::F32(src), Self::F32(w)) = (self, kernel) {
-            if conv1d_direct::applies(params) {
-                return Ok(Self::F32(conv1d_direct::conv1d(
-                    src, l, w, kernel_l, params,
-                )?));
-            }
+        if let (Self::F32(src), Self::F32(w)) = (self, kernel)
+            && conv1d_direct::applies(params)
+        {
+            return Ok(Self::F32(conv1d_direct::conv1d(
+                src, l, w, kernel_l, params,
+            )?));
         }
         let op = Im2Col1D {
             l_k: params.k_size,
@@ -3209,67 +3209,69 @@ impl BackendDevice for CpuDevice {
 
     #[allow(clippy::uninit_vec)]
     unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<CpuStorage> {
-        let elem_count = shape.elem_count();
-        // The code below is highly unsafe but hopefully not directly unsound as we only consider
-        // types that are Copy, not Drop, and for which all bit patterns are proper values.
-        // It's still pretty risky, see the following for more details:
-        // https://github.com/rust-lang/rust-clippy/issues/4483
-        let storage = match dtype {
-            DType::U8 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::U8(v)
-            }
-            DType::U32 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::U32(v)
-            }
-            DType::I16 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::I16(v)
-            }
-            DType::I32 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::I32(v)
-            }
-            DType::I64 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::I64(v)
-            }
-            DType::BF16 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::BF16(v)
-            }
-            DType::F16 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::F16(v)
-            }
-            DType::F32 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::F32(v)
-            }
-            DType::F64 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::F64(v)
-            }
-            DType::F8E4M3 => {
-                let mut v = Vec::with_capacity(elem_count);
-                v.set_len(elem_count);
-                CpuStorage::F8E4M3(v)
-            }
-            DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
-                return Err(Error::UnsupportedDTypeForOp(dtype, "alloc_uninit").bt())
-            }
-        };
-        Ok(storage)
+        unsafe {
+            let elem_count = shape.elem_count();
+            // The code below is highly unsafe but hopefully not directly unsound as we only consider
+            // types that are Copy, not Drop, and for which all bit patterns are proper values.
+            // It's still pretty risky, see the following for more details:
+            // https://github.com/rust-lang/rust-clippy/issues/4483
+            let storage = match dtype {
+                DType::U8 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::U8(v)
+                }
+                DType::U32 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::U32(v)
+                }
+                DType::I16 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::I16(v)
+                }
+                DType::I32 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::I32(v)
+                }
+                DType::I64 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::I64(v)
+                }
+                DType::BF16 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::BF16(v)
+                }
+                DType::F16 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::F16(v)
+                }
+                DType::F32 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::F32(v)
+                }
+                DType::F64 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::F64(v)
+                }
+                DType::F8E4M3 => {
+                    let mut v = Vec::with_capacity(elem_count);
+                    v.set_len(elem_count);
+                    CpuStorage::F8E4M3(v)
+                }
+                DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
+                    return Err(Error::UnsupportedDTypeForOp(dtype, "alloc_uninit").bt());
+                }
+            };
+            Ok(storage)
+        }
     }
 
     fn zeros_impl(&self, shape: &Shape, dtype: DType) -> Result<CpuStorage> {
@@ -3286,7 +3288,7 @@ impl BackendDevice for CpuDevice {
             DType::F64 => CpuStorage::F64(vec![0f64; elem_count]),
             DType::F8E4M3 => CpuStorage::F8E4M3(vec![F8E4M3::ZERO; elem_count]),
             DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
-                return Err(Error::UnsupportedDTypeForOp(dtype, "zeros").bt())
+                return Err(Error::UnsupportedDTypeForOp(dtype, "zeros").bt());
             }
         };
         Ok(storage)

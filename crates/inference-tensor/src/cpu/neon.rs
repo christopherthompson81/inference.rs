@@ -11,12 +11,17 @@ pub struct CurrentCpu {}
 impl CurrentCpu {
     #[cfg(target_arch = "aarch64")]
     unsafe fn reduce_one(x: float32x4_t) -> f32 {
-        vaddvq_f32(x)
+        unsafe { vaddvq_f32(x) }
     }
 
     #[cfg(target_arch = "arm")]
     unsafe fn reduce_one(x: float32x4_t) -> f32 {
-        vgetq_lane_f32(x, 0) + vgetq_lane_f32(x, 1) + vgetq_lane_f32(x, 2) + vgetq_lane_f32(x, 3)
+        unsafe {
+            vgetq_lane_f32(x, 0)
+                + vgetq_lane_f32(x, 1)
+                + vgetq_lane_f32(x, 2)
+                + vgetq_lane_f32(x, 3)
+        }
     }
 }
 
@@ -28,44 +33,48 @@ impl Cpu for CurrentCpu {
     const EPR: usize = 4;
 
     unsafe fn zero() -> Self::Unit {
-        vdupq_n_f32(0.0)
+        unsafe { vdupq_n_f32(0.0) }
     }
 
     unsafe fn from_f32(x: f32) -> Self::Unit {
-        vdupq_n_f32(x)
+        unsafe { vdupq_n_f32(x) }
     }
 
     unsafe fn zero_array() -> Self::Array {
-        [Self::zero(); Self::ARR]
+        unsafe { [Self::zero(); Self::ARR] }
     }
 
     unsafe fn load(mem_addr: *const f32) -> Self::Unit {
-        vld1q_f32(mem_addr)
+        unsafe { vld1q_f32(mem_addr) }
     }
 
     unsafe fn vec_add(a: Self::Unit, b: Self::Unit) -> Self::Unit {
-        vaddq_f32(a, b)
+        unsafe { vaddq_f32(a, b) }
     }
 
     unsafe fn vec_fma(a: Self::Unit, b: Self::Unit, c: Self::Unit) -> Self::Unit {
-        vfmaq_f32(a, b, c)
+        unsafe { vfmaq_f32(a, b, c) }
     }
 
     unsafe fn vec_store(mem_addr: *mut f32, a: Self::Unit) {
-        vst1q_f32(mem_addr, a);
+        unsafe {
+            vst1q_f32(mem_addr, a);
+        }
     }
 
     unsafe fn vec_reduce(mut x: Self::Array, y: *mut f32) {
-        for i in 0..Self::ARR / 2 {
-            x[2 * i] = vaddq_f32(x[2 * i], x[2 * i + 1]);
+        unsafe {
+            for i in 0..Self::ARR / 2 {
+                x[2 * i] = vaddq_f32(x[2 * i], x[2 * i + 1]);
+            }
+            for i in 0..Self::ARR / 4 {
+                x[4 * i] = vaddq_f32(x[4 * i], x[4 * i + 2]);
+            }
+            for i in 0..Self::ARR / 8 {
+                x[8 * i] = vaddq_f32(x[8 * i], x[8 * i + 4]);
+            }
+            *y = Self::reduce_one(x[0]);
         }
-        for i in 0..Self::ARR / 4 {
-            x[4 * i] = vaddq_f32(x[4 * i], x[4 * i + 2]);
-        }
-        for i in 0..Self::ARR / 8 {
-            x[8 * i] = vaddq_f32(x[8 * i], x[8 * i + 4]);
-        }
-        *y = Self::reduce_one(x[0]);
     }
 }
 
@@ -93,59 +102,65 @@ mod fp16 {
             const EPR: usize = 4;
 
             unsafe fn zero() -> Self::Unit {
-                vdupq_n_f32(0.0)
+                unsafe { vdupq_n_f32(0.0) }
             }
 
             unsafe fn zero_array() -> Self::Array {
-                [Self::zero(); Self::ARR]
+                unsafe { [Self::zero(); Self::ARR] }
             }
 
             unsafe fn load(mem_addr: *const f16) -> Self::Unit {
-                let bits = vld1_u16(mem_addr as *const u16);
-                let result: Self::Unit;
-                asm!(
-                    "fcvtl {dst:v}.4s, {src:v}.4h",
-                    src = in(vreg) bits,
-                    dst = out(vreg) result,
-                    options(pure, nomem, nostack),
-                );
-                result
+                unsafe {
+                    let bits = vld1_u16(mem_addr as *const u16);
+                    let result: Self::Unit;
+                    asm!(
+                        "fcvtl {dst:v}.4s, {src:v}.4h",
+                        src = in(vreg) bits,
+                        dst = out(vreg) result,
+                        options(pure, nomem, nostack),
+                    );
+                    result
+                }
             }
 
             unsafe fn vec_add(a: Self::Unit, b: Self::Unit) -> Self::Unit {
-                vaddq_f32(a, b)
+                unsafe { vaddq_f32(a, b) }
             }
 
             unsafe fn vec_fma(a: Self::Unit, b: Self::Unit, c: Self::Unit) -> Self::Unit {
-                vfmaq_f32(a, b, c)
+                unsafe { vfmaq_f32(a, b, c) }
             }
 
             unsafe fn vec_reduce(mut x: Self::Array, y: *mut f32) {
-                for i in 0..Self::ARR / 2 {
-                    x[2 * i] = vaddq_f32(x[2 * i], x[2 * i + 1]);
+                unsafe {
+                    for i in 0..Self::ARR / 2 {
+                        x[2 * i] = vaddq_f32(x[2 * i], x[2 * i + 1]);
+                    }
+                    for i in 0..Self::ARR / 4 {
+                        x[4 * i] = vaddq_f32(x[4 * i], x[4 * i + 2]);
+                    }
+                    for i in 0..Self::ARR / 8 {
+                        x[8 * i] = vaddq_f32(x[8 * i], x[8 * i + 4]);
+                    }
+                    *y = vaddvq_f32(x[0]);
                 }
-                for i in 0..Self::ARR / 4 {
-                    x[4 * i] = vaddq_f32(x[4 * i], x[4 * i + 2]);
-                }
-                for i in 0..Self::ARR / 8 {
-                    x[8 * i] = vaddq_f32(x[8 * i], x[8 * i + 4]);
-                }
-                *y = vaddvq_f32(x[0]);
             }
 
             unsafe fn from_f32(v: f32) -> Self::Unit {
-                vdupq_n_f32(v)
+                unsafe { vdupq_n_f32(v) }
             }
 
             unsafe fn vec_store(mem_addr: *mut f16, a: Self::Unit) {
-                let bits: uint16x4_t;
-                asm!(
-                    "fcvtn {dst:v}.4h, {src:v}.4s",
-                    src = in(vreg) a,
-                    dst = out(vreg) bits,
-                    options(pure, nomem, nostack),
-                );
-                vst1_u16(mem_addr as *mut u16, bits);
+                unsafe {
+                    let bits: uint16x4_t;
+                    asm!(
+                        "fcvtn {dst:v}.4h, {src:v}.4s",
+                        src = in(vreg) a,
+                        dst = out(vreg) bits,
+                        options(pure, nomem, nostack),
+                    );
+                    vst1_u16(mem_addr as *mut u16, bits);
+                }
             }
         }
     }
@@ -297,50 +312,56 @@ mod bfloat16 {
             const EPR: usize = 4;
 
             unsafe fn zero() -> Self::Unit {
-                vdupq_n_f32(0.0)
+                unsafe { vdupq_n_f32(0.0) }
             }
 
             unsafe fn zero_array() -> Self::Array {
-                [Self::zero(); Self::ARR]
+                unsafe { [Self::zero(); Self::ARR] }
             }
 
             unsafe fn load(mem_addr: *const bf16) -> Self::Unit {
-                // bf16 is the top 16 bits of f32; shift left by 16 to reconstruct f32 bits.
-                let i = vld1_u16(mem_addr as *const u16);
-                let s = vshll_n_u16::<16>(i);
-                vreinterpretq_f32_u32(s)
+                unsafe {
+                    // bf16 is the top 16 bits of f32; shift left by 16 to reconstruct f32 bits.
+                    let i = vld1_u16(mem_addr as *const u16);
+                    let s = vshll_n_u16::<16>(i);
+                    vreinterpretq_f32_u32(s)
+                }
             }
 
             unsafe fn vec_add(a: Self::Unit, b: Self::Unit) -> Self::Unit {
-                vaddq_f32(a, b)
+                unsafe { vaddq_f32(a, b) }
             }
 
             unsafe fn vec_fma(a: Self::Unit, b: Self::Unit, c: Self::Unit) -> Self::Unit {
-                vfmaq_f32(a, b, c)
+                unsafe { vfmaq_f32(a, b, c) }
             }
 
             unsafe fn vec_reduce(mut x: Self::Array, y: *mut f32) {
-                for i in 0..Self::ARR / 2 {
-                    x[2 * i] = vaddq_f32(x[2 * i], x[2 * i + 1]);
+                unsafe {
+                    for i in 0..Self::ARR / 2 {
+                        x[2 * i] = vaddq_f32(x[2 * i], x[2 * i + 1]);
+                    }
+                    for i in 0..Self::ARR / 4 {
+                        x[4 * i] = vaddq_f32(x[4 * i], x[4 * i + 2]);
+                    }
+                    for i in 0..Self::ARR / 8 {
+                        x[8 * i] = vaddq_f32(x[8 * i], x[8 * i + 4]);
+                    }
+                    *y = vaddvq_f32(x[0]);
                 }
-                for i in 0..Self::ARR / 4 {
-                    x[4 * i] = vaddq_f32(x[4 * i], x[4 * i + 2]);
-                }
-                for i in 0..Self::ARR / 8 {
-                    x[8 * i] = vaddq_f32(x[8 * i], x[8 * i + 4]);
-                }
-                *y = vaddvq_f32(x[0]);
             }
 
             unsafe fn from_f32(v: f32) -> Self::Unit {
-                vdupq_n_f32(v)
+                unsafe { vdupq_n_f32(v) }
             }
 
             unsafe fn vec_store(mem_addr: *mut bf16, a: Self::Unit) {
-                // Extract top 16 bits of each f32 lane, which is the bf16 representation.
-                let s = vreinterpretq_u32_f32(a);
-                let h = vshrn_n_u32::<16>(s);
-                vst1_u16(mem_addr as *mut u16, h);
+                unsafe {
+                    // Extract top 16 bits of each f32 lane, which is the bf16 representation.
+                    let s = vreinterpretq_u32_f32(a);
+                    let h = vshrn_n_u32::<16>(s);
+                    vst1_u16(mem_addr as *mut u16, h);
+                }
             }
         }
     }
@@ -429,183 +450,204 @@ mod bfloat16 {
 pub use bfloat16::CurrentCpuBF16;
 
 pub(crate) unsafe fn vec_dot_f32(a_row: *const f32, b_row: *const f32, c: *mut f32, k: usize) {
-    let mut sum = CurrentCpu::zero_array();
-    let mut i = 0;
-    while i + CurrentCpu::STEP <= k {
-        for j in 0..CurrentCpu::ARR {
-            sum[j] = CurrentCpu::vec_fma(
-                sum[j],
-                CurrentCpu::load(a_row.add(i + j * CurrentCpu::EPR)),
-                CurrentCpu::load(b_row.add(i + j * CurrentCpu::EPR)),
-            );
+    unsafe {
+        let mut sum = CurrentCpu::zero_array();
+        let mut i = 0;
+        while i + CurrentCpu::STEP <= k {
+            for j in 0..CurrentCpu::ARR {
+                sum[j] = CurrentCpu::vec_fma(
+                    sum[j],
+                    CurrentCpu::load(a_row.add(i + j * CurrentCpu::EPR)),
+                    CurrentCpu::load(b_row.add(i + j * CurrentCpu::EPR)),
+                );
+            }
+            i += CurrentCpu::STEP;
         }
-        i += CurrentCpu::STEP;
-    }
-    CurrentCpu::vec_reduce(sum, c);
-    while i < k {
-        *c += *a_row.add(i) * (*b_row.add(i));
-        i += 1;
+        CurrentCpu::vec_reduce(sum, c);
+        while i < k {
+            *c += *a_row.add(i) * (*b_row.add(i));
+            i += 1;
+        }
     }
 }
 
 pub(crate) unsafe fn vec_sum(row: *const f32, b: *mut f32, k: usize) {
-    let np = k & !(CurrentCpu::STEP - 1);
-    let mut sum = CurrentCpu::zero_array();
-    let mut x = CurrentCpu::zero_array();
-    for i in (0..np).step_by(CurrentCpu::STEP) {
-        for j in 0..CurrentCpu::ARR {
-            x[j] = CurrentCpu::load(row.add(i + j * CurrentCpu::EPR));
-            sum[j] = CurrentCpu::vec_add(sum[j], x[j]);
+    unsafe {
+        let np = k & !(CurrentCpu::STEP - 1);
+        let mut sum = CurrentCpu::zero_array();
+        let mut x = CurrentCpu::zero_array();
+        for i in (0..np).step_by(CurrentCpu::STEP) {
+            for j in 0..CurrentCpu::ARR {
+                x[j] = CurrentCpu::load(row.add(i + j * CurrentCpu::EPR));
+                sum[j] = CurrentCpu::vec_add(sum[j], x[j]);
+            }
         }
-    }
-    CurrentCpu::vec_reduce(sum, b);
-    for i in np..k {
-        *b += *row.add(i)
+        CurrentCpu::vec_reduce(sum, b);
+        for i in np..k {
+            *b += *row.add(i)
+        }
     }
 }
 
 pub(crate) unsafe fn vec_dot_f16(a_row: *const f16, b_row: *const f16, c: *mut f32, k: usize) {
-    let mut sumf = 0.0f32;
-    let mut sum = CurrentCpuF16::zero_array();
-    let mut steps_since_flush = 0usize;
-    let mut i = 0;
-    while i + CurrentCpuF16::STEP <= k {
-        for j in 0..CurrentCpuF16::ARR {
-            sum[j] = CurrentCpuF16::vec_fma(
-                sum[j],
-                CurrentCpuF16::load(a_row.add(i + j * CurrentCpuF16::EPR)),
-                CurrentCpuF16::load(b_row.add(i + j * CurrentCpuF16::EPR)),
-            );
+    unsafe {
+        let mut sumf = 0.0f32;
+        let mut sum = CurrentCpuF16::zero_array();
+        let mut steps_since_flush = 0usize;
+        let mut i = 0;
+        while i + CurrentCpuF16::STEP <= k {
+            for j in 0..CurrentCpuF16::ARR {
+                sum[j] = CurrentCpuF16::vec_fma(
+                    sum[j],
+                    CurrentCpuF16::load(a_row.add(i + j * CurrentCpuF16::EPR)),
+                    CurrentCpuF16::load(b_row.add(i + j * CurrentCpuF16::EPR)),
+                );
+            }
+            steps_since_flush += 1;
+            if steps_since_flush == CurrentCpuF16::FLUSH_INTERVAL {
+                let mut partial = 0.0f32;
+                CurrentCpuF16::vec_reduce(sum, &mut partial);
+                sumf += partial;
+                sum = CurrentCpuF16::zero_array();
+                steps_since_flush = 0;
+            }
+            i += CurrentCpuF16::STEP;
         }
-        steps_since_flush += 1;
-        if steps_since_flush == CurrentCpuF16::FLUSH_INTERVAL {
-            let mut partial = 0.0f32;
-            CurrentCpuF16::vec_reduce(sum, &mut partial);
-            sumf += partial;
-            sum = CurrentCpuF16::zero_array();
-            steps_since_flush = 0;
+        let mut partial = 0.0f32;
+        CurrentCpuF16::vec_reduce(sum, &mut partial);
+        sumf += partial;
+        while i < k {
+            sumf += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
+            i += 1;
         }
-        i += CurrentCpuF16::STEP;
+        *c = sumf;
     }
-    let mut partial = 0.0f32;
-    CurrentCpuF16::vec_reduce(sum, &mut partial);
-    sumf += partial;
-    while i < k {
-        sumf += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
-        i += 1;
-    }
-    *c = sumf;
 }
 
 pub(crate) unsafe fn vec_dot_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut f32, k: usize) {
-    let mut sum = CurrentCpuBF16::zero_array();
-    let mut i = 0;
-    while i + CurrentCpuBF16::STEP <= k {
-        for j in 0..CurrentCpuBF16::ARR {
-            sum[j] = CurrentCpuBF16::vec_fma(
-                sum[j],
-                CurrentCpuBF16::load(a_row.add(i + j * CurrentCpuBF16::EPR)),
-                CurrentCpuBF16::load(b_row.add(i + j * CurrentCpuBF16::EPR)),
-            );
+    unsafe {
+        let mut sum = CurrentCpuBF16::zero_array();
+        let mut i = 0;
+        while i + CurrentCpuBF16::STEP <= k {
+            for j in 0..CurrentCpuBF16::ARR {
+                sum[j] = CurrentCpuBF16::vec_fma(
+                    sum[j],
+                    CurrentCpuBF16::load(a_row.add(i + j * CurrentCpuBF16::EPR)),
+                    CurrentCpuBF16::load(b_row.add(i + j * CurrentCpuBF16::EPR)),
+                );
+            }
+            i += CurrentCpuBF16::STEP;
         }
-        i += CurrentCpuBF16::STEP;
-    }
-    CurrentCpuBF16::vec_reduce(sum, c);
-    while i < k {
-        *c += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
-        i += 1;
+        CurrentCpuBF16::vec_reduce(sum, c);
+        while i < k {
+            *c += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
+            i += 1;
+        }
     }
 }
 
 pub(crate) unsafe fn vec_add_f16(a_row: *const f16, b_row: *const f16, c: *mut f16, k: usize) {
-    let mut i = 0;
-    while i + CurrentCpuF16::STEP <= k {
-        for j in 0..CurrentCpuF16::ARR {
-            CurrentCpuF16::vec_store(
-                c.add(i + j * CurrentCpuF16::EPR),
-                CurrentCpuF16::vec_add(
-                    CurrentCpuF16::load(a_row.add(i + j * CurrentCpuF16::EPR)),
-                    CurrentCpuF16::load(b_row.add(i + j * CurrentCpuF16::EPR)),
-                ),
-            );
+    unsafe {
+        let mut i = 0;
+        while i + CurrentCpuF16::STEP <= k {
+            for j in 0..CurrentCpuF16::ARR {
+                CurrentCpuF16::vec_store(
+                    c.add(i + j * CurrentCpuF16::EPR),
+                    CurrentCpuF16::vec_add(
+                        CurrentCpuF16::load(a_row.add(i + j * CurrentCpuF16::EPR)),
+                        CurrentCpuF16::load(b_row.add(i + j * CurrentCpuF16::EPR)),
+                    ),
+                );
+            }
+            i += CurrentCpuF16::STEP;
         }
-        i += CurrentCpuF16::STEP;
-    }
-    for j in i..k {
-        *c.add(j) = *a_row.add(j) + *b_row.add(j);
+        for j in i..k {
+            *c.add(j) = *a_row.add(j) + *b_row.add(j);
+        }
     }
 }
 
 pub(crate) unsafe fn vec_add_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut bf16, k: usize) {
-    // Widen to f32, add, narrow. The bfdot-specialized CurrentCpuBF16 keeps raw bf16 bits in
-    // its Unit and its vec_add interprets them as f32 lanes, so it must not be used here.
-    let mut i = 0;
-    while i + 8 <= k {
-        let a = vld1q_u16(a_row.add(i) as *const u16);
-        let b = vld1q_u16(b_row.add(i) as *const u16);
-        let a_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(a)));
-        let a_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(a));
-        let b_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(b)));
-        let b_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(b));
-        let lo = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(a_lo, b_lo)));
-        let hi = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(a_hi, b_hi)));
-        vst1q_u16(c.add(i) as *mut u16, vcombine_u16(lo, hi));
-        i += 8;
-    }
-    for j in i..k {
-        *c.add(j) = *a_row.add(j) + *b_row.add(j);
+    unsafe {
+        // Widen to f32, add, narrow. The bfdot-specialized CurrentCpuBF16 keeps raw bf16 bits in
+        // its Unit and its vec_add interprets them as f32 lanes, so it must not be used here.
+        let mut i = 0;
+        while i + 8 <= k {
+            let a = vld1q_u16(a_row.add(i) as *const u16);
+            let b = vld1q_u16(b_row.add(i) as *const u16);
+            let a_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(a)));
+            let a_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(a));
+            let b_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(b)));
+            let b_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(b));
+            let lo = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(a_lo, b_lo)));
+            let hi = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(a_hi, b_hi)));
+            vst1q_u16(c.add(i) as *mut u16, vcombine_u16(lo, hi));
+            i += 8;
+        }
+        for j in i..k {
+            *c.add(j) = *a_row.add(j) + *b_row.add(j);
+        }
     }
 }
 
 pub(crate) unsafe fn vec_scalar_add_f16(scalar: f16, xs: *const f16, ys: *mut f16, k: usize) {
-    let sv = CurrentCpuF16::from_f32(scalar.to_f32());
-    let mut i = 0;
-    while i + CurrentCpuF16::STEP <= k {
-        for j in 0..CurrentCpuF16::ARR {
-            CurrentCpuF16::vec_store(
-                ys.add(i + j * CurrentCpuF16::EPR),
-                CurrentCpuF16::vec_add(CurrentCpuF16::load(xs.add(i + j * CurrentCpuF16::EPR)), sv),
-            );
+    unsafe {
+        let sv = CurrentCpuF16::from_f32(scalar.to_f32());
+        let mut i = 0;
+        while i + CurrentCpuF16::STEP <= k {
+            for j in 0..CurrentCpuF16::ARR {
+                CurrentCpuF16::vec_store(
+                    ys.add(i + j * CurrentCpuF16::EPR),
+                    CurrentCpuF16::vec_add(
+                        CurrentCpuF16::load(xs.add(i + j * CurrentCpuF16::EPR)),
+                        sv,
+                    ),
+                );
+            }
+            i += CurrentCpuF16::STEP;
         }
-        i += CurrentCpuF16::STEP;
-    }
-    for j in i..k {
-        *ys.add(j) = *xs.add(j) + scalar;
+        for j in i..k {
+            *ys.add(j) = *xs.add(j) + scalar;
+        }
     }
 }
 
 pub(crate) unsafe fn vec_mul_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut bf16, k: usize) {
-    let mut i = 0;
-    while i + 8 <= k {
-        let a = vld1q_u16(a_row.add(i) as *const u16);
-        let b = vld1q_u16(b_row.add(i) as *const u16);
-        let a_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(a)));
-        let a_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(a));
-        let b_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(b)));
-        let b_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(b));
-        let lo = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vmulq_f32(a_lo, b_lo)));
-        let hi = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vmulq_f32(a_hi, b_hi)));
-        vst1q_u16(c.add(i) as *mut u16, vcombine_u16(lo, hi));
-        i += 8;
-    }
-    for j in i..k {
-        *c.add(j) = *a_row.add(j) * *b_row.add(j);
+    unsafe {
+        let mut i = 0;
+        while i + 8 <= k {
+            let a = vld1q_u16(a_row.add(i) as *const u16);
+            let b = vld1q_u16(b_row.add(i) as *const u16);
+            let a_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(a)));
+            let a_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(a));
+            let b_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(b)));
+            let b_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(b));
+            let lo = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vmulq_f32(a_lo, b_lo)));
+            let hi = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vmulq_f32(a_hi, b_hi)));
+            vst1q_u16(c.add(i) as *mut u16, vcombine_u16(lo, hi));
+            i += 8;
+        }
+        for j in i..k {
+            *c.add(j) = *a_row.add(j) * *b_row.add(j);
+        }
     }
 }
 
 pub(crate) unsafe fn vec_scalar_add_bf16(scalar: bf16, xs: *const bf16, ys: *mut bf16, k: usize) {
-    let sv = vdupq_n_f32(scalar.to_f32());
-    let mut i = 0;
-    while i + 8 <= k {
-        let x = vld1q_u16(xs.add(i) as *const u16);
-        let x_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(x)));
-        let x_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(x));
-        let lo = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(x_lo, sv)));
-        let hi = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(x_hi, sv)));
-        vst1q_u16(ys.add(i) as *mut u16, vcombine_u16(lo, hi));
-        i += 8;
-    }
-    for j in i..k {
-        *ys.add(j) = *xs.add(j) + scalar;
+    unsafe {
+        let sv = vdupq_n_f32(scalar.to_f32());
+        let mut i = 0;
+        while i + 8 <= k {
+            let x = vld1q_u16(xs.add(i) as *const u16);
+            let x_lo = vreinterpretq_f32_u32(vshll_n_u16::<16>(vget_low_u16(x)));
+            let x_hi = vreinterpretq_f32_u32(vshll_high_n_u16::<16>(x));
+            let lo = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(x_lo, sv)));
+            let hi = vshrn_n_u32::<16>(vreinterpretq_u32_f32(vaddq_f32(x_hi, sv)));
+            vst1q_u16(ys.add(i) as *mut u16, vcombine_u16(lo, hi));
+            i += 8;
+        }
+        for j in i..k {
+            *ys.add(j) = *xs.add(j) + scalar;
+        }
     }
 }

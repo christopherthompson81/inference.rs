@@ -5,7 +5,7 @@ use crate::op::{BackpropOp, BinaryOp, CmpOp, Op, ReduceOp, UnaryOp};
 use crate::scalar::TensorOrScalar;
 use crate::shape::{Dim, Dims, ShapeWithOneHole};
 use crate::storage::{StorageMutRef, StorageRef};
-use crate::{bail, storage::Storage, DType, Device, Error, Layout, Result, Shape};
+use crate::{DType, Device, Error, Layout, Result, Shape, bail, storage::Storage};
 use parking_lot::RwLock;
 use std::sync::Arc;
 
@@ -276,10 +276,12 @@ impl Tensor {
         device: &Device,
         is_variable: bool,
     ) -> Result<Self> {
-        let none = BackpropOp::none();
-        let shape = shape.into();
-        let storage = device.alloc_uninit(&shape, dtype)?;
-        Ok(from_storage(storage, shape, none, is_variable))
+        unsafe {
+            let none = BackpropOp::none();
+            let shape = shape.into();
+            let storage = device.alloc_uninit(&shape, dtype)?;
+            Ok(from_storage(storage, shape, none, is_variable))
+        }
     }
 
     /// Creates a new tensor filled with uninitialized memory.
@@ -294,7 +296,7 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub unsafe fn empty<S: Into<Shape>>(shape: S, dtype: DType, device: &Device) -> Result<Self> {
-        Self::empty_impl(shape, dtype, device, false)
+        unsafe { Self::empty_impl(shape, dtype, device, false) }
     }
 
     /// Creates a new tensor filled with uninitialized memory of the same shape, dtype, and device as the other
@@ -310,7 +312,7 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub unsafe fn empty_like(&self) -> Result<Self> {
-        Tensor::empty(self.shape(), self.dtype(), self.device())
+        unsafe { Tensor::empty(self.shape(), self.dtype(), self.device()) }
     }
 
     pub(crate) fn rand_impl<S: Into<Shape>, T: crate::FloatDType>(
@@ -2521,7 +2523,8 @@ impl Tensor {
             }
             if end_excluded - start_included != src_dims[i] {
                 bail!(
-                    "slice-assign: the range for dim {i} ({start_included}..{end_excluded}) does not match the size of src {}", src_dims[i]
+                    "slice-assign: the range for dim {i} ({start_included}..{end_excluded}) does not match the size of src {}",
+                    src_dims[i]
                 )
             }
             src = src.pad_with_zeros(i, start_included, self_dims[i] - end_excluded)?;
