@@ -428,6 +428,7 @@ impl Loader for SpeechLoader {
         } else {
             device_map::get_all_similar_devices(device)?
         };
+        crate::pipeline::loading::ensure_cuda_kernels(&available_devices)?;
 
         let mapper =
             DeviceMapSetting::dummy().into_mapper(usize::MAX, device, None, &available_devices)?;

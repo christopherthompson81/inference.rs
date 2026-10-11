@@ -37,6 +37,11 @@ CUDART_NEEDED = re.compile(rb"(?:lib)?cudart(?:64_)?\.?(?:so\.)?(\d+)")
 NEEDED_ENTRY = re.compile(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]")
 # A dev CUDA build loads its kernel libraries from the checkout by absolute path, so it cannot travel.
 CHECKOUT_KERNELS = b"/cuda-kernels/"
+# Each `cuda-kernels/<name>.lib` beside a built library names the kernel library that build made.
+KERNEL_POINTERS = "cuda-kernels"
+POINTER_SUFFIX = ".lib"
+# Where the loader looks for them, beside the library that loads them.
+KERNEL_SUBDIR = "kernels"
 # The libraries every manylinux policy lets a wheel assume; anything else needs a plain linux tag.
 MANYLINUX_LIBRARIES = {
     "libc.so.6",
@@ -159,6 +164,18 @@ def build_library(accelerator: str, features: list[str]) -> Path:
     return REPO_ROOT / "target" / "bundle" / library_name()
 
 
+def kernel_libraries(library: Path) -> list[Path]:
+    """The kernel libraries `library` was built with: the pointer files' paths it records (not another variant's)."""
+    data = library.read_bytes()
+    pointers = sorted((library.parent / KERNEL_POINTERS).glob(f"*{POINTER_SUFFIX}"))
+    found = [Path(p.read_text().strip()) for p in pointers]
+    own = [path for path in found if str(path).encode() in data]
+    missing = [str(path) for path in own if not path.is_file()]
+    if missing:
+        sys.exit(f"kernel libraries {library.name} was built with are gone: {missing}")
+    return own
+
+
 def stage(library: Path, into: Path, local_version: str | None) -> Path:
     for name in PACKAGE_FILES:
         source = PACKAGE_SOURCE / name
@@ -172,6 +189,11 @@ def stage(library: Path, into: Path, local_version: str | None) -> Path:
             shutil.copy2(source, into / name)
     (into / BUNDLED_DIR).mkdir()
     shutil.copy2(library, into / BUNDLED_DIR / library_name())
+    kernels = kernel_libraries(library)
+    if kernels:
+        (into / BUNDLED_DIR / KERNEL_SUBDIR).mkdir()
+        for kernel in kernels:
+            shutil.copy2(kernel, into / BUNDLED_DIR / KERNEL_SUBDIR / kernel.name)
     if local_version:
         pyproject = into / "pyproject.toml"
         text = re.sub(
@@ -252,8 +274,11 @@ def main() -> int:
         sys.exit(
             "the library loads its CUDA kernels from this checkout (a dev build); package a release build"
         )
-    accelerator = "cuda" if b"cudart" in data else args.accelerator
-    local_version = cuda_local_version(data) if accelerator == "cuda" else None
+    # the CUDA runtime is named by the kernel libraries, which a CUDA build ships beside the host library
+    kernel_data = b"".join(kernel.read_bytes() for kernel in kernel_libraries(library))
+    cuda = b"cudart" in data or b"cudart" in kernel_data
+    accelerator = "cuda" if cuda else args.accelerator
+    local_version = cuda_local_version(data + kernel_data) if accelerator == "cuda" else None
     with tempfile.TemporaryDirectory(prefix="inference-wheel-") as scratch:
         staged = Path(scratch) / "package"
         staged.mkdir()

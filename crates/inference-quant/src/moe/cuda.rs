@@ -11,39 +11,44 @@ mod ffi {
     use core::ffi::c_void;
     use inference_tensor::cuda::cudarc::driver::sys::CUstream;
 
-    unsafe extern "C" {
-        pub fn launch_moe_align(
-            topk_ids: *const i32,
-            sorted_token_ids: *mut i32,
-            expert_ids: *mut i32,
-            num_tokens_post_pad: *mut i32,
-            cumsum: *mut i32,
-            num_experts: i32,
-            block_size: i32,
-            numel: i32,
-            max_num_tokens_padded: i32,
-            stream: CUstream,
-        );
+    inference_tensor::kernel_library! {
+        library = "inferencequant";
+        path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT").unwrap_or("");
+        id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT").unwrap_or("");
+        unsafe extern "C" {
+            pub fn launch_moe_align(
+                topk_ids: *const i32,
+                sorted_token_ids: *mut i32,
+                expert_ids: *mut i32,
+                num_tokens_post_pad: *mut i32,
+                cumsum: *mut i32,
+                num_experts: i32,
+                block_size: i32,
+                numel: i32,
+                max_num_tokens_padded: i32,
+                stream: CUstream,
+            );
 
-        pub fn launch_moe_sum_bf16(
-            out: *mut c_void,
-            input: *const c_void,
-            num_tokens: i32,
-            hidden: i32,
-            topk: i32,
-            stream: CUstream,
-        );
+            pub fn launch_moe_sum_bf16(
+                out: *mut c_void,
+                input: *const c_void,
+                num_tokens: i32,
+                hidden: i32,
+                topk: i32,
+                stream: CUstream,
+            );
 
-        pub fn launch_hunyuan_moe_capacity_mask(
-            ids: *const c_void,
-            weights: *const c_void,
-            masked_weights: *mut c_void,
-            n_tokens: i32,
-            n_experts: i32,
-            top_k: i32,
-            expert_capacity: i32,
-            stream: CUstream,
-        );
+            pub fn launch_hunyuan_moe_capacity_mask(
+                ids: *const c_void,
+                weights: *const c_void,
+                masked_weights: *mut c_void,
+                n_tokens: i32,
+                n_experts: i32,
+                top_k: i32,
+                expert_capacity: i32,
+                stream: CUstream,
+            );
+        }
     }
 }
 

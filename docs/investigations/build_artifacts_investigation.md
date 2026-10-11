@@ -193,3 +193,80 @@ three modes:
 
 From 105 GB at the start: examples and full DWARF were the bulk of it, then stale variants, per-variant kernel copies,
 superseded incremental sessions and pre-LTO bitcode.
+
+## Run 11 - 2026-10-11
+
+- Question: how much of the shipped library does each model family cost, i.e. what would a one-model package save?
+- Command: `RUSTFLAGS= cargo build --profile bundle -p inference-ffi` (the wheels' build, as `local_ci.sh --size`) with `--features cuda` and with `--no-default-features --features cuda,code-execution[,models-<family>]`. Scratch target on /mnt/data, sm_86, CUDA 12.8.
+- Library sizes:
+
+| families | file | `.text` | `.nv_fatbin` | link wall |
+|---|---|---|---|---|
+| all five (default) | 108.4 MiB | 58.4 MiB | 30.1 MiB | 162 s |
+| none | 96.5 MiB | 48.5 MiB | 30.1 MiB | 71 s |
+| qwen only | 100.1 MiB | | 30.1 MiB | 68 s |
+| llama only | 99.5 MiB | | 30.1 MiB | 69 s |
+
+- **Families:** together 12.0 MiB (11%), one family 3-4 MiB.
+- **Always shipped:**
+  - 48.5 MiB of host code: the engine, plus speech, diffusion, layout and the agent, which have no features;
+  - 30.1 MiB of kernels, the same for every family set;
+  - ~18 MiB of tables, relocations, unwind and exception data.
+- **Source lines:** text families 102k; always-built model crates 27k (speech 12k, layout 5k, diffusion 4k, agent and code-exec 6k); engine 305k (quant 104k, nn 89k, core 66k, tensor 46k).
+- **Kernels are per architecture:** a release built with several values in `CUDA_COMPUTE_CAP` carries ~30 MiB per SM.
+- Implication: model-family features cannot make a small package. The split has to come from the kernels (by architecture, and optional for CPU-only use) and from the engine's own optional parts (quantization formats, speech/image/layout).
+
+## Run 12 - 2026-10-11
+
+- Question, from the user: if capabilities (text generation, audio, image, layout, agent) were plugins, what would the core and each plugin weigh?
+- Command: the Run 11 bundle build (`--features cuda`, all families) with `--config profile.bundle.strip=false`; 160 s wall, 134.8 MB unstripped, the same 61.3 MB `.text` as the stripped file.
+  - `nm -S --size-sort -C --defined-only`: 78,785 symbols. Each text symbol goes to the first `inference_*`/`candle_*` crate in its demangled name, else the first non-std crate.
+  - `inference_core` and `inference_nn` are split by module: decoder/scheduler/KV/paged/vision pipelines and nn's attention/kv/decoder/moe/gdn count as text; speech/transcription as audio; diffusion as image.
+  - Third-party crates serving one capability go with it: symphonia, rustfft and the phonemizer to audio; image codecs to image; html5ever to the agent; tokenizers, minijinja and llguidance to text.
+  - Caveats: under fat LTO, code inlined across crates is counted where it ends up, and generics are counted against the crate that instantiates them, so the split is approximate.
+- Host code (58.1 MiB of text symbols):
+
+| bucket | MiB | largest parts |
+|---|---|---|
+| engine | 18.3 | inference-tensor 10.25 (dtype-generic CPU ops), quant 2.48, api 1.31, protocol 1.12, core engine/pipeline 0.8 |
+| text generation | 11.4 | qwen 1.53, gemma 1.22, llama 1.12, tokenizers 0.98, other 0.83, core text pipelines 0.70, minijinja 0.58, llguidance 0.53 |
+| shared third-party | 10.3 | drop glue 1.18, serde_json 0.71, sort 0.59, rustls 0.44, h2 0.32 |
+| CUDA kernel host | 10.1 | C++ launch code: launch_fattn 2.70, instantiate_mmq 2.32, mmq fixups 0.48, marlin 0.42 |
+| audio | 4.7 | phonemizer 2.43, inference-models-speech 1.11, rustfft 0.58, symphonia ~0.3 |
+| agent | 1.5 | inference-agent 0.30, mcp 0.28, html5ever 0.28, code-exec 0.25, html2text 0.17 |
+| image | 1.4 | image crate and codecs ~1.0, inference-models-diffusion 0.28 |
+| layout | 0.4 | inference-layout 0.41 |
+
+- Kernels (`.nv_fatbin` per static archive, sm_86): inference-quant 18.0 MiB (MMQ/MMVQ/Marlin), inference-fattn 11.2 MiB, inference-nn 0.6 MiB.
+- The other sections (rodata, unwind/exception tables, relocations; ~18 MiB) scale roughly with the code, about +30% on each bucket.
+- Implications for a plugin split:
+  - **Core (engine plus shared): ~29 MiB of host code, ~37 MiB with its tables.** It needs no kernels beyond inference-nn's 0.6 MiB.
+  - **Text generation is most of the GPU weight:** 11.4 MiB host, plus FlashAttention and quantized-matmul kernels (29 MiB) and their 10 MiB of launch code.
+  - **Small plugins:** audio ~6 MiB, image ~2 MiB plus quant kernels when it loads a GGUF, agent ~2 MiB, layout ~0.5 MiB, each with tables.
+  - **These sizes assume plugins share the core** (one build's Rust dylibs). A self-contained plugin behind a C ABI would also carry the ~29 MiB engine.
+
+## Run 13 - 2026-10-11
+
+- Question, from the user: how well does text generation divide internally; would shipping one family be smaller?
+- Host code, from Runs 11 and 12:
+  - A family's own crate is 0.5-1.5 MiB of `.text` (qwen 1.53, gemma 1.22, llama 1.12, other 0.83, phi 0.49).
+  - A one-family library is 3-4 MiB larger than a no-family one.
+  - The rest of text generation's ~11 MiB (tokenizers, minijinja, llguidance, core decoder/scheduler/KV pipelines, nn attention/KV/decoder) is shared by every family.
+- Kernels, per source object in the dev build's shared kernel sets (`target/debug/cuda-kernels/*/*.o`, `size -A`, sm_86):
+
+| group | GPU (`.nv_fatbin`) | host launch code |
+|---|---|---|
+| MMQ, the IQ/ik GGUF types (23 instance files) | 9.53 MiB | 2.61 MiB |
+| FlashAttention MMA f16 (one file per ncols1 x ncols2, every head size inside) | 8.68 MiB | 2.49 MiB |
+| MMVQ (decode, all types) | 2.07 MiB | 0.87 MiB |
+| Marlin (GPTQ/AWQ/affine) | 1.52 MiB | 0.52 MiB |
+| MMQ, the 11 standard GGUF types (q2_k...q8_0) | 0.33-0.57 MiB each, ~4.8 MiB together | 0.11 MiB each |
+| FlashAttention tile, per head size | 0.15-0.35 MiB each | 0.16-0.29 MiB each |
+| other quant formats and ops | 0.62 MiB | 0.70 MiB |
+| inference-nn kernels (GDN, MoE, SSM, sort, ...) | 0.67 MiB | 0.53 MiB |
+
+- Implication: text generation divides along kernels, not families.
+  - **Quantization format** is the biggest lever. The IQ/ik formats alone are ~12 MiB with their launch code, more than all five families together. Standard GGUF types are ~0.4 MiB each; Marlin ~2 MiB.
+  - **Head size** comes next. A family needs only its own: Llama/Qwen 128, Gemma 256, DeepSeek MLA 576/512, ...
+    - The tile kernels are already split per head size.
+    - The MMA kernels hold every head size in each file, so a per-family split would need the instance files regrouped by head size.

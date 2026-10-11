@@ -148,7 +148,7 @@ fn main() {
         };
 
         builder
-            .build_and_link("inferencecuda", prepare_cuda_archive(out_file))
+            .build_loadable_lib("inferencecuda", prepare_cuda_archive(out_file))
             .expect("Build inference-nn CUDA kernels failed!");
         println!("cargo:rustc-link-lib=dylib=cudart");
 

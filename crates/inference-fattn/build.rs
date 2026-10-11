@@ -49,7 +49,7 @@ mod cuda {
         }
         let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
         builder
-            .build_and_link("inferencefattn", out_dir.join("libinferencefattn.a"))
+            .build_loadable_lib("inferencefattn", out_dir.join("libinferencefattn.a"))
             .expect("fattn kernels failed to build");
         println!("cargo:rustc-link-lib=dylib=cudart");
         if !std::env::var("TARGET").unwrap_or_default().contains("msvc") {

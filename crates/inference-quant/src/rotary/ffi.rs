@@ -1,45 +1,50 @@
 use core::ffi::{c_int, c_long, c_void};
 
-unsafe extern "C" {
-    pub(crate) fn rotary_embedding(
-        query: *const c_void,
-        key: *const c_void,
-        cos_cache: *const c_void,
-        sin_cache: *const c_void,
+inference_tensor::kernel_library! {
+    library = "inferencequant";
+    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEQUANT").unwrap_or("");
+    id = option_env!("INFERENCE_KERNEL_ID_INFERENCEQUANT").unwrap_or("");
+    unsafe extern "C" {
+        pub(crate) fn rotary_embedding(
+            query: *const c_void,
+            key: *const c_void,
+            cos_cache: *const c_void,
+            sin_cache: *const c_void,
 
-        is_neox: c_int,
+            is_neox: c_int,
 
-        head_size: c_int,
-        num_tokens: c_long,
-        rot_dim: c_int,
-        num_heads: c_int,
-        num_kv_heads: c_int,
-        query_stride: c_long,
-        key_stride: c_long,
+            head_size: c_int,
+            num_tokens: c_long,
+            rot_dim: c_int,
+            num_heads: c_int,
+            num_kv_heads: c_int,
+            query_stride: c_long,
+            key_stride: c_long,
 
-        dtype: u32,
-        stream: c_long,
-    );
+            dtype: u32,
+            stream: c_long,
+        );
 
-    pub(crate) fn rotary_embedding_positions(
-        query: *const c_void,
-        key: *const c_void,
-        cos_cache: *const c_void,
-        sin_cache: *const c_void,
-        positions: *const c_void,
+        pub(crate) fn rotary_embedding_positions(
+            query: *const c_void,
+            key: *const c_void,
+            cos_cache: *const c_void,
+            sin_cache: *const c_void,
+            positions: *const c_void,
 
-        is_neox: c_int,
+            is_neox: c_int,
 
-        head_size: c_int,
-        num_tokens: c_long,
-        rot_dim: c_int,
-        seq_len: c_int,
-        num_heads: c_int,
-        num_kv_heads: c_int,
-        query_stride: c_long,
-        key_stride: c_long,
+            head_size: c_int,
+            num_tokens: c_long,
+            rot_dim: c_int,
+            seq_len: c_int,
+            num_heads: c_int,
+            num_kv_heads: c_int,
+            query_stride: c_long,
+            key_stride: c_long,
 
-        dtype: u32,
-        stream: c_long,
-    );
+            dtype: u32,
+            stream: c_long,
+        );
+    }
 }

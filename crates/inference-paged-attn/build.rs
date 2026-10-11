@@ -155,7 +155,7 @@ fn main() -> Result<()> {
         out_dir.join("libinferencepagedattention.a")
     };
     builder
-        .build_and_link("inferencepagedattention", prepare_cuda_archive(out_file))
+        .build_loadable_lib("inferencepagedattention", prepare_cuda_archive(out_file))
         .expect("Build paged attention lib failed!");
 
     let using_fa3_fp8_paged = sm90_listed;

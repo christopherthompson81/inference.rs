@@ -115,6 +115,16 @@ pub(crate) struct LoadDevices {
     pub available_devices: Vec<Device>,
 }
 
+/// Opens the CUDA kernel libraries when any of `devices` is CUDA, so a missing one fails before weights load.
+pub(crate) fn ensure_cuda_kernels(devices: &[Device]) -> Result<()> {
+    #[cfg(feature = "cuda")]
+    if devices.iter().any(Device::is_cuda) {
+        inference_nn::cuda::ensure_kernels_loaded().map_err(anyhow::Error::msg)?;
+    }
+    let _ = devices;
+    Ok(())
+}
+
 /// A distributed worker's own GPU, GPU 0 under tensor parallelism, or every device like `device`.
 pub(crate) fn resolve_load_devices(
     model_config: &dyn ModelConfigLike,
@@ -135,6 +145,7 @@ pub(crate) fn resolve_load_devices(
     } else {
         device_map::get_all_similar_devices(device)?
     };
+    ensure_cuda_kernels(&available_devices)?;
     #[cfg(feature = "cuda")]
     for device in &available_devices {
         if let Device::Cuda(dev) = device {

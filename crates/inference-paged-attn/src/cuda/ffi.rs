@@ -62,6 +62,7 @@ pub struct Fa3Fp8DecodeParams {
     pub scheduler_metadata_prepared: c_int,
 }
 
+// the Hopper FA3 kernels link as their own CUTLASS archive
 unsafe extern "C" {
     #[cfg(has_fa3_fp8_paged)]
     pub fn fa3_fp8_paged_materialize_metadata(
@@ -98,215 +99,222 @@ unsafe extern "C" {
         descale: *const f32,
         stream: CUstream,
     ) -> c_int;
+}
 
-    pub fn reshape_and_cache(
-        key: *const c_void,
-        value: *const c_void,
-        key_cache: *const c_void,
-        value_cache: *const c_void,
-        slot_mapping: *const c_long,
+inference_tensor::kernel_library! {
+    library = "inferencepagedattention";
+    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCEPAGEDATTENTION").unwrap_or("");
+    id = option_env!("INFERENCE_KERNEL_ID_INFERENCEPAGEDATTENTION").unwrap_or("");
+    unsafe extern "C" {
+        pub fn reshape_and_cache(
+            key: *const c_void,
+            value: *const c_void,
+            key_cache: *const c_void,
+            value_cache: *const c_void,
+            slot_mapping: *const c_long,
 
-        num_tokens: c_int,
-        num_heads: c_int,
-        head_size: c_int,
-        block_size: c_int,
-        x: c_int,
-        key_stride: c_int,
-        value_stride: c_int,
-        stream: CUstream,
+            num_tokens: c_int,
+            num_heads: c_int,
+            head_size: c_int,
+            block_size: c_int,
+            x: c_int,
+            key_stride: c_int,
+            value_stride: c_int,
+            stream: CUstream,
 
-        dtype: u32,
-        cache_dtype: u32,
-        k_scale: *const f32,
-        v_scale: *const f32,
-    );
+            dtype: u32,
+            cache_dtype: u32,
+            k_scale: *const f32,
+            v_scale: *const f32,
+        );
 
-    pub fn concat_and_cache_mla(
-        ckv: *const c_void,
-        k_pe: *const c_void,
-        ckv_cache: *const c_void,
-        kpe_cache: *const c_void,
-        slot_mapping: *const c_long,
-        num_tokens: c_int,
-        kv_lora_rank: c_int,
-        kpe_head_dim: c_int,
-        block_size: c_int,
-        ckv_stride: c_int,
-        kpe_stride: c_int,
-        stream: CUstream,
-        dtype: u32,
-    );
+        pub fn concat_and_cache_mla(
+            ckv: *const c_void,
+            k_pe: *const c_void,
+            ckv_cache: *const c_void,
+            kpe_cache: *const c_void,
+            slot_mapping: *const c_long,
+            num_tokens: c_int,
+            kv_lora_rank: c_int,
+            kpe_head_dim: c_int,
+            block_size: c_int,
+            ckv_stride: c_int,
+            kpe_stride: c_int,
+            stream: CUstream,
+            dtype: u32,
+        );
 
-    pub fn flashinfer_mla_decode(
-        q_nope: *const c_void,
-        q_pe: *const c_void,
-        ckv_cache: *const c_void,
-        kpe_cache: *const c_void,
-        kv_indptr: *const c_int,
-        kv_indices: *const c_int,
-        kv_last_page_len: *const c_int,
-        out: *const c_void,
-        batch_size: c_int,
-        num_qo_heads: c_int,
-        page_size: c_int,
-        sm_scale: f32,
-        window_left: c_int,
-        logits_soft_cap: f32,
-        rope_scale: f32,
-        rope_theta: f32,
-        request_indices: *const c_int,
-        kv_tile_indices: *const c_int,
-        o_indptr: *const c_int,
-        kv_chunk_size_ptr: *const c_int,
-        dtype: u32,
-        stream: CUstream,
-    ) -> c_int;
+        pub fn flashinfer_mla_decode(
+            q_nope: *const c_void,
+            q_pe: *const c_void,
+            ckv_cache: *const c_void,
+            kpe_cache: *const c_void,
+            kv_indptr: *const c_int,
+            kv_indices: *const c_int,
+            kv_last_page_len: *const c_int,
+            out: *const c_void,
+            batch_size: c_int,
+            num_qo_heads: c_int,
+            page_size: c_int,
+            sm_scale: f32,
+            window_left: c_int,
+            logits_soft_cap: f32,
+            rope_scale: f32,
+            rope_theta: f32,
+            request_indices: *const c_int,
+            kv_tile_indices: *const c_int,
+            o_indptr: *const c_int,
+            kv_chunk_size_ptr: *const c_int,
+            dtype: u32,
+            stream: CUstream,
+        ) -> c_int;
 
-    pub fn reshape_and_cache_flashinfer(
-        key: *const c_void,
-        value: *const c_void,
-        key_cache: *const c_void,
-        value_cache: *const c_void,
-        slot_mapping: *const c_long,
-        num_tokens: c_int,
-        num_heads: c_int,
-        head_size: c_int,
-        block_size: c_int,
-        key_stride: c_int,
-        value_stride: c_int,
-        k_scale: f32,
-        v_scale: f32,
-        dtype: u32,
-        cache_dtype: u32,
-        stream: CUstream,
-    );
+        pub fn reshape_and_cache_flashinfer(
+            key: *const c_void,
+            value: *const c_void,
+            key_cache: *const c_void,
+            value_cache: *const c_void,
+            slot_mapping: *const c_long,
+            num_tokens: c_int,
+            num_heads: c_int,
+            head_size: c_int,
+            block_size: c_int,
+            key_stride: c_int,
+            value_stride: c_int,
+            k_scale: f32,
+            v_scale: f32,
+            dtype: u32,
+            cache_dtype: u32,
+            stream: CUstream,
+        );
 
-    pub fn gather_kv_cache_flashinfer(
-        key_cache: *const c_void,
-        value_cache: *const c_void,
-        k_out: *const c_void,
-        v_out: *const c_void,
-        block_table: *const c_int,
-        cu_seq_lens: *const c_int,
-        num_tokens: c_int,
-        num_seqs: c_int,
-        block_size: c_int,
-        block_table_stride: c_int,
-        num_kv_heads: c_int,
-        head_size: c_int,
-        out_dtype: u32,
-        cache_dtype: u32,
-        k_scale: f32,
-        v_scale: f32,
-        stream: CUstream,
-    );
+        pub fn gather_kv_cache_flashinfer(
+            key_cache: *const c_void,
+            value_cache: *const c_void,
+            k_out: *const c_void,
+            v_out: *const c_void,
+            block_table: *const c_int,
+            cu_seq_lens: *const c_int,
+            num_tokens: c_int,
+            num_seqs: c_int,
+            block_size: c_int,
+            block_table_stride: c_int,
+            num_kv_heads: c_int,
+            head_size: c_int,
+            out_dtype: u32,
+            cache_dtype: u32,
+            k_scale: f32,
+            v_scale: f32,
+            stream: CUstream,
+        );
 
-    pub fn gather_mla_cache(
-        ckv_cache: *const c_void,
-        kpe_cache: *const c_void,
-        ckv_out: *const c_void,
-        kpe_out: *const c_void,
-        block_table: *const c_int,
-        cu_seq_lens: *const c_int,
-        token_to_seq: *const c_int,
-        num_tokens: c_int,
-        block_size: c_int,
-        block_table_stride: c_int,
-        kv_lora_rank: c_int,
-        kpe_head_dim: c_int,
-        stream: CUstream,
-        dtype: u32,
-    );
+        pub fn gather_mla_cache(
+            ckv_cache: *const c_void,
+            kpe_cache: *const c_void,
+            ckv_out: *const c_void,
+            kpe_out: *const c_void,
+            block_table: *const c_int,
+            cu_seq_lens: *const c_int,
+            token_to_seq: *const c_int,
+            num_tokens: c_int,
+            block_size: c_int,
+            block_table_stride: c_int,
+            kv_lora_rank: c_int,
+            kpe_head_dim: c_int,
+            stream: CUstream,
+            dtype: u32,
+        );
 
-    pub fn gather_kv_cache(
-        key_cache: *const c_void,
-        value_cache: *const c_void,
-        k_out: *const c_void,
-        v_out: *const c_void,
-        k_scale: *const f32,
-        v_scale: *const f32,
-        block_table: *const c_int,
-        cu_seq_lens: *const c_int,
-        num_tokens: c_int,
-        num_seqs: c_int,
-        block_size: c_int,
-        block_table_stride: c_int,
-        num_kv_heads: c_int,
-        head_size: c_int,
-        x: c_int,
-        stream: CUstream,
-        out_dtype: u32,
-        cache_dtype: u32,
-    );
+        pub fn gather_kv_cache(
+            key_cache: *const c_void,
+            value_cache: *const c_void,
+            k_out: *const c_void,
+            v_out: *const c_void,
+            k_scale: *const f32,
+            v_scale: *const f32,
+            block_table: *const c_int,
+            cu_seq_lens: *const c_int,
+            num_tokens: c_int,
+            num_seqs: c_int,
+            block_size: c_int,
+            block_table_stride: c_int,
+            num_kv_heads: c_int,
+            head_size: c_int,
+            x: c_int,
+            stream: CUstream,
+            out_dtype: u32,
+            cache_dtype: u32,
+        );
 
-    pub fn copy_blocks_bf16(
-        key_cache_ptrs: *mut c_void,
-        value_cache_ptrs: *mut c_void,
-        block_mapping: *const c_void,
-        num_layers: i32,
-        num_pairs: i32,
-        numel_per_block_key: i32,
-        numel_per_block_value: i32,
-        stream: i64,
-    );
+        pub fn copy_blocks_bf16(
+            key_cache_ptrs: *mut c_void,
+            value_cache_ptrs: *mut c_void,
+            block_mapping: *const c_void,
+            num_layers: i32,
+            num_pairs: i32,
+            numel_per_block_key: i32,
+            numel_per_block_value: i32,
+            stream: i64,
+        );
 
-    pub fn copy_blocks_f16(
-        key_cache_ptrs: *mut c_void,
-        value_cache_ptrs: *mut c_void,
-        block_mapping: *const c_void,
-        num_layers: i32,
-        num_pairs: i32,
-        numel_per_block_key: i32,
-        numel_per_block_value: i32,
-        stream: i64,
-    );
+        pub fn copy_blocks_f16(
+            key_cache_ptrs: *mut c_void,
+            value_cache_ptrs: *mut c_void,
+            block_mapping: *const c_void,
+            num_layers: i32,
+            num_pairs: i32,
+            numel_per_block_key: i32,
+            numel_per_block_value: i32,
+            stream: i64,
+        );
 
-    pub fn copy_blocks_f32(
-        key_cache_ptrs: *mut c_void,
-        value_cache_ptrs: *mut c_void,
-        block_mapping: *const c_void,
-        num_layers: i32,
-        num_pairs: i32,
-        numel_per_block_key: i32,
-        numel_per_block_value: i32,
-        stream: i64,
-    );
+        pub fn copy_blocks_f32(
+            key_cache_ptrs: *mut c_void,
+            value_cache_ptrs: *mut c_void,
+            block_mapping: *const c_void,
+            num_layers: i32,
+            num_pairs: i32,
+            numel_per_block_key: i32,
+            numel_per_block_value: i32,
+            stream: i64,
+        );
 
-    pub fn copy_blocks_u8(
-        key_cache_ptrs: *mut c_void,
-        value_cache_ptrs: *mut c_void,
-        block_mapping: *const c_void,
-        num_layers: i32,
-        num_pairs: i32,
-        numel_per_block_key: i32,
-        numel_per_block_value: i32,
-        stream: i64,
-    );
+        pub fn copy_blocks_u8(
+            key_cache_ptrs: *mut c_void,
+            value_cache_ptrs: *mut c_void,
+            block_mapping: *const c_void,
+            num_layers: i32,
+            num_pairs: i32,
+            numel_per_block_key: i32,
+            numel_per_block_value: i32,
+            stream: i64,
+        );
 
-    pub fn update_kv_scales_f32(
-        k: *const c_void,
-        v: *const c_void,
-        elements: c_long,
-        k_scales: *const f32,
-        v_scales: *const f32,
-        stream: i64,
-    );
+        pub fn update_kv_scales_f32(
+            k: *const c_void,
+            v: *const c_void,
+            elements: c_long,
+            k_scales: *const f32,
+            v_scales: *const f32,
+            stream: i64,
+        );
 
-    pub fn update_kv_scales_f16(
-        k: *const c_void,
-        v: *const c_void,
-        elements: c_long,
-        k_scales: *const f32,
-        v_scales: *const f32,
-        stream: i64,
-    );
+        pub fn update_kv_scales_f16(
+            k: *const c_void,
+            v: *const c_void,
+            elements: c_long,
+            k_scales: *const f32,
+            v_scales: *const f32,
+            stream: i64,
+        );
 
-    pub fn update_kv_scales_bf16(
-        k: *const c_void,
-        v: *const c_void,
-        elements: c_long,
-        k_scales: *const f32,
-        v_scales: *const f32,
-        stream: i64,
-    );
+        pub fn update_kv_scales_bf16(
+            k: *const c_void,
+            v: *const c_void,
+            elements: c_long,
+            k_scales: *const f32,
+            v_scales: *const f32,
+            stream: i64,
+        );
+    }
 }

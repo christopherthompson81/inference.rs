@@ -7,90 +7,95 @@ use inference_tensor::{DType, Result, Shape, Tensor};
 
 const MAX_DFLASH_CONTEXT_TAPS: usize = 64;
 
-unsafe extern "C" {
-    fn dflash_pack_taps_f16(
-        inputs: *const *const c_void,
-        widths: *const i32,
-        taps: i32,
-        row_indices: *const c_void,
-        output: *mut c_void,
-        output_rows: i32,
-        output_width: i32,
-        row_start: i32,
-        stream: i64,
-    ) -> i32;
+inference_tensor::kernel_library! {
+    library = "inferencecuda";
+    path = option_env!("INFERENCE_KERNEL_LIB_INFERENCECUDA").unwrap_or("");
+    id = option_env!("INFERENCE_KERNEL_ID_INFERENCECUDA").unwrap_or("");
+    unsafe extern "C" {
+        fn dflash_pack_taps_f16(
+            inputs: *const *const c_void,
+            widths: *const i32,
+            taps: i32,
+            row_indices: *const c_void,
+            output: *mut c_void,
+            output_rows: i32,
+            output_width: i32,
+            row_start: i32,
+            stream: i64,
+        ) -> i32;
 
-    fn dflash_pack_taps_bf16(
-        inputs: *const *const c_void,
-        widths: *const i32,
-        taps: i32,
-        row_indices: *const c_void,
-        output: *mut c_void,
-        output_rows: i32,
-        output_width: i32,
-        row_start: i32,
-        stream: i64,
-    ) -> i32;
+        fn dflash_pack_taps_bf16(
+            inputs: *const *const c_void,
+            widths: *const i32,
+            taps: i32,
+            row_indices: *const c_void,
+            output: *mut c_void,
+            output_rows: i32,
+            output_width: i32,
+            row_start: i32,
+            stream: i64,
+        ) -> i32;
 
-    fn dflash_pack_taps_f32(
-        inputs: *const *const c_void,
-        widths: *const i32,
-        taps: i32,
-        row_indices: *const c_void,
-        output: *mut c_void,
-        output_rows: i32,
-        output_width: i32,
-        row_start: i32,
-        stream: i64,
-    ) -> i32;
+        fn dflash_pack_taps_f32(
+            inputs: *const *const c_void,
+            widths: *const i32,
+            taps: i32,
+            row_indices: *const c_void,
+            output: *mut c_void,
+            output_rows: i32,
+            output_width: i32,
+            row_start: i32,
+            stream: i64,
+        ) -> i32;
 
-    fn dflash_context_keys_f16(
-        input: *const c_void,
-        norm_weights: *const c_void,
-        cos: *const c_void,
-        sin: *const c_void,
-        positions: *const c_void,
-        output: *mut c_void,
-        layers: i32,
-        heads: i32,
-        rows: i32,
-        head_dim: i32,
-        rot_dim: i32,
-        eps: f32,
-        stream: i64,
-    ) -> i32;
+        fn dflash_context_keys_f16(
+            input: *const c_void,
+            norm_weights: *const c_void,
+            cos: *const c_void,
+            sin: *const c_void,
+            positions: *const c_void,
+            output: *mut c_void,
+            layers: i32,
+            heads: i32,
+            rows: i32,
+            head_dim: i32,
+            rot_dim: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
 
-    fn dflash_context_keys_bf16(
-        input: *const c_void,
-        norm_weights: *const c_void,
-        cos: *const c_void,
-        sin: *const c_void,
-        positions: *const c_void,
-        output: *mut c_void,
-        layers: i32,
-        heads: i32,
-        rows: i32,
-        head_dim: i32,
-        rot_dim: i32,
-        eps: f32,
-        stream: i64,
-    ) -> i32;
+        fn dflash_context_keys_bf16(
+            input: *const c_void,
+            norm_weights: *const c_void,
+            cos: *const c_void,
+            sin: *const c_void,
+            positions: *const c_void,
+            output: *mut c_void,
+            layers: i32,
+            heads: i32,
+            rows: i32,
+            head_dim: i32,
+            rot_dim: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
 
-    fn dflash_context_keys_f32(
-        input: *const c_void,
-        norm_weights: *const c_void,
-        cos: *const c_void,
-        sin: *const c_void,
-        positions: *const c_void,
-        output: *mut c_void,
-        layers: i32,
-        heads: i32,
-        rows: i32,
-        head_dim: i32,
-        rot_dim: i32,
-        eps: f32,
-        stream: i64,
-    ) -> i32;
+        fn dflash_context_keys_f32(
+            input: *const c_void,
+            norm_weights: *const c_void,
+            cos: *const c_void,
+            sin: *const c_void,
+            positions: *const c_void,
+            output: *mut c_void,
+            layers: i32,
+            heads: i32,
+            rows: i32,
+            head_dim: i32,
+            rot_dim: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
+    }
 }
 
 fn contiguous_row_range(indices: &[u32]) -> Option<(usize, usize)> {

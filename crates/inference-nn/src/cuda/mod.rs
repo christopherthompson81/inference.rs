@@ -3,6 +3,17 @@ pub mod dflash_context;
 #[cfg(feature = "cuda")]
 pub mod dynamic_conv;
 pub mod ffi;
+
+/// Opens every CUDA kernel library a model can launch, so a missing one fails at model load rather than mid-run.
+#[cfg(feature = "cuda")]
+pub fn ensure_kernels_loaded() -> std::result::Result<(), String> {
+    ffi::ensure_loaded()?;
+    inference_quant::ensure_kernels_loaded()?;
+    inference_fattn::ensure_kernels_loaded()?;
+    #[cfg(target_family = "unix")]
+    inference_paged_attn::ensure_kernels_loaded()?;
+    Ok(())
+}
 pub mod gdn;
 #[cfg(feature = "cuda")]
 pub mod graph;
