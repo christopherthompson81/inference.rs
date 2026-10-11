@@ -246,11 +246,14 @@ Image generation request
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `guidance_scale` | `float \| None` | optional |
 | `height` | `int \| None` | optional |
 | `model` | `str \| None` | optional |
 | `n` | `int \| None` | optional |
 | `prompt` | `str` | required |
 | `response_format` | `ImageGenerationResponseFormat \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `steps` | `int \| None` | optional |
 | `width` | `int \| None` | optional |
 
 

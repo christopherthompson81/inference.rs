@@ -380,6 +380,16 @@ impl SupportedArch for DiffusionLoaderType {
                 modalities: &[Text, Vision],
                 examples: &[ex!("black-forest-labs/FLUX.1-schnell")],
             },
+            Self::HiDreamO1 => ArchMetadata {
+                families: &["HiDream-O1-Image"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("HiDream-ai/HiDream-O1-Image")],
+            },
+            Self::HiDreamO1Dev => ArchMetadata {
+                families: &["HiDream-O1-Image-Dev"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("HiDream-ai/HiDream-O1-Image-Dev")],
+            },
         }
     }
 }

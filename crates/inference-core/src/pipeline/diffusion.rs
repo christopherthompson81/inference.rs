@@ -3,7 +3,7 @@ use super::loaders::{DiffusionLoad, DiffusionModelPaths, DiffusionModelPathsInne
 use super::{
     AnyMoePipelineMixin, Cache, CacheManagerMixin, DiffusionLoaderType, DiffusionModel,
     DiffusionModelLoader, EitherCache, FluxLoader, ForwardInputsResult, GeneralMetadata,
-    IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
+    HiDreamO1Loader, IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
     PreProcessingMixin, Processor, TokenSource,
 };
 use crate::device_map::{self, DeviceMapper};
@@ -23,7 +23,7 @@ use anyhow::Result;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use image::{DynamicImage, RgbImage};
-use inference_models_diffusion::gguf;
+use inference_models_diffusion::{gguf, hidream};
 use inference_quant::IsqType;
 use inference_quant::log::once_log_info;
 use inference_tensor::{DType, Device, Tensor};
@@ -68,6 +68,12 @@ impl DiffusionLoaderBuilder {
         let loader: Box<dyn DiffusionModelLoader> = match loader {
             DiffusionLoaderType::Flux => Box::new(FluxLoader { offload: false }),
             DiffusionLoaderType::FluxOffloaded => Box::new(FluxLoader { offload: true }),
+            DiffusionLoaderType::HiDreamO1 => Box::new(HiDreamO1Loader {
+                variant: hidream::Variant::Full,
+            }),
+            DiffusionLoaderType::HiDreamO1Dev => Box::new(HiDreamO1Loader {
+                variant: hidream::Variant::Dev,
+            }),
         };
         Box::new(DiffusionLoader {
             inner: loader,
@@ -178,17 +184,18 @@ impl Loader for DiffusionLoader {
                     .filenames
                     .iter()
                     .zip(self.inner.force_cpu_vb())
-                    .map(|(path, force_cpu)| {
+                    .map(|(group, force_cpu)| {
                         let dev = if force_cpu { &Device::Cpu } else { device };
-                        if path
-                            .extension()
-                            .is_some_and(|ext| ext == gguf::GGUF_EXTENSION)
+                        if let [path] = group.as_slice()
+                            && path
+                                .extension()
+                                .is_some_and(|ext| ext == gguf::GGUF_EXTENSION)
                         {
                             return gguf::var_builder(path, gguf::flux_native_name, dtype, dev)
                                 .map(|(vb, shapes)| (vb, Some(shapes)));
                         }
                         from_mmaped_safetensors(
-                            vec![path.clone()],
+                            group.clone(),
                             Some(dtype),
                             dev,
                             vec![None],
@@ -321,20 +328,38 @@ impl Pipeline for DiffusionPipeline {
         assert!(!return_raw_logits);
 
         let ModelInputs { prompts, params } = *inputs.downcast().expect("Downcast failed.");
-        let img = self.model.forward(prompts, params)?.to_dtype(DType::U8)?;
-        let (_b, c, h, w) = img.dims4()?;
         let mut images = Vec::new();
-        for b_img in img.chunk(img.dim(0)?, 0)? {
-            let flattened = b_img.squeeze(0)?.permute((1, 2, 0))?.flatten_all()?;
-            if c != 3 {
-                inference_tensor::bail!("Expected 3 channels in image output");
+        let mut start = 0;
+        while start < prompts.len() {
+            // unseeded prompts with the same settings share a forward; a seeded one runs alone, so batching
+            // never changes its image
+            let end = if params[start].seed.is_some() {
+                start + 1
+            } else {
+                start
+                    + params[start..]
+                        .iter()
+                        .take_while(|p| **p == params[start])
+                        .count()
+            };
+            let img = self
+                .model
+                .forward(prompts[start..end].to_vec(), params[start].clone())?
+                .to_dtype(DType::U8)?;
+            let (_b, c, h, w) = img.dims4()?;
+            for b_img in img.chunk(img.dim(0)?, 0)? {
+                let flattened = b_img.squeeze(0)?.permute((1, 2, 0))?.flatten_all()?;
+                if c != 3 {
+                    inference_tensor::bail!("Expected 3 channels in image output");
+                }
+                #[allow(clippy::cast_possible_truncation)]
+                images.push(DynamicImage::ImageRgb8(
+                    RgbImage::from_raw(w as u32, h as u32, flattened.to_vec1::<u8>()?).ok_or(
+                        inference_tensor::Error::Msg("RgbImage has invalid capacity.".to_string()),
+                    )?,
+                ));
             }
-            #[allow(clippy::cast_possible_truncation)]
-            images.push(DynamicImage::ImageRgb8(
-                RgbImage::from_raw(w as u32, h as u32, flattened.to_vec1::<u8>()?).ok_or(
-                    inference_tensor::Error::Msg("RgbImage has invalid capacity.".to_string()),
-                )?,
-            ));
+            start = end;
         }
         Ok(ForwardInputsResult::Image { images })
     }
@@ -353,6 +378,13 @@ impl Pipeline for DiffusionPipeline {
     }
     fn category(&self) -> ModelCategory {
         ModelCategory::Diffusion
+    }
+
+    fn validate_image_params(
+        &self,
+        params: &inference_models_diffusion::DiffusionGenerationParams,
+    ) -> std::result::Result<(), String> {
+        self.model.validate(params)
     }
 }
 

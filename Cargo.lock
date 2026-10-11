@@ -2416,6 +2416,7 @@ dependencies = [
  "inference-api",
  "inference-audio",
  "inference-macros",
+ "inference-models-diffusion",
  "inference-models-gemma",
  "inference-models-llama",
  "inference-models-other",
@@ -2796,9 +2797,14 @@ name = "inference-models-diffusion"
 version = "0.9.3"
 dependencies = [
  "anyhow",
+ "clap",
+ "indicatif 0.18.3",
  "inference-nn",
  "inference-quant",
  "inference-tensor",
+ "rand 0.9.4",
+ "rand_distr",
+ "rand_isaac",
  "serde",
  "serde_json",
  "serde_plain",

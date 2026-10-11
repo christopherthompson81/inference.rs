@@ -142,12 +142,22 @@ pub trait DiffusionModel {
     ) -> inference_tensor::Result<Tensor>;
     fn device(&self) -> &Device;
     fn max_seq_len(&self) -> usize;
+    /// Why this model refuses `params`, checked before the request is queued.
+    fn validate(&self, _params: &DiffusionGenerationParams) -> std::result::Result<(), String> {
+        Ok(())
+    }
 }
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiffusionGenerationParams {
     pub height: usize,
     pub width: usize,
+    /// Denoising steps, when not the model's own.
+    pub steps: Option<usize>,
+    /// Classifier-free guidance scale, when not the model's own.
+    pub guidance_scale: Option<f64>,
+    /// Seeds the noise, for a reproducible image.
+    pub seed: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -182,6 +192,9 @@ impl Default for DiffusionGenerationParams {
         Self {
             height: 720,
             width: 1280,
+            steps: None,
+            guidance_scale: None,
+            seed: None,
         }
     }
 }

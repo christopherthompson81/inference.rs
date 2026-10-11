@@ -93,6 +93,9 @@ pub struct ModelEntry {
     pub tokenizer: Option<PathBuf>,
     #[serde(default)]
     pub arch: Option<NormalLoaderType>,
+    /// A diffusion model's architecture; FLUX when unset.
+    #[serde(default)]
+    pub diffusion_arch: Option<inference_api::engine::DiffusionLoaderType>,
     #[serde(default)]
     pub dtype: ModelDType,
     #[serde(default)]
@@ -280,7 +283,14 @@ impl ModelEntry {
                 cache,
                 multimodal: self.multimodal.clone(),
             },
-            ModelKind::Diffusion => ModelType::Diffusion { model, device },
+            ModelKind::Diffusion => ModelType::Diffusion {
+                model,
+                diffusion_arch: self
+                    .diffusion_arch
+                    .clone()
+                    .unwrap_or(inference_api::engine::DiffusionLoaderType::Flux),
+                device,
+            },
             ModelKind::Speech => ModelType::Speech { model, device },
             ModelKind::Embedding => ModelType::Embedding {
                 model,

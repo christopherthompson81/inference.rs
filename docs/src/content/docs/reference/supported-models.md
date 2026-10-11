@@ -89,6 +89,8 @@ The `Architecture` column is the `config.json` `architectures` value. Per-family
 |---|---|---|
 | `Flux` | FLUX.1 | <details><summary><code>black-forest-labs/FLUX.1-schnell</code></summary><code>inference run -m black-forest-labs/FLUX.1-schnell</code></details> |
 | `FluxOffloaded` | FLUX.1 (offloaded) | <details><summary><code>black-forest-labs/FLUX.1-schnell</code></summary><code>inference run -m black-forest-labs/FLUX.1-schnell</code></details> |
+| `HiDreamO1` | HiDream-O1-Image | <details><summary><code>HiDream-ai/HiDream-O1-Image</code></summary><code>inference run -m HiDream-ai/HiDream-O1-Image</code></details> |
+| `HiDreamO1Dev` | HiDream-O1-Image-Dev | <details><summary><code>HiDream-ai/HiDream-O1-Image-Dev</code></summary><code>inference run -m HiDream-ai/HiDream-O1-Image-Dev</code></details> |
 
 ## Speech
 

@@ -158,7 +158,7 @@ Extensions:
 ## Image Generation
 
 - `prompt`
-- `n`
+- `n` (1 to 10)
 - `response_format`: `"url"` (default; `url` is the path that serves the PNG from the file store, `/v1/files/{id}/content`) or `"b64_json"` (response carries the base64-encoded PNG in `b64_json`).
 
 OpenAI's `size` string (e.g. `"1024x1024"`) is not supported. Use the `height` and `width` fields instead:
@@ -166,7 +166,15 @@ OpenAI's `size` string (e.g. `"1024x1024"`) is not supported. Use the `height` a
 - `height` (default 720)
 - `width` (default 1280)
 
-`quality`, `style`, `steps`, `guidance_scale` are ignored.
+HiDream-O1-Image snaps `height` and `width` to its closest trained resolution.
+
+inference.rs extensions:
+
+- `steps` (1 to 1000): denoising steps, when not the model's own; HiDream-O1-Image-Dev takes only its 28.
+- `guidance_scale`: FLUX.1-dev's distilled guidance or HiDream-O1-Image's classifier-free guidance; FLUX.1-schnell refuses it, and HiDream-O1-Image-Dev refuses one above 1.
+- `seed`: seeds the noise, so the same request repeats its image on the same device and dtype; choice `i` of `n` takes `seed + i`.
+
+`quality` and `style` are ignored.
 
 ## Audio
 

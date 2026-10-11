@@ -31,6 +31,10 @@ use crate::{
 
 // a transducer beam search costs a joint evaluation per hypothesis per frame; past this it buys nothing
 const MAX_BEAM_SIZE: usize = 16;
+// the training schedules count 1000 timesteps, the diffusion crates' `NUM_TRAIN_TIMESTEPS`
+const MAX_DIFFUSION_STEPS: usize = 1000;
+// OpenAI's own limit on images per request
+const MAX_IMAGE_CHOICES: usize = 10;
 
 const TRANSCRIBE_TASK: &str = "transcribe";
 const SENTENCE_ENDS: [char; 4] = ['.', '?', '!', '\u{3002}'];
@@ -55,11 +59,15 @@ fn generation_request(
     state: &SharedInferenceRsState,
     model: &str,
     messages: RequestMessage,
+    n_choices: usize,
     tx: tokio::sync::mpsc::Sender<Response>,
 ) -> Request {
     let mut request = NormalRequest::new_simple(
         messages,
-        SamplingParams::deterministic(),
+        SamplingParams {
+            n_choices,
+            ..SamplingParams::deterministic()
+        },
         tx,
         state.next_request_id(),
         None,
@@ -76,8 +84,19 @@ pub(crate) async fn run(
     repr: String,
     messages: RequestMessage,
 ) -> Result<Response, ApiError> {
+    run_choices(state, model, repr, messages, 1).await
+}
+
+// As `run`, for a request the engine answers with `n_choices` results in its one response.
+async fn run_choices(
+    state: &SharedInferenceRsState,
+    model: &str,
+    repr: String,
+    messages: RequestMessage,
+    n_choices: usize,
+) -> Result<Response, ApiError> {
     InferenceRs::maybe_log_request(state.clone(), repr);
-    run_unlogged(state, model, messages).await
+    dispatch(state, model, messages, n_choices).await
 }
 
 // As `run`, for a request too frequent to log, as a streamed session's pushes are
@@ -86,15 +105,27 @@ pub(crate) async fn run_unlogged(
     model: &str,
     messages: RequestMessage,
 ) -> Result<Response, ApiError> {
+    dispatch(state, model, messages, 1).await
+}
+
+async fn dispatch(
+    state: &SharedInferenceRsState,
+    model: &str,
+    messages: RequestMessage,
+    n_choices: usize,
+) -> Result<Response, ApiError> {
     validate_model_name(model, state.clone())
         .map_err(|error| ApiError::from_error(&error, ApiErrorKind::InvalidRequest))?;
     let (tx, mut rx) = create_response_channel(None);
-    send_request(state, generation_request(state, model, messages, tx))
-        .await
-        .map_err(|error| {
-            InferenceRs::maybe_log_error(state.clone(), &error);
-            ApiError::from_error(&error, ApiErrorKind::Internal)
-        })?;
+    send_request(
+        state,
+        generation_request(state, model, messages, n_choices, tx),
+    )
+    .await
+    .map_err(|error| {
+        InferenceRs::maybe_log_error(state.clone(), &error);
+        ApiError::from_error(&error, ApiErrorKind::Internal)
+    })?;
     base_process_non_streaming_response(
         &mut rx,
         state.clone(),
@@ -143,15 +174,49 @@ async fn generate_image_inner(
     request: ImageGenerationRequest,
     owner: Option<&str>,
 ) -> Result<ImageGenerationResponse, ApiError> {
+    if !(1..=MAX_IMAGE_CHOICES).contains(&request.n_choices) {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("`n` must be 1 to {MAX_IMAGE_CHOICES}"),
+            Some("invalid_n"),
+            Some("n"),
+        ));
+    }
+    if request
+        .steps
+        .is_some_and(|s| !(1..=MAX_DIFFUSION_STEPS).contains(&s))
+    {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("`steps` must be 1 to {MAX_DIFFUSION_STEPS}"),
+            Some("invalid_steps"),
+            Some("steps"),
+        ));
+    }
+    if request
+        .guidance_scale
+        .is_some_and(|g| !g.is_finite() || g < 0.0)
+    {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            "`guidance_scale` must be a finite number of at least 0".to_string(),
+            Some("invalid_guidance_scale"),
+            Some("guidance_scale"),
+        ));
+    }
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let messages = RequestMessage::ImageGeneration {
         prompt: request.prompt,
         generation_params: DiffusionGenerationParams {
             height: request.height,
             width: request.width,
+            steps: request.steps,
+            guidance_scale: request.guidance_scale,
+            seed: request.seed,
         },
     };
-    let Response::ImageGeneration(generated) = run(state, &request.model, repr, messages).await?
+    let Response::ImageGeneration(generated) =
+        run_choices(state, &request.model, repr, messages, request.n_choices).await?
     else {
         return Err(unexpected(state));
     };

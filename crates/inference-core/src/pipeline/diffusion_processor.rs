@@ -51,7 +51,8 @@ pub struct DiffusionInputsProcessor;
 #[derive(Clone)]
 pub struct ModelInputs {
     pub(crate) prompts: Vec<String>,
-    pub(crate) params: DiffusionGenerationParams,
+    /// One per prompt: requests batched into a step need not share their size, steps or seed.
+    pub(crate) params: Vec<DiffusionGenerationParams>,
 }
 
 impl InputsProcessor for DiffusionInputsProcessor {
@@ -78,9 +79,19 @@ impl InputsProcessor for DiffusionInputsProcessor {
                 .iter_mut()
                 .map(|seq| seq.get_initial_prompt().to_string())
                 .collect::<Vec<_>>(),
-            params: input_seqs[0]
-                .diffusion_params()
-                .context("Diffusion model params must be present")?,
+            params: input_seqs
+                .iter()
+                .map(|seq| {
+                    let mut params = seq
+                        .diffusion_params()
+                        .context("Diffusion model params must be present")?;
+                    // a request's `n` choices each draw their own noise from its seed
+                    params.seed = params
+                        .seed
+                        .map(|seed| seed.wrapping_add(seq.get_response_index() as u64));
+                    Ok(params)
+                })
+                .collect::<Result<Vec<_>>>()?,
         };
         Ok(InputProcessorOutput {
             inputs: Box::new(inputs),

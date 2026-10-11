@@ -87,10 +87,10 @@ pub use loaders::{
     AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
     DeviceMappedModelLoader, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader,
     EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths,
-    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, LoadOptions, Loader,
-    LocalModelPaths, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
-    MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
-    QuantizationKind, TokenSource,
+    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, HiDreamO1Loader,
+    LoadOptions, Loader, LocalModelPaths, ModelKind, ModelPaths, MultimodalLoaderType,
+    MultimodalModel, MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel,
+    NormalModelLoader, QuantizationKind, TokenSource,
 };
 #[cfg(feature = "models-llama")]
 pub use loaders::{
@@ -1517,6 +1517,11 @@ pub trait Pipeline:
 
     /// Rejects speech options this model refuses, so a bad request fails validation instead of mid-generation.
     fn validate_speech_options(&self, _options: &crate::SpeechOptions) -> Result<(), String> {
+        Ok(())
+    }
+
+    /// Rejects image parameters this model refuses, as [`Pipeline::validate_speech_options`] does for speech.
+    fn validate_image_params(&self, _params: &DiffusionGenerationParams) -> Result<(), String> {
         Ok(())
     }
 

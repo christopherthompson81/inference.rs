@@ -43,10 +43,13 @@ async fn main() -> Result<()> {
 
     let finished = Instant::now();
 
+    // the url serves the PNG from the engine's file store; its id is the second-to-last segment
+    let url = response.data[0].url.as_deref().unwrap();
+    let file_id = url.rsplit('/').nth(1).unwrap();
+    std::fs::write("image.png", model.file_content(file_id)?.bytes)?;
     println!(
-        "Done! Took {} s. Image saved at: {}",
-        finished.duration_since(start).as_secs_f32(),
-        response.data[0].url.as_ref().unwrap()
+        "Done! Took {} s. Image saved at: image.png",
+        finished.duration_since(start).as_secs_f32()
     );
 
     Ok(())

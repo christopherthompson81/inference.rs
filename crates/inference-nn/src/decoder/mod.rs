@@ -30,6 +30,7 @@ use crate::{
 };
 
 mod moe;
+pub mod qwen3_vl;
 
 pub use moe::{BLOCK_SPARSE_MOE, MoeRouting, MoeSpec, SparseMoe};
 
@@ -1596,10 +1597,10 @@ impl CausalLm {
     }
 }
 
-impl<F: LayerFfn> CausalLm<AttentionBlock, F> {
+impl<F: LayerFfn> DecoderStack<AttentionBlock, F> {
     /// This forward's M-RoPE (cos, sin) for `position_ids`, which [`ModelForwardContext::set_rope_tables`] takes.
     pub fn mrope_tables(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
-        let tables = self.stack.layers.iter().find_map(|layer| {
+        let tables = self.layers.iter().find_map(|layer| {
             layer
                 .self_attn
                 .rotary_emb
@@ -1610,6 +1611,13 @@ impl<F: LayerFfn> CausalLm<AttentionBlock, F> {
             Some(tables) => tables,
             None => inference_tensor::bail!("the stack has no M-RoPE layer"),
         }
+    }
+}
+
+impl<F: LayerFfn> CausalLm<AttentionBlock, F> {
+    /// This forward's M-RoPE (cos, sin) for `position_ids`, which [`ModelForwardContext::set_rope_tables`] takes.
+    pub fn mrope_tables(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
+        self.stack.mrope_tables(position_ids, dtype)
     }
 }
 

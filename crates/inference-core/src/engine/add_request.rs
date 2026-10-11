@@ -558,10 +558,13 @@ impl Engine {
 
         let pipeline = get_mut_arcmutex!(self.pipeline);
         let category = pipeline.category();
-        let speech_check = match &request.messages {
+        let options_check = match &request.messages {
             RequestMessage::SpeechGeneration { options, .. } => {
                 pipeline.validate_speech_options(options)
             }
+            RequestMessage::ImageGeneration {
+                generation_params, ..
+            } => pipeline.validate_image_params(generation_params),
             _ => Ok(()),
         };
         drop(pipeline);
@@ -573,7 +576,9 @@ impl Engine {
                 | RequestMessage::Completion { .. }
                 | RequestMessage::CompletionTokens(_),
             ) => Ok(()),
-            (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => Ok(()),
+            (ModelCategory::Diffusion, RequestMessage::ImageGeneration { .. }) => {
+                options_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
+            }
             (
                 ModelCategory::Transcription,
                 RequestMessage::Transcription { .. } | RequestMessage::TranscriptionStream { .. },
@@ -581,7 +586,7 @@ impl Engine {
             (ModelCategory::VoiceActivity, RequestMessage::VoiceActivity { .. }) => Ok(()),
             (ModelCategory::Diarization, RequestMessage::Diarization { .. }) => Ok(()),
             (ModelCategory::Speech, RequestMessage::SpeechGeneration { .. }) => {
-                speech_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
+                options_check.map_err(|err| Box::new(Response::ValidationError(err.into())))
             }
             (
                 ModelCategory::Embedding,

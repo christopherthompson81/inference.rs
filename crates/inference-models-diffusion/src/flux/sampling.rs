@@ -2,15 +2,25 @@
 
 use inference_tensor::{Device, Result, Tensor};
 
+use crate::noise::SeededNoise;
+
+/// The initial latents; a `seed` draws them on the host, reproducibly.
 pub fn get_noise(
     num_samples: usize,
     height: usize,
     width: usize,
+    seed: Option<u64>,
     device: &Device,
 ) -> Result<Tensor> {
     let height = height.div_ceil(16) * 2;
     let width = width.div_ceil(16) * 2;
-    Tensor::randn(0f32, 1., (num_samples, 16, height, width), device)
+    let shape = (num_samples, 16, height, width);
+    match seed {
+        Some(seed) => SeededNoise::new(seed)
+            .normal(shape, &Device::Cpu)?
+            .to_device(device),
+        None => Tensor::randn(0f32, 1., shape, device),
+    }
 }
 
 #[derive(Debug, Clone)]
