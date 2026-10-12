@@ -3,7 +3,7 @@ use libc::{c_char, c_double, c_float, c_int, c_long, c_ulong};
 
 mod ffi {
     use super::*;
-    extern "C" {
+    unsafe extern "C" {
         // It would be nice to be able to switch to the NEWLAPACK version of the function but this
         // seems to trigger some link error. Available function names can be seen here:
         // /Library/Developer/CommandLineTools/SDKs/MacOSX13.3.sdk/System/Library/Frameworks/Accelerate.framework/Versions/A/Accelerate.tbd
@@ -181,21 +181,23 @@ pub unsafe fn sgemm(
     c: &mut [f32],
     ldc: i32,
 ) {
-    ffi::sgemm_ffi(
-        &(transa as c_char),
-        &(transb as c_char),
-        &m,
-        &n,
-        &k,
-        &alpha,
-        a.as_ptr(),
-        &lda,
-        b.as_ptr(),
-        &ldb,
-        &beta,
-        c.as_mut_ptr(),
-        &ldc,
-    )
+    unsafe {
+        ffi::sgemm_ffi(
+            &(transa as c_char),
+            &(transb as c_char),
+            &m,
+            &n,
+            &k,
+            &alpha,
+            a.as_ptr(),
+            &lda,
+            b.as_ptr(),
+            &ldb,
+            &beta,
+            c.as_mut_ptr(),
+            &ldc,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -215,21 +217,23 @@ pub unsafe fn dgemm(
     c: &mut [f64],
     ldc: i32,
 ) {
-    ffi::dgemm_ffi(
-        &(transa as c_char),
-        &(transb as c_char),
-        &m,
-        &n,
-        &k,
-        &alpha,
-        a.as_ptr(),
-        &lda,
-        b.as_ptr(),
-        &ldb,
-        &beta,
-        c.as_mut_ptr(),
-        &ldc,
-    )
+    unsafe {
+        ffi::dgemm_ffi(
+            &(transa as c_char),
+            &(transb as c_char),
+            &m,
+            &n,
+            &k,
+            &alpha,
+            a.as_ptr(),
+            &lda,
+            b.as_ptr(),
+            &ldb,
+            &beta,
+            c.as_mut_ptr(),
+            &ldc,
+        )
+    }
 }
 
 #[inline]

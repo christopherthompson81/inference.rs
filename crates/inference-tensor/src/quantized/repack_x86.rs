@@ -4,7 +4,7 @@
 //! directly with the min/offset terms corrected through the q8k bsums, and q8_0
 //! weights are stored offset by +128 with the same correction.
 
-use super::k_quants::{BlockQ4K, BlockQ6K, BlockQ8K, BlockQ8_0, QK8_0, QK_K};
+use super::k_quants::{BlockQ4K, BlockQ6K, BlockQ8_0, BlockQ8K, QK_K, QK8_0};
 use super::{GgmlType, QuantizedType};
 use half::f16;
 
@@ -208,7 +208,7 @@ mod kernels {
 
     #[inline(always)]
     unsafe fn bcast4(act: &[i8], off: usize) -> __m512i {
-        _mm512_set1_epi32(std::ptr::read_unaligned(act.as_ptr().add(off) as *const i32))
+        unsafe { _mm512_set1_epi32(std::ptr::read_unaligned(act.as_ptr().add(off) as *const i32)) }
     }
 
     // q4k: one superblock tile against `mt` q8k activation blocks. Subblocks are
@@ -216,42 +216,54 @@ mod kernels {
     // latency chain when mt is small (decode gemv).
     #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
     pub(crate) unsafe fn q4k_tile(tile: &TileQ4K, acts: &[&BlockQ8K], acc: &mut [[__m512; 1]]) {
-        let mask = _mm512_set1_epi8(0x0F_u8 as i8);
-        for sub2 in 0..4 {
-            let sa = sub2 * 2;
-            let sb = sa + 1;
-            let mut isum_a = [_mm512_setzero_si512(); MAX_MT];
-            let mut isum_b = [_mm512_setzero_si512(); MAX_MT];
-            for g4 in 0..4 {
-                let ga = sa * 4 + g4;
-                let gb = sb * 4 + g4;
-                let wa = _mm512_loadu_si512(tile.qs.as_ptr().add(ga * TILE_N * 4) as *const _);
-                let wb = _mm512_loadu_si512(tile.qs.as_ptr().add(gb * TILE_N * 4) as *const _);
-                let lo_a = _mm512_and_si512(wa, mask);
-                let hi_a = _mm512_and_si512(_mm512_srli_epi16(wa, 4), mask);
-                let lo_b = _mm512_and_si512(wb, mask);
-                let hi_b = _mm512_and_si512(_mm512_srli_epi16(wb, 4), mask);
-                for (m, act) in acts.iter().enumerate() {
-                    isum_a[m] =
-                        _mm512_dpbusd_epi32(isum_a[m], lo_a, bcast4(&act.qs, sa * 32 + g4 * 8));
-                    isum_a[m] =
-                        _mm512_dpbusd_epi32(isum_a[m], hi_a, bcast4(&act.qs, sa * 32 + g4 * 8 + 4));
-                    isum_b[m] =
-                        _mm512_dpbusd_epi32(isum_b[m], lo_b, bcast4(&act.qs, sb * 32 + g4 * 8));
-                    isum_b[m] =
-                        _mm512_dpbusd_epi32(isum_b[m], hi_b, bcast4(&act.qs, sb * 32 + g4 * 8 + 4));
+        unsafe {
+            let mask = _mm512_set1_epi8(0x0F_u8 as i8);
+            for sub2 in 0..4 {
+                let sa = sub2 * 2;
+                let sb = sa + 1;
+                let mut isum_a = [_mm512_setzero_si512(); MAX_MT];
+                let mut isum_b = [_mm512_setzero_si512(); MAX_MT];
+                for g4 in 0..4 {
+                    let ga = sa * 4 + g4;
+                    let gb = sb * 4 + g4;
+                    let wa = _mm512_loadu_si512(tile.qs.as_ptr().add(ga * TILE_N * 4) as *const _);
+                    let wb = _mm512_loadu_si512(tile.qs.as_ptr().add(gb * TILE_N * 4) as *const _);
+                    let lo_a = _mm512_and_si512(wa, mask);
+                    let hi_a = _mm512_and_si512(_mm512_srli_epi16(wa, 4), mask);
+                    let lo_b = _mm512_and_si512(wb, mask);
+                    let hi_b = _mm512_and_si512(_mm512_srli_epi16(wb, 4), mask);
+                    for (m, act) in acts.iter().enumerate() {
+                        isum_a[m] =
+                            _mm512_dpbusd_epi32(isum_a[m], lo_a, bcast4(&act.qs, sa * 32 + g4 * 8));
+                        isum_a[m] = _mm512_dpbusd_epi32(
+                            isum_a[m],
+                            hi_a,
+                            bcast4(&act.qs, sa * 32 + g4 * 8 + 4),
+                        );
+                        isum_b[m] =
+                            _mm512_dpbusd_epi32(isum_b[m], lo_b, bcast4(&act.qs, sb * 32 + g4 * 8));
+                        isum_b[m] = _mm512_dpbusd_epi32(
+                            isum_b[m],
+                            hi_b,
+                            bcast4(&act.qs, sb * 32 + g4 * 8 + 4),
+                        );
+                    }
                 }
-            }
-            for (sub, isum) in [(sa, &isum_a), (sb, &isum_b)] {
-                let scale = _mm512_loadu_ps(tile.scales[sub].as_ptr());
-                let min = _mm512_loadu_ps(tile.mins[sub].as_ptr());
-                for (m, act) in acts.iter().enumerate() {
-                    let dall = act.d;
-                    let f = _mm512_cvtepi32_ps(isum[m]);
-                    acc[m][0] =
-                        _mm512_fmadd_ps(f, _mm512_mul_ps(scale, _mm512_set1_ps(dall)), acc[m][0]);
-                    let bsum = (act.bsums[sub * 2] as i32 + act.bsums[sub * 2 + 1] as i32) as f32;
-                    acc[m][0] = _mm512_fnmadd_ps(min, _mm512_set1_ps(dall * bsum), acc[m][0]);
+                for (sub, isum) in [(sa, &isum_a), (sb, &isum_b)] {
+                    let scale = _mm512_loadu_ps(tile.scales[sub].as_ptr());
+                    let min = _mm512_loadu_ps(tile.mins[sub].as_ptr());
+                    for (m, act) in acts.iter().enumerate() {
+                        let dall = act.d;
+                        let f = _mm512_cvtepi32_ps(isum[m]);
+                        acc[m][0] = _mm512_fmadd_ps(
+                            f,
+                            _mm512_mul_ps(scale, _mm512_set1_ps(dall)),
+                            acc[m][0],
+                        );
+                        let bsum =
+                            (act.bsums[sub * 2] as i32 + act.bsums[sub * 2 + 1] as i32) as f32;
+                        acc[m][0] = _mm512_fnmadd_ps(min, _mm512_set1_ps(dall * bsum), acc[m][0]);
+                    }
                 }
             }
         }
@@ -260,24 +272,26 @@ mod kernels {
     // q6k: values are v-32; vpdpbusd on raw u6 then subtract 32 * bsum per 16-value subblock.
     #[target_feature(enable = "avx512f,avx512vnni,avx512bw")]
     pub(crate) unsafe fn q6k_tile(tile: &TileQ6K, acts: &[&BlockQ8K], acc: &mut [[__m512; 1]]) {
-        for sub in 0..16 {
-            let mut isum = [_mm512_setzero_si512(); MAX_MT];
-            // subblock = 16 k-values = 4 k4-groups
-            for g4 in 0..4 {
-                let g = sub * 4 + g4;
-                let w = _mm512_loadu_si512(tile.qs.as_ptr().add(g * TILE_N * 4) as *const _);
-                for (m, act) in acts.iter().enumerate() {
-                    let a = bcast4(&act.qs, sub * 16 + g4 * 4);
-                    isum[m] = _mm512_dpbusd_epi32(isum[m], w, a);
+        unsafe {
+            for sub in 0..16 {
+                let mut isum = [_mm512_setzero_si512(); MAX_MT];
+                // subblock = 16 k-values = 4 k4-groups
+                for g4 in 0..4 {
+                    let g = sub * 4 + g4;
+                    let w = _mm512_loadu_si512(tile.qs.as_ptr().add(g * TILE_N * 4) as *const _);
+                    for (m, act) in acts.iter().enumerate() {
+                        let a = bcast4(&act.qs, sub * 16 + g4 * 4);
+                        isum[m] = _mm512_dpbusd_epi32(isum[m], w, a);
+                    }
                 }
-            }
-            let scale = _mm512_loadu_ps(tile.scales[sub].as_ptr());
-            for (m, act) in acts.iter().enumerate() {
-                let dall = act.d;
-                let bsum = act.bsums[sub] as f32;
-                let f = _mm512_sub_ps(_mm512_cvtepi32_ps(isum[m]), _mm512_set1_ps(32.0 * bsum));
-                acc[m][0] =
-                    _mm512_fmadd_ps(f, _mm512_mul_ps(scale, _mm512_set1_ps(dall)), acc[m][0]);
+                let scale = _mm512_loadu_ps(tile.scales[sub].as_ptr());
+                for (m, act) in acts.iter().enumerate() {
+                    let dall = act.d;
+                    let bsum = act.bsums[sub] as f32;
+                    let f = _mm512_sub_ps(_mm512_cvtepi32_ps(isum[m]), _mm512_set1_ps(32.0 * bsum));
+                    acc[m][0] =
+                        _mm512_fmadd_ps(f, _mm512_mul_ps(scale, _mm512_set1_ps(dall)), acc[m][0]);
+                }
             }
         }
     }
@@ -292,24 +306,31 @@ mod kernels {
         sub32: usize,
         acc: &mut [[__m512; 1]],
     ) {
-        let mut isum_a = [_mm512_setzero_si512(); MAX_MT];
-        let mut isum_b = [_mm512_setzero_si512(); MAX_MT];
-        for g4 in 0..8 {
-            let wa = _mm512_loadu_si512(t0.qs.as_ptr().add(g4 * TILE_N * 4) as *const _);
-            let wb = _mm512_loadu_si512(t1.qs.as_ptr().add(g4 * TILE_N * 4) as *const _);
-            for (m, act) in acts.iter().enumerate() {
-                isum_a[m] =
-                    _mm512_dpbusd_epi32(isum_a[m], wa, bcast4(&act.qs, sub32 * 32 + g4 * 4));
-                isum_b[m] =
-                    _mm512_dpbusd_epi32(isum_b[m], wb, bcast4(&act.qs, (sub32 + 1) * 32 + g4 * 4));
+        unsafe {
+            let mut isum_a = [_mm512_setzero_si512(); MAX_MT];
+            let mut isum_b = [_mm512_setzero_si512(); MAX_MT];
+            for g4 in 0..8 {
+                let wa = _mm512_loadu_si512(t0.qs.as_ptr().add(g4 * TILE_N * 4) as *const _);
+                let wb = _mm512_loadu_si512(t1.qs.as_ptr().add(g4 * TILE_N * 4) as *const _);
+                for (m, act) in acts.iter().enumerate() {
+                    isum_a[m] =
+                        _mm512_dpbusd_epi32(isum_a[m], wa, bcast4(&act.qs, sub32 * 32 + g4 * 4));
+                    isum_b[m] = _mm512_dpbusd_epi32(
+                        isum_b[m],
+                        wb,
+                        bcast4(&act.qs, (sub32 + 1) * 32 + g4 * 4),
+                    );
+                }
             }
-        }
-        for (blk, isum, tile) in [(sub32, &isum_a, t0), (sub32 + 1, &isum_b, t1)] {
-            let dw = _mm512_cvtph_ps(_mm256_loadu_si256(tile.d.as_ptr() as *const _));
-            for (m, act) in acts.iter().enumerate() {
-                let bsum = (act.bsums[blk * 2] as i32 + act.bsums[blk * 2 + 1] as i32) as f32;
-                let f = _mm512_sub_ps(_mm512_cvtepi32_ps(isum[m]), _mm512_set1_ps(128.0 * bsum));
-                acc[m][0] = _mm512_fmadd_ps(f, _mm512_mul_ps(dw, _mm512_set1_ps(act.d)), acc[m][0]);
+            for (blk, isum, tile) in [(sub32, &isum_a, t0), (sub32 + 1, &isum_b, t1)] {
+                let dw = _mm512_cvtph_ps(_mm256_loadu_si256(tile.d.as_ptr() as *const _));
+                for (m, act) in acts.iter().enumerate() {
+                    let bsum = (act.bsums[blk * 2] as i32 + act.bsums[blk * 2 + 1] as i32) as f32;
+                    let f =
+                        _mm512_sub_ps(_mm512_cvtepi32_ps(isum[m]), _mm512_set1_ps(128.0 * bsum));
+                    acc[m][0] =
+                        _mm512_fmadd_ps(f, _mm512_mul_ps(dw, _mm512_set1_ps(act.d)), acc[m][0]);
+                }
             }
         }
     }
@@ -332,36 +353,38 @@ unsafe fn matmul_unit_512(
     dst_ptr: *mut f32,
     n: usize,
 ) {
-    use core::arch::x86_64::*;
-    let mut act_refs: [&BlockQ8K; kernels::MAX_MT] = [&lhs_q[m0 * kb]; kernels::MAX_MT];
-    let mut acc = [[_mm512_setzero_ps(); 1]; kernels::MAX_MT];
-    for b in 0..kb {
-        for (i, a) in act_refs.iter_mut().enumerate().take(mt) {
-            *a = &lhs_q[(m0 + i) * kb + b];
-        }
-        match packed {
-            PackedX86::Q4K(tiles) => {
-                kernels::q4k_tile(&tiles[nt * kb + b], &act_refs[..mt], &mut acc)
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut act_refs: [&BlockQ8K; kernels::MAX_MT] = [&lhs_q[m0 * kb]; kernels::MAX_MT];
+        let mut acc = [[_mm512_setzero_ps(); 1]; kernels::MAX_MT];
+        for b in 0..kb {
+            for (i, a) in act_refs.iter_mut().enumerate().take(mt) {
+                *a = &lhs_q[(m0 + i) * kb + b];
             }
-            PackedX86::Q6K(tiles) => {
-                kernels::q6k_tile(&tiles[nt * kb + b], &act_refs[..mt], &mut acc)
-            }
-            PackedX86::Q8_0(tiles) => {
-                // q8_0 tiles cover 32 k-values each; 8 tiles per q8k superblock
-                for s in (0..8).step_by(2) {
-                    kernels::q8_0_tile2(
-                        &tiles[nt * (kb * 8) + b * 8 + s],
-                        &tiles[nt * (kb * 8) + b * 8 + s + 1],
-                        &act_refs[..mt],
-                        s,
-                        &mut acc,
-                    );
+            match packed {
+                PackedX86::Q4K(tiles) => {
+                    kernels::q4k_tile(&tiles[nt * kb + b], &act_refs[..mt], &mut acc)
+                }
+                PackedX86::Q6K(tiles) => {
+                    kernels::q6k_tile(&tiles[nt * kb + b], &act_refs[..mt], &mut acc)
+                }
+                PackedX86::Q8_0(tiles) => {
+                    // q8_0 tiles cover 32 k-values each; 8 tiles per q8k superblock
+                    for s in (0..8).step_by(2) {
+                        kernels::q8_0_tile2(
+                            &tiles[nt * (kb * 8) + b * 8 + s],
+                            &tiles[nt * (kb * 8) + b * 8 + s + 1],
+                            &act_refs[..mt],
+                            s,
+                            &mut acc,
+                        );
+                    }
                 }
             }
         }
-    }
-    for (i, row) in acc[..mt].iter().enumerate() {
-        _mm512_storeu_ps(dst_ptr.add((m0 + i) * n + nt * TILE_N), row[0]);
+        for (i, row) in acc[..mt].iter().enumerate() {
+            _mm512_storeu_ps(dst_ptr.add((m0 + i) * n + nt * TILE_N), row[0]);
+        }
     }
 }
 
@@ -379,46 +402,48 @@ unsafe fn matmul_unit_256(
     n: usize,
     vnni: bool,
 ) {
-    use core::arch::x86_64::*;
-    let mut act_refs: [&BlockQ8K; kernels::MAX_MT] = [&lhs_q[m0 * kb]; kernels::MAX_MT];
-    let mut acc = [[_mm256_setzero_ps(); 2]; kernels::MAX_MT];
-    for b in 0..kb {
-        for (i, a) in act_refs.iter_mut().enumerate().take(mt) {
-            *a = &lhs_q[(m0 + i) * kb + b];
+    unsafe {
+        use core::arch::x86_64::*;
+        let mut act_refs: [&BlockQ8K; kernels::MAX_MT] = [&lhs_q[m0 * kb]; kernels::MAX_MT];
+        let mut acc = [[_mm256_setzero_ps(); 2]; kernels::MAX_MT];
+        for b in 0..kb {
+            for (i, a) in act_refs.iter_mut().enumerate().take(mt) {
+                *a = &lhs_q[(m0 + i) * kb + b];
+            }
+            match packed {
+                PackedX86::Q4K(tiles) => {
+                    let t = &tiles[nt * kb + b];
+                    if vnni {
+                        kernels256::q4k_tile_avxvnni(t, &act_refs[..mt], &mut acc)
+                    } else {
+                        kernels256::q4k_tile_avx2(t, &act_refs[..mt], &mut acc)
+                    }
+                }
+                PackedX86::Q6K(tiles) => {
+                    let t = &tiles[nt * kb + b];
+                    if vnni {
+                        kernels256::q6k_tile_avxvnni(t, &act_refs[..mt], &mut acc)
+                    } else {
+                        kernels256::q6k_tile_avx2(t, &act_refs[..mt], &mut acc)
+                    }
+                }
+                PackedX86::Q8_0(tiles) => {
+                    for s in (0..8).step_by(2) {
+                        kernels256::q8_0_tile2_avxvnni(
+                            &tiles[nt * (kb * 8) + b * 8 + s],
+                            &tiles[nt * (kb * 8) + b * 8 + s + 1],
+                            &act_refs[..mt],
+                            s,
+                            &mut acc,
+                        );
+                    }
+                }
+            }
         }
-        match packed {
-            PackedX86::Q4K(tiles) => {
-                let t = &tiles[nt * kb + b];
-                if vnni {
-                    kernels256::q4k_tile_avxvnni(t, &act_refs[..mt], &mut acc)
-                } else {
-                    kernels256::q4k_tile_avx2(t, &act_refs[..mt], &mut acc)
-                }
-            }
-            PackedX86::Q6K(tiles) => {
-                let t = &tiles[nt * kb + b];
-                if vnni {
-                    kernels256::q6k_tile_avxvnni(t, &act_refs[..mt], &mut acc)
-                } else {
-                    kernels256::q6k_tile_avx2(t, &act_refs[..mt], &mut acc)
-                }
-            }
-            PackedX86::Q8_0(tiles) => {
-                for s in (0..8).step_by(2) {
-                    kernels256::q8_0_tile2_avxvnni(
-                        &tiles[nt * (kb * 8) + b * 8 + s],
-                        &tiles[nt * (kb * 8) + b * 8 + s + 1],
-                        &act_refs[..mt],
-                        s,
-                        &mut acc,
-                    );
-                }
-            }
+        for (i, row) in acc[..mt].iter().enumerate() {
+            _mm256_storeu_ps(dst_ptr.add((m0 + i) * n + nt * TILE_N), row[0]);
+            _mm256_storeu_ps(dst_ptr.add((m0 + i) * n + nt * TILE_N + 8), row[1]);
         }
-    }
-    for (i, row) in acc[..mt].iter().enumerate() {
-        _mm256_storeu_ps(dst_ptr.add((m0 + i) * n + nt * TILE_N), row[0]);
-        _mm256_storeu_ps(dst_ptr.add((m0 + i) * n + nt * TILE_N + 8), row[1]);
     }
 }
 
@@ -674,32 +699,34 @@ mod amx {
 
     // tmm0 = C (16x16 i32), tmm1 = A (16 x 32 i8), tmm2 = B (8 x 64 i8)
     unsafe fn configure() {
-        let mut cfg = TileCfg {
-            palette: 1,
-            start_row: 0,
-            _rsvd: [0; 14],
-            colsb: [0; 16],
-            rows: [0; 16],
-        };
-        const _: () = assert!(std::mem::size_of::<TileCfg>() == 64);
-        // tmm0-3: C (16x16 i32); tmm4-5: A (16x32 i8); tmm6-7: B (8x64 i8)
-        for t in 0..4 {
-            cfg.colsb[t] = 64;
-            cfg.rows[t] = 16;
+        unsafe {
+            let mut cfg = TileCfg {
+                palette: 1,
+                start_row: 0,
+                _rsvd: [0; 14],
+                colsb: [0; 16],
+                rows: [0; 16],
+            };
+            const _: () = assert!(std::mem::size_of::<TileCfg>() == 64);
+            // tmm0-3: C (16x16 i32); tmm4-5: A (16x32 i8); tmm6-7: B (8x64 i8)
+            for t in 0..4 {
+                cfg.colsb[t] = 64;
+                cfg.rows[t] = 16;
+            }
+            for t in 4..6 {
+                cfg.colsb[t] = 32;
+                cfg.rows[t] = 16;
+            }
+            for t in 6..8 {
+                cfg.colsb[t] = 64;
+                cfg.rows[t] = 8;
+            }
+            core::arch::asm!(
+                "ldtilecfg [{cfg}]",
+                cfg = in(reg) &cfg,
+                options(nostack)
+            );
         }
-        for t in 4..6 {
-            cfg.colsb[t] = 32;
-            cfg.rows[t] = 16;
-        }
-        for t in 6..8 {
-            cfg.colsb[t] = 64;
-            cfg.rows[t] = 8;
-        }
-        core::arch::asm!(
-            "ldtilecfg [{cfg}]",
-            cfg = in(reg) &cfg,
-            options(nostack)
-        );
     }
 
     thread_local! {
@@ -936,7 +963,7 @@ mod kernels256 {
 
     #[target_feature(enable = "avx2")]
     unsafe fn bcast4_256(act: &[i8], off: usize) -> __m256i {
-        _mm256_set1_epi32(std::ptr::read_unaligned(act.as_ptr().add(off) as *const i32))
+        unsafe { _mm256_set1_epi32(std::ptr::read_unaligned(act.as_ptr().add(off) as *const i32)) }
     }
 
     #[target_feature(enable = "avx2,avxvnni")]
@@ -959,40 +986,43 @@ mod kernels256 {
                 acts: &[&BlockQ8K],
                 acc: &mut [[__m256; 2]],
             ) {
-                let mask = _mm256_set1_epi8(0x0F_u8 as i8);
-                for sub in 0..8 {
-                    let mut isum = [[_mm256_setzero_si256(); 2]; MAX_MT];
-                    for g4 in 0..4 {
-                        let g = sub * 4 + g4;
-                        for h in 0..2 {
-                            let w = _mm256_loadu_si256(
-                                tile.qs.as_ptr().add(g * TILE_N * 4 + h * 32) as *const _,
-                            );
-                            let lo = _mm256_and_si256(w, mask);
-                            let hi = _mm256_and_si256(_mm256_srli_epi16(w, 4), mask);
-                            for (m, act) in acts.iter().enumerate() {
-                                let a_lo = bcast4_256(&act.qs, sub * 32 + g4 * 8);
-                                let a_hi = bcast4_256(&act.qs, sub * 32 + g4 * 8 + 4);
-                                isum[m][h] = $dp(isum[m][h], lo, a_lo);
-                                isum[m][h] = $dp(isum[m][h], hi, a_hi);
+                unsafe {
+                    let mask = _mm256_set1_epi8(0x0F_u8 as i8);
+                    for sub in 0..8 {
+                        let mut isum = [[_mm256_setzero_si256(); 2]; MAX_MT];
+                        for g4 in 0..4 {
+                            let g = sub * 4 + g4;
+                            for h in 0..2 {
+                                let w = _mm256_loadu_si256(
+                                    tile.qs.as_ptr().add(g * TILE_N * 4 + h * 32) as *const _,
+                                );
+                                let lo = _mm256_and_si256(w, mask);
+                                let hi = _mm256_and_si256(_mm256_srli_epi16(w, 4), mask);
+                                for (m, act) in acts.iter().enumerate() {
+                                    let a_lo = bcast4_256(&act.qs, sub * 32 + g4 * 8);
+                                    let a_hi = bcast4_256(&act.qs, sub * 32 + g4 * 8 + 4);
+                                    isum[m][h] = $dp(isum[m][h], lo, a_lo);
+                                    isum[m][h] = $dp(isum[m][h], hi, a_hi);
+                                }
                             }
                         }
-                    }
-                    for h in 0..2 {
-                        let scale = _mm256_loadu_ps(tile.scales[sub].as_ptr().add(h * 8));
-                        let min = _mm256_loadu_ps(tile.mins[sub].as_ptr().add(h * 8));
-                        for (m, act) in acts.iter().enumerate() {
-                            let dall = act.d;
-                            let f = _mm256_cvtepi32_ps(isum[m][h]);
-                            acc[m][h] = _mm256_fmadd_ps(
-                                f,
-                                _mm256_mul_ps(scale, _mm256_set1_ps(dall)),
-                                acc[m][h],
-                            );
-                            let bsum =
-                                (act.bsums[sub * 2] as i32 + act.bsums[sub * 2 + 1] as i32) as f32;
-                            acc[m][h] =
-                                _mm256_fnmadd_ps(min, _mm256_set1_ps(dall * bsum), acc[m][h]);
+                        for h in 0..2 {
+                            let scale = _mm256_loadu_ps(tile.scales[sub].as_ptr().add(h * 8));
+                            let min = _mm256_loadu_ps(tile.mins[sub].as_ptr().add(h * 8));
+                            for (m, act) in acts.iter().enumerate() {
+                                let dall = act.d;
+                                let f = _mm256_cvtepi32_ps(isum[m][h]);
+                                acc[m][h] = _mm256_fmadd_ps(
+                                    f,
+                                    _mm256_mul_ps(scale, _mm256_set1_ps(dall)),
+                                    acc[m][h],
+                                );
+                                let bsum = (act.bsums[sub * 2] as i32
+                                    + act.bsums[sub * 2 + 1] as i32)
+                                    as f32;
+                                acc[m][h] =
+                                    _mm256_fnmadd_ps(min, _mm256_set1_ps(dall * bsum), acc[m][h]);
+                            }
                         }
                     }
                 }
@@ -1010,34 +1040,36 @@ mod kernels256 {
                 acts: &[&BlockQ8K],
                 acc: &mut [[__m256; 2]],
             ) {
-                for sub in 0..16 {
-                    let mut isum = [[_mm256_setzero_si256(); 2]; MAX_MT];
-                    for g4 in 0..4 {
-                        let g = sub * 4 + g4;
-                        for h in 0..2 {
-                            let w = _mm256_loadu_si256(
-                                tile.qs.as_ptr().add(g * TILE_N * 4 + h * 32) as *const _,
-                            );
-                            for (m, act) in acts.iter().enumerate() {
-                                let a = bcast4_256(&act.qs, sub * 16 + g4 * 4);
-                                isum[m][h] = $dp(isum[m][h], w, a);
+                unsafe {
+                    for sub in 0..16 {
+                        let mut isum = [[_mm256_setzero_si256(); 2]; MAX_MT];
+                        for g4 in 0..4 {
+                            let g = sub * 4 + g4;
+                            for h in 0..2 {
+                                let w = _mm256_loadu_si256(
+                                    tile.qs.as_ptr().add(g * TILE_N * 4 + h * 32) as *const _,
+                                );
+                                for (m, act) in acts.iter().enumerate() {
+                                    let a = bcast4_256(&act.qs, sub * 16 + g4 * 4);
+                                    isum[m][h] = $dp(isum[m][h], w, a);
+                                }
                             }
                         }
-                    }
-                    for h in 0..2 {
-                        let scale = _mm256_loadu_ps(tile.scales[sub].as_ptr().add(h * 8));
-                        for (m, act) in acts.iter().enumerate() {
-                            let dall = act.d;
-                            let bsum = act.bsums[sub] as f32;
-                            let f = _mm256_sub_ps(
-                                _mm256_cvtepi32_ps(isum[m][h]),
-                                _mm256_set1_ps(32.0 * bsum),
-                            );
-                            acc[m][h] = _mm256_fmadd_ps(
-                                f,
-                                _mm256_mul_ps(scale, _mm256_set1_ps(dall)),
-                                acc[m][h],
-                            );
+                        for h in 0..2 {
+                            let scale = _mm256_loadu_ps(tile.scales[sub].as_ptr().add(h * 8));
+                            for (m, act) in acts.iter().enumerate() {
+                                let dall = act.d;
+                                let bsum = act.bsums[sub] as f32;
+                                let f = _mm256_sub_ps(
+                                    _mm256_cvtepi32_ps(isum[m][h]),
+                                    _mm256_set1_ps(32.0 * bsum),
+                                );
+                                acc[m][h] = _mm256_fmadd_ps(
+                                    f,
+                                    _mm256_mul_ps(scale, _mm256_set1_ps(dall)),
+                                    acc[m][h],
+                                );
+                            }
                         }
                     }
                 }
@@ -1056,37 +1088,45 @@ mod kernels256 {
         sub32: usize,
         acc: &mut [[__m256; 2]],
     ) {
-        let mut isum_a = [[_mm256_setzero_si256(); 2]; MAX_MT];
-        let mut isum_b = [[_mm256_setzero_si256(); 2]; MAX_MT];
-        for g4 in 0..8 {
-            for h in 0..2 {
-                let wa =
-                    _mm256_loadu_si256(t0.qs.as_ptr().add(g4 * TILE_N * 4 + h * 32) as *const _);
-                let wb =
-                    _mm256_loadu_si256(t1.qs.as_ptr().add(g4 * TILE_N * 4 + h * 32) as *const _);
-                for (m, act) in acts.iter().enumerate() {
-                    isum_a[m][h] = _mm256_dpbusd_avx_epi32(
-                        isum_a[m][h],
-                        wa,
-                        bcast4_256(&act.qs, sub32 * 32 + g4 * 4),
+        unsafe {
+            let mut isum_a = [[_mm256_setzero_si256(); 2]; MAX_MT];
+            let mut isum_b = [[_mm256_setzero_si256(); 2]; MAX_MT];
+            for g4 in 0..8 {
+                for h in 0..2 {
+                    let wa = _mm256_loadu_si256(
+                        t0.qs.as_ptr().add(g4 * TILE_N * 4 + h * 32) as *const _
                     );
-                    isum_b[m][h] = _mm256_dpbusd_avx_epi32(
-                        isum_b[m][h],
-                        wb,
-                        bcast4_256(&act.qs, (sub32 + 1) * 32 + g4 * 4),
+                    let wb = _mm256_loadu_si256(
+                        t1.qs.as_ptr().add(g4 * TILE_N * 4 + h * 32) as *const _
                     );
+                    for (m, act) in acts.iter().enumerate() {
+                        isum_a[m][h] = _mm256_dpbusd_avx_epi32(
+                            isum_a[m][h],
+                            wa,
+                            bcast4_256(&act.qs, sub32 * 32 + g4 * 4),
+                        );
+                        isum_b[m][h] = _mm256_dpbusd_avx_epi32(
+                            isum_b[m][h],
+                            wb,
+                            bcast4_256(&act.qs, (sub32 + 1) * 32 + g4 * 4),
+                        );
+                    }
                 }
             }
-        }
-        for (blk, isum, tile) in [(sub32, &isum_a, t0), (sub32 + 1, &isum_b, t1)] {
-            for h in 0..2 {
-                let dw = _mm256_cvtph_ps(_mm_loadu_si128(tile.d.as_ptr().add(h * 8) as *const _));
-                for (m, act) in acts.iter().enumerate() {
-                    let bsum = (act.bsums[blk * 2] as i32 + act.bsums[blk * 2 + 1] as i32) as f32;
-                    let f =
-                        _mm256_sub_ps(_mm256_cvtepi32_ps(isum[m][h]), _mm256_set1_ps(128.0 * bsum));
-                    acc[m][h] =
-                        _mm256_fmadd_ps(f, _mm256_mul_ps(dw, _mm256_set1_ps(act.d)), acc[m][h]);
+            for (blk, isum, tile) in [(sub32, &isum_a, t0), (sub32 + 1, &isum_b, t1)] {
+                for h in 0..2 {
+                    let dw =
+                        _mm256_cvtph_ps(_mm_loadu_si128(tile.d.as_ptr().add(h * 8) as *const _));
+                    for (m, act) in acts.iter().enumerate() {
+                        let bsum =
+                            (act.bsums[blk * 2] as i32 + act.bsums[blk * 2 + 1] as i32) as f32;
+                        let f = _mm256_sub_ps(
+                            _mm256_cvtepi32_ps(isum[m][h]),
+                            _mm256_set1_ps(128.0 * bsum),
+                        );
+                        acc[m][h] =
+                            _mm256_fmadd_ps(f, _mm256_mul_ps(dw, _mm256_set1_ps(act.d)), acc[m][h]);
+                    }
                 }
             }
         }

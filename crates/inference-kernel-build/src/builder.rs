@@ -1,9 +1,9 @@
 //! Main kernel builder implementation
 
-use crate::compute_cap::{arch_key, gencode_args, ComputeCapability, GpuArch};
+use crate::compute_cap::{ComputeCapability, GpuArch, arch_key, gencode_args};
 use crate::dependency::DependencyManager;
 use crate::error::{Error, Result};
-use crate::hash::{hash_args, hash_paths, BuildCache};
+use crate::hash::{BuildCache, hash_args, hash_paths};
 use crate::parallel::ParallelConfig;
 use crate::source::SourceSelector;
 use crate::toolkit::CudaToolkit;
@@ -319,7 +319,9 @@ impl KernelBuilder {
         let version = self.toolkit.as_ref().and_then(|t| t.version.as_deref());
         let parsed = version.and_then(parse_major_minor);
         if parsed.is_none() {
-            println!("cargo:warning=inference-kernel-build: unknown CUDA version {version:?}, falling back to -Xfatbin=-compress-all");
+            println!(
+                "cargo:warning=inference-kernel-build: unknown CUDA version {version:?}, falling back to -Xfatbin=-compress-all"
+            );
         }
         let flag = if parsed >= Some(SIZE_COMPRESSION_SINCE) {
             "-compress-mode=size"

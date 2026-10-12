@@ -81,20 +81,20 @@ impl crate::CustomOp1 for ArgSort {
             crate::CpuStorage::F6E2M3(_) => {
                 return Err(
                     crate::Error::UnsupportedDTypeForOp(crate::DType::F6E2M3, "argsort").bt(),
-                )
+                );
             }
             crate::CpuStorage::F6E3M2(_) => {
                 return Err(
                     crate::Error::UnsupportedDTypeForOp(crate::DType::F6E3M2, "argsort").bt(),
-                )
+                );
             }
             crate::CpuStorage::F4(_) => {
-                return Err(crate::Error::UnsupportedDTypeForOp(crate::DType::F4, "argsort").bt())
+                return Err(crate::Error::UnsupportedDTypeForOp(crate::DType::F4, "argsort").bt());
             }
             crate::CpuStorage::F8E8M0(_) => {
                 return Err(
                     crate::Error::UnsupportedDTypeForOp(crate::DType::F8E8M0, "argsort").bt(),
-                )
+                );
             }
         };
         let sort_indexes = crate::CpuStorage::U32(sort_indexes);
@@ -107,8 +107,8 @@ impl crate::CustomOp1 for ArgSort {
         storage: &crate::MetalStorage,
         layout: &crate::Layout,
     ) -> Result<(crate::MetalStorage, crate::Shape)> {
-        use crate::backend::BackendStorage;
         use crate::DType;
+        use crate::backend::BackendStorage;
 
         let name = {
             if self.asc {
@@ -124,9 +124,11 @@ impl crate::CustomOp1 for ArgSort {
                     DType::I64 => "asort_asc_i64",
                     DType::F8E4M3 => crate::bail!("Metal device does not yet support F8E4M3."),
                     DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
-                        return Err(
-                            crate::Error::UnsupportedDTypeForOp(storage.dtype(), "argsort").bt(),
+                        return Err(crate::Error::UnsupportedDTypeForOp(
+                            storage.dtype(),
+                            "argsort",
                         )
+                        .bt());
                     }
                 }
             } else {
@@ -142,9 +144,11 @@ impl crate::CustomOp1 for ArgSort {
                     DType::I64 => "asort_desc_i64",
                     DType::F8E4M3 => crate::bail!("Metal device does not yet support F8E4M3."),
                     DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
-                        return Err(
-                            crate::Error::UnsupportedDTypeForOp(storage.dtype(), "argsort").bt(),
+                        return Err(crate::Error::UnsupportedDTypeForOp(
+                            storage.dtype(),
+                            "argsort",
                         )
+                        .bt());
                     }
                 }
             }
@@ -213,7 +217,7 @@ fn metal_merge_arg_sort(
     use crate::DType;
     use candle_metal_kernels::source::Source;
     use candle_metal_kernels::utils::EncoderProvider;
-    use candle_metal_kernels::{set_params, Output, RESOURCE_OPTIONS};
+    use candle_metal_kernels::{Output, RESOURCE_OPTIONS, set_params};
     use objc2_metal::MTLSize;
 
     let (dtype_str, mlx_dtype) = match dtype {

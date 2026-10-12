@@ -51,3 +51,7 @@ Paths are candle-nn's, now under `src/nn/`.
   `layer_norm_slow` in `src/ops.rs`; the CUDA arm of `ops::rms_norm`, so `ops::rms_norm` and `RmsNorm` fail on
   contiguous CUDA input (inference-nn's `ops::rms_norm` is the CUDA one, f32/f16/bf16; candle's f64 CUDA kernel is
   gone).
+- Rust edition 2024 (upstream is 2021), inherited from the workspace: `cargo fix --edition`'s rewrites (`unsafe extern`
+  blocks, `unsafe {}` around the unsafe operations inside an `unsafe fn`, including the NEON kernels, and two closure
+  patterns written out), the thread pool's `gen` variable and field renamed `generation` (`gen` is now reserved),
+  clippy's collapsed `if let` chains, and rustfmt's 2024 style edition.

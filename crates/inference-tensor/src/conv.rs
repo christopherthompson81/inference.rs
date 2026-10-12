@@ -1,6 +1,6 @@
 //! 1D and 2D Convolutions
 //!
-use crate::{op::BackpropOp, op::Op, Device, Error, Result, Tensor};
+use crate::{Device, Error, Result, Tensor, op::BackpropOp, op::Op};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParamsConv1D {
@@ -643,25 +643,27 @@ mod tests {
     #[test]
     fn grouped_conv_rejects_out_channels_that_do_not_split_into_groups() -> Result<()> {
         let x = Tensor::zeros((1, 4, 8), DType::F32, &Device::Cpu)?;
-        assert!(x
-            .conv1d(
+        assert!(
+            x.conv1d(
                 &Tensor::zeros((6, 1, 3), DType::F32, &Device::Cpu)?,
                 1,
                 1,
                 1,
                 4
             )
-            .is_err());
+            .is_err()
+        );
         let x = x.unsqueeze(3)?;
-        assert!(x
-            .conv2d(
+        assert!(
+            x.conv2d(
                 &Tensor::zeros((2, 1, 3, 1), DType::F32, &Device::Cpu)?,
                 1,
                 1,
                 1,
                 4
             )
-            .is_err());
+            .is_err()
+        );
         Ok(())
     }
 
@@ -820,7 +822,9 @@ mod tests {
                 xgv.as_tensor().conv2d(&wg, 1, 1, 1, groups)
             })?;
             let direct = time_ms(&cuda, ITERS, || xg.conv2d(&wg, 1, 1, 1, groups))?;
-            println!("conv2d 3x3 {c}ch groups {groups} 32x32 bf16: split {split:.3} ms, routed {direct:.3} ms");
+            println!(
+                "conv2d 3x3 {c}ch groups {groups} 32x32 bf16: split {split:.3} ms, routed {direct:.3} ms"
+            );
         }
         Ok(())
     }

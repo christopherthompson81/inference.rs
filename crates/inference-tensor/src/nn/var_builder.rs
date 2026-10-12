@@ -435,7 +435,9 @@ impl<'a> VarBuilder<'a> {
         dtype: DType,
         dev: &Device,
     ) -> Result<Self> {
-        let tensors = crate::safetensors::MmapedSafetensors::multi(paths)?;
-        Ok(Self::from_backend(Box::new(tensors), dtype, dev.clone()))
+        unsafe {
+            let tensors = crate::safetensors::MmapedSafetensors::multi(paths)?;
+            Ok(Self::from_backend(Box::new(tensors), dtype, dev.clone()))
+        }
     }
 }

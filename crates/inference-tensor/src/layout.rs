@@ -102,7 +102,7 @@ impl Layout {
             .dims()
             .iter()
             .zip(self.stride())
-            .filter(|(&d, _)| d > 1)
+            .filter(|&(&d, _)| d > 1)
             .map(|(&d, &s)| (d, s))
             .collect();
         axes.sort_unstable_by_key(|&(_, s)| s);
@@ -328,10 +328,12 @@ mod tests {
         // size-1 dims never move, whatever their stride
         assert!(!Layout::new((1, 4).into(), vec![0, 1], 0).has_internal_overlap());
         // broadcast: a zero stride on a dim of size > 1
-        assert!(Layout::contiguous((1, 4))
-            .broadcast_as((3, 4))
-            .unwrap()
-            .has_internal_overlap());
+        assert!(
+            Layout::contiguous((1, 4))
+                .broadcast_as((3, 4))
+                .unwrap()
+                .has_internal_overlap()
+        );
         // the outer stride lands inside the inner dim's span
         assert!(Layout::new((3, 4).into(), vec![2, 1], 0).has_internal_overlap());
         // strides that leave gaps but never collide

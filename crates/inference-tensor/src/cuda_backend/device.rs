@@ -150,7 +150,7 @@ impl CudaDevice {
         &self,
         len: usize,
     ) -> Result<cudarc::driver::CudaSlice<T>> {
-        self.stream.alloc::<T>(len).w()
+        unsafe { self.stream.alloc::<T>(len).w() }
     }
 
     pub fn alloc_zeros<T: cudarc::driver::DeviceRepr + cudarc::driver::ValidAsZeroBits>(
@@ -367,7 +367,7 @@ impl CudaDevice {
     ///   allocating stream finishes.
     /// - Ensure that a tensor is not written two concurrently by multiple streams.
     pub unsafe fn disable_event_tracking(&self) {
-        self.context.disable_event_tracking()
+        unsafe { self.context.disable_event_tracking() }
     }
 
     pub fn is_event_tracking(&self) -> bool {
@@ -594,7 +594,7 @@ impl BackendDevice for CudaDevice {
             DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
                 return Err(
                     CudaError::InternalError("Dummy types not supported in CUDA backend").into(),
-                )
+                );
             }
         };
         Ok(CudaStorage {
@@ -702,58 +702,61 @@ impl BackendDevice for CudaDevice {
     }
 
     unsafe fn alloc_uninit(&self, shape: &Shape, dtype: DType) -> Result<Self::Storage> {
-        let elem_count = shape.elem_count();
-        let slice = match dtype {
-            DType::U8 => {
-                let data = self.alloc::<u8>(elem_count)?;
-                CudaStorageSlice::U8(data)
-            }
-            DType::U32 => {
-                let data = self.alloc::<u32>(elem_count)?;
-                CudaStorageSlice::U32(data)
-            }
-            DType::I16 => {
-                let data = self.alloc::<i16>(elem_count)?;
-                CudaStorageSlice::I16(data)
-            }
-            DType::I32 => {
-                let data = self.alloc::<i32>(elem_count)?;
-                CudaStorageSlice::I32(data)
-            }
-            DType::I64 => {
-                let data = self.alloc::<i64>(elem_count)?;
-                CudaStorageSlice::I64(data)
-            }
-            DType::BF16 => {
-                let data = self.alloc::<bf16>(elem_count)?;
-                CudaStorageSlice::BF16(data)
-            }
-            DType::F16 => {
-                let data = self.alloc::<f16>(elem_count)?;
-                CudaStorageSlice::F16(data)
-            }
-            DType::F32 => {
-                let data = self.alloc::<f32>(elem_count)?;
-                CudaStorageSlice::F32(data)
-            }
-            DType::F64 => {
-                let data = self.alloc::<f64>(elem_count)?;
-                CudaStorageSlice::F64(data)
-            }
-            DType::F8E4M3 => {
-                let data = self.alloc::<F8E4M3>(elem_count)?;
-                CudaStorageSlice::F8E4M3(data)
-            }
-            DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
-                return Err(
-                    CudaError::InternalError("Dummy types not supported in CUDA backend").into(),
-                )
-            }
-        };
-        Ok(CudaStorage {
-            slice,
-            device: self.clone(),
-        })
+        unsafe {
+            let elem_count = shape.elem_count();
+            let slice = match dtype {
+                DType::U8 => {
+                    let data = self.alloc::<u8>(elem_count)?;
+                    CudaStorageSlice::U8(data)
+                }
+                DType::U32 => {
+                    let data = self.alloc::<u32>(elem_count)?;
+                    CudaStorageSlice::U32(data)
+                }
+                DType::I16 => {
+                    let data = self.alloc::<i16>(elem_count)?;
+                    CudaStorageSlice::I16(data)
+                }
+                DType::I32 => {
+                    let data = self.alloc::<i32>(elem_count)?;
+                    CudaStorageSlice::I32(data)
+                }
+                DType::I64 => {
+                    let data = self.alloc::<i64>(elem_count)?;
+                    CudaStorageSlice::I64(data)
+                }
+                DType::BF16 => {
+                    let data = self.alloc::<bf16>(elem_count)?;
+                    CudaStorageSlice::BF16(data)
+                }
+                DType::F16 => {
+                    let data = self.alloc::<f16>(elem_count)?;
+                    CudaStorageSlice::F16(data)
+                }
+                DType::F32 => {
+                    let data = self.alloc::<f32>(elem_count)?;
+                    CudaStorageSlice::F32(data)
+                }
+                DType::F64 => {
+                    let data = self.alloc::<f64>(elem_count)?;
+                    CudaStorageSlice::F64(data)
+                }
+                DType::F8E4M3 => {
+                    let data = self.alloc::<F8E4M3>(elem_count)?;
+                    CudaStorageSlice::F8E4M3(data)
+                }
+                DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
+                    return Err(CudaError::InternalError(
+                        "Dummy types not supported in CUDA backend",
+                    )
+                    .into());
+                }
+            };
+            Ok(CudaStorage {
+                slice,
+                device: self.clone(),
+            })
+        }
     }
 
     fn storage_from_slice<T: crate::WithDType>(&self, s: &[T]) -> Result<Self::Storage> {

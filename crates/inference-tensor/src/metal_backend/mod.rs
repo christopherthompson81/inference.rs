@@ -5,8 +5,8 @@ use crate::conv::{ParamsConv1D, ParamsConv2D, ParamsConvTranspose1D, ParamsConvT
 use crate::op::{BinaryOpT, CmpOp, ReduceOp, UnaryOpT};
 use crate::{CpuStorage, CpuStorageRef, DType, Error, Layout, Result, Shape};
 use candle_metal_kernels::{
-    metal::{Buffer, Commands, Device, ResidencySet},
     BufferOffset, CallConvTranspose2dCfg, Kernels, RESOURCE_OPTIONS,
+    metal::{Buffer, Commands, Device, ResidencySet},
 };
 use objc2_foundation::NSRange;
 #[cfg(feature = "metal-debug-labels")]
@@ -472,7 +472,7 @@ impl BackendStorage for MetalStorage {
                     | DType::F8E8M0
                     | DType::I16
                     | DType::I32 => {
-                        return Err(Error::UnsupportedDTypeForOp(dtype, "const-set").bt())
+                        return Err(Error::UnsupportedDTypeForOp(dtype, "const-set").bt());
                     }
                 };
                 candle_metal_kernels::call_const_set_contiguous(
@@ -503,7 +503,7 @@ impl BackendStorage for MetalStorage {
                     | DType::F8E8M0
                     | DType::I16
                     | DType::I32 => {
-                        return Err(Error::UnsupportedDTypeForOp(dtype, "const-set").bt())
+                        return Err(Error::UnsupportedDTypeForOp(dtype, "const-set").bt());
                     }
                 };
                 candle_metal_kernels::call_const_set_strided(
@@ -1731,7 +1731,7 @@ impl BackendStorage for MetalStorage {
             dtype => {
                 return Err(
                     MetalError::Message(format!("mlx matmul doesn't support {dtype:?}")).into(),
-                )
+                );
             }
         };
         candle_metal_kernels::call_mlx_gemm(
@@ -1836,24 +1836,23 @@ impl BackendStorage for MetalStorage {
                 let strides = src_l.stride();
                 let ndim = strides.len();
                 // Inner blocks are contiguous - eligible for copy2d
-                if ndim == 1 || strides[ndim - 1] == 1 {
-                    if let crate::StridedBlocks::UniformBlocks {
+                if (ndim == 1 || strides[ndim - 1] == 1)
+                    && let crate::StridedBlocks::UniformBlocks {
                         start_offset,
                         block_len,
                         count,
                         src_stride,
                     } = src_l.strided_blocks()
-                    {
-                        return self.copy2d(
-                            dst,
-                            count,
-                            block_len,
-                            src_stride,
-                            block_len,
-                            start_offset,
-                            dst_offset,
-                        );
-                    }
+                {
+                    return self.copy2d(
+                        dst,
+                        count,
+                        block_len,
+                        src_stride,
+                        block_len,
+                        start_offset,
+                        dst_offset,
+                    );
                 }
             }
             let kernel_name = match self.dtype {
@@ -2153,7 +2152,7 @@ impl BackendDevice for MetalDevice {
             | CpuStorageRef::F6E3M2(_)
             | CpuStorageRef::F4(_)
             | CpuStorageRef::F8E8M0(_) => {
-                return Err(Error::UnsupportedDTypeForOp(T::DTYPE, "to_dtype").bt())
+                return Err(Error::UnsupportedDTypeForOp(T::DTYPE, "to_dtype").bt());
             }
         };
         Ok(Self::Storage::new(buffer?, self.clone(), count, T::DTYPE))
@@ -2236,7 +2235,7 @@ impl BackendDevice for MetalDevice {
             | CpuStorage::F6E3M2(_)
             | CpuStorage::F4(_)
             | CpuStorage::F8E8M0(_) => {
-                return Err(Error::UnsupportedDTypeForOp(storage.dtype(), "to_dtype").bt())
+                return Err(Error::UnsupportedDTypeForOp(storage.dtype(), "to_dtype").bt());
             }
         };
         Ok(Self::Storage::new(

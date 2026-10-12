@@ -87,20 +87,20 @@ impl ParallelConfig {
 
         self.nvcc_thread_file_patterns.iter().any(|pattern| {
             // Check if it looks like a glob pattern
-            if pattern.contains('*') || pattern.contains('?') || pattern.contains('[') {
-                if let Ok(compiled) = Pattern::new(pattern) {
-                    // 1. Try matching against the filename component (if pattern has no path separators)
-                    if !pattern.contains('/')
-                        && !pattern.contains('\\')
-                        && compiled.matches(filename_component)
-                    {
-                        return true;
-                    }
+            if (pattern.contains('*') || pattern.contains('?') || pattern.contains('['))
+                && let Ok(compiled) = Pattern::new(pattern)
+            {
+                // 1. Try matching against the filename component (if pattern has no path separators)
+                if !pattern.contains('/')
+                    && !pattern.contains('\\')
+                    && compiled.matches(filename_component)
+                {
+                    return true;
+                }
 
-                    // 2. Try matching against the full path
-                    if compiled.matches(path_str) {
-                        return true;
-                    }
+                // 2. Try matching against the full path
+                if compiled.matches(path_str) {
+                    return true;
                 }
             }
             // Fallback to substring matching (preserve backward compatibility)
@@ -111,17 +111,17 @@ impl ParallelConfig {
     /// Calculate the number of threads to use
     pub fn thread_count(&self) -> usize {
         // Check environment variable first
-        if let Ok(env_threads) = std::env::var("CUDAFORGE_THREADS") {
-            if let Ok(n) = usize::from_str(&env_threads) {
-                return n.max(1);
-            }
+        if let Ok(env_threads) = std::env::var("CUDAFORGE_THREADS")
+            && let Ok(n) = usize::from_str(&env_threads)
+        {
+            return n.max(1);
         }
 
         // Also check RAYON_NUM_THREADS for compatibility
-        if let Ok(env_threads) = std::env::var("RAYON_NUM_THREADS") {
-            if let Ok(n) = usize::from_str(&env_threads) {
-                return n.max(1);
-            }
+        if let Ok(env_threads) = std::env::var("RAYON_NUM_THREADS")
+            && let Ok(n) = usize::from_str(&env_threads)
+        {
+            return n.max(1);
         }
 
         let available = self.detect_available_threads();

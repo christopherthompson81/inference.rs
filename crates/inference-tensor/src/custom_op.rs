@@ -1,6 +1,6 @@
 use crate::op::{BackpropOp, Op};
 use crate::tensor::from_storage;
-use crate::{bail, CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Storage, Tensor};
+use crate::{CpuStorage, CudaStorage, Layout, MetalStorage, Result, Shape, Storage, Tensor, bail};
 use std::sync::Arc;
 
 /// Unary ops that can be defined in user-land.
@@ -361,7 +361,7 @@ pub trait InplaceOp2 {
     /// The forward pass, as run on a cpu device. Note that the storage can use arbitrary strides,
     /// offsets etc so the associated layout should be used to access it.
     fn cpu_fwd(&self, s1: &mut CpuStorage, l1: &Layout, s2: &CpuStorage, l2: &Layout)
-        -> Result<()>;
+    -> Result<()>;
 
     /// The forward pass, as run on a gpu device. Note that the storage can use arbitrary strides,
     /// offsets etc so the associated layout should be used to access it.

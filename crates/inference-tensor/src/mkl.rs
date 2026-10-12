@@ -3,7 +3,7 @@ use libc::{c_char, c_double, c_float, c_int};
 
 mod ffi {
     use super::*;
-    extern "C" {
+    unsafe extern "C" {
         pub fn vsTanh(n: c_int, a: *const c_float, y: *mut c_float);
         pub fn vdTanh(n: c_int, a: *const c_double, y: *mut c_double);
         pub fn vsExp(n: c_int, a: *const c_float, y: *mut c_float);
@@ -95,21 +95,23 @@ pub unsafe fn sgemm(
     c: &mut [f32],
     ldc: i32,
 ) {
-    ffi::sgemm_(
-        &(transa as c_char),
-        &(transb as c_char),
-        &m,
-        &n,
-        &k,
-        &alpha,
-        a.as_ptr(),
-        &lda,
-        b.as_ptr(),
-        &ldb,
-        &beta,
-        c.as_mut_ptr(),
-        &ldc,
-    )
+    unsafe {
+        ffi::sgemm_(
+            &(transa as c_char),
+            &(transb as c_char),
+            &m,
+            &n,
+            &k,
+            &alpha,
+            a.as_ptr(),
+            &lda,
+            b.as_ptr(),
+            &ldb,
+            &beta,
+            c.as_mut_ptr(),
+            &ldc,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -129,21 +131,23 @@ pub unsafe fn dgemm(
     c: &mut [f64],
     ldc: i32,
 ) {
-    ffi::dgemm_(
-        &(transa as c_char),
-        &(transb as c_char),
-        &m,
-        &n,
-        &k,
-        &alpha,
-        a.as_ptr(),
-        &lda,
-        b.as_ptr(),
-        &ldb,
-        &beta,
-        c.as_mut_ptr(),
-        &ldc,
-    )
+    unsafe {
+        ffi::dgemm_(
+            &(transa as c_char),
+            &(transb as c_char),
+            &m,
+            &n,
+            &k,
+            &alpha,
+            a.as_ptr(),
+            &lda,
+            b.as_ptr(),
+            &ldb,
+            &beta,
+            c.as_mut_ptr(),
+            &ldc,
+        )
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -163,21 +167,23 @@ pub unsafe fn hgemm(
     c: &mut [half::f16],
     ldc: i32,
 ) {
-    ffi::hgemm_(
-        &(transa as c_char),
-        &(transb as c_char),
-        &m,
-        &n,
-        &k,
-        &alpha,
-        a.as_ptr(),
-        &lda,
-        b.as_ptr(),
-        &ldb,
-        &beta,
-        c.as_mut_ptr(),
-        &ldc,
-    )
+    unsafe {
+        ffi::hgemm_(
+            &(transa as c_char),
+            &(transb as c_char),
+            &m,
+            &n,
+            &k,
+            &alpha,
+            a.as_ptr(),
+            &lda,
+            b.as_ptr(),
+            &ldb,
+            &beta,
+            c.as_mut_ptr(),
+            &ldc,
+        )
+    }
 }
 
 #[inline]

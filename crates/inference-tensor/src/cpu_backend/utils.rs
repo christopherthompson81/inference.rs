@@ -378,25 +378,25 @@ pub fn unary_map_vec_par<
     f: F,
     f_vec: FV,
 ) -> Vec<U> {
-    if let crate::StridedBlocks::SingleBlock { start_offset, len } = layout.strided_blocks() {
-        if len >= PAR_ELEMWISE_MIN {
-            let src = &vs[start_offset..start_offset + len];
-            let mut ys: Vec<U> = Vec::with_capacity(len);
-            let ys_ptr = ys.as_mut_ptr() as usize;
-            let n_units = len.div_ceil(PAR_ELEMWISE_CHUNK);
-            crate::utils::barrier_pool().execute_chunked(n_units, |range| {
-                let ys_ptr = ys_ptr as *mut U;
-                for unit in range {
-                    let lo = unit * PAR_ELEMWISE_CHUNK;
-                    let hi = len.min(lo + PAR_ELEMWISE_CHUNK);
-                    let dst = unsafe { std::slice::from_raw_parts_mut(ys_ptr.add(lo), hi - lo) };
-                    f_vec(&src[lo..hi], dst);
-                }
-            });
-            // SAFETY: every element is written by exactly one unit.
-            unsafe { ys.set_len(len) };
-            return ys;
-        }
+    if let crate::StridedBlocks::SingleBlock { start_offset, len } = layout.strided_blocks()
+        && len >= PAR_ELEMWISE_MIN
+    {
+        let src = &vs[start_offset..start_offset + len];
+        let mut ys: Vec<U> = Vec::with_capacity(len);
+        let ys_ptr = ys.as_mut_ptr() as usize;
+        let n_units = len.div_ceil(PAR_ELEMWISE_CHUNK);
+        crate::utils::barrier_pool().execute_chunked(n_units, |range| {
+            let ys_ptr = ys_ptr as *mut U;
+            for unit in range {
+                let lo = unit * PAR_ELEMWISE_CHUNK;
+                let hi = len.min(lo + PAR_ELEMWISE_CHUNK);
+                let dst = unsafe { std::slice::from_raw_parts_mut(ys_ptr.add(lo), hi - lo) };
+                f_vec(&src[lo..hi], dst);
+            }
+        });
+        // SAFETY: every element is written by exactly one unit.
+        unsafe { ys.set_len(len) };
+        return ys;
     }
     unary_map_vec(vs, layout, f, f_vec)
 }

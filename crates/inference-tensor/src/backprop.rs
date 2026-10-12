@@ -1,7 +1,7 @@
 //! Methods for backpropagation of gradients.
 use crate::op::{BinaryOp, Op, ReduceOp, UnaryOp};
 use crate::{Error, Result, Tensor, TensorId};
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{HashMap, hash_map::Entry};
 
 // arg has been reduced to node via reduce_dims, expand it back to arg.
 // This has to handle keepdims.
@@ -345,7 +345,9 @@ impl Tensor {
                         stride,
                     } => {
                         if kernel_size != stride {
-                            crate::bail!("backward not supported for avgpool2d if ksize {kernel_size:?} != stride {stride:?}")
+                            crate::bail!(
+                                "backward not supported for avgpool2d if ksize {kernel_size:?} != stride {stride:?}"
+                            )
                         }
                         let (_n, _c, h, w) = arg.dims4()?;
                         let grad_arg = grad.upsample_nearest2d(h, w)?;
@@ -360,7 +362,9 @@ impl Tensor {
                         stride,
                     } => {
                         if kernel_size != stride {
-                            crate::bail!("backward not supported for maxpool2d if ksize {kernel_size:?} != stride {stride:?}")
+                            crate::bail!(
+                                "backward not supported for maxpool2d if ksize {kernel_size:?} != stride {stride:?}"
+                            )
                         }
                         let (_n, _c, h, w) = arg.dims4()?;
                         // For computing the max-pool gradient, we compute a mask where a 1 means

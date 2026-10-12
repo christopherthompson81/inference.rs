@@ -69,7 +69,7 @@ pub use error::{Context, Error, Result};
 pub use indexer::{IndexOp, TensorIndexer};
 pub use layout::Layout;
 pub use nditer::NdIter;
-pub use shape::{Shape, D};
+pub use shape::{D, Shape};
 pub use storage::{Storage, StorageMutRef, StorageRef};
 pub use strided_index::{StridedBlocks, StridedIndex};
 pub use tensor::{Tensor, TensorId};

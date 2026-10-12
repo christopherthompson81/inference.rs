@@ -119,17 +119,16 @@ impl ExternalDependency {
     /// Internal fetch logic, called while holding the lock
     fn fetch_with_lock(&self, dep_dir: &PathBuf) -> Result<PathBuf> {
         // Check if already at correct commit
-        if dep_dir.join("include").exists() {
-            if let Ok(current_commit) = self.get_current_commit(dep_dir) {
-                if current_commit == self.commit {
-                    println!(
-                        "cargo:warning=Using cached {} at {}",
-                        self.name,
-                        dep_dir.display()
-                    );
-                    return Ok(dep_dir.clone());
-                }
-            }
+        if dep_dir.join("include").exists()
+            && let Ok(current_commit) = self.get_current_commit(dep_dir)
+            && current_commit == self.commit
+        {
+            println!(
+                "cargo:warning=Using cached {} at {}",
+                self.name,
+                dep_dir.display()
+            );
+            return Ok(dep_dir.clone());
         }
 
         // Clone if not exists
@@ -292,18 +291,17 @@ impl ExternalDependency {
         for lock_file in &lock_files {
             if lock_file.exists() {
                 // Check if lock file is stale (older than 10 minutes)
-                if let Ok(metadata) = lock_file.metadata() {
-                    if let Ok(modified) = metadata.modified() {
-                        if let Ok(elapsed) = modified.elapsed() {
-                            // If lock file is older than 10 minutes, it's likely stale
-                            if elapsed.as_secs() > 600 {
-                                println!(
-                                    "cargo:warning=Removing stale git lock file: {}",
-                                    lock_file.display()
-                                );
-                                let _ = std::fs::remove_file(lock_file);
-                            }
-                        }
+                if let Ok(metadata) = lock_file.metadata()
+                    && let Ok(modified) = metadata.modified()
+                    && let Ok(elapsed) = modified.elapsed()
+                {
+                    // If lock file is older than 10 minutes, it's likely stale
+                    if elapsed.as_secs() > 600 {
+                        println!(
+                            "cargo:warning=Removing stale git lock file: {}",
+                            lock_file.display()
+                        );
+                        let _ = std::fs::remove_file(lock_file);
                     }
                 }
             }

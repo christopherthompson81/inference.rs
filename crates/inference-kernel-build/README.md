@@ -37,3 +37,5 @@ so existing caches and settings still apply.
   since the kernel libraries link `cudart` and cudarc no longer adds it when it loads its libraries at runtime.
 - `src/builder.rs`: adds `KernelBuilder::compress_fatbin`, which passes `-compress-mode=size` from CUDA 12.8 and
   `-Xfatbin=-compress-all` before it, with a unit test for the version threshold.
+- Rust edition 2024 (cudaforge is 2021), inherited from the workspace: clippy's collapsed `if let` chains and rustfmt's
+  2024 style edition.

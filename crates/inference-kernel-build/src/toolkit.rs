@@ -150,13 +150,14 @@ fn find_nvcc() -> Result<PathBuf> {
         }
 
         // On Windows, search versioned subdirectories
-        if cfg!(target_os = "windows") && base.exists() {
-            if let Ok(entries) = std::fs::read_dir(&base) {
-                for entry in entries.flatten() {
-                    let nvcc = entry.path().join("bin").join("nvcc.exe");
-                    if nvcc.exists() {
-                        return Ok(nvcc);
-                    }
+        if cfg!(target_os = "windows")
+            && base.exists()
+            && let Ok(entries) = std::fs::read_dir(&base)
+        {
+            for entry in entries.flatten() {
+                let nvcc = entry.path().join("bin").join("nvcc.exe");
+                if nvcc.exists() {
+                    return Ok(nvcc);
                 }
             }
         }
@@ -172,10 +173,11 @@ fn parse_gpu_codes(output: &str) -> Vec<usize> {
     let mut codes = Vec::new();
     for line in output.lines() {
         let parts: Vec<&str> = line.split('_').collect();
-        if parts.len() >= 2 && parts.contains(&"sm") {
-            if let Ok(code) = parts[1].parse::<usize>() {
-                codes.push(code);
-            }
+        if parts.len() >= 2
+            && parts.contains(&"sm")
+            && let Ok(code) = parts[1].parse::<usize>()
+        {
+            codes.push(code);
         }
     }
     codes.sort();
@@ -191,11 +193,11 @@ fn detect_cuda_version(nvcc_path: &PathBuf) -> Option<String> {
 
     // Parse version from output like "release 12.1, V12.1.105"
     for line in stdout.lines() {
-        if line.contains("release") {
-            if let Some(version_part) = line.split("release").nth(1) {
-                let version = version_part.trim().split(',').next()?;
-                return Some(version.trim().to_string());
-            }
+        if line.contains("release")
+            && let Some(version_part) = line.split("release").nth(1)
+        {
+            let version = version_part.trim().split(',').next()?;
+            return Some(version.trim().to_string());
         }
     }
 

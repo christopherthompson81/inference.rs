@@ -3,7 +3,7 @@
 
 #[cfg(feature = "metal")]
 use crate::DType;
-use crate::{CpuStorage, Layout, Result, Shape, Tensor, D};
+use crate::{CpuStorage, D, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 /// Applies the softmax function to the input tensor, rescaling the element so that elements on
@@ -90,11 +90,11 @@ impl crate::CustomOp1 for Sigmoid {
         layout: &Layout,
     ) -> Result<(crate::CudaStorage, Shape)> {
         use crate::backend::BackendStorage;
+        use crate::cuda_backend::SlicePtrOrNull;
         use crate::cuda_backend::cudarc::driver::{
             CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg, ValidAsZeroBits,
         };
-        use crate::cuda_backend::SlicePtrOrNull;
-        use crate::cuda_backend::{kernel_name, kernels, Map1, WrapErr};
+        use crate::cuda_backend::{Map1, WrapErr, kernel_name, kernels};
         use crate::{CudaDevice, WithDType};
 
         struct S;
@@ -141,8 +141,8 @@ impl crate::CustomOp1 for Sigmoid {
         storage: &crate::MetalStorage,
         layout: &Layout,
     ) -> Result<(crate::MetalStorage, Shape)> {
-        use crate::backend::BackendStorage;
         use crate::MetalError;
+        use crate::backend::BackendStorage;
         let device = storage.device();
         let dtype = storage.dtype();
         let shape = layout.shape();
@@ -330,7 +330,7 @@ impl crate::CustomOp1 for SoftmaxLastDim {
         use crate::cuda_backend::cudarc::driver::{
             CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
         };
-        use crate::cuda_backend::{kernel_name, kernels, Map1, WrapErr};
+        use crate::cuda_backend::{Map1, WrapErr, kernel_name, kernels};
         use crate::{CudaDevice, WithDType};
 
         struct S;
@@ -696,7 +696,7 @@ impl crate::CustomOp3 for LayerNorm {
         use crate::cuda_backend::cudarc::driver::{
             CudaSlice, DeviceRepr, LaunchConfig, PushKernelArg,
         };
-        use crate::cuda_backend::{kernel_name, kernels, Map3, WrapErr};
+        use crate::cuda_backend::{Map3, WrapErr, kernel_name, kernels};
         use crate::{CudaDevice, WithDType};
 
         struct S {
@@ -1164,7 +1164,7 @@ pub fn sdpa(
 
 #[cfg(test)]
 mod tests {
-    use crate::{DType, Device, Result, Tensor, D};
+    use crate::{D, DType, Device, Result, Tensor};
 
     // A half-precision running sum of a long row's exponentials stalls once it dwarfs each term
     #[test]

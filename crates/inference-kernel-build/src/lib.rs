@@ -93,16 +93,16 @@ mod source;
 mod toolkit;
 
 // Re-export main types
-pub use builder::{loadable_id_env, loadable_lib_env, KernelBuilder, PtxOutput, BUILD_ID_SYMBOL};
+pub use builder::{BUILD_ID_SYMBOL, KernelBuilder, PtxOutput, loadable_id_env, loadable_lib_env};
 pub use compute_cap::{
-    arch_key, detect_compute_cap, detect_compute_caps, gencode_args, get_gpu_arch_string,
-    parse_arch_list, ComputeCapability, GpuArch,
+    ComputeCapability, GpuArch, arch_key, detect_compute_cap, detect_compute_caps, gencode_args,
+    get_gpu_arch_string, parse_arch_list,
 };
-pub use dependency::{resolve_cutlass_from_cargo_checkouts, DependencyManager, ExternalDependency};
+pub use dependency::{DependencyManager, ExternalDependency, resolve_cutlass_from_cargo_checkouts};
 pub use error::{Error, Result};
 pub use hash::BuildCache;
 pub use parallel::ParallelConfig;
-pub use source::{collect_headers, SourceSelector};
+pub use source::{SourceSelector, collect_headers};
 pub use toolkit::CudaToolkit;
 
 /// Convenience alias for the main builder type

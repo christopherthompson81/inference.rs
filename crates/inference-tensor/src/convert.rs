@@ -158,7 +158,7 @@ impl Tensor {
                 }
             }
             DType::F6E2M3 | DType::F6E3M2 | DType::F4 | DType::F8E8M0 => {
-                return Err(crate::Error::UnsupportedDTypeForOp(self.dtype(), "write_bytes").bt())
+                return Err(crate::Error::UnsupportedDTypeForOp(self.dtype(), "write_bytes").bt());
             }
         }
         Ok(())

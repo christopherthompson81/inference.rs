@@ -74,62 +74,78 @@ pub mod neon;
 
 #[inline(always)]
 unsafe fn scalar_vec_dot_f32(a_row: *const f32, b_row: *const f32, c: *mut f32, k: usize) {
-    for i in 0..k {
-        *c += *a_row.add(i) * (*b_row.add(i));
+    unsafe {
+        for i in 0..k {
+            *c += *a_row.add(i) * (*b_row.add(i));
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_sum(row: *const f32, b: *mut f32, k: usize) {
-    *b = 0f32;
-    for i in 0..k {
-        *b += *row.add(i)
+    unsafe {
+        *b = 0f32;
+        for i in 0..k {
+            *b += *row.add(i)
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_dot_f16(a_row: *const f16, b_row: *const f16, c: *mut f32, k: usize) {
-    let mut sum = 0.0;
-    for i in 0..k {
-        sum += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
+    unsafe {
+        let mut sum = 0.0;
+        for i in 0..k {
+            sum += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
+        }
+        *c = sum;
     }
-    *c = sum;
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_dot_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut f32, k: usize) {
-    let mut sum = 0.0;
-    for i in 0..k {
-        sum += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
+    unsafe {
+        let mut sum = 0.0;
+        for i in 0..k {
+            sum += (*a_row.add(i)).to_f32() * (*b_row.add(i)).to_f32();
+        }
+        *c = sum;
     }
-    *c = sum;
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_add_f16(a_row: *const f16, b_row: *const f16, c: *mut f16, k: usize) {
-    for i in 0..k {
-        *c.add(i) = *a_row.add(i) + *b_row.add(i);
+    unsafe {
+        for i in 0..k {
+            *c.add(i) = *a_row.add(i) + *b_row.add(i);
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_add_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut bf16, k: usize) {
-    for i in 0..k {
-        *c.add(i) = *a_row.add(i) + *b_row.add(i);
+    unsafe {
+        for i in 0..k {
+            *c.add(i) = *a_row.add(i) + *b_row.add(i);
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_scalar_add_f16(scalar: f16, xs: *const f16, ys: *mut f16, k: usize) {
-    for i in 0..k {
-        *ys.add(i) = *xs.add(i) + scalar;
+    unsafe {
+        for i in 0..k {
+            *ys.add(i) = *xs.add(i) + scalar;
+        }
     }
 }
 
 #[inline(always)]
 unsafe fn scalar_vec_scalar_add_bf16(scalar: bf16, xs: *const bf16, ys: *mut bf16, k: usize) {
-    for i in 0..k {
-        *ys.add(i) = *xs.add(i) + scalar;
+    unsafe {
+        for i in 0..k {
+            *ys.add(i) = *xs.add(i) + scalar;
+        }
     }
 }
 
@@ -177,154 +193,160 @@ fn use_neon_bf16() -> bool {
 
 #[inline(always)]
 pub(crate) unsafe fn vec_dot_f32(a_row: *const f32, b_row: *const f32, c: *mut f32, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2() {
-        return avx::vec_dot_f32(a_row, b_row, c, k);
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon() {
-        return neon::vec_dot_f32(a_row, b_row, c, k);
-    }
-    {
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2() {
+            return avx::vec_dot_f32(a_row, b_row, c, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon() {
+            return neon::vec_dot_f32(a_row, b_row, c, k);
+        }
         scalar_vec_dot_f32(a_row, b_row, c, k)
     }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_sum(row: *const f32, b: *mut f32, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2() {
-        return avx::vec_sum(row, b, k);
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon() {
-        return neon::vec_sum(row, b, k);
-    }
-    {
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2() {
+            return avx::vec_sum(row, b, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon() {
+            return neon::vec_sum(row, b, k);
+        }
         scalar_vec_sum(row, b, k)
     }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_dot_f16(a_row: *const f16, b_row: *const f16, c: *mut f32, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2_f16() {
-        return avx::vec_dot_f16(a_row, b_row, c, k);
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2_f16() {
+            return avx::vec_dot_f16(a_row, b_row, c, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_f16() {
+            return neon::vec_dot_f16(a_row, b_row, c, k);
+        }
+        scalar_vec_dot_f16(a_row, b_row, c, k)
     }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_f16() {
-        return neon::vec_dot_f16(a_row, b_row, c, k);
-    }
-    scalar_vec_dot_f16(a_row, b_row, c, k)
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_dot_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut f32, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2() {
-        return avx::vec_dot_bf16(a_row, b_row, c, k);
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2() {
+            return avx::vec_dot_bf16(a_row, b_row, c, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_bf16() {
+            return neon::vec_dot_bf16(a_row, b_row, c, k);
+        }
+        scalar_vec_dot_bf16(a_row, b_row, c, k)
     }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_bf16() {
-        return neon::vec_dot_bf16(a_row, b_row, c, k);
-    }
-    scalar_vec_dot_bf16(a_row, b_row, c, k)
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_add_f16(a_row: *const f16, b_row: *const f16, c: *mut f16, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2_f16() {
-        return avx::vec_add_f16(a_row, b_row, c, k);
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_f16() {
-        return neon::vec_add_f16(a_row, b_row, c, k);
-    }
-    {
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2_f16() {
+            return avx::vec_add_f16(a_row, b_row, c, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_f16() {
+            return neon::vec_add_f16(a_row, b_row, c, k);
+        }
         scalar_vec_add_f16(a_row, b_row, c, k)
     }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_add_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut bf16, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2() {
-        return avx::vec_add_bf16(a_row, b_row, c, k);
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_bf16() {
-        return neon::vec_add_bf16(a_row, b_row, c, k);
-    }
-    {
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2() {
+            return avx::vec_add_bf16(a_row, b_row, c, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_bf16() {
+            return neon::vec_add_bf16(a_row, b_row, c, k);
+        }
         scalar_vec_add_bf16(a_row, b_row, c, k)
     }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_scalar_add_f16(scalar: f16, xs: *const f16, ys: *mut f16, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2_f16() {
-        return avx::vec_scalar_add_f16(scalar, xs, ys, k);
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_f16() {
-        return neon::vec_scalar_add_f16(scalar, xs, ys, k);
-    }
-    {
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2_f16() {
+            return avx::vec_scalar_add_f16(scalar, xs, ys, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_f16() {
+            return neon::vec_scalar_add_f16(scalar, xs, ys, k);
+        }
         scalar_vec_scalar_add_f16(scalar, xs, ys, k)
     }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_mul_bf16(a_row: *const bf16, b_row: *const bf16, c: *mut bf16, k: usize) {
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_bf16() {
-        return neon::vec_mul_bf16(a_row, b_row, c, k);
-    }
-    for j in 0..k {
-        *c.add(j) = *a_row.add(j) * *b_row.add(j);
+    unsafe {
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_bf16() {
+            return neon::vec_mul_bf16(a_row, b_row, c, k);
+        }
+        for j in 0..k {
+            *c.add(j) = *a_row.add(j) * *b_row.add(j);
+        }
     }
 }
 
 #[inline(always)]
 pub(crate) unsafe fn vec_scalar_add_bf16(scalar: bf16, xs: *const bf16, ys: *mut bf16, k: usize) {
-    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-    if use_avx2() {
-        return avx::vec_scalar_add_bf16(scalar, xs, ys, k);
-    }
-    #[cfg(any(
-        target_arch = "aarch64",
-        all(target_arch = "arm", target_feature = "neon")
-    ))]
-    if use_neon_bf16() {
-        return neon::vec_scalar_add_bf16(scalar, xs, ys, k);
-    }
-    {
+    unsafe {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if use_avx2() {
+            return avx::vec_scalar_add_bf16(scalar, xs, ys, k);
+        }
+        #[cfg(any(
+            target_arch = "aarch64",
+            all(target_arch = "arm", target_feature = "neon")
+        ))]
+        if use_neon_bf16() {
+            return neon::vec_scalar_add_bf16(scalar, xs, ys, k);
+        }
         scalar_vec_scalar_add_bf16(scalar, xs, ys, k)
     }
 }
