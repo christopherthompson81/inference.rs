@@ -265,6 +265,13 @@ fn qwen_family(archive: &GgufArchive) -> Result<QwenMultimodalFamily> {
     qwen_family_from_names(architecture, projector)
 }
 
+/// Whether `architecture` is a Qwen multimodal GGUF's text side, under any projector it pairs with.
+pub fn is_qwen_multimodal_architecture(architecture: &str) -> bool {
+    [QWEN2VL_PROJECTOR, QWEN25VL_PROJECTOR, QWEN3VL_PROJECTOR]
+        .into_iter()
+        .any(|projector| qwen_family_from_names(architecture, Some(projector)).is_ok())
+}
+
 fn qwen_family_from_names(
     architecture: &str,
     projector: Option<&str>,

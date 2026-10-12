@@ -8,7 +8,6 @@ use std::{
 use anyhow::{Context, Result, bail};
 use inference_core::{GGUF_MULTI_FILE_DELIMITER, ModelDType};
 use inference_gguf::base_model::source_hf_base_model_id;
-use inference_quant::GgufArchive;
 use regex::Regex;
 use tracing::info;
 use walkdir::WalkDir;
@@ -411,16 +410,12 @@ pub fn drop_foreign_local_projectors(
         .filter(|file| is_gguf(file) && is_projector(file))
         .map(|file| (split_key(file), local_base_model_id(&root.join(file))))
         .collect::<Vec<_>>();
-    let any_match = projectors.iter().any(|(_, base)| {
-        base.as_ref()
-            .is_some_and(|base| base.eq_ignore_ascii_case(&model_base))
-    });
+    let any_match = projectors
+        .iter()
+        .any(|(_, base)| same_base_model(base.as_deref(), &model_base));
     let dropped = projectors
         .into_iter()
-        .filter(|(_, base)| match base {
-            Some(base) => !base.eq_ignore_ascii_case(&model_base),
-            None => any_match,
-        })
+        .filter(|(_, base)| !projector_belongs(Some(&model_base), base.as_deref(), any_match))
         .map(|(key, _)| key)
         .collect::<BTreeSet<_>>();
     files
@@ -439,9 +434,29 @@ fn split_key(path: &str) -> String {
     parse_split(path).map_or_else(|| path.to_string(), |split| split.prefix)
 }
 
+fn same_base_model(projector_base: Option<&str>, model_base: &str) -> bool {
+    projector_base.is_some_and(|base| base.eq_ignore_ascii_case(model_base))
+}
+
+/// Whether a projector beside a model is one for it, by their GGUF base models (Hugging Face ids, compared without
+/// case): one that names another base model is not; one naming none is, unless another projector names the model's.
+/// A model naming no base model keeps every projector.
+pub(crate) fn projector_belongs(
+    model_base: Option<&str>,
+    projector_base: Option<&str>,
+    any_projector_matches: bool,
+) -> bool {
+    match (model_base, projector_base) {
+        (None, _) => true,
+        (Some(model_base), Some(_)) => same_base_model(projector_base, model_base),
+        (Some(_), None) => !any_projector_matches,
+    }
+}
+
 fn local_base_model_id(path: &Path) -> Option<String> {
-    let archive = GgufArchive::open_file(path).ok()?;
-    source_hf_base_model_id(&path.to_string_lossy(), archive.metadata())
+    let mut reader = std::io::BufReader::new(fs::File::open(path).ok()?);
+    let header = inference_tensor::quantized::gguf_file::Header::read_summary(&mut reader).ok()?;
+    source_hf_base_model_id(&path.to_string_lossy(), &header.metadata)
         .ok()
         .flatten()
 }
@@ -708,7 +723,7 @@ fn format_group_choices(groups: &[&GgufGroup]) -> String {
     choices.join(", ")
 }
 
-fn quant_label(stem: &str) -> Option<String> {
+pub(crate) fn quant_label(stem: &str) -> Option<String> {
     stem.rsplit('/').find_map(|name| {
         QUANT_SUFFIX_RE
             .captures(name)
@@ -742,12 +757,12 @@ fn logical_stem(path: &str) -> Option<String> {
         .then(|| path[..extension_start].to_string())
 }
 
-fn is_gguf(path: &str) -> bool {
+pub(crate) fn is_gguf(path: &str) -> bool {
     path.get(path.len().saturating_sub(".gguf".len())..)
         .is_some_and(|extension| extension.eq_ignore_ascii_case(".gguf"))
 }
 
-fn is_projector(path: &str) -> bool {
+pub(crate) fn is_projector(path: &str) -> bool {
     has_filename_token(path, "mmproj")
 }
 
@@ -761,7 +776,7 @@ fn projector_role(group: &GgufGroup) -> Option<ProjectorRole> {
     }
 }
 
-fn is_auxiliary_gguf(path: &str) -> bool {
+pub(crate) fn is_auxiliary_gguf(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
     name.starts_with("mtp-")
@@ -803,13 +818,13 @@ fn has_path_token(path: &str, token: &str) -> bool {
     })
 }
 
-struct SplitGguf {
-    prefix: String,
-    index: usize,
+pub(crate) struct SplitGguf {
+    pub(crate) prefix: String,
+    pub(crate) index: usize,
     total: usize,
 }
 
-fn parse_split(path: &str) -> Option<SplitGguf> {
+pub(crate) fn parse_split(path: &str) -> Option<SplitGguf> {
     let captures = SPLIT_GGUF_RE.captures(path)?;
     let prefix = captures.name("prefix")?.as_str();
     let split_suffix_start = prefix.len().saturating_sub("-split".len());

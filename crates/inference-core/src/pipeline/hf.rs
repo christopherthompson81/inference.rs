@@ -2,7 +2,10 @@ use std::{
     env, fs,
     ops::Range,
     path::{Component, Path, PathBuf},
-    sync::OnceLock,
+    sync::{
+        Arc, OnceLock,
+        atomic::{AtomicU64, Ordering},
+    },
 };
 
 use anyhow::{Result, anyhow};
@@ -79,6 +82,106 @@ impl hf_hub::api::Progress for DownloadProgress {
     }
 
     fn finish(&mut self) {}
+}
+
+/// `done` of `total` bytes of one file of a download.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct FileDownloadProgress {
+    pub file: String,
+    pub done: u64,
+    pub total: u64,
+}
+
+// one file's bytes, reported about once per percent; hf-hub clones it for each parallel chunk
+#[derive(Clone)]
+struct ReportedDownload<F> {
+    file: Arc<str>,
+    total: Arc<AtomicU64>,
+    done: Arc<AtomicU64>,
+    reported_percent: Arc<AtomicU64>,
+    report: F,
+}
+
+impl<F: Fn(FileDownloadProgress) + Clone + Send + Sync + 'static> ReportedDownload<F> {
+    fn send(&self, done: u64) {
+        (self.report)(FileDownloadProgress {
+            file: self.file.to_string(),
+            done,
+            total: self.total.load(Ordering::Relaxed),
+        });
+    }
+}
+
+impl<F: Fn(FileDownloadProgress) + Clone + Send + Sync + 'static> hf_hub::api::tokio::Progress
+    for ReportedDownload<F>
+{
+    // called again before each retry, which restarts the count
+    async fn init(&mut self, size: usize, _filename: &str) {
+        self.total.store(size as u64, Ordering::Relaxed);
+        self.done.store(0, Ordering::Relaxed);
+        self.reported_percent.store(0, Ordering::Relaxed);
+        self.send(0);
+    }
+
+    async fn update(&mut self, size: usize) {
+        let done = self.done.fetch_add(size as u64, Ordering::Relaxed) + size as u64;
+        let percent = done * 100 / self.total.load(Ordering::Relaxed).max(1);
+        if percent > self.reported_percent.fetch_max(percent, Ordering::Relaxed) {
+            self.send(done);
+        }
+    }
+
+    async fn finish(&mut self) {}
+}
+
+/// Downloads `files` of Hub repository `repo_id` into the Hugging Face cache (`cache`, or the one loads use) and
+/// returns their local paths. A file
+/// already cached reports once, complete; one being fetched reports about every percent.
+pub async fn download_repo_files<F>(
+    repo_id: &str,
+    revision: &str,
+    files: &[String],
+    token_source: &crate::pipeline::TokenSource,
+    cache: Option<PathBuf>,
+    report: F,
+) -> Result<Vec<PathBuf>>
+where
+    F: Fn(FileDownloadProgress) + Clone + Send + Sync + 'static,
+{
+    let repo = Repo::with_revision(repo_id.to_string(), RepoType::Model, revision.to_string());
+    let cache = resolve_hf_cache(cache.map(Cache::new));
+    let cached = cache.repo(repo.clone());
+    let api = build_async_api_with_cache(token_source, false, Some(cache))?.repo(repo);
+    let mut paths = Vec::with_capacity(files.len());
+    for file in files {
+        if let Some(path) = cached.get(file) {
+            let size = fs::metadata(&path).map_or(0, |metadata| metadata.len());
+            report(FileDownloadProgress {
+                file: file.clone(),
+                done: size,
+                total: size,
+            });
+            paths.push(path);
+            continue;
+        }
+        let progress = ReportedDownload {
+            file: Arc::from(file.as_str()),
+            total: Arc::default(),
+            done: Arc::default(),
+            reported_percent: Arc::default(),
+            report: report.clone(),
+        };
+        let path = api
+            .download_with_progress(file, progress.clone())
+            .await
+            .map_err(|err| hf_async_api_error(Path::new(repo_id), Some(file), revision, &err))?;
+        // an empty file sends no byte updates to report it complete
+        if progress.reported_percent.load(Ordering::Relaxed) < 100 {
+            progress.send(progress.total.load(Ordering::Relaxed));
+        }
+        paths.push(path);
+    }
+    Ok(paths)
 }
 
 // `api.get(file)`, downloading through the progress sinks when one listens and the file is not cached yet
@@ -254,6 +357,14 @@ pub fn hf_hub_cache_dir() -> Option<PathBuf> {
     }
 
     dir
+}
+
+/// The cache loads and downloads use by default: the process-wide one a load set, else the environment's.
+pub fn default_hf_cache_dir() -> Option<PathBuf> {
+    crate::GLOBAL_HF_CACHE
+        .get()
+        .map(|cache| cache.path().clone())
+        .or_else(hf_hub_cache_dir)
 }
 
 /// Resolve the Hugging Face token file path.

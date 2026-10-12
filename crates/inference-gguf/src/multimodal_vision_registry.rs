@@ -95,50 +95,44 @@ impl NativeMultimodalGgufFamily {
     }
 }
 
+// (vision projector type, the text architecture it pairs with, family)
+const FAMILY_NAMES: [(&str, &str, NativeMultimodalGgufFamily); 8] = [
+    ("gemma3", "gemma3", NativeMultimodalGgufFamily::Gemma3),
+    ("gemma3nv", "gemma3n", NativeMultimodalGgufFamily::Gemma3n),
+    ("idefics3", "llama", NativeMultimodalGgufFamily::Idefics3),
+    ("pixtral", "mistral3", NativeMultimodalGgufFamily::Mistral3),
+    ("llama4", "llama4", NativeMultimodalGgufFamily::Llama4),
+    ("lfm2", "lfm2", NativeMultimodalGgufFamily::Lfm2Vl),
+    (
+        "muse-glimmer",
+        "muse-glimmer",
+        NativeMultimodalGgufFamily::MuseGlimmer,
+    ),
+    (
+        paddleocr_vl_bindings::PROJECTOR,
+        paddleocr_vl_bindings::ARCHITECTURE,
+        NativeMultimodalGgufFamily::PaddleOcrVl,
+    ),
+];
+
 fn family_from_names(
     architecture: &str,
     projector: Option<&str>,
 ) -> Result<Option<NativeMultimodalGgufFamily>> {
-    let family = match projector {
-        Some("gemma3") => {
-            require_architecture(architecture, "gemma3", "gemma3")?;
-            NativeMultimodalGgufFamily::Gemma3
-        }
-        Some("gemma3nv") => {
-            require_architecture(architecture, "gemma3n", "gemma3nv")?;
-            NativeMultimodalGgufFamily::Gemma3n
-        }
-        Some("idefics3") => {
-            require_architecture(architecture, "llama", "idefics3")?;
-            NativeMultimodalGgufFamily::Idefics3
-        }
-        Some("pixtral") => {
-            require_architecture(architecture, "mistral3", "pixtral")?;
-            NativeMultimodalGgufFamily::Mistral3
-        }
-        Some("llama4") => {
-            require_architecture(architecture, "llama4", "llama4")?;
-            NativeMultimodalGgufFamily::Llama4
-        }
-        Some("lfm2") => {
-            require_architecture(architecture, "lfm2", "lfm2")?;
-            NativeMultimodalGgufFamily::Lfm2Vl
-        }
-        Some("muse-glimmer") => {
-            require_architecture(architecture, "muse-glimmer", "muse-glimmer")?;
-            NativeMultimodalGgufFamily::MuseGlimmer
-        }
-        Some(paddleocr_vl_bindings::PROJECTOR) => {
-            require_architecture(
-                architecture,
-                paddleocr_vl_bindings::ARCHITECTURE,
-                paddleocr_vl_bindings::PROJECTOR,
-            )?;
-            NativeMultimodalGgufFamily::PaddleOcrVl
-        }
-        Some(_) | None => return Ok(None),
+    let Some((projector, expected, family)) =
+        projector.and_then(|projector| FAMILY_NAMES.iter().find(|(name, ..)| *name == projector))
+    else {
+        return Ok(None);
     };
-    Ok(Some(family))
+    require_architecture(architecture, expected, projector)?;
+    Ok(Some(*family))
+}
+
+/// Whether `architecture` is the text side of a native multimodal GGUF family (loaded with its projector).
+pub fn is_multimodal_text_architecture(architecture: &str) -> bool {
+    FAMILY_NAMES
+        .iter()
+        .any(|(_, expected, _)| *expected == architecture)
 }
 
 fn require_architecture(architecture: &str, expected: &str, projector: &str) -> Result<()> {

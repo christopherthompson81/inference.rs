@@ -17,6 +17,8 @@ const GGUF_MAX_STRING_LENGTH: u64 = 1 << 30;
 const GGUF_MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
 // arrays of fixed-size values past this are located, not parsed: a Value per byte of an embedded blob costs 32x
 const INLINE_ARRAY_ELEMENTS: u64 = 1 << 20;
+// longer metadata arrays are data (vocabularies, embedded tables), not facts a summary reports
+const SUMMARY_ARRAY_ELEMENTS: u64 = 64;
 // past GGML_MAX_DIMS (4): ComfyUI-GGUF keeps a 3D conv at its 5-dim shape
 const GGUF_MAX_TENSOR_DIMS: u32 = 8;
 const GGUF_MAX_VALUE_DEPTH: usize = 64;
@@ -478,6 +480,44 @@ impl ValueType {
     }
 }
 
+// Seeks past an array of over SUMMARY_ARRAY_ELEMENTS fixed-size values or strings; false leaves any other unread.
+fn skip_long_array<R: std::io::Seek + std::io::Read>(
+    reader: &mut R,
+    value_type: ValueType,
+    magic: &VersionedMagic,
+    file_size: u64,
+) -> Result<bool> {
+    if value_type != ValueType::Array {
+        return Ok(false);
+    }
+    let start = reader.stream_position()?;
+    let element = ValueType::from_u32(reader.read_u32::<LittleEndian>()?)?;
+    let len = read_length(reader, magic)?;
+    if len <= SUMMARY_ARRAY_ELEMENTS || element == ValueType::Array {
+        reader.seek(std::io::SeekFrom::Start(start))?;
+        return Ok(false);
+    }
+    if element == ValueType::String {
+        // read through the reader's buffer: a seek or position query per short string costs a syscall each
+        let mut scratch = Vec::new();
+        for _ in 0..len {
+            let bytes = read_length(reader, magic)?;
+            if bytes > GGUF_MAX_STRING_LENGTH {
+                crate::bail!("gguf: string length {bytes} exceeds max {GGUF_MAX_STRING_LENGTH}")
+            }
+            scratch.resize(bytes as usize, 0);
+            reader.read_exact(&mut scratch)?;
+        }
+        return Ok(true);
+    }
+    let bytes = len.saturating_mul(element.min_disk_size(magic));
+    if bytes > remaining_bytes(reader, file_size)? {
+        crate::bail!("gguf: array of {len} elements needs {bytes} bytes, past the end of the file")
+    }
+    reader.seek(std::io::SeekFrom::Current(bytes as i64))?;
+    Ok(true)
+}
+
 /// Skips past a long array of fixed-size values and returns where it is; any other value is left unread.
 fn large_array<R: std::io::Seek + std::io::Read>(
     reader: &mut R,
@@ -531,28 +571,41 @@ pub fn peek_architecture<R: std::io::Seek + std::io::Read>(
     }
 }
 
-impl Content {
-    /// The raw little-endian bytes of `range` (in elements) of a large array.
-    pub fn read_large_array<R: std::io::Seek + std::io::Read>(
-        &self,
-        reader: &mut R,
-        name: &str,
-        range: std::ops::Range<u64>,
-    ) -> Result<Vec<u8>> {
-        let Some(array) = self.large_arrays.get(name) else {
-            crate::bail!("gguf: no large array {name}")
-        };
-        if range.start > range.end || range.end > array.len {
-            crate::bail!("gguf: {range:?} is outside {name}'s {} elements", array.len)
-        }
-        let size = array.value_type.min_disk_size(&self.magic);
-        reader.seek(std::io::SeekFrom::Start(array.offset + range.start * size))?;
-        let mut bytes = vec![0u8; ((range.end - range.start) * size) as usize];
-        reader.read_exact(&mut bytes)?;
-        Ok(bytes)
+/// A tensor's entry in a GGUF's table, its dtype the raw GGML id (types this crate cannot run included).
+#[derive(Debug, Clone)]
+pub struct RawTensorInfo {
+    pub ggml_dtype: u32,
+    pub shape: crate::Shape,
+    pub offset: u64,
+}
+
+/// Everything in a GGUF before its tensor data, read without converting tensor dtypes: what inspecting a file
+/// needs, from files whose tensors this crate cannot load too.
+#[derive(Debug)]
+pub struct Header {
+    pub magic: VersionedMagic,
+    pub metadata: HashMap<String, Value>,
+    /// Top-level arrays of fixed-size values too long to parse into `metadata`, left in the file.
+    pub large_arrays: HashMap<String, LargeArray>,
+    pub tensor_infos: HashMap<String, RawTensorInfo>,
+    pub tensor_data_offset: u64,
+}
+
+impl Header {
+    pub fn read<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {
+        Self::read_with(reader, false)
     }
 
-    pub fn read<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {
+    /// `read` without metadata arrays longer than a few dozen values (a tokenizer's vocabulary, a model's
+    /// embedded data): they are skipped, not kept, so a summary of a large file stays cheap.
+    pub fn read_summary<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {
+        Self::read_with(reader, true)
+    }
+
+    fn read_with<R: std::io::Seek + std::io::Read>(
+        reader: &mut R,
+        skip_long_arrays: bool,
+    ) -> Result<Self> {
         // Capture the file size once so the bounds checks below don't have to
         // seek to the end and back on every length-prefixed read.
         let start = reader.stream_position()?;
@@ -595,6 +648,9 @@ impl Content {
             let key = read_string(reader, &magic, file_size)?;
             let value_type = reader.read_u32::<LittleEndian>()?;
             let value_type = ValueType::from_u32(value_type)?;
+            if skip_long_arrays && skip_long_array(reader, value_type, &magic, file_size)? {
+                continue;
+            }
             if let Some(array) = large_array(reader, value_type, &magic, file_size)? {
                 large_arrays.insert(key, array);
                 continue;
@@ -627,11 +683,10 @@ impl Content {
 
             dimensions.reverse();
             let ggml_dtype = reader.read_u32::<LittleEndian>()?;
-            let ggml_dtype = GgmlDType::from_u32(ggml_dtype)?;
             let offset = reader.read_u64::<LittleEndian>()?;
             tensor_infos.insert(
                 tensor_name,
-                TensorInfo {
+                RawTensorInfo {
                     shape: crate::Shape::from(dimensions),
                     offset,
                     ggml_dtype,
@@ -655,6 +710,54 @@ impl Content {
             large_arrays,
             tensor_infos,
             tensor_data_offset,
+        })
+    }
+}
+
+impl Content {
+    /// The raw little-endian bytes of `range` (in elements) of a large array.
+    pub fn read_large_array<R: std::io::Seek + std::io::Read>(
+        &self,
+        reader: &mut R,
+        name: &str,
+        range: std::ops::Range<u64>,
+    ) -> Result<Vec<u8>> {
+        let Some(array) = self.large_arrays.get(name) else {
+            crate::bail!("gguf: no large array {name}")
+        };
+        if range.start > range.end || range.end > array.len {
+            crate::bail!("gguf: {range:?} is outside {name}'s {} elements", array.len)
+        }
+        let size = array.value_type.min_disk_size(&self.magic);
+        reader.seek(std::io::SeekFrom::Start(array.offset + range.start * size))?;
+        let mut bytes = vec![0u8; ((range.end - range.start) * size) as usize];
+        reader.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+
+    pub fn read<R: std::io::Seek + std::io::Read>(reader: &mut R) -> Result<Self> {
+        let header = Header::read(reader)?;
+        let tensor_infos = header
+            .tensor_infos
+            .into_iter()
+            .map(|(name, info)| {
+                let ggml_dtype = GgmlDType::from_u32(info.ggml_dtype)?;
+                Ok((
+                    name,
+                    TensorInfo {
+                        ggml_dtype,
+                        shape: info.shape,
+                        offset: info.offset,
+                    },
+                ))
+            })
+            .collect::<Result<_>>()?;
+        Ok(Self {
+            magic: header.magic,
+            metadata: header.metadata,
+            large_arrays: header.large_arrays,
+            tensor_infos,
+            tensor_data_offset: header.tensor_data_offset,
         })
     }
 
@@ -732,6 +835,44 @@ pub fn write<W: std::io::Seek + std::io::Write>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn summary_skips_long_arrays_and_keeps_the_rest() -> Result<()> {
+        let tokens = Value::Array(
+            (0..SUMMARY_ARRAY_ELEMENTS + 1)
+                .map(|i| Value::String(format!("token{i}")))
+                .collect(),
+        );
+        let scores = Value::Array(
+            (0..SUMMARY_ARRAY_ELEMENTS + 1)
+                .map(|i| Value::F32(i as f32))
+                .collect(),
+        );
+        let short = Value::Array(vec![Value::U32(1), Value::U32(2)]);
+        let name = Value::String("tiny".to_string());
+        let mut file = std::io::Cursor::new(Vec::new());
+        write(
+            &mut file,
+            &[
+                ("tokenizer.tokens", &tokens),
+                ("tokenizer.scores", &scores),
+                ("short", &short),
+                ("general.name", &name),
+            ],
+            &[],
+        )?;
+        file.set_position(0);
+        let summary = Header::read_summary(&mut file)?;
+        assert!(!summary.metadata.contains_key("tokenizer.tokens"));
+        assert!(!summary.metadata.contains_key("tokenizer.scores"));
+        assert_eq!(summary.metadata["short"].to_vec()?.len(), 2);
+        assert_eq!(summary.metadata["general.name"].to_string()?, "tiny");
+        file.set_position(0);
+        let full = Header::read(&mut file)?;
+        assert_eq!(full.metadata["tokenizer.tokens"].to_vec()?.len(), 65);
+        assert_eq!(full.tensor_data_offset, summary.tensor_data_offset);
+        Ok(())
+    }
 
     // An embedded blob is located, not parsed, and reads back by element range; a short array still parses
     #[test]

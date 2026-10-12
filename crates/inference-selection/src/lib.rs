@@ -2,6 +2,7 @@
 //! discovery, auto-tuning, resource planning and the environment doctor. Built on inference-core's public surface.
 
 mod diagnostics;
+pub mod inventory;
 mod model_loader;
 pub mod model_metadata;
 mod model_selected;

@@ -643,6 +643,35 @@ INFERENCE_API inference_status inference_system_doctor(inference_string **out_re
 INFERENCE_API inference_status inference_model_tune(const char *request, size_t request_len,
                                                    inference_string **out_response);
 
+/* The models on this machine, read without loading them; none needs an engine. Each model is {"path" (what a spec
+ * loads), "source" ("local" | "hf_cache"), "repo_id", "format" ("gguf" | "safetensors" | "nemo" | "other"), "kind"
+ * ("text" | "multimodal" | "embedding" | "image_generation" | "speech" | "transcription" | "voice_activity" |
+ * "diarization" | "projector", null when it cannot load), "loader", "architecture", "name", "size_label",
+ * "quantization", "context_length", "base_model", "size_bytes", "modified" (Unix seconds), "files" (a GGUF's shards),
+ * "projectors" (for a text GGUF, the mmproj GGUFs beside it made for the same base model), "error"}.
+ * inference_model_inspect reads one ({"path"}: a model directory, a GGUF by any shard, or a .nemo) and fails with
+ * INFERENCE_ERR_INVALID_REQUEST for anything else. inference_models_scan takes {"folders": [...], "hf_cache": bool,
+ * "hf_cache_path"?} and returns {"models": [...], "hf_cache": {"path", "repos": [{"repo_id", "size_bytes", "modified"}]} | null,
+ * "errors": [{"path", "error"}]}. inference_hf_cache_delete takes {"repo_id": "org/name", "hf_cache_path"?}, removes
+ * every revision of it from the Hugging Face cache, and returns {"repo_id", "freed_bytes"}. "hf_cache_path" names
+ * the cache to use instead of the environment's (HF_HUB_CACHE, else HF_HOME/hub). */
+INFERENCE_API inference_status inference_model_inspect(const char *request, size_t request_len,
+                                                      inference_string **out_response);
+INFERENCE_API inference_status inference_models_scan(const char *request, size_t request_len,
+                                                    inference_string **out_response);
+INFERENCE_API inference_status inference_hf_cache_delete(const char *request, size_t request_len,
+                                                        inference_string **out_response);
+/* Starts downloading a Hugging Face repository into the cache: {"repo_id", "revision"? ("main"), "files"? (these
+ * files), "quant"? (a GGUF quantization the repository publishes, "Q4_K_M" or "4": its files and the projector
+ * beside it), "token_source"? ("cache" | "none" | "literal:<token>" | "env:<variable>"), "hf_cache_path"?}; with neither "files" nor
+ * "quant" it downloads the whole repository. Poll the stream with inference_stream_next: "files" (data: the file
+ * names), "progress" (data: {"file", "done", "total"} in bytes, about once a percent; a file already cached reports
+ * once, complete), then a last "done" (data: {"repo_id", "revision", "files"}, the local paths), "canceled" or
+ * "error" (data: the error envelope). inference_stream_cancel or inference_stream_free stops the download; a
+ * partly downloaded file resumes on the next attempt. */
+INFERENCE_API inference_status inference_model_download_open(const char *request, size_t request_len,
+                                                            inference_stream **out_stream);
+
 /* The blob's bytes; valid until the blob is freed. NULL for NULL. */
 INFERENCE_API const uint8_t *inference_blob_data(const inference_blob *blob);
 /* Length in bytes. 0 for NULL. */

@@ -142,15 +142,20 @@ pub const PATCH_EMBED_TENSOR: &str = "model.x_embedder.proj1.weight";
 
 /// Whether `path` is a HiDream-O1 GGUF: ComfyUI-GGUF's diffusion marker over HiDream's patch embedder.
 pub fn is_gguf(path: &Path) -> bool {
-    let Ok(archive) = inference_quant::GgufArchive::open_file(path) else {
+    let header = std::fs::File::open(path)
+        .map_err(inference_tensor::Error::wrap)
+        .and_then(|file| {
+            inference_tensor::quantized::gguf_file::Header::read(&mut std::io::BufReader::new(file))
+        });
+    let Ok(header) = header else {
         return false;
     };
-    let diffusion = archive
-        .metadata()
+    let diffusion = header
+        .metadata
         .get(GGUF_TYPE_KEY)
         .and_then(|v| v.to_string().ok())
         .is_some_and(|t| t == GGUF_DIFFUSION);
-    diffusion && archive.tensors().contains_key(PATCH_EMBED_TENSOR)
+    diffusion && header.tensor_infos.contains_key(PATCH_EMBED_TENSOR)
 }
 
 /// The HiDream-O1 GGUF `model_id` names: the file itself, or a directory's only GGUF when it holds no checkpoint.

@@ -46,10 +46,14 @@ internal sealed class EngineHandle : SafeHandle
     }
 }
 
-/// <summary>A native stream holding a reference on its engine, released when the stream is freed.</summary>
+/// <summary>A native stream holding a reference on its engine, if it has one, released when the stream is freed.</summary>
 internal sealed class StreamHandle : SafeHandle
 {
-    private readonly EngineHandle _engine;
+    private readonly EngineHandle? _engine;
+
+    /// <summary>A stream no engine serves, such as a model download.</summary>
+    internal StreamHandle(IntPtr stream)
+        : base(IntPtr.Zero, ownsHandle: true) => SetHandle(stream);
 
     /// <summary>Takes a new reference on <paramref name="engine"/>; frees <paramref name="stream"/> if it cannot.</summary>
     internal StreamHandle(IntPtr stream, EngineHandle engine)
@@ -74,7 +78,7 @@ internal sealed class StreamHandle : SafeHandle
     protected override bool ReleaseHandle()
     {
         NativeMethods.inference_stream_free(handle);
-        _engine.DangerousRelease();
+        _engine?.DangerousRelease();
         return true;
     }
 }

@@ -40,10 +40,11 @@ class StreamEvent:
 class Stream:
     """A streaming request's events; close it, or use `with`, to abandon it. An open stream keeps its engine."""
 
-    def __init__(self, engine: Handle, pointer):
+    def __init__(self, engine: Handle | None, pointer):
         def free(stream):
             lib.inference_stream_free(stream)
-            engine.release()
+            if engine is not None:
+                engine.release()
 
         self._stream = Handle(pointer, free)
         self._finalizer = weakref.finalize(self, self._stream.close)
@@ -652,9 +653,37 @@ def system_doctor() -> str:
     return _report("inference_system_doctor")
 
 
-def tune_model(request_json: str) -> str:
-    """The quantization and settings that fit a model on this machine, found without loading it; needs no engine."""
+def _engine_free(name: str, request_json: str) -> str:
     data = text_arg(request_json)
     response = ctypes.c_void_p()
-    check(lib.inference_model_tune(data, len(data), ctypes.byref(response)), "inference_model_tune")
+    check(getattr(lib, name)(data, len(data), ctypes.byref(response)), name)
     return take_string(response)
+
+
+def tune_model(request_json: str) -> str:
+    """The quantization and settings that fit a model on this machine, found without loading it; needs no engine."""
+    return _engine_free("inference_model_tune", request_json)
+
+
+def inspect_model(request_json: str) -> str:
+    """One model's facts, read without loading it: `{"path"}` names a model directory, GGUF or .nemo."""
+    return _engine_free("inference_model_inspect", request_json)
+
+
+def scan_models(request_json: str) -> str:
+    """The models in `{"folders", "hf_cache"}`: those folders and, when asked, the Hugging Face cache."""
+    return _engine_free("inference_models_scan", request_json)
+
+
+def delete_cached_repo(request_json: str) -> str:
+    """Deletes `{"repo_id"}` from the Hugging Face cache, every revision."""
+    return _engine_free("inference_hf_cache_delete", request_json)
+
+
+def download_model(request_json: str) -> Stream:
+    """Downloads a Hugging Face repository, its files or one GGUF quant into the cache: `files`, `progress` and a last
+    `done`, `canceled` or `error` event. Cancel or close the stream to stop it; a partial file resumes next time."""
+    data = text_arg(request_json)
+    stream = ctypes.c_void_p()
+    check(lib.inference_model_download_open(data, len(data), ctypes.byref(stream)), "inference_model_download_open")
+    return Stream(None, stream)

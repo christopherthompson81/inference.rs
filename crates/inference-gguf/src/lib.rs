@@ -31,3 +31,12 @@ pub use inference_nn::gguf::Content;
 pub use inference_nn::gguf::GGUFArchitecture;
 
 pub const GGUF_MULTI_FILE_DELIMITER: &str = ";";
+
+/// Whether a GGUF of `architecture` loads here: a text model, or the text side of a multimodal one.
+pub fn loads_architecture(architecture: &str) -> bool {
+    architecture
+        .parse::<normal_registry::CanonicalGgufArchitecture>()
+        .is_ok()
+        || multimodal_vision_registry::is_multimodal_text_architecture(architecture)
+        || qwen_multimodal_bindings::is_qwen_multimodal_architecture(architecture)
+}

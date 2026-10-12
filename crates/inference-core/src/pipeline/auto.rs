@@ -262,40 +262,11 @@ impl AutoLoader {
     }
 
     fn read_config_from_path(&self, paths: &dyn ModelPaths) -> Result<ConfigArtifacts> {
-        let config_path = paths.get_config_filename();
-        let contents = match std::fs::read_to_string(config_path) {
-            Ok(contents) => Some(contents),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => None,
-            Err(err) => return Err(err.into()),
-        };
-        let contents = contents
-            .map(|config| self.apply_config_overrides(&config))
-            .transpose()?;
-        let model_root = Path::new(&self.model_id);
-        let repo_files = if model_root.exists() {
-            Self::list_local_repo_files(model_root)
-        } else {
-            Vec::new()
-        };
-        let sentence_transformers_present = Self::has_sentence_transformers_sibling(config_path)
-            || repo_files
-                .iter()
-                .any(|f| f == "config_sentence_transformers.json");
-        let weight_index = contents
-            .as_deref()
-            .is_some_and(DiffusionLoaderType::needs_weight_index)
-            .then(|| {
-                let dir = config_path.parent()?;
-                std::fs::read_to_string(dir.join(DiffusionLoaderType::WEIGHT_INDEX)).ok()
-            })
-            .flatten();
-        Ok(ConfigArtifacts {
-            contents,
-            sentence_transformers_present,
-            repo_files,
-            remote_access_issue: None,
-            weight_index,
-        })
+        local_config_artifacts(
+            Path::new(&self.model_id),
+            paths.get_config_filename(),
+            |config| self.apply_config_overrides(config),
+        )
     }
 
     fn read_config_from_hf(
@@ -400,155 +371,6 @@ impl AutoLoader {
         }
     }
 
-    fn detect(&self, artifacts: &ConfigArtifacts) -> Result<Detected> {
-        if let Some(tp) = DiffusionLoaderType::auto_detect_from_files(&artifacts.repo_files) {
-            return Ok(Detected::Diffusion(tp));
-        }
-        if let Some(tp) = artifacts.weight_index.as_deref().and_then(|index| {
-            DiffusionLoaderType::auto_detect_from_weight_index(index, &self.model_id)
-        }) {
-            return Ok(Detected::Diffusion(tp));
-        }
-
-        if let Some(ref config) = artifacts.contents
-            && let Some(tp) = crate::pipeline::SpeechLoaderType::auto_detect_from_config(config)
-        {
-            return Ok(Detected::Speech(tp));
-        }
-
-        if let Some(ref config) = artifacts.contents
-            && let Some(tp) =
-                crate::pipeline::TranscriptionLoaderType::auto_detect_from_config(config)
-        {
-            return Ok(Detected::Transcription(tp));
-        }
-
-        if let Some(ref config) = artifacts.contents
-            && crate::pipeline::DiarizationLoaderType::auto_detect_from_config(config).is_some()
-        {
-            return Ok(Detected::Diarization);
-        }
-
-        if artifacts.sentence_transformers_present {
-            if let Some(ref config) = artifacts.contents {
-                let cfg: AutoConfig = serde_json::from_str(config)?;
-                if let Some(name) = cfg.architectures.first()
-                    && let Ok(tp) = EmbeddingLoaderType::from_causal_lm_name(name)
-                {
-                    info!(
-                        "Detected `config_sentence_transformers.json`; using embedding loader `{tp}`."
-                    );
-                    return Ok(Detected::Embedding(Some(tp)));
-                }
-            }
-            if artifacts.contents.is_none()
-                && let Some(issue) = artifacts.remote_access_issue.as_ref()
-            {
-                return Err(hf_access_error(Path::new(&self.model_id), issue));
-            }
-            info!(
-                "Detected `config_sentence_transformers.json`; routing via auto embedding loader."
-            );
-            return Ok(Detected::Embedding(None));
-        }
-
-        // Detect Mistral-native models that use params.json instead of config.json
-        if artifacts.contents.is_none() && artifacts.repo_files.iter().any(|f| f == "params.json") {
-            // Voxtral uses params.json with a "multimodal" key containing "whisper_model_args"
-            info!("Detected `params.json` in repo; routing as Voxtral.");
-            return Ok(Detected::Multimodal(MultimodalLoaderType::Voxtral));
-        }
-
-        // a local path only: a Hub id would be listed here, before the loader runs
-        if artifacts.contents.is_none()
-            && std::path::Path::new(&self.model_id).exists()
-            && super::transcription::silero_gguf(&self.model_id, None, &TokenSource::None, true)
-                .is_ok()
-        {
-            info!("Detected a Silero VAD GGUF; routing as voice activity detection.");
-            return Ok(Detected::VoiceActivity);
-        }
-
-        // a local `.nemo` routes by its class, a Hub repo's by name (a multi-GB download to find it is not ours)
-        if artifacts.contents.is_none() {
-            let local = Path::new(&self.model_id).exists();
-            let names_sortformer = |s: &str| s.to_ascii_lowercase().contains(SORTFORMER_NAME);
-            let with_extension = |ext: &str| -> Vec<&String> {
-                artifacts
-                    .repo_files
-                    .iter()
-                    .filter(|f| Path::new(f).extension().is_some_and(|e| e == ext))
-                    .collect()
-            };
-            let nemos = with_extension(inference_models_speech::nemo::EXTENSION);
-            let ggufs = with_extension(GGUF_EXTENSION);
-            let probe = |find: fn(&str, Option<String>, &TokenSource, bool) -> Result<PathBuf>| {
-                local && find(&self.model_id, None, &TokenSource::None, true).is_ok()
-            };
-            let hub_sortformer = !local
-                && nemos
-                    .iter()
-                    .any(|f| names_sortformer(f) || names_sortformer(&self.model_id));
-            if probe(super::transcription::sortformer_nemo) || hub_sortformer {
-                info!("Detected a Streaming Sortformer `.nemo`; routing as speaker diarization.");
-                return Ok(Detected::Diarization);
-            }
-            let names_asr = |s: &str| {
-                let s = s.to_ascii_lowercase();
-                ASR_NAMES.iter().any(|n| s.contains(n))
-            };
-            let hub_asr = !local
-                && nemos
-                    .iter()
-                    .chain(&ggufs)
-                    .any(|f| names_asr(f) || names_asr(&self.model_id));
-            if probe(super::transcription::asr_nemo)
-                || probe(super::transcription::asr_gguf)
-                || hub_asr
-            {
-                info!(
-                    "Detected a speech recognition `.nemo` or `asr` GGUF; routing as transcription."
-                );
-                return Ok(Detected::Transcription(
-                    crate::pipeline::TranscriptionLoaderType::Parakeet,
-                ));
-            }
-        }
-
-        if artifacts.contents.is_none()
-            && let Some(tp) = DiffusionLoaderType::auto_detect_hidream_gguf(&self.model_id)
-        {
-            return Ok(Detected::Diffusion(tp));
-        }
-
-        if artifacts.contents.is_none()
-            && super::speech::local_kokoro_gguf(&self.model_id).is_some()
-        {
-            info!("Detected a Kokoro GGUF; routing as Kokoro.");
-            return Ok(Detected::Speech(crate::pipeline::SpeechLoaderType::Kokoro));
-        }
-
-        let config = artifacts.contents.as_ref().ok_or_else(|| {
-            if let Some(issue) = artifacts.remote_access_issue.as_ref() {
-                hf_access_error(Path::new(&self.model_id), issue)
-            } else {
-                anyhow::anyhow!(
-                    "Auto loader could not determine model type: missing `config.json` and no diffusion/speech markers found."
-                )
-            }
-        })?;
-        let cfg: AutoConfig = serde_json::from_str(config)?;
-        if cfg.architectures.len() != 1 {
-            anyhow::bail!("Expected exactly one architecture in config");
-        }
-        let name = &cfg.architectures[0];
-        if let Ok(tp) = MultimodalLoaderType::from_causal_lm_name(name) {
-            return Ok(Detected::Multimodal(tp));
-        }
-        let tp = NormalLoaderType::from_causal_lm_name(name)?;
-        Ok(Detected::Normal(tp))
-    }
-
     fn ensure_loader(&self, detected: Detected) -> Result<()> {
         let mut guard = self.loader.lock().unwrap();
         if guard.is_some() {
@@ -635,6 +457,249 @@ impl AutoLoader {
     }
 }
 
+fn detect(model_id: &str, artifacts: &ConfigArtifacts) -> Result<Detected> {
+    if let Some(tp) = DiffusionLoaderType::auto_detect_from_files(&artifacts.repo_files) {
+        return Ok(Detected::Diffusion(tp));
+    }
+    if let Some(tp) = artifacts
+        .weight_index
+        .as_deref()
+        .and_then(|index| DiffusionLoaderType::auto_detect_from_weight_index(index, model_id))
+    {
+        return Ok(Detected::Diffusion(tp));
+    }
+
+    if let Some(ref config) = artifacts.contents
+        && let Some(tp) = crate::pipeline::SpeechLoaderType::auto_detect_from_config(config)
+    {
+        return Ok(Detected::Speech(tp));
+    }
+
+    if let Some(ref config) = artifacts.contents
+        && let Some(tp) = crate::pipeline::TranscriptionLoaderType::auto_detect_from_config(config)
+    {
+        return Ok(Detected::Transcription(tp));
+    }
+
+    if let Some(ref config) = artifacts.contents
+        && crate::pipeline::DiarizationLoaderType::auto_detect_from_config(config).is_some()
+    {
+        return Ok(Detected::Diarization);
+    }
+
+    if artifacts.sentence_transformers_present {
+        if let Some(ref config) = artifacts.contents {
+            let cfg: AutoConfig = serde_json::from_str(config)?;
+            if let Some(name) = cfg.architectures.first()
+                && let Ok(tp) = EmbeddingLoaderType::from_causal_lm_name(name)
+            {
+                info!(
+                    "Detected `config_sentence_transformers.json`; using embedding loader `{tp}`."
+                );
+                return Ok(Detected::Embedding(Some(tp)));
+            }
+        }
+        if artifacts.contents.is_none()
+            && let Some(issue) = artifacts.remote_access_issue.as_ref()
+        {
+            return Err(hf_access_error(Path::new(model_id), issue));
+        }
+        info!("Detected `config_sentence_transformers.json`; routing via auto embedding loader.");
+        return Ok(Detected::Embedding(None));
+    }
+
+    // Detect Mistral-native models that use params.json instead of config.json
+    if artifacts.contents.is_none() && artifacts.repo_files.iter().any(|f| f == "params.json") {
+        // Voxtral uses params.json with a "multimodal" key containing "whisper_model_args"
+        info!("Detected `params.json` in repo; routing as Voxtral.");
+        return Ok(Detected::Multimodal(MultimodalLoaderType::Voxtral));
+    }
+
+    // a local path only: a Hub id would be listed here, before the loader runs
+    if artifacts.contents.is_none()
+        && std::path::Path::new(model_id).exists()
+        && super::transcription::silero_gguf(model_id, None, &TokenSource::None, true).is_ok()
+    {
+        info!("Detected a Silero VAD GGUF; routing as voice activity detection.");
+        return Ok(Detected::VoiceActivity);
+    }
+
+    // a local `.nemo` routes by its class, a Hub repo's by name (a multi-GB download to find it is not ours)
+    if artifacts.contents.is_none() {
+        let local = Path::new(model_id).exists();
+        let names_sortformer = |s: &str| s.to_ascii_lowercase().contains(SORTFORMER_NAME);
+        let with_extension = |ext: &str| -> Vec<&String> {
+            artifacts
+                .repo_files
+                .iter()
+                .filter(|f| Path::new(f).extension().is_some_and(|e| e == ext))
+                .collect()
+        };
+        let nemos = with_extension(inference_models_speech::nemo::EXTENSION);
+        let ggufs = with_extension(GGUF_EXTENSION);
+        let probe = |find: fn(&str, Option<String>, &TokenSource, bool) -> Result<PathBuf>| {
+            local && find(model_id, None, &TokenSource::None, true).is_ok()
+        };
+        let hub_sortformer = !local
+            && nemos
+                .iter()
+                .any(|f| names_sortformer(f) || names_sortformer(model_id));
+        if probe(super::transcription::sortformer_nemo) || hub_sortformer {
+            info!("Detected a Streaming Sortformer `.nemo`; routing as speaker diarization.");
+            return Ok(Detected::Diarization);
+        }
+        let names_asr = |s: &str| {
+            let s = s.to_ascii_lowercase();
+            ASR_NAMES.iter().any(|n| s.contains(n))
+        };
+        let hub_asr = !local
+            && nemos
+                .iter()
+                .chain(&ggufs)
+                .any(|f| names_asr(f) || names_asr(model_id));
+        if probe(super::transcription::asr_nemo) || probe(super::transcription::asr_gguf) || hub_asr
+        {
+            info!("Detected a speech recognition `.nemo` or `asr` GGUF; routing as transcription.");
+            return Ok(Detected::Transcription(
+                crate::pipeline::TranscriptionLoaderType::Parakeet,
+            ));
+        }
+    }
+
+    if artifacts.contents.is_none()
+        && let Some(tp) = DiffusionLoaderType::auto_detect_hidream_gguf(model_id)
+    {
+        return Ok(Detected::Diffusion(tp));
+    }
+
+    if artifacts.contents.is_none() && super::speech::local_kokoro_gguf(model_id).is_some() {
+        info!("Detected a Kokoro GGUF; routing as Kokoro.");
+        return Ok(Detected::Speech(crate::pipeline::SpeechLoaderType::Kokoro));
+    }
+
+    let config = artifacts.contents.as_ref().ok_or_else(|| {
+        if let Some(issue) = artifacts.remote_access_issue.as_ref() {
+            hf_access_error(Path::new(model_id), issue)
+        } else {
+            anyhow::anyhow!(
+                "Auto loader could not determine model type: missing `config.json` and no diffusion/speech markers found."
+            )
+        }
+    })?;
+    let cfg: AutoConfig = serde_json::from_str(config)?;
+    if cfg.architectures.len() != 1 {
+        anyhow::bail!("Expected exactly one architecture in config");
+    }
+    let name = &cfg.architectures[0];
+    if let Ok(tp) = MultimodalLoaderType::from_causal_lm_name(name) {
+        return Ok(Detected::Multimodal(tp));
+    }
+    let tp = NormalLoaderType::from_causal_lm_name(name)?;
+    Ok(Detected::Normal(tp))
+}
+
+// A local model's config and file listing as detection reads them; `config_path` need not exist.
+fn local_config_artifacts(
+    model_root: &Path,
+    config_path: &Path,
+    apply_overrides: impl Fn(&str) -> Result<String>,
+) -> Result<ConfigArtifacts> {
+    let contents = match std::fs::read_to_string(config_path) {
+        Ok(contents) => Some(contents),
+        // a model that is one file has no config beside it
+        Err(err)
+            if matches!(
+                err.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            None
+        }
+        Err(err) => return Err(err.into()),
+    };
+    let contents = contents
+        .map(|config| apply_overrides(&config))
+        .transpose()?;
+    let repo_files = if model_root.exists() {
+        AutoLoader::list_local_repo_files(model_root)
+    } else {
+        Vec::new()
+    };
+    let sentence_transformers_present = AutoLoader::has_sentence_transformers_sibling(config_path)
+        || repo_files
+            .iter()
+            .any(|f| f == "config_sentence_transformers.json");
+    let weight_index = contents
+        .as_deref()
+        .is_some_and(DiffusionLoaderType::needs_weight_index)
+        .then(|| {
+            let dir = config_path.parent()?;
+            std::fs::read_to_string(dir.join(DiffusionLoaderType::WEIGHT_INDEX)).ok()
+        })
+        .flatten();
+    Ok(ConfigArtifacts {
+        contents,
+        sentence_transformers_present,
+        repo_files,
+        remote_access_issue: None,
+        weight_index,
+    })
+}
+
+/// What the auto loader would load a model as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DetectedModelKind {
+    Text,
+    Multimodal,
+    Embedding,
+    ImageGeneration,
+    Speech,
+    Transcription,
+    VoiceActivity,
+    Diarization,
+}
+
+/// A model's kind and, where the kind has several, the loader that serves it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DetectedModel {
+    pub kind: DetectedModelKind,
+    pub loader: Option<String>,
+}
+
+impl From<Detected> for DetectedModel {
+    fn from(detected: Detected) -> Self {
+        let (kind, loader) = match detected {
+            Detected::Normal(tp) => (DetectedModelKind::Text, Some(tp.to_string())),
+            Detected::Multimodal(tp) => (DetectedModelKind::Multimodal, Some(tp.to_string())),
+            Detected::Embedding(tp) => (DetectedModelKind::Embedding, tp.map(|tp| tp.to_string())),
+            Detected::Diffusion(tp) => (DetectedModelKind::ImageGeneration, spec_name(&tp)),
+            Detected::Speech(tp) => (DetectedModelKind::Speech, spec_name(&tp)),
+            Detected::Transcription(tp) => (DetectedModelKind::Transcription, spec_name(&tp)),
+            Detected::VoiceActivity => (DetectedModelKind::VoiceActivity, None),
+            Detected::Diarization => (DetectedModelKind::Diarization, None),
+        };
+        Self { kind, loader }
+    }
+}
+
+// the name a spec gives this loader type (`flux`, `dia`, `parakeet`)
+fn spec_name(loader: &impl serde::Serialize) -> Option<String> {
+    serde_json::to_value(loader)
+        .ok()?
+        .as_str()
+        .map(str::to_string)
+}
+
+/// Routes a local model directory or file as loading it would, without loading it. A GGUF that only its
+/// architecture identifies (a text model's) fails here: it carries no `config.json` to route by.
+pub fn detect_local_model(path: &Path) -> Result<DetectedModel> {
+    let artifacts = local_config_artifacts(path, &path.join("config.json"), |config| {
+        Ok(config.to_string())
+    })?;
+    detect(&path.to_string_lossy(), &artifacts).map(Into::into)
+}
+
 fn device_map_for_detected(mapper: DeviceMapSetting, detected: &Detected) -> DeviceMapSetting {
     match (mapper, detected) {
         (
@@ -677,7 +742,7 @@ impl Loader for AutoLoader {
         let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let config = self.read_config_from_hf(revision.clone(), &token_source, silent)?;
-        let detected = self.detect(&config)?;
+        let detected = detect(&self.model_id, &config)?;
         let options = LoadOptions {
             mapper: device_map_for_detected(options.mapper, &detected),
             ..options
@@ -698,7 +763,7 @@ impl Loader for AutoLoader {
     ) -> Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(options.silent);
         let config = self.read_config_from_path(paths)?;
-        let detected = self.detect(&config)?;
+        let detected = detect(&self.model_id, &config)?;
         let options = LoadOptions {
             mapper: device_map_for_detected(options.mapper, &detected),
             ..options
@@ -730,32 +795,17 @@ impl Loader for AutoLoader {
 mod tests {
     use super::*;
 
-    fn detector() -> AutoLoader {
-        AutoLoader {
-            model_id: "Qwen/Qwen3.6-35B-A3B".to_string(),
-            normal_builder: Mutex::new(None),
-            multimodal_builder: Mutex::new(None),
-            embedding_builder: Mutex::new(None),
-            loader: Mutex::new(None),
-            hf_cache_path: None,
-            hf_config_overrides: None,
-            max_model_len: None,
-            dynamic_lora_enabled: true,
-        }
-    }
-
     fn without_config(model_id: &str, repo_files: &[&str]) -> Result<Detected> {
-        let detector = AutoLoader {
-            model_id: model_id.to_string(),
-            ..detector()
-        };
-        detector.detect(&ConfigArtifacts {
-            contents: None,
-            sentence_transformers_present: false,
-            repo_files: repo_files.iter().map(|f| f.to_string()).collect(),
-            remote_access_issue: None,
-            weight_index: None,
-        })
+        detect(
+            model_id,
+            &ConfigArtifacts {
+                contents: None,
+                sentence_transformers_present: false,
+                repo_files: repo_files.iter().map(|f| f.to_string()).collect(),
+                remote_access_issue: None,
+                weight_index: None,
+            },
+        )
     }
 
     #[test]
@@ -806,8 +856,9 @@ mod tests {
 
     #[test]
     fn qwen3_5_moe_auto_detection_routes_dynamic_lora_to_multimodal() {
-        let detected = detector()
-            .detect(&ConfigArtifacts {
+        let detected = detect(
+            "Qwen/Qwen3.6-35B-A3B",
+            &ConfigArtifacts {
                 contents: Some(
                     r#"{"architectures":["Qwen3_5MoeForConditionalGeneration"]}"#.to_string(),
                 ),
@@ -815,8 +866,9 @@ mod tests {
                 repo_files: Vec::new(),
                 remote_access_issue: None,
                 weight_index: None,
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
 
         assert!(matches!(
             detected,

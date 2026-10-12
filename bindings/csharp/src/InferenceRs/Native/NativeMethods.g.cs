@@ -383,6 +383,22 @@ internal static unsafe partial class NativeMethods
         byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_model_inspect(
+        byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_models_scan(
+        byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_hf_cache_delete(
+        byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_model_download_open(
+        byte* request, nuint requestLen, out IntPtr outStream);
+
+    [LibraryImport(Library)]
     internal static partial IntPtr inference_blob_data(IntPtr blob);
 
     [LibraryImport(Library)]
