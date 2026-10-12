@@ -12,8 +12,6 @@ public delegate Func<Action<LoadProgress>, IDisposable> SlotLoader(ModelSlotView
 /// <summary>One model a tab runs: where it comes from, the device, and its load progress and errors.</summary>
 public sealed partial class ModelSlotViewModel : ObservableObject, IDisposable
 {
-    // a KV cache sized for this much context, not the 90% of free memory an unsized one takes, so several models fit
-    public const decimal DefaultContextLength = 8192;
     private const double BytesPerMiB = 1024 * 1024;
 
     // one load at a time: progress reaches every listener in the process, so each bar shows only its own load
@@ -52,10 +50,10 @@ public sealed partial class ModelSlotViewModel : ObservableObject, IDisposable
     public partial string Source { get; set; } = "";
 
     [ObservableProperty]
-    public partial string Device { get; set; } = Host.AutoDevice;
+    public partial string Device { get; set; } = DefaultDevice();
 
     [ObservableProperty]
-    public partial decimal ContextLength { get; set; } = DefaultContextLength;
+    public partial decimal ContextLength { get; set; } = SettingsStore.Current.ContextLength;
 
     /// <summary>The multimodal projector of a GGUF model, in the GGUF's directory.</summary>
     [ObservableProperty]
@@ -111,6 +109,38 @@ public sealed partial class ModelSlotViewModel : ObservableObject, IDisposable
     public string? DeviceOrNull => Device == Host.AutoDevice ? null : Device;
 
     private bool CanLoad() => IsIdle && Source.Trim().Length > 0;
+
+    // the settings' device, unless this machine no longer has it
+    private static string DefaultDevice() =>
+        Host.DeviceOptions.Contains(SettingsStore.Current.Device) ? SettingsStore.Current.Device : Host.AutoDevice;
+
+    /// <summary>The slot's model and options, to remember for the next session.</summary>
+    public SlotState Capture() => new()
+    {
+        Source = Source,
+        Device = Device,
+        ContextLength = ContextLength,
+        MmprojPath = MmprojPath,
+    };
+
+    /// <summary>Fills the slot in from a remembered session; loading it is up to the caller.</summary>
+    public void Restore(SlotState state)
+    {
+        Source = state.Source;
+        if (Host.DeviceOptions.Contains(state.Device)) Device = state.Device;
+        if (state.ContextLength > 0) ContextLength = state.ContextLength;
+        MmprojPath = state.MmprojPath;
+    }
+
+    /// <summary>Puts a model the model manager picked into the slot, unloading what it held.</summary>
+    public void Assign(string source, string mmprojPath)
+    {
+        if (!IsIdle) return;
+        Unload();
+        Error = "";
+        Source = source;
+        MmprojPath = mmprojPath;
+    }
 
     [RelayCommand(CanExecute = nameof(CanLoad))]
     private async Task LoadAsync()

@@ -1,0 +1,105 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+        x:Class="InferenceRs.AvaloniaDemo.Views.ModelManagerWindow"
+        x:DataType="vm:ModelManagerViewModel"
+        Title="Models"
+        Width="1180" Height="780" MinWidth="820" MinHeight="520"
+        WindowStartupLocation="CenterOwner">
+  <DockPanel Margin="12">
+    <Grid DockPanel.Dock="Top" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="8" Margin="0,0,0,8">
+      <Button Content="Refresh" Command="{Binding RefreshCommand}" />
+      <TextBox Grid.Column="1" Text="{Binding Filter}" PlaceholderText="Filter by name, architecture, quantization or path" />
+      <CheckBox Grid.Column="2" IsChecked="{Binding ShowProjectors}" Content="Projectors" />
+      <CheckBox Grid.Column="3" IsChecked="{Binding ShowUnsupported}" Content="Unsupported" />
+    </Grid>
+    <StackPanel DockPanel.Dock="Top" Spacing="2" Margin="0,0,0,8">
+      <TextBlock Classes="muted" Text="{Binding Status}" />
+      <SelectableTextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+    </StackPanel>
+
+    <Border DockPanel.Dock="Bottom" Classes="card" Margin="0,10,0,0">
+      <StackPanel Spacing="8">
+        <TextBlock Classes="heading" Text="Download from Hugging Face" />
+        <Grid ColumnDefinitions="2*,*,2*,Auto,Auto" ColumnSpacing="6">
+          <TextBox Text="{Binding DownloadRepo}" PlaceholderText="Repository, e.g. unsloth/Qwen3-8B-GGUF" />
+          <TextBox Grid.Column="1" Text="{Binding DownloadQuant}" PlaceholderText="GGUF quant, e.g. Q4_K_M" />
+          <TextBox Grid.Column="2" Text="{Binding DownloadFiles}" PlaceholderText="Files, comma separated (optional)" />
+          <Button Grid.Column="3" Classes="accent" Content="Download" Command="{Binding DownloadCommand}" />
+          <Button Grid.Column="4" Content="Cancel" Command="{Binding CancelDownloadCommand}" />
+        </Grid>
+        <TextBlock Classes="muted"
+                   Text="A quant downloads its GGUF and the projector beside it; with neither a quant nor files, the whole repository." />
+        <ProgressBar Minimum="0" Maximum="100" Value="{Binding DownloadPercent}" IsVisible="{Binding IsDownloading}" />
+        <TextBlock Classes="muted" Text="{Binding DownloadStatus}" />
+      </StackPanel>
+    </Border>
+
+    <Border DockPanel.Dock="Right" Classes="card" Width="400" Margin="10,0,0,0">
+      <Panel>
+        <TextBlock Classes="muted" Text="Select a model to see its details." IsVisible="{Binding !HasSelection}" />
+        <ScrollViewer IsVisible="{Binding HasSelection}">
+          <StackPanel Spacing="8" DataContext="{Binding Selected}" x:DataType="vm:ModelEntryViewModel">
+            <SelectableTextBlock Classes="heading" Text="{Binding Name}" TextWrapping="Wrap" />
+            <TextBlock Text="{Binding KindLabel}" />
+            <TextBlock Classes="muted" Text="{Binding Details}" />
+            <SelectableTextBlock Classes="muted mono" Text="{Binding Path}" TextWrapping="Wrap" />
+            <TextBlock Classes="muted" Text="{Binding SizeText}" />
+            <StackPanel IsVisible="{Binding HasBaseModel}">
+              <TextBlock Text="Base model" FontWeight="SemiBold" />
+              <SelectableTextBlock Text="{Binding BaseModel}" />
+            </StackPanel>
+            <StackPanel IsVisible="{Binding HasContext}">
+              <TextBlock Text="Context length" FontWeight="SemiBold" />
+              <TextBlock Text="{Binding ContextLength}" />
+            </StackPanel>
+            <StackPanel IsVisible="{Binding HasProjectors}">
+              <TextBlock Text="Projector (images and audio)" FontWeight="SemiBold" />
+              <SelectableTextBlock Classes="muted mono" Text="{Binding ProjectorText}" TextWrapping="Wrap" />
+            </StackPanel>
+            <SelectableTextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+          </StackPanel>
+        </ScrollViewer>
+      </Panel>
+    </Border>
+
+    <Grid RowDefinitions="*,Auto">
+      <ListBox ItemsSource="{Binding Entries}" SelectedItem="{Binding Selected}">
+        <ListBox.ItemTemplate>
+          <DataTemplate x:DataType="vm:ModelEntryViewModel">
+            <Grid ColumnDefinitions="*,140,110,80" ColumnSpacing="8">
+              <StackPanel>
+                <TextBlock Text="{Binding Name}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                <TextBlock Classes="muted" Text="{Binding Where}" TextTrimming="CharacterEllipsis" />
+              </StackPanel>
+              <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{Binding KindLabel}" />
+              <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="{Binding Quantization}" />
+              <TextBlock Grid.Column="3" VerticalAlignment="Center" HorizontalAlignment="Right" Text="{Binding SizeText}" />
+            </Grid>
+          </DataTemplate>
+        </ListBox.ItemTemplate>
+      </ListBox>
+      <StackPanel Grid.Row="1" Spacing="6" Margin="0,8,0,0" IsVisible="{Binding HasSelection}">
+        <WrapPanel ItemSpacing="6" LineSpacing="6">
+          <TextBlock VerticalAlignment="Center" Text="Use in:" />
+          <Button Content="Chat" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Chat}" />
+          <Button Content="Documents" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Documents}" />
+          <Button Content="Speech" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Speech}" />
+          <Button Content="Transcription" Command="{Binding UseCommand}"
+                  CommandParameter="{x:Static vm:ModelTarget.Transcription}" />
+          <Button Content="Diarization" Command="{Binding UseCommand}"
+                  CommandParameter="{x:Static vm:ModelTarget.Diarization}" />
+          <Button Content="Images" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Images}" />
+          <Button Content="Delete..." Command="{Binding DeleteCommand}" Margin="12,0,0,0" />
+        </WrapPanel>
+        <Border Classes="card" IsVisible="{Binding IsConfirmingDelete}">
+          <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
+            <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Text="{Binding DeleteDescription}" />
+            <Button Grid.Column="1" Classes="accent" Content="Delete" Command="{Binding ConfirmDeleteCommand}" />
+            <Button Grid.Column="2" Content="Keep" Command="{Binding KeepModelCommand}" />
+          </Grid>
+        </Border>
+      </StackPanel>
+    </Grid>
+  </DockPanel>
+</Window>

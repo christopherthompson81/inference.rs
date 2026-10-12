@@ -103,20 +103,27 @@ public sealed partial class ChatViewModel : ObservableObject, IDisposable
     public partial string Input { get; set; } = "";
 
     [ObservableProperty]
-    public partial string SystemPrompt { get; set; } = "";
+    public partial string SystemPrompt { get; set; } = SettingsStore.Current.SystemPrompt;
 
     // NumericUpDown binds decimal only
     [ObservableProperty]
-    public partial decimal Temperature { get; set; } = 0.7m;
+    public partial decimal Temperature { get; set; } = SettingsStore.Current.Temperature;
 
     [ObservableProperty]
-    public partial decimal TopP { get; set; } = 0.95m;
+    public partial decimal TopP { get; set; } = SettingsStore.Current.TopP;
+
+    /// <summary>0 samples from the whole vocabulary.</summary>
+    [ObservableProperty]
+    public partial decimal TopK { get; set; } = SettingsStore.Current.TopK;
 
     [ObservableProperty]
-    public partial decimal MaxTokens { get; set; } = 1024;
+    public partial decimal MinP { get; set; } = SettingsStore.Current.MinP;
 
     [ObservableProperty]
-    public partial bool EnableThinking { get; set; } = true;
+    public partial decimal MaxTokens { get; set; } = SettingsStore.Current.MaxTokens;
+
+    [ObservableProperty]
+    public partial bool EnableThinking { get; set; } = SettingsStore.Current.EnableThinking;
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SendCommand))]
@@ -234,6 +241,8 @@ public sealed partial class ChatViewModel : ObservableObject, IDisposable
             ["max_tokens"] = (int)MaxTokens,
             ["enable_thinking"] = EnableThinking,
         };
+        if (TopK > 0) request["top_k"] = (int)TopK;
+        if (MinP > 0) request["min_p"] = (double)MinP;
         return (request.ToJsonString(), media);
     }
 

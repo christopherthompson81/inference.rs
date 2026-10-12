@@ -10,7 +10,8 @@
     <Border DockPanel.Dock="Top" Background="#D13438" Padding="12,8" IsVisible="{Binding HasHostError}">
       <SelectableTextBlock Foreground="White" TextWrapping="Wrap" Text="{Binding HostError}" />
     </Border>
-    <TabControl Padding="0">
+    <Panel>
+    <TabControl Padding="0" SelectedIndex="{Binding SelectedTab}">
       <TabItem Header="Chat">
         <views:ChatView DataContext="{Binding Chat}" />
       </TabItem>
@@ -30,5 +31,11 @@
         <views:EngineView DataContext="{Binding Engine}" />
       </TabItem>
     </TabControl>
+    <!-- over the tab strip's empty right end -->
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Spacing="6" Margin="12,10">
+      <Button Content="Models..." Click="OnModels" />
+      <Button Content="Settings..." Click="OnSettings" />
+    </StackPanel>
+    </Panel>
   </DockPanel>
 </Window>

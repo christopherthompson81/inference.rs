@@ -12,7 +12,9 @@
     <views:ModelSlotView DockPanel.Dock="Top" DataContext="{Binding Slot}" Margin="0,0,0,10" />
 
     <Border DockPanel.Dock="Right" Classes="card" Width="260" Margin="10,0,0,0">
-      <StackPanel Spacing="10">
+      <ScrollViewer>
+      <!-- clear of the scroll bar -->
+      <StackPanel Spacing="10" Margin="0,0,14,0">
         <TextBlock Classes="heading" Text="Sampling" />
         <StackPanel Spacing="2">
           <TextBlock Text="Temperature" />
@@ -21,6 +23,14 @@
         <StackPanel Spacing="2">
           <TextBlock Text="Top p" />
           <NumericUpDown Value="{Binding TopP}" Minimum="0" Maximum="1" Increment="0.05" FormatString="0.00" />
+        </StackPanel>
+        <StackPanel Spacing="2">
+          <TextBlock Text="Top k (0: off)" />
+          <NumericUpDown Value="{Binding TopK}" Minimum="0" Maximum="1000" Increment="1" FormatString="0" />
+        </StackPanel>
+        <StackPanel Spacing="2">
+          <TextBlock Text="Min p (0: off)" />
+          <NumericUpDown Value="{Binding MinP}" Minimum="0" Maximum="1" Increment="0.01" FormatString="0.00" />
         </StackPanel>
         <StackPanel Spacing="2">
           <TextBlock Text="Max tokens" />
@@ -33,6 +43,7 @@
         </StackPanel>
         <Button Content="Clear conversation" Command="{Binding ClearCommand}" HorizontalAlignment="Stretch" />
       </StackPanel>
+      </ScrollViewer>
     </Border>
 
     <Grid DockPanel.Dock="Bottom" RowDefinitions="Auto,Auto" Margin="0,10,0,0">

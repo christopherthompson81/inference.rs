@@ -85,7 +85,7 @@ public sealed partial class DocumentViewModel : ObservableObject, IDisposable
         OcrSlot = new ModelSlotViewModel(
             "OCR model",
             "PaddlePaddle/PaddleOCR-VL-1.5, or a .gguf with its mmproj",
-            Specs.Chat,
+            Specs.Ocr,
             files,
             hasContext: true);
         LayoutSlot.Changed += (_, _) => DetectCommand.NotifyCanExecuteChanged();
