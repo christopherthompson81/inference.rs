@@ -2117,17 +2117,63 @@ extern "C" void sample_ranked_topk_distribution(
 }
 
 constexpr int NUCLEUS_SAMPLE_THREADS = 1024;
-// Halves the score range each step; 40 steps resolve any finite logit spread far below f32 spacing.
+// Halves [NUCLEUS_MIN_SCORE, 0] each step, far below f32 spacing after 40.
 constexpr int NUCLEUS_BISECTION_STEPS = 40;
+// expf underflows to 0 below this, so lower scores (masked -inf included) carry no mass.
+constexpr float NUCLEUS_MIN_SCORE = -104.0f;
+
+using NucleusReduce = cub::BlockReduce<float, NUCLEUS_SAMPLE_THREADS>;
+
+// Sum over the row of exp(logit * inverse_temperature - scaled_max), on every thread of the block.
+template <typename T>
+__device__ float nucleus_row_normalizer(const T *row_logits, const int vocab,
+                                        const float inv_temperature,
+                                        const float scaled_max,
+                                        typename NucleusReduce::TempStorage &temp,
+                                        float &shared) {
+  float local = 0.0f;
+  for (int i = threadIdx.x; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
+    local += expf(topk_to_float(row_logits[i]) * inv_temperature - scaled_max);
+  }
+  const float total = NucleusReduce(temp).Sum(local);
+  if (threadIdx.x == 0) {
+    shared = total;
+  }
+  __syncthreads();
+  return shared;
+}
+
+// The full-vocabulary normalizer of each ranked row, scaled by its sequence's inverse temperature.
+template <typename T>
+__global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
+    ranked_row_normalizers_kernel(const T *__restrict__ logits,
+                                  const float *__restrict__ packed,
+                                  const float *__restrict__ inverse_temperatures,
+                                  float *__restrict__ normalizers, const int vocab,
+                                  const int packed_k, const int rows_per_sequence) {
+  __shared__ typename NucleusReduce::TempStorage temp;
+  __shared__ float shared;
+  const int row = blockIdx.x;
+  const float inv_temperature = inverse_temperatures[row / rows_per_sequence];
+  const float scaled_max =
+      packed[static_cast<size_t>(row) * 2 * packed_k] * inv_temperature;
+  const float total = nucleus_row_normalizer(
+      logits + static_cast<size_t>(row) * vocab, vocab, inv_temperature,
+      scaled_max, temp, shared);
+  if (threadIdx.x == 0) {
+    normalizers[row] = total;
+  }
+}
 
 // Top-p / min-p over the whole vocabulary by the CPU sampler's rule; a nucleus wider than the ranked top-k bisects.
 template <typename T>
-__global__ void sample_nucleus_kernel(const T *__restrict__ logits,
+__global__ void __launch_bounds__(NUCLEUS_SAMPLE_THREADS)
+    sample_nucleus_kernel(const T *__restrict__ logits,
                                       const float *__restrict__ packed,
                                       const float *__restrict__ params,
                                       uint32_t *__restrict__ tokens,
                                       const int vocab, const int packed_k) {
-  using Reduce = cub::BlockReduce<float, NUCLEUS_SAMPLE_THREADS>;
+  using Reduce = NucleusReduce;
   using ReduceInt = cub::BlockReduce<int, NUCLEUS_SAMPLE_THREADS>;
   using Scan = cub::BlockScan<float, NUCLEUS_SAMPLE_THREADS>;
   __shared__ union {
@@ -2163,17 +2209,9 @@ __global__ void sample_nucleus_kernel(const T *__restrict__ logits,
   const bool filter_top_p = top_p > 0.0f && top_p < 1.0f;
   const bool filter_min_p = min_p > 0.0f && min_p < 1.0f;
 
-  float local = 0.0f;
-  for (int i = tid; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
-    local += expf(topk_to_float(row_logits[i]) * inv_temperature - scaled_max);
-  }
-  const float block_total = Reduce(temp.reduce).Sum(local);
-  if (tid == 0) {
-    shared_float = block_total;
-  }
-  __syncthreads();
   // Weights are exp(score - max), so the top token weighs 1 and min-p compares weights against min_p itself.
-  const float total = shared_float;
+  const float total = nucleus_row_normalizer(row_logits, vocab, inv_temperature,
+                                             scaled_max, temp.reduce, shared_float);
   const float cutoff = top_p * total;
 
   if (tid == 0) {
@@ -2242,18 +2280,7 @@ __global__ void sample_nucleus_kernel(const T *__restrict__ logits,
   const float min_score = filter_min_p ? logf(min_p) : -INFINITY;
   float threshold = -INFINITY;
   if (filter_top_p) {
-    float low_local = 0.0f;
-    for (int i = tid; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
-      low_local = fminf(low_local, topk_to_float(row_logits[i]) * inv_temperature -
-                                       scaled_max);
-    }
-    __syncthreads();
-    const float row_min = Reduce(temp.reduce).Reduce(low_local, cub::Min());
-    if (tid == 0) {
-      shared_float = row_min;
-    }
-    __syncthreads();
-    float low = shared_float;
+    float low = NUCLEUS_MIN_SCORE;
     float high = 0.0f;
     for (int step = 0; step < NUCLEUS_BISECTION_STEPS; ++step) {
       const float middle = 0.5f * (low + high);
@@ -2327,6 +2354,31 @@ __global__ void sample_nucleus_kernel(const T *__restrict__ logits,
 }
 
 // dtype: 0 f16, 1 bf16, 2 f32
+extern "C" void ranked_row_normalizers(const void *logits, const float *packed,
+                                       const float *inverse_temperatures,
+                                       float *normalizers, const int nrows,
+                                       const int vocab, const int packed_k,
+                                       const int rows_per_sequence,
+                                       const int dtype, int64_t stream) {
+  if (nrows <= 0 || vocab <= 0 || packed_k <= 0 || rows_per_sequence <= 0) {
+    return;
+  }
+  const cudaStream_t custream = (cudaStream_t)stream;
+  if (dtype == 0) {
+    ranked_row_normalizers_kernel<__half><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+        static_cast<const __half *>(logits), packed, inverse_temperatures,
+        normalizers, vocab, packed_k, rows_per_sequence);
+  } else if (dtype == 1) {
+    ranked_row_normalizers_kernel<__nv_bfloat16><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+        static_cast<const __nv_bfloat16 *>(logits), packed, inverse_temperatures,
+        normalizers, vocab, packed_k, rows_per_sequence);
+  } else {
+    ranked_row_normalizers_kernel<float><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+        static_cast<const float *>(logits), packed, inverse_temperatures,
+        normalizers, vocab, packed_k, rows_per_sequence);
+  }
+}
+
 extern "C" void sample_nucleus(const void *logits, const float *packed,
                                const float *params, uint32_t *tokens,
                                const int nrows, const int vocab,

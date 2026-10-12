@@ -235,3 +235,23 @@ Greedy check, since Run 5 had greedy MTP 3 at 87-89: same script, 3 requests eac
 The first gap was mostly run order; the rerun is within 1-2% of base, inside run-to-run variation (the card sits at
 its ~357 W cap throughout). Nothing in the change touches the greedy path, so I am not chasing it further now. All
 of today's numbers sit below Run 5's 87-89, so the card itself is running slower than this morning.
+
+## Run 10 - 2026-10-12 17:30
+
+Review fixes (code review of the branch):
+- The nucleus bisection started at the row minimum, so one -inf logit pinned the threshold at -inf and silently
+  dropped top-p for wide rows. It now starts at -104 (where expf underflows to 0). The nucleus test gained an
+  ascending row with masked tokens; with the old bound restored it fails, with the fix it passes.
+- The host plan judged top-p / min-p in f64 while the kernels judge f32, so top_p 0.99999999 planned Nucleus and
+  then failed the step. One `is_active_filter(f32)` now decides for both.
+- A GPU draft row with no valid token (UINT32_MAX) now errors instead of being embedded as the next draft input.
+- `__launch_bounds__` on the 1024-thread kernels; the nucleus and normalizer kernels share one reduction.
+- The verify normalizers come from a one-pass kernel (`ranked_row_normalizers`) instead of tensor ops that
+  materialized several F32 [rows, vocab] temporaries per step.
+- Nucleus rows outside lookahead go through the resident submit/complete path instead of the CPU.
+- The GPU draft path no longer keeps full draft logits alive and stacks sparse rows once.
+- Logits dtype codes crossing the FFI are named constants.
+
+Same scripts after the fixes (MTP 3 greedy / top_p 0.95, 600 tokens, three rounds): greedy 85.1, 86.3, 85.8 (was
+81.6-83.2); top_p 62.5, 66.0, 58.9 (was 55.3-62.4). Plain decode, interleaved: top_p 39.6-44.9, level with
+temperature only (40.1-50.1). The demo's top_p 0.95 with MTP is now inside llama.cpp's 61-67 range.

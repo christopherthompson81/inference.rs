@@ -781,19 +781,27 @@ impl Qwen3_5TextModel {
             #[cfg(feature = "cuda")]
             let drafts = match &cuda_sampler {
                 Some(sampler) => {
-                    let sample = sampler.sample(step, &step_logits)?;
-                    let drafts = sample.tokens.to_vec1::<u32>()?;
+                    let (drafts, sample) = sampler.sample(step, &step_logits)?;
                     cuda_samples.push(sample);
                     drafts
                 }
-                None => sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?,
+                None => {
+                    let drafts =
+                        sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+                    logits.push(step_logits);
+                    drafts
+                }
             };
             #[cfg(not(feature = "cuda"))]
-            let drafts = sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+            let drafts = {
+                let drafts =
+                    sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+                logits.push(step_logits);
+                drafts
+            };
             for (i, draft) in drafts.iter().enumerate() {
                 tokens[i].push(*draft);
             }
-            logits.push(step_logits);
             if step + 1 == n_predict {
                 break;
             }
@@ -821,23 +829,26 @@ impl Qwen3_5TextModel {
 
         #[cfg(feature = "cuda")]
         if !cuda_samples.is_empty() {
+            // [batch, n_predict, k] -> per sequence [n_predict, k]
+            let ids = Tensor::stack(
+                &cuda_samples
+                    .iter()
+                    .map(|sample| &sample.ids)
+                    .collect::<Vec<_>>(),
+                1,
+            )?;
+            let probs = Tensor::stack(
+                &cuda_samples
+                    .iter()
+                    .map(|sample| &sample.probs)
+                    .collect::<Vec<_>>(),
+                1,
+            )?;
             let proposals = tokens
                 .into_iter()
                 .enumerate()
                 .map(|(row, tokens)| {
-                    let ids = cuda_samples
-                        .iter()
-                        .map(|sample| sample.ids.get(row))
-                        .collect::<Result<Vec<_>>>()?;
-                    let probs = cuda_samples
-                        .iter()
-                        .map(|sample| sample.probs.get(row))
-                        .collect::<Result<Vec<_>>>()?;
-                    SpeculativeProposal::with_sparse_probs(
-                        tokens,
-                        Tensor::stack(&ids, 0)?,
-                        Tensor::stack(&probs, 0)?,
-                    )
+                    SpeculativeProposal::with_sparse_probs(tokens, ids.get(row)?, probs.get(row)?)
                 })
                 .collect::<Result<Vec<_>>>()?;
             return Ok(Some(SpeculativeProposalBatch::new(proposals)));

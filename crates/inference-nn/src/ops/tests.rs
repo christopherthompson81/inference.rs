@@ -901,10 +901,21 @@ fn cuda_resident_nucleus_sampling_matches_full_vocab_reference() -> inference_te
         (2e-5, 1.3, 0, 0.6, 0.7, 0.95),
         (0.05, 0.7, 0, 0.0, 0.05, 0.5),
         (0.002, 1.0, 40, 0.95, 0.0, 0.3),
+        (2e-5, 1.0, 0, 0.9, 0.0, 0.05),
     ];
+    // The last row ascends, so tokens outside the nucleus come first, and masks every seventh to -inf.
+    let masked_row = cases.len() - 1;
     let mut rows = Vec::with_capacity(cases.len() * VOCAB);
     for (row, (scale, ..)) in cases.iter().enumerate() {
-        rows.extend((0..VOCAB).map(|column| ((column * 7919 + row * 131) % VOCAB) as f32 * scale));
+        rows.extend((0..VOCAB).map(|column| {
+            if row == masked_row && column % 7 == 0 {
+                f32::NEG_INFINITY
+            } else if row == masked_row {
+                column as f32 * scale
+            } else {
+                ((column * 7919 + row * 131) % VOCAB) as f32 * scale
+            }
+        }));
     }
     let params = cases
         .iter()
@@ -964,8 +975,8 @@ fn cuda_resident_nucleus_sampling_matches_full_vocab_reference() -> inference_te
         );
     }
     assert_eq!(
-        wide_rows, 3,
-        "rows 1-3 have nuclei wider than the ranked top-k"
+        wide_rows, 4,
+        "rows 1-3 and the masked row have nuclei wider than the ranked top-k"
     );
     Ok(())
 }

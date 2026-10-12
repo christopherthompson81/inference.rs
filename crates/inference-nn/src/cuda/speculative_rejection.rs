@@ -9,13 +9,14 @@ use inference_tensor::cuda_backend::cudarc::driver::{
     sys,
 };
 use inference_tensor::{
-    CpuStorage, CudaStorage, D, DType, DeviceLocation, InplaceOp1, Layout, Result, Shape, Storage,
+    CpuStorage, CudaStorage, DType, DeviceLocation, InplaceOp1, Layout, Result, Shape, Storage,
     Tensor,
 };
 
 use crate::ops::{
     CUDA_TOPK_MAX_K, CudaRankedTopKPackedWorkspace, RankedTopKPackedOutput,
-    cuda_topk_ranked_packed_batched, cuda_topk_ranked_packed_batched_with_workspace,
+    cuda_ranked_row_normalizers, cuda_topk_ranked_packed_batched,
+    cuda_topk_ranked_packed_batched_with_workspace,
 };
 
 use super::ffi;
@@ -1341,18 +1342,17 @@ fn sparse_rejection_cuda_device_with_outcomes(
         SparseRejectionMode::BoundedTopK {
             nucleus_rows: true, ..
         } => {
-            let scaled = input
-                .target_logits
-                .to_dtype(DType::F32)?
-                .broadcast_mul(&input.inverse_temperatures.reshape((shape.batch, 1, 1))?)?;
-            let max = scaled.max_keepdim(D::Minus1)?;
-            Some(
-                scaled
-                    .broadcast_sub(&max)?
-                    .exp()?
-                    .sum(D::Minus1)?
+            let packed = packed_target
+                .as_ref()
+                .expect("bounded top-k ranks the target rows");
+            Some(cuda_ranked_row_normalizers(
+                &input
+                    .target_logits
+                    .reshape((shape.batch * shape.rows, shape.vocab))?
                     .contiguous()?,
-            )
+                packed,
+                input.inverse_temperatures,
+            )?)
         }
         _ => None,
     };

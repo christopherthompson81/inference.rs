@@ -788,6 +788,18 @@ inference_tensor::kernel_library! {
             packed_k: i32,
             stream: i64,
         );
+        pub fn ranked_row_normalizers(
+            logits: *const c_void,
+            packed: *const f32,
+            inverse_temperatures: *const f32,
+            normalizers: *mut f32,
+            nrows: i32,
+            vocab: i32,
+            packed_k: i32,
+            rows_per_sequence: i32,
+            dtype: i32,
+            stream: i64,
+        );
         pub fn sample_nucleus(
             logits: *const c_void,
             packed: *const f32,

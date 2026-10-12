@@ -556,14 +556,23 @@ impl CudaDraftSampler {
         }))
     }
 
-    /// One draft step: `logits` is `[batch, vocab]` for the sequences given to [`Self::new`].
-    pub fn sample(&self, step: usize, logits: &Tensor) -> Result<crate::ops::CudaDraftSample> {
+    /// One draft step over `[batch, vocab]` logits: the drafted tokens, and the sample with their distributions.
+    pub fn sample(
+        &self,
+        step: usize,
+        logits: &Tensor,
+    ) -> Result<(Vec<u32>, crate::ops::CudaDraftSample)> {
         let batch = self.top_ks.len();
-        crate::ops::cuda_ranked_topk_draft_sample(
+        let sample = crate::ops::cuda_ranked_topk_draft_sample(
             logits,
             &self.params.narrow(0, step * batch, batch)?,
             &self.top_ks,
-        )
+        )?;
+        let tokens = sample.tokens.to_vec1::<u32>()?;
+        if tokens.contains(&crate::ops::CUDA_TOP1_INVALID_TOKEN) {
+            inference_tensor::bail!("MTP draft sampling found no finite, unfiltered draft token");
+        }
+        Ok((tokens, sample))
     }
 }
 

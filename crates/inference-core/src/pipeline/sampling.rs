@@ -1315,6 +1315,31 @@ fn try_sample_batch_cuda(
         }
     };
 
+    if seqs.iter().any(|seq| {
+        seq.sampler()
+            .cuda_batch_sampling_plan(seq.return_logprobs())
+            .is_some_and(|plan| matches!(plan.kind, CudaBatchSamplingKind::Nucleus))
+    }) {
+        // Only the resident sampler draws nucleus rows; it commits tokens without logprobs, as its decode path does.
+        let Some(submission) = try_submit_cuda_token_batch_owned(&logits, seqs, rng)? else {
+            return Ok(None);
+        };
+        return Ok(Some(
+            submission
+                .complete()?
+                .into_iter()
+                .map(|token| {
+                    Ok(Logprobs {
+                        token,
+                        logprob: 0.0,
+                        top_logprobs: None,
+                        bytes: None,
+                    })
+                })
+                .collect(),
+        ));
+    }
+
     let mut samplers_and_plans = Vec::with_capacity(seqs.len());
     let mut sampling_logprob_required = false;
     for seq in seqs {

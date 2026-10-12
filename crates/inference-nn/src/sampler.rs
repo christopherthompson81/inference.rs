@@ -556,8 +556,9 @@ impl CudaSpeculativeSamplingPlan {
     }
 }
 
+/// Whether a top-p or min-p value filters anything, judged at the f32 precision the CUDA samplers run at.
 #[cfg(feature = "cuda")]
-fn is_active_filter(value: f32) -> bool {
+pub fn is_active_filter(value: f32) -> bool {
     value > 0.0 && value < 1.0
 }
 
@@ -797,8 +798,8 @@ impl Sampler {
                 if !inverse_temperature.is_finite() || inverse_temperature <= 0.0 {
                     return None;
                 }
-                let has_top_p_filter = self.top_p > 0.0 && self.top_p < 1.0;
-                let has_min_p_filter = self.min_p > 0.0 && self.min_p < 1.0;
+                let has_top_p_filter = is_active_filter(self.top_p as f32);
+                let has_min_p_filter = is_active_filter(self.min_p as f32);
                 let kind = if self.top_k > 0 {
                     let k = usize::try_from(self.top_k).ok()?;
                     if k > crate::ops::CUDA_TOPK_MAX_K {
