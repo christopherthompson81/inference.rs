@@ -1836,24 +1836,23 @@ impl BackendStorage for MetalStorage {
                 let strides = src_l.stride();
                 let ndim = strides.len();
                 // Inner blocks are contiguous - eligible for copy2d
-                if ndim == 1 || strides[ndim - 1] == 1 {
-                    if let crate::StridedBlocks::UniformBlocks {
+                if (ndim == 1 || strides[ndim - 1] == 1)
+                    && let crate::StridedBlocks::UniformBlocks {
                         start_offset,
                         block_len,
                         count,
                         src_stride,
                     } = src_l.strided_blocks()
-                    {
-                        return self.copy2d(
-                            dst,
-                            count,
-                            block_len,
-                            src_stride,
-                            block_len,
-                            start_offset,
-                            dst_offset,
-                        );
-                    }
+                {
+                    return self.copy2d(
+                        dst,
+                        count,
+                        block_len,
+                        src_stride,
+                        block_len,
+                        start_offset,
+                        dst_offset,
+                    );
                 }
             }
             let kernel_name = match self.dtype {

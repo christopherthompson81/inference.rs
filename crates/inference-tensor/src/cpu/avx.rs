@@ -97,11 +97,13 @@ impl CpuF16 for CurrentCpuF16 {
 
     #[cfg(not(target_feature = "f16c"))]
     unsafe fn load(mem_addr: *const f16) -> Self::Unit {
-        let mut tmp = [0.0f32; 8];
-        for i in 0..8 {
-            tmp[i] = (*mem_addr.add(i)).to_f32();
+        unsafe {
+            let mut tmp = [0.0f32; 8];
+            for i in 0..8 {
+                tmp[i] = (*mem_addr.add(i)).to_f32();
+            }
+            _mm256_loadu_ps(tmp.as_ptr())
         }
-        _mm256_loadu_ps(tmp.as_ptr())
     }
 
     unsafe fn vec_add(a: Self::Unit, b: Self::Unit) -> Self::Unit {
@@ -119,10 +121,12 @@ impl CpuF16 for CurrentCpuF16 {
 
     #[cfg(not(target_feature = "f16c"))]
     unsafe fn vec_store(mem_addr: *mut f16, a: Self::Unit) {
-        let mut tmp = [0.0f32; 8];
-        _mm256_storeu_ps(tmp.as_mut_ptr(), a);
-        for i in 0..8 {
-            *mem_addr.add(i) = f16::from_f32(tmp[i]);
+        unsafe {
+            let mut tmp = [0.0f32; 8];
+            _mm256_storeu_ps(tmp.as_mut_ptr(), a);
+            for i in 0..8 {
+                *mem_addr.add(i) = f16::from_f32(tmp[i]);
+            }
         }
     }
 

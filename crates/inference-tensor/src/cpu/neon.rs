@@ -212,77 +212,89 @@ mod fp16 {
             const FLUSH_INTERVAL: usize = 16;
 
             unsafe fn zero() -> Self::Unit {
-                let result: Self::Unit;
-                asm!(
-                    "movi {v:v}.8h, #0",
-                    v = out(vreg) result,
-                    options(nostack, pure, nomem)
-                );
-                result
+                unsafe {
+                    let result: Self::Unit;
+                    asm!(
+                        "movi {v:v}.8h, #0",
+                        v = out(vreg) result,
+                        options(nostack, pure, nomem)
+                    );
+                    result
+                }
             }
 
             unsafe fn zero_array() -> Self::Array {
-                [Self::zero(); Self::ARR]
+                unsafe { [Self::zero(); Self::ARR] }
             }
 
             unsafe fn load(mem_addr: *const f16) -> Self::Unit {
-                std::ptr::read_unaligned(mem_addr.cast())
+                unsafe { std::ptr::read_unaligned(mem_addr.cast()) }
             }
 
             unsafe fn vec_add(a: Self::Unit, b: Self::Unit) -> Self::Unit {
-                let result: Self::Unit;
-                asm!(
-                    "fadd {v:v}.8h, {a:v}.8h, {b:v}.8h",
-                    v = out(vreg) result,
-                    a = in(vreg) a,
-                    b = in(vreg) b,
-                    options(pure, nomem, nostack)
-                );
-                result
+                unsafe {
+                    let result: Self::Unit;
+                    asm!(
+                        "fadd {v:v}.8h, {a:v}.8h, {b:v}.8h",
+                        v = out(vreg) result,
+                        a = in(vreg) a,
+                        b = in(vreg) b,
+                        options(pure, nomem, nostack)
+                    );
+                    result
+                }
             }
 
             unsafe fn vec_fma(a: Self::Unit, b: Self::Unit, c: Self::Unit) -> Self::Unit {
-                let result: Self::Unit;
-                asm!(
-                    "fmla {a:v}.8h, {b:v}.8h, {c:v}.8h",
-                    a = inout(vreg) a => result,
-                    b = in(vreg) b,
-                    c = in(vreg) c,
-                    options(pure, nomem, nostack)
-                );
-                result
+                unsafe {
+                    let result: Self::Unit;
+                    asm!(
+                        "fmla {a:v}.8h, {b:v}.8h, {c:v}.8h",
+                        a = inout(vreg) a => result,
+                        b = in(vreg) b,
+                        c = in(vreg) c,
+                        options(pure, nomem, nostack)
+                    );
+                    result
+                }
             }
 
             unsafe fn vec_reduce(x: Self::Array, y: *mut f32) {
-                let mut sum = 0.0f32;
-                for item in x {
-                    sum += Self::reduce_one(item);
+                unsafe {
+                    let mut sum = 0.0f32;
+                    for item in x {
+                        sum += Self::reduce_one(item);
+                    }
+                    *y = sum;
                 }
-                *y = sum;
             }
 
             unsafe fn from_f32(v: f32) -> Self::Unit {
-                let result: Self::Unit;
-                asm!(
-                    "fcvt {tmp:h}, {src:s}",
-                    "fmov {w:w}, {tmp:h}",
-                    "dup {dst:v}.8h, {w:w}",
-                    src = in(vreg) v,
-                    tmp = out(vreg) _,
-                    w = out(reg) _,
-                    dst = out(vreg) result,
-                    options(nostack, pure, nomem),
-                );
-                result
+                unsafe {
+                    let result: Self::Unit;
+                    asm!(
+                        "fcvt {tmp:h}, {src:s}",
+                        "fmov {w:w}, {tmp:h}",
+                        "dup {dst:v}.8h, {w:w}",
+                        src = in(vreg) v,
+                        tmp = out(vreg) _,
+                        w = out(reg) _,
+                        dst = out(vreg) result,
+                        options(nostack, pure, nomem),
+                    );
+                    result
+                }
             }
 
             unsafe fn vec_store(mem_addr: *mut f16, a: Self::Unit) {
-                asm!(
-                    "st1 {{ {vec:v}.8h }}, [{ptr}]",
-                    vec = in(vreg) a,
-                    ptr = in(reg) mem_addr,
-                    options(nostack, preserves_flags)
-                );
+                unsafe {
+                    asm!(
+                        "st1 {{ {vec:v}.8h }}, [{ptr}]",
+                        vec = in(vreg) a,
+                        ptr = in(reg) mem_addr,
+                        options(nostack, preserves_flags)
+                    );
+                }
             }
         }
     }
@@ -382,64 +394,72 @@ mod bfloat16 {
             const EPR: usize = 8;
 
             unsafe fn zero() -> Self::Unit {
-                vreinterpretq_u16_f32(vdupq_n_f32(0.0))
+                unsafe { vreinterpretq_u16_f32(vdupq_n_f32(0.0)) }
             }
 
             unsafe fn zero_array() -> Self::Array {
-                [Self::zero(); Self::ARR]
+                unsafe { [Self::zero(); Self::ARR] }
             }
 
             unsafe fn load(mem_addr: *const bf16) -> Self::Unit {
-                vld1q_u16(mem_addr as *const u16)
+                unsafe { vld1q_u16(mem_addr as *const u16) }
             }
 
             unsafe fn vec_add(a: Self::Unit, b: Self::Unit) -> Self::Unit {
-                let result: Self::Unit;
-                asm!(
-                    "fadd {v:v}.4s, {a:v}.4s, {b:v}.4s",
-                    v = out(vreg) result,
-                    a = in(vreg) a,
-                    b = in(vreg) b,
-                    options(pure, nomem, nostack)
-                );
-                result
+                unsafe {
+                    let result: Self::Unit;
+                    asm!(
+                        "fadd {v:v}.4s, {a:v}.4s, {b:v}.4s",
+                        v = out(vreg) result,
+                        a = in(vreg) a,
+                        b = in(vreg) b,
+                        options(pure, nomem, nostack)
+                    );
+                    result
+                }
             }
 
             unsafe fn vec_fma(a: Self::Unit, b: Self::Unit, c: Self::Unit) -> Self::Unit {
-                // IMPORTANT: `a` is not bf16x8 here. It is 128 bits used as f32x4 (.4s) to accumulate
-                // results from bfdot. `b` and `c` are bf16x8 inputs (.8h).
-                // bfdot: acc[i] += (f32)b[2i]*c[2i] + (f32)b[2i+1]*c[2i+1]
-                let result: Self::Unit;
-                asm!(
-                    "bfdot {acc:v}.4s, {b:v}.8h, {c:v}.8h",
-                    acc = inout(vreg) a => result,
-                    b = in(vreg) b,
-                    c = in(vreg) c,
-                    options(pure, nomem, nostack)
-                );
-                result
+                unsafe {
+                    // IMPORTANT: `a` is not bf16x8 here. It is 128 bits used as f32x4 (.4s) to accumulate
+                    // results from bfdot. `b` and `c` are bf16x8 inputs (.8h).
+                    // bfdot: acc[i] += (f32)b[2i]*c[2i] + (f32)b[2i+1]*c[2i+1]
+                    let result: Self::Unit;
+                    asm!(
+                        "bfdot {acc:v}.4s, {b:v}.8h, {c:v}.8h",
+                        acc = inout(vreg) a => result,
+                        b = in(vreg) b,
+                        c = in(vreg) c,
+                        options(pure, nomem, nostack)
+                    );
+                    result
+                }
             }
 
             unsafe fn vec_reduce(x: Self::Array, y: *mut f32) {
-                // IMPORTANT: `x` is not bf16x8 here. It is 128 bits used as f32x4.
-                // This means that if you use `vec_reduce` where `x` is actually bf16x8 you will get
-                // entirely wrong results.
-                let mut xf: [float32x4_t; Self::ARR] = std::mem::transmute(x);
-                for i in 0..Self::ARR / 2 {
-                    xf[2 * i] = vaddq_f32(xf[2 * i], xf[2 * i + 1]);
+                unsafe {
+                    // IMPORTANT: `x` is not bf16x8 here. It is 128 bits used as f32x4.
+                    // This means that if you use `vec_reduce` where `x` is actually bf16x8 you will get
+                    // entirely wrong results.
+                    let mut xf: [float32x4_t; Self::ARR] = std::mem::transmute(x);
+                    for i in 0..Self::ARR / 2 {
+                        xf[2 * i] = vaddq_f32(xf[2 * i], xf[2 * i + 1]);
+                    }
+                    for i in 0..Self::ARR / 4 {
+                        xf[4 * i] = vaddq_f32(xf[4 * i], xf[4 * i + 2]);
+                    }
+                    *y = vaddvq_f32(xf[0]);
                 }
-                for i in 0..Self::ARR / 4 {
-                    xf[4 * i] = vaddq_f32(xf[4 * i], xf[4 * i + 2]);
-                }
-                *y = vaddvq_f32(xf[0]);
             }
 
             unsafe fn from_f32(v: f32) -> Self::Unit {
-                vreinterpretq_u16_f32(vdupq_n_f32(v))
+                unsafe { vreinterpretq_u16_f32(vdupq_n_f32(v)) }
             }
 
             unsafe fn vec_store(mem_addr: *mut bf16, a: Self::Unit) {
-                vst1q_u16(mem_addr as *mut u16, a);
+                unsafe {
+                    vst1q_u16(mem_addr as *mut u16, a);
+                }
             }
         }
     }
