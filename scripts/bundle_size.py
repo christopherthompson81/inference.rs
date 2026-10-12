@@ -96,8 +96,8 @@ def main(argv: list[str]) -> int:
         out = subprocess.run(["size", "-A", str(path)], check=True, capture_output=True, text=True).stdout
         for name, size in sections(out).items():
             sizes[name] = sizes.get(name, 0) + size
-        key = f"{FILE}:{path.name}"
-        sizes[key] = sizes.get(key, 0) + path.stat().st_size
+        file_key = f"{FILE}:{path.name}"
+        sizes[file_key] = sizes.get(file_key, 0) + path.stat().st_size
     sizes[FILE] = sum(path.stat().st_size for path in files)
     if "--update" in argv:
         BASELINE.write_text(json.dumps({**key, "sizes": sizes}, indent=2, sort_keys=True) + "\n")
