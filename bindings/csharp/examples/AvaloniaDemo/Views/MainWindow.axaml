@@ -1,0 +1,34 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+        xmlns:views="using:InferenceRs.AvaloniaDemo.Views"
+        x:Class="InferenceRs.AvaloniaDemo.Views.MainWindow"
+        x:DataType="vm:MainViewModel"
+        Title="inference.rs from C#"
+        Width="1280" Height="860" MinWidth="900" MinHeight="600">
+  <DockPanel>
+    <Border DockPanel.Dock="Top" Background="#D13438" Padding="12,8" IsVisible="{Binding HasHostError}">
+      <SelectableTextBlock Foreground="White" TextWrapping="Wrap" Text="{Binding HostError}" />
+    </Border>
+    <TabControl Padding="0">
+      <TabItem Header="Chat">
+        <views:ChatView DataContext="{Binding Chat}" />
+      </TabItem>
+      <TabItem Header="Speech to text">
+        <views:TranscriptionView DataContext="{Binding Transcription}" />
+      </TabItem>
+      <TabItem Header="Text to speech">
+        <views:SpeechView DataContext="{Binding Speech}" />
+      </TabItem>
+      <TabItem Header="Images">
+        <views:ImageView DataContext="{Binding Image}" />
+      </TabItem>
+      <TabItem Header="Documents">
+        <views:DocumentView DataContext="{Binding Document}" />
+      </TabItem>
+      <TabItem Header="Engine">
+        <views:EngineView DataContext="{Binding Engine}" />
+      </TabItem>
+    </TabControl>
+  </DockPanel>
+</Window>

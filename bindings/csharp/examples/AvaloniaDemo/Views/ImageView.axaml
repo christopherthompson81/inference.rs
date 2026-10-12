@@ -1,0 +1,44 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+             xmlns:views="using:InferenceRs.AvaloniaDemo.Views"
+             x:Class="InferenceRs.AvaloniaDemo.Views.ImageView"
+             x:DataType="vm:ImageViewModel">
+  <DockPanel Margin="12">
+    <StackPanel DockPanel.Dock="Top" Spacing="10" Margin="0,0,0,10">
+      <views:ModelSlotView DataContext="{Binding Slot}" />
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <TextBlock VerticalAlignment="Center" Text="Architecture (chosen before loading)" />
+        <ComboBox ItemsSource="{Binding Archs}" SelectedItem="{Binding Arch}" MinWidth="160"
+                  IsEnabled="{Binding Slot.IsIdle}" />
+      </StackPanel>
+    </StackPanel>
+    <Border DockPanel.Dock="Left" Classes="card" Width="300" Margin="0,0,10,0">
+      <StackPanel Spacing="10">
+        <TextBlock Classes="heading" Text="Prompt" />
+        <TextBox Text="{Binding Prompt}" AcceptsReturn="True" TextWrapping="Wrap" Height="140" />
+        <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="2">
+          <TextBlock Text="Width" />
+          <TextBlock Grid.Column="1" Text="Height" />
+          <NumericUpDown Grid.Row="1" Value="{Binding Width}" Minimum="64" Maximum="2048" Increment="64" FormatString="0" />
+          <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Height}" Minimum="64" Maximum="2048" Increment="64" FormatString="0" />
+          <TextBlock Grid.Row="2" Text="Steps (0: auto)" Margin="0,6,0,0" />
+          <TextBlock Grid.Row="2" Grid.Column="1" Text="Guidance (0: auto)" Margin="0,6,0,0" />
+          <NumericUpDown Grid.Row="3" Value="{Binding Steps}" Minimum="0" Maximum="200" Increment="1" FormatString="0" />
+          <NumericUpDown Grid.Row="3" Grid.Column="1" Value="{Binding Guidance}" Minimum="0" Maximum="20" Increment="0.5" FormatString="0.0" />
+          <TextBlock Grid.Row="4" Text="Seed (-1: random)" Margin="0,6,0,0" />
+          <NumericUpDown Grid.Row="5" Value="{Binding Seed}" Minimum="-1" Maximum="4294967295" Increment="1" FormatString="0" />
+        </Grid>
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Button Classes="accent" Content="Generate" Command="{Binding GenerateCommand}" />
+          <Button Content="Save..." Command="{Binding SaveCommand}" />
+        </StackPanel>
+        <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsBusy}" />
+        <TextBlock Classes="muted" Text="{Binding Status}" />
+      </StackPanel>
+    </Border>
+    <Border Classes="card">
+      <Image Source="{Binding Image}" Stretch="Uniform" />
+    </Border>
+  </DockPanel>
+</UserControl>

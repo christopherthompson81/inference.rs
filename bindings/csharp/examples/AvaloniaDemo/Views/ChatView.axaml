@@ -1,0 +1,105 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+             xmlns:views="using:InferenceRs.AvaloniaDemo.Views"
+             x:Class="InferenceRs.AvaloniaDemo.Views.ChatView"
+             x:DataType="vm:ChatViewModel">
+  <!-- Send's own hot key is Ctrl+Enter; macOS users reach for Cmd -->
+  <UserControl.KeyBindings>
+    <KeyBinding Gesture="Meta+Enter" Command="{Binding SendCommand}" />
+  </UserControl.KeyBindings>
+  <DockPanel Margin="12">
+    <views:ModelSlotView DockPanel.Dock="Top" DataContext="{Binding Slot}" Margin="0,0,0,10" />
+
+    <Border DockPanel.Dock="Right" Classes="card" Width="260" Margin="10,0,0,0">
+      <StackPanel Spacing="10">
+        <TextBlock Classes="heading" Text="Sampling" />
+        <StackPanel Spacing="2">
+          <TextBlock Text="Temperature" />
+          <NumericUpDown Value="{Binding Temperature}" Minimum="0" Maximum="2" Increment="0.05" FormatString="0.00" />
+        </StackPanel>
+        <StackPanel Spacing="2">
+          <TextBlock Text="Top p" />
+          <NumericUpDown Value="{Binding TopP}" Minimum="0" Maximum="1" Increment="0.05" FormatString="0.00" />
+        </StackPanel>
+        <StackPanel Spacing="2">
+          <TextBlock Text="Max tokens" />
+          <NumericUpDown Value="{Binding MaxTokens}" Minimum="1" Maximum="32768" Increment="64" FormatString="0" />
+        </StackPanel>
+        <CheckBox IsChecked="{Binding EnableThinking}" Content="Let the model reason first" />
+        <StackPanel Spacing="2">
+          <TextBlock Text="System prompt" />
+          <TextBox Text="{Binding SystemPrompt}" AcceptsReturn="True" TextWrapping="Wrap" Height="120" />
+        </StackPanel>
+        <Button Content="Clear conversation" Command="{Binding ClearCommand}" HorizontalAlignment="Stretch" />
+      </StackPanel>
+    </Border>
+
+    <Grid DockPanel.Dock="Bottom" RowDefinitions="Auto,Auto" Margin="0,10,0,0">
+      <ItemsControl ItemsSource="{Binding Attachments}" Margin="0,0,0,6">
+        <ItemsControl.ItemsPanel>
+          <ItemsPanelTemplate>
+            <WrapPanel />
+          </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:AttachmentViewModel">
+            <Border Classes="card" Padding="6" Margin="0,0,6,0">
+              <StackPanel Orientation="Horizontal" Spacing="6">
+                <Image Source="{Binding Thumbnail}" Height="40" IsVisible="{Binding IsImage}" />
+                <TextBlock VerticalAlignment="Center" Text="{Binding Name}" />
+                <Button Content="x" Padding="6,0"
+                        Command="{Binding $parent[UserControl].((vm:ChatViewModel)DataContext).RemoveAttachmentCommand}"
+                        CommandParameter="{Binding}" />
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+      <Grid Grid.Row="1" ColumnDefinitions="Auto,*,Auto,Auto" ColumnSpacing="6">
+        <Button Content="Attach..." Command="{Binding AttachCommand}" VerticalAlignment="Bottom" />
+        <TextBox Grid.Column="1" x:Name="Input" Text="{Binding Input}" AcceptsReturn="True" TextWrapping="Wrap"
+                 MaxHeight="160" PlaceholderText="Message (Ctrl+Enter sends)" />
+        <Button Grid.Column="2" Classes="accent" Content="Send" Command="{Binding SendCommand}" VerticalAlignment="Bottom"
+                HotKey="Ctrl+Enter" />
+        <Button Grid.Column="3" Content="Stop" Command="{Binding StopCommand}" VerticalAlignment="Bottom" />
+      </Grid>
+    </Grid>
+
+    <ScrollViewer x:Name="Scroller">
+      <ItemsControl ItemsSource="{Binding Messages}" Margin="0,0,6,0">
+        <ItemsControl.ItemTemplate>
+          <DataTemplate x:DataType="vm:ChatMessageViewModel">
+            <Border Classes="card" Margin="0,0,0,8">
+              <StackPanel Spacing="6">
+                <TextBlock Classes="heading" Text="{Binding Role}" />
+                <ItemsControl ItemsSource="{Binding Attachments}">
+                  <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate>
+                      <WrapPanel />
+                    </ItemsPanelTemplate>
+                  </ItemsControl.ItemsPanel>
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="vm:AttachmentViewModel">
+                      <StackPanel Margin="0,0,8,0">
+                        <Image Source="{Binding Thumbnail}" MaxHeight="120" IsVisible="{Binding IsImage}" />
+                        <TextBlock Classes="muted" Text="{Binding Name}" />
+                      </StackPanel>
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+                <Expander Header="Reasoning" IsVisible="{Binding HasReasoning}" HorizontalAlignment="Stretch">
+                  <SelectableTextBlock Classes="muted" Text="{Binding Reasoning}" />
+                </Expander>
+                <SelectableTextBlock Text="{Binding Content}" TextWrapping="Wrap" />
+                <SelectableTextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+                <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsStreaming}" />
+                <TextBlock Classes="muted" Text="{Binding Stats}" />
+              </StackPanel>
+            </Border>
+          </DataTemplate>
+        </ItemsControl.ItemTemplate>
+      </ItemsControl>
+    </ScrollViewer>
+  </DockPanel>
+</UserControl>

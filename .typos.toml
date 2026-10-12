@@ -83,6 +83,8 @@ shll = "shll"
 
 [default.extend-identifiers]
 "AtomLayoutNdKV" = "AtomLayoutNdKV"
+# Avalonia's bitmap class
+"WriteableBitmap" = "WriteableBitmap"
 
 [type.rust.extend-identifiers]
 "arange" = "arange"

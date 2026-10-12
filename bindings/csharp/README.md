@@ -33,6 +33,11 @@ foreach (var streamEvent in engine.ChatStream("""{"model": "default", "messages"
 }
 ```
 
+## Demo
+
+`examples/AvaloniaDemo` is a desktop app over the bindings, a tab per modality: chat with attachments, speech to text,
+text to speech, images, document OCR and the engine's models and metrics. See its README.
+
 ## Tests
 
 `scripts/local_ci.sh --bindings` builds the library, writes the tiny random-weight test checkpoint and runs

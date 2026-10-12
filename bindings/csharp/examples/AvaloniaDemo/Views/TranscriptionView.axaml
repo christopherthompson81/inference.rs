@@ -1,0 +1,48 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+             xmlns:views="using:InferenceRs.AvaloniaDemo.Views"
+             x:Class="InferenceRs.AvaloniaDemo.Views.TranscriptionView"
+             x:DataType="vm:TranscriptionViewModel">
+  <DockPanel Margin="12">
+    <StackPanel DockPanel.Dock="Top" Spacing="10" Margin="0,0,0,10">
+      <views:ModelSlotView DataContext="{Binding Slot}" />
+      <views:ModelSlotView DataContext="{Binding Diarizer}" />
+      <Grid ColumnDefinitions="Auto,*,Auto,Auto,Auto" ColumnSpacing="6">
+        <Button Content="Choose audio..." Command="{Binding ChooseAudioCommand}" />
+        <TextBlock Grid.Column="1" VerticalAlignment="Center" Text="{Binding AudioName}" />
+        <TextBox Grid.Column="2" Text="{Binding Language}" PlaceholderText="Language (optional)" Width="160" />
+        <Button Grid.Column="3" Classes="accent" Content="Transcribe" Command="{Binding TranscribeCommand}" />
+        <TextBlock Grid.Column="4" Classes="muted" VerticalAlignment="Center" Text="{Binding Status}" />
+      </Grid>
+    </StackPanel>
+    <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+      <Border Classes="card">
+        <DockPanel>
+          <TextBlock DockPanel.Dock="Top" Classes="heading" Text="Transcript" Margin="0,0,0,6" />
+          <ScrollViewer>
+            <SelectableTextBlock Text="{Binding Transcript}" TextWrapping="Wrap" />
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+      <Border Grid.Column="1" Classes="card">
+        <DockPanel>
+          <TextBlock DockPanel.Dock="Top" Classes="heading" Text="Segments" Margin="0,0,0,6" />
+          <ScrollViewer>
+            <ItemsControl ItemsSource="{Binding Segments}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="vm:TranscriptSegment">
+                  <Grid ColumnDefinitions="Auto,Auto,*" ColumnSpacing="10" Margin="0,0,0,4">
+                    <TextBlock Classes="muted mono" Text="{Binding Span}" />
+                    <TextBlock Grid.Column="1" FontWeight="SemiBold" Text="{Binding Speaker}" />
+                    <SelectableTextBlock Grid.Column="2" Text="{Binding Text}" TextWrapping="Wrap" />
+                  </Grid>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </DockPanel>
+      </Border>
+    </Grid>
+  </DockPanel>
+</UserControl>
