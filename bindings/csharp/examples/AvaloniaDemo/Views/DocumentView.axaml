@@ -1,0 +1,98 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+             xmlns:views="using:InferenceRs.AvaloniaDemo.Views"
+             x:Class="InferenceRs.AvaloniaDemo.Views.DocumentView"
+             x:DataType="vm:DocumentViewModel">
+  <DockPanel Margin="12">
+    <StackPanel DockPanel.Dock="Top" Spacing="10" Margin="0,0,0,10">
+      <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+        <views:ModelSlotView DataContext="{Binding LayoutSlot}" />
+        <views:ModelSlotView Grid.Column="1" DataContext="{Binding OcrSlot}" />
+      </Grid>
+      <StackPanel Orientation="Horizontal" Spacing="8">
+        <Button Content="Choose page..." Command="{Binding ChoosePageCommand}" />
+        <Button Classes="accent" Content="Detect layout" Command="{Binding DetectCommand}" />
+        <Button Classes="accent" Content="Read text" Command="{Binding ReadCommand}" />
+        <TextBlock VerticalAlignment="Center" Text="Text prompt" />
+        <TextBox Text="{Binding TextPrompt}" Width="140" />
+        <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsBusy}" Width="120" VerticalAlignment="Center" />
+        <TextBlock Classes="muted" VerticalAlignment="Center" Text="{Binding Status}" />
+      </StackPanel>
+    </StackPanel>
+    <Grid ColumnDefinitions="*,*" ColumnSpacing="10">
+      <Border Classes="card">
+        <!-- the page and its regions share page-pixel coordinates; the Viewbox scales both -->
+        <Viewbox Stretch="Uniform">
+          <Border Padding="{Binding BadgeGutter}">
+            <Grid Width="{Binding PageWidth}" Height="{Binding PageHeight}">
+              <Image Source="{Binding Page}" />
+              <ItemsControl ItemsSource="{Binding Regions}">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <Canvas />
+                  </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.Styles>
+                  <Style Selector="ContentPresenter" x:DataType="vm:RegionViewModel">
+                    <Setter Property="Canvas.Left" Value="{Binding X}" />
+                    <Setter Property="Canvas.Top" Value="{Binding Y}" />
+                  </Style>
+                </ItemsControl.Styles>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RegionViewModel">
+                    <Border Width="{Binding Width}" Height="{Binding Height}" BorderBrush="#E81123" BorderThickness="3"
+                            Background="#18E81123" />
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+              <!-- a layer of their own, unclipped, so a badge can sit left of a region at the page's edge -->
+              <ItemsControl ItemsSource="{Binding Regions}" ClipToBounds="False">
+                <ItemsControl.ItemsPanel>
+                  <ItemsPanelTemplate>
+                    <Canvas />
+                  </ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.Styles>
+                  <Style Selector="ContentPresenter" x:DataType="vm:RegionViewModel">
+                    <Setter Property="Canvas.Left" Value="{Binding BadgeX}" />
+                    <Setter Property="Canvas.Top" Value="{Binding Y}" />
+                  </Style>
+                </ItemsControl.Styles>
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RegionViewModel">
+                    <TextBlock Text="{Binding Order}" FontSize="{Binding BadgeFontSize}" Foreground="White"
+                               Background="#E81123" Padding="4,0" />
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </Grid>
+          </Border>
+        </Viewbox>
+      </Border>
+      <Border Grid.Column="1" Classes="card">
+        <TabControl>
+          <TabItem Header="Regions">
+            <ScrollViewer>
+              <ItemsControl ItemsSource="{Binding Regions}">
+                <ItemsControl.ItemTemplate>
+                  <DataTemplate x:DataType="vm:RegionViewModel">
+                    <StackPanel Margin="0,0,0,8" Spacing="2">
+                      <TextBlock FontWeight="SemiBold" Text="{Binding Caption}" />
+                      <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                    </StackPanel>
+                  </DataTemplate>
+                </ItemsControl.ItemTemplate>
+              </ItemsControl>
+            </ScrollViewer>
+          </TabItem>
+          <TabItem Header="Text">
+            <ScrollViewer>
+              <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+            </ScrollViewer>
+          </TabItem>
+        </TabControl>
+      </Border>
+    </Grid>
+  </DockPanel>
+</UserControl>

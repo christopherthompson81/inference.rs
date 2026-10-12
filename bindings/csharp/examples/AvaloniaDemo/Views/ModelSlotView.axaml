@@ -1,0 +1,37 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+             x:Class="InferenceRs.AvaloniaDemo.Views.ModelSlotView"
+             x:DataType="vm:ModelSlotViewModel">
+  <Border Classes="card">
+    <StackPanel Spacing="8">
+      <TextBlock Classes="heading" Text="{Binding Title}" />
+      <Grid ColumnDefinitions="*,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="6">
+        <TextBox Text="{Binding Source}" PlaceholderText="{Binding Hint}" IsEnabled="{Binding IsIdle}" />
+        <Button Grid.Column="1" Content="File..." Command="{Binding BrowseFileCommand}" IsEnabled="{Binding IsIdle}" />
+        <Button Grid.Column="2" Content="Folder..." Command="{Binding BrowseFolderCommand}" IsEnabled="{Binding IsIdle}" />
+        <ComboBox Grid.Column="3" ItemsSource="{Binding Devices}" SelectedItem="{Binding Device}" MinWidth="100"
+                  IsEnabled="{Binding IsIdle}" />
+        <Button Grid.Column="4" Classes="accent" Content="Load" Command="{Binding LoadCommand}" />
+        <Button Grid.Column="5" Content="Unload" Command="{Binding UnloadCommand}" />
+      </Grid>
+      <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding HasContext}">
+        <TextBlock VerticalAlignment="Center" Text="Context length (tokens)" />
+        <NumericUpDown Value="{Binding ContextLength}" Minimum="512" Maximum="1048576" Increment="1024" FormatString="0"
+                       IsEnabled="{Binding IsIdle}" />
+      </StackPanel>
+      <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="6" IsVisible="{Binding TakesMmproj}">
+        <TextBlock VerticalAlignment="Center" Text="mmproj" />
+        <TextBox Grid.Column="1" Text="{Binding MmprojPath}" IsEnabled="{Binding IsIdle}"
+                 PlaceholderText="For images and audio: the model's mmproj GGUF in the same directory; empty finds one there" />
+        <Button Grid.Column="2" Content="File..." Command="{Binding BrowseMmprojCommand}" IsEnabled="{Binding IsIdle}" />
+      </Grid>
+      <StackPanel Spacing="4" IsVisible="{Binding IsLoading}">
+        <ProgressBar Minimum="0" Maximum="100" Value="{Binding Percent}" />
+        <TextBlock Classes="muted" Text="{Binding Stage}" />
+      </StackPanel>
+      <TextBlock Classes="muted" Text="{Binding Status}" />
+      <SelectableTextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+    </StackPanel>
+  </Border>
+</UserControl>

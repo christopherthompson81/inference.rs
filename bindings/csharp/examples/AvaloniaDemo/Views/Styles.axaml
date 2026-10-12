@@ -1,0 +1,30 @@
+<Styles xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+  <Style Selector="Border.card">
+    <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundAltHighBrush}" />
+    <Setter Property="BorderBrush" Value="{DynamicResource SystemControlForegroundBaseLowBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Padding" Value="12" />
+  </Style>
+  <Style Selector="TextBlock.heading">
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="FontSize" Value="15" />
+  </Style>
+  <Style Selector=":is(TextBlock).muted">
+    <Setter Property="Opacity" Value="0.7" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+  <Style Selector=":is(TextBlock).error">
+    <Setter Property="Foreground" Value="#D13438" />
+    <Setter Property="TextWrapping" Value="Wrap" />
+  </Style>
+  <!-- a bare "monospace" resolves on Linux only -->
+  <Style Selector=":is(TextBlock).mono">
+    <Setter Property="FontFamily" Value="Cascadia Mono, Consolas, Menlo, DejaVu Sans Mono, monospace" />
+  </Style>
+  <!-- the spinner buttons take ~80px, so a narrower box hides its value -->
+  <Style Selector="NumericUpDown">
+    <Setter Property="MinWidth" Value="140" />
+  </Style>
+</Styles>

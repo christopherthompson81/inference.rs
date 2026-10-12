@@ -2,6 +2,9 @@
   <Folder Name="/src/">
     <Project Path="src/InferenceRs/InferenceRs.csproj" />
   </Folder>
+  <Folder Name="/examples/">
+    <Project Path="examples/AvaloniaDemo/AvaloniaDemo.csproj" />
+  </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/InferenceRs.BindingCoverage/InferenceRs.BindingCoverage.csproj" />
     <Project Path="tests/InferenceRs.EngineTest/InferenceRs.EngineTest.csproj" />

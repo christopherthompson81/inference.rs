@@ -1,0 +1,29 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:InferenceRs.AvaloniaDemo.ViewModels"
+             xmlns:views="using:InferenceRs.AvaloniaDemo.Views"
+             x:Class="InferenceRs.AvaloniaDemo.Views.SpeechView"
+             x:DataType="vm:SpeechViewModel">
+  <StackPanel Margin="12" Spacing="10">
+    <views:ModelSlotView DataContext="{Binding Slot}" />
+    <Border Classes="card">
+      <StackPanel Spacing="10">
+        <TextBlock Classes="heading" Text="Text to speak" />
+        <TextBox Text="{Binding Text}" AcceptsReturn="True" TextWrapping="Wrap" Height="160" />
+        <Grid ColumnDefinitions="Auto,200,Auto,Auto,*" ColumnSpacing="8">
+          <TextBlock VerticalAlignment="Center" Text="Voice" />
+          <TextBox Grid.Column="1" Text="{Binding Voice}" PlaceholderText="af_heart" />
+          <TextBlock Grid.Column="2" VerticalAlignment="Center" Text="Speed" />
+          <NumericUpDown Grid.Column="3" Value="{Binding Speed}" Minimum="0.5" Maximum="2" Increment="0.1" FormatString="0.0" />
+        </Grid>
+        <StackPanel Orientation="Horizontal" Spacing="8">
+          <Button Classes="accent" Content="Generate" Command="{Binding GenerateCommand}" />
+          <Button Content="Play" Command="{Binding PlayCommand}" />
+          <Button Content="Save..." Command="{Binding SaveCommand}" />
+          <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsBusy}" Width="120" VerticalAlignment="Center" />
+          <TextBlock Classes="muted" VerticalAlignment="Center" Text="{Binding Status}" />
+        </StackPanel>
+      </StackPanel>
+    </Border>
+  </StackPanel>
+</UserControl>
