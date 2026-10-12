@@ -59,6 +59,7 @@ internal static class Program
         ModelsAreManagedAtRuntime(model);
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
+        ALoadReportsItsProgress(model);
         AudioTranscribes(Path.Combine(model, ParakeetDir));
         StreamedAudioTranscribes(Path.Combine(model, StreamingDir), Path.Combine(model, ParakeetDir));
         VoiceActivityFindsTheSpeech(Path.Combine(model, SileroDir));
@@ -400,6 +401,18 @@ internal static class Program
         bad.Tools.Add(new HostTool("not json", call => ""));
         var refused = Throws(() => InferenceEngine.Load(Spec(model), bad));
         Check("a malformed tool definition is InvalidArgument", refused?.Status == InferenceStatus.InvalidArgument);
+    }
+
+    private static void ALoadReportsItsProgress(string model)
+    {
+        var events = new System.Collections.Concurrent.ConcurrentQueue<LoadProgress>();
+        using (InferenceEngine.Load(Spec(model), new HostCallbacks { Progress = events.Enqueue }))
+        {
+        }
+        Check("a load reports its progress", !events.IsEmpty);
+        var ends = events.GroupBy(progress => progress.Stage).Select(stage => (stage.First(), stage.Last())).ToList();
+        Check("each stage runs from none to all of its items",
+            ends.All(end => end.Item1.Done == 0 && end.Item2.Done == end.Item2.Total && end.Item2.Unit == "items"));
     }
 
     private static byte[] ToneWav()

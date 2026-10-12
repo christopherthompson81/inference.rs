@@ -39,6 +39,11 @@ pub type inference_search_callback = unsafe extern "C" fn(
     result: *mut inference_callback_result,
 );
 
+/// Mirrors `inference_progress_callback`.
+#[allow(non_camel_case_types)]
+pub type inference_progress_callback =
+    unsafe extern "C" fn(user_data: *mut c_void, event: *const c_char, event_len: usize);
+
 /// Mirrors `inference_logits_processor_callback`.
 #[allow(non_camel_case_types)]
 pub type inference_logits_processor_callback = unsafe extern "C" fn(
@@ -67,6 +72,8 @@ pub struct inference_host_callbacks {
     pub tool_count: usize,
     pub search: Option<inference_search_callback>,
     pub search_user_data: *mut c_void,
+    pub progress: Option<inference_progress_callback>,
+    pub progress_user_data: *mut c_void,
 }
 
 // The header makes the caller promise user_data may be used from any thread for the engine's lifetime.
@@ -218,7 +225,20 @@ pub(crate) unsafe fn engine_callbacks(
             };
             Arc::new(run) as Arc<inference_api::engine::SearchCallback>
         });
-        Ok(EngineCallbacks { tools, search })
+        let progress = callbacks.progress.map(|progress| {
+            let user_data = UserData(callbacks.progress_user_data);
+            let report = move |event: &inference_api::engine::ProgressEvent<'_>| {
+                let json = serde_json::to_string(event).expect("a progress event serializes");
+                // the header's callback contract: a valid function that reads the bytes only during the call
+                progress(user_data.get(), json.as_ptr().cast(), json.len());
+            };
+            Arc::new(report) as Arc<inference_api::engine::ProgressSink>
+        });
+        Ok(EngineCallbacks {
+            tools,
+            search,
+            progress,
+        })
     }
 }
 
@@ -359,6 +379,8 @@ mod tests {
             tool_count: 1,
             search: Some(search),
             search_user_data: std::ptr::null_mut(),
+            progress: None,
+            progress_user_data: std::ptr::null_mut(),
         };
         let callbacks = unsafe { engine_callbacks(&callbacks) }.ok().unwrap();
         assert_eq!(callbacks.tools[0].tool.function.name, "echo");
@@ -398,6 +420,8 @@ mod tests {
             tool_count: 1,
             search: None,
             search_user_data: std::ptr::null_mut(),
+            progress: None,
+            progress_user_data: std::ptr::null_mut(),
         };
         let callbacks = unsafe { engine_callbacks(&callbacks) }.ok().unwrap();
         assert_eq!(run_tool(&callbacks).unwrap_err().to_string(), NO_RESULT);
@@ -411,6 +435,8 @@ mod tests {
             tool_count: 1,
             search: None,
             search_user_data: std::ptr::null_mut(),
+            progress: None,
+            progress_user_data: std::ptr::null_mut(),
         };
         assert!(unsafe { engine_callbacks(&callbacks) }.is_err());
         let twice = [
@@ -422,6 +448,8 @@ mod tests {
             tool_count: 2,
             search: None,
             search_user_data: std::ptr::null_mut(),
+            progress: None,
+            progress_user_data: std::ptr::null_mut(),
         };
         assert!(unsafe { engine_callbacks(&callbacks) }.is_err());
         let callbacks = inference_host_callbacks {
@@ -429,6 +457,8 @@ mod tests {
             tool_count: 1,
             search: None,
             search_user_data: std::ptr::null_mut(),
+            progress: None,
+            progress_user_data: std::ptr::null_mut(),
         };
         assert!(unsafe { engine_callbacks(&callbacks) }.is_err());
     }

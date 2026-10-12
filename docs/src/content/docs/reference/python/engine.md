@@ -556,6 +556,15 @@ list_skill_versions(
 
 ## `HostCallbacks`
 
+Host functions fixed when an engine loads: `search` returns a JSON array of {title, description, url, content};
+`progress` hears every model load in the process while the engine lives, on the loading threads.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `tools` | `list` | `factory: list` |
+| `search` | `Callable[[str], str] \| None` | optional |
+| `progress` | `Callable[[LoadProgress], None] \| None` | optional |
+
 
 ## `HostRegistration`
 
@@ -595,6 +604,15 @@ __exit__()
 
 
 ## `HostTool`
+
+A host tool: its OpenAI function definition, and a handler whose return (or exception) the model sees.
+
+Handlers run on engine worker threads, possibly several at once, and must not call back into the engine.
+
+| Field | Type |
+| --- | --- |
+| `definition_json` | `str` |
+| `handler` | `Callable[[HostToolCall], str]` |
 
 
 ## `HostToolCall`
@@ -1172,6 +1190,18 @@ list_skill_versions(skill_id: str) -> str
 ```
 
 
+## `LoadProgress`
+
+A model-load stage's progress: `done` of `total` `unit`s ("items" or "bytes").
+
+| Field | Type |
+| --- | --- |
+| `stage` | `str` |
+| `done` | `int` |
+| `total` | `int` |
+| `unit` | `str` |
+
+
 ## `MediaAttachment`
 
 A buffer a request names by position: an image, audio or video URL of media://0 is the first.
@@ -1183,6 +1213,13 @@ A buffer a request names by position: an image, audio or video URL of media://0 
 
 
 ## `SkillFile`
+
+One file of a skill upload: its path within the skill (SKILL.md, scripts/run.py) and bytes.
+
+| Field | Type |
+| --- | --- |
+| `path` | `str` |
+| `data` | `bytes` |
 
 
 ## `Status`

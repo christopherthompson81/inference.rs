@@ -123,6 +123,7 @@ pub(crate) struct LoadOptions {
     pub(crate) agentic: AgenticSpec,
     pub(crate) tools: Vec<ToolCallbackWithTool>,
     pub(crate) search: Option<Arc<SearchCallback>>,
+    pub(crate) progress: Option<Arc<inference_api::engine::ProgressSink>>,
     pub(crate) with_logging: bool,
     pub(crate) auto_map: AutoMapSizing,
 }
@@ -155,6 +156,7 @@ impl LoadOptions {
         let callbacks = EngineCallbacks {
             tools: self.tools,
             search: self.search,
+            progress: self.progress,
         };
         (spec, callbacks)
     }
@@ -386,6 +388,12 @@ macro_rules! load_options_methods {
             callback: std::sync::Arc<$crate::SearchCallback>,
         ) -> Self {
             self.options.search = Some(callback);
+            self
+        }
+
+        /// Receives the progress of every model load in the process (its stages' counts) while the model lives.
+        pub fn with_load_progress(mut self, sink: std::sync::Arc<$crate::ProgressSink>) -> Self {
+            self.options.progress = Some(sink);
             self
         }
 

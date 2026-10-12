@@ -53,6 +53,49 @@ fn resolve_hf_cache(cache: Option<Cache>) -> Cache {
         .unwrap_or_else(Cache::from_env)
 }
 
+// a download's bytes as a progress stage, for the sinks listening to loads
+#[derive(Default)]
+struct DownloadProgress(Option<inference_nn::utils::progress::StageReporter>);
+
+impl hf_hub::api::Progress for DownloadProgress {
+    // hf-hub calls this again before each attempt, then reports the byte offset the attempt resumes from
+    fn init(&mut self, size: usize, filename: &str) {
+        match &self.0 {
+            Some(reporter) => reporter.restart(),
+            None => {
+                self.0 = inference_nn::utils::progress::StageReporter::new(
+                    format!("Downloading {filename}"),
+                    size as u64,
+                    inference_nn::utils::progress::ProgressUnit::Bytes,
+                )
+            }
+        }
+    }
+
+    fn update(&mut self, size: usize) {
+        if let Some(reporter) = &self.0 {
+            reporter.inc(size as u64);
+        }
+    }
+
+    fn finish(&mut self) {}
+}
+
+// `api.get(file)`, downloading through the progress sinks when one listens and the file is not cached yet
+fn fetch(
+    api: &ApiRepo,
+    model_id: &Path,
+    file: &str,
+    revision: &str,
+) -> std::result::Result<PathBuf, ApiError> {
+    if inference_nn::utils::progress::progress_reported()
+        && offline_cache_repo(model_id, revision).get(file).is_none()
+    {
+        return api.download_with_progress(file, DownloadProgress::default());
+    }
+    api.get(file)
+}
+
 pub(crate) fn offline_cache_repo(model_id: &Path, revision: &str) -> hf_hub::CacheRepo {
     resolve_hf_cache(None).repo(offline_repo(model_id, revision))
 }
@@ -750,7 +793,7 @@ pub(crate) fn get_file(
         return Err(offline_missing_file_error(model_id, file, revision));
     }
 
-    api.get(file)
+    fetch(api, model_id, file, revision)
         .map_err(|err| hf_api_error(model_id, Some(file), revision, &err))
 }
 
@@ -774,7 +817,7 @@ pub(crate) fn try_get_file(
         return Ok(offline_cache_repo(model_id, revision).get(file));
     }
 
-    match api.get(file) {
+    match fetch(api, model_id, file, revision) {
         Ok(p) => Ok(Some(p)),
         Err(err) => match api_error_status_code(&err) {
             Some(404) => Ok(None),

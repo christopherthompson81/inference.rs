@@ -1270,6 +1270,8 @@ fn host_callbacks_load_and_skills_are_stored() {
         tool_count: tools.len(),
         search: None,
         search_user_data: null_mut(),
+        progress: None,
+        progress_user_data: null_mut(),
     };
     let mut engine = null_mut();
     let status = unsafe {
@@ -1351,6 +1353,8 @@ fn host_callbacks_load_and_skills_are_stored() {
         tool_count: 1,
         search: None,
         search_user_data: null_mut(),
+        progress: None,
+        progress_user_data: null_mut(),
     };
     let mut engine = null_mut();
     let status = unsafe {
@@ -2188,4 +2192,61 @@ fn a_chat_tokenizes_as_its_template_renders_it_and_counts_the_same() {
         Some(templated.len() as u64)
     );
     unsafe { inference_engine_free(engine) };
+}
+
+// a progress callback's user_data: the events it was given, as JSON
+unsafe extern "C" fn record_progress(
+    user_data: *mut std::ffi::c_void,
+    event: *const c_char,
+    event_len: usize,
+) {
+    let events = unsafe { &*(user_data as *const std::sync::Mutex<Vec<Value>>) };
+    let bytes = unsafe { std::slice::from_raw_parts(event.cast::<u8>(), event_len) };
+    events
+        .lock()
+        .unwrap()
+        .push(serde_json::from_slice(bytes).unwrap());
+}
+
+#[test]
+fn a_load_reports_each_stage_from_start_to_end() {
+    use inference_ffi::callbacks::*;
+
+    let events = std::sync::Mutex::new(Vec::<Value>::new());
+    let dir = support::tiny_checkpoint().unwrap();
+    let spec = spec(dir.path());
+    let callbacks = inference_host_callbacks {
+        tools: null(),
+        tool_count: 0,
+        search: None,
+        search_user_data: null_mut(),
+        progress: Some(record_progress),
+        progress_user_data: &events as *const _ as *mut std::ffi::c_void,
+    };
+    let mut engine = null_mut();
+    let status = unsafe {
+        inference_engine_load_with_callbacks(
+            spec.as_ptr().cast(),
+            spec.len(),
+            &callbacks,
+            &mut engine,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    unsafe { inference_engine_free(engine) };
+
+    let events = events.into_inner().unwrap();
+    assert!(!events.is_empty(), "the load reported nothing");
+    let mut stages: Vec<&str> = events
+        .iter()
+        .map(|e| e["stage"].as_str().unwrap())
+        .collect();
+    stages.dedup();
+    for stage in stages {
+        let of_stage: Vec<&Value> = events.iter().filter(|e| e["stage"] == stage).collect();
+        assert_eq!(of_stage[0]["done"], 0, "{stage}: {of_stage:?}");
+        let last = of_stage.last().unwrap();
+        assert_eq!(last["done"], last["total"], "{stage}: {of_stage:?}");
+        assert_eq!(last["unit"], "items", "{stage}: {of_stage:?}");
+    }
 }

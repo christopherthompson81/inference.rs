@@ -7,7 +7,6 @@ use super::{
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::PagedAttentionMeta;
 use crate::pipeline::LoadOptions;
-use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
@@ -18,7 +17,7 @@ use crate::{
 };
 use anyhow::Result;
 use futures::future::BoxFuture;
-use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use hf_hub::{Repo, RepoType};
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
 use inference_audio::mel::StreamResampler;
@@ -327,15 +326,9 @@ impl Loader for DiarizationLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(options.silent);
         let revision = revision.unwrap_or_else(|| "main".to_string());
-        let api = ApiBuilder::new()
-            .with_progress(!options.silent)
-            .with_token(get_token(&token_source)?)
-            .build()?
-            .repo(Repo::with_revision(
-                self.model_id.clone(),
-                RepoType::Model,
-                revision.clone(),
-            ));
+        let api = crate::pipeline::hf::build_api(&token_source, !options.silent)?.repo(
+            Repo::with_revision(self.model_id.clone(), RepoType::Model, revision.clone()),
+        );
         let id = std::path::Path::new(&self.model_id);
         let dtype = options.dtype.try_into_dtype(&[options.device])?;
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
@@ -447,15 +440,11 @@ fn single_file(
         return Ok(PathBuf::from(only(names)?));
     }
     let revision = revision.unwrap_or_else(|| "main".to_string());
-    let api = ApiBuilder::new()
-        .with_progress(!silent)
-        .with_token(get_token(token_source)?)
-        .build()?
-        .repo(Repo::with_revision(
-            model_id.to_string(),
-            RepoType::Model,
-            revision.clone(),
-        ));
+    let api = crate::pipeline::hf::build_api(token_source, !silent)?.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        revision.clone(),
+    ));
     let name = only(crate::pipeline::hf::list_repo_files(
         &api, path, true, &revision,
     )?)?;
@@ -615,15 +604,9 @@ impl Loader for TranscriptionLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(options.silent);
         let revision = revision.unwrap_or_else(|| "main".to_string());
-        let api = ApiBuilder::new()
-            .with_progress(!options.silent)
-            .with_token(get_token(&token_source)?)
-            .build()?
-            .repo(Repo::with_revision(
-                self.model_id.clone(),
-                RepoType::Model,
-                revision.clone(),
-            ));
+        let api = crate::pipeline::hf::build_api(&token_source, !options.silent)?.repo(
+            Repo::with_revision(self.model_id.clone(), RepoType::Model, revision.clone()),
+        );
         let id = std::path::Path::new(&self.model_id);
         let get = |file: &str| crate::pipeline::hf::get_file(&api, id, file, &revision);
         // a repo's transformers Parakeet files win over a `.nemo` beside them; neither loading reports both causes

@@ -95,7 +95,7 @@ pub use inference_core::{
     AgentToolApproval, AgentToolApprovalCallback, AgentToolApprovalDecision,
     AgentToolApprovalHandler,
 };
-// The types `EngineCallbacks` carries: host tools and the search callback a client registers at load.
+// The types `EngineCallbacks` carries: host tools, the search callback and the load progress sink a client registers.
 pub use inference_core::{
     CalledFunction, SearchCallback, SearchFunctionParameters, SearchResult, Tool, ToolCallContext,
     ToolCallbackKind, ToolCallbackWithTool,
@@ -242,7 +242,12 @@ pub struct EngineCallbacks {
     /// Called by their definitions' names.
     pub tools: Vec<ToolCallbackWithTool>,
     pub search: Option<Arc<SearchCallback>>,
+    /// Receives the progress of every model load in the process while the engine lives (its own load, models it adds
+    /// or reloads, and any other engine's); it runs on the loading thread, so a panic in it fails the load.
+    pub progress: Option<Arc<ProgressSink>>,
 }
+
+pub use inference_core::load_progress::{ProgressEvent, ProgressSink, ProgressUnit};
 
 /// Runtime LoRA adapter management; listing adapters is always allowed.
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
@@ -741,6 +746,8 @@ pub struct Engine {
     models: Arc<ModelLoadSettings>,
     // Removed with the last clone, when the engine owns its skill directory.
     _skill_dir: Option<Arc<tempfile::TempDir>>,
+    // Unregistered with the last clone.
+    _progress: Option<Arc<inference_core::load_progress::ProgressSinkGuard>>,
 }
 
 impl Engine {
@@ -750,11 +757,20 @@ impl Engine {
             adapters,
             models: Arc::new(models),
             _skill_dir: None,
+            _progress: None,
         }
     }
 
     fn with_skill_dir(mut self, dir: Option<tempfile::TempDir>) -> Self {
         self._skill_dir = dir.map(Arc::new);
+        self
+    }
+
+    fn with_progress(
+        mut self,
+        progress: Option<Arc<inference_core::load_progress::ProgressSinkGuard>>,
+    ) -> Self {
+        self._progress = progress;
         self
     }
 
@@ -766,6 +782,10 @@ impl Engine {
         mut spec: EngineSpec,
         callbacks: EngineCallbacks,
     ) -> Result<Self, EngineLoadError> {
+        // registered before the load, which is the first thing it reports
+        let progress = callbacks
+            .progress
+            .map(|sink| Arc::new(inference_core::load_progress::add_progress_sink(sink)));
         let adapters = std::mem::take(&mut spec.adapters).into_config()?;
         let (skill_store, skill_dir) = std::mem::take(&mut spec.skills).open()?;
         let agentic = AgenticDefaults {
@@ -798,7 +818,8 @@ impl Engine {
             adapters,
             models,
         )
-        .with_skill_dir(skill_dir))
+        .with_skill_dir(skill_dir)
+        .with_progress(progress))
     }
 
     pub async fn load_json(

@@ -20,6 +20,11 @@ public sealed record HostTool(string DefinitionJson, Func<HostToolCall, string> 
 /// <remarks>Runs on engine worker threads; an exception fails the request it runs in.</remarks>
 public delegate void LogitsProcessor(Span<float> logits, ReadOnlySpan<uint> context);
 
+/// <summary>A model-load stage's progress: <paramref name="Done"/> of <paramref name="Total"/> <paramref name="Unit"/>s.</summary>
+/// <param name="Stage">The step, such as <c>Loading repeating layers</c> or <c>Downloading model.safetensors</c>.</param>
+/// <param name="Unit"><c>items</c> or <c>bytes</c>.</param>
+public sealed record LoadProgress(string Stage, long Done, long Total, string Unit);
+
 /// <summary>Host functions the agent loop calls, fixed when the engine loads.</summary>
 public sealed class HostCallbacks
 {
@@ -27,6 +32,11 @@ public sealed class HostCallbacks
 
     /// <summary>Answers a web search with a JSON array of <c>{title, description, url, content}</c>.</summary>
     public Func<string, string>? Search { get; init; }
+
+    /// <summary>Hears every model load in the process while the engine lives: its own, models it adds or reloads, and
+    /// other engines' loads.</summary>
+    /// <remarks>Runs on the loading threads; an exception is dropped, and it must not call back into the engine.</remarks>
+    public Action<LoadProgress>? Progress { get; init; }
 }
 
 /// <summary>Handlers by the id the native side passes back as user_data.</summary>
@@ -87,12 +97,16 @@ internal static unsafe class HostCallbackBridge
                 }
                 var search = callbacks.Search is { } handler ? HostCallbackRegistry.Add(handler) : 0;
                 if (search != 0) _ids.Add(search);
+                var progress = callbacks.Progress is { } listener ? HostCallbackRegistry.Add(listener) : 0;
+                if (progress != 0) _ids.Add(progress);
                 _callbacks.Pointer[0] = new NativeHostCallbacks
                 {
                     Tools = _tools.Pointer,
                     ToolCount = _tools.Count,
                     Search = search == 0 ? null : &Search,
                     SearchUserData = search,
+                    Progress = progress == 0 ? null : &Progress,
+                    ProgressUserData = progress,
                 };
             }
             catch
@@ -161,6 +175,26 @@ internal static unsafe class HostCallbackBridge
         catch (Exception exception)
         {
             Fail(result, exception.Message);
+        }
+    }
+
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    private static void Progress(IntPtr userData, byte* eventJson, nuint eventLen)
+    {
+        try
+        {
+            if (HostCallbackRegistry.Find<Action<LoadProgress>>(userData) is not { } listener) return;
+            using var document = JsonDocument.Parse(Utf8.ToString(eventJson, eventLen));
+            var root = document.RootElement;
+            listener(new LoadProgress(
+                root.GetProperty("stage").GetString() ?? "",
+                root.GetProperty("done").GetInt64(),
+                root.GetProperty("total").GetInt64(),
+                root.GetProperty("unit").GetString() ?? ""));
+        }
+        catch
+        {
+            // nothing may escape an UnmanagedCallersOnly method; the update is dropped
         }
     }
 

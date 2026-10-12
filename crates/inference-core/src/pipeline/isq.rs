@@ -853,6 +853,11 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<inference_quant::Uqf
     );
     bar.set_message("starting");
     bar.tick();
+    let reporter = inference_nn::utils::progress::StageReporter::new(
+        format!("Writing UQFF {ty}"),
+        layers.len() as u64,
+        inference_nn::utils::progress::ProgressUnit::Items,
+    );
 
     let mut seen = HashSet::new();
     let mut current_chunk = Vec::new();
@@ -958,6 +963,9 @@ fn write_uqff_type(ctx: UqffTypeWriteContext<'_>) -> Result<inference_quant::Uqf
             module.ct.replace(layer);
         }
         bar.inc(1);
+        if let Some(reporter) = &reporter {
+            reporter.inc(1);
+        }
     }
     debug_assert!(receivers.next().is_none());
 

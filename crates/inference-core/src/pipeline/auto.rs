@@ -304,12 +304,8 @@ impl AutoLoader {
         token_source: &TokenSource,
         silent: bool,
     ) -> Result<ConfigArtifacts> {
-        let cache = self
-            .hf_cache_path
-            .clone()
-            .map(Cache::new)
-            .unwrap_or_default();
-        let api = build_api_with_cache(token_source, !silent, Some(cache))?;
+        let cache = self.hf_cache_path.clone().map(Cache::new);
+        let api = build_api_with_cache(token_source, !silent, cache)?;
         let revision = revision.unwrap_or_else(|| "main".to_string());
         let api = api.repo(Repo::with_revision(
             self.model_id.clone(),

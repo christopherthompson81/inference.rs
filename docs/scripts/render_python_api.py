@@ -23,6 +23,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WEBSITE_DIR = SCRIPT_DIR.parent
 REPO_DIR = WEBSITE_DIR.parent
 PACKAGE_DIR = REPO_DIR / "bindings" / "python" / "inference_rs"
+NATIVE_MODULE = "_native.py"
 OUT_DIR = WEBSITE_DIR / "src" / "content" / "docs" / "reference" / "python"
 STUB_REL = "bindings/python/inference_rs"
 
@@ -48,6 +49,7 @@ GROUPS = [
                 "HostTool",
                 "HostToolCall",
                 "HostRegistration",
+                "LoadProgress",
             }
         ),
     ),
@@ -716,7 +718,12 @@ def main() -> int:
     opts = parser.parse_args()
 
     classes_by_name, aliases = _collect(
-        [ast.parse(path.read_text()) for path in sorted(PACKAGE_DIR.glob("*.py"))]
+        # `_native.py` holds the ctypes mirrors of the C structs, which share names with the public classes
+        [
+            ast.parse(path.read_text())
+            for path in sorted(PACKAGE_DIR.glob("*.py"))
+            if path.name != NATIVE_MODULE
+        ]
     )
     # The private modules contribute only what the package exports; `types` is public as a whole.
     exported = _exported()

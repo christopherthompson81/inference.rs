@@ -79,6 +79,12 @@ macro_rules! skip_without_cuda {
 
 use inference_nn::get_mut_arcmutex;
 pub use inference_nn::metal::warmup_metal_kernels;
+/// Model-load progress for hosts that show it: register a sink, get each stage's counts.
+pub mod load_progress {
+    pub use inference_nn::utils::progress::{
+        ProgressEvent, ProgressSink, ProgressSinkGuard, ProgressUnit, add_progress_sink,
+    };
+}
 use inference_nn::{
     amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, model, moe,
     paged_attention, sampler, topology, utils,
