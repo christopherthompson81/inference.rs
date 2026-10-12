@@ -4,6 +4,7 @@
         x:Class="InferenceRs.AvaloniaDemo.Views.ModelManagerWindow"
         x:DataType="vm:ModelManagerViewModel"
         Title="Models"
+        Icon="/Assets/icon.png"
         Width="1180" Height="780" MinWidth="820" MinHeight="520"
         WindowStartupLocation="CenterOwner">
   <DockPanel Margin="12">

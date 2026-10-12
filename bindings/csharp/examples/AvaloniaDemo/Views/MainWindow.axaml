@@ -5,6 +5,7 @@
         x:Class="InferenceRs.AvaloniaDemo.Views.MainWindow"
         x:DataType="vm:MainViewModel"
         Title="inference.rs from C#"
+        Icon="/Assets/icon.png"
         Width="1280" Height="860" MinWidth="900" MinHeight="600">
   <DockPanel>
     <Border DockPanel.Dock="Top" Background="#D13438" Padding="12,8" IsVisible="{Binding HasHostError}">

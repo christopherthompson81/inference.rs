@@ -4,6 +4,7 @@
         x:Class="InferenceRs.AvaloniaDemo.Views.SettingsWindow"
         x:DataType="vm:SettingsViewModel"
         Title="Settings"
+        Icon="/Assets/icon.png"
         Width="640" Height="760" MinWidth="520" MinHeight="420"
         WindowStartupLocation="CenterOwner">
   <DockPanel Margin="12">
