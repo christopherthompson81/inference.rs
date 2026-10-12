@@ -1,7 +1,8 @@
-//! HiDream-O1-Image text-to-image: one Qwen3-VL transformer that denoises 32 px RGB patches directly, no VAE.
+//! HiDream-O1-Image: one Qwen3-VL transformer denoising 32 px RGB patches directly, from text and reference images.
 
 pub mod gguf_writer;
 pub mod model;
+pub mod references;
 pub mod sampling;
 
 use std::path::{Path, PathBuf};
@@ -16,13 +17,17 @@ use tokenizers::Tokenizer;
 use crate::DiffusionGenerationParams;
 use crate::noise::SeededNoise;
 use inference_nn::device_map::DummyDeviceMapper;
+use inference_nn::model::MAX_REFERENCE_IMAGES;
 use inference_nn::model::{DiffusionModel, NormalLoadingMetadata};
-use model::{HiDreamO1, PATCH_DIM, PATCH_SIZE};
+use model::{Conditioning, HiDreamO1, PATCH_DIM, PATCH_SIZE};
+use references::References;
 use sampling::{DEV_TIMESTEPS, NUM_TRAIN_TIMESTEPS, Schedule, UniPc};
 
 // the timestep embedding replaces this token, the prompt's last
 const PROMPT_SUFFIX: &str = "<|im_end|>\n<|im_start|>assistant\n<|boi_token|><|tms_token|>";
 const PROMPT_PREFIX: &str = "<|im_start|>user\n";
+// Qwen3-VL's chat template for one image in a user turn; its single pad grows to the image's ViT tokens
+const IMAGE_PLACEHOLDER: &str = "<|vision_start|><|image_pad|><|vision_end|>";
 pub const UNCONDITIONAL_PROMPT: &str = " ";
 const T_EPS: f32 = 0.001;
 /// The sizes the model was trained at, about 4.2 MP each; a request snaps to the closest aspect.
@@ -45,6 +50,8 @@ const FULL_SHIFT: f64 = 3.0;
 const FULL_NOISE_SCALE: f32 = 8.0;
 const DEV_NOISE_SCALE: f32 = 7.5;
 const DEV_NOISE_CLIP_STD: f32 = 2.5;
+// Dev's edit runs plain Euler at the pipeline's default noise scale, not its flash sampler's
+const DEV_EDIT_NOISE_SCALE: f32 = 8.0;
 
 /// The undistilled model samples with UniPC and guidance; Dev with its fixed re-noising schedule and none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -53,11 +60,12 @@ pub enum Variant {
     Dev,
 }
 
-/// The step rule: UniPC's multistep predictor-corrector, or Dev's flash Euler that re-noises each step.
+/// The step rule: UniPC's predictor-corrector, Dev's re-noising flash Euler, or the plain Euler Dev edits with.
 #[derive(Clone, Copy, Debug)]
 pub enum Sampler {
     UniPc,
     Flash { clip_std: f32 },
+    Euler,
 }
 
 /// How one image is sampled.
@@ -71,8 +79,13 @@ pub struct Settings {
 }
 
 impl Variant {
-    /// The reference pipeline's settings; `steps` and `guidance_scale` override the full model's.
-    pub fn settings(self, steps: Option<usize>, guidance_scale: Option<f64>) -> Result<Settings> {
+    /// The reference pipeline's settings for `references` images; `steps` and `guidance_scale` override Full's.
+    pub fn settings(
+        self,
+        steps: Option<usize>,
+        guidance_scale: Option<f64>,
+        references: usize,
+    ) -> Result<Settings> {
         Ok(match self {
             Self::Full => Settings {
                 schedule: Schedule::unipc(steps.unwrap_or(FULL_STEPS), FULL_SHIFT),
@@ -90,13 +103,18 @@ impl Variant {
                         DEV_TIMESTEPS.len()
                     );
                 }
+                // inference.py's Dev default: editing (exactly one reference) steps plain Euler
+                let (sampler, noise_scale) = if references == 1 {
+                    (Sampler::Euler, DEV_EDIT_NOISE_SCALE)
+                } else {
+                    let clip_std = DEV_NOISE_CLIP_STD;
+                    (Sampler::Flash { clip_std }, DEV_NOISE_SCALE)
+                };
                 Settings {
                     schedule: Schedule::fixed(&DEV_TIMESTEPS),
                     guidance_scale: 0.0,
-                    sampler: Sampler::Flash {
-                        clip_std: DEV_NOISE_CLIP_STD,
-                    },
-                    noise_scale: DEV_NOISE_SCALE,
+                    sampler,
+                    noise_scale,
                 }
             }
         })
@@ -281,24 +299,57 @@ impl HiDreamO1Pipeline {
         self.variant
     }
 
-    /// The chat-templated prompt, ending in the image and timestep tokens.
-    pub fn prompt_tokens(&self, prompt: &str) -> Result<Vec<u32>> {
-        let text = format!("{PROMPT_PREFIX}{prompt}{PROMPT_SUFFIX}");
-        Ok(self
+    /// The chat-templated prompt: the references' image pads, the caption, then the image and timestep tokens.
+    pub fn prompt_tokens(&self, prompt: &str, references: Option<&References>) -> Result<Vec<u32>> {
+        let pads = references.map(References::vit_tokens).unwrap_or_default();
+        let images = IMAGE_PLACEHOLDER.repeat(pads.len());
+        let text = format!("{PROMPT_PREFIX}{images}{prompt}{PROMPT_SUFFIX}");
+        let ids = self
             .tokenizer
             .encode(text, false)
             .map_err(inference_tensor::Error::msg)?
             .get_ids()
-            .to_vec())
+            .to_vec();
+        let pad = self.model.image_token_id();
+        let mut pads = pads.into_iter();
+        let mut out = Vec::with_capacity(ids.len());
+        for id in ids {
+            match (id == pad).then(|| pads.next()).flatten() {
+                Some(n) => out.extend(std::iter::repeat_n(pad, n)),
+                None => out.push(id),
+            }
+        }
+        Ok(out)
     }
 
-    /// The final patches (1, patches, 3072) of a `width` x `height` image, both multiples of 32.
+    /// The conditional sequence and, under guidance, the unconditional one: both see the same references.
+    pub fn sequences(
+        &self,
+        prompt: &str,
+        (rows, cols): (usize, usize),
+        guided: bool,
+        references: Option<&References>,
+    ) -> Result<(model::Sequence, Option<model::Sequence>)> {
+        let layout = |prompt: &str| {
+            self.model.sequence(
+                &self.prompt_tokens(prompt, references)?,
+                rows,
+                cols,
+                references,
+            )
+        };
+        let uncond = guided.then(|| layout(UNCONDITIONAL_PROMPT)).transpose()?;
+        Ok((layout(prompt)?, uncond))
+    }
+
+    /// The final patches (1, patches, 3072) of a `width` x `height` image (multiples of 32), seeing any `references`.
     pub fn generate(
         &self,
         prompt: &str,
         (width, height): (usize, usize),
         settings: &Settings,
         noise: &mut dyn Noise,
+        references: Option<&References>,
         observe: &mut dyn FnMut(usize, &Tensor),
     ) -> Result<Tensor> {
         if width % PATCH_SIZE != 0 || height % PATCH_SIZE != 0 {
@@ -307,15 +358,12 @@ impl HiDreamO1Pipeline {
         let (rows, cols) = (height / PATCH_SIZE, width / PATCH_SIZE);
         let device = self.model.device();
         let dtype = self.model.dtype();
-        let cond = self
-            .model
-            .sequence(&self.prompt_tokens(prompt)?, rows, cols)?;
-        let uncond = (settings.guidance_scale > 1.0)
-            .then(|| {
-                self.model
-                    .sequence(&self.prompt_tokens(UNCONDITIONAL_PROMPT)?, rows, cols)
-            })
-            .transpose()?;
+        let guided = settings.guidance_scale > 1.0;
+        let (cond, uncond) = self.sequences(prompt, (rows, cols), guided, references)?;
+        // the ViT and the reference patches' embedding are the same for both samples and every step
+        let conditioning: Option<Conditioning> =
+            references.map(|r| self.model.condition(r)).transpose()?;
+        let conditioning = conditioning.as_ref();
         let mut z = noise
             .sample(rows * cols, device)?
             .affine(f64::from(settings.noise_scale), 0.0)?
@@ -338,11 +386,11 @@ impl HiDreamO1Pipeline {
                     .sub(&z32)?
                     .affine(1.0 / f64::from(sigma), 0.0)
             };
-            let x_pred = self.model.forward(&cond, &z, &t_emb)?;
+            let x_pred = self.model.forward(&cond, &z, &t_emb, conditioning)?;
             observe(i, &x_pred);
             let mut v = velocity(x_pred)?;
             if let Some(uncond) = &uncond {
-                let v_uncond = velocity(self.model.forward(uncond, &z, &t_emb)?)?;
+                let v_uncond = velocity(self.model.forward(uncond, &z, &t_emb, conditioning)?)?;
                 v = (&v_uncond + v.sub(&v_uncond)?.affine(settings.guidance_scale, 0.0)?)?;
             }
             let model_output = v.neg()?;
@@ -356,6 +404,12 @@ impl HiDreamO1Pipeline {
                     schedule.sigmas[i + 1],
                     settings.noise_scale,
                     clip_std,
+                )?,
+                Sampler::Euler => sampling::euler_step(
+                    &model_output,
+                    &z32,
+                    schedule.sigmas[i],
+                    schedule.sigmas[i + 1],
                 )?,
             };
             z = next.to_dtype(dtype)?;
@@ -389,8 +443,18 @@ impl DiffusionModel for HiDreamO1Pipeline {
         prompts: Vec<String>,
         params: DiffusionGenerationParams,
     ) -> Result<Tensor> {
-        let (width, height) = closest_resolution(params.width, params.height);
-        let settings = self.variant.settings(params.steps, params.guidance_scale)?;
+        let images_in = &params.references.0;
+        let settings =
+            self.variant
+                .settings(params.steps, params.guidance_scale, images_in.len())?;
+        let snapped = closest_resolution(params.width, params.height);
+        let (references, (width, height)) = if images_in.is_empty() {
+            (None, snapped)
+        } else {
+            let size = (!params.match_reference).then_some(snapped);
+            let (references, size) = References::prepare(images_in, size, self.model.device())?;
+            (Some(references), size)
+        };
         let mut images = Vec::with_capacity(prompts.len());
         for prompt in &prompts {
             let seed = params.seed.unwrap_or_else(|| rand::rng().random());
@@ -400,6 +464,7 @@ impl DiffusionModel for HiDreamO1Pipeline {
                 (width, height),
                 &settings,
                 &mut noise,
+                references.as_ref(),
                 &mut |_, _| {},
             )?;
             images.push(patches_to_image(&z, width, height)?.i(0)?);
@@ -412,8 +477,30 @@ impl DiffusionModel for HiDreamO1Pipeline {
     }
 
     fn validate(&self, params: &DiffusionGenerationParams) -> std::result::Result<(), String> {
+        let images = &params.references.0;
+        let references = images.len();
+        if references > 0 && !self.model.sees_images() {
+            return Err(model::NO_VISION_TOWER.to_string());
+        }
+        if references > MAX_REFERENCE_IMAGES {
+            return Err(format!(
+                "HiDream-O1 takes at most {MAX_REFERENCE_IMAGES} reference images"
+            ));
+        }
+        if params.match_reference && references != 1 {
+            return Err("only a single reference image can set the output size".to_string());
+        }
+        if references > 0 {
+            let dims: Vec<(usize, usize)> = images
+                .iter()
+                .map(|i| (i.width() as usize, i.height() as usize))
+                .collect();
+            let size =
+                (!params.match_reference).then(|| closest_resolution(params.width, params.height));
+            References::output_size(&dims, size).map_err(|err| err.to_string())?;
+        }
         self.variant
-            .settings(params.steps, params.guidance_scale)
+            .settings(params.steps, params.guidance_scale, references)
             .map(|_| ())
             .map_err(|err| err.to_string())
     }

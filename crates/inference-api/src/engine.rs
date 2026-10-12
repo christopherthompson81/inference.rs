@@ -30,7 +30,8 @@ use crate::{
         FileListObject, FileMetadata, FileUpload,
     },
     generation::{
-        SpeechAudio, detect_voice_activity, diarize, generate_image, generate_speech, transcribe,
+        SpeechAudio, detect_voice_activity, diarize, edit_image, generate_image, generate_speech,
+        transcribe,
     },
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
@@ -51,9 +52,10 @@ use crate::{
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, DiarizationOutput, DiarizationRequest,
-        EmbeddingRequest, EmbeddingResponse, ImageGenerationRequest, ModelObjects,
-        OpenAiToolSurface, SpeechGenerationRequest, TranscriptionOutput, TranscriptionRequest,
-        TranscriptionSessionRequest, VoiceActivityRequest, VoiceActivityResponse,
+        EmbeddingRequest, EmbeddingResponse, ImageEditRequest, ImageGenerationRequest,
+        ModelObjects, OpenAiToolSurface, SpeechGenerationRequest, TranscriptionOutput,
+        TranscriptionRequest, TranscriptionSessionRequest, VoiceActivityRequest,
+        VoiceActivityResponse,
     },
     operations::{
         self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
@@ -1604,6 +1606,23 @@ impl Engine {
 
     pub async fn image_generation_json(&self, request: &[u8]) -> Result<String, ApiError> {
         to_json(&self.image_generation(parse_json(request)?).await?)
+    }
+
+    /// Edits an image, or places subject references in a new scene; `media` holds its `media://N` buffers.
+    pub async fn image_edit(
+        &self,
+        request: ImageEditRequest,
+        media: MediaAttachments,
+    ) -> Result<ImageGenerationResponse, ApiError> {
+        edit_image(self.state(), request, media, self.owner()).await
+    }
+
+    pub async fn image_edit_json(
+        &self,
+        request: &[u8],
+        media: MediaAttachments,
+    ) -> Result<String, ApiError> {
+        to_json(&self.image_edit(parse_json(request)?, media).await?)
     }
 
     pub async fn speech_generation_json(&self, request: &[u8]) -> Result<SpeechAudio, ApiError> {

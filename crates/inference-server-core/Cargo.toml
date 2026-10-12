@@ -50,6 +50,7 @@ rand.workspace = true
 rand_distr.workspace = true
 tower = { workspace = true, features = ["util"] }
 inference-models-speech.workspace = true
+inference-models-diffusion.workspace = true
 tokenizers.workspace = true
 # the keyed tests cover the UI mounted beside the API, as `serve` mounts it
 inference-webui.workspace = true

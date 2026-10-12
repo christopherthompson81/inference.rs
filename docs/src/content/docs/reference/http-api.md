@@ -138,7 +138,7 @@ Requesting files (`files` on chat, Responses, and Anthropic Messages requests):
 | `mime_type` | string | Content-Type. |
 | `bytes` | integer | Body size. |
 | `created_at` | integer | Unix epoch seconds. |
-| `purpose` | string | `agent_output` for agent-produced files, `user_data` for uploaded/request files, `generated_image` for images from `/v1/images/generations` with `response_format: "url"`. |
+| `purpose` | string | `agent_output` for agent-produced files, `user_data` for uploaded/request files, `generated_image` for images from `/v1/images/generations` and `/v1/images/edits` with `response_format: "url"`. |
 | `source` | object | `{"tool", "round", "turn"}` attribution. |
 | `text` | string | Full text body for text files. Absent if elided. |
 | `preview` | string | Short UTF-8 preview for text files. |

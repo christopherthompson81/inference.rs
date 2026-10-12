@@ -272,12 +272,12 @@ pub use inference_api::{
     openai::{
         AdapterSelection, AudioResponseFormat, ChatCompletionRequest, DiarizationOutput,
         DiarizationRequest, DiarizationResponse, DiarizationResponseFormat, DiarizationSegment,
-        EmbeddingRequest, EmbeddingResponse, EmbeddingVector, Grammar, ImageGenerationRequest,
-        OpenAiTool, SpeechGenerationRequest, SpeechSegment, StopTokens, TimestampGranularity,
-        TranscriptionDelta, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
-        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionSessionRequest,
-        TranscriptionWord, VerboseTranscriptionResponse, VoiceActivityRequest,
-        VoiceActivityResponse,
+        EmbeddingRequest, EmbeddingResponse, EmbeddingVector, Grammar, ImageEditRequest,
+        ImageGenerationRequest, ImageReference, OpenAiTool, SpeechGenerationRequest, SpeechSegment,
+        StopTokens, TimestampGranularity, TranscriptionDelta, TranscriptionOutput,
+        TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
+        TranscriptionSegment, TranscriptionSessionRequest, TranscriptionWord,
+        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
     },
     response::{
         ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,

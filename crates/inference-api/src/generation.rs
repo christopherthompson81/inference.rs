@@ -3,9 +3,9 @@
 use futures::future::BoxFuture;
 use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
-    ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, NormalRequest, Request,
-    RequestMessage, Response, SamplingParams, SegmentOptions, SpeechOptions, TimedText,
-    Transcription, TranscriptionOptions, VoiceActivity,
+    ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, MAX_REFERENCE_IMAGES,
+    NormalRequest, ReferenceImages, Request, RequestMessage, Response, SamplingParams,
+    SegmentOptions, SpeechOptions, TimedText, Transcription, TranscriptionOptions, VoiceActivity,
     speech_utils::{self, Sample},
 };
 
@@ -16,9 +16,10 @@ use crate::{
     dispatch::{base_process_non_streaming_response, create_response_channel, send_request},
     files::store_generated_image,
     lora_routing::DEFAULT_MODEL_ID,
+    media_source::MediaAttachments,
     openai::{
         AudioResponseFormat, DiarizationOutput, DiarizationRequest, DiarizationResponse,
-        DiarizationResponseFormat, DiarizationSegment, ImageGenerationRequest,
+        DiarizationResponseFormat, DiarizationSegment, ImageEditRequest, ImageGenerationRequest,
         SpeechGenerationRequest, SpeechSegment, TimestampGranularity, TranscriptionOutput,
         TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
         TranscriptionSegment, TranscriptionWord, VerboseTranscriptionResponse,
@@ -26,7 +27,7 @@ use crate::{
         transcript_vtt,
     },
     types::SharedInferenceRsState,
-    util::validate_model_name,
+    util::{parse_image_url_for_server, validate_model_name},
 };
 
 // a transducer beam search costs a joint evaluation per hypothesis per frame; past this it buys nothing
@@ -174,49 +175,169 @@ async fn generate_image_inner(
     request: ImageGenerationRequest,
     owner: Option<&str>,
 ) -> Result<ImageGenerationResponse, ApiError> {
-    if !(1..=MAX_IMAGE_CHOICES).contains(&request.n_choices) {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            format!("`n` must be 1 to {MAX_IMAGE_CHOICES}"),
-            Some("invalid_n"),
-            Some("n"),
-        ));
-    }
-    if request
-        .steps
-        .is_some_and(|s| !(1..=MAX_DIFFUSION_STEPS).contains(&s))
-    {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            format!("`steps` must be 1 to {MAX_DIFFUSION_STEPS}"),
-            Some("invalid_steps"),
-            Some("steps"),
-        ));
-    }
-    if request
-        .guidance_scale
-        .is_some_and(|g| !g.is_finite() || g < 0.0)
-    {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            "`guidance_scale` must be a finite number of at least 0".to_string(),
-            Some("invalid_guidance_scale"),
-            Some("guidance_scale"),
-        ));
-    }
+    let options = ImageOptions {
+        model: &request.model,
+        n_choices: request.n_choices,
+        steps: request.steps,
+        guidance_scale: request.guidance_scale,
+        response_format: request.response_format,
+    };
+    options.validate()?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let params = DiffusionGenerationParams {
+        height: request.height,
+        width: request.width,
+        steps: request.steps,
+        guidance_scale: request.guidance_scale,
+        seed: request.seed,
+        ..Default::default()
+    };
+    run_image_request(state, &options, repr, request.prompt.clone(), params, owner).await
+}
+
+/// Edits an image, or places subject references in a new scene, with a diffusion model that takes references.
+pub(crate) fn edit_image<'a>(
+    state: &'a SharedInferenceRsState,
+    request: ImageEditRequest,
+    media: MediaAttachments,
+    owner: Option<&'a str>,
+) -> BoxFuture<'a, Result<ImageGenerationResponse, ApiError>> {
+    Box::pin(edit_image_inner(state, request, media, owner))
+}
+
+async fn edit_image_inner(
+    state: &SharedInferenceRsState,
+    request: ImageEditRequest,
+    media: MediaAttachments,
+    owner: Option<&str>,
+) -> Result<ImageGenerationResponse, ApiError> {
+    let options = ImageOptions {
+        model: &request.model,
+        n_choices: request.n_choices,
+        steps: request.steps,
+        guidance_scale: request.guidance_scale,
+        response_format: request.response_format,
+    };
+    options.validate()?;
+    // checked before any image is fetched
+    if !(1..=MAX_REFERENCE_IMAGES).contains(&request.images.len()) {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            format!("`images` must hold 1 to {MAX_REFERENCE_IMAGES} images"),
+            Some("invalid_images"),
+            Some("images"),
+        ));
+    }
+    let mut images = Vec::with_capacity(request.images.len());
+    for (i, image) in request.images.iter().enumerate() {
+        let image = parse_image_url_for_server(&image.image_url, &media)
+            .await
+            .map_err(|e| {
+                ApiError::new(
+                    ApiErrorKind::InvalidRequest,
+                    format!("image {i}: {e}"),
+                    Some("invalid_image"),
+                    Some("images"),
+                )
+            })?;
+        images.push(image);
+    }
+    // no size follows the first image: one image keeps its own size, several take its aspect
+    let (width, height, match_reference) = match (request.width, request.height) {
+        (Some(width), Some(height)) => (width, height, false),
+        (None, None) => {
+            let first = &images[0];
+            (
+                first.width() as usize,
+                first.height() as usize,
+                images.len() == 1,
+            )
+        }
+        _ => {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                "give both `width` and `height`, or neither".to_string(),
+                Some("invalid_size"),
+                Some(if request.width.is_none() {
+                    "width"
+                } else {
+                    "height"
+                }),
+            ));
+        }
+    };
+    let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
+    let params = DiffusionGenerationParams {
+        height,
+        width,
+        references: ReferenceImages(std::sync::Arc::new(images)),
+        match_reference,
+        steps: request.steps,
+        guidance_scale: request.guidance_scale,
+        seed: request.seed,
+    };
+    run_image_request(state, &options, repr, request.prompt.clone(), params, owner).await
+}
+
+/// What generation and edit requests share.
+struct ImageOptions<'a> {
+    model: &'a str,
+    n_choices: usize,
+    steps: Option<usize>,
+    guidance_scale: Option<f64>,
+    response_format: ImageGenerationResponseFormat,
+}
+
+impl ImageOptions<'_> {
+    fn validate(&self) -> Result<(), ApiError> {
+        if !(1..=MAX_IMAGE_CHOICES).contains(&self.n_choices) {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                format!("`n` must be 1 to {MAX_IMAGE_CHOICES}"),
+                Some("invalid_n"),
+                Some("n"),
+            ));
+        }
+        if self
+            .steps
+            .is_some_and(|s| !(1..=MAX_DIFFUSION_STEPS).contains(&s))
+        {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                format!("`steps` must be 1 to {MAX_DIFFUSION_STEPS}"),
+                Some("invalid_steps"),
+                Some("steps"),
+            ));
+        }
+        if self
+            .guidance_scale
+            .is_some_and(|g| !g.is_finite() || g < 0.0)
+        {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                "`guidance_scale` must be a finite number of at least 0".to_string(),
+                Some("invalid_guidance_scale"),
+                Some("guidance_scale"),
+            ));
+        }
+        Ok(())
+    }
+}
+
+async fn run_image_request(
+    state: &SharedInferenceRsState,
+    options: &ImageOptions<'_>,
+    repr: String,
+    prompt: String,
+    generation_params: DiffusionGenerationParams,
+    owner: Option<&str>,
+) -> Result<ImageGenerationResponse, ApiError> {
     let messages = RequestMessage::ImageGeneration {
-        prompt: request.prompt,
-        generation_params: DiffusionGenerationParams {
-            height: request.height,
-            width: request.width,
-            steps: request.steps,
-            guidance_scale: request.guidance_scale,
-            seed: request.seed,
-        },
+        prompt,
+        generation_params,
     };
     let Response::ImageGeneration(generated) =
-        run_choices(state, &request.model, repr, messages, request.n_choices).await?
+        run_choices(state, options.model, repr, messages, options.n_choices).await?
     else {
         return Err(unexpected(state));
     };
@@ -224,9 +345,9 @@ async fn generate_image_inner(
         InferenceRs::maybe_log_error(state.clone(), e.as_ref());
         ApiError::from_error(e.as_ref(), ApiErrorKind::Internal)
     };
-    let response = match request.response_format {
+    let response = match options.response_format {
         ImageGenerationResponseFormat::Url => {
-            let model = (request.model != DEFAULT_MODEL_ID).then_some(request.model.as_str());
+            let model = (options.model != DEFAULT_MODEL_ID).then_some(options.model);
             let data = generated
                 .images
                 .iter()

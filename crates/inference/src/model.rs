@@ -10,9 +10,10 @@ use futures::{Stream, StreamExt};
 use inference_api::{
     Engine,
     engine_chat::{ChatStream, ChatStreamEvent},
+    media_source::{ATTACHMENT_PREFIX, Media, MediaAttachments},
     openai::{
-        EmbeddingInput, EmbeddingRequest, EmbeddingResponse, Grammar, ImageGenerationRequest,
-        SpeechGenerationRequest,
+        EmbeddingInput, EmbeddingRequest, EmbeddingResponse, Grammar, ImageEditRequest,
+        ImageGenerationRequest, ImageReference, SpeechGenerationRequest,
     },
     response::ChatCompletionResponse,
 };
@@ -204,6 +205,21 @@ impl Model {
         request: ImageGenerationRequest,
     ) -> Result<inference_api::response::ImageGenerationResponse> {
         Ok(self.engine.image_generation(request).await?)
+    }
+
+    /// Edits one image, or places several in a new scene, as `request` asks; `images` replace its own.
+    pub async fn edit_image(
+        &self,
+        mut request: ImageEditRequest,
+        images: Vec<image::DynamicImage>,
+    ) -> Result<inference_api::response::ImageGenerationResponse> {
+        request.images = (0..images.len())
+            .map(|i| ImageReference {
+                image_url: format!("{ATTACHMENT_PREFIX}{i}"),
+            })
+            .collect();
+        let media = MediaAttachments::from_media(images.into_iter().map(Media::Image).collect());
+        Ok(self.engine.image_edit(request, media).await?)
     }
 
     pub async fn generate_speech(

@@ -148,10 +148,41 @@ pub trait DiffusionModel {
     }
 }
 
+/// The most reference images one request may carry, which the API checks before fetching any.
+pub const MAX_REFERENCE_IMAGES: usize = 16;
+
+/// The images an edit or subject-reference request conditions on, shared by each of its choices.
+#[derive(Clone, Default)]
+pub struct ReferenceImages(pub std::sync::Arc<Vec<image::DynamicImage>>);
+
+// the choices of one request share the images, which batching compares for every queued request
+impl PartialEq for ReferenceImages {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0) || self.0 == other.0
+    }
+}
+
+impl std::fmt::Debug for ReferenceImages {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} reference images", self.0.len())
+    }
+}
+
+impl ReferenceImages {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DiffusionGenerationParams {
     pub height: usize,
     pub width: usize,
+    #[serde(skip)]
+    pub references: ReferenceImages,
+    /// The output takes the only reference image's own size, in place of `width` and `height`.
+    #[serde(default)]
+    pub match_reference: bool,
     /// Denoising steps, when not the model's own.
     pub steps: Option<usize>,
     /// Classifier-free guidance scale, when not the model's own.
@@ -192,6 +223,8 @@ impl Default for DiffusionGenerationParams {
         Self {
             height: 720,
             width: 1280,
+            references: ReferenceImages::default(),
+            match_reference: false,
             steps: None,
             guidance_scale: None,
             seed: None,

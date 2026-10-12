@@ -176,6 +176,20 @@ inference.rs extensions:
 
 `quality` and `style` are ignored.
 
+## Image Edits
+
+`POST /v1/images/edits` edits one image, or places several (subject references) in a new scene, with a model that takes
+reference images (HiDream-O1-Image). It takes OpenAI's multipart form, `image` (or `image[]`, repeated) as the files, or a
+JSON body whose `images` are `{"image_url": ...}` entries (`http(s)` or `data:` URLs).
+
+- `prompt`, `n`, `response_format`, as for generation.
+- `size`, in the form only: `<width>x<height>`, or `auto`. The JSON body takes `width` and `height`.
+- With no size, one image keeps its own aspect at the model's trained area, and several take the first image's aspect.
+- `steps`, `guidance_scale` and `seed`, as for generation.
+
+`mask` is refused: the model edits from the instruction alone. `quality`, `background`, `input_fidelity` and
+`output_format` are ignored.
+
 ## Audio
 
 ### `/v1/audio/speech` (TTS)

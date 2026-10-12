@@ -91,9 +91,10 @@ Single-input convenience wrapper.
 
 ```rust
 async fn generate_image(&self, request: ImageGenerationRequest) -> Result<ImageGenerationResponse>
+async fn edit_image(&self, request: ImageEditRequest, images: Vec<DynamicImage>) -> Result<ImageGenerationResponse>
 async fn generate_speech(&self, request: SpeechGenerationRequest) -> Result<SpeechAudio>
 ```
-Diffusion image generation and text to speech, taking the same requests as `/v1/images/generations` and `/v1/audio/speech`. Examples: [diffusion](/examples/rust/models/diffusion/), [speech](/examples/rust/models/speech/).
+Diffusion image generation and editing, and text to speech, taking the same requests as `/v1/images/generations`, `/v1/images/edits` and `/v1/audio/speech`; `edit_image` attaches the decoded `images` in place of the request's own. Examples: [diffusion](/examples/rust/models/diffusion/), [speech](/examples/rust/models/speech/).
 
 ## Quantization
 

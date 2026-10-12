@@ -1,11 +1,11 @@
 ---
 title: Generate images with diffusion models
-description: Running FLUX and HiDream-O1-Image through the inference OpenAI-compatible API.
+description: Running FLUX and HiDream-O1-Image, and editing images with HiDream-O1-Image, through the inference OpenAI-compatible API.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-inference.rs serves diffusion models through `POST /v1/images/generations`: FLUX and HiDream-O1-Image; see the [supported models reference](/reference/supported-models/).
+inference.rs serves diffusion models through `POST /v1/images/generations`: FLUX and HiDream-O1-Image; see the [supported models reference](/reference/supported-models/). HiDream-O1-Image also edits images and places subject references in new scenes through `POST /v1/images/edits` ([Editing images](#editing-images)).
 
 ## Running FLUX
 
@@ -65,8 +65,7 @@ in BF16 by default, about 18 GB of GPU memory.
 
 The model generates at its trained resolutions only, about 4.2 megapixels each: a request's `width` and `height`
 snap to the one of 2048x2048, 2304x1728, 2560x1440, 2496x1664, 3104x1312, 2304x1792 (or their portrait forms)
-with the closest aspect ratio, and the response image has that size. Image editing and subject references
-(conditioning on input images) are not supported yet.
+with the closest aspect ratio, and the response image has that size.
 
 ### HiDream-O1 from GGUF
 
@@ -83,14 +82,16 @@ with `inference serve diffusion --diffusion-arch`. These files ship no config or
 
 `inference quantize hidream-o1 -m <checkpoint dir or repo> -o <file>.gguf --type q8_0` writes one from the checkpoint in
 seconds. It quantizes the text stack's matrices, keeps the embedding at F16, the patch and timestep embedders at BF16,
-and norms, biases and the prediction head at F32, and leaves out the vision tower and `lm_head`, which text-to-image never
-reads. Its Q8_0 matrices are byte-identical to the published `smthem/HiDream-O1-Image-Dev` ones.
+norms, biases and the prediction head at F32, and the vision tower that [editing](#editing-images) reads at BF16. It leaves
+out `lm_head`, which the model never reads. Its Q8_0 matrices are byte-identical to the published
+`smthem/HiDream-O1-Image-Dev` ones. A file written without the vision tower (by an earlier `quantize`) still generates,
+and refuses edits.
 
 | Weights | File | GPU memory at 1024x1024 | Dev, 28 steps | Full, 50 steps |
 |---|---|---|---|---|
 | BF16 (from the repos) | 16 GB | about 18 GB | 8.4 s | 28.5 s |
-| Q8_0 | 8.1 GiB | 8.6 GiB | 6.6 s | 22.3 s |
-| Q6_K, `--keep down_proj=q8_0` | 7.0 GiB | 7.5 GiB | 7.4 s | |
+| Q8_0 | 9.2 GiB | 8.6 GiB | 6.6 s | 22.3 s |
+| Q6_K, `--keep down_proj=q8_0` | 8.0 GiB | 7.5 GiB | 7.4 s | |
 
 Measured on an RTX 3090 at 1024x1024. Q8_0 is the recommended type: the full model's predictions stay as close to F32 as BF16's,
 and Dev's distilled noisy steps lose a little detail. Plain Q6_K is noticeably worse; keeping `down_proj` at Q8_0, which
@@ -164,6 +165,86 @@ println!("{}", response.data[0].url.as_ref().unwrap());
 
 </TabItem>
 </Tabs>
+
+## Editing images
+
+HiDream-O1-Image conditions on reference images through `POST /v1/images/edits`. With one image it edits it by
+instruction; with several (up to 16) it places them as subjects in the scene the prompt describes. Each image is seen
+twice: by the model's Qwen3-VL vision encoder in the prompt, and as full-size pixel patches after the image being
+denoised, so an edit's sequence is about twice a generation's and a step takes about twice as long. The vision encoder
+(about 0.8 GiB on the GPU) loads with the first request that has images, so text-to-image never holds it.
+
+<Tabs>
+<TabItem label="HTTP">
+
+OpenAI's multipart form, the images as `image` (or repeated `image[]`) files:
+
+```bash
+curl http://localhost:1234/v1/images/edits \
+  -F image=@photo.png \
+  -F prompt="Make the sky stormy." \
+  -F response_format=b64_json
+```
+
+or a JSON body naming them by URL (`http(s)` or `data:`):
+
+```bash
+curl http://localhost:1234/v1/images/edits \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "Make the sky stormy.", "images": [{"image_url": "data:image/png;base64,..."}]}'
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+import inference_rs as ir
+from inference_rs import types as t
+
+with ir.Engine(spec) as engine:
+    with open("photo.png", "rb") as f:
+        photo = ir.MediaAttachment(f.read(), "image/png")
+    response = engine.image_edit(
+        t.ImageEditRequest(prompt="Make the sky stormy.", images=[t.ImageReference(image_url="media://0")]),
+        [photo],
+    )
+```
+
+</TabItem>
+<TabItem label="Rust">
+
+```rust
+use inference::{ImageEditRequest, ImageGenerationResponseFormat};
+
+let photo = image::open("photo.png")?;
+let response = model
+    .edit_image(
+        ImageEditRequest {
+            response_format: ImageGenerationResponseFormat::B64Json,
+            ..ImageEditRequest::new("Make the sky stormy.", [])
+        },
+        vec![photo],
+    )
+    .await?;
+```
+
+</TabItem>
+</Tabs>
+
+The edit request takes the generation fields, with `images` and these differences:
+
+| Field | Default | Notes |
+|---|---|---|
+| `images` | required | `{"image_url": ...}` entries; through the C ABI and the bindings, `media://N` names the Nth attached buffer. |
+| `width`, `height` | none | Both or neither. With neither, one image keeps its own aspect at about 2048x2048's area (32-pixel aligned, center-cropped by at most a patch), and several take the first image's aspect, snapped as for generation. The form's `size` (`<w>x<h>` or `auto`) sets them. |
+
+`mask` is refused: the model edits from the instruction. The samplers are the reference pipeline's: the full model runs
+its 50 UniPC steps with guidance (the unguided pass sees the images too), and Dev edits one image with 28 plain Euler
+steps and places several subjects with its usual re-noising schedule. The reference recommends the full model for
+editing; Dev's edits can carry a faint speckle.
+
+The model edits at its trained resolution only: at 1024x1024 it produces noise, as the reference pipeline does. Measured
+on an RTX 3090 at 1792x2304 (one reference of that size): Dev 96 s in BF16 and 93 s from Q8_0, the full model 340 s.
 
 ## Request fields
 

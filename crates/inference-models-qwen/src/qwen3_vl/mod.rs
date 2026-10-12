@@ -10,9 +10,9 @@ use std::{
 };
 
 use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
+use crate::vision::qwen3_vl::Qwen3VLVisionModel;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use inference_tensor::{DType, Device, IndexOp, Result, Tensor};
-use vision::Qwen3VLVisionModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -36,7 +36,6 @@ use crate::{
 pub mod config;
 pub mod inputs_processor;
 pub mod text;
-pub mod vision;
 
 pub use config::Config;
 
@@ -1023,7 +1022,11 @@ impl Qwen3VLModel {
             deepstack_visual_embeds.as_deref(),
         ) {
             (Some(visual_pos_masks), Some(deepstack)) if layer_idx < deepstack.len() => {
-                text::deepstack_process(xs, visual_pos_masks, &deepstack[layer_idx])
+                crate::decoder::qwen3_vl::deepstack_process(
+                    xs,
+                    visual_pos_masks,
+                    &deepstack[layer_idx],
+                )
             }
             _ => Ok(xs),
         };

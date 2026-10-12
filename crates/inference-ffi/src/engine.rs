@@ -641,6 +641,30 @@ entry_points! {
     json inference_image_generation => |engine, request| engine.image_generation_json(request).map_err(api_failure);
 }
 
+/// Safety: as for `inference_chat`, with `media` valid for `media_count` entries.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_image_edit(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    media: *const inference_media,
+    media_count: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                let media = arg_media(media, media_count)?;
+                engine.image_edit_json(request, media).map_err(api_failure)
+            },
+        )
+    }
+}
+
 /// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_blob` valid for a write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_speech_generation(

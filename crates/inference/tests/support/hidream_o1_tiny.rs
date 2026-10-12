@@ -4,13 +4,18 @@
 use std::path::{Path, PathBuf};
 
 use inference_models_diffusion::hidream::model::{Config, HiDreamO1};
+use inference_nn::vision::qwen3_vl::Qwen3VLVisionModel;
 use inference_tensor::quantized::gguf_file::{self, Value};
 use inference_tensor::quantized::{GgmlDType, QTensor};
 
 #[path = "recording.rs"]
 mod recording;
 
-const FIXTURE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/hidream_o1");
+// through the crates directory, so the server crate's tests resolve it too
+const FIXTURE: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../inference/tests/fixtures/hidream_o1"
+);
 const TEXT_LAYERS: usize = 2;
 const WEIGHTS: &str = "model.safetensors";
 const INDEX: &str = "model.safetensors.index.json";
@@ -26,6 +31,8 @@ pub fn tiny_hidream_o1(name: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
     let recorded =
         recording::record_checkpoint_seeded_by_name(&files, TEXT_LAYERS, &[], |vb, metadata| {
+            // the model builds its ViT on the first edit, so the checkpoint asks for it here
+            Qwen3VLVisionModel::new(&cfg.vision_config, vb.pp("model").pp("visual"))?;
             HiDreamO1::new(&cfg, vb, metadata).map(|_| ())
         })?;
     let parent = tempfile::tempdir()?;
@@ -46,13 +53,30 @@ pub fn tiny_hidream_o1(name: &str) -> anyhow::Result<(tempfile::TempDir, PathBuf
 
 /// `checkpoint` as a ComfyUI-GGUF HiDream file at `gguf`, every tensor in F32, config and tokenizer beside it.
 pub fn tiny_hidream_o1_f32_gguf(checkpoint: &Path, gguf: &Path) -> anyhow::Result<()> {
+    write_f32_gguf(checkpoint, gguf, |_| true)
+}
+
+/// As [`tiny_hidream_o1_f32_gguf`], less the tensors under `prefix`.
+pub fn tiny_hidream_o1_f32_gguf_without(
+    checkpoint: &Path,
+    gguf: &Path,
+    prefix: &str,
+) -> anyhow::Result<()> {
+    write_f32_gguf(checkpoint, gguf, |name| !name.starts_with(prefix))
+}
+
+fn write_f32_gguf(
+    checkpoint: &Path,
+    gguf: &Path,
+    keep: impl Fn(&str) -> bool,
+) -> anyhow::Result<()> {
     copy_configs(checkpoint, gguf)?;
     let weights = inference_tensor::safetensors::load(
         checkpoint.join(WEIGHTS),
         &inference_tensor::Device::Cpu,
     )?;
     let mut tensors = Vec::with_capacity(weights.len());
-    for (name, t) in weights {
+    for (name, t) in weights.into_iter().filter(|(name, _)| keep(name)) {
         let t = t.to_dtype(inference_tensor::DType::F32)?;
         tensors.push((name, QTensor::quantize(&t, GgmlDType::F32)?));
     }

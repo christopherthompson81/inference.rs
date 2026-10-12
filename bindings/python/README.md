@@ -5,8 +5,8 @@ It needs no compiled extension: `ctypes` loads the library, and the package chec
 refusing any other while the ABI is 0.0.x.
 
 - `Engine` loads a model from its `EngineSpec` and serves the requests the HTTP server does: chat (with media
-  attachments), completions, embeddings, Anthropic Messages, Responses, model and LoRA adapter management, image and
-  speech generation, files, skills and agent approvals. Specs, requests and responses are the dataclasses in
+  attachments), completions, embeddings, Anthropic Messages, Responses, model and LoRA adapter management, image
+  generation and editing, speech generation, files, skills and agent approvals. Specs, requests and responses are the dataclasses in
   `inference_rs.types`, generated from the server's OpenAPI document, so they match what the engine accepts (each may
   also be its JSON). Streaming calls return a `Stream` of `StreamEvent`s whose data is parsed the same way. Failures
   raise `InferenceError`, whose `detail` is the protocol's error JSON and `code` its code.

@@ -465,6 +465,17 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_image_generation));
     }
 
+    /// <summary>Edits an image, or places subject references in a new scene; images may name <c>media://N</c>.</summary>
+    public string ImageEdit(string requestJson, IReadOnlyList<MediaAttachment>? media = null)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        using var attachments = Media(media);
+        var status = NativeMethods.inference_image_edit(
+            engine.Handle, request.Pointer, request.Length, attachments.Pointer, attachments.Count, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_image_edit));
+    }
+
     /// <summary>Speaks text; the blob's MIME type carries the sample rate and channel count.</summary>
     public Blob SpeechGeneration(string requestJson)
     {

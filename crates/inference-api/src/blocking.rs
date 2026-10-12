@@ -185,6 +185,16 @@ impl BlockingEngine {
         })
     }
 
+    pub fn image_edit_json(
+        &self,
+        request: &[u8],
+        media: MediaAttachments,
+    ) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.image_edit_json(&request, media).await
+        })
+    }
+
     pub fn speech_generation_json(&self, request: &[u8]) -> Result<SpeechAudio, ApiError> {
         self.call(request, |engine, request| async move {
             engine.speech_generation_json(&request).await

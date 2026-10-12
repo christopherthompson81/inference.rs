@@ -10,8 +10,8 @@ use inference_tensor::{DType, Device, Result};
 pub const GGUF_EXTENSION: &str = "gguf";
 // GGUFs converted from ComfyUI checkpoints keep its wrapper prefix on every FLUX tensor.
 const COMFY_FLUX_PREFIX: &str = "model.diffusion_model.";
-// HiDream-O1's checkpoint carries Qwen3-VL's vision tower and lm_head, which text-to-image never reads
-const HIDREAM_UNREAD: [&str; 2] = ["lm_head.", "model.visual."];
+// HiDream-O1's checkpoint carries Qwen3-VL's lm_head, which the denoiser never reads
+const HIDREAM_UNREAD: [&str; 1] = ["lm_head."];
 
 /// A var builder over `path`, naming each GGUF tensor by `native_name` (tensors it maps to `None` are skipped).
 pub fn var_builder(
@@ -42,7 +42,7 @@ pub fn flux_native_name(gguf_name: &str) -> Option<String> {
     )
 }
 
-/// A HiDream-O1 GGUF's tensor names, already Hugging Face's, less the ones text-to-image never loads.
+/// A HiDream-O1 GGUF's tensor names, already Hugging Face's, less the ones the denoiser never loads.
 pub fn hidream_native_name(gguf_name: &str) -> Option<String> {
     (!HIDREAM_UNREAD.iter().any(|p| gguf_name.starts_with(p))).then(|| gguf_name.to_string())
 }
@@ -77,11 +77,14 @@ mod tests {
     use super::{flux_native_name, hidream_native_name, t5_native_name};
 
     #[test]
-    fn hidream_names_skip_the_vision_tower_and_lm_head() {
-        let x = "model.x_embedder.proj1.weight";
-        assert_eq!(hidream_native_name(x).as_deref(), Some(x));
+    fn hidream_names_keep_the_vision_tower_and_skip_lm_head() {
+        for name in [
+            "model.x_embedder.proj1.weight",
+            "model.visual.merger.norm.weight",
+        ] {
+            assert_eq!(hidream_native_name(name).as_deref(), Some(name));
+        }
         assert_eq!(hidream_native_name("lm_head.weight"), None);
-        assert_eq!(hidream_native_name("model.visual.merger.norm.weight"), None);
     }
 
     #[test]

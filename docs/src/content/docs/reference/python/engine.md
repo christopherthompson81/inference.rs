@@ -404,6 +404,15 @@ image_generation(
 ) -> types.ImageGenerationResponse
 ```
 
+### `Engine.image_edit`
+
+```text
+image_edit(
+    request: types.ImageEditRequest | str,
+    media: Sequence[MediaAttachment] = (),
+) -> types.ImageGenerationResponse
+```
+
 ### `Engine.speech_generation`
 
 ```text
@@ -911,6 +920,15 @@ unload_lora_adapter(request_json: str) -> str
 
 ```text
 image_generation(request_json: str) -> str
+```
+
+### `JsonEngine.image_edit`
+
+```text
+image_edit(
+    request_json: str,
+    media: Sequence[MediaAttachment] = (),
+) -> str
 ```
 
 ### `JsonEngine.speech_generation`

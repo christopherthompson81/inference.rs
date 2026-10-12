@@ -84,6 +84,7 @@ mod completion_core;
 pub mod completions;
 pub mod embeddings;
 pub mod files;
+mod form;
 pub mod handler_core;
 mod handlers;
 pub mod image_generation;

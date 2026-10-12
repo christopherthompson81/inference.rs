@@ -1874,6 +1874,63 @@ impl ImageGenerationRequest {
     }
 }
 
+/// One image an edit request conditions on.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ImageReference {
+    /// An `http(s)` or `data:` URL, or `media://N` for the request's Nth attached buffer.
+    #[schema(example = "data:image/png;base64,...")]
+    pub image_url: String,
+}
+
+/// Image edit request: one image to edit, or several subject references for a new scene.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ImageEditRequest {
+    /// Model ID; "default" targets the only loaded model.
+    #[schema(example = "default")]
+    #[serde(default = "default_model")]
+    pub model: String,
+    /// The edit instruction, or the scene the subjects are placed in.
+    #[schema(example = "Make the sky stormy.")]
+    pub prompt: String,
+    /// The image to edit, or the subject references.
+    pub images: Vec<ImageReference>,
+    /// How many choices to generate.
+    #[serde(rename = "n")]
+    #[serde(default = "default_1usize")]
+    #[schema(example = 1)]
+    pub n_choices: usize,
+    /// Return the images as URLs or base64 data.
+    #[serde(default = "default_response_format")]
+    pub response_format: ImageGenerationResponseFormat,
+    /// Image width in pixels; with neither size, one image keeps its aspect and several take the first's.
+    #[serde(default)]
+    pub width: Option<usize>,
+    /// Image height in pixels.
+    #[serde(default)]
+    pub height: Option<usize>,
+    /// Denoising steps (1 to 1000) when not the model's own; an inference.rs extension.
+    #[serde(default)]
+    pub steps: Option<usize>,
+    /// Classifier-free guidance scale when not the model's own; an inference.rs extension.
+    #[serde(default)]
+    pub guidance_scale: Option<f64>,
+    /// Seeds the noise, so a request repeats its image; an inference.rs extension.
+    #[serde(default)]
+    pub seed: Option<u64>,
+}
+
+impl ImageEditRequest {
+    /// A request editing `images` by `prompt`, every other field at its default.
+    pub fn new(prompt: impl Into<String>, images: impl IntoIterator<Item = String>) -> Self {
+        let images: Vec<_> = images
+            .into_iter()
+            .map(|image_url| ImageReference { image_url })
+            .collect();
+        serde_json::from_value(serde_json::json!({"prompt": prompt.into(), "images": images}))
+            .expect("an edit request needs only its prompt and images")
+    }
+}
+
 /// Audio format options for speech generation responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "lowercase")]

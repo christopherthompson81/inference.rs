@@ -2586,8 +2586,11 @@ impl Default for Conv3dConfig {
 }
 
 pub struct Conv3dNoBias {
-    conv2d_1: Conv2d,
-    conv2d_2: Conv2d,
+    // the kernel as one (in * t * h * w, out) matrix, the layer's only copy of its weight
+    flat: Tensor,
+    in_channels: usize,
+    kernel: [usize; 3],
+    cfg: Conv2dConfig,
 }
 
 impl Conv3dNoBias {
@@ -2628,40 +2631,49 @@ impl Conv3dNoBias {
             vb.get(expected_shape, "weight")?
         };
 
-        // Split on temporal dimension
-        // https://github.com/pytorch/pytorch/issues/139066
-
-        let w1 = ws.i((.., .., 0, .., ..))?;
-        let w2 = ws.i((.., .., 1, .., ..))?;
-
-        let cfg = Conv2dConfig {
-            padding: cfg.padding,
-            stride: cfg.stride,
-            dilation: cfg.dilation,
-            groups: cfg.groups,
-        };
-
         Ok(Self {
-            conv2d_1: Conv2d::new(w1.contiguous()?, None, cfg),
-            conv2d_2: Conv2d::new(w2.contiguous()?, None, cfg),
+            flat: ws.flatten_from(1)?.t()?.contiguous()?,
+            in_channels: in_channels / cfg.groups,
+            kernel: kernel_sizes,
+            cfg: Conv2dConfig {
+                padding: cfg.padding,
+                stride: cfg.stride,
+                dilation: cfg.dilation,
+                groups: cfg.groups,
+            },
         })
     }
 
     pub fn weight(&self) -> Result<Tensor> {
-        let w1 = self.conv2d_1.weight().clone().unsqueeze(2)?;
-        let w2 = self.conv2d_2.weight().clone().unsqueeze(2)?;
-        Tensor::cat(&[w1, w2], 2)
+        let [t, h, w] = self.kernel;
+        let out = self.flat.dim(1)?;
+        self.flat
+            .t()?
+            .contiguous()?
+            .reshape((out, self.in_channels, t, h, w))
     }
 }
 
 impl Module for Conv3dNoBias {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs1 = xs.i((.., .., 0, .., ..))?;
-        let xs2 = xs.i((.., .., 1, .., ..))?;
-
-        (Convolution.forward_2d(&self.conv2d_1, &xs1)?
-            + Convolution.forward_2d(&self.conv2d_2, &xs2)?)?
-        .unsqueeze(2)
+        let (n, c, t, h, w) = xs.dims5()?;
+        let plain = self.cfg.padding == 0 && self.cfg.groups == 1 && self.cfg.dilation == 1;
+        // one kernel position (a ViT's patch embedding): a single matmul, rounded once, not after each temporal half
+        if plain && [t, h, w] == self.kernel {
+            let out = self.flat.dim(1)?;
+            return xs
+                .reshape((n, c * t * h * w))?
+                .matmul(&self.flat)?
+                .reshape((n, out, 1, 1, 1));
+        }
+        // otherwise a conv2d per temporal slice, as conv3d is slow on CUDA
+        // https://github.com/pytorch/pytorch/issues/139066
+        let ws = self.weight()?;
+        let slice = |i: usize| -> Result<Tensor> {
+            let conv = Conv2d::new(ws.i((.., .., i, .., ..))?.contiguous()?, None, self.cfg);
+            Convolution.forward_2d(&conv, &xs.i((.., .., i, .., ..))?)
+        };
+        (slice(0)? + slice(1)?)?.unsqueeze(2)
     }
 }
 

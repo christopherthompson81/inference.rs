@@ -939,6 +939,123 @@
         }
       }
     },
+    "/v1/images/edits": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "Image edit endpoint handler: a JSON body, or OpenAI's multipart form with the images as files.",
+        "operationId": "image_edit",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ImageEditRequest"
+              }
+            },
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "description": "The multipart form `/v1/images/edits` takes; a JSON `ImageEditRequest` names its images by URL instead.",
+                "required": [
+                  "image",
+                  "prompt"
+                ],
+                "properties": {
+                  "guidance_scale": {
+                    "type": [
+                      "number",
+                      "null"
+                    ],
+                    "format": "double"
+                  },
+                  "height": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "image": {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "format": "binary"
+                    },
+                    "description": "The image to edit, or (repeated as `image[]`) the subject references: PNG, JPEG, WebP and the like."
+                  },
+                  "model": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "n": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "prompt": {
+                    "type": "string"
+                  },
+                  "response_format": {
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "seed": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int64",
+                    "minimum": 0
+                  },
+                  "size": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "`<width>x<height>`, or `auto` (as no size): one image keeps its aspect, several take the first's."
+                  },
+                  "steps": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "minimum": 0
+                  },
+                  "width": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "In place of `size`, as the JSON body takes them.",
+                    "minimum": 0
+                  }
+                }
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The edited images",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageGenerationResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/images/generations": {
       "post": {
         "tags": [
@@ -5481,6 +5598,84 @@
           }
         }
       },
+      "ImageEditRequest": {
+        "type": "object",
+        "description": "Image edit request: one image to edit, or several subject references for a new scene.",
+        "required": [
+          "prompt",
+          "images"
+        ],
+        "properties": {
+          "guidance_scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Classifier-free guidance scale when not the model's own; an inference.rs extension."
+          },
+          "height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Image height in pixels.",
+            "minimum": 0
+          },
+          "images": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImageReference"
+            },
+            "description": "The image to edit, or the subject references."
+          },
+          "model": {
+            "type": "string",
+            "description": "Model ID; \"default\" targets the only loaded model.",
+            "example": "default"
+          },
+          "n": {
+            "type": "integer",
+            "description": "How many choices to generate.",
+            "example": 1,
+            "minimum": 0
+          },
+          "prompt": {
+            "type": "string",
+            "description": "The edit instruction, or the scene the subjects are placed in.",
+            "example": "Make the sky stormy."
+          },
+          "response_format": {
+            "$ref": "#/components/schemas/ImageGenerationResponseFormat",
+            "description": "Return the images as URLs or base64 data."
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seeds the noise, so a request repeats its image; an inference.rs extension.",
+            "minimum": 0
+          },
+          "steps": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Denoising steps (1 to 1000) when not the model's own; an inference.rs extension.",
+            "minimum": 0
+          },
+          "width": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Image width in pixels; with neither size, one image keeps its aspect and several take the first's.",
+            "minimum": 0
+          }
+        }
+      },
       "ImageGenerationRequest": {
         "type": "object",
         "description": "Image generation request",
@@ -5572,6 +5767,20 @@
           "url",
           "b64_json"
         ]
+      },
+      "ImageReference": {
+        "type": "object",
+        "description": "One image an edit request conditions on.",
+        "required": [
+          "image_url"
+        ],
+        "properties": {
+          "image_url": {
+            "type": "string",
+            "description": "An `http(s)` or `data:` URL, or `media://N` for the request's Nth attached buffer.",
+            "example": "data:image/png;base64,..."
+          }
+        }
       },
       "IncludeOption": {
         "type": "string",

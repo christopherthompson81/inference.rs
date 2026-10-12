@@ -174,6 +174,8 @@ GROUPS = [
                 "Skill",
                 "Approval",
                 "ImageGeneration",
+                "ImageEdit",
+                "ImageReference",
                 "ImageChoice",
                 "SpeechGeneration",
                 "AudioResponseFormat",

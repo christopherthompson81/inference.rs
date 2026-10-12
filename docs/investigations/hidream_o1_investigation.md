@@ -353,3 +353,178 @@ Questions:
   - `GgmlDType::from_name` returns the error, `GgufWriteSummary` is re-exported at the `inference_api` root, and the help lists only allowed types.
   - The guard covers exactly the writable DS4 types (Q4_0, Q4_K, Q5_K); the upstream run confirms Q4_0 on the MMVQ path.
   - The engine test writes its Q8_0 and Dev files with the real writer.
+
+## Run 11 - 2026-10-11
+
+Question: what does the reference's image-conditioned path (editing with one reference image, subject references with two or more) add to text-to-image, and what do we lack?
+
+Read: `models/pipeline.py::generate_image`, `models/utils.py` (`resize_pilimage`, `calculate_dimensions`, `get_rope_index_fix_point`), `models/qwen3_vl_transformers.py::_forward_generation`, `inference.py` (checkout `2c2d29f`, still the remote head).
+
+Raw:
+- **Each reference image enters twice.**
+  - *Through the ViT.* It is LANCZOS-resized to `calculate_dimensions(384, aspect)`, multiples of 32 (384 becomes 288 for K of 5 to 8, and 192 above 8). Then the stock Qwen3-VL processor runs (mean/std 0.5, patch 16, merge 2) and it is placed in the user turn as `<|vision_start|><|image_pad|>*N<|vision_end|>`, one per image, before the caption. The ViT output replaces the pads, and the deepstack features are added at those rows after decoder layers 0-2, as in stock Qwen3-VL.
+  - *As pixel patches.* `resize_pilimage(img, max_size, 32)`: BOX halving while the short side is at least 2 * max_size, then BICUBIC resize to the largest 32-aligned size whose area fits max_size^2, then a center crop. It is normalized to [-1, 1] and patchified like the target. It runs through `x_embedder` and is appended after the noisy target patches, at every step, unchanged.
+  - `max_size` is `max(h, w)` for K = 1, then 48/64 for K = 2, 1/2 for K up to 4, 24/64 for K up to 8, and 1/4 above that.
+- **Mask:** rows of type > 0 (the timestep token, the target and the reference patches) see the whole sequence; the prompt rows, image pads included, stay causal. This is our text-to-image mask with the prefix longer.
+- **Positions** (`skip_vision_start_token = [0]*K + [1] + [1]*K`):
+  - the prompt and its image pads use stock Qwen3-VL M-RoPE, on the merged grid;
+  - the target sits at `(4096, 4096 + row, 4096 + col)` as before;
+  - each reference continues at the previous maximum + 1, `(s, s + row, s + col)`.
+  - The first "pad" of each grid is a `vision_start` id standing in for patch 0, which the skip flag accounts for. No extra token.
+- **CFG** (Full): the uncond sample is `" "` with the same K images; the ViT runs once and its outputs are reused for both samples and every step.
+- **Samplers:**
+  - Full: UniPC as in text-to-image.
+  - Dev with exactly one reference (editing) defaults to diffusers' `FlowMatchEulerDiscreteScheduler` over the same 28 timesteps, sigmas `t/1000` then 0: plain Euler, `z' = z + (sigma_next - sigma) * (-v)`, with no re-noising. `--editing_scheduler flash` keeps the flash sampler. Dev with two or more references uses the flash sampler.
+- **Output size:** snapped to the 11 presets, unless `keep_original_aspect` with one reference: the reference is resized to max 2048 and the output takes its size.
+- **Layout and skeleton** conditioning are extra reference images drawn by `create_layout_reference_images`; the model sees nothing new.
+
+What we lack:
+- the Qwen3-VL vision tower. It lives in `inference-models-qwen`, which the always-built diffusion crate cannot depend on. Our GGUF writer drops `model.visual.*` (`HIDREAM_UNREAD`); the published `smthem` Dev Q8_0 keeps all 351 ViT tensors (F16 weights, F32 norms and biases);
+- PIL-style resizes for the two reference paths;
+- the sequence and position builder with images;
+- the Euler step;
+- an edit request: there is no `/v1/images/edits`, no engine operation and no ABI entry.
+
+Plan:
+1. Move the Qwen3-VL vision encoder (`vision.rs`, `VisionConfig`, `deepstack_process`) to `inference-nn`, so one implementation serves Qwen3-VL, Qwen3.5 and HiDream.
+2. HiDream reference images: model, samplers, writer keeps the ViT, an `edit_image` engine operation, `/v1/images/edits` (multipart and JSON), the ABI and bindings, and the parity script with `--ref-image`.
+3. The demo's Images tab gains an edit mode.
+
+## Run 12 - 2026-10-11
+
+Question: does the reference's Dev edit run here, and at what size can parity check it?
+
+Commands:
+- `scripts/hidream_o1_parity.sh <Dev> --dev --prompt "remove the earphones" --size 1024x1024 --ref-image assets/edit/test.jpg --keep-dumps ...`. The prompt and image are the reference repo's own editing sample, a 1792x2304 product poster with a person.
+- `inference.py --model_type dev --keep_original_aspect` on the same inputs, through a wrapper that forces the 4D-mask path (flash_attn is not installed here).
+- `vit_check.py` (scratchpad): the reference ViT in BF16 on CUDA against F32 on CPU, on the dumped `pixel_values`.
+
+Raw:
+- **At 1024x1024 the reference itself fails.** The output is noise. x_pred is a flat grey-blue field for the first ~10 steps (std 0.10-0.11), then turns to noise (std 0.83 at the last step).
+  - The sequence is 146 prompt tokens (130 image pads for a 26x20 ViT grid), then 1024 target patches and 1008 reference patches (28x36), 2178 rows in all.
+- **The ViT is not the cause** (torch 2.11; the README warns against 2.9): main output cosine 0.99822, deepstack 0.99990 / 0.99915 / 0.99865.
+- **At the trained size it works:** 1792x2304 with `--keep_original_aspect`, 28 steps in 85 s (3.07 s/step, BF16, 4D mask) on the RTX 3090. The earphones are gone; the rest of the poster (text, can, pose, background) is kept.
+
+Implications:
+- Editing parity must run at full size: 4032 target patches plus 4032 reference patches, about 8.2k rows. The dumps are about 2.8 GB for Dev.
+- Small sizes are no smoke test for editing. The tiny random-weight engine test only checks plumbing and determinism.
+
+## Run 13 - 2026-10-11
+
+Question: does our reference-image path (ViT in the prompt, reference patches, the Euler edit sampler) match the reference's Dev edit?
+
+Commands:
+- `scripts/hidream_o1_parity.sh <Dev> --dev --prompt "remove the earphones" --ref-image assets/edit/test.jpg --keep-aspect --keep-dumps /mnt/data/_tmp/hidream_edit_dev_keep`;
+- the same dumps with the reference image re-saved as a PNG of Pillow's own decode, replayed by the example alone.
+
+Raw:
+- **Layout:** output 1792x2304 and ViT grid [1, 26, 20], as the reference. Sample 0 has 146 tokens and 8210 rows; ids and every M-RoPE position match exactly.
+- **Preprocessing from the JPEG:** the ViT pixels differ by up to 2.24 8-bit levels and the patches by up to 4.23, even after rounding ours to the BF16 the reference feeds.
+  - From Pillow's decode as a PNG, the ViT pixels match bit for bit, so the port of Pillow's resampler (fixed point, horizontal then vertical, Lanczos) is exact. The JPEG gap is the decoder: `image` against libjpeg-turbo.
+  - The patches differed by 3e-5 in 24154 values until the scale became `x * (1/255)`. torchvision multiplies (0 of 256 levels differ against `ToDtype(scale=True)`); dividing differs in 111. Now 0 of 12386304 differ.
+- **Teacher forced** (28 forwards): x_pred cosine min 0.995955 (forward 0, the noisiest), mean 0.999778. From the JPEG directly: min 0.995716, mean 0.999781.
+- **Free running:** 1792x2304 in 95.9 s (the reference: 87 s), PSNR 29.03 dB, mean |diff| 3.5. By eye they are the same edit, and both carry the same faint speckle.
+- The per-step cosine stays at 0.9999-1.0000 through the middle, then drops to 0.995 at the last steps, as in text-to-image.
+
+Implications: the model side is right. The JPEG decoder costs about 0.0002 of cosine, so it is not worth a libjpeg dependency. Next: Full with CFG (the uncond sample sees the images too), Dev with two references (the flash sampler), and a GGUF that keeps the ViT.
+
+## Run 14 - 2026-10-12
+
+Question: does the full model's edit (UniPC, CFG with the images in the unconditional sample too) match?
+
+Command: `scripts/hidream_o1_parity.sh <Full> --prompt "remove the earphones" --ref-image <Pillow PNG of the sample> --keep-aspect --keep-dumps /mnt/data/_tmp/hidream_edit_full_keep`
+
+Raw:
+- **Reference:** 100 forwards (50 steps x cond/uncond) at 1792x2304, 5m37s (6.75 s/step).
+- **Layout:**
+  - Sample 0 has 146 tokens and 8210 rows; sample 1 (`" "` with the same image) has 143 tokens and 8207 rows. Ids and positions match for both.
+  - ViT pixels and patches are bit-exact.
+- **Teacher forced:** x_pred cosine min 0.996823 (forward 1, the uncond half of the noisiest step), mean 0.999916. This misses the default 0.999 bar the script holds Full to without F32 replays; Run 7 put the BF16 floor of those noisy forwards at about 0.9966.
+- **Free running:** 346.5 s, PSNR 33.99 dB, mean |diff| 3.79, max 59. The per-step x_pred cosine is 0.9996-1.0000 throughout. By eye it is the same clean edit (no Dev speckle).
+
+Implication: the full model's edit is right. Next: an F32 replay of forwards 0 and 1, so the noisy forwards are held to the F32 bar rather than a bare cosine.
+
+## Run 15 - 2026-10-12
+
+Question: do several references (the README's 10-image subject example, Dev, flash sampler) match? And our Q8_0 GGUF with the ViT kept?
+
+Commands:
+- `scripts/hidream_o1_parity.sh <Dev> --dev --prompt <the README's subject prompt> --size 2048x2048 --ref-image assets/IP/{1..10}.jpg --keep-dumps ...`;
+- the same with PNGs of Pillow's decode;
+- the example with `--their-inputs` (the reference's own ViT pixels and patches) and `--their-vision` (its ViT outputs);
+- `vit_check.py` for F32 truth;
+- `inference quantize hidream-o1 -m <Dev> -o .../vit/HiDream-O1-Image-Dev-Q8_0.gguf`, replayed on the Run 13 edit dumps.
+
+Raw:
+- **Q8_0 with the ViT:** written in 18 s, 9.88 GB (8.73 GB without the ViT). On the edit: teacher forced min 0.996242, mean 0.999753; free running 93.2 s, 31.86 dB. It passes the quantized bar.
+- **Subject layout:**
+  - 10 ViT grids match the reference's. With 10 references the ViT input is 192 px, below the processor's 65536-pixel minimum, so its own upscale runs; that path works.
+  - Sample 0 has 850 tokens and 7339 rows; ids and positions match.
+  - From PNGs, the patches are bit-exact (BOX halving and BICUBIC fit). The ViT pixels differ by up to 2 levels in 7514 of 4435968 values: our Pillow bicubic stands in for torchvision's in the processor's upscale.
+- **Subject teacher forced, first:** min 0.967773 (forward 2), mean 0.992817, against the edit's 0.9957 / 0.9998. Free running 86.5 s at 19.27 dB: the same boy, pose, props and steps, with the details diverging.
+- **Bisecting:**
+
+  | step | ViT output cos vs reference | teacher forced (min / mean) |
+  |---|---|---|
+  | as written | 0.994814 | 0.966840 / 0.992935 |
+  | `--their-inputs` | 0.995134 | 0.964228 / 0.993641 |
+  | `--their-vision` (reference ViT outputs) | - | 0.988542 / 0.997204 |
+  | our ViT in F32 vs reference F32 | 0.999999 | - |
+
+  The implementations agree; ours in BF16 is noisier. Against F32: ours 0.995765, the reference's BF16 0.998230, and the reference's own BF16 rerun 0.9979.
+- **Fixes found on the way:**
+  - The merger's GELU is `nn.GELU()` (erf). Ours was the tanh approximation, in all three Qwen3-VL mergers; little effect here.
+  - `Conv3dNoBias` (the Qwen2/2.5/3-VL patch embedding) ran as two conv2ds summed in BF16; it is now one matmul for a single-kernel input. Little effect.
+  - **The CUDA tanh-GELU for bf16/f16 evaluated every step of the formula in half precision.** It now computes in float and rounds once, as torch does; the CPU path likewise, and `gelu_erf`, `elu`, f16 `silu`/`sigmoid` round once too. Ours vs F32: 0.995765 -> 0.997309, deepstack 0.9998 / 0.9995 / 0.9987. Teacher forced: 0.973951 / 0.994615.
+  - Attention in F32 (an experiment, reverted) moved ours vs F32 from 0.99549 to 0.99606. Head dim 72 has no flash kernel here, so the cuBLASLt path rounds the logits to BF16.
+
+Implications:
+- Ten references amplify the conditioning's noise far more than one. The reference's own BF16 run is the noisy party too.
+- The fair bar is the F32 one, as for text-to-image's noisy steps: replay forwards 1 and 2 in F32 and hold ours to the reference's distance from it.
+
+## Run 16 - 2026-10-12
+
+Question: held to F32 rather than to the reference's BF16, how far is ours on the 10-reference subject run?
+
+Commands:
+- `scripts/hidream_o1_parity.sh <Dev> --dev ... --ref-image <10 PNGs> --f32 1,2 --keep-dumps /mnt/data/_tmp/hidream_subject_f32`. The F32 pass now leaves out the reference's cached `precomputed_*` ViT outputs, so it encodes the images in F32 itself; before that, the recording failed on the deepstack list.
+- `floor_refs.py` (scratchpad): the reference in BF16, replaying forwards 1 and 2 from their recorded inputs.
+
+Raw:
+
+| forward | ours vs F32 | reference (dumped run) vs F32 | reference replayed vs F32 | replayed vs dumped |
+|---|---|---|---|---|
+| 1 | 0.978767 | 0.986232 | 0.984344 | 0.992801 |
+| 2 | 0.980801 | 0.988201 | - | - |
+
+- MATH SDPA does not fit 24 GB at 7339 rows (6.4 GiB per allocation), so the floor comes from the replay alone. Two BF16 runs of the reference itself are 0.9928 apart.
+- With vision attention in F32 (experiment, reverted): the ViT is closer to the reference (0.998095), but forwards 1 and 2 land at 0.974199 and 0.978902, further from F32. One precision change moves a forward by about 0.005 either way here.
+- Teacher forced against the BF16 reference (min / mean): 0.977937 / 0.994979. Free running: 82.0 s, 19.09 dB; same subject, pose and props, with details apart.
+
+Implications:
+- Ten references put the denoiser in a regime where BF16 noise in the conditioning moves predictions by about 0.01. Ours is about 0.006 further from F32 than torch's BF16, the same order as the run-to-run spread of the reference itself.
+- The rest is our cuBLASLt attention for the ViT's head dim 72 (BF16 logits), which F32 attention did not cure. It is kept in BF16: in F32 it costs the chat models with large images and buys nothing measurable here.
+- One reference (editing) stays at the BF16 bar (Runs 13, 14), which is the case the reference recommends.
+
+## Run 17 - 2026-10-12
+
+Question: the full model's edit held to F32 at its two noisiest forwards (cond and uncond of step 0), after the GELU fix.
+
+Commands:
+- `scripts/hidream_o1_parity.sh <Full> ... --keep-aspect --f32 0,1 --keep-dumps /mnt/data/_tmp/hidream_edit_full_f32`;
+- the example's new `--quick` (only the F32-covered forwards, no sampling), with and without F32 vision attention;
+- `vit_check.py` for this image's F32 ViT.
+
+Raw:
+
+| forward | ours vs F32 | reference vs F32 | ours, F32 vision attention |
+|---|---|---|---|
+| 0 (cond) | 0.998657 (ok, slack 1e-3) | 0.999561 | 0.998450 |
+| 1 (uncond, `" "` with the image) | 0.995033 (0.003 short) | 0.998115 | 0.998575 |
+
+- **ViT vs F32 on this image:** ours (BF16 attention) 0.997640; the reference's dumped BF16 run 0.996296; the reference's two BF16 runs are 0.99797 apart. Our ViT is the closer of the two BF16 encoders.
+- **Teacher forced:** every forward without F32 has min 0.999758. Free running: 339.7 s, 34.48 dB, max |diff| 62.
+
+Implications:
+- The uncond forward reads little but the image, so the ViT's BF16 noise moves it by a few thousandths. That is noise, not a defect: our encoder is nearer F32 than the reference's, and switching our attention to F32 only trades which forward comes out ahead.
+- Vision attention stays BF16.

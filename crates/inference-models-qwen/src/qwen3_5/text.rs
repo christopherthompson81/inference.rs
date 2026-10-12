@@ -2447,8 +2447,7 @@ impl Qwen3_5TextModel {
                 let hidden = xs.dim(inference_tensor::D::Minus1)?;
                 let n = indices.len();
                 let idx = Tensor::from_vec(indices, (n,), &self.device)?;
-                let idx_expanded = idx.unsqueeze(1)?.repeat((1, hidden))?;
-                Some((idx, idx_expanded))
+                Some(idx.unsqueeze(1)?.repeat((1, hidden))?)
             }
         } else {
             None
@@ -2577,9 +2576,12 @@ impl Qwen3_5TextModel {
                     .as_ref()
                     .zip(deepstack_visual_embeds)
                     .filter(|(_, embeds)| i < embeds.len());
-                if let Some(((idx, idx_expanded), embeds)) = deepstack {
-                    xs =
-                        self.deepstack_process(layer_output.add()?, idx, idx_expanded, &embeds[i])?;
+                if let Some((idx_expanded, embeds)) = deepstack {
+                    xs = crate::decoder::qwen3_vl::deepstack_add(
+                        layer_output.add()?,
+                        idx_expanded,
+                        &embeds[i],
+                    )?;
                     normalized_x = None;
                 } else {
                     let next_layer = self.layers.get(i + 1);
@@ -2666,33 +2668,6 @@ impl Qwen3_5TextModel {
             }
             ctx.lm_head(&*self.lm_head, &xs)
         })()
-    }
-
-    fn deepstack_process(
-        &self,
-        hidden_states: Tensor,
-        idx: &Tensor,
-        idx_expanded: &Tensor,
-        visual_embeds: &Tensor,
-    ) -> Result<Tensor> {
-        let device = hidden_states.device();
-        let dtype = hidden_states.dtype();
-        let visual_embeds = visual_embeds.to_device(device)?.to_dtype(dtype)?;
-
-        let (batch, seq, hidden) = hidden_states.dims3()?;
-        let total = batch * seq;
-        let hidden_flat = hidden_states.reshape((total, hidden))?;
-
-        if idx.dim(0)? != visual_embeds.dim(0)? {
-            inference_tensor::bail!(
-                "Mismatch between DeepStack visual embeds ({}) and mask positions ({})",
-                visual_embeds.dim(0)?,
-                idx.dim(0)?
-            );
-        }
-
-        let result = hidden_flat.scatter_add(idx_expanded, &visual_embeds, 0)?;
-        result.reshape((batch, seq, hidden))
     }
 }
 

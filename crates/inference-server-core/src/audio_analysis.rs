@@ -1,24 +1,20 @@
 //! The audio analysis routes: multipart uploads over the engine's speech recognition and voice activity detection.
 
 use axum::{
-    extract::{
-        Multipart,
-        multipart::{MultipartError, MultipartRejection},
-    },
+    extract::{Multipart, multipart::MultipartRejection},
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
-use inference_api::api_error::{ApiError, ApiErrorKind};
-use serde_json::{Map, Value};
+use inference_api::api_error::ApiError;
 
 use crate::{
+    form::{Field, invalid, multipart_payload, read_form},
     handler_core::openai_error_response,
     openai::{DiarizationRequest, TranscriptionRequest, VoiceActivityRequest},
     types::OwnedEngine,
 };
 
 const FILE_FIELD: &str = "file";
-const STREAM_FIELD: &str = "stream";
 const INVALID_CODE: &str = "invalid_audio_request";
 
 /// The multipart form `/v1/audio/transcriptions` takes.
@@ -31,33 +27,6 @@ pub struct TranscriptionForm {
     file: Vec<u8>,
     #[schema(inline)]
     request: TranscriptionRequest,
-}
-
-fn invalid(message: impl Into<String>, param: &str) -> ApiError {
-    ApiError::new(
-        ApiErrorKind::InvalidRequest,
-        message,
-        Some(INVALID_CODE),
-        Some(param),
-    )
-}
-
-fn multipart_error(error: MultipartError, field: &str) -> ApiError {
-    let kind = if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
-        ApiErrorKind::PayloadTooLarge
-    } else {
-        ApiErrorKind::InvalidRequest
-    };
-    ApiError::new(kind, error.body_text(), Some(INVALID_CODE), Some(field))
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum Field {
-    Number,
-    Integer,
-    Flag,
-    // OpenAI's form repeats an array field, with or without brackets
-    List,
 }
 
 const TRANSCRIPTION_FIELDS: &[(&str, Field)] = &[
@@ -78,76 +47,22 @@ const DIARIZATION_FIELDS: &[(&str, Field)] = &[
     ("threshold", Field::Number),
     ("return_probabilities", Field::Flag),
 ];
-const LIST_SUFFIX: &str = "[]";
 
-// the form's text fields become the JSON a request deserializes from, so they validate as JSON does; `kinds` names
-// the fields that are not strings
-async fn read_form<T: serde::de::DeserializeOwned>(
-    mut multipart: Multipart,
+// OpenAI's audio forms carry one upload
+async fn read_audio_form<T: serde::de::DeserializeOwned>(
+    multipart: Multipart,
     kinds: &[(&str, Field)],
 ) -> Result<(T, Vec<u8>), ApiError> {
-    let mut fields = Map::new();
-    let mut audio = None;
-    let next = |e| multipart_error(e, "body");
-    while let Some(field) = multipart.next_field().await.map_err(next)? {
-        let raw = field.name().unwrap_or_default().to_string();
-        if raw == FILE_FIELD {
-            if audio.is_some() {
-                return Err(invalid("The form has more than one `file`.", FILE_FIELD));
-            }
-            let bytes = field
-                .bytes()
-                .await
-                .map_err(|e| multipart_error(e, FILE_FIELD))?;
-            audio = Some(bytes.to_vec());
-            continue;
-        }
-        let text = field.text().await.map_err(|e| multipart_error(e, &raw))?;
-        if raw == STREAM_FIELD {
-            if text != "false" {
-                let message = "Streamed results are not supported; omit `stream`.";
-                return Err(invalid(message, STREAM_FIELD));
-            }
-            continue;
-        }
-        let name = raw.trim_end_matches(LIST_SUFFIX).to_string();
-        let kind = kinds.iter().find(|(n, _)| *n == name).map(|(_, k)| *k);
-        let value = match kind {
-            Some(Field::Number) => Value::from(
-                text.parse::<f64>()
-                    .map_err(|_| invalid(format!("`{text}` is not a number"), &name))?,
-            ),
-            Some(Field::Integer) => Value::from(
-                text.parse::<u64>()
-                    .map_err(|_| invalid(format!("`{text}` is not a whole number"), &name))?,
-            ),
-            Some(Field::Flag) => Value::Bool(
-                text.parse::<bool>()
-                    .map_err(|_| invalid(format!("`{text}` is not true or false"), &name))?,
-            ),
-            Some(Field::List) | None => Value::String(text),
-        };
-        if kind == Some(Field::List) {
-            let list = fields
-                .entry(name)
-                .or_insert_with(|| Value::Array(Vec::new()));
-            if let Value::Array(items) = list {
-                items.push(value);
-            }
-        } else {
-            fields.insert(name, value);
-        }
+    let (request, mut uploads) = read_form(multipart, kinds, &[FILE_FIELD], INVALID_CODE).await?;
+    match uploads.len() {
+        0 => Err(invalid("The form has no `file`.", FILE_FIELD, INVALID_CODE)),
+        1 => Ok((request, uploads.remove(0).bytes)),
+        _ => Err(invalid(
+            "The form has more than one `file`.",
+            FILE_FIELD,
+            INVALID_CODE,
+        )),
     }
-    let audio = audio.ok_or_else(|| invalid("The form has no `file`.", FILE_FIELD))?;
-    let request = serde_json::from_value(Value::Object(fields))
-        .map_err(|e| invalid(e.to_string(), "body"))?;
-    Ok((request, audio))
-}
-
-fn multipart_payload(
-    payload: Result<Multipart, MultipartRejection>,
-) -> Result<Multipart, ApiError> {
-    payload.map_err(|rejection| invalid(rejection.body_text(), "body"))
 }
 
 /// Transcription endpoint handler.
@@ -166,12 +81,12 @@ pub async fn transcription(
     OwnedEngine(engine): OwnedEngine,
     payload: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    let multipart = match multipart_payload(payload) {
+    let multipart = match multipart_payload(payload, INVALID_CODE) {
         Ok(multipart) => multipart,
         Err(error) => return openai_error_response(error),
     };
     let (request, audio) =
-        match read_form::<TranscriptionRequest>(multipart, TRANSCRIPTION_FIELDS).await {
+        match read_audio_form::<TranscriptionRequest>(multipart, TRANSCRIPTION_FIELDS).await {
             Ok(form) => form,
             Err(error) => return openai_error_response(error),
         };
@@ -213,12 +128,12 @@ pub async fn voice_activity(
     OwnedEngine(engine): OwnedEngine,
     payload: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    let multipart = match multipart_payload(payload) {
+    let multipart = match multipart_payload(payload, INVALID_CODE) {
         Ok(multipart) => multipart,
         Err(error) => return openai_error_response(error),
     };
     let (request, audio) =
-        match read_form::<VoiceActivityRequest>(multipart, VOICE_ACTIVITY_FIELDS).await {
+        match read_audio_form::<VoiceActivityRequest>(multipart, VOICE_ACTIVITY_FIELDS).await {
             Ok(form) => form,
             Err(error) => return openai_error_response(error),
         };
@@ -252,12 +167,12 @@ pub async fn diarization(
     OwnedEngine(engine): OwnedEngine,
     payload: Result<Multipart, MultipartRejection>,
 ) -> Response {
-    let multipart = match multipart_payload(payload) {
+    let multipart = match multipart_payload(payload, INVALID_CODE) {
         Ok(multipart) => multipart,
         Err(error) => return openai_error_response(error),
     };
     let (request, audio) =
-        match read_form::<DiarizationRequest>(multipart, DIARIZATION_FIELDS).await {
+        match read_audio_form::<DiarizationRequest>(multipart, DIARIZATION_FIELDS).await {
             Ok(form) => form,
             Err(error) => return openai_error_response(error),
         };

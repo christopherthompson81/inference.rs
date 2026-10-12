@@ -59,6 +59,7 @@ json_requests!(
     inference_protocol::openai::CompletionRequest,
     inference_protocol::openai::EmbeddingRequest,
     inference_protocol::openai::ImageGenerationRequest,
+    inference_protocol::openai::ImageEditRequest,
     inference_protocol::openai::SpeechGenerationRequest,
     inference_protocol::openai::TranscriptionRequest,
     inference_protocol::openai::TranscriptionSessionRequest,
