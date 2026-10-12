@@ -13,7 +13,7 @@ pub use gguf_discovery::{
     list_local_gguf_companions, resolve_gguf_projector, resolve_gguf_quant,
 };
 pub(crate) use gguf_discovery::{
-    is_auxiliary_gguf, is_gguf, is_projector, parse_split, quant_label,
+    is_auxiliary_gguf, is_gguf, is_projector, parse_split, projector_belongs, quant_label,
 };
 
 use inference_core::{

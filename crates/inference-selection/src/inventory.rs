@@ -9,17 +9,20 @@ use std::{
 };
 
 use anyhow::{Context, Result, bail};
-use inference_core::{DetectedModelKind, detect_local_model, hf_hub_cache_dir};
+use inference_core::{DetectedModelKind, default_hf_cache_dir, detect_local_model};
 use inference_gguf::base_model::source_hf_base_model_id;
 use inference_quant::GgufDType;
 use inference_tensor::quantized::gguf_file::{self, Value};
 use serde::{Deserialize, Serialize};
 
-use crate::quant::{is_auxiliary_gguf, is_gguf, is_projector, parse_split, quant_label};
+use crate::quant::{
+    is_auxiliary_gguf, is_gguf, is_projector, parse_split, projector_belongs, quant_label,
+};
 
 const MODEL_DIR_MARKERS: [&str; 3] = ["config.json", "model_index.json", "params.json"];
 const NEMO_EXTENSION: &str = "nemo";
-const WEIGHT_EXTENSIONS: [&str; 6] = ["safetensors", "gguf", NEMO_EXTENSION, "bin", "pth", "pt"];
+// a checkpoint directory's weights; GGUFs beside a config are listed as files, each its own model
+const WEIGHT_EXTENSIONS: [&str; 5] = ["safetensors", NEMO_EXTENSION, "bin", "pth", "pt"];
 // org/model/variant layouts nest a few levels; a deeper tree is not a model library
 const SCAN_MAX_DEPTH: usize = 6;
 const HF_REPO_DIR_PREFIX: &str = "models--";
@@ -174,7 +177,11 @@ pub fn inspect_model(path: &Path) -> Result<InventoryModel> {
     if !path.is_file() {
         bail!("`{}` is not a file or directory", path.display());
     }
-    let dir = path.parent().unwrap_or(Path::new("."));
+    // a bare file name's parent is "", which lists nothing
+    let dir = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     if has_extension(path, NEMO_EXTENSION) {
         return Ok(nemo_model(path, origin));
     }
@@ -188,7 +195,11 @@ pub fn inspect_model(path: &Path) -> Result<InventoryModel> {
     let groups = gguf_groups(&siblings);
     let group = groups
         .into_iter()
-        .find(|group| group.contains(&path.to_path_buf()))
+        .find(|group| {
+            group
+                .iter()
+                .any(|shard| shard.file_name() == path.file_name())
+        })
         .context("the GGUF is an auxiliary file (LoRA, MTP or DFlash), not a model")?;
     gguf_models_in(&[group], &siblings, origin)
         .pop()
@@ -225,7 +236,7 @@ pub fn scan_models(request: &ScanRequest) -> ModelScan {
 
 /// The repositories in the Hugging Face cache (`hub`, or the environment's), each with all its revisions' size.
 pub fn hf_cache_listing(hub: Option<&Path>) -> Option<HfCacheListing> {
-    let hub = hub.map(Path::to_path_buf).or_else(hf_hub_cache_dir)?;
+    let hub = hub.map(Path::to_path_buf).or_else(default_hf_cache_dir)?;
     let mut repos = repo_dirs(&hub)
         .into_iter()
         .map(|(repo_id, dir)| HfCacheRepo {
@@ -254,12 +265,18 @@ pub fn delete_hf_cache_repo(repo_id: &str, hub: Option<&Path>) -> Result<HfCache
                     .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
         })
     };
-    if !valid_part(parts.next()) || !valid_part(parts.next()) || parts.next().is_some() {
+    // `org/name`, or a legacy repository's bare `name` (`gpt2`)
+    let first = parts.next();
+    let second = parts.next();
+    if !valid_part(first)
+        || second.is_some_and(|name| !valid_part(Some(name)))
+        || parts.next().is_some()
+    {
         bail!("`{repo_id}` is not a Hugging Face repository id (`org/name`)");
     }
     let hub = hub
         .map(Path::to_path_buf)
-        .or_else(hf_hub_cache_dir)
+        .or_else(default_hf_cache_dir)
         .context("cannot determine the Hugging Face cache directory")?;
     let dir = hub.join(repo_dir_name(repo_id));
     if !dir.is_dir() {
@@ -353,8 +370,9 @@ fn scan_dir(
             .iter()
             .any(|file| file.file_name() == Some(marker.as_ref()))
     });
-    // a config without weights (a cache entry only probed) is nothing to load
-    if model_dir && walk_files(dir).iter().any(|file| is_weight_file(file)) {
+    // a config without checkpoint weights (a cache entry only probed, a GGUF repo's config) is no checkpoint
+    let checkpoint = model_dir && walk_files(dir).iter().any(|file| is_weight_file(file));
+    if checkpoint {
         found.push(dir_model(dir, origin));
     }
     found.extend(gguf_models_in(&gguf_groups(&files), &files, origin));
@@ -368,7 +386,7 @@ fn scan_dir(
         models.entry(model.path.clone()).or_insert(model);
     }
     // a model directory's subfolders are its parts (a diffusers text_encoder), not more models
-    if model_dir || depth >= SCAN_MAX_DEPTH {
+    if checkpoint || depth >= SCAN_MAX_DEPTH {
         return;
     }
     let Ok(entries) = fs::read_dir(dir) else {
@@ -403,13 +421,13 @@ fn files_in(dir: &Path) -> Result<Vec<PathBuf>> {
 fn gguf_groups(files: &[PathBuf]) -> Vec<Vec<PathBuf>> {
     let mut groups: BTreeMap<String, Vec<(usize, PathBuf)>> = BTreeMap::new();
     for file in files {
-        let name = file.to_string_lossy();
+        let name = file_name(file);
         if !is_gguf(&name) || is_auxiliary_gguf(&name) {
             continue;
         }
         let (key, index) = match parse_split(&name) {
             Some(split) => (split.prefix, split.index),
-            None => (name.into_owned(), 0),
+            None => (name, 0),
         };
         groups.entry(key).or_default().push((index, file.clone()));
     }
@@ -452,7 +470,7 @@ fn gguf_facts(shards: &[PathBuf]) -> Result<GgufFacts> {
         .as_deref()
         .and_then(|arch| metadata.get(&format!("{arch}.context_length")))
         .and_then(|value| value.to_u64().ok());
-    let label = shards[0].to_string_lossy();
+    let label = file_name(&shards[0]);
     let base_model = source_hf_base_model_id(&label, metadata).ok().flatten();
     let gguf_type = meta_string(metadata, "general.type");
     let projector = is_projector(&label)
@@ -517,11 +535,6 @@ fn gguf_models_in(
                 .then(|| (shards[0].clone(), facts.base_model.clone()))
         })
         .collect::<Vec<_>>();
-    let sibling_models = facts
-        .iter()
-        .filter(|(_, facts)| facts.as_ref().is_ok_and(|facts| !facts.imatrix))
-        .count()
-        - sibling_projectors.len();
     let facts = groups
         .iter()
         .map(|shards| {
@@ -551,7 +564,7 @@ fn gguf_models_in(
                     return model;
                 }
             };
-            let stem = shards[0].to_string_lossy();
+            let stem = file_name(&shards[0]);
             model.quantization =
                 quant_label(stem.trim_end_matches(".gguf")).or(facts.dominant_dtype);
             if facts.projector {
@@ -573,18 +586,17 @@ fn gguf_models_in(
                         None => "no `general.architecture`".to_string(),
                     });
                 }
+                // the loader's own rule, so what this reports is what a load beside them picks from
+                let model_base = facts.base_model.as_deref();
+                let any_match = sibling_projectors.iter().any(|(_, base)| {
+                    model_base.is_some_and(|model| {
+                        base.as_deref()
+                            .is_some_and(|base| base.eq_ignore_ascii_case(model))
+                    })
+                });
                 model.projectors = sibling_projectors
                     .iter()
-                    .filter(
-                        |(_, projector_base)| match (&facts.base_model, projector_base) {
-                            (Some(model_base), Some(projector_base)) => {
-                                model_base.eq_ignore_ascii_case(projector_base)
-                            }
-                            // without base models to compare, only a folder's one model owns its projectors
-                            (None, None) => sibling_models == 1,
-                            _ => false,
-                        },
-                    )
+                    .filter(|(_, base)| projector_belongs(model_base, base.as_deref(), any_match))
                     .map(|(path, _)| path.to_string_lossy().into_owned())
                     .collect();
             }
@@ -722,6 +734,12 @@ fn is_weight_file(path: &Path) -> bool {
     WEIGHT_EXTENSIONS
         .iter()
         .any(|extension| has_extension(path, extension))
+}
+
+// the discovery helpers read Hub-style relative names: a folder above the model must not count as a token
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map_or_else(String::new, |name| name.to_string_lossy().into_owned())
 }
 
 fn has_extension(path: &Path, extension: &str) -> bool {
@@ -864,6 +882,68 @@ mod tests {
     }
 
     #[test]
+    fn folder_names_gguf_repo_configs_and_base_model_less_models_scan_as_loads_see_them() {
+        let dir = tempfile::tempdir().unwrap();
+        // a folder named like an auxiliary file's marker above the model
+        let models = dir.path().join("lora").join("models");
+        fs::create_dir_all(&models).unwrap();
+        write_gguf(
+            &models.join("Delta-Q4_K_M.gguf"),
+            &[("general.architecture", text("llama"))],
+        );
+        write_gguf(
+            &models.join("mmproj-one-F16.gguf"),
+            &[
+                ("general.architecture", text("clip")),
+                base_model("acme/One"),
+            ],
+        );
+        write_gguf(
+            &models.join("mmproj-two-F16.gguf"),
+            &[("general.architecture", text("clip"))],
+        );
+        // a GGUF repository that ships a config: its quants, in subfolders, are the models
+        let repo = dir.path().join("repo");
+        fs::create_dir_all(repo.join("Q8_0")).unwrap();
+        fs::write(
+            repo.join("config.json"),
+            r#"{"architectures": ["LlamaForCausalLM"]}"#,
+        )
+        .unwrap();
+        write_gguf(
+            &repo.join("Q8_0").join("Epsilon-Q8_0.gguf"),
+            &[("general.architecture", text("llama"))],
+        );
+
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            hf_cache: false,
+            hf_cache_path: None,
+        });
+
+        let delta = by_name(&scan, "Delta-Q4_K_M.gguf");
+        assert_eq!(delta.kind, Some(InventoryKind::Text));
+        // naming no base model, it keeps every projector, as the loader does
+        assert_eq!(delta.projectors.len(), 2);
+        assert_eq!(
+            by_name(&scan, "Epsilon-Q8_0.gguf").kind,
+            Some(InventoryKind::Text)
+        );
+        assert!(
+            scan.models
+                .iter()
+                .all(|model| !model.path.ends_with("repo"))
+        );
+
+        // nextest runs each test in its own process, so the working directory is this test's
+        std::env::set_current_dir(&models).unwrap();
+        assert_eq!(
+            inspect_model(Path::new("Delta-Q4_K_M.gguf")).unwrap().kind,
+            Some(InventoryKind::Text)
+        );
+    }
+
+    #[test]
     fn hf_cache_snapshots_list_and_delete() {
         let hub = tempfile::tempdir().unwrap();
         let repo = hub.path().join("models--acme--tiny");
@@ -905,6 +985,15 @@ mod tests {
             );
         }
         assert!(delete_hf_cache_repo("acme/missing", Some(hub.path())).is_err());
+        let legacy = hub.path().join("models--gpt2");
+        fs::create_dir_all(legacy.join("snapshots")).unwrap();
+        assert_eq!(
+            delete_hf_cache_repo("gpt2", Some(hub.path()))
+                .unwrap()
+                .repo_id,
+            "gpt2"
+        );
+        assert!(!legacy.exists());
         let deleted = delete_hf_cache_repo("acme/tiny", Some(hub.path())).unwrap();
         assert!(deleted.freed_bytes >= 64);
         assert!(!repo.exists());

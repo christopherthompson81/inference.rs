@@ -8,7 +8,6 @@ use std::{
 use anyhow::{Context, Result, bail};
 use inference_core::{GGUF_MULTI_FILE_DELIMITER, ModelDType};
 use inference_gguf::base_model::source_hf_base_model_id;
-use inference_quant::GgufArchive;
 use regex::Regex;
 use tracing::info;
 use walkdir::WalkDir;
@@ -411,16 +410,12 @@ pub fn drop_foreign_local_projectors(
         .filter(|file| is_gguf(file) && is_projector(file))
         .map(|file| (split_key(file), local_base_model_id(&root.join(file))))
         .collect::<Vec<_>>();
-    let any_match = projectors.iter().any(|(_, base)| {
-        base.as_ref()
-            .is_some_and(|base| base.eq_ignore_ascii_case(&model_base))
-    });
+    let any_match = projectors
+        .iter()
+        .any(|(_, base)| same_base_model(base.as_deref(), &model_base));
     let dropped = projectors
         .into_iter()
-        .filter(|(_, base)| match base {
-            Some(base) => !base.eq_ignore_ascii_case(&model_base),
-            None => any_match,
-        })
+        .filter(|(_, base)| !projector_belongs(Some(&model_base), base.as_deref(), any_match))
         .map(|(key, _)| key)
         .collect::<BTreeSet<_>>();
     files
@@ -439,9 +434,29 @@ fn split_key(path: &str) -> String {
     parse_split(path).map_or_else(|| path.to_string(), |split| split.prefix)
 }
 
+fn same_base_model(projector_base: Option<&str>, model_base: &str) -> bool {
+    projector_base.is_some_and(|base| base.eq_ignore_ascii_case(model_base))
+}
+
+/// Whether a projector beside a model is one for it, by their GGUF base models (Hugging Face ids, compared without
+/// case): one that names another base model is not; one naming none is, unless another projector names the model's.
+/// A model naming no base model keeps every projector.
+pub(crate) fn projector_belongs(
+    model_base: Option<&str>,
+    projector_base: Option<&str>,
+    any_projector_matches: bool,
+) -> bool {
+    match (model_base, projector_base) {
+        (None, _) => true,
+        (Some(model_base), Some(_)) => same_base_model(projector_base, model_base),
+        (Some(_), None) => !any_projector_matches,
+    }
+}
+
 fn local_base_model_id(path: &Path) -> Option<String> {
-    let archive = GgufArchive::open_file(path).ok()?;
-    source_hf_base_model_id(&path.to_string_lossy(), archive.metadata())
+    let mut reader = std::io::BufReader::new(fs::File::open(path).ok()?);
+    let header = inference_tensor::quantized::gguf_file::Header::read_summary(&mut reader).ok()?;
+    source_hf_base_model_id(&path.to_string_lossy(), &header.metadata)
         .ok()
         .flatten()
 }

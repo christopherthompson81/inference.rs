@@ -359,6 +359,14 @@ pub fn hf_hub_cache_dir() -> Option<PathBuf> {
     dir
 }
 
+/// The cache loads and downloads use by default: the process-wide one a load set, else the environment's.
+pub fn default_hf_cache_dir() -> Option<PathBuf> {
+    crate::GLOBAL_HF_CACHE
+        .get()
+        .map(|cache| cache.path().clone())
+        .or_else(hf_hub_cache_dir)
+}
+
 /// Resolve the Hugging Face token file path.
 pub fn hf_token_path() -> Option<PathBuf> {
     hf_home_dir().map(|home| home.join("token"))

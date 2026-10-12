@@ -177,9 +177,9 @@ pub use pipeline::Starcoder2Loader;
 pub use pipeline::get_device_layers_for_loader;
 pub use pipeline::hf::build_api_with_cache;
 pub use pipeline::hf::{
-    FileDownloadProgress, HF_HUB_OFFLINE_ENV, download_repo_files, hf_home_dir, hf_hub_cache_dir,
-    hf_token_path, is_hf_hub_offline, list_model_files, probe_hf_repo_files, read_model_file_range,
-    try_get_model_file,
+    FileDownloadProgress, HF_HUB_OFFLINE_ENV, default_hf_cache_dir, download_repo_files,
+    hf_home_dir, hf_hub_cache_dir, hf_token_path, is_hf_hub_offline, list_model_files,
+    probe_hf_repo_files, read_model_file_range, try_get_model_file,
 };
 // Named only by the ModelSelected schema attributes.
 #[cfg(feature = "utoipa")]

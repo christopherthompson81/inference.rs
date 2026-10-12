@@ -480,9 +480,7 @@ impl ValueType {
     }
 }
 
-/// Skips past a long array of fixed-size values and returns where it is; any other value is left unread.
-// Seeks past an array longer than SUMMARY_ARRAY_ELEMENTS of fixed-size values or strings; false leaves the reader
-// where it was for any other value.
+// Seeks past an array of over SUMMARY_ARRAY_ELEMENTS fixed-size values or strings; false leaves any other unread.
 fn skip_long_array<R: std::io::Seek + std::io::Read>(
     reader: &mut R,
     value_type: ValueType,
@@ -520,6 +518,7 @@ fn skip_long_array<R: std::io::Seek + std::io::Read>(
     Ok(true)
 }
 
+/// Skips past a long array of fixed-size values and returns where it is; any other value is left unread.
 fn large_array<R: std::io::Seek + std::io::Read>(
     reader: &mut R,
     value_type: ValueType,
