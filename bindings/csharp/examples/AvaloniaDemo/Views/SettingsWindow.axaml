@@ -7,6 +7,8 @@
         Width="640" Height="760" MinWidth="520" MinHeight="420"
         WindowStartupLocation="CenterOwner">
   <DockPanel Margin="12">
+    <SelectableTextBlock DockPanel.Dock="Bottom" Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}"
+                         Margin="0,8,0,0" />
     <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8" Margin="0,10,0,0">
       <TextBlock Classes="muted" VerticalAlignment="Center" Text="{Binding SettingsFile}" TextTrimming="CharacterEllipsis" />
       <Button Grid.Column="1" Content="Cancel" Click="OnCancel" />

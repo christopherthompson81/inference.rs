@@ -29,6 +29,12 @@ public sealed partial class SettingsViewModel : ObservableObject
     [ObservableProperty]
     public partial string HfCachePath { get; set; }
 
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasError))]
+    public partial string Error { get; set; } = "";
+
+    public bool HasError => Error.Length > 0;
+
     [RelayCommand]
     private async Task AddFolderAsync()
     {
@@ -44,12 +50,21 @@ public sealed partial class SettingsViewModel : ObservableObject
         if (await _files.OpenFolderAsync("Hugging Face cache (the hub directory)") is { } folder) HfCachePath = folder;
     }
 
-    /// <summary>Writes the edited settings and returns them, now current.</summary>
-    public AppSettings Save()
+    /// <summary>Writes the edited settings and returns them, now current; null, with the reason in
+    /// <see cref="Error"/>, when the file cannot be written.</summary>
+    public AppSettings? Save()
     {
         Settings.ModelFolders = [.. Folders];
         Settings.HfCachePath = HfCachePath.Trim();
-        SettingsStore.Save(Settings);
-        return Settings;
+        try
+        {
+            SettingsStore.Save(Settings);
+            return Settings;
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            Error = $"Could not save {SettingsStore.FilePath}: {error.Message}";
+            return null;
+        }
     }
 }

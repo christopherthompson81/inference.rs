@@ -9,7 +9,10 @@ public partial class SettingsWindow : Window
 {
     public SettingsWindow() => InitializeComponent();
 
-    private void OnSave(object? sender, RoutedEventArgs e) => Close(((SettingsViewModel)DataContext!).Save());
+    private void OnSave(object? sender, RoutedEventArgs e)
+    {
+        if (((SettingsViewModel)DataContext!).Save() is { } saved) Close(saved);
+    }
 
     private void OnCancel(object? sender, RoutedEventArgs e) => Close(null);
 }

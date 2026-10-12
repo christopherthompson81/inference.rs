@@ -94,8 +94,7 @@
         </WrapPanel>
         <Border Classes="card" IsVisible="{Binding IsConfirmingDelete}">
           <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
-            <TextBlock VerticalAlignment="Center" TextWrapping="Wrap"
-                       Text="Delete this model from disk? A cached repository goes with all its files and revisions." />
+            <TextBlock VerticalAlignment="Center" TextWrapping="Wrap" Text="{Binding DeleteDescription}" />
             <Button Grid.Column="1" Classes="accent" Content="Delete" Command="{Binding ConfirmDeleteCommand}" />
             <Button Grid.Column="2" Content="Keep" Command="{Binding KeepModelCommand}" />
           </Grid>

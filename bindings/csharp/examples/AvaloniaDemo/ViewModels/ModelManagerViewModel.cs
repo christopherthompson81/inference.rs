@@ -112,11 +112,20 @@ public sealed class ModelEntryViewModel
 
     public string Details => string.Join(", ", new[] { Architecture, Loader, SizeLabel, Quantization }.Where(part => part is { Length: > 0 }));
 
-    /// <summary>What a slot loads: the repository id for a cached checkpoint, the file or directory otherwise.</summary>
-    public string LoadSource => InHfCache && Format is not ("gguf" or "nemo") && RepoId is { } repo ? repo : Path;
+    /// <summary>What a slot loads: a cached checkpoint's repository id when it is in the cache loads look in by
+    /// default (the speech and image specs take no cache path), else the file or directory itself.</summary>
+    public string LoadSource =>
+        InHfCache && Format is not ("gguf" or "nemo") && RepoId is { } repo && SettingsStore.Current.HfCacheOrNull is null
+            ? repo
+            : Path;
 
-    /// <summary>Cache repositories delete through the bindings; a local GGUF or .nemo is a file to remove.</summary>
-    public bool CanDelete => InHfCache ? RepoId is not null : Format is "gguf" or "nemo";
+    /// <summary>Cache repositories delete through the bindings; a local GGUF or .nemo is files to remove.</summary>
+    public bool CanDelete => InHfCache ? RepoId is not null : Files.Count > 0;
+
+    /// <summary>What deleting it removes: a cached entry goes with its whole repository.</summary>
+    public string DeleteDescription => InHfCache
+        ? $"Delete {RepoId} from the Hugging Face cache? Every file and revision of the repository goes, not only this one."
+        : $"Delete {string.Join(", ", Files.Select(System.IO.Path.GetFileName))} from disk?";
 
     public bool HasProjectors => Projectors.Count > 0;
 
@@ -173,6 +182,7 @@ public sealed partial class ModelManagerViewModel : ObservableObject, IDisposabl
 
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(HasSelection))]
+    [NotifyPropertyChangedFor(nameof(DeleteDescription))]
     [NotifyCanExecuteChangedFor(nameof(DeleteCommand))]
     [NotifyCanExecuteChangedFor(nameof(UseCommand))]
     public partial ModelEntryViewModel? Selected { get; set; }
@@ -180,6 +190,8 @@ public sealed partial class ModelManagerViewModel : ObservableObject, IDisposabl
     partial void OnSelectedChanged(ModelEntryViewModel? value) => IsConfirmingDelete = false;
 
     public bool HasSelection => Selected is not null;
+
+    public string DeleteDescription => Selected?.DeleteDescription ?? "";
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(RefreshCommand))]

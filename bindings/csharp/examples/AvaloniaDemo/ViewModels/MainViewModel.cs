@@ -101,7 +101,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             SettingsStore.Save(settings);
         }
-        catch (IOException)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             // a read-only config directory loses the session, not the shutdown
         }
