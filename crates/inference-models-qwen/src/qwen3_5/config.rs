@@ -5,7 +5,7 @@ use crate::layers::{Activation, YarnRopeConfig};
 use crate::serde_default_fn;
 
 // Re-export vision config from qwen3_vl
-pub use crate::qwen3_vl::config::VisionConfig;
+pub use crate::vision::qwen3_vl::VisionConfig;
 
 serde_default_fn!(usize, default_full_attn_interval, 4);
 serde_default_fn!(usize, default_conv_kernel, 4);

@@ -1,6 +1,7 @@
-//! Qwen3-VL's text config and its shared-decoder spec, here so HiDream-O1's denoiser reuses the text stack.
+//! Qwen3-VL's text config, its shared-decoder spec and deepstack injection, here so HiDream-O1's denoiser reuses them.
 
 use inference_quant::QuantizedConfig;
+use inference_tensor::{DType, Result, Tensor};
 
 use super::{DecoderSpec, MLP, MoeRouting, MoeSpec, NormKind, QkNorm, RopeKind};
 use crate::layers::Activation;
@@ -119,4 +120,47 @@ impl TextConfig {
             ..Default::default()
         }
     }
+}
+
+/// transformers' `_deepstack_process`: `hidden_states[visual_pos_masks, :] += visual_embeds` on a copy.
+pub fn deepstack_process(
+    hidden_states: Tensor,
+    visual_pos_masks: &Tensor,
+    visual_embeds: &Tensor,
+) -> Result<Tensor> {
+    let device = hidden_states.device();
+    let dtype = hidden_states.dtype();
+    let visual_embeds = visual_embeds.to_device(device)?.to_dtype(dtype)?;
+
+    let (batch, seq, hidden) = hidden_states.dims3()?;
+    let total = batch * seq;
+    let hidden_flat = hidden_states.reshape((total, hidden))?;
+
+    let mask_flat: Vec<f32> = visual_pos_masks
+        .to_device(device)?
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1()?;
+    let indices: Vec<u32> = mask_flat
+        .iter()
+        .enumerate()
+        .filter(|&(_, &v)| v > 0.0)
+        .map(|(i, _)| u32::try_from(i).expect("token index fits u32"))
+        .collect();
+
+    if indices.is_empty() {
+        return Ok(hidden_states);
+    }
+    if indices.len() != visual_embeds.dim(0)? {
+        inference_tensor::bail!(
+            "Mismatch between DeepStack visual embeds ({}) and mask positions ({})",
+            visual_embeds.dim(0)?,
+            indices.len()
+        );
+    }
+
+    let idx = Tensor::from_vec(indices, (visual_embeds.dim(0)?,), device)?;
+    let idx_expanded = idx.unsqueeze(1)?.repeat((1, hidden))?;
+    let result = hidden_flat.scatter_add(&idx_expanded, &visual_embeds, 0)?;
+    result.reshape((batch, seq, hidden))
 }

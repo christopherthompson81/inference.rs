@@ -7,8 +7,9 @@ use crate::{
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
     },
-    qwen3_vl::{VisualEncoder, insert_current_visual_outputs, vision::Qwen3VLVisionModel},
+    qwen3_vl::{VisualEncoder, insert_current_visual_outputs},
     vision::multimodal_layout::{MultimodalEncoderOutputs, PackedMultimodalLayout},
+    vision::qwen3_vl::Qwen3VLVisionModel,
 };
 
 pub struct PackedVisualInput<'a> {

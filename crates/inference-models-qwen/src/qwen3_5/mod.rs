@@ -22,8 +22,9 @@ use crate::{
         AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
         encoder_cache::{CacheModality, EncoderCacheManager},
     },
-    qwen3_vl::{VisualEncoder, concatenate_visual_items, vision::Qwen3VLVisionModel},
+    qwen3_vl::{VisualEncoder, concatenate_visual_items},
     vision::multimodal_layout::PackedMultimodalLayout,
+    vision::qwen3_vl::Qwen3VLVisionModel,
 };
 
 pub mod config;

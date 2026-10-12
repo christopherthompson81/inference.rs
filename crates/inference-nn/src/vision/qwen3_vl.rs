@@ -1,3 +1,5 @@
+//! Qwen3-VL's vision tower with its deepstack mergers, shared by Qwen3-VL, Qwen3.5 and HiDream-O1's reference images.
+
 use crate::attention::FlashParams;
 use std::f64;
 
@@ -5,13 +7,61 @@ use inference_quant::{QuantizedConfig, ShardedVarBuilder};
 use inference_tensor::nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module};
 use inference_tensor::{D, DType, Device, IndexOp, Result, Tensor};
 
+use crate::serde_default_fn;
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{self, Activation, Conv3dConfig, Conv3dNoBias, Sdpa},
     utils::unvarbuilder::UnVarBuilder,
 };
 
-use super::config::VisionConfig;
+serde_default_fn!(
+    Activation,
+    default_vision_hidden_act,
+    Activation::GeluPytorchTanh
+);
+serde_default_fn!(usize, default_in_channels, 3);
+serde_default_fn!(usize, default_depth, 27);
+serde_default_fn!(usize, default_hidden_size, 1152);
+serde_default_fn!(usize, default_out_hidden_size, 3584);
+serde_default_fn!(usize, default_intermediate_size, 4304);
+serde_default_fn!(usize, default_num_heads, 16);
+serde_default_fn!(usize, default_patch_size, 16);
+serde_default_fn!(usize, default_spatial_merge_size, 2);
+serde_default_fn!(usize, default_temporal_patch_size, 2);
+serde_default_fn!(usize, default_num_position_embeddings, 2304);
+serde_default_fn!(
+    Vec<usize>,
+    default_deepstack_visual_indexes,
+    vec![8, 16, 24]
+);
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct VisionConfig {
+    #[serde(default = "default_depth")]
+    pub depth: usize,
+    #[serde(default = "default_hidden_size")]
+    pub hidden_size: usize,
+    #[serde(default = "default_out_hidden_size")]
+    pub out_hidden_size: usize,
+    #[serde(default = "default_vision_hidden_act")]
+    pub hidden_act: Activation,
+    #[serde(default = "default_intermediate_size")]
+    pub intermediate_size: usize,
+    #[serde(default = "default_num_heads")]
+    pub num_heads: usize,
+    #[serde(default = "default_in_channels", alias = "in_channels")]
+    pub in_chans: usize,
+    #[serde(default = "default_patch_size")]
+    pub patch_size: usize,
+    #[serde(default = "default_spatial_merge_size")]
+    pub spatial_merge_size: usize,
+    #[serde(default = "default_temporal_patch_size")]
+    pub temporal_patch_size: usize,
+    #[serde(default = "default_num_position_embeddings")]
+    pub num_position_embeddings: usize,
+    #[serde(default = "default_deepstack_visual_indexes")]
+    pub deepstack_visual_indexes: Vec<usize>,
+}
 
 struct PatchEmbed {
     proj: Conv3dNoBias,
@@ -667,5 +717,16 @@ impl Qwen3VLVisionModel {
         }
 
         uvb.to_safetensors()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn vision_config_accepts_transformers_in_channels() {
+        let config: VisionConfig = serde_json::from_str(r#"{"in_channels": 5}"#).unwrap();
+        assert_eq!(config.in_chans, 5);
     }
 }
