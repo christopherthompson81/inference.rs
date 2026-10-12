@@ -33,12 +33,24 @@ class HostTool:
     handler: Callable[[HostToolCall], str]
 
 
+@dataclass(frozen=True)
+class LoadProgress:
+    """A model-load stage's progress: `done` of `total` `unit`s ("items" or "bytes")."""
+
+    stage: str
+    done: int
+    total: int
+    unit: str
+
+
 @dataclass
 class HostCallbacks:
-    """Host functions fixed when an engine loads; `search` answers with a JSON array of {title, description, url, content}."""
+    """Host functions fixed when an engine loads: `search` returns a JSON array of {title, description, url, content};
+    `progress` hears every model load in the process while the engine lives, on the loading threads."""
 
     tools: list = field(default_factory=list)
     search: Callable[[str], str] | None = None
+    progress: Callable[[LoadProgress], None] | None = None
 
 
 # An id, not a pointer to a Python object: requests still finishing may call a callback after the engine is freed,
@@ -119,6 +131,18 @@ def _search(user_data, query, query_len, result):
         _answer(result, handler(ctypes.string_at(query, query_len).decode("utf-8")))
     except BaseException as error:  # noqa: BLE001 - a handler's failure reaches the model, not the engine
         _fail(result, error)
+
+
+@_native.PROGRESS_CALLBACK
+def _progress(user_data, event, event_len):
+    try:
+        handler = _find(user_data)
+        if handler is None:
+            return
+        data = json.loads(ctypes.string_at(event, event_len).decode("utf-8"))
+        handler(LoadProgress(data["stage"], data["done"], data["total"], data["unit"]))
+    except BaseException:  # noqa: BLE001 - nothing may raise through a C callback; the update is dropped
+        return
 
 
 @_native.LOGITS_PROCESSOR_CALLBACK
@@ -235,6 +259,9 @@ class Registration:
             search_id = _register(callbacks.search) if callbacks.search is not None else 0
             if search_id:
                 self.ids.append(search_id)
+            progress_id = _register(callbacks.progress) if callbacks.progress is not None else 0
+            if progress_id:
+                self.ids.append(progress_id)
         except BaseException:
             unregister(self.ids)
             raise
@@ -244,4 +271,6 @@ class Registration:
             len(callbacks.tools),
             _search if search_id else _native.SEARCH_CALLBACK(),
             search_id or None,
+            _progress if progress_id else _native.PROGRESS_CALLBACK(),
+            progress_id or None,
         )

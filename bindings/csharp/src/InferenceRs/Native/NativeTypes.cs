@@ -83,4 +83,6 @@ internal unsafe struct NativeHostCallbacks
     public nuint ToolCount;
     public delegate* unmanaged[Cdecl]<IntPtr, byte*, nuint, IntPtr, void> Search;
     public IntPtr SearchUserData;
+    public delegate* unmanaged[Cdecl]<IntPtr, byte*, nuint, void> Progress;
+    public IntPtr ProgressUserData;
 }

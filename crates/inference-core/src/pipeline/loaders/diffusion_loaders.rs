@@ -563,14 +563,11 @@ pub fn write_hidream_gguf(
         local.to_path_buf()
     } else {
         let revision = revision.unwrap_or_else(|| DEFAULT_REVISION.to_string());
-        let api = hf_hub::api::sync::ApiBuilder::from_env()
-            .with_token(crate::pipeline::tokens::get_token(token_source)?)
-            .build()?
-            .repo(hf_hub::Repo::with_revision(
-                model_id.to_string(),
-                hf_hub::RepoType::Model,
-                revision.clone(),
-            ));
+        let api = hf::build_api(token_source, false)?.repo(hf_hub::Repo::with_revision(
+            model_id.to_string(),
+            hf_hub::RepoType::Model,
+            revision.clone(),
+        ));
         // the loader's own fetch, offline cache included; the hub cache keeps a revision's files in one directory
         HiDreamO1Loader {
             variant: hidream::Variant::Full,

@@ -224,6 +224,16 @@ class EngineTest(unittest.TestCase):
             ir.JsonEngine(spec(self.model), bad)
         self.assertEqual(refused.exception.status, ir.Status.INVALID_ARGUMENT)
 
+    def test_a_load_reports_each_stage_from_none_to_all(self):
+        events = []
+        with ir.JsonEngine(spec(self.model), ir.HostCallbacks(progress=events.append)):
+            pass
+        self.assertTrue(events, "the load reported nothing")
+        for stage in {event.stage for event in events}:
+            of_stage = [event for event in events if event.stage == stage]
+            self.assertEqual(of_stage[0].done, 0, of_stage)
+            self.assertEqual((of_stage[-1].done, of_stage[-1].unit), (of_stage[-1].total, "items"), of_stage)
+
 
 # the tiny Parakeet the tiny_checkpoint example writes beside the PaddleOCR-VL checkpoint
 PARAKEET_DIR = "parakeet"

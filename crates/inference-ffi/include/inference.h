@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 23
+#define INFERENCE_ABI_VERSION_PATCH 24
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -226,12 +226,23 @@ typedef struct inference_host_tool {
     void *user_data;
 } inference_host_tool;
 
-/* tools may be NULL when tool_count is 0; search may be NULL to keep the built-in search. */
+/* Receives model-load progress as JSON {"stage", "done", "total", "unit"}: "stage" names the step ("Loading repeating
+ * layers", "Loading model-00001-of-00002.safetensors", "Downloading config.json"), "done" of "total" counts "unit"s
+ * ("items" or "bytes"). Each stage reports at its start (done 0), at each whole percent and when its last unit is done;
+ * stages may run at once (a model's shards load in parallel), and a name may recur (a vision tower, then the text
+ * stack). It hears every model load in the process while the engine lives: its own load, models it adds or reloads
+ * (including on demand), and other engines' loads. It runs on the loading threads under the host callback rules above;
+ * event is valid only during the call. */
+typedef void (*inference_progress_callback)(void *user_data, const char *event, size_t event_len);
+
+/* tools may be NULL when tool_count is 0; search may be NULL to keep the built-in search; progress may be NULL. */
 typedef struct inference_host_callbacks {
     const inference_host_tool *tools;
     size_t tool_count;
     inference_search_callback search;
     void *search_user_data;
+    inference_progress_callback progress;
+    void *progress_user_data;
 } inference_host_callbacks;
 
 /* inference_engine_load with host callbacks; callbacks may be NULL. A malformed tool is

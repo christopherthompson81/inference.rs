@@ -9,7 +9,6 @@ use super::{
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{self, WorkerTransferData, use_ring};
 use crate::pipeline::LoadOptions;
-use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
@@ -21,7 +20,7 @@ use crate::utils::{
 use crate::{DeviceMapSetting, Pipeline};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use hf_hub::{Repo, RepoType};
 use image::{DynamicImage, RgbImage};
 use inference_models_diffusion::{gguf, hidream};
 use inference_quant::IsqType;
@@ -93,10 +92,7 @@ impl Loader for DiffusionLoader {
         let silent = options.silent;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let paths: anyhow::Result<Box<dyn ModelPaths>> = {
-            let api = ApiBuilder::from_env()
-                .with_progress(!silent)
-                .with_token(get_token(&token_source)?)
-                .build()?;
+            let api = crate::pipeline::hf::build_api(&token_source, !silent)?;
             let revision = revision.unwrap_or("main".to_string());
             let api = api.repo(Repo::with_revision(
                 self.model_id.clone(),

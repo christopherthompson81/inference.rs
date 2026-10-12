@@ -11,7 +11,7 @@ use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, safetensors::Mmaped
 use inference_tensor::{DType, Device, Result, Tensor, pickle::PthTensors};
 use regex::Regex;
 
-use crate::utils::progress::{NiceProgressBar, new_multi_progress};
+use crate::utils::progress::{NiceProgressBar, multi_progress_unless_silent};
 use indicatif::MultiProgress;
 
 const INFERENCE_RS_NO_MMAP: &str = "INFERENCE_RS_NO_MMAP";
@@ -115,7 +115,7 @@ fn load_safetensors(
     }
 
     // One MultiProgress so the per-file bars from the loader threads stack instead of overwriting each other.
-    let progress = (!silent).then(new_multi_progress);
+    let progress = multi_progress_unless_silent(silent);
     let make_dummy: Arc<dyn Fn(&str) -> bool + Send + Sync> = match make_dummy_regexes.clone() {
         Some(regexes) => Arc::new(move |key| regexes.iter().any(|r| r.is_match(key))),
         None => Arc::new(|_| false),
@@ -217,7 +217,12 @@ fn load_tensors_from_path(load: TensorLoad<'_>) -> Result<HashMap<String, Tensor
     if !iter.is_empty() {
         let pairs: Box<dyn Iterator<Item = (String, String)>> = match &progress {
             Some(multi) => {
-                Box::new(NiceProgressBar::<_, 'b'>(iter.into_iter(), "Loading", multi).into_iter())
+                // each shard loads on its own thread, so each is a stage of its own
+                let stage = format!(
+                    "Loading {}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                );
+                Box::new(NiceProgressBar::<_, 'b', _>(iter.into_iter(), stage, multi).into_iter())
             }
             None => Box::new(iter.into_iter()),
         };

@@ -108,6 +108,7 @@ async fn calling_both(
     let callbacks = EngineCallbacks {
         tools,
         search: None,
+        progress: None,
     };
     let (dir, engine) = tiny_engine_with(callbacks).await?;
     script(

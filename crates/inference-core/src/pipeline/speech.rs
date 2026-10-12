@@ -8,7 +8,6 @@ use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{WorkerTransferData, use_ring};
 use crate::paged_attention::PagedAttentionMeta;
 use crate::pipeline::LoadOptions;
-use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
@@ -18,7 +17,7 @@ use crate::utils::varbuilder_utils::from_mmaped_safetensors;
 use crate::{DeviceMapSetting, MessageContent, Pipeline, SpeechGenerationConfig, distributed};
 use anyhow::Result;
 use futures::future::BoxFuture;
-use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use hf_hub::{Repo, RepoType};
 use indexmap::IndexMap;
 use inference_models_speech::kokoro::{GGUF_EXTENSION, KokoroConfig, KokoroTts, is_kokoro_gguf};
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput, SpeechOptions};
@@ -266,10 +265,7 @@ impl Loader for SpeechLoader {
         let arch = match self.arch {
             Some(arch) => arch,
             None => {
-                let api = ApiBuilder::new()
-                    .with_progress(!silent)
-                    .with_token(get_token(&token_source)?)
-                    .build()?;
+                let api = crate::pipeline::hf::build_api(&token_source, !silent)?;
                 let rev = revision.clone().unwrap_or_else(|| "main".to_string());
                 let api = api.repo(Repo::with_revision(
                     self.model_id.clone(),
@@ -295,10 +291,7 @@ impl Loader for SpeechLoader {
 
             // Main model
             let config = {
-                let api = ApiBuilder::new()
-                    .with_progress(!silent)
-                    .with_token(get_token(&token_source)?)
-                    .build()?;
+                let api = crate::pipeline::hf::build_api(&token_source, !silent)?;
                 let revision = revision.clone().unwrap_or("main".to_string());
                 let api = api.repo(Repo::with_revision(
                     self.model_id.to_string(),
@@ -317,10 +310,7 @@ impl Loader for SpeechLoader {
 
             // DAC model
             {
-                let api = ApiBuilder::new()
-                    .with_progress(!silent)
-                    .with_token(get_token(&token_source)?)
-                    .build()?;
+                let api = crate::pipeline::hf::build_api(&token_source, !silent)?;
                 let revision = revision.unwrap_or("main".to_string());
 
                 // Apply default here
@@ -516,15 +506,11 @@ fn kokoro_paths(
     silent: bool,
 ) -> Result<SpeechModelPaths> {
     let revision = revision.unwrap_or_else(|| "main".to_string());
-    let api = ApiBuilder::new()
-        .with_progress(!silent)
-        .with_token(get_token(token_source)?)
-        .build()?
-        .repo(Repo::with_revision(
-            model_id.to_string(),
-            RepoType::Model,
-            revision.clone(),
-        ));
+    let api = crate::pipeline::hf::build_api(token_source, !silent)?.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        revision.clone(),
+    ));
     let id = std::path::Path::new(model_id);
     let files: Vec<String> = if id.is_dir() {
         let mut files = Vec::new();

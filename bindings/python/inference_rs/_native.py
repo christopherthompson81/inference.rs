@@ -52,6 +52,7 @@ class SkillFile(Structure):
 
 TOOL_CALLBACK = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p, c_size_t, c_void_p, c_size_t, c_void_p)
 SEARCH_CALLBACK = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)
+PROGRESS_CALLBACK = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t)
 LOGITS_PROCESSOR_CALLBACK = CFUNCTYPE(c_int32, c_void_p, POINTER(c_float), c_size_t, POINTER(c_uint32), c_size_t)
 
 
@@ -70,6 +71,8 @@ class HostCallbacks(Structure):
         ("tool_count", c_size_t),
         ("search", SEARCH_CALLBACK),
         ("search_user_data", c_void_p),
+        ("progress", PROGRESS_CALLBACK),
+        ("progress_user_data", c_void_p),
     ]
 
 
@@ -78,7 +81,7 @@ out = POINTER(c_void_p)
 buffer = (c_char_p, c_size_t)
 
 # BEGIN GENERATED from inference.h by bindings/scripts/generate_native.py
-ABI_VERSION = (0 << 16) | (0 << 8) | 23
+ABI_VERSION = (0 << 16) | (0 << 8) | 24
 
 # name: (restype, argtypes)
 SIGNATURES = {
