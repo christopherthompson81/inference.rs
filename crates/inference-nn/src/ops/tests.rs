@@ -851,6 +851,137 @@ fn cuda_resident_topk_sampling_matches_filtered_reference() -> inference_tensor:
 }
 
 #[cfg(feature = "cuda")]
+fn nucleus_reference_weights(
+    logits: &[f32],
+    inverse_temperature: f32,
+    top_p: f32,
+    min_p: f32,
+) -> Vec<f32> {
+    let mut order = (0..logits.len()).collect::<Vec<_>>();
+    order.sort_unstable_by(|&left, &right| logits[right].partial_cmp(&logits[left]).unwrap());
+    let scaled_max = logits[order[0]] * inverse_temperature;
+    let mut weights = logits
+        .iter()
+        .map(|logit| (logit * inverse_temperature - scaled_max).exp())
+        .collect::<Vec<_>>();
+    if top_p > 0.0 && top_p < 1.0 {
+        let cutoff =
+            f64::from(top_p) * weights.iter().map(|weight| f64::from(*weight)).sum::<f64>();
+        let mut cumulative = 0.0f64;
+        for &index in &order {
+            if cumulative >= cutoff {
+                weights[index] = 0.0;
+            } else {
+                cumulative += f64::from(weights[index]);
+            }
+        }
+    }
+    if min_p > 0.0 && min_p < 1.0 {
+        for weight in &mut weights {
+            if min_p >= *weight {
+                *weight = 0.0;
+            }
+        }
+    }
+    weights
+}
+
+#[cfg(feature = "cuda")]
+#[test]
+fn cuda_resident_nucleus_sampling_matches_full_vocab_reference() -> inference_tensor::Result<()> {
+    const VOCAB: usize = 20_000;
+    const CDF_TOLERANCE: f64 = 1e-3;
+
+    let device = Device::new_cuda(0)?;
+    // (logit scale, inverse temperature, top-k, top-p, min-p, uniform); scale 2e-5 makes a nucleus far wider than 128
+    let cases = [
+        (0.05f32, 1.0f32, 0usize, 0.9f32, 0.0f32, 0.42f32),
+        (2e-5, 1.0, 0, 0.9, 0.0, 0.73),
+        (2e-5, 0.8, 0, 0.0, 0.5, 0.11),
+        (2e-5, 1.3, 0, 0.6, 0.7, 0.95),
+        (0.05, 0.7, 0, 0.0, 0.05, 0.5),
+        (0.002, 1.0, 40, 0.95, 0.0, 0.3),
+        (2e-5, 1.0, 0, 0.9, 0.0, 0.05),
+    ];
+    // The last row ascends, so tokens outside the nucleus come first, and masks every seventh to -inf.
+    let masked_row = cases.len() - 1;
+    let mut rows = Vec::with_capacity(cases.len() * VOCAB);
+    for (row, (scale, ..)) in cases.iter().enumerate() {
+        rows.extend((0..VOCAB).map(|column| {
+            if row == masked_row && column % 7 == 0 {
+                f32::NEG_INFINITY
+            } else if row == masked_row {
+                column as f32 * scale
+            } else {
+                ((column * 7919 + row * 131) % VOCAB) as f32 * scale
+            }
+        }));
+    }
+    let params = cases
+        .iter()
+        .map(|&(_, inverse_temperature, top_k, top_p, min_p, uniform)| {
+            super::CudaTopKSamplingParams {
+                inverse_temperature,
+                top_k,
+                top_p,
+                min_p,
+                uniform,
+            }
+        })
+        .collect::<Vec<_>>();
+    let logits = Tensor::from_vec(rows.clone(), (cases.len(), VOCAB), &device)?;
+    let mut workspace = None;
+    let submission = super::cuda_topk_sampling_submit_batched(&logits, &params, &mut workspace)?;
+    let actual =
+        super::cuda_topk_sampling_submission_complete(workspace.as_mut().unwrap(), &submission)?
+            .token_ids()
+            .to_vec();
+
+    let mut wide_rows = 0;
+    for (row, &(_, inverse_temperature, top_k, top_p, min_p, uniform)) in cases.iter().enumerate() {
+        let row_logits = &rows[row * VOCAB..(row + 1) * VOCAB];
+        let token = actual[row] as usize;
+        let reference_k = if top_k == 0 { VOCAB } else { top_k };
+        let weights = nucleus_reference_weights(row_logits, inverse_temperature, top_p, min_p);
+        let kept = weights.iter().filter(|weight| **weight > 0.0).count();
+        if top_k > 0 || kept <= 128 {
+            let expected = topk_sampling_reference(
+                row_logits,
+                inverse_temperature,
+                reference_k,
+                top_p,
+                min_p,
+                uniform,
+            );
+            assert_eq!(token as u32, expected, "row {row}");
+            continue;
+        }
+        wide_rows += 1;
+        assert!(
+            weights[token] > 0.0,
+            "row {row}: token {token} is outside the nucleus"
+        );
+        let total = weights.iter().map(|weight| f64::from(*weight)).sum::<f64>();
+        let before = weights[..token]
+            .iter()
+            .map(|weight| f64::from(*weight))
+            .sum::<f64>()
+            / total;
+        let after = before + f64::from(weights[token]) / total;
+        let uniform = f64::from(uniform);
+        assert!(
+            before <= uniform + CDF_TOLERANCE && after >= uniform - CDF_TOLERANCE,
+            "row {row}: token {token} covers [{before}, {after}) but the draw was {uniform}"
+        );
+    }
+    assert_eq!(
+        wide_rows, 4,
+        "rows 1-3 and the masked row have nuclei wider than the ranked top-k"
+    );
+    Ok(())
+}
+
+#[cfg(feature = "cuda")]
 #[test]
 fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> inference_tensor::Result<()> {
     const BATCH: usize = 2;

@@ -767,13 +767,41 @@ impl Qwen3_5TextModel {
             .collect::<Vec<_>>();
         let mut tokens: Vec<Vec<u32>> = vec![Vec::with_capacity(n_predict); batch];
         let mut logits = Vec::with_capacity(n_predict);
+        #[cfg(feature = "cuda")]
+        let cuda_sampler = crate::speculative::proposer::CudaDraftSampler::new(
+            ctx.sequences,
+            n_predict,
+            hidden.device(),
+            &ctx.rng,
+        )?;
+        #[cfg(feature = "cuda")]
+        let mut cuda_samples = Vec::with_capacity(n_predict);
         for step in 0..n_predict {
             let step_logits = self.draft_logits(&hidden)?;
-            let drafts = sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+            #[cfg(feature = "cuda")]
+            let drafts = match &cuda_sampler {
+                Some(sampler) => {
+                    let (drafts, sample) = sampler.sample(step, &step_logits)?;
+                    cuda_samples.push(sample);
+                    drafts
+                }
+                None => {
+                    let drafts =
+                        sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+                    logits.push(step_logits);
+                    drafts
+                }
+            };
+            #[cfg(not(feature = "cuda"))]
+            let drafts = {
+                let drafts =
+                    sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
+                logits.push(step_logits);
+                drafts
+            };
             for (i, draft) in drafts.iter().enumerate() {
                 tokens[i].push(*draft);
             }
-            logits.push(step_logits);
             if step + 1 == n_predict {
                 break;
             }
@@ -799,6 +827,32 @@ impl Qwen3_5TextModel {
             hidden = self.drafter_forward(head, &chained, &hidden, &kv_cache, paged_meta)?;
         }
 
+        #[cfg(feature = "cuda")]
+        if !cuda_samples.is_empty() {
+            // [batch, n_predict, k] -> per sequence [n_predict, k]
+            let ids = Tensor::stack(
+                &cuda_samples
+                    .iter()
+                    .map(|sample| &sample.ids)
+                    .collect::<Vec<_>>(),
+                1,
+            )?;
+            let probs = Tensor::stack(
+                &cuda_samples
+                    .iter()
+                    .map(|sample| &sample.probs)
+                    .collect::<Vec<_>>(),
+                1,
+            )?;
+            let proposals = tokens
+                .into_iter()
+                .enumerate()
+                .map(|(row, tokens)| {
+                    SpeculativeProposal::with_sparse_probs(tokens, ids.get(row)?, probs.get(row)?)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Some(SpeculativeProposalBatch::new(proposals)));
+        }
         // [n_predict, batch, vocab] -> per sequence [n_predict, vocab]
         let logits = Tensor::stack(&logits, 1)?;
         let proposals = tokens

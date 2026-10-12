@@ -305,7 +305,8 @@ fn sparse_rejection_candidate<'a>(
     let [_, _, vocab] = *logits.dims() else {
         unreachable!("sparse rejection logits were normalized to rank three")
     };
-    if plan.top_k > 0 && !matches!(logits.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+    if plan.uses_ranked_target() && !matches!(logits.dtype(), DType::BF16 | DType::F16 | DType::F32)
+    {
         return Ok(None);
     }
     if !logits.device().is_cuda()
@@ -463,12 +464,12 @@ fn sparse_rejection_same_group(
     candidate: &SparseRejectionCandidate<'_>,
     seed: &SparseRejectionCandidate<'_>,
 ) -> bool {
-    let top_k_mode = seed.plan.top_k > 0;
+    let top_k_mode = seed.plan.uses_ranked_target();
     candidate.drafts == seed.drafts
         && candidate.vocab == seed.vocab
         && candidate.distribution.width() == seed.distribution.width()
         && candidate.distribution.is_deterministic() == seed.distribution.is_deterministic()
-        && (candidate.plan.top_k > 0) == top_k_mode
+        && candidate.plan.uses_ranked_target() == top_k_mode
         && (!top_k_mode || candidate.logits.dtype() == seed.logits.dtype())
         && candidate.logits.device().same_device(seed.logits.device())
         && match (candidate.proposal.as_device(), seed.proposal.as_device()) {
@@ -519,13 +520,14 @@ fn submit_sparse_rejection_group(
     let batch = group.len();
     let drafts = seed.drafts;
     let device = seed.logits.device();
-    let mode = if seed.plan.top_k > 0 {
+    let mode = if seed.plan.uses_ranked_target() {
         SparseRejectionMode::BoundedTopK {
             max_top_k: group
                 .iter()
-                .map(|row| row.plan.top_k)
+                .map(|row| row.plan.ranked_width(seed.vocab))
                 .max()
                 .expect("sparse rejection group is non-empty"),
+            nucleus_rows: group.iter().any(|row| row.plan.top_k == 0),
         }
     } else {
         SparseRejectionMode::Categorical

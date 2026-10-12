@@ -231,7 +231,9 @@ impl dyn Pipeline {
         batched
             && !ctx.return_raw_logits
             && self.device().is_cuda()
-            && ((self.supports_batched_cuda_sampling() && sampling::can_sample_batch_cuda(seqs))
+            && ((self.supports_batched_cuda_sampling()
+                && (sampling::can_sample_batch_cuda(seqs)
+                    || sampling::can_submit_cuda_token_batch_seqs(seqs)))
                 || crate::speculative::verifier::can_batch_device_verify(seqs))
     }
 

@@ -500,6 +500,82 @@ pub fn sample_draft_rows(
     Ok(tokens)
 }
 
+/// Samples MTP draft steps on the GPU, keeping each step's sparse distribution there for the device verifier.
+#[cfg(feature = "cuda")]
+pub struct CudaDraftSampler {
+    params: Tensor,
+    top_ks: Vec<usize>,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaDraftSampler {
+    /// None keeps host sampling: a greedy row, one the GPU sampler cannot serve, or one that bars rejection sampling.
+    pub fn new(
+        sequences: &[&dyn DraftSequence],
+        steps: usize,
+        device: &inference_tensor::Device,
+        rng: &Arc<Mutex<Isaac64Rng>>,
+    ) -> Result<Option<Self>> {
+        if !device.is_cuda() || sequences.is_empty() {
+            return Ok(None);
+        }
+        let mut plans = Vec::with_capacity(sequences.len());
+        for seq in sequences {
+            let plan = seq
+                .sampler()
+                .cuda_speculative_sampling_plan(false)
+                .filter(|_| seq.stochastic_verification_allowed());
+            let Some(plan) = plan else {
+                return Ok(None);
+            };
+            plans.push(plan);
+        }
+        let mut params = Vec::with_capacity(steps * plans.len());
+        for _ in 0..steps {
+            for (seq, plan) in sequences.iter().zip(&plans) {
+                let sequence_rng = seq.sampling_rng(rng);
+                let mut sequence_rng = sequence_rng.lock().expect("could not lock rng mutex");
+                params.push(crate::ops::CudaTopKSamplingParams {
+                    inverse_temperature: plan.inverse_temperature,
+                    top_k: plan.top_k,
+                    top_p: plan.top_p,
+                    min_p: plan.min_p,
+                    uniform: Sampler::draw_cuda_resident_uniform(&mut sequence_rng),
+                });
+            }
+        }
+        let rows = params.len();
+        let params = Tensor::from_vec(
+            crate::ops::cuda_topk_sampling_param_rows(&params)?,
+            (rows, crate::ops::CUDA_TOPK_SAMPLING_PARAM_WIDTH),
+            device,
+        )?;
+        Ok(Some(Self {
+            params,
+            top_ks: plans.iter().map(|plan| plan.top_k).collect(),
+        }))
+    }
+
+    /// One draft step over `[batch, vocab]` logits: the drafted tokens, and the sample with their distributions.
+    pub fn sample(
+        &self,
+        step: usize,
+        logits: &Tensor,
+    ) -> Result<(Vec<u32>, crate::ops::CudaDraftSample)> {
+        let batch = self.top_ks.len();
+        let sample = crate::ops::cuda_ranked_topk_draft_sample(
+            logits,
+            &self.params.narrow(0, step * batch, batch)?,
+            &self.top_ks,
+        )?;
+        let tokens = sample.tokens.to_vec1::<u32>()?;
+        if tokens.contains(&crate::ops::CUDA_TOP1_INVALID_TOKEN) {
+            inference_tensor::bail!("MTP draft sampling found no finite, unfiltered draft token");
+        }
+        Ok((tokens, sample))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use inference_tensor::{Device, Tensor};
