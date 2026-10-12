@@ -17,6 +17,15 @@ A desktop app (Avalonia 12, Linux, Windows and macOS) that runs the engine throu
 Each tab loads its own models, showing the load's progress (downloads included) and the C ABI's errors. Chat models
 take a context length, which sizes their KV cache so several models fit on one GPU.
 
+- **Models...** lists the models in your model folders and the Hugging Face cache (through the bindings' inventory
+  calls, no engine needed): how each loads, its architecture, quantization, size, base model and, for a text GGUF,
+  the projector beside it. A model goes into the tab that runs it with one click; cached repositories and local GGUF
+  files can be deleted; and a Hugging Face repository, chosen files or one GGUF quant (with its projector) downloads
+  with progress and cancel.
+- **Settings...** holds the load defaults (device, context length, MTP speculative decoding for chat), the chat
+  panel's sampling defaults, the model folders, the Hugging Face cache and token, and whether to restore each tab's
+  model at startup (and load it). They live in `inference-rs-demo/settings.json` under the user's config directory.
+
 ```bash
 cargo build --release -p inference-ffi --features cuda   # or without cuda; the bindings find target/release
 dotnet run --project bindings/csharp/examples/AvaloniaDemo

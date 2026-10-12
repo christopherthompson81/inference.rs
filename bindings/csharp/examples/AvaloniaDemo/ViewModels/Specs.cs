@@ -7,10 +7,22 @@ namespace InferenceRs.AvaloniaDemo.ViewModels;
 public static class Specs
 {
     /// <summary>A chat model: auto-detected from a Hugging Face id or directory, or a GGUF file with its mmproj.</summary>
-    public static SlotLoader Chat => slot =>
+    /// <remarks>Uses the settings' MTP choice, for checkpoints with a built-in draft head.</remarks>
+    public static SlotLoader Chat => slot => ChatModel(slot, mtp: true);
+
+    /// <summary>A document reader: loaded as a chat model, without speculative decoding.</summary>
+    public static SlotLoader Ocr => slot => ChatModel(slot, mtp: false);
+
+    private static Func<Action<LoadProgress>, IDisposable> ChatModel(ModelSlotViewModel slot, bool mtp)
     {
+        var settings = SettingsStore.Current;
         var source = slot.Source.Trim();
-        if (!slot.IsGguf) return Engine(new JsonObject { ["Run"] = new JsonObject { ["model_id"] = source } }, slot);
+        if (!slot.IsGguf)
+        {
+            var run = new JsonObject { ["model_id"] = source };
+            if (settings.HfCacheOrNull is { } runCache) run["hf_cache_path"] = runCache;
+            return Engine(new JsonObject { ["Run"] = run }, slot, mtp);
+        }
         var directory = Path.GetDirectoryName(Path.GetFullPath(source))!;
         var gguf = new JsonObject
         {
@@ -31,8 +43,9 @@ public static class Specs
             // a projector beside the GGUF, when there is one
             gguf["mmproj_selection"] = "any";
         }
-        return Engine(new JsonObject { ["GGUF"] = gguf }, slot);
-    };
+        if (settings.HfCacheOrNull is { } cache) gguf["hf_cache_path"] = cache;
+        return Engine(new JsonObject { ["GGUF"] = gguf }, slot, mtp);
+    }
 
     public static SlotLoader Diffusion(Func<string> arch) => slot => Engine(
         new JsonObject { ["DiffusionPlain"] = new JsonObject { ["model_id"] = slot.Source.Trim(), ["arch"] = arch() } },
@@ -56,11 +69,19 @@ public static class Specs
         return _ => LayoutModel.Load(path, backend);
     };
 
-    private static Func<Action<LoadProgress>, IDisposable> Engine(JsonObject model, ModelSlotViewModel slot)
+    private static Func<Action<LoadProgress>, IDisposable> Engine(JsonObject model, ModelSlotViewModel slot, bool mtp = false)
     {
+        var settings = SettingsStore.Current;
         var runtime = new JsonObject();
         if (slot.DeviceOrNull is { } device) runtime["device"] = device;
         if (slot.HasContext) runtime["paged_cache"] = new JsonObject { ["context_len"] = (int)slot.ContextLength };
+        if (settings.TokenSource is { } token) runtime["token_source"] = token;
+        if (mtp && settings.Mtp)
+        {
+            var drafts = new JsonObject();
+            if (settings.MtpDrafts > 0) drafts["n_predict"] = (int)settings.MtpDrafts;
+            runtime["mtp"] = drafts;
+        }
         var spec = new JsonObject { ["model"] = model, ["runtime"] = runtime }.ToJsonString();
         return progress => InferenceEngine.Load(spec, new HostCallbacks { Progress = progress });
     }
