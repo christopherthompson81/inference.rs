@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 24
+#define INFERENCE_ABI_VERSION_PATCH 25
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -450,6 +450,12 @@ INFERENCE_API inference_status inference_lora_adapter_unload(const inference_eng
  * inference_file_content. */
 INFERENCE_API inference_status inference_image_generation(const inference_engine *engine, const char *request,
                                                          size_t request_len, inference_string **out_response);
+/* Edits an image, or places subject references in a new scene (the POST /v1/images/edits JSON body), with a model
+ * that takes reference images; each "images" entry's image_url may be "media://N" for media[N]. out_response
+ * receives the image list JSON, as inference_image_generation's. media may be NULL when media_count is 0. */
+INFERENCE_API inference_status inference_image_edit(const inference_engine *engine, const char *request,
+                                                   size_t request_len, const inference_media *media,
+                                                   size_t media_count, inference_string **out_response);
 /* Scores a prompt in one forward pass. The request is {"model"?, "prompt": text | [token ids], "output"?:
  * "logprobs" | "logits"}; text is tokenized with the model's special tokens. out_response receives {"tokens",
  * "vocab_size", "token_logprobs"}, token_logprobs[i] being log p(tokens[i] | tokens[..i]) and null for the first token.

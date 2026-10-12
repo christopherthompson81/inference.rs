@@ -389,6 +389,18 @@ class JsonEngine:
     def image_generation(self, request_json: str) -> str:
         return self._call("inference_image_generation", request_json)
 
+    def image_edit(self, request_json: str, media: Sequence[MediaAttachment] = ()) -> str:
+        data = text_arg(request_json)
+        buffers = _Buffers()
+        array, count = self._media(media, buffers)
+        response = ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_image_edit(engine, data, len(data), array, count, ctypes.byref(response)),
+                "inference_image_edit",
+            )
+        return take_string(response)
+
     def speech_generation(self, request_json: str) -> Blob:
         """Speaks text; the blob's MIME type carries the sample rate and channel count."""
         return self._blob("inference_speech_generation", request_json)

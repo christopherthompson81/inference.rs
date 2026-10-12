@@ -96,6 +96,18 @@ class EngineTest(unittest.TestCase):
             by_media["choices"][0]["message"]["content"],
         )
 
+    def test_an_edit_takes_its_images_as_attachments(self):
+        png = find_in_checkout(IMAGE_FIXTURE).read_bytes()
+        edit = json.dumps({"prompt": "make it blue", "images": [{"image_url": "media://0"}]})
+        # the buffer reaches the engine, which a chat model refuses as it refuses generation
+        with self.assertRaises(ir.InferenceError) as refused:
+            self.engine.image_edit(edit, [ir.MediaAttachment(png, "image/png")])
+        self.assertEqual(refused.exception.status, ir.Status.INVALID_REQUEST)
+        self.assertIn("incompatible", refused.exception.detail)
+        with self.assertRaises(ir.InferenceError) as unattached:
+            self.engine.image_edit(edit)
+        self.assertEqual(unattached.exception.code, "invalid_image")
+
     def test_other_protocols(self):
         completion = json.dumps(
             {

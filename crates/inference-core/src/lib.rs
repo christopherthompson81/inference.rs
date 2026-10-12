@@ -190,14 +190,14 @@ pub use pipeline::{
     DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingLoaderType,
     EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader, GGMLLoaderBuilder,
     GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides,
-    IsqOrganization, LoadOptions, Loader, LocalModelPaths, Modalities, ModelKind, ModelPaths,
-    MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
-    MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
-    NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType, SpeechPipeline,
-    SupportedModality, TokenSource, TranscriptionLoader, TranscriptionLoaderType,
-    TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, VoiceActivityLoader,
-    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand, write_asr_gguf, write_hidream_gguf,
+    IsqOrganization, LoadOptions, Loader, LocalModelPaths, MAX_REFERENCE_IMAGES, Modalities,
+    ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
+    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
+    NormalLoaderType, NormalSpecificConfig, ReferenceImages, ResolvedLoraAdapter, SpeechLoader,
+    SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, TranscriptionLoader,
+    TranscriptionLoaderType, TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
+    VoiceActivityLoader, expand_isq_value, expand_uqff_shards, parse_uqff_shard,
+    resolve_uqff_report_output, resolve_uqff_shorthand, write_asr_gguf, write_hidream_gguf,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{

@@ -235,6 +235,13 @@ class Engine:
     def image_generation(self, request: types.ImageGenerationRequest | str) -> types.ImageGenerationResponse:
         return from_json(types.ImageGenerationResponse, self.json.image_generation(to_json(request)))
 
+    def image_edit(
+        self,
+        request: types.ImageEditRequest | str,
+        media: Sequence[MediaAttachment] = (),
+    ) -> types.ImageGenerationResponse:
+        return from_json(types.ImageGenerationResponse, self.json.image_edit(to_json(request), media))
+
     def speech_generation(self, request: types.SpeechGenerationRequest | str) -> Blob:
         """The audio; its MIME type carries the sample rate and channel count."""
         return self.json.speech_generation(to_json(request))

@@ -47,6 +47,7 @@ internal static class Program
         {
             ChatAndStreamAgree(engine);
             MediaAttachmentsMatchDataUrls(engine);
+            AnEditTakesItsImagesAsAttachments(engine);
             OtherProtocolsStream(engine);
             ResponsesAreStored(engine);
             ErrorsCarryTheEnvelope(engine);
@@ -128,6 +129,18 @@ internal static class Program
         var byMedia = JsonNode.Parse(engine.Chat(ImageRequest("media://0"), [new MediaAttachment(png, "image/png")]))!;
         Check("an attached image decodes like the same image as a data URL",
             (string?)byUrl["choices"]![0]!["message"]!["content"] == (string?)byMedia["choices"]![0]!["message"]!["content"]);
+    }
+
+    private static void AnEditTakesItsImagesAsAttachments(InferenceEngine engine)
+    {
+        var png = File.ReadAllBytes(FindInCheckout(ImageFixture));
+        const string edit = """{"prompt": "make it blue", "images": [{"image_url": "media://0"}]}""";
+        // the buffer reaches the engine, which a chat model refuses as it refuses generation
+        var refused = Throws(() => engine.ImageEdit(edit, [new MediaAttachment(png, "image/png")]));
+        Check("an edit's attachment reaches the engine, which a chat model refuses",
+            refused?.Status == InferenceStatus.InvalidRequest && refused.Detail.Contains("incompatible"));
+        var unattached = Throws(() => engine.ImageEdit(edit));
+        Check("an edit naming no attachment is refused", unattached?.Detail.Contains("invalid_image") == true);
     }
 
     private static void OtherProtocolsStream(InferenceEngine engine)

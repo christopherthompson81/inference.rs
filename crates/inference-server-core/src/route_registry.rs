@@ -84,6 +84,8 @@ pub const CALIBRATION_APPLY_ROUTE: RouteInfo =
     RouteInfo::new("/calibration/apply", "POST", RouteKind::InferenceRs);
 pub const IMAGE_GENERATION_ROUTE: RouteInfo =
     RouteInfo::new("/v1/images/generations", "POST", RouteKind::OpenAi);
+pub const IMAGE_EDIT_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/images/edits", "POST", RouteKind::OpenAi);
 pub const FILES_ROUTE: RouteInfo = RouteInfo::new("/v1/files", "GET, POST", RouteKind::OpenAi);
 pub const FILE_ROUTE: RouteInfo =
     RouteInfo::new("/v1/files/{id}", "GET, DELETE", RouteKind::OpenAi);
@@ -169,6 +171,7 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     COMPLETIONS_ROUTE,
     EMBEDDINGS_ROUTE,
     IMAGE_GENERATION_ROUTE,
+    IMAGE_EDIT_ROUTE,
     SPEECH_GENERATION_ROUTE,
     TRANSCRIPTION_ROUTE,
     REALTIME_ROUTE,

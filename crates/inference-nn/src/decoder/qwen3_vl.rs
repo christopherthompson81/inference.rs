@@ -129,13 +129,7 @@ pub fn deepstack_process(
     visual_embeds: &Tensor,
 ) -> Result<Tensor> {
     let device = hidden_states.device();
-    let dtype = hidden_states.dtype();
-    let visual_embeds = visual_embeds.to_device(device)?.to_dtype(dtype)?;
-
-    let (batch, seq, hidden) = hidden_states.dims3()?;
-    let total = batch * seq;
-    let hidden_flat = hidden_states.reshape((total, hidden))?;
-
+    let hidden = hidden_states.dim(2)?;
     let mask_flat: Vec<f32> = visual_pos_masks
         .to_device(device)?
         .to_dtype(DType::F32)?
@@ -151,16 +145,34 @@ pub fn deepstack_process(
     if indices.is_empty() {
         return Ok(hidden_states);
     }
-    if indices.len() != visual_embeds.dim(0)? {
+    let n = indices.len();
+    let idx = Tensor::from_vec(indices, (n,), device)?;
+    deepstack_add(
+        hidden_states,
+        &idx.unsqueeze(1)?.repeat((1, hidden))?,
+        visual_embeds,
+    )
+}
+
+/// Adds `visual_embeds` (n, hidden) at the rows `idx_expanded` (n, hidden) names, each row index repeated.
+pub fn deepstack_add(
+    hidden_states: Tensor,
+    idx_expanded: &Tensor,
+    visual_embeds: &Tensor,
+) -> Result<Tensor> {
+    let visual_embeds = visual_embeds
+        .to_device(hidden_states.device())?
+        .to_dtype(hidden_states.dtype())?;
+    if idx_expanded.dim(0)? != visual_embeds.dim(0)? {
         inference_tensor::bail!(
             "Mismatch between DeepStack visual embeds ({}) and mask positions ({})",
             visual_embeds.dim(0)?,
-            indices.len()
+            idx_expanded.dim(0)?
         );
     }
-
-    let idx = Tensor::from_vec(indices, (visual_embeds.dim(0)?,), device)?;
-    let idx_expanded = idx.unsqueeze(1)?.repeat((1, hidden))?;
-    let result = hidden_flat.scatter_add(&idx_expanded, &visual_embeds, 0)?;
-    result.reshape((batch, seq, hidden))
+    let (batch, seq, hidden) = hidden_states.dims3()?;
+    hidden_states
+        .reshape((batch * seq, hidden))?
+        .scatter_add(idx_expanded, &visual_embeds, 0)?
+        .reshape((batch, seq, hidden))
 }

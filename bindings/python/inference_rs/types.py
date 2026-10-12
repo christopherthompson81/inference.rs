@@ -890,6 +890,22 @@ class ImageChoice:
 
 
 @dataclass(kw_only=True)
+class ImageEditRequest:
+    """Image edit request: one image to edit, or several subject references for a new scene."""
+
+    guidance_scale: float | None = None
+    height: int | None = None
+    images: list[ImageReference]
+    model: str | None = None
+    n: int | None = None
+    prompt: str
+    response_format: ImageGenerationResponseFormat | None = None
+    seed: int | None = None
+    steps: int | None = None
+    width: int | None = None
+
+
+@dataclass(kw_only=True)
 class ImageGenerationRequest:
     """Image generation request"""
 
@@ -915,6 +931,13 @@ class ImageGenerationResponseFormat(str, Enum):
 
     URL = "url"
     B64_JSON = "b64_json"
+
+
+@dataclass(kw_only=True)
+class ImageReference:
+    """One image an edit request conditions on."""
+
+    image_url: str
 
 
 class IncludeOption(str, Enum):

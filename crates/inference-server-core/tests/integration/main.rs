@@ -20,9 +20,15 @@ mod silero_support;
 #[allow(clippy::duplicate_mod)]
 mod diarization_support;
 
+// The tiny random-weight HiDream-O1 the image edit route loads.
+#[path = "../../../inference/tests/support/hidream_o1_tiny.rs"]
+#[allow(clippy::duplicate_mod)]
+mod hidream_support;
+
 mod cancel;
 mod chat_route;
 mod flux;
+mod image_edit_route;
 mod keyed;
 mod mcp;
 mod realtime_route;

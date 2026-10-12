@@ -323,6 +323,9 @@ impl DiffusionModel for FluxStepper {
     }
 
     fn validate(&self, params: &DiffusionGenerationParams) -> std::result::Result<(), String> {
+        if !params.references.is_empty() {
+            return Err("FLUX generates from text alone; it takes no reference images".to_string());
+        }
         if params.guidance_scale.is_some() && self.cfg.guidance_config.is_none() {
             return Err(
                 "FLUX schnell is not guidance distilled; it takes no guidance scale".to_string(),

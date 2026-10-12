@@ -1,20 +1,27 @@
-//! HiDream-O1 through the engine on a tiny random-weight checkpoint: detection, size snapping, seeds and Dev's limits.
+//! HiDream-O1 on a tiny random-weight checkpoint: detection, size snapping, seeds, Dev's limits, reference images.
 
 use base64::Engine as _;
 use inference::{
-    DiffusionLoaderType, DiffusionModelBuilder, ImageGenerationRequest,
+    DiffusionLoaderType, DiffusionModelBuilder, ImageEditRequest, ImageGenerationRequest,
     ImageGenerationResponseFormat, Model, ModelBuilder, ModelDType,
 };
 
 #[path = "../support/hidream_o1_tiny.rs"]
 mod support;
-use support::{copy_configs, tiny_hidream_o1, tiny_hidream_o1_f32_gguf};
+use support::{
+    copy_configs, tiny_hidream_o1, tiny_hidream_o1_f32_gguf, tiny_hidream_o1_f32_gguf_without,
+};
 
 const PROMPT: &str = "a small red cube on a table";
 const SEED: u64 = 7;
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 // mean per-channel distance (of 255) of a Q8_0 GGUF's image from the checkpoint's; measured 0.79
 const Q8_0_MEAN_DIFF: f64 = 4.0;
+// a 4:3 reference, which the output matches at about 2048 x 2048's area, both sides patch-aligned
+const REFERENCE_SIZE: (u32, u32) = (640, 480);
+const MATCHED_SIZE: (u32, u32) = (2336, 1760);
+const VISION_PREFIX: &str = "model.visual.";
+const LITERAL_PAD_PROMPT: &str = "a cube labelled <|image_pad|>";
 
 fn request(steps: Option<usize>, seed: u64) -> ImageGenerationRequest {
     ImageGenerationRequest {
@@ -36,6 +43,30 @@ fn decode(choice: &inference_api::response::ImageChoice) -> anyhow::Result<image
 
 async fn image(model: &Model, request: ImageGenerationRequest) -> anyhow::Result<image::RgbImage> {
     decode(&model.generate_image(request).await?.data[0])
+}
+
+fn reference(shade: u8) -> image::DynamicImage {
+    let (w, h) = REFERENCE_SIZE;
+    image::DynamicImage::ImageRgb8(image::RgbImage::from_fn(w, h, |x, y| {
+        image::Rgb([(x % 251) as u8, (y % 241) as u8, shade])
+    }))
+}
+
+fn edit(seed: u64) -> ImageEditRequest {
+    ImageEditRequest {
+        response_format: ImageGenerationResponseFormat::B64Json,
+        steps: Some(1),
+        seed: Some(seed),
+        ..ImageEditRequest::new("make it blue", [])
+    }
+}
+
+async fn edited(
+    model: &Model,
+    request: ImageEditRequest,
+    images: Vec<image::DynamicImage>,
+) -> anyhow::Result<image::RgbImage> {
+    decode(&model.edit_image(request, images).await?.data[0])
 }
 
 fn error_text<T, E: std::fmt::Display>(result: Result<T, E>) -> String {
@@ -156,5 +187,75 @@ async fn hidream_o1_dev_samples_its_fixed_schedule_only() -> anyhow::Result<()> 
     let first = image(&model, request(None, SEED)).await?;
     assert_eq!(first.dimensions(), (2560, 1440));
     assert_eq!(first, image(&model, request(None, SEED)).await?);
+    Ok(())
+}
+
+// one image is edited at its own aspect; the reference conditions the result, and a seed still repeats it
+#[tokio::test]
+async fn an_edit_keeps_the_reference_size_and_follows_the_reference() -> anyhow::Result<()> {
+    let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1")?;
+    let model = build(&path).await?;
+    let first = edited(&model, edit(SEED), vec![reference(0)]).await?;
+    assert_eq!(first.dimensions(), MATCHED_SIZE);
+    // compared whole, so a failure prints no pixel bytes
+    let again = edited(&model, edit(SEED), vec![reference(0)]).await?;
+    assert!(first == again, "a seed should repeat its edit");
+    let other = edited(&model, edit(SEED), vec![reference(200)]).await?;
+    assert!(first != other, "another reference gave the same edit");
+    // several references are subjects for a scene at the requested, snapped size
+    let scene = ImageEditRequest {
+        width: Some(640),
+        height: Some(360),
+        ..edit(SEED)
+    };
+    let placed = edited(&model, scene, vec![reference(0), reference(200)]).await?;
+    assert_eq!(placed.dimensions(), (2560, 1440));
+    let half_sized = ImageEditRequest {
+        width: Some(640),
+        ..edit(SEED)
+    };
+    let text = error_text(model.edit_image(half_sized, vec![reference(0)]).await);
+    assert!(text.contains("`width` and `height`"), "{text}");
+    // a caption may hold the image pad's text: past the references' own pads it is the caption's
+    let literal = ImageEditRequest {
+        prompt: LITERAL_PAD_PROMPT.to_string(),
+        ..edit(SEED)
+    };
+    edited(&model, literal, vec![reference(0)]).await?;
+    image(
+        &model,
+        ImageGenerationRequest {
+            prompt: LITERAL_PAD_PROMPT.to_string(),
+            ..request(Some(1), SEED)
+        },
+    )
+    .await?;
+    // a sliver is refused before it is queued, with why
+    let sliver = image::DynamicImage::ImageRgb8(image::RgbImage::new(4000, 8));
+    let narrow = error_text(model.edit_image(edit(SEED), vec![sliver]).await);
+    assert!(narrow.contains("too narrow"), "{narrow}");
+    let none = error_text(model.edit_image(edit(SEED), Vec::new()).await);
+    assert!(none.contains("1 to 16"), "{none}");
+    Ok(())
+}
+
+// weights written for text-to-image alone still generate, and refuse reference images by saying what they lack
+#[tokio::test]
+async fn a_gguf_without_the_vision_tower_refuses_references() -> anyhow::Result<()> {
+    let (_dir, path) = tiny_hidream_o1("tiny-hidream-o1")?;
+    let out = tempfile::tempdir()?;
+    let full = out.path().join("tiny-hidream-o1-f32.gguf");
+    tiny_hidream_o1_f32_gguf(&path, &full)?;
+    // the F32 file carries the ViT, so it edits exactly as the checkpoint does
+    let want = edited(&build(&path).await?, edit(SEED), vec![reference(0)]).await?;
+    let got = edited(&build(&full).await?, edit(SEED), vec![reference(0)]).await?;
+    assert!(got == want, "the GGUF's edit differs from the checkpoint's");
+    std::fs::remove_file(&full)?;
+    let blind = out.path().join("tiny-hidream-o1-blind.gguf");
+    tiny_hidream_o1_f32_gguf_without(&path, &blind, VISION_PREFIX)?;
+    let model = build(&blind).await?;
+    image(&model, request(Some(1), SEED)).await?;
+    let text = error_text(model.edit_image(edit(SEED), vec![reference(0)]).await);
+    assert!(text.contains("vision tower"), "{text}");
     Ok(())
 }

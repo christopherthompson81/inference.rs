@@ -81,7 +81,7 @@ out = POINTER(c_void_p)
 buffer = (c_char_p, c_size_t)
 
 # BEGIN GENERATED from inference.h by bindings/scripts/generate_native.py
-ABI_VERSION = (0 << 16) | (0 << 8) | 24
+ABI_VERSION = (0 << 16) | (0 << 8) | 25
 
 # name: (restype, argtypes)
 SIGNATURES = {
@@ -146,6 +146,7 @@ SIGNATURES = {
     "inference_lora_adapter_load": (status, (c_void_p, *buffer, out)),
     "inference_lora_adapter_unload": (status, (c_void_p, *buffer, out)),
     "inference_image_generation": (status, (c_void_p, *buffer, out)),
+    "inference_image_edit": (status, (c_void_p, *buffer, POINTER(Media), c_size_t, out)),
     "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
     "inference_speech_generation": (status, (c_void_p, *buffer, out)),
     "inference_transcription": (status, (c_void_p, *buffer, *buffer, out)),

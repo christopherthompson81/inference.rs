@@ -2798,6 +2798,7 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "clap",
+ "image",
  "indicatif 0.18.3",
  "inference-nn",
  "inference-quant",
@@ -3133,6 +3134,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-api",
  "inference-core",
+ "inference-models-diffusion",
  "inference-models-other",
  "inference-models-speech",
  "inference-nn",

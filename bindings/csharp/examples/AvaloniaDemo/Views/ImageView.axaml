@@ -17,11 +17,42 @@
       <StackPanel Spacing="10">
         <TextBlock Classes="heading" Text="Prompt" />
         <TextBox Text="{Binding Prompt}" AcceptsReturn="True" TextWrapping="Wrap" Height="140" />
+        <StackPanel Spacing="6">
+          <StackPanel Orientation="Horizontal" Spacing="8">
+            <TextBlock VerticalAlignment="Center" Text="References" />
+            <Button Content="Add..." Command="{Binding AddReferenceCommand}" />
+          </StackPanel>
+          <TextBlock Classes="muted" IsVisible="{Binding !IsEditing}"
+                     Text="Add one image to edit it, or several as subjects for a new scene (HiDream-O1)." />
+          <ItemsControl ItemsSource="{Binding References}">
+            <ItemsControl.ItemsPanel>
+              <ItemsPanelTemplate>
+                <WrapPanel />
+              </ItemsPanelTemplate>
+            </ItemsControl.ItemsPanel>
+            <ItemsControl.ItemTemplate>
+              <DataTemplate x:DataType="vm:AttachmentViewModel">
+                <Border Classes="card" Padding="4" Margin="0,0,6,6">
+                  <StackPanel Orientation="Horizontal" Spacing="4">
+                    <Image Source="{Binding Thumbnail}" Height="48" />
+                    <Button Content="x" Padding="6,0" VerticalAlignment="Top"
+                            Command="{Binding $parent[UserControl].((vm:ImageViewModel)DataContext).RemoveReferenceCommand}"
+                            CommandParameter="{Binding}" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+          <CheckBox IsChecked="{Binding MatchReference}" IsVisible="{Binding HasOneReference}"
+                    Content="Keep the reference's size" />
+        </StackPanel>
         <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="8" RowSpacing="2">
           <TextBlock Text="Width" />
           <TextBlock Grid.Column="1" Text="Height" />
-          <NumericUpDown Grid.Row="1" Value="{Binding Width}" Minimum="64" Maximum="2048" Increment="64" FormatString="0" />
-          <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Height}" Minimum="64" Maximum="2048" Increment="64" FormatString="0" />
+          <NumericUpDown Grid.Row="1" Value="{Binding Width}" Minimum="64" Maximum="2048" Increment="64" FormatString="0"
+                         IsEnabled="{Binding UsesSize}" />
+          <NumericUpDown Grid.Row="1" Grid.Column="1" Value="{Binding Height}" Minimum="64" Maximum="2048" Increment="64"
+                         FormatString="0" IsEnabled="{Binding UsesSize}" />
           <TextBlock Grid.Row="2" Text="Steps (0: auto)" Margin="0,6,0,0" />
           <TextBlock Grid.Row="2" Grid.Column="1" Text="Guidance (0: auto)" Margin="0,6,0,0" />
           <NumericUpDown Grid.Row="3" Value="{Binding Steps}" Minimum="0" Maximum="200" Increment="1" FormatString="0" />
@@ -30,7 +61,8 @@
           <NumericUpDown Grid.Row="5" Value="{Binding Seed}" Minimum="-1" Maximum="4294967295" Increment="1" FormatString="0" />
         </Grid>
         <StackPanel Orientation="Horizontal" Spacing="8">
-          <Button Classes="accent" Content="Generate" Command="{Binding GenerateCommand}" />
+          <Button Classes="accent" Content="Generate" Command="{Binding GenerateCommand}" IsVisible="{Binding !IsEditing}" />
+          <Button Classes="accent" Content="Edit" Command="{Binding GenerateCommand}" IsVisible="{Binding IsEditing}" />
           <Button Content="Save..." Command="{Binding SaveCommand}" />
         </StackPanel>
         <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsBusy}" />

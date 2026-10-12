@@ -4,8 +4,9 @@ C# bindings for `libinference_ffi`, the inference.rs C ABI (`crates/inference-ff
 
 - `InferenceEngine` loads a model from a JSON spec and serves the requests the HTTP server does, as JSON in and JSON
   out: chat (with media attachments), completions, embeddings, Anthropic Messages, Responses, model and LoRA adapter
-  management, image and speech generation, files, skills, agent approvals and system reports. Streaming calls return
-  an `EngineStream` of `StreamEvent`s. Failures throw `InferenceException`, whose `Detail` is the protocol's error JSON.
+  management, image generation and editing, speech generation, files, skills, agent approvals and system reports.
+  Streaming calls return an `EngineStream` of `StreamEvent`s. Failures throw `InferenceException`, whose `Detail` is the
+  protocol's error JSON.
 - `HostCallbacks` registers host tools, a search backend and a model-load progress listener (`Progress`, each stage's counts) when an engine loads.
 - `LayoutModel` runs PP-DocLayoutV3 document layout detection, from the HF directory or a GGUF of it.
 

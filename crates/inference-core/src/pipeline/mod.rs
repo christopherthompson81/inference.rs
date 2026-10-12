@@ -46,7 +46,7 @@ use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTr
 use crate::attention::FlashParams;
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::{GdnDeferredStateSpec, PagedAuxiliaryPrefixState};
-pub use crate::model::DiffusionGenerationParams;
+pub use crate::model::{DiffusionGenerationParams, MAX_REFERENCE_IMAGES, ReferenceImages};
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{
     AttentionBackendKind, CacheConfig, CacheEngine, MemoryGpuConfig, ModelConfigLike,

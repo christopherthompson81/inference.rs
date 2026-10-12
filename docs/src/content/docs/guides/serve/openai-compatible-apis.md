@@ -62,6 +62,7 @@ The `api_key` is required by the client but not validated by the server; see [au
 | `POST /v1/completions` | Legacy text completions. |
 | `POST /v1/embeddings` | Embedding generation. |
 | `POST /v1/images/generations` | Image generation. |
+| `POST /v1/images/edits` | Image editing and subject references (HiDream-O1-Image). |
 | `POST /v1/audio/speech` | Text to speech. |
 | `POST /v1/files` | Upload OpenAI-compatible user files. |
 | `GET /v1/files` | List uploaded and generated files. |

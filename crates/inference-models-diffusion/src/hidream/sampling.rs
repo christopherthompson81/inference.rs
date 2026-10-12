@@ -1,4 +1,4 @@
-//! HiDream-O1's samplers: Wan's flow UniPC (the full model) and Dev's re-noising Euler step.
+//! HiDream-O1's samplers: Wan's flow UniPC (full), Dev's re-noising Euler, and the plain Euler step Dev edits with.
 
 use inference_tensor::{Result, Tensor};
 
@@ -207,6 +207,16 @@ pub fn flash_step(
     noise
         .affine(f64::from(sigma_next * s_noise), 0.0)?
         .add(&denoised.affine(f64::from(1.0 - sigma_next), 0.0)?)
+}
+
+/// diffusers' `FlowMatchEulerDiscreteScheduler.step`: `sample + (sigma_next - sigma) * model_output`.
+pub fn euler_step(
+    model_output: &Tensor,
+    sample: &Tensor,
+    sigma: f32,
+    sigma_next: f32,
+) -> Result<Tensor> {
+    sample.add(&model_output.affine(f64::from(sigma_next - sigma), 0.0)?)
 }
 
 #[cfg(test)]

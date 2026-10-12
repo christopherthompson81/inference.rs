@@ -917,6 +917,51 @@ fn generation_requests_reach_the_engine_and_are_refused_by_a_chat_model() {
         "{error}"
     );
 
+    // an edit's buffers reach the engine, which refuses them on a chat model as it refuses generation
+    let page = std::fs::read(std::path::Path::new(support::FIXTURES).join("page_00.png")).unwrap();
+    let truncated = [0x89u8, b'P', b'N', b'G'];
+    let media = [&page[..], &truncated[..]].map(|png| inference_media {
+        data: png.as_ptr(),
+        len: png.len(),
+        mime_type: c"image/png".as_ptr(),
+    });
+    let edit = |request: &Value| {
+        let request = request.to_string();
+        let mut response = null_mut();
+        let status = unsafe {
+            inference_image_edit(
+                engine,
+                request.as_ptr().cast::<c_char>(),
+                request.len(),
+                media.as_ptr(),
+                media.len(),
+                &mut response,
+            )
+        };
+        assert!(response.is_null());
+        (
+            status,
+            serde_json::from_str::<Value>(&last_error()).unwrap(),
+        )
+    };
+    let (status, error) = edit(&json!({"prompt": "blue", "images": [{"image_url": "media://2"}]}));
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert_eq!(error["error"]["param"], "images", "{error}");
+    let (status, error) = edit(&json!({"prompt": "blue", "images": [{"image_url": "media://1"}]}));
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert_eq!(
+        error["error"]["code"], "invalid_image",
+        "a truncated PNG: {error}"
+    );
+    let (status, error) = edit(&json!({"prompt": "blue", "images": [{"image_url": "media://0"}]}));
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("incompatible")),
+        "{error}"
+    );
+
     let speak = |format: &str| {
         let request = json!({"input": "hello", "response_format": format}).to_string();
         let mut audio = null_mut();

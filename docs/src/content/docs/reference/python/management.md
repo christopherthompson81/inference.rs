@@ -240,6 +240,24 @@ OpenAI file metadata + inference.rs extensions (`format`, `mime_type`, `source`,
 | `url` | `str \| None` | optional |
 
 
+## `ImageEditRequest`
+
+Image edit request: one image to edit, or several subject references for a new scene.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `guidance_scale` | `float \| None` | optional |
+| `height` | `int \| None` | optional |
+| `images` | `list[ImageReference]` | required |
+| `model` | `str \| None` | optional |
+| `n` | `int \| None` | optional |
+| `prompt` | `str` | required |
+| `response_format` | `ImageGenerationResponseFormat \| None` | optional |
+| `seed` | `int \| None` | optional |
+| `steps` | `int \| None` | optional |
+| `width` | `int \| None` | optional |
+
+
 ## `ImageGenerationRequest`
 
 Image generation request
@@ -275,6 +293,15 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `ImageGenerationResponseFormat.URL` | `'url'` |
 | `ImageGenerationResponseFormat.B64_JSON` | `'b64_json'` |
+
+
+## `ImageReference`
+
+One image an edit request conditions on.
+
+| Field | Type |
+| --- | --- |
+| `image_url` | `str` |
 
 
 ## `LoadLoraAdapterRequest`
