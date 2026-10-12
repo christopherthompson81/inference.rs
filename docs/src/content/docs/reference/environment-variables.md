@@ -79,9 +79,21 @@ directory the build put them in, in that order. A missing one fails model loadin
 loads one copy, so the visible GPUs must need the same architecture; on a machine with mixed GPUs, set
 `CUDA_VISIBLE_DEVICES` to GPUs of one architecture.
 
+A library found in none of those places is downloaded from the GitHub release of this version, checked against the
+release's manifest (`kernels-cu<major>.json`: the build id this binary expects and the file's SHA-256), and kept in
+`~/.cache/inference-rs/kernels/<version>/sm<arch>/`, the last place the loader looks. A binary built from source finds
+its kernels where its build put them, since no release carries kernels of its build. `inference kernels fetch`
+downloads them ahead of time for a machine that will be offline (run it on that machine, with its GPU visible).
+`inference kernels prune` removes other versions' downloads, partial downloads a day old, and build dirs no binary has
+opened a library from for 30 days and no running process holds; a binary built with `cargo install` whose build dir it
+removed must be reinstalled.
+
 | Variable | Purpose |
 |---|---|
 | `INFERENCE_KERNEL_DIR` | Directory holding the kernel libraries; searched first. |
+| `INFERENCE_KERNEL_CACHE` | Where downloaded kernel libraries are kept, as `<dir>/<version>/sm<arch>/`. Default `$XDG_CACHE_HOME/inference-rs/kernels`, else `~/.cache/inference-rs/kernels`. |
+| `INFERENCE_KERNEL_URL` | Where kernel libraries and their manifest download from, instead of this version's GitHub release: an `https` mirror, or plain `http` to this machine (`127.0.0.1`, `localhost`) for testing. |
+| `INFERENCE_KERNEL_DOWNLOAD` | `0` stops kernel libraries from downloading; a missing one is then an error. |
 | `INFERENCE_KERNEL_BUILD_CACHE` | Build time. Where release-type builds (`cargo install`, wheels) keep the kernel libraries they build. Default `$XDG_CACHE_HOME/inference-rs/kernels/built`, else `~/.cache/inference-rs/kernels/built`. Dev builds use `target/debug/cuda-kernels`. |
 
 ## CUDA acceleration

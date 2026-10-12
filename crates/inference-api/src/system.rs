@@ -1,5 +1,9 @@
 //! Engine-independent facts about the host: devices and build, diagnostics, the Hugging Face cache, auto-tuning.
 
+#[cfg(feature = "cuda")]
+pub use inference_core::kernel_fetch::{
+    FetchReport, KernelSet, Pruned, fetch_kernels, kernel_types, prune_kernels,
+};
 use inference_core::{AutoDeviceMapParams, ModelDType, TokenSource, parse_isq_value};
 pub use inference_core::{hf_hub_cache_dir, hf_token_path};
 pub use inference_selection::{

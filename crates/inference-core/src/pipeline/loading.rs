@@ -119,6 +119,7 @@ pub(crate) struct LoadDevices {
 pub(crate) fn ensure_cuda_kernels(devices: &[Device]) -> Result<()> {
     #[cfg(feature = "cuda")]
     if devices.iter().any(Device::is_cuda) {
+        crate::kernel_fetch::install();
         inference_nn::cuda::ensure_kernels_loaded().map_err(anyhow::Error::msg)?;
     }
     let _ = devices;

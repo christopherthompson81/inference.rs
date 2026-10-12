@@ -33,6 +33,18 @@ pub fn ensure_kernels_loaded() -> std::result::Result<(), String> {
     gguf::ensure_kernels_loaded()
 }
 
+#[cfg(feature = "cuda")]
+/// The GGUF types with a kernel library of their own, by library suffix (`q4_k`).
+pub fn gguf_kernel_types() -> impl Iterator<Item = &'static str> {
+    gguf::type_kernel_libraries()
+}
+
+#[cfg(feature = "cuda")]
+/// Opens the kernel library of GGUF type `name` (`q4_k`) now.
+pub fn ensure_gguf_type_kernels(name: &str) -> std::result::Result<(), String> {
+    gguf::ensure_type_kernels_by_name(name)
+}
+
 mod fp8;
 mod fp8_config;
 mod gemv;

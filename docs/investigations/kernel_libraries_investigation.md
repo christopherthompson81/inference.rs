@@ -232,3 +232,65 @@ Re-checks:
   - Objects: 101 `-sm86`, 102 `-sm90a` (the extra is `blockwise_fp8_cutlass_sm90`), 35 build-id objects.
   - CUTLASS symbols: 8 on sm86, 29 on sm90a.
   - The q4_k copies hold only sm_86 and only sm_90a ELF respectively.
+
+## Run 11 - 2026-10-11 19:30
+
+Question (phase 4): does a missing kernel library download, verify and cache, and do the failure cases say what is wrong?
+
+Design:
+- **Loader:**
+  - inference-tensor's `kernel_library::open` looks last in `~/.cache/inference-rs/kernels/<version>/sm<arch>/` (`INFERENCE_KERNEL_CACHE` overrides the root).
+  - When a library is nowhere, it calls the fetcher a higher crate installed (`set_fetcher`), then looks again.
+  - It also refreshes the `.lock` of the build dir it opened from, so pruning can tell which build dirs are in use.
+- **Fetcher:** inference-core's `kernel_fetch`, installed by `ensure_cuda_kernels`.
+  - It reads `kernels-cu<major>.json` from `INFERENCE_KERNEL_URL`, else `<repository>/releases/download/v<version>`, once per process.
+  - It refuses a library whose release build id differs from the one the binary expects. A binary built from source has kernels no release carries.
+  - It streams the asset to `.<asset>.<pid>.part` beside the target while hashing, and renames it into place only if the SHA-256 matches.
+  - The blocking client runs on its own thread, since engine loads can run inside a tokio runtime. `INFERENCE_KERNEL_DOWNLOAD=0` turns it off.
+- **`inference kernels fetch [--types q4_k,q6_k | --all]`** opens the base libraries and those types through the same loader with the fetcher installed. Downloads get the same id and checksum checks as a model load.
+- **`inference kernels prune [--dry-run]`** removes download dirs of other versions (`<digits.dots>` names only, so the `built/` dir beside them stays). It also removes `<name>-<16 hex>` build dirs whose `.lock` is older than 30 days.
+
+Setup:
+- `RUSTFLAGS= cargo build --profile bundle -p inference-ffi --features cuda`, then `package_kernels.py`.
+- `python3 -m http.server` serves `target/kernels/0.9.3/assets/`, and `INFERENCE_KERNEL_URL` points at it.
+- `INFERENCE_KERNEL_DIR` holds only the 4 base libraries, `INFERENCE_KERNEL_CACHE` is an empty dir, and the build cache is renamed away.
+- The workload is Qwen3-1.7B-UD-Q4_K_XL.gguf through Python `JsonEngine` on `cuda:0`.
+
+Results:
+- **First run:** generates 8 tokens. The server logs 5 GETs (the manifest and the iq4_xs, q4_k, q5_k and q6_k libraries), and the four files land in `<cache>/0.9.3/sm86/`.
+- **Second run:** generates, with no download.
+- **One byte of the q6_k asset changed:** engine load fails with "... downloading it failed: http://127.0.0.1:8766/cu12-sm86-libinferencequant_q6_k.so has SHA-256 7633..., the manifest says b83c...". No partial file is left.
+- **Manifest build id for q6_k set to zeros:** "the v0.9.3 release's `libinferencequant_q6_k.so` is from another build (id 0000000000000000, this binary expects <its id>); a binary built from source finds its kernels where its build put them".
+- **`INFERENCE_KERNEL_DOWNLOAD=0`:** "downloading it failed: downloading is off (INFERENCE_KERNEL_DOWNLOAD=0)".
+- **Dev CLI `inference kernels fetch --types q4_k,q6_k`:** the libraries are already local (dev build), so nothing downloads, and it reports `sm86` and the download dir. `--types nonsense` errors and lists the 34 known types.
+- **`inference kernels prune` on synthetic caches** (`INFERENCE_KERNEL_CACHE` holding `0.9.2/`, `0.9.3/` and `built/`; `INFERENCE_KERNEL_BUILD_CACHE` holding a build dir with a `.lock` from 40 days ago, a fresh one and `notabuild/`):
+  - `--dry-run` lists `0.9.2` (300.0 KB) and the old build dir (500.0 KB).
+  - The real run removes exactly those two.
+
+## Run 12 - 2026-10-11 20:40
+
+Question: what did the phase 4 review find, and do the fixes hold?
+
+Findings and fixes:
+- **Prune could delete user dirs.** With `INFERENCE_KERNEL_CACHE` at a shared dir, any digits-and-dots subdir (`2024`) went. Version dirs now need an `x.y.z` name and hold only `sm*` dirs. Tested on `0.9.2/sm86` (pruned) against `2024`, `1.2`, `0.9.1/photos` and a version dir with a stray file (all kept).
+- **A failed manifest fetch was cached for the process.** One network blip made every later download fail. Now only a loaded manifest is kept (`Mutex<Option<Arc<Manifest>>>`).
+- **Prune vs a binary in use.** A `.lock` mtime only moves when a library opens, so a server up for 30 days could lose its build dir. `open` now takes a shared lock on the build dir's `.lock` for the process's life, and prune skips any dir it cannot lock exclusively, which also covers a build in progress. A test holds a shared lock on a 30-day-old dir and checks it is kept. The docs and the build-id refusal now say a pruned `cargo install` binary must be rebuilt or reinstalled.
+- **Hardening:**
+  - The partial file is named after the library (`.lib<name>.so.<pid>.<n>.part`), never the manifest's asset name, and the counter keeps two opens in one process apart.
+  - The download stops once it passes the manifest's size, and must match it exactly.
+  - `https_only` applies except for http to a loopback host.
+  - `READ_STALL_TIMEOUT` (120 s) replaces a misnamed 600 s "download" timeout; reqwest's blocking timeout applies per read.
+  - A 404 says no release publishes the file.
+- **`fetch` checks:** it validates and lowercases `--types` before downloading anything. It refuses with no visible GPU, where it would otherwise fetch the highest built arch for nobody.
+- **Cleanup:**
+  - Dead `.part` files a day old are pruned.
+  - `TYPE_LIBRARIES` carries each type's opener, replacing the separate match.
+  - The cache-root logic lives once, in `kernel_library` (`download_root`, `build_cache_root`).
+  - Archs in the error message are sorted before dedup.
+- **Not taken:** C ABI entries for fetch and prune, so Python can prefetch for offline use. That is left for a follow-up, since today a model load fetches what it needs.
+
+Re-check, same setup as Run 11 on a rebuilt bundle:
+- A first run downloads 4 files and generates; a second run downloads nothing.
+- A changed byte fails on SHA-256.
+- A manifest size 100 bytes short fails with "... is larger than the 891724 bytes the manifest gives".
+- Neither failure leaves a file or a partial behind.

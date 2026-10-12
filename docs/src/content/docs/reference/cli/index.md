@@ -20,6 +20,7 @@ sidebar:
 | [`inference tune`](/reference/cli/tune/) | Recommend quantization + device mapping for a model. Rejects `--quant auto`; pass `--quant <level>` or `--isq <level>` to bias the recommendation toward a specific quantization target. Adapter options are rejected because adapter memory is not included in the estimate |
 | [`inference login`](/reference/cli/login/) | Authenticate with Hugging Face Hub |
 | [`inference cache`](/reference/cli/cache/) | Manage the Hugging Face model cache |
+| [`inference kernels`](/reference/cli/kernels/) | Manage the CUDA kernel libraries: download them for offline use, prune old ones |
 | [`inference bench`](/reference/cli/bench/) | Run performance benchmarks for base or LoRA model generation |
 | [`inference from-config`](/reference/cli/from-config/) | Run from a full TOML configuration file |
 | [`inference update`](/reference/cli/update/) | Update or migrate an install using the installer |
