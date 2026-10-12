@@ -411,13 +411,14 @@ pub fn drop_foreign_local_projectors(
         .filter(|file| is_gguf(file) && is_projector(file))
         .map(|file| (split_key(file), local_base_model_id(&root.join(file))))
         .collect::<Vec<_>>();
-    let any_match = projectors
-        .iter()
-        .any(|(_, base)| base.as_deref() == Some(model_base.as_str()));
+    let any_match = projectors.iter().any(|(_, base)| {
+        base.as_ref()
+            .is_some_and(|base| base.eq_ignore_ascii_case(&model_base))
+    });
     let dropped = projectors
         .into_iter()
         .filter(|(_, base)| match base {
-            Some(base) => *base != model_base,
+            Some(base) => !base.eq_ignore_ascii_case(&model_base),
             None => any_match,
         })
         .map(|(key, _)| key)
@@ -856,7 +857,7 @@ mod tests {
         );
         write_gguf(
             &dir.path().join("mmproj-Alpha-7B-F16.gguf"),
-            Some("acme/Alpha-7B"),
+            Some("Acme/alpha-7b"),
         );
         write_gguf(&dir.path().join("mmproj-BF16.gguf"), Some("acme/Beta-30B"));
         write_gguf(&dir.path().join("mmproj-unlabeled-F16.gguf"), None);
