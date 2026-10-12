@@ -31,4 +31,13 @@ cargo build --release -p inference-ffi --features cuda   # or without cuda; the 
 dotnet run --project bindings/csharp/examples/AvaloniaDemo
 ```
 
+On Linux, `install.sh` builds both and installs the demo for this user: the app with the native library and its CUDA
+kernels in `~/.local/lib/inference-rs-demo`, `inference-rs-demo` on the PATH, and a launcher entry with the icon.
+It builds with CUDA when `nvidia-smi` finds a GPU (`--cpu` or `--cuda` to choose); `--prefix` installs elsewhere,
+`--profile debug` installs an existing dev build, and `--uninstall` removes it.
+
+```bash
+bindings/csharp/examples/AvaloniaDemo/install.sh
+```
+
 It depends only on the bindings project. `scripts/local_ci.sh --bindings` builds it with the solution.
