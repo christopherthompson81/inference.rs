@@ -908,6 +908,7 @@ pub(crate) fn can_sample_batch_cuda(seqs: &[&mut Sequence]) -> bool {
             let Some(plan) = seq
                 .sampler()
                 .cuda_batch_sampling_plan(seq.return_logprobs())
+                .filter(|plan| !matches!(plan.kind, CudaBatchSamplingKind::Nucleus))
             else {
                 return false;
             };
@@ -1034,6 +1035,7 @@ fn prepare_cuda_token_batch(
         let top_k = match plan.kind {
             CudaBatchSamplingKind::Greedy => 1,
             CudaBatchSamplingKind::TopK { k } => k,
+            CudaBatchSamplingKind::Nucleus => 0,
             CudaBatchSamplingKind::Categorical => {
                 unreachable!("resident sampling excludes categorical plans")
             }
@@ -1320,7 +1322,10 @@ fn try_sample_batch_cuda(
             return Ok(None);
         }
         let sampler = seq.sampler();
-        let Some(plan) = sampler.cuda_batch_sampling_plan(seq.return_logprobs()) else {
+        let Some(plan) = sampler
+            .cuda_batch_sampling_plan(seq.return_logprobs())
+            .filter(|plan| !matches!(plan.kind, CudaBatchSamplingKind::Nucleus))
+        else {
             return Ok(None);
         };
         sampling_logprob_required |= seq.sampling_logprob_required();
@@ -1388,7 +1393,7 @@ fn try_sample_batch_cuda(
         .map(|(_, plan)| match plan.kind {
             CudaBatchSamplingKind::Greedy => 1,
             CudaBatchSamplingKind::TopK { k } => k,
-            CudaBatchSamplingKind::Categorical => unreachable!(),
+            CudaBatchSamplingKind::Categorical | CudaBatchSamplingKind::Nucleus => unreachable!(),
         })
         .max()
         .expect("batch is non-empty");

@@ -3,6 +3,8 @@
 #include "radix_topk.cuh"
 #include <algorithm>
 #include <cub/block/block_radix_sort.cuh>
+#include <cub/block/block_reduce.cuh>
+#include <cub/block/block_scan.cuh>
 #include <limits>
 #include <stdint.h>
 #include <type_traits>
@@ -1908,6 +1910,9 @@ __global__ void sample_ranked_topk_kernel(
 
   const float *row_params =
       params + row * static_cast<size_t>(RANKED_TOPK_SAMPLE_PARAM_WIDTH);
+  if (row_params[1] == 0.0f) {
+    return; // full-vocabulary nucleus row, sampled by sample_nucleus_kernel
+  }
   const float inv_temperature = row_params[0];
   const int row_k = min(static_cast<int>(row_params[1]), packed_k);
   const float top_p = row_params[2];
@@ -2010,6 +2015,337 @@ extern "C" void sample_ranked_topk(
   const int grid = (nrows + block - 1) / block;
   sample_ranked_topk_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
       packed, params, tokens, nrows, packed_k);
+}
+
+// Draws a draft from the ranked top-k (top-k 0: the whole packed width) and writes the filtered q it drew from.
+__global__ void sample_ranked_topk_distribution_kernel(
+    const float *__restrict__ packed, const float *__restrict__ params,
+    uint32_t *__restrict__ tokens, uint32_t *__restrict__ ids,
+    float *__restrict__ probs, const int nrows, const int packed_k) {
+  const int row = blockIdx.x * blockDim.x + threadIdx.x;
+  if (row >= nrows) {
+    return;
+  }
+  const float *row_params =
+      params + row * static_cast<size_t>(RANKED_TOPK_SAMPLE_PARAM_WIDTH);
+  const float inv_temperature = row_params[0];
+  const int requested_k = static_cast<int>(row_params[1]);
+  const int row_k = requested_k == 0 ? packed_k : min(requested_k, packed_k);
+  const float top_p = row_params[2];
+  const float min_p = row_params[3];
+  const float uniform = row_params[4];
+  const float *row_packed = packed + row * static_cast<size_t>(2 * packed_k);
+  uint32_t *row_ids = ids + row * static_cast<size_t>(packed_k);
+  float *row_probs = probs + row * static_cast<size_t>(packed_k);
+  const float scaled_max = row_packed[0] * inv_temperature;
+
+  for (int rank = 0; rank < packed_k; ++rank) {
+    const float packed_id = row_packed[packed_k + rank];
+    row_ids[rank] = packed_id >= 0.0f && isfinite(packed_id)
+                        ? static_cast<uint32_t>(packed_id)
+                        : 0u;
+    row_probs[rank] = 0.0f;
+  }
+  if (row_k <= 0 || !(inv_temperature > 0.0f) || !isfinite(inv_temperature) ||
+      !isfinite(scaled_max) || !isfinite(top_p) || !isfinite(min_p) ||
+      !(uniform >= 0.0f) || !(uniform < 1.0f)) {
+    tokens[row] = UINT32_MAX;
+    return;
+  }
+
+  float total = 0.0f;
+  for (int rank = 0; rank < row_k; ++rank) {
+    const float weight = expf(row_packed[rank] * inv_temperature - scaled_max);
+    row_probs[rank] = weight;
+    total += weight;
+  }
+  if (top_p > 0.0f && top_p < 1.0f) {
+    const float cutoff = top_p * total;
+    float cumulative = 0.0f;
+    for (int rank = 0; rank < row_k; ++rank) {
+      if (cumulative >= cutoff) {
+        row_probs[rank] = 0.0f;
+      } else {
+        cumulative += row_probs[rank];
+      }
+    }
+  }
+  if (min_p > 0.0f && min_p < 1.0f) {
+    for (int rank = 0; rank < row_k; ++rank) {
+      if (min_p >= row_probs[rank]) {
+        row_probs[rank] = 0.0f;
+      }
+    }
+  }
+  float kept = 0.0f;
+  for (int rank = 0; rank < row_k; ++rank) {
+    kept += row_probs[rank];
+  }
+  if (!(kept > 0.0f) || !isfinite(kept)) {
+    tokens[row] = UINT32_MAX;
+    return;
+  }
+  const float chosen = uniform * kept;
+  float cumulative = 0.0f;
+  int selected = -1;
+  for (int rank = 0; rank < row_k; ++rank) {
+    const float weight = row_probs[rank];
+    if (weight > 0.0f) {
+      cumulative += weight;
+      selected = rank;
+      if (cumulative > chosen) {
+        break;
+      }
+    }
+  }
+  for (int rank = 0; rank < row_k; ++rank) {
+    row_probs[rank] /= kept;
+  }
+  tokens[row] = row_ids[selected];
+}
+
+extern "C" void sample_ranked_topk_distribution(
+    const float *packed, const float *params, uint32_t *tokens, uint32_t *ids,
+    float *probs, const int nrows, const int packed_k, int64_t stream) {
+  if (nrows <= 0 || packed_k <= 0) {
+    return;
+  }
+  const int block = RANKED_TOPK_SAMPLE_THREADS;
+  const int grid = (nrows + block - 1) / block;
+  sample_ranked_topk_distribution_kernel<<<grid, block, 0, (cudaStream_t)stream>>>(
+      packed, params, tokens, ids, probs, nrows, packed_k);
+}
+
+constexpr int NUCLEUS_SAMPLE_THREADS = 1024;
+// Halves the score range each step; 40 steps resolve any finite logit spread far below f32 spacing.
+constexpr int NUCLEUS_BISECTION_STEPS = 40;
+
+// Top-p / min-p over the whole vocabulary by the CPU sampler's rule; a nucleus wider than the ranked top-k bisects.
+template <typename T>
+__global__ void sample_nucleus_kernel(const T *__restrict__ logits,
+                                      const float *__restrict__ packed,
+                                      const float *__restrict__ params,
+                                      uint32_t *__restrict__ tokens,
+                                      const int vocab, const int packed_k) {
+  using Reduce = cub::BlockReduce<float, NUCLEUS_SAMPLE_THREADS>;
+  using ReduceInt = cub::BlockReduce<int, NUCLEUS_SAMPLE_THREADS>;
+  using Scan = cub::BlockScan<float, NUCLEUS_SAMPLE_THREADS>;
+  __shared__ union {
+    typename Reduce::TempStorage reduce;
+    typename ReduceInt::TempStorage reduce_int;
+    typename Scan::TempStorage scan;
+  } temp;
+  __shared__ float shared_float;
+  __shared__ uint32_t shared_token;
+  __shared__ bool done;
+
+  const int row = blockIdx.x;
+  const int tid = threadIdx.x;
+  const float *row_params =
+      params + row * static_cast<size_t>(RANKED_TOPK_SAMPLE_PARAM_WIDTH);
+  if (row_params[1] != 0.0f) {
+    return;
+  }
+  const float inv_temperature = row_params[0];
+  const float top_p = row_params[2];
+  const float min_p = row_params[3];
+  const float uniform = row_params[4];
+  const T *row_logits = logits + static_cast<size_t>(row) * vocab;
+  const float *row_packed = packed + static_cast<size_t>(row) * 2 * packed_k;
+  const float scaled_max = row_packed[0] * inv_temperature;
+  if (!(inv_temperature > 0.0f) || !isfinite(inv_temperature) ||
+      !isfinite(scaled_max) || !(uniform >= 0.0f) || !(uniform < 1.0f)) {
+    if (tid == 0) {
+      tokens[row] = UINT32_MAX;
+    }
+    return;
+  }
+  const bool filter_top_p = top_p > 0.0f && top_p < 1.0f;
+  const bool filter_min_p = min_p > 0.0f && min_p < 1.0f;
+
+  float local = 0.0f;
+  for (int i = tid; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
+    local += expf(topk_to_float(row_logits[i]) * inv_temperature - scaled_max);
+  }
+  const float block_total = Reduce(temp.reduce).Sum(local);
+  if (tid == 0) {
+    shared_float = block_total;
+  }
+  __syncthreads();
+  // Weights are exp(score - max), so the top token weighs 1 and min-p compares weights against min_p itself.
+  const float total = shared_float;
+  const float cutoff = top_p * total;
+
+  if (tid == 0) {
+    done = false;
+    int retained = packed_k;
+    bool top_p_covered = !filter_top_p;
+    if (filter_top_p) {
+      float cumulative = 0.0f;
+      for (int rank = 0; rank < packed_k; ++rank) {
+        if (cumulative >= cutoff) {
+          retained = rank;
+          top_p_covered = true;
+          break;
+        }
+        cumulative += expf(row_packed[rank] * inv_temperature - scaled_max);
+      }
+    }
+    const float last_weight =
+        expf(row_packed[packed_k - 1] * inv_temperature - scaled_max);
+    const bool min_p_covered = filter_min_p && min_p >= last_weight;
+    if ((filter_top_p && top_p_covered) || min_p_covered || packed_k >= vocab) {
+      float kept_total = 0.0f;
+      for (int rank = 0; rank < retained; ++rank) {
+        const float weight =
+            expf(row_packed[rank] * inv_temperature - scaled_max);
+        if (!filter_min_p || !(min_p >= weight)) {
+          kept_total += weight;
+        }
+      }
+      const float chosen = uniform * kept_total;
+      float cumulative = 0.0f;
+      int selected = -1;
+      int last_positive = -1;
+      for (int rank = 0; rank < retained; ++rank) {
+        const float weight =
+            expf(row_packed[rank] * inv_temperature - scaled_max);
+        if (filter_min_p && min_p >= weight) {
+          continue;
+        }
+        cumulative += weight;
+        if (weight > 0.0f) {
+          last_positive = rank;
+        }
+        if (cumulative > chosen) {
+          selected = rank;
+          break;
+        }
+      }
+      if (selected < 0) {
+        selected = last_positive;
+      }
+      const float token =
+          selected >= 0 ? row_packed[packed_k + selected] : -1.0f;
+      tokens[row] = token >= 0.0f && isfinite(token)
+                        ? static_cast<uint32_t>(token)
+                        : UINT32_MAX;
+      done = true;
+    }
+  }
+  __syncthreads();
+  if (done) {
+    return;
+  }
+
+  // Scores relative to the max are <= 0; min-p keeps score > log(min_p).
+  const float min_score = filter_min_p ? logf(min_p) : -INFINITY;
+  float threshold = -INFINITY;
+  if (filter_top_p) {
+    float low_local = 0.0f;
+    for (int i = tid; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
+      low_local = fminf(low_local, topk_to_float(row_logits[i]) * inv_temperature -
+                                       scaled_max);
+    }
+    __syncthreads();
+    const float row_min = Reduce(temp.reduce).Reduce(low_local, cub::Min());
+    if (tid == 0) {
+      shared_float = row_min;
+    }
+    __syncthreads();
+    float low = shared_float;
+    float high = 0.0f;
+    for (int step = 0; step < NUCLEUS_BISECTION_STEPS; ++step) {
+      const float middle = 0.5f * (low + high);
+      float mass = 0.0f;
+      for (int i = tid; i < vocab; i += NUCLEUS_SAMPLE_THREADS) {
+        const float score =
+            topk_to_float(row_logits[i]) * inv_temperature - scaled_max;
+        if (score >= middle) {
+          mass += expf(score);
+        }
+      }
+      __syncthreads();
+      const float block_mass = Reduce(temp.reduce).Sum(mass);
+      if (tid == 0) {
+        shared_float = block_mass;
+      }
+      __syncthreads();
+      if (shared_float >= cutoff) {
+        low = middle;
+      } else {
+        high = middle;
+      }
+    }
+    threshold = low;
+  }
+
+  const int chunk = (vocab + NUCLEUS_SAMPLE_THREADS - 1) / NUCLEUS_SAMPLE_THREADS;
+  const int begin = min(tid * chunk, vocab);
+  const int end = min(begin + chunk, vocab);
+  float partial = 0.0f;
+  int last_kept = -1;
+  for (int i = begin; i < end; ++i) {
+    const float score =
+        topk_to_float(row_logits[i]) * inv_temperature - scaled_max;
+    if (score >= threshold && score > min_score) {
+      partial += expf(score);
+      last_kept = i;
+    }
+  }
+  __syncthreads();
+  float prefix = 0.0f;
+  float kept_total = 0.0f;
+  Scan(temp.scan).ExclusiveSum(partial, prefix, kept_total);
+  if (tid == 0) {
+    shared_token = UINT32_MAX;
+  }
+  __syncthreads();
+  const float chosen = uniform * kept_total;
+  if (partial > 0.0f && chosen >= prefix && chosen < prefix + partial) {
+    float cumulative = prefix;
+    for (int i = begin; i < end; ++i) {
+      const float score =
+          topk_to_float(row_logits[i]) * inv_temperature - scaled_max;
+      if (score >= threshold && score > min_score) {
+        cumulative += expf(score);
+        if (cumulative > chosen) {
+          shared_token = static_cast<uint32_t>(i);
+          break;
+        }
+      }
+    }
+  }
+  __syncthreads();
+  const int row_last_kept = ReduceInt(temp.reduce_int).Reduce(last_kept, cub::Max());
+  if (tid == 0) {
+    if (shared_token == UINT32_MAX && row_last_kept >= 0) {
+      shared_token = static_cast<uint32_t>(row_last_kept);
+    }
+    tokens[row] = shared_token;
+  }
+}
+
+// dtype: 0 f16, 1 bf16, 2 f32
+extern "C" void sample_nucleus(const void *logits, const float *packed,
+                               const float *params, uint32_t *tokens,
+                               const int nrows, const int vocab,
+                               const int packed_k, const int dtype,
+                               int64_t stream) {
+  if (nrows <= 0 || vocab <= 0 || packed_k <= 0) {
+    return;
+  }
+  const cudaStream_t custream = (cudaStream_t)stream;
+  if (dtype == 0) {
+    sample_nucleus_kernel<__half><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+        static_cast<const __half *>(logits), packed, params, tokens, vocab, packed_k);
+  } else if (dtype == 1) {
+    sample_nucleus_kernel<__nv_bfloat16><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+        static_cast<const __nv_bfloat16 *>(logits), packed, params, tokens, vocab, packed_k);
+  } else {
+    sample_nucleus_kernel<float><<<nrows, NUCLEUS_SAMPLE_THREADS, 0, custream>>>(
+        static_cast<const float *>(logits), packed, params, tokens, vocab, packed_k);
+  }
 }
 
 template <bool BATCHED, bool COMPUTE_SOFTMAX>

@@ -9,7 +9,7 @@ use inference_tensor::cuda_backend::cudarc::driver::{
     sys,
 };
 use inference_tensor::{
-    CpuStorage, CudaStorage, DType, DeviceLocation, InplaceOp1, Layout, Result, Shape, Storage,
+    CpuStorage, CudaStorage, D, DType, DeviceLocation, InplaceOp1, Layout, Result, Shape, Storage,
     Tensor,
 };
 
@@ -34,7 +34,11 @@ const OP: &str = "sparse_rejection_cuda";
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SparseRejectionMode {
     Categorical,
-    BoundedTopK { max_top_k: usize },
+    /// `nucleus_rows`: some row has top-k 0 with top-p / min-p, which needs each target row's full normalizer.
+    BoundedTopK {
+        max_top_k: usize,
+        nucleus_rows: bool,
+    },
 }
 
 #[cfg(test)]
@@ -407,6 +411,7 @@ struct SparseRejectionKernelLaunch {
     min_p_ptr: usize,
     accept_ptr: usize,
     sample_ptr: usize,
+    normalizers_ptr: usize,
     batch: i32,
     drafts: i32,
     vocab: i32,
@@ -459,6 +464,7 @@ impl InplaceOp1 for SparseRejectionKernelLaunch {
                     self.min_p_ptr as *const f32,
                     self.accept_ptr as *const f32,
                     self.sample_ptr as *const f32,
+                    self.normalizers_ptr as *const f32,
                     outcomes_ptr,
                     self.batch,
                     self.drafts,
@@ -1310,7 +1316,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
     let shape = validate_input(&input)?;
     let packed_target = match input.mode {
         SparseRejectionMode::Categorical => None,
-        SparseRejectionMode::BoundedTopK { max_top_k } => {
+        SparseRejectionMode::BoundedTopK { max_top_k, .. } => {
             if max_top_k == 0 || max_top_k > CUDA_TOPK_MAX_K {
                 inference_tensor::bail!(
                     "{OP} max_top_k={max_top_k} must be in [1, {CUDA_TOPK_MAX_K}]"
@@ -1330,6 +1336,25 @@ fn sparse_rejection_cuda_device_with_outcomes(
             };
             Some(packed)
         }
+    };
+    let full_normalizers = match input.mode {
+        SparseRejectionMode::BoundedTopK {
+            nucleus_rows: true, ..
+        } => {
+            let scaled = input
+                .target_logits
+                .to_dtype(DType::F32)?
+                .broadcast_mul(&input.inverse_temperatures.reshape((shape.batch, 1, 1))?)?;
+            let max = scaled.max_keepdim(D::Minus1)?;
+            Some(
+                scaled
+                    .broadcast_sub(&max)?
+                    .exp()?
+                    .sum(D::Minus1)?
+                    .contiguous()?,
+            )
+        }
+        _ => None,
     };
     let kernel_target = packed_target.as_ref().map_or_else(
         || input.target_logits.clone(),
@@ -1444,6 +1469,26 @@ fn sparse_rejection_cuda_device_with_outcomes(
     let accept_ptr = unsafe { (accept_ptr as *const f32).add(accept_layout.start_offset()) };
     let (sample_ptr, sample_guard) = sample_slice.device_ptr(&stream);
     let sample_ptr = unsafe { (sample_ptr as *const f32).add(sample_layout.start_offset()) };
+    let normalizers_storage = full_normalizers
+        .as_ref()
+        .map(|normalizers| normalizers.storage_and_layout());
+    let normalizers_slice = match &normalizers_storage {
+        Some((storage, layout)) => {
+            let inference_tensor::Storage::Cuda(storage) = &**storage else {
+                inference_tensor::bail!("{OP} requires CUDA target normalizers");
+            };
+            let CudaStorageSlice::F32(slice) = &storage.slice else {
+                inference_tensor::bail!("{OP} target normalizer storage dtype mismatch");
+            };
+            Some((slice, layout.start_offset()))
+        }
+        None => None,
+    };
+    let normalizers_device = normalizers_slice.map(|(slice, offset)| {
+        let (ptr, guard) = slice.device_ptr(&stream);
+        (unsafe { (ptr as *const f32).add(offset) as usize }, guard)
+    });
+    let normalizers_ptr = normalizers_device.as_ref().map_or(0, |(ptr, _)| *ptr);
 
     let outcomes = match outcomes {
         Some(outcomes) => {
@@ -1488,6 +1533,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
         min_p_ptr: min_p_ptr as usize,
         accept_ptr: accept_ptr as usize,
         sample_ptr: sample_ptr as usize,
+        normalizers_ptr,
         batch: shape.batch_i32,
         drafts: shape.drafts_i32,
         vocab: shape.vocab_i32,
@@ -1505,6 +1551,7 @@ fn sparse_rejection_cuda_device_with_outcomes(
     drop(min_p_guard);
     drop(accept_guard);
     drop(sample_guard);
+    drop(normalizers_device);
 
     let mut inputs = vec![
         input.target_logits.clone(),
@@ -1518,6 +1565,8 @@ fn sparse_rejection_cuda_device_with_outcomes(
     input.draft_tokens.extend_inputs(&mut inputs);
     input.q_token_ids.extend_inputs(&mut inputs);
     input.q_probs.extend_inputs(&mut inputs);
+    drop(normalizers_storage);
+    inputs.extend(full_normalizers);
     Ok(SparseRejectionOutput {
         _outcomes: outcomes.clone(),
         _inputs: inputs,
@@ -1889,6 +1938,7 @@ mod tests {
                 case.target_top_k.fill(case.vocab as u32);
                 case.mode = SparseRejectionMode::BoundedTopK {
                     max_top_k: case.vocab,
+                    nucleus_rows: false,
                 };
             }
             let tensors = case.to_device(&device)?;
@@ -2052,7 +2102,10 @@ mod tests {
         let mut case = deterministic_workspace_case(2, 2);
         case.inverse_temperatures = vec![0.5, 1.25];
         case.target_top_k = vec![5; case.batch];
-        case.mode = SparseRejectionMode::BoundedTopK { max_top_k: 5 };
+        case.mode = SparseRejectionMode::BoundedTopK {
+            max_top_k: 5,
+            nucleus_rows: false,
+        };
         let expected = reference(&case);
 
         assert_eq!(case.run_workspace(&device, &mut workspace, true)?, expected);
@@ -2187,7 +2240,10 @@ mod tests {
             min_p: vec![0.0, 0.15],
             accept_uniforms: vec![0.99, 0.99, 0.90, 0.50],
             sample_uniforms: vec![0.30, 0.80],
-            mode: SparseRejectionMode::BoundedTopK { max_top_k: 4 },
+            mode: SparseRejectionMode::BoundedTopK {
+                max_top_k: 4,
+                nucleus_rows: false,
+            },
         };
         let expected = reference(&case);
         assert_eq!(
@@ -2249,7 +2305,10 @@ mod tests {
                 min_p: vec![0.05, 0.10],
                 accept_uniforms: vec![0.99; batch * drafts],
                 sample_uniforms: vec![0.27, 0.83],
-                mode: SparseRejectionMode::BoundedTopK { max_top_k },
+                mode: SparseRejectionMode::BoundedTopK {
+                    max_top_k,
+                    nucleus_rows: false,
+                },
             };
             let expected = reference(&case);
             assert_eq!(case.run(&device)?, expected);
@@ -2257,6 +2316,79 @@ mod tests {
             let mut workspace = None;
             assert_eq!(case.run_workspace(&device, &mut workspace, true)?, expected);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn nucleus_rows_match_full_width_top_k_and_fall_back_when_wide() -> Result<()> {
+        skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        let outcome = |rows: Vec<SparseRejectionRow>| {
+            rows.iter()
+                .map(|row| (row.status, row.accepted_count, row.continuation))
+                .collect::<Vec<_>>()
+        };
+
+        let mut bounded = deterministic_workspace_case(4, 3);
+        bounded.top_p = vec![0.9, 0.6, 0.95, 0.5];
+        bounded.min_p = vec![0.0, 0.0, 0.2, 0.1];
+        bounded.target_top_k.fill(bounded.vocab as u32);
+        bounded.mode = SparseRejectionMode::BoundedTopK {
+            max_top_k: bounded.vocab,
+            nucleus_rows: false,
+        };
+        let expected = outcome(bounded.run(&device)?);
+        assert!(
+            expected
+                .iter()
+                .all(|(status, ..)| *status == SPARSE_REJECTION_STATUS_OK)
+        );
+        let mut nucleus = bounded;
+        nucleus.target_top_k.fill(0);
+        nucleus.mode = SparseRejectionMode::BoundedTopK {
+            max_top_k: nucleus.vocab,
+            nucleus_rows: true,
+        };
+        assert_eq!(outcome(nucleus.run(&device)?), expected);
+
+        // Flat rows put the nucleus far past the 128 ranked tokens; the peaked row's nucleus is its top token.
+        let vocab = 300;
+        let mut target_logits = vec![0.0f32; 3 * 2 * vocab];
+        target_logits[2 * 2 * vocab..]
+            .iter_mut()
+            .step_by(vocab)
+            .for_each(|logit| *logit = 30.0);
+        let wide = HostCase {
+            batch: 3,
+            drafts: 1,
+            vocab,
+            q_width: 1,
+            target_logits,
+            draft_tokens: vec![0; 3],
+            q_token_ids: vec![0; 3],
+            q_probs: vec![1.0; 3],
+            inverse_temperatures: vec![1.0; 3],
+            target_top_k: vec![0; 3],
+            top_p: vec![0.9, 0.0, 0.9],
+            min_p: vec![0.0, 0.5, 0.0],
+            accept_uniforms: vec![0.5; 3],
+            sample_uniforms: vec![0.5; 3],
+            mode: SparseRejectionMode::BoundedTopK {
+                max_top_k: CUDA_TOPK_MAX_K,
+                nucleus_rows: true,
+            },
+        };
+        assert_eq!(
+            wide.run(&device)?
+                .iter()
+                .map(|row| row.status)
+                .collect::<Vec<_>>(),
+            vec![
+                SPARSE_REJECTION_STATUS_NEEDS_CPU,
+                SPARSE_REJECTION_STATUS_NEEDS_CPU,
+                SPARSE_REJECTION_STATUS_OK,
+            ]
+        );
         Ok(())
     }
 

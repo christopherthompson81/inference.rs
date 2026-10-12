@@ -778,6 +778,27 @@ inference_tensor::kernel_library! {
             packed_k: i32,
             stream: i64,
         );
+        pub fn sample_ranked_topk_distribution(
+            packed: *const f32,
+            params: *const f32,
+            tokens: *mut u32,
+            ids: *mut u32,
+            probs: *mut f32,
+            nrows: i32,
+            packed_k: i32,
+            stream: i64,
+        );
+        pub fn sample_nucleus(
+            logits: *const c_void,
+            packed: *const f32,
+            params: *const f32,
+            tokens: *mut u32,
+            nrows: i32,
+            vocab: i32,
+            packed_k: i32,
+            dtype: i32,
+            stream: i64,
+        );
         pub fn dflash_greedy_select(
             packed_topk: *const f32,
             projected_hidden: *const c_void,
@@ -847,6 +868,7 @@ inference_tensor::kernel_library! {
             min_p: *const f32,
             accept_uniforms: *const f32,
             sample_uniforms: *const f32,
+            full_normalizers: *const f32,
             outcomes: *mut u32,
             batch: i32,
             drafts: i32,

@@ -441,15 +441,23 @@ __global__ void sparse_rejection_categorical_f32_kernel(
   }
 }
 
+__device__ __forceinline__ float row_normalizer(const float *normalizers,
+                                               const size_t row) {
+  return normalizers == nullptr ? 0.0f : normalizers[row];
+}
+
+// requested_k 0: top-p / min-p over the whole vocabulary via full_normalizer; a wider nucleus needs the CPU.
 __device__ SpecRejectionStatus prepare_topk_distribution(
     const float *packed, const int packed_k, const uint32_t requested_k,
     const int vocab, const float inverse_temperature, const float top_p,
-    const float min_p, uint32_t *ids, float *weights, int *support_size,
-    float *denominator) {
-  if (requested_k == 0) {
+    const float min_p, const float full_normalizer, uint32_t *ids,
+    float *weights, int *support_size, float *denominator) {
+  const bool nucleus = requested_k == 0;
+  if (nucleus && !(full_normalizer > 0.0f && isfinite(full_normalizer))) {
     return SPEC_REJECTION_NEEDS_CPU;
   }
-  const int effective_k = min(static_cast<int>(requested_k), vocab);
+  const int effective_k =
+      nucleus ? min(packed_k, vocab) : min(static_cast<int>(requested_k), vocab);
   if (effective_k > packed_k) {
     return SPEC_REJECTION_NEEDS_CPU;
   }
@@ -490,9 +498,11 @@ __device__ SpecRejectionStatus prepare_topk_distribution(
   if (!(topk_sum > 0.0f) || !isfinite(topk_sum)) {
     return SPEC_REJECTION_INVALID_TARGET;
   }
+  const float last_weight = weights[count - 1];
+  bool top_p_covered = false;
 
   if (filter_active(top_p)) {
-    const float cutoff = top_p * topk_sum;
+    const float cutoff = top_p * (nucleus ? full_normalizer : topk_sum);
     float cumulative = 0.0f;
     for (int slot = 0; slot < count; ++slot) {
       if (cumulative >= cutoff) {
@@ -501,6 +511,11 @@ __device__ SpecRejectionStatus prepare_topk_distribution(
         cumulative += weights[slot];
       }
     }
+    top_p_covered = cumulative >= cutoff;
+  }
+  if (nucleus && count == effective_k && effective_k < vocab && !top_p_covered &&
+      !(filter_active(min_p) && min_p >= last_weight)) {
+    return SPEC_REJECTION_NEEDS_CPU;
   }
   if (filter_active(min_p)) {
     const float threshold = weights[0] * min_p;
@@ -579,6 +594,7 @@ __global__ void sparse_rejection_topk_f32_kernel(
     const float *__restrict__ top_p, const float *__restrict__ min_p,
     const float *__restrict__ accept_uniforms,
     const float *__restrict__ sample_uniforms,
+    const float *__restrict__ full_normalizers,
     uint32_t *__restrict__ outcomes, const int batch, const int drafts,
     const int vocab, const int q_width, const int packed_k) {
   const int sequence = blockIdx.x;
@@ -602,8 +618,9 @@ __global__ void sparse_rejection_topk_f32_kernel(
     float target_denominator = 0.0f;
     status = prepare_topk_distribution(
         packed, packed_k, target_top_k[sequence], vocab, inverse_temperature,
-        top_p[sequence], min_p[sequence], target_ids, target_weights,
-        &support_size, &target_denominator);
+        top_p[sequence], min_p[sequence],
+        row_normalizer(full_normalizers, sequence_row + position), target_ids,
+        target_weights, &support_size, &target_denominator);
     if (status != SPEC_REJECTION_OK) {
       break;
     }
@@ -662,8 +679,9 @@ __global__ void sparse_rejection_topk_f32_kernel(
     if (!(residual_total > 0.0f) || !isfinite(residual_total)) {
       status = prepare_topk_distribution(
           packed, packed_k, target_top_k[sequence], vocab, inverse_temperature,
-          top_p[sequence], min_p[sequence], target_ids, target_weights,
-          &support_size, &target_denominator);
+          top_p[sequence], min_p[sequence],
+          row_normalizer(full_normalizers, sequence_row + position), target_ids,
+          target_weights, &support_size, &target_denominator);
     }
     if (status == SPEC_REJECTION_OK) {
       status = sample_sparse_distribution(
@@ -679,8 +697,9 @@ __global__ void sparse_rejection_topk_f32_kernel(
     float target_denominator = 0.0f;
     status = prepare_topk_distribution(
         packed, packed_k, target_top_k[sequence], vocab, inverse_temperature,
-        top_p[sequence], min_p[sequence], target_ids, target_weights,
-        &support_size, &target_denominator);
+        top_p[sequence], min_p[sequence],
+        row_normalizer(full_normalizers, sequence_row + drafts), target_ids,
+        target_weights, &support_size, &target_denominator);
     if (status == SPEC_REJECTION_OK) {
       status = sample_sparse_distribution(target_ids, target_weights,
                                           support_size,
@@ -721,11 +740,13 @@ extern "C" void sparse_rejection_topk_f32(
     const uint32_t *q_token_ids, const float *q_probs,
     const float *inverse_temperatures, const uint32_t *target_top_k,
     const float *top_p, const float *min_p, const float *accept_uniforms,
-    const float *sample_uniforms, uint32_t *outcomes, int batch, int drafts,
-    int vocab, int q_width, int packed_k, int64_t stream) {
+    const float *sample_uniforms, const float *full_normalizers,
+    uint32_t *outcomes, int batch, int drafts, int vocab, int q_width,
+    int packed_k, int64_t stream) {
   const cudaStream_t cuda_stream = reinterpret_cast<cudaStream_t>(stream);
   sparse_rejection_topk_f32_kernel<<<batch, 1, 0, cuda_stream>>>(
       packed_target, draft_tokens, q_token_ids, q_probs,
       inverse_temperatures, target_top_k, top_p, min_p, accept_uniforms,
-      sample_uniforms, outcomes, batch, drafts, vocab, q_width, packed_k);
+      sample_uniforms, full_normalizers, outcomes, batch, drafts, vocab,
+      q_width, packed_k);
 }

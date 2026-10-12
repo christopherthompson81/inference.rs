@@ -767,8 +767,28 @@ impl Qwen3_5TextModel {
             .collect::<Vec<_>>();
         let mut tokens: Vec<Vec<u32>> = vec![Vec::with_capacity(n_predict); batch];
         let mut logits = Vec::with_capacity(n_predict);
+        #[cfg(feature = "cuda")]
+        let cuda_sampler = crate::speculative::proposer::CudaDraftSampler::new(
+            ctx.sequences,
+            n_predict,
+            hidden.device(),
+            &ctx.rng,
+        )?;
+        #[cfg(feature = "cuda")]
+        let mut cuda_samples = Vec::with_capacity(n_predict);
         for step in 0..n_predict {
             let step_logits = self.draft_logits(&hidden)?;
+            #[cfg(feature = "cuda")]
+            let drafts = match &cuda_sampler {
+                Some(sampler) => {
+                    let sample = sampler.sample(step, &step_logits)?;
+                    let drafts = sample.tokens.to_vec1::<u32>()?;
+                    cuda_samples.push(sample);
+                    drafts
+                }
+                None => sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?,
+            };
+            #[cfg(not(feature = "cuda"))]
             let drafts = sample_draft_rows(&step_logits, ctx.sequences, &mut contexts, &ctx.rng)?;
             for (i, draft) in drafts.iter().enumerate() {
                 tokens[i].push(*draft);
@@ -799,6 +819,29 @@ impl Qwen3_5TextModel {
             hidden = self.drafter_forward(head, &chained, &hidden, &kv_cache, paged_meta)?;
         }
 
+        #[cfg(feature = "cuda")]
+        if !cuda_samples.is_empty() {
+            let proposals = tokens
+                .into_iter()
+                .enumerate()
+                .map(|(row, tokens)| {
+                    let ids = cuda_samples
+                        .iter()
+                        .map(|sample| sample.ids.get(row))
+                        .collect::<Result<Vec<_>>>()?;
+                    let probs = cuda_samples
+                        .iter()
+                        .map(|sample| sample.probs.get(row))
+                        .collect::<Result<Vec<_>>>()?;
+                    SpeculativeProposal::with_sparse_probs(
+                        tokens,
+                        Tensor::stack(&ids, 0)?,
+                        Tensor::stack(&probs, 0)?,
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            return Ok(Some(SpeculativeProposalBatch::new(proposals)));
+        }
         // [n_predict, batch, vocab] -> per sequence [n_predict, vocab]
         let logits = Tensor::stack(&logits, 1)?;
         let proposals = tokens

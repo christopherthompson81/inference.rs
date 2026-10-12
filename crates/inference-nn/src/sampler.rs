@@ -317,8 +317,12 @@ pub struct Sampler {
 #[derive(Clone, Copy, Debug)]
 pub enum CudaBatchSamplingKind {
     Greedy,
-    TopK { k: usize },
+    TopK {
+        k: usize,
+    },
     Categorical,
+    /// Top-p and/or min-p over the whole vocabulary, without a top-k bound.
+    Nucleus,
 }
 
 #[cfg(feature = "cuda")]
@@ -533,6 +537,28 @@ pub struct CudaSpeculativeSamplingPlan {
     pub top_k: usize,
     pub top_p: f32,
     pub min_p: f32,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaSpeculativeSamplingPlan {
+    /// Verified against a ranked top-k of the target: a top-k bound, or top-p / min-p over the whole vocabulary.
+    pub fn uses_ranked_target(&self) -> bool {
+        self.top_k > 0 || is_active_filter(self.top_p) || is_active_filter(self.min_p)
+    }
+
+    /// The ranked width this row needs; an unbounded (nucleus) row takes the widest ranked top-k.
+    pub fn ranked_width(&self, vocab: usize) -> usize {
+        if self.top_k > 0 {
+            self.top_k
+        } else {
+            crate::ops::cuda_topk_ranked_packed_max_k(vocab).unwrap_or(0)
+        }
+    }
+}
+
+#[cfg(feature = "cuda")]
+fn is_active_filter(value: f32) -> bool {
+    value > 0.0 && value < 1.0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -782,7 +808,7 @@ impl Sampler {
                 } else if !(has_top_p_filter || has_min_p_filter) {
                     CudaBatchSamplingKind::Categorical
                 } else {
-                    return None;
+                    CudaBatchSamplingKind::Nucleus
                 };
                 Some(CudaBatchSamplingPlan {
                     kind,
@@ -803,7 +829,7 @@ impl Sampler {
         let plan = self.cuda_batch_sampling_plan(return_logprobs)?;
         let top_k = match plan.kind {
             CudaBatchSamplingKind::Greedy => return None,
-            CudaBatchSamplingKind::Categorical => 0,
+            CudaBatchSamplingKind::Categorical | CudaBatchSamplingKind::Nucleus => 0,
             CudaBatchSamplingKind::TopK { k } => k,
         };
         let top_p = plan.top_p;
@@ -861,8 +887,8 @@ impl Sampler {
         let row_k = match plan.kind {
             CudaBatchSamplingKind::Greedy => 1,
             CudaBatchSamplingKind::TopK { k } => k.min(packed_k),
-            CudaBatchSamplingKind::Categorical => {
-                inference_tensor::bail!("categorical plan cannot parse CUDA top-k output")
+            CudaBatchSamplingKind::Categorical | CudaBatchSamplingKind::Nucleus => {
+                inference_tensor::bail!("{:?} plan cannot parse CUDA top-k output", plan.kind)
             }
         };
         let top_values = &packed[..row_k];
@@ -906,8 +932,11 @@ impl Sampler {
         let row_k = match plan.kind {
             CudaBatchSamplingKind::Greedy => 1,
             CudaBatchSamplingKind::TopK { k } => k.min(packed_k),
-            CudaBatchSamplingKind::Categorical => {
-                inference_tensor::bail!("categorical plan cannot parse CUDA ranked top-k output")
+            CudaBatchSamplingKind::Categorical | CudaBatchSamplingKind::Nucleus => {
+                inference_tensor::bail!(
+                    "{:?} plan cannot parse CUDA ranked top-k output",
+                    plan.kind
+                )
             }
         };
         let top_values = &packed[..row_k];
@@ -2661,7 +2690,14 @@ mod tests {
 
         let mut filtered = unbounded;
         filtered.top_p = 0.9;
-        assert!(filtered.cuda_batch_sampling_plan(false).is_none());
+        assert!(matches!(
+            filtered.cuda_batch_sampling_plan(false).unwrap().kind,
+            CudaBatchSamplingKind::Nucleus
+        ));
+        assert!(filtered.cuda_resident_sampling_plan(false).is_some());
+        let speculative_filtered = filtered.cuda_speculative_sampling_plan(false).unwrap();
+        assert_eq!(speculative_filtered.top_k, 0);
+        assert_eq!(speculative_filtered.top_p, 0.9);
     }
 
     #[cfg(feature = "cuda")]
