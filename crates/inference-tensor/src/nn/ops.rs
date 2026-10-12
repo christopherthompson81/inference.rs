@@ -62,12 +62,17 @@ impl crate::CustomOp1 for Sigmoid {
         }
 
         // FIXME: using `crate::map_dtype` causes compilation errors.
+        // half precision rounds once from f32, as the CUDA kernels and torch do
         let storage = match storage {
             CpuStorage::BF16(slice) => {
-                CpuStorage::BF16(crate::cpu_backend::unary_map(slice, layout, fwd))
+                CpuStorage::BF16(crate::cpu_backend::unary_map(slice, layout, |v| {
+                    half::bf16::from_f32(fwd(v.to_f32()))
+                }))
             }
             CpuStorage::F16(slice) => {
-                CpuStorage::F16(crate::cpu_backend::unary_map(slice, layout, fwd))
+                CpuStorage::F16(crate::cpu_backend::unary_map(slice, layout, |v| {
+                    half::f16::from_f32(fwd(v.to_f32()))
+                }))
             }
             CpuStorage::F32(slice) => {
                 CpuStorage::F32(crate::cpu_backend::unary_map(slice, layout, fwd))

@@ -1,4 +1,5 @@
 //! Qwen3-VL's vision tower with its deepstack mergers, shared by Qwen3-VL, Qwen3.5 and HiDream-O1's reference images.
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::FlashParams;
 use std::f64;
@@ -372,8 +373,8 @@ impl PatchMerger {
         } else {
             normed.reshape((grouped, self.merged_hidden_size))?
         };
-        let xs = self.fc1.forward(&reshaped)?;
-        let xs = xs.gelu()?;
+        // transformers' merger is nn.GELU(), the erf form, unlike the blocks' tanh approximation
+        let xs = self.fc1.forward(&reshaped)?.gelu_erf()?;
         self.fc2.forward(&xs)
     }
 

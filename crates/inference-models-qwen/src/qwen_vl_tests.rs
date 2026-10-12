@@ -305,9 +305,9 @@ fn qwen3_vl_moe_prefill_bf16() -> Result<()> {
     let (logits, _) = prefill_as(&Qwen3VLMoELoader, &config, moe_shapes(), DType::BF16)?;
     let expected = by_arch(
         Snapshot {
-            probes: [1.34375, 0.21386719, 0.27929688, -0.66796875],
-            sum: -38.24656,
-            l2: 17.86099,
+            probes: [1.3359375, 0.21484375, 0.27929688, -0.671875],
+            sum: -38.321186,
+            l2: 17.859823,
         },
         Snapshot {
             probes: [1.328125, 0.20605469, 0.27148438, -0.671875],

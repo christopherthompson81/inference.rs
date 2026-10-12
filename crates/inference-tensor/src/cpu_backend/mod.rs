@@ -2396,12 +2396,17 @@ impl BackendStorage for CpuStorage {
     fn elu(&self, layout: &Layout, alpha: f64) -> Result<Self> {
         // TODO: Have some generic map for functions that apply on num_traits::Float elements.
         match self {
+            // half precision rounds once from f32, as the CUDA kernels do
             Self::BF16(storage) => {
-                let data = unary_map(storage, layout, |v| elu(v, bf16::from_f64(alpha)));
+                let data = unary_map(storage, layout, |v| {
+                    bf16::from_f32(elu(v.to_f32(), alpha as f32))
+                });
                 Ok(Self::BF16(data))
             }
             Self::F16(storage) => {
-                let data = unary_map(storage, layout, |v| elu(v, f16::from_f64(alpha)));
+                let data = unary_map(storage, layout, |v| {
+                    f16::from_f32(elu(v.to_f32(), alpha as f32))
+                });
                 Ok(Self::F16(data))
             }
             Self::F32(storage) => {

@@ -598,27 +598,14 @@ const SQRT_TWO_OVER_PI_F64: f64 = 0.79788456080286535587989211986876373;
 impl UnaryOpT for Gelu {
     const NAME: &'static str = "gelu";
     const V: Self = Gelu;
+    // rounded once from f32, as torch does; in half precision every step of the formula would round
     #[inline(always)]
     fn bf16(v: bf16) -> bf16 {
-        bf16::from_f32_const(0.5)
-            * v
-            * (bf16::ONE
-                + bf16::tanh(
-                    bf16::from_f32_const(SQRT_TWO_OVER_PI_F32)
-                        * v
-                        * (bf16::ONE + bf16::from_f32_const(0.044715) * v * v),
-                ))
+        bf16::from_f32(Self::f32(v.to_f32()))
     }
     #[inline(always)]
     fn f16(v: f16) -> f16 {
-        f16::from_f32_const(0.5)
-            * v
-            * (f16::ONE
-                + f16::tanh(
-                    f16::from_f32_const(SQRT_TWO_OVER_PI_F32)
-                        * v
-                        * (f16::ONE + f16::from_f32_const(0.044715) * v * v),
-                ))
+        f16::from_f32(Self::f32(v.to_f32()))
     }
     #[inline(always)]
     fn f32(v: f32) -> f32 {
@@ -650,14 +637,7 @@ impl UnaryOpT for Gelu {
     }
     #[inline(always)]
     fn f8e4m3(v: f8e4m3) -> f8e4m3 {
-        f8e4m3::from_f32(0.5)
-            * v
-            * (f8e4m3::ONE
-                + f8e4m3::tanh(
-                    f8e4m3::from_f32(SQRT_TWO_OVER_PI_F32)
-                        * v
-                        * (f8e4m3::ONE + f8e4m3::from_f32(0.044715) * v * v),
-                ))
+        f8e4m3::from_f32(Self::f32(v.to_f32()))
     }
     const KERNEL: &'static str = "ugelu";
 
@@ -740,11 +720,11 @@ impl UnaryOpT for Silu {
     const V: Self = Silu;
     #[inline(always)]
     fn bf16(v: bf16) -> bf16 {
-        v / (bf16::ONE + (-v).exp())
+        bf16::from_f32(Self::f32(v.to_f32()))
     }
     #[inline(always)]
     fn f16(v: f16) -> f16 {
-        v / (f16::ONE + (-v).exp())
+        f16::from_f32(Self::f32(v.to_f32()))
     }
     #[inline(always)]
     fn f32(v: f32) -> f32 {
@@ -1194,5 +1174,74 @@ impl UnaryOpT for Sign {
         } else {
             f8e4m3::ZERO
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{DType, Device, Tensor};
+
+    const STEPS: usize = 4001;
+    const RANGE: f32 = 8.0;
+    // one step of each type's mantissa, relative to the value
+    const BF16_STEP: f64 = 1.0 / 128.0;
+    const F16_STEP: f64 = 1.0 / 1024.0;
+    // the activations' far negative tail: an f32 formula cancels to noise there, below anything a model reads
+    const TINY: f64 = 1e-3;
+    const ELU_ALPHA: f64 = 0.7;
+
+    // every value from -8 to 8 in small steps, exact in each half-precision type
+    fn inputs(dtype: DType, device: &Device) -> crate::Result<Tensor> {
+        let xs: Vec<f32> = (0..STEPS)
+            .map(|i| -RANGE + 2.0 * RANGE * i as f32 / (STEPS - 1) as f32)
+            .collect();
+        Tensor::new(xs, device)?.to_dtype(dtype)
+    }
+
+    // half precision rounds once from a wide result, as torch does: within one step of the type from the f64 result
+    fn rounds_once(device: &Device) -> crate::Result<()> {
+        for (dtype, step) in [(DType::BF16, BF16_STEP), (DType::F16, F16_STEP)] {
+            let xs = inputs(dtype, device)?;
+            let wide = xs.to_dtype(DType::F64)?;
+            for (name, got, want) in [
+                ("gelu", xs.gelu()?, wide.gelu()?),
+                ("gelu_erf", xs.gelu_erf()?, wide.gelu_erf()?),
+                ("silu", xs.silu()?, wide.silu()?),
+                (
+                    "sigmoid",
+                    crate::nn::ops::sigmoid(&xs)?,
+                    crate::nn::ops::sigmoid(&wide)?,
+                ),
+                ("elu", xs.elu(ELU_ALPHA)?, wide.elu(ELU_ALPHA)?),
+            ] {
+                let want = want.to_vec1::<f64>()?;
+                let got = got.to_dtype(DType::F64)?.to_vec1::<f64>()?;
+                let off = got
+                    .iter()
+                    .zip(&want)
+                    .filter(|&(a, b)| (a - b).abs() > step * b.abs().max(TINY))
+                    .count();
+                assert_eq!(
+                    off, 0,
+                    "{name} {dtype:?} on {device:?}: {off} of {STEPS} values off"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn half_precision_activations_round_once_on_cpu() -> crate::Result<()> {
+        rounds_once(&Device::Cpu)
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn half_precision_activations_round_once_on_cuda() -> crate::Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        rounds_once(&device)
     }
 }
