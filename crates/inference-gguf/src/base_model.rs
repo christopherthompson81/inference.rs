@@ -30,7 +30,7 @@ pub fn infer_hf_base_model_id<'a>(
     Ok(selected.map(|(_, model_id)| model_id))
 }
 
-fn source_hf_base_model_id(
+pub fn source_hf_base_model_id(
     label: &str,
     metadata: &HashMap<String, Value>,
 ) -> Result<Option<String>> {
