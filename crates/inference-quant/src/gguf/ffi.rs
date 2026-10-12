@@ -1126,44 +1126,139 @@ gguf_type_library! {
     );
 }
 
+/// Each GGUF type with a kernel library of its own: its library suffix (`q4_k`), its type, and the opener of its library.
+#[allow(clippy::type_complexity)]
+pub(crate) const TYPE_LIBRARIES: &[(&str, super::kernel::GgufType, fn() -> Result<(), String>)] = &[
+    ("q4_0", super::kernel::GgufType::Q4_0, q4_0::ensure_loaded),
+    ("q4_1", super::kernel::GgufType::Q4_1, q4_1::ensure_loaded),
+    ("q5_0", super::kernel::GgufType::Q5_0, q5_0::ensure_loaded),
+    ("q5_1", super::kernel::GgufType::Q5_1, q5_1::ensure_loaded),
+    ("q8_0", super::kernel::GgufType::Q8_0, q8_0::ensure_loaded),
+    ("q2_k", super::kernel::GgufType::Q2K, q2_k::ensure_loaded),
+    ("q3_k", super::kernel::GgufType::Q3K, q3_k::ensure_loaded),
+    ("q4_k", super::kernel::GgufType::Q4K, q4_k::ensure_loaded),
+    ("q5_k", super::kernel::GgufType::Q5K, q5_k::ensure_loaded),
+    ("q6_k", super::kernel::GgufType::Q6K, q6_k::ensure_loaded),
+    (
+        "iq4_nl",
+        super::kernel::GgufType::Iq4Nl,
+        iq4_nl::ensure_loaded,
+    ),
+    (
+        "iq4_xs",
+        super::kernel::GgufType::Iq4Xs,
+        iq4_xs::ensure_loaded,
+    ),
+    (
+        "iq2_xxs",
+        super::kernel::GgufType::Iq2Xxs,
+        iq2_xxs::ensure_loaded,
+    ),
+    (
+        "iq2_xs",
+        super::kernel::GgufType::Iq2Xs,
+        iq2_xs::ensure_loaded,
+    ),
+    ("iq2_s", super::kernel::GgufType::Iq2S, iq2_s::ensure_loaded),
+    (
+        "iq3_xxs",
+        super::kernel::GgufType::Iq3Xxs,
+        iq3_xxs::ensure_loaded,
+    ),
+    ("iq3_s", super::kernel::GgufType::Iq3S, iq3_s::ensure_loaded),
+    ("iq1_s", super::kernel::GgufType::Iq1S, iq1_s::ensure_loaded),
+    ("iq1_m", super::kernel::GgufType::Iq1M, iq1_m::ensure_loaded),
+    (
+        "iq1_kt",
+        super::kernel::GgufType::Iq1Kt,
+        iq1_kt::ensure_loaded,
+    ),
+    (
+        "iq2_kt",
+        super::kernel::GgufType::Iq2Kt,
+        iq2_kt::ensure_loaded,
+    ),
+    (
+        "iq3_kt",
+        super::kernel::GgufType::Iq3Kt,
+        iq3_kt::ensure_loaded,
+    ),
+    (
+        "iq4_kt",
+        super::kernel::GgufType::Iq4Kt,
+        iq4_kt::ensure_loaded,
+    ),
+    ("iq2_k", super::kernel::GgufType::Iq2K, iq2_k::ensure_loaded),
+    ("iq3_k", super::kernel::GgufType::Iq3K, iq3_k::ensure_loaded),
+    ("iq4_k", super::kernel::GgufType::Iq4K, iq4_k::ensure_loaded),
+    ("iq5_k", super::kernel::GgufType::Iq5K, iq5_k::ensure_loaded),
+    ("iq6_k", super::kernel::GgufType::Iq6K, iq6_k::ensure_loaded),
+    (
+        "iq4_ks",
+        super::kernel::GgufType::Iq4Ks,
+        iq4_ks::ensure_loaded,
+    ),
+    (
+        "iq2_ks",
+        super::kernel::GgufType::Iq2Ks,
+        iq2_ks::ensure_loaded,
+    ),
+    (
+        "iq4_kss",
+        super::kernel::GgufType::Iq4Kss,
+        iq4_kss::ensure_loaded,
+    ),
+    (
+        "iq5_ks",
+        super::kernel::GgufType::Iq5Ks,
+        iq5_ks::ensure_loaded,
+    ),
+    (
+        "iq3_ks",
+        super::kernel::GgufType::Iq3Ks,
+        iq3_ks::ensure_loaded,
+    ),
+    (
+        "iq2_kl",
+        super::kernel::GgufType::Iq2Kl,
+        iq2_kl::ensure_loaded,
+    ),
+];
+
 /// Opens GGUF type `ty`'s kernel library now, so a missing one fails at model load; float and Q8 types have none.
 pub(crate) fn ensure_type_loaded(ty: super::kernel::GgufType) -> Result<(), String> {
-    use super::kernel::GgufType;
-    match ty {
-        GgufType::F32 | GgufType::F16 | GgufType::BF16 | GgufType::Q8_1 | GgufType::Q8K => Ok(()),
-        GgufType::Q4_0 => q4_0::ensure_loaded(),
-        GgufType::Q4_1 => q4_1::ensure_loaded(),
-        GgufType::Q5_0 => q5_0::ensure_loaded(),
-        GgufType::Q5_1 => q5_1::ensure_loaded(),
-        GgufType::Q8_0 => q8_0::ensure_loaded(),
-        GgufType::Q2K => q2_k::ensure_loaded(),
-        GgufType::Q3K => q3_k::ensure_loaded(),
-        GgufType::Q4K => q4_k::ensure_loaded(),
-        GgufType::Q5K => q5_k::ensure_loaded(),
-        GgufType::Q6K => q6_k::ensure_loaded(),
-        GgufType::Iq4Nl => iq4_nl::ensure_loaded(),
-        GgufType::Iq4Xs => iq4_xs::ensure_loaded(),
-        GgufType::Iq2Xxs => iq2_xxs::ensure_loaded(),
-        GgufType::Iq2Xs => iq2_xs::ensure_loaded(),
-        GgufType::Iq2S => iq2_s::ensure_loaded(),
-        GgufType::Iq3Xxs => iq3_xxs::ensure_loaded(),
-        GgufType::Iq3S => iq3_s::ensure_loaded(),
-        GgufType::Iq1S => iq1_s::ensure_loaded(),
-        GgufType::Iq1M => iq1_m::ensure_loaded(),
-        GgufType::Iq1Kt => iq1_kt::ensure_loaded(),
-        GgufType::Iq2Kt => iq2_kt::ensure_loaded(),
-        GgufType::Iq3Kt => iq3_kt::ensure_loaded(),
-        GgufType::Iq4Kt => iq4_kt::ensure_loaded(),
-        GgufType::Iq2K => iq2_k::ensure_loaded(),
-        GgufType::Iq3K => iq3_k::ensure_loaded(),
-        GgufType::Iq4K => iq4_k::ensure_loaded(),
-        GgufType::Iq5K => iq5_k::ensure_loaded(),
-        GgufType::Iq6K => iq6_k::ensure_loaded(),
-        GgufType::Iq4Ks => iq4_ks::ensure_loaded(),
-        GgufType::Iq2Ks => iq2_ks::ensure_loaded(),
-        GgufType::Iq4Kss => iq4_kss::ensure_loaded(),
-        GgufType::Iq5Ks => iq5_ks::ensure_loaded(),
-        GgufType::Iq3Ks => iq3_ks::ensure_loaded(),
-        GgufType::Iq2Kl => iq2_kl::ensure_loaded(),
+    match TYPE_LIBRARIES.iter().find(|(_, of, _)| *of == ty) {
+        Some((_, _, open)) => open(),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // the build gives every `kernels/cuda/*/*_instance_<type>.cu` type a library; the table must name each one
+    #[test]
+    fn every_type_with_instance_files_is_in_the_table() {
+        let mut built = std::collections::BTreeSet::new();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("kernels/cuda");
+        for dir in std::fs::read_dir(root).unwrap() {
+            let dir = dir.unwrap().path();
+            if !dir.is_dir() {
+                continue;
+            }
+            for file in std::fs::read_dir(dir).unwrap() {
+                let path = file.unwrap().path();
+                let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+                if path.extension().is_some_and(|e| e == "cu")
+                    && let Some((_, ty)) = stem.split_once("_instance_")
+                {
+                    built.insert(ty.to_string());
+                }
+            }
+        }
+        let listed: std::collections::BTreeSet<String> = super::TYPE_LIBRARIES
+            .iter()
+            .map(|(name, _, _)| name.to_string())
+            .collect();
+        assert_eq!(built, listed);
     }
 }

@@ -17,12 +17,13 @@ use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 
 use args::{
-    CacheCommand, Cli, Command, QuantizeCommand, resolve_model_type, resolve_quantize_command,
+    CacheCommand, Cli, Command, KernelsCommand, QuantizeCommand, resolve_model_type,
+    resolve_quantize_command,
 };
 use commands::{
     BenchRunConfig, run_asr_quantize, run_bench, run_cache_delete, run_cache_list, run_doctor,
-    run_from_config, run_hidream_quantize, run_interactive, run_login, run_quantize, run_server,
-    run_tune, run_uninstall, run_update, run_uqff,
+    run_from_config, run_hidream_quantize, run_interactive, run_kernels_fetch, run_kernels_prune,
+    run_login, run_quantize, run_server, run_tune, run_uninstall, run_update, run_uqff,
 };
 use inference_api::{LogVerbosity, initialize_inference_logging};
 
@@ -143,6 +144,11 @@ async fn main() -> Result<()> {
         Command::Cache { cmd } => match cmd {
             CacheCommand::List => run_cache_list()?,
             CacheCommand::Delete { model_id } => run_cache_delete(&model_id)?,
+        },
+
+        Command::Kernels { cmd } => match cmd {
+            KernelsCommand::Fetch { types, all } => run_kernels_fetch(types, all)?,
+            KernelsCommand::Prune { dry_run } => run_kernels_prune(dry_run)?,
         },
 
         Command::Bench {

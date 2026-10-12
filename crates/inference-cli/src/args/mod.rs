@@ -187,6 +187,12 @@ pub enum Command {
         cmd: CacheCommand,
     },
 
+    /// Manage the CUDA kernel libraries: download them for offline use, prune old ones
+    Kernels {
+        #[command(subcommand)]
+        cmd: KernelsCommand,
+    },
+
     /// Run performance benchmarks for base or LoRA model generation.
     Bench {
         #[command(subcommand)]
@@ -258,6 +264,28 @@ pub enum CacheCommand {
         /// Model ID (e.g., "Qwen/Qwen3-4B")
         #[arg(short = 'm', long)]
         model_id: String,
+    },
+}
+
+/// CUDA kernel library subcommands
+#[derive(Subcommand, Clone)]
+pub enum KernelsCommand {
+    /// Download this GPU's kernel libraries that this install lacks: the base set, plus GGUF types' kernels
+    Fetch {
+        /// GGUF quantization types whose kernels to fetch too, comma separated (`q4_k,q6_k`)
+        #[arg(long, value_delimiter = ',', conflicts_with = "all")]
+        types: Vec<String>,
+
+        /// Fetch every GGUF quantization type's kernels
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Remove other versions' downloaded kernels, dead partial downloads, and kernel build dirs unused for 30 days
+    Prune {
+        /// List what would be removed without removing it
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 

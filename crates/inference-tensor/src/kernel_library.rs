@@ -6,6 +6,14 @@ pub const KERNEL_SUBDIR: &str = "kernels";
 pub const KERNEL_DIR_ENV: &str = "INFERENCE_KERNEL_DIR";
 /// The string every kernel library exports with its build's id; `inference_kernel_build::BUILD_ID_SYMBOL` matches.
 pub const BUILD_ID_SYMBOL: &std::ffi::CStr = c"inference_kernel_build_id";
+/// Overrides where downloaded kernel libraries are kept: `<dir>/<version>/sm<arch>/lib<name>.so`.
+pub const DOWNLOAD_CACHE_ENV: &str = "INFERENCE_KERNEL_CACHE";
+/// The build dir file a loader refreshes on open, so a build can prune dirs no binary has used for a while.
+pub const BUILD_DIR_LOCK: &str = ".lock";
+/// inference-kernel-build's `LIB_CACHE_ENV`: where release-type builds keep the kernel libraries they build.
+pub const BUILD_CACHE_ENV: &str = "INFERENCE_KERNEL_BUILD_CACHE";
+const CACHE_SUBDIR: &str = "inference-rs/kernels";
+const BUILT_SUBDIR: &str = "built";
 /// Each GPU arch's libraries sit in `sm<arch>/` (`sm86`, `sm90a`); `inference_kernel_build::ARCH_DIR_PREFIX` matches.
 pub const ARCH_DIR_PREFIX: &str = "sm";
 
@@ -151,9 +159,9 @@ pub(crate) fn runs_on(arch: &str, cc: usize) -> bool {
     }
 }
 
-// the arch dir this process opens kernel copies from, `sm86`
+/// The arch dir (`sm86`) this process opens kernel libraries from, or why there is none.
 #[cfg(unix)]
-fn arch_dir() -> Result<&'static str, String> {
+pub fn process_arch_dir() -> Result<&'static str, String> {
     static DIR: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
     DIR.get_or_init(|| {
         pick_arch(built_archs(), device_caps()).map(|arch| format!("{ARCH_DIR_PREFIX}{arch}"))
@@ -177,23 +185,84 @@ pub fn candidates(name: &str, built: &str, arch_dir: &str) -> Vec<std::path::Pat
     if let Some(dir) = std::path::Path::new(built).parent() {
         dirs.push(dir.to_path_buf());
     }
+    dirs.extend(download_dir());
     dirs.into_iter()
         .map(|dir| dir.join(arch_dir).join(&file))
         .collect()
+}
+
+/// A kernel library to download: `lib{library}.so` for `arch_dir`, carrying `build_id`, into `dir/arch_dir/`.
+pub struct Fetch<'a> {
+    pub library: &'a str,
+    pub arch_dir: &'a str,
+    pub build_id: &'a str,
+    pub dir: &'a std::path::Path,
+}
+
+/// Downloads a kernel library this build does not have locally.
+pub type Fetcher = fn(&Fetch<'_>) -> Result<(), String>;
+
+static FETCHER: std::sync::OnceLock<Fetcher> = std::sync::OnceLock::new();
+
+/// Installs the fetcher [`open`] calls when a library is in none of its [`candidates`]; the first one stays.
+pub fn set_fetcher(fetcher: Fetcher) {
+    let _ = FETCHER.set(fetcher);
+}
+
+/// Where this version's downloaded kernel libraries are kept: `$INFERENCE_KERNEL_CACHE/<version>`, else the user cache.
+pub fn download_dir() -> Option<std::path::PathBuf> {
+    Some(download_root()?.join(env!("CARGO_PKG_VERSION")))
+}
+
+/// Where every version's downloaded kernel libraries are kept, one dir per version.
+pub fn download_root() -> Option<std::path::PathBuf> {
+    std::env::var_os(DOWNLOAD_CACHE_ENV)
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(user_cache()?.join(CACHE_SUBDIR)))
+}
+
+/// Where release-type builds keep the kernel libraries they build (inference-kernel-build's `persistent_lib_root`).
+pub fn build_cache_root() -> Option<std::path::PathBuf> {
+    std::env::var_os(BUILD_CACHE_ENV)
+        .map(std::path::PathBuf::from)
+        .or_else(|| Some(user_cache()?.join(CACHE_SUBDIR).join(BUILT_SUBDIR)))
+}
+
+fn user_cache() -> Option<std::path::PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".cache"))
+        })
 }
 
 /// Opens kernel library `name`, from the first of [`candidates`] that exists, refusing one whose build id is not
 /// `id` (empty when this build made no kernels).
 #[cfg(unix)]
 pub fn open(name: &str, built: &str, id: &str) -> Result<Library, String> {
-    let arch_dir =
-        arch_dir().map_err(|error| format!("CUDA kernel library `lib{name}.so`: {error}"))?;
+    let arch_dir = process_arch_dir()
+        .map_err(|error| format!("CUDA kernel library `lib{name}.so`: {error}"))?;
     let tried = candidates(name, built, arch_dir);
+    let mut fetched = None;
+    if !tried.iter().any(|p| p.is_file())
+        && let (Some(fetcher), Some(dir)) = (FETCHER.get(), download_dir())
+    {
+        fetched = Some(fetcher(&Fetch {
+            library: name,
+            arch_dir,
+            build_id: id,
+            dir: &dir,
+        }));
+    }
     let Some(path) = tried.iter().find(|p| p.is_file()) else {
         let tried: Vec<_> = tried.iter().map(|p| p.display().to_string()).collect();
+        let fetch = match fetched {
+            Some(Err(error)) => format!("; not downloaded: {error}"),
+            _ => String::new(),
+        };
         return Err(format!(
-            "CUDA kernel library `lib{name}.so` is not installed for this GPU's arch ({arch_dir}; looked in {}); set \
-             {KERNEL_DIR_ENV} to a directory holding `{arch_dir}/lib{name}.so`",
+            "CUDA kernel library `lib{name}.so` is not installed for this GPU's arch ({arch_dir}; looked in {}){fetch}; \
+             set {KERNEL_DIR_ENV} to a directory holding `{arch_dir}/lib{name}.so`",
             tried.join(", ")
         ));
     };
@@ -223,6 +292,20 @@ pub fn open(name: &str, built: &str, id: &str) -> Result<Library, String> {
              kernels that came with it, or set {KERNEL_DIR_ENV}",
             path.display()
         ));
+    }
+    // a shared lock held for the process's life, and a fresh mtime, keep pruning off a build dir in use
+    if let Some(build_dir) = path.parent().and_then(std::path::Path::parent)
+        && let Ok(lock) = std::fs::File::options()
+            .write(true)
+            .open(build_dir.join(BUILD_DIR_LOCK))
+    {
+        let _ = lock.set_modified(std::time::SystemTime::now());
+        if lock.try_lock_shared().is_ok() {
+            static HELD: std::sync::Mutex<Vec<std::fs::File>> = std::sync::Mutex::new(Vec::new());
+            HELD.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(lock);
+        }
     }
     Ok(library)
 }
@@ -360,15 +443,19 @@ mod tests {
     }
 
     #[test]
-    fn the_build_path_is_looked_in_last() {
+    fn the_build_path_comes_after_the_packaged_ones_and_downloads_last() {
         let paths = candidates("somekernels", "/built/libsomekernels.so", "sm86");
+        let built = paths
+            .iter()
+            .position(|p| p == std::path::Path::new("/built/sm86/libsomekernels.so"));
         assert_eq!(
-            paths
-                .last()
-                .map(|p| p.to_string_lossy().into_owned())
-                .as_deref(),
-            Some("/built/sm86/libsomekernels.so")
+            built,
+            Some(paths.len() - 1 - usize::from(download_dir().is_some())),
+            "{paths:?}"
         );
+        if let Some(dir) = download_dir() {
+            assert_eq!(paths.last(), Some(&dir.join("sm86/libsomekernels.so")));
+        }
         let beside = paths
             .iter()
             .filter(|p| p.ends_with("libsomekernels.so"))

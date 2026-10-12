@@ -10,6 +10,27 @@ pub mod fast_mmvq;
 mod ffi;
 #[cfg(feature = "cuda")]
 pub(crate) use ffi::ensure_loaded as ensure_kernels_loaded;
+
+#[cfg(feature = "cuda")]
+pub(crate) fn type_kernel_libraries() -> impl Iterator<Item = &'static str> {
+    ffi::TYPE_LIBRARIES.iter().map(|(name, _, _)| *name)
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) fn ensure_type_kernels_by_name(name: &str) -> std::result::Result<(), String> {
+    let name = name.to_ascii_lowercase();
+    let Some((_, _, open)) = ffi::TYPE_LIBRARIES
+        .iter()
+        .find(|(library, _, _)| *library == name)
+    else {
+        let known: Vec<_> = type_kernel_libraries().collect();
+        return Err(format!(
+            "no GGUF type `{name}` has a kernel library (known: {})",
+            known.join(", ")
+        ));
+    };
+    open()
+}
 mod iq_dequant;
 mod iq_tables;
 mod iqk_dequant;

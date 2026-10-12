@@ -105,6 +105,8 @@ mod models;
 mod pipeline;
 mod prefix_cacher;
 pub use inference_protocol::reasoning_parsers;
+#[cfg(feature = "cuda")]
+pub mod kernel_fetch;
 pub mod remote_fetch;
 mod request;
 mod response;

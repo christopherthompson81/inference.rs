@@ -139,7 +139,7 @@ fn get_last_modified(path: &Path) -> Result<String> {
 }
 
 /// Format bytes as human-readable size
-fn format_size(bytes: u64) -> String {
+pub(super) fn format_size(bytes: u64) -> String {
     if bytes >= 1_000_000_000 {
         format!("{:.1} GB", bytes as f64 / 1e9)
     } else if bytes >= 1_000_000 {
