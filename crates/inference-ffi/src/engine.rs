@@ -9,10 +9,14 @@ use inference_api::{
     Engine, EngineLoadError,
     anthropic::anthropic_error_body,
     api_error::{ApiError, ApiErrorKind},
-    blocking::{BlockingEngine, BlockingStream, BlockingTranscriptionSession, StreamPoll},
+    blocking::{
+        BlockingEngine, BlockingStream, BlockingTranscriptionSession, StreamPoll,
+        model_download_stream,
+    },
     engine_chat::RequestCancellation,
     files::{FileUpload, MAX_FILE_UPLOAD_BYTES, file_too_large},
     media_source::{MediaAttachment, MediaAttachments},
+    model_inventory::{hf_cache_delete_json, model_inspect_json, models_scan_json},
     skill_store::{SkillFiles, skill_api_error},
     system::{system_doctor_json, system_info_json, tune_model_json},
 };
@@ -1524,13 +1528,72 @@ pub unsafe extern "C" fn inference_model_tune(
     request_len: usize,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
+    unsafe { engine_free_json_call(request, request_len, out_response, tune_model_json) }
+}
+
+unsafe fn engine_free_json_call(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+    call: fn(&[u8]) -> Result<String, ApiError>,
+) -> inference_status {
     unsafe {
         guard(|| {
             out_arg(out_response, "out_response")?;
             let request = arg_bytes(request, request_len, "request")?;
-            out_response.write(string_handle(
-                tune_model_json(request).map_err(api_failure)?,
-            ));
+            out_response.write(string_handle(call(request).map_err(api_failure)?));
+            Ok(())
+        })
+    }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_inspect(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe { engine_free_json_call(request, request_len, out_response, model_inspect_json) }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_models_scan(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe { engine_free_json_call(request, request_len, out_response, models_scan_json) }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_hf_cache_delete(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe { engine_free_json_call(request, request_len, out_response, hf_cache_delete_json) }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_stream` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_download_open(
+    request: *const c_char,
+    request_len: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            out_arg(out_stream, "out_stream")?;
+            let request = arg_bytes(request, request_len, "request")?;
+            let stream = model_download_stream(request).map_err(api_failure)?;
+            out_stream.write(Box::into_raw(Box::new(inference_stream {
+                cancellation: stream.cancellation(),
+                stream,
+                done: false,
+            })));
             Ok(())
         })
     }

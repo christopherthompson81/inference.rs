@@ -708,7 +708,7 @@ fn format_group_choices(groups: &[&GgufGroup]) -> String {
     choices.join(", ")
 }
 
-fn quant_label(stem: &str) -> Option<String> {
+pub(crate) fn quant_label(stem: &str) -> Option<String> {
     stem.rsplit('/').find_map(|name| {
         QUANT_SUFFIX_RE
             .captures(name)
@@ -742,12 +742,12 @@ fn logical_stem(path: &str) -> Option<String> {
         .then(|| path[..extension_start].to_string())
 }
 
-fn is_gguf(path: &str) -> bool {
+pub(crate) fn is_gguf(path: &str) -> bool {
     path.get(path.len().saturating_sub(".gguf".len())..)
         .is_some_and(|extension| extension.eq_ignore_ascii_case(".gguf"))
 }
 
-fn is_projector(path: &str) -> bool {
+pub(crate) fn is_projector(path: &str) -> bool {
     has_filename_token(path, "mmproj")
 }
 
@@ -761,7 +761,7 @@ fn projector_role(group: &GgufGroup) -> Option<ProjectorRole> {
     }
 }
 
-fn is_auxiliary_gguf(path: &str) -> bool {
+pub(crate) fn is_auxiliary_gguf(path: &str) -> bool {
     let lower = path.to_ascii_lowercase();
     let name = lower.rsplit('/').next().unwrap_or(&lower);
     name.starts_with("mtp-")
@@ -803,13 +803,13 @@ fn has_path_token(path: &str, token: &str) -> bool {
     })
 }
 
-struct SplitGguf {
-    prefix: String,
-    index: usize,
+pub(crate) struct SplitGguf {
+    pub(crate) prefix: String,
+    pub(crate) index: usize,
     total: usize,
 }
 
-fn parse_split(path: &str) -> Option<SplitGguf> {
+pub(crate) fn parse_split(path: &str) -> Option<SplitGguf> {
     let captures = SPLIT_GGUF_RE.captures(path)?;
     let prefix = captures.name("prefix")?.as_str();
     let split_suffix_start = prefix.len().saturating_sub("-split".len());

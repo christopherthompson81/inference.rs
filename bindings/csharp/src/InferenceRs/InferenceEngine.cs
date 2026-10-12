@@ -666,12 +666,37 @@ public sealed unsafe class InferenceEngine : IDisposable
     }
 
     /// <summary>The quantization and settings that fit a model on this machine, found without loading it.</summary>
-    public static string TuneModel(string requestJson)
+    public static string TuneModel(string requestJson) => EngineFree(requestJson, NativeMethods.inference_model_tune, nameof(NativeMethods.inference_model_tune));
+
+    /// <summary>One model's facts, read without loading it: <c>{"path"}</c> names a model directory, GGUF or .nemo.</summary>
+    public static string InspectModel(string requestJson) => EngineFree(requestJson, NativeMethods.inference_model_inspect, nameof(NativeMethods.inference_model_inspect));
+
+    /// <summary>The models in <c>{"folders", "hf_cache"}</c>: those folders and, when asked, the Hugging Face cache.</summary>
+    public static string ScanModels(string requestJson) => EngineFree(requestJson, NativeMethods.inference_models_scan, nameof(NativeMethods.inference_models_scan));
+
+    /// <summary>Deletes <c>{"repo_id"}</c> from the Hugging Face cache, every revision.</summary>
+    public static string DeleteCachedRepo(string requestJson) => EngineFree(requestJson, NativeMethods.inference_hf_cache_delete, nameof(NativeMethods.inference_hf_cache_delete));
+
+    /// <summary>Downloads a Hugging Face repository, its files or one GGUF quant into the cache as a stream of
+    /// <c>files</c>, <c>progress</c> and a last <c>done</c>, <c>canceled</c> or <c>error</c> event.</summary>
+    /// <remarks>Cancel or dispose the stream to stop it; a partly downloaded file resumes next time.</remarks>
+    public static EngineStream DownloadModel(string requestJson)
     {
         NativeMethods.EnsureAbi();
         using var request = new PinnedBytes(requestJson);
-        var status = NativeMethods.inference_model_tune(request.Pointer, request.Length, out var response);
-        return Text(status, response, nameof(NativeMethods.inference_model_tune));
+        var status = NativeMethods.inference_model_download_open(request.Pointer, request.Length, out var stream);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_model_download_open));
+        return new EngineStream(new StreamHandle(stream));
+    }
+
+    private unsafe delegate InferenceStatus EngineFreeCall(byte* request, nuint requestLen, out IntPtr response);
+
+    private static string EngineFree(string requestJson, EngineFreeCall call, string operation)
+    {
+        NativeMethods.EnsureAbi();
+        using var request = new PinnedBytes(requestJson);
+        var status = call(request.Pointer, request.Length, out var response);
+        return Text(status, response, operation);
     }
 
     // Dispose ends the engine for its callers even while open streams keep the native engine alive.

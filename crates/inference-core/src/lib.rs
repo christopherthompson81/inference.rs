@@ -177,26 +177,28 @@ pub use pipeline::Starcoder2Loader;
 pub use pipeline::get_device_layers_for_loader;
 pub use pipeline::hf::build_api_with_cache;
 pub use pipeline::hf::{
-    HF_HUB_OFFLINE_ENV, hf_home_dir, hf_hub_cache_dir, hf_token_path, is_hf_hub_offline,
-    list_model_files, probe_hf_repo_files, read_model_file_range, try_get_model_file,
+    FileDownloadProgress, HF_HUB_OFFLINE_ENV, download_repo_files, hf_home_dir, hf_hub_cache_dir,
+    hf_token_path, is_hf_hub_offline, list_model_files, probe_hf_repo_files, read_model_file_range,
+    try_get_model_file,
 };
 // Named only by the ModelSelected schema attributes.
 #[cfg(feature = "utoipa")]
 pub use pipeline::UqffWriteSpec;
 pub use pipeline::{
     AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams, AutoEmbeddingLoader,
-    AutoLoader, AutoLoaderBuilder, AutoMultimodalLoader, AutoNormalLoader, DiarizationLoader,
-    DiarizationLoaderType, DiffusionGenerationParams, DiffusionLoader, DiffusionLoaderBuilder,
-    DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingLoaderType,
-    EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader, GGMLLoaderBuilder,
-    GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides,
-    IsqOrganization, LoadOptions, Loader, LocalModelPaths, MAX_REFERENCE_IMAGES, Modalities,
-    ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
-    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
-    NormalLoaderType, NormalSpecificConfig, ReferenceImages, ResolvedLoraAdapter, SpeechLoader,
-    SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, TranscriptionLoader,
-    TranscriptionLoaderType, TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
-    VoiceActivityLoader, expand_isq_value, expand_uqff_shards, parse_uqff_shard,
+    AutoLoader, AutoLoaderBuilder, AutoMultimodalLoader, AutoNormalLoader, DetectedModel,
+    DetectedModelKind, DiarizationLoader, DiarizationLoaderType, DiffusionGenerationParams,
+    DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader,
+    EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig,
+    GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder,
+    GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOptions, Loader, LocalModelPaths,
+    MAX_REFERENCE_IMAGES, Modalities, ModelKind, ModelPaths, MultimodalLoader,
+    MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
+    MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
+    NormalSpecificConfig, ReferenceImages, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType,
+    SpeechPipeline, SupportedModality, TokenSource, TranscriptionLoader, TranscriptionLoaderType,
+    TranscriptionPipeline, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, VoiceActivityLoader,
+    detect_local_model, expand_isq_value, expand_uqff_shards, parse_uqff_shard,
     resolve_uqff_report_output, resolve_uqff_shorthand, write_asr_gguf, write_hidream_gguf,
 };
 #[cfg(feature = "models-llama")]

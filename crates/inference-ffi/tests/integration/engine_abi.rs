@@ -2295,3 +2295,113 @@ fn a_load_reports_each_stage_from_start_to_end() {
         assert_eq!(last["unit"], "items", "{stage}: {of_stage:?}");
     }
 }
+
+fn json_call(
+    call: unsafe extern "C" fn(
+        *const c_char,
+        usize,
+        *mut *mut inference_string,
+    ) -> inference_status,
+    request: &Value,
+) -> (inference_status, Option<Value>) {
+    let request = request.to_string();
+    let mut response = null_mut();
+    let status = unsafe { call(request.as_ptr().cast(), request.len(), &mut response) };
+    let body =
+        (status == INFERENCE_OK).then(|| serde_json::from_str(&take_string(response)).unwrap());
+    (status, body)
+}
+
+fn write_gguf(path: &std::path::Path, architecture: &str) {
+    let architecture = inference_tensor::quantized::gguf_file::Value::String(architecture.into());
+    let mut file = std::fs::File::create(path).unwrap();
+    inference_tensor::quantized::gguf_file::write(
+        &mut file,
+        &[("general.architecture", &architecture)],
+        &[],
+    )
+    .unwrap();
+}
+
+#[test]
+fn model_inventory_inspects_scans_and_reports_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let model = dir.path().join("Tiny-Q8_0.gguf");
+    write_gguf(&model, "llama");
+    write_gguf(&dir.path().join("foreign-Q8_0.gguf"), "audiocpp");
+
+    let (status, inspected) = json_call(inference_model_inspect, &json!({"path": model}));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let inspected = inspected.unwrap();
+    assert_eq!(inspected["kind"], "text");
+    assert_eq!(inspected["quantization"], "Q8_0");
+
+    let (status, scan) = json_call(
+        inference_models_scan,
+        &json!({"folders": [dir.path()], "hf_cache": false}),
+    );
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let scan = scan.unwrap();
+    assert_eq!(scan["models"].as_array().unwrap().len(), 2, "{scan}");
+    assert!(scan["hf_cache"].is_null());
+
+    for (call, request) in [
+        (
+            inference_model_inspect as _,
+            json!({"path": dir.path().join("missing.gguf")}),
+        ),
+        (inference_models_scan as _, json!({"folders": "not a list"})),
+        (
+            inference_hf_cache_delete as _,
+            json!({"repo_id": "../escape"}),
+        ),
+    ] {
+        assert_eq!(
+            json_call(call, &request).0,
+            INFERENCE_ERR_INVALID_REQUEST,
+            "{request}"
+        );
+    }
+}
+
+#[test]
+fn a_download_of_cached_files_reports_them_and_ends_done() {
+    let hub = tempfile::tempdir().unwrap();
+    let repo = hub.path().join("models--acme--tiny");
+    let snapshot = repo.join("snapshots").join("abc123");
+    std::fs::create_dir_all(&snapshot).unwrap();
+    std::fs::create_dir_all(repo.join("refs")).unwrap();
+    std::fs::write(repo.join("refs").join("main"), "abc123").unwrap();
+    std::fs::write(snapshot.join("config.json"), "{}").unwrap();
+
+    let request = json!({
+        "repo_id": "acme/tiny",
+        "files": ["config.json"],
+        "token_source": "none",
+        "hf_cache_path": hub.path(),
+    })
+    .to_string();
+    let mut stream = null_mut();
+    let status = unsafe {
+        inference_model_download_open(request.as_ptr().cast(), request.len(), &mut stream)
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let events = drain(stream);
+    let names = events
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, ["files", "progress", "done"], "{events:?}");
+    assert_eq!(
+        events[1]["data"],
+        json!({"file": "config.json", "done": 2, "total": 2})
+    );
+    let files = events[2]["data"]["files"].as_array().unwrap();
+    assert!(files[0].as_str().unwrap().ends_with("config.json"));
+
+    let invalid = json!({"repo_id": "acme/tiny", "quant": 4}).to_string();
+    let status = unsafe {
+        inference_model_download_open(invalid.as_ptr().cast(), invalid.len(), &mut stream)
+    };
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST);
+}

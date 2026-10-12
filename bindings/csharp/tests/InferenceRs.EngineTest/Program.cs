@@ -33,11 +33,12 @@ internal static class Program
 
     private static int Main()
     {
+        ModelInventoryNeedsNoEngine();
         var model = Environment.GetEnvironmentVariable(ModelVariable);
         if (string.IsNullOrEmpty(model))
         {
-            Console.WriteLine($"{ModelVariable} is not set; skipping.");
-            return 77;
+            Console.WriteLine($"{ModelVariable} is not set; skipping the engine.");
+            return failures == 0 ? 77 : 1;
         }
         Check("system info is JSON", JsonNode.Parse(InferenceEngine.SystemInfo()) is JsonObject);
         var badTune = Throws(() => InferenceEngine.TuneModel("""{"model_id": "org/model", "dtype": "no-such-dtype"}"""));
@@ -533,6 +534,26 @@ internal static class Program
         var parsed = JsonNode.Parse(blob.Data)!;
         Check("diarization gives each speaker a segment",
             (parsed["segments"] as JsonArray)?.Count == (int?)parsed["num_speakers"]);
+    }
+
+    private static void ModelInventoryNeedsNoEngine()
+    {
+        var folder = Directory.CreateTempSubdirectory("inventory");
+        try
+        {
+            var scan = JsonNode.Parse(InferenceEngine.ScanModels(new JsonObject { ["folders"] = new JsonArray(folder.FullName) }.ToJsonString()))!;
+            Check("an empty folder scans to no models", scan["models"]!.AsArray().Count == 0);
+            var missing = Throws(() => InferenceEngine.InspectModel(new JsonObject { ["path"] = Path.Combine(folder.FullName, "missing.gguf") }.ToJsonString()));
+            Check("inspecting a missing file is InvalidRequest", missing?.Status == InferenceStatus.InvalidRequest);
+            var escape = Throws(() => InferenceEngine.DeleteCachedRepo("""{"repo_id": "../escape"}"""));
+            Check("deleting a path as a repository is InvalidRequest", escape?.Status == InferenceStatus.InvalidRequest);
+            var badDownload = Throws(() => InferenceEngine.DownloadModel("""{"repo_id": "acme/tiny", "quant": 4}""").Dispose());
+            Check("a malformed download is InvalidRequest", badDownload?.Status == InferenceStatus.InvalidRequest);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
     }
 
     private static InferenceException? Throws(Action action)

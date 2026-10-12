@@ -12,6 +12,9 @@ pub use gguf_discovery::{
     drop_foreign_local_projectors, has_gguf_model_files, list_local_files_recursive,
     list_local_gguf_companions, resolve_gguf_projector, resolve_gguf_quant,
 };
+pub(crate) use gguf_discovery::{
+    is_auxiliary_gguf, is_gguf, is_projector, parse_split, quant_label,
+};
 
 use inference_core::{
     TokenSource, parse_isq_value, parse_uqff_shard, probe_hf_repo_files,

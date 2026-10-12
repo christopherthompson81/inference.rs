@@ -1252,7 +1252,7 @@ A streaming request's events; close it, or use `with`, to abandon it. An open st
 ### `Stream.__init__`
 
 ```text
-__init__(engine: Handle, pointer)
+__init__(engine: Handle | None, pointer)
 ```
 
 ### `Stream.next`

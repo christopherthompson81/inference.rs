@@ -2,27 +2,22 @@
 
 use anyhow::Result;
 use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL};
-use std::path::{Path, PathBuf};
-
-/// Get the Hugging Face Hub directory
-fn hf_hub_dir() -> Result<PathBuf> {
-    inference_api::system::hf_hub_cache_dir()
-        .ok_or_else(|| anyhow::anyhow!("Cannot determine Hugging Face hub cache directory"))
-}
+use inference_api::model_inventory::{delete_hf_cache_repo, hf_cache_listing};
 
 /// List all cached models
 pub fn run_cache_list() -> Result<()> {
-    let hub_dir = hf_hub_dir()?;
+    let listing = hf_cache_listing(None)
+        .ok_or_else(|| anyhow::anyhow!("Cannot determine Hugging Face hub cache directory"))?;
 
     println!();
     println!("Hugging Face model cache");
     println!("-----------------------");
     println!();
 
-    if !hub_dir.exists() {
+    if listing.repos.is_empty() {
         println!("No cached models found.");
         println!();
-        println!("Cache directory: {}", hub_dir.display());
+        println!("Cache directory: {}", listing.path);
         return Ok(());
     }
 
@@ -35,48 +30,25 @@ pub fn run_cache_list() -> Result<()> {
             Cell::new("Size"),
             Cell::new("Last Used"),
         ]);
-
-    let mut total_size = 0u64;
-    let mut model_count = 0;
-
-    let mut models: Vec<_> = std::fs::read_dir(&hub_dir)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| entry.file_name().to_string_lossy().starts_with("models--"))
-        .collect();
-
-    // Sort by name for consistent output
-    models.sort_by_key(|a| a.file_name());
-
-    for entry in models {
-        let name = entry.file_name().to_string_lossy().to_string();
-        // Convert "models--org--name" to "org/name"
-        let model_id = name.trim_start_matches("models--").replace("--", "/");
-        let size = dir_size(&entry.path()).unwrap_or(0);
-        let last_used = get_last_modified(&entry.path()).unwrap_or_else(|_| "unknown".to_string());
-
+    for repo in &listing.repos {
         table.add_row(vec![
-            Cell::new(&model_id),
-            Cell::new(format_size(size)),
-            Cell::new(&last_used),
+            Cell::new(&repo.repo_id),
+            Cell::new(format_size(repo.size_bytes)),
+            Cell::new(last_modified(repo.modified)),
         ]);
-        total_size += size;
-        model_count += 1;
     }
-
-    if model_count == 0 {
-        println!("No cached models found.");
-    } else {
-        println!("{table}");
-        println!();
-        println!(
-            "Total: {} model{}, {}",
-            model_count,
-            if model_count == 1 { "" } else { "s" },
-            format_size(total_size)
-        );
-    }
+    let total_size = listing.repos.iter().map(|repo| repo.size_bytes).sum();
+    let model_count = listing.repos.len();
+    println!("{table}");
     println!();
-    println!("Cache directory: {}", hub_dir.display());
+    println!(
+        "Total: {} model{}, {}",
+        model_count,
+        if model_count == 1 { "" } else { "s" },
+        format_size(total_size)
+    );
+    println!();
+    println!("Cache directory: {}", listing.path);
     println!();
 
     Ok(())
@@ -84,46 +56,27 @@ pub fn run_cache_list() -> Result<()> {
 
 /// Delete a specific model from cache
 pub fn run_cache_delete(model_id: &str) -> Result<()> {
-    let hub_dir = hf_hub_dir()?;
-    // Convert "org/name" to "models--org--name"
-    let dir_name = format!("models--{}", model_id.replace('/', "--"));
-    let model_path = hub_dir.join(&dir_name);
-
-    if !model_path.exists() {
-        anyhow::bail!(
-            "Model '{}' not found in cache.\nRun 'inference cache list' to see cached models.",
-            model_id
-        );
-    }
-
-    let size = dir_size(&model_path).unwrap_or(0);
-    std::fs::remove_dir_all(&model_path)?;
-    println!("✅ Deleted '{}' ({})", model_id, format_size(size));
+    let deleted = delete_hf_cache_repo(model_id, None).map_err(|error| {
+        anyhow::anyhow!("{error}\nRun 'inference cache list' to see cached models.")
+    })?;
+    println!(
+        "✅ Deleted '{}' ({})",
+        deleted.repo_id,
+        format_size(deleted.freed_bytes)
+    );
     Ok(())
 }
 
-/// Calculate total size of a directory recursively
-fn dir_size(path: &Path) -> Result<u64> {
-    let mut size = 0;
-    for entry in walkdir::WalkDir::new(path)
-        .into_iter()
-        .filter_map(|e| e.ok())
-    {
-        if entry.file_type().is_file() {
-            size += entry.metadata().map(|m| m.len()).unwrap_or(0);
-        }
-    }
-    Ok(size)
-}
-
-/// Get human-readable last modified time
-fn get_last_modified(path: &Path) -> Result<String> {
-    let metadata = std::fs::metadata(path)?;
-    let modified = metadata.modified()?;
-    let duration = modified.elapsed().unwrap_or_default();
-    let days = duration.as_secs() / 86400;
-
-    Ok(if days == 0 {
+/// Human-readable age of a Unix-seconds timestamp
+fn last_modified(modified: Option<u64>) -> String {
+    let Some(modified) = modified else {
+        return "unknown".to_string();
+    };
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |now| now.as_secs().saturating_sub(modified));
+    let days = elapsed / 86400;
+    if days == 0 {
         "today".to_string()
     } else if days == 1 {
         "yesterday".to_string()
@@ -135,7 +88,7 @@ fn get_last_modified(path: &Path) -> Result<String> {
         format!("{} months ago", days / 30)
     } else {
         format!("{} years ago", days / 365)
-    })
+    }
 }
 
 /// Format bytes as human-readable size
