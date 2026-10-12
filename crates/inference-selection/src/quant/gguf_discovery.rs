@@ -7,7 +7,10 @@ use std::{
 
 use anyhow::{Context, Result, bail};
 use inference_core::{GGUF_MULTI_FILE_DELIMITER, ModelDType};
+use inference_gguf::base_model::source_hf_base_model_id;
+use inference_quant::GgufArchive;
 use regex::Regex;
+use tracing::info;
 use walkdir::WalkDir;
 
 static SPLIT_GGUF_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -386,6 +389,60 @@ pub fn list_local_gguf_companions(root: &Path, exact_file: &str) -> Result<Vec<S
         }
     }
     Ok(files.into_iter().collect())
+}
+
+/// Drops local projectors made for another GGUF base model than the model's: a folder of many models' GGUFs.
+/// When some projector names the model's base model, projectors naming none are dropped too.
+pub fn drop_foreign_local_projectors(
+    root: &Path,
+    model_file: &str,
+    files: Vec<String>,
+) -> Vec<String> {
+    let model_file = model_file
+        .split(GGUF_MULTI_FILE_DELIMITER)
+        .next()
+        .unwrap_or_default()
+        .trim();
+    let Some(model_base) = local_base_model_id(&root.join(model_file)) else {
+        return files;
+    };
+    let projectors = files
+        .iter()
+        .filter(|file| is_gguf(file) && is_projector(file))
+        .map(|file| (split_key(file), local_base_model_id(&root.join(file))))
+        .collect::<Vec<_>>();
+    let any_match = projectors
+        .iter()
+        .any(|(_, base)| base.as_deref() == Some(model_base.as_str()));
+    let dropped = projectors
+        .into_iter()
+        .filter(|(_, base)| match base {
+            Some(base) => *base != model_base,
+            None => any_match,
+        })
+        .map(|(key, _)| key)
+        .collect::<BTreeSet<_>>();
+    files
+        .into_iter()
+        .filter(|file| {
+            let keep = !dropped.contains(&split_key(file));
+            if !keep {
+                info!("GGUF: skipping projector `{file}`, not made for `{model_base}`");
+            }
+            keep
+        })
+        .collect()
+}
+
+fn split_key(path: &str) -> String {
+    parse_split(path).map_or_else(|| path.to_string(), |split| split.prefix)
+}
+
+fn local_base_model_id(path: &Path) -> Option<String> {
+    let archive = GgufArchive::open_file(path).ok()?;
+    source_hf_base_model_id(&path.to_string_lossy(), archive.metadata())
+        .ok()
+        .flatten()
 }
 
 fn build_groups(files: &[String], kind: ArtifactKind) -> BTreeMap<String, GgufGroup> {
@@ -773,9 +830,61 @@ fn parse_split(path: &str) -> Option<SplitGguf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference_tensor::quantized::gguf_file;
 
     fn files(entries: &[&str]) -> Vec<String> {
         entries.iter().map(|entry| (*entry).to_string()).collect()
+    }
+
+    fn write_gguf(path: &Path, base_model: Option<&str>) {
+        let url =
+            base_model.map(|id| gguf_file::Value::String(format!("https://huggingface.co/{id}")));
+        let metadata = url
+            .iter()
+            .map(|url| ("general.base_model.0.repo_url", url))
+            .collect::<Vec<_>>();
+        let mut file = fs::File::create(path).unwrap();
+        gguf_file::write(&mut file, &metadata, &[]).unwrap();
+    }
+
+    #[test]
+    fn local_projectors_of_other_base_models_are_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gguf(
+            &dir.path().join("Alpha-7B-Q4_K_M.gguf"),
+            Some("acme/Alpha-7B"),
+        );
+        write_gguf(
+            &dir.path().join("mmproj-Alpha-7B-F16.gguf"),
+            Some("acme/Alpha-7B"),
+        );
+        write_gguf(&dir.path().join("mmproj-BF16.gguf"), Some("acme/Beta-30B"));
+        write_gguf(&dir.path().join("mmproj-unlabeled-F16.gguf"), None);
+        let listed = list_local_gguf_companions(dir.path(), "Alpha-7B-Q4_K_M.gguf").unwrap();
+        let kept = drop_foreign_local_projectors(dir.path(), "Alpha-7B-Q4_K_M.gguf", listed);
+        assert_eq!(
+            kept,
+            files(&["Alpha-7B-Q4_K_M.gguf", "mmproj-Alpha-7B-F16.gguf"])
+        );
+
+        fs::remove_file(dir.path().join("mmproj-Alpha-7B-F16.gguf")).unwrap();
+        let listed = list_local_gguf_companions(dir.path(), "Alpha-7B-Q4_K_M.gguf").unwrap();
+        let kept = drop_foreign_local_projectors(dir.path(), "Alpha-7B-Q4_K_M.gguf", listed);
+        assert_eq!(
+            kept,
+            files(&["Alpha-7B-Q4_K_M.gguf", "mmproj-unlabeled-F16.gguf"])
+        );
+    }
+
+    #[test]
+    fn local_projectors_are_kept_when_the_model_names_no_base_model() {
+        let dir = tempfile::tempdir().unwrap();
+        write_gguf(&dir.path().join("Alpha-7B-Q4_K_M.gguf"), None);
+        write_gguf(&dir.path().join("mmproj-BF16.gguf"), Some("acme/Beta-30B"));
+        let listed = list_local_gguf_companions(dir.path(), "Alpha-7B-Q4_K_M.gguf").unwrap();
+        let kept =
+            drop_foreign_local_projectors(dir.path(), "Alpha-7B-Q4_K_M.gguf", listed.clone());
+        assert_eq!(kept, listed);
     }
 
     #[test]

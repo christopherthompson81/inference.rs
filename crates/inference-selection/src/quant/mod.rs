@@ -9,8 +9,8 @@ use futures::future::BoxFuture;
 use tracing::{debug, info, warn};
 
 pub use gguf_discovery::{
-    has_gguf_model_files, list_local_files_recursive, list_local_gguf_companions,
-    resolve_gguf_projector, resolve_gguf_quant,
+    drop_foreign_local_projectors, has_gguf_model_files, list_local_files_recursive,
+    list_local_gguf_companions, resolve_gguf_projector, resolve_gguf_quant,
 };
 
 use inference_core::{
@@ -289,7 +289,14 @@ fn resolve_gguf_spec(
         *quantized_filename = artifact.file_spec();
     }
     if matches!(model, ModelSelected::GGUF { .. }) {
-        let files = files.unwrap_or_default();
+        let mut files = files.unwrap_or_default();
+        if let ModelSelected::GGUF {
+            quantized_filename, ..
+        } = &model
+            && Path::new(&model_id).is_dir()
+        {
+            files = drop_foreign_local_projectors(Path::new(&model_id), quantized_filename, files);
+        }
         let artifact_repo = is_confident_gguf_artifact_repo(&model_id, &files);
         pick_projector(&mut model, &files, artifact_repo, picked_by_quant)?;
     }
@@ -318,10 +325,18 @@ fn pick_projector(
         MmprojSelection::ArtifactRepo => artifact_repo,
         MmprojSelection::Any | MmprojSelection::Required => true,
     };
-    if mmproj_filename.is_none()
-        && wanted
-        && let Some(projector) = resolve_gguf_projector(files, *dtype)?
-    {
+    let resolved = if mmproj_filename.is_none() && wanted {
+        match resolve_gguf_projector(files, *dtype) {
+            Err(error) if *mmproj_selection == MmprojSelection::Any => {
+                warn!("GGUF: loading `{quantized_model_id}` without a projector: {error}");
+                None
+            }
+            resolved => resolved?,
+        }
+    } else {
+        None
+    };
+    if let Some(projector) = resolved {
         info!(
             "GGUF: selected {} projector `{}`",
             projector.label,
