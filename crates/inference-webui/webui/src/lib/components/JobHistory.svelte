@@ -7,7 +7,19 @@
   let { kind, onOpen, busy = false }: { kind: JobKind; onOpen: (job: Job) => void; busy?: boolean } = $props();
   let error = $state("");
 
-  onMount(() => void jobsStore.refresh(kind));
+  // the entry the tab showed last, reopened once the list is in; one deleted, or another owner's, is skipped
+  onMount(async () => {
+    const remembered = jobsStore.current[kind];
+    await jobsStore.refresh(kind);
+    const job = remembered ? jobsStore.lists[kind].find((entry) => entry.id === remembered) : undefined;
+    if (job && jobsStore.current[kind] === remembered) onOpen(job);
+    else if (remembered && !job) jobsStore.current[kind] = null;
+  });
+
+  $effect(() => {
+    void jobsStore.current[kind];
+    jobsStore.persistCurrent();
+  });
 
   async function remove(job: Job) {
     try {

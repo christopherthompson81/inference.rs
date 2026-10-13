@@ -3,13 +3,33 @@ import type { Job, JobFile, JobKind } from "../services/jobs";
 import { managerStore, type SlotId } from "./manager.svelte";
 
 const TITLE_LENGTH = 60;
+// which entry each tab last showed, so a reload or a return to the tab opens it again
+const CURRENT_KEY = "inference-rs-current-jobs";
+const NONE: Record<JobKind, string | null> = { transcription: null, speech: null, images: null, documents: null };
+
+function storedCurrent(): Record<JobKind, string | null> {
+  try {
+    return { ...NONE, ...JSON.parse(localStorage.getItem(CURRENT_KEY) ?? "{}") };
+  } catch {
+    return { ...NONE };
+  }
+}
 // a Hugging Face cache path: `.../models--<org>--<name>/snapshots/<revision>[/<file>]`
 const HF_CACHE_REPO = /models--([^/]+?)--([^/]+)\/snapshots\/[^/]+(?:\/(.+))?$/;
 
 class JobsStore {
   lists = $state<Record<JobKind, Job[]>>({ transcription: [], speech: [], images: [], documents: [] });
   /** The job each view shows, so its history marks it. */
-  current = $state<Record<JobKind, string | null>>({ transcription: null, speech: null, images: null, documents: null });
+  current = $state<Record<JobKind, string | null>>(storedCurrent());
+
+  /** Keeps which entry each tab shows, for the next visit. */
+  persistCurrent() {
+    try {
+      localStorage.setItem(CURRENT_KEY, JSON.stringify(this.current));
+    } catch {
+      // private windows may refuse storage
+    }
+  }
 
   async refresh(kind: JobKind) {
     try {
