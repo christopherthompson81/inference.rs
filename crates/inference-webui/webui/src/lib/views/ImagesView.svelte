@@ -110,6 +110,19 @@
     document.getElementById("refine-prompt")?.focus();
   }
 
+  async function refineFile(file: File | undefined) {
+    if (!file) return;
+    // the thread keeps its starting image as a PNG, so another type is redrawn as one
+    const image = file.type === "image/png" ? file : await pngOf(file);
+    const url = await new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(reader.error);
+      reader.readAsDataURL(image);
+    });
+    await anchorOn({ url, caption: file.name, filename: file.name });
+  }
+
   async function open(job: Job) {
     const data = job.data as unknown as ImagesJob;
     ({ prompt, width, height, steps, guidance, seed } = data);
@@ -290,6 +303,10 @@
         {#if references.length > 0}
           <button class="text-xs text-gray-500 underline" onclick={() => chooseReferences(null)}>clear {references.length}</button>
         {/if}
+        <label class="cursor-pointer {plain}" title="Start a refinement from an image of your own: describe each change and the model edits it">
+          Refine an image...
+          <input type="file" accept="image/*" class="hidden" disabled={busy} onchange={(e) => refineFile(e.currentTarget.files?.[0])} />
+        </label>
         <button
           class="rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           onclick={run}
@@ -306,11 +323,27 @@
           {/each}
         </div>
       {/if}
+      {#if images.length > 0 && !anchor}
+        <p class="text-xs text-gray-500">Refine an image to edit it step by step with the model, or click it to browse the gallery.</p>
+      {/if}
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
         {#each images as image, index (index)}
-          <button class="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800" onclick={() => view(image)} aria-label="View image {index + 1}">
-            <img src={image} alt="Generated" class="w-full" />
-          </button>
+          <figure class="flex flex-col gap-1.5">
+            <button class="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800" onclick={() => view(image)} aria-label="View image {index + 1}">
+              <img src={image} alt="Generated" class="w-full" />
+            </button>
+            <figcaption class="flex gap-1.5">
+              <button
+                class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                onclick={() => anchorOn({ url: image, caption: prompt, filename: `image-${index + 1}.png` })}
+                disabled={busy}
+              >
+                Refine
+              </button>
+              <button class="{plain} px-2 py-1 text-xs" onclick={() => view(image)}>View</button>
+              <a class="{plain} px-2 py-1 text-xs" href={image} download="image-{index + 1}.png">Download</a>
+            </figcaption>
+          </figure>
         {/each}
       </div>
 
