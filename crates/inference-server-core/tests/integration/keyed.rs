@@ -597,6 +597,11 @@ async fn each_owner_keeps_its_own_web_ui_jobs() -> anyhow::Result<()> {
     };
     let (status, body) = status_and_body(&app, file(&alpha)).await?;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "RIFF"));
+    // a player seeks with range requests
+    let mut ranged = file(&alpha);
+    ranged.headers_mut().insert("range", "bytes=1-2".parse()?);
+    let (status, body) = status_and_body(&app, ranged).await?;
+    assert_eq!((status, body.as_str()), (StatusCode::PARTIAL_CONTENT, "IF"));
     assert_eq!(
         status_and_body(&app, file(&beta)).await?.0,
         StatusCode::NOT_FOUND

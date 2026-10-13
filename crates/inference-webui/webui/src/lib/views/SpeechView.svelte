@@ -58,10 +58,20 @@
   let continuous = $state(false);
   let activeWord = $state(-1);
   let frame = 0;
+  let paused = $state(true);
+  // seconds into the whole reading: the ready paragraphs played one after another
+  let position = $state(0);
+  // a seek asked for before a paragraph's audio has loaded
+  let pendingSeek: number | null = null;
 
   let ready = $derived(managerStore.servedIn("speech") != null);
   let generated = $derived(blocks.filter((block) => block.status === "ready").length);
   let total = $derived(blocks.length);
+  // where each paragraph starts in the whole reading; a paragraph not yet generated takes no time
+  let offsets = $derived(
+    blocks.reduce<number[]>((at, block, i) => [...at, (at[i] ?? 0) + (block.status === "ready" ? block.duration : 0)], [0]),
+  );
+  let length = $derived(offsets[offsets.length - 1] ?? 0);
 
   function readIpa(): boolean {
     try {
@@ -244,16 +254,46 @@
     if (!player || !block || block.status !== "ready" || !block.audioUrl) return;
     playing = index;
     activeWord = -1;
-    if (player.src !== new URL(block.audioUrl, location.href).href) player.src = block.audioUrl;
-    player.currentTime = from;
+    if (player.src !== new URL(block.audioUrl, location.href).href) {
+      // a seek before the new audio's metadata is in would be lost; it is applied once it loads
+      pendingSeek = from;
+      player.src = block.audioUrl;
+    } else {
+      player.currentTime = from;
+    }
     void player.play();
     void tick().then(() => document.getElementById(`block-${index}`)?.scrollIntoView({ block: "nearest" }));
   }
 
-  function playAll() {
+  function loaded() {
+    if (player && pendingSeek != null) player.currentTime = pendingSeek;
+    pendingSeek = null;
+  }
+
+  // play, or carry on from where playback paused
+  function toggle() {
+    if (!player) return;
+    if (!paused) return player.pause();
     continuous = true;
+    if (playing >= 0) return void player.play();
+    seekTo(position < length ? position : 0);
+  }
+
+  // the paragraph holding `time` in the whole reading, played from there
+  function seekTo(time: number) {
+    const index = blocks.findLastIndex((block, i) => block.status === "ready" && offsets[i] <= time);
     const first = blocks.findIndex((block) => block.status === "ready");
-    if (first >= 0) play(first);
+    const target = index >= 0 ? index : first;
+    if (target < 0) return;
+    continuous = true;
+    play(target, Math.max(0, time - offsets[target]));
+  }
+
+  function step(direction: 1 | -1) {
+    const from = playing >= 0 ? playing : 0;
+    for (let i = from + direction; i >= 0 && i < blocks.length; i += direction) {
+      if (blocks[i].status === "ready") return void ((continuous = true), play(i));
+    }
   }
 
   function stop() {
@@ -269,7 +309,10 @@
     const next = playing + 1;
     // an unready block is either still to come (generation resumes playback) or the end of the reading
     if (blocks[next]?.status === "ready") play(next);
-    else if (!(busy && blocks[next])) playing = -1;
+    else if (!(busy && blocks[next])) {
+      playing = -1;
+      position = 0;
+    }
   }
 
   function follow() {
@@ -279,10 +322,16 @@
       const words = blocks[playing]?.words ?? [];
       const word = words.findLastIndex((w) => w.start <= player!.currentTime);
       if (word !== activeWord) activeWord = word;
+      position = (offsets[playing] ?? 0) + player.currentTime;
       if (!player.paused) frame = requestAnimationFrame(step);
     };
     step();
   }
+
+  const clock = (seconds: number) => {
+    const total = Math.max(0, Math.floor(seconds));
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  };
 
   async function exportAs(format: "wav" | "json" | "md") {
     const base = (blocks[0]?.text ?? "speech").replace(/[^\w-]+/g, "-").slice(0, 40) || "speech";
@@ -378,9 +427,6 @@
             Generate
           </button>
         {/if}
-        <button class={plain} onclick={() => (playing >= 0 && !player?.paused ? stop() : playAll())} disabled={generated === 0}>
-          {playing >= 0 && !player?.paused ? "Stop" : "Play all"}
-        </button>
         <label class="flex items-center gap-1.5 pb-1.5 text-sm" title="The IPA of each word above it, once its paragraph is generated">
           <input type="checkbox" class="accent-blue-600" checked={ipa} onchange={(e) => setIpa(e.currentTarget.checked)} />
           IPA
@@ -412,7 +458,45 @@
         ></textarea>
       {/if}
 
-      <audio bind:this={player} class="hidden" onplay={follow} onseeked={follow} onended={ended}></audio>
+      <audio
+        bind:this={player}
+        class="hidden"
+        onplay={() => ((paused = false), follow())}
+        onpause={() => (paused = true)}
+        onseeked={follow}
+        onended={ended}
+        onloadedmetadata={loaded}
+      ></audio>
+
+      {#if generated > 0}
+        <!-- the reading's transport: it stays in view above the paragraphs it plays -->
+        <div class="sticky top-0 z-10 flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm dark:border-gray-800 dark:bg-gray-950">
+          <button class="rounded p-1 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800" onclick={() => step(-1)} aria-label="Previous paragraph" title="Previous paragraph">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z" /></svg>
+          </button>
+          <button class="rounded-full bg-blue-600 p-2 text-white hover:bg-blue-700" onclick={toggle} aria-label={paused ? "Play" : "Pause"} title={paused ? "Play" : "Pause"}>
+            {#if paused}
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z" /></svg>
+            {:else}
+              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z" /></svg>
+            {/if}
+          </button>
+          <button class="rounded p-1 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800" onclick={() => step(1)} aria-label="Next paragraph" title="Next paragraph">
+            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z" /></svg>
+          </button>
+          <input
+            type="range"
+            class="min-w-0 flex-1 accent-blue-600"
+            min="0"
+            max={length}
+            step="0.1"
+            value={position}
+            aria-label="Position in the reading"
+            oninput={(e) => seekTo(Number(e.currentTarget.value))}
+          />
+          <span class="shrink-0 font-mono text-xs text-gray-500">{clock(position)} / {clock(length)}</span>
+        </div>
+      {/if}
 
       <div class="flex flex-col gap-2">
         {#each blocks as block, index (index)}
