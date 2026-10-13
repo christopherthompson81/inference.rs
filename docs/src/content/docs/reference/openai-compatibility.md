@@ -196,7 +196,8 @@ JSON body whose `images` are `{"image_url": ...}` entries (`http(s)` or `data:` 
 
 - `model`, `input`: supported.
 - `response_format`: only `wav` and `pcm` are accepted; `mp3`, `opus`, `aac`, `flac` return a validation error.
-- `voice`, `instructions`, `speed`: ignored.
+- `voice`, `speed`: read by Kokoro (a voice it ships, comma-separated to blend; the speaking rate); Dia ignores them. `instructions`: ignored.
+- `phonemes`, `seed`, `timestamps` (inference.rs extensions, Kokoro): a phoneme string spoken in place of `input`; a seed for repeatable audio; a JSON answer with the audio base64-encoded and each word's start, end and IPA. See [speech models guide](/guides/models/use-speech-models/).
 
 ### `/v1/audio/transcriptions` (speech recognition)
 

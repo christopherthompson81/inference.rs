@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use image::DynamicImage;
 use inference_tensor::Tensor;
 
@@ -115,23 +113,18 @@ pub async fn send_diarization_responses(
 
 pub async fn send_speech_responses(
     input_seqs: &mut [&mut Sequence],
-    pcms: &[Arc<Vec<f32>>],
-    rates: &[usize],
-    channels: &[usize],
+    outputs: Vec<inference_models_speech::SpeechGenerationOutput>,
 ) -> inference_tensor::Result<()> {
-    if input_seqs.len() != pcms.len() {
+    if input_seqs.len() != outputs.len() {
         inference_tensor::bail!(
-            "Input seqs len ({}) does not match pcms generated len ({})",
+            "Input seqs len ({}) does not match speech outputs len ({})",
             input_seqs.len(),
-            pcms.len()
+            outputs.len()
         );
     }
 
-    for (seq, (pcm, (rate, channel))) in input_seqs
-        .iter_mut()
-        .zip(pcms.iter().zip(rates.iter().zip(channels)))
-    {
-        seq.add_speech_pcm_to_group(pcm.clone(), *rate, *channel);
+    for (seq, output) in input_seqs.iter_mut().zip(outputs) {
+        seq.add_speech_output_to_group(output);
 
         let group = seq.get_mut_group();
         group

@@ -635,15 +635,28 @@ fn with_prefix_schwa(token: &str, word: &str) -> String {
 
 /// `text` read as `lang` and rendered into Kokoro's alphabet.
 pub fn phonemes(text: &str, lang: &str, in_vocab: impl Fn(char) -> bool) -> Result<String> {
-    Ok(phonemize(text, lang, in_vocab)?.0)
+    Ok(phonemize(text, lang, in_vocab)?.phonemes)
 }
 
-/// The rendered phonemes and, when the trace accounts for every group, each group's source-word index.
-fn phonemize(
-    text: &str,
-    lang: &str,
-    in_vocab: impl Fn(char) -> bool,
-) -> Result<(String, Option<Vec<usize>>)> {
+/// A reading of `text` with the words it was read from.
+#[derive(Debug, Clone)]
+pub struct Phonemized {
+    /// The reading in Kokoro's alphabet, spoken as is.
+    pub phonemes: String,
+    /// The source words in order, each with its canonical IPA (empty when the trace can't place it).
+    pub words: Vec<PhonemizedWord>,
+    /// The source-word index of each spoken group, a run of phonemes between spaces; None when the trace can't say.
+    pub groups: Option<Vec<usize>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PhonemizedWord {
+    pub text: String,
+    pub ipa: String,
+}
+
+/// The rendered phonemes, the source words with their canonical IPA, and each group's source word when known.
+pub fn phonemize(text: &str, lang: &str, in_vocab: impl Fn(char) -> bool) -> Result<Phonemized> {
     let traced = vernacula_phonemizer::phonemize_trace(text, lang).map_err(phonemizer_error)?;
     let text16 = text.encode_utf16().collect::<Vec<_>>();
     let traced16 = traced.ipa.encode_utf16().collect::<Vec<_>>();
@@ -664,7 +677,28 @@ fn phonemize(
         (Some(map), true) => reduce_english_prefix_vowel(&rendered, &text16, map, &words),
         _ => rendered,
     };
-    Ok((rendered, map))
+    let mut word_ipa = vec![Vec::new(); words.len()];
+    if let Some(map) = map.as_ref().filter(|m| count_word_groups(&ipa) == m.len()) {
+        let groups = ipa
+            .split_whitespace()
+            .filter(|g| g.chars().any(char::is_alphabetic));
+        for (group, &word) in groups.zip(map) {
+            word_ipa[word].push(group);
+        }
+    }
+    let words = words
+        .iter()
+        .zip(word_ipa)
+        .map(|(span, ipa)| PhonemizedWord {
+            text: String::from_utf16_lossy(&text16[span.start..span.end]),
+            ipa: ipa.join(" "),
+        })
+        .collect();
+    Ok(Phonemized {
+        phonemes: rendered,
+        words,
+        groups: map,
+    })
 }
 
 #[cfg(test)]
@@ -855,7 +889,33 @@ mod tests {
             eprintln!("skipped: {e}");
             return None;
         }
-        Some(phonemize(text, l, |c| VOCAB.contains(c)).unwrap())
+        let read = phonemize(text, l, |c| VOCAB.contains(c)).unwrap();
+        Some((read.phonemes, read.groups))
+    }
+
+    #[test]
+    fn each_source_word_carries_its_canonical_ipa() {
+        if readable("en").is_err() {
+            return;
+        }
+        let read = phonemize("I paid $3.14 today.", "en", |c| VOCAB.contains(c)).unwrap();
+        let texts = read
+            .words
+            .iter()
+            .map(|w| w.text.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(texts, ["I", "paid", "$3.14", "today."]);
+        assert!(
+            read.words.iter().all(|w| !w.ipa.is_empty()),
+            "{:?}",
+            read.words
+        );
+        // the expanded number keeps all its readings on its one written word
+        assert!(
+            read.words[2].ipa.split(' ').count() >= 2,
+            "{:?}",
+            read.words[2]
+        );
     }
 
     #[test]

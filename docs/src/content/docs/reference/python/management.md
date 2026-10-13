@@ -773,6 +773,7 @@ Speech generation request
 | `response_format` | `AudioResponseFormat` | required |
 | `seed` | `int \| None` | optional |
 | `speed` | `float \| None` | optional |
+| `timestamps` | `bool \| None` | optional |
 | `voice` | `str \| None` | optional |
 
 
@@ -798,6 +799,30 @@ A span of speech, in seconds from the start of the audio.
 | --- | --- |
 | `end` | `float` |
 | `start` | `float` |
+
+
+## `SpeechWithTimestamps`
+
+The answer to a speech request with `timestamps`.
+
+| Field | Type |
+| --- | --- |
+| `audio` | `str` |
+| `content_type` | `str` |
+| `duration` | `float` |
+| `words` | `list[SpeechWord]` |
+
+
+## `SpeechWord`
+
+A word of a speech request's `input` and when it is spoken, in seconds from the start of the audio.
+
+| Field | Type |
+| --- | --- |
+| `end` | `float` |
+| `ipa` | `str` |
+| `start` | `float` |
+| `word` | `str` |
 
 
 ## `TimestampGranularity`

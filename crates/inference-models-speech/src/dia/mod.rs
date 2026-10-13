@@ -509,6 +509,7 @@ impl DiaPipeline {
             pcm: Arc::new(pcm),
             rate: RATE,
             channels: CHANNELS,
+            words: None,
         })
     }
 

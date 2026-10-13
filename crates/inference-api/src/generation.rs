@@ -1,5 +1,6 @@
 //! Image and speech generation as engine operations, free of HTTP.
 
+use base64::Engine as _;
 use futures::future::BoxFuture;
 use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
@@ -20,11 +21,11 @@ use crate::{
     openai::{
         AudioResponseFormat, DiarizationOutput, DiarizationRequest, DiarizationResponse,
         DiarizationResponseFormat, DiarizationSegment, ImageEditRequest, ImageGenerationRequest,
-        SpeechGenerationRequest, SpeechSegment, TimestampGranularity, TranscriptionOutput,
-        TranscriptionRequest, TranscriptionResponse, TranscriptionResponseFormat,
-        TranscriptionSegment, TranscriptionWord, VerboseTranscriptionResponse,
-        VoiceActivityRequest, VoiceActivityResponse, diarization_rttm, transcript_srt,
-        transcript_vtt,
+        SpeechGenerationRequest, SpeechSegment, SpeechWithTimestamps, SpeechWord,
+        TimestampGranularity, TranscriptionOutput, TranscriptionRequest, TranscriptionResponse,
+        TranscriptionResponseFormat, TranscriptionSegment, TranscriptionWord,
+        VerboseTranscriptionResponse, VoiceActivityRequest, VoiceActivityResponse,
+        diarization_rttm, transcript_srt, transcript_vtt,
     },
     types::SharedInferenceRsState,
     util::{parse_image_url_for_server, validate_model_name},
@@ -46,13 +47,17 @@ const MAX_SEGMENT_SECONDS: f64 = 30.0;
 
 // Speech models emit f32 samples; PCM output is signed 16-bit little-endian.
 const PCM_SAMPLE_FORMAT: &str = "s16le";
+const JSON_CONTENT_TYPE: &str = "application/json";
 const UNEXPECTED_RESPONSE: &str =
     "the engine answered a generation request with another kind of response";
 
 /// Encoded speech audio and its MIME type, which carries the sample rate and channel count.
 pub struct SpeechAudio {
+    /// The audio, or with `timestamps` the `SpeechWithTimestamps` JSON carrying it.
     pub bytes: Vec<u8>,
     pub content_type: String,
+    /// When each input word is spoken, from a model that can tell.
+    pub words: Option<Vec<SpeechWord>>,
 }
 
 // Generation requests are one-shot and deterministic: no tools, streaming or sampling choices.
@@ -412,10 +417,40 @@ async fn generate_speech_inner(
             pcm,
             rate,
             channels,
-        } => Ok(SpeechAudio {
-            bytes: encode_speech(format, &pcm, rate, channels)?,
-            content_type: format.audio_content_type(rate, channels, PCM_SAMPLE_FORMAT),
-        }),
+            words,
+        } => {
+            let audio = encode_speech(format, &pcm, rate, channels)?;
+            let content_type = format.audio_content_type(rate, channels, PCM_SAMPLE_FORMAT);
+            let words = words.map(|words| {
+                words
+                    .into_iter()
+                    .map(|w| SpeechWord {
+                        word: w.text,
+                        ipa: w.ipa,
+                        start: w.start,
+                        end: w.end,
+                    })
+                    .collect::<Vec<_>>()
+            });
+            if !request.timestamps {
+                return Ok(SpeechAudio {
+                    bytes: audio,
+                    content_type,
+                    words,
+                });
+            }
+            let body = SpeechWithTimestamps {
+                audio: base64::engine::general_purpose::STANDARD.encode(&audio),
+                content_type,
+                duration: pcm.len() as f64 / (rate * channels.max(1)) as f64,
+                words: words.clone().unwrap_or_default(),
+            };
+            Ok(SpeechAudio {
+                bytes: serde_json::to_vec(&body).map_err(|_| ApiError::internal())?,
+                content_type: JSON_CONTENT_TYPE.to_string(),
+                words,
+            })
+        }
         _ => Err(unexpected(state)),
     }
 }

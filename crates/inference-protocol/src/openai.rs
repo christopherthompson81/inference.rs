@@ -2000,6 +2000,33 @@ pub struct SpeechGenerationRequest {
     /// The desired audio format for the generated speech.
     #[schema(example = "mp3")]
     pub response_format: AudioResponseFormat,
+    /// Answers with JSON (`SpeechWithTimestamps`): the audio in `response_format`, base64-encoded, and when each word
+    /// of `input` is spoken, with its IPA. Kokoro times words; another model answers with no words.
+    #[serde(default)]
+    pub timestamps: bool,
+}
+
+/// A word of a speech request's `input` and when it is spoken, in seconds from the start of the audio.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct SpeechWord {
+    pub word: String,
+    /// The word's canonical IPA, as the phonemizer read it; empty when it couldn't be placed on the word.
+    pub ipa: String,
+    pub start: f64,
+    pub end: f64,
+}
+
+/// The answer to a speech request with `timestamps`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+pub struct SpeechWithTimestamps {
+    /// The audio in the request's `response_format`, base64-encoded.
+    pub audio: String,
+    /// The audio's media type.
+    pub content_type: String,
+    /// Seconds of audio.
+    pub duration: f64,
+    /// The input's words in order; empty for a model that can't time them.
+    pub words: Vec<SpeechWord>,
 }
 
 impl SpeechGenerationRequest {
@@ -2013,6 +2040,7 @@ impl SpeechGenerationRequest {
             phonemes: None,
             seed: None,
             response_format,
+            timestamps: false,
         }
     }
 }

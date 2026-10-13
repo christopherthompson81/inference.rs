@@ -16,7 +16,7 @@ use crate::{
     tag = "inference.rs",
     path = "/v1/audio/speech",
     request_body = SpeechGenerationRequest,
-    responses((status = 200, description = "Speech generation"))
+    responses((status = 200, description = "The audio in `response_format`; with `timestamps`, the JSON carrying it and its word times", body = crate::openai::SpeechWithTimestamps))
 ))]
 pub async fn speech_generation(
     OwnedEngine(engine): OwnedEngine,

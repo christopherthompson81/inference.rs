@@ -808,7 +808,11 @@ mod tests {
             Ok(3usize)
         });
 
-        std::thread::sleep(Duration::from_millis(30));
+        // both admitted jobs start; a loaded machine may take a while to schedule them
+        let deadline = std::time::Instant::now() + TEST_RECV_TIMEOUT;
+        while started.load(Ordering::SeqCst) < 2 && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
         assert_eq!(started.load(Ordering::SeqCst), 2);
         let second = rx2.recv().unwrap().unwrap();
         std::thread::sleep(Duration::from_millis(30));

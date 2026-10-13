@@ -66,6 +66,18 @@ pub struct SpeechGenerationOutput {
     pub pcm: Arc<Vec<f32>>,
     pub rate: usize,
     pub channels: usize,
+    /// The input's words in order with when each is spoken, for a model that reads text and can tell (Kokoro).
+    pub words: Option<Vec<SpokenWord>>,
+}
+
+/// A word of the input and when it is spoken, in seconds from the start of the audio.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpokenWord {
+    pub text: String,
+    /// The word's canonical IPA, as the phonemizer read it; empty when it can't be placed on the word.
+    pub ipa: String,
+    pub start: f64,
+    pub end: f64,
 }
 
 inference_nn::json_config!(dia::DiaConfig);

@@ -20,7 +20,7 @@ use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use indexmap::IndexMap;
 use inference_models_speech::kokoro::{GGUF_EXTENSION, KokoroConfig, KokoroTts, is_kokoro_gguf};
-use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput, SpeechOptions};
+use inference_models_speech::{DiaConfig, DiaPipeline, SpeechOptions};
 use inference_quant::IsqType;
 use inference_tensor::nn::VarBuilder;
 use inference_tensor::{Device, Tensor};
@@ -620,15 +620,9 @@ impl Pipeline for SpeechPipeline {
         assert!(!return_raw_logits);
 
         let ModelInputs { prompts, options } = *inputs.downcast().expect("Downcast failed.");
-        let mut pcms = Vec::new();
-        let mut rates = Vec::new();
-        let mut channels_all = Vec::new();
+        let mut outputs = Vec::new();
         for (prompt, options) in prompts.iter().zip(&options) {
-            let SpeechGenerationOutput {
-                pcm,
-                rate,
-                channels,
-            } = match (&self.model, self.cfg) {
+            outputs.push(match (&self.model, self.cfg) {
                 (SpeechModel::Dia(model), cfg) => model.generate(prompt, &cfg)?,
                 (SpeechModel::Kokoro(model), SpeechGenerationConfig::Kokoro { speed }) => model
                     .generate(
@@ -640,17 +634,10 @@ impl Pipeline for SpeechPipeline {
                 (SpeechModel::Kokoro(_), _) => {
                     inference_tensor::bail!("Kokoro was given another model's speech config")
                 }
-            };
-            pcms.push(pcm);
-            rates.push(rate);
-            channels_all.push(channels);
+            });
         }
 
-        Ok(ForwardInputsResult::Speech {
-            pcms,
-            rates,
-            channels: channels_all,
-        })
+        Ok(ForwardInputsResult::Speech { outputs })
     }
 
     fn sample_causal_gen<'a>(

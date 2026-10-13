@@ -5,13 +5,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Extension, Multipart, Path as UrlPath, Query};
-use axum::http::{StatusCode, header};
+use axum::body::Body;
+use axum::extract::{Extension, Multipart, Path as UrlPath, Query, Request};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::fs;
+use tower_http::services::ServeFile;
 use tracing::error;
 use uuid::Uuid;
 
@@ -284,24 +286,41 @@ pub async fn delete_job(
     }
 }
 
+/// A job's file, served with range support so a player can seek in its audio.
 pub async fn job_file(
     Extension(app): Extension<Arc<AppState>>,
     UrlPath((id, name)): UrlPath<(String, String)>,
+    request: Request,
 ) -> Response {
     let (Some(dir), Some(mime)) = (job_dir(&app.jobs_dir, &id), job_file_type(&name)) else {
         return bad_request("invalid job file").into_response();
     };
-    match fs::read(dir.join(&name)).await {
-        Ok(bytes) => (
-            [
-                (header::CONTENT_TYPE, mime),
-                (header::X_CONTENT_TYPE_OPTIONS, "nosniff"),
-                (header::CONTENT_SECURITY_POLICY, "sandbox"),
-            ],
-            bytes,
-        )
-            .into_response(),
-        Err(_) => (StatusCode::NOT_FOUND, "job file not found").into_response(),
+    let mime: mime_guess::mime::Mime = mime.parse().expect("job file types are valid media types");
+    match ServeFile::new_with_mime(dir.join(&name), &mime)
+        .try_call(request)
+        .await
+    {
+        Ok(response) => {
+            let mut response = response.map(Body::new);
+            let headers = response.headers_mut();
+            headers.insert(
+                header::X_CONTENT_TYPE_OPTIONS,
+                HeaderValue::from_static("nosniff"),
+            );
+            headers.insert(
+                header::CONTENT_SECURITY_POLICY,
+                HeaderValue::from_static("sandbox"),
+            );
+            response
+        }
+        Err(e) => {
+            error!("read job file error: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to read the job file",
+            )
+                .into_response()
+        }
     }
 }
 

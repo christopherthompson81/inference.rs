@@ -30,6 +30,8 @@ extend-ignore-re = [
     "cudaDevAttrMaxSharedMemoryPerBlockOptin",
     "sharedMemPerBlockOptin",
     '"tese"',
+    # the Charis SIL font, which the web UI's IPA prefers
+    "Charis SIL",
     "setp\\.ne\\.b32",
     # metal_kernels
     "out uneeded values",
