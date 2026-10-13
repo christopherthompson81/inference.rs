@@ -44,3 +44,28 @@ estimate, not a timed run of the old view). Over two Next and one Previous, and 
 "Rendering the page" placeholder and the page's SVG was never replaced.
 
 **Implication:** reading is 3x faster at the default sequences, and the page no longer flashes or reflows on a switch.
+
+## Run 3 - 2026-10-13 17:10
+
+**Question:** with the regions read 16 at a time, does the batch drain between pages, and does running the layout
+ahead keep it full?
+
+**Change:** Process all pages runs as a pipeline: one task renders and lays out up to 2 pages ahead and queues their
+regions; 16 readers take regions from any page. A page is kept when its last region is read; a failed page is marked
+and the rest go on; saves run one after another.
+
+**Raw finding:** same server and PDFs (Run 2's page, 3 and 6 pages, default 4 OCR sequences), the page reloaded
+before each run, no other GPU work. A first run of each build is slower (4.5 to 5.0 s for 3 pages, warming caches).
+
+| build | 3 pages | 6 pages | per page |
+|---|---|---|---|
+| a batch per page (master) | 4.0, 4.0 s | 8.1, 8.1 s | 1.33 s |
+| pipelined | 3.5, 3.5 s | 7.2, 7.2 s | 1.18 s |
+| pipelined, Chromium 153 and pdf.js's modern build | 3.7, 3.7 s | 7.1, 7.2 s | 1.19 s |
+
+An earlier pipelined run took 6.5 s for the 3 pages while the LAN server on port 1234 shared the GPU; it was stopped
+for these runs.
+
+**Implication:** the run-ahead saves about 0.15 s a page, the gap while one page's last regions drained before the
+next was laid out: about 11%. Kept. The tests now use Playwright's bundled Chromium (153) rather than the system's
+131, which lacks `Uint8Array.toHex`; pdf.js's modern build works in it, so the legacy build is no longer needed.

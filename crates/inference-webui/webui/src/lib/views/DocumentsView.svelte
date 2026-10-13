@@ -35,6 +35,8 @@
   // regions read at once: the engine batches them (3x at its default 4 sequences); past the OCR model's sequence
   // limit they wait in its queue, so a model loaded with more sequences reads faster still
   const READ_CONCURRENCY = 16;
+  // pages laid out ahead of the reading: enough to keep the queue full, few enough to hold their images
+  const LOOKAHEAD_PAGES = 2;
 
   type Status = "new" | "working" | "laid out" | "read" | "failed";
 
@@ -80,7 +82,7 @@
   onDestroy(() => {
     controller?.abort();
     release();
-    void pdf?.destroy();
+    void pdf?.loadingTask.destroy();
   });
 
   function release() {
@@ -93,7 +95,7 @@
 
   function reset(next: Page[], docName: string) {
     release();
-    void pdf?.destroy();
+    void pdf?.loadingTask.destroy();
     pdf = null;
     pages = next;
     current = 0;
@@ -212,65 +214,28 @@
     return canvas.toDataURL("image/png");
   }
 
-  // one page through what's loaded: the layout when asked and not done yet, then the reading of each region
-  async function processPage(index: number, steps: { layout: boolean; read: boolean }, signal: AbortSignal, total: number) {
-    const p = pages[index];
-    const label = (stage: string) => `${total > 1 ? `Page ${index + 1} of ${pages.length}: ` : ""}${stage}`;
-    p.status = "working";
-    p.error = "";
-    try {
-      const blob = await ensureImage(index);
-      if (steps.layout) {
-        progress = { label: label("detecting the layout"), done: 0, total: 0 };
-        const result = await detectLayout(SLOTS.layout.id, await dataUrl(blob));
-        p.regions = result.regions.map((region) => ({ ...region, text: "" }));
-        p.text = "";
-        p.status = "laid out";
-      }
-      if (steps.read) {
-        const image = await loadImage(blob);
-        const jobs =
-          p.regions.length === 0
-            ? [{ region: null as ReadRegion | null, box: [0, 0, image.naturalWidth, image.naturalHeight] as [number, number, number, number], prompt: textPrompt }]
-            : p.regions
-                .filter((region) => !PICTURES.has(region.label))
-                .map((region) => ({ region, box: region.bbox, prompt: TASK_PROMPTS[region.label] ?? textPrompt }));
-        p.text = "";
-        let next = 0;
-        let done = 0;
-        progress = { label: label(`reading ${jobs.length} regions`), done: 0, total: jobs.length };
-        // a few workers take the regions in turn; each result lands on its own region, so the order holds
-        let failed = false;
-        const worker = async () => {
-          while (!failed && next < jobs.length) {
-            if (signal.aborted) throw new DOMException("canceled", "AbortError");
-            const job = jobs[next++];
-            try {
-              const read = await readImage(SLOTS.ocr.id, crop(image, job.box), job.prompt);
-              if (job.region) job.region.text = read;
-              else p.text = read;
-            } catch (e) {
-              // the other workers stop taking regions once one has failed
-              failed = true;
-              throw e;
-            }
-            done++;
-            progress = { label: label(`read ${done} of ${jobs.length} regions`), done, total: jobs.length };
-          }
-        };
-        await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, jobs.length) }, worker));
-        p.status = "read";
-      }
-      if (!steps.layout && !steps.read) p.status = "new";
-    } catch (e) {
-      p.status = signal.aborted ? (p.regions.length ? "laid out" : "new") : "failed";
-      p.error = e instanceof Error ? e.message : String(e);
-      throw e;
-    } finally {
-      await keep(steps.read ? "ocr" : "layout");
-    }
+  interface ReadJob {
+    index: number;
+    region: ReadRegion | null;
+    box: [number, number, number, number];
+    prompt: string;
+    image: HTMLImageElement;
   }
 
+  // a page's reading: a job per region with text, or the whole page when nothing was laid out
+  function readJobs(index: number, image: HTMLImageElement): ReadJob[] {
+    const p = pages[index];
+    if (p.regions.length === 0) {
+      return [{ index, region: null, box: [0, 0, image.naturalWidth, image.naturalHeight], prompt: textPrompt, image }];
+    }
+    return p.regions
+      .filter((region) => !PICTURES.has(region.label))
+      .map((region) => ({ index, region, box: region.bbox, prompt: TASK_PROMPTS[region.label] ?? textPrompt, image }));
+  }
+
+  // Pages run as a pipeline: one task renders and lays out pages ahead, queueing their regions, while the readers take
+  // regions from any page, so the OCR batch stays full across page boundaries. A page is kept once its last region is
+  // read, and a page that fails is marked and the rest go on.
   async function run(which: "layout" | "read" | "all") {
     busy = true;
     status = "";
@@ -278,26 +243,146 @@
     const signal = controller.signal;
     const started = performance.now();
     const targets = which === "all" ? pages.map((_, i) => i).filter((i) => pages[i].status !== "read") : [current];
-    try {
-      for (const [n, index] of targets.entries()) {
-        if (signal.aborted) break;
-        const p = pages[index];
-        const steps = {
-          layout: which === "layout" || (which === "all" && layoutReady && p.status === "new"),
-          read: which === "read" || (which === "all" && ocrReady),
-        };
-        if (which === "all") await show(index);
-        await processPage(index, steps, signal, which === "all" ? targets.length : 1);
-        if (which === "all") progress = { label: `Page ${n + 1} of ${targets.length} done`, done: n + 1, total: targets.length };
+    const many = targets.length > 1;
+    const queue: ReadJob[] = [];
+    // regions still to read for each page laid out and queued
+    const remaining = new Map<number, number>();
+    let producing = true;
+    let laidOut = 0;
+    let queued = 0;
+    let read = 0;
+    let failures = 0;
+    let waiters: (() => void)[] = [];
+    const changed = () => {
+      const woken = waiters;
+      waiters = [];
+      for (const wake of woken) wake();
+    };
+    const until = () => new Promise<void>((resolve) => waiters.push(resolve));
+    const report = () => {
+      const stage = many ? `${laidOut} of ${targets.length} pages laid out, ` : "";
+      progress = queued
+        ? { label: `${stage}${read} of ${queued} regions read`, done: read, total: queued }
+        : { label: many ? `${stage}detecting the layout` : "Detecting the layout", done: 0, total: 0 };
+    };
+    const fail = (index: number, e: unknown) => {
+      failures++;
+      pages[index].status = "failed";
+      pages[index].error = e instanceof Error ? e.message : String(e);
+      // what's still queued for the page is dropped; what's in flight lands and is ignored
+      for (let i = queue.length - 1; i >= 0; i--) if (queue[i].index === index) queue.splice(i, 1);
+      remaining.delete(index);
+      changed();
+    };
+    // the earliest page still being worked on is the one shown
+    const follow = () => {
+      if (!many) return;
+      const next = targets.find((i) => pages[i].status === "working");
+      if (next != null && next !== current) void show(next);
+    };
+
+    const producer = async () => {
+      try {
+        for (const index of targets) {
+          while (remaining.size >= LOOKAHEAD_PAGES && !signal.aborted) await until();
+          if (signal.aborted) return;
+          const p = pages[index];
+          const layout = which === "layout" || (which === "all" && layoutReady && p.status === "new");
+          const reading = which === "read" || (which === "all" && ocrReady);
+          p.status = "working";
+          p.error = "";
+          follow();
+          report();
+          try {
+            const blob = await ensureImage(index);
+            if (layout) {
+              const result = await detectLayout(SLOTS.layout.id, await dataUrl(blob));
+              p.regions = result.regions.map((region) => ({ ...region, text: "" }));
+              p.text = "";
+            }
+            laidOut++;
+            if (!reading) {
+              p.status = p.regions.length ? "laid out" : "new";
+              keepSoon("layout");
+              continue;
+            }
+            const jobs = readJobs(index, await loadImage(blob));
+            p.text = "";
+            if (jobs.length === 0) {
+              p.status = "read";
+              keepSoon("ocr");
+              continue;
+            }
+            remaining.set(index, jobs.length);
+            queue.push(...jobs);
+            queued += jobs.length;
+            report();
+            changed();
+          } catch (e) {
+            if (signal.aborted) return;
+            fail(index, e);
+          }
+        }
+      } finally {
+        producing = false;
+        changed();
       }
-      status = `Done in ${((performance.now() - started) / 1000).toFixed(1)} s`;
-    } catch (e) {
-      status = signal.aborted ? "Canceled" : e instanceof Error ? e.message : String(e);
+    };
+
+    const reader = async () => {
+      for (;;) {
+        if (signal.aborted) return;
+        const job = queue.shift();
+        if (!job) {
+          if (!producing) return;
+          await until();
+          continue;
+        }
+        try {
+          const text = await readImage(SLOTS.ocr.id, crop(job.image, job.box), job.prompt, signal);
+          if (!remaining.has(job.index)) continue;
+          if (job.region) job.region.text = text;
+          else pages[job.index].text = text;
+        } catch (e) {
+          if (signal.aborted) return;
+          if (remaining.has(job.index)) fail(job.index, e);
+          continue;
+        }
+        read++;
+        const left = remaining.get(job.index)! - 1;
+        if (left > 0) remaining.set(job.index, left);
+        else {
+          remaining.delete(job.index);
+          pages[job.index].status = "read";
+          keepSoon("ocr");
+          follow();
+          changed();
+        }
+        report();
+      }
+    };
+
+    try {
+      await Promise.all([producer(), ...Array.from({ length: READ_CONCURRENCY }, reader)]);
+      await keeping;
+      const took = `${((performance.now() - started) / 1000).toFixed(1)} s`;
+      status = signal.aborted ? "Canceled" : failures ? `${failures} page${failures === 1 ? "" : "s"} failed; done in ${took}` : `Done in ${took}`;
     } finally {
+      // a canceled page goes back to what it was
+      for (const index of targets) {
+        const p = pages[index];
+        if (p.status === "working") p.status = p.regions.length ? "laid out" : "new";
+      }
       progress = null;
       busy = false;
       controller = null;
     }
+  }
+
+  // saves run one after another, so the first can create the document's job before the rest add to it
+  let keeping: Promise<void> = Promise.resolve();
+  function keepSoon(slot: SlotId) {
+    keeping = keeping.then(() => keep(slot));
   }
 
   // the document kept as one job: each worked page's image once, and every page's reading

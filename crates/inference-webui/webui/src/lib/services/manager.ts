@@ -123,11 +123,12 @@ async function getJson<T>(path: string): Promise<T> {
   return response.json();
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await authedFetch(url(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    signal,
   });
   if (!response.ok) throw await failure(response);
   const text = await response.text();
@@ -364,7 +365,7 @@ export async function editImage(model: string, prompt: string, images: File[], o
 }
 
 /** One chat turn with an image, for reading a page region; the reply's text. */
-export async function readImage(model: string, image: string, prompt: string): Promise<string> {
+export async function readImage(model: string, image: string, prompt: string, signal?: AbortSignal): Promise<string> {
   const reply = await postJson<{ choices: { message: { content: string | null } }[] }>("v1/chat/completions", {
     model,
     messages: [
@@ -378,6 +379,6 @@ export async function readImage(model: string, image: string, prompt: string): P
     ],
     max_tokens: 2048,
     temperature: 0,
-  });
+  }, signal);
   return reply.choices[0]?.message.content?.trim() ?? "";
 }
