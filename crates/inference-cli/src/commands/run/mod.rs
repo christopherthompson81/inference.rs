@@ -135,6 +135,7 @@ fn run_spec(
 ) -> Result<inference_api::EngineSpec> {
     engine_spec(EngineSpecInputs {
         model_type,
+        empty: false,
         matformer: &runtime.matformer_selection(),
         model_id: None,
         runtime,

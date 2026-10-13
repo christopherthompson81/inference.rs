@@ -46,6 +46,12 @@ pub struct ModelConfig {
     /// Hub revision (branch, tag or commit) to load; the default branch when unset.
     #[serde(default)]
     pub hf_revision: Option<String>,
+    /// Sizes this model's paged KV cache for this many tokens instead of the engine's setting.
+    #[serde(default)]
+    pub paged_context_len: Option<usize>,
+    /// Speculative decoding for this model; the engine's MTP setting applies to its first model only.
+    #[serde(skip)]
+    pub mtp: Option<MtpConfig>,
 }
 
 impl ModelConfig {
@@ -62,6 +68,8 @@ impl ModelConfig {
             in_situ_quant: None,
             encoder_cache_memory_bytes: None,
             hf_revision: None,
+            paged_context_len: None,
+            mtp: None,
         }
     }
 
@@ -837,6 +845,8 @@ impl InferenceRsForServerBuilder {
         // Determine if we're in single-model or multi-model mode
         if !self.models.is_empty() {
             self.build_multi_model().await
+        } else if self.model.is_none() {
+            Ok(InferenceRs::empty(self.log))
         } else {
             self.build_single_model().await
         }
@@ -935,11 +945,9 @@ impl InferenceRsForServerBuilder {
 
         inference_core::distributed::begin_tensor_parallel_session(self.models.len())?;
 
-        let first = &self.models[0].model;
-        let first_dtype = get_model_dtype(first)?;
         let settings = self.model_load_settings()?;
 
-        let mut paged_kv_plan = plan_paged_kv(
+        let paged_kv_plan = plan_paged_kv(
             &self
                 .models
                 .iter()
@@ -950,15 +958,6 @@ impl InferenceRsForServerBuilder {
                 .collect::<Vec<_>>(),
             Default::default(),
         )?;
-        if let Some(first) = paged_kv_plan.paged_attn.first_mut() {
-            *first = reserve_external_mtp_memory_with_runtime(
-                *first,
-                self.mtp_config.as_ref(),
-                settings.mtp_runtime,
-                &first_dtype,
-                &settings.device,
-            )?;
-        }
 
         let mut loaded_model_ids = Vec::new();
         let mut registered_ids = HashSet::new();
@@ -971,11 +970,19 @@ impl InferenceRsForServerBuilder {
                 );
             }
             // the global MTP setting and its memory reservation belong to the first model only
-            let mtp_config = self.mtp_config.clone().filter(|_| model_index == 0);
+            let mtp_config = model_config
+                .mtp
+                .clone()
+                .or_else(|| self.mtp_config.clone().filter(|_| model_index == 0));
+            let paged_attn = settings.model_cache(
+                model_config,
+                paged_kv_plan.paged_attn[model_index],
+                mtp_config.as_ref(),
+            )?;
             let loaded = settings
                 .load(
                     model_config,
-                    paged_kv_plan.paged_attn[model_index],
+                    paged_attn,
                     mtp_config,
                     settings.max_seqs,
                     model_index == 0,
@@ -1350,8 +1357,33 @@ impl ModelLoadSettings {
             }],
             Default::default(),
         )?;
-        self.load(model_config, plan.paged_attn[0], None, max_seqs, false)
+        let mtp = model_config.mtp.clone();
+        let paged_attn = self.model_cache(model_config, plan.paged_attn[0], mtp.as_ref())?;
+        self.load(model_config, paged_attn, mtp, max_seqs, false)
             .await
+    }
+
+    // The planned cache with the model's own context size, less what an external MTP drafter needs.
+    fn model_cache(
+        &self,
+        model_config: &ModelConfig,
+        planned: Option<PagedAttentionConfig>,
+        mtp: Option<&MtpConfig>,
+    ) -> Result<Option<PagedAttentionConfig>> {
+        let mut cache = planned;
+        if let (Some(cache), Some(tokens)) = (cache.as_mut(), model_config.paged_context_len) {
+            cache.mem_gpu = MemoryGpuConfig::ContextSize(tokens);
+        }
+        if mtp.is_none() {
+            return Ok(cache);
+        }
+        reserve_external_mtp_memory_with_runtime(
+            cache,
+            mtp,
+            self.mtp_runtime,
+            &get_model_dtype(&model_config.model)?,
+            &self.device,
+        )
     }
 }
 

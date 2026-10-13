@@ -754,7 +754,7 @@ class EncoderCacheStats:
 
 @dataclass(kw_only=True)
 class EngineSpec:
-    """What to load and how to run it: the JSON form of the options `inference serve` takes."""
+    """What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor `models` the engine starts empty, and `add_model` loads what it serves."""
 
     adapters: AdapterSpec | None = None
     agentic: AgenticSpec | None = None
@@ -1474,6 +1474,8 @@ class ModelSpec:
     max_model_len: int | None = None
     model: ModelSelected
     model_id: str | None = None
+    mtp: MtpSpec | None = None
+    paged_context_len: int | None = None
 
 
 @dataclass(kw_only=True)

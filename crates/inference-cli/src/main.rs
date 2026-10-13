@@ -47,9 +47,16 @@ async fn main() -> Result<()> {
             agent_options,
             sandbox,
         } => {
-            let model_type = resolve_model_type(model_type, default_model)?;
+            // without a model the server starts empty and loads models on request
+            let empty = model_type.is_none() && !default_model.names_model();
+            let model_type = if empty {
+                default_model.into_settings_only()?
+            } else {
+                resolve_model_type(model_type, default_model)?
+            };
             run_server(
                 model_type,
+                empty,
                 server,
                 runtime,
                 agent_options,

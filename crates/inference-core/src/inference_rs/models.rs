@@ -227,6 +227,7 @@ impl InferenceRs {
             }
         }
 
+        Self::init_device_support(&pipeline.lock().await.device());
         let mut engine_config = config.engine_config;
         Self::init_external_tool_callbacks(
             &pipeline,
@@ -273,10 +274,6 @@ impl InferenceRs {
             .engines
             .write()
             .map_err(|_| "Failed to acquire write lock on engines")?;
-
-        if engines.len() <= 1 {
-            return Err("Cannot remove the last model from InferenceRs".to_string());
-        }
 
         match engines.remove(&resolved_model_id) {
             Some(engine_instance) => {

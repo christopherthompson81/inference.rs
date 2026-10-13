@@ -417,11 +417,26 @@ impl DefaultModelOptions {
     /// Returns an error if neither model_id nor a local quantized file is provided.
     pub fn into_model_type(mut self) -> anyhow::Result<ModelType> {
         self.format.normalize()?;
-        let model_id = match self.model_id {
+        let model_id = match self.model_id.take() {
             Some(model_id) => model_id,
             None => self.format.derive_local_model_root()?,
         };
-        Ok(ModelType::Auto {
+        Ok(self.with_model_id(model_id))
+    }
+
+    /// Whether these options name a model, by id or by local files.
+    pub fn names_model(&self) -> bool {
+        self.model_id.is_some() || self.format.quantized_file.is_some()
+    }
+
+    /// The runtime settings without a model (device, cache, quantization), for a server that starts empty.
+    pub fn into_settings_only(mut self) -> anyhow::Result<ModelType> {
+        self.format.normalize()?;
+        Ok(self.with_model_id(String::new()))
+    }
+
+    fn with_model_id(self, model_id: String) -> ModelType {
+        ModelType::Auto {
             model: ModelSourceOptions {
                 model_id,
                 tokenizer: self.tokenizer,
@@ -436,7 +451,7 @@ impl DefaultModelOptions {
             device: self.device,
             cache: self.cache,
             multimodal: self.multimodal,
-        })
+        }
     }
 }
 

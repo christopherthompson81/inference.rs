@@ -1486,7 +1486,7 @@
             "description": "Model not found"
           },
           "409": {
-            "description": "The last model can't be removed"
+            "description": "The model is unloaded or reloading"
           }
         }
       }
@@ -5154,7 +5154,7 @@
       },
       "EngineSpec": {
         "type": "object",
-        "description": "What to load and how to run it: the JSON form of the options `inference serve` takes.",
+        "description": "What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor\n`models` the engine starts empty, and `add_model` loads what it serves.",
         "properties": {
           "adapters": {
             "$ref": "#/components/schemas/AdapterSpec"
@@ -8021,6 +8021,25 @@
               "null"
             ],
             "description": "The id requests use for this model; defaults to the model's own id."
+          },
+          "mtp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MtpSpec",
+                "description": "Speculative decoding for this model; `runtime.mtp` applies to the first model only."
+              }
+            ]
+          },
+          "paged_context_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Tokens of context this model's paged KV cache holds, in place of `runtime.paged_cache`'s size.",
+            "minimum": 0
           }
         },
         "additionalProperties": false
