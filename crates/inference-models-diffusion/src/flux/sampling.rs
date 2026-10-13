@@ -122,6 +122,7 @@ fn denoise_inner(
         None
     };
     let mut img = img.clone();
+    let mut ahead = None;
     for window in timesteps.windows(2) {
         let (t_curr, t_prev) = match window {
             [a, b] => (a, b),
@@ -129,7 +130,12 @@ fn denoise_inner(
         };
         let t_vec = Tensor::full(*t_curr as f32, b_sz, dev)?;
         let pred = model.forward(&img, img_ids, txt, txt_ids, &t_vec, vec_, guidance.as_ref())?;
-        img = (img + pred * (t_prev - t_curr))?
+        img = (img + pred * (t_prev - t_curr))?;
+        // a step is seconds of GPU work: queued far ahead, the thread spins a core on the full launch queue, so it
+        // stays one step ahead and sleeps on the one before
+        if let Some(previous) = ahead.replace(dev.fence()?) {
+            previous.wait()?;
+        }
     }
     Ok(img)
 }
