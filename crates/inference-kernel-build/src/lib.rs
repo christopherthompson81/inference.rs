@@ -93,7 +93,9 @@ mod source;
 mod toolkit;
 
 // Re-export main types
-pub use builder::{BUILD_ID_SYMBOL, KernelBuilder, PtxOutput, loadable_id_env, loadable_lib_env};
+pub use builder::{
+    BUILD_DIR_LOCK, BUILD_ID_SYMBOL, KernelBuilder, PtxOutput, loadable_id_env, loadable_lib_env,
+};
 pub use compute_cap::{
     ComputeCapability, GpuArch, arch_key, detect_compute_cap, detect_compute_caps, gencode_args,
     get_gpu_arch_string, parse_arch_list,

@@ -7,7 +7,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur during CUDA kernel building
-#[derive(Debug, Error)]
+#[derive(Error)]
 pub enum Error {
     /// nvcc binary not found
     #[error("nvcc not found: {0}. Set NVCC environment variable or ensure nvcc is in PATH")]
@@ -53,4 +53,23 @@ pub enum Error {
     /// Invalid configuration
     #[error("Invalid configuration: {0}")]
     InvalidConfig(String),
+
+    /// A running binary loads its kernels from the build dir; rebuilding them would change what it opens next
+    #[error(
+        "the CUDA kernel libraries in {dir} are in use by {holders}; stop it and build again (a build would replace \
+         libraries it may still open)"
+    )]
+    KernelLibrariesInUse {
+        /// The build dir whose libraries are open.
+        dir: PathBuf,
+        /// The processes holding them, as far as the platform tells.
+        holders: String,
+    },
+}
+
+// build scripts `expect` these, which prints Debug: the message reads better than the variant
+impl std::fmt::Debug for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, f)
+    }
 }
