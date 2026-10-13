@@ -31,5 +31,6 @@ mod flux;
 mod image_edit_route;
 mod keyed;
 mod mcp;
+mod model_manager;
 mod realtime_route;
 mod transcription_route;

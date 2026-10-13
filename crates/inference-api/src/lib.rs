@@ -28,6 +28,7 @@ pub mod lora_routing;
 #[doc(hidden)]
 pub mod media_source;
 pub mod model_inventory;
+pub mod model_manager;
 pub mod models;
 pub use inference_protocol::openai;
 pub mod operations;

@@ -638,14 +638,30 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
             .header("content-type", "application/json")
             .body(Body::from(json!({ "model_id": model_id }).to_string()))
     };
-    for (enabled, status) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
-        let app = InferenceRsServerRouterBuilder::new()
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 40000));
+    let lan = std::net::SocketAddr::from(([192, 168, 1, 20], 40000));
+    let cases = [
+        (false, Some(loopback), StatusCode::NOT_FOUND),
+        (true, Some(loopback), StatusCode::OK),
+        // an open server takes only clients on its own machine for admins
+        (true, Some(lan), StatusCode::FORBIDDEN),
+        (true, None, StatusCode::FORBIDDEN),
+    ];
+    for (enabled, peer, status) in cases {
+        let mut app = InferenceRsServerRouterBuilder::new()
             .with_engine(&engine)
             .with_model_management(enabled)
             .build()
             .await?;
+        if let Some(peer) = peer {
+            app = app.layer(axum::extract::connect_info::MockConnectInfo(peer));
+        }
         let response = app.oneshot(set_default()?).await?;
-        assert_eq!(response.status(), status, "model management {enabled}");
+        assert_eq!(
+            response.status(),
+            status,
+            "model management {enabled}, {peer:?}"
+        );
     }
     Ok(())
 }

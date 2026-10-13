@@ -70,6 +70,7 @@ public sealed partial class MainViewModel : ObservableObject, IDisposable
         {
             ModelTarget.Chat => (Chat.Slot, ChatTab),
             ModelTarget.Documents => (Document.OcrSlot, DocumentsTab),
+            ModelTarget.Layout => (Document.LayoutSlot, DocumentsTab),
             ModelTarget.Speech => (Speech.Slot, SpeechTab),
             ModelTarget.Transcription => (Transcription.Slot, TranscriptionTab),
             ModelTarget.Diarization => (Transcription.Diarizer, TranscriptionTab),

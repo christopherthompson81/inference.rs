@@ -59,6 +59,8 @@ inference serve [OPTIONS] [COMMAND]
 | `--allow-file-listing` | `false` | Let an open server's GET /v1/files list every stored file (a keyed one lists each owner's own) |
 | `--allow-model-management` | `false` | Serve the routes that add and remove models at runtime; adding one loads any path or hub repo the server reaches |
 | `--api-keys-file <API_KEYS_FILE>` |  | File of `name = key` lines; each request must carry a key and sees only its owner's data (and INFERENCE_RS_API_KEY) |
+| `--model-folder <DIR>` |  | A folder of models (GGUF files, model directories, `.nemo` files) that admins can load from; repeat for more. The Hugging Face cache is always offered |
+| `--admin <OWNER>` |  | A key owner (a name from --api-keys-file, or `default` for INFERENCE_RS_API_KEY) who may load, unload, download and delete models; repeat for more. Without keys only clients on this machine may |
 | `--mcp-port <MCP_PORT>` |  | Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at POST /mcp) |
 | `--max-tool-rounds <MAX_TOOL_ROUNDS>` |  | Default maximum tool-call rounds for the agentic loop. Per-request values from the HTTP API override this. Safety cap: 256 if unset |
 | `--tool-dispatch-url <TOOL_DISPATCH_URL>` |  | URL to POST tool calls to for server-side execution. For security, this is only configurable server-side (not per-request via HTTP API) |

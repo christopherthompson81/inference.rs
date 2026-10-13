@@ -1,9 +1,29 @@
 ---
 title: Layout
-description: "PP-DocLayoutV3 document layout detection."
+description: "PP-DocLayoutV3 document layout detection, in process and over HTTP."
 sidebar:
   order: 8
 ---
+## `LayoutDetectRequest`
+
+A page to find the layout regions of.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `image` | `str` | required |
+| `model` | `str` | required |
+| `threshold` | `float \| None` | optional |
+
+
+## `LayoutDetectResponse`
+
+| Field | Type |
+| --- | --- |
+| `height` | `int` |
+| `regions` | `list[LayoutRegion]` |
+| `width` | `int` |
+
+
 ## `LayoutDetection`
 
 One region, in reading order; `box` is x1, y1, x2, y2 and `polygon` its outline's (x, y) vertices, in
@@ -101,6 +121,18 @@ __enter__()
 ```text
 __exit__()
 ```
+
+
+## `LayoutRegion`
+
+One region of a page, in its predicted reading order.
+
+| Field | Type |
+| --- | --- |
+| `bbox` | `list[float]` |
+| `label` | `str` |
+| `polygon` | `list[list[float]]` |
+| `score` | `float` |
 
 
 ## `PixelFormat`

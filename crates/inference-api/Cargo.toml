@@ -24,6 +24,7 @@ futures.workspace = true
 image.workspace = true
 indexmap.workspace = true
 inference-core = { workspace = true, features = ["utoipa"] }
+inference-layout.workspace = true
 inference-agent.workspace = true
 inference-selection = { workspace = true, features = ["utoipa"] }
 inference-quant.workspace = true
@@ -54,10 +55,10 @@ models-llama = ["inference-core/models-llama"]
 models-other = ["inference-core/models-other"]
 models-phi = ["inference-core/models-phi"]
 models-qwen = ["inference-core/models-qwen"]
-cuda = ["inference-core/cuda", "inference-selection/cuda"]
+cuda = ["inference-core/cuda", "inference-selection/cuda", "inference-layout/cuda"]
 cudnn = ["inference-core/cudnn", "inference-selection/cudnn"]
 cutile = ["cuda", "inference-core/cutile", "inference-selection/cutile"]
-metal = ["inference-core/metal", "inference-selection/metal"]
+metal = ["inference-core/metal", "inference-selection/metal", "inference-layout/metal"]
 flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3", "inference-selection/flash-attn-v3"]
 accelerate = ["inference-core/accelerate", "inference-selection/accelerate"]
 mkl = ["inference-core/mkl", "inference-selection/mkl"]

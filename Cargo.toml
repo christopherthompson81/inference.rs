@@ -244,6 +244,7 @@ inference-metal-compile = { path = "crates/inference-metal-compile", version = "
 inference-fattn = { path = "crates/inference-fattn", version = "0.9.3" }
 inference-quant = { path = "crates/inference-quant", version = "0.9.3" }
 inference-vision = { path = "crates/inference-vision", version = "0.9.3" }
+inference-layout = { path = "crates/inference-layout", version = "0.9.3" }
 inference-api = { path = "crates/inference-api", version = "0.9.3", default-features = false }
 inference-server-core = { path = "crates/inference-server-core", version = "0.9.3", default-features = false }
 inference-webui = { path = "crates/inference-webui", version = "0.9.3" }

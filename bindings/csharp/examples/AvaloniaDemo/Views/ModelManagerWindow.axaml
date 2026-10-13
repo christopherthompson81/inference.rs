@@ -85,6 +85,7 @@
           <TextBlock VerticalAlignment="Center" Text="Use in:" />
           <Button Content="Chat" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Chat}" />
           <Button Content="Documents" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Documents}" />
+          <Button Content="Layout" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Layout}" />
           <Button Content="Speech" Command="{Binding UseCommand}" CommandParameter="{x:Static vm:ModelTarget.Speech}" />
           <Button Content="Transcription" Command="{Binding UseCommand}"
                   CommandParameter="{x:Static vm:ModelTarget.Transcription}" />

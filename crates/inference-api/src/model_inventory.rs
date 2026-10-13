@@ -22,6 +22,9 @@ use crate::api_error::ApiError;
 use crate::request_body::{JsonRequest, parse_json};
 
 const DEFAULT_REVISION: &str = "main";
+const DOWNLOAD_THREAD: &str = "inference-download";
+// a download's runtime: hf-hub fetches its chunks in parallel on whatever runtime it runs on
+const DOWNLOAD_WORKERS: usize = 4;
 // how often a running download looks for its cancellation
 const CANCEL_POLL: Duration = Duration::from_millis(100);
 
@@ -146,7 +149,13 @@ async fn download_files(
 /// paths), `canceled` or `error` (data: the error envelope).
 /// The returned future does the download; the caller runs it on a runtime.
 pub(crate) fn model_download(request: &[u8]) -> Result<ModelDownload, ApiError> {
-    let request = ModelDownloadRequest::from_json(request)?;
+    model_download_from(ModelDownloadRequest::from_json(request)?)
+}
+
+/// As [`model_download`], from a parsed request.
+pub(crate) fn model_download_from(
+    request: ModelDownloadRequest,
+) -> Result<ModelDownload, ApiError> {
     let token_source = match request.token_source.as_deref() {
         Some(value) => value
             .parse::<TokenSource>()
@@ -232,6 +241,27 @@ impl Drop for CancelOnDrop {
     fn drop(&mut self) {
         self.cancellation.cancel();
     }
+}
+
+/// Runs a download's `work` to its end on a runtime of its own, on a thread of its own.
+pub(crate) fn start_download(
+    work: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+) -> Result<(), ApiError> {
+    // hf-hub spawns each chunk as a task that outlives a dropped download; shutting down its own runtime ends them
+    let downloader = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(DOWNLOAD_WORKERS)
+        .enable_all()
+        .thread_name(DOWNLOAD_THREAD)
+        .build()
+        .map_err(|_| ApiError::internal())?;
+    std::thread::Builder::new()
+        .name(DOWNLOAD_THREAD.to_string())
+        .spawn(move || {
+            downloader.block_on(work);
+            downloader.shutdown_background();
+        })
+        .map_err(|_| ApiError::internal())?;
+    Ok(())
 }
 
 /// A download not yet started: run `work`, and read `events` until they end.

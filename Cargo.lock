@@ -2480,6 +2480,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-agent",
  "inference-core",
+ "inference-layout",
  "inference-models-other",
  "inference-nn",
  "inference-protocol",

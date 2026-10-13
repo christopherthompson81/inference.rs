@@ -159,7 +159,7 @@ GROUPS = [
     (
         "Models, adapters, files and skills",
         "management",
-        "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls.",
+        "Model status and cache counters, the model manager, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls.",
         lambda n: n.startswith(
             (
                 "Model",
@@ -197,6 +197,7 @@ GROUPS = [
                 "Tokenize",
                 "Detokenize",
                 "McpTool",
+                "Managed",
                 "DefaultModel",
                 "Prompt",
                 "LogitsOutput",
@@ -206,8 +207,9 @@ GROUPS = [
     (
         "Layout",
         "layout",
-        "PP-DocLayoutV3 document layout detection.",
-        lambda n: n in {"LayoutModel", "LayoutImage", "LayoutDetection", "PixelFormat"},
+        "PP-DocLayoutV3 document layout detection, in process and over HTTP.",
+        lambda n: n in {"LayoutModel", "LayoutImage", "LayoutDetection", "PixelFormat"}
+        or n.startswith(("LayoutDetect", "LayoutRegion")),
     ),
 ]
 

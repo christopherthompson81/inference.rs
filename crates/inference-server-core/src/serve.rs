@@ -1,7 +1,10 @@
 //! Running a built router: its listener, the MCP listener beside it, and the startup log.
 
 use anyhow::{Context, Result};
-use axum::{Router, serve::Listener};
+use axum::{
+    Router,
+    serve::{ListenerExt, TapIo},
+};
 use inference_api::Engine;
 use tracing::{debug, info};
 
@@ -37,6 +40,8 @@ pub async fn serve(app: Router, engine: &Engine, options: ServeOptions<'_>) -> R
         .with_context(|| format!("Failed to bind the HTTP server to {host}:{port}"))?;
     info!("Server listening on http://{host}:{port}");
     log_api_surfaces(host, port);
+    // the peer address tells an open server's admin requests (from this machine) from the rest
+    let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
     axum::serve(tcp_nodelay_listener(listener), app).await?;
     Ok(())
 }
@@ -66,16 +71,17 @@ async fn spawn_mcp_server(
 }
 
 // Streamed tokens are small writes; Nagle would hold each one back waiting for an ACK.
+// A named type, not `impl Listener`: axum records a TapIo listener's peer address only when it can see the type.
 fn tcp_nodelay_listener(
     listener: tokio::net::TcpListener,
-) -> impl Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr> {
-    use axum::serve::ListenerExt;
+) -> TapIo<tokio::net::TcpListener, fn(&mut tokio::net::TcpStream)> {
+    listener.tap_io(set_nodelay)
+}
 
-    listener.tap_io(|stream| {
-        if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!("failed to set TCP_NODELAY on incoming connection: {error}");
-        }
-    })
+fn set_nodelay(stream: &mut tokio::net::TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::warn!("failed to set TCP_NODELAY on incoming connection: {error}");
+    }
 }
 
 fn log_api_surfaces(host: &str, port: u16) {
@@ -109,6 +115,8 @@ fn log_routes(routes: &[RouteInfo], kind: RouteKind) {
 
 #[cfg(test)]
 mod tests {
+    use axum::serve::Listener;
+
     use super::*;
 
     #[tokio::test]

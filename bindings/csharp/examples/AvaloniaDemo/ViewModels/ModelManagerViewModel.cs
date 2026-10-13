@@ -14,6 +14,7 @@ public enum ModelTarget
 {
     Chat,
     Documents,
+    Layout,
     Speech,
     Transcription,
     Diarization,
@@ -55,6 +56,7 @@ public sealed class ModelEntryViewModel
             "transcription" => [ModelTarget.Transcription],
             "diarization" => [ModelTarget.Diarization],
             "image_generation" => [ModelTarget.Images],
+            "layout" => [ModelTarget.Layout],
             _ => [],
         };
     }

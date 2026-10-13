@@ -263,7 +263,9 @@ pub struct EngineCallbacks {
     pub progress: Option<Arc<ProgressSink>>,
 }
 
-pub use inference_core::load_progress::{ProgressEvent, ProgressSink, ProgressUnit};
+pub use inference_core::load_progress::{
+    ProgressEvent, ProgressSink, ProgressSinkGuard, ProgressUnit, add_progress_sink,
+};
 
 /// Runtime LoRA adapter management; listing adapters is always allowed.
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
@@ -740,7 +742,7 @@ impl EngineSpec {
     }
 }
 
-fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoadError> {
+pub(crate) fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoadError> {
     let invalid = || {
         EngineLoadError::InvalidSpec(format!(
             "device `{device}` is not one of auto, cpu, cuda:N, metal:N"
@@ -915,6 +917,11 @@ impl Engine {
 
     pub fn agent_permission(&self) -> Option<AgentPermission> {
         self.chat.agentic.agent_permission
+    }
+
+    /// The device the engine loads its models on.
+    pub fn device(&self) -> &Device {
+        self.models.device()
     }
 
     /// The model a request without `model` goes to.

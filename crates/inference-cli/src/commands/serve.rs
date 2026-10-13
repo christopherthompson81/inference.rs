@@ -13,6 +13,7 @@ use inference_api::{
     },
     initialize_logging,
     lora_adapters::LoraAdapterApiConfig,
+    model_manager::{ModelManager, ModelManagerConfig},
     skill_store::SkillStore,
 };
 use inference_server_core::{
@@ -273,9 +274,24 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
         auth: auth.clone(),
         ..UiOptions::from_agentic(&spec.agentic)
     });
+    let token_source = spec.runtime.token_source.clone();
     let engine = Engine::load(spec).await?;
+    let folders = server
+        .model_folders
+        .iter()
+        .map(|folder| std::path::absolute(folder).with_context(|| folder.display().to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    let manager = ModelManager::new(
+        engine.clone(),
+        ModelManagerConfig {
+            folders,
+            hf_cache_path: None,
+            token_source,
+        },
+    );
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
+        .with_model_manager(manager)
         .with_observability_config(server.observability_config())
         .with_file_listing(server.allow_file_listing)
         .with_model_management(server.allow_model_management)

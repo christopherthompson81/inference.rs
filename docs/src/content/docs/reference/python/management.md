@@ -1,6 +1,6 @@
 ---
 title: Models, adapters, files and skills
-description: "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls."
+description: "Model status and cache counters, the model manager, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls."
 sidebar:
   order: 7
 ---
@@ -365,6 +365,89 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `generation` | `str` |
 | `rank` | `int` |
 | `retired` | `bool` |
+
+
+## `ManagedDeleteRequest`
+
+What to delete: a repository from the Hugging Face cache, or a GGUF in a model folder.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `path` | `str \| None` | optional |
+| `repo_id` | `str \| None` | optional |
+
+
+## `ManagedDeletion`
+
+| Field | Type |
+| --- | --- |
+| `deleted` | `str` |
+| `freed_bytes` | `int` |
+
+
+## `ManagedDownloadRequest`
+
+A download into the server's Hugging Face cache.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `files` | `list[str] \| None` | optional |
+| `quant` | `str \| None` | optional |
+| `repo_id` | `str` | required |
+| `revision` | `str \| None` | optional |
+
+
+## `ManagedKind`
+
+How a managed model serves requests.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `ManagedKind.TEXT` | `'text'` |
+| `ManagedKind.MULTIMODAL` | `'multimodal'` |
+| `ManagedKind.EMBEDDING` | `'embedding'` |
+| `ManagedKind.IMAGE_GENERATION` | `'image_generation'` |
+| `ManagedKind.SPEECH` | `'speech'` |
+| `ManagedKind.TRANSCRIPTION` | `'transcription'` |
+| `ManagedKind.VOICE_ACTIVITY` | `'voice_activity'` |
+| `ManagedKind.DIARIZATION` | `'diarization'` |
+| `ManagedKind.LAYOUT` | `'layout'` |
+
+
+## `ManagedLoadRequest`
+
+A load: what to load, the id requests will name it by, and how to run it.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `device` | `str \| None` | optional |
+| `mmproj` | `str \| None` | optional |
+| `model_id` | `str` | required |
+| `mtp` | `MtpSpec \| None` | optional |
+| `paged_context_len` | `int \| None` | optional |
+| `source` | `str` | required |
+
+
+## `ManagedModel`
+
+A served model and where it came from.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `kind` | `ManagedKind` | required |
+| `model_id` | `str` | required |
+| `projector` | `str \| None` | optional |
+| `source` | `str \| None` | optional |
+| `status` | `ModelStatus` | required |
+
+
+## `ManagedModels`
+
+| Field | Type |
+| --- | --- |
+| `data` | `list[ManagedModel]` |
 
 
 ## `McpToolList`
