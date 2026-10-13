@@ -638,14 +638,79 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
             .header("content-type", "application/json")
             .body(Body::from(json!({ "model_id": model_id }).to_string()))
     };
-    for (enabled, status) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
-        let app = InferenceRsServerRouterBuilder::new()
+    let loopback = std::net::SocketAddr::from(([127, 0, 0, 1], 40000));
+    let lan = std::net::SocketAddr::from(([192, 168, 1, 20], 40000));
+    let cases = [
+        (false, Some(loopback), StatusCode::NOT_FOUND),
+        (true, Some(loopback), StatusCode::OK),
+        // an open server takes only clients on its own machine for admins
+        (true, Some(lan), StatusCode::FORBIDDEN),
+        (true, None, StatusCode::FORBIDDEN),
+    ];
+    for (enabled, peer, status) in cases {
+        let mut app = InferenceRsServerRouterBuilder::new()
             .with_engine(&engine)
             .with_model_management(enabled)
             .build()
             .await?;
+        if let Some(peer) = peer {
+            app = app.layer(axum::extract::connect_info::MockConnectInfo(peer));
+        }
         let response = app.oneshot(set_default()?).await?;
-        assert_eq!(response.status(), status, "model management {enabled}");
+        assert_eq!(
+            response.status(),
+            status,
+            "model management {enabled}, {peer:?}"
+        );
+    }
+
+    // a page the server's user opens reaches it from loopback too: only the server's own pages count
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_model_management(true)
+        .build()
+        .await?
+        .layer(axum::extract::connect_info::MockConnectInfo(loopback));
+    let browsers = [
+        (
+            "localhost:1234",
+            Some("cross-site"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "localhost:1234",
+            None,
+            Some("http://attacker.example"),
+            StatusCode::FORBIDDEN,
+        ),
+        // a name the attacker rebound to this machine
+        (
+            "attacker.example:1234",
+            Some("same-origin"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        ("localhost:1234", Some("same-origin"), None, StatusCode::OK),
+        (
+            "[::1]:1234",
+            None,
+            Some("http://[::1]:1234"),
+            StatusCode::OK,
+        ),
+    ];
+    for (host, site, origin, status) in browsers {
+        let mut request = set_default()?;
+        let headers = request.headers_mut();
+        headers.insert("host", host.parse()?);
+        if let Some(site) = site {
+            headers.insert("sec-fetch-site", site.parse()?);
+        }
+        if let Some(origin) = origin {
+            headers.insert("origin", origin.parse()?);
+        }
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), status, "{host} {site:?} {origin:?}");
     }
     Ok(())
 }

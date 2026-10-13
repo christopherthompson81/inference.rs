@@ -16,8 +16,6 @@ use crate::{
 };
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-// a download's runtime: hf-hub fetches its chunks in parallel on whatever runtime it runs on
-const DOWNLOAD_WORKERS: usize = 4;
 
 // Multi-threaded because engine start-up uses `block_in_place`, which a current-thread runtime does not allow.
 fn runtime() -> &'static Runtime {
@@ -400,21 +398,7 @@ impl BlockingStream {
 /// `canceled` or `error` event. Canceling or dropping the stream stops it.
 pub fn model_download_stream(request: &[u8]) -> Result<BlockingStream, ApiError> {
     let download = crate::model_inventory::model_download(request)?;
-    // hf-hub spawns each chunk as a task that outlives a dropped download; shutting down its own runtime ends them
-    let downloader = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(DOWNLOAD_WORKERS)
-        .enable_all()
-        .thread_name("inference-download")
-        .build()
-        .map_err(|_| ApiError::internal())?;
-    let work = download.work;
-    std::thread::Builder::new()
-        .name("inference-download".to_string())
-        .spawn(move || {
-            downloader.block_on(work);
-            downloader.shutdown_background();
-        })
-        .map_err(|_| ApiError::internal())?;
+    crate::model_inventory::start_download(download.work)?;
     Ok(BlockingStream::new(download.events, download.cancellation))
 }
 

@@ -13,6 +13,7 @@ use inference_api::{
     },
     initialize_logging,
     lora_adapters::LoraAdapterApiConfig,
+    model_manager::{ModelManager, ModelManagerConfig},
     skill_store::SkillStore,
 };
 use inference_server_core::{
@@ -37,6 +38,7 @@ const MEBIBYTE_BYTES: usize = 1024 * 1024;
 #[allow(clippy::too_many_arguments)]
 pub async fn run_server(
     mut model_type: ModelType,
+    empty: bool,
     server: ServerOptions,
     mut runtime: RuntimeOptions,
     agent_options: AgentCliOptions,
@@ -58,6 +60,7 @@ pub async fn run_server(
     normalize_quant_flags(&mut model_type)?;
     let spec = engine_spec(EngineSpecInputs {
         model_type: &model_type,
+        empty,
         matformer: &matformer,
         model_id: None,
         runtime: &runtime,
@@ -78,7 +81,14 @@ pub(crate) fn model_spec(
     matformer: &MatformerSelection,
     global: &GlobalOptions,
 ) -> Result<(ModelSelected, RuntimeSpec)> {
-    let model = convert_to_model_selected(model_type, matformer)?;
+    Ok((
+        convert_to_model_selected(model_type, matformer)?,
+        model_runtime_spec(model_type, global)?,
+    ))
+}
+
+/// The runtime settings that come with a model's options, without the model.
+fn model_runtime_spec(model_type: &ModelType, global: &GlobalOptions) -> Result<RuntimeSpec> {
     let (max_model_len, hf_config_overrides) = extract_hf_config_settings(model_type);
     let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
         extract_paged_attn_settings(model_type);
@@ -103,12 +113,14 @@ pub(crate) fn model_spec(
         log: global.log.clone(),
         ..Default::default()
     };
-    Ok((model, runtime))
+    Ok(runtime)
 }
 
 /// What `serve` and `run` need to describe their engine, resolved from the command line.
 pub(crate) struct EngineSpecInputs<'a> {
     pub model_type: &'a ModelType,
+    /// Start without `model_type`'s model, keeping only its runtime settings.
+    pub empty: bool,
     pub matformer: &'a MatformerSelection,
     pub model_id: Option<String>,
     pub runtime: &'a RuntimeOptions,
@@ -124,9 +136,14 @@ pub(crate) struct EngineSpecInputs<'a> {
 
 /// The engine `serve` and `run` load, as the spec the C ABI and bindings load from.
 pub(crate) fn engine_spec(inputs: EngineSpecInputs) -> Result<EngineSpec> {
-    let (model, model_runtime) = model_spec(inputs.model_type, inputs.matformer, inputs.global)?;
+    let (model, model_runtime) = if inputs.empty {
+        (None, model_runtime_spec(inputs.model_type, inputs.global)?)
+    } else {
+        let (model, runtime) = model_spec(inputs.model_type, inputs.matformer, inputs.global)?;
+        (Some(model), runtime)
+    };
     Ok(EngineSpec {
-        model: Some(model),
+        model,
         model_id: inputs.model_id,
         runtime: runtime_options_spec(inputs.runtime, model_runtime, inputs.throughput_logging),
         agentic: agentic_spec(AgenticInputs {
@@ -257,9 +274,24 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
         auth: auth.clone(),
         ..UiOptions::from_agentic(&spec.agentic)
     });
+    let token_source = spec.runtime.token_source.clone();
     let engine = Engine::load(spec).await?;
+    let folders = server
+        .model_folders
+        .iter()
+        .map(|folder| std::path::absolute(folder).with_context(|| folder.display().to_string()))
+        .collect::<Result<Vec<_>>>()?;
+    let manager = ModelManager::new(
+        engine.clone(),
+        ModelManagerConfig {
+            folders,
+            hf_cache_path: None,
+            token_source,
+        },
+    );
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
+        .with_model_manager(manager)
         .with_observability_config(server.observability_config())
         .with_file_listing(server.allow_file_listing)
         .with_model_management(server.allow_model_management)
@@ -1959,6 +1991,7 @@ mod tests {
         let model_type = crate::args::resolve_model_type(model_type, default_model).unwrap();
         engine_spec(EngineSpecInputs {
             model_type: &model_type,
+            empty: false,
             matformer: &runtime.matformer_selection(),
             model_id: Some("alias".to_string()),
             runtime: &runtime,

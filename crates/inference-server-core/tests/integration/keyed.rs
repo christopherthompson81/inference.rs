@@ -111,6 +111,67 @@ async fn a_request_without_a_known_key_is_refused_but_health_is_open() -> anyhow
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn only_an_admin_key_changes_the_served_models() -> anyhow::Result<()> {
+    let (_dir, engine) = tiny_engine().await?;
+    let mut keys = ApiKeys::parse(KEYS)?;
+    keys.set_admins(["team-a".to_string()])?;
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_api_keys(keys)
+        .build()
+        .await?
+        // a keyed server goes by the key, wherever the client is
+        .layer(axum::extract::connect_info::MockConnectInfo(
+            std::net::SocketAddr::from(([127, 0, 0, 1], 40000)),
+        ));
+    let model_id = engine.default_model_id().expect("a default model");
+    let status = json!({ "model_id": model_id });
+    let (code, body) = status_and_body(
+        &app,
+        send_json("POST", "/v1/models/unload", BETA, status.clone()),
+    )
+    .await?;
+    assert_eq!(code, StatusCode::FORBIDDEN, "{body}");
+    assert!(body.contains("admin_required"), "{body}");
+    let (code, _) = status_and_body(
+        &app,
+        send_json("POST", "/v1/models/status", BETA, status.clone()),
+    )
+    .await?;
+    assert_eq!(code, StatusCode::OK);
+    let (code, body) =
+        status_and_body(&app, send_json("POST", "/v1/models/unload", ALPHA, status)).await?;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    assert!(
+        ApiKeys::parse(KEYS)?
+            .set_admins(["team-c".to_string()])
+            .is_err()
+    );
+
+    // the web UI shows its model controls to admins only
+    let mut keys = ApiKeys::parse(KEYS)?;
+    keys.set_admins(["team-a".to_string()])?;
+    let auth = Auth::new(keys);
+    let api = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_auth(auth.clone())
+        .build()
+        .await?;
+    let options = inference_webui::UiOptions {
+        auth,
+        ..Default::default()
+    };
+    let ui = inference_webui::mount(api, &engine, options, Default::default()).await?;
+    for (key, admin) in [(ALPHA, true), (BETA, false)] {
+        let (code, body) = status_and_body(&ui, get("/ui/api/capabilities", key)).await?;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        let capabilities: Value = serde_json::from_str(&body)?;
+        assert_eq!(capabilities["admin"], json!(admin), "{body}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_file_is_listed_read_and_deleted_only_by_its_owner() -> anyhow::Result<()> {
     let (_dir, engine) = tiny_engine().await?;
     let app = keyed_router(&engine).await?;

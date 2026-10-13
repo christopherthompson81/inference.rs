@@ -754,7 +754,7 @@ class EncoderCacheStats:
 
 @dataclass(kw_only=True)
 class EngineSpec:
-    """What to load and how to run it: the JSON form of the options `inference serve` takes."""
+    """What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor `models` the engine starts empty, and `add_model` loads what it serves."""
 
     adapters: AdapterSpec | None = None
     agentic: AgenticSpec | None = None
@@ -988,6 +988,32 @@ class JsonSchemaResponseFormat:
 
 
 @dataclass(kw_only=True)
+class LayoutDetectRequest:
+    """A page to find the layout regions of."""
+
+    image: str
+    model: str
+    threshold: float | None = None
+
+
+@dataclass(kw_only=True)
+class LayoutDetectResponse:
+    height: int
+    regions: list[LayoutRegion]
+    width: int
+
+
+@dataclass(kw_only=True)
+class LayoutRegion:
+    """One region of a page, in its predicted reading order."""
+
+    bbox: list[float]
+    label: str
+    polygon: list[list[float]]
+    score: float
+
+
+@dataclass(kw_only=True)
 class LoadLoraAdapterRequest:
     expected_generation: str | None = None
     load_inplace: bool | None = False
@@ -1054,6 +1080,72 @@ class LoraRuntimeConfig:
     max_adapters: int | None = 16
     max_bytes: int | None = 8589934592
     max_rank: int | None = 256
+
+
+@dataclass(kw_only=True)
+class ManagedDeleteRequest:
+    """What to delete: a repository from the Hugging Face cache, or a GGUF in a model folder."""
+
+    path: str | None = None
+    repo_id: str | None = None
+
+
+@dataclass(kw_only=True)
+class ManagedDeletion:
+    deleted: str
+    freed_bytes: int
+
+
+@dataclass(kw_only=True)
+class ManagedDownloadRequest:
+    """A download into the server's Hugging Face cache."""
+
+    files: list[str] | None = None
+    quant: str | None = None
+    repo_id: str
+    revision: str | None = None
+
+
+class ManagedKind(str, Enum):
+    """How a managed model serves requests."""
+
+    TEXT = "text"
+    MULTIMODAL = "multimodal"
+    EMBEDDING = "embedding"
+    IMAGE_GENERATION = "image_generation"
+    SPEECH = "speech"
+    TRANSCRIPTION = "transcription"
+    VOICE_ACTIVITY = "voice_activity"
+    DIARIZATION = "diarization"
+    LAYOUT = "layout"
+
+
+@dataclass(kw_only=True)
+class ManagedLoadRequest:
+    """A load: what to load, the id requests will name it by, and how to run it."""
+
+    device: str | None = None
+    mmproj: str | None = None
+    model_id: str
+    mtp: MtpSpec | None = None
+    paged_context_len: int | None = None
+    source: str
+
+
+@dataclass(kw_only=True)
+class ManagedModel:
+    """A served model and where it came from."""
+
+    kind: ManagedKind
+    model_id: str
+    projector: str | None = None
+    source: str | None = None
+    status: ModelStatus
+
+
+@dataclass(kw_only=True)
+class ManagedModels:
+    data: list[ManagedModel]
 
 
 @dataclass(kw_only=True)
@@ -1474,6 +1566,8 @@ class ModelSpec:
     max_model_len: int | None = None
     model: ModelSelected
     model_id: str | None = None
+    mtp: MtpSpec | None = None
+    paged_context_len: int | None = None
 
 
 @dataclass(kw_only=True)

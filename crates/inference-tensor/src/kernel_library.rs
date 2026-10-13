@@ -8,7 +8,8 @@ pub const KERNEL_DIR_ENV: &str = "INFERENCE_KERNEL_DIR";
 pub const BUILD_ID_SYMBOL: &std::ffi::CStr = c"inference_kernel_build_id";
 /// Overrides where downloaded kernel libraries are kept: `<dir>/<version>/sm<arch>/lib<name>.so`.
 pub const DOWNLOAD_CACHE_ENV: &str = "INFERENCE_KERNEL_CACHE";
-/// The build dir file a loader refreshes on open, so a build can prune dirs no binary has used for a while.
+/// The build dir file a loader refreshes on open and holds shared, so a build never replaces libraries in use;
+/// `inference_kernel_build::BUILD_DIR_LOCK` matches.
 pub const BUILD_DIR_LOCK: &str = ".lock";
 /// inference-kernel-build's `LIB_CACHE_ENV`: where release-type builds keep the kernel libraries they build.
 pub const BUILD_CACHE_ENV: &str = "INFERENCE_KERNEL_BUILD_CACHE";

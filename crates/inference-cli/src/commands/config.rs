@@ -172,6 +172,8 @@ fn build_model_specs(
                 &model_type,
             )?,
             hf_revision: None,
+            paged_context_len: None,
+            mtp: None,
         });
     }
     Ok((specs, cpu))

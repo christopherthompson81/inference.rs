@@ -227,6 +227,7 @@ impl InferenceRs {
             }
         }
 
+        Self::init_device_support(&pipeline.lock().await.device());
         let mut engine_config = config.engine_config;
         Self::init_external_tool_callbacks(
             &pipeline,
@@ -274,10 +275,6 @@ impl InferenceRs {
             .write()
             .map_err(|_| "Failed to acquire write lock on engines")?;
 
-        if engines.len() <= 1 {
-            return Err("Cannot remove the last model from InferenceRs".to_string());
-        }
-
         match engines.remove(&resolved_model_id) {
             Some(engine_instance) => {
                 // If this was the default engine, set a new default
@@ -306,7 +303,24 @@ impl InferenceRs {
                 let _ = engine_instance.sender.blocking_send(Request::Terminate);
                 Ok(())
             }
-            _ => Err(format!("Model {resolved_model_id} not found")),
+            None => {
+                drop(engines);
+                // an unloaded model has no engine to stop, only the state its reload would use
+                let forgotten = self
+                    .unloaded_models
+                    .write()
+                    .map_err(|_| "Failed to acquire write lock on unloaded_models")?
+                    .remove(&resolved_model_id)
+                    .is_some();
+                if !forgotten {
+                    return Err(format!("Model {resolved_model_id} not found"));
+                }
+                self.model_aliases
+                    .write()
+                    .map_err(|_| "Failed to acquire write lock on model_aliases")?
+                    .retain(|_, target| target != &resolved_model_id);
+                Ok(())
+            }
         }
     }
 

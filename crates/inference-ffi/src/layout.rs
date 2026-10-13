@@ -19,8 +19,7 @@ const _: () = {
     assert_send_sync::<PPDocLayoutV3Detector>();
 };
 
-/// Largest accepted image, in pixels (a 600-dpi A0 page is ~70M); bigger inputs are rejected instead of allocated.
-pub const MAX_IMAGE_PIXELS: usize = 1 << 28;
+pub use inference_api::model_manager::MAX_LAYOUT_IMAGE_PIXELS as MAX_IMAGE_PIXELS;
 
 /// Mirrors the `inference.h` constants of the same names.
 pub const INFERENCE_LAYOUT_DEFAULT_THRESHOLD: f32 = -1.0;

@@ -42,6 +42,18 @@ pub struct ServerOptions {
     #[serde(default)]
     pub api_keys_file: Option<PathBuf>,
 
+    /// A folder of models (GGUF files, model directories, `.nemo` files) that admins can load from; repeat for more.
+    /// The Hugging Face cache is always offered.
+    #[arg(long = "model-folder", value_name = "DIR")]
+    #[serde(default)]
+    pub model_folders: Vec<PathBuf>,
+
+    /// A key owner (a name from --api-keys-file, or `default` for INFERENCE_RS_API_KEY) who may load, unload, download
+    /// and delete models; repeat for more. Without keys only clients on this machine may.
+    #[arg(long = "admin", value_name = "OWNER")]
+    #[serde(default)]
+    pub admins: Vec<String>,
+
     /// Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at POST /mcp).
     #[arg(long)]
     #[serde(default)]
@@ -101,6 +113,13 @@ impl ServerOptions {
             // starting open when a key was meant would be the wrong way to fail
             Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{API_KEY_ENV} is not UTF-8"),
         }
+        if keys.is_empty() && !self.admins.is_empty() {
+            anyhow::bail!(
+                "--admin names a key owner, but the server has no keys (--api-keys-file)"
+            );
+        }
+        keys.set_admins(self.admins.iter().cloned())
+            .map_err(|error| anyhow::anyhow!("--admin: {error}"))?;
         Ok(keys)
     }
 }
@@ -114,6 +133,8 @@ impl Default for ServerOptions {
             allow_file_listing: false,
             allow_model_management: false,
             api_keys_file: None,
+            admins: Vec::new(),
+            model_folders: Vec::new(),
             mcp_port: None,
             max_tool_rounds: None,
             tool_dispatch_url: None,

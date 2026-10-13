@@ -9,8 +9,8 @@ use std::{
 };
 
 use axum::{
-    Extension, Json, Router,
-    extract::{Request, State},
+    Extension, Json, RequestExt, Router,
+    extract::{ConnectInfo, Request, State},
     http::{
         HeaderMap, HeaderValue, Method, StatusCode,
         header::{AUTHORIZATION, COOKIE, SET_COOKIE},
@@ -43,6 +43,9 @@ const MAX_SESSIONS_PER_OWNER: usize = 32;
 const FETCH_SITE_HEADER: &str = "sec-fetch-site";
 const SAME_ORIGIN: &str = "same-origin";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
+const LOCALHOST: &str = "localhost";
+/// The error code of a request [`require_admin`] refuses.
+pub const ADMIN_REQUIRED_CODE: &str = "admin_required";
 /// Which requests pass without a key: `(method, path as the guarded router sees it)`.
 pub type PublicRequests = fn(&Method, &str) -> bool;
 
@@ -75,10 +78,16 @@ impl Owner {
     }
 }
 
+/// Whether a request may change what the server serves (load, unload, download and delete models, tune, re-quantize):
+/// a keyed server's admin owners, or on an open server a client on this machine.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Admin(pub bool);
+
 /// The keys a server accepts, each naming the owner it acts for. Keys are held as digests.
 #[derive(Clone, Debug, Default)]
 pub struct ApiKeys {
     keys: Vec<([u8; 32], String)>,
+    admins: HashSet<String>,
 }
 
 impl ApiKeys {
@@ -123,6 +132,21 @@ impl ApiKeys {
 
     pub fn is_empty(&self) -> bool {
         self.keys.is_empty()
+    }
+
+    /// Makes `owners` the admins; each must own a key.
+    pub fn set_admins(&mut self, owners: impl IntoIterator<Item = String>) -> anyhow::Result<()> {
+        let owners: HashSet<String> = owners.into_iter().collect();
+        let known = self.owners();
+        if let Some(unknown) = owners.iter().find(|owner| !known.contains(owner.as_str())) {
+            anyhow::bail!("admin `{unknown}` owns no key");
+        }
+        self.admins = owners;
+        Ok(())
+    }
+
+    pub fn is_admin(&self, owner: &str) -> bool {
+        self.admins.contains(owner)
     }
 
     pub fn owners(&self) -> HashSet<&str> {
@@ -295,6 +319,24 @@ fn same_origin(headers: &HeaderMap) -> bool {
     }
 }
 
+// The `Host` a request names is this machine's; a client sending none is not a browser.
+fn loopback_host(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let name = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    name.eq_ignore_ascii_case(LOCALHOST)
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 // Anthropic clients read their own error envelope; everyone else reads OpenAI's.
 fn unauthorized(path: &str) -> Response {
     let error = ApiError::new(
@@ -338,8 +380,41 @@ async fn authenticate(
             None => return unauthorized(request.uri().path()),
         },
     };
+    let admin = match (auth.as_deref(), owner.as_deref()) {
+        (Some(auth), Some(owner)) => auth.keys.is_admin(owner),
+        (Some(_), None) => false,
+        // no peer address (a router served without connect info) is never taken for this machine
+        (None, _) => {
+            let local = request
+                .extract_parts::<ConnectInfo<std::net::SocketAddr>>()
+                .await
+                .is_ok_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+            // any page the server's user opens is a loopback client too: only the server's own pages count, at a
+            // loopback name, so neither another site nor a name rebound to this machine acts as admin
+            local && same_origin(request.headers()) && loopback_host(request.headers())
+        }
+    };
     request.extensions_mut().insert(owner);
+    request.extensions_mut().insert(Admin(admin));
     next.run(request).await
+}
+
+/// Refuses a request that is not an [`Admin`]'s; layered on the routes that change what the server serves.
+pub async fn require_admin(request: Request, next: Next) -> Response {
+    if request
+        .extensions()
+        .get::<Admin>()
+        .is_some_and(|admin| admin.0)
+    {
+        return next.run(request).await;
+    }
+    openai_error_response(ApiError::new(
+        ApiErrorKind::Forbidden,
+        "Changing the served models needs an admin: a key the server lists with `--admin`, or on a server without \
+         keys a client on the server's own machine.",
+        Some(ADMIN_REQUIRED_CODE),
+        None,
+    ))
 }
 
 /// `{"key"}` to sign a browser in.

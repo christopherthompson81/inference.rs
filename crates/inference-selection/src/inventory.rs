@@ -31,6 +31,8 @@ const HF_DEFAULT_REF: &str = "main";
 const PROJECTOR_GGUF_TYPE: &str = "mmproj";
 const IMATRIX_GGUF_TYPE: &str = "imatrix";
 const PROJECTOR_GGUF_ARCHITECTURE: &str = "clip";
+// inference_layout's `model_type` and GGUF `general.architecture`; that crate's kernels are too heavy to depend on here
+const LAYOUT_ARCHITECTURE: &str = "pp_doclayout_v3";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -54,6 +56,8 @@ pub enum InventoryKind {
     Diarization,
     /// A multimodal projector (mmproj GGUF), loaded beside a text GGUF rather than on its own.
     Projector,
+    /// A document layout detector (PP-DocLayoutV3), loaded apart from the engine.
+    Layout,
 }
 
 impl From<DetectedModelKind> for InventoryKind {
@@ -569,6 +573,8 @@ fn gguf_models_in(
                 quant_label(stem.trim_end_matches(".gguf")).or(facts.dominant_dtype);
             if facts.projector {
                 model.kind = Some(InventoryKind::Projector);
+            } else if facts.architecture.as_deref() == Some(LAYOUT_ARCHITECTURE) {
+                model.kind = Some(InventoryKind::Layout);
             } else {
                 let text = facts
                     .architecture
@@ -653,6 +659,10 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
         model.quantization = config["quantization_config"]["quant_method"]
             .as_str()
             .map(str::to_string);
+        if config["model_type"].as_str() == Some(LAYOUT_ARCHITECTURE) {
+            model.kind = Some(InventoryKind::Layout);
+            return model;
+        }
     }
     apply_detection(&mut model, dir);
     if model.kind.is_none()
@@ -776,6 +786,32 @@ mod tests {
             .iter()
             .find(|model| model.path.ends_with(name))
             .unwrap_or_else(|| panic!("`{name}` is missing from {:?}", scan.models))
+    }
+
+    #[test]
+    fn layout_detectors_are_their_own_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let checkpoint = dir.path().join("layout-detector");
+        fs::create_dir(&checkpoint).unwrap();
+        fs::write(
+            checkpoint.join("config.json"),
+            r#"{"model_type": "pp_doclayout_v3"}"#,
+        )
+        .unwrap();
+        fs::write(checkpoint.join("model.safetensors"), b"").unwrap();
+        write_gguf(
+            &dir.path().join("layout-detector.gguf"),
+            &[("general.architecture", text(LAYOUT_ARCHITECTURE))],
+        );
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        for name in ["layout-detector", "layout-detector.gguf"] {
+            let model = by_name(&scan, name);
+            assert_eq!(model.kind, Some(InventoryKind::Layout), "{model:?}");
+            assert_eq!(model.error, None);
+        }
     }
 
     #[test]

@@ -18,6 +18,12 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 const SIZE_COMPRESSION_SINCE: (u32, u32) = (12, 8);
 
+/// A build dir's lock: a build holds it exclusively, a binary using the dir's libraries shared for its life;
+/// `inference_tensor::kernel_library::BUILD_DIR_LOCK` matches.
+pub const BUILD_DIR_LOCK: &str = ".lock";
+#[cfg(target_os = "linux")]
+const PROC_LOCKS: &str = "/proc/locks";
+
 /// Each GPU arch's copy of a loadable library sits in `sm<arch>/`; `inference_tensor::kernel_library` matches it.
 pub const ARCH_DIR_PREFIX: &str = "sm";
 
@@ -27,6 +33,73 @@ pub fn arch_dir(arch: &GpuArch) -> String {
         "{ARCH_DIR_PREFIX}{}",
         arch.to_nvcc_arch().trim_start_matches("sm_")
     )
+}
+
+// Waits out another build, which ends. A running binary holds its shared lock for its life, so then the build goes on
+// without the lock, and the error it returns is for the moment the build would replace a library.
+fn lock_build_dir(lock: &std::fs::File, dir: &Path) -> Result<Option<Error>> {
+    use std::fs::TryLockError;
+    match lock.try_lock() {
+        Ok(()) => return Ok(None),
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(error)) => return Err(error.into()),
+    }
+    match lock.try_lock_shared() {
+        Ok(()) => {
+            lock.unlock()?;
+            Ok(Some(Error::KernelLibrariesInUse {
+                dir: dir.to_path_buf(),
+                holders: lock_holders(lock),
+            }))
+        }
+        Err(TryLockError::WouldBlock) => {
+            lock.lock()?;
+            Ok(None)
+        }
+        Err(TryLockError::Error(error)) => Err(error.into()),
+    }
+}
+
+// the processes holding `lock`, from the kernel's lock table
+#[cfg(target_os = "linux")]
+fn lock_holders(lock: &std::fs::File) -> String {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(inode) = lock.metadata().map(|metadata| metadata.ino()) else {
+        return "a running process".to_string();
+    };
+    let table = std::fs::read_to_string(PROC_LOCKS).unwrap_or_default();
+    let mut holders: Vec<String> = table
+        .lines()
+        .filter_map(|line| {
+            // `1: FLOCK  ADVISORY  READ 12614 103:05:22548678 0 EOF`
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let file = fields.get(5)?;
+            (file.rsplit(':').next()?.parse::<u64>().ok()? == inode)
+                .then(|| fields.get(4).copied())?
+        })
+        .map(|pid| {
+            let command = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|bytes| {
+                    String::from_utf8_lossy(&bytes)
+                        .replace('\0', " ")
+                        .trim()
+                        .to_string()
+                })
+                .unwrap_or_default();
+            format!("pid {pid} ({command})")
+        })
+        .collect();
+    holders.dedup();
+    if holders.is_empty() {
+        "a running process".to_string()
+    } else {
+        holders.join(", ")
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lock_holders(_: &std::fs::File) -> String {
+    "a running process built from this target dir".to_string()
 }
 
 // a kernel source and the object compiled from it, for one arch dir (`sm86`) in a per-arch build
@@ -466,8 +539,9 @@ impl KernelBuilder {
         }
         let dir = root.join(format!("{name}-{:016x}", key.finish()));
         std::fs::create_dir_all(&dir)?;
-        let lock = std::fs::File::create(dir.join(".lock"))?;
-        lock.lock()?;
+        let lock = std::fs::File::create(dir.join(BUILD_DIR_LOCK))?;
+        // an up-to-date build changes nothing a running binary holds, so only a rebuild is refused
+        let in_use = lock_build_dir(&lock, &dir)?;
 
         self.out_dir = dir.clone();
         let mut libs: Vec<String> = vec![name.to_string()];
@@ -488,7 +562,7 @@ impl KernelBuilder {
             .iter()
             .map(|lib| archs.iter().map(|arch| variant_path(lib, arch)).collect())
             .collect();
-        for (out_file, lib_variants) in nominal.iter().zip(&variants) {
+        for (out_file, lib_variants) in nominal.iter().zip(&variants).filter(|_| in_use.is_none()) {
             // a single-arch library from an older layout; the loader opens only the per-arch copies
             let _ = std::fs::remove_file(out_file);
             // a library from before ids were linked in is rebuilt
@@ -500,6 +574,9 @@ impl KernelBuilder {
         }
         let all_variants: Vec<PathBuf> = variants.iter().flatten().cloned().collect();
         if let Some((toolkit, objects)) = self.compile_objects(&all_variants, Some(&archs))? {
+            if let Some(in_use) = in_use {
+                return Err(in_use);
+            }
             for (lib, out_file) in libs.iter().zip(&nominal) {
                 let own: Vec<&Compiled> = objects
                     .iter()
@@ -1245,6 +1322,39 @@ mod tests {
         assert_eq!(lib("dir/mmvq_instance_iq4_k.cu"), "kernels_iq4_k");
         assert_eq!(lib("dir/mmvq_instance_iq4_ks.cu"), "kernels");
         assert_eq!(lib("dir/mmvq_quantize.cu"), "kernels");
+    }
+
+    #[test]
+    fn a_build_waits_out_another_build_and_reports_a_running_binary() {
+        let dir = std::env::temp_dir().join(format!("kernel-build-lock-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(BUILD_DIR_LOCK);
+        let open = || fs::File::create(&path).unwrap();
+        // flock locks belong to the open file, so a second handle in this process contends like another process
+        let build = open();
+        assert!(lock_build_dir(&build, &dir).unwrap().is_none());
+        build.unlock().unwrap();
+
+        let binary = open();
+        binary.lock_shared().unwrap();
+        let error = lock_build_dir(&open(), &dir).unwrap().unwrap().to_string();
+        assert!(error.contains("in use"), "{error}");
+        #[cfg(target_os = "linux")]
+        assert!(
+            error.contains(&format!("pid {}", std::process::id())),
+            "{error}"
+        );
+        drop(binary);
+
+        let other = open();
+        other.lock().unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            drop(other);
+        });
+        assert!(lock_build_dir(&open(), &dir).unwrap().is_none());
+        release.join().unwrap();
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

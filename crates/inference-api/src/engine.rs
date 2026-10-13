@@ -103,13 +103,15 @@ pub use inference_core::{
     ToolCallbackKind, ToolCallbackWithTool,
 };
 
-const ONE_MODEL_SOURCE: &str = "give either `model` or a non-empty `models`, not both";
+const ONE_MODEL_SOURCE: &str = "give either `model` or `models`, not both";
 const DEFAULT_WITHOUT_MODELS: &str =
     "`default_model_id` picks one of `models`; with `model`, use `model_id`";
-const ANYMOE_WITH_MODELS: &str = "`anymoe` wraps the single `model`; it cannot apply to `models`";
+const ANYMOE_WITH_MODELS: &str = "`anymoe` wraps the single `model`; give `model`, not `models`";
 const REVISION_WITH_MODELS: &str = "`runtime.hf_revision` names a revision of `model`; with `models`, give each its own `hf_revision`";
 const MODEL_ID_WITH_MODELS: &str =
     "`model_id` names `model`; with `models`, give each its own `model_id`";
+const ID_WITHOUT_MODEL: &str =
+    "`model_id` and `default_model_id` name a model; an engine without one starts empty";
 const PAGED_CACHE_ONE_SIZE: &str =
     "paged_cache takes at most one of context_len, memory_mb and memory_fraction";
 const CODE_EXECUTION_UNAVAILABLE: &str =
@@ -120,7 +122,8 @@ const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`"
 // Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
 pub const DEFAULT_MAX_SEQS: usize = 32;
 
-/// What to load and how to run it: the JSON form of the options `inference serve` takes.
+/// What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor
+/// `models` the engine starts empty, and `add_model` loads what it serves.
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSpec {
@@ -175,6 +178,12 @@ pub struct ModelSpec {
     /// Hub revision (branch, tag or commit) to load; the default branch when unset.
     #[serde(default)]
     pub hf_revision: Option<String>,
+    /// Tokens of context this model's paged KV cache holds, in place of `runtime.paged_cache`'s size.
+    #[serde(default)]
+    pub paged_context_len: Option<usize>,
+    /// Speculative decoding for this model; `runtime.mtp` applies to the first model only.
+    #[serde(default)]
+    pub mtp: Option<MtpSpec>,
 }
 
 impl ModelSpec {
@@ -192,6 +201,9 @@ impl ModelSpec {
         if self.encoder_cache_memory_bytes == Some(0) {
             return Err(zero("encoder_cache_memory_bytes"));
         }
+        if self.paged_context_len == Some(0) {
+            return Err(zero("paged_context_len"));
+        }
         // The builder names a model in its errors by this key; the alias is what requests use.
         let key = self.model_id.clone().unwrap_or_else(|| label.to_string());
         let mut config = ModelConfig::new(key, self.model);
@@ -203,6 +215,8 @@ impl ModelSpec {
         config.num_device_layers = self.device_layers;
         config.in_situ_quant = self.isq;
         config.hf_revision = self.hf_revision;
+        config.paged_context_len = self.paged_context_len;
+        config.mtp = self.mtp.map(MtpSpec::into_config);
         if let Some(bytes) = self.encoder_cache_memory_bytes {
             config = config.with_encoder_cache_memory_bytes(bytes);
         }
@@ -249,7 +263,9 @@ pub struct EngineCallbacks {
     pub progress: Option<Arc<ProgressSink>>,
 }
 
-pub use inference_core::load_progress::{ProgressEvent, ProgressSink, ProgressUnit};
+pub use inference_core::load_progress::{
+    ProgressEvent, ProgressSink, ProgressSinkGuard, ProgressUnit, add_progress_sink,
+};
 
 /// Runtime LoRA adapter management; listing adapters is always allowed.
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
@@ -616,7 +632,16 @@ impl EngineSpec {
                     None => builder,
                 }
             }
-            _ => return Err(invalid(ONE_MODEL_SOURCE.to_string())),
+            (None, true) => {
+                if self.anymoe.is_some() {
+                    return Err(invalid(ANYMOE_WITH_MODELS.to_string()));
+                }
+                if self.model_id.is_some() || self.default_model_id.is_some() {
+                    return Err(invalid(ID_WITHOUT_MODEL.to_string()));
+                }
+                builder
+            }
+            (Some(_), false) => return Err(invalid(ONE_MODEL_SOURCE.to_string())),
         };
         let mut builder = builder
             .with_no_kv_cache(runtime.no_kv_cache)
@@ -717,7 +742,7 @@ impl EngineSpec {
     }
 }
 
-fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoadError> {
+pub(crate) fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoadError> {
     let invalid = || {
         EngineLoadError::InvalidSpec(format!(
             "device `{device}` is not one of auto, cpu, cuda:N, metal:N"
@@ -892,6 +917,11 @@ impl Engine {
 
     pub fn agent_permission(&self) -> Option<AgentPermission> {
         self.chat.agentic.agent_permission
+    }
+
+    /// The device the engine loads its models on.
+    pub fn device(&self) -> &Device {
+        self.models.device()
     }
 
     /// The model a request without `model` goes to.
@@ -2024,7 +2054,9 @@ mod tests {
                 .map(|error| error.to_string())
                 .unwrap_or_default()
         };
-        assert!(refused(serde_json::json!({})).contains("either `model`"));
+        assert_eq!(refused(serde_json::json!({})), "");
+        assert!(refused(serde_json::json!({"model_id": "a"})).contains("starts empty"));
+        assert!(refused(serde_json::json!({"default_model_id": "a"})).contains("starts empty"));
         assert!(
             refused(serde_json::json!({"model": plain, "models": [{"model": plain}]}))
                 .contains("either `model`")
@@ -2044,6 +2076,10 @@ mod tests {
         assert!(
             refused(serde_json::json!({"models": [{"model": plain, "max_model_len": 0}]}))
                 .contains("models[0].max_model_len")
+        );
+        assert!(
+            refused(serde_json::json!({"models": [{"model": plain, "paged_context_len": 0}]}))
+                .contains("models[0].paged_context_len")
         );
         let anymoe = serde_json::json!({"config": {"hidden_size": 8, "expert_type": "fine_tuned"},
             "path": "p", "prefix": "model.layers", "mlp": "mlp", "model_ids": ["e"]});

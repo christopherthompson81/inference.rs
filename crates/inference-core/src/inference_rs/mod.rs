@@ -4,6 +4,9 @@ use futures::future::BoxFuture;
 
 use crate::*;
 
+// what an instance started without a model calls itself, where one started with a model takes that model's id
+const EMPTY_INSTANCE_ID: &str = "inference-rs";
+
 mod builder;
 mod config;
 mod lora;
@@ -632,6 +635,37 @@ impl InferenceRs {
         }
     }
 
+    // cuBLASLt and the tensor kernels for the device a model runs on; both are kept once loaded
+    fn init_device_support(device: &Device) {
+        inference_quant::cublaslt::maybe_init_cublas_lt_wrapper(device.clone());
+        #[cfg(feature = "cuda")]
+        match cuda::preload::preload_tensor_kernels(device) {
+            Ok(count) if count > 0 => info!("Preloaded {count} tensor CUDA functions."),
+            Ok(_) => {}
+            Err(err) => warn!("Failed to preload tensor CUDA functions: {err}"),
+        }
+    }
+
+    /// An instance serving no models yet; [`InferenceRs::add_model`] adds them, the first becoming the default.
+    pub fn empty(log: Option<String>) -> Arc<Self> {
+        info!("inference.rs version: {INFERENCE_RS_VERSION}");
+        info!("git revision: {INFERENCE_RS_GIT_REVISION}");
+        Arc::new(Self {
+            engines: RwLock::new(HashMap::new()),
+            unloaded_models: RwLock::new(HashMap::new()),
+            reloading_models: RwLock::new(HashSet::new()),
+            default_engine_id: RwLock::new(None),
+            model_aliases: RwLock::new(HashMap::new()),
+            log,
+            id: EMPTY_INSTANCE_ID.to_string(),
+            creation_time: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("Time travel has occurred!")
+                .as_secs(),
+            next_request_id: Mutex::new(RefCell::new(1)),
+        })
+    }
+
     async fn new(config: InferenceRsBuilder) -> Arc<Self> {
         info!("inference.rs version: {INFERENCE_RS_VERSION}");
         info!("git revision: {INFERENCE_RS_GIT_REVISION}");
@@ -658,14 +692,7 @@ impl InferenceRs {
             defer_daemon_start,
         } = config;
 
-        let device = get_mut_arcmutex!(pipeline).device();
-        inference_quant::cublaslt::maybe_init_cublas_lt_wrapper(device.clone());
-        #[cfg(feature = "cuda")]
-        match cuda::preload::preload_tensor_kernels(&device) {
-            Ok(count) if count > 0 => info!("Preloaded {count} tensor CUDA functions."),
-            Ok(_) => {}
-            Err(err) => warn!("Failed to preload tensor CUDA functions: {err}"),
-        }
+        Self::init_device_support(&get_mut_arcmutex!(pipeline).device());
 
         let no_kv_cache = no_kv_cache.unwrap_or(false);
         let no_prefix_cache = no_prefix_cache.unwrap_or(false);

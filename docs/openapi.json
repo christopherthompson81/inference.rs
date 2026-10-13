@@ -1087,6 +1087,40 @@
         }
       }
     },
+    "/v1/layout/detect": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "The layout regions of a page, in reading order, from a layout model `/v1/manager/load` loaded.",
+        "operationId": "detect_layout",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LayoutDetectRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The page's regions",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LayoutDetectResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "No such layout model"
+          }
+        }
+      }
+    },
     "/v1/load_lora_adapter": {
       "post": {
         "tags": [
@@ -1188,6 +1222,167 @@
           },
           "500": {
             "description": "Internal server error"
+          }
+        }
+      }
+    },
+    "/v1/manager/delete": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's: deletes a repository from the server's Hugging Face cache, or a GGUF from a model folder; never a loaded model.",
+        "operationId": "delete",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedDeleteRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedDeletion"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin"
+          },
+          "409": {
+            "description": "The model is loaded"
+          }
+        }
+      }
+    },
+    "/v1/manager/download": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's. Downloads from the Hub into the server's cache, with the server's token. The response is an event stream: `files`, `progress` (`{\"file\", \"done\", \"total\"}` in bytes), then `done`, `canceled` or `error`. Closing it stops the download.",
+        "operationId": "download",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedDownloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`text/event-stream` of the download"
+          },
+          "403": {
+            "description": "Not an admin"
+          }
+        }
+      }
+    },
+    "/v1/manager/inventory": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's: the models in the server's model folders (`--model-folder`) and its Hugging Face cache.",
+        "operationId": "inventory",
+        "responses": {
+          "200": {
+            "description": "The models found, the cache's repositories, and folders that could not be read"
+          },
+          "403": {
+            "description": "Not an admin"
+          }
+        }
+      }
+    },
+    "/v1/manager/load": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's. Loads an inventory entry or a Hugging Face repository as `model_id`, unloading what held that id. The response is an event stream: `progress` events, then `loaded` (the model) or `error`.",
+        "operationId": "load",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ManagedLoadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "`text/event-stream` of the load's progress and outcome"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Not an admin"
+          }
+        }
+      }
+    },
+    "/v1/manager/models": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "managed_models",
+        "responses": {
+          "200": {
+            "description": "The served models: their kind, status, and where each was loaded from",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManagedModels"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/manager/unload": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's: stops serving a model, or a layout model, and frees it.",
+        "operationId": "unload",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Unloaded"
+          },
+          "403": {
+            "description": "Not an admin"
+          },
+          "404": {
+            "description": "Not served"
           }
         }
       }
@@ -1486,7 +1681,7 @@
             "description": "Model not found"
           },
           "409": {
-            "description": "The last model can't be removed"
+            "description": "The model is unloaded or reloading"
           }
         }
       }
@@ -5154,7 +5349,7 @@
       },
       "EngineSpec": {
         "type": "object",
-        "description": "What to load and how to run it: the JSON form of the options `inference serve` takes.",
+        "description": "What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor\n`models` the engine starts empty, and `add_model` loads what it serves.",
         "properties": {
           "adapters": {
             "$ref": "#/components/schemas/AdapterSpec"
@@ -5873,6 +6068,98 @@
           "schema": {}
         }
       },
+      "LayoutDetectRequest": {
+        "type": "object",
+        "description": "A page to find the layout regions of.",
+        "required": [
+          "model",
+          "image"
+        ],
+        "properties": {
+          "image": {
+            "type": "string",
+            "description": "The page image (PNG, JPEG, ...) as base64 or a `data:` URL."
+          },
+          "model": {
+            "type": "string",
+            "description": "The layout model's id."
+          },
+          "threshold": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Lowest score kept, 0 to 1."
+          }
+        },
+        "additionalProperties": false
+      },
+      "LayoutDetectResponse": {
+        "type": "object",
+        "required": [
+          "width",
+          "height",
+          "regions"
+        ],
+        "properties": {
+          "height": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "regions": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LayoutRegion"
+            }
+          },
+          "width": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "LayoutRegion": {
+        "type": "object",
+        "description": "One region of a page, in its predicted reading order.",
+        "required": [
+          "label",
+          "score",
+          "bbox",
+          "polygon"
+        ],
+        "properties": {
+          "bbox": {
+            "type": "array",
+            "items": {
+              "type": "number",
+              "format": "float"
+            },
+            "description": "`[x1, y1, x2, y2]` in image pixels."
+          },
+          "label": {
+            "type": "string",
+            "description": "The region's class (`text`, `table`, `formula`, `chart`, ...)."
+          },
+          "polygon": {
+            "type": "array",
+            "items": {
+              "type": "array",
+              "items": {
+                "type": "number",
+                "format": "float"
+              }
+            },
+            "description": "The region's outline in image pixels."
+          },
+          "score": {
+            "type": "number",
+            "format": "float"
+          }
+        }
+      },
       "LoadLoraAdapterRequest": {
         "type": "object",
         "required": [
@@ -6112,6 +6399,192 @@
             "description": "Maximum rank accepted from an adapter configuration.",
             "default": 256,
             "minimum": 0
+          }
+        }
+      },
+      "ManagedDeleteRequest": {
+        "type": "object",
+        "description": "What to delete: a repository from the Hugging Face cache, or a GGUF in a model folder.",
+        "properties": {
+          "path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A local GGUF entry's `path`; its split shards go with it."
+          },
+          "repo_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ManagedDeletion": {
+        "type": "object",
+        "required": [
+          "deleted",
+          "freed_bytes"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "string",
+            "description": "The repository or path deleted."
+          },
+          "freed_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "ManagedDownloadRequest": {
+        "type": "object",
+        "description": "A download into the server's Hugging Face cache.",
+        "required": [
+          "repo_id"
+        ],
+        "properties": {
+          "files": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Exactly these files. With no files and no `quant`, the whole repository."
+          },
+          "quant": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A GGUF quantization the repository publishes (`Q4_K_M`, `4`): its files and the projector beside it."
+          },
+          "repo_id": {
+            "type": "string"
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
+      "ManagedKind": {
+        "type": "string",
+        "description": "How a managed model serves requests.",
+        "enum": [
+          "text",
+          "multimodal",
+          "embedding",
+          "image_generation",
+          "speech",
+          "transcription",
+          "voice_activity",
+          "diarization",
+          "layout"
+        ]
+      },
+      "ManagedLoadRequest": {
+        "type": "object",
+        "description": "A load: what to load, the id requests will name it by, and how to run it.",
+        "required": [
+          "source",
+          "model_id"
+        ],
+        "properties": {
+          "device": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a layout detector, `cpu` or `cuda:N`; unset uses the engine's device. Other models run on the engine's."
+          },
+          "mmproj": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a text GGUF, one of its entry's `projectors`; unset takes its only one, and none when there are several."
+          },
+          "model_id": {
+            "type": "string",
+            "description": "The id requests use; a model already holding it is unloaded first."
+          },
+          "mtp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MtpSpec",
+                "description": "Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`\nis refused."
+              }
+            ]
+          },
+          "paged_context_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Tokens of context the model's paged KV cache holds; unset uses the server's setting, and without paged attention\nit is ignored.",
+            "minimum": 0
+          },
+          "source": {
+            "type": "string",
+            "description": "An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout\nmodel loads from the inventory."
+          }
+        },
+        "additionalProperties": false
+      },
+      "ManagedModel": {
+        "type": "object",
+        "description": "A served model and where it came from.",
+        "required": [
+          "model_id",
+          "kind",
+          "status"
+        ],
+        "properties": {
+          "kind": {
+            "$ref": "#/components/schemas/ManagedKind"
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "projector": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The projector GGUF loaded beside it."
+          },
+          "source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The inventory path or repository it was loaded from; unset for a model the server started with."
+          },
+          "status": {
+            "$ref": "#/components/schemas/ModelStatus"
+          }
+        }
+      },
+      "ManagedModels": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ManagedModel"
+            }
           }
         }
       },
@@ -8021,6 +8494,25 @@
               "null"
             ],
             "description": "The id requests use for this model; defaults to the model's own id."
+          },
+          "mtp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MtpSpec",
+                "description": "Speculative decoding for this model; `runtime.mtp` applies to the first model only."
+              }
+            ]
+          },
+          "paged_context_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Tokens of context this model's paged KV cache holds, in place of `runtime.paged_cache`'s size.",
+            "minimum": 0
           }
         },
         "additionalProperties": false

@@ -146,6 +146,21 @@ pub const SESSION_ROUTE: RouteInfo = RouteInfo::new(
     RouteKind::InferenceRs,
 );
 
+pub const MANAGER_INVENTORY_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/inventory", "GET", RouteKind::InferenceRs);
+pub const MANAGER_MODELS_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/models", "GET", RouteKind::InferenceRs);
+pub const MANAGER_LOAD_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/load", "POST", RouteKind::InferenceRs);
+pub const MANAGER_UNLOAD_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/unload", "POST", RouteKind::InferenceRs);
+pub const MANAGER_DOWNLOAD_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/download", "POST", RouteKind::InferenceRs);
+pub const MANAGER_DELETE_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/delete", "POST", RouteKind::InferenceRs);
+pub const LAYOUT_DETECT_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/layout/detect", "POST", RouteKind::InferenceRs);
+
 pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     ROOT_ROUTE,
     HEALTH_ROUTE,
@@ -186,6 +201,17 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     CALIBRATION_START_ROUTE,
     CALIBRATION_STATUS_ROUTE,
     CALIBRATION_APPLY_ROUTE,
+];
+
+/// Served with a model manager (`with_model_manager`).
+pub const MODEL_MANAGER_ROUTES: &[RouteInfo] = &[
+    MANAGER_INVENTORY_ROUTE,
+    MANAGER_MODELS_ROUTE,
+    MANAGER_LOAD_ROUTE,
+    MANAGER_UNLOAD_ROUTE,
+    MANAGER_DOWNLOAD_ROUTE,
+    MANAGER_DELETE_ROUTE,
+    LAYOUT_DETECT_ROUTE,
 ];
 
 pub const RUNTIME_LORA_API_ROUTES: &[RouteInfo] =

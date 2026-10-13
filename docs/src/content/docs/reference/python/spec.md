@@ -135,7 +135,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `EngineSpec`
 
-What to load and how to run it: the JSON form of the options `inference serve` takes.
+What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor `models` the engine starts empty, and `add_model` loads what it serves.
 
 | Field | Type | Default |
 | --- | --- | --- |
@@ -528,6 +528,8 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `max_model_len` | `int \| None` | optional |
 | `model` | `ModelSelected` | required |
 | `model_id` | `str \| None` | optional |
+| `mtp` | `MtpSpec \| None` | optional |
+| `paged_context_len` | `int \| None` | optional |
 
 
 ## `ModelSpeculativeStats`

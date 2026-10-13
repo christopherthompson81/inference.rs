@@ -111,8 +111,9 @@ async fn static_handler(uri: axum::http::Uri) -> Response<Body> {
     }
 }
 
-// The models a chat can pick: loaded text, multimodal and speech models, without the `default` alias or adapter cards.
-fn build_model_list(engine: &Engine) -> IndexMap<String, UiModelInfo> {
+/// The models a chat can pick, as they are now: loaded text, multimodal and speech models, without the `default`
+/// alias or adapter cards.
+pub(crate) fn chat_models(engine: &Engine) -> IndexMap<String, UiModelInfo> {
     let mut models = IndexMap::new();
     let Ok(cards) = engine.models() else {
         return models;
@@ -254,8 +255,6 @@ pub async fn mount(
 }
 
 async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> {
-    let models = build_model_list(engine);
-
     let base_cache = get_cache_dir();
     let chats_dir = base_cache.join("chats");
     fs::create_dir_all(&chats_dir).await?;
@@ -267,11 +266,10 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
 
     let default_model = engine
         .default_model_id()
-        .or_else(|| models.keys().next().cloned());
+        .or_else(|| chat_models(engine).keys().next().cloned());
 
     let app_state = Arc::new(AppState {
         engine: engine.clone(),
-        models,
         default_model: default_model.clone(),
         current: tokio::sync::RwLock::new(default_model),
         owner: None,

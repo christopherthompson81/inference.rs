@@ -311,7 +311,7 @@ pub async fn add_model(
   responses(
     (status = 200, description = "Model removed", body = inference_api::models::ModelRemoved),
     (status = 404, description = "Model not found"),
-    (status = 409, description = "The last model can't be removed")
+    (status = 409, description = "The model is unloaded or reloading")
   )
 ))]
 pub async fn remove_model(

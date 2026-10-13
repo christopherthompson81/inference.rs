@@ -13,7 +13,7 @@ const NO_MODELS: &str = "MultiModelBuilder needs at least one model";
 
 /// A builder one model of a [`MultiModelBuilder`] comes from.
 pub trait IntoModelSpec {
-    /// The model and its own overrides (ISQ, template, device layers, revision); the rest is the multi-builder's.
+    /// The model and its own overrides (ISQ, template, device layers, revision, KV size, MTP); the rest, the engine's.
     fn model_spec(self) -> Result<ModelSpec>;
 }
 
@@ -31,6 +31,8 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         isq: runtime.isq,
         encoder_cache_memory_bytes: runtime.encoder_cache_memory_bytes,
         hf_revision: runtime.hf_revision,
+        paged_context_len: runtime.paged_cache.context_len,
+        mtp: runtime.mtp,
     }
 }
 

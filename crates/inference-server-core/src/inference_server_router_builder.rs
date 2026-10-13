@@ -44,13 +44,15 @@ use crate::{
         CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE, CONTAINER_FILE_CONTENT_ROUTE,
         CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DEFAULT_MODEL_ROUTE, DIARIZATION_ROUTE,
         EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
-        IMAGE_EDIT_ROUTE, IMAGE_GENERATION_ROUTE, LIST_LORA_ADAPTERS_ROUTE,
-        LOAD_LORA_ADAPTER_ROUTE, MODEL_ALIAS_ROUTE, MODEL_CACHE_STATS_ROUTE,
-        MODEL_SPECULATIVE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE,
-        REALTIME_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE,
-        ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
-        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE,
-        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
+        IMAGE_EDIT_ROUTE, IMAGE_GENERATION_ROUTE, LAYOUT_DETECT_ROUTE, LIST_LORA_ADAPTERS_ROUTE,
+        LOAD_LORA_ADAPTER_ROUTE, MANAGER_DELETE_ROUTE, MANAGER_DOWNLOAD_ROUTE,
+        MANAGER_INVENTORY_ROUTE, MANAGER_LOAD_ROUTE, MANAGER_MODELS_ROUTE, MANAGER_UNLOAD_ROUTE,
+        MODEL_ALIAS_ROUTE, MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE,
+        MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE,
+        REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE,
+        SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE,
+        SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
+        UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -109,6 +111,7 @@ pub struct InferenceRsServerRouterBuilder {
     observability: ObservabilityConfig,
     file_listing: bool,
     model_management: bool,
+    model_manager: Option<std::sync::Arc<inference_api::model_manager::ModelManager>>,
     auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
 
@@ -126,6 +129,7 @@ impl Default for InferenceRsServerRouterBuilder {
             observability: ObservabilityConfig::default(),
             file_listing: false,
             model_management: false,
+            model_manager: None,
             auth: None,
         }
     }
@@ -195,6 +199,16 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
+    /// Serves `manager`'s routes: the inventory, loads, unloads, downloads and deletions for admins, and the served
+    /// models and layout detection for everyone.
+    pub fn with_model_manager(
+        mut self,
+        manager: std::sync::Arc<inference_api::model_manager::ModelManager>,
+    ) -> Self {
+        self.model_manager = Some(manager);
+        self
+    }
+
     /// Requires a key on all but health probes and sign in, scoping each request to its owner; later routes aren't.
     pub fn with_api_keys(self, keys: crate::auth::ApiKeys) -> Self {
         self.with_auth(crate::auth::Auth::new(keys))
@@ -233,6 +247,7 @@ impl InferenceRsServerRouterBuilder {
             router_max_body_limit,
             &self.observability,
             self.model_management,
+            self.model_manager,
         )?;
 
         #[cfg(feature = "swagger-ui")]
@@ -269,6 +284,7 @@ fn init_router(
     router_max_body_limit: usize,
     observability: &ObservabilityConfig,
     model_management: bool,
+    model_manager: Option<std::sync::Arc<inference_api::model_manager::ModelManager>>,
 ) -> Result<Router> {
     let allow_origin = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
@@ -304,7 +320,7 @@ fn init_router(
         ])
         .allow_origin(allow_origin);
 
-    let mut router = Router::new()
+    let router = Router::new()
         .route(CHAT_COMPLETIONS_ROUTE.path, post(chatcompletions))
         .route(ANTHROPIC_MESSAGES_ROUTE.path, post(anthropic_messages))
         .route(
@@ -315,17 +331,13 @@ fn init_router(
         .route(EMBEDDINGS_ROUTE.path, post(embeddings))
         .route(MODELS_ROUTE.path, get(models))
         .route(LIST_LORA_ADAPTERS_ROUTE.path, get(list_lora_adapters))
-        .route(UNLOAD_MODEL_ROUTE.path, post(unload_model))
-        .route(RELOAD_MODEL_ROUTE.path, post(reload_model))
         .route(MODEL_STATUS_ROUTE.path, post(get_model_status))
         .route(MODEL_CACHE_STATS_ROUTE.path, get(model_cache_stats))
         .route(
             MODEL_SPECULATIVE_STATS_ROUTE.path,
             get(model_speculative_stats),
         )
-        .route(TUNE_MODEL_ROUTE.path, post(tune_model))
         .route(SYSTEM_INFO_ROUTE.path, get(system_info))
-        .route(SYSTEM_DOCTOR_ROUTE.path, post(system_doctor))
         .route(HEALTH_ROUTE.path, get(health))
         .route(
             AUTH_SESSION_ROUTE.path,
@@ -333,13 +345,10 @@ fn init_router(
         )
         .route("/metrics", metrics_route)
         .route(ROOT_ROUTE.path, get(health))
-        .route(RE_ISQ_ROUTE.path, post(re_isq))
-        .route(CALIBRATION_START_ROUTE.path, post(calibration_start))
         .route(
             CALIBRATION_STATUS_ROUTE.path,
             axum::routing::get(calibration_status),
         )
-        .route(CALIBRATION_APPLY_ROUTE.path, post(calibration_apply))
         .route(IMAGE_GENERATION_ROUTE.path, post(image_generation))
         .route(IMAGE_EDIT_ROUTE.path, post(image_edit))
         .route(FILES_ROUTE.path, get(list_files).post(upload_file))
@@ -373,11 +382,21 @@ fn init_router(
             get(get_session).put(put_session).delete(delete_session),
         );
 
+    // what changes the served models, or runs work on the server's behalf, is an admin's
+    let mut admin = Router::new()
+        .route(UNLOAD_MODEL_ROUTE.path, post(unload_model))
+        .route(RELOAD_MODEL_ROUTE.path, post(reload_model))
+        .route(TUNE_MODEL_ROUTE.path, post(tune_model))
+        .route(SYSTEM_DOCTOR_ROUTE.path, post(system_doctor))
+        .route(RE_ISQ_ROUTE.path, post(re_isq))
+        .route(CALIBRATION_START_ROUTE.path, post(calibration_start))
+        .route(CALIBRATION_APPLY_ROUTE.path, post(calibration_apply));
+
     if model_management {
         tracing::warn!(
-            "model management is enabled; authorized clients can load models from any path or hub repo the server can reach"
+            "model management is enabled; admins can load models from any path or hub repo the server can reach"
         );
-        router = router
+        admin = admin
             .route(ADD_MODEL_ROUTE.path, post(add_model))
             .route(REMOVE_MODEL_ROUTE.path, post(remove_model))
             .route(DEFAULT_MODEL_ROUTE.path, post(set_default_model))
@@ -389,24 +408,46 @@ fn init_router(
         if let Some(root) = lora_adapter_api.allowed_root() {
             tracing::warn!(
                 adapter_root = %root.display(),
-                "runtime LoRA adapter management is enabled; authorized clients can load adapter files from this root"
+                "runtime LoRA adapter management is enabled; admins can load adapter files from this root"
             );
         } else {
             tracing::warn!(
-                "runtime LoRA adapter management is enabled without an adapter root; authorized clients can load any adapter path readable by the server"
+                "runtime LoRA adapter management is enabled without an adapter root; admins can load any adapter path readable by the server"
             );
         }
-        router = router
+        admin = admin
             .route(LOAD_LORA_ADAPTER_ROUTE.path, post(load_lora_adapter))
             .route(UNLOAD_LORA_ADAPTER_ROUTE.path, post(unload_lora_adapter));
     }
 
-    let router = router
+    let mut router = router;
+    if let Some(manager) = &model_manager {
+        use crate::model_manager as managed;
+        router = router
+            .route(MANAGER_MODELS_ROUTE.path, get(managed::managed_models))
+            .route(LAYOUT_DETECT_ROUTE.path, post(managed::detect_layout));
+        admin = admin
+            .route(MANAGER_INVENTORY_ROUTE.path, get(managed::inventory))
+            .route(MANAGER_LOAD_ROUTE.path, post(managed::load))
+            .route(MANAGER_UNLOAD_ROUTE.path, post(managed::unload))
+            .route(MANAGER_DOWNLOAD_ROUTE.path, post(managed::download))
+            .route(MANAGER_DELETE_ROUTE.path, post(managed::delete));
+        tracing::info!(
+            folders = ?manager.config().folders,
+            "model manager: admins load, download and delete models in these folders and the Hugging Face cache"
+        );
+    }
+
+    let mut router = router
+        .merge(admin.route_layer(middleware::from_fn(crate::auth::require_admin)))
         .fallback(api_route_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(cors_layer)
         .layer(DefaultBodyLimit::max(router_max_body_limit))
         .with_state(engine);
+    if let Some(manager) = model_manager {
+        router = router.layer(Extension(manager));
+    }
 
     Ok(router)
 }

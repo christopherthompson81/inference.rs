@@ -1853,20 +1853,43 @@ fn models_are_added_made_default_aliased_and_removed_at_runtime() {
         &json!({"model_id": "second"}),
     );
     assert_eq!(served["served"], json!(false), "{served}");
+    unsafe { inference_engine_free(engine) };
+}
+
+#[test]
+fn an_engine_started_empty_serves_the_models_added_to_it() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&json!({"runtime": {"device": "cpu"}}).to_string());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
     let (_, models) = query(inference_models_list, engine);
-    let last = models["data"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|card| card["default"] == json!(true))
-        .unwrap()["id"]
-        .clone();
-    let (status, error) = request_call(inference_model_remove, engine, &json!({"model_id": last}));
-    assert_eq!(
-        (status, error["error"]["code"].clone()),
-        (INFERENCE_ERR_INVALID_REQUEST, json!("model_conflict")),
-        "{error}"
+    assert_eq!(models["data"], json!([]), "{models}");
+    let (status, error) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error:?}");
+
+    let model =
+        json!({"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}});
+    let (status, added) = request_call(
+        inference_model_add,
+        engine,
+        &json!({"model": model, "model_id": "only", "paged_context_len": 256}),
     );
+    assert_eq!(status, INFERENCE_OK, "{added}");
+    // the first model added becomes the default
+    let (status, response) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
+    assert!(response["usage"]["completion_tokens"].as_u64().unwrap() > 0);
+
+    let (status, removed) =
+        request_call(inference_model_remove, engine, &json!({"model_id": "only"}));
+    assert_eq!(
+        (status, removed),
+        (INFERENCE_OK, json!({"model_id": "only"}))
+    );
+    let (_, models) = query(inference_models_list, engine);
+    assert_eq!(models["data"], json!([]), "{models}");
+    let (status, _) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND);
     unsafe { inference_engine_free(engine) };
 }
 
