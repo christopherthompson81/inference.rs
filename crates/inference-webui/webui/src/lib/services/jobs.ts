@@ -65,14 +65,54 @@ export async function deleteJob(id: string): Promise<void> {
   );
 }
 
-/** The extension a kept copy of `file` takes, from its name or else its type. */
-export function extensionOf(file: Blob & { name?: string }, fallback: string): string {
-  const named = file.name?.split(".").pop()?.toLowerCase();
-  if (file.name?.includes(".") && named && /^[a-z0-9]+$/.test(named)) return named;
-  return file.type.split("/")[1]?.replace("mpeg", "mp3").replace("x-wav", "wav") || fallback;
+// the extensions the server keeps (`JOB_FILE_TYPES` in jobs.rs), and the other spellings of them a file may carry
+const KEPT_EXTENSIONS: Record<"image" | "audio", Record<string, string>> = {
+  image: { png: "png", jpg: "jpg", jpeg: "jpg", webp: "webp", gif: "gif", bmp: "bmp" },
+  audio: {
+    wav: "wav", "x-wav": "wav", wave: "wav", mp3: "mp3", mpeg: "mp3", ogg: "ogg", oga: "ogg", opus: "opus",
+    flac: "flac", "x-flac": "flac", m4a: "m4a", "x-m4a": "m4a", mp4: "m4a", aac: "aac", webm: "webm",
+    aiff: "aiff", "x-aiff": "aiff", aif: "aiff",
+  },
+};
+
+/** The extension the server keeps `file` under, from its name or else its type; null for a type it doesn't keep. */
+export function keptExtension(file: Blob & { name?: string }, kind: "image" | "audio"): string | null {
+  const known = KEPT_EXTENSIONS[kind];
+  const named = file.name?.includes(".") ? file.name.split(".").pop()!.toLowerCase() : "";
+  return known[named] ?? known[file.type.split("/")[1] ?? ""] ?? null;
+}
+
+async function fetched(url: string): Promise<Response> {
+  const response = await fetch(url);
+  if (!response.ok) throw new Error(`${url}: ${response.status} ${response.statusText}`);
+  return response;
 }
 
 /** A blob from a data URL, as the image routes return them. */
 export async function blobOf(url: string): Promise<Blob> {
-  return (await fetch(url)).blob();
+  return (await fetched(url)).blob();
+}
+
+/** The job's file as a data URL, which the media routes take where they don't take a URL. */
+export async function jobDataUrl(job: Job<unknown>, name: string): Promise<string> {
+  const blob = await (await check(await authedFetch(jobFileUrl(job, name)))).blob();
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+}
+
+/** `image` redrawn as a PNG, for a type the server doesn't keep. */
+export async function pngOf(image: Blob): Promise<Blob> {
+  const bitmap = await createImageBitmap(image);
+  const canvas = document.createElement("canvas");
+  canvas.width = bitmap.width;
+  canvas.height = bitmap.height;
+  canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  return new Promise((resolve, reject) =>
+    canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error("the image could not be redrawn"))), "image/png"),
+  );
 }

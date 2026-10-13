@@ -5,7 +5,7 @@
   import { jobsStore } from "../stores/jobs.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
   import { diarize, transcribe } from "../services/manager";
-  import { extensionOf, jobFile, jobFileUrl, type Job } from "../services/jobs";
+  import { jobFile, jobFileUrl, keptExtension, type Job } from "../services/jobs";
 
   const AUDIO_STEM = "audio";
 
@@ -53,8 +53,16 @@
     status = file.name;
   }
 
+  // an entry deleted while it is shown can no longer be read back
+  $effect(() => {
+    if (restored && !jobsStore.lists.transcription.some((job) => job.id === restored!.id)) {
+      restored = null;
+      if (!audio) show(null);
+    }
+  });
+
   function open(job: Job) {
-    const data = job.data as unknown as TranscriptionJob;
+    const data = $state.snapshot(job.data) as unknown as TranscriptionJob;
     const name = job.files.find((file) => file.startsWith(`${AUDIO_STEM}.`));
     audio = null;
     restored = name ? job : null;
@@ -118,13 +126,19 @@
       if (speakersFailed) status += `; no speakers: ${speakersFailed}`;
       const data: TranscriptionJob = { audioName: input.name, language: language.trim(), transcript, segments };
       // transcribing a history entry again updates it rather than keeping its audio twice
-      const files = again ? [] : [{ name: `${AUDIO_STEM}.${extensionOf(input.file, "wav")}`, blob: input.file }];
+      const extension = keptExtension(input.file, "audio");
+      const files = again || !extension ? [] : [{ name: `${AUDIO_STEM}.${extension}`, blob: input.file }];
+      if (!again && !extension) status += "; this audio type is not kept, only the transcript";
       try {
-        restored = await jobsStore.save(
+        const kept = await jobsStore.save(
           { id: again?.id, kind: "transcription", title: input.name, slot: "transcription", data },
           files,
         );
-        audio = null;
+        // with its audio kept, the entry is what runs again; without, the chosen file still is
+        if (again || files.length > 0) {
+          restored = kept;
+          audio = null;
+        }
       } catch (e) {
         status += `; not kept: ${e instanceof Error ? e.message : String(e)}`;
       }

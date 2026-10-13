@@ -18,6 +18,9 @@ use uuid::Uuid;
 use crate::types::AppState;
 
 const JOB_RECORD: &str = "job.json";
+const JOB_RECORD_PARTIAL: &str = "job.json.partial";
+// held while a record is read and written back, or its job deleted; saves are rare, so one lock serves every job
+static RECORDS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 const JOB_ID_PREFIX: &str = "job_";
 const JOB_FIELD: &str = "job";
 pub(crate) const JOB_KINDS: &[&str] = &["transcription", "speech", "images", "documents"];
@@ -37,6 +40,7 @@ const JOB_FILE_TYPES: &[(&str, &str)] = &[
     ("m4a", "audio/mp4"),
     ("aac", "audio/aac"),
     ("webm", "audio/webm"),
+    ("aiff", "audio/aiff"),
 ];
 
 #[derive(Serialize, Deserialize)]
@@ -107,8 +111,11 @@ async fn read_record(dir: &Path) -> Option<JobRecord> {
     serde_json::from_slice(&bytes).ok()
 }
 
+// through a temporary file, so a reader never sees half a record
 async fn write_record(dir: &Path, record: &JobRecord) -> std::io::Result<()> {
-    fs::write(dir.join(JOB_RECORD), serde_json::to_vec_pretty(record)?).await
+    let partial = dir.join(JOB_RECORD_PARTIAL);
+    fs::write(&partial, serde_json::to_vec_pretty(record)?).await?;
+    fs::rename(&partial, dir.join(JOB_RECORD)).await
 }
 
 // a refused request, small enough to return as an error
@@ -160,7 +167,7 @@ pub async fn save_job(
         return bad_request(format!("unknown job kind `{}`", job.kind)).into_response();
     }
     let new = job.id.is_none();
-    let (dir, mut record) = match job.id {
+    let (dir, record) = match job.id {
         Some(id) => {
             let Some(dir) = job_dir(&app.jobs_dir, &id) else {
                 return bad_request("invalid job id").into_response();
@@ -189,25 +196,40 @@ pub async fn save_job(
             (dir, record)
         }
     };
-    record.title = job.title;
-    record.model = job.model;
-    record.data = job.data;
 
     let kept = async {
-        keep_files(&mut multipart, &dir, &mut record).await?;
+        let names = keep_files(&mut multipart, &dir).await?;
+        let _records = RECORDS.lock().await;
+        // read again under the lock, so a concurrent update or delete of the same job isn't lost
+        let mut record = if new {
+            record
+        } else {
+            read_record(&dir)
+                .await
+                .ok_or_else(|| (StatusCode::NOT_FOUND, "job not found".to_string()))?
+        };
+        record.title = job.title;
+        record.model = job.model;
+        record.data = job.data;
+        for name in names {
+            if !record.files.contains(&name) {
+                record.files.push(name);
+            }
+        }
         write_record(&dir, &record).await.map_err(|e| {
             error!("write job error: {e}");
             internal_error()
-        })
+        })?;
+        Ok::<_, Refusal>(record)
     };
     match kept.await {
-        Ok(()) => Json(record).into_response(),
-        Err(response) => {
+        Ok(record) => Json(record).into_response(),
+        Err(refusal) => {
             // a job refused part way leaves nothing behind; one kept before keeps its old record
             if new {
                 let _ = fs::remove_dir_all(&dir).await;
             }
-            response.into_response()
+            refusal.into_response()
         }
     }
 }
@@ -219,11 +241,9 @@ fn internal_error() -> Refusal {
     )
 }
 
-async fn keep_files(
-    multipart: &mut Multipart,
-    dir: &Path,
-    record: &mut JobRecord,
-) -> Result<(), Refusal> {
+// the multipart's files, written into `dir`; their names
+async fn keep_files(multipart: &mut Multipart, dir: &Path) -> Result<Vec<String>, Refusal> {
+    let mut names = Vec::new();
     while let Some(field) = multipart
         .next_field()
         .await
@@ -245,11 +265,9 @@ async fn keep_files(
             error!("write job file error: {e}");
             internal_error()
         })?;
-        if !record.files.contains(&name) {
-            record.files.push(name);
-        }
+        names.push(name);
     }
-    Ok(())
+    Ok(names)
 }
 
 pub async fn delete_job(
@@ -259,6 +277,7 @@ pub async fn delete_job(
     let Some(dir) = job_dir(&app.jobs_dir, &req.id) else {
         return bad_request("invalid job id").into_response();
     };
+    let _records = RECORDS.lock().await;
     match fs::remove_dir_all(&dir).await {
         Ok(()) => (StatusCode::OK, "Deleted").into_response(),
         Err(_) => (StatusCode::NOT_FOUND, "job not found").into_response(),

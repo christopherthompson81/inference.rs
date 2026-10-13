@@ -4,7 +4,7 @@
   import { jobsStore } from "../stores/jobs.svelte";
   import { managerStore, SLOTS, type SlotId } from "../stores/manager.svelte";
   import { detectLayout, readImage, type LayoutRegion } from "../services/manager";
-  import { blobOf, jobFileUrl, type Job } from "../services/jobs";
+  import { blobOf, jobDataUrl, type Job } from "../services/jobs";
 
   // PaddleOCR-VL's task prompts by PP-DocLayoutV3 label; every other text kind takes the text prompt
   const TASK_PROMPTS: Record<string, string> = {
@@ -67,14 +67,24 @@
     }
   }
 
-  function open(job: Job) {
-    const data = job.data as unknown as DocumentsJob;
-    page = job.files.includes(PAGE_FILE) ? jobFileUrl(job, PAGE_FILE) : null;
+  // the page comes back as a data URL, as `choose` makes it: the layout route takes no URL
+  async function open(job: Job) {
+    const data = $state.snapshot(job.data) as unknown as DocumentsJob;
+    // cleared first, so the page remounts and measures itself again even when it is the same page
+    page = null;
     pageImage = null;
     size = { width: 0, height: 0 };
     ({ pageName, textPrompt, regions, text } = data);
-    status = pageName;
     jobsStore.current.documents = job.id;
+    status = pageName;
+    busy = true;
+    try {
+      if (job.files.includes(PAGE_FILE)) page = await jobDataUrl(job, PAGE_FILE);
+    } catch (e) {
+      status = `${pageName}: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = false;
+    }
   }
 
   // a page's detection and reading are one job: the first keeps the page, the next update it

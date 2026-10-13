@@ -5,7 +5,7 @@
   import { jobsStore } from "../stores/jobs.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
   import { editImage, generateImage, type ImageOptions } from "../services/manager";
-  import { blobOf, extensionOf, jobFile, jobFileUrl, type Job } from "../services/jobs";
+  import { blobOf, jobFile, jobFileUrl, keptExtension, pngOf, type Job } from "../services/jobs";
 
   const IMAGE_STEM = "image-";
   const REFERENCE_STEM = "reference-";
@@ -52,13 +52,16 @@
     images = job.files.filter((name) => name.startsWith(IMAGE_STEM)).map((name) => jobFileUrl(job, name));
     jobsStore.current.images = job.id;
     status = "";
+    chooseReferences(null);
     // the references come back as files, so the job can be run again as it was
+    busy = true;
     try {
       const names = job.files.filter((name) => name.startsWith(REFERENCE_STEM));
       chooseReferences(await Promise.all(names.map((name) => jobFile(job, name))));
     } catch (e) {
-      chooseReferences(null);
       status = `References not read: ${e instanceof Error ? e.message : String(e)}`;
+    } finally {
+      busy = false;
     }
   }
 
@@ -88,10 +91,13 @@
         const made = await Promise.all(
           images.map(async (image, index) => ({ name: `${IMAGE_STEM}${index + 1}.png`, blob: await blobOf(image) })),
         );
-        const given = sent.map((file, index) => ({
-          name: `${REFERENCE_STEM}${index + 1}.${extensionOf(file, "png")}`,
-          blob: file,
-        }));
+        const given = await Promise.all(
+          sent.map(async (file, index) => {
+            const extension = keptExtension(file, "image");
+            const blob = extension ? file : await pngOf(file);
+            return { name: `${REFERENCE_STEM}${index + 1}.${extension ?? "png"}`, blob };
+          }),
+        );
         await jobsStore.save({ kind: "images", title: job.prompt, slot: "images", data: job }, [...made, ...given]);
       } catch (e) {
         status += `; not kept: ${e instanceof Error ? e.message : String(e)}`;
