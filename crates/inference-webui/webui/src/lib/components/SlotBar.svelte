@@ -81,7 +81,11 @@
         <span class="truncate font-mono text-[11px] text-gray-400" title={served.projector}>+ {baseName(served.projector)}</span>
       {/if}
     {:else}
-      <span class="text-xs text-gray-400">{managerStore.admin ? "Nothing loaded" : "Nothing loaded; an admin loads models"}</span>
+      <span class="text-xs text-gray-400">{managerStore.admin
+          ? "Nothing loaded"
+          : managerStore.keyed
+            ? "Nothing loaded; an admin key loads models"
+            : "Nothing loaded; open this page on the server's own machine to load models"}</span>
     {/if}
   </div>
 

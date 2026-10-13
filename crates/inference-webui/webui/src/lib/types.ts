@@ -213,6 +213,8 @@ export interface Capabilities {
   signed_in?: boolean;
   /** May load, unload, download and delete models. */
   admin?: boolean;
+  /** The server takes keys; without them, a browser on the server's machine is admin. */
+  keyed?: boolean;
 }
 
 export interface Settings {

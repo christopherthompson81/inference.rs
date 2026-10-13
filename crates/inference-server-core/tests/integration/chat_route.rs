@@ -4,6 +4,7 @@ use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
+use inference_server_core::auth::Peer;
 use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -654,7 +655,9 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
             .build()
             .await?;
         if let Some(peer) = peer {
-            app = app.layer(axum::extract::connect_info::MockConnectInfo(peer));
+            app = app.layer(axum::extract::connect_info::MockConnectInfo(Peer::from(
+                peer,
+            )));
         }
         let response = app.oneshot(set_default()?).await?;
         assert_eq!(
@@ -670,7 +673,9 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
         .with_model_management(true)
         .build()
         .await?
-        .layer(axum::extract::connect_info::MockConnectInfo(loopback));
+        .layer(axum::extract::connect_info::MockConnectInfo(Peer::from(
+            loopback,
+        )));
     let browsers = [
         (
             "localhost:1234",
@@ -711,6 +716,38 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
         }
         let response = app.clone().oneshot(request).await?;
         assert_eq!(response.status(), status, "{host} {site:?} {origin:?}");
+    }
+
+    // a browser on this machine may reach it by one of its own addresses; a client elsewhere on the LAN can't
+    let own = std::net::SocketAddr::from(([192, 168, 1, 20], 1234));
+    let neighbour = std::net::SocketAddr::from(([192, 168, 1, 21], 40000));
+    let from_own_address = std::net::SocketAddr::from(([192, 168, 1, 20], 40000));
+    for (remote, host, status) in [
+        (from_own_address, "192.168.1.20:1234", StatusCode::OK),
+        (
+            from_own_address,
+            "attacker.example:1234",
+            StatusCode::FORBIDDEN,
+        ),
+        (neighbour, "192.168.1.20:1234", StatusCode::FORBIDDEN),
+    ] {
+        let peer = Peer {
+            remote,
+            local: Some(own),
+        };
+        let app = InferenceRsServerRouterBuilder::new()
+            .with_engine(&engine)
+            .with_model_management(true)
+            .build()
+            .await?
+            .layer(axum::extract::connect_info::MockConnectInfo(peer));
+        let mut request = set_default()?;
+        request.headers_mut().insert("host", host.parse()?);
+        request
+            .headers_mut()
+            .insert("sec-fetch-site", "same-origin".parse()?);
+        let response = app.oneshot(request).await?;
+        assert_eq!(response.status(), status, "{remote} {host}");
     }
     Ok(())
 }

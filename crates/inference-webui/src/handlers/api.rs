@@ -746,6 +746,7 @@ pub async fn get_capabilities(
         "shell_enabled": app.shell_enabled,
         "tool_dispatch_url": app.tool_dispatch_url,
         "signed_in": app.owner.is_some(),
+        "keyed": app.keyed,
     }))
 }
 

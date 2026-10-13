@@ -3,12 +3,14 @@
 use anyhow::{Context, Result};
 use axum::{
     Router,
-    serve::{ListenerExt, TapIo},
+    extract::connect_info::Connected,
+    serve::{IncomingStream, Listener},
 };
 use inference_api::Engine;
 use tracing::{debug, info};
 
 use crate::{
+    auth::Peer,
     lora_adapters::runtime_lora_updates_enabled,
     mcp_server::{MCP_PROTOCOL_VERSION, MCP_ROUTE, create_mcp_router},
     route_registry::{INFERENCE_RS_API_ROUTES, RUNTIME_LORA_API_ROUTES, RouteInfo, RouteKind},
@@ -41,8 +43,8 @@ pub async fn serve(app: Router, engine: &Engine, options: ServeOptions<'_>) -> R
     info!("Server listening on http://{host}:{port}");
     log_api_surfaces(host, port);
     // the peer address tells an open server's admin requests (from this machine) from the rest
-    let app = app.into_make_service_with_connect_info::<std::net::SocketAddr>();
-    axum::serve(tcp_nodelay_listener(listener), app).await?;
+    let app = app.into_make_service_with_connect_info::<Peer>();
+    axum::serve(NodelayListener(listener), app).await?;
     Ok(())
 }
 
@@ -63,7 +65,7 @@ async fn spawn_mcp_server(
     info!("MCP server listening on http://{host}:{mcp_port}{MCP_ROUTE}");
     info!("MCP protocol version is {MCP_PROTOCOL_VERSION}");
     tokio::spawn(async move {
-        if let Err(e) = axum::serve(tcp_nodelay_listener(listener), router).await {
+        if let Err(e) = axum::serve(NodelayListener(listener), router).await {
             tracing::error!("MCP server error: {e}");
         }
     });
@@ -71,16 +73,31 @@ async fn spawn_mcp_server(
 }
 
 // Streamed tokens are small writes; Nagle would hold each one back waiting for an ACK.
-// A named type, not `impl Listener`: axum records a TapIo listener's peer address only when it can see the type.
-fn tcp_nodelay_listener(
-    listener: tokio::net::TcpListener,
-) -> TapIo<tokio::net::TcpListener, fn(&mut tokio::net::TcpStream)> {
-    listener.tap_io(set_nodelay)
+struct NodelayListener(tokio::net::TcpListener);
+
+impl Listener for NodelayListener {
+    type Io = tokio::net::TcpStream;
+    type Addr = std::net::SocketAddr;
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        let (stream, addr) = Listener::accept(&mut self.0).await;
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!("failed to set TCP_NODELAY on incoming connection: {error}");
+        }
+        (stream, addr)
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Listener::local_addr(&self.0)
+    }
 }
 
-fn set_nodelay(stream: &mut tokio::net::TcpStream) {
-    if let Err(error) = stream.set_nodelay(true) {
-        tracing::warn!("failed to set TCP_NODELAY on incoming connection: {error}");
+impl Connected<IncomingStream<'_, NodelayListener>> for Peer {
+    fn connect_info(stream: IncomingStream<'_, NodelayListener>) -> Self {
+        Self {
+            remote: *stream.remote_addr(),
+            local: stream.io().local_addr().ok(),
+        }
     }
 }
 
@@ -123,7 +140,7 @@ mod tests {
     async fn accepted_connections_enable_tcp_nodelay() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let mut listener = tcp_nodelay_listener(listener);
+        let mut listener = NodelayListener(listener);
         let connect = tokio::net::TcpStream::connect(address);
 
         let ((stream, _), client) = tokio::join!(listener.accept(), connect);

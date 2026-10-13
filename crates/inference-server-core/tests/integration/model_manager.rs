@@ -13,6 +13,7 @@ use inference_api::{
     Engine,
     model_manager::{ModelManager, ModelManagerConfig},
 };
+use inference_server_core::auth::Peer;
 use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -40,7 +41,7 @@ async fn router(folders: Vec<std::path::PathBuf>, peer: [u8; 4]) -> anyhow::Resu
         .with_model_manager(manager)
         .build()
         .await?
-        .layer(MockConnectInfo(SocketAddr::from((peer, PORT)))))
+        .layer(MockConnectInfo(Peer::from(SocketAddr::from((peer, PORT))))))
 }
 
 fn post(path: &str, body: Value) -> Request<Body> {

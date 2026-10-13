@@ -294,6 +294,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         code_execution_enabled: options.code_execution,
         shell_enabled: options.shell,
         tool_dispatch_url: options.tool_dispatch_url,
+        keyed: options.auth.is_some(),
     });
 
     let router = Router::new()

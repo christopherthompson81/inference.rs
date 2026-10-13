@@ -3142,6 +3142,7 @@ dependencies = [
  "inference-quant",
  "inference-tensor",
  "inference-webui",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "mime",
