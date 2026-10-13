@@ -126,12 +126,13 @@
 </script>
 
 <div class="flex h-screen flex-col overflow-hidden">
-  <nav class="flex h-10 shrink-0 items-center gap-1 border-b border-gray-200 bg-gray-50 px-3 dark:border-gray-800 dark:bg-gray-900">
-    <img src="favicon.png" alt="" class="mr-1 h-5 w-5" />
-    <span class="mr-3 text-sm font-semibold text-gray-800 dark:text-gray-100">inference.rs</span>
+  <!-- the tabs scroll on a phone rather than widen the page -->
+  <nav class="flex h-10 shrink-0 items-center gap-1 overflow-x-auto border-b border-gray-200 bg-gray-50 px-3 dark:border-gray-800 dark:bg-gray-900">
+    <img src="favicon.png" alt="" class="mr-1 h-5 w-5 shrink-0" />
+    <span class="mr-3 shrink-0 text-sm font-semibold text-gray-800 dark:text-gray-100">inference.rs</span>
     {#each TABS as item (item.id)}
       <button
-        class="rounded-md px-3 py-1 text-sm {tab === item.id
+        class="shrink-0 rounded-md px-3 py-1 text-sm whitespace-nowrap {tab === item.id
           ? 'bg-white font-medium text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-100'
           : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}"
         onclick={() => show(item.id)}

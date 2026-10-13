@@ -20,6 +20,8 @@ Started without `-m` or `-f`, the server loads nothing until you choose models i
 
 Each tab's model bar picks a model from those folders or the cache, or names a Hugging Face repository, and loads it with its options: the KV context length and MTP speculative decoding for chat models, the projector beside a text GGUF, the device for the layout model. Loading shows its progress and replaces the tab's previous model; **Unload** frees it. A model started with `-m` still loads at startup and can be chatted with as before.
 
+Each job tab keeps a history beside it, as the chat keeps its chats: every finished transcription, speech, image and document is saved on the server with its inputs, its results and the model that made them. Clicking an entry shows it again, ready to run again; transcribing a history entry again, or reading a page after detecting its layout, updates that entry rather than adding another. Jobs are kept under `~/.cache/inference-rs/jobs` (or `$XDG_CACHE_HOME`).
+
 Loading, unloading, downloading and deleting are an admin's. On a server without keys that is a browser on the server's own machine (open the UI at `localhost`); everyone else sees which models are loaded and uses them. With keys, the owners named with `--admin` are admins. See [the model manager](/reference/http-api/#model-manager) for the routes behind the tabs.
 
 The chat panel provides:
@@ -64,6 +66,6 @@ Pass `--no-ui` to `inference serve` to skip mounting the UI router. The HTTP API
 Without [API keys](/reference/http-api/#authentication) the UI is single-user: anyone who can reach `/ui` sees every
 saved chat, and through them the sessions and files those chats used (`serve` warns when it is mounted on a
 non-loopback address). With keys, the UI asks for one, signs the browser in with a cookie, and each key's owner sees
-only its own saved chats, sessions and files; **sign out** in the status bar ends the session. Chats saved before the
+only its own saved chats, job history, sessions and files; **sign out** in the status bar ends the session. Chats saved before the
 server had keys belong to no owner and don't show. Uploaded media and generated speech sit under random names in
 shared directories, so anyone signed in who is given such a URL can fetch it.

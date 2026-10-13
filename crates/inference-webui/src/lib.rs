@@ -30,6 +30,7 @@ use crate::utils::get_cache_dir;
 
 mod chat;
 mod handlers;
+mod jobs;
 mod types;
 mod utils;
 
@@ -70,6 +71,14 @@ pub(crate) const UI_SAVE_CHAT_SESSION_ROUTE: RouteInfo =
     RouteInfo::new("/api/save_chat_session", "POST", RouteKind::Ui);
 pub(crate) const UI_RESTORE_CHAT_SESSION_ROUTE: RouteInfo =
     RouteInfo::new("/api/restore_chat_session", "POST", RouteKind::Ui);
+pub(crate) const UI_LIST_JOBS_ROUTE: RouteInfo =
+    RouteInfo::new("/api/list_jobs", "GET", RouteKind::Ui);
+pub(crate) const UI_SAVE_JOB_ROUTE: RouteInfo =
+    RouteInfo::new("/api/save_job", "POST", RouteKind::Ui);
+pub(crate) const UI_DELETE_JOB_ROUTE: RouteInfo =
+    RouteInfo::new("/api/delete_job", "POST", RouteKind::Ui);
+pub(crate) const UI_JOB_FILE_ROUTE: RouteInfo =
+    RouteInfo::new("/api/job_file/{id}/{name}", "GET", RouteKind::Ui);
 pub(crate) const UI_SETTINGS_ROUTE: RouteInfo =
     RouteInfo::new("/api/settings", "GET", RouteKind::Ui);
 pub(crate) const UI_CAPABILITIES_ROUTE: RouteInfo =
@@ -260,6 +269,8 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
     fs::create_dir_all(&chats_dir).await?;
     let speech_dir = base_cache.join("speech");
     fs::create_dir_all(&speech_dir).await?;
+    let jobs_dir = base_cache.join("jobs");
+    fs::create_dir_all(&jobs_dir).await?;
     let uploads_dir = base_cache.join("uploads");
     fs::create_dir_all(&uploads_dir).await?;
     inference_server_core::configure_ui_upload_dir(&uploads_dir).await?;
@@ -274,6 +285,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         current: tokio::sync::RwLock::new(default_model),
         owner: None,
         chats_dir: chats_dir.to_string_lossy().to_string(),
+        jobs_dir: jobs_dir.to_string_lossy().to_string(),
         speech_dir: speech_dir.to_string_lossy().to_string(),
         current_chat: tokio::sync::RwLock::new(None),
         default_params: GenerationParams::default(),
@@ -305,6 +317,10 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
             UI_RESTORE_CHAT_SESSION_ROUTE.path,
             post(restore_chat_session),
         )
+        .route(UI_LIST_JOBS_ROUTE.path, get(jobs::list_jobs))
+        .route(UI_SAVE_JOB_ROUTE.path, post(jobs::save_job))
+        .route(UI_DELETE_JOB_ROUTE.path, post(jobs::delete_job))
+        .route(UI_JOB_FILE_ROUTE.path, get(jobs::job_file))
         .route(UI_SETTINGS_ROUTE.path, get(get_settings))
         .route(UI_CAPABILITIES_ROUTE.path, get(get_capabilities))
         .route(UI_MCP_TOOLS_ROUTE.path, get(list_mcp_tools))
