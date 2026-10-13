@@ -32,6 +32,9 @@
   // a kept single-page job from before documents had pages
   const LEGACY_PAGE_FILE = "page.png";
   const pageFile = (index: number) => `page-${index + 1}.png`;
+  // regions read at once: the engine batches them (3x at its default 4 sequences); past the OCR model's sequence
+  // limit they wait in its queue, so a model loaded with more sequences reads faster still
+  const READ_CONCURRENCY = 16;
 
   type Status = "new" | "working" | "laid out" | "read" | "failed";
 
@@ -125,7 +128,7 @@
           file.name,
         );
         pdf = opened;
-        await ensureImage(0);
+        await show(0);
         status = `${opened.numPages} page${opened.numPages === 1 ? "" : "s"}`;
       } else {
         const drawn = await uprightPng(file);
@@ -151,10 +154,23 @@
     return rendered.blob;
   }
 
+  // the page's image rendered and decoded, so swapping it in doesn't flash an empty frame
+  async function ready(index: number) {
+    await ensureImage(index);
+    const url = pages[index].url;
+    if (!url) return;
+    const image = new Image();
+    image.src = url;
+    await image.decode().catch(() => {});
+  }
+
+  // the shown page stays until the next is ready; its neighbour renders meanwhile, for the page after
   async function show(index: number) {
-    current = Math.min(Math.max(index, 0), pages.length - 1);
+    const target = Math.min(Math.max(index, 0), pages.length - 1);
     try {
-      await ensureImage(current);
+      await ready(target);
+      current = target;
+      if (target + 1 < pages.length && pdf) void ready(target + 1).catch(() => {});
     } catch (e) {
       status = e instanceof Error ? e.message : String(e);
     }
@@ -220,13 +236,29 @@
                 .filter((region) => !PICTURES.has(region.label))
                 .map((region) => ({ region, box: region.bbox, prompt: TASK_PROMPTS[region.label] ?? textPrompt }));
         p.text = "";
-        for (const [n, job] of jobs.entries()) {
-          if (signal.aborted) throw new DOMException("canceled", "AbortError");
-          progress = { label: label(`reading region ${n + 1} of ${jobs.length}`), done: n, total: jobs.length };
-          const read = await readImage(SLOTS.ocr.id, crop(image, job.box), job.prompt);
-          if (job.region) job.region.text = read;
-          else p.text = read;
-        }
+        let next = 0;
+        let done = 0;
+        progress = { label: label(`reading ${jobs.length} regions`), done: 0, total: jobs.length };
+        // a few workers take the regions in turn; each result lands on its own region, so the order holds
+        let failed = false;
+        const worker = async () => {
+          while (!failed && next < jobs.length) {
+            if (signal.aborted) throw new DOMException("canceled", "AbortError");
+            const job = jobs[next++];
+            try {
+              const read = await readImage(SLOTS.ocr.id, crop(image, job.box), job.prompt);
+              if (job.region) job.region.text = read;
+              else p.text = read;
+            } catch (e) {
+              // the other workers stop taking regions once one has failed
+              failed = true;
+              throw e;
+            }
+            done++;
+            progress = { label: label(`read ${done} of ${jobs.length} regions`), done, total: jobs.length };
+          }
+        };
+        await Promise.all(Array.from({ length: Math.min(READ_CONCURRENCY, jobs.length) }, worker));
         p.status = "read";
       }
       if (!steps.layout && !steps.read) p.status = "new";
@@ -254,7 +286,7 @@
           layout: which === "layout" || (which === "all" && layoutReady && p.status === "new"),
           read: which === "read" || (which === "all" && ocrReady),
         };
-        if (which === "all") current = index;
+        if (which === "all") await show(index);
         await processPage(index, steps, signal, which === "all" ? targets.length : 1);
         if (which === "all") progress = { label: `Page ${n + 1} of ${targets.length} done`, done: n + 1, total: targets.length };
       }
