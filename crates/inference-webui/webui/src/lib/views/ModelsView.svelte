@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { managerStore, SLOTS, displayName, formatBytes, baseName, type SlotId } from "../stores/manager.svelte";
+  import { managerStore, SLOTS, displayName, formatBytes, baseName, fits, type SlotId } from "../stores/manager.svelte";
   import { deleteModel, downloadModel, type InventoryModel } from "../services/manager";
 
   let { onUse }: { onUse: (slot: SlotId) => void } = $props();
@@ -44,9 +44,7 @@
   }
 
   function slotsFor(model: InventoryModel): SlotId[] {
-    return (Object.keys(SLOTS) as SlotId[]).filter((slot) =>
-      model.kind != null && (SLOTS[slot].kinds as string[]).includes(model.kind),
-    );
+    return (Object.keys(SLOTS) as SlotId[]).filter((slot) => fits(slot, model));
   }
 
   function kindLabel(model: InventoryModel): string {
@@ -178,7 +176,7 @@
             <div class="mt-2 flex flex-wrap items-center gap-1.5">
               {#each slotsFor(selected) as slot (slot)}
                 <button class="rounded-md bg-blue-600 px-2.5 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50" onclick={() => use(selected!, slot)} disabled={managerStore.activityOf(slot).busy}>
-                  Load as {slot}
+                  Load as {SLOTS[slot].title.toLowerCase().replace(" (optional)", "")}
                 </button>
               {/each}
               {#if plan}

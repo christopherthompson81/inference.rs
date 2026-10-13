@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import SlotBar from "../components/SlotBar.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
   import { speak } from "../services/manager";
@@ -11,6 +12,9 @@
   let audioUrl = $state<string | null>(null);
 
   let ready = $derived(managerStore.servedIn("speech") != null);
+  onDestroy(() => {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+  });
 
   async function run() {
     busy = true;

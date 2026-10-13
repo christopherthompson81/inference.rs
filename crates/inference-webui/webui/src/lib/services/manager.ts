@@ -157,8 +157,10 @@ async function postEvents(
   let buffer = "";
   for (;;) {
     const { value, done } = await reader.read();
-    if (done) break;
-    buffer += value;
+    // a stream may end without the blank line after its last event
+    if (done) buffer += "\n\n";
+    // a proxy may rewrite line endings to CRLF
+    else buffer += value.replace(/\r\n?/g, "\n");
     let end: number;
     while ((end = buffer.indexOf("\n\n")) >= 0) {
       const block = buffer.slice(0, end);
@@ -180,6 +182,7 @@ async function postEvents(
       }
       onEvent(event, parsed);
     }
+    if (done) break;
   }
 }
 

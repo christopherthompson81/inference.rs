@@ -9,9 +9,7 @@ use std::sync::{Arc, RwLock};
 use base64::Engine as _;
 use inference_core::default_hf_cache_dir;
 use inference_layout::pp_doclayout_v3::{DEFAULT_THRESHOLD, PPDocLayoutV3Detector};
-use inference_selection::inventory::{
-    InventoryKind, InventoryModel, InventorySource, ModelFormat, ModelScan,
-};
+use inference_selection::inventory::{InventoryKind, InventoryModel, ModelFormat, ModelScan};
 use inference_tensor::Device;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -19,17 +17,20 @@ use serde_json::json;
 use crate::api_error::{ApiError, ApiErrorKind};
 use crate::engine::{Engine, ModelSpec, MtpSpec, ProgressSink, add_progress_sink, explicit_device};
 use crate::model_inventory::{
-    ModelDownloadRequest, ScanRequest, delete_hf_cache_repo, inspect_model, model_download_from,
-    scan_models, start_download,
+    ModelDownloadRequest, ScanRequest, delete_hf_cache_repo, inspect_model, is_repo_id,
+    model_download_from, scan_models, start_download,
 };
 use crate::models::{ModelOperationRequest, ModelStatus};
 use crate::request_body::{JsonRequest, parse_json};
-use inference_protocol::openai::ModelCategory;
+use inference_protocol::openai::{ModelCategory, ModelObject};
 
-/// Largest image the layout detector takes, in pixels (a 600-dpi A0 page is ~70M); bigger ones are refused.
+/// Largest image the layout detector takes, in pixels (a 600-dpi A3 page is ~70M); bigger ones are refused.
 pub const MAX_LAYOUT_IMAGE_PIXELS: usize = 1 << 28;
 const DATA_URL_BASE64: &str = ";base64,";
 const SPLIT_FILE_SEPARATOR: &str = ";";
+// the Hugging Face cache's repository dirs: `models--org--name`
+const HF_REPO_DIR_PREFIX: &str = "models--";
+const HF_REPO_SEPARATOR: &str = "--";
 const LAYOUT_STATUS: ModelStatus = ModelStatus::Loaded;
 
 /// A download's events, as JSON; dropping them stops it.
@@ -81,14 +82,17 @@ impl From<ModelCategory> for ManagedKind {
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedLoadRequest {
-    /// An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached.
+    /// An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout
+    /// model loads from the inventory.
     pub source: String,
     /// The id requests use; a model already holding it is unloaded first.
     pub model_id: String,
-    /// Tokens of context the model's paged KV cache holds; unset uses the server's setting.
+    /// Tokens of context the model's paged KV cache holds; unset uses the server's setting, and without paged attention
+    /// it is ignored.
     #[serde(default)]
     pub paged_context_len: Option<usize>,
-    /// Speculative decoding with the checkpoint's own MTP head.
+    /// Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`
+    /// is refused.
     #[serde(default)]
     pub mtp: Option<MtpSpec>,
     /// For a text GGUF, one of its entry's `projectors`; unset takes its only one, and none when there are several.
@@ -257,19 +261,21 @@ impl ModelManager {
             .models()?
             .data
             .into_iter()
+            .filter(is_model_card)
             .filter_map(|card| {
-                // the `default` alias and LoRA adapters carry no category of their own
-                let category = card.category.filter(|_| card.parent.is_none())?;
+                // an unloaded model's card has no category; the manager knows the kind of those it loaded
                 let entry = loaded.get(&card.id);
+                let kind = entry
+                    .map(|entry| entry.kind)
+                    .or(card.category.map(Into::into))?;
                 Some(ManagedModel {
-                    kind: entry.map_or(category.into(), |entry| entry.kind),
+                    kind,
                     source: entry.map(|entry| entry.source.clone()),
                     projector: entry.and_then(|entry| entry.projector.clone()),
                     status: status_of(card.status.as_deref()),
                     model_id: card.id,
                 })
             })
-            .filter(|model| model.model_id != crate::lora_routing::DEFAULT_MODEL_ID)
             .collect();
         let layouts = self.layouts.read().map_err(|_| ApiError::internal())?;
         data.extend(layouts.iter().map(|(id, layout)| ManagedModel {
@@ -293,6 +299,11 @@ impl ModelManager {
         let id = request.model_id.trim().to_string();
         if id.is_empty() {
             return Err(ApiError::invalid_request("`model_id` is empty"));
+        }
+        if request.mtp.as_ref().is_some_and(|mtp| mtp.model.is_some()) {
+            return Err(ApiError::invalid_request(
+                "`mtp` drafts with the checkpoint's own head here; an assistant model is not loaded by the manager",
+            ));
         }
         let source = self.resolve(&request.source)?;
         let kind = match &source {
@@ -376,9 +387,13 @@ impl ModelManager {
             mtp: request.mtp,
         };
         self.engine.add_model(spec).await?;
-        let kind = match kind {
+        let kind = match kind.or_else(|| self.served_kind(&id)) {
             Some(kind) => kind,
-            None => self.served_kind(&id)?,
+            None => {
+                // a served model the manager cannot describe is one it would leave untracked
+                self.remove_id(&id).await?;
+                return Err(ApiError::internal());
+            }
         };
         self.loaded
             .write()
@@ -403,7 +418,7 @@ impl ModelManager {
     /// Stops serving `model_id` and frees it.
     pub async fn unload(&self, request: ModelOperationRequest) -> Result<(), ApiError> {
         let _gate = self.gate.lock().await;
-        if !self.remove_id(&request.model_id).await? {
+        if !self.remove_id(request.model_id.trim()).await? {
             return Err(ApiError::new(
                 ApiErrorKind::NotFound,
                 format!("model `{}` is not served", request.model_id),
@@ -431,28 +446,26 @@ impl ModelManager {
 
     /// Deletes a cached repository or a folder's GGUF; never one that is loaded.
     pub fn delete(&self, request: ManagedDeleteRequest) -> Result<ManagedDeletion, ApiError> {
-        let in_use = |path: &str| {
-            let loaded = self.loaded.read().map_err(|_| ApiError::internal())?;
-            let layouts = self.layouts.read().map_err(|_| ApiError::internal())?;
-            let sources = loaded
-                .values()
-                .flat_map(|entry| [Some(&entry.source), entry.projector.as_ref()])
-                .flatten()
-                .chain(layouts.values().map(|layout| &layout.source));
-            Ok::<_, ApiError>(sources.into_iter().any(|source| source.starts_with(path)))
+        // a load in progress has not recorded its source yet
+        let _gate = self.gate.blocking_lock();
+        let sources = self.sources()?;
+        // a path holding a source, or one inside a source (a model started with `-f` is known by its folder)
+        let in_use = |path: &Path| {
+            sources
+                .iter()
+                .map(Path::new)
+                .any(|source| source.starts_with(path) || path.starts_with(source))
         };
         match (request.repo_id, request.path) {
             (Some(repo_id), None) => {
                 let hub = self.hub();
-                let repo_dir = hub
-                    .as_deref()
-                    .map(|hub| hub.join(format!("models--{}", repo_id.replace('/', "--"))));
-                let repo_dir = repo_dir.map(|dir| dir.to_string_lossy().into_owned());
-                if repo_dir
-                    .as_deref()
-                    .is_some_and(|dir| in_use(dir).unwrap_or(true))
-                    || self.loaded_repo(&repo_id)?
-                {
+                let repo_dir = hub.as_deref().map(|hub| {
+                    hub.join(format!(
+                        "{HF_REPO_DIR_PREFIX}{}",
+                        repo_id.replace('/', HF_REPO_SEPARATOR)
+                    ))
+                });
+                if repo_dir.as_deref().is_some_and(in_use) || sources.contains(&repo_id) {
                     return Err(in_use_error(&repo_id));
                 }
                 let deleted = delete_hf_cache_repo(&repo_id, hub.as_deref())
@@ -468,12 +481,17 @@ impl ModelManager {
                         "`{path}` is not a local model"
                     )));
                 };
-                if entry.source != InventorySource::Local || entry.format != ModelFormat::Gguf {
+                let in_folder = self
+                    .config
+                    .folders
+                    .iter()
+                    .any(|folder| Path::new(&path).starts_with(folder));
+                if !in_folder || entry.format != ModelFormat::Gguf {
                     return Err(ApiError::invalid_request(
                         "only a model folder's GGUF files are deleted; delete a cached repository by `repo_id`",
                     ));
                 }
-                if entry.files.iter().any(|file| in_use(file).unwrap_or(true)) {
+                if entry.files.iter().any(|file| in_use(Path::new(file))) {
                     return Err(in_use_error(&path));
                 }
                 let mut freed_bytes = 0;
@@ -569,9 +587,10 @@ impl ModelManager {
     fn resolve(&self, source: &str) -> Result<Source, ApiError> {
         let path = Path::new(source);
         if path.is_absolute() {
+            // compared by components, so `.` and `..` would let one path pass for another
             let lexical = path
                 .components()
-                .all(|part| !matches!(part, Component::ParentDir));
+                .all(|part| !matches!(part, Component::ParentDir | Component::CurDir));
             let roots = self.config.folders.iter().cloned().chain(self.hub());
             let inside = lexical && roots.into_iter().any(|root| path.starts_with(root));
             if !inside || !path.exists() {
@@ -583,7 +602,8 @@ impl ModelManager {
                 .map_err(|error| ApiError::invalid_request(format!("{error:#}")))?;
             return Ok(Source::Local(Box::new(entry)));
         }
-        if is_repo_id(source) {
+        // the loader reads a name that exists relative to the server's working directory as that path
+        if is_repo_id(source) && !path.exists() {
             return Ok(Source::Repo(source.to_string()));
         }
         Err(ApiError::invalid_request(format!(
@@ -628,20 +648,38 @@ impl ModelManager {
         }
     }
 
-    fn served_kind(&self, id: &str) -> Result<ManagedKind, ApiError> {
+    fn served_kind(&self, id: &str) -> Option<ManagedKind> {
         self.engine
-            .models()?
+            .models()
+            .ok()?
             .data
             .into_iter()
             .find(|card| card.id == id)
             .and_then(|card| card.category)
             .map(Into::into)
-            .ok_or_else(ApiError::internal)
     }
 
-    fn loaded_repo(&self, repo_id: &str) -> Result<bool, ApiError> {
+    // what serving needs on disk: each managed model's source and projector, and the id of every model the manager
+    // did not load (started with `-m`, or added by `/v1/models/add`), which for a local model is its path
+    fn sources(&self) -> Result<Vec<String>, ApiError> {
         let loaded = self.loaded.read().map_err(|_| ApiError::internal())?;
-        Ok(loaded.values().any(|entry| entry.source == repo_id))
+        let layouts = self.layouts.read().map_err(|_| ApiError::internal())?;
+        let mut sources: Vec<String> = loaded
+            .values()
+            .flat_map(|entry| [Some(entry.source.clone()), entry.projector.clone()])
+            .flatten()
+            .chain(layouts.values().map(|layout| layout.source.clone()))
+            .collect();
+        sources.extend(
+            self.engine
+                .models()?
+                .data
+                .into_iter()
+                .filter(is_model_card)
+                .filter(|card| !loaded.contains_key(&card.id))
+                .map(|card| card.id),
+        );
+        Ok(sources)
     }
 
     // frees whatever serves `id`; whether anything did
@@ -652,16 +690,12 @@ impl ModelManager {
             .map_err(|_| ApiError::internal())?
             .remove(id)
             .is_some();
-        self.loaded
-            .write()
-            .map_err(|_| ApiError::internal())?
-            .remove(id);
         let served = self
             .engine
             .models()?
             .data
             .iter()
-            .any(|card| card.id == id && card.parent.is_none() && card.category.is_some());
+            .any(|card| card.id == id && is_model_card(card));
         if served {
             self.engine
                 .remove_model(ModelOperationRequest {
@@ -669,8 +703,18 @@ impl ModelManager {
                 })
                 .await?;
         }
+        // forgotten only once the engine let it go, so a refused removal keeps its files protected
+        self.loaded
+            .write()
+            .map_err(|_| ApiError::internal())?
+            .remove(id);
         Ok(layout || served)
     }
+}
+
+// a served model's card, not the `default` alias or a LoRA adapter's
+fn is_model_card(card: &ModelObject) -> bool {
+    card.parent.is_none() && card.id != crate::lora_routing::DEFAULT_MODEL_ID
 }
 
 fn status_of(status: Option<&str>) -> ModelStatus {
@@ -705,21 +749,6 @@ fn loadable_kind(entry: &InventoryModel) -> Result<ManagedKind, ApiError> {
             )));
         }
     })
-}
-
-// `org/name` (or a legacy bare `name`), as the Hub spells repository ids
-fn is_repo_id(source: &str) -> bool {
-    let valid = |part: &str| {
-        !part.is_empty()
-            && !part.starts_with('.')
-            && part
-                .chars()
-                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-    };
-    let mut parts = source.split('/');
-    let first = parts.next().is_some_and(valid);
-    let second = parts.next().is_none_or(valid);
-    first && second && parts.next().is_none()
 }
 
 fn in_use_error(what: &str) -> ApiError {

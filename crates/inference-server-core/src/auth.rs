@@ -43,6 +43,7 @@ const MAX_SESSIONS_PER_OWNER: usize = 32;
 const FETCH_SITE_HEADER: &str = "sec-fetch-site";
 const SAME_ORIGIN: &str = "same-origin";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
+const LOCALHOST: &str = "localhost";
 /// The error code of a request [`require_admin`] refuses.
 pub const ADMIN_REQUIRED_CODE: &str = "admin_required";
 /// Which requests pass without a key: `(method, path as the guarded router sees it)`.
@@ -318,6 +319,24 @@ fn same_origin(headers: &HeaderMap) -> bool {
     }
 }
 
+// The `Host` a request names is this machine's; a client sending none is not a browser.
+fn loopback_host(headers: &HeaderMap) -> bool {
+    let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return true;
+    };
+    let name = match host.strip_prefix('[') {
+        Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    name.eq_ignore_ascii_case(LOCALHOST)
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 // Anthropic clients read their own error envelope; everyone else reads OpenAI's.
 fn unauthorized(path: &str) -> Response {
     let error = ApiError::new(
@@ -365,10 +384,15 @@ async fn authenticate(
         (Some(auth), Some(owner)) => auth.keys.is_admin(owner),
         (Some(_), None) => false,
         // no peer address (a router served without connect info) is never taken for this machine
-        (None, _) => request
-            .extract_parts::<ConnectInfo<std::net::SocketAddr>>()
-            .await
-            .is_ok_and(|ConnectInfo(peer)| peer.ip().is_loopback()),
+        (None, _) => {
+            let local = request
+                .extract_parts::<ConnectInfo<std::net::SocketAddr>>()
+                .await
+                .is_ok_and(|ConnectInfo(peer)| peer.ip().is_loopback());
+            // any page the server's user opens is a loopback client too: only the server's own pages count, at a
+            // loopback name, so neither another site nor a name rebound to this machine acts as admin
+            local && same_origin(request.headers()) && loopback_host(request.headers())
+        }
     };
     request.extensions_mut().insert(owner);
     request.extensions_mut().insert(Admin(admin));

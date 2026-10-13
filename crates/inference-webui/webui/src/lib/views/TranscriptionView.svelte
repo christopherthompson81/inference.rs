@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import SlotBar from "../components/SlotBar.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
   import { diarize, transcribe } from "../services/manager";
@@ -19,6 +20,9 @@
   let segments = $state<Segment[]>([]);
 
   let ready = $derived(managerStore.servedIn("transcription") != null);
+  onDestroy(() => {
+    if (audioUrl) URL.revokeObjectURL(audioUrl);
+  });
   let diarizer = $derived(managerStore.servedIn("diarization") != null);
 
   function choose(file: File | undefined) {
@@ -53,13 +57,24 @@
     status = "Transcribing";
     const started = performance.now();
     try {
+      // the speakers are optional: a diarizer that fails leaves the transcript unlabeled
+      let speakersFailed = "";
       const [reply, turns] = await Promise.all([
         transcribe(SLOTS.transcription.id, audio, language.trim() || undefined),
-        diarizer ? diarize(SLOTS.diarization.id, audio).then((r) => r.segments) : Promise.resolve([]),
+        diarizer
+          ? diarize(SLOTS.diarization.id, audio).then(
+              (r) => r.segments,
+              (e) => {
+                speakersFailed = e instanceof Error ? e.message : String(e);
+                return [];
+              },
+            )
+          : Promise.resolve([]),
       ]);
       transcript = reply.text;
       segments = label(reply.segments ?? [], turns);
       status = `Done in ${((performance.now() - started) / 1000).toFixed(1)} s`;
+      if (speakersFailed) status += `; no speakers: ${speakersFailed}`;
     } catch (e) {
       status = e instanceof Error ? e.message : String(e);
     } finally {
@@ -82,6 +97,7 @@
     <input
       class="w-36 rounded-md border border-gray-300 bg-white px-2 py-1.5 text-sm dark:border-gray-700 dark:bg-gray-950"
       placeholder="Language (auto)"
+      aria-label="Language"
       bind:value={language}
     />
     <button

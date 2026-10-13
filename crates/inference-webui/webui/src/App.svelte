@@ -51,6 +51,8 @@
   }
 
   let tab = $state<Tab>(storedTab());
+  // set once onMount has applied the server's saved selection, which the effect below must not race
+  let started = $state(false);
 
   function show(next: Tab) {
     tab = next;
@@ -67,6 +69,7 @@
       const { models } = await api.listModels();
       modelStore.models = models;
       const current = models.some((model) => model.name === modelStore.selectedModel);
+      // the selection is the server's: change it only when the selected model went away, or none was selected
       if (!current && models.length > 0) {
         const preferred = models.find((model) => model.name === SLOTS.chat.id) ?? models[0];
         modelStore.selectModel(preferred.name);
@@ -81,7 +84,7 @@
 
   $effect(() => {
     void managerStore.changes;
-    void refreshChatModels();
+    if (started) void refreshChatModels();
   });
 
   onMount(async () => {
@@ -116,6 +119,8 @@
       }
     } catch (e) {
       console.error("Failed to initialize:", e);
+    } finally {
+      started = true;
     }
   });
 </script>
@@ -130,6 +135,7 @@
           ? 'bg-white font-medium text-gray-900 shadow-sm dark:bg-gray-800 dark:text-gray-100'
           : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}"
         onclick={() => show(item.id)}
+        aria-current={tab === item.id ? "page" : undefined}
       >
         {item.label}
       </button>

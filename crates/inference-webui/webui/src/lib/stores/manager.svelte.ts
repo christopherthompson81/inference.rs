@@ -10,6 +10,8 @@ export interface Slot {
   chat?: boolean;
   /** Offers a device, for the layout detector that runs beside the engine. */
   device?: boolean;
+  /** Also takes a text GGUF with a projector beside it, which the inventory lists as text. */
+  visionGguf?: boolean;
   hint: string;
 }
 
@@ -57,6 +59,7 @@ export const SLOTS = {
     title: "OCR model",
     kinds: ["multimodal"],
     chat: true,
+    visionGguf: true,
     hint: "PaddleOCR-VL, or another vision-language model",
   },
 } satisfies Record<string, Slot>;
@@ -113,6 +116,8 @@ class ManagerStore {
   /** Bumped after each load or unload, so views that list models refresh. */
   changes = $state(0);
   private timer: ReturnType<typeof setInterval> | null = null;
+  // a poll sent before a load finished must not overwrite the list read after it
+  private refreshes = 0;
 
   start(admin: boolean) {
     this.admin = admin;
@@ -122,8 +127,10 @@ class ManagerStore {
   }
 
   async refresh() {
+    const sent = ++this.refreshes;
     try {
-      this.served = await manager.servedModels();
+      const served = await manager.servedModels();
+      if (sent === this.refreshes) this.served = served;
     } catch {
       // a server without the manager serves no slots
     }
@@ -159,9 +166,8 @@ class ManagerStore {
 
   /** The inventory's models a slot can load, by name. */
   candidates(slot: SlotId): InventoryModel[] {
-    const kinds: ModelKind[] = SLOTS[slot].kinds;
     return (this.inventory?.models ?? [])
-      .filter((model) => model.kind != null && kinds.includes(model.kind))
+      .filter((model) => fits(slot, model))
       .sort((a, b) => displayName(a).localeCompare(displayName(b)));
   }
 
@@ -216,6 +222,14 @@ class ManagerStore {
     await this.refresh();
     this.changes++;
   }
+}
+
+/** Whether `slot` can load `model`. */
+export function fits(slot: SlotId, model: InventoryModel): boolean {
+  const spec: Slot = SLOTS[slot];
+  if (model.kind == null) return false;
+  if (spec.kinds.includes(model.kind)) return true;
+  return spec.visionGguf === true && model.kind === "text" && model.projectors.length > 0;
 }
 
 /** How a model is listed: a GGUF or `.nemo` by its file, anything else by its repository or folder name. */

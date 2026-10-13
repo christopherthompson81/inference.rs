@@ -156,7 +156,7 @@ fn known_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), Api
     }
 }
 
-// Removing a model or making it the default needs it running; an unloaded one is reloaded first.
+// Making a model the default needs it running; an unloaded one is reloaded first.
 pub(crate) fn loaded_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), ApiError> {
     known_model(state, model_id)?;
     match state.is_model_loaded(model_id) {
@@ -177,7 +177,17 @@ pub(crate) async fn remove_model(
     state: &SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> Result<ModelRemoved, ApiError> {
-    loaded_model(state, &request.model_id)?;
+    known_model(state, &request.model_id)?;
+    // an unloaded model is just forgotten; a reload in progress would bring it back
+    if matches!(
+        state.get_model_status(&request.model_id),
+        Ok(Some(CoreModelStatus::Reloading))
+    ) {
+        return Err(model_conflict(format!(
+            "model `{}` is reloading; remove it once it is loaded",
+            request.model_id
+        )));
+    }
     let (state, model_id) = (state.clone(), request.model_id.clone());
     // Removal hands the model's engine a blocking terminate.
     tokio::task::spawn_blocking(move || state.remove_model(&model_id))

@@ -186,6 +186,20 @@ async fn an_empty_server_loads_serves_and_unloads_models_from_its_folders() -> a
     )
     .await?;
     assert_eq!(models["data"].as_array().unwrap().len(), 1, "{models}");
+
+    // a model the engine unloaded is still freed, and forgotten
+    let (status, body) =
+        json_body(&app, post("/v1/models/unload", json!({"model_id": "asr"}))).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, _) =
+        json_body(&app, post("/v1/manager/unload", json!({"model_id": "asr"}))).await?;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (_, models) = json_body(
+        &app,
+        Request::get("/v1/manager/models").body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(models["data"], json!([]), "{models}");
     Ok(())
 }
 
@@ -213,6 +227,19 @@ async fn loads_reach_only_the_folders_and_only_for_admins() -> anyhow::Result<()
         .await?;
         assert_eq!(refused.last().unwrap().0, "error", "{source}: {refused:?}");
     }
+    let source = chat.path().to_string_lossy();
+    let assistant = json!({"source": source, "model_id": "x", "mtp": {"model": elsewhere.path()}});
+    let refused = events(&app, post("/v1/manager/load", assistant)).await?;
+    assert_eq!(
+        refused.last().unwrap().0,
+        "error",
+        "an assistant model is a path of its own: {refused:?}"
+    );
+    let outside = elsewhere.path().join("model.safetensors");
+    let (status, body) =
+        json_body(&app, post("/v1/manager/delete", json!({"path": outside}))).await?;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(elsewhere.path().join("config.json").exists());
 
     let lan = router(vec![chat.path().to_path_buf()], LAN).await?;
     let source = chat.path().to_string_lossy();

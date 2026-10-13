@@ -1,11 +1,13 @@
 <script lang="ts">
+  import { onDestroy } from "svelte";
   import SlotBar from "../components/SlotBar.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
   import { editImage, generateImage, type ImageOptions } from "../services/manager";
 
   let prompt = $state("A lighthouse on a rocky coast at dusk, oil painting");
-  let width = $state(1024);
-  let height = $state(1024);
+  // 0 leaves the size to the server: the model's default, or for an edit the reference's
+  let width = $state(0);
+  let height = $state(0);
   // 0 and -1 leave the model's own choice
   let steps = $state(0);
   let guidance = $state(0);
@@ -17,6 +19,7 @@
   let status = $state("");
 
   let ready = $derived(managerStore.servedIn("images") != null);
+  onDestroy(() => previews.forEach((url) => URL.revokeObjectURL(url)));
 
   function chooseReferences(files: FileList | null) {
     for (const url of previews) URL.revokeObjectURL(url);
@@ -29,8 +32,12 @@
     status = references.length > 0 ? "Editing" : "Generating";
     const started = performance.now();
     const options: ImageOptions = {};
-    // 0 leaves the size to the model, which for an edit is the reference's
     if (width > 0 && height > 0) Object.assign(options, { width, height });
+    else if (width > 0 || height > 0) {
+      status = "Give both width and height, or neither";
+      busy = false;
+      return;
+    }
     if (steps > 0) options.steps = steps;
     if (guidance > 0) options.guidance_scale = guidance;
     if (seed >= 0) options.seed = seed;
@@ -55,8 +62,8 @@
 
   <textarea class="min-h-20 {field}" bind:value={prompt}></textarea>
   <div class="flex flex-wrap items-end gap-2">
-    <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Width (0: model's)</span><input type="number" step="64" min="0" class="w-24 {field}" bind:value={width} /></label>
-    <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Height</span><input type="number" step="64" min="0" class="w-24 {field}" bind:value={height} /></label>
+    <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Width (0: default)</span><input type="number" step="64" min="0" class="w-24 {field}" bind:value={width} /></label>
+    <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Height (0: default)</span><input type="number" step="64" min="0" class="w-24 {field}" bind:value={height} /></label>
     <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Steps (0: model's)</span><input type="number" min="0" class="w-24 {field}" bind:value={steps} /></label>
     <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Guidance (0: model's)</span><input type="number" min="0" step="0.5" class="w-24 {field}" bind:value={guidance} /></label>
     <label class="flex flex-col gap-1"><span class="text-[11px] text-gray-500">Seed (-1: random)</span><input type="number" min="-1" class="w-28 {field}" bind:value={seed} /></label>

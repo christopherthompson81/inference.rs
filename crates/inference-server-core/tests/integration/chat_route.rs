@@ -663,5 +663,54 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
             "model management {enabled}, {peer:?}"
         );
     }
+
+    // a page the server's user opens reaches it from loopback too: only the server's own pages count
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_model_management(true)
+        .build()
+        .await?
+        .layer(axum::extract::connect_info::MockConnectInfo(loopback));
+    let browsers = [
+        (
+            "localhost:1234",
+            Some("cross-site"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            "localhost:1234",
+            None,
+            Some("http://attacker.example"),
+            StatusCode::FORBIDDEN,
+        ),
+        // a name the attacker rebound to this machine
+        (
+            "attacker.example:1234",
+            Some("same-origin"),
+            None,
+            StatusCode::FORBIDDEN,
+        ),
+        ("localhost:1234", Some("same-origin"), None, StatusCode::OK),
+        (
+            "[::1]:1234",
+            None,
+            Some("http://[::1]:1234"),
+            StatusCode::OK,
+        ),
+    ];
+    for (host, site, origin, status) in browsers {
+        let mut request = set_default()?;
+        let headers = request.headers_mut();
+        headers.insert("host", host.parse()?);
+        if let Some(site) = site {
+            headers.insert("sec-fetch-site", site.parse()?);
+        }
+        if let Some(origin) = origin {
+            headers.insert("origin", origin.parse()?);
+        }
+        let response = app.clone().oneshot(request).await?;
+        assert_eq!(response.status(), status, "{host} {site:?} {origin:?}");
+    }
     Ok(())
 }

@@ -303,7 +303,24 @@ impl InferenceRs {
                 let _ = engine_instance.sender.blocking_send(Request::Terminate);
                 Ok(())
             }
-            _ => Err(format!("Model {resolved_model_id} not found")),
+            None => {
+                drop(engines);
+                // an unloaded model has no engine to stop, only the state its reload would use
+                let forgotten = self
+                    .unloaded_models
+                    .write()
+                    .map_err(|_| "Failed to acquire write lock on unloaded_models")?
+                    .remove(&resolved_model_id)
+                    .is_some();
+                if !forgotten {
+                    return Err(format!("Model {resolved_model_id} not found"));
+                }
+                self.model_aliases
+                    .write()
+                    .map_err(|_| "Failed to acquire write lock on model_aliases")?
+                    .retain(|_, target| target != &resolved_model_id);
+                Ok(())
+            }
         }
     }
 

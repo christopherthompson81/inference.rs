@@ -119,6 +119,30 @@ pub fn hf_cache_delete_json(request: &[u8]) -> Result<String, ApiError> {
     to_json(&deleted)
 }
 
+/// `org/name` (or a legacy bare `name`), as the Hub spells repository ids.
+pub(crate) fn is_repo_id(source: &str) -> bool {
+    let valid = |part: &str| {
+        !part.is_empty()
+            && !part.starts_with('.')
+            && part
+                .chars()
+                .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    };
+    let mut parts = source.split('/');
+    let first = parts.next().is_some_and(valid);
+    let second = parts.next().is_none_or(valid);
+    first && second && parts.next().is_none()
+}
+
+// a path inside the repository: plain components only, no root, `.` or `..`
+fn is_relative_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.contains('\\')
+        && std::path::Path::new(name)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
 fn event(name: &str, data: serde_json::Value) -> String {
     json!({ "event": name, "data": data }).to_string()
 }
@@ -156,6 +180,19 @@ pub(crate) fn model_download(request: &[u8]) -> Result<ModelDownload, ApiError> 
 pub(crate) fn model_download_from(
     request: ModelDownloadRequest,
 ) -> Result<ModelDownload, ApiError> {
+    // the cache's paths are built from these, so none may climb out of it
+    if !is_repo_id(&request.repo_id) {
+        return Err(ApiError::invalid_request(format!(
+            "`{}` is not a Hugging Face repository id (`org/name`)",
+            request.repo_id
+        )));
+    }
+    let names = request.revision.iter().chain(&request.files);
+    if let Some(bad) = names.into_iter().find(|name| !is_relative_name(name)) {
+        return Err(ApiError::invalid_request(format!(
+            "`{bad}` is not a plain revision or file name in the repository"
+        )));
+    }
     let token_source = match request.token_source.as_deref() {
         Some(value) => value
             .parse::<TokenSource>()
@@ -269,4 +306,46 @@ pub(crate) struct ModelDownload {
     pub(crate) work: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     pub(crate) events: std::pin::Pin<Box<dyn Stream<Item = String> + Send>>,
     pub(crate) cancellation: RequestCancellation,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn download(repo_id: &str, revision: Option<&str>, files: &[&str]) -> Result<(), ApiError> {
+        model_download_from(ModelDownloadRequest {
+            repo_id: repo_id.to_string(),
+            revision: revision.map(str::to_string),
+            files: files.iter().map(|file| file.to_string()).collect(),
+            quant: None,
+            token_source: None,
+            hf_cache_path: None,
+        })
+        .map(drop)
+    }
+
+    #[test]
+    fn a_download_names_nothing_outside_its_repository() {
+        assert!(
+            download(
+                "org/model",
+                Some("main"),
+                &["config.json", "sub/model.gguf"]
+            )
+            .is_ok()
+        );
+        for (repo, revision, file) in [
+            ("../org/model", None, "config.json"),
+            ("org/model", Some("main/../../../../outside"), "config.json"),
+            ("org/model", None, "../../outside"),
+            ("org/model", None, "/etc/outside"),
+            ("org/model", None, "./config.json"),
+            ("org/model", None, "a\\..\\b"),
+        ] {
+            assert!(
+                download(repo, revision, &[file]).is_err(),
+                "{repo} {revision:?} {file}"
+            );
+        }
+    }
 }

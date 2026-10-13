@@ -33,17 +33,25 @@
   let ocrReady = $derived(managerStore.servedIn("ocr") != null);
   let badge = $derived(Math.max(8, size.width * BADGE_PAGE_FRACTION));
 
-  function choose(file: File | undefined) {
+  // drawn upright into a PNG first: the browser applies a photo's EXIF rotation and the server's decoder does not,
+  // so the boxes it returns and the crops cut here must come from the same pixels
+  async function choose(file: File | undefined) {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      page = reader.result as string;
+    try {
+      const bitmap = await createImageBitmap(file, { imageOrientation: "from-image" });
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      canvas.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      page = canvas.toDataURL("image/png");
       pageName = file.name;
       regions = [];
       text = "";
       status = file.name;
-    };
-    reader.readAsDataURL(file);
+    } catch (e) {
+      status = `${file.name}: ${e instanceof Error ? e.message : String(e)}`;
+    }
   }
 
   function loaded(event: Event) {
@@ -69,9 +77,8 @@
     }
   }
 
-  // the region's box of the page, clamped to it, as a PNG data URL
-  function crop(box: [number, number, number, number]): string {
-    const image = pageImage!;
+  // the region's box of `image`, clamped to it, as a PNG data URL
+  function crop(image: HTMLImageElement, size: { width: number; height: number }, box: [number, number, number, number]): string {
     const left = Math.min(Math.max(Math.floor(box[0]), 0), size.width - 1);
     const top = Math.min(Math.max(Math.floor(box[1]), 0), size.height - 1);
     const right = Math.min(Math.max(Math.ceil(box[2]), left + 1), size.width);
@@ -98,10 +105,13 @@
     busy = true;
     text = "";
     const started = performance.now();
+    // the page as it was when reading began
+    const image = pageImage;
+    const pageSize = { ...size };
     try {
       for (const [index, job] of jobs.entries()) {
         status = `Reading ${index + 1} of ${jobs.length}`;
-        const read = await readImage(SLOTS.ocr.id, crop(job.box), job.prompt);
+        const read = await readImage(SLOTS.ocr.id, crop(image, pageSize, job.box), job.prompt);
         if (job.region) job.region.text = read;
         text += `${read}\n\n`;
       }
@@ -125,7 +135,7 @@
   <div class="flex flex-wrap items-center gap-2">
     <label class="cursor-pointer rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-800">
       Choose page...
-      <input type="file" accept="image/*" class="hidden" onchange={(e) => choose(e.currentTarget.files?.[0])} />
+      <input type="file" accept="image/*" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget.files?.[0])} />
     </label>
     <button class="{button} bg-blue-600 text-white hover:bg-blue-700" onclick={detect} disabled={!layoutReady || !page || busy}>
       Detect layout

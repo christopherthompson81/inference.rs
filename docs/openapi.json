@@ -6521,7 +6521,7 @@
               },
               {
                 "$ref": "#/components/schemas/MtpSpec",
-                "description": "Speculative decoding with the checkpoint's own MTP head."
+                "description": "Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`\nis refused."
               }
             ]
           },
@@ -6530,12 +6530,12 @@
               "integer",
               "null"
             ],
-            "description": "Tokens of context the model's paged KV cache holds; unset uses the server's setting.",
+            "description": "Tokens of context the model's paged KV cache holds; unset uses the server's setting, and without paged attention\nit is ignored.",
             "minimum": 0
           },
           "source": {
             "type": "string",
-            "description": "An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached."
+            "description": "An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout\nmodel loads from the inventory."
           }
         },
         "additionalProperties": false

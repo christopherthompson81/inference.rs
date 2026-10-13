@@ -11,12 +11,25 @@
   let served = $derived(managerStore.servedIn(slot));
   let activity = $derived(managerStore.activityOf(slot));
   let candidates = $derived(managerStore.candidates(slot));
-  let listed = $derived(candidates.some((model) => model.path === form.source));
-  let choice = $state("");
-  let repo = $state("");
-  // until the user picks, the form follows what the slot serves
-  let picked = $state(false);
-  let entry = $derived(listed ? managerStore.entry(form.source) : undefined);
+  // what the user picked in this bar; until then it shows the slot's model, the last one kept, or the first candidate
+  let pickedChoice = $state<string | null>(null);
+  let typedRepo = $state<string | null>(null);
+  let pickedProjector = $state<string | null>(null);
+  const listed = (path: string) => candidates.some((model) => model.path === path);
+  // while a load runs or after it failed, the form holds what it was asked for
+  let fallback = $derived(
+    activity.busy || activity.error
+      ? form.source
+      : served?.source || form.source || candidates[0]?.path || "",
+  );
+  let choice = $derived(pickedChoice ?? (fallback && listed(fallback) ? fallback : REPO));
+  let repo = $derived(typedRepo ?? (fallback && !listed(fallback) ? fallback : ""));
+  let source = $derived(choice === REPO ? repo.trim() : choice);
+  let entry = $derived(choice === REPO ? undefined : managerStore.entry(choice));
+  let projector = $derived(
+    pickedProjector ??
+      (served?.source === source ? (served?.projector ?? "") : form.source === source ? form.mmproj : ""),
+  );
   let percent = $derived(
     activity.progress && activity.progress.total > 0
       ? Math.round((100 * activity.progress.done) / activity.progress.total)
@@ -30,30 +43,9 @@
     return served.source.startsWith("/") ? baseName(served.source) : served.source;
   });
 
-  $effect(() => {
-    const source = served?.source;
-    if (source && !picked && form.source !== source) {
-      form.source = source;
-      form.mmproj = served?.projector ?? "";
-    }
-  });
-
-  // the select follows the form: a listed source picks its entry, anything else is a repository
-  $effect(() => {
-    if (listed) choice = form.source;
-    else if (form.source) {
-      choice = REPO;
-      repo = form.source;
-    } else if (candidates[0]) form.source = candidates[0].path;
-    else choice = REPO;
-  });
-
   function pick(value: string) {
-    picked = true;
-    choice = value;
-    form.source = value === REPO ? repo.trim() : value;
-    form.mmproj = "";
-    managerStore.persistForms();
+    pickedChoice = value;
+    pickedProjector = null;
   }
 
   function details(path: string): string {
@@ -65,9 +57,13 @@
   }
 
   async function load() {
-    if (choice === REPO) form.source = repo.trim();
-    if (!form.source) return;
+    if (!source) return;
+    form.source = source;
+    form.mmproj = projector;
     await managerStore.load(slot);
+    if (!managerStore.activityOf(slot).error) {
+      pickedChoice = typedRepo = pickedProjector = null;
+    }
   }
 </script>
 
@@ -109,8 +105,9 @@
         <input
           class="min-w-56 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
           placeholder="org/model"
-          bind:value={repo}
-          onchange={() => pick(REPO)}
+          aria-label="Hugging Face repository"
+          value={repo}
+          oninput={(e) => (typedRepo = e.currentTarget.value)}
           disabled={activity.busy}
         />
       {/if}
@@ -119,8 +116,8 @@
           <span class="text-[11px] text-gray-500 dark:text-gray-400">Projector (images, audio)</span>
           <select
             class="max-w-56 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
-            bind:value={form.mmproj}
-            onchange={() => managerStore.persistForms()}
+            value={projector}
+            onchange={(e) => (pickedProjector = e.currentTarget.value)}
             disabled={activity.busy}
           >
             <option value="">{entry.projectors.length === 1 ? "The one beside it" : "None (text only)"}</option>
@@ -181,7 +178,7 @@
         <button
           class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           onclick={load}
-          disabled={activity.busy || (choice === REPO ? !repo.trim() : !form.source)}
+          disabled={activity.busy || !source}
         >
           {served ? "Replace" : "Load"}
         </button>

@@ -846,6 +846,11 @@ impl InferenceRsForServerBuilder {
         if !self.models.is_empty() {
             self.build_multi_model().await
         } else if self.model.is_none() {
+            if self.mtp_config.is_some() {
+                warn!(
+                    "MTP applies to a model given at startup; a model added later takes its own `mtp`"
+                );
+            }
             Ok(InferenceRs::empty(self.log))
         } else {
             self.build_single_model().await
@@ -1371,8 +1376,13 @@ impl ModelLoadSettings {
         mtp: Option<&MtpConfig>,
     ) -> Result<Option<PagedAttentionConfig>> {
         let mut cache = planned;
-        if let (Some(cache), Some(tokens)) = (cache.as_mut(), model_config.paged_context_len) {
-            cache.mem_gpu = MemoryGpuConfig::ContextSize(tokens);
+        match (cache.as_mut(), model_config.paged_context_len) {
+            (Some(cache), Some(tokens)) => cache.mem_gpu = MemoryGpuConfig::ContextSize(tokens),
+            (None, Some(_)) => warn!(
+                "`paged_context_len` sizes a paged KV cache; `{}` loads without paged attention",
+                model_config.model_id
+            ),
+            _ => {}
         }
         if mtp.is_none() {
             return Ok(cache);
