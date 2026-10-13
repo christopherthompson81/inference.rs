@@ -379,7 +379,7 @@ pub async fn upload_text(
 }
 
 pub async fn list_models(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
-    let models: Vec<_> = app.models.values().cloned().collect();
+    let models: Vec<_> = crate::chat_models(&app.engine).into_values().collect();
     Json(json!({ "models": models }))
 }
 
@@ -387,7 +387,7 @@ pub async fn select_model(
     Extension(app): Extension<Arc<AppState>>,
     Json(req): Json<SelectRequest>,
 ) -> impl IntoResponse {
-    if !app.models.contains_key(&req.name) {
+    if !crate::chat_models(&app.engine).contains_key(&req.name) {
         return (
             StatusCode::BAD_REQUEST,
             format!("Model '{}' not found", req.name),
@@ -431,15 +431,15 @@ pub async fn new_chat(
     Extension(app): Extension<Arc<AppState>>,
     Json(req): Json<NewChatRequest>,
 ) -> impl IntoResponse {
-    if !app.models.contains_key(&req.model) {
+    let models = crate::chat_models(&app.engine);
+    if !models.contains_key(&req.model) {
         return (StatusCode::BAD_REQUEST, "Unknown model").into_response();
     }
 
     let chat_id = format!("chat_{}", Uuid::new_v4().simple());
 
     let now = Utc::now().to_rfc3339();
-    let kind = app
-        .models
+    let kind = models
         .get(&req.model)
         .map(|m| m.kind.clone())
         .unwrap_or_else(|| "text".to_string());
@@ -658,8 +658,8 @@ pub async fn get_settings(Extension(app): Extension<Arc<AppState>>) -> impl Into
     let current_model = app.current.read().await.clone();
     let defaults = current_model
         .as_ref()
-        .and_then(|model_id| app.models.get(model_id))
-        .map(|model| model.generation_defaults.clone())
+        .and_then(|model_id| crate::chat_models(&app.engine).swap_remove(model_id))
+        .map(|model| model.generation_defaults)
         .unwrap_or_else(|| app.default_params.clone());
 
     Json(json!({
@@ -690,8 +690,8 @@ pub async fn generate_speech(
         }
     };
 
-    let kind = app
-        .models
+    let models = crate::chat_models(&app.engine);
+    let kind = models
         .get(&model_name)
         .map(|m| m.kind.as_str())
         .unwrap_or("text");
@@ -734,8 +734,13 @@ pub async fn generate_speech(
     (StatusCode::OK, Json(json!({ "url": url }))).into_response()
 }
 
-pub async fn get_capabilities(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
+pub async fn get_capabilities(
+    Extension(app): Extension<Arc<AppState>>,
+    admin: Option<Extension<inference_server_core::auth::Admin>>,
+) -> impl IntoResponse {
     Json(json!({
+        // whether this client may load, unload, download and delete models
+        "admin": admin.is_some_and(|Extension(admin)| admin.0),
         "search_enabled": app.search_enabled,
         "code_execution_enabled": app.code_execution_enabled,
         "shell_enabled": app.shell_enabled,

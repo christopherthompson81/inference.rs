@@ -147,6 +147,27 @@ async fn only_an_admin_key_changes_the_served_models() -> anyhow::Result<()> {
             .set_admins(["team-c".to_string()])
             .is_err()
     );
+
+    // the web UI shows its model controls to admins only
+    let mut keys = ApiKeys::parse(KEYS)?;
+    keys.set_admins(["team-a".to_string()])?;
+    let auth = Auth::new(keys);
+    let api = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_auth(auth.clone())
+        .build()
+        .await?;
+    let options = inference_webui::UiOptions {
+        auth,
+        ..Default::default()
+    };
+    let ui = inference_webui::mount(api, &engine, options, Default::default()).await?;
+    for (key, admin) in [(ALPHA, true), (BETA, false)] {
+        let (code, body) = status_and_body(&ui, get("/ui/api/capabilities", key)).await?;
+        assert_eq!(code, StatusCode::OK, "{body}");
+        let capabilities: Value = serde_json::from_str(&body)?;
+        assert_eq!(capabilities["admin"], json!(admin), "{body}");
+    }
     Ok(())
 }
 

@@ -1,4 +1,3 @@
-use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
@@ -137,7 +136,6 @@ impl GenerationParams {
 pub struct AppState {
     /// Acts for `owner`, so the sessions this state forks and restores are that owner's.
     pub engine: Engine,
-    pub models: IndexMap<String, UiModelInfo>,
     /// The model a new owner's UI starts on.
     pub default_model: Option<String>,
     pub current: RwLock<Option<String>>,
@@ -173,7 +171,6 @@ impl AppState {
         std::fs::create_dir_all(&chats_dir)?;
         Ok(Self {
             engine: self.engine.for_owner(owner),
-            models: self.models.clone(),
             default_model: self.default_model.clone(),
             current: RwLock::new(self.default_model.clone()),
             owner: Some(owner.to_string()),

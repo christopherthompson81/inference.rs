@@ -128,7 +128,8 @@
           onclick={() => (openParam = openParam === key ? null : key)}
         >
           <span class="text-gray-400 dark:text-gray-500">{label}</span>
-          <span class="text-gray-700 dark:text-gray-200">{value ?? "—"}</span>
+          <!-- an f32 default (1.1) comes back as 1.100000023841858 -->
+          <span class="text-gray-700 dark:text-gray-200">{value == null ? "—" : +value.toFixed(4)}</span>
         </button>
         {#if openParam === key}
           {#if key === "temp"}

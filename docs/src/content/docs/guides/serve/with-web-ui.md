@@ -4,14 +4,27 @@ description: What you get from the built-in web UI mounted at /ui, and how to cu
 ---
 
 ```bash
-inference serve -m Qwen/Qwen3-4B
+inference serve --model-folder ~/models
 ```
 
 Open `http://localhost:1234/ui`. The built-in web UI is mounted at `/ui` by default whenever you run `inference serve`. It is a single-page app bundled into the binary; nothing is fetched from the network at runtime.
 
-The UI provides:
+Started without `-m` or `-f`, the server loads nothing until you choose models in the UI. It has a tab per job, each with its own model:
 
-- A chat panel with markdown rendering, code block syntax highlighting, and streamed output.
+- **Chat**: the chat panel below, over a text or multimodal model.
+- **Speech to text**: an audio file's transcript with segment times, and speaker labels when a diarization model is loaded too.
+- **Text to speech**: a WAV from Kokoro or Dia, played in the page or saved.
+- **Images**: text to image with HiDream-O1 or FLUX, and with reference images, HiDream-O1's edits.
+- **Documents**: PP-DocLayoutV3 layout regions drawn over a page image, each then read by an OCR model such as PaddleOCR-VL with the prompt for its kind (text, table, formula, chart).
+- **Models**: the models in the `--model-folder` folders and the Hugging Face cache, loaded into a tab with a click, downloaded from the Hub with progress, or deleted.
+
+Each tab's model bar picks a model from those folders or the cache, or names a Hugging Face repository, and loads it with its options: the KV context length and MTP speculative decoding for chat models, the projector beside a text GGUF, the device for the layout model. Loading shows its progress and replaces the tab's previous model; **Unload** frees it. A model started with `-m` still loads at startup and can be chatted with as before.
+
+Loading, unloading, downloading and deleting are an admin's. On a server without keys that is a browser on the server's own machine (open the UI at `localhost`); everyone else sees which models are loaded and uses them. With keys, the owners named with `--admin` are admins. See [the model manager](/reference/http-api/#model-manager) for the routes behind the tabs.
+
+The chat panel provides:
+
+- Markdown rendering, code block syntax highlighting, and streamed output.
 - A settings drawer with sampling controls (temperature, top-p, top-k, max tokens) and a system prompt field.
 - Inline rendering of thinking tokens when the model emits them, with Default, Off, Low, Medium, High, and XHigh reasoning controls.
 - Tool-call visualization when `--enable-search`, `--enable-code-execution`, or `--enable-shell` is also set.
