@@ -12,11 +12,8 @@ export interface RenderedPage {
 
 /** A PDF opened for rendering its pages; pdf.js loads only when a PDF is opened. */
 export async function openPdf(file: Blob): Promise<PDFDocumentProxy> {
-  // the legacy build polyfills what the modern one assumes (Uint8Array.toHex), which browsers a year old lack
-  const [pdfjs, worker] = await Promise.all([
-    import("pdfjs-dist/legacy/build/pdf.mjs"),
-    import("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url"),
-  ]);
+  // the modern build needs a current browser (Uint8Array.toHex: Chrome 140, Firefox 133, Safari 18.2)
+  const [pdfjs, worker] = await Promise.all([import("pdfjs-dist"), import("pdfjs-dist/build/pdf.worker.min.mjs?url")]);
   pdfjs.GlobalWorkerOptions.workerSrc = worker.default;
   return pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
 }
