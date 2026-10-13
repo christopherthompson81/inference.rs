@@ -107,6 +107,7 @@ function storedForms(): Record<SlotId, SlotForm> {
 class ManagerStore {
   /** Whether this client may load, unload, download and delete models. */
   admin = $state(false);
+  keyed = $state(false);
   served = $state<ManagedModel[]>([]);
   inventory = $state<Inventory | null>(null);
   inventoryError = $state<string | null>(null);
@@ -119,8 +120,9 @@ class ManagerStore {
   // a poll sent before a load finished must not overwrite the list read after it
   private refreshes = 0;
 
-  start(admin: boolean) {
+  start(admin: boolean, keyed: boolean) {
     this.admin = admin;
+    this.keyed = keyed;
     void this.refresh();
     if (admin) void this.scan();
     this.timer ??= setInterval(() => void this.refresh(), REFRESH_MS);

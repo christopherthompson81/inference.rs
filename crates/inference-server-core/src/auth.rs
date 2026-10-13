@@ -44,6 +44,18 @@ const FETCH_SITE_HEADER: &str = "sec-fetch-site";
 const SAME_ORIGIN: &str = "same-origin";
 const FORWARDED_PROTO_HEADER: &str = "x-forwarded-proto";
 const LOCALHOST: &str = "localhost";
+// headers a proxy adds for the client it passes a request on for
+const FORWARDING_HEADERS: &[&str] = &[
+    "forwarded",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+    "via",
+];
+// how long the machine's name resolves the same
+const HOSTNAME_TTL: Duration = Duration::from_secs(30);
+#[cfg(unix)]
+const HOSTNAME_MAX: usize = 256;
 /// The error code of a request [`require_admin`] refuses.
 pub const ADMIN_REQUIRED_CODE: &str = "admin_required";
 /// Which requests pass without a key: `(method, path as the guarded router sees it)`.
@@ -319,8 +331,86 @@ fn same_origin(headers: &HeaderMap) -> bool {
     }
 }
 
-// The `Host` a request names is this machine's; a client sending none is not a browser.
-fn loopback_host(headers: &HeaderMap) -> bool {
+/// A connection's two ends, which tell a client on the server's own machine from the rest. A keyless server's
+/// local admin needs it as the router's connect info (`into_make_service_with_connect_info::<Peer>()`).
+#[derive(Debug, Clone, Copy)]
+pub struct Peer {
+    pub remote: std::net::SocketAddr,
+    /// The address the client reached, when the listener knows it; without it only loopback is this machine, by
+    /// a loopback name.
+    pub local: Option<std::net::SocketAddr>,
+}
+
+impl From<std::net::SocketAddr> for Peer {
+    fn from(remote: std::net::SocketAddr) -> Self {
+        Self {
+            remote,
+            local: None,
+        }
+    }
+}
+
+impl Peer {
+    // a client on this machine: over loopback, or from the very address it reached, which only the machine itself
+    // can complete a handshake from
+    fn is_this_machine(&self) -> bool {
+        let remote = self.remote.ip().to_canonical();
+        remote.is_loopback() || self.local_ip() == Some(remote)
+    }
+
+    fn local_ip(&self) -> Option<std::net::IpAddr> {
+        self.local.map(|local| local.ip().to_canonical())
+    }
+}
+
+// a request a proxy passed on: its client may be anywhere, however local the proxy's own connection looks
+fn forwarded(headers: &HeaderMap) -> bool {
+    FORWARDING_HEADERS
+        .iter()
+        .any(|name| headers.contains_key(*name))
+}
+
+// This machine's name, which a browser on it may name the server by.
+fn machine_hostname() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            let mut buffer = [0u8; HOSTNAME_MAX];
+            // SAFETY: the buffer outlives the call, which writes at most its length
+            let written = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) };
+            let end = buffer.iter().position(|&b| b == 0).unwrap_or(buffer.len());
+            (written == 0 && end > 0).then(|| String::from_utf8_lossy(&buffer[..end]).into_owned())
+        }
+        #[cfg(not(unix))]
+        {
+            std::env::var("COMPUTERNAME").ok()
+        }
+    })
+    .as_deref()
+}
+
+// What the machine's name resolves to here, kept briefly: a browser naming the server by it gets one of these.
+async fn machine_hostname_addresses(machine: &str) -> Vec<std::net::IpAddr> {
+    static RESOLVED: Mutex<Option<(Instant, Vec<std::net::IpAddr>)>> = Mutex::new(None);
+    if let Some((at, addresses)) = RESOLVED.lock().unwrap().as_ref()
+        && at.elapsed() < HOSTNAME_TTL
+    {
+        return addresses.clone();
+    }
+    let addresses: Vec<_> = tokio::net::lookup_host((machine, 0))
+        .await
+        .map(|found| found.map(|address| address.ip().to_canonical()).collect())
+        .unwrap_or_default();
+    *RESOLVED.lock().unwrap() = Some((Instant::now(), addresses.clone()));
+    addresses
+}
+
+// The `Host` a request names is this machine: a loopback name, or the address the client reached, by its literal or
+// by the machine's own single-label name resolving to it. A site's domain rebound here is none of these, and a proxy
+// on this machine reaches a different address than the name its clients use. A client sending no `Host` is not a
+// browser.
+async fn this_machine_host(headers: &HeaderMap, peer: &Peer) -> bool {
     let Some(host) = headers
         .get(axum::http::header::HOST)
         .and_then(|value| value.to_str().ok())
@@ -331,10 +421,21 @@ fn loopback_host(headers: &HeaderMap) -> bool {
         Some(bracketed) => bracketed.split(']').next().unwrap_or_default(),
         None => host.split(':').next().unwrap_or_default(),
     };
-    name.eq_ignore_ascii_case(LOCALHOST)
-        || name
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
+    if name.eq_ignore_ascii_case(LOCALHOST) {
+        return true;
+    }
+    if let Ok(ip) = name.parse::<std::net::IpAddr>() {
+        let ip = ip.to_canonical();
+        return ip.is_loopback() || peer.local_ip() == Some(ip);
+    }
+    // a dotted name (an FQDN, `.local`) may be answered by the network, so it could be rebound
+    let Some(machine) = machine_hostname().filter(|machine| !machine.contains('.')) else {
+        return false;
+    };
+    let Some(local) = peer.local_ip() else {
+        return false;
+    };
+    name.eq_ignore_ascii_case(machine) && machine_hostname_addresses(machine).await.contains(&local)
 }
 
 // Anthropic clients read their own error envelope; everyone else reads OpenAI's.
@@ -385,13 +486,23 @@ async fn authenticate(
         (Some(_), None) => false,
         // no peer address (a router served without connect info) is never taken for this machine
         (None, _) => {
-            let local = request
-                .extract_parts::<ConnectInfo<std::net::SocketAddr>>()
+            let peer = request
+                .extract_parts::<ConnectInfo<Peer>>()
                 .await
-                .is_ok_and(|ConnectInfo(peer)| peer.ip().is_loopback());
-            // any page the server's user opens is a loopback client too: only the server's own pages count, at a
-            // loopback name, so neither another site nor a name rebound to this machine acts as admin
-            local && same_origin(request.headers()) && loopback_host(request.headers())
+                .ok()
+                .map(|ConnectInfo(peer)| peer);
+            // any page the server's user opens is a local client too: only the server's own pages count, at a name
+            // for this machine, so neither another site nor a name rebound to this machine acts as admin
+            match peer {
+                Some(peer)
+                    if peer.is_this_machine()
+                        && !forwarded(request.headers())
+                        && same_origin(request.headers()) =>
+                {
+                    this_machine_host(request.headers(), &peer).await
+                }
+                _ => false,
+            }
         }
     };
     request.extensions_mut().insert(owner);
@@ -498,6 +609,36 @@ fn session_cookie_response(cookie: &str) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_browser_on_this_machine_may_name_it_by_its_hostname() {
+        let Some(machine) = machine_hostname().filter(|machine| !machine.contains('.')) else {
+            return;
+        };
+        let Some(resolved) = machine_hostname_addresses(machine).await.first().copied() else {
+            return;
+        };
+        let at = |local: std::net::IpAddr| Peer {
+            remote: (local, 40000).into(),
+            local: Some((local, 1234).into()),
+        };
+        let host = async |name: String, peer: Peer| {
+            let mut headers = HeaderMap::new();
+            headers.insert(axum::http::header::HOST, name.parse().unwrap());
+            this_machine_host(&headers, &peer).await
+        };
+        assert!(host(format!("{machine}:1234"), at(resolved)).await);
+        assert!(host(format!("{}:1234", machine.to_uppercase()), at(resolved)).await);
+        // a proxy on this machine reaches loopback, not what the name its clients use resolves to
+        let proxy = std::net::Ipv4Addr::new(127, 0, 0, 3).into();
+        if resolved != proxy {
+            assert!(!host(format!("{machine}:1234"), at(proxy)).await);
+        }
+        assert!(!host(format!("{machine}.local:1234"), at(resolved)).await);
+        assert!(!host(format!("{machine}.attacker.example:1234"), at(resolved)).await);
+        assert!(host("localhost:1234".into(), at(proxy)).await);
+        assert!(!host("192.0.2.1:1234".into(), at(proxy)).await);
+    }
 
     #[test]
     fn a_keys_file_maps_each_key_to_its_owner() {

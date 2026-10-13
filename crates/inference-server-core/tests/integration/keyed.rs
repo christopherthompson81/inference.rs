@@ -122,7 +122,10 @@ async fn only_an_admin_key_changes_the_served_models() -> anyhow::Result<()> {
         .await?
         // a keyed server goes by the key, wherever the client is
         .layer(axum::extract::connect_info::MockConnectInfo(
-            std::net::SocketAddr::from(([127, 0, 0, 1], 40000)),
+            inference_server_core::auth::Peer::from(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                40000,
+            ))),
         ));
     let model_id = engine.default_model_id().expect("a default model");
     let status = json!({ "model_id": model_id });

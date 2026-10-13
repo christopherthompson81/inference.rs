@@ -113,8 +113,13 @@
 
 {#if !managerStore.admin}
   <div class="m-auto max-w-md p-8 text-center text-sm text-gray-500">
-    Loading, downloading and deleting models is for admins: a key the server lists with <code>--admin</code>, or, on a
-    server without keys, a browser on the server's own machine (open it at <code>localhost</code>).
+    {#if managerStore.keyed}
+      Loading, downloading and deleting models is for admins: the keys the server names with <code>--admin</code>.
+    {:else}
+      Loading, downloading and deleting models is for a browser on the server's own machine, at
+      <code>localhost</code>, its address or its name. From another device, start the server with keys and
+      <code>--admin</code>.
+    {/if}
   </div>
 {:else}
   <div class="flex min-h-0 w-full flex-1 flex-col gap-3 overflow-hidden p-4">

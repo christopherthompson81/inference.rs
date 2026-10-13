@@ -159,6 +159,8 @@ pub struct AppState {
     pub shell_enabled: bool,
     /// Tool dispatch URL (if configured)
     pub tool_dispatch_url: Option<String>,
+    /// The server takes keys, so its admins are the owners it names rather than browsers on its machine.
+    pub keyed: bool,
 }
 
 const CHAT_FILE_EXT: &str = "json";
@@ -188,6 +190,7 @@ impl AppState {
             code_execution_enabled: self.code_execution_enabled,
             shell_enabled: self.shell_enabled,
             tool_dispatch_url: self.tool_dispatch_url.clone(),
+            keyed: self.keyed,
         })
     }
 
