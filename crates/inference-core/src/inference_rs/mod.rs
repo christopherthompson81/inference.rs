@@ -319,6 +319,8 @@ impl InferenceRs {
         // Warm cuTile before the engine starts capturing and serving CUDA work.
         #[cfg(feature = "cutile")]
         let warmup_device = device.clone();
+        #[cfg(feature = "cuda")]
+        let release_device = device.clone();
 
         let logger = Arc::new(IntervalLogger::new(
             Duration::from_secs(5),
@@ -417,7 +419,11 @@ impl InferenceRs {
                         }
                     };
                     Arc::new(engine).run().await;
-                })
+                });
+                // the runtime's threads free their scratch as they end
+                drop(rt);
+                #[cfg(feature = "cuda")]
+                release_device_memory(&release_device);
             }
         });
 
@@ -1158,5 +1164,17 @@ impl InferenceRs {
         } else {
             Err(format!("Model {resolved_model_id} not found"))
         }
+    }
+}
+
+// An ended engine's memory goes back to the device, not to the allocator pool's cache, which never releases by itself.
+#[cfg(feature = "cuda")]
+fn release_device_memory(device: &Device) {
+    let usage = crate::utils::memory_usage::MemoryUsage;
+    let released = usage
+        .synchronize_cuda_context(device)
+        .and_then(|_| usage.trim_cuda_memory_pool(device, 0));
+    if let Err(error) = released {
+        warn!("Failed to return an unloaded model's memory to the device: {error}");
     }
 }

@@ -2,18 +2,16 @@
 //! Handles batch > 8 (complement to fast_mmvq which handles batch 1-8).
 
 use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread::ThreadId;
+use std::sync::{Mutex, OnceLock};
 
-use inference_tensor::cuda::cudarc::driver::{
-    CudaSlice, CudaStream, DevicePtrMut, DeviceRepr, SyncOnDrop,
-};
+use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, DeviceRepr};
 use inference_tensor::cuda_backend::CudaDType;
 use inference_tensor::{
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, quantized::QTensor,
 };
 
 use super::kernel::{GgufType, KernelWeight};
+use super::thread_workspace::ThreadWorkspaces;
 
 use super::ffi;
 use crate::{
@@ -385,33 +383,8 @@ fn mmq_moe_launcher(dtype: GgufType) -> Option<MmqMoeLauncher> {
     Some(f)
 }
 
-struct WorkspaceSlot {
-    slice: CudaSlice<u8>,
-}
-
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct WorkspaceKey {
-    device: inference_tensor::cuda::DeviceId,
-    stream: usize,
-    thread: ThreadId,
-    capacity: usize,
-}
-
-struct WorkspaceGuard<'a> {
-    slot: MutexGuard<'static, WorkspaceSlot>,
-    stream: &'a CudaStream,
-}
-
-impl WorkspaceGuard<'_> {
-    fn ptr_mut(&mut self) -> (u64, SyncOnDrop<'_>) {
-        self.slot.slice.device_ptr_mut(self.stream)
-    }
-}
-
-type WsMap = Mutex<HashMap<WorkspaceKey, &'static Mutex<WorkspaceSlot>>>;
-
-static MMQ_WORKSPACE: OnceLock<WsMap> = OnceLock::new();
-static FIXUP_WORKSPACE: OnceLock<WsMap> = OnceLock::new();
+static MMQ_WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
+static FIXUP_WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
 
 #[derive(Clone, Copy)]
 struct DeviceInfo {
@@ -460,37 +433,6 @@ fn get_device_info(dev: &CudaDevice) -> DeviceInfo {
 
 fn fixup_workspace_bytes(dev: &CudaDevice) -> usize {
     dev.sm_count() * MMQ_X_MAX * MMQ_Y_MAX * std::mem::size_of::<f32>()
-}
-
-fn workspace_ensure<'a>(
-    ws: &'static OnceLock<WsMap>,
-    dev: &CudaDevice,
-    bytes: usize,
-    stream: &'a CudaStream,
-) -> Result<WorkspaceGuard<'a>> {
-    let map = ws.get_or_init(|| Mutex::new(HashMap::new()));
-    let capacity = bytes.max(1).next_power_of_two();
-    let key = WorkspaceKey {
-        device: dev.id(),
-        stream: stream.cu_stream() as usize,
-        thread: std::thread::current().id(),
-        capacity,
-    };
-    let device_mtx: &'static Mutex<WorkspaceSlot> = {
-        let mut guard = map.lock().unwrap();
-        match guard.get(&key).copied() {
-            Some(mtx) => mtx,
-            None => {
-                let slice = unsafe { dev.alloc::<u8>(capacity)? };
-                // CUDA graph replay requires process-stable workspace addresses.
-                let leaked = Box::leak(Box::new(Mutex::new(WorkspaceSlot { slice })));
-                guard.insert(key, leaked);
-                leaked
-            }
-        }
-    };
-    let slot = device_mtx.lock().unwrap();
-    Ok(WorkspaceGuard { slot, stream })
 }
 
 struct DenseMmqRun<'a, W: KernelWeight + ?Sized> {
@@ -727,12 +669,12 @@ fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<V
     let workspace_main = batch_size * blocks_per_row * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_extra = MMQ_X_MAX * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_bytes = workspace_main + workspace_extra;
-    let mut workspace = workspace_ensure(&MMQ_WORKSPACE, &dev, workspace_bytes, &stream)?;
+    let mut workspace = MMQ_WORKSPACE.ensure(&dev, workspace_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
 
     let fixup_bytes = fixup_workspace_bytes(&dev);
-    let mut fixup_workspace = workspace_ensure(&FIXUP_WORKSPACE, &dev, fixup_bytes, &stream)?;
+    let mut fixup_workspace = FIXUP_WORKSPACE.ensure(&dev, fixup_bytes, &stream)?;
     let (fixup_ptr, _fixup_guard) = fixup_workspace.ptr_mut();
     let fixup_ptr = fixup_ptr as *mut std::ffi::c_void;
 
@@ -835,12 +777,12 @@ fn down_from_glu(
     let workspace_main = batch_size * blocks_per_row * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_extra = MMQ_X_MAX * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_bytes = workspace_main + workspace_extra;
-    let mut workspace = workspace_ensure(&MMQ_WORKSPACE, &dev, workspace_bytes, &stream)?;
+    let mut workspace = MMQ_WORKSPACE.ensure(&dev, workspace_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
 
     let fixup_bytes = fixup_workspace_bytes(&dev);
-    let mut fixup_workspace = workspace_ensure(&FIXUP_WORKSPACE, &dev, fixup_bytes, &stream)?;
+    let mut fixup_workspace = FIXUP_WORKSPACE.ensure(&dev, fixup_bytes, &stream)?;
     let (fixup_ptr, _fixup_guard) = fixup_workspace.ptr_mut();
     let fixup_ptr = fixup_ptr as *mut std::ffi::c_void;
 
@@ -1013,12 +955,12 @@ pub fn grouped(
     let workspace_main = total_assignments * blocks_per_row * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_extra = MMQ_X_MAX * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_bytes = workspace_main + workspace_extra;
-    let mut workspace = workspace_ensure(&MMQ_WORKSPACE, dev, workspace_bytes, &stream)?;
+    let mut workspace = MMQ_WORKSPACE.ensure(dev, workspace_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
 
     let fixup_bytes = fixup_workspace_bytes(dev);
-    let mut fixup_workspace = workspace_ensure(&FIXUP_WORKSPACE, dev, fixup_bytes, &stream)?;
+    let mut fixup_workspace = FIXUP_WORKSPACE.ensure(dev, fixup_bytes, &stream)?;
     let (fixup_ptr, _fixup_guard) = fixup_workspace.ptr_mut();
     let fixup_ptr = fixup_ptr as *mut std::ffi::c_void;
 
@@ -1224,12 +1166,12 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
     let workspace_main = total_assignments * blocks_per_row * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_extra = MMQ_X_MAX * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_bytes = workspace_main + workspace_extra;
-    let mut workspace = workspace_ensure(&MMQ_WORKSPACE, dev, workspace_bytes, &stream)?;
+    let mut workspace = MMQ_WORKSPACE.ensure(dev, workspace_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
 
     let fixup_bytes = fixup_workspace_bytes(dev);
-    let mut fixup_workspace = workspace_ensure(&FIXUP_WORKSPACE, dev, fixup_bytes, &stream)?;
+    let mut fixup_workspace = FIXUP_WORKSPACE.ensure(dev, fixup_bytes, &stream)?;
     let (fixup_ptr, _fixup_guard) = fixup_workspace.ptr_mut();
     let fixup_ptr = fixup_ptr as *mut std::ffi::c_void;
 
@@ -1461,12 +1403,12 @@ pub fn grouped_pair_packed(
     let workspace_main = total_assignments * blocks_per_row * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_extra = MMQ_X_MAX * BLOCK_Q8_1_MMQ_SIZE;
     let workspace_bytes = workspace_main + workspace_extra;
-    let mut workspace = workspace_ensure(&MMQ_WORKSPACE, dev, workspace_bytes, &stream)?;
+    let mut workspace = MMQ_WORKSPACE.ensure(dev, workspace_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
 
     let fixup_bytes = fixup_workspace_bytes(dev);
-    let mut fixup_workspace = workspace_ensure(&FIXUP_WORKSPACE, dev, fixup_bytes, &stream)?;
+    let mut fixup_workspace = FIXUP_WORKSPACE.ensure(dev, fixup_bytes, &stream)?;
     let (fixup_ptr, _fixup_guard) = fixup_workspace.ptr_mut();
     let fixup_ptr = fixup_ptr as *mut std::ffi::c_void;
 
