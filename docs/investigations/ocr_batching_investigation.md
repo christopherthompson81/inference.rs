@@ -69,3 +69,58 @@ for these runs.
 **Implication:** the run-ahead saves about 0.15 s a page, the gap while one page's last regions drained before the
 next was laid out: about 11%. Kept. The tests now use Playwright's bundled Chromium (153) rather than the system's
 131, which lacks `Uint8Array.toHex`; pdf.js's modern build works in it, so the legacy build is no longer needed.
+
+## Run 4 - 2026-10-13 17:45
+
+**Question:** on a long document, how much memory does the run hold, and are the OCR model's sequence slots idle?
+
+**Setup:** a real 329-page born-digital A4 book (text set in Word, exported as a 3.3 MB PDF), Process all pages with
+PP-DocLayoutV3 and PaddleOCR-VL-1.5 at the default 4 sequences, in Playwright's Chromium 153. Every 0.25 s the
+script read `inference_sequences_running` and `inference_sequences_waiting` from `/metrics`, the summed RSS of the
+browser's processes, the page's JS heap (`performance.memory`) and its progress label; GPU utilization every 1 s.
+Scratchpad `batch/big.py`.
+
+**Raw finding:**
+- 549 s for 329 pages (1.67 s a page), 4,423 regions (13.4 a page).
+- Running sequences over the run: 4 in 76% of samples, 3 in 14%, 2 in 5%, 1 in 4%, 0 in 1%; mean 3.59 of 4. Waiting
+  was 0 in every sample. GPU utilization averaged 79% (under 50% in 6% of samples).
+- The progress label had reading caught up with layout throughout: "28 of 329 pages laid out, 180 of 184 regions
+  read" at 54 s, "177 of 329 pages laid out, 2145 of 2150 regions read" at 274 s.
+- Browser RSS: 510 MB before opening the PDF, 663 MB at the start of the run, rising steadily to 1,938 MB at the end
+  (about 3.9 MB a page); JS heap 14 MB throughout.
+
+**Implication:** the region queue costs nothing: a queued region holds a box and its page's shared image, at most two
+pages ahead. The growth is the rendered PNG each page keeps (a `Blob` outside the JS heap) for the whole document,
+even once the page is saved to the server. The idle slots (10% of capacity) are the single layout task: with the
+server queue always empty, the readers were starved, not the model. Rendering, encoding, layout and decoding take
+about 1.6 s a page against about 0.7 s a page of reading at four slots. Next: run several layout tasks and release a
+page's image once it is kept.
+
+## Run 5 - 2026-10-13 18:40
+
+**Change:** three layout tasks instead of one with four pages of look-ahead; a page's rendered image is released
+once it is read and kept (it shows from its job file after that; the page on screen keeps its own); saves coalesce, so
+one still waiting covers every change made since it was asked for.
+
+**Raw finding, Run 4's book and method:** 523 s for 329 pages (1.59 s a page, from 1.67); running sequences mean 3.83
+of 4 (4 in 84% of samples, from 76%); waiting 0 throughout; GPU 79%; browser RSS 678 MB at the start, peaking at
+1,607 MB and flattening from the middle of the run (1,417 MB at 131 s, 1,474 MB at 261 s, 1,542 MB at 392 s) where it
+had grown to 1,938 MB.
+
+**Profile, 40 s into a run:** the server used about one core, nearly all of it one engine thread at 95%; the
+browser's main process 15% (its renderer processes weren't readable from the sampler).
+
+**Slots and readers, pages 21 to 80 of the book (60 pages):**
+
+| OCR `max_seqs` | readers in the browser | time | running, mean | GPU |
+|---|---|---|---|---|
+| 4 | 16 | 112 s | 3.83 | 83% |
+| 5 | 16 | 110 s | 4.79 | 82% |
+| 5 | 5 | 111 s | 4.65 | 82% |
+| 4 | 4 | 113 s | 3.70 | 85% |
+
+**Implication:** with five sequences kept full the run takes the same time, so neither the browser (whose six
+connections per host the readers stay under or at) nor the slot count limits it now: the OCR engine does. This fits
+Run 1, where 4 to 8 requests in flight gained 7%: each region costs a vision-encoder pass, whose cost grows with the
+regions rather than amortizing across them. Further speed is engine work (the vision encoder's batching), wherever
+the document pipeline itself runs.
