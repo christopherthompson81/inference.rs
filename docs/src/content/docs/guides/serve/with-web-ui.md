@@ -22,7 +22,7 @@ Each tab's model bar picks a model from those folders or the cache, or names a H
 
 Each job tab keeps a history beside it, as the chat keeps its chats: every finished transcription, speech, image and document is saved on the server with its inputs, its results and the model that made them. Clicking an entry shows it again, ready to run again; transcribing a history entry again, or reading a page after detecting its layout, updates that entry rather than adding another. Jobs are kept under `~/.cache/inference-rs/jobs` (or `$XDG_CACHE_HOME`).
 
-Loading, unloading, downloading and deleting are an admin's. On a server without keys that is a browser on the server's own machine, whether it opens the UI at `localhost`, the machine's address or its hostname; everyone else, such as another device on the network, sees which models are loaded and uses them. With keys, the owners named with `--admin` are admins. See [the model manager](/reference/http-api/#model-manager) for the routes behind the tabs.
+Loading, unloading, downloading and deleting are an admin's. On a server without keys that is a browser on the server's own machine, whether it opens the UI at `localhost`, the machine's address or its hostname (not a dotted name such as `.local`, which the network may answer); everyone else, such as another device on the network, sees which models are loaded and uses them. With keys, the owners named with `--admin` are admins. See [the model manager](/reference/http-api/#model-manager) for the routes behind the tabs.
 
 The chat panel provides:
 

@@ -718,22 +718,35 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
         assert_eq!(response.status(), status, "{host} {site:?} {origin:?}");
     }
 
-    // a browser on this machine may reach it by one of its own addresses; a client elsewhere on the LAN can't
-    let own = std::net::SocketAddr::from(([192, 168, 1, 20], 1234));
-    let neighbour = std::net::SocketAddr::from(([192, 168, 1, 21], 40000));
-    let from_own_address = std::net::SocketAddr::from(([192, 168, 1, 20], 40000));
-    for (remote, host, status) in [
-        (from_own_address, "192.168.1.20:1234", StatusCode::OK),
+    // a browser on this machine may reach it by one of its own addresses; a client elsewhere on the LAN can't, nor
+    // one a proxy on this machine passes on
+    let own = std::net::SocketAddr::from(([198, 51, 100, 20], 1234));
+    let neighbour = std::net::SocketAddr::from(([198, 51, 100, 21], 40000));
+    let from_own_address = std::net::SocketAddr::from(([198, 51, 100, 20], 40000));
+    for (remote, host, forwarded, status) in [
+        (
+            from_own_address,
+            "198.51.100.20:1234",
+            false,
+            StatusCode::OK,
+        ),
         (
             from_own_address,
             "attacker.example:1234",
+            false,
             StatusCode::FORBIDDEN,
         ),
-        (neighbour, "192.168.1.20:1234", StatusCode::FORBIDDEN),
+        (
+            neighbour,
+            "198.51.100.20:1234",
+            false,
+            StatusCode::FORBIDDEN,
+        ),
+        (loopback, "localhost:1234", true, StatusCode::FORBIDDEN),
     ] {
         let peer = Peer {
             remote,
-            local: Some(own),
+            local: Some(if remote == loopback { loopback } else { own }),
         };
         let app = InferenceRsServerRouterBuilder::new()
             .with_engine(&engine)
@@ -746,6 +759,11 @@ async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Resul
         request
             .headers_mut()
             .insert("sec-fetch-site", "same-origin".parse()?);
+        if forwarded {
+            request
+                .headers_mut()
+                .insert("x-forwarded-for", "198.51.100.21".parse()?);
+        }
         let response = app.oneshot(request).await?;
         assert_eq!(response.status(), status, "{remote} {host}");
     }
