@@ -6503,6 +6503,14 @@
             ],
             "description": "For a layout detector, `cpu` or `cuda:N`; unset uses the engine's device. Other models run on the engine's."
           },
+          "max_seqs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Sequences the model serves at once; unset uses the server's `--max-seqs`.",
+            "minimum": 0
+          },
           "mmproj": {
             "type": [
               "string",
@@ -8483,6 +8491,14 @@
               "integer",
               "null"
             ],
+            "minimum": 0
+          },
+          "max_seqs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Sequences this model serves at once, in place of `runtime.max_seqs`.",
             "minimum": 0
           },
           "model": {

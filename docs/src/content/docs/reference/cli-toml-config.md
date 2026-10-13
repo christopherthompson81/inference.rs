@@ -46,7 +46,7 @@ quant = "4"
 
 | Field | CLI flag | Default | Purpose |
 |---|---|---|---|
-| `max_seqs` | `--max-seqs` | 32 | Max concurrent sequences. |
+| `max_seqs` | `--max-seqs` | 4 | Max concurrent sequences per model; a `[[models]]` entry's `max_seqs` overrides it. |
 | `max_num_batched_tokens` | `--max-num-batched-tokens` | 4096 | Most tokens one paged-attention scheduler step processes. |
 | `max_prefill_chunk_tokens` | `--max-prefill-chunk-tokens` | 512 | CUDA prompt-token quantum used while decode is resident, and for recurrent prefill batching. |
 | `max_decode_steps_before_prefill` | `--max-decode-steps-before-prefill` | 8 | Most decode steps before a waiting prefill batch is admitted. |
@@ -140,6 +140,7 @@ Each entry defines one loaded model.
 | `dtype` | enum | no | `auto`, `f16`, `bf16`, `f32`. |
 | `hf_overrides` | JSON object | no | Recursively merged Hugging Face config overrides. |
 | `max_model_len` | integer | no | Runtime prompt-plus-output context limit. |
+| `max_seqs` | integer | no | Concurrent sequences for this model, in place of `[runtime] max_seqs`. |
 | `chat_template` | path | no | Chat template override for this model. |
 | `jinja_explicit` | path | no | Jinja override for this model. |
 | `matformer_config_path` | path | no | MatFormer slice config (CSV/JSON). |

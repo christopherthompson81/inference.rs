@@ -32,6 +32,7 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         encoder_cache_memory_bytes: runtime.encoder_cache_memory_bytes,
         hf_revision: runtime.hf_revision,
         paged_context_len: runtime.paged_cache.context_len,
+        max_seqs: runtime.max_seqs,
         mtp: runtime.mtp,
     }
 }

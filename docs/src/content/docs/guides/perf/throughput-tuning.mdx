@@ -63,9 +63,11 @@ The default is the same on every surface:
 
 | Surface | Flag / argument | Default |
 |---|---|---|
-| CLI | `--max-seqs` | 32 |
-| Python | `t.RuntimeSpec(max_seqs=...)` | 32 |
-| Rust | `.with_max_num_seqs(...)` | 32 |
+| CLI | `--max-seqs` | 4 |
+| Python | `t.RuntimeSpec(max_seqs=...)` | 4 |
+| Rust | `.with_max_num_seqs(...)` | 4 |
+
+The default is low because each running sequence holds memory for as long as it runs, whether or not the server is busy: a hybrid model's recurrent state alone is about 150 MB per sequence at 27B, so 32 sequences would take 5 GB. Raise it for a server many clients share. A model can set its own: `max_seqs` in a model spec, a `[[models]]` entry, or a model manager load (the web UI's **Sequences** field).
 
 More running sequences need more KV cache. With paged attention, size the block pool to match: one of `--pa-context-len`, `--pa-memory-mb`, or `--pa-memory-fraction` (default: 90% of available VRAM). If the pool runs out of blocks mid-generation, the scheduler preempts a running sequence, frees its blocks, and requeues it, which costs recomputation.
 

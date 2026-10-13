@@ -1125,6 +1125,7 @@ class ManagedLoadRequest:
     """A load: what to load, the id requests will name it by, and how to run it."""
 
     device: str | None = None
+    max_seqs: int | None = None
     mmproj: str | None = None
     model_id: str
     mtp: MtpSpec | None = None
@@ -1564,6 +1565,7 @@ class ModelSpec:
     isq: str | None = None
     jinja_explicit: str | None = None
     max_model_len: int | None = None
+    max_seqs: int | None = None
     model: ModelSelected
     model_id: str | None = None
     mtp: MtpSpec | None = None

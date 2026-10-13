@@ -526,6 +526,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
 | `max_model_len` | `int \| None` | optional |
+| `max_seqs` | `int \| None` | optional |
 | `model` | `ModelSelected` | required |
 | `model_id` | `str \| None` | optional |
 | `mtp` | `MtpSpec \| None` | optional |

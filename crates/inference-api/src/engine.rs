@@ -119,8 +119,10 @@ const CODE_EXECUTION_UNAVAILABLE: &str =
 // How an added model's spec is named in its errors.
 const ADDED_MODEL: &str = "spec";
 const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`";
-// Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
-pub const DEFAULT_MAX_SEQS: usize = 32;
+/// Sequences a model serves at once unless told otherwise, shared by `inference serve` and specs. Low, since each one
+/// holds memory for its whole life (a hybrid model's recurrent state is ~150 MB per sequence at 27B); a busy shared
+/// server raises it.
+pub const DEFAULT_MAX_SEQS: usize = 4;
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor
 /// `models` the engine starts empty, and `add_model` loads what it serves.
@@ -184,6 +186,9 @@ pub struct ModelSpec {
     /// Speculative decoding for this model; `runtime.mtp` applies to the first model only.
     #[serde(default)]
     pub mtp: Option<MtpSpec>,
+    /// Sequences this model serves at once, in place of `runtime.max_seqs`.
+    #[serde(default)]
+    pub max_seqs: Option<usize>,
 }
 
 impl ModelSpec {
@@ -204,6 +209,9 @@ impl ModelSpec {
         if self.paged_context_len == Some(0) {
             return Err(zero("paged_context_len"));
         }
+        if self.max_seqs == Some(0) {
+            return Err(zero("max_seqs"));
+        }
         // The builder names a model in its errors by this key; the alias is what requests use.
         let key = self.model_id.clone().unwrap_or_else(|| label.to_string());
         let mut config = ModelConfig::new(key, self.model);
@@ -216,6 +224,7 @@ impl ModelSpec {
         config.in_situ_quant = self.isq;
         config.hf_revision = self.hf_revision;
         config.paged_context_len = self.paged_context_len;
+        config.max_seqs = self.max_seqs;
         config.mtp = self.mtp.map(MtpSpec::into_config);
         if let Some(bytes) = self.encoder_cache_memory_bytes {
             config = config.with_encoder_cache_memory_bytes(bytes);

@@ -53,6 +53,7 @@ export interface LoadRequest {
   source: string;
   model_id: string;
   paged_context_len?: number;
+  max_seqs?: number;
   mtp?: { n_predict?: number };
   mmproj?: string;
   device?: string;
