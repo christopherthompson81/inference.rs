@@ -301,6 +301,31 @@ export async function speak(request: { model: string; input: string; voice?: str
   return response.blob();
 }
 
+export interface SpokenWord {
+  word: string;
+  /** The word's IPA; empty when the phonemizer couldn't place it. */
+  ipa: string;
+  start: number;
+  end: number;
+}
+
+/** Speech for `input` as a WAV blob, with when each of its words is spoken. */
+export async function speakTimed(
+  request: { model: string; input: string; voice?: string; speed?: number },
+  signal?: AbortSignal,
+): Promise<{ audio: Blob; duration: number; words: SpokenWord[] }> {
+  const response = await authedFetch(url("v1/audio/speech"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...request, response_format: "wav", timestamps: true }),
+    signal,
+  });
+  if (!response.ok) throw await failure(response);
+  const reply: { audio: string; content_type: string; duration: number; words: SpokenWord[] } = await response.json();
+  const bytes = Uint8Array.from(atob(reply.audio), (c) => c.charCodeAt(0));
+  return { audio: new Blob([bytes], { type: "audio/wav" }), duration: reply.duration, words: reply.words };
+}
+
 export interface ImageOptions {
   width?: number;
   height?: number;
