@@ -134,8 +134,8 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
-async function postForm<T>(path: string, form: FormData): Promise<T> {
-  const response = await authedFetch(url(path), { method: "POST", body: form });
+async function postForm<T>(path: string, form: FormData, signal?: AbortSignal): Promise<T> {
+  const response = await authedFetch(url(path), { method: "POST", body: form, signal });
   if (!response.ok) throw await failure(response);
   return response.json();
 }
@@ -255,25 +255,38 @@ export interface TranscriptSegment {
   text: string;
 }
 
-export function transcribe(model: string, audio: File, language?: string) {
-  const form = new FormData();
-  form.append("file", audio);
-  form.append("model", model);
-  form.append("response_format", "verbose_json");
-  if (language) form.append("language", language);
-  return postForm<{ text: string; language?: string; duration?: number; segments?: TranscriptSegment[] }>(
-    "v1/audio/transcriptions",
-    form,
-  );
+export interface TranscriptWord {
+  word: string;
+  start: number;
+  end: number;
 }
 
-export function diarize(model: string, audio: File) {
+/** The transcript of `audio` with its segments and timed words. */
+export function transcribe(model: string, audio: Blob, options: { language?: string; signal?: AbortSignal } = {}) {
   const form = new FormData();
-  form.append("file", audio);
+  form.append("file", audio, audio instanceof File ? audio.name : "clip.wav");
+  form.append("model", model);
+  form.append("response_format", "verbose_json");
+  form.append("timestamp_granularities[]", "word");
+  form.append("timestamp_granularities[]", "segment");
+  if (options.language) form.append("language", options.language);
+  return postForm<{
+    text: string;
+    language?: string;
+    duration?: number;
+    segments?: TranscriptSegment[];
+    words?: TranscriptWord[];
+  }>("v1/audio/transcriptions", form, options.signal);
+}
+
+export function diarize(model: string, audio: Blob, signal?: AbortSignal) {
+  const form = new FormData();
+  form.append("file", audio, audio instanceof File ? audio.name : "audio.wav");
   form.append("model", model);
   return postForm<{ num_speakers: number; segments: { speaker: number; start: number; end: number }[] }>(
     "v1/audio/diarization",
     form,
+    signal,
   );
 }
 
