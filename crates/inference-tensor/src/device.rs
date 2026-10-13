@@ -489,4 +489,53 @@ impl Device {
             Self::Metal(d) => d.synchronize(),
         }
     }
+
+    /// A point after the work queued so far, to wait for with the thread asleep: for work long enough (a diffusion
+    /// step) that a core spinning on it costs more than waking up. CUDA's default wait spins.
+    pub fn fence(&self) -> Result<Fence> {
+        #[cfg(feature = "cuda")]
+        if let Self::Cuda(d) = self {
+            return Ok(Fence {
+                event: Some(d.sleeping_event()?),
+            });
+        }
+        Ok(Fence {
+            #[cfg(feature = "cuda")]
+            event: None,
+        })
+    }
+}
+
+/// Queued device work to wait for, from [`Device::fence`]; a device that doesn't queue ahead has nothing to wait for.
+pub struct Fence {
+    #[cfg(feature = "cuda")]
+    event: Option<cudarc::driver::CudaEvent>,
+}
+
+impl Fence {
+    /// Blocks, asleep, until the work queued before the fence is done.
+    pub fn wait(self) -> Result<()> {
+        #[cfg(feature = "cuda")]
+        if let Some(event) = self.event {
+            event.synchronize().map_err(crate::Error::wrap)?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod fence_tests {
+    use crate::{DType, Device, Tensor};
+
+    #[test]
+    fn a_fence_is_passed_once_the_work_before_it_is_done() -> crate::Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let a = Tensor::ones((512, 512), DType::F32, &device)?;
+        let product = a.matmul(&a)?;
+        device.fence()?.wait()?;
+        assert_eq!(product.get(0)?.get(0)?.to_scalar::<f32>()?, 512.0);
+        Ok(())
+    }
 }

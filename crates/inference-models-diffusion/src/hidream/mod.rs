@@ -381,6 +381,7 @@ impl HiDreamO1Pipeline {
             .collect();
         let t_embs = self.model.timestep_embeddings(&flow_times)?;
         let mut unipc = UniPc::default();
+        let mut ahead = None;
         for (i, &step_t) in schedule.timesteps.iter().enumerate() {
             let t_emb = t_embs.narrow(0, i, 1)?;
             let sigma = (step_t / NUM_TRAIN_TIMESTEPS as f32).max(T_EPS);
@@ -418,6 +419,11 @@ impl HiDreamO1Pipeline {
                 )?,
             };
             z = next.to_dtype(dtype)?;
+            // a step is seconds of GPU work: queued far ahead, the thread spins a core on the full launch queue, so it
+            // stays one step ahead and sleeps on the one before
+            if let Some(previous) = ahead.replace(device.fence()?) {
+                previous.wait()?;
+            }
         }
         Ok(z)
     }

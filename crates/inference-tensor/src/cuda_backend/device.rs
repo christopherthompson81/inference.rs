@@ -356,6 +356,15 @@ impl CudaDevice {
         self.stream.clone()
     }
 
+    /// An event after the stream's queued work, which a waiting thread sleeps on: the context's default wait spins.
+    pub fn sleeping_event(&self) -> Result<cudarc::driver::CudaEvent> {
+        self.stream
+            .record_event(Some(
+                cudarc::driver::sys::CUevent_flags::CU_EVENT_BLOCKING_SYNC,
+            ))
+            .map_err(crate::Error::wrap)
+    }
+
     /// When turned on, all cuda tensors **created after calling this function** will
     /// not track uses via cuda events.
     ///
