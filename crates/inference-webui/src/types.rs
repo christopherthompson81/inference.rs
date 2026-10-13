@@ -142,6 +142,8 @@ pub struct AppState {
     /// Who this UI state is for; its chats and the sessions it forks and restores are that owner's.
     pub owner: Option<String>,
     pub chats_dir: String,
+    /// The owner's job history (see `jobs`).
+    pub jobs_dir: String,
     /// Directory for storing generated speech wav files
     pub speech_dir: String,
     pub current_chat: RwLock<Option<String>>,
@@ -167,14 +169,17 @@ impl AppState {
     /// This UI state as `owner` sees it: the same models and tools, with that owner's own chats directory.
     pub fn for_owner(&self, owner: &str) -> std::io::Result<Self> {
         let key = inference_api::sandbox_key(Some(owner), "");
-        let chats_dir = Path::new(&self.chats_dir).join(OWNER_CHATS_DIR).join(key);
+        let chats_dir = Path::new(&self.chats_dir).join(OWNER_CHATS_DIR).join(&key);
         std::fs::create_dir_all(&chats_dir)?;
+        let jobs_dir = Path::new(&self.jobs_dir).join(OWNER_CHATS_DIR).join(&key);
+        std::fs::create_dir_all(&jobs_dir)?;
         Ok(Self {
             engine: self.engine.for_owner(owner),
             default_model: self.default_model.clone(),
             current: RwLock::new(self.default_model.clone()),
             owner: Some(owner.to_string()),
             chats_dir: chats_dir.to_string_lossy().to_string(),
+            jobs_dir: jobs_dir.to_string_lossy().to_string(),
             speech_dir: self.speech_dir.clone(),
             current_chat: RwLock::new(None),
             default_params: self.default_params.clone(),

@@ -67,7 +67,7 @@
   }
 </script>
 
-<section class="rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-900/60">
+<section class="min-w-0 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-900/60">
   <div class="flex flex-wrap items-center gap-2">
     <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{spec.title}</h3>
     {#if served}
@@ -87,10 +87,10 @@
 
   {#if managerStore.admin}
     <div class="mt-2 flex flex-wrap items-end gap-2">
-      <label class="flex min-w-64 flex-1 flex-col gap-1">
+      <label class="flex min-w-0 flex-1 basis-64 flex-col gap-1">
         <span class="text-[11px] text-gray-500 dark:text-gray-400">{spec.hint}</span>
         <select
-          class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+          class="w-full min-w-0 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
           value={choice}
           onchange={(e) => pick(e.currentTarget.value)}
           disabled={activity.busy}
@@ -103,7 +103,7 @@
       </label>
       {#if choice === REPO}
         <input
-          class="min-w-56 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
+          class="w-full min-w-0 sm:min-w-56 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
           placeholder="org/model"
           aria-label="Hugging Face repository"
           value={repo}

@@ -532,3 +532,87 @@ async fn each_owner_keeps_its_own_web_ui_chats() -> anyhow::Result<()> {
     assert_eq!(status_and_body(&app, load).await?.0, StatusCode::NOT_FOUND);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_owner_keeps_its_own_web_ui_jobs() -> anyhow::Result<()> {
+    let cache = tempfile::tempdir()?;
+    // the UI keeps its jobs under the cache dir; nextest runs each test in its own process
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache.path()) };
+    let (_dir, engine) = tiny_engine().await?;
+    let auth = Auth::new(ApiKeys::parse(KEYS)?);
+    let api = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_auth(auth.clone())
+        .build()
+        .await?;
+    let options = inference_webui::UiOptions {
+        auth,
+        ..Default::default()
+    };
+    let app = inference_webui::mount(api, &engine, options, Default::default()).await?;
+    let (alpha, beta) = (sign_in(&app, ALPHA).await?, sign_in(&app, BETA).await?);
+
+    let save = |job: Value, file: (&str, &str), cookie: &str| {
+        let job = job.to_string();
+        let mut request = multipart_upload(&[("job", None, &job), ("file", Some(file.0), file.1)]);
+        *request.uri_mut() = "/ui/api/save_job".parse().unwrap();
+        with_cookie(request, cookie)
+    };
+    let job = json!({"kind": "speech", "title": "hello", "data": {"voice": "af_heart"}});
+    let (status, body) =
+        status_and_body(&app, save(job.clone(), ("speech.wav", "RIFF"), &alpha)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let id = serde_json::from_str::<Value>(&body)?["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    for name in ["page.html", "page.svg", "../speech.wav"] {
+        let status = status_and_body(&app, save(job.clone(), (name, "<x/>"), &alpha))
+            .await?
+            .0;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{name}");
+    }
+
+    let list = |cookie: &str| {
+        with_cookie(
+            Request::get("/ui/api/list_jobs?kind=speech")
+                .body(Body::empty())
+                .unwrap(),
+            cookie,
+        )
+    };
+    let (_, listed) = status_and_body(&app, list(&alpha)).await?;
+    assert!(listed.contains(&id), "{listed}");
+    assert!(!status_and_body(&app, list(&beta)).await?.1.contains(&id));
+    let file = |cookie: &str| {
+        with_cookie(
+            Request::get(format!("/ui/api/job_file/{id}/speech.wav"))
+                .body(Body::empty())
+                .unwrap(),
+            cookie,
+        )
+    };
+    let (status, body) = status_and_body(&app, file(&alpha)).await?;
+    assert_eq!((status, body.as_str()), (StatusCode::OK, "RIFF"));
+    assert_eq!(
+        status_and_body(&app, file(&beta)).await?.0,
+        StatusCode::NOT_FOUND
+    );
+
+    let delete = |cookie: &str| {
+        with_cookie(
+            send_json("POST", "/ui/api/delete_job", "", json!({"id": id})),
+            cookie,
+        )
+    };
+    assert_eq!(
+        status_and_body(&app, delete(&beta)).await?.0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        status_and_body(&app, delete(&alpha)).await?.0,
+        StatusCode::OK
+    );
+    assert!(!status_and_body(&app, list(&alpha)).await?.1.contains(&id));
+    Ok(())
+}
