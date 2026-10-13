@@ -423,6 +423,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | Field | Type | Default |
 | --- | --- | --- |
 | `device` | `str \| None` | optional |
+| `max_seqs` | `int \| None` | optional |
 | `mmproj` | `str \| None` | optional |
 | `model_id` | `str` | required |
 | `mtp` | `MtpSpec \| None` | optional |

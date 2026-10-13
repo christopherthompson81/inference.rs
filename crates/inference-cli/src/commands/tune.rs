@@ -217,7 +217,10 @@ fn emit_toml_config(
     out.push_str("host = \"0.0.0.0\"\n");
     out.push_str("port = 1234\n\n");
     out.push_str("[runtime]\n");
-    out.push_str("max_seqs = 32\n\n");
+    out.push_str(&format!(
+        "max_seqs = {}\n\n",
+        inference_api::engine::DEFAULT_MAX_SEQS
+    ));
 
     out.push_str("[[models]]\n");
     let kind = model_kind(model_type);

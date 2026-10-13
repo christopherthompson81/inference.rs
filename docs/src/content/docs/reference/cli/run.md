@@ -53,7 +53,7 @@ inference run [OPTIONS] [COMMAND]
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
-| `--max-seqs <MAX_SEQS>` | `32` | Maximum concurrent sequences |
+| `--max-seqs <MAX_SEQS>` | `4` | Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server |
 | `--max-num-batched-tokens <MAX_NUM_BATCHED_TOKENS>` | `4096` | Maximum tokens processed in one paged-attention scheduler step |
 | `--max-prefill-chunk-tokens <MAX_PREFILL_CHUNK_TOKENS>` | `512` | CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching |
 | `--max-decode-steps-before-prefill <MAX_DECODE_STEPS_BEFORE_PREFILL>` | `8` | Maximum decode steps before a waiting prefill batch is admitted |

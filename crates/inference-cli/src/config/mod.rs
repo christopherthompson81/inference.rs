@@ -102,6 +102,9 @@ pub struct ModelEntry {
     pub hf_overrides: Option<inference_api::engine::HfConfigOverrides>,
     #[serde(default)]
     pub max_model_len: Option<usize>,
+    /// Sequences this model serves at once, in place of `[runtime] max_seqs`.
+    #[serde(default)]
+    pub max_seqs: Option<usize>,
     #[serde(default)]
     pub format: FormatOptions,
     #[serde(default)]

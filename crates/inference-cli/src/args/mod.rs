@@ -20,7 +20,7 @@ use clap_complete::Shell;
 use inference_api::{
     engine::{
         DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        DEFAULT_MAX_PREFILL_CHUNK_TOKENS, TokenSource,
+        DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DEFAULT_MAX_SEQS, TokenSource,
     },
     engine_chat::ReasoningEffort,
 };
@@ -646,8 +646,8 @@ pub struct GlobalOptions {
 /// Runtime options for inference
 #[derive(clap::Args, Clone, Deserialize)]
 pub struct RuntimeOptions {
-    /// Maximum concurrent sequences
-    #[arg(long, default_value_t = 32)]
+    /// Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server
+    #[arg(long, default_value_t = DEFAULT_MAX_SEQS)]
     #[serde(default = "default_max_seqs")]
     pub max_seqs: usize,
 
@@ -1026,7 +1026,7 @@ impl Default for GlobalOptions {
 impl Default for RuntimeOptions {
     fn default() -> Self {
         Self {
-            max_seqs: 32,
+            max_seqs: DEFAULT_MAX_SEQS,
             max_num_batched_tokens: default_max_num_batched_tokens(),
             max_prefill_chunk_tokens: default_max_prefill_chunk_tokens(),
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),
@@ -1076,7 +1076,7 @@ fn default_token_source() -> TokenSource {
 }
 
 fn default_max_seqs() -> usize {
-    32
+    DEFAULT_MAX_SEQS
 }
 
 fn default_max_num_batched_tokens() -> NonZeroUsize {

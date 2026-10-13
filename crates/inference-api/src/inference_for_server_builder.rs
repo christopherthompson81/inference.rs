@@ -49,6 +49,9 @@ pub struct ModelConfig {
     /// Sizes this model's paged KV cache for this many tokens instead of the engine's setting.
     #[serde(default)]
     pub paged_context_len: Option<usize>,
+    /// Sequences this model serves at once instead of the engine's setting.
+    #[serde(default)]
+    pub max_seqs: Option<usize>,
     /// Speculative decoding for this model; the engine's MTP setting applies to its first model only.
     #[serde(skip)]
     pub mtp: Option<MtpConfig>,
@@ -69,6 +72,7 @@ impl ModelConfig {
             encoder_cache_memory_bytes: None,
             hf_revision: None,
             paged_context_len: None,
+            max_seqs: None,
             mtp: None,
         }
     }
@@ -97,7 +101,7 @@ pub mod defaults {
     pub const SEED: Option<u64> = None;
     pub const LOG: Option<String> = None;
     pub const MODEL: Option<inference_selection::ModelSelected> = None;
-    pub const MAX_SEQS: usize = 16;
+    pub const MAX_SEQS: usize = crate::engine::DEFAULT_MAX_SEQS;
     pub const MAX_NUM_BATCHED_TOKENS: usize = DEFAULT_MAX_NUM_BATCHED_TOKENS;
     pub const MAX_PREFILL_CHUNK_TOKENS: usize = DEFAULT_MAX_PREFILL_CHUNK_TOKENS;
     pub const MAX_DECODE_STEPS_BEFORE_PREFILL: usize = DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL;
@@ -956,9 +960,9 @@ impl InferenceRsForServerBuilder {
             &self
                 .models
                 .iter()
-                .map(|_| PagedKvModelRequest {
+                .map(|model_config| PagedKvModelRequest {
                     paged_attn: settings.requested_cache,
-                    max_num_seqs: settings.max_seqs,
+                    max_num_seqs: settings.model_max_seqs(model_config),
                 })
                 .collect::<Vec<_>>(),
             Default::default(),
@@ -989,7 +993,7 @@ impl InferenceRsForServerBuilder {
                     model_config,
                     paged_attn,
                     mtp_config,
-                    settings.max_seqs,
+                    settings.model_max_seqs(model_config),
                     model_index == 0,
                 )
                 .await?;
@@ -1354,7 +1358,7 @@ impl ModelLoadSettings {
 
     /// Loads one more model for an engine already serving others, sizing its paged cache from the memory left now.
     pub async fn load_additional(&self, model_config: &ModelConfig) -> Result<LoadedModel> {
-        let max_seqs = self.max_seqs;
+        let max_seqs = self.model_max_seqs(model_config);
         let plan = plan_paged_kv(
             &[PagedKvModelRequest {
                 paged_attn: self.requested_cache,
@@ -1368,14 +1372,20 @@ impl ModelLoadSettings {
             .await
     }
 
-    // The planned cache with the model's own context size, less what an external MTP drafter needs.
+    fn model_max_seqs(&self, model_config: &ModelConfig) -> usize {
+        model_config.max_seqs.unwrap_or(self.max_seqs)
+    }
+
+    // The planned cache with the model's own context size and sequences, less what an external MTP drafter needs.
     fn model_cache(
         &self,
         model_config: &ModelConfig,
         planned: Option<PagedAttentionConfig>,
         mtp: Option<&MtpConfig>,
     ) -> Result<Option<PagedAttentionConfig>> {
-        let mut cache = planned;
+        let mut cache = planned
+            .map(|cache| cache.with_serving_capacity(self.model_max_seqs(model_config)))
+            .transpose()?;
         match (cache.as_mut(), model_config.paged_context_len) {
             (Some(cache), Some(tokens)) => cache.mem_gpu = MemoryGpuConfig::ContextSize(tokens),
             (None, Some(_)) => warn!(

@@ -69,7 +69,7 @@ inference serve [OPTIONS] [COMMAND]
 | `--access-log-health` | `false` | Include health, metrics, docs, and UI requests in HTTP access logs |
 | `--disable-request-id-header` | `false` | Disable the x-request-id response header |
 | `--disable-metrics` | `false` | Disable Prometheus HTTP metrics and the metrics recorder |
-| `--max-seqs <MAX_SEQS>` | `32` | Maximum concurrent sequences |
+| `--max-seqs <MAX_SEQS>` | `4` | Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server |
 | `--max-num-batched-tokens <MAX_NUM_BATCHED_TOKENS>` | `4096` | Maximum tokens processed in one paged-attention scheduler step |
 | `--max-prefill-chunk-tokens <MAX_PREFILL_CHUNK_TOKENS>` | `512` | CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching |
 | `--max-decode-steps-before-prefill <MAX_DECODE_STEPS_BEFORE_PREFILL>` | `8` | Maximum decode steps before a waiting prefill batch is admitted |

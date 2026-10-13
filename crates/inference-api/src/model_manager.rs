@@ -91,6 +91,9 @@ pub struct ManagedLoadRequest {
     /// it is ignored.
     #[serde(default)]
     pub paged_context_len: Option<usize>,
+    /// Sequences the model serves at once; unset uses the server's `--max-seqs`.
+    #[serde(default)]
+    pub max_seqs: Option<usize>,
     /// Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`
     /// is refused.
     #[serde(default)]
@@ -384,6 +387,7 @@ impl ModelManager {
             encoder_cache_memory_bytes: None,
             hf_revision: None,
             paged_context_len: request.paged_context_len,
+            max_seqs: request.max_seqs,
             mtp: request.mtp,
         };
         self.engine.add_model(spec).await?;

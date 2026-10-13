@@ -70,6 +70,8 @@ export type SlotId = keyof typeof SLOTS;
 export interface SlotForm {
   source: string;
   contextLength: number;
+  /** Sequences the model serves at once; 0 leaves the server's `--max-seqs`. */
+  maxSeqs: number;
   mtp: boolean;
   mtpDrafts: number;
   mmproj: string;
@@ -88,7 +90,7 @@ const REFRESH_MS = 10_000;
 const DEFAULT_CONTEXT = 8192;
 
 function defaultForm(): SlotForm {
-  return { source: "", contextLength: DEFAULT_CONTEXT, mtp: false, mtpDrafts: 0, mmproj: "", device: "auto" };
+  return { source: "", contextLength: DEFAULT_CONTEXT, maxSeqs: 0, mtp: false, mtpDrafts: 0, mmproj: "", device: "auto" };
 }
 
 // every slot's form, from what this browser kept, so reading one never creates state mid-render
@@ -196,6 +198,7 @@ class ManagerStore {
     const request: manager.LoadRequest = { source: form.source.trim(), model_id: spec.id };
     if (spec.chat) {
       if (form.contextLength > 0) request.paged_context_len = form.contextLength;
+      if (form.maxSeqs > 0) request.max_seqs = form.maxSeqs;
       if (form.mtp) request.mtp = form.mtpDrafts > 0 ? { n_predict: form.mtpDrafts } : {};
       if (form.mmproj) request.mmproj = form.mmproj;
     }
