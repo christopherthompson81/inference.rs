@@ -12,7 +12,7 @@ Open `http://localhost:1234/ui`. The built-in web UI is mounted at `/ui` by defa
 Started without `-m` or `-f`, the server loads nothing until you choose models in the UI. It has a tab per job, each with its own model:
 
 - **Chat**: the chat panel below, over a text or multimodal model.
-- **Speech to text**: an audio file's transcript with segment times, and speaker labels when a diarization model is loaded too.
+- **Speech to text**: an audio file's transcript, sentence by sentence. With a diarization model loaded too, it finds the speakers first and transcribes each one's turns, with a progress bar counting them; each speaker can be given a name. Playback highlights each word as it is spoken, and clicking a word or a segment's time plays from there. The transcript exports as SRT or WebVTT subtitles, CSV, JSON (with word times) or plain text, under the speakers' names.
 - **Text to speech**: a WAV from Kokoro or Dia, played in the page or saved.
 - **Images**: text to image with HiDream-O1 or FLUX, and with reference images, HiDream-O1's edits.
 - **Documents**: PP-DocLayoutV3 layout regions drawn over a page image, each then read by an OCR model such as PaddleOCR-VL with the prompt for its kind (text, table, formula, chart).
