@@ -1,15 +1,12 @@
 //! CUDA fast path for GGUF matmul with BF16/F32 activations.
 
-use std::collections::HashMap;
-use std::sync::{Mutex, MutexGuard, OnceLock};
-use std::thread::ThreadId;
-
-use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtrMut, SyncOnDrop};
+use inference_tensor::cuda::cudarc::driver::CudaStream;
 use inference_tensor::{
-    CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, quantized::QTensor,
+    CudaStorage, DType, Device, Result, Shape, Storage, Tensor, quantized::QTensor,
 };
 
 use super::kernel::{GgufType, KernelWeight};
+use super::thread_workspace::ThreadWorkspaces;
 
 use super::ffi;
 use crate::{
@@ -84,64 +81,7 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
 /// Maximum flattened batch handled by the CUDA launcher table.
 pub const MMVQ_MAX_BATCH: usize = 8;
 
-struct WorkspaceSlot {
-    slice: CudaSlice<u8>,
-}
-
-struct WorkspaceGuard<'a> {
-    slot: MutexGuard<'static, WorkspaceSlot>,
-    stream: &'a CudaStream,
-}
-
-impl WorkspaceGuard<'_> {
-    fn ptr_mut(&mut self) -> (u64, SyncOnDrop<'_>) {
-        self.slot.slice.device_ptr_mut(self.stream)
-    }
-}
-
-#[derive(Clone, Copy, Eq, Hash, PartialEq)]
-struct WorkspaceKey {
-    device: inference_tensor::cuda::DeviceId,
-    stream: usize,
-    thread: ThreadId,
-    capacity: usize,
-}
-
-type WsMap = Mutex<HashMap<WorkspaceKey, &'static Mutex<WorkspaceSlot>>>;
-
-static WORKSPACE: OnceLock<WsMap> = OnceLock::new();
-
-fn workspace_ensure<'a>(
-    dev: &CudaDevice,
-    bytes: usize,
-    stream: &'a CudaStream,
-) -> Result<WorkspaceGuard<'a>> {
-    let map = WORKSPACE.get_or_init(|| Mutex::new(HashMap::new()));
-    let capacity = bytes.max(1).next_power_of_two();
-    let key = WorkspaceKey {
-        device: dev.id(),
-        stream: stream.cu_stream() as usize,
-        thread: std::thread::current().id(),
-        capacity,
-    };
-    let workspace_mtx: &'static Mutex<WorkspaceSlot> = {
-        let mut guard = map.lock().unwrap();
-        match guard.get(&key).copied() {
-            Some(mtx) => mtx,
-            None => {
-                let slice = unsafe { dev.alloc::<u8>(capacity)? };
-                // CUDA graph replay requires process-stable workspace addresses.
-                let leaked = Box::leak(Box::new(Mutex::new(WorkspaceSlot { slice })));
-                guard.insert(key, leaked);
-                leaked
-            }
-        }
-    };
-    Ok(WorkspaceGuard {
-        slot: workspace_mtx.lock().unwrap(),
-        stream,
-    })
-}
+static WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
 
 // Launcher dispatch by weight and output dtype.
 
@@ -449,7 +389,7 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
     let dst_row_bytes = num_blocks_per_row * Q8_1_TYPE_SIZE;
     let scratch_bytes = b_size * dst_row_bytes;
 
-    let mut workspace = workspace_ensure(&dev, scratch_bytes, &stream)?;
+    let mut workspace = WORKSPACE.ensure(&dev, scratch_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
     let stride_col_y = (k_padded / Q8_1_BLOCK_SIZE) as i32;
@@ -652,7 +592,7 @@ pub fn fused_glu(
     let dst_row_bytes = num_blocks_per_row * Q8_1_TYPE_SIZE;
     let scratch_bytes = b_size * dst_row_bytes;
 
-    let mut workspace = workspace_ensure(&dev, scratch_bytes, &stream)?;
+    let mut workspace = WORKSPACE.ensure(&dev, scratch_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
     let stride_col_y = (k_padded / Q8_1_BLOCK_SIZE) as i32;
@@ -867,7 +807,7 @@ pub fn fused_qkv(
     let dst_row_bytes = num_blocks_per_row * Q8_1_TYPE_SIZE;
     let scratch_bytes = b_size * dst_row_bytes;
 
-    let mut workspace = workspace_ensure(&dev, scratch_bytes, &stream)?;
+    let mut workspace = WORKSPACE.ensure(&dev, scratch_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
     let scratch_ptr = scratch_ptr as *mut std::ffi::c_void;
     let stride_col_y = (k_padded / Q8_1_BLOCK_SIZE) as i32;
@@ -1252,7 +1192,7 @@ pub fn moe_decode(
         WORKSPACE_ALIGN,
     );
     let mid_bytes = pairs * mid_padded / Q8_1_BLOCK_SIZE * Q8_1_TYPE_SIZE;
-    let mut workspace = workspace_ensure(&dev, x_bytes + mid_bytes, &stream)?;
+    let mut workspace = WORKSPACE.ensure(&dev, x_bytes + mid_bytes, &stream)?;
     let (scratch, _scratch_guard) = workspace.ptr_mut();
     let x_q8 = scratch as *mut std::ffi::c_void;
     let mid_q8 = (scratch + x_bytes as u64) as *mut std::ffi::c_void;

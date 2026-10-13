@@ -40,6 +40,8 @@ mod kt_dequant;
 mod packed_affine;
 pub mod raw;
 mod repack;
+#[cfg(feature = "cuda")]
+mod thread_workspace;
 mod weight_source;
 
 pub use weight_source::{
