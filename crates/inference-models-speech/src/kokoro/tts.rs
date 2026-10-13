@@ -9,7 +9,7 @@ use super::chunker::chunk_for_synthesis;
 use super::g2p;
 use super::gguf::{GGUF_EXTENSION, read_kokoro_gguf};
 use super::{KokoroConfig, KokoroModel, SAMPLE_RATE, SourceNoise, VoicePack, pth_var_builder};
-use crate::{SpeechGenerationOutput, SpeechOptions};
+use crate::{SpeechGenerationOutput, SpeechOptions, SpokenWord};
 
 // the reference pipeline's default voice, used when the request names none and the model ships it
 const DEFAULT_VOICE: &str = "af_heart";
@@ -108,8 +108,8 @@ impl KokoroTts {
         VoicePack::mean(&packs)
     }
 
-    /// `text` cut where Kokoro's context needs it and read as `lang`, one phoneme string per piece.
-    fn text_phonemes(&self, text: &str, lang: &str) -> Result<Vec<String>> {
+    /// `text` cut where Kokoro's context needs it and read as `lang`, one reading per piece.
+    fn text_phonemes(&self, text: &str, lang: &str) -> Result<Vec<g2p::Phonemized>> {
         let in_vocab = |c: char| self.model.in_vocab(c);
         let mut count = |s: &str| {
             Ok(g2p::phonemes(s, lang, in_vocab)?
@@ -119,7 +119,7 @@ impl KokoroTts {
         };
         chunk_for_synthesis(text, &mut count)?
             .iter()
-            .map(|piece| g2p::phonemes(piece, lang, in_vocab))
+            .map(|piece| g2p::phonemize(piece, lang, in_vocab))
             .collect()
     }
 
@@ -175,30 +175,130 @@ impl KokoroTts {
         let speed = options.speed.unwrap_or(default_speed);
         let voice = self.voice(options.voice.as_deref())?;
         let pieces = match options.phonemes.as_deref() {
-            Some(phonemes) => vec![phonemes.to_string()],
+            // a caller's phonemes have no source words to time
+            Some(phonemes) => vec![g2p::Phonemized {
+                phonemes: phonemes.to_string(),
+                words: Vec::new(),
+                groups: None,
+            }],
             None => self.text_phonemes(text, g2p::voice_language(self.first_voice(options))?)?,
         };
-        if pieces.iter().all(|p| p.trim().is_empty()) {
+        if pieces.iter().all(|p| p.phonemes.trim().is_empty()) {
             bail!("nothing to speak: the input has no phonemes")
         }
+        let space = self.model.token_ids(" ").first().copied();
         let mut noise = SourceNoise::seeded(seed);
         let mut pcm = Vec::new();
+        let mut words = Vec::new();
         for piece in &pieces {
+            let piece_start = pcm.len();
+            let mut groups = Vec::new();
             // the text chunker already fits its pieces; a caller's phoneme string is cut here
-            for chunk in chunks(piece, self.model.max_phonemes()) {
-                pcm.extend(
-                    self.model
-                        .synthesize(&chunk, &voice, speed, &mut noise)?
-                        .audio,
+            for chunk in chunks(&piece.phonemes, self.model.max_phonemes()) {
+                let output = self.model.synthesize(&chunk, &voice, speed, &mut noise)?;
+                let offset = seconds(pcm.len() - piece_start);
+                let ids = self.model.token_ids(&chunk);
+                groups.extend(
+                    group_spans(&ids, &output.durations, output.audio.len(), space)
+                        .into_iter()
+                        .map(|(start, end)| (start + offset, end + offset)),
                 );
+                pcm.extend(output.audio);
             }
+            let piece_offset = seconds(piece_start);
+            let duration = seconds(pcm.len() - piece_start);
+            words.extend(
+                word_times(piece, &groups, duration)
+                    .into_iter()
+                    .map(|mut word| {
+                        word.start += piece_offset;
+                        word.end += piece_offset;
+                        word
+                    }),
+            );
         }
         Ok(SpeechGenerationOutput {
             pcm: Arc::new(pcm),
             rate: SAMPLE_RATE,
             channels: CHANNELS,
+            words: options.phonemes.is_none().then_some(words),
         })
     }
+}
+
+fn seconds(samples: usize) -> f64 {
+    samples as f64 / SAMPLE_RATE as f64
+}
+
+/// Each spoken group's span in seconds: a group is a run of tokens between spaces, and the predicted durations are
+/// scaled to the audio they made. `durations` covers the padding token on each side of `ids`.
+fn group_spans(
+    ids: &[u32],
+    durations: &[u32],
+    samples: usize,
+    space: Option<u32>,
+) -> Vec<(f64, f64)> {
+    let total: u32 = durations.iter().sum();
+    if total == 0 || durations.len() != ids.len() + 2 {
+        return Vec::new();
+    }
+    let per_unit = seconds(samples) / f64::from(total);
+    let mut at = f64::from(durations[0]) * per_unit;
+    let mut spans = Vec::new();
+    let mut open: Option<f64> = None;
+    for (&id, &units) in ids.iter().zip(&durations[1..]) {
+        let end = at + f64::from(units) * per_unit;
+        if Some(id) == space {
+            if let Some(start) = open.take() {
+                spans.push((start, at));
+            }
+        } else if open.is_none() {
+            open = Some(at);
+        }
+        at = end;
+    }
+    if let Some(start) = open {
+        spans.push((start, at));
+    }
+    spans
+}
+
+/// The piece's words timed by the groups mapped onto them, or spread evenly when the map doesn't fit the groups; a word
+/// no group reads (punctuation alone) takes no time where it falls.
+fn word_times(piece: &g2p::Phonemized, groups: &[(f64, f64)], duration: f64) -> Vec<SpokenWord> {
+    let count = piece.words.len();
+    let mut spans: Vec<Option<(f64, f64)>> = vec![None; count];
+    match &piece.groups {
+        Some(map) if map.len() == groups.len() => {
+            for (&word, &(start, end)) in map.iter().zip(groups) {
+                if let Some(span) = spans.get_mut(word) {
+                    *span = Some(span.map_or((start, end), |(s, _)| (s, end)));
+                }
+            }
+        }
+        _ => {
+            for (i, span) in spans.iter_mut().enumerate() {
+                let share = duration / count as f64;
+                *span = Some((share * i as f64, share * (i + 1) as f64));
+            }
+        }
+    }
+    let mut cursor = 0.0;
+    piece
+        .words
+        .iter()
+        .zip(spans)
+        .map(|(word, span)| {
+            let (start, end) = span.unwrap_or((cursor, cursor));
+            cursor = end;
+            SpokenWord {
+                text: word.text.clone(),
+                ipa: word.ipa.clone(),
+                start,
+                end,
+            }
+        })
+        .collect()
 }
 
 /// Words packed into chunks of at most `max` characters, ending after a pause where one fits; a longer word is cut.
@@ -242,7 +342,40 @@ fn chunks(text: &str, max: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::chunks;
+    use super::{chunks, g2p, group_spans, word_times};
+
+    const SPACE: u32 = 16;
+
+    #[test]
+    fn groups_run_between_spaces_scaled_to_the_audio() {
+        // pad, a b, space, c, pad: 10 duration units over 1 s of audio
+        let spans = group_spans(&[1, 2, SPACE, 3], &[1, 2, 2, 1, 3, 1], 24_000, Some(SPACE));
+        let rounded: Vec<_> = spans
+            .iter()
+            .map(|(s, e)| ((s * 10.).round() / 10., (e * 10.).round() / 10.))
+            .collect();
+        assert_eq!(rounded, [(0.1, 0.5), (0.6, 0.9)]);
+    }
+
+    #[test]
+    fn words_take_their_groups_or_an_even_share() {
+        let word = |text: &str| g2p::PhonemizedWord {
+            text: text.into(),
+            ipa: String::new(),
+        };
+        let mut piece = g2p::Phonemized {
+            phonemes: String::new(),
+            words: vec![word("$3"), word("now")],
+            groups: Some(vec![0, 0, 1]),
+        };
+        let groups = [(0.0, 0.2), (0.2, 0.5), (0.6, 0.9)];
+        let times = word_times(&piece, &groups, 1.0);
+        assert_eq!((times[0].start, times[0].end), (0.0, 0.5));
+        assert_eq!((times[1].start, times[1].end), (0.6, 0.9));
+        piece.groups = None;
+        let even = word_times(&piece, &groups, 1.0);
+        assert_eq!((even[1].start, even[1].end), (0.5, 1.0));
+    }
 
     #[test]
     fn chunks_pack_words_and_cut_overlong_ones() {

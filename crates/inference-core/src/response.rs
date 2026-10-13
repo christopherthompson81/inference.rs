@@ -33,6 +33,8 @@ pub enum Response {
         pcm: Arc<Vec<f32>>,
         rate: usize,
         channels: usize,
+        /// When each input word is spoken, from a model that can tell.
+        words: Option<Vec<inference_models_speech::SpokenWord>>,
     },
     Transcription(inference_models_speech::Transcription),
     TranscriptionStream(crate::TranscriptionStreamUpdate),

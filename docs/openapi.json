@@ -353,7 +353,14 @@
         },
         "responses": {
           "200": {
-            "description": "Speech generation"
+            "description": "The audio in `response_format`; with `timestamps`, the JSON carrying it and its word times",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpeechWithTimestamps"
+                }
+              }
+            }
           }
         }
       }
@@ -12884,6 +12891,10 @@
             "format": "float",
             "description": "Speaking rate, 1.0 being the model's own (Kokoro). Dia ignores it."
           },
+          "timestamps": {
+            "type": "boolean",
+            "description": "Answers with JSON (`SpeechWithTimestamps`): the audio in `response_format`, base64-encoded, and when each word\nof `input` is spoken, with its IPA. Kokoro times words; another model answers with no words."
+          },
           "voice": {
             "type": [
               "string",
@@ -12967,6 +12978,65 @@
           "start": {
             "type": "number",
             "format": "double"
+          }
+        }
+      },
+      "SpeechWithTimestamps": {
+        "type": "object",
+        "description": "The answer to a speech request with `timestamps`.",
+        "required": [
+          "audio",
+          "content_type",
+          "duration",
+          "words"
+        ],
+        "properties": {
+          "audio": {
+            "type": "string",
+            "description": "The audio in the request's `response_format`, base64-encoded."
+          },
+          "content_type": {
+            "type": "string",
+            "description": "The audio's media type."
+          },
+          "duration": {
+            "type": "number",
+            "format": "double",
+            "description": "Seconds of audio."
+          },
+          "words": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SpeechWord"
+            },
+            "description": "The input's words in order; empty for a model that can't time them."
+          }
+        }
+      },
+      "SpeechWord": {
+        "type": "object",
+        "description": "A word of a speech request's `input` and when it is spoken, in seconds from the start of the audio.",
+        "required": [
+          "word",
+          "ipa",
+          "start",
+          "end"
+        ],
+        "properties": {
+          "end": {
+            "type": "number",
+            "format": "double"
+          },
+          "ipa": {
+            "type": "string",
+            "description": "The word's canonical IPA, as the phonemizer read it; empty when it couldn't be placed on the word."
+          },
+          "start": {
+            "type": "number",
+            "format": "double"
+          },
+          "word": {
+            "type": "string"
           }
         }
       },

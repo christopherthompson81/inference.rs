@@ -840,30 +840,22 @@ impl dyn Pipeline {
                 response::send_image_responses(input_seqs, images).await?;
             }
             ForwardInputsResult::Speech { .. } => {
-                let mut rates = Vec::with_capacity(results.len());
-                let mut channels = Vec::with_capacity(results.len());
-                let mut pcms = Vec::with_capacity(results.len());
+                let mut outputs = Vec::with_capacity(results.len());
                 for r in results {
                     let ForwardInputsResult::Speech {
-                        pcms: row_pcms,
-                        rates: row_rates,
-                        channels: row_channels,
+                        outputs: row_outputs,
                     } = r
                     else {
                         unreachable!("All results must have same type, `Speech`")
                     };
-                    assert_eq!(row_rates.len(), 1, "Each sequence must have 1 PCM output.");
                     assert_eq!(
-                        row_channels.len(),
+                        row_outputs.len(),
                         1,
-                        "Each sequence must have 1 PCM output."
+                        "Each sequence must have 1 speech output."
                     );
-                    assert_eq!(row_pcms.len(), 1, "Each sequence must have 1 PCM output.");
-                    rates.push(row_rates[0]);
-                    channels.push(row_channels[0]);
-                    pcms.extend(row_pcms);
+                    outputs.extend(row_outputs);
                 }
-                response::send_speech_responses(input_seqs, &pcms, &rates, &channels).await?;
+                response::send_speech_responses(input_seqs, outputs).await?;
             }
             ForwardInputsResult::Transcription { .. } => {
                 let transcripts = results

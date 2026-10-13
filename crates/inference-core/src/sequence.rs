@@ -1324,8 +1324,11 @@ impl Sequence {
         get_mut_group!(self).images.push(image);
     }
 
-    pub fn add_speech_pcm_to_group(&self, pcm: Arc<Vec<f32>>, rate: usize, channels: usize) {
-        get_mut_group!(self).speech_pcms.push((pcm, rate, channels));
+    pub fn add_speech_output_to_group(
+        &self,
+        output: inference_models_speech::SpeechGenerationOutput,
+    ) {
+        get_mut_group!(self).speech_outputs.push(output);
     }
 
     pub fn add_choice_to_group(&self, choice: Choice) {
@@ -1708,7 +1711,7 @@ pub struct SequenceGroup {
     pub total_completion_time: u128,
     choices: Vec<Choice>,
     images: Vec<DynamicImage>,
-    speech_pcms: Vec<(Arc<Vec<f32>>, usize, usize)>, // (pcm, rate, channels)
+    speech_outputs: Vec<inference_models_speech::SpeechGenerationOutput>,
     raw_choices: Vec<(Vec<Tensor>, Vec<u32>)>,
     embedding_choices: Vec<Vec<f32>>,
     completion_choices: Vec<(f32, CompletionChoice)>,
@@ -1730,7 +1733,7 @@ impl SequenceGroup {
         Self {
             choices: Vec::new(),
             images: Vec::new(),
-            speech_pcms: Vec::new(),
+            speech_outputs: Vec::new(),
             raw_choices: Vec::new(),
             embedding_choices: Vec::new(),
             completion_choices: Vec::new(),
@@ -1894,14 +1897,15 @@ impl SequenceGroup {
         &self,
         sender: Sender<Response>,
     ) -> Result<(), SendError<Response>> {
-        assert_eq!(self.speech_pcms.len(), 1);
+        assert_eq!(self.speech_outputs.len(), 1);
 
-        let (pcm, rate, channels) = self.speech_pcms[0].clone();
+        let output = self.speech_outputs[0].clone();
         sender
             .send(Response::Speech {
-                pcm,
-                rate,
-                channels,
+                pcm: output.pcm,
+                rate: output.rate,
+                channels: output.channels,
+                words: output.words,
             })
             .await?;
 

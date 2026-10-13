@@ -555,6 +555,11 @@ Request fields Kokoro reads:
   `generation.speed` sets the default.
 - `seed`: seeds the vocoder's noise, so the same request gives the same audio. Without it each
   request draws a fresh seed.
+- `timestamps`: answers with JSON instead of raw audio: `audio` (the `response_format` audio, base64-encoded),
+  `content_type`, `duration` in seconds, and `words`, each word of `input` with its `start` and `end` in seconds and
+  its canonical `ipa`. The times come from the durations Kokoro predicts for each phoneme, scaled to the audio and
+  grouped into the words the phonemizer read them from; a written form read as several words (`$3.14`) is one word
+  with all its readings. With `phonemes` there are no source words, so `words` is empty; Dia answers with no words.
 
 <Tabs>
 <TabItem label="HTTP">

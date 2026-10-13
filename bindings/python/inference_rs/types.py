@@ -2793,6 +2793,7 @@ class SpeechGenerationRequest:
     response_format: AudioResponseFormat
     seed: int | None = None
     speed: float | None = None
+    timestamps: bool | None = None
     voice: str | None = None
 
 
@@ -2819,6 +2820,26 @@ class SpeechSegment:
 
     end: float
     start: float
+
+
+@dataclass(kw_only=True)
+class SpeechWithTimestamps:
+    """The answer to a speech request with `timestamps`."""
+
+    audio: str
+    content_type: str
+    duration: float
+    words: list[SpeechWord]
+
+
+@dataclass(kw_only=True)
+class SpeechWord:
+    """A word of a speech request's `input` and when it is spoken, in seconds from the start of the audio."""
+
+    end: float
+    ipa: str
+    start: float
+    word: str
 
 
 @dataclass(kw_only=True)

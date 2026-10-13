@@ -1067,9 +1067,7 @@ pub enum ForwardInputsResult {
         images: Vec<DynamicImage>,
     },
     Speech {
-        pcms: Vec<Arc<Vec<f32>>>,
-        rates: Vec<usize>,
-        channels: Vec<usize>,
+        outputs: Vec<inference_models_speech::SpeechGenerationOutput>,
     },
     BlockGeneration {
         token_blocks: Vec<Vec<u32>>,
@@ -1104,14 +1102,8 @@ impl ForwardInputsResult {
             Self::Image { images } => Ok(Self::Image {
                 images: vec![images[bs_idx].clone()],
             }),
-            Self::Speech {
-                pcms,
-                rates,
-                channels,
-            } => Ok(Self::Speech {
-                pcms: vec![pcms[bs_idx].clone()],
-                rates: vec![rates[bs_idx]],
-                channels: vec![channels[bs_idx]],
+            Self::Speech { outputs } => Ok(Self::Speech {
+                outputs: vec![outputs[bs_idx].clone()],
             }),
             Self::BlockGeneration {
                 token_blocks,

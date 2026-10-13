@@ -178,6 +178,8 @@ GROUPS = [
                 "ImageReference",
                 "ImageChoice",
                 "SpeechGeneration",
+                "SpeechWithTimestamps",
+                "SpeechWord",
                 "AudioResponseFormat",
                 "Transcription",
                 "VerboseTranscription",
