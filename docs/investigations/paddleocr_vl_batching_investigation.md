@@ -302,3 +302,22 @@ baseline, the other the known quote-style flip.
 
 **Implication:** about 8%. Qwen3-VL's shared-decoder path refuses graphs for the same reason and could take the same
 route.
+
+## Run 15 - 2026-10-14 03:30
+
+**Question:** with decode on graphs, where does GPU time go? nsys with `--cuda-graph-trace=node` (without it a
+replayed graph's kernels are missing from the kernel table, and Run 14's step gaps looked like idle host time; a
+`cuEventSynchronize` of about 2.3 ms per step on the completion worker was the graph running).
+
+**Raw finding, 60 regions at 16 in flight:** GPU busy 87% of the timed phase. Decode graphs are 30% of kernel time;
+the rest is prefill and the vision tower: vision attention 1.48 s, large `badd_bf16` 0.64 s (the tower's linear
+biases, added after each GEMM), the tower's GEMMs about 1.5 s, `ugelu_bf16` 0.11 s.
+
+**Change:** `layers::linear_bias_gelu` runs a biased `Linear` through cuBLASLt with the bias (and the tanh GELU the
+tower uses) in the GEMM epilogue on CUDA half types, the unfused layer elsewhere; the tower's q/k/v/out and fc1/fc2
+use it. A CUDA test holds it to the unfused layer within 2% of the largest output.
+
+**Raw finding, Run 3's benchmark at 16 in flight:** 10.9 s and 11.1 s (12.1-12.4 s before). Text: 99 and 98 of 100
+identical to the baseline, the others the known quote-style flips.
+
+**Implication:** about 10%. Other SigLIP-style towers that run plain biased linears could take the same helper.
