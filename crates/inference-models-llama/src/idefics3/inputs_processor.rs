@@ -779,7 +779,9 @@ fn resize(
         size,
     )?;
 
-    Ok(image.resize_exact(w as u32, h as u32, resampling))
+    Ok(inference_vision::resize_exact(
+        image, w as u32, h as u32, resampling,
+    ))
     // Ok(image.resize_exact(w as u32, h as u32,  FilterType::Nearest))
 }
 
@@ -900,8 +902,12 @@ impl ImagePreProcessor for Idefics3ImageProcessor {
                     max_image_size,
                 );
 
-                *image =
-                    image.resize_exact(new_w as u32, new_h as u32, config.resampling.to_filter()?);
+                *image = inference_vision::resize_exact(
+                    image,
+                    new_w as u32,
+                    new_h as u32,
+                    config.resampling.to_filter()?,
+                );
 
                 let (split_image_array, rows, cols) = split_image(image, max_image_size)?;
                 new_images.extend(split_image_array);

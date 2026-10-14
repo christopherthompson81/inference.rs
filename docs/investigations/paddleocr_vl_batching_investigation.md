@@ -246,3 +246,23 @@ other models resize with `resize_exact` and CatmullRom on the same path, and wou
 already +0.85 MiB (30 merges since the baseline was last set, none of which ran `--size`), so the resizer is about
 0.48 MiB. Resizing through `resize_typed` with RGB8 only (not the untyped entry point) did not change the size. The
 baseline is updated with this change. Benchmark on the typed path: 13.4 s, text as above.
+
+## Run 12 - 2026-10-14 00:40
+
+**Question:** do the other vision models gain the same from `inference_vision::resize_exact` (SIMD for RGB8 and RGBA8
+with the convolution filters, the `image` crate for nearest and other pixel types), and do their answers hold?
+
+**Raw finding, the helper against the `image` crate** on a synthetic pattern that wraps 255 -> 0 every few pixels
+(the hardest case): Triangle and Gaussian within 1 everywhere; CatmullRom and Lanczos3 mean difference 0.05-0.23,
+98.7% or more of bytes within 2, the rest at the wraps, where the ringing filters clamp overshoot differently.
+
+**Raw finding, Qwen3.5-0.8B (the Qwen3-VL preprocessor)** describing three full book pages at temperature 0, 80
+tokens: 3.47 s and 3.49 s on master, 2.37 s and 2.37 s with the helper, about 0.37 s less per image. Master is
+identical run to run. Against master: one answer identical, one 0.89 similar, one split at an early near-tie token
+("historical or linguistic study" vs "linguistic study") and went on differently; both describe the page correctly.
+
+**Dead end:** SmolVLM-256M (GGUF with its mmproj, idefics3) fails every image request on master too:
+`fast_mmq shared_lhs: weight ncols 3072 does not match input tail 768`. A separate bug, left for its own fix.
+
+**Implication:** the switch is worth it for every model that resizes with a convolution filter. Nearest (Phi-3-V,
+Phi-4-MM) stays on the `image` crate.

@@ -713,7 +713,7 @@ impl ImagePreProcessor for Gemma3nImageProcessor {
         let mut pixel_values = Vec::new();
         for mut image in images {
             if do_resize {
-                image = image.resize_exact(width, height, resample);
+                image = inference_vision::resize_exact(&image, width, height, resample);
             }
 
             let transforms = Transforms {

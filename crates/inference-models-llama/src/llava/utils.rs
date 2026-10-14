@@ -56,7 +56,8 @@ pub(crate) fn resize_and_pad_image(
             target_height,
         )
     };
-    let resized_image = image.resize_exact(
+    let resized_image = inference_vision::resize_exact(
+        image,
         new_width,
         new_height,
         image::imageops::FilterType::CatmullRom,

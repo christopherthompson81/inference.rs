@@ -638,8 +638,12 @@ impl ImagePreProcessor for LLaVANextInputProcessor {
         // Here I didn't use mistral_vision::Transform, because a lot transformations are before turning the image into a tensor
         let image_padded = resize_and_pad_image(&image, best_resolution);
         let filter = config.resampling.to_filter()?;
-        let image_original_resize =
-            image.resize_exact(resized_size as u32, resized_size as u32, filter);
+        let image_original_resize = inference_vision::resize_exact(
+            &image,
+            resized_size as u32,
+            resized_size as u32,
+            filter,
+        );
         let mut samples = vec![image_original_resize];
         for patch in divide_to_samples(
             &image_padded,
