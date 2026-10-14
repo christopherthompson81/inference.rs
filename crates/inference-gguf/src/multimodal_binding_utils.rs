@@ -238,6 +238,7 @@ pub(super) fn bind_siglip_encoder(
         "v.post_ln",
     )?;
     for layer in inventory.require_layers("v.blk.", family)? {
+        let (fc1, fc2) = siglip_mlp_roles(inventory, layer)?;
         bind_required_linears(
             inventory,
             bindings,
@@ -248,14 +249,32 @@ pub(super) fn bind_siglip_encoder(
                 ("self_attn.k_proj", "attn_k"),
                 ("self_attn.v_proj", "attn_v"),
                 ("self_attn.out_proj", "attn_out"),
-                ("mlp.fc1", "ffn_up"),
-                ("mlp.fc2", "ffn_down"),
+                ("mlp.fc1", fc1),
+                ("mlp.fc2", fc2),
                 ("layer_norm1", "ln1"),
                 ("layer_norm2", "ln2"),
             ],
         )?;
     }
     Ok(())
+}
+
+// fc1 widens to the intermediate size; some converters (SmolVLM's mmproj) name it ffn_down and fc2 ffn_up
+fn siglip_mlp_roles(
+    inventory: &TensorInventory<'_>,
+    layer: usize,
+) -> Result<(&'static str, &'static str)> {
+    let width = |role: &str| -> Result<usize> {
+        Ok(inventory
+            .shape(&format!("v.blk.{layer}.{role}.bias"))?
+            .iter()
+            .product())
+    };
+    Ok(if width("ffn_down")? > width("ffn_up")? {
+        ("ffn_down", "ffn_up")
+    } else {
+        ("ffn_up", "ffn_down")
+    })
 }
 
 pub(super) fn bind_llama_text(
