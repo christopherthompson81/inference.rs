@@ -381,7 +381,8 @@ impl ImagePreProcessor for PaddleOcrVlImageProcessor {
             patches.push(px);
             grid.extend([t as u32, h as u32, w as u32]);
         }
-        let grid = Tensor::from_vec(grid, (images.len(), 3), device)?;
+        // read back by every step of the sequence, so it stays on the host: on the device each read waits for the GPU
+        let grid = Tensor::from_vec(grid, (images.len(), 3), &Device::Cpu)?;
         Ok(PreprocessedImages {
             pixel_values: Tensor::cat(&patches, 0)?,
             pixel_attention_mask: None,
