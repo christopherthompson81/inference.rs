@@ -10,6 +10,8 @@ use crate::attention::{FlashParams, SdpaParams};
 const FATTN_HEAD_DIMS: [usize; 6] = [64, 80, 96, 112, 128, 256];
 // fattn instantiates softcap only at these (and 512)
 const FATTN_SOFTCAP_HEAD_DIMS: [usize; 2] = [128, 256];
+// Head dims only fattn's tile kernel takes (no mma, paged or packed instance): SigLIP-style vision towers (72)
+const FATTN_TILE_HEAD_DIMS: [usize; 2] = [40, 72];
 
 pub fn fattn_supports(head_dim: usize, has_softcap: bool) -> bool {
     #[cfg(feature = "cuda")]
@@ -36,6 +38,28 @@ fn fa3_supports(head_dim: usize, has_softcap: bool) -> bool {
 
 pub fn flash_backend_supports(head_dim: usize, has_softcap: bool) -> bool {
     fattn_supports(head_dim, has_softcap) || fa3_supports(head_dim, has_softcap)
+}
+
+/// Whether dense attention (unpaged, unpacked) at `head_dim` may try fattn: every layout's dims, and the tile-only
+/// ones without softcap or a window. The call itself still asks fattn, so a shape it can't take falls back.
+pub fn flash_backend_supports_dense_sdpa(
+    head_dim: usize,
+    has_softcap: bool,
+    has_sliding_window: bool,
+) -> bool {
+    flash_backend_supports_sdpa(head_dim, has_softcap, has_sliding_window)
+        || fattn_tile_available()
+            && !has_softcap
+            && !has_sliding_window
+            && FATTN_TILE_HEAD_DIMS.contains(&head_dim)
+}
+
+fn fattn_tile_available() -> bool {
+    #[cfg(feature = "cuda")]
+    let available = inference_fattn::mma_available();
+    #[cfg(not(feature = "cuda"))]
+    let available = false;
+    available
 }
 
 pub fn flash_backend_supports_sdpa(
