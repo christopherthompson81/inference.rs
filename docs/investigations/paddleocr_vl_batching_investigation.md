@@ -321,3 +321,29 @@ use it. A CUDA test holds it to the unfused layer within 2% of the largest outpu
 identical to the baseline, the others the known quote-style flips.
 
 **Implication:** about 10%. Other SigLIP-style towers that run plain biased linears could take the same helper.
+
+## Run 16 - 2026-10-14 04:30
+
+**Question:** after Run 15, what's left, and can fattn's mma kernel run the vision attention faster?
+
+**Raw finding, nsys over 60 regions at 16 in flight (node-traced graphs):** GPU busy 86%, 6.18 s of kernels, 33% of
+them the decode graphs. Decode is at memory bandwidth: its GEMMs average 12 us, about one read of each weight matrix,
+about 0.67 ms a step for the model's ~0.6 GB at the card's ~936 GB/s; decode attention, 28 us a layer, is about one
+read of its KV. Vision attention is 25% of kernel time, the tower's and prefill's GEMMs about 30%, layer norms and
+copies about 5%.
+
+**Raw finding, fattn alone on the RTX 3090 (bf16, 16 heads, non-causal, no mask; 4 x n^2 x d x heads FLOPs):**
+
+| n | d 64 | d 80 (the tower, padded) | two cuBLAS matmuls at d 80, no softmax |
+|---|---|---|---|
+| 1,000 | 0.18 ms, 23 TFLOPs | 0.23 ms, 22 TFLOPs | 0.26 ms |
+| 2,500 | 0.84 ms, 30 TFLOPs | 1.03 ms, 31 TFLOPs | 1.15 ms |
+| 4,896 | 2.77 ms, 35 TFLOPs | 3.62 ms, 34 TFLOPs | 5.22 ms |
+
+Retuning the Ampere config for `(80, 80, ncols 64)`, each a full rebuild of the mma instances (8 minutes):
+`nbatch_fa` 64 -> 128: 0.26 / 1.05 / 3.66 ms (no gain); 256 threads at occupancy 1: 0.29 / 1.40 / 5.15 ms (worse).
+Reverted.
+
+**Implication:** fattn already beats the bare matmuls and runs at about half the card's dense bf16 rate; the shipped
+config is locally best. More would need another kernel design (larger Q tiles than the template's 64 columns), for
+at most ~1.3x on a quarter of the kernel time. Not pursued. Across Runs 5-15 the benchmark went 24.3 -> about 11 s.
