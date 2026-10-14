@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
+  import AudioTransport from "../components/AudioTransport.svelte";
   import JobHistory from "../components/JobHistory.svelte";
   import SlotBar from "../components/SlotBar.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
@@ -53,6 +54,9 @@
   let player = $state<HTMLAudioElement | null>(null);
   let activeSegment = $state(-1);
   let activeWord = $state(-1);
+  let paused = $state(true);
+  let position = $state(0);
+  let length = $state(0);
   let frame = 0;
   let namesTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -244,6 +248,7 @@
   }
 
   function locate(time: number) {
+    position = time;
     const current = segments[activeSegment];
     const segment =
       current && time >= current.start && time < current.end
@@ -263,6 +268,20 @@
     if (!player) return;
     player.currentTime = time;
     void player.play();
+  }
+
+  function toggle() {
+    if (!player) return;
+    if (player.paused) void player.play();
+    else player.pause();
+  }
+
+  // the sentence before or after the one playing, or after the playhead between sentences
+  function step(direction: 1 | -1) {
+    const time = player?.currentTime ?? 0;
+    const from = activeSegment >= 0 ? activeSegment : segments.findLastIndex((s) => s.start <= time) + (direction < 0 ? 1 : 0);
+    const target = segments[from + direction];
+    if (target) seek(target.start);
   }
 
   const clock = (seconds: number) => {
@@ -329,15 +348,16 @@
       {/if}
 
       {#if audioUrl}
-        <!-- stays in view above the transcript it plays -->
         <audio
           bind:this={player}
-          controls
           src={audioUrl}
-          class="sticky top-0 z-10 w-full rounded-md bg-white dark:bg-gray-950"
-          onplay={follow}
+          class="hidden"
+          onplay={() => ((paused = false), follow())}
+          onpause={() => (paused = true)}
+          onloadedmetadata={() => player && ((length = player.duration), (position = player.currentTime))}
           onseeked={() => player && locate(player.currentTime)}
         ></audio>
+        <AudioTransport {paused} {position} {length} unit="sentence" ontoggle={toggle} onseek={seek} onstep={step} />
       {/if}
 
       {#if segments.length > 0}
