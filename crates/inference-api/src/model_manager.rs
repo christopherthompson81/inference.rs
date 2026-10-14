@@ -101,6 +101,10 @@ pub struct ManagedLoadRequest {
     /// For a text GGUF, one of its entry's `projectors`; unset takes its only one, and none when there are several.
     #[serde(default)]
     pub mmproj: Option<String>,
+    /// For a speech recognition model, a Silero VAD GGUF (an inventory `path`): recordings over 5 minutes are then cut
+    /// at their silences, and run past the 24 minutes one pass takes.
+    #[serde(default)]
+    pub vad: Option<String>,
     /// For a layout detector, `cpu` or `cuda:N`; unset uses the engine's device. Other models run on the engine's.
     #[serde(default)]
     pub device: Option<String>,
@@ -115,6 +119,9 @@ pub struct ManagedModel {
     pub source: Option<String>,
     /// The projector GGUF loaded beside it.
     pub projector: Option<String>,
+    /// The voice activity GGUF that cuts its long recordings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vad: Option<String>,
     pub status: ModelStatus,
 }
 
@@ -209,6 +216,7 @@ struct Loaded {
     kind: ManagedKind,
     source: String,
     projector: Option<String>,
+    vad: Option<String>,
 }
 
 struct LayoutModel {
@@ -275,6 +283,7 @@ impl ModelManager {
                     kind,
                     source: entry.map(|entry| entry.source.clone()),
                     projector: entry.and_then(|entry| entry.projector.clone()),
+                    vad: entry.and_then(|entry| entry.vad.clone()),
                     status: status_of(card.status.as_deref()),
                     model_id: card.id,
                 })
@@ -286,6 +295,7 @@ impl ModelManager {
             kind: ManagedKind::Layout,
             source: Some(layout.source.clone()),
             projector: None,
+            vad: None,
             status: LAYOUT_STATUS,
         }));
         data.sort_by(|a, b| a.model_id.cmp(&b.model_id));
@@ -330,6 +340,24 @@ impl ModelManager {
             },
             (Source::Repo(_), None) => None,
         };
+        let vad = match &request.vad {
+            None => None,
+            Some(_) if kind != Some(ManagedKind::Transcription) => {
+                return Err(ApiError::invalid_request(
+                    "`vad` cuts a speech recognition model's long recordings; this source is not one",
+                ));
+            }
+            Some(vad) => match self.resolve(vad)? {
+                Source::Local(entry) if entry.kind == Some(InventoryKind::VoiceActivity) => {
+                    Some(entry.path.clone())
+                }
+                _ => {
+                    return Err(ApiError::invalid_request(format!(
+                        "`{vad}` is not a voice activity model in the server's model folders"
+                    )));
+                }
+            },
+        };
         self.remove_id(&id).await?;
         let _progress = add_progress_sink(progress);
         let source_name = request.source.clone();
@@ -366,6 +394,7 @@ impl ModelManager {
                 kind: ManagedKind::Layout,
                 source: Some(source_name),
                 projector: None,
+                vad: None,
                 status: LAYOUT_STATUS,
             });
         }
@@ -375,8 +404,12 @@ impl ModelManager {
             ));
         }
         let spec = ModelSpec {
-            model: serde_json::from_value(self.model_selected(&source, projector.as_deref()))
-                .map_err(|error| ApiError::invalid_request(error.to_string()))?,
+            model: serde_json::from_value(self.model_selected(
+                &source,
+                projector.as_deref(),
+                vad.as_deref(),
+            ))
+            .map_err(|error| ApiError::invalid_request(error.to_string()))?,
             model_id: Some(id.clone()),
             chat_template: None,
             jinja_explicit: None,
@@ -408,6 +441,7 @@ impl ModelManager {
                     kind,
                     source: source_name.clone(),
                     projector: projector.clone(),
+                    vad: vad.clone(),
                 },
             );
         Ok(ManagedModel {
@@ -415,6 +449,7 @@ impl ModelManager {
             kind,
             source: Some(source_name),
             projector,
+            vad,
             status: ModelStatus::Loaded,
         })
     }
@@ -615,7 +650,12 @@ impl ModelManager {
         )))
     }
 
-    fn model_selected(&self, source: &Source, projector: Option<&str>) -> serde_json::Value {
+    fn model_selected(
+        &self,
+        source: &Source,
+        projector: Option<&str>,
+        vad: Option<&str>,
+    ) -> serde_json::Value {
         let hf_cache = self
             .config
             .hf_cache_path
@@ -647,6 +687,10 @@ impl ModelManager {
                 }
                 json!({ "GGUF": gguf })
             }
+            // auto-detection routes speech recognition too, but only this selection takes a VAD
+            Source::Local(entry) if vad.is_some() => json!({
+                "Transcription": { "model_id": entry.path, "vad_model_id": vad }
+            }),
             Source::Local(entry) => json!({ "Run": { "model_id": entry.path } }),
             Source::Repo(repo) => json!({ "Run": { "model_id": repo, "hf_cache_path": hf_cache } }),
         }
@@ -663,14 +707,20 @@ impl ModelManager {
             .map(Into::into)
     }
 
-    // what serving needs on disk: each managed model's source and projector, and the id of every model the manager
+    // what serving needs on disk: each managed model's source, projector and VAD, and the id of every model the manager
     // did not load (started with `-m`, or added by `/v1/models/add`), which for a local model is its path
     fn sources(&self) -> Result<Vec<String>, ApiError> {
         let loaded = self.loaded.read().map_err(|_| ApiError::internal())?;
         let layouts = self.layouts.read().map_err(|_| ApiError::internal())?;
         let mut sources: Vec<String> = loaded
             .values()
-            .flat_map(|entry| [Some(entry.source.clone()), entry.projector.clone()])
+            .flat_map(|entry| {
+                [
+                    Some(entry.source.clone()),
+                    entry.projector.clone(),
+                    entry.vad.clone(),
+                ]
+            })
             .flatten()
             .chain(layouts.values().map(|layout| layout.source.clone()))
             .collect();

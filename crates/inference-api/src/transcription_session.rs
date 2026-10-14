@@ -135,7 +135,11 @@ impl TranscriptionSession {
         let transcription = update
             .transcription
             .ok_or_else(|| unexpected(&self.state))?;
-        let output = render_transcript(&self.request.as_transcription_request(), transcription)?;
+        let output = render_transcript(
+            &self.request.as_transcription_request(),
+            transcription,
+            None,
+        )?;
         Ok((update.delta, output))
     }
 }

@@ -4,7 +4,8 @@
   import SlotBar from "../components/SlotBar.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
   import { managerStore, SLOTS } from "../stores/manager.svelte";
-  import { diarize, transcribe } from "../services/manager";
+  import { transcribe } from "../services/manager";
+  import { compactAudio } from "../services/audioUpload";
   import { jobFile, jobFileUrl, keptExtension, type Job } from "../services/jobs";
   import {
     EXPORT_FORMATS,
@@ -16,8 +17,6 @@
   } from "../services/transcriptExport";
 
   const AUDIO_STEM = "audio";
-  // turns of one speaker this close together are transcribed as one clip
-  const MERGE_GAP_SECONDS = 1.0;
   // a word belongs to a sentence it starts within, give or take rounding in the reply's times
   const WORD_EDGE_SECONDS = 0.01;
   // a renamed speaker is saved once typing pauses this long
@@ -36,12 +35,6 @@
     done: number;
     /** 0 while the stage can't count its work. */
     total: number;
-  }
-
-  interface Span {
-    speaker: string;
-    start: number;
-    end: number;
   }
 
   let audio = $state<File | null>(null);
@@ -126,80 +119,25 @@
     return restored && name ? jobFile(restored, name) : null;
   }
 
-  // the diarizer's turns in time order, a speaker's turns joined when nobody speaks between them
-  function spansOf(turns: { speaker: number; start: number; end: number }[]): Span[] {
-    const spans: Span[] = [];
-    for (const turn of [...turns].sort((a, b) => a.start - b.start)) {
-      const speaker = `Speaker ${turn.speaker}`;
-      const last = spans.at(-1);
-      if (last?.speaker === speaker && turn.start - last.end <= MERGE_GAP_SECONDS) {
-        last.end = Math.max(last.end, turn.end);
-      } else {
-        spans.push({ speaker, start: turn.start, end: turn.end });
-      }
-    }
-    return spans;
-  }
-
-  // a reply's sentences, moved to `offset` in the whole audio, each with the words that start inside it
-  function segmentsOf(
-    reply: { text: string; segments?: { start: number; end: number; text: string }[]; words?: TimedWord[] },
-    speaker: string,
-    offset: number,
-  ): TranscriptSegment[] {
-    const words = (reply.words ?? []).map((w) => ({ word: w.word, start: w.start + offset, end: w.end + offset }));
+  // a reply's sentences, each with the words that start inside it and the diarizer's speaker when it ran
+  function segmentsOf(reply: {
+    text: string;
+    segments?: { start: number; end: number; text: string; speaker?: number }[];
+    words?: TimedWord[];
+  }): TranscriptSegment[] {
+    const words = (reply.words ?? []).map((w) => ({ word: w.word, start: w.start, end: w.end }));
     const parts = reply.segments?.length
-      ? reply.segments.map((part) => ({ start: part.start + offset, end: part.end + offset, text: part.text }))
-      : [{ start: words[0]?.start ?? offset, end: words.at(-1)?.end ?? offset, text: reply.text }];
+      ? reply.segments
+      : [{ start: words[0]?.start ?? 0, end: words.at(-1)?.end ?? 0, text: reply.text }];
     return parts
       .map((part) => ({
-        ...part,
-        speaker,
+        start: part.start,
+        end: part.end,
+        speaker: "speaker" in part && part.speaker !== undefined ? `Speaker ${part.speaker}` : "",
         text: part.text.trim(),
         words: words.filter((w) => w.start >= part.start - WORD_EDGE_SECONDS && w.start < part.end + WORD_EDGE_SECONDS),
       }))
       .filter((segment) => segment.text);
-  }
-
-  // the speaker whose turn holds `time`, else the one whose turn is nearest
-  function speakerAt(spans: Span[], time: number): string {
-    let best = spans[0];
-    let bestGap = Infinity;
-    for (const span of spans) {
-      const gap = time < span.start ? span.start - time : time > span.end ? time - span.end : 0;
-      if (gap < bestGap) {
-        best = span;
-        bestGap = gap;
-      }
-      if (gap === 0) break;
-    }
-    return best.speaker;
-  }
-
-  // each sentence cut where its words change speaker, every word going to the turn around its middle
-  function bySpeaker(sentences: TranscriptSegment[], spans: Span[]): TranscriptSegment[] {
-    if (spans.length === 0) return sentences;
-    return sentences.flatMap((sentence) => {
-      const words = sentence.words ?? [];
-      if (words.length === 0) {
-        return [{ ...sentence, speaker: speakerAt(spans, (sentence.start + sentence.end) / 2) }];
-      }
-      const runs: { speaker: string; words: TimedWord[] }[] = [];
-      for (const word of words) {
-        const speaker = speakerAt(spans, (word.start + word.end) / 2);
-        const last = runs.at(-1);
-        if (last?.speaker === speaker) last.words.push(word);
-        else runs.push({ speaker, words: [word] });
-      }
-      if (runs.length === 1) return [{ ...sentence, speaker: runs[0].speaker }];
-      return runs.map((run) => ({
-        start: run.words[0].start,
-        end: run.words.at(-1)!.end,
-        text: run.words.map((w) => w.word.trim()).join(" "),
-        speaker: run.speaker,
-        words: run.words,
-      }));
-    });
   }
 
   async function run() {
@@ -219,27 +157,27 @@
       if (!file) return;
       const options = { language: language.trim() || undefined, signal };
 
-      // one pass over the whole file each, side by side: the server splits long audio itself
+      // one upload: the server diarizes the same audio while it transcribes, and labels the sentences
       progress = { stage: diarizer ? "Transcribing and finding the speakers" : "Transcribing", done: 0, total: 0 };
       let speakersFailed = "";
-      const [reply, turns] = await Promise.all([
-        transcribe(SLOTS.transcription.id, file, options),
-        diarizer
-          ? diarize(SLOTS.diarization.id, file, signal).then(
-              (result) => result.segments,
-              (e) => {
-                if (signal.aborted) throw e;
-                speakersFailed = e instanceof Error ? e.message : String(e);
-                return [];
-              },
-            )
-          : Promise.resolve([]),
-      ]);
-      segments = bySpeaker(segmentsOf(reply, "", 0), spansOf(turns));
+      // what the model hears, at the size it needs, which the history keeps too
+      const upload = await compactAudio(file);
+      let reply;
+      try {
+        reply = await transcribe(SLOTS.transcription.id, upload, {
+          ...options,
+          diarizationModel: diarizer ? SLOTS.diarization.id : undefined,
+        });
+      } catch (e) {
+        if (signal.aborted || !diarizer) throw e;
+        speakersFailed = e instanceof Error ? e.message : String(e);
+        reply = await transcribe(SLOTS.transcription.id, upload, options);
+      }
+      segments = segmentsOf(reply);
       progress = null;
       status = `Done in ${((performance.now() - started) / 1000).toFixed(1)} s`;
       if (speakersFailed) status += `; no speakers: ${speakersFailed}`;
-      await keep(file, again);
+      await keep(upload, again);
     } catch (e) {
       status = signal.aborted ? "Canceled" : e instanceof Error ? e.message : String(e);
     } finally {

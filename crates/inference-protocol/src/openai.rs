@@ -2156,6 +2156,11 @@ pub struct TranscriptionRequest {
     /// Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.
     #[serde(default)]
     pub beam_size: Option<usize>,
+    /// A diarization model to run over the same audio: segments then break where the speaker changes, and segments
+    /// and words carry the speaker.
+    #[serde(default)]
+    #[schema(example = "diarization")]
+    pub diarization_model: Option<String>,
 }
 
 impl TranscriptionRequest {
@@ -2169,6 +2174,7 @@ impl TranscriptionRequest {
             temperature: None,
             timestamp_granularities: Vec::new(),
             beam_size: None,
+            diarization_model: None,
         }
     }
 }
@@ -2184,6 +2190,9 @@ pub struct TranscriptionWord {
     pub word: String,
     pub start: f64,
     pub end: f64,
+    /// The diarizer's index of who says it, when the request named a `diarization_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<usize>,
 }
 
 /// A timed span of a transcript, about a sentence.
@@ -2193,6 +2202,9 @@ pub struct TranscriptionSegment {
     pub start: f64,
     pub end: f64,
     pub text: String,
+    /// The diarizer's index of who speaks it, when the request named a `diarization_model`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
@@ -2235,10 +2247,13 @@ pub fn transcript_srt(segments: &[TranscriptionSegment]) -> String {
         .enumerate()
         .map(|(i, s)| {
             format!(
-                "{}\n{} --> {}\n{}\n",
+                "{}\n{} --> {}\n{}{}\n",
                 i + 1,
                 subtitle_time(s.start, ','),
                 subtitle_time(s.end, ','),
+                s.speaker
+                    .map(|n| format!("Speaker {n}: "))
+                    .unwrap_or_default(),
                 s.text
             )
         })
@@ -2251,10 +2266,14 @@ pub fn transcript_vtt(segments: &[TranscriptionSegment]) -> String {
     let cues = segments
         .iter()
         .map(|s| {
+            // a WebVTT voice span names the speaker
             format!(
-                "{} --> {}\n{}\n",
+                "{} --> {}\n{}{}\n",
                 subtitle_time(s.start, '.'),
                 subtitle_time(s.end, '.'),
+                s.speaker
+                    .map(|n| format!("<v Speaker {n}>"))
+                    .unwrap_or_default(),
                 s.text
             )
         })
@@ -3317,12 +3336,14 @@ mod tests {
                 start: 0.32,
                 end: 3_725.5,
                 text: "Well, I don't.".into(),
+                speaker: None,
             },
             super::TranscriptionSegment {
                 id: 1,
                 start: 3_726.0,
                 end: 3_727.04,
                 text: "It is.".into(),
+                speaker: None,
             },
         ];
         assert_eq!(

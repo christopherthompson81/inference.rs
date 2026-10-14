@@ -37,6 +37,9 @@ const LONG_FORM_SECONDS: f64 = 5.0 * 60.0;
 const WINDOW_SECONDS: f64 = 2.0 * 60.0;
 // how far a window reaches into the gaps around it, for speech the VAD scored just under its threshold
 const WINDOW_EDGE_SECONDS: f64 = 1.0;
+// without a VAD, audio past MAX_SECONDS is cut at the quietest frame this far back from each window's end
+const QUIET_SEARCH_SECONDS: f64 = 20.0;
+const QUIET_FRAME_SECONDS: f64 = 0.1;
 // tokens transformers' processor pins to the end of the token before them, as NeMo does for TDT
 const ATTACHED_PUNCTUATION: [&str; 11] = [
     "?", "'", "\u{a1}", "\u{bf}", "-", ":", ",", "%", "/", ".", "!",
@@ -230,16 +233,16 @@ impl Parakeet {
     ) -> Result<Transcription> {
         let language = self.language(options)?;
         // checked before resampling, which would copy hours of audio the model then refuses
-        let seconds = pcm.len() as f64 / f64::from(sample_rate);
-        if seconds > MAX_SECONDS {
-            return Err(msg(format!(
-                "the audio is {seconds:.0} s; Parakeet's full attention takes at most {MAX_SECONDS:.0} s \
-                 (a transcription model loaded with a VAD transcribes longer audio)"
-            )));
-        }
         let pcm =
             inference_audio::mel::resample(pcm, sample_rate, self.sample_rate()).map_err(msg)?;
-        self.transcribe_samples(&pcm, language, options.beam_size)
+        let rate = self.sample_rate();
+        let duration = pcm.len() as f64 / f64::from(rate);
+        if duration <= MAX_SECONDS {
+            return self.transcribe_samples(&pcm, language, options.beam_size);
+        }
+        // past full attention's bound, and with no VAD to find the silences, cut where the audio is quietest
+        let windows = quiet_windows(&pcm, rate);
+        self.transcribe_windows(&pcm, &windows, language, options.beam_size)
     }
 
     fn identifies(&self, language: &str) -> bool {
@@ -299,15 +302,28 @@ impl Parakeet {
             &options,
         );
         let window_samples = (WINDOW_SECONDS * f64::from(rate)) as usize;
+        let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
+        let windows = widen(&windows(&speech, window_samples), pcm.len(), edge);
+        self.transcribe_windows(&pcm, &windows, language, beam)
+    }
+
+    // each `(start, end)` sample window transcribed alone, its words moved to where it sits in `pcm`
+    fn transcribe_windows(
+        &self,
+        pcm: &[f32],
+        windows: &[(usize, usize)],
+        language: Option<&str>,
+        beam: Option<usize>,
+    ) -> Result<Transcription> {
+        let rate = self.sample_rate();
         let mut merged = Transcription {
             text: String::new(),
             tokens: Vec::new(),
             words: Vec::new(),
-            duration,
+            duration: pcm.len() as f64 / f64::from(rate),
             language: None,
         };
-        let edge = (WINDOW_EDGE_SECONDS * f64::from(rate)) as usize;
-        for (start, end) in widen(&windows(&speech, window_samples), pcm.len(), edge) {
+        for &(start, end) in windows {
             let offset = start as f64 / f64::from(rate);
             let part = self.transcribe_samples(&pcm[start..end], language, beam)?;
             merged.language = merged.language.or(part.language);
@@ -564,6 +580,29 @@ fn windows(speech: &[(usize, usize)], max: usize) -> Vec<(usize, usize)> {
     out
 }
 
+// back-to-back windows of at most WINDOW_SECONDS, each ending at the quietest frame of its last QUIET_SEARCH_SECONDS
+fn quiet_windows(pcm: &[f32], rate: u32) -> Vec<(usize, usize)> {
+    let window = (WINDOW_SECONDS * f64::from(rate)) as usize;
+    let search = (QUIET_SEARCH_SECONDS * f64::from(rate)) as usize;
+    let frame = ((QUIET_FRAME_SECONDS * f64::from(rate)) as usize).max(1);
+    let mut out = Vec::new();
+    let mut start = 0;
+    while pcm.len() - start > window {
+        let from = start + window - search;
+        let cut = (from..start + window - frame)
+            .step_by(frame)
+            .min_by(|&a, &b| {
+                let energy = |at: usize| pcm[at..at + frame].iter().map(|x| x * x).sum::<f32>();
+                energy(a).total_cmp(&energy(b))
+            })
+            .map_or(start + window, |at| at + frame / 2);
+        out.push((start, cut));
+        start = cut;
+    }
+    out.push((start, pcm.len()));
+    out
+}
+
 // each window reaches up to `edge` samples into the gaps around it, never past a gap's midpoint or the audio
 fn widen(windows: &[(usize, usize)], len: usize, edge: usize) -> Vec<(usize, usize)> {
     windows
@@ -621,6 +660,42 @@ mod tests {
         let speech = [(0, 10), (20, 40), (45, 90), (95, 300), (310, 320)];
         assert_eq!(windows(&speech, 100), [(0, 90), (95, 300), (310, 320)]);
         assert_eq!(windows(&[], 100), Vec::<(usize, usize)>::new());
+    }
+
+    // without a VAD, long audio splits back to back at the quiet stretch before each window's limit
+    #[test]
+    fn quiet_windows_cut_at_the_quietest_frame() {
+        let rate = 100;
+        let seconds = 300;
+        // a tone throughout, silent for 2 s at 110 s and 225 s
+        let pcm: Vec<f32> = (0..seconds * rate)
+            .map(|i| {
+                let t = i as f64 / rate as f64;
+                if (110.0..112.0).contains(&t) || (225.0..227.0).contains(&t) {
+                    0.0
+                } else {
+                    (t * 7.0).sin() as f32
+                }
+            })
+            .collect();
+        let windows = quiet_windows(&pcm, rate as u32);
+        assert_eq!(windows.first().map(|w| w.0), Some(0));
+        assert_eq!(windows.last().map(|w| w.1), Some(pcm.len()));
+        assert!(windows.windows(2).all(|pair| pair[0].1 == pair[1].0));
+        assert!(
+            windows
+                .iter()
+                .all(|w| w.1 - w.0 <= (WINDOW_SECONDS as usize) * rate)
+        );
+        let cuts: Vec<f64> = windows[..windows.len() - 1]
+            .iter()
+            .map(|w| w.1 as f64 / rate as f64)
+            .collect();
+        assert_eq!(cuts.len(), 2);
+        assert!(
+            (110.0..112.0).contains(&cuts[0]) && (225.0..227.0).contains(&cuts[1]),
+            "cuts {cuts:?}"
+        );
     }
 
     #[test]

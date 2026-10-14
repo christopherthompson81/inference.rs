@@ -67,6 +67,8 @@ const METHOD_NOT_ALLOWED_MESSAGE: &str = "The requested HTTP method is not allow
 
 /// This is the axum default request body limit for the router. Accept up to 50mb input.
 pub const DEFAULT_MAX_BODY_LIMIT: usize = N_INPUT_SIZE * MB_TO_B;
+/// The audio uploads' own limit, past the router's: 512 MiB is about 4.6 hours of 16 kHz mono 16-bit WAV.
+pub const AUDIO_MAX_BODY_LIMIT: usize = 512 * MB_TO_B;
 
 /// A builder for creating a inference.rs server router with configurable options.
 ///
@@ -286,6 +288,7 @@ fn init_router(
     model_management: bool,
     model_manager: Option<std::sync::Arc<inference_api::model_manager::ModelManager>>,
 ) -> Result<Router> {
+    let audio_limit = router_max_body_limit.max(AUDIO_MAX_BODY_LIMIT);
     let allow_origin = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
 
@@ -361,10 +364,19 @@ fn init_router(
             get(get_container_file_content),
         )
         .route(SPEECH_GENERATION_ROUTE.path, post(speech_generation))
-        .route(TRANSCRIPTION_ROUTE.path, post(transcription))
+        .route(
+            TRANSCRIPTION_ROUTE.path,
+            post(transcription).layer(DefaultBodyLimit::max(audio_limit)),
+        )
         .route(REALTIME_ROUTE.path, get(crate::realtime::realtime))
-        .route(VOICE_ACTIVITY_ROUTE.path, post(voice_activity))
-        .route(DIARIZATION_ROUTE.path, post(diarization))
+        .route(
+            VOICE_ACTIVITY_ROUTE.path,
+            post(voice_activity).layer(DefaultBodyLimit::max(audio_limit)),
+        )
+        .route(
+            DIARIZATION_ROUTE.path,
+            post(diarization).layer(DefaultBodyLimit::max(audio_limit)),
+        )
         .route(AGENT_APPROVAL_ROUTE.path, post(resolve_agent_approval))
         .route(RESPONSES_ROUTE.path, post(create_response))
         .route(SKILLS_ROUTE.path, get(list_skills).post(upload_skill))

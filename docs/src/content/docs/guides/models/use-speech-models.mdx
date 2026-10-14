@@ -56,6 +56,11 @@ search for TDT heads, its default beam search for RNN-T ones, matching NeMo toke
 model a beam gains little; on clean LibriSpeech, TDT's MALSD cut the word error rate by about a tenth and RNN-T's
 beam not at all, at several times greedy's decoding time. CTC heads decode greedily only.
 
+`diarization_model` (an inference.rs field) names a loaded diarization model to run over the same upload while
+the audio is transcribed. Each word then goes to the speaker whose turn it overlaps most (the nearest turn when
+it overlaps none), segments also break where the speaker changes, and segments and words carry a `speaker`
+index; `srt` prefixes each cue with `Speaker N: ` and `vtt` names it in a `<v Speaker N>` voice span.
+
 <Tabs>
 <TabItem label="HTTP">
 
@@ -109,7 +114,10 @@ you name.
 Loaded with a Silero VAD (`vad_model_id` in the engine spec, or `TranscriptionModelBuilder::with_vad_model_id`),
 Parakeet cuts a recording longer than 5 minutes at its silences into windows of at most 2 minutes, transcribes
 each, and joins them with their timestamps in place; stretches without speech are skipped, and the 24-minute
-bound no longer applies.
+bound no longer applies. Without a VAD, a recording over 24 minutes is cut instead at its quietest moments
+(the lowest-energy 100 ms in the last 20 s before each 2-minute mark). The model manager takes the VAD as `vad`
+in `/v1/manager/load`, an inventory path, and the web UI offers the folder's VAD models beside a speech
+recognition model.
 
 ```python
 spec = t.EngineSpec(
@@ -189,7 +197,8 @@ inference serve -m nvidia/nemotron-3.5-asr-streaming-0.6b
 FastConformer RNN-T recognisers trained for cache-aware streaming: causal convolutions and attention limited
 to a window of chunks. They load from the transformers layout like Parakeet and are transcribed over the whole
 recording with the attention window they were trained with, which gives the streaming result; like Parakeet,
-they take 24 minutes in one pass, and longer recordings with a VAD. Nemotron-3.5 takes the request's `language` (`de-DE`, `de`, ... from its
+they take 24 minutes in one pass, and longer recordings in windows, cut at a VAD's silences or, without one, at
+the audio's quietest moments. Nemotron-3.5 takes the request's `language` (`de-DE`, `de`, ... from its
 `processor_config.json`) as a prompt, or identifies the language itself when none is given, and
 `verbose_json` reports it either way. A language outside its list is refused.
 

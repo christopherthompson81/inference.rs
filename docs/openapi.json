@@ -400,6 +400,14 @@
                         "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
                         "minimum": 0
                       },
+                      "diarization_model": {
+                        "type": [
+                          "string",
+                          "null"
+                        ],
+                        "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker.",
+                        "example": "diarization"
+                      },
                       "language": {
                         "type": [
                           "string",
@@ -6551,6 +6559,13 @@
           "source": {
             "type": "string",
             "description": "An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout\nmodel loads from the inventory."
+          },
+          "vad": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "For a speech recognition model, a Silero VAD GGUF (an inventory `path`): recordings over 5 minutes are then cut\nat their silences, and run past the 24 minutes one pass takes."
           }
         },
         "additionalProperties": false
@@ -6586,6 +6601,13 @@
           },
           "status": {
             "$ref": "#/components/schemas/ModelStatus"
+          },
+          "vad": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The voice activity GGUF that cuts its long recordings."
           }
         }
       },
@@ -13311,6 +13333,14 @@
             "description": "Beam search over this many hypotheses (1 to 16) for an RNN-T or TDT model; unset decodes greedily.",
             "minimum": 0
           },
+          "diarization_model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A diarization model to run over the same audio: segments then break where the speaker changes, and segments\nand words carry the speaker.",
+            "example": "diarization"
+          },
           "language": {
             "type": [
               "string",
@@ -13390,6 +13420,14 @@
             "type": "integer",
             "minimum": 0
           },
+          "speaker": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The diarizer's index of who speaks it, when the request named a `diarization_model`.",
+            "minimum": 0
+          },
           "start": {
             "type": "number",
             "format": "double"
@@ -13445,6 +13483,14 @@
           "end": {
             "type": "number",
             "format": "double"
+          },
+          "speaker": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "The diarizer's index of who says it, when the request named a `diarization_model`.",
+            "minimum": 0
           },
           "start": {
             "type": "number",
