@@ -775,14 +775,16 @@ impl MiniCpmOImageProcessor {
         let (source_images, patches) = if let Some(best_grid) = best_grid {
             // Source image, down-sampling and ensure divided by patch_size
             let best_resize = self.find_best_resize((w, h), scale_resolution, patch_size, false);
-            let source_image = image.resize_exact(
+            let source_image = inference_vision::resize_exact(
+                image,
                 best_resize.0 as u32,
                 best_resize.1 as u32,
                 FilterType::CatmullRom,
             );
             let refine_size =
                 self.get_refine_size((w, h), best_grid, scale_resolution, patch_size, true);
-            let refine_image = image.resize_exact(
+            let refine_image = inference_vision::resize_exact(
+                image,
                 refine_size.0 as u32,
                 refine_size.1 as u32,
                 FilterType::CatmullRom,
@@ -797,7 +799,8 @@ impl MiniCpmOImageProcessor {
         } else {
             // Don't need to slice, upsample
             let best_size = self.find_best_resize((w, h), scale_resolution, patch_size, true);
-            let source_images = image.resize_exact(
+            let source_images = inference_vision::resize_exact(
+                image,
                 best_size.0 as u32,
                 best_size.1 as u32,
                 FilterType::CatmullRom,

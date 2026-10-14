@@ -819,7 +819,7 @@ impl MLlamaImageProcessor {
         );
 
         Ok((
-            image.resize_exact(new_width as u32, new_height as u32, filter),
+            inference_vision::resize_exact(&image, new_width as u32, new_height as u32, filter),
             (num_tiles_height, num_tiles_width),
         ))
     }

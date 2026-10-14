@@ -274,7 +274,8 @@ impl Gemma4ImageProcessor {
                 Some(sizes) => sizes[image_index],
                 None => self.compute_resize_dims(h as usize, w as usize)?,
             };
-            let resized = image.resize_exact(new_w as u32, new_h as u32, resample);
+            let resized =
+                inference_vision::resize_exact(&image, new_w as u32, new_h as u32, resample);
             let transforms = Transforms {
                 input: &ToTensorNoNorm,
                 inner_transforms: &[&do_rescale.then_some(Rescale {
@@ -1287,8 +1288,12 @@ impl MultimodalInputsProcessor for Gemma4ImageProcessor {
 
                             for frame in &video.frames {
                                 let frame_rgb = convert_to_rgb(frame);
-                                let resized =
-                                    frame_rgb.resize_exact(new_w as u32, new_h as u32, resample);
+                                let resized = inference_vision::resize_exact(
+                                    &frame_rgb,
+                                    new_w as u32,
+                                    new_h as u32,
+                                    resample,
+                                );
 
                                 let transforms = Transforms {
                                     input: &ToTensorNoNorm,
@@ -1608,7 +1613,8 @@ impl ImagePreProcessor for Gemma4ImageProcessor {
             let (new_h, new_w) = self.compute_resize_dims(h as usize, w as usize)?;
 
             // resize_exact takes (width, height, filter)
-            let resized = image.resize_exact(new_w as u32, new_h as u32, resample);
+            let resized =
+                inference_vision::resize_exact(&image, new_w as u32, new_h as u32, resample);
 
             let transforms = Transforms {
                 input: &ToTensorNoNorm,

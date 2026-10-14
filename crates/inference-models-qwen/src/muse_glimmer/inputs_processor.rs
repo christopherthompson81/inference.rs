@@ -520,7 +520,12 @@ impl MuseGlimmerImageProcessor {
             let factor = self.settings.patch_size * self.settings.merge_size;
             let (target_h, target_w) =
                 Self::smart_resize(height as usize, width as usize, factor, max_tokens)?;
-            image.resize_exact(target_w as u32, target_h as u32, self.settings.resampling)
+            inference_vision::resize_exact(
+                &image,
+                target_w as u32,
+                target_h as u32,
+                self.settings.resampling,
+            )
         } else {
             image
         };

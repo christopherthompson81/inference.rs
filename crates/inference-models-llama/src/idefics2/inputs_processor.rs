@@ -621,7 +621,12 @@ impl ImagePreProcessor for Idefics2ImageProcessor {
                     );
                 };
 
-                *image = image.resize_exact(w as u32, h as u32, config.resampling.to_filter()?);
+                *image = inference_vision::resize_exact(
+                    image,
+                    w as u32,
+                    h as u32,
+                    config.resampling.to_filter()?,
+                );
             }
         }
 

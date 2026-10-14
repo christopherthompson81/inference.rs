@@ -658,7 +658,8 @@ impl Qwen2VLImageProcessor {
         let mut processed_images = Vec::new();
 
         for mut image in images {
-            image = image.resize_exact(
+            image = inference_vision::resize_exact(
+                &image,
                 width,
                 height,
                 config
@@ -678,7 +679,8 @@ impl Qwen2VLImageProcessor {
                 )?;
                 height = resized_height as u32;
                 width = resized_width as u32;
-                image = image.resize_exact(
+                image = inference_vision::resize_exact(
+                    &image,
                     resized_width as u32,
                     resized_height as u32,
                     config

@@ -718,7 +718,8 @@ impl ImagePreProcessor for Mistral3ImageProcessor {
                     max_width,
                     patch_size,
                 )?;
-                *image = image.resize_exact(width as u32, height as u32, resample);
+                *image =
+                    inference_vision::resize_exact(image, width as u32, height as u32, resample);
             }
 
             let (width, height) = image.dimensions();
