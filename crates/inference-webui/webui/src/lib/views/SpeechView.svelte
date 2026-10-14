@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onDestroy, tick } from "svelte";
+  import AudioTransport from "../components/AudioTransport.svelte";
   import JobHistory from "../components/JobHistory.svelte";
   import SlotBar from "../components/SlotBar.svelte";
   import { jobsStore } from "../stores/jobs.svelte";
@@ -328,11 +329,6 @@
     step();
   }
 
-  const clock = (seconds: number) => {
-    const total = Math.max(0, Math.floor(seconds));
-    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
-  };
-
   async function exportAs(format: "wav" | "json" | "md") {
     const base = (blocks[0]?.text ?? "speech").replace(/[^\w-]+/g, "-").slice(0, 40) || "speech";
     try {
@@ -469,33 +465,7 @@
       ></audio>
 
       {#if generated > 0}
-        <!-- the reading's transport: it stays in view above the paragraphs it plays -->
-        <div class="sticky top-0 z-10 flex items-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-sm dark:border-gray-800 dark:bg-gray-950">
-          <button class="rounded p-1 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800" onclick={() => step(-1)} aria-label="Previous paragraph" title="Previous paragraph">
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M6 5h2v14H6zM20 5v14L9 12z" /></svg>
-          </button>
-          <button class="rounded-full bg-blue-600 p-2 text-white hover:bg-blue-700" onclick={toggle} aria-label={paused ? "Play" : "Pause"} title={paused ? "Play" : "Pause"}>
-            {#if paused}
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M7 4v16l13-8z" /></svg>
-            {:else}
-              <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M6 4h4v16H6zM14 4h4v16h-4z" /></svg>
-            {/if}
-          </button>
-          <button class="rounded p-1 text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800" onclick={() => step(1)} aria-label="Next paragraph" title="Next paragraph">
-            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="currentColor"><path d="M16 5h2v14h-2zM4 5v14l11-7z" /></svg>
-          </button>
-          <input
-            type="range"
-            class="min-w-0 flex-1 accent-blue-600"
-            min="0"
-            max={length}
-            step="0.1"
-            value={position}
-            aria-label="Position in the reading"
-            oninput={(e) => seekTo(Number(e.currentTarget.value))}
-          />
-          <span class="shrink-0 font-mono text-xs text-gray-500">{clock(position)} / {clock(length)}</span>
-        </div>
+        <AudioTransport {paused} {position} {length} unit="paragraph" ontoggle={toggle} onseek={seekTo} onstep={step} />
       {/if}
 
       <div class="flex flex-col gap-2">
