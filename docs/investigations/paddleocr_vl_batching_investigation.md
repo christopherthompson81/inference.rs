@@ -280,6 +280,7 @@ once prepared, and admission seeds the sequence's `cached_pixel_values` with the
 **Implication:** within noise. After Run 11 the preprocessing left on the engine thread is about 0.4 s of a 13 s run,
 and moving it adds a request state and a re-entry path through the engine queue. Not taken; the patch is not kept in
 the repo.
+
 ## Run 14 - 2026-10-14 02:30
 
 **Question:** the engine already replays CUDA graphs for decode steps; why not for PaddleOCR-VL, and what do they
