@@ -15,6 +15,9 @@
   let pickedChoice = $state<string | null>(null);
   let typedRepo = $state<string | null>(null);
   let pickedProjector = $state<string | null>(null);
+  let pickedVad = $state<string | null>(null);
+  // a served model's own, else the one kept, else the first listed: long recordings work without a choice
+  let vad = $derived(pickedVad ?? (served ? (served.vad ?? "") : (form.vad ?? managerStore.vads[0]?.path ?? "")));
   const listed = (path: string) => candidates.some((model) => model.path === path);
   // while a load runs or after it failed, the form holds what it was asked for
   let fallback = $derived(
@@ -60,9 +63,10 @@
     if (!source) return;
     form.source = source;
     form.mmproj = projector;
+    if (spec.vad) form.vad = vad;
     await managerStore.load(slot);
     if (!managerStore.activityOf(slot).error) {
-      pickedChoice = typedRepo = pickedProjector = null;
+      pickedChoice = typedRepo = pickedProjector = pickedVad = null;
     }
   }
 </script>
@@ -79,6 +83,9 @@
       </span>
       {#if served.projector}
         <span class="truncate font-mono text-[11px] text-gray-400" title={served.projector}>+ {baseName(served.projector)}</span>
+      {/if}
+      {#if served.vad}
+        <span class="truncate font-mono text-[11px] text-gray-400" title={served.vad}>+ {baseName(served.vad)}</span>
       {/if}
     {:else}
       <span class="text-xs text-gray-400">{managerStore.admin
@@ -127,6 +134,23 @@
             <option value="">{entry.projectors.length === 1 ? "The one beside it" : "None (text only)"}</option>
             {#each entry.projectors as projector (projector)}
               <option value={projector}>{baseName(projector)}</option>
+            {/each}
+          </select>
+        </label>
+      {/if}
+      {#if spec.vad}
+        <label class="flex flex-col gap-1">
+          <span class="text-[11px] text-gray-500 dark:text-gray-400">VAD (long audio)</span>
+          <select
+            class="max-w-56 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+            aria-label="Voice activity model"
+            value={vad}
+            onchange={(e) => (pickedVad = e.currentTarget.value)}
+            disabled={activity.busy}
+          >
+            <option value="">None</option>
+            {#each managerStore.vads as model (model.path)}
+              <option value={model.path}>{displayName(model)}</option>
             {/each}
           </select>
         </label>

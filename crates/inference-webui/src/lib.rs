@@ -36,6 +36,9 @@ mod utils;
 
 static STATIC_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/static");
 const UI_API_PREFIX: &str = "/api/";
+const MAX_UI_BODY_BYTES: usize = 50 * 1024 * 1024;
+// a kept job carries its audio, as long as the audio routes take: about 4.6 hours of 16 kHz mono WAV
+const MAX_JOB_BODY_BYTES: usize = 512 * 1024 * 1024;
 
 pub(crate) const UI_UPLOAD_IMAGE_ROUTE: RouteInfo =
     RouteInfo::new("/api/upload_image", "POST", RouteKind::Ui);
@@ -319,7 +322,10 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
             post(restore_chat_session),
         )
         .route(UI_LIST_JOBS_ROUTE.path, get(jobs::list_jobs))
-        .route(UI_SAVE_JOB_ROUTE.path, post(jobs::save_job))
+        .route(
+            UI_SAVE_JOB_ROUTE.path,
+            post(jobs::save_job).layer(DefaultBodyLimit::max(MAX_JOB_BODY_BYTES)),
+        )
         .route(UI_DELETE_JOB_ROUTE.path, post(jobs::delete_job))
         .route(UI_JOB_FILE_ROUTE.path, get(jobs::job_file))
         .route(UI_SETTINGS_ROUTE.path, get(get_settings))
@@ -336,7 +342,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         )
         .route(UI_ROOT_ROUTE.path, get(static_handler))
         .route(UI_STATIC_ROUTE.path, get(static_handler))
-        .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
+        .layer(DefaultBodyLimit::max(MAX_UI_BODY_BYTES))
         .layer(middleware::from_fn_with_state(
             Arc::new(OwnerStates {
                 open: app_state,

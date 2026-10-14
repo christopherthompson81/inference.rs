@@ -429,6 +429,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | `mtp` | `MtpSpec \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 | `source` | `str` | required |
+| `vad` | `str \| None` | optional |
 
 
 ## `ManagedModel`
@@ -442,6 +443,7 @@ A served model and where it came from.
 | `projector` | `str \| None` | optional |
 | `source` | `str \| None` | optional |
 | `status` | `ModelStatus` | required |
+| `vad` | `str \| None` | optional |
 
 
 ## `ManagedModels`
@@ -867,6 +869,7 @@ Speech recognition request; the audio itself travels beside it (a multipart `fil
 | Field | Type | Default |
 | --- | --- | --- |
 | `beam_size` | `int \| None` | optional |
+| `diarization_model` | `str \| None` | optional |
 | `language` | `str \| None` | optional |
 | `model` | `str \| None` | optional |
 | `prompt` | `str \| None` | optional |
@@ -901,12 +904,13 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 A timed span of a transcript, about a sentence.
 
-| Field | Type |
-| --- | --- |
-| `end` | `float` |
-| `id` | `int` |
-| `start` | `float` |
-| `text` | `str` |
+| Field | Type | Default |
+| --- | --- | --- |
+| `end` | `float` | required |
+| `id` | `int` | required |
+| `speaker` | `int \| None` | optional |
+| `start` | `float` | required |
+| `text` | `str` | required |
 
 
 ## `TranscriptionSession`
@@ -971,11 +975,12 @@ Opens a streamed transcription on a cache-aware streaming model: mono audio is p
 
 A timed word of a transcript, in seconds from the start of the audio.
 
-| Field | Type |
-| --- | --- |
-| `end` | `float` |
-| `start` | `float` |
-| `word` | `str` |
+| Field | Type | Default |
+| --- | --- | --- |
+| `end` | `float` | required |
+| `speaker` | `int \| None` | optional |
+| `start` | `float` | required |
+| `word` | `str` | required |
 
 
 ## `TuneModelRequest`

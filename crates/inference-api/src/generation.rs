@@ -6,7 +6,8 @@ use inference_core::{
     AudioInput, Diarization, DiarizationOptions, DiffusionGenerationParams, ImageChoice,
     ImageGenerationResponse, ImageGenerationResponseFormat, InferenceRs, MAX_REFERENCE_IMAGES,
     NormalRequest, ReferenceImages, Request, RequestMessage, Response, SamplingParams,
-    SegmentOptions, SpeechOptions, TimedText, Transcription, TranscriptionOptions, VoiceActivity,
+    SegmentOptions, SpeakerSegment, SpeechOptions, TimedText, Transcription, TranscriptionOptions,
+    VoiceActivity,
     speech_utils::{self, Sample},
 };
 
@@ -482,31 +483,72 @@ async fn transcribe_inner(
     }
     let audio = decode_audio(audio)?;
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
-    match run(
-        state,
-        &request.model,
-        repr,
-        RequestMessage::Transcription {
-            audio,
-            options: TranscriptionOptions {
-                language: request.language.clone(),
-                beam_size: request.beam_size,
-            },
+    let speech = |audio| RequestMessage::Transcription {
+        audio,
+        options: TranscriptionOptions {
+            language: request.language.clone(),
+            beam_size: request.beam_size,
         },
-    )
-    .await?
-    {
-        Response::Transcription(transcript) => render_transcript(&request, transcript),
+    };
+    let Some(diarizer) = request.diarization_model.clone() else {
+        return match run(state, &request.model, repr, speech(audio)).await? {
+            Response::Transcription(transcript) => render_transcript(&request, transcript, None),
+            _ => Err(unexpected(state)),
+        };
+    };
+    // one upload, both models over it at once
+    let diarization_request = DiarizationRequest {
+        model: diarizer.clone(),
+        threshold: None,
+        response_format: Default::default(),
+        return_probabilities: false,
+    };
+    let diarization_repr =
+        serde_json::to_string(&diarization_request).map_err(|_| ApiError::internal())?;
+    let turns = RequestMessage::Diarization {
+        audio: audio.clone(),
+        options: DiarizationOptions { threshold: None },
+    };
+    let (transcript, diarization) = futures::join!(
+        run(state, &request.model, repr, speech(audio)),
+        run(state, &diarizer, diarization_repr, turns),
+    );
+    match (transcript?, diarization?) {
+        (Response::Transcription(transcript), Response::Diarization(diarization)) => {
+            let speakers = word_speakers(&transcript.words, &diarization.segments);
+            render_transcript(&request, transcript, Some(&speakers))
+        }
         _ => Err(unexpected(state)),
     }
 }
 
+// each word's speaker: the turn it overlaps most, else the turn nearest its middle; 0 without any turns
+fn word_speakers(words: &[TimedText], turns: &[SpeakerSegment]) -> Vec<usize> {
+    words
+        .iter()
+        .map(|word| {
+            let middle = (word.start + word.end) / 2.0;
+            let score = |turn: &SpeakerSegment| {
+                let overlap = word.end.min(turn.end) - word.start.max(turn.start);
+                let gap = (turn.start - middle).max(middle - turn.end).max(0.0);
+                if overlap > 0.0 { overlap } else { -gap }
+            };
+            turns
+                .iter()
+                .max_by(|a, b| score(a).total_cmp(&score(b)))
+                .map_or(0, |turn| turn.speaker)
+        })
+        .collect()
+}
+
+/// `speakers` gives each word's diarized speaker, when the request diarized.
 pub(crate) fn render_transcript(
     request: &TranscriptionRequest,
     transcript: Transcription,
+    speakers: Option<&[usize]>,
 ) -> Result<TranscriptionOutput, ApiError> {
     let format = request.response_format;
-    let segments = transcript_segments(&transcript.words);
+    let segments = transcript_segments(&transcript.words, speakers);
     let body = match format {
         TranscriptionResponseFormat::Json => serde_json::to_string(&TranscriptionResponse {
             text: transcript.text,
@@ -523,10 +565,12 @@ pub(crate) fn render_transcript(
                     transcript
                         .words
                         .iter()
-                        .map(|w| TranscriptionWord {
+                        .enumerate()
+                        .map(|(i, w)| TranscriptionWord {
                             word: w.text.clone(),
                             start: w.start,
                             end: w.end,
+                            speaker: speakers.map(|speakers| speakers[i]),
                         })
                         .collect()
                 });
@@ -551,13 +595,19 @@ pub(crate) fn render_transcript(
     })
 }
 
-// a segment ends after a word closing a sentence, or before a pause long enough to be one
-fn transcript_segments(words: &[TimedText]) -> Vec<TranscriptionSegment> {
+// a segment ends after a word closing a sentence, before a pause long enough to be one, and where the speaker changes
+fn transcript_segments(
+    words: &[TimedText],
+    speakers: Option<&[usize]>,
+) -> Vec<TranscriptionSegment> {
     let mut segments: Vec<TranscriptionSegment> = Vec::new();
     let mut open = false;
-    for word in words {
+    for (i, word) in words.iter().enumerate() {
+        let speaker = speakers.map(|speakers| speakers[i]);
         let pause = segments.last().is_some_and(|s| {
-            word.start - s.end >= SEGMENT_PAUSE_SECONDS || word.end - s.start > MAX_SEGMENT_SECONDS
+            word.start - s.end >= SEGMENT_PAUSE_SECONDS
+                || word.end - s.start > MAX_SEGMENT_SECONDS
+                || s.speaker != speaker
         });
         match segments.last_mut() {
             Some(segment) if open && !pause => {
@@ -570,6 +620,7 @@ fn transcript_segments(words: &[TimedText]) -> Vec<TranscriptionSegment> {
                 start: word.start,
                 end: word.end,
                 text: word.text.clone(),
+                speaker,
             }),
         }
         open = !word.text.ends_with(SENTENCE_ENDS);
@@ -812,7 +863,7 @@ mod tests {
             word("a", 3.2, 3.3),
             word("pause?", 3.3, 3.6),
         ];
-        let segments = transcript_segments(&words);
+        let segments = transcript_segments(&words, None);
         let spans: Vec<(&str, f64, f64)> = segments
             .iter()
             .map(|s| (s.text.as_str(), s.start, s.end))
@@ -828,13 +879,64 @@ mod tests {
         assert_eq!(segments.iter().map(|s| s.id).collect::<Vec<_>>(), [0, 1, 2]);
     }
 
+    // a word goes to the turn it overlaps most, a word in no turn to the nearest, and segments break at the change
+    #[test]
+    fn diarized_words_split_segments_by_speaker() {
+        let words = [
+            word("Hello", 0.0, 0.4),
+            word("there", 0.5, 0.9),
+            word("Hi", 1.0, 1.2),
+            word("back.", 1.25, 1.6),
+            word("Gap", 5.0, 5.2),
+        ];
+        let turns = [
+            SpeakerSegment {
+                speaker: 0,
+                start: 0.0,
+                end: 0.95,
+            },
+            SpeakerSegment {
+                speaker: 1,
+                start: 0.85,
+                end: 1.7,
+            },
+            SpeakerSegment {
+                speaker: 0,
+                start: 6.0,
+                end: 7.0,
+            },
+        ];
+        let speakers = word_speakers(&words, &turns);
+        assert_eq!(speakers, [0, 0, 1, 1, 0]);
+        let segments = transcript_segments(&words, Some(&speakers));
+        let spans: Vec<(&str, Option<usize>)> = segments
+            .iter()
+            .map(|s| (s.text.as_str(), s.speaker))
+            .collect();
+        assert_eq!(
+            spans,
+            [
+                ("Hello there", Some(0)),
+                ("Hi back.", Some(1)),
+                ("Gap", Some(0))
+            ]
+        );
+        assert!(
+            inference_protocol::openai::transcript_vtt(&segments).contains("<v Speaker 1>Hi back.")
+        );
+        assert!(
+            inference_protocol::openai::transcript_srt(&segments)
+                .contains("Speaker 0: Hello there")
+        );
+    }
+
     // unpunctuated speech with no pause still breaks into segments of at most MAX_SEGMENT_SECONDS
     #[test]
     fn unpunctuated_speech_is_cut_into_bounded_segments() {
         let words: Vec<TimedText> = (0..100)
             .map(|i| word("word", i as f64, i as f64 + 0.9))
             .collect();
-        let segments = transcript_segments(&words);
+        let segments = transcript_segments(&words, None);
         assert!(segments.len() > 1);
         assert!(
             segments

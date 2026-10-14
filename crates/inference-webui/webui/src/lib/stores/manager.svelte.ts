@@ -14,6 +14,8 @@ export interface Slot {
   visionGguf?: boolean;
   /** The KV context a load offers first, in place of the chat default. */
   defaultContext?: number;
+  /** Offers a voice activity model to cut long recordings at their silences. */
+  vad?: boolean;
   hint: string;
 }
 
@@ -29,6 +31,7 @@ export const SLOTS = {
     id: "transcription",
     title: "Speech recognition model",
     kinds: ["transcription"],
+    vad: true,
     hint: "Parakeet, Nemotron ASR or Qwen3-ASR: a .nemo, directory, GGUF or repo",
   },
   diarization: {
@@ -80,6 +83,8 @@ export interface SlotForm {
   mtp: boolean;
   mtpDrafts: number;
   mmproj: string;
+  /** The voice activity model to load beside it: unset takes the first the inventory lists, "" none. */
+  vad?: string;
   device: string;
 }
 
@@ -180,6 +185,11 @@ class ManagerStore {
   }
 
   /** The inventory's models a slot can load, by name. */
+  /** The voice activity models a speech recognition load can cut its long recordings with. */
+  get vads(): InventoryModel[] {
+    return (this.inventory?.models ?? []).filter((model) => model.kind === "voice_activity");
+  }
+
   candidates(slot: SlotId): InventoryModel[] {
     return (this.inventory?.models ?? [])
       .filter((model) => fits(slot, model))
@@ -212,6 +222,10 @@ class ManagerStore {
       if (form.maxSeqs > 0) request.max_seqs = form.maxSeqs;
       if (form.mtp) request.mtp = form.mtpDrafts > 0 ? { n_predict: form.mtpDrafts } : {};
       if (form.mmproj) request.mmproj = form.mmproj;
+    }
+    if (spec.vad) {
+      const vad = form.vad ?? this.vads[0]?.path ?? "";
+      if (vad) request.vad = vad;
     }
     if (spec.device && form.device !== "auto") request.device = form.device;
     this.activity[slot] = { busy: true, progress: null, error: null };

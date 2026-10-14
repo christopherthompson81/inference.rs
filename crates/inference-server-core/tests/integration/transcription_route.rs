@@ -221,3 +221,83 @@ async fn the_diarization_form_returns_segments_or_rttm() -> anyhow::Result<()> {
     assert_eq!(body_text(response).await?.lines().count(), speakers);
     Ok(())
 }
+
+// one upload, both models: the diarizer named in the form labels every segment and word with a speaker
+#[tokio::test(flavor = "multi_thread")]
+async fn a_diarization_model_labels_the_transcript_with_speakers() -> anyhow::Result<()> {
+    let asr = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
+    let diarizer = diarization_support::tiny_nemotron3_diarization()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"Transcription": {"model_id": asr.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    engine
+        .add_model(serde_json::from_value(json!({
+            "model": {"Diarization": {"model_id": diarizer.path().to_string_lossy(), "dtype": "f32"}},
+            "model_id": "diarization",
+        }))?)
+        .await?;
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .build()
+        .await?;
+    let fields = [
+        ("response_format", "verbose_json"),
+        ("timestamp_granularities[]", "word"),
+        ("diarization_model", "diarization"),
+    ];
+    let response = app
+        .clone()
+        .oneshot(form(&fields, Some(&tone_wav())))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let verbose: Value = serde_json::from_str(&body_text(response).await?)?;
+    for item in verbose["segments"]
+        .as_array()
+        .into_iter()
+        .chain(verbose["words"].as_array())
+        .flatten()
+    {
+        assert!(item["speaker"].is_u64(), "{verbose}");
+    }
+
+    let unknown = [("diarization_model", "no-such-diarizer")];
+    let response = app
+        .clone()
+        .oneshot(form(&unknown, Some(&tone_wav())))
+        .await?;
+    assert!(response.status().is_client_error(), "{}", response.status());
+    Ok(())
+}
+
+// audio uploads take more than the router's body limit, which still holds elsewhere
+#[tokio::test(flavor = "multi_thread")]
+async fn audio_uploads_pass_a_small_router_body_limit() -> anyhow::Result<()> {
+    const ROUTER_LIMIT: usize = 1024;
+    let dir = parakeet_support::tiny_parakeet_checkpoint(parakeet_support::HEADS[0])?;
+    let spec = serde_json::from_value(json!({
+        "model": {"Transcription": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_max_body_limit(ROUTER_LIMIT)
+        .build()
+        .await?;
+    let wav = tone_wav();
+    assert!(wav.len() > ROUTER_LIMIT);
+    let response = app.clone().oneshot(form(&[], Some(&wav))).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let chat = Request::post("/v1/chat/completions")
+        .header(header::CONTENT_TYPE, "application/json")
+        .body(Body::from(
+            json!({"model": "default", "messages": [{"role": "user", "content": "x".repeat(4 * ROUTER_LIMIT)}]})
+                .to_string(),
+        ))?;
+    let response = app.clone().oneshot(chat).await?;
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    Ok(())
+}

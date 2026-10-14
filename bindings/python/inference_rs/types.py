@@ -1131,6 +1131,7 @@ class ManagedLoadRequest:
     mtp: MtpSpec | None = None
     paged_context_len: int | None = None
     source: str
+    vad: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -1142,6 +1143,7 @@ class ManagedModel:
     projector: str | None = None
     source: str | None = None
     status: ModelStatus
+    vad: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -2936,6 +2938,7 @@ class TranscriptionRequest:
     """Speech recognition request; the audio itself travels beside it (a multipart `file` over HTTP)."""
 
     beam_size: int | None = None
+    diarization_model: str | None = None
     language: str | None = None
     model: str | None = None
     prompt: str | None = None
@@ -2965,6 +2968,7 @@ class TranscriptionSegment:
 
     end: float
     id: int
+    speaker: int | None = None
     start: float
     text: str
 
@@ -2985,6 +2989,7 @@ class TranscriptionWord:
     """A timed word of a transcript, in seconds from the start of the audio."""
 
     end: float
+    speaker: int | None = None
     start: float
     word: str
 

@@ -46,6 +46,8 @@ export interface ManagedModel {
   kind: Exclude<ModelKind, "projector">;
   source: string | null;
   projector: string | null;
+  /** The voice activity GGUF that cuts a speech recognition model's long recordings. */
+  vad?: string;
   status: "loaded" | "unloaded" | "reloading";
 }
 
@@ -56,6 +58,7 @@ export interface LoadRequest {
   max_seqs?: number;
   mtp?: { n_predict?: number };
   mmproj?: string;
+  vad?: string;
   device?: string;
 }
 
@@ -263,7 +266,11 @@ export interface TranscriptWord {
 }
 
 /** The transcript of `audio` with its segments and timed words. */
-export function transcribe(model: string, audio: Blob, options: { language?: string; signal?: AbortSignal } = {}) {
+export function transcribe(
+  model: string,
+  audio: Blob,
+  options: { language?: string; diarizationModel?: string; signal?: AbortSignal } = {},
+) {
   const form = new FormData();
   form.append("file", audio, audio instanceof File ? audio.name : "clip.wav");
   form.append("model", model);
@@ -271,24 +278,14 @@ export function transcribe(model: string, audio: Blob, options: { language?: str
   form.append("timestamp_granularities[]", "word");
   form.append("timestamp_granularities[]", "segment");
   if (options.language) form.append("language", options.language);
+  if (options.diarizationModel) form.append("diarization_model", options.diarizationModel);
   return postForm<{
     text: string;
     language?: string;
     duration?: number;
-    segments?: TranscriptSegment[];
-    words?: TranscriptWord[];
+    segments?: (TranscriptSegment & { speaker?: number })[];
+    words?: (TranscriptWord & { speaker?: number })[];
   }>("v1/audio/transcriptions", form, options.signal);
-}
-
-export function diarize(model: string, audio: Blob, signal?: AbortSignal) {
-  const form = new FormData();
-  form.append("file", audio, audio instanceof File ? audio.name : "audio.wav");
-  form.append("model", model);
-  return postForm<{ num_speakers: number; segments: { speaker: number; start: number; end: number }[] }>(
-    "v1/audio/diarization",
-    form,
-    signal,
-  );
 }
 
 /** Speech for `input`, as a WAV blob. */
