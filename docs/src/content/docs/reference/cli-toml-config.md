@@ -198,6 +198,21 @@ lora = [
 Multimodal GGUF supports dynamic language-model LoRA. Vision, audio, and projector adapters are not
 supported. GGML does not support LoRA.
 
+## Server without preloaded models
+
+A LAN server whose admins load models from the UI, launched the same way each time:
+
+```toml
+command = "serve"
+
+[server]
+host = "0.0.0.0"
+port = 1234
+model_folders = ["/srv/models"]
+api_keys_file = "/etc/inference-rs/api-keys"
+admins = ["alice", "bob"]
+```
+
 ## Multi-model example
 
 ```toml
@@ -253,7 +268,7 @@ tok_model_id = "google/gemma-4-E4B-it"
 
 Invalid configs abort startup with a message identifying the problem:
 
-- At least one entry in `[[models]]`.
+- At least one entry in `[[models]]` for `run`. A `serve` config may list none: the server starts empty, and admins load models through the [model manager](/reference/http-api/#model-manager) from `model_folders` and the Hugging Face cache.
 - `default_model_id` matches a `model_id` in `[[models]]`.
 - `cpu` is consistent across all models when set.
 - `search_embedding_model` requires `enable_search = true` (or `agent = true`).
@@ -280,6 +295,6 @@ Flag interactions that hold on the command line and as TOML keys:
 ## Server behavior notes
 
 - **CORS and body limit.** Not exposed as CLI flags or TOML keys. Defaults: any origin; methods `GET`, `POST`, `PUT`, `DELETE`; allowed headers `Content-Type`, `Authorization`, `x-api-key`, `anthropic-version`, `anthropic-beta`, `x-request-id`; exposed headers `x-request-id`; 50 MB request body limit. Configure programmatically through `InferenceRsServerRouterBuilder` in `inference-server-core`.
-- **Authentication.** inference.rs does not implement authentication. Put a reverse proxy (nginx, Caddy, Traefik) in front for auth and TLS. OpenAI-protocol clients always send `Authorization: Bearer ...` because the OpenAI SDK requires an API key; inference.rs does not validate the header.
+- **Authentication.** Set `api_keys_file` (or `INFERENCE_RS_API_KEY`) to require keys; see [authentication](/reference/http-api/#authentication). TLS is not built in: put a reverse proxy (nginx, Caddy, Traefik) in front for it.
 - **Logging and metrics.** Access logs are written to normal server stdout/stderr by default, with request ids and route/status/latency metadata. `GET /metrics` exposes Prometheus HTTP metrics by default. See [observability](/guides/deploy/observability/).
 - **Payload logging.** `-v` enables debug detail and `-vv` trace-level file/cache internals; `RUST_LOG` module filters (e.g. `RUST_LOG=inference_core=debug,tower_http=info`) override both. `-l <path>` logs all requests and responses to a file.
