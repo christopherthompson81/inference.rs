@@ -157,3 +157,23 @@ flight run, `nvidia-smi` every 200 ms: GPU 72% busy on average, under 50% in 26%
 CPU time included waiting for GPU work already queued. With real regions the run is now mostly GPU-bound. What's left
 is smaller: packing several small images into one vision pass, prefilling image prompts of different sizes in one
 step, and CUDA graphs for decode.
+
+## Run 8 - 2026-10-13 22:10
+
+**Question:** the engine's 5 s throughput log during Run 7's 16-in-flight run showed 6 to 9 sequences running and 5
+to 10 waiting, and a 20% encoder cache hit rate on regions never seen before. Is the paged cache (8,192 tokens, the
+web UI's default context) the limit?
+
+**Raw finding, Run 3's benchmark at 16 in flight, OCR loaded with three cache sizes:**
+
+| `paged_context_len` | time | running / waiting (log) | encoder cache hits |
+|---|---|---|---|
+| 8,192 | 23.8 s | 6-8 / 8-10 | 20-24% |
+| 32,768 | 21.4 s | 15-16 / 0 | 2% |
+| 65,536 | 22.2 s | 15-16 / 0 | 2% |
+
+5.3 GB of VRAM with both models loaded at 65,536.
+
+**Implication:** a region's prompt is often 750 to 1,500 image tokens, so 8,192 tokens hold only a few at once: the
+rest wait, and some are preempted and re-prefilled (the "hits" are their images encoded again). At 32,768 all 16 run,
+10% faster; past that nothing more. The web UI's OCR slot now offers 32,768 by default.
