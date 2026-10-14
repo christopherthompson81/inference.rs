@@ -280,3 +280,24 @@ once prepared, and admission seeds the sequence's `cached_pixel_values` with the
 **Implication:** within noise. After Run 11 the preprocessing left on the engine thread is about 0.4 s of a 13 s run,
 and moving it adds a request state and a re-entry path through the engine queue. Not taken; the patch is not kept in
 the repo.
+## Run 14 - 2026-10-14 02:30
+
+**Question:** the engine already replays CUDA graphs for decode steps; why not for PaddleOCR-VL, and what do they
+save?
+
+**Raw finding:** `inference_cuda_graph_dispatch_total` over 20 regions: 644 decode steps `skipped` with
+`model_unsupported`. The model never opted in, and the shared decoder refuses graphs for every M-RoPE layer, because
+models build those tables on the host each step (Run 7's `window_positions`), which a replay would freeze.
+
+**Change:** past the prompt all three M-RoPE planes hold index + delta. The processor folds each row's delta
+(`position_delta`, cached in `mrope_position_delta`) into the decode `position_ids`, which the graph's positions
+input carries on replay; in decode the model builds its tables on the device from those positions
+(`text_decode_position_ids_from_context`), and opts in through
+`CausalLm::supports_cuda_decode_graphs_with_device_mrope` (M-RoPE allowed, Phi's LongRoPE still not).
+
+**Raw finding:** 650 replays and 12 eager cache populations over the same 20 regions. Run 3's benchmark at 16 in
+flight: 12.1 s and 12.4 s (master the same session: 13.1-13.3 s). Text: 100 and 99 of 100 identical to the
+baseline, the other the known quote-style flip.
+
+**Implication:** about 8%. Qwen3-VL's shared-decoder path refuses graphs for the same reason and could take the same
+route.

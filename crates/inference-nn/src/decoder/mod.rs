@@ -1619,6 +1619,17 @@ impl<F: LayerFfn> CausalLm<AttentionBlock, F> {
     pub fn mrope_tables(&self, position_ids: &Tensor, dtype: DType) -> Result<(Tensor, Tensor)> {
         self.stack.mrope_tables(position_ids, dtype)
     }
+
+    /// Decode graph support for a caller that builds its M-RoPE tables on the device from the step's positions.
+    #[cfg(feature = "cuda")]
+    pub fn supports_cuda_decode_graphs_with_device_mrope(&self) -> bool {
+        self.stack.layers.iter().all(|layer| {
+            !matches!(
+                layer.self_attn.rotary_emb.as_deref(),
+                Some(LayerRope::Phi(_))
+            ) && layer.mlp.cuda_decode_graphs()
+        })
+    }
 }
 
 impl<A: LayerAttention, F: LayerFfn> CausalLm<A, F> {

@@ -21,6 +21,7 @@ use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
 
 use super::PaddleOcrVlVisionSpecificArgs;
 use super::preprocess::{MERGE, preprocess_decoded};
+use super::rope_index::position_delta;
 
 pub const IMAGE_START: &str = "<|IMAGE_START|>";
 pub const IMAGE_PLACEHOLDER: &str = "<|IMAGE_PLACEHOLDER|>";
@@ -259,6 +260,31 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
             }
         }
 
+        // decode positions carry each row's delta, so the graph-replayable positions input is already the mrope one
+        let deltas = if is_prompt {
+            Vec::new()
+        } else {
+            let image_pad_id = image_pad_id.unwrap_or(u32::MAX);
+            input_seqs
+                .iter_mut()
+                .zip(&grids)
+                .map(
+                    |(seq, row_grids)| match seq.multimodal().mrope_position_delta {
+                        Some(delta) => delta,
+                        None => {
+                            let delta = position_delta(
+                                seq.prompt_position_source_toks(),
+                                row_grids,
+                                image_pad_id,
+                                MERGE,
+                            );
+                            seq.multimodal_mut().mrope_position_delta = Some(delta);
+                            delta
+                        }
+                    },
+                )
+                .collect()
+        };
         let pixel_values =
             (!pixel_values_accum.is_empty()).then(|| Tensor::cat(&pixel_values_accum, 0).unwrap());
         let image_grid_thw = if grids.iter().all(Vec::is_empty) {
@@ -318,6 +344,17 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
             .unwrap()
         };
 
+        let position_ids = if is_prompt {
+            position_ids
+        } else {
+            position_ids
+                .into_iter()
+                .zip(&deltas)
+                .map(|(position, &delta)| {
+                    usize::try_from(position as i64 + delta).map_err(anyhow::Error::from)
+                })
+                .collect::<Result<Vec<_>>>()?
+        };
         // mrope positions are recomputed from the full history; after a prefix hit get_toks is only the suffix.
         let prompt_ids = input_seqs
             .iter()
