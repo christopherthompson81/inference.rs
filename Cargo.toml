@@ -115,6 +115,7 @@ metrics-util = { version = "0.20.4", default-features = false, features = ["debu
 futures = "0.3"
 clap = { version = "4.5.54", features = ["derive", "wrap_help"] }
 tokio = { version = "1.49.0", features = ["full", "rt-multi-thread"] }
+fast_image_resize = "6.1.0"
 # All features but avif, avif increases the msrv dramatically
 image = { version = "0.25.9", default-features = false, features = [
     'bmp',
