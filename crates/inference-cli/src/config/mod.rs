@@ -168,8 +168,9 @@ fn validate_config(config: &CliConfig) -> Result<()> {
         CliConfig::Run(cfg) => (&cfg.models, None),
     };
 
-    if models.is_empty() {
-        anyhow::bail!("Config must define at least one model in [[models]]");
+    // a server may start empty, like `inference serve` with no model, and load models through the manager
+    if models.is_empty() && matches!(config, CliConfig::Run(_)) {
+        anyhow::bail!("A run config must define a model in [[models]]");
     }
 
     if let CliConfig::Run(cfg) = config {
@@ -332,6 +333,23 @@ model_id = "google/gemma-4-E4B-it"
             cfg.models[0].to_model_type(false),
             ModelType::Auto { .. }
         ));
+    }
+
+    #[test]
+    fn a_server_may_start_without_models_but_a_run_needs_one() {
+        let serve: CliConfig = toml::from_str(
+            r#"
+command = "serve"
+
+[server]
+model_folders = ["/srv/models"]
+admins = ["alice"]
+"#,
+        )
+        .unwrap();
+        validate_config(&serve).unwrap();
+        let run: CliConfig = toml::from_str(r#"command = "run""#).unwrap();
+        assert!(validate_config(&run).is_err());
     }
 
     #[test]
