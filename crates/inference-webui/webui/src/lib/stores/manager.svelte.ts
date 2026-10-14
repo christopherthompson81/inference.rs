@@ -12,6 +12,8 @@ export interface Slot {
   device?: boolean;
   /** Also takes a text GGUF with a projector beside it, which the inventory lists as text. */
   visionGguf?: boolean;
+  /** The KV context a load offers first, in place of the chat default. */
+  defaultContext?: number;
   hint: string;
 }
 
@@ -60,6 +62,9 @@ export const SLOTS = {
     kinds: ["multimodal"],
     chat: true,
     visionGguf: true,
+    // the cache all regions in flight share: a region's prompt is often 750-1,500 image tokens, and at 8,192 only a
+    // handful fit, the rest waiting or preempted (re-encoding their images)
+    defaultContext: 32768,
     hint: "PaddleOCR-VL, or another vision-language model",
   },
 } satisfies Record<string, Slot>;
@@ -89,8 +94,9 @@ const FORMS_KEY = "inference-rs-slot-forms";
 const REFRESH_MS = 10_000;
 const DEFAULT_CONTEXT = 8192;
 
-function defaultForm(): SlotForm {
-  return { source: "", contextLength: DEFAULT_CONTEXT, maxSeqs: 0, mtp: false, mtpDrafts: 0, mmproj: "", device: "auto" };
+function defaultForm(slot: SlotId): SlotForm {
+  const contextLength = (SLOTS[slot] as Slot).defaultContext ?? DEFAULT_CONTEXT;
+  return { source: "", contextLength, maxSeqs: 0, mtp: false, mtpDrafts: 0, mmproj: "", device: "auto" };
 }
 
 // every slot's form, from what this browser kept, so reading one never creates state mid-render
@@ -102,7 +108,12 @@ function storedForms(): Record<SlotId, SlotForm> {
     // unreadable storage starts fresh
   }
   const forms = {} as Record<SlotId, SlotForm>;
-  for (const slot of Object.keys(SLOTS) as SlotId[]) forms[slot] = { ...defaultForm(), ...stored[slot] };
+  for (const slot of Object.keys(SLOTS) as SlotId[]) {
+    const form = { ...defaultForm(slot), ...stored[slot] };
+    // a form kept before the slot had its own default holds the old shared one, which nobody chose for it
+    if (stored[slot]?.contextLength === DEFAULT_CONTEXT) form.contextLength = defaultForm(slot).contextLength;
+    forms[slot] = form;
+  }
   return forms;
 }
 
