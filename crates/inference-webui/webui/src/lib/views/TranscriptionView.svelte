@@ -6,7 +6,6 @@
   import { managerStore, SLOTS } from "../stores/manager.svelte";
   import { diarize, transcribe } from "../services/manager";
   import { jobFile, jobFileUrl, keptExtension, type Job } from "../services/jobs";
-  import { decodeMono, durationOf, wavClip } from "../services/audioClip";
   import {
     EXPORT_FORMATS,
     download,
@@ -19,8 +18,6 @@
   const AUDIO_STEM = "audio";
   // turns of one speaker this close together are transcribed as one clip
   const MERGE_GAP_SECONDS = 1.0;
-  // a clip starts and ends this much wider than its turn, so a diarizer's tight edge doesn't clip a word
-  const CLIP_PAD_SECONDS = 0.2;
   // a word belongs to a sentence it starts within, give or take rounding in the reply's times
   const WORD_EDGE_SECONDS = 0.01;
   // a renamed speaker is saved once typing pauses this long
@@ -164,6 +161,47 @@
       .filter((segment) => segment.text);
   }
 
+  // the speaker whose turn holds `time`, else the one whose turn is nearest
+  function speakerAt(spans: Span[], time: number): string {
+    let best = spans[0];
+    let bestGap = Infinity;
+    for (const span of spans) {
+      const gap = time < span.start ? span.start - time : time > span.end ? time - span.end : 0;
+      if (gap < bestGap) {
+        best = span;
+        bestGap = gap;
+      }
+      if (gap === 0) break;
+    }
+    return best.speaker;
+  }
+
+  // each sentence cut where its words change speaker, every word going to the turn around its middle
+  function bySpeaker(sentences: TranscriptSegment[], spans: Span[]): TranscriptSegment[] {
+    if (spans.length === 0) return sentences;
+    return sentences.flatMap((sentence) => {
+      const words = sentence.words ?? [];
+      if (words.length === 0) {
+        return [{ ...sentence, speaker: speakerAt(spans, (sentence.start + sentence.end) / 2) }];
+      }
+      const runs: { speaker: string; words: TimedWord[] }[] = [];
+      for (const word of words) {
+        const speaker = speakerAt(spans, (word.start + word.end) / 2);
+        const last = runs.at(-1);
+        if (last?.speaker === speaker) last.words.push(word);
+        else runs.push({ speaker, words: [word] });
+      }
+      if (runs.length === 1) return [{ ...sentence, speaker: runs[0].speaker }];
+      return runs.map((run) => ({
+        start: run.words[0].start,
+        end: run.words.at(-1)!.end,
+        text: run.words.map((w) => w.word.trim()).join(" "),
+        speaker: run.speaker,
+        words: run.words,
+      }));
+    });
+  }
+
   async function run() {
     busy = true;
     status = "";
@@ -179,35 +217,25 @@
       progress = { stage: "Reading the audio", done: 0, total: 0 };
       const file = await source();
       if (!file) return;
-      const pcm = await decodeMono(file);
-      const duration = durationOf(pcm);
       const options = { language: language.trim() || undefined, signal };
 
-      let spans: Span[] = [];
+      // one pass over the whole file each, side by side: the server splits long audio itself
+      progress = { stage: diarizer ? "Transcribing and finding the speakers" : "Transcribing", done: 0, total: 0 };
       let speakersFailed = "";
-      if (diarizer) {
-        progress = { stage: "Finding the speakers", done: 0, total: 0 };
-        try {
-          spans = spansOf((await diarize(SLOTS.diarization.id, file, signal)).segments);
-        } catch (e) {
-          if (signal.aborted) throw e;
-          speakersFailed = e instanceof Error ? e.message : String(e);
-        }
-      }
-      if (spans.length === 0) {
-        // one request for the whole file: the server splits long audio itself
-        progress = { stage: "Transcribing", done: 0, total: 0 };
-        segments = segmentsOf(await transcribe(SLOTS.transcription.id, file, options), "", 0);
-      } else {
-        // a clip per turn: each comes back with its speaker known, and the turns count the progress
-        for (const [index, span] of spans.entries()) {
-          progress = { stage: "Transcribing", done: index, total: spans.length };
-          const start = Math.max(0, span.start - CLIP_PAD_SECONDS);
-          const end = Math.min(duration, span.end + CLIP_PAD_SECONDS);
-          const reply = await transcribe(SLOTS.transcription.id, wavClip(pcm, start, end), options);
-          segments = [...segments, ...segmentsOf(reply, span.speaker, start)];
-        }
-      }
+      const [reply, turns] = await Promise.all([
+        transcribe(SLOTS.transcription.id, file, options),
+        diarizer
+          ? diarize(SLOTS.diarization.id, file, signal).then(
+              (result) => result.segments,
+              (e) => {
+                if (signal.aborted) throw e;
+                speakersFailed = e instanceof Error ? e.message : String(e);
+                return [];
+              },
+            )
+          : Promise.resolve([]),
+      ]);
+      segments = bySpeaker(segmentsOf(reply, "", 0), spansOf(turns));
       progress = null;
       status = `Done in ${((performance.now() - started) / 1000).toFixed(1)} s`;
       if (speakersFailed) status += `; no speakers: ${speakersFailed}`;
