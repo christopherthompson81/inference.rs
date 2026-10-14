@@ -39,8 +39,29 @@ impl AdaIn1d {
         })
     }
 
-    /// AdaIN then `act`; on the CPU one pass per channel row instead of a dozen tensor ops.
+    /// AdaIN then `act`; on the CPU and CUDA one pass per channel row instead of a dozen tensor ops.
     pub fn forward_act(&self, xs: &Tensor, s: &Tensor, act: &Activation) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if xs.device().is_cuda() && xs.dtype() == DType::F32 && s.dim(0)? == xs.dim(0)? {
+            use inference_nn::cuda::adain::{AdainActivation, adain_act};
+            let h = self.fc.forward(s)?;
+            return match act {
+                Activation::Snake { alpha_row, .. } => adain_act(
+                    xs,
+                    &h,
+                    AdainActivation::Snake,
+                    Some(alpha_row),
+                    NORM_EPS as f32,
+                ),
+                Activation::LeakyRelu(slope) => adain_act(
+                    xs,
+                    &h,
+                    AdainActivation::LeakyRelu(*slope),
+                    None,
+                    NORM_EPS as f32,
+                ),
+            };
+        }
         // the fused pass needs one style row per batch item; anything else keeps the broadcasting tensor path
         if !xs.device().is_cpu() || xs.dtype() != DType::F32 || s.dim(0)? != xs.dim(0)? {
             return act.forward(&self.forward(xs, s)?);
@@ -70,6 +91,9 @@ impl AdaIn1d {
 pub enum Activation {
     Snake {
         module: Snake1d,
+        // (channels,) on the model's device, for the CUDA pass
+        #[cfg(feature = "cuda")]
+        alpha_row: Tensor,
         alpha: Vec<f32>,
         inv_alpha: Vec<f32>,
     },
@@ -79,13 +103,13 @@ pub enum Activation {
 impl Activation {
     fn snake(alpha: Tensor) -> Result<Self> {
         let module = Snake1d::new(alpha.clone(), 0.)?;
-        let alpha = alpha
-            .flatten_all()?
-            .to_dtype(DType::F32)?
-            .to_vec1::<f32>()?;
+        let alpha_row = alpha.flatten_all()?.to_dtype(DType::F32)?;
+        let alpha = alpha_row.to_vec1::<f32>()?;
         let inv_alpha = alpha.iter().map(|a| a.recip()).collect();
         Ok(Self::Snake {
             module,
+            #[cfg(feature = "cuda")]
+            alpha_row,
             alpha,
             inv_alpha,
         })
