@@ -15,7 +15,7 @@ pub mod vision;
 use std::any::Any;
 
 use inference_quant::ShardedVarBuilder;
-use inference_tensor::{Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor};
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -37,6 +37,7 @@ const ENCODER_CACHE_ENTRIES: usize = 32;
 
 use config::Config;
 use connector::Connector;
+use inference_nn::vision::mrope::text_decode_position_ids_from_context;
 use merge::Merger;
 use rope_index::window_positions;
 use vision::VisionModel;
@@ -192,15 +193,32 @@ impl MultimodalModel for PaddleOcrVlModel {
         } else {
             image_grid_thw.clone()
         };
-        let position_ids = window_positions(
-            &prompt_ids,
-            &grids,
-            image_token_id as u32,
-            merge,
-            seqlen_offsets,
-            len,
-            dev,
-        )?;
+        let decoding = len == 1
+            && vision_rows.is_empty()
+            && prompt_ids
+                .iter()
+                .zip(seqlen_offsets)
+                .all(|(prompt, &offset)| offset >= prompt.len());
+        let position_ids = match decoding {
+            // past the prompt all three planes hold index + delta, which the processor folded into the positions
+            true => match text_decode_position_ids_from_context(input_ids, ctx)? {
+                Some(positions) => positions
+                    .to_dtype(DType::I64)?
+                    .unsqueeze(0)?
+                    .broadcast_as((3, batch, len))?
+                    .contiguous()?,
+                None => inference_tensor::bail!("PaddleOCR-VL decode has no positions"),
+            },
+            false => window_positions(
+                &prompt_ids,
+                &grids,
+                image_token_id as u32,
+                merge,
+                seqlen_offsets,
+                len,
+                dev,
+            )?,
+        };
 
         // `pixel_values` is every vision row's images concatenated on dim 0, split back by t*h*w.
         let embeds = if vision_rows.is_empty() {
@@ -311,6 +329,10 @@ impl MultimodalModel for PaddleOcrVlModel {
             self.encoder_cache_hits.clone(),
             self.encoder_cache_misses.clone(),
         ))
+    }
+    #[cfg(feature = "cuda")]
+    fn supports_cuda_decode_graphs(&self) -> bool {
+        self.text.supports_cuda_decode_graphs_with_device_mrope()
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         Box::new(PaddleOcrVlVisionSpecificArgs {

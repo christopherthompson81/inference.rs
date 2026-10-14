@@ -63,6 +63,16 @@ fn prompt_positions(
     (rows, max_pos + 1 - seq as i64)
 }
 
+/// How far past its index a token after the prompt sits, as decode positions it (index + delta).
+pub fn position_delta(
+    prompt: &[u32],
+    grids: &[(usize, usize, usize)],
+    image_token_id: u32,
+    merge: usize,
+) -> i64 {
+    prompt_positions(prompt, grids, image_token_id, merge).1
+}
+
 /// The `[3, batch, len]` positions of each row's `len` tokens from its offset: the prompt's own positions inside the
 /// prompt, and past it the cursor carried on (index + delta), as transformers' `get_rope_index` gives them. Built on
 /// the host from each row's prompt, so a step uploads only its own window.
@@ -132,6 +142,26 @@ mod tests {
             vec![rows[0][prompt.len()]; 3],
             "decode must continue the cursor"
         );
+    }
+
+    // graph decode reads index + position_delta from the step's positions instead of building the planes
+    #[test]
+    fn position_delta_gives_the_decode_planes() {
+        let prompt = vec![10, 11, IMG, IMG, IMG, IMG, 12, 13];
+        let delta = position_delta(&prompt, &[GRID], IMG, 2);
+        for offset in [prompt.len(), prompt.len() + 5] {
+            let decoded = window_positions(
+                std::slice::from_ref(&prompt),
+                &[vec![GRID]],
+                IMG,
+                2,
+                &[offset],
+                1,
+                &Device::Cpu,
+            )
+            .unwrap();
+            assert_eq!(at(&decoded, 0, 0), vec![offset as i64 + delta; 3]);
+        }
     }
 
     #[test]
