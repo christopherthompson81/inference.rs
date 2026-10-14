@@ -319,18 +319,10 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
         };
 
         // mrope positions are recomputed from the full history; after a prefix hit get_toks is only the suffix.
-        let max_len = input_seqs
+        let prompt_ids = input_seqs
             .iter()
-            .map(|seq| seq.prompt_position_source_toks().len())
-            .max()
-            .unwrap_or(0);
-        let mut rows = Vec::with_capacity(input_seqs.len());
-        for seq in input_seqs.iter() {
-            let mut ids = seq.prompt_position_source_toks().to_vec();
-            ids.resize(max_len, 0);
-            rows.push(Tensor::new(ids, device).unwrap());
-        }
-        let input_ids_full = Tensor::stack(&rows, 0).unwrap();
+            .map(|seq| seq.prompt_position_source_toks().to_vec())
+            .collect();
 
         let inputs: Box<dyn Any> = Box::new(ModelInputs {
             input_ids: input,
@@ -339,7 +331,7 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
             position_ids,
             pixel_values,
             model_specific_args: Box::new(PaddleOcrVlVisionSpecificArgs {
-                input_ids_full,
+                prompt_ids,
                 image_grid_thw,
                 image_hashes: hashes,
                 vision_rows,

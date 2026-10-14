@@ -4,7 +4,7 @@
 use inference_nn::serde_default_fn;
 use inference_nn::{
     amoe, attention, cuda, decoder, device_map, gdn, kv_cache, layers, media_inputs, metal, mla,
-    model, moe, ops, paged_attention, speculative, utils, vision,
+    model, moe, ops, paged_attention, speculative, utils,
 };
 
 pub mod deepseek2;
