@@ -38,7 +38,7 @@ const ENCODER_CACHE_ENTRIES: usize = 32;
 use config::Config;
 use connector::Connector;
 use merge::Merger;
-use rope_index::get_rope_index_batched;
+use rope_index::window_positions;
 use vision::VisionModel;
 
 pub struct PaddleOcrVlModel {
@@ -118,8 +118,8 @@ impl IsqModel for PaddleOcrVlModel {
 }
 
 pub struct PaddleOcrVlVisionSpecificArgs {
-    // Whole prompt per row, so mrope positions/deltas recompute statelessly every step (like qwen3_vl).
-    pub input_ids_full: Tensor,
+    // Whole prompt per row, on the host, so each step builds its own mrope positions without reading the device.
+    pub prompt_ids: Vec<Vec<u32>>,
     // Per-row image grids, needed on every pass for mrope; empty only when no row has an image.
     pub image_grid_thw: Vec<Vec<(usize, usize, usize)>>,
     pub image_hashes: Vec<Vec<u64>>,
@@ -173,7 +173,7 @@ impl MultimodalModel for PaddleOcrVlModel {
         ctx: &mut ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let PaddleOcrVlVisionSpecificArgs {
-            input_ids_full,
+            prompt_ids,
             image_grid_thw,
             image_hashes,
             vision_rows,
@@ -186,19 +186,20 @@ impl MultimodalModel for PaddleOcrVlModel {
         let image_token_id = self.cfg.image_token_id as i64;
         let seqlen_offsets = ctx.seqlen_offsets();
 
-        let (batch, _full_len) = input_ids_full.dims2()?;
+        let (batch, len) = input_ids.dims2()?;
         let grids: Vec<Vec<(usize, usize, usize)>> = if image_grid_thw.is_empty() {
             vec![Vec::new(); batch]
         } else {
             image_grid_thw.clone()
         };
-        let (full_pos, deltas) =
-            get_rope_index_batched(&input_ids_full, &grids, image_token_id, merge, dev)?;
-        let position_ids = crate::vision::mrope::mrope_position_ids_for_input(
-            &full_pos,
-            &deltas,
-            input_ids,
+        let position_ids = window_positions(
+            &prompt_ids,
+            &grids,
+            image_token_id as u32,
+            merge,
             seqlen_offsets,
+            len,
+            dev,
         )?;
 
         // `pixel_values` is every vision row's images concatenated on dim 0, split back by t*h*w.
@@ -219,13 +220,10 @@ impl MultimodalModel for PaddleOcrVlModel {
                     .iter()
                     .filter(|&&id| id as i64 == image_token_id)
                     .count();
-                let full_ids = input_ids_full
-                    .narrow(0, b, 1)?
-                    .flatten_all()?
-                    .to_vec1::<u32>()?;
+                let full_ids = &prompt_ids[b];
                 let offset_in_prompt = seqlen_offsets.get(b).copied().unwrap_or(0);
                 let active = window_images(
-                    &full_ids,
+                    full_ids,
                     offset_in_prompt,
                     window_image_tokens,
                     image_token_id as u32,
@@ -316,7 +314,7 @@ impl MultimodalModel for PaddleOcrVlModel {
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         Box::new(PaddleOcrVlVisionSpecificArgs {
-            input_ids_full: input_ids.clone(),
+            prompt_ids: input_ids.to_vec2::<u32>().unwrap_or_default(),
             image_grid_thw: Vec::new(),
             image_hashes: Vec::new(),
             vision_rows: Vec::new(),

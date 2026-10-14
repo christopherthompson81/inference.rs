@@ -1,15 +1,14 @@
 //! 3D mrope position ids, per transformers `PaddleOCRVLModel.get_rope_index` (Qwen2-VL style, images only).
 
-use inference_tensor::{DType, Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 
 // Grids are pre-merge, one per run of t*(h/m)*(w/m) placeholders; decode adds the returned delta to its position.
-pub fn get_rope_index(
-    input_ids: &[i64],
+fn prompt_positions(
+    input_ids: &[u32],
     image_grids: &[(usize, usize, usize)],
-    image_token_id: i64,
+    image_token_id: u32,
     merge: usize,
-    dev: &Device,
-) -> Result<(Tensor, i64)> {
+) -> ([Vec<i64>; 3], i64) {
     let seq = input_ids.len();
     let mut rows: [Vec<i64>; 3] = [
         Vec::with_capacity(seq),
@@ -61,99 +60,98 @@ pub fn get_rope_index(
         "position_ids length must equal sequence length"
     );
     let max_pos = rows.iter().flatten().copied().max().unwrap_or(-1);
-    let delta = max_pos + 1 - seq as i64;
-
-    let flat: Vec<i64> = rows.into_iter().flatten().collect();
-    let position_ids = Tensor::from_vec(flat, (3, seq), dev)?;
-    Ok((position_ids, delta))
+    (rows, max_pos + 1 - seq as i64)
 }
 
-// Returns `[3, batch, full_len]` positions and `[batch, 1]` deltas, as `mrope_position_ids_for_input` expects.
-pub fn get_rope_index_batched(
-    input_ids: &Tensor,
+/// The `[3, batch, len]` positions of each row's `len` tokens from its offset: the prompt's own positions inside the
+/// prompt, and past it the cursor carried on (index + delta), as transformers' `get_rope_index` gives them. Built on
+/// the host from each row's prompt, so a step uploads only its own window.
+pub fn window_positions(
+    prompts: &[Vec<u32>],
     grids: &[Vec<(usize, usize, usize)>],
-    image_token_id: i64,
+    image_token_id: u32,
     merge: usize,
+    offsets: &[usize],
+    len: usize,
     dev: &Device,
-) -> Result<(Tensor, Tensor)> {
-    let (batch, _full_len) = input_ids.dims2()?;
-    let ids = input_ids.to_dtype(DType::I64)?.to_vec2::<i64>()?;
-    let mut pos_rows = Vec::with_capacity(batch);
-    let mut deltas = Vec::with_capacity(batch);
-    for b in 0..batch {
-        let (pos, delta) = get_rope_index(&ids[b], &grids[b], image_token_id, merge, dev)?;
-        pos_rows.push(pos);
-        deltas.push(delta);
+) -> Result<Tensor> {
+    let batch = prompts.len();
+    let mut planes: [Vec<i64>; 3] = std::array::from_fn(|_| Vec::with_capacity(batch * len));
+    for (b, prompt) in prompts.iter().enumerate() {
+        let (rows, delta) = prompt_positions(prompt, &grids[b], image_token_id, merge);
+        for (plane, row) in planes.iter_mut().zip(&rows) {
+            plane.extend((offsets[b]..offsets[b] + len).map(|i| match row.get(i) {
+                Some(&pos) => pos,
+                None => i as i64 + delta,
+            }));
+        }
     }
-    let position_ids = Tensor::stack(&pos_rows, 1)?;
-    let deltas = Tensor::from_vec(deltas, (batch, 1), dev)?;
-    Ok((position_ids, deltas))
+    Tensor::from_vec(planes.concat(), (3, batch, len), dev)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    const IMG: u32 = 999;
+    const GRID: (usize, usize, usize) = (1, 4, 4);
+
+    fn at(positions: &Tensor, row: usize, col: usize) -> Vec<i64> {
+        positions
+            .narrow(1, row, 1)
+            .and_then(|t| t.narrow(2, col, 1))
+            .and_then(|t| t.flatten_all())
+            .and_then(|t| t.to_vec1::<i64>())
+            .unwrap()
+    }
+
     // Needs a non-zero delta (image compresses positions) to not be vacuous.
     #[test]
     fn decode_position_continues_prefill_cursor() {
-        let dev = Device::Cpu;
-        let img = 999i64;
-        let grid = (1usize, 4usize, 4usize);
-        let prompt: Vec<i64> = vec![10, 11, img, img, img, img, 12, 13];
-        let (_pos, delta) = get_rope_index(&prompt, &[grid], img, 2, &dev).unwrap();
+        let prompt = vec![10, 11, IMG, IMG, IMG, IMG, 12, 13];
+        let (_, delta) = prompt_positions(&prompt, &[GRID], IMG, 2);
         assert!(
             delta < 0,
             "image block should compress positions -> negative delta"
         );
-
-        let decode_p = prompt.len() as i64 + delta;
-
         let mut extended = prompt.clone();
         extended.push(42);
-        let (pos_ext, _) = get_rope_index(&extended, &[grid], img, 2, &dev).unwrap();
-        let last_col: Vec<i64> = pos_ext
-            .narrow(1, prompt.len(), 1)
-            .unwrap()
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<i64>()
-            .unwrap();
+        let (rows, _) = prompt_positions(&extended, &[GRID], IMG, 2);
+        let decoded = window_positions(
+            std::slice::from_ref(&prompt),
+            &[vec![GRID]],
+            IMG,
+            2,
+            &[prompt.len()],
+            1,
+            &Device::Cpu,
+        )
+        .unwrap();
         assert_eq!(
-            last_col,
-            vec![decode_p; 3],
-            "decode position must continue the cursor"
+            at(&decoded, 0, 0),
+            vec![rows[0][prompt.len()]; 3],
+            "decode must continue the cursor"
         );
     }
 
     #[test]
-    fn batched_rope_index_matches_per_sequence() {
-        let dev = Device::Cpu;
-        let img = 999i64;
-        let grid = (1usize, 4usize, 4usize);
-        let row0: Vec<i64> = vec![10, 11, img, img, img, img, 12, 13];
-        let row1: Vec<i64> = vec![20, 21, 22, 23, 24, 25, 26, 27];
-        let input_ids =
-            Tensor::from_vec([row0.clone(), row1.clone()].concat(), (2, 8), &dev).unwrap();
-        let grids = vec![vec![grid], vec![]];
-
-        let (pos, deltas) = get_rope_index_batched(&input_ids, &grids, img, 2, &dev).unwrap();
-        assert_eq!(pos.dims(), &[3, 2, 8]);
-        assert_eq!(deltas.dims(), &[2, 1]);
-
-        let (pos0, d0) = get_rope_index(&row0, &[grid], img, 2, &dev).unwrap();
-        let (pos1, d1) = get_rope_index(&row1, &[], img, 2, &dev).unwrap();
-        let got0 = pos.narrow(1, 0, 1).unwrap().squeeze(1).unwrap();
-        let got1 = pos.narrow(1, 1, 1).unwrap().squeeze(1).unwrap();
-        assert_eq!(
-            got0.to_vec2::<i64>().unwrap(),
-            pos0.to_vec2::<i64>().unwrap()
-        );
-        assert_eq!(
-            got1.to_vec2::<i64>().unwrap(),
-            pos1.to_vec2::<i64>().unwrap()
-        );
-        let dv = deltas.flatten_all().unwrap().to_vec1::<i64>().unwrap();
-        assert_eq!(dv, vec![d0, d1]);
+    fn a_window_takes_its_columns_of_each_prompt() {
+        let row0 = vec![10, 11, IMG, IMG, IMG, IMG, 12, 13];
+        let row1 = vec![20, 21, 22, 23, 24, 25, 26, 27];
+        let grids = vec![vec![GRID], vec![]];
+        let (full0, _) = prompt_positions(&row0, &grids[0], IMG, 2);
+        let (full1, _) = prompt_positions(&row1, &grids[1], IMG, 2);
+        let window =
+            window_positions(&[row0, row1], &grids, IMG, 2, &[2, 2], 4, &Device::Cpu).unwrap();
+        for col in 0..4 {
+            assert_eq!(
+                at(&window, 0, col),
+                (0..3).map(|p| full0[p][2 + col]).collect::<Vec<_>>()
+            );
+            assert_eq!(
+                at(&window, 1, col),
+                (0..3).map(|p| full1[p][2 + col]).collect::<Vec<_>>()
+            );
+        }
     }
 }

@@ -140,3 +140,20 @@ GPU-bound) and half the per-step work before the text decoder (about 5 ms a step
 row's whole prompt each step, and the `input_ids` read-backs). Packing several images into one tower pass would
 mainly help the small regions (the 53 under 1,500 patches take about 30 ms each, 1.6 s in all); the per-step work is
 the larger lever.
+
+## Run 7 - 2026-10-13 21:50
+
+**Change:** each row's prompt tokens travel on the host (`prompt_ids`), and `window_positions` builds only the step's
+`[3, batch, len]` M-RoPE positions there (the prompt's own positions inside the prompt, index + delta past it) and
+uploads them once. Gone: building `input_ids_full` on the device row by row, reading it back every step, and
+uploading three full position rows per row.
+
+**Raw finding, Run 3's benchmark:** 47.3 s at 1 in flight, 26.9 s at 4, 23.7 s at 16 (Run 5: 47.7, 27.3, 24.3).
+Text: 98 of 100 identical to the baseline at 16 in flight, 99 of 100 at 1 (the others 0.997 similar). During a 16 in
+flight run, `nvidia-smi` every 200 ms: GPU 72% busy on average, under 50% in 26% of samples; the engine thread used
+54% of a core.
+
+**Implication:** about 2.5%, not the 11 s Run 6 attributed to the per-step work: the probe's "before the text decoder"
+CPU time included waiting for GPU work already queued. With real regions the run is now mostly GPU-bound. What's left
+is smaller: packing several small images into one vision pass, prefilling image prompts of different sizes in one
+step, and CUDA graphs for decode.
