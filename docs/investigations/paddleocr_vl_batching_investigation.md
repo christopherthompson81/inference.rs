@@ -266,3 +266,17 @@ identical run to run. Against master: one answer identical, one 0.89 similar, on
 
 **Implication:** the switch is worth it for every model that resizes with a convolution filter. Nearest (Phi-3-V,
 Phi-4-MM) stays on the `image` crate.
+
+## Run 13 - 2026-10-14 01:30
+
+**Question:** with the SIMD resize in, does moving image preprocessing off the engine thread still pay? The change
+tried: an opt-in `media_preparation` hook on the inputs processor (PaddleOCR-VL's: the same `preprocess`, on the
+host), run in `spawn_blocking` when a request reaches the loop; the request goes back through the engine's own queue
+once prepared, and admission seeds the sequence's `cached_pixel_values` with the result.
+
+**Raw finding, Run 3's benchmark at 16 in flight, the same session:** master 13.2, 13.3 and 13.1 s; with the change
+13.1, 12.8 and 13.4 s. Text unchanged.
+
+**Implication:** within noise. After Run 11 the preprocessing left on the engine thread is about 0.4 s of a 13 s run,
+and moving it adds a request state and a re-entry path through the engine queue. Not taken; the patch is not kept in
+the repo.
