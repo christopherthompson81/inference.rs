@@ -1012,57 +1012,69 @@ mod tests {
         Ok(())
     }
 
-    // A SigLIP vision tower's attention: head dim 72, bidirectional, no mask; only fattn's tile kernel takes it
+    // SigLIP-style vision attention: bidirectional, no mask, at the head dims fattn runs padded to an mma one
     #[cfg(feature = "cuda")]
     #[test]
-    fn bidirectional_attention_at_head_dim_72_runs_on_cuda_and_matches_the_cpu() -> CandleResult<()>
-    {
+    fn bidirectional_attention_at_padded_head_dims_runs_on_cuda_and_matches_the_cpu()
+    -> CandleResult<()> {
         crate::skip_without_cuda!();
         let dev = Device::new_cuda(0)?;
-        let (h, len, d) = (16, 300, 72);
-        assert!(flash_backend_supports_dense_sdpa(d, false, false));
-        assert!(
-            !flash_backend_supports_sdpa(d, false, false),
-            "72 has no paged or packed kernel"
-        );
-        let rand = || {
-            Tensor::randn(0f32, 1., (1, len, h, d), &Device::Cpu)?
-                .to_dtype(DType::BF16)?
-                .to_dtype(DType::F32)?
-                .transpose(1, 2)
-        };
-        let (q, k, v) = (rand()?, rand()?, rand()?);
-        let sdpa_params = SdpaParams {
-            n_kv_groups: 1,
-            softcap: None,
-            softmax_scale: 1. / (d as f32).sqrt(),
-            sliding_window: None,
-            sinks: None,
-            chunk: None,
-        };
-        let flash = FlashParams::empty(false);
-        let expected = naive_sdpa(
-            &q.contiguous()?,
-            &k.contiguous()?,
-            &v.contiguous()?,
-            None,
-            &sdpa_params,
-        )?;
-        let on_gpu = |t: &Tensor| t.to_device(&dev)?.to_dtype(DType::BF16);
-        let out = Sdpa.run_attention(
-            &on_gpu(&q)?,
-            &on_gpu(&k)?,
-            &on_gpu(&v)?,
-            &AttentionMask::None,
-            Some(&flash),
-            &sdpa_params,
-        )?;
-        let diff = (out.to_dtype(DType::F32)?.to_device(&Device::Cpu)? - expected)?
-            .abs()?
-            .flatten_all()?
-            .max(0)?
-            .to_scalar::<f32>()?;
-        assert!(diff < SINKS_BF16_TOLERANCE, "max abs diff {diff}");
+        let (h, len) = (16, 300);
+        for d in [40, 72] {
+            assert!(flash_backend_supports_dense_sdpa(d, false, false));
+            assert!(
+                !flash_backend_supports_sdpa(d, false, false),
+                "{d} has no paged or packed kernel"
+            );
+            let sdpa_params = SdpaParams {
+                n_kv_groups: 1,
+                softcap: None,
+                softmax_scale: 1. / (d as f32).sqrt(),
+                sliding_window: None,
+                sinks: None,
+                chunk: None,
+            };
+            let flash = FlashParams::empty(false);
+            // seq-major storage as a text model's projections give it, heads-major as a vision tower's
+            for heads_major in [false, true] {
+                let rand = || {
+                    let t = Tensor::randn(0f32, 1., (1, len, h, d), &Device::Cpu)?
+                        .to_dtype(DType::BF16)?
+                        .to_dtype(DType::F32)?;
+                    if heads_major {
+                        t.transpose(1, 2)?.contiguous()
+                    } else {
+                        t.transpose(1, 2)
+                    }
+                };
+                let (q, k, v) = (rand()?, rand()?, rand()?);
+                let expected = naive_sdpa(
+                    &q.contiguous()?,
+                    &k.contiguous()?,
+                    &v.contiguous()?,
+                    None,
+                    &sdpa_params,
+                )?;
+                let on_gpu = |t: &Tensor| t.to_device(&dev)?.to_dtype(DType::BF16);
+                let out = Sdpa.run_attention(
+                    &on_gpu(&q)?,
+                    &on_gpu(&k)?,
+                    &on_gpu(&v)?,
+                    &AttentionMask::None,
+                    Some(&flash),
+                    &sdpa_params,
+                )?;
+                let diff = (out.to_dtype(DType::F32)?.to_device(&Device::Cpu)? - expected)?
+                    .abs()?
+                    .flatten_all()?
+                    .max(0)?
+                    .to_scalar::<f32>()?;
+                assert!(
+                    diff < SINKS_BF16_TOLERANCE,
+                    "head dim {d} heads-major {heads_major}: max abs diff {diff}"
+                );
+            }
+        }
         Ok(())
     }
 

@@ -177,3 +177,25 @@ web UI's default context) the limit?
 **Implication:** a region's prompt is often 750 to 1,500 image tokens, so 8,192 tokens hold only a few at once: the
 rest wait, and some are preempted and re-prefilled (the "hits" are their images encoded again). At 32,768 all 16 run,
 10% faster; past that nothing more. The web UI's OCR slot now offers 32,768 by default.
+
+## Run 9 - 2026-10-13 22:50
+
+**Question:** a microbenchmark of fattn alone (bf16, 16 heads, no mask) disagrees with Run 6: the tile kernel at head
+dim 72 took 0.50 / 2.71 / 10.37 ms at 1,000 / 2,500 / 5,000 tokens, the mma kernel at 80 took 0.24 / 1.03 / 3.80 ms,
+about 2.7x faster. Did Run 6's padded call reach the mma kernel?
+
+**Raw finding:** no. With Run 6's padding put back and a log line on a refusal, every vision call was refused
+(`inference_fattn::supported` false for the padded operands, true for the unpadded ones), and the code fell back to
+the unpadded tile call. The tower hands attention `(1, seq, 16, 72)` views of heads-major storage (strides
+`[352512, 72, 352512, 1]`); `pad_with_zeros` on such a view returned strides `[1, 16, 1, 78336]`, a head dim no
+longer contiguous, which fattn cannot read. In a standalone test, padding contiguous seq-major operands is accepted at
+every length tried.
+
+**Change:** pad in storage order (transpose to heads-major, pad, transpose back; a contiguous copy first when neither
+order is contiguous), at head dims 40 (to 64) and 72 (to 80).
+
+**Raw finding, Run 3's benchmark at 16 in flight, 32,768 cache:** 18.0 s and 18.0 s over two fresh runs (Run 8: 21.4 s).
+Text 100 of 100 identical to the Run 5 baseline.
+
+**Implication:** Run 6's "no gain" measured the tile kernel twice. The pad is worth 16% end to end. Tests now pin both
+storage orders through `Sdpa.run_attention` at 40 and 72, and that a padded heads-major view stays readable by fattn.

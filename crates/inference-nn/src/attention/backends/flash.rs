@@ -291,12 +291,56 @@ pub fn flash_attn(
     }
     #[cfg(feature = "cuda")]
     {
+        let head_dim = q.dim(3)?;
+        if let Some(padded) = mma_padding(head_dim)
+            && flash_params.is_none_or(|params| !params.packed)
+            && sdpa_params.sinks.is_none()
+        {
+            // zero channels add nothing to q.k or the output, and the scale is explicit, so only the kernel changes
+            let (qp, kp, vp) = (
+                pad_head_dim(q, padded)?,
+                pad_head_dim(k, padded)?,
+                pad_head_dim(v, padded)?,
+            );
+            if let Some(out) = try_fattn(&qp, &kp, &vp, flash_params, sdpa_params)? {
+                return Ok(Some(out.narrow(
+                    inference_tensor::D::Minus1,
+                    0,
+                    head_dim,
+                )?));
+            }
+        }
         try_fattn(q, k, v, flash_params, sdpa_params)
     }
     #[cfg(not(feature = "cuda"))]
     {
         let _ = (q, k, v, flash_params, sdpa_params);
         Ok(None)
+    }
+}
+
+// a tile-only head dim padded to the next one fattn's tensor-core (mma) kernel takes, which runs it 2-3x faster
+#[cfg(feature = "cuda")]
+fn mma_padding(head_dim: usize) -> Option<usize> {
+    match head_dim {
+        40 => Some(64),
+        72 => Some(80),
+        _ => None,
+    }
+}
+
+// padded in storage order: padding a `(b, seq, heads, d)` view of `(b, heads, seq, d)` scatters the head dim
+#[cfg(feature = "cuda")]
+fn pad_head_dim(t: &Tensor, padded: usize) -> Result<Tensor> {
+    let extra = padded - t.dim(inference_tensor::D::Minus1)?;
+    let heads_major = t.transpose(1, 2)?;
+    if heads_major.is_contiguous() {
+        heads_major
+            .pad_with_zeros(inference_tensor::D::Minus1, 0, extra)?
+            .transpose(1, 2)
+    } else {
+        t.contiguous()?
+            .pad_with_zeros(inference_tensor::D::Minus1, 0, extra)
     }
 }
 
@@ -372,5 +416,29 @@ mod tests {
         assert!(!flash_backend_supports(320, false));
         assert!(!flash_backend_supports_sdpa(320, false, true));
         assert!(!flash_backend_supports_sdpa(512, false, true));
+    }
+
+    // vision towers hand over `(b, seq, heads, d)` views of heads-major storage; padding must keep rows fattn can read
+    #[test]
+    fn padded_head_dims_stay_readable_by_the_mma_kernel() -> Result<()> {
+        crate::skip_without_cuda!();
+        let dev = Device::new_cuda(0)?;
+        let (h, len) = (16, 300);
+        for (d, padded) in [(40, 64), (72, 80)] {
+            assert_eq!(mma_padding(d), Some(padded));
+            let heads_major = Tensor::zeros((1, h, len, d), DType::BF16, &dev)?.transpose(1, 2)?;
+            let seq_major = Tensor::zeros((1, len, h, d), DType::BF16, &dev)?;
+            for t in [heads_major, seq_major] {
+                let p = pad_head_dim(&t, padded)?;
+                assert_eq!(p.dims(), [1, len, h, padded]);
+                assert_eq!(p.stride()[3], 1, "head dim {d} scattered by the pad");
+                let opts = inference_fattn::FattnOptions {
+                    scale: 1.,
+                    ..Default::default()
+                };
+                assert!(inference_fattn::supported(&p, &p, &p, &opts)?);
+            }
+        }
+        Ok(())
     }
 }
