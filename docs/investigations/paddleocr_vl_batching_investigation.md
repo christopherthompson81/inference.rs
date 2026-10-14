@@ -199,3 +199,22 @@ Text 100 of 100 identical to the Run 5 baseline.
 
 **Implication:** Run 6's "no gain" measured the tile kernel twice. The pad is worth 16% end to end. Tests now pin both
 storage orders through `Sdpa.run_attention` at 40 and 72, and that a padded heads-major view stays readable by fattn.
+
+## Run 10 - 2026-10-13 23:20
+
+**Question:** the last profile spent about 18% of kernel time in bf16 elementwise ops (add, mul, copy), mostly the
+vision tower's rope: `rotate_half` (two narrows, a neg, a cat) and two broadcast multiplies and an add, for q and k
+in every layer, after a transpose copy of each projection. Does the fused rope kernel the text models use
+(`apply_rotary_qk_preselected`, neox, in place on token-major rows) pay off here?
+
+**Change:** the tower's cos/sin tables are half a head wide (height then width frequencies; neox repeats them), and
+q and k are rotated in place as heads-first views of the projection outputs, so q, k and v skip their transpose
+copies too.
+
+**Raw finding, Run 3's benchmark at 16 in flight, 32,768 cache:** 17.1 s and 17.4 s (Run 9: 18.0 s). Text: 98 and
+99 of 100 identical to the Run 5 baseline; the others differ only in straight vs curly quotes (0.992 and 0.997
+similar), the kernel rounding to bf16 once instead of after every op. The tiny-model tests that pin image decodes
+pass unchanged.
+
+**Implication:** about 4%. What remains at 16 in flight: vision attention (now the mma kernel), the text decoder's
+matmuls, and per-step overhead.
