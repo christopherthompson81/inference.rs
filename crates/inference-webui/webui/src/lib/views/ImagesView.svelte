@@ -13,12 +13,15 @@
   const TURN_STEM = "turn-";
   // a refinement starts from this file of its job: the image that was anchored
   const ANCHOR_FILE = `${REFERENCE_STEM}1.png`;
+  const SOURCE_SUFFIX = "-source.png";
   const REFINE_TITLE = "Refine: ";
 
   interface ThreadTurn {
     prompt: string;
     /** The job file holding the turn's image. */
     image: string;
+    /** The job file it edited; absent, the turn before's image, or the first turn's the anchored file. */
+    source?: string;
   }
 
   interface ImagesJob {
@@ -28,7 +31,7 @@
     steps: number;
     guidance: number;
     seed: number;
-    /** A refinement: each turn an edit of the one before, the first of the anchored image. */
+    /** The refinements, each an edit of an image in the job: one it made, or the anchored file. */
     thread?: ThreadTurn[];
   }
 
@@ -36,6 +39,7 @@
     prompt: string;
     url: string | null;
     file: string | null;
+    source: string | null;
     status: "working" | "done" | "failed";
     error: string;
   }
@@ -51,14 +55,19 @@
   let references = $state<File[]>([]);
   let previews = $state<string[]>([]);
   let images = $state<string[]>([]);
+  // the job's file for each of `images`, once kept
+  let imageFiles = $state<string[]>([]);
   let busy = $state(false);
   let status = $state("");
 
   let gallery = $state<{ items: GalleryItem[]; start: number } | null>(null);
-  // the image the refinement edits next, and the turns that led to it
-  let anchor = $state<{ url: string; caption: string } | null>(null);
+  // the job shown: what it generated, from which prompt and references, then the refinements of its images
+  let jobId = $state<string | null>(null);
+  let made = $state<ImagesJob | null>(null);
+  let madeReferences = $state<string[]>([]);
   let thread = $state<Turn[]>([]);
-  let threadJob = $state<string | null>(null);
+  // the image the refinement edits next; `file` is the job's file holding it, null for one from elsewhere
+  let anchor = $state<{ url: string; caption: string; file: string | null } | null>(null);
   let refinePrompt = $state("");
 
   let ready = $derived(managerStore.servedIn("images") != null);
@@ -79,10 +88,10 @@
     return jobsStore.lists.images.flatMap((job) => {
       const data = job.data as unknown as ImagesJob;
       const turns = (data.thread ?? []).filter((turn) => job.files.includes(turn.image));
-      const made = job.files.filter((name) => name.startsWith(IMAGE_STEM));
+      const generated = job.files.filter((name) => name.startsWith(IMAGE_STEM));
       return [
         ...[...turns].reverse().map((turn) => ({ url: jobFileUrl(job, turn.image), caption: turn.prompt, filename: turn.image })),
-        ...made.map((name) => ({ url: jobFileUrl(job, name), caption: data.prompt, filename: name })),
+        ...generated.map((name) => ({ url: jobFileUrl(job, name), caption: data.prompt, filename: name })),
       ];
     });
   }
@@ -99,11 +108,20 @@
     gallery = { items: shown, start: Math.max(0, shown.findIndex((item) => item.url === url)) };
   }
 
+  // the job's file holding the image at `url`, if it is one of the job shown
+  function fileOf(url: string): string | null {
+    const at = images.indexOf(url);
+    if (at >= 0) return imageFiles[at] ?? null;
+    return thread.find((turn) => turn.url === url)?.file ?? null;
+  }
+
+  // an image of the job shown is refined within it; one from elsewhere starts a refinement of its own
   async function anchorOn(item: GalleryItem) {
     gallery = null;
-    anchor = { url: item.url, caption: item.caption };
-    thread = [];
-    threadJob = null;
+    const shown = images.includes(item.url) || thread.some((turn) => turn.url === item.url);
+    if (!shown) clear();
+    const file = fileOf(item.url);
+    anchor = { url: item.url, caption: item.caption, file };
     refinePrompt = "";
     await tick();
     document.getElementById("refine")?.scrollIntoView({ behavior: "smooth", block: "start" });
@@ -123,37 +141,52 @@
     await anchorOn({ url, caption: file.name, filename: file.name });
   }
 
+  function clear() {
+    jobId = null;
+    made = null;
+    madeReferences = [];
+    images = [];
+    imageFiles = [];
+    thread = [];
+    anchor = null;
+  }
+
+  // the job as its conversation: what it generated, then each refinement, ready to go on from the last image
   async function open(job: Job) {
     const data = job.data as unknown as ImagesJob;
     ({ prompt, width, height, steps, guidance, seed } = data);
     status = "";
     chooseReferences(null);
-    if (data.thread) {
-      // a refinement comes back as its thread, ready to go on from its last image
-      images = [];
-      threadJob = job.id;
-      thread = data.thread.map((turn) => ({
+    jobId = job.id;
+    imageFiles = job.files.filter((name) => name.startsWith(IMAGE_STEM));
+    images = imageFiles.map((name) => jobFileUrl(job, name));
+    made = images.length > 0 ? data : null;
+    const names = job.files.filter((name) => name.startsWith(REFERENCE_STEM));
+    madeReferences = made ? names.map((name) => jobFileUrl(job, name)) : [];
+    let previous = !made && job.files.includes(ANCHOR_FILE) ? ANCHOR_FILE : null;
+    thread = (data.thread ?? []).map((turn) => {
+      const source = turn.source ?? previous;
+      previous = turn.image;
+      return {
         prompt: turn.prompt,
         url: job.files.includes(turn.image) ? jobFileUrl(job, turn.image) : null,
         file: turn.image,
+        source,
         status: "done",
         error: "",
-      }));
-      const last = thread.findLast((turn) => turn.url);
-      anchor = last
-        ? { url: last.url!, caption: last.prompt }
-        : job.files.includes(ANCHOR_FILE)
-          ? { url: jobFileUrl(job, ANCHOR_FILE), caption: data.prompt }
-          : null;
-      jobsStore.current.images = job.id;
-      return;
-    }
-    images = job.files.filter((name) => name.startsWith(IMAGE_STEM)).map((name) => jobFileUrl(job, name));
+      };
+    });
+    const last = thread.findLast((turn) => turn.url);
+    anchor = last
+      ? { url: last.url!, caption: last.prompt, file: last.file }
+      : !made && job.files.includes(ANCHOR_FILE)
+        ? { url: jobFileUrl(job, ANCHOR_FILE), caption: data.prompt, file: ANCHOR_FILE }
+        : null;
     jobsStore.current.images = job.id;
+    if (!made) return;
     // the references come back as files, so the job can be run again as it was
     busy = true;
     try {
-      const names = job.files.filter((name) => name.startsWith(REFERENCE_STEM));
       chooseReferences(await Promise.all(names.map((name) => jobFile(job, name))));
     } catch (e) {
       status = `References not read: ${e instanceof Error ? e.message : String(e)}`;
@@ -180,6 +213,9 @@
     const started = performance.now();
     const job: ImagesJob = { prompt: prompt.trim(), width, height, steps, guidance, seed };
     const sent = [...references];
+    clear();
+    made = job;
+    madeReferences = [...previews];
     try {
       images =
         sent.length > 0
@@ -187,7 +223,7 @@
           : await generateImage(SLOTS.images.id, job.prompt, options);
       status = `Done in ${((performance.now() - started) / 1000).toFixed(1)} s`;
       try {
-        const made = await Promise.all(
+        const outputs = await Promise.all(
           images.map(async (image, index) => ({ name: `${IMAGE_STEM}${index + 1}.png`, blob: await blobOf(image) })),
         );
         const given = await Promise.all(
@@ -197,13 +233,17 @@
             return { name: `${REFERENCE_STEM}${index + 1}.${extension ?? "png"}`, blob };
           }),
         );
-        const kept = await jobsStore.save({ kind: "images", title: job.prompt, slot: "images", data: job }, [...made, ...given]);
+        const kept = await jobsStore.save({ kind: "images", title: job.prompt, slot: "images", data: job }, [...outputs, ...given]);
         // shown from the history, so the gallery finds them among the rest
-        images = made.map((file) => jobFileUrl(kept, file.name));
+        jobId = kept.id;
+        imageFiles = outputs.map((file) => file.name);
+        images = imageFiles.map((name) => jobFileUrl(kept, name));
+        madeReferences = given.map((file) => jobFileUrl(kept, file.name));
       } catch (e) {
         status += `; not kept: ${e instanceof Error ? e.message : String(e)}`;
       }
     } catch (e) {
+      made = null;
       status = e instanceof Error ? e.message : String(e);
     } finally {
       busy = false;
@@ -220,7 +260,7 @@
     delete options.height;
     busy = true;
     refinePrompt = "";
-    const turn: Turn = { prompt: ask, url: null, file: null, status: "working", error: "" };
+    const turn: Turn = { prompt: ask, url: null, file: null, source: anchor.file, status: "working", error: "" };
     thread = [...thread, turn];
     const at = thread.length - 1;
     try {
@@ -230,7 +270,7 @@
       if (!result) throw new Error("the model returned no image");
       thread[at].url = result;
       thread[at].status = "done";
-      anchor = { url: result, caption: ask };
+      anchor = { url: result, caption: ask, file: null };
       await keepTurn(at, start, result);
     } catch (e) {
       thread[at].status = "failed";
@@ -243,33 +283,47 @@
     }
   }
 
-  // the thread kept as one history entry: the anchored image, then each turn's
+  // each turn kept in the job it refines: a generation's, or one of its own holding the anchored image
   async function keepTurn(at: number, start: File, result: string) {
     const name = `${TURN_STEM}${at + 1}.png`;
     const files = [{ name, blob: await blobOf(result) }];
-    if (!threadJob) files.unshift({ name: ANCHOR_FILE, blob: start });
+    if (!thread[at].source) {
+      // an image from elsewhere: a new refinement's anchored file, or kept beside the turn that edited it
+      const source = jobId ? `${TURN_STEM}${at + 1}${SOURCE_SUFFIX}` : ANCHOR_FILE;
+      files.unshift({ name: source, blob: start });
+      thread[at].source = source;
+    }
     thread[at].file = name;
+    const base = made ?? { prompt: thread[0].prompt, width: 0, height: 0, steps, guidance, seed };
     const data: ImagesJob = {
-      prompt: thread[0].prompt,
-      width: 0,
-      height: 0,
-      steps,
-      guidance,
-      seed,
-      thread: thread.filter((turn) => turn.file).map((turn) => ({ prompt: turn.prompt, image: turn.file! })),
+      ...base,
+      thread: thread
+        .filter((turn) => turn.file)
+        .map((turn) => ({ prompt: turn.prompt, image: turn.file!, source: turn.source ?? undefined })),
     };
+    const title = made ? made.prompt : `${REFINE_TITLE}${thread[0].prompt}`;
     try {
-      const kept = await jobsStore.save(
-        { id: threadJob ?? undefined, kind: "images", title: `${REFINE_TITLE}${thread[0].prompt}`, slot: "images", data },
-        files,
-      );
-      threadJob = kept.id;
+      const kept = await jobsStore.save({ id: jobId ?? undefined, kind: "images", title, slot: "images", data }, files);
+      jobId = kept.id;
       const url = jobFileUrl(kept, name);
       thread[at].url = url;
-      if (anchor?.url === result) anchor = { url, caption: anchor.caption };
+      if (anchor?.url === result) anchor = { url, caption: anchor.caption, file: name };
     } catch (e) {
+      thread[at].file = null;
       thread[at].error = `not kept: ${e instanceof Error ? e.message : String(e)}`;
     }
+  }
+
+  // the image a turn edited, shown beside its prompt unless it is the result just above
+  function sourceOf(index: number): { url: string; label: string } | null {
+    const source = thread[index].source;
+    const above = index > 0 ? thread[index - 1].file : imageFiles.length === 1 ? imageFiles[0] : null;
+    if (!source || source === above) return null;
+    const at = imageFiles.indexOf(source);
+    if (at >= 0) return { url: images[at], label: `image ${at + 1}` };
+    const turn = thread.findIndex((other) => other.file === source);
+    if (turn >= 0 && thread[turn].url) return { url: thread[turn].url!, label: `the result of "${thread[turn].prompt}"` };
+    return jobId ? { url: jobFileUrl({ id: jobId } as Job, source), label: "the image it started from" } : null;
   }
 
   function refineKey(event: KeyboardEvent) {
@@ -323,46 +377,64 @@
           {/each}
         </div>
       {/if}
-      {#if images.length > 0 && !anchor}
-        <p class="text-xs text-gray-500">Refine an image to edit it step by step with the model, or click it to browse the gallery.</p>
-      {/if}
-      <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
-        {#each images as image, index (index)}
-          <figure class="flex flex-col gap-1.5">
-            <button class="overflow-hidden rounded-lg border border-gray-200 dark:border-gray-800" onclick={() => view(image)} aria-label="View image {index + 1}">
-              <img src={image} alt="Generated" class="w-full" />
-            </button>
-            <figcaption class="flex gap-1.5">
-              <button
-                class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                onclick={() => anchorOn({ url: image, caption: prompt, filename: `image-${index + 1}.png` })}
-                disabled={busy}
-              >
-                Refine
-              </button>
-              <button class="{plain} px-2 py-1 text-xs" onclick={() => view(image)}>View</button>
-              <a class="{plain} px-2 py-1 text-xs" href={image} download="image-{index + 1}.png">Download</a>
-            </figcaption>
-          </figure>
-        {/each}
-      </div>
-
-      {#if anchor}
-        <section id="refine" class="mt-2 flex flex-col gap-3 rounded-lg border border-gray-200 p-3 dark:border-gray-800">
-          <div class="flex items-center gap-3">
-            <button onclick={() => view(anchor!.url)} aria-label="View the anchored image">
-              <img src={anchor.url} alt="Anchored" class="h-16 w-16 rounded object-cover ring-2 ring-blue-500" />
-            </button>
-            <div class="min-w-0 flex-1">
-              <h3 class="text-sm font-semibold">Refine</h3>
-              <p class="truncate text-xs text-gray-500">Each message edits the anchored image; its result becomes the next anchor.</p>
+      {#if made || thread.length > 0 || anchor}
+        <section class="flex flex-col gap-3" aria-label="Conversation">
+          {#if made}
+            <div class="flex flex-col items-end gap-1.5 self-end">
+              <div class="rounded-2xl rounded-br-sm bg-blue-600 px-3 py-2 text-sm whitespace-pre-wrap text-white">{made.prompt}</div>
+              {#if madeReferences.length > 0}
+                <div class="flex flex-wrap justify-end gap-1.5">
+                  {#each madeReferences as reference (reference)}
+                    <img src={reference} alt="Reference" class="h-12 rounded border border-gray-200 object-cover dark:border-gray-800" />
+                  {/each}
+                </div>
+              {/if}
             </div>
-            <button class={plain} onclick={() => ((anchor = null), (thread = []), (threadJob = null))} disabled={busy}>Close</button>
-          </div>
+            {#if images.length === 0}
+              <div class="flex h-40 w-40 animate-pulse items-center justify-center rounded-lg bg-gray-100 text-xs text-gray-500 dark:bg-gray-800">Generating...</div>
+            {/if}
+            <div class="grid grid-cols-1 gap-3 md:grid-cols-2">
+              {#each images as image, index (index)}
+                <figure class="flex flex-col gap-1.5">
+                  <button
+                    class="overflow-hidden rounded-lg border {anchor?.url === image ? 'border-blue-500 ring-2 ring-blue-500' : 'border-gray-200 dark:border-gray-800'}"
+                    onclick={() => view(image)}
+                    aria-label="View image {index + 1}"
+                  >
+                    <img src={image} alt="Generated" class="w-full" />
+                  </button>
+                  <figcaption class="flex gap-1.5">
+                    {#if anchor?.url !== image}
+                      <button
+                        class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                        onclick={() => anchorOn({ url: image, caption: made!.prompt, filename: `image-${index + 1}.png` })}
+                        disabled={busy}
+                      >
+                        Refine
+                      </button>
+                    {/if}
+                    <button class="{plain} px-2 py-1 text-xs" onclick={() => view(image)}>View</button>
+                    <a class="{plain} px-2 py-1 text-xs" href={image} download="image-{index + 1}.png">Download</a>
+                  </figcaption>
+                </figure>
+              {/each}
+            </div>
+            {#if !anchor && thread.length === 0}
+              <p class="text-xs text-gray-500">Refine an image to edit it step by step with the model, or click it to browse the gallery.</p>
+            {/if}
+          {/if}
 
           {#each thread as turn, index (index)}
+            {@const from = sourceOf(index)}
             <div id="turn-{index}" class="flex flex-col gap-2">
-              <div class="self-end rounded-2xl rounded-br-sm bg-blue-600 px-3 py-2 text-sm text-white">{turn.prompt}</div>
+              <div class="flex items-end gap-2 self-end">
+                {#if from}
+                  <button onclick={() => view(from.url)} aria-label="View the image this edits" title="Edits {from.label}">
+                    <img src={from.url} alt="Edited" class="h-10 w-10 rounded object-cover opacity-80" />
+                  </button>
+                {/if}
+                <div class="rounded-2xl rounded-br-sm bg-blue-600 px-3 py-2 text-sm whitespace-pre-wrap text-white">{turn.prompt}</div>
+              </div>
               <div class="flex items-end gap-2 self-start">
                 {#if turn.status === "working"}
                   <div class="flex h-40 w-40 items-center justify-center rounded-lg bg-gray-100 text-xs text-gray-500 animate-pulse dark:bg-gray-800">Editing...</div>
@@ -377,7 +449,7 @@
                     />
                   </button>
                   {#if anchor?.url !== turn.url}
-                    <button class="{plain} px-2 py-1 text-xs" onclick={() => (anchor = { url: turn.url!, caption: turn.prompt })} disabled={busy}>
+                    <button class="{plain} px-2 py-1 text-xs" onclick={() => anchorOn({ url: turn.url!, caption: turn.prompt, filename: turn.file ?? "" })} disabled={busy}>
                       Anchor here
                     </button>
                   {/if}
@@ -387,25 +459,31 @@
             </div>
           {/each}
 
-          <div class="flex items-end gap-2">
-            <textarea
-              id="refine-prompt"
-              class="min-h-10 flex-1 resize-y {field}"
-              rows="2"
-              placeholder="Describe a change, e.g. make it night, add a boat"
-              aria-label="Refinement"
-              bind:value={refinePrompt}
-              onkeydown={refineKey}
-              disabled={busy}
-            ></textarea>
-            <button
-              class="rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-              onclick={refine}
-              disabled={!ready || !refinePrompt.trim() || busy}
-            >
-              Send
-            </button>
-          </div>
+          {#if anchor}
+            <div id="refine" class="flex items-end gap-2 rounded-lg border border-gray-200 p-2 dark:border-gray-800">
+              <button onclick={() => view(anchor!.url)} aria-label="View the anchored image" title="The next edit starts from this image">
+                <img src={anchor.url} alt="Anchored" class="h-14 w-14 rounded object-cover ring-2 ring-blue-500" />
+              </button>
+              <textarea
+                id="refine-prompt"
+                class="min-h-10 flex-1 resize-y {field}"
+                rows="2"
+                placeholder="Describe a change, e.g. make it night, add a boat"
+                aria-label="Refinement"
+                bind:value={refinePrompt}
+                onkeydown={refineKey}
+                disabled={busy}
+              ></textarea>
+              <button
+                class="rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                onclick={refine}
+                disabled={!ready || !refinePrompt.trim() || busy}
+              >
+                Send
+              </button>
+              <button class={plain} onclick={() => (anchor = null)} disabled={busy} title="Stop refining; the conversation stays">Close</button>
+            </div>
+          {/if}
         </section>
       {/if}
     </div>
