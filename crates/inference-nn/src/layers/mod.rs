@@ -243,6 +243,35 @@ pub fn linear(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Li
     Ok(Linear::new(ws, Some(bs)))
 }
 
+/// `linear` over `(rows, in)` then tanh GELU when `gelu`; on CUDA half types the bias and GELU ride the cuBLASLt GEMM.
+pub fn linear_bias_gelu(linear: &Linear, xs: &Tensor, gelu: bool) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    if matches!(xs.dtype(), DType::BF16 | DType::F16)
+        && xs.rank() == 2
+        && let Some(bias) = linear.bias()
+    {
+        inference_quant::cublaslt::maybe_init_cublas_lt_wrapper(xs.device().clone());
+        if let Some(cublaslt) =
+            inference_quant::cublaslt::CUBLASLT_CONTROLLER.get_for_device(xs.device())
+        {
+            let act = gelu.then_some(inference_tensor::nn::Activation::Gelu);
+            return cublaslt
+                .batch_matmul(
+                    &linear.weight().unsqueeze(0)?,
+                    &xs.contiguous()?.unsqueeze(0)?,
+                    None,
+                    None,
+                    None,
+                    Some(bias),
+                    act,
+                )?
+                .squeeze(0);
+        }
+    }
+    let ys = linear.forward(xs)?;
+    if gelu { ys.gelu() } else { Ok(ys) }
+}
+
 pub fn linear_no_bias(in_dim: usize, out_dim: usize, vb: ShardedVarBuilder) -> Result<Linear> {
     let ws = vb.get((out_dim, in_dim), "weight")?;
     Ok(Linear::new(ws, None))
@@ -3529,6 +3558,47 @@ mod tests {
             .zip(actual_sin.flatten_all()?.to_vec1::<f32>()?)
         {
             assert!((expected - actual).abs() < 1e-5);
+        }
+        Ok(())
+    }
+
+    // the cuBLASLt bias and GELU epilogues against matmul + broadcast add + tanh GELU
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn fused_linear_bias_gelu_matches_the_unfused_layer() -> inference_tensor::Result<()> {
+        use inference_tensor::Module;
+        // bf16 output rounding, relative to the largest output
+        const FUSED_LINEAR_TOLERANCE: f32 = 0.02;
+        skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        let (rows, d_in, d_out) = (300, 1152, 4304);
+        let rand = |shape: (usize, usize)| {
+            Tensor::randn(0f32, 0.05, shape, &device)?.to_dtype(DType::BF16)
+        };
+        let linear = inference_tensor::nn::Linear::new(
+            rand((d_out, d_in))?,
+            Some(Tensor::randn(0f32, 0.5, d_out, &device)?.to_dtype(DType::BF16)?),
+        );
+        let xs = Tensor::randn(0f32, 1., (rows, d_in), &device)?.to_dtype(DType::BF16)?;
+        inference_quant::cublaslt::maybe_init_cublas_lt_wrapper(device.clone());
+        assert!(
+            inference_quant::cublaslt::CUBLASLT_CONTROLLER
+                .get_for_device(&device)
+                .is_some(),
+            "the fused path needs cuBLASLt"
+        );
+        for gelu in [false, true] {
+            let fused = super::linear_bias_gelu(&linear, &xs, gelu)?.to_dtype(DType::F32)?;
+            let reference = linear.forward(&xs)?;
+            let reference =
+                if gelu { reference.gelu()? } else { reference }.to_dtype(DType::F32)?;
+            assert_eq!(fused.dims(), [rows, d_out]);
+            let diff = (fused - &reference)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let scale = reference.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(
+                diff <= FUSED_LINEAR_TOLERANCE * scale,
+                "gelu {gelu}: max diff {diff} of {scale}"
+            );
         }
         Ok(())
     }

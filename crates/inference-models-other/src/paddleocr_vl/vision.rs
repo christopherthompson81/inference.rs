@@ -4,7 +4,7 @@
 use super::config::VisionConfig;
 use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
-use crate::layers::{Sdpa, layer_norm, linear};
+use crate::layers::{Sdpa, layer_norm, linear, linear_bias_gelu};
 use crate::utils::unvarbuilder::UnVarBuilder;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{LayerNorm, Linear, Module};
@@ -108,13 +108,13 @@ impl VisionAttention {
         // heads-first views of the projections' token-major rows, which the rope kernel rotates in place
         let heads = |t: Tensor| t.reshape((1, n, self.num_heads, hd))?.transpose(1, 2);
         let (q, k) = inference_quant::rotary::apply_rotary_qk_preselected(
-            &heads(self.q_proj.forward(x)?)?,
-            &heads(self.k_proj.forward(x)?)?,
+            &heads(linear_bias_gelu(&self.q_proj, x, false)?)?,
+            &heads(linear_bias_gelu(&self.k_proj, x, false)?)?,
             cos,
             sin,
             true,
         )?;
-        let v = heads(self.v_proj.forward(x)?)?;
+        let v = heads(linear_bias_gelu(&self.v_proj, x, false)?)?;
 
         // One image per call, so full bidirectional attention with no cu_seqlens mask.
         let sdpa_params = SdpaParams {
@@ -140,7 +140,7 @@ impl VisionAttention {
             .transpose(0, 1)?
             .contiguous()?
             .reshape((n, self.num_heads * hd))?;
-        self.out_proj.forward(&ctx)
+        linear_bias_gelu(&self.out_proj, &ctx, false)
     }
 }
 
@@ -158,7 +158,8 @@ impl VisionMlp {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.fc2.forward(&self.fc1.forward(x)?.gelu()?) // gelu_pytorch_tanh
+        // gelu_pytorch_tanh
+        linear_bias_gelu(&self.fc2, &linear_bias_gelu(&self.fc1, x, true)?, false)
     }
 }
 
