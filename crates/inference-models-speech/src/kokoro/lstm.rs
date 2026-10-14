@@ -92,22 +92,56 @@ fn host_steps(gx: &[f32], w_hh: &[f32], hidden: usize, steps: usize, reverse: bo
     out
 }
 
+/// Both directions' weights side by side for the fused CUDA recurrence: one input projection, one launch.
+#[cfg(feature = "cuda")]
+#[derive(Debug, Clone)]
+struct Fused {
+    // (in, 8 * hidden) and (8 * hidden,): forward gates then backward ones
+    w_ih_t: Tensor,
+    bias: Tensor,
+    // (2, hidden, 4 * hidden)
+    w_hh_t: Tensor,
+}
+
 /// A bidirectional single-layer LSTM over (1, T, in), concatenating both directions to (1, T, 2 * hidden).
 #[derive(Debug, Clone)]
 pub struct BiLstm {
     forward: Direction,
     backward: Direction,
+    #[cfg(feature = "cuda")]
+    fused: Option<Fused>,
 }
 
 impl BiLstm {
     pub fn new(in_dim: usize, hidden: usize, vb: VarBuilder) -> Result<Self> {
+        let forward = Direction::new(in_dim, hidden, "", &vb)?;
+        let backward = Direction::new(in_dim, hidden, "_reverse", &vb)?;
+        #[cfg(feature = "cuda")]
+        let fused = (vb.device().is_cuda() && forward.w_hh_t.dtype() == DType::F32)
+            .then(|| -> Result<Fused> {
+                Ok(Fused {
+                    w_ih_t: Tensor::cat(&[&forward.w_ih_t, &backward.w_ih_t], 1)?,
+                    bias: Tensor::cat(&[&forward.bias, &backward.bias], 0)?,
+                    w_hh_t: Tensor::stack(&[&forward.w_hh_t, &backward.w_hh_t], 0)?,
+                })
+            })
+            .transpose()?;
         Ok(Self {
-            forward: Direction::new(in_dim, hidden, "", &vb)?,
-            backward: Direction::new(in_dim, hidden, "_reverse", &vb)?,
+            forward,
+            backward,
+            #[cfg(feature = "cuda")]
+            fused,
         })
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if let Some(fused) = &self.fused
+            && xs.device().is_cuda()
+        {
+            let gx = xs.i(0)?.matmul(&fused.w_ih_t)?.broadcast_add(&fused.bias)?;
+            return inference_nn::cuda::lstm::lstm_bidirectional(&gx, &fused.w_hh_t)?.unsqueeze(0);
+        }
         // only the host loops run side by side; a GPU's ops from two threads would interleave on its one stream
         let (fwd, bwd) = if xs.device().is_cpu() {
             rayon::join(

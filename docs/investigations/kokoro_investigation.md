@@ -610,3 +610,121 @@ Phonemizer 224339e8, published with the user's approval. One data file changed: 
 - Live, with the checkout hidden and a fresh cache (ref `224339e8`):
   - pf_dora on "O padrão 802.11 e a versão 5.0 custam 1.500 reais." returned 200.
   - ff_siwis on "Mmes et Mlles, bienvenue." returned 200.
+
+## Run 27 - 2026-10-14 09:10
+
+Question: would batching paragraphs speed up a long reading on CUDA, and where does a reading's time go now?
+
+Command: `serve -p 1236 speech -m /mnt/data/models/Kokoro-82M-source` (CUDA dev build, RTX 3090), then a bench script that speaks synthetic paragraphs of 1-6 sentences (af_heart, WAV) through `/v1/audio/speech`, either one at a time as the web UI does or N in flight.
+
+| paragraphs | in flight | audio | wall | faster than real time |
+|---|---|---|---|---|
+| 4 | 1 | 35.2 s | 2.71 s | 13x |
+| 40 | 1 | 644.8 s | 47.82 s | 13x |
+| 40 | 8 | 644.8 s | 47.77 s | 13x |
+
+- Requests in flight gain nothing: the engine hands the speech pipeline several queued prompts per step, but `forward_inputs` speaks them one after another.
+- `nvidia-smi` showed 3% GPU utilization during the run.
+
+nsys over 8 paragraphs (104 s of audio, 8.8 s window):
+- GPU busy 31%, 325,735 kernels.
+- `conv_transpose1d_f32` is 32% of kernel time: 16 calls at 54 ms each, the generator's two upsampling convs per paragraph. They have padding, and both backends take col2im only when `padding == 0`, so they fall to the direct kernel.
+- `bmul`/`badd`/`usigmoid`/`utanh` run about 260,000 times at 1-5 us each: the LSTM recurrence on CUDA is about 12 tensor ops per timestep.
+- Host side: 298k `cuLaunchKernel`, and 308k `cuMemAllocAsync` with as many frees and 616k event creates and destroys, one set per op.
+
+Implication: the cost is per-op overhead in the LSTM steps plus one slow conv. Batching paragraphs would spread the LSTM's launches across several paragraphs, but it can't match the reference exactly. Kokoro's instance norms average over time, so a padded short paragraph would sound different, and the reference pipeline itself runs batch 1. Removing the per-step ops and the slow conv speeds every paragraph, including the first one playback waits on. Next: col2im with padding, then the LSTM recurrence.
+
+## Run 28 - 2026-10-14 09:30
+
+Question: what does the generator's transposed conv cost once padding no longer forces the direct kernel?
+
+Change: `Tensor::conv_transpose1d` runs a padded conv (dilation 1, `output_padding <= padding`) unpadded, then narrows `padding` off the front. Padding only crops a transposed conv's full output, so this is exact, and it reaches col2im on every backend. The new test `conv_transpose1d_matches_a_direct_loop` covers k20/s10/p5 and k12/s6/p3 (the generator's), Kokoro's depthwise k3/s2/p1/op1, `output_padding > 0`, a dilated case still on the direct kernel, and the old unpadded case, on the CPU and CUDA.
+
+Finding (8 paragraphs under nsys):
+- `conv_transpose1d_f32` is gone from the top of the list; `col2im1d_f32` takes 0.2 ms per call.
+- The window went from 8.8 s to 7.8 s, and the bench from 9.18 s to 8.18 s.
+
+## Run 29 - 2026-10-14 09:50
+
+Question: how much of a reading is the LSTM recurrence's per-step ops?
+
+Change:
+- New kernel `lstm_bidirectional_f32` (inference-nn `kernels/cuda/lstm.cu`, `cuda::lstm::lstm_bidirectional`) runs every step of both directions in one launch. It uses one block per direction: the recurrent weights stay in L2, and h, c and the gates stay in shared memory.
+- Kokoro's `BiLstm` on CUDA (F32) concatenates both directions' input weights, so one matmul makes both directions' gate inputs, followed by one launch. The CPU keeps its host loops.
+- Test `matches_a_host_loop_in_both_directions`: hidden 3 to 300 (below, at and past one gate per thread, plus an unroll tail), both directions, against a host loop of PyTorch's cell.
+  - It failed once at 1.4e-4 with weights of std 0.3, which made float rounding compound over 17 steps. With PyTorch's 1 / sqrt(hidden) weight scale it passed 6 runs out of 6.
+
+Finding:
+- Kernels went from 325,751 to 17,977 for 8 paragraphs, and `cuLaunchKernel` from 298k to 15.5k.
+- Each BiLSTM is one 5 ms launch (48 for 8 paragraphs).
+- Bench 8.18 s -> 5.78 s, but GPU busy only 30% of a 5.4 s window.
+- CUDA parity: 34.1/44.6/35.3/39.3 dB SNR (was 34.2/44.0/35.9/38.6), with the same token counts.
+
+Temporary stage timing (eprintln probes, since removed) on a 221-token, 529-frame paragraph (about 13 s of audio):
+
+| stage | time |
+|---|---|
+| phonemize | 6.6 ms |
+| durations | 23 ms |
+| F0, N, text encoder | 17 ms |
+| decoder | 676 ms |
+| - harmonic source (host) | 42 ms |
+| - STFT (host) | 243 ms |
+| - network (GPU) | 164 ms |
+| - iSTFT (host) | 221 ms |
+
+Implication: the host DSP is now most of a paragraph.
+
+## Run 30 - 2026-10-14 10:10
+
+Question: why does the host STFT take 243 ms?
+
+Finding: both `stft` and `istft` are direct DFTs (n_fft 20, 11 bins) that evaluate an f64 `cos` and `sin` for every bin, tap and frame: about 27M trig calls on a 13 s paragraph.
+
+Change 1: a twiddle table per call, computed from the same expression, so the values and accumulation order are unchanged and the output is bit-identical. Result: STFT 243 -> 38 ms, iSTFT 221 -> 39 ms, bench 4 paragraphs 2.05 -> 1.02 s.
+
+Change 2: frames (and the source's samples) are independent, so each is computed with rayon and collected in order. The noise draw stays sequential so seeded output repeats, and the overlap-add still sums frames in order.
+
+| stage | after |
+|---|---|
+| harmonic source | 21 ms (the sequential noise draw) |
+| STFT | 9 ms |
+| iSTFT | 15 ms |
+
+Result: 40 paragraphs 47.82 s -> 13.06 s (49x real time).
+
+## Run 31 - 2026-10-14 10:30
+
+Question: with the host DSP gone, what does the GPU network spend its time on?
+
+Finding: in Run 29's profile, `badd`, `bmul`, `bdiv`, `bsub`, `usqr`, `fast_sum` and `ucopy` came to about 690 ms for 8 paragraphs. That is AdaIN's instance norm as a dozen tensor ops, which only the CPU had fused.
+
+Change:
+- New kernel `adain_act_f32` (inference-nn `kernels/cuda/adain.cu`, `cuda::adain::adain_act`): instance norm, the style's affine read straight from `fc(s)` on the device (no host round trip), then Snake or a leaky ReLU, one block per (batch, channel) row.
+- Test `matches_the_tensor_ops_for_both_activations` covers row lengths 7, 300 and 5000, against the tensor path; it passed 5 runs out of 5.
+- `AdaIn1d::forward_act` takes it on CUDA (F32).
+
+Findings:
+- Network 164 -> 116 ms on the 13 s paragraph.
+- 40 paragraphs 13.06 -> 10.36 s (62x real time).
+- CUDA parity 33.8/45.1/35.6/39.8 dB; CPU parity 34.0/42.1/35.8/39.7 dB, durations exact.
+
+nsys over 8 paragraphs:
+- Window 1.66 s (was 8.8 s), GPU busy 72%, 9,193 kernels.
+- `im2col1d_f32` (477 us each) and `ampere_sgemm_128x64_tn` together are 51% of kernel time: the generator's resblock convs materialize (L, C * K) columns at the upsampled length.
+- The LSTM kernel takes 20% (5 ms per BiLSTM).
+
+Summary for long readings, 40 paragraphs (645 s of audio), one at a time as the web UI sends them:
+
+| | wall | real time |
+|---|---|---|
+| Run 27 | 47.82 s | 13x |
+| conv padding (28) | about 43 s (scaled from 8 paragraphs) | 15x |
+| LSTM kernel (29) | about 30 s (scaled) | 18x |
+| DSP (30) | 13.06 s | 49x |
+| AdaIN kernel (31) | 10.36 s | 62x |
+
+Implications:
+- Batching paragraphs would now help little. The GPU is 72% busy, and most of its time is in convs whose work grows with the batch.
+- Its exactness problem (Kokoro's instance norms over padded frames) remains.
+- What's left is the conv path: im2col traffic, about 76 ms of a 13 s paragraph, which an implicit GEMM or shifted-GEMM accumulation would avoid. Then the LSTM's single block per direction, which could split across blocks with a grid barrier.

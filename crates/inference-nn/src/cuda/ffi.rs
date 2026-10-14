@@ -71,6 +71,26 @@ inference_tensor::kernel_library! {
             width: i32,
             stream: i64,
         ) -> i32;
+        pub fn adain_act_f32(
+            xs: *const c_void,
+            h: *const c_void,
+            alpha: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            channels: i32,
+            len: i32,
+            eps: f32,
+            slope: f32,
+            stream: i64,
+        ) -> i32;
+        pub fn lstm_bidirectional_f32(
+            gx: *const c_void,
+            w_hh_t: *const c_void,
+            out: *mut c_void,
+            steps: i32,
+            hidden: i32,
+            stream: i64,
+        ) -> i32;
         pub fn dynamic_conv_bf16(
             hidden: *const c_void,
             dynamic: *const c_void,

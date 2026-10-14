@@ -6,6 +6,7 @@ use inference_tensor::Result;
 use rand::{Rng, SeedableRng};
 use rand_distr::StandardNormal;
 use rand_isaac::Isaac64Rng;
+use rayon::prelude::*;
 
 pub const SAMPLE_RATE: usize = 24_000;
 // SineGen(harmonic_num = 8): the fundamental and eight overtones
@@ -38,6 +39,16 @@ impl SourceNoise {
     }
 }
 
+// cos and sin of 2 pi k n / n_fft for each bin k and tap n, row-major by bin
+fn twiddles(n_fft: usize, bins: usize) -> Vec<(f64, f64)> {
+    (0..bins * n_fft)
+        .map(|i| {
+            let angle = 2. * PI * ((i / n_fft) * (i % n_fft)) as f64 / n_fft as f64;
+            (angle.cos(), angle.sin())
+        })
+        .collect()
+}
+
 fn hann(n_fft: usize) -> Vec<f32> {
     (0..n_fft)
         .map(|n| (0.5 - 0.5 * (2. * PI * n as f64 / n_fft as f64).cos()) as f32)
@@ -66,8 +77,7 @@ pub fn harmonic_source(
     }
     let noise = noise.draw(len * HARMONICS)?;
     let scale = (1. / upsample as f64) as f32;
-    let mut out = Vec::with_capacity(len);
-    for n in 0..len {
+    let sample = |n: usize| {
         let f = f0[n / upsample];
         let voiced = f > VOICED_THRESHOLD;
         let src = (scale * (n as f32 + 0.5) - 0.5).max(0.);
@@ -85,9 +95,9 @@ pub fn harmonic_source(
             };
             sum += weights[h] * wave;
         }
-        out.push(sum.tanh());
-    }
-    Ok(out)
+        sum.tanh()
+    };
+    Ok((0..len).into_par_iter().map(sample).collect())
 }
 
 /// `torch.stft(center=True, reflect)` with a periodic Hann window: magnitudes then phases, (n_fft + 2) x frames flat.
@@ -106,24 +116,35 @@ pub fn stft(xs: &[f32], n_fft: usize, hop: usize) -> (Vec<f32>, usize) {
     };
     let window = hann(n_fft);
     let bins = n_fft / 2 + 1;
+    let twiddles = twiddles(n_fft, bins);
     let frames = len / hop + 1;
-    let mut out = vec![0f32; 2 * bins * frames];
-    for t in 0..frames {
+    // each frame's magnitudes then phases, laid out by bin afterwards
+    let frame = |t: usize| {
         let start = (t * hop) as isize - pad as isize;
+        let v: Vec<f64> = (0..n_fft)
+            .map(|n| f64::from(at(start + n as isize) * window[n]))
+            .collect();
+        let mut column = vec![0f32; 2 * bins];
         for k in 0..bins {
             let (mut re, mut im) = (0f64, 0f64);
-            for (n, w) in window.iter().enumerate() {
-                let v = f64::from(at(start + n as isize) * w);
-                let angle = 2. * PI * (k * n) as f64 / n_fft as f64;
-                re += v * angle.cos();
-                im -= v * angle.sin();
+            for (v, (cos, sin)) in v.iter().zip(&twiddles[k * n_fft..(k + 1) * n_fft]) {
+                re += v * cos;
+                im -= v * sin;
             }
             // a real FFT's DC and Nyquist bins are exactly real, so their angle is 0 or +pi, never -pi
             if k == 0 || k == bins - 1 {
                 im = 0.;
             }
-            out[k * frames + t] = re.hypot(im) as f32;
-            out[(bins + k) * frames + t] = im.atan2(re) as f32;
+            column[k] = re.hypot(im) as f32;
+            column[bins + k] = im.atan2(re) as f32;
+        }
+        column
+    };
+    let columns: Vec<Vec<f32>> = (0..frames).into_par_iter().map(frame).collect();
+    let mut out = vec![0f32; 2 * bins * frames];
+    for (t, column) in columns.iter().enumerate() {
+        for (row, &value) in column.iter().enumerate() {
+            out[row * frames + t] = value;
         }
     }
     (out, frames)
@@ -134,9 +155,10 @@ pub fn istft(rows: &[Vec<f32>], n_fft: usize, hop: usize) -> Vec<f32> {
     let bins = n_fft / 2 + 1;
     let frames = rows[0].len();
     let window = hann(n_fft);
+    let twiddles = twiddles(n_fft, bins);
     let total = n_fft + hop * (frames - 1);
-    let (mut ola, mut env) = (vec![0f64; total], vec![0f64; total]);
-    for t in 0..frames {
+    // each frame's windowed samples, computed apart and then overlap-added in frame order
+    let frame = |t: usize| {
         let spec = (0..bins)
             .map(|k| {
                 let mag = f64::from(rows[k][t].exp());
@@ -144,15 +166,24 @@ pub fn istft(rows: &[Vec<f32>], n_fft: usize, hop: usize) -> Vec<f32> {
                 (mag * phase.cos(), mag * phase.sin())
             })
             .collect::<Vec<_>>();
-        for (n, &w) in window.iter().enumerate() {
+        let mut samples = vec![0f64; n_fft];
+        for (n, (&w, sample)) in window.iter().zip(&mut samples).enumerate() {
             // irfft drops the imaginary parts of the DC and Nyquist bins
             let mut v = spec[0].0 + spec[bins - 1].0 * if n % 2 == 0 { 1. } else { -1. };
             for (k, &(re, im)) in spec.iter().enumerate().take(bins - 1).skip(1) {
-                let angle = 2. * PI * (k * n) as f64 / n_fft as f64;
-                v += 2. * (re * angle.cos() - im * angle.sin());
+                let (cos, sin) = twiddles[k * n_fft + n];
+                v += 2. * (re * cos - im * sin);
             }
+            *sample = v / n_fft as f64 * f64::from(w);
+        }
+        samples
+    };
+    let windowed: Vec<Vec<f64>> = (0..frames).into_par_iter().map(frame).collect();
+    let (mut ola, mut env) = (vec![0f64; total], vec![0f64; total]);
+    for (t, samples) in windowed.iter().enumerate() {
+        for (n, (&sample, &w)) in samples.iter().zip(&window).enumerate() {
             let w = f64::from(w);
-            ola[t * hop + n] += v / n_fft as f64 * w;
+            ola[t * hop + n] += sample;
             env[t * hop + n] += w * w;
         }
     }

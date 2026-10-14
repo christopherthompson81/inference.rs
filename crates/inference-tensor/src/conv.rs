@@ -219,6 +219,19 @@ impl Tensor {
         kernel: &Self,
         params: &ParamsConvTranspose1D,
     ) -> Result<Self> {
+        // padding only crops the full output, so a padded conv takes the backends' col2im path and is cut down after
+        if params.padding > 0 && params.output_padding <= params.padding && params.dilation == 1 {
+            let full = ParamsConvTranspose1D {
+                padding: 0,
+                output_padding: 0,
+                ..params.clone()
+            };
+            return self.conv_transpose1d_single_group(kernel, &full)?.narrow(
+                2,
+                params.padding,
+                params.l_out(),
+            );
+        }
         let storage = self.storage().conv_transpose1d(
             self.layout(),
             &kernel.storage(),
@@ -513,6 +526,90 @@ mod tests {
         Ok(())
     }
 
+    fn direct_conv_transpose1d(
+        x: &[Vec<Vec<f32>>],
+        w: &[Vec<Vec<f32>>],
+        (padding, output_padding, stride, dilation): (usize, usize, usize, usize),
+    ) -> Vec<Vec<Vec<f32>>> {
+        let (l, c_out, k) = (x[0][0].len(), w[0].len(), w[0][0].len());
+        let l_out = (l - 1) * stride + dilation * (k - 1) + output_padding + 1 - 2 * padding;
+        x.iter()
+            .map(|xb| {
+                let mut out = vec![vec![0f32; l_out]; c_out];
+                for (xc, wc) in xb.iter().zip(w) {
+                    for (i, xi) in xc.iter().enumerate() {
+                        for (o, wo) in wc.iter().enumerate() {
+                            for (t, wt) in wo.iter().enumerate() {
+                                let j = (i * stride + t * dilation) as isize - padding as isize;
+                                if (0..l_out as isize).contains(&j) {
+                                    out[o][j as usize] += xi * wt;
+                                }
+                            }
+                        }
+                    }
+                }
+                out
+            })
+            .collect()
+    }
+
+    // Padded transposed convs take col2im and a crop, over batches and several input channels; dilated ones don't
+    #[test]
+    fn conv_transpose1d_matches_a_direct_loop() -> Result<()> {
+        // (kernel, padding, output padding, stride, dilation)
+        let cases = [
+            (20, 5, 0, 10, 1),
+            (12, 3, 0, 6, 1),
+            (3, 1, 1, 2, 1),
+            (4, 1, 0, 2, 1),
+            (5, 1, 2, 3, 1),
+            (3, 2, 0, 1, 2),
+            (3, 0, 0, 2, 1),
+            (5, 0, 0, 2, 1),
+        ];
+        let mut devices = vec![Device::Cpu];
+        devices.extend(Device::new_cuda(0).ok());
+        for (k, padding, output_padding, stride, dilation) in cases {
+            let x = Tensor::randn(0f32, 1., (2, 3, 9), &Device::Cpu)?;
+            let w = Tensor::randn(0f32, 1., (3, 4, k), &Device::Cpu)?;
+            let want = direct_conv_transpose1d(
+                &x.to_vec3()?,
+                &w.to_vec3()?,
+                (padding, output_padding, stride, dilation),
+            );
+            for device in &devices {
+                let got = x
+                    .to_device(device)?
+                    .conv_transpose1d(
+                        &w.to_device(device)?,
+                        padding,
+                        output_padding,
+                        stride,
+                        dilation,
+                        1,
+                    )?
+                    .to_vec3::<f32>()?;
+                assert_eq!(
+                    got[0][0].len(),
+                    want[0][0].len(),
+                    "k{k} p{padding} op{output_padding}"
+                );
+                for (g, e) in got
+                    .iter()
+                    .flatten()
+                    .flatten()
+                    .zip(want.iter().flatten().flatten())
+                {
+                    assert!(
+                        (g - e).abs() < 1e-4,
+                        "{device:?} k{k} p{padding} op{output_padding} s{stride} d{dilation}: {g} vs {e}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     // The direct loop per group, then concatenated: the grouped split hands each chunk a kernel with a start offset
     #[test]
     fn cpu_conv1d_with_strided_or_grouped_kernels_matches_a_direct_loop() -> Result<()> {
@@ -542,35 +639,6 @@ mod tests {
             for (o, row) in batch.iter().enumerate() {
                 for (g, e) in row.iter().zip(&halves[o / 3][bi][o % 3]) {
                     assert!((g - e).abs() < 1e-5, "grouped: {g} vs {e}");
-                }
-            }
-        }
-        Ok(())
-    }
-
-    // Batches and several input channels: the col2im path multiplies a transposed input by a broadcast kernel
-    #[test]
-    fn cpu_conv_transpose1d_matches_a_direct_loop() -> Result<()> {
-        let (b, c_in, c_out, l, k, stride) = (2, 3, 4, 7, 5, 2);
-        let x = Tensor::randn(0f32, 1., (b, c_in, l), &Device::Cpu)?;
-        let w = Tensor::randn(0f32, 1., (c_in, c_out, k), &Device::Cpu)?;
-        let got = x
-            .conv_transpose1d(&w, 0, 0, stride, 1, 1)?
-            .to_vec3::<f32>()?;
-        let (xv, wv) = (x.to_vec3::<f32>()?, w.to_vec3::<f32>()?);
-        let l_out = (l - 1) * stride + k;
-        for bi in 0..b {
-            for o in 0..c_out {
-                let mut want = vec![0f32; l_out];
-                for i in 0..c_in {
-                    for (t, xt) in xv[bi][i].iter().enumerate() {
-                        for (j, wj) in wv[i][o].iter().enumerate() {
-                            want[t * stride + j] += xt * wj;
-                        }
-                    }
-                }
-                for (g, e) in got[bi][o].iter().zip(&want) {
-                    assert!((g - e).abs() < 1e-5, "batch {bi} out {o}: {g} vs {e}");
                 }
             }
         }
