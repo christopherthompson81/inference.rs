@@ -35,8 +35,10 @@
   // regions read at once: the engine batches them (3x at its default 4 sequences); past the OCR model's sequence
   // limit they wait in its queue, so a model loaded with more sequences reads faster still
   const READ_CONCURRENCY = 16;
+  // pages rendered and laid out at once: one alone can't keep four OCR sequences busy
+  const LAYOUT_CONCURRENCY = 3;
   // pages laid out ahead of the reading: enough to keep the queue full, few enough to hold their images
-  const LOOKAHEAD_PAGES = 2;
+  const LOOKAHEAD_PAGES = 4;
 
   type Status = "new" | "working" | "laid out" | "read" | "failed";
 
@@ -172,6 +174,8 @@
     try {
       await ready(target);
       current = target;
+      const kept = jobsStore.lists.documents.find((job) => job.id === jobsStore.current.documents);
+      if (kept) releaseKept(kept);
       if (target + 1 < pages.length && pdf) void ready(target + 1).catch(() => {});
     } catch (e) {
       status = e instanceof Error ? e.message : String(e);
@@ -281,11 +285,15 @@
       if (next != null && next !== current) void show(next);
     };
 
+    let cursor = 0;
+    let laying = 0;
     const producer = async () => {
-      try {
-        for (const index of targets) {
-          while (remaining.size >= LOOKAHEAD_PAGES && !signal.aborted) await until();
-          if (signal.aborted) return;
+      for (;;) {
+        while (remaining.size + laying >= LOOKAHEAD_PAGES && !signal.aborted) await until();
+        if (signal.aborted || cursor >= targets.length) return;
+        const index = targets[cursor++];
+        laying++;
+        try {
           const p = pages[index];
           const layout = which === "layout" || (which === "all" && layoutReady && p.status === "new");
           const reading = which === "read" || (which === "all" && ocrReady);
@@ -322,12 +330,16 @@
             if (signal.aborted) return;
             fail(index, e);
           }
+        } finally {
+          laying--;
+          changed();
         }
-      } finally {
-        producing = false;
-        changed();
       }
     };
+    const producers = Promise.all(Array.from({ length: LAYOUT_CONCURRENCY }, producer)).finally(() => {
+      producing = false;
+      changed();
+    });
 
     const reader = async () => {
       for (;;) {
@@ -363,7 +375,7 @@
     };
 
     try {
-      await Promise.all([producer(), ...Array.from({ length: READ_CONCURRENCY }, reader)]);
+      await Promise.all([producers, ...Array.from({ length: READ_CONCURRENCY }, reader)]);
       await keeping;
       const took = `${((performance.now() - started) / 1000).toFixed(1)} s`;
       status = signal.aborted ? "Canceled" : failures ? `${failures} page${failures === 1 ? "" : "s"} failed; done in ${took}` : `Done in ${took}`;
@@ -379,10 +391,28 @@
     }
   }
 
-  // saves run one after another, so the first can create the document's job before the rest add to it
+  // saves run one after another, so the first can create the document's job before the rest add to it; a save still
+  // waiting covers every change made since it was asked for, so later asks join it
   let keeping: Promise<void> = Promise.resolve();
+  let keepWaiting = false;
   function keepSoon(slot: SlotId) {
-    keeping = keeping.then(() => keep(slot));
+    if (keepWaiting) return;
+    keepWaiting = true;
+    keeping = keeping.then(() => {
+      keepWaiting = false;
+      return keep(slot);
+    });
+  }
+
+  // a page read and kept shows from its job file, so its rendered image needn't stay in the browser; the page on
+  // screen keeps its own until it's left
+  function releaseKept(job: Job) {
+    for (const [index, p] of pages.entries()) {
+      if (index === current || p.status !== "read" || !p.file || !p.blob) continue;
+      if (p.url?.startsWith("blob:")) URL.revokeObjectURL(p.url);
+      p.url = jobFileUrl(job, p.file);
+      p.blob = null;
+    }
   }
 
   // the document kept as one job: each worked page's image once, and every page's reading
@@ -404,8 +434,12 @@
       })),
     };
     try {
-      await jobsStore.save({ id: jobsStore.current.documents ?? undefined, kind: "documents", title: name, slot, data }, files);
+      const kept = await jobsStore.save(
+        { id: jobsStore.current.documents ?? undefined, kind: "documents", title: name, slot, data },
+        files,
+      );
       for (const { p, index } of fresh) p.file = pageFile(index);
+      releaseKept(kept);
     } catch (e) {
       status = `Not kept: ${e instanceof Error ? e.message : String(e)}`;
     }
