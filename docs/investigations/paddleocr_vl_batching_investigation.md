@@ -218,3 +218,31 @@ pass unchanged.
 
 **Implication:** about 4%. What remains at 16 in flight: vision attention (now the mma kernel), the text decoder's
 matmuls, and per-step overhead.
+
+## Run 11 - 2026-10-13 23:50
+
+**Question:** where does the time go now? nsys over 60 real regions at 16 in flight (32,768 cache), counting only the
+timed OCR phase (the layout pass over the pages runs first, in f32, and is not part of the benchmark).
+
+**Raw finding:** the GPU is busy 59% of the phase. Kernel time: `flash_attn_ext_f16` 29% (vision attention, about
+3.5 ms per call on the large regions), `badd_bf16` 12%, bf16 GEMMs most of the rest, the rope kernel 1.5%. Idle gaps:
+2.3 s in 37 gaps over 10 ms (50 to 150 ms each, spread over the run), 1.1 s in 5-20 us gaps. Each long gap starts
+with the allocations of a new sequence. A timer around `prepare_multimodal_prompt` (engine thread, `add_request`):
+101 calls, 3.8 s in all, mean 38 ms, max 157 ms; nearly all of it the `image` crate's CatmullRom `resize_exact`, about
+6 ms even for a 45x33 crop going to 420x308.
+
+**Change:** `inference_vision::resize_rgb8`, the same filter through `fast_image_resize` (SIMD). Against the `image`
+crate on a synthetic pattern: mean pixel difference 0.05-0.08, at most 14 at hard edges, identical at the same size.
+
+**Raw finding, Run 3's benchmark at 16 in flight:** preprocessing 0.4-0.6 s in all (mean 3.8-5.8 ms); 14.5 s and
+13.2 s (16.5-16.9 s the same session before the change). Text: 99 of 100 identical to the baseline, the other the
+same quote-style difference as Run 10.
+
+**Implication:** about 20%. The preprocessing that's left still runs on the engine thread, between steps; moving
+image preparation off it (as speech preparation already is, but without blocking the loop) would hide the rest. 15
+other models resize with `resize_exact` and CatmullRom on the same path, and would gain the same way.
+
+`local_ci.sh --size` after the change: `libinference_ffi.so` +1.30 MiB over the committed baseline, but master alone is
+already +0.85 MiB (30 merges since the baseline was last set, none of which ran `--size`), so the resizer is about
+0.48 MiB. Resizing through `resize_typed` with RGB8 only (not the untyped entry point) did not change the size. The
+baseline is updated with this change. Benchmark on the typed path: 13.4 s, text as above.

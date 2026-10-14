@@ -76,9 +76,8 @@ pub fn preprocess_decoded(
 ) -> Result<(Tensor, (usize, usize, usize))> {
     let (w0, h0) = img.dimensions();
     let (h_bar, w_bar) = smart_resize(h0 as usize, w0 as usize)?;
-    let resized = img
-        .resize_exact(w_bar as u32, h_bar as u32, FilterType::CatmullRom)
-        .to_rgb8();
+    let resized =
+        inference_vision::resize_rgb8(img, w_bar as u32, h_bar as u32, FilterType::CatmullRom);
     let buf: Vec<f32> = resized.as_raw().iter().map(|&v| v as f32).collect();
     let chw = Tensor::from_vec(buf, (h_bar, w_bar, 3), dev)?
         .permute((2, 0, 1))?

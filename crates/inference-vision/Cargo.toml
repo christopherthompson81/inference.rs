@@ -15,3 +15,4 @@ homepage.workspace = true
 [dependencies]
 inference-tensor.workspace = true
 image.workspace = true
+fast_image_resize.workspace = true

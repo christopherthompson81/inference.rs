@@ -18,6 +18,7 @@ inference-tensor.workspace = true
 image.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
+inference-vision.workspace = true
 itertools.workspace = true
 regex.workspace = true
 serde.workspace = true
