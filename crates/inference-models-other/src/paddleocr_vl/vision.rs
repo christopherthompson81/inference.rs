@@ -8,22 +8,9 @@ use crate::layers::{Sdpa, layer_norm, linear};
 use crate::utils::unvarbuilder::UnVarBuilder;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::nn::{LayerNorm, Linear, Module};
-use inference_tensor::{D, Device, Result, Tensor};
+use inference_tensor::{Device, Result, Tensor};
 
-fn rotate_half(x: &Tensor) -> Result<Tensor> {
-    let hd = x.dim(D::Minus1)?;
-    let x1 = x.narrow(D::Minus1, 0, hd / 2)?;
-    let x2 = x.narrow(D::Minus1, hd / 2, hd / 2)?;
-    Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)
-}
-
-fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    let cos = cos.unsqueeze(0)?;
-    let sin = sin.unsqueeze(0)?;
-    x.broadcast_mul(&cos)? + rotate_half(x)?.broadcast_mul(&sin)?
-}
-
-// `apply_rotary_pos_emb_vision`: height freqs then width freqs, repeated neox-style to fill head_dim.
+// `apply_rotary_pos_emb_vision`: height freqs then width freqs, half a head; neox rope repeats them over the rest.
 fn vision_rope(
     h: usize,
     w: usize,
@@ -37,28 +24,24 @@ fn vision_rope(
         .map(|k| 1f32 / (theta as f32).powf((2 * k) as f32 / rope_dim as f32))
         .collect();
     let n = h * w;
-    let mut cos = vec![0f32; n * head_dim];
-    let mut sin = vec![0f32; n * head_dim];
+    let mut cos = vec![0f32; n * rope_dim];
+    let mut sin = vec![0f32; n * rope_dim];
     for j in 0..n {
         let h_id = (j / w) as f32;
         let w_id = (j % w) as f32;
         for k in 0..half {
             let ah = h_id * inv_freq[k];
             let aw = w_id * inv_freq[k];
-            let base = j * head_dim;
+            let base = j * rope_dim;
             cos[base + k] = ah.cos();
             cos[base + half + k] = aw.cos();
-            cos[base + rope_dim + k] = ah.cos();
-            cos[base + rope_dim + half + k] = aw.cos();
             sin[base + k] = ah.sin();
             sin[base + half + k] = aw.sin();
-            sin[base + rope_dim + k] = ah.sin();
-            sin[base + rope_dim + half + k] = aw.sin();
         }
     }
     Ok((
-        Tensor::from_vec(cos, (n, head_dim), dev)?,
-        Tensor::from_vec(sin, (n, head_dim), dev)?,
+        Tensor::from_vec(cos, (n, rope_dim), dev)?,
+        Tensor::from_vec(sin, (n, rope_dim), dev)?,
     ))
 }
 
@@ -122,14 +105,16 @@ impl VisionAttention {
     fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         let n = x.dim(0)?;
         let hd = self.head_dim;
-        let reshape = |t: Tensor| -> Result<Tensor> {
-            t.reshape((n, self.num_heads, hd))?
-                .transpose(0, 1)?
-                .contiguous()
-        };
-        let q = apply_rope(&reshape(self.q_proj.forward(x)?)?, cos, sin)?;
-        let k = apply_rope(&reshape(self.k_proj.forward(x)?)?, cos, sin)?;
-        let v = reshape(self.v_proj.forward(x)?)?;
+        // heads-first views of the projections' token-major rows, which the rope kernel rotates in place
+        let heads = |t: Tensor| t.reshape((1, n, self.num_heads, hd))?.transpose(1, 2);
+        let (q, k) = inference_quant::rotary::apply_rotary_qk_preselected(
+            &heads(self.q_proj.forward(x)?)?,
+            &heads(self.k_proj.forward(x)?)?,
+            cos,
+            sin,
+            true,
+        )?;
+        let v = heads(self.v_proj.forward(x)?)?;
 
         // One image per call, so full bidirectional attention with no cu_seqlens mask.
         let sdpa_params = SdpaParams {
@@ -142,9 +127,9 @@ impl VisionAttention {
         };
         let flash_params = FlashParams::empty(false);
         let ctx = Sdpa.run_attention(
-            &q.unsqueeze(0)?,
-            &k.unsqueeze(0)?,
-            &v.unsqueeze(0)?,
+            &q,
+            &k,
+            &v,
             &AttentionMask::None,
             Some(&flash_params),
             &sdpa_params,
