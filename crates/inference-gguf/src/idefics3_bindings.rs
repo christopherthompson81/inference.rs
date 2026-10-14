@@ -69,6 +69,34 @@ mod tests {
         );
     }
 
+    // the published SmolVLM mmproj stores fc1 (hidden -> intermediate) as ffn_down and fc2 as ffn_up
+    #[test]
+    fn maps_swapped_mlp_names_by_shape() {
+        let mut tensors = tensor_inventory();
+        for (name, shape) in &mut tensors {
+            match name.as_str() {
+                "v.blk.0.ffn_down.weight" => *shape = vec![32, 8],
+                "v.blk.0.ffn_down.bias" => *shape = vec![32],
+                "v.blk.0.ffn_up.weight" => *shape = vec![8, 32],
+                _ => {}
+            }
+        }
+        let inventory = TensorInventory::new(
+            tensors
+                .iter()
+                .map(|(name, shape)| (name.as_str(), shape.as_slice())),
+        );
+        let bindings = build_idefics3_bindings_from_inventory(&inventory).unwrap();
+        assert_eq!(
+            bindings.get("model.vision_model.encoder.layers.0.mlp.fc1.weight"),
+            Some(&GgufTensorBinding::tensor("v.blk.0.ffn_down.weight"))
+        );
+        assert_eq!(
+            bindings.get("model.vision_model.encoder.layers.0.mlp.fc2.bias"),
+            Some(&GgufTensorBinding::tensor("v.blk.0.ffn_up.bias"))
+        );
+    }
+
     fn tensor_inventory() -> Vec<(String, Vec<usize>)> {
         let mut tensors = vec![
             ("token_embd.weight".to_string(), vec![8, 8]),
