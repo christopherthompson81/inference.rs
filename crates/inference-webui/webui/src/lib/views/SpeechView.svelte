@@ -151,13 +151,25 @@
     for (const block of blocks) release(block);
   });
 
-  async function chooseFile(file: File | undefined) {
-    if (!file) return;
-    markdown = await file.text();
+  // an empty reading, kept as a job of its own once generated
+  function startNew(text = "") {
+    stop();
+    for (const block of blocks) release(block);
+    blocks = [];
+    markdown = text;
     jobsStore.current.speech = null;
-    status = file.name;
+    status = "";
     reparse();
-    editing = false;
+    editing = text === "";
+  }
+
+  // a file opened is a reading of its own, so nothing carries over from the one shown
+  async function chooseFile(input: HTMLInputElement) {
+    const file = input.files?.[0];
+    input.value = "";
+    if (!file) return;
+    startNew(await file.text());
+    status = file.name;
   }
 
   async function generate() {
@@ -414,7 +426,7 @@
 </script>
 
 <div class="flex min-h-0 w-full flex-1 flex-col md:flex-row">
-  <JobHistory kind="speech" onOpen={open} {busy} />
+  <JobHistory kind="speech" newLabel="New speech" onOpen={open} onNew={() => startNew()} {busy} />
   <div class="min-h-0 flex-1 overflow-y-auto">
     <div class="mx-auto flex w-full max-w-4xl flex-col gap-3 p-4">
       <SlotBar slot="speech" />
@@ -430,7 +442,7 @@
         </label>
         <label class="cursor-pointer {plain}">
           Open text...
-          <input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" class="hidden" disabled={busy} onchange={(e) => chooseFile(e.currentTarget.files?.[0])} />
+          <input type="file" accept=".md,.markdown,.txt,text/markdown,text/plain" class="hidden" disabled={busy} onchange={(e) => chooseFile(e.currentTarget)} />
         </label>
         <button class={plain} onclick={() => (editing = !editing)} aria-pressed={editing}>{editing ? "Done editing" : "Edit text"}</button>
         {#if busy}

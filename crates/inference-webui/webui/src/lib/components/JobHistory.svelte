@@ -4,7 +4,13 @@
   import type { Job, JobKind } from "../services/jobs";
 
   // `busy` holds the history still while the view runs a job
-  let { kind, onOpen, busy = false }: { kind: JobKind; onOpen: (job: Job) => void; busy?: boolean } = $props();
+  let {
+    kind,
+    onOpen,
+    onNew,
+    newLabel,
+    busy = false,
+  }: { kind: JobKind; onOpen: (job: Job) => void; onNew: () => void; newLabel: string; busy?: boolean } = $props();
   let error = $state("");
 
   // the entry the tab showed last, reopened once the list is in; one deleted, or another owner's, is skipped
@@ -38,7 +44,16 @@
   class="flex max-h-48 shrink-0 flex-col border-b border-gray-200 bg-gray-50 md:max-h-none md:w-64 md:border-r md:border-b-0 dark:border-gray-800 dark:bg-gray-900"
   aria-label="History"
 >
-  <div class="px-3 pt-3 pb-1 text-xs font-medium text-gray-500">History</div>
+  <div class="flex items-center justify-between gap-2 px-3 pt-3 pb-1">
+    <span class="text-xs font-medium text-gray-500">History</span>
+    <button
+      class="rounded-md border border-gray-300 px-2 py-0.5 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
+      disabled={busy}
+      onclick={onNew}
+    >
+      {newLabel}
+    </button>
+  </div>
   {#if error}
     <div class="px-3 text-xs text-red-600">{error}</div>
   {/if}

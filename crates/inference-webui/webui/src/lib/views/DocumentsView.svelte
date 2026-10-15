@@ -120,7 +120,14 @@
     return { blob, width: canvas.width, height: canvas.height };
   }
 
-  async function choose(file: File | undefined) {
+  function startNew() {
+    reset([], "");
+    status = "";
+  }
+
+  async function choose(input: HTMLInputElement) {
+    const file = input.files?.[0];
+    input.value = "";
     if (!file) return;
     status = "";
     try {
@@ -497,7 +504,7 @@
 </script>
 
 <div class="flex min-h-0 w-full flex-1 flex-col md:flex-row">
-  <JobHistory kind="documents" onOpen={open} {busy} />
+  <JobHistory kind="documents" newLabel="New document" onOpen={open} onNew={startNew} {busy} />
   <div class="min-h-0 flex-1 overflow-y-auto">
     <div class="flex w-full flex-col gap-3 p-4">
       <div class="grid gap-3 lg:grid-cols-2">
@@ -508,7 +515,7 @@
       <div class="flex flex-wrap items-center gap-2">
         <label class="cursor-pointer {plain}">
           Open page or PDF...
-          <input type="file" accept="image/*,application/pdf,.pdf" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget.files?.[0])} />
+          <input type="file" accept="image/*,application/pdf,.pdf" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget)} />
         </label>
         <button class="{button} bg-blue-600 text-white hover:bg-blue-700" onclick={() => run("layout")} disabled={!layoutReady || !page || busy}>
           Detect layout
