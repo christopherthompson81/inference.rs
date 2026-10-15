@@ -184,7 +184,16 @@ impl KokoroTts {
             None => self.text_phonemes(text, g2p::voice_language(self.first_voice(options))?)?,
         };
         if pieces.iter().all(|p| p.phonemes.trim().is_empty()) {
-            bail!("nothing to speak: the input has no phonemes")
+            if options.phonemes.is_some() || text.trim().is_empty() {
+                bail!("nothing to speak: the input is empty")
+            }
+            // text with nothing to say (a rule, a lone symbol) is silence, not a failure
+            return Ok(SpeechGenerationOutput {
+                pcm: Arc::new(Vec::new()),
+                rate: SAMPLE_RATE,
+                channels: CHANNELS,
+                words: Some(Vec::new()),
+            });
         }
         let space = self.model.token_ids(" ").first().copied();
         let mut noise = SourceNoise::seeded(seed);

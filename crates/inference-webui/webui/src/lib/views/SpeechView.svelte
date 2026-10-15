@@ -16,10 +16,12 @@
   // the reader waits this long after typing stops before splitting the text again
   const REPARSE_DELAY_MS = 400;
   const IPA_KEY = "inference-rs-tts-ipa";
+  const SKIPPED_TITLE = "Nothing here to read aloud";
   const HASH_OFFSET = 0x811c9dc5;
   const HASH_PRIME = 0x01000193;
 
-  type Status = "pending" | "changed" | "generating" | "ready" | "failed";
+  // a skipped block has nothing to read aloud (a rule, a lone symbol), so playback passes over it
+  type Status = "pending" | "changed" | "generating" | "ready" | "skipped" | "failed";
 
   interface Block extends TextBlock {
     /** What the audio depends on: the spoken text, the voice and the speed. */
@@ -40,6 +42,8 @@
     speed: number;
     /** The audio kept for each block key, by job file. */
     clips?: { key: string; file: string; duration: number; words: SpokenWord[] }[];
+    /** The keys of blocks with nothing to read aloud. */
+    skipped?: string[];
   }
 
   let markdown = $state(SAMPLE);
@@ -67,6 +71,8 @@
 
   let ready = $derived(managerStore.servedIn("speech") != null);
   let generated = $derived(blocks.filter((block) => block.status === "ready").length);
+  // paragraphs needing no more work: those with audio and those with nothing to read aloud
+  let finished = $derived(generated + blocks.filter((block) => block.status === "skipped").length);
   let total = $derived(blocks.length);
   // where each paragraph starts in the whole reading; a paragraph not yet generated takes no time
   let offsets = $derived(
@@ -105,17 +111,20 @@
 
   // the blocks of the text now, keeping the audio of every block whose speech, voice and speed are unchanged
   function reparse(kept: Map<string, Partial<Block>> = new Map()) {
-    const previous = new Map(blocks.filter((b) => b.status === "ready").map((b) => [b.key, b]));
+    const previous = new Map(
+      blocks.filter((b) => b.status === "ready" || b.status === "skipped").map((b) => [b.key, b]),
+    );
     const used = new Set<string>();
     const next = markdownBlocks(markdown).map((text, index): Block => {
       const key = keyOf(text);
       const reuse = previous.get(key) ?? kept.get(key);
-      if (reuse && reuse.status === "ready") used.add(key);
+      const done = reuse?.status === "ready" || reuse?.status === "skipped";
+      if (done) used.add(key);
       const wasThere = blocks[index] && blocks[index].status !== "pending";
       return {
         ...text,
         key,
-        status: reuse?.status === "ready" ? "ready" : wasThere ? "changed" : "pending",
+        status: done ? reuse.status! : wasThere ? "changed" : "pending",
         audio: reuse?.audio ?? null,
         audioUrl: reuse?.audioUrl ?? null,
         file: reuse?.file ?? null,
@@ -158,9 +167,10 @@
     const signal = controller.signal;
     const started = performance.now();
     let made = 0;
+    let skipped = 0;
     try {
       for (const [index, block] of blocks.entries()) {
-        if (block.status === "ready") continue;
+        if (block.status === "ready" || block.status === "skipped") continue;
         blocks[index].status = "generating";
         try {
           const spoken = await speakTimed(
@@ -170,6 +180,11 @@
           // the text may have been split again while this block was speaking
           const current = blocks[index];
           if (!current || current.key !== block.key) continue;
+          if (spoken.duration === 0) {
+            current.status = "skipped";
+            skipped++;
+            continue;
+          }
           current.audio = spoken.audio;
           current.audioUrl = URL.createObjectURL(spoken.audio);
           current.duration = spoken.duration;
@@ -178,7 +193,9 @@
           current.status = "ready";
           made++;
           // playback waiting at the edge of what was generated carries on
-          if (continuous && playing === index - 1 && player?.ended) play(index);
+          const waiting =
+            playing >= 0 && playing < index && blocks.slice(playing + 1, index).every((b) => b.status === "skipped");
+          if (continuous && waiting && player?.ended) play(index);
         } catch (e) {
           if (signal.aborted) throw e;
           blocks[index].status = "failed";
@@ -186,7 +203,7 @@
         }
       }
       status = made > 0 ? `${made} generated in ${((performance.now() - started) / 1000).toFixed(1)} s` : "";
-      if (made > 0) await keep();
+      if (made > 0 || skipped > 0) await keep();
     } catch (e) {
       status = signal.aborted ? "Canceled" : e instanceof Error ? e.message : String(e);
       for (const block of blocks) if (block.status === "generating") block.status = "pending";
@@ -207,6 +224,7 @@
       clips: blocks
         .filter((block) => block.status === "ready" && block.file)
         .map((block) => ({ key: block.key, file: block.file!, duration: block.duration, words: block.words })),
+      skipped: blocks.filter((block) => block.status === "skipped").map((block) => block.key),
     };
     const title = blocks[0]?.text ?? "Speech";
     try {
@@ -238,6 +256,7 @@
           { status: "ready", file: clip.file, audioUrl: jobFileUrl(job, clip.file), duration: clip.duration, words: clip.words },
         ]),
     );
+    for (const key of data.skipped ?? []) kept.set(key, { status: "skipped" });
     reparse(kept);
     editing = false;
   }
@@ -307,7 +326,8 @@
   function ended() {
     cancelAnimationFrame(frame);
     if (!continuous) return void (playing = -1);
-    const next = playing + 1;
+    let next = playing + 1;
+    while (blocks[next]?.status === "skipped") next++;
     // an unready block is either still to come (generation resumes playback) or the end of the reading
     if (blocks[next]?.status === "ready") play(next);
     else if (!(busy && blocks[next])) {
@@ -376,6 +396,7 @@
     changed: "bg-amber-100 text-amber-800 dark:bg-amber-900/40 dark:text-amber-200",
     generating: "bg-blue-100 text-blue-700 animate-pulse dark:bg-blue-900/40 dark:text-blue-200",
     ready: "bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-200",
+    skipped: "bg-gray-100 text-gray-500 dark:bg-gray-800 dark:text-gray-400",
     failed: "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-200",
   };
   const badge = (block: Block) =>
@@ -418,7 +439,7 @@
           <button
             class="rounded-md bg-blue-600 px-4 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
             onclick={generate}
-            disabled={!ready || generated === total}
+            disabled={!ready || finished === total}
           >
             Generate
           </button>
@@ -430,7 +451,7 @@
       </div>
 
       <div class="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-        <span>{ready ? `${generated} of ${total} paragraphs generated` : "Load a speech synthesis model first"}</span>
+        <span>{ready ? `${finished} of ${total} paragraphs generated` : "Load a speech synthesis model first"}</span>
         {#if status}<span>{status}</span>{/if}
         <span class="ml-auto flex gap-1.5">
           <button class="{plain} px-2 py-1 text-xs" onclick={() => exportAs("wav")} disabled={generated === 0 || busy}>WAV</button>
@@ -439,8 +460,8 @@
         </span>
       </div>
       {#if total > 0}
-        <div class="h-1.5 overflow-hidden rounded bg-gray-200 dark:bg-gray-800" role="progressbar" aria-label="Paragraphs generated" aria-valuemin={0} aria-valuemax={total} aria-valuenow={generated}>
-          <div class="h-full bg-green-600 transition-[width] duration-300" style="width: {(100 * generated) / total}%"></div>
+        <div class="h-1.5 overflow-hidden rounded bg-gray-200 dark:bg-gray-800" role="progressbar" aria-label="Paragraphs generated" aria-valuemin={0} aria-valuemax={total} aria-valuenow={finished}>
+          <div class="h-full bg-green-600 transition-[width] duration-300" style="width: {(100 * finished) / total}%"></div>
         </div>
       {/if}
 
@@ -478,7 +499,7 @@
           >
             <div class="mb-1 flex items-center gap-2 text-[11px]">
               <span class="text-gray-400">{block.kind === "item" ? "list item" : block.kind} {index + 1}</span>
-              <span class="rounded px-1.5 py-0.5 font-medium {BADGES[block.status]}" title={block.error || undefined}>{badge(block)}</span>
+              <span class="rounded px-1.5 py-0.5 font-medium {BADGES[block.status]}" title={block.error || (block.status === "skipped" ? SKIPPED_TITLE : undefined)}>{badge(block)}</span>
               {#if block.status === "ready"}
                 <button class="text-gray-500 hover:text-blue-600" onclick={() => ((continuous = false), play(index))} title="Play this paragraph">Play</button>
                 <button class="text-gray-500 hover:text-blue-600" onclick={() => ((continuous = true), play(index))} title="Play from this paragraph on">Play from here</button>

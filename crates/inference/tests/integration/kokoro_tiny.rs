@@ -260,5 +260,11 @@ async fn kokoro_reads_english_text() -> anyhow::Result<()> {
         ..request(None)
     };
     assert!(model.generate_speech(blank).await.is_err());
+    // text that says nothing is silence, so a reading with a rule in it still plays
+    let rule = SpeechGenerationRequest {
+        input: "---".into(),
+        ..request(None)
+    };
+    assert_eq!(samples(&model.generate_speech(rule).await?.bytes), 0);
     Ok(())
 }
