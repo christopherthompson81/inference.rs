@@ -32,6 +32,9 @@
   // a kept single-page job from before documents had pages
   const LEGACY_PAGE_FILE = "page.png";
   const pageFile = (index: number) => `page-${index + 1}.png`;
+  // the pages either side of the one shown that the navigation links
+  const PAGE_WINDOW = 2;
+  const GAP = -1;
   // regions read at once: the engine batches them (3x at its default 4 sequences); past the OCR model's sequence
   // limit they wait in its queue, so a model loaded with more sequences reads faster still
   const READ_CONCURRENCY = 16;
@@ -80,12 +83,34 @@
   let page = $derived(pages[current]);
   let badge = $derived(Math.max(8, (page?.width ?? 0) * BADGE_PAGE_FRACTION));
   let readCount = $derived(pages.filter((p) => p.status === "read").length);
+  let pageLinks = $derived(pageWindow(current, pages.length));
+  // the first page not yet read after the one shown, wrapping to the start
+  let unread = $derived.by(() => {
+    const after = pages.findIndex((p, index) => index > current && p.status !== "read");
+    return after >= 0 ? after : pages.findIndex((p, index) => index < current && p.status !== "read");
+  });
 
   onDestroy(() => {
     controller?.abort();
     release();
     void pdf?.loadingTask.destroy();
   });
+
+  // the first and last pages, and those near the one shown; -1 marks a gap
+  function pageWindow(at: number, count: number): number[] {
+    const near = new Set([0, count - 1]);
+    for (let i = at - PAGE_WINDOW; i <= at + PAGE_WINDOW; i++) if (i >= 0 && i < count) near.add(i);
+    const sorted = [...near].sort((a, b) => a - b);
+    const links: number[] = [];
+    for (const page of sorted) {
+      const last = links.at(-1);
+      // a gap of one page shows that page, which takes no more room than the ellipsis
+      if (last !== undefined && page - last === 2) links.push(page - 1);
+      else if (last !== undefined && page - last > 2) links.push(GAP);
+      links.push(page);
+    }
+    return links;
+  }
 
   function release() {
     for (const p of pages) if (p.url?.startsWith("blob:")) URL.revokeObjectURL(p.url);
@@ -563,19 +588,42 @@
             <span class="text-sm">Page {current + 1} of {pages.length}</span>
             <button class="{plain} px-2 py-1" onclick={() => show(current + 1)} disabled={current === pages.length - 1} aria-label="Next page">&rsaquo;</button>
             <span class="text-xs text-gray-500">{readCount} of {pages.length} read</span>
-            <div class="flex flex-wrap gap-1">
-              {#each pages as p, index (index)}
-                <button
-                  class="h-6 min-w-6 rounded px-1 text-[11px] font-medium {STATUS_COLORS[p.status]} {index === current ? 'ring-2 ring-blue-500' : ''}"
-                  onclick={() => show(index)}
-                  title="Page {index + 1}: {p.status}{p.error ? ` (${p.error})` : ''}"
-                  aria-label="Page {index + 1}, {p.status}"
-                  aria-current={index === current ? "page" : undefined}
-                >
-                  {index + 1}
-                </button>
+            <div class="flex flex-wrap items-center gap-1">
+              {#each pageLinks as link, at (at)}
+                {#if link === GAP}
+                  <span class="px-0.5 text-xs text-gray-400">...</span>
+                {:else}
+                  {@const p = pages[link]}
+                  <button
+                    class="h-6 min-w-6 rounded px-1 text-[11px] font-medium {STATUS_COLORS[p.status]} {link === current ? 'ring-2 ring-blue-500' : ''}"
+                    onclick={() => show(link)}
+                    title="Page {link + 1}: {p.status}{p.error ? ` (${p.error})` : ''}"
+                    aria-label="Page {link + 1}, {p.status}"
+                    aria-current={link === current ? "page" : undefined}
+                  >
+                    {link + 1}
+                  </button>
+                {/if}
               {/each}
             </div>
+            <label class="flex items-center gap-1 text-xs text-gray-500">
+              Go to
+              <input
+                type="number"
+                min="1"
+                max={pages.length}
+                class="w-16 rounded-md border border-gray-300 bg-white px-1.5 py-0.5 text-xs dark:border-gray-700 dark:bg-gray-950"
+                aria-label="Go to page"
+                onchange={(e) => {
+                  const at = Math.round(e.currentTarget.valueAsNumber) - 1;
+                  if (at >= 0 && at < pages.length) show(at);
+                  e.currentTarget.value = "";
+                }}
+              />
+            </label>
+            {#if unread >= 0}
+              <button class="{plain} px-2 py-1 text-xs" onclick={() => show(unread)} title="The next page not yet read, after this one">Next unread</button>
+            {/if}
           {/if}
           <span class="ml-auto flex flex-wrap items-center gap-1.5">
             <span class="text-xs text-gray-500">Export</span>
