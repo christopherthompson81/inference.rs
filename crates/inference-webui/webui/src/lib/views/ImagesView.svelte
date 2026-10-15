@@ -151,6 +151,15 @@
     anchor = null;
   }
 
+  function startNew() {
+    clear();
+    chooseReferences(null);
+    prompt = "";
+    refinePrompt = "";
+    status = "";
+    jobsStore.current.images = null;
+  }
+
   // the job as its conversation: what it generated, then each refinement, ready to go on from the last image
   async function open(job: Job) {
     const data = job.data as unknown as ImagesJob;
@@ -338,7 +347,7 @@
 </script>
 
 <div class="flex min-h-0 w-full flex-1 flex-col md:flex-row">
-  <JobHistory kind="images" onOpen={open} {busy} />
+  <JobHistory kind="images" newLabel="New image" onOpen={open} onNew={startNew} {busy} />
   <div class="min-h-0 flex-1 overflow-y-auto">
     <div class="mx-auto flex w-full max-w-5xl flex-col gap-3 p-4">
       <SlotBar slot="images" />

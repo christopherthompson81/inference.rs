@@ -82,7 +82,22 @@
     activeWord = -1;
   }
 
-  function choose(file: File | undefined) {
+  function startNew() {
+    player?.pause();
+    audio = null;
+    restored = null;
+    audioName = "";
+    show(null);
+    reset();
+    position = 0;
+    length = 0;
+    status = "";
+    jobsStore.current.transcription = null;
+  }
+
+  function choose(input: HTMLInputElement) {
+    const file = input.files?.[0];
+    input.value = "";
     if (!file) return;
     audio = file;
     audioName = file.name;
@@ -297,7 +312,7 @@
 </script>
 
 <div class="flex min-h-0 w-full flex-1 flex-col md:flex-row">
-  <JobHistory kind="transcription" onOpen={open} {busy} />
+  <JobHistory kind="transcription" newLabel="New transcription" onOpen={open} onNew={startNew} {busy} />
   <div class="min-h-0 flex-1 overflow-y-auto">
     <div class="mx-auto flex w-full max-w-5xl flex-col gap-3 p-4">
       <SlotBar slot="transcription" />
@@ -306,7 +321,7 @@
       <div class="flex flex-wrap items-center gap-2">
         <label class="cursor-pointer {plain}">
           Choose audio...
-          <input type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget.files?.[0])} />
+          <input type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget)} />
         </label>
         <input class="w-36 {field}" placeholder="Language (auto)" aria-label="Language" bind:value={language} disabled={busy} />
         {#if busy}
