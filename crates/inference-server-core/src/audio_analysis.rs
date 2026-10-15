@@ -24,7 +24,7 @@ const DECODE_CODE: &str = "invalid_audio";
 #[derive(utoipa::ToSchema)]
 #[allow(dead_code)]
 pub struct TranscriptionForm {
-    /// The audio to transcribe: WAV, MP3, FLAC, Ogg, Matroska/WebM, MP4/M4A (AAC), and Opus in Ogg or Matroska.
+    /// The audio to transcribe: WAV, MP3, FLAC, Ogg, Matroska/WebM, MP4/M4A (AAC), Opus, and AC-3 or E-AC-3 in Matroska.
     #[schema(value_type = String, format = Binary)]
     file: Vec<u8>,
     #[schema(inline)]
@@ -60,10 +60,9 @@ async fn read_audio_form<T: serde::de::DeserializeOwned>(
         0 => Err(invalid("The form has no `file`.", FILE_FIELD, INVALID_CODE)),
         1 => {
             let bytes = uploads.remove(0).bytes;
-            let decoded =
-                tokio::task::spawn_blocking(move || crate::opus_audio::opus_as_wav(bytes))
-                    .await
-                    .map_err(|e| invalid(e.to_string(), FILE_FIELD, INVALID_CODE))?;
+            let decoded = tokio::task::spawn_blocking(move || crate::audio_codecs::as_wav(bytes))
+                .await
+                .map_err(|e| invalid(e.to_string(), FILE_FIELD, INVALID_CODE))?;
             let bytes = decoded.map_err(|e| {
                 invalid(
                     format!("The audio could not be decoded: {e}"),

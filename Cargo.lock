@@ -3170,6 +3170,8 @@ dependencies = [
  "metrics-exporter-prometheus",
  "mime",
  "opus",
+ "oxideav-ac3",
+ "oxideav-core",
  "rand 0.9.4",
  "rand_distr",
  "serde",
@@ -4114,6 +4116,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "74d9a941c0c43d2dceaf25f5c9ca4c9f9cceb28dfa5e4e3cfd14e476f003e7c9"
 dependencies = [
  "object 0.36.7",
+]
+
+[[package]]
+name = "oxideav-ac3"
+version = "0.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "efb5f931133bf47e30ed9d809ae1cc6b2c95f5643a73b39fc75fffc0329184be"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.40"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64502aa4210ff04a5d574ca86f2c22e064a6c3bda812914b138c777e8ce6b023"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.18",
 ]
 
 [[package]]

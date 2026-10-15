@@ -226,6 +226,8 @@ rubato = { version = "0.16.2", default-features = false }
 rustfft = { version = "6.4.1", default-features = false }
 hound = "3.5.1"
 opus = "0.4.0"
+oxideav-ac3 = "0.0.11"
+oxideav-core = "0.1.40"
 seccompiler = "0.5.0"
 landlock = "0.4.4"
 nix = { version = "0.31.3", default-features = false }

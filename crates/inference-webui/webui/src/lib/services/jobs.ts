@@ -71,6 +71,7 @@ const KEPT_EXTENSIONS: Record<"image" | "audio", Record<string, string>> = {
   audio: {
     wav: "wav", "x-wav": "wav", wave: "wav", mp3: "mp3", mpeg: "mp3", ogg: "ogg", oga: "ogg", opus: "opus",
     flac: "flac", "x-flac": "flac", m4a: "m4a", "x-m4a": "m4a", mp4: "m4a", aac: "aac", webm: "webm",
+    mka: "mka", mkv: "mkv", "x-matroska": "mkv",
     aiff: "aiff", "x-aiff": "aiff", aif: "aiff",
   },
 };

@@ -19,6 +19,9 @@ base64.workspace = true
 mime.workspace = true
 # libopus, built from its bundled source: symphonia has no Opus decoder, and the server decodes it so the C ABI needs none
 opus.workspace = true
+# AC-3 and E-AC-3, pure Rust: symphonia has no decoder for either
+oxideav-ac3.workspace = true
+oxideav-core.workspace = true
 http-body = { workspace = true }
 http-body-util.workspace = true
 futures.workspace = true

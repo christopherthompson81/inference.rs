@@ -42,6 +42,8 @@ const JOB_FILE_TYPES: &[(&str, &str)] = &[
     ("m4a", "audio/mp4"),
     ("aac", "audio/aac"),
     ("webm", "audio/webm"),
+    ("mka", "audio/x-matroska"),
+    ("mkv", "video/x-matroska"),
     ("aiff", "audio/aiff"),
 ];
 

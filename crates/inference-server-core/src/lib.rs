@@ -78,6 +78,7 @@
 
 pub mod anthropic;
 pub mod approvals;
+mod audio_codecs;
 pub mod auth;
 pub mod chat_completion;
 mod completion_core;
@@ -91,7 +92,6 @@ pub mod image_generation;
 pub mod lora_adapters;
 pub mod mcp_server;
 pub mod model_manager;
-mod opus_audio;
 pub use media_source::configure_ui_upload_dir;
 pub mod audio_analysis;
 pub mod inference_server_router_builder;

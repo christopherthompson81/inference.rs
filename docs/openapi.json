@@ -386,7 +386,7 @@
                   "file": {
                     "type": "string",
                     "format": "binary",
-                    "description": "The audio to transcribe: WAV, MP3, FLAC, Ogg, Matroska/WebM, MP4/M4A (AAC), and Opus in Ogg or Matroska."
+                    "description": "The audio to transcribe: WAV, MP3, FLAC, Ogg, Matroska/WebM, MP4/M4A (AAC), Opus, and AC-3 or E-AC-3 in Matroska."
                   },
                   "request": {
                     "type": "object",
