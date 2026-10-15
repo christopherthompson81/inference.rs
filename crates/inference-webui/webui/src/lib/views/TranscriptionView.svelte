@@ -321,7 +321,7 @@
       <div class="flex flex-wrap items-center gap-2">
         <label class="cursor-pointer {plain}">
           Choose audio...
-          <input type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget)} />
+          <input type="file" accept="audio/*,.wav,.mp3,.flac,.ogg,.m4a,.mka,.mkv,.webm,video/x-matroska,video/webm,video/mp4" class="hidden" disabled={busy} onchange={(e) => choose(e.currentTarget)} />
         </label>
         <input class="w-36 {field}" placeholder="Language (auto)" aria-label="Language" bind:value={language} disabled={busy} />
         {#if busy}

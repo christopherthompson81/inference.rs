@@ -4,6 +4,14 @@ const WAV_HEADER_BYTES = 44;
 const PCM16_MAX = 0x7fff;
 // a RIFF header's fields: channels at 22, sample rate at 24, bits per sample at 34
 const FORMAT_PROBE_BYTES = 36;
+// the EBML magic that opens a Matroska or WebM file
+const EBML_MAGIC = [0x1a, 0x45, 0xdf, 0xa3];
+
+// Matroska often carries Opus or AC-3, which the server has no decoder for, so the browser decodes it
+async function matroska(file: Blob): Promise<boolean> {
+  const head = new Uint8Array(await file.slice(0, EBML_MAGIC.length).arrayBuffer());
+  return EBML_MAGIC.every((byte, i) => head[i] === byte);
+}
 
 // a WAV wider than the models need: more channels, a higher rate or deeper samples than 16 kHz mono 16-bit
 async function oversizedWav(file: Blob): Promise<boolean> {
@@ -52,13 +60,15 @@ function wav16(pcm: Float32Array): Blob {
   return new Blob([buffer], { type: "audio/wav" });
 }
 
-/** What to upload for `file`: a WAV wider than the models need goes as 16 kHz mono when that is smaller; any other
- * file, or one the browser can't decode, goes as it is. */
+/** What to upload for `file`: a WAV wider than the models need goes as 16 kHz mono when that is smaller, and a
+ * Matroska or WebM file always does; any other file, or one the browser can't decode, goes as it is. */
 export async function compactAudio(file: File): Promise<File> {
-  if (!(await oversizedWav(file))) return file;
+  const container = await matroska(file);
+  if (!container && !(await oversizedWav(file))) return file;
   try {
     const compact = wav16(await monoAtModelRate(file));
-    return compact.size < file.size ? new File([compact], file.name, { type: "audio/wav" }) : file;
+    const name = container ? file.name.replace(/\.[^.]*$/, "") + ".wav" : file.name;
+    return container || compact.size < file.size ? new File([compact], name, { type: "audio/wav" }) : file;
   } catch {
     return file;
   }
