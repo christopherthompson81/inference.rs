@@ -62,7 +62,6 @@ class SettingsStore {
   reasoningEffort = $state<ReasoningEffort | "">(
     stored.reasoningEffort ?? (stored.enableThinking === false ? "off" : ""),
   );
-  sidebarOpen = $state(window.innerWidth >= 768);
   settingsOpen = $state(false);
   toolsOpen = $state(false);
 

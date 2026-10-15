@@ -88,9 +88,6 @@ pub(crate) const UI_CAPABILITIES_ROUTE: RouteInfo =
     RouteInfo::new("/api/capabilities", "GET", RouteKind::Ui);
 pub(crate) const UI_MCP_TOOLS_ROUTE: RouteInfo =
     RouteInfo::new("/api/mcp_tools", "GET", RouteKind::Ui);
-pub(crate) const UI_GENERATE_SPEECH_ROUTE: RouteInfo =
-    RouteInfo::new("/api/generate_speech", "POST", RouteKind::Ui);
-pub(crate) const UI_SPEECH_ROUTE: RouteInfo = RouteInfo::new("/speech", "GET", RouteKind::Ui);
 pub(crate) const UI_UPLOADS_ROUTE: RouteInfo = RouteInfo::new("/uploads", "GET", RouteKind::Ui);
 pub(crate) const UI_ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::Ui);
 pub(crate) const UI_STATIC_ROUTE: RouteInfo = RouteInfo::new("/{*path}", "GET", RouteKind::Ui);
@@ -123,7 +120,7 @@ async fn static_handler(uri: axum::http::Uri) -> Response<Body> {
     }
 }
 
-/// The models a chat can pick, as they are now: loaded text, multimodal and speech models, without the `default`
+/// The models a chat can pick, as they are now: loaded text and multimodal models, without the `default`
 /// alias or adapter cards.
 pub(crate) fn chat_models(engine: &Engine) -> IndexMap<String, UiModelInfo> {
     let mut models = IndexMap::new();
@@ -137,7 +134,6 @@ pub(crate) fn chat_models(engine: &Engine) -> IndexMap<String, UiModelInfo> {
         let kind = match card.category {
             Some(ModelCategory::Text) => "text",
             Some(ModelCategory::Multimodal) => "multimodal",
-            Some(ModelCategory::Speech) => "speech",
             _ => continue,
         };
         let labels = |modalities: &[Modality]| modalities.iter().map(modality_label).collect();
@@ -201,7 +197,7 @@ impl UiOptions {
 // The page and its assets load without a key, so a browser can show the sign-in prompt; data and media need one.
 fn ui_public_requests(method: &Method, path: &str) -> bool {
     method == Method::GET
-        && ![UI_API_PREFIX, UI_UPLOADS_ROUTE.path, UI_SPEECH_ROUTE.path]
+        && ![UI_API_PREFIX, UI_UPLOADS_ROUTE.path]
             .iter()
             .any(|prefix| path.starts_with(prefix))
 }
@@ -270,8 +266,6 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
     let base_cache = get_cache_dir();
     let chats_dir = base_cache.join("chats");
     fs::create_dir_all(&chats_dir).await?;
-    let speech_dir = base_cache.join("speech");
-    fs::create_dir_all(&speech_dir).await?;
     let jobs_dir = base_cache.join("jobs");
     fs::create_dir_all(&jobs_dir).await?;
     let uploads_dir = base_cache.join("uploads");
@@ -289,7 +283,6 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         owner: None,
         chats_dir: chats_dir.to_string_lossy().to_string(),
         jobs_dir: jobs_dir.to_string_lossy().to_string(),
-        speech_dir: speech_dir.to_string_lossy().to_string(),
         current_chat: tokio::sync::RwLock::new(None),
         default_params: GenerationParams::default(),
         search_enabled: options.search.is_some(),
@@ -331,11 +324,6 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .route(UI_SETTINGS_ROUTE.path, get(get_settings))
         .route(UI_CAPABILITIES_ROUTE.path, get(get_capabilities))
         .route(UI_MCP_TOOLS_ROUTE.path, get(list_mcp_tools))
-        .route(UI_GENERATE_SPEECH_ROUTE.path, post(generate_speech))
-        .nest_service(
-            UI_SPEECH_ROUTE.path,
-            get_service(ServeDir::new(speech_dir.clone())),
-        )
         .nest_service(
             UI_UPLOADS_ROUTE.path,
             get_service(ServeDir::new(uploads_dir.clone())),

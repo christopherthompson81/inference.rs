@@ -1,5 +1,5 @@
 <script lang="ts">
-  import ModelBar from "./lib/components/ModelBar.svelte";
+  import ChatToolbar from "./lib/components/ChatToolbar.svelte";
   import Sidebar from "./lib/components/Sidebar.svelte";
   import MessageList from "./lib/components/MessageList.svelte";
   import ChatInput from "./lib/components/ChatInput.svelte";
@@ -19,6 +19,7 @@
   import { settingsStore } from "./lib/stores/settings.svelte";
   import * as api from "./lib/services/api";
   import { onMount } from "svelte";
+  import type { UiModelInfo } from "./lib/types";
 
   const TABS = [
     { id: "chat", label: "Chat" },
@@ -63,20 +64,19 @@
     }
   }
 
-  // the chat's model list follows what is loaded, and moves to the chat slot when it is the only choice left
+  // the chat talks to the chat slot's model, or with none loaded there the first text model the server holds
+  async function pickChatModel(models: UiModelInfo[]) {
+    modelStore.models = models;
+    const chosen = models.find((model) => model.name === SLOTS.chat.id) ?? models[0];
+    if (!chosen) return void (modelStore.selectedModel = null);
+    if (chosen.name === modelStore.selectedModel) return;
+    modelStore.selectModel(chosen.name);
+    await api.selectModel(chosen.name).catch(() => {});
+  }
+
   async function refreshChatModels() {
     try {
-      const { models } = await api.listModels();
-      modelStore.models = models;
-      const current = models.some((model) => model.name === modelStore.selectedModel);
-      // the selection is the server's: change it only when the selected model went away, or none was selected
-      if (!current && models.length > 0) {
-        const preferred = models.find((model) => model.name === SLOTS.chat.id) ?? models[0];
-        modelStore.selectModel(preferred.name);
-        await api.selectModel(preferred.name).catch(() => {});
-      } else if (models.length === 0) {
-        modelStore.selectedModel = null;
-      }
+      await pickChatModel((await api.listModels()).models);
     } catch (e) {
       console.error("Failed to list models:", e);
     }
@@ -93,15 +93,8 @@
     }
 
     try {
-      const { models } = await api.listModels();
-      modelStore.models = models;
-
+      await pickChatModel((await api.listModels()).models);
       const settings = await api.getSettings();
-      if (settings.model) {
-        modelStore.selectModel(settings.model);
-      } else if (models.length > 0) {
-        modelStore.selectModel(models[0].name);
-      }
 
       if (settings.defaults) {
         settingsStore.applyDefaults(settings.defaults);
@@ -144,31 +137,11 @@
   </nav>
 
   {#if tab === "chat"}
-    <ModelBar />
+    <div class="flex min-h-0 flex-1 flex-col md:flex-row">
+      <Sidebar />
 
-    <div class="flex min-h-0 flex-1">
-      {#if settingsStore.sidebarOpen}
-        <button
-          class="fixed inset-0 z-30 bg-black/30 md:hidden"
-          onclick={() => (settingsStore.sidebarOpen = false)}
-          aria-label="Close sidebar"
-        ></button>
-      {/if}
-
-      {#if settingsStore.sidebarOpen}
-        <div
-          class="fixed top-22 bottom-7 z-40 flex w-72 flex-col border-r border-gray-200 bg-gray-50 md:hidden dark:border-gray-800 dark:bg-gray-900"
-        >
-          <Sidebar />
-        </div>
-        <div
-          class="hidden w-72 shrink-0 flex-col border-r border-gray-200 bg-gray-50 md:flex dark:border-gray-800 dark:bg-gray-900"
-        >
-          <Sidebar />
-        </div>
-      {/if}
-
-      <div class="flex min-w-0 flex-1 flex-col">
+      <div class="flex min-h-0 min-w-0 flex-1 flex-col">
+        <ChatToolbar />
         <div class="px-4 pt-3">
           <SlotBar slot="chat" />
         </div>

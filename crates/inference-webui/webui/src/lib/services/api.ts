@@ -182,14 +182,6 @@ export function uploadVideo(file: File) {
   return uploadFile("upload_video", file);
 }
 
-// === Speech ===
-
-export async function generateSpeech(
-  text: string,
-): Promise<{ url: string }> {
-  return post("generate_speech", { text });
-}
-
 // === Agentic session persistence ===
 
 export async function saveChatSession(
