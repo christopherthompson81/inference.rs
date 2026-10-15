@@ -7,7 +7,6 @@ use axum::{
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tracing::error;
@@ -17,7 +16,6 @@ use inference_api::api_error::ApiErrorKind;
 use inference_api::media_source::{
     AUDIO_UPLOAD_EXTENSIONS, IMAGE_UPLOAD_EXTENSIONS, VIDEO_UPLOAD_EXTENSIONS,
 };
-use inference_api::openai::{AudioResponseFormat, SpeechGenerationRequest};
 use inference_api::operations::SessionForkRequest;
 
 use crate::chat::append_chat_message;
@@ -649,11 +647,6 @@ pub struct MessageStats {
     pub session_id: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub struct GenerateSpeechRequest {
-    pub text: String,
-}
-
 pub async fn get_settings(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
     let current_model = app.current.read().await.clone();
     let defaults = current_model
@@ -675,63 +668,6 @@ pub async fn get_settings(Extension(app): Extension<Arc<AppState>>) -> impl Into
         "search_enabled": app.search_enabled,
         "search_embedding_model": app.search_embedding_model.map(|m| m.to_string()),
     }))
-}
-
-pub async fn generate_speech(
-    Extension(app): Extension<Arc<AppState>>,
-    Json(req): Json<GenerateSpeechRequest>,
-) -> impl IntoResponse {
-    let model_name = {
-        let cur = app.current.read().await;
-        if let Some(name) = &*cur {
-            name.clone()
-        } else {
-            return (StatusCode::BAD_REQUEST, "No model selected").into_response();
-        }
-    };
-
-    let models = crate::chat_models(&app.engine);
-    let kind = models
-        .get(&model_name)
-        .map(|m| m.kind.as_str())
-        .unwrap_or("text");
-    if kind != "speech" {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Selected model is not a speech model",
-        )
-            .into_response();
-    }
-
-    let request = SpeechGenerationRequest {
-        model: model_name,
-        ..SpeechGenerationRequest::new(req.text, AudioResponseFormat::Wav)
-    };
-    let audio = match app.engine.speech_generation(request).await {
-        Ok(audio) => audio,
-        Err(e) => {
-            error!("speech generation error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "speech generation failed",
-            )
-                .into_response();
-        }
-    };
-
-    let filename = format!("{}.wav", Uuid::new_v4());
-    let filepath = PathBuf::from(&app.speech_dir).join(&filename);
-    if let Err(e) = fs::write(&filepath, &audio.bytes).await {
-        error!("failed to write wav file: {}", e);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "failed to write wav file",
-        )
-            .into_response();
-    }
-
-    let url = format!("speech/{filename}");
-    (StatusCode::OK, Json(json!({ "url": url }))).into_response()
 }
 
 pub async fn get_capabilities(

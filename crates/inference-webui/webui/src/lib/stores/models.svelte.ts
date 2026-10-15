@@ -26,10 +26,6 @@ class ModelStore {
   get isMultimodal(): boolean {
     return this.selectedModelKind === "multimodal";
   }
-
-  get isSpeech(): boolean {
-    return this.selectedModelKind === "speech";
-  }
 }
 
 export const modelStore = new ModelStore();

@@ -145,7 +145,6 @@ pub struct AppState {
     /// The owner's job history (see `jobs`).
     pub jobs_dir: String,
     /// Directory for storing generated speech wav files
-    pub speech_dir: String,
     pub current_chat: RwLock<Option<String>>,
     /// Default generation parameters
     pub default_params: GenerationParams,
@@ -182,7 +181,6 @@ impl AppState {
             owner: Some(owner.to_string()),
             chats_dir: chats_dir.to_string_lossy().to_string(),
             jobs_dir: jobs_dir.to_string_lossy().to_string(),
-            speech_dir: self.speech_dir.clone(),
             current_chat: RwLock::new(None),
             default_params: self.default_params.clone(),
             search_enabled: self.search_enabled,
