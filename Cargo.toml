@@ -225,6 +225,7 @@ rubato = { version = "0.16.2", default-features = false }
 # Scalar kernels only: audio front ends run small FFTs (microseconds each) and the SIMD variants cost ~700k IR lines.
 rustfft = { version = "6.4.1", default-features = false }
 hound = "3.5.1"
+opus = "0.4.0"
 seccompiler = "0.5.0"
 landlock = "0.4.4"
 nix = { version = "0.31.3", default-features = false }

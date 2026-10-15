@@ -16,13 +16,15 @@ use crate::{
 
 const FILE_FIELD: &str = "file";
 const INVALID_CODE: &str = "invalid_audio_request";
+// the code the engine gives audio it can't decode
+const DECODE_CODE: &str = "invalid_audio";
 
 /// The multipart form `/v1/audio/transcriptions` takes.
 #[cfg(test)]
 #[derive(utoipa::ToSchema)]
 #[allow(dead_code)]
 pub struct TranscriptionForm {
-    /// The audio to transcribe: WAV, MP3, FLAC, OGG and the other formats symphonia decodes.
+    /// The audio to transcribe: WAV, MP3, FLAC, Ogg, Matroska/WebM, MP4/M4A (AAC), and Opus in Ogg or Matroska.
     #[schema(value_type = String, format = Binary)]
     file: Vec<u8>,
     #[schema(inline)]
@@ -56,7 +58,21 @@ async fn read_audio_form<T: serde::de::DeserializeOwned>(
     let (request, mut uploads) = read_form(multipart, kinds, &[FILE_FIELD], INVALID_CODE).await?;
     match uploads.len() {
         0 => Err(invalid("The form has no `file`.", FILE_FIELD, INVALID_CODE)),
-        1 => Ok((request, uploads.remove(0).bytes)),
+        1 => {
+            let bytes = uploads.remove(0).bytes;
+            let decoded =
+                tokio::task::spawn_blocking(move || crate::opus_audio::opus_as_wav(bytes))
+                    .await
+                    .map_err(|e| invalid(e.to_string(), FILE_FIELD, INVALID_CODE))?;
+            let bytes = decoded.map_err(|e| {
+                invalid(
+                    format!("The audio could not be decoded: {e}"),
+                    FILE_FIELD,
+                    DECODE_CODE,
+                )
+            })?;
+            Ok((request, bytes))
+        }
         _ => Err(invalid(
             "The form has more than one `file`.",
             FILE_FIELD,

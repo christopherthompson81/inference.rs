@@ -91,6 +91,7 @@ pub mod image_generation;
 pub mod lora_adapters;
 pub mod mcp_server;
 pub mod model_manager;
+mod opus_audio;
 pub use media_source::configure_ui_upload_dir;
 pub mod audio_analysis;
 pub mod inference_server_router_builder;

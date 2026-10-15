@@ -17,12 +17,16 @@ anyhow.workspace = true
 axum = { workspace = true, features = ["tokio", "multipart", "ws"] }
 base64.workspace = true
 mime.workspace = true
+# libopus, built from its bundled source: symphonia has no Opus decoder, and the server decodes it so the C ABI needs none
+opus.workspace = true
 http-body = { workspace = true }
 http-body-util.workspace = true
 futures.workspace = true
+hound.workspace = true
 inference-api.workspace = true
 serde.workspace = true
 sha2.workspace = true
+symphonia.workspace = true
 # The served document keeps docs/openapi.json's key order.
 serde_json = { workspace = true, features = ["preserve_order"] }
 tokio.workspace = true
