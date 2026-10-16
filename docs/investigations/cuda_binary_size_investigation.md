@@ -1999,3 +1999,33 @@ Implication: removing ISQ is not a bundle-size lever. The case for or against it
 safetensors checkpoints at load, producing UQFF, MoQE, online calibration, `tune`'s quant choice) against the
 maintenance and bug surface of its load paths (Run 74 of the codebase-size log: the UQFF-writing load on a GPU,
 re-ISQ's silent failures).
+
+## Run 60 - 2026-10-15 17:13
+
+Question: `scripts/local_ci.sh --size` fails on master (75f290752) though nothing meant to grow the bundle merged
+since the baseline (#470). Which merge grew it?
+
+Commands: `scripts/local_ci.sh --size` at master, at bd7d157d6 (#472, the commit before the phonemizer bump #473),
+and on the speech to text MKV branch.
+
+```
+                          baseline    bd7d157d6 (#472)   master (75f290752)   MKV branch
+file                      113.18Mi    113.18Mi           130.18Mi (+16.99)    130.42Mi (+17.24)
+file:libinference_ffi.so   66.58Mi     66.58Mi            83.58Mi (+16.99)     83.82Mi (+17.24)
+.text                      60.51Mi     60.51Mi            73.97Mi (+13.46)     74.13Mi (+13.62)
+.nv_fatbin                 30.70Mi     30.70Mi            30.70Mi              30.70Mi
+```
+
+Between #472 and master only #473 (vernacula-phonemizer 224339e8 -> be9d9bf1) and three web UI PRs (#474-#476)
+merged; `cargo tree -p inference-ffi` holds no inference-webui, so the whole +17 MiB is the phonemizer bump. The
+MKV branch's own share (symphonia's Matroska demuxer and AAC decoder) is +0.25 MiB.
+
+Why: the phonemizer crate went from 11 language modules to 116 (crate source 0.87 MB -> 4.5 MB of Rust), and
+`registry.rs` picks a language by its code at run time (146 match arms), so every language is reachable and the
+linker keeps them all. The crate has no Cargo features. Kokoro reads 9 of them (en, es, fr, hi, it, pt-BR, ja, cmn,
+plus the English variants).
+
+Implication: the lasting fix belongs in the phonemizer (one Cargo feature per language, Kokoro asking for its
+own), but that port isn't finished and its size is for later, so the growth is accepted for now: the baseline
+moves up to include it, keeping `--size` useful for every other change. CI doesn't run `--size`, which is how this
+merged unnoticed.

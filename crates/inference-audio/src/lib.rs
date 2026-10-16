@@ -10,8 +10,12 @@ pub mod nemo;
 
 use anyhow::Result;
 use symphonia::core::{
-    audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
-    meta::MetadataOptions, probe::Hint,
+    audio::SampleBuffer,
+    codecs::{CODEC_TYPE_NULL, DecoderOptions},
+    formats::FormatOptions,
+    io::MediaSourceStream,
+    meta::MetadataOptions,
+    probe::Hint,
 };
 
 // 30 minutes of 48 kHz stereo; compressed input can otherwise expand to tens of GB
@@ -64,22 +68,40 @@ impl AudioInput {
             &MetadataOptions::default(),
         )?;
         let mut format = probed.format;
+        // a video's default track is its picture, so the first track with a sample rate is the audio
         let track = format
-            .default_track()
-            .ok_or_else(|| anyhow::anyhow!("no supported audio tracks"))?;
-        let codec_params = &track.codec_params;
+            .tracks()
+            .iter()
+            .find(|t| {
+                t.codec_params.codec != CODEC_TYPE_NULL && t.codec_params.sample_rate.is_some()
+            })
+            .ok_or_else(|| anyhow::anyhow!("no audio track in a codec this server decodes"))?;
+        let track_id = track.id;
+        let mut codec_params = track.codec_params.clone();
+        // Matroska leaves PCM's packet size unstated; no packet holds more frames than the whole input
+        if codec_params.max_frames_per_packet.is_none() {
+            let channels = codec_params.channels.map_or(1, |c| c.count());
+            let sample_bytes = codec_params
+                .bits_per_coded_sample
+                .map_or(1, |bits| bits.div_ceil(8));
+            codec_params.max_frames_per_packet =
+                Some((bytes.len() / (channels * sample_bytes as usize)) as u64 + 1);
+        }
         let sample_rate = codec_params
             .sample_rate
             .ok_or_else(|| anyhow::anyhow!("unknown sample rate"))?;
         #[allow(clippy::cast_possible_truncation)]
-        let channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(1);
+        let mut channels = codec_params.channels.map(|c| c.count() as u16).unwrap_or(1);
         let mut decoder =
-            symphonia::default::get_codecs().make(codec_params, &DecoderOptions::default())?;
+            symphonia::default::get_codecs().make(&codec_params, &DecoderOptions::default())?;
         let mut samples = Vec::new();
         loop {
             match format.next_packet() {
+                Ok(packet) if packet.track_id() != track_id => {}
                 Ok(packet) => {
                     let decoded = decoder.decode(&packet)?;
+                    // Matroska may leave the channel layout to the codec's own header (AAC's does)
+                    channels = decoded.spec().channels.count().try_into()?;
                     let mut buf =
                         SampleBuffer::<f32>::new(decoded.capacity() as u64, *decoded.spec());
                     buf.copy_interleaved_ref(decoded);
@@ -224,6 +246,92 @@ mod tests {
         assert_eq!(input.sample_rate, 8000);
         assert!(AudioInput::from_bytes_limited(&buffer, 79).is_err());
         assert!(AudioInput::from_bytes_limited(&buffer, 80).is_ok());
+    }
+
+    // one EBML element, its size always written in the 8-byte form
+    fn element(id: u32, body: &[u8]) -> Vec<u8> {
+        let id = id.to_be_bytes();
+        let start = id.iter().position(|&b| b != 0).unwrap();
+        let mut out = id[start..].to_vec();
+        out.push(0x01);
+        out.extend_from_slice(&(body.len() as u64).to_be_bytes()[1..]);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn uint(id: u32, value: u64) -> Vec<u8> {
+        element(id, &value.to_be_bytes())
+    }
+
+    // a simple block of the cluster: track number as a 1-byte vint, timestamp 0, keyframe
+    fn block(track: u8, data: &[u8]) -> Vec<u8> {
+        element(0xA3, &[&[0x80 | track, 0, 0, 0x80][..], data].concat())
+    }
+
+    // a video's picture track comes first, so the audio is not its default track
+    #[test]
+    fn from_bytes_reads_the_audio_track_of_a_matroska_video() {
+        let pcm: Vec<i16> = (0..64).map(|i| (i * 300 - 9600) as i16).collect();
+        let pcm_bytes: Vec<u8> = pcm.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let header = element(
+            0x1A45_DFA3,
+            &[
+                uint(0x4286, 1),
+                uint(0x42F7, 1),
+                uint(0x42F2, 4),
+                uint(0x42F3, 8),
+                element(0x4282, b"matroska"),
+                uint(0x4287, 4),
+                uint(0x4285, 2),
+            ]
+            .concat(),
+        );
+        let video = element(
+            0xAE,
+            &[
+                uint(0xD7, 1),
+                uint(0x73C5, 1),
+                uint(0x83, 1),
+                element(0x86, b"V_UNCOMPRESSED"),
+                element(0xE0, &[uint(0xB0, 2), uint(0xBA, 2)].concat()),
+            ]
+            .concat(),
+        );
+        let audio = element(
+            0xAE,
+            &[
+                uint(0xD7, 2),
+                uint(0x73C5, 2),
+                uint(0x83, 2),
+                element(0x86, b"A_PCM/INT/LIT"),
+                element(
+                    0xE1,
+                    &[
+                        element(0xB5, &16000f64.to_be_bytes()),
+                        uint(0x9F, 2),
+                        uint(0x6264, 16),
+                    ]
+                    .concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let segment = element(
+            0x1853_8067,
+            &[
+                element(0x1549_A966, &uint(0x2A_D7B1, 1_000_000)),
+                element(0x1654_AE6B, &[video, audio].concat()),
+                element(
+                    0x1F43_B675,
+                    &[uint(0xE7, 0), block(1, &[0; 12]), block(2, &pcm_bytes)].concat(),
+                ),
+            ]
+            .concat(),
+        );
+        let input = AudioInput::from_bytes(&[header, segment].concat()).unwrap();
+        assert_eq!((input.sample_rate, input.channels), (16000, 2));
+        let want: Vec<f32> = pcm.iter().map(|&s| f32::from(s) / 32768.0).collect();
+        assert_eq!(input.samples, want);
     }
 
     #[test]

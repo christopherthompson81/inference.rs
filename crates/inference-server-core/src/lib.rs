@@ -78,6 +78,7 @@
 
 pub mod anthropic;
 pub mod approvals;
+mod audio_codecs;
 pub mod auth;
 pub mod chat_completion;
 mod completion_core;
