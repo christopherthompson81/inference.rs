@@ -2157,3 +2157,26 @@ file                   113.44Mi     109.49Mi    -3.95Mi
 
 Implication: for an engine crate with generic convenience methods, the per-crate copies were as large as all
 the serde decoding of our own types. Keep the generic part of a public method to argument conversion.
+
+## Run 64 - 2026-10-16 12:30
+
+Question: what does vernacula-phonemizer 4c660b6e take off? Since 9cfebcdc it compiles its closure-generic
+rewrite helpers once (#1617), decodes its data through an in-repo `FromJson` derive instead of serde's
+`Deserialize` (#1618), and ships the English POS and OOV G2P models as binary (#1619, #1623).
+
+Command: `scripts/local_ci.sh --size-update` on master (07e8cb1df) with the Cargo rev and `DATA_REVISION` at
+4c660b6e.
+
+```
+                          9cfebcdc       4c660b6e      change
+file                      109.49Mi       108.25Mi     -1.24Mi
+.text                      57.10Mi        55.92Mi     -1.18Mi
+.gcc_except_table           2.47Mi         2.43Mi     -0.04Mi
+.eh_frame                   4.61Mi         4.59Mi     -0.02Mi
+```
+
+Run 62 put the phonemizer's serde decoders at 0.71 MiB, so the other ~0.5 MiB is the shared rewrite bodies.
+Kokoro's tests pass (39/39), and with the cargo checkout hidden all nine languages speak from the Hugging Face
+tag (snapshot 2dd2e252, which has the new `g2p-model.bin`).
+
+Implication: the baseline moves down again.

@@ -6574,15 +6574,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
+name = "vernacula-json-derive"
+version = "0.1.0"
+source = "git+https://github.com/christopherthompson81/vernacula-phonemizer?rev=4c660b6e#4c660b6e858eeeedf0d442f39cdf7ee0398f7d02"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "vernacula-phonemizer"
 version = "0.1.0"
-source = "git+https://github.com/christopherthompson81/vernacula-phonemizer?rev=9cfebcdc#9cfebcdc2dd2840e28532826d560ef303b191d1a"
+source = "git+https://github.com/christopherthompson81/vernacula-phonemizer?rev=4c660b6e#4c660b6e858eeeedf0d442f39cdf7ee0398f7d02"
 dependencies = [
  "indexmap",
  "regress",
- "serde",
  "serde_json",
  "unicode-normalization",
+ "vernacula-json-derive",
 ]
 
 [[package]]
