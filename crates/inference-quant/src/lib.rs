@@ -590,14 +590,20 @@ fn raw_quantization_config(
     Ok(raw)
 }
 
-// Custom deserializer implementation
 impl<'de> Deserialize<'de> for QuantizedConfig {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: Deserializer<'de>,
     {
         let value = serde_json::Value::deserialize(deserializer)?;
-        let raw = RawConfig::deserialize(value.clone()).map_err(serde::de::Error::custom)?;
+        Self::from_value(value).map_err(serde::de::Error::custom)
+    }
+}
+
+impl QuantizedConfig {
+    // non-generic, so it compiles once here rather than in every crate whose config holds one
+    fn from_value(value: serde_json::Value) -> serde_json::Result<Self> {
+        let raw = RawConfig::deserialize(value.clone())?;
 
         match &raw.quant_method {
             Some(m) if m == "gptq" || m == "awq" => {

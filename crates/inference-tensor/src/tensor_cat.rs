@@ -19,19 +19,24 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub fn cat<A: AsRef<Tensor>, D: Dim>(args: &[A], dim: D) -> Result<Self> {
-        if args.is_empty() {
+        let Some(arg0) = args.first() else {
             Err(Error::OpRequiresAtLeastOneTensor { op: "cat" }.bt())?
-        }
-        let arg0 = args[0].as_ref();
+        };
+        let dim = dim.to_index(arg0.as_ref().shape(), "cat")?;
+        let args: Vec<&Tensor> = args.iter().map(AsRef::as_ref).collect();
+        Self::cat_at(&args, dim)
+    }
+
+    // the generic entry point stays thin, so the concatenation compiles once rather than in every calling crate
+    fn cat_at(args: &[&Tensor], dim: usize) -> Result<Self> {
+        let arg0 = args[0];
         if args.len() == 1 {
             return Ok(arg0.clone());
         }
-        let dim = dim.to_index(arg0.shape(), "cat")?;
         for arg in args {
-            arg.as_ref().check_dim(dim, "cat")?;
+            arg.check_dim(dim, "cat")?;
         }
         for (arg_idx, arg) in args.iter().enumerate() {
-            let arg = arg.as_ref();
             if arg0.rank() != arg.rank() {
                 Err(Error::UnexpectedNumberOfDims {
                     expected: arg0.rank(),
@@ -58,10 +63,9 @@ impl Tensor {
                 }
             }
         }
-        let all_copy2d_compat = args.iter().all(|v| {
-            let t = v.as_ref();
-            t.is_contiguous() || t.layout().outer_stride_for_dim(dim).is_some()
-        });
+        let all_copy2d_compat = args
+            .iter()
+            .all(|t| t.is_contiguous() || t.layout().outer_stride_for_dim(dim).is_some());
         if all_copy2d_compat {
             Self::cat_contiguous(args, dim)
         } else if dim == 0 {
@@ -69,18 +73,18 @@ impl Tensor {
         } else {
             let args: Vec<Tensor> = args
                 .iter()
-                .map(|a| a.as_ref().transpose(0, dim))
+                .map(|a| a.transpose(0, dim))
                 .collect::<Result<Vec<_>>>()?;
-            let cat = Self::cat0(&args)?;
+            let cat = Self::cat0(&args.iter().collect::<Vec<_>>())?;
             cat.transpose(0, dim)
         }
     }
 
-    fn cat0<A: AsRef<Tensor>>(args: &[A]) -> Result<Self> {
+    fn cat0(args: &[&Tensor]) -> Result<Self> {
         if args.is_empty() {
             Err(Error::OpRequiresAtLeastOneTensor { op: "cat" }.bt())?
         }
-        let arg0 = args[0].as_ref();
+        let arg0 = args[0];
         if args.len() == 1 {
             return Ok(arg0.clone());
         }
@@ -92,7 +96,6 @@ impl Tensor {
         cat_dims[0] = 0;
         let mut offsets = vec![0usize];
         for (arg_idx, arg) in args.iter().enumerate() {
-            let arg = arg.as_ref();
             if arg.dtype() != dtype {
                 Err(Error::DTypeMismatchBinaryOp {
                     lhs: dtype,
@@ -144,18 +147,17 @@ impl Tensor {
         let op = crate::op::BackpropOp::new(args, |args| crate::op::Op::Cat(args, 0));
         let mut storage = unsafe { device.alloc_uninit(&shape, dtype)? };
         for (arg, &offset) in args.iter().zip(offsets.iter()) {
-            let arg = arg.as_ref();
             arg.storage()
                 .copy_strided_src(&mut storage, offset, arg.layout())?;
         }
         Ok(crate::tensor::from_storage(storage, shape, op, false))
     }
 
-    fn cat_contiguous<A: AsRef<Tensor>>(args: &[A], dim: usize) -> Result<Self> {
+    fn cat_contiguous(args: &[&Tensor], dim: usize) -> Result<Self> {
         if args.is_empty() {
             Err(Error::OpRequiresAtLeastOneTensor { op: "cat" }.bt())?
         }
-        let arg0 = args[0].as_ref();
+        let arg0 = args[0];
         if args.len() == 1 {
             return Ok(arg0.clone());
         }
@@ -166,7 +168,6 @@ impl Tensor {
         let mut cat_dims = first_dims.to_vec();
         cat_dims[dim] = 0;
         for (arg_idx, arg) in args.iter().enumerate() {
-            let arg = arg.as_ref();
             if arg.dtype() != dtype {
                 Err(Error::DTypeMismatchBinaryOp {
                     lhs: dtype,
@@ -219,7 +220,6 @@ impl Tensor {
         let mut storage = unsafe { device.alloc_uninit(&shape, dtype)? };
         let mut dst_o = 0;
         for arg in args.iter() {
-            let arg = arg.as_ref();
             let arg_dims = arg.shape().dims();
             let d1: usize = arg_dims.iter().take(dim).product();
             let d2 = block_size * arg_dims[dim];

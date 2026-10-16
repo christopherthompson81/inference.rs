@@ -114,24 +114,7 @@ macro_rules! binary_op {
 macro_rules! binary_op_scalar {
     ($fn_name:ident, $op_name:ident) => {
         pub fn $fn_name<T: TensorOrScalar>(&self, rhs: T) -> Result<Self> {
-            let rhs = match rhs.to_tensor_scalar()? {
-                crate::scalar::TensorScalar::Tensor(rhs) => rhs,
-                crate::scalar::TensorScalar::Scalar(rhs) => rhs
-                    .to_dtype(self.dtype())?
-                    .to_device(self.device())?
-                    .broadcast_as(self.shape())?,
-            };
-            let shape = self.same_shape_binary_op(&rhs, stringify!($fn_name))?;
-            if self.elem_count() == 0 {
-                return Ok(self.clone());
-            }
-            let storage = self.storage().binary_impl::<crate::op::$op_name>(
-                &*rhs.storage(),
-                self.layout(),
-                rhs.layout(),
-            )?;
-            let op = BackpropOp::new2(self, &rhs, |t1, t2| Op::Binary(t1, t2, BinaryOp::$op_name));
-            Ok(from_storage(storage, shape.clone(), op, false))
+            self.binary_op_scalar(rhs.to_tensor_scalar()?, BinaryOp::$op_name)
         }
     };
 }
@@ -601,6 +584,37 @@ impl Tensor {
     binary_op!(div, Div);
     binary_op_scalar!(maximum, Maximum);
     binary_op_scalar!(minimum, Minimum);
+
+    // the generic entry points above stay thin, so this body compiles once rather than in every calling crate
+    fn binary_op_scalar(&self, rhs: crate::scalar::TensorScalar, op: BinaryOp) -> Result<Self> {
+        let rhs = match rhs {
+            crate::scalar::TensorScalar::Tensor(rhs) => rhs,
+            crate::scalar::TensorScalar::Scalar(rhs) => rhs
+                .to_dtype(self.dtype())?
+                .to_device(self.device())?
+                .broadcast_as(self.shape())?,
+        };
+        let name = match op {
+            BinaryOp::Maximum => "maximum",
+            BinaryOp::Minimum => "minimum",
+            _ => unreachable!("binary_op_scalar is only defined for maximum and minimum"),
+        };
+        let shape = self.same_shape_binary_op(&rhs, name)?;
+        if self.elem_count() == 0 {
+            return Ok(self.clone());
+        }
+        let (lhs_storage, rhs_storage) = (self.storage(), rhs.storage());
+        let (lhs_l, rhs_l) = (self.layout(), rhs.layout());
+        let storage = match op {
+            BinaryOp::Maximum => {
+                lhs_storage.binary_impl::<crate::op::Maximum>(&rhs_storage, lhs_l, rhs_l)?
+            }
+            _ => lhs_storage.binary_impl::<crate::op::Minimum>(&rhs_storage, lhs_l, rhs_l)?,
+        };
+        drop((lhs_storage, rhs_storage));
+        let op = BackpropOp::new2(self, &rhs, |t1, t2| Op::Binary(t1, t2, op));
+        Ok(from_storage(storage, shape.clone(), op, false))
+    }
     broadcast_binary_op!(broadcast_add, add);
     broadcast_binary_op!(broadcast_mul, mul);
     broadcast_binary_op!(broadcast_sub, sub);
@@ -660,8 +674,11 @@ impl Tensor {
 
     /// Repeat this tensor along the specified dimensions.
     pub fn repeat<S: Into<Shape>>(&self, shape: S) -> Result<Tensor> {
+        self.repeat_by(shape.into())
+    }
+
+    fn repeat_by(&self, repeats: Shape) -> Result<Tensor> {
         // Similar to PyTorch, we extend the number of dimensions of self if needed.
-        let repeats = shape.into();
         let repeats = repeats.dims();
         let mut inp = if self.rank() < repeats.len() {
             let shape = [vec![1; repeats.len() - self.rank()], self.dims().to_vec()].concat();
@@ -852,8 +869,11 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub fn narrow<D: Dim>(&self, dim: D, start: usize, len: usize) -> Result<Self> {
+        self.narrow_at(dim.to_index(self.shape(), "narrow")?, start, len)
+    }
+
+    fn narrow_at(&self, dim: usize, start: usize, len: usize) -> Result<Self> {
         let dims = self.dims();
-        let dim = dim.to_index(self.shape(), "narrow")?;
         let err = |msg| {
             Err::<(), _>(
                 Error::NarrowInvalidArgs {
@@ -932,7 +952,10 @@ impl Tensor {
     }
 
     fn sum_impl<D: Dims>(&self, sum_dims: D, keepdim: bool) -> Result<Self> {
-        let sum_dims = sum_dims.to_indexes(self.shape(), "sum")?;
+        self.sum_over(sum_dims.to_indexes(self.shape(), "sum")?, keepdim)
+    }
+
+    fn sum_over(&self, sum_dims: Vec<usize>, keepdim: bool) -> Result<Self> {
         let storage = self
             .storage()
             .reduce_op(ReduceOp::Sum, self.layout(), &sum_dims)?;
@@ -1867,28 +1890,30 @@ impl Tensor {
         end_dim: Option<D2>,
     ) -> Result<Tensor> {
         if self.rank() == 0 {
-            self.reshape(1)
-        } else {
-            let start_dim = match start_dim {
-                None => 0,
-                Some(dim) => dim.to_index(self.shape(), "flatten")?,
-            };
-            let end_dim = match end_dim {
-                None => self.rank() - 1,
-                Some(dim) => dim.to_index(self.shape(), "flatten")?,
-            };
-            if start_dim < end_dim {
-                let dims = self.dims();
-                let mut dst_dims = dims[..start_dim].to_vec();
-                dst_dims.push(dims[start_dim..end_dim + 1].iter().product::<usize>());
-                if end_dim + 1 < dims.len() {
-                    dst_dims.extend(&dims[end_dim + 1..]);
-                }
-                self.reshape(dst_dims)
-            } else {
-                Ok(self.clone())
-            }
+            return self.reshape(1);
         }
+        let start_dim = match start_dim {
+            None => 0,
+            Some(dim) => dim.to_index(self.shape(), "flatten")?,
+        };
+        let end_dim = match end_dim {
+            None => self.rank() - 1,
+            Some(dim) => dim.to_index(self.shape(), "flatten")?,
+        };
+        self.flatten_between(start_dim, end_dim)
+    }
+
+    fn flatten_between(&self, start_dim: usize, end_dim: usize) -> Result<Tensor> {
+        if start_dim >= end_dim {
+            return Ok(self.clone());
+        }
+        let dims = self.dims();
+        let mut dst_dims = dims[..start_dim].to_vec();
+        dst_dims.push(dims[start_dim..end_dim + 1].iter().product::<usize>());
+        if end_dim + 1 < dims.len() {
+            dst_dims.extend(&dims[end_dim + 1..]);
+        }
+        self.reshape(dst_dims)
     }
 
     /// Flattens the input tensor on the dimension indexes from `start_dim` to `end_dim` (both
@@ -2015,7 +2040,10 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub fn permute<D: Dims>(&self, dims: D) -> Result<Tensor> {
-        let dims = dims.to_indexes(self.shape(), "permute")?;
+        self.permute_indexes(dims.to_indexes(self.shape(), "permute")?)
+    }
+
+    fn permute_indexes(&self, dims: Vec<usize>) -> Result<Tensor> {
         // O(n^2) permutation check but these arrays are small.
         let is_permutation =
             dims.len() == self.rank() && (0..dims.len()).all(|i| dims.contains(&i));
@@ -2140,6 +2168,10 @@ impl Tensor {
     /// any value, the dimension `t_a` must be equal to `i_a` if `i_a` is different from 1. If
     /// `i_a` is equal to 1, any value can be used.
     pub fn broadcast_as<S: Into<Shape>>(&self, shape: S) -> Result<Self> {
+        self.broadcast_to(shape.into())
+    }
+
+    fn broadcast_to(&self, shape: Shape) -> Result<Self> {
         let tensor_ = Tensor_ {
             id: TensorId::new(),
             storage: self.storage.clone(),
@@ -2238,7 +2270,11 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub fn reshape<S: ShapeWithOneHole>(&self, s: S) -> Result<Tensor> {
-        let shape = s.into_shape(self.elem_count())?;
+        self.reshape_to(s.into_shape(self.elem_count())?)
+    }
+
+    // the shape-generic entry points stay thin, so their bodies compile once rather than in every calling crate
+    fn reshape_to(&self, shape: Shape) -> Result<Tensor> {
         if shape.elem_count() != self.elem_count() {
             return Err(Error::ShapeMismatchBinaryOp {
                 lhs: self.shape().clone(),
@@ -2319,9 +2355,12 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub fn unsqueeze<D: Dim>(&self, dim: D) -> Result<Self> {
+        self.unsqueeze_at(dim.to_index_plus_one(self.shape(), "unsqueeze")?)
+    }
+
+    fn unsqueeze_at(&self, dim: usize) -> Result<Self> {
         let mut dims = self.dims().to_vec();
         let mut strides = self.stride().to_vec();
-        let dim = dim.to_index_plus_one(self.shape(), "unsqueeze")?;
         // Cannot panic because to_index_plus_one already checks dimensions
         dims.insert(dim, 1);
         // Any stride would work here, but we pick one so as to maximize the probability to remain

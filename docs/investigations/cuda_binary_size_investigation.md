@@ -2051,3 +2051,109 @@ from the Hugging Face tag 9cfebcdc, all nine languages speak.
 
 Implication: the baseline moves back down. A run in a script whose language is off (Cyrillic inside en, say) is
 now dropped rather than read; Kokoro's own scripts are all in the set.
+
+## Run 62 - 2026-10-16 10:35
+
+Question: the phonemizer cut its decoding code from 4.35 to 0.96 MiB by dropping serde's derived `Deserialize`
+(about 9 KB per struct) for a decoder that reads a parsed `serde_json::Value` through helpers generic only over
+the field type, and cut more by making closure-generic helpers `&mut dyn FnMut` shims. How much of our library is
+serde decoding, and where else does one generic body compile into many copies?
+
+Command: the `--size` build with symbols kept, `RUSTFLAGS= CARGO_PROFILE_BUNDLE_STRIP=false cargo build --profile
+bundle -p inference-ffi --features cuda` on master (b6f5f6827), then `nm --print-size --size-sort -C` over the
+library's text symbols, grouped by name. Changing `strip` rebuilds the whole bundle tree (4 min here, warm ccache).
+
+```
+text symbols                          63100   49.84 MiB  (.text is 60.68 MiB; the rest has no symbol size)
+serde deserialize, all                 4642    4.99 MiB
+serde serialize                         354    0.34 MiB
+serde other                            1842    0.52 MiB
+JsonRequest / json_config from_json      85    0.57 MiB  (each holds its type's inlined visitor, 4-15 KiB)
+```
+
+Deserialize code by the crate whose type it decodes:
+
+```
+serde_json, serde_saphyr, path_to_error   ~1.4 MiB   shared parser code, paid once
+vernacula_phonemizer                       0.71 MiB   the crate's own fix, d4efb4d2, cuts most of it
+tokenizers                                 0.61 MiB   external
+inference_protocol                         0.52 MiB
+model families (llama/qwen/gemma/phi/other) 0.66 MiB
+inference_quant, _nn, _selection, _api, _core, _models_speech, _mcp   ~1.6 MiB
+largest types: ModelSelected 218 KiB, QuantizedConfig 130 KiB, PreProcessorConfig 76 KiB, LoraConfig 42 KiB
+```
+
+Our own types come to about 2.8 MiB of decoders plus the 0.57 MiB of `from_json` bodies, about 5.5 KB a
+derive over ~630 derives. The phonemizer's rewrite kept about a fifth of its decoding code, so the same here
+might win ~2.5 MiB of .text (plus its unwind and relocation share), ~2% of the package, across 630 types that
+lean on rename/default/untagged/flatten attributes and on serde_path_to_error's field paths in error bodies.
+
+The generic-copy pattern is larger and cheaper. The tensor backends' `Map1`/`Map2` traits compile every op's
+`map` over all dtypes:
+
+```
+cuda Map1   32 ops   1.09 MiB   20 unary ops at an identical 34257 bytes each, differing only in kernel name
+cuda Map2   29 ops   1.05 MiB   binary ops 36-39 KiB each
+cpu  Map2    9 ops   0.59 MiB   WCond<i64/i16/u8/i32> 108 KiB each
+cpu  Map1   13 ops   0.31 MiB
+binary_impl 37       1.10 MiB
+binary_map_vec_par  378  0.55 MiB
+```
+
+Implication: two candidates. The tensor op families (~4.5 MiB) are the phonemizer's `&mut dyn FnMut` shape:
+one dtype-dispatch body per backend, with the op passed as data (a kernel name for the CUDA unary ops, which
+already launch by name). A serde replacement for our config and request types is the second, at about half the
+win and many times the work. The phonemizer's own bump to d4efb4d2 should take ~0.6 MiB with it for free.
+
+## Run 63 - 2026-10-16 11:20
+
+Question: Run 62's symbol listing also showed one function compiled many times under the same name: a generic
+method instantiated in each downstream crate that calls it (release builds don't share generics across crates,
+and fat LTO keeps the copies). How much is that, and how much do the CUDA op families and those copies give
+back when their bodies stop being generic?
+
+Command: same symbol build, then the text symbols grouped by exact name, counting every copy past the first.
+
+```
+duplicate copies before   7.00 MiB over 5403 names
+binary_impl::<Minimum>, ::<Maximum> (cpu)   x10 each   832 KiB   reached only from the generic maximum/minimum
+cuda Map2 for Minimum, Maximum               x10 each   636 KiB
+binary_map_vec_par for Minimum/Maximum       x10        417 KiB
+Tensor::reshape 198, cat0 80, cat_contiguous 73, broadcast_as 52, permute 48, cat 43, clamp 34 KiB, ...
+QuantizedConfig::deserialize                 x5          80 KiB   one per crate whose config holds one
+drop_glue                                               984 KiB   compiler-made, left alone
+```
+
+Changes: `Unary(&'static str)` and `Binary(&'static str)` carry the kernel name into one `Map1`/`Map2` body
+in the CUDA backend; `maximum`/`minimum`, `reshape`, `broadcast_as`, `permute`, `narrow`, `repeat`,
+`unsqueeze`, `sum` and `flatten` resolve their generic argument and call a private non-generic body; `cat`
+collects `&Tensor`s and calls one; `QuantizedConfig`'s `Deserialize` reads a `Value` and calls a non-generic
+`from_value`.
+
+`scripts/local_ci.sh --size` before the `QuantizedConfig` change:
+
+```
+                       baseline          now     change
+file                   113.44Mi     109.66Mi    -3.78Mi
+.text                   60.68Mi      57.25Mi    -3.43Mi
+.eh_frame                4.77Mi       4.62Mi    -0.15Mi
+.gcc_except_table        2.64Mi       2.48Mi    -0.16Mi
+```
+
+Duplicate copies after: 4.49 MiB. What's left is drop glue, std and dependency code (hashbrown, anyhow, serde_json,
+tokenizers, reqwest), and dtype-generic methods (`to_vec1`, `from_vec_impl`) whose body depends on the dtype.
+
+With the `QuantizedConfig` change too, `scripts/local_ci.sh --size-update` (the new baseline):
+
+```
+                       baseline          now     change
+file                   113.44Mi     109.49Mi    -3.95Mi
+.text                   60.68Mi      57.10Mi    -3.59Mi
+.eh_frame                4.77Mi       4.61Mi    -0.16Mi
+.gcc_except_table        2.64Mi       2.47Mi    -0.17Mi
+```
+
+`--lint`, `--tests` (2688 passed) and `--cuda` (3092 passed) pass.
+
+Implication: for an engine crate with generic convenience methods, the per-crate copies were as large as all
+the serde decoding of our own types. Keep the generic part of a public method to argument conversion.
