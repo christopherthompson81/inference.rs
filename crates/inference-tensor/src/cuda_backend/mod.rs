@@ -432,7 +432,9 @@ impl Map1Any for FastReduce<'_> {
     }
 }
 
-impl<U: UnaryOpT> Map1 for U {
+// one body for every unary op, which differ only in their kernel's name
+struct Unary(&'static str);
+impl Map1 for Unary {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         src: &CudaSlice<T>,
@@ -445,7 +447,7 @@ impl<U: UnaryOpT> Map1 for U {
         let cfg = LaunchConfig::for_num_elems(el_count as u32);
         let ds = SlicePtrOrNull::params_from_layout(dev, layout)?;
         let src = &src.slice(layout.start_offset()..);
-        let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), &kernels::UNARY)?;
+        let func = dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::UNARY)?;
         // SAFETY: Set later by running the kernel.
         let mut out = unsafe { dev.alloc::<T>(el_count)? };
         let mut builder = func.builder();
@@ -1153,7 +1155,8 @@ impl Map2 for WhereCond<'_> {
     }
 }
 
-impl<U: crate::op::BinaryOpT> Map2 for U {
+struct Binary(&'static str);
+impl Map2 for Binary {
     fn f<T: DeviceRepr + WithDType + ValidAsZeroBits>(
         &self,
         lhs: &CudaSlice<T>,
@@ -1173,7 +1176,7 @@ impl<U: crate::op::BinaryOpT> Map2 for U {
         };
         let lhs = &lhs.slice(lhs_l.start_offset()..);
         let rhs = &rhs.slice(rhs_l.start_offset()..);
-        let func = dev.get_or_load_func(&kernel_name::<T>(U::KERNEL), &kernels::BINARY)?;
+        let func = dev.get_or_load_func(&kernel_name::<T>(self.0), &kernels::BINARY)?;
         // SAFETY: Set later by running the kernel.
         let out = unsafe { dev.alloc::<T>(elem_count)? };
         let mut builder = func.builder();
@@ -1746,7 +1749,7 @@ impl BackendStorage for CudaStorage {
 
     fn unary_impl<U: UnaryOpT>(&self, layout: &Layout) -> Result<Self> {
         let device = self.device().clone();
-        let slice = U::V.map(&self.slice, &device, layout)?;
+        let slice = Unary(U::KERNEL).map(&self.slice, &device, layout)?;
         Ok(Self { slice, device })
     }
 
@@ -1757,7 +1760,7 @@ impl BackendStorage for CudaStorage {
         rhs_l: &Layout,
     ) -> Result<Self> {
         let device = self.device().clone();
-        let slice = B::V.map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
+        let slice = Binary(B::KERNEL).map(&self.slice, lhs_l, &rhs.slice, rhs_l, &device)?;
         Ok(Self { slice, device })
     }
 
