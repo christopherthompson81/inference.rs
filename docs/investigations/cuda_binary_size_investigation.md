@@ -2029,3 +2029,25 @@ Implication: the lasting fix belongs in the phonemizer (one Cargo feature per la
 own), but that port isn't finished and its size is for later, so the growth is accepted for now: the baseline
 moves up to include it, keeping `--size` useful for every other change. CI doesn't run `--size`, which is how this
 merged unnoticed.
+
+## Run 61 - 2026-10-15 18:10
+
+Question: with the phonemizer's per-language Cargo features (vernacula-phonemizer 9cfebcdc), how much of Run 60's
++17 MiB does building only Kokoro's languages win back?
+
+Command: `scripts/local_ci.sh --size-update` on master (035a31069) with the pin at 9cfebcdc,
+`default-features = false, features = ["en-GB", "es", "fr", "hi", "it", "pt-BR", "ja", "cmn"]` (en, with en-US,
+is always built). A trial against the PR head (1f8207c0) before it merged measured the same.
+
+```
+                          be9d9bf1, all 116 languages   9cfebcdc, Kokoro's 9   change
+file                      130.42Mi                      113.44Mi               -16.98Mi
+file:libinference_ffi.so   83.82Mi                       66.84Mi               -16.98Mi
+```
+
+The library is back to its size before the phonemizer grew (113.18 MiB at #472), plus the +0.25 MiB of Matroska
+and AAC decoding from #477. Kokoro's tests pass (39/39), and with the cargo checkout hidden, so the data comes
+from the Hugging Face tag 9cfebcdc, all nine languages speak.
+
+Implication: the baseline moves back down. A run in a script whose language is off (Cyrillic inside en, say) is
+now dropped rather than read; Kokoro's own scripts are all in the set.
