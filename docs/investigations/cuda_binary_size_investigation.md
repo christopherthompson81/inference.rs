@@ -2293,3 +2293,35 @@ code and shared generics; needs a decode/prefill check that the token path didn'
 backend's launches: the dtype only changes the kernel name suffix and the slice type, so one launch body per op
 taking a device pointer and dtype could save ~1 MiB. (3) `kernel_library!` resolving names in a loop (~0.15 MiB).
 (4) Speech configs through one decoder (~0.1 MiB).
+
+## Run 67 - 2026-10-16 14:20
+
+Question: Run 65 found the f16 mma attention kernel is 80% of the attention library, 5-16% of it per head size.
+Does any head size serve no supported architecture?
+
+Command: the head sizes inference-fattn builds (`kernels/cuda/instances/`, `fattn.cu`'s switches) against
+the head dims of every architecture in `supported-models.md` (published configs of the listed checkpoints, local
+configs, and the config defaults in our model crates), and llama.cpp's `git log -S` for why each size was added.
+
+```
+size      added upstream for           our architectures
+40        tile "more HSs" (#16492)     none
+64        -                            Llama 3.2 1B, Qwen2.5 0.5B, GPT-OSS, LFM2, Granite 4.0 micro, CLIP/Pixtral/Whisper encoders, Kokoro
+72        SigLIP (#16962), tile only   SigLIP vision towers (Idefics2/3, Gemma 3, PaddleOCR-VL, Phi-4-MM, ...)
+80        -                            Phi-2; Qwen2/2.5-VL and Mllama vision
+96        -                            Phi-3/3.5 mini; Muse Glimmer vision
+112       early mma (#11583)           none
+128       -                            most text models, Gemma 4 audio, Parakeet, FLUX, HiDream
+192/128   MiMo-V2.5 (#22812)           none (DeepSeek's unabsorbed 192/128 is MHA; the kernel needs GQA)
+256       -                            Gemma 1-3n, Qwen3-Next, Qwen3.5
+320/256   Mistral Small 4 (#22286)     none
+512       Gemma 4 (#20998)             Gemma 4 global layers, DiffusionGemma
+576/512   DeepSeek MLA (#13306)        DeepSeek V2/V3, GLM-4.7-Flash
+```
+
+40, 112, 192/128 and 320/256 serve no architecture we load; a call at one of them would fall back to the
+non-flash path, not fail. 112 alone is 7.2 MiB of the 80.5 MiB uncompressed f16 code.
+
+Implication: not removed. They are the head sizes of models likely to be added later (MiMo, Mistral Small 4),
+so removing them now would mean adding them back. The packaging-side option from Run 65 (attention split per
+head size, rare ones downloaded) would cut their cost without dropping them.
