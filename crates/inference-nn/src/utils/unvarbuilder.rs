@@ -149,29 +149,17 @@ impl UnVarBuilder {
     }
 
     pub fn add<T: ToTensors>(&self, item: &T) {
-        let mut data = self.data.write().expect("Write failed!");
-        let path = self.path();
-        data.extend(
-            item.to_tensors()
-                .into_iter()
-                .map(|(n, t)| {
-                    (
-                        if path.is_empty() {
-                            n
-                        } else {
-                            format!("{path}.{n}")
-                        },
-                        t,
-                    )
-                })
-                .collect::<Vec<(_, _)>>(),
-        );
+        self.extend(item.to_tensors().into_iter().collect());
     }
 
     pub fn add_tensor<S: ToString>(&self, s: S, v: Tensor) {
+        self.add_named_tensor(s.to_string(), v);
+    }
+
+    fn add_named_tensor(&self, name: String, v: Tensor) {
         let mut data = self.data.write().expect("Write failed!");
         let mut path = self.path.clone();
-        path.push(s.to_string());
+        path.push(name);
         data.insert(
             path.into_iter().filter(|p| !p.trim().is_empty()).join("."),
             v,

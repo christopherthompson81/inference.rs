@@ -466,19 +466,15 @@ impl Device {
         }
     }
 
-    pub(crate) fn storage_owned<S: WithDType>(&self, data: Vec<S>) -> Result<Storage> {
+    pub(crate) fn storage_from_cpu_owned(&self, storage: CpuStorage) -> Result<Storage> {
         match self {
-            Device::Cpu => Ok(Storage::Cpu(S::to_cpu_storage_owned(data))),
-            Device::Cuda(device) => {
-                let storage = S::to_cpu_storage_owned(data);
-                let storage = device.storage_from_cpu_storage_owned(storage)?;
-                Ok(Storage::Cuda(storage))
-            }
-            Device::Metal(device) => {
-                let storage = S::to_cpu_storage_owned(data);
-                let storage = device.storage_from_cpu_storage_owned(storage)?;
-                Ok(Storage::Metal(storage))
-            }
+            Device::Cpu => Ok(Storage::Cpu(storage)),
+            Device::Cuda(device) => Ok(Storage::Cuda(
+                device.storage_from_cpu_storage_owned(storage)?,
+            )),
+            Device::Metal(device) => Ok(Storage::Metal(
+                device.storage_from_cpu_storage_owned(storage)?,
+            )),
         }
     }
 
