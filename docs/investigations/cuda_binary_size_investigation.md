@@ -2180,3 +2180,175 @@ Kokoro's tests pass (39/39), and with the cargo checkout hidden all nine languag
 tag (snapshot 2dd2e252, which has the new `g2p-model.bin`).
 
 Implication: the baseline moves down again.
+
+## Run 65 - 2026-10-16 13:10
+
+Question: after Runs 63 and 64, where do the package's 108.25 MiB come from?
+
+Command: the baseline's per-file sizes, `size -A` on each kernel library, the bundle build with symbols kept
+(`CARGO_PROFILE_BUNDLE_STRIP=false`, master 9880ba421) grouped by crate, and the kernel libraries' cubins
+(`cuobjdump -xelf all`, then each `.text.<kernel>` section's size, uncompressed).
+
+```
+libinference_ffi.so            61.65 MiB   .text 45.36, .rodata 4.16, .eh_frame 3.6, .rela.dyn 2.9, except 2.4
+libinferencequant_<type> x34   24.17 MiB   GPU code 16.53, host .text 4.64
+libinferencefattn.so           17.01 MiB   GPU code 11.25, host .text 4.21
+libinferencequant.so            3.81 MiB   GPU code 2.14
+libinferencenn.so               1.43 MiB
+libinferencepagedattention.so   0.18 MiB
+```
+
+The Rust library's code by area (text symbols, 45.09 MiB of the 45.36):
+
+```
+inference.rs crates            20.02   tensor 5.59, nn 2.33, core 1.97, quant 1.94, model families ~5.2
+std/core/alloc generic          8.62   drop glue 2.35, serde seeds for our types 1.30, slice sorts 1.06 (157 copies)
+text (tokenizers, regex, minijinja, llguidance)   2.74
+serde crates                    2.54   (plus the 1.30 above: ~3.8 serde in all)
+HTTP, TLS, async                2.25
+images                          2.06   fast_image_resize 1.01
+phonemizer                      1.44
+audio (symphonia, rustfft)      1.17
+other                           ~4.0
+```
+
+Inside inference-tensor the op families still lead: the `Map1`/`Map2` impls 2.16 MiB over 57 symbols, the CPU
+`unary_impl` per op 0.63 MiB.
+
+The attention library's GPU code, uncompressed (99.65 MiB, stored compressed as 11.25):
+
+```
+flash_attn_ext_f16 (mma)   80.54 MiB   270 instances
+  by head size: 512 15.7, 128 13.1, 256 11.6, 576/512 8.8, 112 7.2, 96 6.6, 80 5.9, 64 5.4, 192/128 4.3, 320/256 1.9
+flash_attn_tile            10.74 MiB   310
+stream_k fixups             6.39 MiB   586
+combine, vec, mask          1.97 MiB
+```
+
+Implication: the kernel libraries are 43% of the package. The largest single lever is which attention instances
+ship: the f16 mma kernel is 80% of the attention library, and each head size is 5-16% of it, so a head size no
+supported model uses is worth checking before anything in Rust. The per-type quant libraries (24 MiB) already
+download on demand (#425), so what a package bundles of them is a packaging choice. In Rust, what's left is spread
+thin: drop glue, serde (~3.8 MiB), the tensor op families, and dependencies no larger than 1 MiB each.
+
+## Run 66 - 2026-10-16 13:45
+
+Question: crate by crate, largest first, why are our own crates (20 MiB direct) the size they are?
+
+Command: Run 65's symbol build, each text symbol credited to the crate that owns its type (for `<A as B>::f`, A's
+crate, else B's), plus the code compiled elsewhere for that crate's types (drop glue, serde seeds, sorts, rayon
+glue: any std or dependency symbol whose name mentions the crate). Fat LTO inlines across crates, so a small
+function's code shows up in its callers; the split is approximate.
+
+```
+crate                    direct  +generic elsewhere  total MiB
+inference_tensor          5.59      1.30               6.89
+inference_nn              2.33      0.94               3.26
+inference_quant           1.94      0.78               2.71
+inference_core            1.97      0.65               2.62
+inference_models_qwen     1.24      0.23               1.46
+inference_api             1.04      0.35               1.39
+inference_models_gemma    1.04      0.18               1.22
+inference_models_speech   0.62      0.52               1.14
+inference_protocol        0.42      0.71               1.14
+inference_models_llama    0.93      0.16               1.09
+inference_models_other    0.63      0.18               0.81
+inference_selection       0.25      0.31               0.56
+inference_models_phi      0.39      0.10               0.49
+the rest (gguf, layout, diffusion, agent, mcp, code_exec, ...) ~2.5
+```
+
+Per crate:
+
+- tensor: the backends' op x dtype matrix. Each CUDA `Map1`/`Map2` impl matches 10 dtypes, each arm an inlined
+  launch (kernel-name format, function lookup, argument builder) of ~4 KiB, so ~40 KiB an op over ~30 ops
+  (2.2 MiB with the CPU `Map` impls). The CPU side compiles a compute loop per op and dtype: `unary_impl` 33 KiB
+  an op (19 ops), `binary_impl` 45 KiB (6), `WCond` 106 KiB per index type (4), `Conv2D` 124 KiB, `index_add`
+  118 KiB. Rayon glue for its parallel loops adds 0.5 MiB.
+- nn, core, quant: no hot spot. The largest function is 47 KiB and the families are `new`/`forward`/`load` per
+  layer, loader or quant method, so the size follows the feature count. One generated pattern: 201 kernel-table
+  initializers from `kernel_library!` (184 KiB), each inlining a CStr check and error path per kernel symbol.
+- model families: `new` and `forward` per model (qwen 0.3, gemma 0.4 MiB) plus each config's decoder
+  (`from_json`, 50-100 KiB a family) and the multimodal input processors (20-40 KiB each).
+- api: 36 `blocking::run` instances (119 KiB), one per C ABI operation's future; request decoders (115 KiB).
+- speech, protocol, selection: mostly serde. protocol's request and response types (~0.45 MiB with the generic
+  code); selection is `ModelSelected`'s enum decoder (192 KiB of `visit_enum`); speech decodes its configs from
+  both JSON and YAML (serde_saphyr), so those structs get two decoders.
+
+Cross-cutting:
+
+```
+slice sorts           1.26 MiB  1046 fns: per-crate copies (22 sorts of u32 alone), ~7 KiB a stable sort
+drop glue             2.35 MiB  12065 fns
+serde (all)          ~3.8 MiB
+```
+
+Every crate builds at opt-level 3, and rustc shares generic instances across crates only at opt-level 0, 1, "s"
+or "z" (core_responsibilities_investigation.md), so the per-crate copies (Run 63's residual 4.5 MiB, the sorts)
+follow from the profile.
+
+Implication: candidates, by expected size over work. (1) `opt-level = "s"` per package in the bundle profile for
+crates off the per-token path (api, protocol, selection, agent, mcp, code_exec, gguf, layout's loaders?): smaller
+code and shared generics; needs a decode/prefill check that the token path didn't slow. (2) Type-erase the CUDA
+backend's launches: the dtype only changes the kernel name suffix and the slice type, so one launch body per op
+taking a device pointer and dtype could save ~1 MiB. (3) `kernel_library!` resolving names in a loop (~0.15 MiB).
+(4) Speech configs through one decoder (~0.1 MiB).
+
+## Run 67 - 2026-10-16 14:20
+
+Question: Run 65 found the f16 mma attention kernel is 80% of the attention library, 5-16% of it per head size.
+Does any head size serve no supported architecture?
+
+Command: the head sizes inference-fattn builds (`kernels/cuda/instances/`, `fattn.cu`'s switches) against
+the head dims of every architecture in `supported-models.md` (published configs of the listed checkpoints, local
+configs, and the config defaults in our model crates), and llama.cpp's `git log -S` for why each size was added.
+
+```
+size      added upstream for           our architectures
+40        tile "more HSs" (#16492)     none
+64        -                            Llama 3.2 1B, Qwen2.5 0.5B, GPT-OSS, LFM2, Granite 4.0 micro, CLIP/Pixtral/Whisper encoders, Kokoro
+72        SigLIP (#16962), tile only   SigLIP vision towers (Idefics2/3, Gemma 3, PaddleOCR-VL, Phi-4-MM, ...)
+80        -                            Phi-2; Qwen2/2.5-VL and Mllama vision
+96        -                            Phi-3/3.5 mini; Muse Glimmer vision
+112       early mma (#11583)           none
+128       -                            most text models, Gemma 4 audio, Parakeet, FLUX, HiDream
+192/128   MiMo-V2.5 (#22812)           none (DeepSeek's unabsorbed 192/128 is MHA; the kernel needs GQA)
+256       -                            Gemma 1-3n, Qwen3-Next, Qwen3.5
+320/256   Mistral Small 4 (#22286)     none
+512       Gemma 4 (#20998)             Gemma 4 global layers, DiffusionGemma
+576/512   DeepSeek MLA (#13306)        DeepSeek V2/V3, GLM-4.7-Flash
+```
+
+40, 112, 192/128 and 320/256 serve no architecture we load; a call at one of them would fall back to the
+non-flash path, not fail. 112 alone is 7.2 MiB of the 80.5 MiB uncompressed f16 code.
+
+Implication: not removed. They are the head sizes of models likely to be added later (MiMo, Mistral Small 4),
+so removing them now would mean adding them back. The packaging-side option from Run 65 (attention split per
+head size, rare ones downloaded) would cut their cost without dropping them.
+
+## Run 68 - 2026-10-16 15:10
+
+Question: can `--size` hold Run 63's gain, failing when generic code starts compiling again in each calling crate?
+
+Change: the bundle profile keeps the symbol table (`strip = "debuginfo"`; debug info still goes), `build_wheels.py`
+strips the copy it packages, and `bundle_size.py` measures a stripped copy of the library, so the file and section
+sizes are the shipped ones, then adds `copies`: per demangled text symbol name compiled more than once, the bytes
+past the largest copy, compared with the same limits as a section. When it grows it lists the most-copied
+functions.
+
+```
+                          before (stripped by the profile)   after (stripped copy)
+file                      108.25Mi                           108.25Mi   (+248 bytes)
+file:libinference_ffi.so   61.65Mi                            61.65Mi
+copies                    -                                    4.35Mi
+built library on disk      61.65Mi                            74.56Mi   (symbols kept)
+wheel's library            61.65Mi                            61.65Mi
+```
+
+A check of the check: with `maximum`/`minimum` put back to their generic bodies from before #479, `--size` fails
+with `file +1.83Mi, .text +1.69Mi, copies +1.65Mi` and lists `binary_impl::<Minimum>` (416 KiB),
+`binary_impl::<Maximum>` (415 KiB) and the CUDA `Binary` map (335 KiB) first. Restored, it passes.
+
+Implication: the convention goes in CLAUDE.md (a foundation crate's public generic converts its arguments and calls
+a non-generic body), and `--size` now reports when it slips. What `copies` holds today is mostly drop glue, std,
+serde_json, tokenizers and reqwest instances.

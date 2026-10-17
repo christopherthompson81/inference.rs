@@ -2,19 +2,26 @@
 """Compare a built `libinference_ffi` and its CUDA kernel libraries with the committed section sizes (Linux).
 
 Usage: bundle_size.py LIBRARY COMPUTE_CAP CUDA_VERSION [--update]. `file` is the total over the library and its kernel
-libraries, `file:<name>` each one. Exits 1 when the total or a tracked section grew past
-the limit, 0 otherwise; a build for another compute capability or toolkit is only reported. `--update` rewrites the
-baseline.
+libraries, `file:<name>` each one, measured stripped as the wheels ship them. `copies` is the library's code in
+functions compiled more than once under one name, most often a generic instantiated again in each crate that calls it.
+Exits 1 when the total, a tracked section or `copies` grew past the limit, 0 otherwise; a build for another compute
+capability or toolkit is only reported. `--update` rewrites the baseline.
 """
 
+import collections
 import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 BASELINE = Path(__file__).with_name("bundle_size_baseline.json")
 FILE = "file"
+COPIES = "copies"
+# How many of the most-copied functions a growing `copies` lists.
+COPIES_SHOWN = 10
+TEXT_SYMBOL = re.compile(r"^[0-9a-f]+ ([0-9a-f]+) [tTwW] (.+)$")
 # Sections smaller than this on both sides move with unrelated noise, so they are kept but not compared.
 TRACKED_MIN = 1 << 20
 # A change counts only past both limits, so a small section's jitter and a large one's few KiB both pass.
@@ -33,6 +40,29 @@ def sections(size_output: str) -> dict[str, int]:
         parts = line.split()
         if len(parts) >= 2 and parts[0].startswith(".") and parts[1].isdigit():
             out[parts[0]] = int(parts[1])
+    return out
+
+
+def copies(library: Path) -> collections.Counter[str] | None:
+    """Bytes past the first copy, per function name compiled more than once; None when the library has no symbols."""
+    out = subprocess.run(
+        ["nm", "--print-size", "--size-sort", "--demangle", str(library)],
+        capture_output=True,
+        text=True,
+        check=False,
+    ).stdout
+    sizes: dict[str, list[int]] = collections.defaultdict(list)
+    for line in out.splitlines():
+        if m := TEXT_SYMBOL.match(line):
+            sizes[m.group(2)].append(int(m.group(1), 16))
+    if not sizes:
+        return None
+    return collections.Counter({name: sum(s) - max(s) for name, s in sizes.items() if len(s) > 1})
+
+
+def stripped(library: Path, into: Path) -> Path:
+    out = into / library.name
+    subprocess.run(["strip", "--strip-all", "-o", str(out), str(library)], check=True)
     return out
 
 
@@ -90,6 +120,8 @@ def main(argv: list[str]) -> int:
     except MissingKernels as error:
         print(error, file=sys.stderr)
         return 2
+    scratch = tempfile.TemporaryDirectory()
+    files[0] = stripped(library, Path(scratch.name))
     # what ships: the sections summed over every file, the total, and each library summed over its archs
     sizes: dict[str, int] = {}
     for path in files:
@@ -99,17 +131,28 @@ def main(argv: list[str]) -> int:
         file_key = f"{FILE}:{path.name}"
         sizes[file_key] = sizes.get(file_key, 0) + path.stat().st_size
     sizes[FILE] = sum(path.stat().st_size for path in files)
+    copied = copies(library)
+    if copied is None:
+        print(f"{library.name} has no symbols, so {COPIES} is not measured (the bundle profile keeps them)")
+    else:
+        sizes[COPIES] = sum(copied.values())
     if "--update" in argv:
         BASELINE.write_text(json.dumps({**key, "sizes": sizes}, indent=2, sort_keys=True) + "\n")
         print(f"wrote {BASELINE}")
         return 0
     saved = json.loads(BASELINE.read_text())
+    if copied is None:
+        saved["sizes"].pop(COPIES, None)
     print(report(saved["sizes"], sizes))
     saved_key = {name: saved.get(name) for name in key}
     if saved_key != key:
         print(f"baseline is for {saved_key}, this build is {key}: not compared")
         return 0
     grown = regressions(saved["sizes"], sizes)
+    if COPIES in grown and copied is not None:
+        print("most-copied functions (bytes past the first copy):", file=sys.stderr)
+        for name, extra in copied.most_common(COPIES_SHOWN):
+            print(f"  {extra >> 10:6} KiB  {name[:150]}", file=sys.stderr)
     if grown:
         print(f"grew past {CHANGE_FRACTION:.0%} and {CHANGE_BYTES >> 10} KiB: {', '.join(grown)}", file=sys.stderr)
         print("if intended, rerun with --size-update and commit the baseline", file=sys.stderr)

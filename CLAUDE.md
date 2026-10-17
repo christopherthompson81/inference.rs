@@ -46,7 +46,8 @@ cargo clippy --workspace --tests --examples -- -D warnings
 # --docs checks the docs of the crates that differ from master (rustdoc is never incremental); --docs-all checks all.
 # Neither renders HTML (`cargo doc` does): rendering merges into target/doc under a lock that serialized the runs.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests.
-# --size builds the CUDA C ABI library under the bundle profile and fails on growth past scripts/bundle_size_baseline.json;
+# --size builds the CUDA C ABI library under the bundle profile and fails on growth past scripts/bundle_size_baseline.json
+# (the file, its sections, and `copies`: code in functions compiled more than once, listed when it grows);
 # --size-update rewrites the baseline, committed with the change that moved it.
 # --metal is the macOS counterpart of --cuda; the metal-only paths are invisible to a CPU or CUDA lint.
 scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--slim] [--docs|--docs-all] [--bindings] [--size|--size-update]
@@ -175,6 +176,8 @@ Never include a "Test plan" section in PR descriptions.
 **Magic values.** Hoist durations, sizes, sentinels, and other constants to named `const`s at the top of the file. A sentinel value that crosses module boundaries (e.g. one place sets `Some(0)`, another checks for it) must be a `pub const`, not a literal both sides happen to share.
 
 **Function shape.** When a function passes 6+ args, prefer wrapping the invariants in a small context struct (e.g. `DispatchCtx<'a>`). Don't add error handling, fallbacks, or validation for scenarios that can't actually occur — trust internal code and framework guarantees. Don't add backwards-compatibility shims unless explicitly asked.
+
+**Generic entry points.** Release builds compile a generic function again in every crate that calls it. In the crates others build on (tensor, nn, quant), keep a public generic function's generic part to converting its arguments, then call a non-generic body (`fn reshape<S: ShapeWithOneHole>` converts the shape and calls `reshape_to(Shape)`). The same goes for an op that differs only in data, such as a kernel name: pass the data, don't make it a type parameter. `--size` reports the copies.
 
 ### Testing Approach
 
