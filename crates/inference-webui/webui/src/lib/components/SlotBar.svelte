@@ -15,6 +15,9 @@
 
   // the select's value for a source the inventory does not list: a Hugging Face repository
   const REPO = "__repo__";
+  // the per-layer select's values: the profile or rule (the server's default), none, or typed overrides
+  const LAYERS_UNIFORM = "uniform";
+  const LAYERS_CUSTOM = "__custom__";
 
   let spec: Slot = $derived(SLOTS[slot]);
   let form = $derived(managerStore.form(slot));
@@ -43,6 +46,15 @@
     pickedProjector ??
       (served?.source === source ? (served?.projector ?? "") : form.source === source ? form.mmproj : ""),
   );
+  let pickedCustomLayers = $state(false);
+  let customLayers = $derived(pickedCustomLayers || (form.cacheLayers !== "" && form.cacheLayers !== LAYERS_UNIFORM));
+  let layersChoice = $derived(customLayers ? LAYERS_CUSTOM : form.cacheLayers);
+  function pickLayers(value: string) {
+    pickedCustomLayers = value === LAYERS_CUSTOM;
+    if (!pickedCustomLayers) form.cacheLayers = value;
+    else if (form.cacheLayers === LAYERS_UNIFORM) form.cacheLayers = "";
+    managerStore.persistForms();
+  }
   let percent = $derived(
     activity.progress && activity.progress.total > 0
       ? Math.round((100 * activity.progress.done) / activity.progress.total)
@@ -265,17 +277,32 @@
         </label>
         <label
           class="flex flex-col gap-1"
-          title="Layers stored differently from the cache type, such as 0=q8,20-27=q6; uniform turns off the model's profile and the rule that keeps a quantized cache's first layer at q8"
+          title="Per-layer cache types, which apply to a quantized K cache (q2-q8): a measured model's profile keeps its sensitive layers at q8, other models keep their first cached layer at q8 below q6; uniform uses the cache type everywhere"
         >
-          <span class="text-[11px] text-gray-500 dark:text-gray-400">Per layer (advanced)</span>
-          <input
-            class="w-36 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
-            placeholder="profile"
-            bind:value={form.cacheLayers}
-            onchange={() => managerStore.persistForms()}
-            disabled={activity.busy || !quantized(form.cacheK)}
-          />
+          <span class="text-[11px] text-gray-500 dark:text-gray-400">Per layer</span>
+          <select
+            class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+            value={layersChoice}
+            onchange={(e) => pickLayers(e.currentTarget.value)}
+            disabled={activity.busy}
+          >
+            <option value="">{entry?.kv_profile ? `Profile: ${entry.kv_profile}` : "Default (layer 0 at q8)"}</option>
+            <option value={LAYERS_UNIFORM}>Uniform</option>
+            <option value={LAYERS_CUSTOM}>Custom...</option>
+          </select>
         </label>
+        {#if customLayers}
+          <label class="flex flex-col gap-1" title="Layers stored differently, such as 0=q8,20-27=q6, applied after the profile or rule">
+            <span class="text-[11px] text-gray-500 dark:text-gray-400">Layers</span>
+            <input
+              class="w-36 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
+              placeholder="0=q8,20-27=q6"
+              bind:value={form.cacheLayers}
+              onchange={() => managerStore.persistForms()}
+              disabled={activity.busy}
+            />
+          </label>
+        {/if}
       {/if}
       {#if spec.device && full}
         <label class="flex flex-col gap-1">

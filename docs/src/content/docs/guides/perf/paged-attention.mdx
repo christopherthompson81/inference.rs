@@ -172,7 +172,10 @@ hybrid Qwen3.5 and Qwen3.8 models and TinyLlama have no such layer. So a quantiz
 - `--pa-cache-layers` (and `paged_cache_layers` on a model or a manager load) sets layers itself, last:
   `0=q8,20-27=q6`. `uniform` stores the type in every layer, without a profile or the rule.
 
-The load logs the plan it chose (`PagedAttention KV cache type is q4, with the Qwen3 0.6B profile`). Quantized widths
+The web UI's slot settings show the plan a quantized cache will get under **Per layer**: the profile the model's
+shape matches (the model manager's inventory reads it from the GGUF metadata or `config.json`), or the default rule;
+**Uniform** and **Custom...** (typed overrides) set the rest. The load logs the plan it chose (`PagedAttention KV
+cache type is q4, with the Qwen3 0.6B profile`). Quantized widths
 can differ by layer; `auto` and `f8e4m3` cannot be mixed with them. `scripts/kv_layer_sweep.py` measures a model's
 layers against a running server and prints its profile entry.
 

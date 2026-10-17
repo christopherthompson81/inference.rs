@@ -133,15 +133,15 @@ impl utoipa::ToSchema for PagedCacheLayers {}
 
 /// The shape a profile recognizes a model by, the same for every quantization of its weights.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-struct Fingerprint {
-    layers: usize,
-    hidden: usize,
-    heads: usize,
-    kv_heads: usize,
-    head_dim: usize,
+pub struct KvFingerprint {
+    pub layers: usize,
+    pub hidden: usize,
+    pub heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
 }
 
-impl Fingerprint {
+impl KvFingerprint {
     fn of(model: &dyn ModelConfigLike) -> Self {
         Self {
             layers: model.num_layers(),
@@ -168,13 +168,21 @@ struct Floor {
 #[serde(deny_unknown_fields)]
 struct Profile {
     name: String,
-    fingerprint: Fingerprint,
+    fingerprint: KvFingerprint,
     floors: std::collections::BTreeMap<usize, Floor>,
 }
 
 fn profiles() -> &'static [Profile] {
     static PROFILES: OnceLock<Vec<Profile>> = OnceLock::new();
     PROFILES.get_or_init(|| serde_json::from_str(PROFILES_JSON).expect("kv_profiles.json is valid"))
+}
+
+/// The measured profile a model of this shape gets when its cache is quantized; `None` leaves it to the general rule.
+pub fn profile_name(fingerprint: &KvFingerprint) -> Option<&'static str> {
+    profiles()
+        .iter()
+        .find(|profile| profile.fingerprint == *fingerprint)
+        .map(|profile| profile.name.as_str())
 }
 
 /// Each layer's cache type (by layer index; only layers with a paged cache matter) and what set it, for the log.
@@ -222,7 +230,7 @@ pub fn plan(
     let mut types = vec![base; model.num_layers()];
     let mut source = format!("{base}");
     if !layers.uniform && matches!(base, PagedCacheType::Quant { .. }) {
-        let fingerprint = Fingerprint::of(model);
+        let fingerprint = KvFingerprint::of(model);
         match profiles()
             .iter()
             .find(|profile| profile.fingerprint == fingerprint)

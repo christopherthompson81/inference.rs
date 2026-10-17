@@ -27,6 +27,8 @@ export interface InventoryModel {
   quantization: string | null;
   context_length: number | null;
   base_model: string | null;
+  /** The measured KV cache profile a quantized cache on it follows; null, the general rule. */
+  kv_profile: string | null;
   size_bytes: number;
   modified: number | null;
   files: string[];
