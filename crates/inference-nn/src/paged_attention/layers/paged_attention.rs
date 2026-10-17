@@ -345,6 +345,9 @@ fn gather_kv_cache_for_layout(
     head_dim: usize,
     dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
+    // only a quantized cache, CUDA's, needs the head dim its rows hold
+    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+    let _ = head_dim;
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
