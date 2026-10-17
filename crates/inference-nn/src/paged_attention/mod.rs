@@ -26,7 +26,9 @@ pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
 pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
-pub use cache_layers::{CachePlan, PagedCacheLayers, plan as cache_plan};
+pub use cache_layers::{
+    CachePlan, KvFingerprint, PagedCacheLayers, plan as cache_plan, profile_name as kv_profile_name,
+};
 pub use config::{
     HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
 };

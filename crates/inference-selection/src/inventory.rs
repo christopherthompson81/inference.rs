@@ -11,6 +11,7 @@ use std::{
 use anyhow::{Context, Result, bail};
 use inference_core::{DetectedModelKind, default_hf_cache_dir, detect_local_model};
 use inference_gguf::base_model::source_hf_base_model_id;
+use inference_nn::paged_attention::{KvFingerprint, kv_profile_name};
 use inference_quant::GgufDType;
 use inference_tensor::quantized::gguf_file::{self, Value};
 use serde::{Deserialize, Serialize};
@@ -103,6 +104,8 @@ pub struct InventoryModel {
     pub context_length: Option<u64>,
     /// The Hugging Face model it derives from.
     pub base_model: Option<String>,
+    /// The measured KV cache profile a quantized cache on it follows (its shape matched one); unset, the general rule.
+    pub kv_profile: Option<String>,
     pub size_bytes: u64,
     /// Last modification, in Unix seconds.
     pub modified: Option<u64>,
@@ -454,6 +457,46 @@ struct GgufFacts {
     /// An importance matrix (llama.cpp's `general.type = imatrix`), data for quantizing rather than a model.
     imatrix: bool,
     dominant_dtype: Option<String>,
+    kv_profile: Option<String>,
+}
+
+// a GGUF's shape as the loaded model reports it: block_count counts the MTP layers, a hybrid may list KV heads per layer
+fn gguf_kv_fingerprint(metadata: &HashMap<String, Value>, arch: &str) -> Option<KvFingerprint> {
+    let count = |key: &str| {
+        let value = metadata.get(&format!("{arch}.{key}"))?;
+        match value.to_vec() {
+            Ok(values) => values.iter().filter_map(|v| v.to_u64().ok()).max(),
+            Err(_) => value.to_u64().ok(),
+        }
+        .map(|n| n as usize)
+    };
+    let hidden = count("embedding_length")?;
+    let heads = count("attention.head_count")?;
+    Some(KvFingerprint {
+        layers: count("block_count")? - count("nextn_predict_layers").unwrap_or(0),
+        hidden,
+        heads,
+        kv_heads: count("attention.head_count_kv").unwrap_or(heads),
+        head_dim: count("attention.key_length").unwrap_or(hidden / heads),
+    })
+}
+
+fn config_kv_fingerprint(config: &serde_json::Value) -> Option<KvFingerprint> {
+    let text = if config["text_config"].is_object() {
+        &config["text_config"]
+    } else {
+        config
+    };
+    let count = |key: &str| text[key].as_u64().map(|n| n as usize);
+    let hidden = count("hidden_size")?;
+    let heads = count("num_attention_heads")?;
+    Some(KvFingerprint {
+        layers: count("num_hidden_layers")?,
+        hidden,
+        heads,
+        kv_heads: count("num_key_value_heads").unwrap_or(heads),
+        head_dim: count("head_dim").unwrap_or(hidden / heads),
+    })
 }
 
 fn gguf_facts(shards: &[PathBuf]) -> Result<GgufFacts> {
@@ -498,7 +541,13 @@ fn gguf_facts(shards: &[PathBuf]) -> Result<GgufFacts> {
         .into_iter()
         .max_by_key(|(name, bytes)| (*bytes, *name))
         .map(|(name, _)| name.to_string());
+    let kv_profile = architecture
+        .as_deref()
+        .and_then(|arch| gguf_kv_fingerprint(metadata, arch))
+        .and_then(|fingerprint| kv_profile_name(&fingerprint))
+        .map(str::to_string);
     Ok(GgufFacts {
+        kv_profile,
         name: meta_string(metadata, "general.name"),
         size_label: meta_string(metadata, "general.size_label"),
         architecture,
@@ -611,6 +660,7 @@ fn gguf_models_in(
             model.size_label = facts.size_label;
             model.context_length = facts.context_length;
             model.base_model = facts.base_model;
+            model.kv_profile = facts.kv_profile;
             model
         })
         .collect()
@@ -659,6 +709,9 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
         model.quantization = config["quantization_config"]["quant_method"]
             .as_str()
             .map(str::to_string);
+        model.kv_profile = config_kv_fingerprint(&config)
+            .and_then(|fingerprint| kv_profile_name(&fingerprint))
+            .map(str::to_string);
         if config["model_type"].as_str() == Some(LAYOUT_ARCHITECTURE) {
             model.kind = Some(InventoryKind::Layout);
             return model;
@@ -697,6 +750,7 @@ fn base_model_entry(path: PathBuf, format: ModelFormat, origin: Origin<'_>) -> I
         quantization: None,
         context_length: None,
         base_model: None,
+        kv_profile: None,
         size_bytes: 0,
         modified: None,
         files: Vec::new(),
@@ -786,6 +840,50 @@ mod tests {
             .iter()
             .find(|model| model.path.ends_with(name))
             .unwrap_or_else(|| panic!("`{name}` is missing from {:?}", scan.models))
+    }
+
+    #[test]
+    fn a_models_shape_names_its_kv_profile() {
+        let dir = tempfile::tempdir().unwrap();
+        // the 27B hybrid's shape, with the MTP layer block_count counts
+        write_gguf(
+            &dir.path().join("hybrid-IQ4_XS.gguf"),
+            &[
+                ("general.architecture", text("qwen35")),
+                ("qwen35.block_count", Value::U32(65)),
+                ("qwen35.nextn_predict_layers", Value::U32(1)),
+                ("qwen35.embedding_length", Value::U32(5120)),
+                ("qwen35.attention.head_count", Value::U32(24)),
+                ("qwen35.attention.head_count_kv", Value::U32(4)),
+                ("qwen35.attention.key_length", Value::U32(256)),
+            ],
+        );
+        write_gguf(
+            &dir.path().join("unmeasured-Q8_0.gguf"),
+            &[
+                ("general.architecture", text("qwen3")),
+                ("qwen3.block_count", Value::U32(30)),
+                ("qwen3.embedding_length", Value::U32(1024)),
+                ("qwen3.attention.head_count", Value::U32(16)),
+            ],
+        );
+        let checkpoint = dir.path().join("small-dense");
+        fs::create_dir(&checkpoint).unwrap();
+        fs::write(
+            checkpoint.join("config.json"),
+            r#"{"architectures": ["Qwen3ForCausalLM"], "num_hidden_layers": 28, "hidden_size": 1024,
+                "num_attention_heads": 16, "num_key_value_heads": 8, "head_dim": 128}"#,
+        )
+        .unwrap();
+        fs::write(checkpoint.join("model.safetensors"), b"").unwrap();
+        let scan = scan_models(&ScanRequest {
+            folders: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        });
+        let profile = |name| by_name(&scan, name).kv_profile.as_deref();
+        assert_eq!(profile("hybrid-IQ4_XS.gguf"), Some("Qwen3.8 27B"));
+        assert_eq!(profile("small-dense"), Some("Qwen3 0.6B"));
+        assert_eq!(profile("unmeasured-Q8_0.gguf"), None);
     }
 
     #[test]
