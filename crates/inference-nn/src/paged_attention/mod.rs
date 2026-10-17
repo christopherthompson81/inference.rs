@@ -8,6 +8,7 @@ pub mod block_hash;
 pub mod block_pool;
 pub mod block_table_rows;
 mod cache_engine;
+mod cache_layers;
 mod config;
 /// Encoder output cache for multimodal models (vision/audio encoder outputs).
 pub mod encoder_cache;
@@ -25,6 +26,7 @@ pub const _PAD_SLOT_ID: i64 = -1;
 
 pub use attention_backend::AttentionBackendKind;
 pub use cache_engine::{CacheConfig, CacheEngine, PagedCacheType};
+pub use cache_layers::{CachePlan, PagedCacheLayers, plan as cache_plan};
 pub use config::{
     HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
 };
@@ -190,6 +192,8 @@ pub struct PagedAttentionConfig {
     pub block_size: Option<usize>,
     pub mem_gpu: MemoryGpuConfig,
     pub cache_type: PagedCacheType,
+    /// Per-layer storage on top of `cache_type`; the default takes the model's profile or the general rule.
+    pub cache_layers: PagedCacheLayers,
     pub serving_capacity: Option<usize>,
     pub base_device_memory_reservation_bytes: usize,
     pub primary_activation_memory_reservation_bytes: usize,
@@ -215,6 +219,7 @@ impl PagedAttentionConfig {
             block_size,
             mem_gpu,
             cache_type,
+            cache_layers: PagedCacheLayers::default(),
             serving_capacity: None,
             base_device_memory_reservation_bytes: 0,
             primary_activation_memory_reservation_bytes: 0,
@@ -223,6 +228,11 @@ impl PagedAttentionConfig {
             recurrent_checkpoint_lanes_auto: false,
             resolve_memory_utilization_after_load: true,
         })
+    }
+
+    pub fn with_cache_layers(mut self, cache_layers: PagedCacheLayers) -> Self {
+        self.cache_layers = cache_layers;
+        self
     }
 
     pub fn with_serving_capacity(mut self, serving_capacity: usize) -> anyhow::Result<Self> {
@@ -306,21 +316,36 @@ fn trim_cuda_mempool(device: &Device) -> inference_tensor::Result<()> {
 
 const SIZE_IN_MB: usize = 1024 * 1024;
 
-// `$value_bytes` is a value's (numerator, denominator) bytes: quantized caches take a fraction of a byte per value
+// `$token_bytes` is a token's cache bytes as (numerator, denominator): quantized layers take fractions of a byte
 macro_rules! mb_to_blocks {
-    ($mb_size:expr, $value_bytes:expr, $block_size:expr, $config:expr) => {
-        $mb_size * $value_bytes.1
-            / $value_bytes.0
-            / $block_size
-            / $config.total_kv_cache_elements_per_token()
+    ($mb_size:expr, $token_bytes:expr, $block_size:expr) => {
+        $mb_size * $token_bytes.1 / $token_bytes.0 / $block_size
     };
 }
 
 macro_rules! ctxt_to_blocks {
-    ($context_len:expr, $value_bytes:expr, $block_size:expr, $config:expr) => {
-        ($context_len * $value_bytes.0 * $config.total_kv_cache_elements_per_token())
-            .div_ceil($value_bytes.1)
+    ($context_len:expr, $token_bytes:expr) => {
+        ($context_len * $token_bytes.0).div_ceil($token_bytes.1)
     };
+}
+
+// A value's bytes all share this denominator: 32 covers a quantized layer's K-and-V average, (2k + 1 + 2v + 1) / 32.
+const VALUE_BYTES_DENOMINATOR: usize = 32;
+
+/// A token's paged cache bytes over every layer, each at its own type, as (numerator, denominator).
+pub fn kv_bytes_per_token(
+    plan: &CachePlan,
+    dtype: DType,
+    config: &dyn ModelConfigLike,
+) -> (usize, usize) {
+    let numerator = (0..config.num_layers())
+        .filter_map(|idx| {
+            let elements = config.layer_kv_cache_elements_per_token(idx)?;
+            let (num, den) = plan.layers.get(idx)?.bytes_per_value(dtype);
+            Some(elements * num * (VALUE_BYTES_DENOMINATOR / den))
+        })
+        .sum();
+    (numerator, VALUE_BYTES_DENOMINATOR)
 }
 
 fn fit_post_load_cache_budget(
@@ -372,6 +397,7 @@ pub fn calculate_cache_config(
     block_size: Option<usize>,
     dtype: DType,
     cache_type: PagedCacheType,
+    cache_layers: &PagedCacheLayers,
     config: &dyn ModelConfigLike,
     device: &Device,
     layer_devices: &[Option<Device>],
@@ -383,11 +409,28 @@ pub fn calculate_cache_config(
     if !SUPPORTED_BLOCK_SIZE.contains(&block_size) {
         anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
     }
-    cache_type
-        .validate(dtype, config, device, layer_devices)
-        .map_err(anyhow::Error::msg)?;
+    let plan = cache_plan(cache_type, cache_layers, config);
+    let distinct = plan.distinct(config);
+    // a cache engine allocates one element type, so only quantized widths (all u8 rows) can differ by layer
+    let quantized = |cache: &PagedCacheType| matches!(cache, PagedCacheType::Quant { .. });
+    if distinct.len() > 1 && !distinct.iter().all(quantized) {
+        anyhow::bail!(
+            "per-layer KV cache types can mix quantized widths (q2..q8) only; `{}` gives {}",
+            cache_layers,
+            distinct
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+    for cache in distinct {
+        cache
+            .validate(dtype, config, device, layer_devices)
+            .map_err(anyhow::Error::msg)?;
+    }
     let model_dtype = dtype;
-    let value_bytes = cache_type.bytes_per_value(dtype);
+    let token_bytes = kv_bytes_per_token(&plan, dtype, config);
     let dtype = cache_type.to_dtype(dtype);
 
     let mut cache_devices = Vec::new();
@@ -481,7 +524,7 @@ pub fn calculate_cache_config(
             }
             MemoryGpuConfig::ContextSize(toks) => {
                 // ContextSize is demand-driven (bytes needed for N tokens), not a memory budget, so model weight does not apply here.
-                ctxt_to_blocks!(toks, value_bytes, block_size, config).div_ceil(SIZE_IN_MB)
+                ctxt_to_blocks!(toks, token_bytes).div_ceil(SIZE_IN_MB)
             }
         };
         if let Some(memory) = post_load_memory {
@@ -513,8 +556,7 @@ pub fn calculate_cache_config(
     let mut mem_gpu = min_mem_gpu;
     if device.is_metal() {
         let max_tokens = max_num_tokens.unwrap_or(config.max_seq_len());
-        let mem_for_tokens =
-            ctxt_to_blocks!(max_tokens, value_bytes, block_size, config) / SIZE_IN_MB;
+        let mem_for_tokens = ctxt_to_blocks!(max_tokens, token_bytes) / SIZE_IN_MB;
         if mem_for_tokens < mem_gpu {
             if !silent {
                 info!(
@@ -526,7 +568,7 @@ pub fn calculate_cache_config(
         }
     }
 
-    let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, value_bytes, block_size, config);
+    let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, token_bytes, block_size);
     if num_gpu_blocks == 0 {
         anyhow::bail!(
             "Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention."
@@ -536,7 +578,10 @@ pub fn calculate_cache_config(
     if !silent {
         let available_context_tokens = num_gpu_blocks.saturating_sub(1) * block_size;
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
-        info!("PagedAttention KV cache type is {cache_type} ({dtype:?})");
+        info!(
+            "PagedAttention KV cache type is {} ({dtype:?})",
+            plan.source
+        );
         info!(
             "Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {available_context_tokens} tokens"
         );
@@ -545,6 +590,7 @@ pub fn calculate_cache_config(
         block_size,
         num_gpu_blocks,
         cache_type,
+        layer_types: plan.layers,
         kv_cache_group_ids: config.kv_cache_group_ids(),
     })
 }

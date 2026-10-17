@@ -22,6 +22,7 @@ fn test_scheduler() -> PagedAttentionScheduler {
             block_size: 8,
             num_gpu_blocks: 128,
             cache_type: PagedCacheType::Auto,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0],
         },
     )
@@ -693,6 +694,7 @@ fn cache_pressure_discards_staged_prefix_admission_until_retry_succeeds() {
             block_size: 8,
             num_gpu_blocks: 2,
             cache_type: PagedCacheType::Auto,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0],
         },
     );
@@ -739,6 +741,7 @@ fn disabled_waiting_prompt_preemption_preserves_decode_state() {
             block_size: 8,
             num_gpu_blocks: 5,
             cache_type: PagedCacheType::Auto,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0],
         },
     );
@@ -2704,6 +2707,7 @@ fn lazy_prompt_reservation_pressure_preserves_decode_and_staged_validation() {
             block_size: 8,
             num_gpu_blocks: 8,
             cache_type: PagedCacheType::Auto,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0],
         },
     );
@@ -2837,6 +2841,7 @@ fn lazy_prompt_still_rejects_a_full_request_over_capacity() {
             block_size: 8,
             num_gpu_blocks: 4,
             cache_type: PagedCacheType::Auto,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0],
         },
     );

@@ -8,8 +8,8 @@ use inference_api::{
     Engine, EngineSpec,
     engine::{
         AdapterSpec, AgenticSpec, AutoDeviceMapParams, HfConfigOverrides, McpClientConfig,
-        MmprojSelection, ModelSelected, MtpSpec, PagedCacheSpec, PagedCacheType, RuntimeSpec,
-        SandboxLimits, SearchSpec, SkillsSpec,
+        MmprojSelection, ModelSelected, MtpSpec, PagedCacheLayers, PagedCacheSpec, PagedCacheType,
+        RuntimeSpec, SandboxLimits, SearchSpec, SkillsSpec,
     },
     initialize_logging,
     lora_adapters::LoraAdapterApiConfig,
@@ -90,7 +90,7 @@ pub(crate) fn model_spec(
 /// The runtime settings that come with a model's options, without the model.
 fn model_runtime_spec(model_type: &ModelType, global: &GlobalOptions) -> Result<RuntimeSpec> {
     let (max_model_len, hf_config_overrides) = extract_hf_config_settings(model_type);
-    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
+    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type, cache_layers) =
         extract_paged_attn_settings(model_type);
     let (cpu, device_layers) = extract_device_settings(model_type);
     let runtime = RuntimeSpec {
@@ -107,6 +107,7 @@ fn model_runtime_spec(model_type: &ModelType, global: &GlobalOptions) -> Result<
             memory_fraction,
             block_size,
             cache_type,
+            cache_layers,
         },
         encoder_cache_memory_bytes: extract_encoder_cache_memory_bytes(model_type)?,
         hf_config_overrides,
@@ -781,7 +782,17 @@ pub(crate) fn extract_paged_attn_settings(
         ModelType::Text { cache, .. } => cache,
         ModelType::Multimodal { cache, .. } => cache,
         ModelType::Embedding { cache, .. } => cache,
-        _ => return (None, None, None, None, None, PagedCacheType::Auto),
+        _ => {
+            return (
+                None,
+                None,
+                None,
+                None,
+                None,
+                PagedCacheType::Auto,
+                PagedCacheLayers::default(),
+            );
+        }
     };
 
     cache.paged_attn.clone().into_builder_flags()

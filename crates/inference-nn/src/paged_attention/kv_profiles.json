@@ -1,0 +1,27 @@
+[
+  {
+    "name": "Qwen3 0.6B",
+    "fingerprint": {"layers": 28, "hidden": 1024, "heads": 16, "kv_heads": 8, "head_dim": 128},
+    "floors": {"0": {"k": 8, "v": 8}, "5": {"k": 8, "v": 8}}
+  },
+  {
+    "name": "Qwen2.5-Coder 3B",
+    "fingerprint": {"layers": 36, "hidden": 2048, "heads": 16, "kv_heads": 2, "head_dim": 128},
+    "floors": {"0": {"k": 8, "v": 8}}
+  },
+  {
+    "name": "TinyLlama 1.1B",
+    "fingerprint": {"layers": 22, "hidden": 2048, "heads": 32, "kv_heads": 4, "head_dim": 64},
+    "floors": {}
+  },
+  {
+    "name": "Qwen3.5 0.8B",
+    "fingerprint": {"layers": 24, "hidden": 1024, "heads": 8, "kv_heads": 2, "head_dim": 256},
+    "floors": {}
+  },
+  {
+    "name": "Qwen3.8 27B",
+    "fingerprint": {"layers": 64, "hidden": 5120, "heads": 24, "kv_heads": 4, "head_dim": 256},
+    "floors": {}
+  }
+]

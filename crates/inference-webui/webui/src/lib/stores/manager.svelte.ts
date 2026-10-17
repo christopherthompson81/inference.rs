@@ -89,6 +89,8 @@ export interface SlotForm {
   /** The KV cache's K and V storage (`auto`, `f8e4m3`, `q2`..`q8`); "" keeps the server's. */
   cacheK: string;
   cacheV: string;
+  /** Per-layer cache storage (`0=q8,20-27=q6` or `uniform`); "" takes the model's profile or the general rule. */
+  cacheLayers: string;
   /** Whether the server loads this slot again when it starts. */
   loadAtStart: boolean;
 }
@@ -135,6 +137,7 @@ function defaultForm(slot: SlotId): SlotForm {
     device: "auto",
     cacheK: "",
     cacheV: "",
+    cacheLayers: "",
     loadAtStart: false,
   };
 }
@@ -237,6 +240,7 @@ class ManagerStore {
         device: request.device ?? "auto",
         cacheK,
         cacheV,
+        cacheLayers: request.paged_cache_layers ?? "",
         loadAtStart: kept.load_at_start,
       });
     }
@@ -255,6 +259,7 @@ class ManagerStore {
       if (form.mmproj) request.mmproj = form.mmproj;
       const cache = cacheType(form);
       if (cache) request.paged_cache_type = cache;
+      if (form.cacheLayers.trim()) request.paged_cache_layers = form.cacheLayers.trim();
     }
     if (spec.vad) {
       const vad = form.vad ?? this.vads[0]?.path ?? "";

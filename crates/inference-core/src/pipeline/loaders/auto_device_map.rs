@@ -95,12 +95,18 @@ pub fn get_device_layers(
     let base_device_memory_reservation_bytes = paged_attn_config
         .as_ref()
         .map_or(0, |config| config.base_device_memory_reservation_bytes);
-    // a value's bytes as (numerator, denominator): an fp8 or quantized cache takes less than the activations' dtype
-    let value_bytes = paged_attn_config
-        .as_ref()
-        .map_or((dtype.size_in_bytes(), 1), |cfg| {
-            cfg.cache_type.bytes_per_value(dtype)
-        });
+    // each layer's value bytes as (numerator, denominator): fp8 or quantized layers take less than the activations'
+    let cache_plan = paged_attn_config.as_ref().map(|cfg| {
+        inference_nn::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model_cfg)
+    });
+    let value_bytes = |idx: usize| {
+        cache_plan
+            .as_ref()
+            .and_then(|plan| plan.layers.get(idx))
+            .map_or((dtype.size_in_bytes(), 1), |cache| {
+                cache.bytes_per_value(dtype)
+            })
+    };
     let kv_cache_elems = match paged_attn_config {
         Some(cfg) => {
             // The mapping estimate is bounded independently from the post-load memory mode.
@@ -178,6 +184,7 @@ pub fn get_device_layers(
                 Some(cfg.block_size.unwrap_or(DEFAULT_PAGED_ATTENTION_BLOCK_SIZE)),
                 dtype,
                 cfg.cache_type,
+                &cfg.cache_layers,
                 &*model_cfg,
                 &devices[0],
                 &devices.iter().map(|d| Some(d.clone())).collect::<Vec<_>>(),
@@ -210,10 +217,10 @@ pub fn get_device_layers(
         }
     };
     // Per paged layer; hybrid models leave the recurrent/linear layers out of the cache entirely.
-    let kv_cache_bytes = (kv_cache_elems * value_bytes.0).div_ceil(value_bytes.1);
     let kv_bytes_for_layer = |idx: usize| {
         if model_cfg.layer_has_paged_kv_cache(idx) {
-            kv_cache_bytes
+            let (num, den) = value_bytes(idx);
+            (kv_cache_elems * num).div_ceil(den)
         } else {
             0
         }

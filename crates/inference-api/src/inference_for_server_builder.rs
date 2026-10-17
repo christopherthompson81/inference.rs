@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use inference_core::{
     AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
     HfConfigOverrides, InferenceRs, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
-    ModelLoaderConfig, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheType,
-    SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel, TokenSource,
-    ToolCallbackWithTool, paged_attn_supported, parse_isq_value,
+    ModelLoaderConfig, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheLayers,
+    PagedCacheType, SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel,
+    TokenSource, ToolCallbackWithTool, paged_attn_supported, parse_isq_value,
     reserve_external_mtp_memory_with_runtime,
 };
 use inference_selection::{
@@ -52,6 +52,9 @@ pub struct ModelConfig {
     /// Stores this model's paged KV cache this way instead of the engine's setting.
     #[serde(default)]
     pub paged_cache_type: Option<PagedCacheType>,
+    /// This model's per-layer cache storage instead of the engine's setting.
+    #[serde(skip)]
+    pub paged_cache_layers: Option<PagedCacheLayers>,
     /// Sequences this model serves at once instead of the engine's setting.
     #[serde(default)]
     pub max_seqs: Option<usize>,
@@ -76,6 +79,7 @@ impl ModelConfig {
             hf_revision: None,
             paged_context_len: None,
             paged_cache_type: None,
+            paged_cache_layers: None,
             max_seqs: None,
             mtp: None,
         }
@@ -283,6 +287,7 @@ pub struct InferenceRsForServerBuilder {
 
     /// PagedAttention KV cache type
     paged_cache_type: PagedCacheType,
+    paged_cache_layers: PagedCacheLayers,
 
     /// Optional MTP assistant configuration.
     mtp_config: Option<MtpConfig>,
@@ -341,6 +346,7 @@ impl Default for InferenceRsForServerBuilder {
             tool_callbacks: HashMap::new(),
             mcp_client_config: None,
             paged_cache_type: defaults::PAGED_CACHE_TYPE,
+            paged_cache_layers: PagedCacheLayers::default(),
             mtp_config: defaults::MTP_CONFIG,
             encoder_cache_memory_bytes: None,
             disable_eos_stop: false,
@@ -650,6 +656,11 @@ impl InferenceRsForServerBuilder {
     }
 
     /// Sets the block size for PagedAttention.
+    pub fn with_paged_cache_layers(mut self, layers: PagedCacheLayers) -> Self {
+        self.paged_cache_layers = layers;
+        self
+    }
+
     pub fn with_paged_attn_cache_type(mut self, cache_type: PagedCacheType) -> Self {
         self.paged_cache_type = cache_type;
         self
@@ -779,6 +790,7 @@ impl InferenceRsForServerBuilder {
             self.paged_cache_type,
             !paged_attn,
         )?
+        .map(|config| config.with_cache_layers(self.paged_cache_layers))
         .map(|config| config.with_serving_capacity(self.max_seqs))
         .transpose()?;
         let max_seqs = self.max_seqs;
@@ -893,6 +905,7 @@ impl InferenceRsForServerBuilder {
                 self.paged_cache_type,
                 !paged_attn,
             )?
+            .map(|config| config.with_cache_layers(self.paged_cache_layers))
             .map(|config| config.with_serving_capacity(self.max_seqs))
             .transpose()?,
             self.mtp_config.as_ref(),
@@ -1397,6 +1410,9 @@ impl ModelLoadSettings {
                 model_config.model_id
             ),
             _ => {}
+        }
+        if let (Some(cache), Some(layers)) = (cache.as_mut(), model_config.paged_cache_layers) {
+            cache.cache_layers = layers;
         }
         match (cache.as_mut(), model_config.paged_cache_type) {
             (Some(cache), Some(cache_type)) => cache.cache_type = cache_type,

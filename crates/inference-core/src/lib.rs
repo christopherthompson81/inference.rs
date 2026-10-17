@@ -167,7 +167,9 @@ pub use inference_models_speech::{
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxMode, SandboxPolicy, SandboxProfile};
-pub use paged_attention::{MemoryGpuConfig, PagedAttentionConfig, PagedCacheType};
+pub use paged_attention::{
+    MemoryGpuConfig, PagedAttentionConfig, PagedCacheLayers, PagedCacheType,
+};
 #[cfg(feature = "models-gemma")]
 pub use pipeline::GemmaLoader;
 #[cfg(feature = "models-qwen")]

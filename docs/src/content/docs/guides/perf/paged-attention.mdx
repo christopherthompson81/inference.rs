@@ -158,6 +158,24 @@ K is the sensitive half. Teacher-forced perplexity through the cache
 `q8/q4` is the safe default when memory is short: lossless on both and smaller than FP8. Hybrid models, whose
 few attention layers hold the whole cache (Qwen3.5 and later), take `q4`.
 
+### Per-layer types
+
+Low K widths cost most in a few layers, and which ones depends on the model: in dense Qwen2 and Qwen3 models layer
+0 dominates (Qwen2.5-Coder 3B's perplexity goes from 5.35 to 24.3 when only layer 0's K drops to 3 bits), while the
+hybrid Qwen3.5 and Qwen3.8 models and TinyLlama have no such layer. So a quantized cache type is applied per layer:
+
+- A measured model's **profile** (`crates/inference-nn/src/paged_attention/kv_profiles.json`, recognized by its
+  layer count, hidden size, head counts and head size, so every quantization of its weights matches) names the
+  layers that stay at `q8`. Qwen3 0.6B at `q4` keeps layers 0 and 5 at `q8`, which takes its perplexity cost from
+  +22% to +1.9% for 7% more cache.
+- A model **without a profile** keeps its first cached layer at `q8` when the type's K is under 6 bits.
+- `--pa-cache-layers` (and `paged_cache_layers` on a model or a manager load) sets layers itself, last:
+  `0=q8,20-27=q6`. `uniform` stores the type in every layer, without a profile or the rule.
+
+The load logs the plan it chose (`PagedAttention KV cache type is q4, with the Qwen3 0.6B profile`). Quantized widths
+can differ by layer; `auto` and `f8e4m3` cannot be mixed with them. `scripts/kv_layer_sweep.py` measures a model's
+layers against a running server and prints its profile entry.
+
 Quantized caches run on CUDA with fattn's kernels (Turing or newer) and the HND layout, for models whose K and V
 heads have equal sizes that are a multiple of 64; other models fail to load with the reason. MLA models (DeepSeek)
 are not supported.

@@ -263,6 +263,19 @@
             {/if}
           </select>
         </label>
+        <label
+          class="flex flex-col gap-1"
+          title="Layers stored differently from the cache type, such as 0=q8,20-27=q6; uniform turns off the model's profile and the rule that keeps a quantized cache's first layer at q8"
+        >
+          <span class="text-[11px] text-gray-500 dark:text-gray-400">Per layer (advanced)</span>
+          <input
+            class="w-36 rounded-md border border-gray-300 bg-white px-2 py-1 font-mono text-xs dark:border-gray-700 dark:bg-gray-950"
+            placeholder="profile"
+            bind:value={form.cacheLayers}
+            onchange={() => managerStore.persistForms()}
+            disabled={activity.busy || !quantized(form.cacheK)}
+          />
+        </label>
       {/if}
       {#if spec.device && full}
         <label class="flex flex-col gap-1">

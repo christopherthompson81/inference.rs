@@ -49,6 +49,7 @@ inference bench [OPTIONS] [COMMAND]
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
+| `--pa-cache-layers <CACHE_LAYERS>` |  | Per-layer KV cache storage on top of --pa-cache-type: layers=type items such as 0=q8,20-27=q6, or uniform (the type everywhere, without the model's profile or the general rule) |
 | `--encoder-cache-memory-mb <ENCODER_CACHE_MEMORY_MB>` |  | Maximum logical tensor memory retained by the multimodal encoder cache, in MiB |
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
@@ -111,6 +112,7 @@ inference bench auto [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
+| `--pa-cache-layers <CACHE_LAYERS>` |  | Per-layer KV cache storage on top of --pa-cache-type: layers=type items such as 0=q8,20-27=q6, or uniform (the type everywhere, without the model's profile or the general rule) |
 | `--encoder-cache-memory-mb <ENCODER_CACHE_MEMORY_MB>` |  | Maximum logical tensor memory retained by the multimodal encoder cache, in MiB |
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
@@ -160,6 +162,7 @@ inference bench text [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
+| `--pa-cache-layers <CACHE_LAYERS>` |  | Per-layer KV cache storage on top of --pa-cache-type: layers=type items such as 0=q8,20-27=q6, or uniform (the type everywhere, without the model's profile or the general rule) |
 
 ## inference bench multimodal
 
@@ -205,6 +208,7 @@ inference bench multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
+| `--pa-cache-layers <CACHE_LAYERS>` |  | Per-layer KV cache storage on top of --pa-cache-type: layers=type items such as 0=q8,20-27=q6, or uniform (the type everywhere, without the model's profile or the general rule) |
 | `--encoder-cache-memory-mb <ENCODER_CACHE_MEMORY_MB>` |  | Maximum logical tensor memory retained by the multimodal encoder cache, in MiB |
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
@@ -296,4 +300,5 @@ inference bench embedding [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
+| `--pa-cache-layers <CACHE_LAYERS>` |  | Per-layer KV cache storage on top of --pa-cache-type: layers=type items such as 0=q8,20-27=q6, or uniform (the type everywhere, without the model's profile or the general rule) |
 
