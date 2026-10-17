@@ -280,7 +280,19 @@ pub struct CacheConfig {
     pub block_size: usize,
     pub num_gpu_blocks: usize,
     pub cache_type: PagedCacheType,
+    /// Each layer's own storage (`cache_layers::plan`); a layer past its end stores `cache_type`.
+    pub layer_types: Vec<PagedCacheType>,
     pub kv_cache_group_ids: Vec<u32>,
+}
+
+impl CacheConfig {
+    /// What layer `layer_idx` stores.
+    pub fn layer_type(&self, layer_idx: usize) -> PagedCacheType {
+        self.layer_types
+            .get(layer_idx)
+            .copied()
+            .unwrap_or(self.cache_type)
+    }
 }
 
 pub type KVCache = (Tensor, Tensor);
@@ -474,7 +486,7 @@ impl CacheEngine {
                     (key_blocks, value_blocks)
                 }
                 KvCacheLayout::FlashInferHnd
-                    if let PagedCacheType::Quant { k, v } = cache_config.cache_type =>
+                    if let PagedCacheType::Quant { k, v } = cache_config.layer_type(layer_idx) =>
                 {
                     // rows of bytes: each head's values at K's or V's bits, then their group scales
                     let (heads, block_size, head_dim) = Self::calculate_flashinfer_block_shape(
@@ -803,6 +815,7 @@ mod tests {
             block_size: 32,
             num_gpu_blocks: 2,
             cache_type: PagedCacheType::F8E4M3,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0],
         };
         let engine = CacheEngine::new(

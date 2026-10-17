@@ -231,3 +231,128 @@ load, fewer and wider loads) is the follow-up.
 
 Size (`scripts/local_ci.sh --size-update`): the package grows 107.74 -> 108.58 MiB (+0.84), almost all of it the
 fattn library's quantized loads (17.01 -> 17.68 MiB).
+
+## Run 8 - 2026-10-18 10:30
+
+Question: does sensitivity to K's bits vary enough by layer to make per-layer cache types worth building?
+
+Command: a temporary per-layer override (branch `exp/kv-layer-sensitivity`: `INFERENCE_KV_LAYER_FILE` lines of
+`layer type`, read at each cache allocation, so a reload through the manager takes a new map), Run 6's decode
+perplexity on Qwen3 0.6B (28 layers, bf16 7.3192): every layer at q8 except one at q3 K (q3/q8).
+
+```
+all q8          7.3287          all q3/q8   12.1119
+one layer at q3/q8, rest q8:
+ 0  8.6068   1 7.4596   2 7.3755   3 7.2855   4 7.4861   5 7.7921   6 7.3243
+ 7  7.4150   8 7.3596   9 7.3596  10 7.5254  11 7.3293  12 7.3329  13 7.3885
+14  7.3034  15 7.3386  16 7.3544  17 7.2815  18 7.3014  19 7.3358  20 7.3061
+21  7.3845  22 7.3776  23 7.3227  24 7.4091  25 7.3774  26 7.3786  27 7.3544
+```
+
+Layer 0 alone carries +1.28 of the +4.78 all layers cost; layer 5 +0.46, layer 10 +0.20, layers 1 and 4
+~+0.15; the other 23 are within noise (~+-0.05). Protecting the few:
+
+```
+q3/q8, layer 0 at q8           9.4477
+q3/q8, layers 0 and 5 at q8    8.5833
+q4,    layer 0 at q8           7.7282   (q4 everywhere 8.9311)
+q4,    layers 0 and 5 at q8    7.4566   (+1.9% vs bf16, at 0.60 bytes a value; q8/q4 is 0.81)
+q3,    layers 0 and 5 at q8    8.5302   (q3 everywhere 12.1908)
+```
+
+Implication: per-layer types are worth building: two of 28 layers at q8 take q4 from +22% to +1.9% for 7%
+more cache. Layer 0 (the attention sinks' layer) leads here and in the literature; the rest are model-specific,
+so the feature wants explicit layer ranges and a way to find the sensitive layers (this sweep, as a tool).
+
+## Run 9 - 2026-10-18 11:30
+
+Question: does a cubic compander (exllamav3's idea) lower the cost of 3-5 bit widths? A grid level u in [-1, 1]
+stands for `a*u^3 + (1 - a)*u` of the group's scale (levels crowd toward zero), encoded by inverting the cubic with
+Newton steps, decoded in the gather and in fattn's loader; `a` set by a temporary `INFERENCE_KV_COMPAND` for widths
+of 5 bits and below.
+
+Command: Run 6's decode perplexity, Qwen3 0.6B.
+
+```
+            q5       q4       q3       q8/q4    q6/q3
+uniform     7.8450   8.9311  12.1908   7.3249   7.3732   (Run 6)
+a = 0.3     8.4922   8.2894  13.4450   7.3458   7.4947
+a = 0.5     8.3429   9.1262  18.5622   7.3165   7.5112
+```
+
+Only q4 at a = 0.3 gains; the rest lose, 3-bit badly. After the 32-point rotation and absmax scaling a group's
+values are not Gaussian enough for a fixed curve to place levels better than the uniform midpoint grid.
+
+Implication: no compander. Protecting sensitive layers (Run 8: q4 with two layers at q8, 7.4566) beats any
+grid change here.
+
+## Run 10 - 2026-10-18 14:25
+
+Question: are the sensitive layers specific to a model, to a family, or common? Run 8's sweep on three more
+models: TinyLlama 1.1B (Llama, 22 layers, Q4_K_M GGUF), Qwen3.5 0.8B (hybrid, attention at layers 3..23 every 4th)
+and Qwen2.5-Coder 3B (Qwen2, 36 layers, Q4_K_M GGUF); each layer alone at q3/q8, the rest q8. Tokenizers for the
+GGUFs from their Hub repos' `tokenizer.json`.
+
+```
+                 bf16     all q8   all q3/q8   worst single layers at q3/q8
+TinyLlama 1.1B   3.7170   3.7098   3.8814      8: 3.7354  15: 3.7276  19: 3.7274  (all others within 0.02)
+Qwen3.5 0.8B     5.1245   5.1210   5.1235      11: 5.1382  19: 5.1302  (no layer matters)
+Qwen2.5-C 3B     5.3613   5.3543  25.1143      0: 24.2777   then 2: 5.3884  12: 5.3886 (all others within 0.03)
+Qwen3 0.6B       7.3192   7.3287  12.1119      0: 8.6068    5: 7.7921  10: 7.5254 (Run 8)
+```
+
+Layer 0 is the whole story in Qwen2.5-Coder (one layer at 3-bit K takes perplexity from 5.35 to 24.3, all but
+3.5% of the full damage) and the largest part in Qwen3. TinyLlama spreads a small cost thinly over its later
+layers with none standing out, and the hybrid Qwen3.5 does not care. No mid-stack layer repeats across models.
+
+Implication: a general rule of keeping layer 0's K at 8 bits covers the catastrophic case seen and costs one
+layer's share; mid-stack layers (Qwen3's 5) are model-specific and belong in profiles. The 27B sweeps (2- and
+3-bit K per attention layer) are next.
+
+## Run 11 - 2026-10-18 13:57
+
+Question: per-layer sensitivity of the model this is for, Qwen3.8 27B (IQ4_XS GGUF, hybrid: attention at layers
+3, 7, ..., 63), at 2- and 3-bit K.
+
+Command: Run 8's sweep, each attention layer alone at q2/q8 and then q3/q8, the rest at q8.
+
+```
+bf16 2.6837   all q8 2.6848   all q2/q8 2.7221 (+1.4%)   all q3/q8 2.6903 (+0.2%)
+one layer at q2/q8: 3 2.6894  7 2.6805  11 2.6856  15 2.6827  19 2.6853  23 2.6769  27 2.6853  31 2.6918
+                    35 2.6800  39 2.6982  43 2.6932  47 2.6835  51 2.6879  55 2.6940  59 2.6891  63 2.6859
+one layer at q3/q8: every layer within 2.6788..2.6913
+```
+
+No layer stands out: the worst single layer at 2-bit K (39) costs 0.5%, and all of them together 1.4%. Like the
+0.8B, the 27B's few attention layers take very low K widths, and no layer 0 problem arises (its first attention
+layer is 3).
+
+Implication: for the 27B no profile is needed; a uniform low width is fine. Per-layer protection matters for dense
+models (Qwen2/Qwen3: layer 0); the general rule keeps the first attention layer's K at 8 bits when a model's
+type is below 6 bits, and profiles carry the model-specific rest.
+
+## Run 12 - 2026-10-18 16:10
+
+Question: does the per-layer feature (profiles, the general rule, `paged_cache_layers`) reproduce the sweeps'
+gains through the real load path?
+
+Command: the test server on this branch; loads through `/v1/manager/load` with `paged_cache_type` and
+`paged_cache_layers`, scored as in Run 6.
+
+Plans chosen at q4 (from the load log): Qwen3 0.6B (safetensors), Qwen3.8 27B (GGUF), TinyLlama 1.1B (GGUF) and
+Qwen2.5-Coder 3B (GGUF) each matched their profile by fingerprint; SmolVLM 256M, without one, got
+`layer 0 at q8 (the first cached layer)`.
+
+```
+Qwen3 0.6B        q4 (profile: 0 and 5, K floor only)   7.5791
+                  q4, layers 0 and 5 at q8 (K and V)     7.4566   (= Run 8)
+                  q4@uniform                             9.0072
+Qwen2.5-Coder 3B  q3 (profile: layer 0)                  5.5416   (bf16 5.3613)
+                  q3@uniform                            26.3844
+```
+
+Raising the protected layers' V as well as K is worth its few bytes (7.5791 -> 7.4566), so profiles and the rule
+keep protected layers at q8 for both. `uniform` reads a little above Run 6's q4 (9.0072 vs 8.9311) since Run 7's
+fattn change (GQA batching) altered rounding. `scripts/kv_layer_sweep.py`, the sweep through
+`paged_cache_layers`, reproduces Run 10 on Qwen3.5 0.8B (baseline 5.1210, layer 3 at q3/q8 +0.10%) and prints
+its profile entry.

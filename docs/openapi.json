@@ -6639,6 +6639,17 @@
               }
             ]
           },
+          "paged_cache_layers": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PagedCacheLayers",
+                "description": "Per-layer cache storage on top of `paged_cache_type`: `layers=type` items such as `0=q8,20-27=q6`, or `uniform`\n(no profile or general rule); unset uses the server's `--pa-cache-layers`."
+              }
+            ]
+          },
           "paged_cache_type": {
             "oneOf": [
               {
@@ -8650,6 +8661,17 @@
               {
                 "$ref": "#/components/schemas/MtpSpec",
                 "description": "Speculative decoding for this model; `runtime.mtp` applies to the first model only."
+              }
+            ]
+          },
+          "paged_cache_layers": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PagedCacheLayers",
+                "description": "This model's per-layer cache storage (`0=q8,20-27=q6` or `uniform`), in place of `runtime.paged_cache`'s."
               }
             ]
           },
@@ -10897,6 +10919,10 @@
           }
         }
       },
+      "PagedCacheLayers": {
+        "type": "string",
+        "description": "Per-layer KV cache storage: `layers=type` items such as `0=q8,20-27=q6`, or `uniform` for the base type everywhere, without the model's profile or the general rule."
+      },
       "PagedCacheSpec": {
         "type": "object",
         "description": "How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`.",
@@ -10908,6 +10934,10 @@
             ],
             "description": "Tokens per block.",
             "minimum": 0
+          },
+          "cache_layers": {
+            "$ref": "#/components/schemas/PagedCacheLayers",
+            "description": "Per-layer storage on top of `cache_type`: `layers=type` items (`0=q8,20-27=q6`), or `uniform` for\n`cache_type` everywhere. Unset, a quantized type keeps the layers the model's profile (or, without one, the\nfirst cached layer) names as sensitive at higher widths."
           },
           "cache_type": {
             "$ref": "#/components/schemas/PagedCacheType"

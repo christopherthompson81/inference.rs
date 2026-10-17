@@ -1,7 +1,7 @@
 //! Several models served by one engine, each request picking one by id.
 
 use inference_api::engine::{
-    EngineCallbacks, EngineSpec, ModelSelected, ModelSpec, PagedCacheType,
+    EngineCallbacks, EngineSpec, ModelSelected, ModelSpec, PagedCacheLayers, PagedCacheType,
 };
 
 use crate::{
@@ -37,6 +37,8 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         // `auto` is the builder's default, so only another type overrides the engine's
         paged_cache_type: (runtime.paged_cache.cache_type != PagedCacheType::Auto)
             .then_some(runtime.paged_cache.cache_type),
+        paged_cache_layers: (runtime.paged_cache.cache_layers != PagedCacheLayers::default())
+            .then_some(runtime.paged_cache.cache_layers),
         max_seqs: runtime.max_seqs,
         mtp: runtime.mtp,
     }

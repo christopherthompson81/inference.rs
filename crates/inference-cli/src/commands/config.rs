@@ -174,6 +174,7 @@ fn build_model_specs(
             hf_revision: None,
             paged_context_len: None,
             paged_cache_type: None,
+            paged_cache_layers: None,
             max_seqs: entry.max_seqs,
             mtp: None,
         });
@@ -199,7 +200,7 @@ struct ConfigSpecInputs<'a> {
 /// The engine a TOML config loads: every model it lists, sharing its runtime settings.
 fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
     let (models, cpu) = build_model_specs(inputs.models, inputs.runtime)?;
-    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
+    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type, cache_layers) =
         inputs.paged_attn.into_builder_flags();
     let base = RuntimeSpec {
         device: cpu.then(|| "cpu".to_string()),
@@ -213,6 +214,7 @@ fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
             memory_fraction,
             block_size,
             cache_type,
+            cache_layers,
         },
         ..Default::default()
     };

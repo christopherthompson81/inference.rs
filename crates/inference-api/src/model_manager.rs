@@ -16,8 +16,8 @@ use serde_json::json;
 
 use crate::api_error::{ApiError, ApiErrorKind};
 use crate::engine::{
-    Engine, ModelSpec, MtpSpec, PagedCacheType, ProgressEvent, ProgressSink, add_progress_sink,
-    explicit_device,
+    Engine, ModelSpec, MtpSpec, PagedCacheLayers, PagedCacheType, ProgressEvent, ProgressSink,
+    add_progress_sink, explicit_device,
 };
 use crate::model_inventory::{
     ModelDownloadRequest, ScanRequest, delete_hf_cache_repo, inspect_model, is_repo_id,
@@ -100,6 +100,10 @@ pub struct ManagedLoadRequest {
     /// those bits) or `qK/qV`; unset uses the server's `--pa-cache-type`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paged_cache_type: Option<PagedCacheType>,
+    /// Per-layer cache storage on top of `paged_cache_type`: `layers=type` items such as `0=q8,20-27=q6`, or `uniform`
+    /// (no profile or general rule); unset uses the server's `--pa-cache-layers`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paged_cache_layers: Option<PagedCacheLayers>,
     /// Sequences the model serves at once; unset uses the server's `--max-seqs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seqs: Option<usize>,
@@ -543,6 +547,7 @@ impl ModelManager {
             hf_revision: None,
             paged_context_len: request.paged_context_len,
             paged_cache_type: request.paged_cache_type,
+            paged_cache_layers: request.paged_cache_layers,
             max_seqs: request.max_seqs,
             mtp: request.mtp,
         };

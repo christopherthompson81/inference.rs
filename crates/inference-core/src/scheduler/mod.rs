@@ -289,6 +289,7 @@ mod tests {
             block_size: 32,
             num_gpu_blocks,
             cache_type: PagedCacheType::Auto,
+            layer_types: Vec::new(),
             kv_cache_group_ids: vec![0, 1],
         }
     }

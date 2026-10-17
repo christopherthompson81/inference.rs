@@ -1129,6 +1129,7 @@ class ManagedLoadRequest:
     mmproj: str | None = None
     model_id: str
     mtp: MtpSpec | None = None
+    paged_cache_layers: PagedCacheLayers | None = None
     paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
     source: str
@@ -1572,6 +1573,7 @@ class ModelSpec:
     model: ModelSelected
     model_id: str | None = None
     mtp: MtpSpec | None = None
+    paged_cache_layers: PagedCacheLayers | None = None
     paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
 
@@ -2236,6 +2238,7 @@ class PagedCacheSpec:
     """How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`."""
 
     block_size: int | None = None
+    cache_layers: PagedCacheLayers | None = None
     cache_type: PagedCacheType | None = None
     context_len: int | None = None
     memory_fraction: float | None = None
@@ -3154,6 +3157,7 @@ OpenResponsesInput = Union[str, list[Union[OpenResponsesInputMessage, OpenRespon
 OpenResponsesStreamEvent = Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventResponseCancelled, OpenResponsesStreamEventError]
 OutputContent = Union[OutputContentOutputText, OutputContentRefusal]
 OutputItem = Union[OutputItemMessage, OutputItemFunctionCall, OutputItemShellCall, OutputItemShellCallOutput, OutputItemReasoning]
+PagedCacheLayers = str
 PagedCacheType = str
 PromptInput = Union[str, list[int]]
 ResponseFormat = Union[ResponseFormatText, ResponseFormatJsonObject, ResponseFormatJsonSchema]

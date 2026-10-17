@@ -57,6 +57,8 @@ export interface LoadRequest {
   paged_context_len?: number;
   /** `auto`, `f8e4m3`, `q2`..`q8`, or `qK/qV`; unset keeps the server's. */
   paged_cache_type?: string;
+  /** Per-layer storage on top of it: `layers=type` items (`0=q8,20-27=q6`) or `uniform`. */
+  paged_cache_layers?: string;
   max_seqs?: number;
   mtp?: { n_predict?: number };
   mmproj?: string;

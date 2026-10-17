@@ -85,9 +85,9 @@ pub use inference_core::{
     DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_SHELL_TIMEOUT_SECS,
     DiffusionLoaderType, HfConfigOverrides, IsqOrganization, IsqType, LoraAdapterSpec,
     LoraRuntimeConfig, MAX_LORA_ALIAS_BYTES, McpClientConfig, ModelDType, NetworkMode,
-    NormalLoaderType, PagedCacheType, SandboxMode, SandboxProfile, SearchEmbeddingModel,
-    ShellConfig, SpeechLoaderType, TokenSource, TranscriptionLoaderType, UqffWriteConfig,
-    expand_isq_value, parse_isq_value,
+    NormalLoaderType, PagedCacheLayers, PagedCacheType, SandboxMode, SandboxProfile,
+    SearchEmbeddingModel, ShellConfig, SpeechLoaderType, TokenSource, TranscriptionLoaderType,
+    UqffWriteConfig, expand_isq_value, parse_isq_value,
 };
 pub use inference_selection::{
     MmprojSelection, ModelSelected, SpeechGenerationSpec, get_auto_device_map_params,
@@ -186,6 +186,9 @@ pub struct ModelSpec {
     /// This model's paged KV cache storage (`auto`, `f8e4m3`, `q4`, `q8/q4`), in place of `runtime.paged_cache`'s.
     #[serde(default)]
     pub paged_cache_type: Option<PagedCacheType>,
+    /// This model's per-layer cache storage (`0=q8,20-27=q6` or `uniform`), in place of `runtime.paged_cache`'s.
+    #[serde(default)]
+    pub paged_cache_layers: Option<PagedCacheLayers>,
     /// Speculative decoding for this model; `runtime.mtp` applies to the first model only.
     #[serde(default)]
     pub mtp: Option<MtpSpec>,
@@ -228,6 +231,7 @@ impl ModelSpec {
         config.hf_revision = self.hf_revision;
         config.paged_context_len = self.paged_context_len;
         config.paged_cache_type = self.paged_cache_type;
+        config.paged_cache_layers = self.paged_cache_layers;
         config.max_seqs = self.max_seqs;
         config.mtp = self.mtp.map(MtpSpec::into_config);
         if let Some(bytes) = self.encoder_cache_memory_bytes {
@@ -398,6 +402,11 @@ pub struct PagedCacheSpec {
     pub block_size: Option<usize>,
     #[serde(default)]
     pub cache_type: PagedCacheType,
+    /// Per-layer storage on top of `cache_type`: `layers=type` items (`0=q8,20-27=q6`), or `uniform` for
+    /// `cache_type` everywhere. Unset, a quantized type keeps the layers the model's profile (or, without one, the
+    /// first cached layer) names as sensitive at higher widths.
+    #[serde(default)]
+    pub cache_layers: PagedCacheLayers,
 }
 
 /// MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.
@@ -714,6 +723,7 @@ impl EngineSpec {
             .with_paged_attn_gpu_mem_usage_optional(paged.memory_fraction)
             .with_paged_attn_block_size_optional(paged.block_size)
             .with_paged_attn_cache_type(paged.cache_type)
+            .with_paged_cache_layers(paged.cache_layers)
             .with_mtp_config_optional(runtime.mtp.map(MtpSpec::into_config))
             .with_anymoe_optional(self.anymoe);
         let agentic = self.agentic;

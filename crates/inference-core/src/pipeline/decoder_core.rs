@@ -104,6 +104,7 @@ impl DecoderCore {
                 paged_attn_config.block_size,
                 args.dtype,
                 paged_attn_config.cache_type,
+                &paged_attn_config.cache_layers,
                 args.model.config.as_ref(),
                 &args.device,
                 &layer_devices,

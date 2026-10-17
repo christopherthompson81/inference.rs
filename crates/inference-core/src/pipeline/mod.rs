@@ -501,12 +501,14 @@ fn paged_kv_bytes_per_token(
     dtype: DType,
     model_config: &dyn ModelConfigLike,
 ) -> Result<usize> {
-    paged_attn_config
-        .cache_type
-        .to_dtype(dtype)
-        .size_in_bytes()
-        .checked_mul(model_config.total_kv_cache_elements_per_token())
-        .ok_or_else(|| anyhow::anyhow!("PagedAttention token memory size overflow"))
+    let plan = inference_nn::paged_attention::cache_plan(
+        paged_attn_config.cache_type,
+        &paged_attn_config.cache_layers,
+        model_config,
+    );
+    let (numerator, denominator) =
+        inference_nn::paged_attention::kv_bytes_per_token(&plan, dtype, model_config);
+    Ok(numerator.div_ceil(denominator))
 }
 
 struct RecurrentBudgetContext<'a> {
