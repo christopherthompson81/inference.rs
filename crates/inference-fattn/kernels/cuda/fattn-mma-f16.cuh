@@ -385,7 +385,6 @@ static __device__ __forceinline__ fattn_kv_rows fattn_sequence_rows(const fattn_
 // the K/V source a tile load instantiates for
 #define FATTN_KV_PLAIN 0
 #define FATTN_KV_FP8   1
-#define FATTN_KV_QUANT 2
 
 // e4m3 bits placed as f16 are 2^-8 of the value (bias 7 vs 15); sm86 has no fp8 conversion, and the emulated one is slow
 #define FATTN_FP8_E4M3_BIAS_GAP 256.0f
@@ -414,39 +413,83 @@ static __device__ __forceinline__ void fattn_load_fp8_chunk(const char * src, co
     ggml_cuda_memcpy_1<16>(dst_smem, chunk);
 }
 
-// Dequantizes the 8 values of a quantized row (see fattn_layout) starting at value `first` into one 16-byte f16 chunk
-// (not inlined: every kernel variant calls it from each unrolled load, which inlined added 2.85 MiB of fattn code):
-// they are `bits` bytes, 8 consecutive values a chunk, under their group's f16 scale. A null row stores zeros.
-static __device__ __noinline__ void fattn_load_quant_chunk(
-        const uint8_t * row, const int first, const int bits, const int data_bytes, void * dst_smem) {
-    __align__(16) half2 chunk[4];
-    if (!row) {
-#pragma unroll
-        for (int l = 0; l < 4; ++l) {
-            chunk[l] = make_half2(0.0f, 0.0f);
-        }
-        ggml_cuda_memcpy_1<16>(dst_smem, chunk);
-        return;
-    }
-    // the chunk's `bits` bytes from aligned words: rows start 4-byte aligned, and 3 words cover any 8 bytes
-    const int offset = (first/8)*bits;
-    const uint32_t * words = (const uint32_t *) row + offset/4;
-    const int shift = 8*(offset % 4);
-    const uint64_t low = uint64_t(words[0]) | (uint64_t(words[1]) << 32);
-    const uint64_t packed = shift ? (low >> shift) | (uint64_t(words[2]) << (64 - shift)) : low;
-    const float mid   = float(1 << (bits - 1));
-    const float scale = __half2float(((const half *) (row + data_bytes))[first/32]) / mid;
+// a quantized tile's groups per thread whose loads issue together, ahead of their smem stores: decode-sized kernels
+// gain from more loads in flight, wide prefill ones lose more to the registers they take
+#define FATTN_QUANT_BATCH_NARROW 4
+#define FATTN_QUANT_BATCH_WIDE   2
+#define FATTN_QUANT_NARROW_COLS  16
+// half2 a quantized group of 32 values dequantizes to
+#define FATTN_QUANT_GROUP_H2 16
+
+// Dequantizes D2 half2 columns from col2 of quantized rows (see fattn_layout), a 32-value group per work item: its 4
+// chunks of 8 values are `bits` bytes each under one f16 scale, and a thread issues its batch's loads before any store
+// (not inlined: every kernel variant calls it for K and V, and inlined loads added megabytes of fattn code).
+template<int stride_tile, bool swz, int nthreads, int nbatch_fa, bool oob_check, int batch>
+static __device__ __noinline__ void fattn_load_quant_tile(
+        const uint8_t * KV, const fattn_kv_rows rows, half2 * tile_KV, const int D2, const int stride_KV,
+        const int k_VKQ_0, const int i_sup, const int col2) {
+    const int groups = D2/FATTN_QUANT_GROUP_H2;
+    const int items  = nbatch_fa*groups;
+    const int tid    = threadIdx.y*ggml_cuda_get_physical_warp_size() + threadIdx.x;
+    const int bits   = rows.bits;
     const uint32_t mask = (1u << bits) - 1;
+    const float mid = float(1 << (bits - 1));
+    for (int item0 = 0; item0 < items; item0 += nthreads*batch) {
+        // a chunk's `bits` bytes from 3 aligned words: rows start 4-byte aligned
+        uint32_t words[batch][4][3];
+        half scale[batch];
 #pragma unroll
-    for (int l = 0; l < 4; ++l) {
-        const float lo = float(uint32_t(packed >> ((2*l + 0)*bits)) & mask) + 0.5f - mid;
-        const float hi = float(uint32_t(packed >> ((2*l + 1)*bits)) & mask) + 0.5f - mid;
-        chunk[l] = __floats2half2_rn(lo*scale, hi*scale);
+        for (int b = 0; b < batch; ++b) {
+            const int item  = item0 + b*nthreads + tid;
+            const int i     = item / groups;
+            const int group = col2/FATTN_QUANT_GROUP_H2 + item - i*groups;
+            const bool live = item < items && (!oob_check || i < i_sup);
+            const uint8_t * row = KV + 4*fattn_kv_row(rows, k_VKQ_0 + (live ? i : 0), stride_KV);
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                const uint32_t * src = (const uint32_t *) row + ((4*group + c)*bits)/4;
+#pragma unroll
+                for (int w = 0; w < 3; ++w) {
+                    words[b][c][w] = live ? src[w] : 0;
+                }
+            }
+            scale[b] = live ? ((const half *) (row + rows.data_bytes))[group] : __float2half(0.0f);
+        }
+#pragma unroll
+        for (int b = 0; b < batch; ++b) {
+            const int item = item0 + b*nthreads + tid;
+            if (item >= items) {
+                break;
+            }
+            const int i     = item / groups;
+            const int g     = item - i*groups;
+            const float s   = __half2float(scale[b]) / mid;
+#pragma unroll
+            for (int c = 0; c < 4; ++c) {
+                const int shift = 8*((((col2/FATTN_QUANT_GROUP_H2 + g)*4 + c)*bits) % 4);
+                const uint64_t low = uint64_t(words[b][c][0]) | (uint64_t(words[b][c][1]) << 32);
+                const uint64_t packed = shift ? (low >> shift) | (uint64_t(words[b][c][2]) << (64 - shift)) : low;
+                __align__(16) half2 chunk[4];
+#pragma unroll
+                for (int l = 0; l < 4; ++l) {
+                    const float lo = float(uint32_t(packed >> ((2*l + 0)*bits)) & mask) + 0.5f - mid;
+                    const float hi = float(uint32_t(packed >> ((2*l + 1)*bits)) & mask) + 0.5f - mid;
+                    chunk[l] = __floats2half2_rn(lo*s, hi*s);
+                }
+                const int h2 = (4*g + c)*4;
+                void * dst;
+                if constexpr (swz) {
+                    dst = (char *) tile_KV + ggml_cuda_fattn_smem_swizzle::bytes_rc<stride_tile>(i, h2);
+                } else {
+                    dst = tile_KV + i*stride_tile + h2;
+                }
+                ggml_cuda_memcpy_1<16>(dst, chunk);
+            }
+        }
     }
-    ggml_cuda_memcpy_1<16>(dst_smem, chunk);
 }
 
-template<int stride_tile, bool swz, int nwarps, int nbatch_fa, bool use_cp_async, bool oob_check, bool use_sparse>
+template<int stride_tile, bool swz, int nwarps, int nbatch_fa, bool use_cp_async, bool oob_check, bool use_sparse, int ncols>
 static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
         const half2 * const __restrict__ KV, half2 * const __restrict__ tile_KV, const int D2, const int stride_KV,
         const int k_VKQ_0, const int i_sup, const int32_t * const __restrict__ indices, const bool KV_convert,
@@ -523,9 +566,18 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
         return;
       }
     }
+    if (rows.bits) {
+        // quantized caches are paged, never gathered by sparse indices; row offsets count bytes in 4s (half2 units)
+        if constexpr (!use_sparse) {
+            constexpr int batch = ncols <= FATTN_QUANT_NARROW_COLS ? FATTN_QUANT_BATCH_NARROW : FATTN_QUANT_BATCH_WIDE;
+            fattn_load_quant_tile<stride_tile, swz, nwarps*warp_size, nbatch_fa, oob_check, batch>(
+                (const uint8_t *) KV, rows, tile_KV, D2, stride_KV, k_VKQ_0, i_sup, col2);
+        }
+        return;
+    }
     {
         const half2 zero[4] = {{0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}};
-        // fp8 and quantized rows are separate instantiations of the loop: a per-chunk branch on the source type stops
+        // fp8 rows are a separate instantiation of the loop: a per-chunk branch on the source type stops
         // the loads being batched
         const half2 scale2 = __float2half2_rn(rows.scale*FATTN_FP8_E4M3_BIAS_GAP);
         auto load = [&] __device__ (const int n, auto narrow, auto general) {
@@ -570,11 +622,6 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
                         const bool live = !use_sparse && (!oob_check || i < i_sup);
                         fattn_load_fp8_chunk(live ? (const char *) KV + 4*row_KV + 2*(col2 + k*h2_per_chunk) : nullptr,
                             scale2, dst_smem);
-                    } else if constexpr (decltype(narrow)::value == FATTN_KV_QUANT) {
-                        // row_KV counts a row's bytes in 4s, the half2 unit the strides are given in
-                        const bool live = !use_sparse && (!oob_check || i < i_sup);
-                        fattn_load_quant_chunk(live ? (const uint8_t *) KV + 4*row_KV : nullptr,
-                            2*(col2 + k*h2_per_chunk), rows.bits, rows.data_bytes, dst_smem);
                     } else if (KV_convert) {
                         __align__(16) half2 chunk[h2_per_chunk];
                         ggml_cuda_memcpy_1<16>(chunk, src);
@@ -596,9 +643,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
         // 5: max  2*16= 32 bytes,  16 half
         // 6: max  1*16= 16 bytes,   8 half
         const bool general = rows.table || rows.len != INT_MAX;
-        if (rows.bits) {
-            ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_QUANT>{}, std::true_type{});
-        } else if (rows.fp8) {
+        if (rows.fp8) {
             ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_FP8>{}, std::true_type{});
         } else if (general) {
             ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_PLAIN>{}, std::true_type{});
@@ -797,7 +842,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         constexpr bool use_cp_async = true;
         cp_async_wait_all();
         __syncthreads();
-        flash_attn_ext_f16_load_tile<stride_tile_V, swz_V, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+        flash_attn_ext_f16_load_tile<stride_tile_V, swz_V, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse, ncols1*ncols2>
             (V_h2, tile_V, nbatch_V2, stride_V, k_VKQ_0, k_VKQ_sup, nullptr, KV_convert, lay, sequence, true, 0);
     } else {
         // the sparse mask values are gathered per element, always load them synchronously
@@ -821,7 +866,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         if constexpr (nstages <= 1) {
             const int k0_diff = k0_stop - k0_start;
             constexpr bool use_cp_async = nstages == 1;
-            flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+            flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse, ncols1*ncols2>
                 (K_h2, tile_K, k0_diff, stride_K, k_VKQ_0, k_VKQ_sup, indices, KV_convert, lay, sequence, false, k0_start);
             if (use_cp_async) {
                 cp_async_wait_all();
@@ -1162,7 +1207,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
                         (mask_h, tile_mask, stride_mask, k_VKQ_0 + nbatch_fa, k_VKQ_sup, jt*ncols1, ne01, nullptr);
                 }
             }
-            flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+            flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse, ncols1*ncols2>
                 (K_h2, tile_K, nbatch_K2, stride_K, k_VKQ_0 + nbatch_fa, k_VKQ_sup, nullptr, KV_convert, lay, sequence, false, 0);
         }
     }
@@ -1178,7 +1223,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
             const int i0_diff = i0_stop - i0_start;
             if (!V_is_K_view || i0_stop > 2*nbatch_K2) {
                 constexpr bool use_cp_async = nstages == 1;
-                flash_attn_ext_f16_load_tile<stride_tile_V, swz_V, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+                flash_attn_ext_f16_load_tile<stride_tile_V, swz_V, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse, ncols1*ncols2>
                     (V_h2, tile_V, i0_diff/2, stride_V, k_VKQ_0, k_VKQ_sup, indices, KV_convert, lay, sequence, true, i0_start/2);
                 if (use_cp_async) {
                     cp_async_wait_all();
@@ -1500,7 +1545,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
                     (mask_h, tile_mask, stride_mask, kb0*nbatch_fa, k_VKQ_sup, jt*ncols1, ne01, nullptr);
             }
         }
-        flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse>
+        flash_attn_ext_f16_load_tile<stride_tile_K, swz_K, nwarps, nbatch_fa, use_cp_async, oob_check, use_sparse, ncols1*ncols2>
             (K_h2, tile_K, nbatch_K2, stride_K, kb0*nbatch_fa, k_VKQ_sup, nullptr, KV_convert, lay, sequence, false, 0);
     }
 

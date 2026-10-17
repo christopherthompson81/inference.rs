@@ -356,3 +356,47 @@ keep protected layers at q8 for both. `uniform` reads a little above Run 6's q4 
 fattn change (GQA batching) altered rounding. `scripts/kv_layer_sweep.py`, the sweep through
 `paged_cache_layers`, reproduces Run 10 on Qwen3.5 0.8B (baseline 5.1210, layer 3 at q3/q8 +0.10%) and prints
 its profile entry.
+
+## Run 13 - 2026-10-18 19:30
+
+Question: why does a quantized cache's fattn take twice bf16's time (Run 7), and can the loads get it back?
+
+Command: `cargo nextest run -p inference-fattn --features cuda --run-ignored only -E 'test(/bench::quant_vs_bf16/)'
+--no-capture`, a new bench: paged K/V of random codes against bf16 at three model shapes; RTX 3090. ncu has no
+counter access here, so the causes come from variants.
+
+```
+llama-8b shape (32/8 heads, head 128)     q8/q8 us   bf16 us
+b1 decode kv 16384                        220.1      100.2    (q4/q4 215.0: bits do not matter)
+b8 decode kv 16384                       2075.4      794.7
+b1 prefill q 1024 kv 4096                2287.6     1126.2
+same, chunk loader inlined                213.4 / 2005.3       (no change)
+same, quantized loads replaced by zeros    24.6 /  161.3       (the loop and stores are not the cost)
+dense fp8 (also synchronous loads)        121.6 / 1092.7
+```
+
+The width does not matter and prefill, which bf16 runs compute-bound, is as slow, so the loads are latency-bound:
+each thread dequantized one 8-value chunk at a time (3 words plus its group's scale from another cache line), and
+the next chunk's loads waited behind the previous chunk's shared-memory store. The new loader takes a 32-value
+group per work item (its 4 chunks, one scale load) and issues a batch of groups' loads before any store; 4 groups
+per thread helps decode kernels (<= 16 columns) and costs prefill ones registers, so wide kernels take 2.
+
+```
+ratio to bf16                       old              batch 2          batch 4          chosen (4 narrow, 2 wide)
+qwen3-0.6b b1 decode kv 16384       2.22             1.08             0.87             0.87
+qwen3-0.6b b8 decode kv 16384       2.41             1.14             0.89             0.82
+qwen3.5-0.8b b1 decode kv 16384     2.01             1.02             0.90             0.90
+llama-8b b1 decode kv 16384         2.20             1.03             0.83             0.83
+llama-8b prefill q 1024             2.03             1.20             1.27 (abs +24%)  1.19
+qwen3.5-0.8b prefill q 1024         2.02             1.21             1.27             1.24
+```
+
+End to end (Run 7's harness, ~6,250-token prompt, 256 tokens):
+
+```
+Qwen3 0.6B decode tok/s       bf16 334.2   q8 330.3   q8/q4 332.9   q4 332.9     (Run 7: bf16 292, q8 208)
+Qwen3.8 27B IQ4_XS            bf16  50.0   q8/q4 49.7  q4   49.9                (Run 7: -5.5%)
+```
+
+Implication: a quantized cache now decodes at bf16's rate (the kernel alone is 10-25% faster); prefill over it
+stays 1.0-1.24x bf16's, where bf16's cp.async pipelining has no quantized counterpart yet.
