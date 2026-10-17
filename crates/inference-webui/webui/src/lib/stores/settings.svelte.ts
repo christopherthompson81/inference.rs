@@ -8,6 +8,7 @@ interface StoredSettings {
   topK: number;
   maxTokens: number;
   repetitionPenalty: number;
+  greedy?: boolean;
   systemPrompt: string;
   enableSearch: boolean;
   enableCodeExecution: boolean;
@@ -54,6 +55,8 @@ class SettingsStore {
   topK = $state(stored.topK ?? 40);
   maxTokens = $state(stored.maxTokens ?? 8192);
   repetitionPenalty = $state(stored.repetitionPenalty ?? 1.1);
+  // overrides the sampling values without losing them: always the likeliest token, no penalty
+  greedy = $state(stored.greedy ?? false);
   systemPrompt = $state(stored.systemPrompt ?? "");
   enableSearch = $state(stored.enableSearch ?? false);
   enableCodeExecution = $state(stored.enableCodeExecution ?? false);
@@ -72,6 +75,7 @@ class SettingsStore {
       topK: this.topK,
       maxTokens: this.maxTokens,
       repetitionPenalty: this.repetitionPenalty,
+      greedy: this.greedy,
       systemPrompt: this.systemPrompt,
       enableSearch: this.enableSearch,
       enableCodeExecution: this.enableCodeExecution,

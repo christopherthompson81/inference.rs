@@ -17,6 +17,8 @@ import * as api from "../services/api";
 import { settingsStore } from "./settings.svelte";
 import { modelStore } from "./models.svelte";
 
+const GREEDY_SAMPLING = { temperature: 0, top_p: 1, top_k: 1, repetition_penalty: 1 };
+
 const UI_UPLOAD_URL =
   /^uploads\/(?:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.(?:jpg|jpeg|png|gif|webp|bmp|svg|mp4|avi|mov|mkv|webm|m4v)$/;
 
@@ -233,11 +235,16 @@ class ChatStore {
 
     const options: StreamOptions = {
       model: model || "default",
-      temperature: settingsStore.temperature,
-      top_p: settingsStore.topP,
-      top_k: settingsStore.topK,
+      // greedy sends every value: one left out takes the model's generation defaults
+      ...(settingsStore.greedy
+        ? GREEDY_SAMPLING
+        : {
+            temperature: settingsStore.temperature,
+            top_p: settingsStore.topP,
+            top_k: settingsStore.topK,
+            repetition_penalty: settingsStore.repetitionPenalty,
+          }),
       max_tokens: settingsStore.maxTokens,
-      repetition_penalty: settingsStore.repetitionPenalty,
       reasoning_effort: settingsStore.reasoningEffort || undefined,
       agent_permission:
         settingsStore.agentPermission !== "auto" ? settingsStore.agentPermission : undefined,

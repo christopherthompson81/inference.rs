@@ -78,10 +78,24 @@
       </div>
     {/snippet}
 
-    {@render param("temp", "temp", settingsStore.temperature)}
-    {@render param("top_p", "top_p", settingsStore.topP)}
-    {@render param("top_k", "top_k", settingsStore.topK)}
-    {@render param("rep", "rep", settingsStore.repetitionPenalty)}
+    <label
+      class="flex items-center gap-1 rounded px-1.5 py-0.5 hover:bg-gray-100 dark:hover:bg-gray-800"
+      title="Always take the likeliest token, with no repetition penalty, over the sampling values"
+    >
+      <input
+        type="checkbox"
+        class="accent-blue-600"
+        bind:checked={settingsStore.greedy}
+        onchange={() => settingsStore.persist()}
+      />
+      greedy
+    </label>
+    <div class="flex items-center gap-1 {settingsStore.greedy ? 'pointer-events-none line-through opacity-40' : ''}">
+      {@render param("temp", "temp", settingsStore.temperature)}
+      {@render param("top_p", "top_p", settingsStore.topP)}
+      {@render param("top_k", "top_k", settingsStore.topK)}
+      {@render param("rep", "rep", settingsStore.repetitionPenalty)}
+    </div>
     {@render param("max", "max", settingsStore.maxTokens)}
 
     <button
