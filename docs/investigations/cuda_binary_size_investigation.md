@@ -2180,3 +2180,53 @@ Kokoro's tests pass (39/39), and with the cargo checkout hidden all nine languag
 tag (snapshot 2dd2e252, which has the new `g2p-model.bin`).
 
 Implication: the baseline moves down again.
+
+## Run 65 - 2026-10-16 13:10
+
+Question: after Runs 63 and 64, where do the package's 108.25 MiB come from?
+
+Command: the baseline's per-file sizes, `size -A` on each kernel library, the bundle build with symbols kept
+(`CARGO_PROFILE_BUNDLE_STRIP=false`, master 9880ba421) grouped by crate, and the kernel libraries' cubins
+(`cuobjdump -xelf all`, then each `.text.<kernel>` section's size, uncompressed).
+
+```
+libinference_ffi.so            61.65 MiB   .text 45.36, .rodata 4.16, .eh_frame 3.6, .rela.dyn 2.9, except 2.4
+libinferencequant_<type> x34   24.17 MiB   GPU code 16.53, host .text 4.64
+libinferencefattn.so           17.01 MiB   GPU code 11.25, host .text 4.21
+libinferencequant.so            3.81 MiB   GPU code 2.14
+libinferencenn.so               1.43 MiB
+libinferencepagedattention.so   0.18 MiB
+```
+
+The Rust library's code by area (text symbols, 45.09 MiB of the 45.36):
+
+```
+inference.rs crates            20.02   tensor 5.59, nn 2.33, core 1.97, quant 1.94, model families ~5.2
+std/core/alloc generic          8.62   drop glue 2.35, serde seeds for our types 1.30, slice sorts 1.06 (157 copies)
+text (tokenizers, regex, minijinja, llguidance)   2.74
+serde crates                    2.54   (plus the 1.30 above: ~3.8 serde in all)
+HTTP, TLS, async                2.25
+images                          2.06   fast_image_resize 1.01
+phonemizer                      1.44
+audio (symphonia, rustfft)      1.17
+other                           ~4.0
+```
+
+Inside inference-tensor the op families still lead: the `Map1`/`Map2` impls 2.16 MiB over 57 symbols, the CPU
+`unary_impl` per op 0.63 MiB.
+
+The attention library's GPU code, uncompressed (99.65 MiB, stored compressed as 11.25):
+
+```
+flash_attn_ext_f16 (mma)   80.54 MiB   270 instances
+  by head size: 512 15.7, 128 13.1, 256 11.6, 576/512 8.8, 112 7.2, 96 6.6, 80 5.9, 64 5.4, 192/128 4.3, 320/256 1.9
+flash_attn_tile            10.74 MiB   310
+stream_k fixups             6.39 MiB   586
+combine, vec, mask          1.97 MiB
+```
+
+Implication: the kernel libraries are 43% of the package. The largest single lever is which attention instances
+ship: the f16 mma kernel is 80% of the attention library, and each head size is 5-16% of it, so a head size no
+supported model uses is worth checking before anything in Rust. The per-type quant libraries (24 MiB) already
+download on demand (#425), so what a package bundles of them is a packaging choice. In Rust, what's left is spread
+thin: drop glue, serde (~3.8 MiB), the tensor op families, and dependencies no larger than 1 MiB each.
