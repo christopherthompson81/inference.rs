@@ -81,7 +81,7 @@ out = POINTER(c_void_p)
 buffer = (c_char_p, c_size_t)
 
 # BEGIN GENERATED from inference.h by bindings/scripts/generate_native.py
-ABI_VERSION = (0 << 16) | (0 << 8) | 25
+ABI_VERSION = (0 << 16) | (0 << 8) | 26
 
 # name: (restype, argtypes)
 SIGNATURES = {

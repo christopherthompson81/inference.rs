@@ -1,6 +1,6 @@
 [package]
 name = "inference-flash-attn-v3"
-version = "0.9.3"
+version = "0.0.26"
 edition = "2024"
 description = "FlashAttention-3 (Hopper) for inference-tensor, derived from candle-flash-attn-v3."
 repository = "https://github.com/christopherthompson81/inference.rs"

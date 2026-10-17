@@ -200,6 +200,7 @@ GROUPS = [
                 "Detokenize",
                 "McpTool",
                 "Managed",
+                "SavedModel",
                 "DefaultModel",
                 "Prompt",
                 "LogitsOutput",

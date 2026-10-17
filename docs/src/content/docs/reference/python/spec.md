@@ -530,6 +530,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `model` | `ModelSelected` | required |
 | `model_id` | `str \| None` | optional |
 | `mtp` | `MtpSpec \| None` | optional |
+| `paged_cache_layers` | `PagedCacheLayers \| None` | optional |
 | `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 
@@ -658,6 +659,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | Field | Type | Default |
 | --- | --- | --- |
 | `block_size` | `int \| None` | optional |
+| `cache_layers` | `PagedCacheLayers \| None` | optional |
 | `cache_type` | `PagedCacheType \| None` | optional |
 | `context_len` | `int \| None` | optional |
 | `memory_fraction` | `float \| None` | optional |

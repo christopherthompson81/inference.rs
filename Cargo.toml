@@ -78,7 +78,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.9.3"
+version = "0.0.26"
 edition = "2024"
 description = "Fast, flexible model inference."
 homepage = "https://github.com/christopherthompson81/inference.rs"
@@ -234,34 +234,34 @@ nix = { version = "0.31.3", default-features = false }
 itoa = "1.0.18"
 cutile = "=0.3.1"
 
-inference-core = { path = "crates/inference-core", version = "0.9.3", default-features = false }
-inference-nn = { path = "crates/inference-nn", version = "0.9.3" }
-inference-models-diffusion = { path = "crates/inference-models-diffusion", version = "0.9.3" }
-inference-models-gemma = { path = "crates/inference-models-gemma", version = "0.9.3" }
-inference-models-llama = { path = "crates/inference-models-llama", version = "0.9.3" }
-inference-models-other = { path = "crates/inference-models-other", version = "0.9.3" }
-inference-models-phi = { path = "crates/inference-models-phi", version = "0.9.3" }
-inference-models-qwen = { path = "crates/inference-models-qwen", version = "0.9.3" }
-inference-models-speech = { path = "crates/inference-models-speech", version = "0.9.3" }
-inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.9.3" }
-inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.9.3" }
-inference-fattn = { path = "crates/inference-fattn", version = "0.9.3" }
-inference-quant = { path = "crates/inference-quant", version = "0.9.3" }
-inference-vision = { path = "crates/inference-vision", version = "0.9.3" }
-inference-layout = { path = "crates/inference-layout", version = "0.9.3" }
-inference-api = { path = "crates/inference-api", version = "0.9.3", default-features = false }
-inference-server-core = { path = "crates/inference-server-core", version = "0.9.3", default-features = false }
-inference-webui = { path = "crates/inference-webui", version = "0.9.3" }
-inference = { path = "crates/inference", version = "0.9.3", default-features = false }
-inference-audio = { path = "crates/inference-audio", version = "0.9.3" }
-inference-agent = { path = "crates/inference-agent", version = "0.9.3" }
-inference-gguf = { path = "crates/inference-gguf", version = "0.9.3" }
-inference-selection = { path = "crates/inference-selection", version = "0.9.3" }
-inference-mcp = { path = "crates/inference-mcp", version = "0.9.3" }
-inference-protocol = { path = "crates/inference-protocol", version = "0.9.3" }
-inference-macros = { path = "crates/inference-macros", version = "0.9.3" }
-inference-code-exec = { path = "crates/inference-code-exec", version = "0.9.3" }
-inference-sandbox = { path = "crates/inference-sandbox", version = "0.9.3" }
+inference-core = { path = "crates/inference-core", version = "0.0.26", default-features = false }
+inference-nn = { path = "crates/inference-nn", version = "0.0.26" }
+inference-models-diffusion = { path = "crates/inference-models-diffusion", version = "0.0.26" }
+inference-models-gemma = { path = "crates/inference-models-gemma", version = "0.0.26" }
+inference-models-llama = { path = "crates/inference-models-llama", version = "0.0.26" }
+inference-models-other = { path = "crates/inference-models-other", version = "0.0.26" }
+inference-models-phi = { path = "crates/inference-models-phi", version = "0.0.26" }
+inference-models-qwen = { path = "crates/inference-models-qwen", version = "0.0.26" }
+inference-models-speech = { path = "crates/inference-models-speech", version = "0.0.26" }
+inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.0.26" }
+inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.0.26" }
+inference-fattn = { path = "crates/inference-fattn", version = "0.0.26" }
+inference-quant = { path = "crates/inference-quant", version = "0.0.26" }
+inference-vision = { path = "crates/inference-vision", version = "0.0.26" }
+inference-layout = { path = "crates/inference-layout", version = "0.0.26" }
+inference-api = { path = "crates/inference-api", version = "0.0.26", default-features = false }
+inference-server-core = { path = "crates/inference-server-core", version = "0.0.26", default-features = false }
+inference-webui = { path = "crates/inference-webui", version = "0.0.26" }
+inference = { path = "crates/inference", version = "0.0.26", default-features = false }
+inference-audio = { path = "crates/inference-audio", version = "0.0.26" }
+inference-agent = { path = "crates/inference-agent", version = "0.0.26" }
+inference-gguf = { path = "crates/inference-gguf", version = "0.0.26" }
+inference-selection = { path = "crates/inference-selection", version = "0.0.26" }
+inference-mcp = { path = "crates/inference-mcp", version = "0.0.26" }
+inference-protocol = { path = "crates/inference-protocol", version = "0.0.26" }
+inference-macros = { path = "crates/inference-macros", version = "0.0.26" }
+inference-code-exec = { path = "crates/inference-code-exec", version = "0.0.26" }
+inference-sandbox = { path = "crates/inference-sandbox", version = "0.0.26" }
 
 # Shipped libraries and wheels: ~6% smaller, same speed, ~3x the build time (cuda_binary_size_investigation.md).
 # Symbols stay so `local_ci.sh --size` can count generic copies; build_wheels.py strips what it ships.
