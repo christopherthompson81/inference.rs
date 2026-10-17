@@ -1,7 +1,17 @@
 <script lang="ts">
-  import { managerStore, SLOTS, displayName, baseName, formatBytes, type Slot, type SlotId } from "../stores/manager.svelte";
+  import {
+    managerStore,
+    SLOTS,
+    CACHE_TYPES,
+    displayName,
+    baseName,
+    formatBytes,
+    type Slot,
+    type SlotId,
+  } from "../stores/manager.svelte";
 
-  let { slot }: { slot: SlotId } = $props();
+  // full: every setting, as the Models tab's slot settings show them; otherwise the model and a link there
+  let { slot, full = false }: { slot: SlotId; full?: boolean } = $props();
 
   // the select's value for a source the inventory does not list: a Hugging Face repository
   const REPO = "__repo__";
@@ -59,19 +69,44 @@
     return parts.filter(Boolean).join(", ");
   }
 
-  async function load() {
-    if (!source) return;
+  // the bar's picks into the slot's form, which loads and saves read
+  function commit() {
     form.source = source;
     form.mmproj = projector;
     if (spec.vad) form.vad = vad;
+  }
+
+  async function load() {
+    if (!source) return;
+    commit();
     await managerStore.load(slot);
     if (!managerStore.activityOf(slot).error) {
       pickedChoice = typedRepo = pickedProjector = pickedVad = null;
     }
   }
+
+  async function save() {
+    if (!source) return;
+    commit();
+    await managerStore.saveSettings(slot);
+  }
+
+  const quantized = (cache: string) => /^q[2-8]$/.test(cache);
+
+  // K's choice decides V's unless both are quantized widths, which may differ
+  function pickCacheK(value: string) {
+    form.cacheK = value;
+    if (!quantized(value) || !quantized(form.cacheV)) form.cacheV = value;
+    managerStore.persistForms();
+  }
+
+  let kept = $derived(managerStore.saved[spec.id]);
 </script>
 
-<section class="min-w-0 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-900/60">
+<section
+  id={full ? `settings-${slot}` : undefined}
+  class="min-w-0 scroll-mt-4 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm dark:border-gray-800 dark:bg-gray-900/60"
+>
   <div class="flex flex-wrap items-center gap-2">
     <h3 class="text-xs font-semibold uppercase tracking-wider text-gray-500 dark:text-gray-400">{spec.title}</h3>
     {#if served}
@@ -138,7 +173,7 @@
           </select>
         </label>
       {/if}
-      {#if spec.vad}
+      {#if spec.vad && full}
         <label class="flex flex-col gap-1">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">VAD (long audio)</span>
           <select
@@ -155,7 +190,7 @@
           </select>
         </label>
       {/if}
-      {#if spec.chat}
+      {#if spec.chat && full}
         <label class="flex flex-col gap-1">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">Context (tokens)</span>
           <input
@@ -197,8 +232,39 @@
             />
           </label>
         {/if}
+        <label class="flex flex-col gap-1" title="How the KV cache stores keys: q8/q4 (8-bit K, 4-bit V) keeps quality at 2.5x less memory than bf16">
+          <span class="text-[11px] text-gray-500 dark:text-gray-400">K cache</span>
+          <select
+            class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+            value={form.cacheK}
+            onchange={(e) => pickCacheK(e.currentTarget.value)}
+            disabled={activity.busy}
+          >
+            <option value="">Server's</option>
+            {#each CACHE_TYPES as cache (cache)}
+              <option value={cache}>{cache === "auto" ? "auto (bf16)" : cache}</option>
+            {/each}
+          </select>
+        </label>
+        <label class="flex flex-col gap-1" title="How the KV cache stores values; quantized widths may differ from K's">
+          <span class="text-[11px] text-gray-500 dark:text-gray-400">V cache</span>
+          <select
+            class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs disabled:opacity-60 dark:border-gray-700 dark:bg-gray-950"
+            bind:value={form.cacheV}
+            onchange={() => managerStore.persistForms()}
+            disabled={activity.busy || !quantized(form.cacheK)}
+          >
+            {#if quantized(form.cacheK)}
+              {#each CACHE_TYPES.filter(quantized) as cache (cache)}
+                <option value={cache}>{cache}</option>
+              {/each}
+            {:else}
+              <option value={form.cacheK}>{form.cacheK ? "as K" : "Server's"}</option>
+            {/if}
+          </select>
+        </label>
       {/if}
-      {#if spec.device}
+      {#if spec.device && full}
         <label class="flex flex-col gap-1">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">Device</span>
           <select
@@ -213,6 +279,12 @@
           </select>
         </label>
       {/if}
+      {#if full}
+        <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="The server loads this slot again when it starts">
+          <input type="checkbox" class="accent-blue-600" bind:checked={form.loadAtStart} disabled={activity.busy} />
+          Load at startup
+        </label>
+      {/if}
       <div class="flex gap-1.5 pb-px">
         <button
           class="rounded-md bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
@@ -221,6 +293,16 @@
         >
           {served ? "Replace" : "Load"}
         </button>
+        {#if full}
+          <button
+            class="rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
+            onclick={save}
+            disabled={activity.busy || !source}
+            title="Keep these settings on the server without loading"
+          >
+            Save
+          </button>
+        {/if}
         <button
           class="rounded-md border border-gray-300 px-3 py-1 text-xs text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:text-gray-200 dark:hover:bg-gray-800"
           onclick={() => managerStore.unload(slot)}
@@ -228,8 +310,22 @@
         >
           Unload
         </button>
+        {#if !full}
+          <a
+            class="self-center px-1 text-xs text-blue-600 hover:underline dark:text-blue-400"
+            href={`#settings-${slot}`}
+            title="Context, KV cache, sequences and the rest, kept on the server"
+          >
+            Settings
+          </a>
+        {/if}
       </div>
     </div>
+    {#if full && kept}
+      <p class="mt-1 text-[11px] text-gray-400">
+        Kept on the server{kept.load_at_start ? ", loaded at startup" : ""}: {kept.request.source}
+      </p>
+    {/if}
     {#if candidates.length === 0 && managerStore.inventory}
       <p class="mt-1 text-[11px] text-gray-400">
         No model of this kind in the server's folders or cache; name a Hugging Face repository, or download one in Models.

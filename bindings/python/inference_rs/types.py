@@ -2647,6 +2647,21 @@ class SandboxProfile(str, Enum):
     DEVELOPER = "developer"
 
 
+@dataclass(kw_only=True)
+class SavedModel:
+    """A load the manager keeps under its model id: the request its last successful load used, and whether the server loads it again when it starts."""
+
+    load_at_start: bool | None = None
+    request: ManagedLoadRequest
+
+
+@dataclass(kw_only=True)
+class SavedModels:
+    """The loads the manager keeps, by model id."""
+
+    saved: dict[str, SavedModel]
+
+
 class SearchContextSize(str, Enum):
     LOW = "low"
     MEDIUM = "medium"

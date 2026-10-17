@@ -55,11 +55,19 @@ export interface LoadRequest {
   source: string;
   model_id: string;
   paged_context_len?: number;
+  /** `auto`, `f8e4m3`, `q2`..`q8`, or `qK/qV`; unset keeps the server's. */
+  paged_cache_type?: string;
   max_seqs?: number;
   mtp?: { n_predict?: number };
   mmproj?: string;
   vad?: string;
   device?: string;
+}
+
+/** A load the server keeps under its model id, and whether it loads it again at startup. */
+export interface SavedModel {
+  request: LoadRequest;
+  load_at_start: boolean;
 }
 
 export interface LoadProgress {
@@ -136,6 +144,15 @@ async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): P
   if (!response.ok) throw await failure(response);
   const text = await response.text();
   return (text ? JSON.parse(text) : undefined) as T;
+}
+
+async function send(method: "PUT" | "DELETE", path: string, body?: unknown): Promise<void> {
+  const response = await authedFetch(url(path), {
+    method,
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!response.ok) throw await failure(response);
 }
 
 async function postForm<T>(path: string, form: FormData, signal?: AbortSignal): Promise<T> {
@@ -216,6 +233,12 @@ export async function loadModel(
 }
 
 export const unloadModel = (model_id: string) => postJson<void>("v1/manager/unload", { model_id });
+
+export const savedModels = () =>
+  getJson<{ saved: Record<string, SavedModel> }>("v1/manager/saved").then((r) => r.saved);
+
+export const saveModel = (model_id: string, saved: SavedModel) =>
+  send("PUT", `v1/manager/saved/${encodeURIComponent(model_id)}`, saved);
 
 /** Downloads into the server's cache until done, canceled (by `signal`) or failed. */
 export async function downloadModel(

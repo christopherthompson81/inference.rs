@@ -25,6 +25,15 @@ const LAN: [u8; 4] = [192, 168, 1, 20];
 const PORT: u16 = 40000;
 
 async fn router(folders: Vec<std::path::PathBuf>, peer: [u8; 4]) -> anyhow::Result<Router> {
+    Ok(router_keeping(folders, peer, None).await?.0)
+}
+
+// The router and its manager, which keeps its loads in `saved_path` when one is given.
+async fn router_keeping(
+    folders: Vec<std::path::PathBuf>,
+    peer: [u8; 4],
+    saved_path: Option<std::path::PathBuf>,
+) -> anyhow::Result<(Router, std::sync::Arc<ModelManager>)> {
     let engine = Engine::load(serde_json::from_value(
         json!({"runtime": {"device": "cpu"}}),
     )?)
@@ -33,15 +42,17 @@ async fn router(folders: Vec<std::path::PathBuf>, peer: [u8; 4]) -> anyhow::Resu
         engine.clone(),
         ModelManagerConfig {
             folders,
+            saved_path,
             ..Default::default()
         },
     );
-    Ok(InferenceRsServerRouterBuilder::new()
+    let app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
-        .with_model_manager(manager)
+        .with_model_manager(manager.clone())
         .build()
         .await?
-        .layer(MockConnectInfo(Peer::from(SocketAddr::from((peer, PORT))))))
+        .layer(MockConnectInfo(Peer::from(SocketAddr::from((peer, PORT)))));
+    Ok((app, manager))
 }
 
 fn post(path: &str, body: Value) -> Request<Body> {
@@ -269,5 +280,85 @@ async fn loads_reach_only_the_folders_and_only_for_admins() -> anyhow::Result<()
     )
     .await?;
     assert_eq!(status, StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_load_is_kept_and_a_restart_loads_what_was_marked() -> anyhow::Result<()> {
+    let chat = crate::support::tiny_checkpoint()?;
+    let settings = tempfile::tempdir()?;
+    let saved_path = settings.path().join("model-settings.json");
+    let folders = vec![chat.path().to_path_buf()];
+    let (app, _) = router_keeping(folders.clone(), LOOPBACK, Some(saved_path.clone())).await?;
+    let chat_path = chat.path().to_string_lossy().to_string();
+
+    let loaded = events(
+        &app,
+        post(
+            "/v1/manager/load",
+            json!({"source": chat_path, "model_id": "chat", "max_seqs": 2}),
+        ),
+    )
+    .await?;
+    assert_eq!(loaded.last().unwrap().0, "loaded", "{loaded:?}");
+    let (status, saved) =
+        json_body(&app, Request::get("/v1/manager/saved").body(Body::empty())?).await?;
+    assert_eq!(status, StatusCode::OK, "{saved}");
+    assert_eq!(
+        saved["saved"]["chat"],
+        json!({"request": {"source": chat_path, "model_id": "chat", "max_seqs": 2}, "load_at_start": false})
+    );
+
+    // an edit without a load: the path names the id, whatever the body's request says
+    let kept = json!({"request": {"source": chat_path, "model_id": "other", "paged_cache_type": "q8/q4"},
+        "load_at_start": true});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::put("/v1/manager/saved/chat")
+                .header("content-type", "application/json")
+                .body(Body::from(kept.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let (_, saved) =
+        json_body(&app, Request::get("/v1/manager/saved").body(Body::empty())?).await?;
+    assert_eq!(saved["saved"]["chat"]["request"]["model_id"], "chat");
+    assert_eq!(
+        saved["saved"]["chat"]["request"]["paged_cache_type"],
+        "q8/q4"
+    );
+
+    // a server started on the same file serves what was marked
+    let (restarted, manager) = router_keeping(folders, LOOPBACK, Some(saved_path)).await?;
+    manager.load_at_start().await;
+    let served = manager
+        .models()
+        .map_err(|error| anyhow::anyhow!(error.message))?;
+    assert!(
+        served.data.iter().any(|model| model.model_id == "chat"),
+        "{served:?}"
+    );
+
+    let response = restarted
+        .clone()
+        .oneshot(Request::delete("/v1/manager/saved/chat").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let (_, saved) = json_body(
+        &restarted,
+        Request::get("/v1/manager/saved").body(Body::empty())?,
+    )
+    .await?;
+    assert_eq!(saved["saved"], json!({}));
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn kept_loads_are_an_admins() -> anyhow::Result<()> {
+    let app = router(Vec::new(), LAN).await?;
+    let (status, _) =
+        json_body(&app, Request::get("/v1/manager/saved").body(Body::empty())?).await?;
+    assert_eq!(status, StatusCode::FORBIDDEN);
     Ok(())
 }

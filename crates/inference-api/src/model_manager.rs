@@ -2,7 +2,7 @@
 //! loads from it into the engine (or into a document layout detector beside it) with their progress, downloads into
 //! the cache and deletions.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -16,7 +16,8 @@ use serde_json::json;
 
 use crate::api_error::{ApiError, ApiErrorKind};
 use crate::engine::{
-    Engine, ModelSpec, MtpSpec, PagedCacheType, ProgressSink, add_progress_sink, explicit_device,
+    Engine, ModelSpec, MtpSpec, PagedCacheType, ProgressEvent, ProgressSink, add_progress_sink,
+    explicit_device,
 };
 use crate::model_inventory::{
     ModelDownloadRequest, ScanRequest, delete_hf_cache_repo, inspect_model, is_repo_id,
@@ -47,6 +48,8 @@ pub struct ModelManagerConfig {
     pub hf_cache_path: Option<PathBuf>,
     /// The token downloads use (`cache`, `env:VAR`, `literal:TOKEN`); unset uses the one `hf auth login` saved.
     pub token_source: Option<String>,
+    /// The JSON file the manager keeps each model id's last successful load in ([`SavedModel`]); unset keeps none.
+    pub saved_path: Option<PathBuf>,
 }
 
 /// How a managed model serves requests.
@@ -81,7 +84,7 @@ impl From<ModelCategory> for ManagedKind {
 }
 
 /// A load: what to load, the id requests will name it by, and how to run it.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ManagedLoadRequest {
     /// An inventory entry's `path`, or a Hugging Face repository id (`org/name`), downloaded when not cached; a layout
@@ -91,29 +94,45 @@ pub struct ManagedLoadRequest {
     pub model_id: String,
     /// Tokens of context the model's paged KV cache holds; unset uses the server's setting, and without paged attention
     /// it is ignored.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paged_context_len: Option<usize>,
     /// How the model's paged KV cache stores K and V: `auto` (the model's dtype), `f8e4m3`, `q2`..`q8` (both at
     /// those bits) or `qK/qV`; unset uses the server's `--pa-cache-type`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub paged_cache_type: Option<PagedCacheType>,
     /// Sequences the model serves at once; unset uses the server's `--max-seqs`.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_seqs: Option<usize>,
     /// Speculative decoding with the checkpoint's own MTP head (`n_predict`, `draft_sampling`); an assistant `model`
     /// is refused.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mtp: Option<MtpSpec>,
     /// For a text GGUF, one of its entry's `projectors`; unset takes its only one, and none when there are several.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mmproj: Option<String>,
     /// For a speech recognition model, a Silero VAD GGUF (an inventory `path`): recordings over 5 minutes are then cut
     /// at their silences, and run past the 24 minutes one pass takes.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub vad: Option<String>,
     /// For a layout detector, `cpu` or `cuda:N`; unset uses the engine's device. Other models run on the engine's.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device: Option<String>,
+}
+
+/// A load the manager keeps under its model id: the request its last successful load used, and whether the server
+/// loads it again when it starts.
+#[derive(Clone, Debug, Deserialize, Serialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SavedModel {
+    pub request: ManagedLoadRequest,
+    #[serde(default)]
+    pub load_at_start: bool,
+}
+
+/// The loads the manager keeps, by model id.
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct SavedModels {
+    pub saved: BTreeMap<String, SavedModel>,
 }
 
 /// A served model and where it came from.
@@ -215,7 +234,8 @@ json_requests!(
     ManagedLoadRequest,
     ManagedDownloadRequest,
     ManagedDeleteRequest,
-    LayoutDetectRequest
+    LayoutDetectRequest,
+    SavedModel
 );
 
 struct Loaded {
@@ -244,17 +264,92 @@ pub struct ModelManager {
     gate: tokio::sync::Mutex<()>,
     loaded: RwLock<HashMap<String, Loaded>>,
     layouts: RwLock<HashMap<String, LayoutModel>>,
+    saved: RwLock<BTreeMap<String, SavedModel>>,
 }
 
 impl ModelManager {
     pub fn new(engine: Engine, config: ModelManagerConfig) -> Arc<Self> {
+        let saved = config
+            .saved_path
+            .as_deref()
+            .map(read_saved)
+            .unwrap_or_default();
         Arc::new(Self {
             engine,
             config,
             gate: tokio::sync::Mutex::new(()),
             loaded: RwLock::new(HashMap::new()),
             layouts: RwLock::new(HashMap::new()),
+            saved: RwLock::new(saved),
         })
+    }
+
+    /// The loads kept by model id.
+    pub fn saved(&self) -> Result<SavedModels, ApiError> {
+        let saved = self.saved.read().map_err(|_| ApiError::internal())?.clone();
+        Ok(SavedModels { saved })
+    }
+
+    /// Keeps `saved` as `model_id`'s load (its request names that id) without loading it.
+    pub fn save(&self, model_id: &str, mut saved: SavedModel) -> Result<(), ApiError> {
+        if model_id.trim().is_empty() {
+            return Err(ApiError::invalid_request("the model id is empty"));
+        }
+        saved.request.model_id = model_id.to_string();
+        self.update_saved(|all| {
+            all.insert(model_id.to_string(), saved);
+        })
+    }
+
+    /// Stops keeping `model_id`'s load; a served model stays served.
+    pub fn forget(&self, model_id: &str) -> Result<(), ApiError> {
+        self.update_saved(|all| {
+            all.remove(model_id);
+        })
+    }
+
+    /// Loads every kept load marked `load_at_start`, one after another; a failure is logged and the rest still load.
+    pub async fn load_at_start(&self) {
+        let pending: Vec<SavedModel> = match self.saved.read() {
+            Ok(saved) => saved
+                .values()
+                .filter(|s| s.load_at_start)
+                .cloned()
+                .collect(),
+            Err(_) => return,
+        };
+        for saved in pending {
+            let id = saved.request.model_id.clone();
+            tracing::info!("loading `{id}` from `{}` at startup", saved.request.source);
+            if let Err(error) = self
+                .load(saved.request, Arc::new(|_: &ProgressEvent<'_>| {}))
+                .await
+            {
+                tracing::warn!("`{id}` did not load at startup: {}", error.message);
+            }
+        }
+    }
+
+    fn update_saved(
+        &self,
+        change: impl FnOnce(&mut BTreeMap<String, SavedModel>),
+    ) -> Result<(), ApiError> {
+        let mut saved = self.saved.write().map_err(|_| ApiError::internal())?;
+        change(&mut saved);
+        if let Some(path) = &self.config.saved_path {
+            write_saved(path, &saved).map_err(|error| {
+                ApiError::new(
+                    ApiErrorKind::Internal,
+                    format!(
+                        "could not keep the model settings in {}: {error}",
+                        path.display()
+                    ),
+                    None,
+                    None,
+                )
+            })?;
+        }
+        Ok(())
     }
 
     pub fn config(&self) -> &ModelManagerConfig {
@@ -310,6 +405,27 @@ impl ModelManager {
 
     /// Loads `request.source` as `request.model_id`, replacing what held that id; `progress` hears the load.
     pub async fn load(
+        &self,
+        request: ManagedLoadRequest,
+        progress: Arc<ProgressSink>,
+    ) -> Result<ManagedModel, ApiError> {
+        let kept = request.clone();
+        let model = self.load_request(request, progress).await?;
+        // a later startup loads it the same way; whether it does is the kept entry's choice
+        self.update_saved(|all| {
+            let load_at_start = all.get(&kept.model_id).is_some_and(|s| s.load_at_start);
+            all.insert(
+                kept.model_id.clone(),
+                SavedModel {
+                    request: kept,
+                    load_at_start,
+                },
+            );
+        })?;
+        Ok(model)
+    }
+
+    async fn load_request(
         &self,
         request: ManagedLoadRequest,
         progress: Arc<ProgressSink>,
@@ -819,6 +935,34 @@ fn in_use_error(what: &str) -> ApiError {
         Some("model_in_use"),
         None,
     )
+}
+
+// The kept loads in `path`; a file that is missing or unreadable keeps none (and says why, unless missing).
+fn read_saved(path: &Path) -> BTreeMap<String, SavedModel> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => serde_json::from_str(&text).unwrap_or_else(|error| {
+            tracing::warn!("ignoring the model settings in {}: {error}", path.display());
+            BTreeMap::new()
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => {
+            tracing::warn!(
+                "could not read the model settings in {}: {error}",
+                path.display()
+            );
+            BTreeMap::new()
+        }
+    }
+}
+
+// Writes beside the file and renames over it, so a crash mid-write leaves the old settings.
+fn write_saved(path: &Path, saved: &BTreeMap<String, SavedModel>) -> std::io::Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let partial = path.with_extension("json.partial");
+    std::fs::write(&partial, serde_json::to_vec_pretty(saved)?)?;
+    std::fs::rename(&partial, path)
 }
 
 #[cfg(test)]

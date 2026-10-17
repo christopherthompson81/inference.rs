@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use axum::{
     Extension,
+    extract::Path,
     response::{
         IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
@@ -15,7 +16,7 @@ use futures::{Stream, StreamExt};
 use inference_api::engine::ProgressEvent;
 use inference_api::model_manager::{
     LayoutDetectRequest, ManagedDeleteRequest, ManagedDownloadRequest, ManagedLoadRequest,
-    ModelManager,
+    ModelManager, SavedModel,
 };
 use inference_api::models::ModelOperationRequest;
 use serde_json::json;
@@ -196,6 +197,70 @@ pub async fn delete(
             }
         }
         Err(ApiJsonRejection(error)) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+    get,
+    tag = "inference.rs",
+    path = "/v1/manager/saved",
+    description = "An admin's: the loads the server keeps by model id, each model's last successful \
+        `/v1/manager/load` and whether the server loads it again at startup.",
+    responses(
+        (status = 200, description = "The kept loads", body = inference_api::model_manager::SavedModels),
+        (status = 403, description = "Not an admin"),
+    )
+))]
+pub async fn saved(Extension(manager): Extension<Arc<ModelManager>>) -> Response {
+    json_response(manager.saved())
+}
+
+#[cfg_attr(test, utoipa::path(
+    put,
+    tag = "inference.rs",
+    path = "/v1/manager/saved/{model_id}",
+    description = "An admin's: keeps a load for `model_id` without loading it, such as its settings or whether it loads \
+        at startup. The request's `model_id` becomes the path's.",
+    params(("model_id" = String, Path, description = "The id the load serves the model as")),
+    request_body = SavedModel,
+    responses(
+        (status = 204, description = "Kept"),
+        (status = 400, description = "Invalid request"),
+        (status = 403, description = "Not an admin"),
+    )
+))]
+pub async fn save(
+    Extension(manager): Extension<Arc<ModelManager>>,
+    Path(model_id): Path<String>,
+    payload: Result<ApiJson<SavedModel>, ApiJsonRejection>,
+) -> Response {
+    match payload {
+        Ok(ApiJson(saved)) => match manager.save(&model_id, saved) {
+            Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+            Err(error) => openai_error_response(error),
+        },
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+    delete,
+    tag = "inference.rs",
+    path = "/v1/manager/saved/{model_id}",
+    description = "An admin's: stops keeping `model_id`'s load; a model it serves stays served.",
+    params(("model_id" = String, Path, description = "The id the load serves the model as")),
+    responses(
+        (status = 204, description = "Forgotten"),
+        (status = 403, description = "Not an admin"),
+    )
+))]
+pub async fn forget(
+    Extension(manager): Extension<Arc<ModelManager>>,
+    Path(model_id): Path<String>,
+) -> Response {
+    match manager.forget(&model_id) {
+        Ok(()) => axum::http::StatusCode::NO_CONTENT.into_response(),
+        Err(error) => openai_error_response(error),
     }
 }
 
