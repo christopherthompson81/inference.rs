@@ -530,6 +530,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `model` | `ModelSelected` | required |
 | `model_id` | `str \| None` | optional |
 | `mtp` | `MtpSpec \| None` | optional |
+| `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 
 
@@ -661,16 +662,6 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `context_len` | `int \| None` | optional |
 | `memory_fraction` | `float \| None` | optional |
 | `memory_mb` | `int \| None` | optional |
-
-
-## `PagedCacheType`
-
-Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
-
-| Member | Wire/config name |
-| --- | --- |
-| `PagedCacheType.AUTO` | `'auto'` |
-| `PagedCacheType.F8E4M3` | `'f8e4m3'` |
 
 
 ## `RuntimeSpec`

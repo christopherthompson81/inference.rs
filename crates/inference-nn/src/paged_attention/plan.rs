@@ -102,7 +102,10 @@ pub fn fattn_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
     input.device_is_cuda
         && input.query_layout_is_dense
         && matches!(input.dtype, DType::F16 | DType::BF16)
-        && matches!(input.cache_dtype, DType::F16 | DType::BF16 | DType::F8E4M3)
+        && matches!(
+            input.cache_dtype,
+            DType::F16 | DType::BF16 | DType::F8E4M3 | DType::U8
+        )
         && !input.has_alibi
         && !input.has_custom_mask
         && input.causality_known

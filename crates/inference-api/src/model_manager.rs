@@ -15,7 +15,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::api_error::{ApiError, ApiErrorKind};
-use crate::engine::{Engine, ModelSpec, MtpSpec, ProgressSink, add_progress_sink, explicit_device};
+use crate::engine::{
+    Engine, ModelSpec, MtpSpec, PagedCacheType, ProgressSink, add_progress_sink, explicit_device,
+};
 use crate::model_inventory::{
     ModelDownloadRequest, ScanRequest, delete_hf_cache_repo, inspect_model, is_repo_id,
     model_download_from, scan_models, start_download,
@@ -91,6 +93,10 @@ pub struct ManagedLoadRequest {
     /// it is ignored.
     #[serde(default)]
     pub paged_context_len: Option<usize>,
+    /// How the model's paged KV cache stores K and V: `auto` (the model's dtype), `f8e4m3`, `q2`..`q8` (both at
+    /// those bits) or `qK/qV`; unset uses the server's `--pa-cache-type`.
+    #[serde(default)]
+    pub paged_cache_type: Option<PagedCacheType>,
     /// Sequences the model serves at once; unset uses the server's `--max-seqs`.
     #[serde(default)]
     pub max_seqs: Option<usize>,
@@ -420,6 +426,7 @@ impl ModelManager {
             encoder_cache_memory_bytes: None,
             hf_revision: None,
             paged_context_len: request.paged_context_len,
+            paged_cache_type: request.paged_cache_type,
             max_seqs: request.max_seqs,
             mtp: request.mtp,
         };

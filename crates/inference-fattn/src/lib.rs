@@ -25,6 +25,9 @@ pub struct FattnOptions {
     pub sinks: Option<inference_tensor::Tensor>,
     /// Dequantization scales of fp8 e4m3 K and V (`x * scale`); `None` is 1.0.
     pub kv_scales: Option<KvScales>,
+    /// Paged u8 K/V caches in the quantized row format (`inference_paged_attn::kv_quant`): groups of 32
+    /// Hadamard-rotated values at these bits. The caller rotates Q by the same transform first, and the result after.
+    pub kv_bits: Option<KvBits>,
     /// Causal masking without a mask tensor: each sequence's queries are its last positions, so every sequence needs
     /// at least as many keys as queries (a sequence with no visible key comes out NaN). Excludes `mask`. Runs on the
     /// mma kernel, except a single query with no window, which needs no mask at all.
@@ -48,6 +51,13 @@ impl Default for KvScales {
     fn default() -> Self {
         Self { k: 1., v: 1. }
     }
+}
+
+/// Bits per value of quantized K and V caches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KvBits {
+    pub k: u32,
+    pub v: u32,
 }
 
 /// A paged K/V cache read in place: `(num_blocks, n_head_kv, block_size, head_dim)` blocks, as FlashInfer's HND layout.

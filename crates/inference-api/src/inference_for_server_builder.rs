@@ -49,6 +49,9 @@ pub struct ModelConfig {
     /// Sizes this model's paged KV cache for this many tokens instead of the engine's setting.
     #[serde(default)]
     pub paged_context_len: Option<usize>,
+    /// Stores this model's paged KV cache this way instead of the engine's setting.
+    #[serde(default)]
+    pub paged_cache_type: Option<PagedCacheType>,
     /// Sequences this model serves at once instead of the engine's setting.
     #[serde(default)]
     pub max_seqs: Option<usize>,
@@ -72,6 +75,7 @@ impl ModelConfig {
             encoder_cache_memory_bytes: None,
             hf_revision: None,
             paged_context_len: None,
+            paged_cache_type: None,
             max_seqs: None,
             mtp: None,
         }
@@ -1390,6 +1394,14 @@ impl ModelLoadSettings {
             (Some(cache), Some(tokens)) => cache.mem_gpu = MemoryGpuConfig::ContextSize(tokens),
             (None, Some(_)) => warn!(
                 "`paged_context_len` sizes a paged KV cache; `{}` loads without paged attention",
+                model_config.model_id
+            ),
+            _ => {}
+        }
+        match (cache.as_mut(), model_config.paged_cache_type) {
+            (Some(cache), Some(cache_type)) => cache.cache_type = cache_type,
+            (None, Some(_)) => warn!(
+                "`paged_cache_type` sets a paged KV cache's storage; `{}` loads without paged attention",
                 model_config.model_id
             ),
             _ => {}

@@ -2526,6 +2526,7 @@ impl TextModel {
                     metadata,
                     num_seqs,
                     kv_len,
+                    layer.self_attn.head_dim,
                     dtype,
                 )?);
             }

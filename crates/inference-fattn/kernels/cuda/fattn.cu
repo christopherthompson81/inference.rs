@@ -181,8 +181,10 @@ static void ggml_cuda_flash_attn_ext_mma_f16_switch_ncols2(ggml_backend_cuda_con
     // Edge cases like no mask, ALiBi, unpadded K/V, or misaligned addresses for large data transfers
     //     are put into the template specialization without GQA optimizations.
     bool use_gqa_opt = mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    // quantized K/V rows are read in 4-byte words, not the 16-byte loads the alignment check below is for
+    const bool quant_kv = fattn_get_layout(KQV).k_bits != 0;
     for (const ggml_tensor * t : {Q, K, V, mask}) {
-        if (t == nullptr || ggml_is_quantized(t->type)) {
+        if (t == nullptr || ggml_is_quantized(t->type) || (quant_kv && (t == K || t == V))) {
             continue;
         }
         for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
@@ -535,8 +537,10 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     // The effective batch size for the kernel can be increased by gqa_ratio.
     // The kernel versions without this optimization are also used for ALiBi, if there is no mask, or if the KV cache is not padded,
     bool gqa_opt_applies = gqa_ratio >= 2 && mask && max_bias == 0.0f && K->ne[1] % FATTN_KQ_STRIDE == 0;
+    // quantized K/V rows are read in 4-byte words, not the 16-byte loads the alignment check below is for
+    const bool quant_kv = fattn_get_layout(dst).k_bits != 0;
     for (const ggml_tensor * t : {Q, K, V, mask}) {
-        if (t == nullptr || ggml_is_quantized(t->type)) {
+        if (t == nullptr || ggml_is_quantized(t->type) || (quant_kv && (t == K || t == V))) {
             continue;
         }
         for (size_t i = 1; i < GGML_MAX_DIMS; ++i) {
@@ -606,7 +610,8 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
     }
 
     const fattn_layout lay = fattn_get_layout(dst);
-    if (!lay.fp8 && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {
+    const bool narrow = fattn_narrow_kv(lay);
+    if (!narrow && (!ggml_cuda_fattn_kv_type_supported(K->type) || !ggml_cuda_fattn_kv_type_supported(V->type))) {
         return BEST_FATTN_KERNEL_NONE;
     }
 
@@ -614,9 +619,9 @@ static best_fattn_kernel ggml_cuda_get_best_fattn_kernel(const int device, const
         return BEST_FATTN_KERNEL_NONE;
     }
 
-    // only the mma kernel resolves paged or packed rows, dequantizes fp8 and builds an implicit mask
-    if (lay.block_table || lay.fp8 || lay.cu_q || lay.cu_kv || lay.implicit_mask) {
-        const bool kv_ok = (lay.fp8 ? K->type == GGML_TYPE_I8 : K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16)
+    // only the mma kernel resolves paged or packed rows, dequantizes narrow K/V and builds an implicit mask
+    if (lay.block_table || narrow || lay.cu_q || lay.cu_kv || lay.implicit_mask) {
+        const bool kv_ok = (narrow ? K->type == GGML_TYPE_I8 : K->type == GGML_TYPE_F16 || K->type == GGML_TYPE_BF16)
             && V->type == K->type;
         return kv_ok && turing_mma_available(cc) && Q->ne[0] != 40 && Q->ne[0] != 72
             ? BEST_FATTN_KERNEL_MMA_F16 : BEST_FATTN_KERNEL_NONE;

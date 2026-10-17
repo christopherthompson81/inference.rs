@@ -58,6 +58,7 @@ pub mod paged_attention {
             inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
+        #[allow(clippy::too_many_arguments)]
         pub fn gather_canvas_kv(
             &self,
             _key_cache: &Tensor,
@@ -65,6 +66,7 @@ pub mod paged_attention {
             _input_metadata: &PagedAttentionInputMetadata,
             _seq_idx: usize,
             _kv_len: usize,
+            _head_dim: usize,
             _dtype: inference_tensor::DType,
         ) -> Result<(Tensor, Tensor)> {
             inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");

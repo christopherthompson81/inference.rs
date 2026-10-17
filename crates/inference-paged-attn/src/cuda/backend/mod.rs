@@ -4,6 +4,7 @@ mod fa3;
 mod flashinfer;
 mod gather_kv;
 mod mla;
+mod quant_cache;
 mod reshape_cache;
 mod scale_update;
 pub use cache::{copy_blocks, swap_blocks};
@@ -23,6 +24,7 @@ use inference_tensor::cuda::cudarc::{
 };
 use inference_tensor::{Layout, Result};
 pub use mla::{concat_and_cache_mla, flashinfer_mla_decode, gather_mla_cache};
+pub use quant_cache::{gather_kv_cache_quant, hadamard, quant_cache_bits, reshape_and_cache_quant};
 pub use reshape_cache::reshape_and_cache;
 pub use scale_update::kv_scale_update;
 

@@ -30,6 +30,10 @@ struct fattn_layout {
     int32_t fp8;
     float   k_scale;
     float   v_scale;
+    // nonzero: K/V rows of quant_head_dim values in groups of 32 at these bits, then one f16 scale per group
+    int32_t k_bits;
+    int32_t v_bits;
+    int32_t quant_head_dim;
     const int32_t * cu_q;        // [n_seq + 1] start rows of each sequence's Q and dst; null: batched
     const int32_t * cu_kv;       // [n_seq + 1] start rows of each sequence's dense K/V; null: batched
     // no mask tensor: kp is visible to qp = kv_len - q_len + row iff kp < kv_len, causal: kp <= qp, window: qp - kp <= w
@@ -92,7 +96,14 @@ struct fattn_kv_rows {
     bool    fp8;
     float   scale;
     int32_t base;
+    int32_t bits;       // a quantized row's bits per value, 0 otherwise
+    int32_t data_bytes; // a quantized row's bytes before its group scales
 };
+
+// fp8 and quantized K/V are 1-byte (GGML_TYPE_I8) operands the mma loads dequantize
+static __host__ __device__ __forceinline__ bool fattn_narrow_kv(const fattn_layout & lay) {
+    return lay.fp8 || lay.k_bits;
+}
 
 // Row i in half2; rows past the sequence reuse its first row (masked). __ldg lets lookups move above smem stores.
 static __device__ __forceinline__ int64_t fattn_kv_row(const fattn_kv_rows & rows, const int i, const int stride) {
@@ -1156,12 +1167,13 @@ void launch_fattn(
     // K/V the mma loads convert themselves (bf16, or fp8 via lay); vec has bf16 instances and ignores the flag
     const bool KV_bf16_in_loads = K->type == GGML_TYPE_BF16 && !need_f16_K;
     GGML_ASSERT(!KV_bf16_in_loads || (V->type == GGML_TYPE_BF16 && !need_f16_V));
-    GGML_ASSERT(!lay.fp8 || (!need_f16_K && !need_f16_V));
+    const bool narrow = fattn_narrow_kv(lay);
+    GGML_ASSERT(!narrow || (!need_f16_K && !need_f16_V));
     // at 576 V comes out of K's tiles, already scaled by the K scale
-    GGML_ASSERT(!lay.fp8 || Q->ne[0] != 576);
-    const bool KV_convert = KV_bf16_in_loads || lay.fp8;
-    // a paged, packed or fp8 source is read in place: no f16 copy of it, and no sparse gather on top
-    GGML_ASSERT(!(lay.block_table || lay.fp8 || lay.cu_kv || lay.cu_q) || ((KV_convert || K->type == GGML_TYPE_F16) && !use_sparse));
+    GGML_ASSERT(!narrow || Q->ne[0] != 576);
+    const bool KV_convert = KV_bf16_in_loads || narrow;
+    // a paged, packed or narrow source is read in place: no f16 copy of it, and no sparse gather on top
+    GGML_ASSERT(!(lay.block_table || narrow || lay.cu_kv || lay.cu_q) || ((KV_convert || K->type == GGML_TYPE_F16) && !use_sparse));
 
     GGML_ASSERT(Q->nb[0] == ggml_element_size(Q));
     GGML_ASSERT(K->nb[0] == ggml_element_size(K));

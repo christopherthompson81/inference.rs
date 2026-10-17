@@ -2679,6 +2679,7 @@ dependencies = [
  "float8",
  "half",
  "inference-kernel-build",
+ "inference-paged-attn",
  "inference-tensor",
 ]
 

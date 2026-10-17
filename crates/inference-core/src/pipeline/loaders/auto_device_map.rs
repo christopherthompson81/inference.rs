@@ -35,21 +35,6 @@ fn post_load_memory_config(
     }
 }
 
-fn calculate_key_block_shape(
-    model_config: &dyn ModelConfigLike,
-    dtype: DType,
-    block_size: usize,
-) -> (usize, usize, usize, usize) {
-    let element_size = dtype.size_in_bytes();
-    let x = 16 / element_size;
-    (
-        model_config.num_kv_heads(),
-        model_config.k_head_dim() / x,
-        block_size,
-        x,
-    )
-}
-
 fn calculate_value_block_shape(
     model_config: &dyn ModelConfigLike,
     block_size: usize,
@@ -110,6 +95,12 @@ pub fn get_device_layers(
     let base_device_memory_reservation_bytes = paged_attn_config
         .as_ref()
         .map_or(0, |config| config.base_device_memory_reservation_bytes);
+    // a value's bytes as (numerator, denominator): an fp8 or quantized cache takes less than the activations' dtype
+    let value_bytes = paged_attn_config
+        .as_ref()
+        .map_or((dtype.size_in_bytes(), 1), |cfg| {
+            cfg.cache_type.bytes_per_value(dtype)
+        });
     let kv_cache_elems = match paged_attn_config {
         Some(cfg) => {
             // The mapping estimate is bounded independently from the post-load memory mode.
@@ -194,9 +185,10 @@ pub fn get_device_layers(
                 Some(total_model_size_in_bytes),
                 Some(max_seq_len * max_batch_size),
             )?;
-            let key_shape = calculate_key_block_shape(&*model_cfg, dtype, cache.block_size);
-            let key_sz =
-                cache.num_gpu_blocks * key_shape.0 * key_shape.1 * key_shape.2 * key_shape.3;
+            let key_sz = cache.num_gpu_blocks
+                * model_cfg.num_kv_heads()
+                * model_cfg.k_head_dim()
+                * cache.block_size;
             let val_shape = calculate_value_block_shape(&*model_cfg, cache.block_size);
             let val_sz = cache.num_gpu_blocks * val_shape.0 * val_shape.1 * val_shape.2;
             key_sz + val_sz
@@ -218,7 +210,7 @@ pub fn get_device_layers(
         }
     };
     // Per paged layer; hybrid models leave the recurrent/linear layers out of the cache entirely.
-    let kv_cache_bytes = kv_cache_elems * dtype.size_in_bytes();
+    let kv_cache_bytes = (kv_cache_elems * value_bytes.0).div_ceil(value_bytes.1);
     let kv_bytes_for_layer = |idx: usize| {
         if model_cfg.layer_has_paged_kv_cache(idx) {
             kv_cache_bytes

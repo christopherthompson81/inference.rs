@@ -368,17 +368,24 @@ static constexpr __device__ int ggml_cuda_fattn_mma_get_nstages(
 
 static __device__ __forceinline__ fattn_kv_rows fattn_sequence_rows(const fattn_layout & lay, const int sequence, const bool V) {
     const float scale = V ? lay.v_scale : lay.k_scale;
+    const int bits = V ? lay.v_bits : lay.k_bits;
+    const int data_bytes = lay.quant_head_dim*bits/8;
     if (lay.block_table == nullptr) {
         const int base = lay.cu_kv ? lay.cu_kv[sequence] : 0;
         const int len  = lay.cu_kv ? lay.cu_kv[sequence + 1] - base : INT_MAX;
-        return fattn_kv_rows{nullptr, 0, len, 0, lay.fp8 != 0, scale, base};
+        return fattn_kv_rows{nullptr, 0, len, 0, lay.fp8 != 0, scale, base, bits, data_bytes};
     }
     const int64_t block_stride = (V ? lay.block_stride_V : lay.block_stride_K) / int64_t(sizeof(half2));
     // a length past the table's span would index beyond the sequence's table row
     const int len = min(lay.seq_lens[sequence], lay.max_blocks << lay.block_size_log2);
     return fattn_kv_rows{lay.block_table + int64_t(sequence)*lay.max_blocks, lay.block_size_log2, len, block_stride,
-        lay.fp8 != 0, scale, 0};
+        lay.fp8 != 0, scale, 0, bits, data_bytes};
 }
+
+// the K/V source a tile load instantiates for
+#define FATTN_KV_PLAIN 0
+#define FATTN_KV_FP8   1
+#define FATTN_KV_QUANT 2
 
 // e4m3 bits placed as f16 are 2^-8 of the value (bias 7 vs 15); sm86 has no fp8 conversion, and the emulated one is slow
 #define FATTN_FP8_E4M3_BIAS_GAP 256.0f
@@ -403,6 +410,38 @@ static __device__ __forceinline__ void fattn_load_fp8_chunk(const char * src, co
 #pragma unroll
     for (int l = 0; l < 4; ++l) {
         chunk[l] = __hmul2(chunk[l], scale2);
+    }
+    ggml_cuda_memcpy_1<16>(dst_smem, chunk);
+}
+
+// Dequantizes the 8 values of a quantized row (see fattn_layout) starting at value `first` into one 16-byte f16 chunk
+// (not inlined: every kernel variant calls it from each unrolled load, which inlined added 2.85 MiB of fattn code):
+// they are `bits` bytes, 8 consecutive values a chunk, under their group's f16 scale. A null row stores zeros.
+static __device__ __noinline__ void fattn_load_quant_chunk(
+        const uint8_t * row, const int first, const int bits, const int data_bytes, void * dst_smem) {
+    __align__(16) half2 chunk[4];
+    if (!row) {
+#pragma unroll
+        for (int l = 0; l < 4; ++l) {
+            chunk[l] = make_half2(0.0f, 0.0f);
+        }
+        ggml_cuda_memcpy_1<16>(dst_smem, chunk);
+        return;
+    }
+    // the chunk's `bits` bytes from aligned words: rows start 4-byte aligned, and 3 words cover any 8 bytes
+    const int offset = (first/8)*bits;
+    const uint32_t * words = (const uint32_t *) row + offset/4;
+    const int shift = 8*(offset % 4);
+    const uint64_t low = uint64_t(words[0]) | (uint64_t(words[1]) << 32);
+    const uint64_t packed = shift ? (low >> shift) | (uint64_t(words[2]) << (64 - shift)) : low;
+    const float mid   = float(1 << (bits - 1));
+    const float scale = __half2float(((const half *) (row + data_bytes))[first/32]) / mid;
+    const uint32_t mask = (1u << bits) - 1;
+#pragma unroll
+    for (int l = 0; l < 4; ++l) {
+        const float lo = float(uint32_t(packed >> ((2*l + 0)*bits)) & mask) + 0.5f - mid;
+        const float hi = float(uint32_t(packed >> ((2*l + 1)*bits)) & mask) + 0.5f - mid;
+        chunk[l] = __floats2half2_rn(lo*scale, hi*scale);
     }
     ggml_cuda_memcpy_1<16>(dst_smem, chunk);
 }
@@ -486,9 +525,10 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
     }
     {
         const half2 zero[4] = {{0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}, {0.0f, 0.0f}};
-        // fp8 is a separate instantiation of the loop: a per-chunk branch on it stops the loads being batched
+        // fp8 and quantized rows are separate instantiations of the loop: a per-chunk branch on the source type stops
+        // the loads being batched
         const half2 scale2 = __float2half2_rn(rows.scale*FATTN_FP8_E4M3_BIAS_GAP);
-        auto load = [&] __device__ (const int n, auto fp8, auto general) {
+        auto load = [&] __device__ (const int n, auto narrow, auto general) {
             const int stride_k = 32 >> n;
             const int k0_start = stride_k == 32 ? 0 : chunks_per_row - chunks_per_row % (2*stride_k);
             const int k0_stop  =                      chunks_per_row - chunks_per_row % (1*stride_k);
@@ -525,11 +565,16 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
                     } else {
                         dst_smem = tile_KV + i*stride_tile + k*4;
                     }
-                    if constexpr (decltype(fp8)::value) {
+                    if constexpr (decltype(narrow)::value == FATTN_KV_FP8) {
                         // fp8 rows hold one byte per element, so the chunk's 8 elements sit at half the half2 offset
                         const bool live = !use_sparse && (!oob_check || i < i_sup);
                         fattn_load_fp8_chunk(live ? (const char *) KV + 4*row_KV + 2*(col2 + k*h2_per_chunk) : nullptr,
                             scale2, dst_smem);
+                    } else if constexpr (decltype(narrow)::value == FATTN_KV_QUANT) {
+                        // row_KV counts a row's bytes in 4s, the half2 unit the strides are given in
+                        const bool live = !use_sparse && (!oob_check || i < i_sup);
+                        fattn_load_quant_chunk(live ? (const uint8_t *) KV + 4*row_KV : nullptr,
+                            2*(col2 + k*h2_per_chunk), rows.bits, rows.data_bytes, dst_smem);
                     } else if (KV_convert) {
                         __align__(16) half2 chunk[h2_per_chunk];
                         ggml_cuda_memcpy_1<16>(chunk, src);
@@ -551,12 +596,14 @@ static __device__ __forceinline__ void flash_attn_ext_f16_load_tile(
         // 5: max  2*16= 32 bytes,  16 half
         // 6: max  1*16= 16 bytes,   8 half
         const bool general = rows.table || rows.len != INT_MAX;
-        if (rows.fp8) {
-            ggml_cuda_unroll<6>{}(load, std::true_type{}, std::true_type{});
+        if (rows.bits) {
+            ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_QUANT>{}, std::true_type{});
+        } else if (rows.fp8) {
+            ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_FP8>{}, std::true_type{});
         } else if (general) {
-            ggml_cuda_unroll<6>{}(load, std::false_type{}, std::true_type{});
+            ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_PLAIN>{}, std::true_type{});
         } else {
-            ggml_cuda_unroll<6>{}(load, std::false_type{}, std::false_type{});
+            ggml_cuda_unroll<6>{}(load, std::integral_constant<int, FATTN_KV_PLAIN>{}, std::false_type{});
         }
     }
 }
@@ -2227,7 +2274,7 @@ void ggml_cuda_flash_attn_ext_mma_f16_case(ggml_backend_cuda_context & ctx, ggml
     const fattn_layout lay = fattn_get_layout(dst);
     const bool KV_bf16_in_kernel = dst->src[1]->type == GGML_TYPE_BF16 && dst->src[2]->type == GGML_TYPE_BF16
         && (dst->src[0]->ne[1] <= FATTN_MMA_KV_BF16_MAX_Q || lay.block_table || lay.cu_kv);
-    const bool KV_in_kernel = KV_bf16_in_kernel || lay.fp8;
+    const bool KV_in_kernel = KV_bf16_in_kernel || fattn_narrow_kv(lay);
     launch_fattn<DV, ncols1, ncols2>
         (ctx, dst, fattn_kernel, nwarps, nbytes_shared_total, nbatch_fa,
          !KV_in_kernel, !KV_in_kernel, true, use_sparse, warp_size_host);

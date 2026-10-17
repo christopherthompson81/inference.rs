@@ -63,9 +63,10 @@ fn validate_cache_scales(cache_dtype: DType, scales: KvCacheScales, op: &str) ->
 }
 
 pub fn is_flashinfer_cache(key_cache: &Tensor, value_cache: &Tensor) -> bool {
-    key_cache.dims().len() == 4
-        && value_cache.dims().len() == 4
-        && key_cache.dims() == value_cache.dims()
+    let (k, v) = (key_cache.dims(), value_cache.dims());
+    // quantized K and V rows differ in bytes when their bits do
+    let quant = key_cache.dtype() == DType::U8 && value_cache.dtype() == DType::U8;
+    k.len() == 4 && v.len() == 4 && (k == v || (quant && k[..3] == v[..3]))
 }
 
 #[allow(clippy::too_many_arguments)]

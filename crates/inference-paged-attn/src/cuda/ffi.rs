@@ -208,6 +208,47 @@ inference_tensor::kernel_library! {
             stream: CUstream,
         );
 
+        pub fn reshape_and_cache_quant(
+            src: *const c_void,
+            cache: *mut c_void,
+            slot_mapping: *const c_long,
+            num_tokens: c_int,
+            num_heads: c_int,
+            head_size: c_int,
+            block_size: c_int,
+            stride: c_int,
+            bits: c_int,
+            width: c_int,
+            dtype: u32,
+            stream: CUstream,
+        );
+
+        pub fn gather_kv_cache_quant(
+            cache: *const c_void,
+            out: *mut c_void,
+            block_table: *const c_int,
+            cu_seq_lens: *const c_int,
+            num_tokens: c_int,
+            num_seqs: c_int,
+            block_size: c_int,
+            block_table_stride: c_int,
+            num_kv_heads: c_int,
+            head_size: c_int,
+            bits: c_int,
+            width: c_int,
+            out_dtype: u32,
+            stream: CUstream,
+        );
+
+        pub fn hadamard_rows(
+            src: *const c_void,
+            dst: *mut c_void,
+            elements: i64,
+            width: c_int,
+            dtype: u32,
+            stream: CUstream,
+        );
+
         pub fn gather_mla_cache(
             ckv_cache: *const c_void,
             kpe_cache: *const c_void,

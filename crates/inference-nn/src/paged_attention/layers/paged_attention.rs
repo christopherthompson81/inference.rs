@@ -6,6 +6,8 @@ use std::{collections::HashMap, sync::Once};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_fattn::{FattnOptions, KvScales as FattnKvScales, Packed, PagedKv};
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+use inference_paged_attn::kv_quant;
 #[cfg(not(all(feature = "cuda", target_family = "unix")))]
 use inference_paged_attn::paged_attention;
 use inference_paged_attn::reshape_and_cache;
@@ -173,10 +175,23 @@ fn cache_block_size(key_cache: &Tensor, value_cache: &Tensor) -> Result<usize> {
     }
 }
 
-fn cache_kv_shape(key_cache: &Tensor, value_cache: &Tensor) -> Result<(usize, usize)> {
+// The cache's (kv heads, head size); a quantized cache's rows are bytes, so it holds `query_head_size` if they fit it.
+fn cache_kv_shape(
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    query_head_size: usize,
+) -> Result<(usize, usize)> {
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
             let (_, num_kv_heads, _, head_size) = key_cache.dims4()?;
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            if inference_paged_attn::quant_cache_bits(key_cache, value_cache, query_head_size)
+                .is_some()
+            {
+                return Ok((num_kv_heads, query_head_size));
+            }
+            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+            let _ = query_head_size;
             Ok((num_kv_heads, head_size))
         }
         AttentionBackendKind::Standard => {
@@ -226,6 +241,37 @@ fn cache_input_can_write_directly(tensor: &Tensor) -> Result<bool> {
         && row_stride >= heads.saturating_mul(head_size))
 }
 
+// A quantized (u8) cache's bit widths on fattn's options; None when its rows do not fit `head_dim`.
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn with_quant_bits(
+    mut opts: FattnOptions,
+    key_cache: &Tensor,
+    value_cache: &Tensor,
+    head_dim: usize,
+) -> Option<FattnOptions> {
+    if key_cache.dtype() != DType::U8 {
+        return Some(opts);
+    }
+    let (k, v) = inference_paged_attn::quant_cache_bits(key_cache, value_cache, head_dim)?;
+    opts.kv_bits = Some(inference_fattn::KvBits { k, v });
+    Some(opts)
+}
+
+// A quantized cache holds Hadamard-rotated K and V: Q goes in rotated as K was (dot products unchanged), and the
+// output comes out rotated as V was, which the same (self-inverse) transform undoes.
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn rotate_for_quant(
+    x: &Tensor,
+    opts: &FattnOptions,
+    rotation: fn(usize) -> usize,
+) -> Result<Tensor> {
+    if opts.kv_bits.is_some() {
+        inference_paged_attn::hadamard(x, rotation(x.dim(inference_tensor::D::Minus1)?))
+    } else {
+        Ok(x.clone())
+    }
+}
+
 fn write_kv_cache(
     key: &Tensor,
     value: &Tensor,
@@ -253,7 +299,15 @@ fn write_kv_cache(
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
-            {
+            if key_cache.dtype() == DType::U8 {
+                inference_paged_attn::reshape_and_cache_quant(
+                    key,
+                    value,
+                    key_cache,
+                    value_cache,
+                    slot_mapping,
+                )
+            } else {
                 reshape_and_cache_flashinfer(
                     key,
                     value,
@@ -280,6 +334,7 @@ fn write_kv_cache(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn gather_kv_cache_for_layout(
     key_cache: &Tensor,
     value_cache: &Tensor,
@@ -287,12 +342,24 @@ fn gather_kv_cache_for_layout(
     block_tables: &Tensor,
     cu_kv: &Tensor,
     num_tokens: usize, // Must equal cu_kv[-1].
+    head_dim: usize,
     dtype: DType,
 ) -> Result<(Tensor, Tensor)> {
     match AttentionBackendKind::from_cache(key_cache, value_cache) {
         AttentionBackendKind::FlashInfer => {
             #[cfg(all(feature = "cuda", target_family = "unix"))]
-            {
+            if key_cache.dtype() == DType::U8 {
+                // the gather rotates rows back, so what it returns is plain K/V
+                inference_paged_attn::gather_kv_cache_quant(
+                    key_cache,
+                    value_cache,
+                    block_tables,
+                    cu_kv,
+                    num_tokens,
+                    head_dim,
+                    dtype,
+                )
+            } else {
                 gather_kv_cache_flashinfer(
                     key_cache,
                     value_cache,
@@ -905,6 +972,7 @@ impl PagedAttention {
     /// passes snapshot the frozen encoder cache once per block and reuse it across all
     /// denoising steps. Metadata block-table rows are per query row; one row per sequence
     /// is selected by stride.
+    #[allow(clippy::too_many_arguments)]
     pub fn gather_canvas_kv(
         &self,
         key_cache: &Tensor,
@@ -912,6 +980,7 @@ impl PagedAttention {
         input_metadata: &PagedAttentionInputMetadata,
         num_seqs: usize,
         kv_len: usize,
+        head_dim: usize,
         dtype: DType,
     ) -> Result<(Tensor, Tensor)> {
         let device = key_cache.device();
@@ -961,6 +1030,7 @@ impl PagedAttention {
             &table,
             &cu_kv,
             num_tokens,
+            head_dim,
             dtype,
         )?;
         // Packed [num_seqs * kv_len, kv_heads, head_size] -> [num_seqs, kv_heads, kv_len, hd].
@@ -1268,6 +1338,7 @@ impl PagedAttention {
             block_tables,
             &cu_kv,
             num_kv_tokens,
+            ctx.dims.head_size,
             tensors.query.dtype(),
         )?;
         let max_kv = kv_lens.iter().copied().max().unwrap_or(0);
@@ -1796,6 +1867,7 @@ impl PagedAttention {
             block_tables,
             &cu_kv,
             num_kv_tokens,
+            ctx.dims.head_size,
             query.dtype(),
         )?;
         let q_4d = query.reshape((query_rows, ctx.dims.attention_heads, 1, ctx.dims.head_size))?;
@@ -2011,9 +2083,13 @@ impl PagedAttention {
             window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
             sinks: fattn_sinks(ctx.sdpa_params.sinks.as_ref())?,
             chunk: ctx.sdpa_params.chunk,
+            kv_bits: None,
             ..Default::default()
         };
-        let q = query.transpose(1, 2)?;
+        let Some(opts) = with_quant_bits(opts, key_cache, value_cache, d) else {
+            return Ok(None);
+        };
+        let q = rotate_for_quant(&query.transpose(1, 2)?, &opts, kv_quant::k_rotation)?;
         // the plan admits no padding: b rows of s queries each, or every sequence packed into one row
         let batched = query_lens.len() == b && query_lens.iter().all(|&len| len == s);
         let out = if batched {
@@ -2041,7 +2117,9 @@ impl PagedAttention {
             inference_fattn::flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?
                 .reshape((b, s, h, d))?
         };
-        out.transpose(1, 2).map(Some)
+        rotate_for_quant(&out, &opts, kv_quant::v_rotation)?
+            .transpose(1, 2)
+            .map(Some)
     }
 
     // fattn reads the cache in place through the padded block tables and needs none of FlashInfer's plan.
@@ -2084,15 +2162,28 @@ impl PagedAttention {
             window_left: sliding_window_left(ctx.sdpa_params.sliding_window),
             sinks: fattn_sinks(ctx.sdpa_params.sinks.as_ref())?,
             chunk: ctx.sdpa_params.chunk,
+            kv_bits: None,
             ..Default::default()
         };
-        let query = query.unsqueeze(1)?;
+        let Some(opts) = with_quant_bits(
+            opts,
+            key_cache,
+            value_cache,
+            query.dim(inference_tensor::D::Minus1)?,
+        ) else {
+            return Ok(None);
+        };
+        let query = rotate_for_quant(&query.unsqueeze(1)?, &opts, kv_quant::k_rotation)?;
         if !inference_fattn::supported_paged(&query, &kv, &opts)? {
             return Ok(None);
         }
-        inference_fattn::flash_attn_paged(&query, &kv, &opts)?
-            .squeeze(1)
-            .map(Some)
+        rotate_for_quant(
+            &inference_fattn::flash_attn_paged(&query, &kv, &opts)?,
+            &opts,
+            kv_quant::v_rotation,
+        )?
+        .squeeze(1)
+        .map(Some)
     }
 
     // HND-layout decode: FA3's fp8 kernel where it applies, fattn, else the gather (which refuses graph capture).
@@ -2171,6 +2262,7 @@ impl PagedAttention {
             Some(cache_kv_shape(
                 key_cache.as_ref().expect("missing donor key cache"),
                 value_cache.as_ref().expect("missing donor value cache"),
+                query.dim(inference_tensor::D::Minus1)?,
             )?)
         };
         let ctx = self.build_forward_ctx(PagedForwardSetup {
