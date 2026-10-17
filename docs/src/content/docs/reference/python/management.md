@@ -427,6 +427,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | `mmproj` | `str \| None` | optional |
 | `model_id` | `str` | required |
 | `mtp` | `MtpSpec \| None` | optional |
+| `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 | `source` | `str` | required |
 | `vad` | `str \| None` | optional |

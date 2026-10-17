@@ -183,6 +183,9 @@ pub struct ModelSpec {
     /// Tokens of context this model's paged KV cache holds, in place of `runtime.paged_cache`'s size.
     #[serde(default)]
     pub paged_context_len: Option<usize>,
+    /// This model's paged KV cache storage (`auto`, `f8e4m3`, `q4`, `q8/q4`), in place of `runtime.paged_cache`'s.
+    #[serde(default)]
+    pub paged_cache_type: Option<PagedCacheType>,
     /// Speculative decoding for this model; `runtime.mtp` applies to the first model only.
     #[serde(default)]
     pub mtp: Option<MtpSpec>,
@@ -224,6 +227,7 @@ impl ModelSpec {
         config.in_situ_quant = self.isq;
         config.hf_revision = self.hf_revision;
         config.paged_context_len = self.paged_context_len;
+        config.paged_cache_type = self.paged_cache_type;
         config.max_seqs = self.max_seqs;
         config.mtp = self.mtp.map(MtpSpec::into_config);
         if let Some(bytes) = self.encoder_cache_memory_bytes {

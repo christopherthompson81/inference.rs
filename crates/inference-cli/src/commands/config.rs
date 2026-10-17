@@ -173,6 +173,7 @@ fn build_model_specs(
             )?,
             hf_revision: None,
             paged_context_len: None,
+            paged_cache_type: None,
             max_seqs: entry.max_seqs,
             mtp: None,
         });

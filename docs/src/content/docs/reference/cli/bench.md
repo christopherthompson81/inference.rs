@@ -48,7 +48,7 @@ inference bench [OPTIONS] [COMMAND]
 | `--pa-memory-mb <MEMORY_MB>` |  | GPU memory to allocate in MBs (alternative to context-len) |
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
-| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
+| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
 | `--encoder-cache-memory-mb <ENCODER_CACHE_MEMORY_MB>` |  | Maximum logical tensor memory retained by the multimodal encoder cache, in MiB |
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
@@ -110,7 +110,7 @@ inference bench auto [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-mb <MEMORY_MB>` |  | GPU memory to allocate in MBs (alternative to context-len) |
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
-| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
+| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
 | `--encoder-cache-memory-mb <ENCODER_CACHE_MEMORY_MB>` |  | Maximum logical tensor memory retained by the multimodal encoder cache, in MiB |
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
@@ -159,7 +159,7 @@ inference bench text [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-mb <MEMORY_MB>` |  | GPU memory to allocate in MBs (alternative to context-len) |
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
-| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
+| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
 
 ## inference bench multimodal
 
@@ -204,7 +204,7 @@ inference bench multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-mb <MEMORY_MB>` |  | GPU memory to allocate in MBs (alternative to context-len) |
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
-| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
+| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
 | `--encoder-cache-memory-mb <ENCODER_CACHE_MEMORY_MB>` |  | Maximum logical tensor memory retained by the multimodal encoder cache, in MiB |
 | `--max-edge <MAX_EDGE>` |  | Maximum edge length for image resizing (aspect ratio preserved) |
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
@@ -295,5 +295,5 @@ inference bench embedding [OPTIONS] --model-id <MODEL_ID>
 | `--pa-memory-mb <MEMORY_MB>` |  | GPU memory to allocate in MBs (alternative to context-len) |
 | `--pa-memory-fraction <MEMORY_FRACTION>` |  | GPU memory utilization fraction 0.0-1.0 (alternative to context-len/memory-mb) |
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
-| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
+| `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4 |
 

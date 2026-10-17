@@ -1129,6 +1129,7 @@ class ManagedLoadRequest:
     mmproj: str | None = None
     model_id: str
     mtp: MtpSpec | None = None
+    paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
     source: str
     vad: str | None = None
@@ -1571,6 +1572,7 @@ class ModelSpec:
     model: ModelSelected
     model_id: str | None = None
     mtp: MtpSpec | None = None
+    paged_cache_type: PagedCacheType | None = None
     paged_context_len: int | None = None
 
 
@@ -2238,11 +2240,6 @@ class PagedCacheSpec:
     context_len: int | None = None
     memory_fraction: float | None = None
     memory_mb: int | None = None
-
-
-class PagedCacheType(str, Enum):
-    AUTO = "auto"
-    F8E4M3 = "f8e4m3"
 
 
 @dataclass(kw_only=True)
@@ -3142,6 +3139,7 @@ OpenResponsesInput = Union[str, list[Union[OpenResponsesInputMessage, OpenRespon
 OpenResponsesStreamEvent = Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventResponseCancelled, OpenResponsesStreamEventError]
 OutputContent = Union[OutputContentOutputText, OutputContentRefusal]
 OutputItem = Union[OutputItemMessage, OutputItemFunctionCall, OutputItemShellCall, OutputItemShellCallOutput, OutputItemReasoning]
+PagedCacheType = str
 PromptInput = Union[str, list[int]]
 ResponseFormat = Union[ResponseFormatText, ResponseFormatJsonObject, ResponseFormatJsonSchema]
 ResponsesMessages = Union[list[Message], str]

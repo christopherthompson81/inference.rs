@@ -82,7 +82,7 @@ When none are set, the pool defaults to 90% of available VRAM.
 Two more flags tune the cache itself:
 
 - `--pa-block-size <n>`: block size (default 32).
-- `--pa-cache-type`: KV cache quantization (`auto` or `f8e4m3`). This is separate from model-weight quantization (`--quant`/`--isq`); the two are chosen independently.
+- `--pa-cache-type`: KV cache storage: `auto` (the model's dtype), `f8e4m3`, `q2`..`q8` (K and V at that many bits), or `qK/qV` such as `q8/q4` (see [KV cache quantization](#kv-cache-quantization)). This is separate from model-weight quantization (`--quant`/`--isq`); the two are chosen independently. A model loaded through the model manager (the web UI) can set its own with `paged_cache_type`.
 
 Scheduler memory and latency are controlled independently:
 
@@ -109,7 +109,7 @@ MLA (Multi-head Latent Attention)'s latent cache is supported through a dedicate
 
 On CUDA, paged attention dispatches to one of two paths:
 
-- Default decode and eligible prefill chunks: fattn (llama.cpp's FlashAttention kernels) reading the HND-layout paged cache in place. This covers compute capability 7.5+ (Turing and newer), head dims 64, 80, 96, 112, 128 and 256 (and 512 with grouped-query attention), and FP16, BF16 or FP8 caches, including sliding windows, attention sinks (gpt-oss) and chunked attention (Llama 4).
+- Default decode and eligible prefill chunks: fattn (llama.cpp's FlashAttention kernels) reading the HND-layout paged cache in place. This covers compute capability 7.5+ (Turing and newer), head dims 64, 80, 96, 112, 128 and 256 (and 512 with grouped-query attention), and FP16, BF16, FP8 or quantized caches, including sliding windows, attention sinks (gpt-oss) and chunked attention (Llama 4).
 - Fallback: anything else (older GPUs, other head dims, FP32 caches) gathers each sequence's blocks and then runs the available attention backend. It is slower, and decode over the gather runs without CUDA graphs.
 
 CUDA prompts are chunked from the batch-wide token budget. The per-sequence chunk is the budget
@@ -125,6 +125,42 @@ converts at cache-write time; paged decode and prefill (fattn) dequantize K and 
 they load them, without gathering a full-precision cache. Scales are immutable for the cache lifetime, so
 previously written entries are never reinterpreted. The default scale is 1.0, matching the common
 vLLM and SGLang serving configuration. FP8 cache is not currently supported for MLA layouts.
+
+## KV cache quantization
+
+`q2` through `q8` store K and V at that many bits a value, and `qK/qV` gives K and V their own (`q8/q4` is 8-bit K
+with 4-bit V). Each head's row is rotated by a 32-point Hadamard transform, which evens out channels with outsized
+values, then each group of 32 values is scaled by its largest and rounded to the grid; a group's scale adds half a
+bit a value. fattn reads the cache in place, dequantizing as it loads, with the query and output rotated to match.
+
+| Cache | Bytes a value | vs BF16 |
+|---|---|---|
+| `auto` (BF16) | 2 | 1x |
+| `f8e4m3` | 1 | 2x smaller |
+| `q8` | 1.06 | 1.9x smaller |
+| `q8/q4` | 0.81 | 2.5x smaller |
+| `q6/q4` | 0.69 | 2.9x smaller |
+| `q4` | 0.56 | 3.6x smaller |
+| `q3` | 0.44 | 4.6x smaller |
+
+K is the sensitive half. Teacher-forced perplexity through the cache
+([measurements](https://github.com/christopherthompson81/inference.rs/blob/master/docs/investigations/kv_cache_quant_investigation.md)):
+
+| Cache | Dense model, every layer attends | Hybrid model, a quarter of the layers attend |
+|---|---|---|
+| `f8e4m3` | +0.6% | +0.2% |
+| `q8` | +0.1% | no change |
+| `q8/q4` | +0.1% | +0.2% |
+| `q6/q4`, `q6/q3` | +1-2% | +0.5-1.9% |
+| `q4` | +22% | +0.6% |
+| `q3` | +67% | +2.6% |
+
+`q8/q4` is the safe default when memory is short: lossless on both and smaller than FP8. Hybrid models, whose
+few attention layers hold the whole cache (Qwen3.5 and later), take `q4`.
+
+Quantized caches run on CUDA with fattn's kernels (Turing or newer) and the HND layout, for models whose K and V
+heads have equal sizes that are a multiple of 64; other models fail to load with the reason. MLA models (DeepSeek)
+are not supported.
 
 ## Flash attention vs FlashInfer
 

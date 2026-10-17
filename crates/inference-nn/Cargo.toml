@@ -25,7 +25,7 @@ indexmap.workspace = true
 indicatif.workspace = true
 inference-audio.workspace = true
 inference-fattn = { workspace = true, optional = true }
-inference-paged-attn = { workspace = true, optional = true }
+inference-paged-attn.workspace = true
 inference-quant.workspace = true
 itertools.workspace = true
 metrics.workspace = true
@@ -63,7 +63,6 @@ cuda = [
     "inference-tensor/cuda",
     "dep:inference-kernel-build",
     "inference-quant/cuda",
-    "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
     "dep:inference-fattn",
     "inference-fattn/cuda",
@@ -73,7 +72,6 @@ metal = [
     "inference-tensor/metal",
     "inference-quant/metal",
     "dep:candle-metal-kernels",
-    "dep:inference-paged-attn",
     "inference-paged-attn/metal",
     "dep:objc2-metal"
 ]

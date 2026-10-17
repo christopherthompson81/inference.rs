@@ -1,5 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
+use inference_paged_attn::kv_quant;
 use inference_tensor::cuda_backend::cudarc::driver::{CudaStream, DevicePtr, DevicePtrMut};
 use inference_tensor::{
     CpuStorage, CudaStorage, D, DType, Device, Layout, Result, Shape, Storage, Tensor,
@@ -29,6 +30,7 @@ const PAGED_HEAD_DIMS: [usize; 7] = [64, 80, 96, 112, 128, 256, 512];
 const Q_LOAD_ALIGN: usize = 16;
 // the kernels load K/V rows in place in chunks of this many bytes; only bf16 K/V for the tile kernel is copied first
 const KV_LOAD_ALIGN: usize = 16;
+const QUANT_ROW_ALIGN: usize = 4;
 // a never-read address: supported() describes operands at it (null reads as absent), and implicit masks point at it
 const PROBE_PTR: u64 = 256;
 // e4m3's largest value times this reaches f16's largest (65504 / 448), where dequantized K/V would overflow
@@ -63,6 +65,9 @@ mod ffi {
         pub fp8: i32,
         pub k_scale: f32,
         pub v_scale: f32,
+        pub k_bits: i32,
+        pub v_bits: i32,
+        pub quant_head_dim: i32,
         pub cu_q: *const core::ffi::c_void,
         pub cu_kv: *const core::ffi::c_void,
         pub implicit_mask: i32,
@@ -117,7 +122,7 @@ fn ggml_type(dtype: DType) -> Result<i32> {
         DType::F32 => GGML_TYPE_F32,
         DType::F16 => GGML_TYPE_F16,
         DType::BF16 => GGML_TYPE_BF16,
-        DType::F8E4M3 => GGML_TYPE_I8,
+        DType::F8E4M3 | DType::U8 => GGML_TYPE_I8,
         dt => inference_tensor::bail!("fattn does not take {dt:?}"),
     })
 }
@@ -199,12 +204,16 @@ fn paged_limit(q: &Tensor, kv: &PagedKv, opts: &FattnOptions) -> Result<Option<S
 fn rows_aligned(t: &Tensor) -> bool {
     let l = t.layout();
     let es = t.dtype().size_in_bytes();
-    (l.start_offset() * es).is_multiple_of(KV_LOAD_ALIGN)
-        && l.stride().split_last().is_some_and(|(_, outer)| {
-            outer
-                .iter()
-                .all(|&s| (s * es).is_multiple_of(KV_LOAD_ALIGN))
-        })
+    // quantized rows are read a byte at a time, from row offsets counted in 4s
+    let align = if t.dtype() == DType::U8 {
+        QUANT_ROW_ALIGN
+    } else {
+        KV_LOAD_ALIGN
+    };
+    (l.start_offset() * es).is_multiple_of(align)
+        && l.stride()
+            .split_last()
+            .is_some_and(|(_, outer)| outer.iter().all(|&s| (s * es).is_multiple_of(align)))
 }
 
 // K/V dtypes, alignment and the device: what fattn cannot take, whatever the call.
@@ -214,9 +223,13 @@ fn operand_limit(q: &Tensor, k: &Tensor, v: &Tensor) -> Option<String> {
             "fattn reads K/V rows in {KV_LOAD_ALIGN}-byte chunks; their offsets and strides must align"
         ));
     }
-    if !matches!(k.dtype(), DType::F16 | DType::BF16 | DType::F8E4M3) || k.dtype() != v.dtype() {
+    if !matches!(
+        k.dtype(),
+        DType::F16 | DType::BF16 | DType::F8E4M3 | DType::U8
+    ) || k.dtype() != v.dtype()
+    {
         return Some(format!(
-            "fattn takes f16, bf16 or fp8 e4m3 K and V of one dtype, got {:?} and {:?}",
+            "fattn takes f16, bf16, fp8 e4m3 or quantized (u8) K and V of one dtype, got {:?} and {:?}",
             k.dtype(),
             v.dtype()
         ));
@@ -248,6 +261,13 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
     // at 576 V is read out of K's tiles, which are dequantized with the K scale
     if fp8 && q.dim(D::Minus1)? == MLA_HEAD_DIM {
         inference_tensor::bail!("fattn does not take fp8 K/V at head dim {MLA_HEAD_DIM}");
+    }
+    let quant = k.dtype() == DType::U8;
+    if quant != opts.kv_bits.is_some() {
+        inference_tensor::bail!(
+            "fattn takes kv_bits exactly for quantized (u8) K/V; these are {:?}",
+            k.dtype()
+        );
     }
     if opts.mask.is_some() && opts.causal {
         inference_tensor::bail!("fattn takes a mask tensor or causal masking, not both");
@@ -361,6 +381,10 @@ fn device_ptr<'a>(
                 .device_ptr(stream);
             (p, Box::new(g))
         }
+        DType::U8 => {
+            let (p, g) = storage.as_cuda_slice::<u8>()?.device_ptr(stream);
+            (p, Box::new(g))
+        }
         dt => inference_tensor::bail!("fattn does not take {dt:?}"),
     };
     guards.push(guard);
@@ -400,8 +424,11 @@ fn cache_descriptor(
     layout: &Layout,
     b: usize,
     n_kv: usize,
+    head_dim: usize,
 ) -> Result<ffi::Tensor> {
-    let (_, h_kv, _, d) = layout.shape().dims4()?;
+    // a quantized cache's last dim is its row's bytes; ggml's ne0 is the values it holds
+    let (_, h_kv, _, row) = layout.shape().dims4()?;
+    let d = if dtype == DType::U8 { head_dim } else { row };
     let st = layout.stride();
     let es = dtype.size_in_bytes() as i64;
     Ok(ffi::Tensor {
@@ -525,7 +552,8 @@ impl Fattn<'_> {
                 (b, bhsd(a.q, q_dt, q_l)?, b * sq, h, sq)
             }
         };
-        let mut lay = dense_layout(k_dt, self.opts, sq, q_l.dims()[q_l.dims().len() - 1]);
+        let head_dim = q_l.dims()[q_l.dims().len() - 1];
+        let mut lay = dense_layout(k_dt, self.opts, sq, head_dim);
         if let Some(p) = &self.paged {
             let es = k_dt.size_in_bytes() as i64;
             lay.block_table = null_or(a.block_table);
@@ -542,8 +570,8 @@ impl Fattn<'_> {
             (Some(p), _) => {
                 let n_kv = paged_kv_len(p)?;
                 (
-                    cache_descriptor(a.k, k_dt, k_l, b, n_kv)?,
-                    cache_descriptor(a.v, v_dt, v_l, b, n_kv)?,
+                    cache_descriptor(a.k, k_dt, k_l, b, n_kv, head_dim)?,
+                    cache_descriptor(a.v, v_dt, v_l, b, n_kv, head_dim)?,
                 )
             }
             (None, Some(p)) => {
@@ -569,7 +597,11 @@ impl Fattn<'_> {
             (Some(s), Some(ptr)) => sinks_descriptor(ptr, s.layout())?,
             _ => ABSENT,
         };
-        let dv = v_l.shape().dim(D::Minus1)?;
+        let dv = if v_dt == DType::U8 {
+            head_dim
+        } else {
+            v_l.shape().dim(D::Minus1)?
+        };
         let out_shape = match &self.q_seqs {
             Some(_) => Shape::from((out_rows, h, dv)),
             None => Shape::from((b, sq, h, dv)),
@@ -580,7 +612,7 @@ impl Fattn<'_> {
             v: v_t,
             mask,
             sinks,
-            uses_lay: sequences || lay.fp8 != 0 || lay.implicit_mask != 0,
+            uses_lay: sequences || lay.fp8 != 0 || lay.k_bits != 0 || lay.implicit_mask != 0,
             lay,
             out_shape,
         })
@@ -765,6 +797,13 @@ fn dense_layout(
         fp8: (k_dtype == DType::F8E4M3) as i32,
         k_scale: scales.k,
         v_scale: scales.v,
+        k_bits: opts.kv_bits.map_or(0, |b| b.k as i32),
+        v_bits: opts.kv_bits.map_or(0, |b| b.v as i32),
+        quant_head_dim: if opts.kv_bits.is_some() {
+            head_dim as i32
+        } else {
+            0
+        },
         cu_q: std::ptr::null(),
         cu_kv: std::ptr::null(),
         implicit_mask: (opts.mask.is_none()
@@ -893,11 +932,18 @@ fn validate_paged(
     opts: &FattnOptions,
 ) -> Result<()> {
     let (nb, h_kv, bs, kd) = kv.k_cache.dims4()?;
-    let (vnb, vh, vbs, _) = kv.v_cache.dims4()?;
+    let (vnb, vh, vbs, vd) = kv.v_cache.dims4()?;
     if let Some(limit) = paged_limit(q, kv, opts)? {
         inference_tensor::bail!("{limit}");
     }
-    if kd != d || (nb, h_kv, bs) != (vnb, vh, vbs) {
+    // a quantized cache's rows are its bytes: d values at the given bits, then one f16 scale per group of 32
+    let rows_fit = match opts.kv_bits {
+        Some(bits) => {
+            kv_quant::bits_of(kd, d) == Some(bits.k) && kv_quant::bits_of(vd, d) == Some(bits.v)
+        }
+        None => kd == d,
+    };
+    if !rows_fit || (nb, h_kv, bs) != (vnb, vh, vbs) {
         inference_tensor::bail!(
             "fattn paged operands disagree: q {:?} k cache {:?} v cache {:?}",
             q.shape(),

@@ -10,6 +10,8 @@ license.workspace = true
 
 [dependencies]
 inference-tensor.workspace = true
+# the quantized K/V row format
+inference-paged-attn.workspace = true
 float8.workspace = true
 half = { workspace = true }
 

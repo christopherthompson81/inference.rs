@@ -306,15 +306,20 @@ fn trim_cuda_mempool(device: &Device) -> inference_tensor::Result<()> {
 
 const SIZE_IN_MB: usize = 1024 * 1024;
 
+// `$value_bytes` is a value's (numerator, denominator) bytes: quantized caches take a fraction of a byte per value
 macro_rules! mb_to_blocks {
-    ($mb_size:expr, $dtype_size:expr, $block_size:expr, $config:expr) => {
-        $mb_size / $dtype_size / $block_size / $config.total_kv_cache_elements_per_token()
+    ($mb_size:expr, $value_bytes:expr, $block_size:expr, $config:expr) => {
+        $mb_size * $value_bytes.1
+            / $value_bytes.0
+            / $block_size
+            / $config.total_kv_cache_elements_per_token()
     };
 }
 
 macro_rules! ctxt_to_blocks {
-    ($context_len:expr, $dtype_size:expr, $block_size:expr, $config:expr) => {
-        $context_len * $dtype_size * $config.total_kv_cache_elements_per_token()
+    ($context_len:expr, $value_bytes:expr, $block_size:expr, $config:expr) => {
+        ($context_len * $value_bytes.0 * $config.total_kv_cache_elements_per_token())
+            .div_ceil($value_bytes.1)
     };
 }
 
@@ -382,8 +387,8 @@ pub fn calculate_cache_config(
         .validate(dtype, config, device, layer_devices)
         .map_err(anyhow::Error::msg)?;
     let model_dtype = dtype;
+    let value_bytes = cache_type.bytes_per_value(dtype);
     let dtype = cache_type.to_dtype(dtype);
-    let dtype_size = dtype.size_in_bytes();
 
     let mut cache_devices = Vec::new();
     for layer_device in layer_devices {
@@ -476,7 +481,7 @@ pub fn calculate_cache_config(
             }
             MemoryGpuConfig::ContextSize(toks) => {
                 // ContextSize is demand-driven (bytes needed for N tokens), not a memory budget, so model weight does not apply here.
-                ctxt_to_blocks!(toks, dtype_size, block_size, config).div_ceil(SIZE_IN_MB)
+                ctxt_to_blocks!(toks, value_bytes, block_size, config).div_ceil(SIZE_IN_MB)
             }
         };
         if let Some(memory) = post_load_memory {
@@ -509,7 +514,7 @@ pub fn calculate_cache_config(
     if device.is_metal() {
         let max_tokens = max_num_tokens.unwrap_or(config.max_seq_len());
         let mem_for_tokens =
-            ctxt_to_blocks!(max_tokens, dtype_size, block_size, config) / SIZE_IN_MB;
+            ctxt_to_blocks!(max_tokens, value_bytes, block_size, config) / SIZE_IN_MB;
         if mem_for_tokens < mem_gpu {
             if !silent {
                 info!(
@@ -521,7 +526,7 @@ pub fn calculate_cache_config(
         }
     }
 
-    let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, dtype_size, block_size, config);
+    let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, value_bytes, block_size, config);
     if num_gpu_blocks == 0 {
         anyhow::bail!(
             "Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention."
@@ -531,7 +536,7 @@ pub fn calculate_cache_config(
     if !silent {
         let available_context_tokens = num_gpu_blocks.saturating_sub(1) * block_size;
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
-        info!("PagedAttention KV cache type is {dtype:?}");
+        info!("PagedAttention KV cache type is {cache_type} ({dtype:?})");
         info!(
             "Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {available_context_tokens} tokens"
         );

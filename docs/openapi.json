@@ -6548,6 +6548,17 @@
               }
             ]
           },
+          "paged_cache_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PagedCacheType",
+                "description": "How the model's paged KV cache stores K and V: `auto` (the model's dtype), `f8e4m3`, `q2`..`q8` (both at\nthose bits) or `qK/qV`; unset uses the server's `--pa-cache-type`."
+              }
+            ]
+          },
           "paged_context_len": {
             "type": [
               "integer",
@@ -8548,6 +8559,17 @@
               {
                 "$ref": "#/components/schemas/MtpSpec",
                 "description": "Speculative decoding for this model; `runtime.mtp` applies to the first model only."
+              }
+            ]
+          },
+          "paged_cache_type": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/PagedCacheType",
+                "description": "This model's paged KV cache storage (`auto`, `f8e4m3`, `q4`, `q8/q4`), in place of `runtime.paged_cache`'s."
               }
             ]
           },
@@ -10827,10 +10849,7 @@
       },
       "PagedCacheType": {
         "type": "string",
-        "enum": [
-          "auto",
-          "f8e4m3"
-        ]
+        "description": "KV cache storage: `auto` (the activation dtype), `f8e4m3`, `q2`..`q8` (K and V bits), or `qK/qV`."
       },
       "PromptInput": {
         "oneOf": [

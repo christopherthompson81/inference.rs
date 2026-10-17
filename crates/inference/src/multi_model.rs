@@ -1,6 +1,8 @@
 //! Several models served by one engine, each request picking one by id.
 
-use inference_api::engine::{EngineCallbacks, EngineSpec, ModelSelected, ModelSpec};
+use inference_api::engine::{
+    EngineCallbacks, EngineSpec, ModelSelected, ModelSpec, PagedCacheType,
+};
 
 use crate::{
     DiffusionModelBuilder, EmbeddingModelBuilder, EngineLoadError, GgufModelBuilder,
@@ -13,7 +15,7 @@ const NO_MODELS: &str = "MultiModelBuilder needs at least one model";
 
 /// A builder one model of a [`MultiModelBuilder`] comes from.
 pub trait IntoModelSpec {
-    /// The model and its own overrides (ISQ, template, device layers, revision, KV size, MTP); the rest, the engine's.
+    /// The model and its own overrides (ISQ, template, device layers, revision, KV size and type, MTP); the rest, the engine's.
     fn model_spec(self) -> Result<ModelSpec>;
 }
 
@@ -32,6 +34,9 @@ fn per_model(model: ModelSelected, options: LoadOptions) -> ModelSpec {
         encoder_cache_memory_bytes: runtime.encoder_cache_memory_bytes,
         hf_revision: runtime.hf_revision,
         paged_context_len: runtime.paged_cache.context_len,
+        // `auto` is the builder's default, so only another type overrides the engine's
+        paged_cache_type: (runtime.paged_cache.cache_type != PagedCacheType::Auto)
+            .then_some(runtime.paged_cache.cache_type),
         max_seqs: runtime.max_seqs,
         mtp: runtime.mtp,
     }

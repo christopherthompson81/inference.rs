@@ -22,8 +22,8 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use inference::{
-    GgufModelBuilder, LogitsOutput, Model, ModelBuilder, PromptInput, PromptLogitsRequest,
-    api::operations::TokenizeRequest,
+    GgufModelBuilder, LogitsOutput, Model, ModelBuilder, PagedAttentionMetaBuilder, PagedCacheType,
+    PromptInput, PromptLogitsRequest, api::operations::TokenizeRequest,
 };
 
 const PROMPT_CHUNKSIZE: usize = 1024;
@@ -53,6 +53,19 @@ struct Args {
     /// A local GGUF file to score instead of `--model-id`.
     #[arg(long)]
     gguf: Option<PathBuf>,
+
+    /// The paged KV cache's storage (`auto`, `f8e4m3`, `q4`, `q8/q4`, ...).
+    #[arg(long)]
+    pa_cache_type: Option<PagedCacheType>,
+
+    /// Prefill prompts this many tokens a step (a request's own scoring pass still runs in one).
+    #[arg(long)]
+    prefill_chunk: Option<usize>,
+
+    /// Score each chunk's first N tokens first, so the full chunk finds them in the prefix cache and its later tokens
+    /// attend over the stored (possibly quantized) K/V, as decoding does; only the tokens past N are scored.
+    #[arg(long)]
+    cached_prefix: Option<usize>,
 
     /// Score like `llama-perplexity -c <N> --chunks 1`: the first N tokens, each in the second half given everything
     /// before it, printed as `PPL = <value>`.
@@ -90,6 +103,16 @@ async fn main() -> Result<()> {
             if let Some(calibration_file) = &args.calibration_file {
                 model_builder = model_builder.with_calibration_file(calibration_file.clone());
             }
+            if let Some(cache_type) = args.pa_cache_type {
+                model_builder = model_builder.with_paged_attn(
+                    PagedAttentionMetaBuilder::default()
+                        .with_paged_cache_type(cache_type)
+                        .build()?,
+                );
+            }
+            if let Some(tokens) = args.prefill_chunk {
+                model_builder = model_builder.with_max_prefill_chunk_tokens(tokens);
+            }
             model_builder.build().await?
         }
     };
@@ -117,10 +140,23 @@ async fn main() -> Result<()> {
             prompt: PromptInput::Tokens([vec![bos_token], chunk.to_vec()].concat()),
             output: LogitsOutput::Logprobs,
         };
+        let prompt = [vec![bos_token], chunk.to_vec()].concat();
+        let skip = match args.cached_prefix {
+            Some(prefix) if prefix + 1 < prompt.len() => {
+                let warm = PromptLogitsRequest {
+                    model: None,
+                    prompt: PromptInput::Tokens(prompt[..=prefix].to_vec()),
+                    output: LogitsOutput::Logprobs,
+                };
+                model.prompt_logits(warm).await?;
+                prefix + 1
+            }
+            _ => 0,
+        };
         let scored = model.prompt_logits(request).await?;
 
         // The first token has no prediction; the rest give the mean negative log-likelihood.
-        let logprobs: Vec<f32> = scored.token_logprobs.iter().flatten().copied().collect();
+        let logprobs: Vec<f32> = scored.token_logprobs[skip..].iter().flatten().copied().collect();
         let nll = -logprobs.iter().sum::<f32>() / logprobs.len() as f32;
         let perplexity = nll.exp();
         let end = Instant::now();

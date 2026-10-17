@@ -52,10 +52,44 @@ struct Case {
 }
 
 fn check(c: Case) -> Result<()> {
-    check_with(c, false)
+    check_with(c, false, None)
 }
 
-fn check_with(c: Case, capture: bool) -> Result<()> {
+// Caches of random rows quantized at (K, V) bits, and the same caches dequantized: what attention should see.
+fn quantized_caches(
+    (k_bits, v_bits): (u32, u32),
+    (blocks, n_head_kv, bs, d): (usize, usize, usize, usize),
+    dtype: DType,
+    dev: &Device,
+) -> Result<[Tensor; 4]> {
+    use inference_paged_attn::{gather_kv_cache_quant, kv_quant, reshape_and_cache_quant};
+    let tokens = blocks * bs;
+    let rows = || Tensor::randn(0f32, 1., (tokens, n_head_kv, d), dev)?.to_dtype(dtype);
+    let (k, v) = (rows()?, rows()?);
+    let cache = |bits| {
+        Tensor::zeros(
+            (blocks, n_head_kv, bs, kv_quant::row_bytes(d, bits)),
+            DType::U8,
+            dev,
+        )
+    };
+    let (k_cache, v_cache) = (cache(k_bits)?, cache(v_bits)?);
+    let slots = Tensor::arange(0i64, tokens as i64, dev)?;
+    reshape_and_cache_quant(&k, &v, &k_cache, &v_cache, &slots)?;
+    // one sequence over every block in order reads the whole cache back
+    let as_u32 = |n: usize| u32::try_from(n).map_err(inference_tensor::Error::wrap);
+    let table = Tensor::arange(0u32, as_u32(blocks)?, dev)?.unsqueeze(0)?;
+    let cu = Tensor::new(&[0u32, as_u32(tokens)?], dev)?;
+    let (k_ref, v_ref) = gather_kv_cache_quant(&k_cache, &v_cache, &table, &cu, tokens, d, dtype)?;
+    let hnd = |t: Tensor| {
+        t.reshape((blocks, bs, n_head_kv, d))?
+            .permute((0, 2, 1, 3))?
+            .contiguous()
+    };
+    Ok([k_cache, v_cache, hnd(k_ref)?, hnd(v_ref)?])
+}
+
+fn check_with(c: Case, capture: bool, kv_bits: Option<(u32, u32)>) -> Result<()> {
     crate::skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let (n_head, n_head_kv) = c.heads;
@@ -118,7 +152,13 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
             .to_dtype(c.cache_dtype)?
             .to_device(&dev)
     };
-    let (k_cache, v_cache) = (cache()?, cache()?);
+    let [k_cache, v_cache, k_ref, v_ref] = match kv_bits {
+        Some(bits) => quantized_caches(bits, (NUM_BLOCKS, n_head_kv, bs, d), q_dtype, &dev)?,
+        None => {
+            let (k, v) = (cache()?, cache()?);
+            [k.clone(), v.clone(), k, v]
+        }
+    };
     let query = Tensor::randn(0f32, 1., (b, n_head, q, d), &dev)?.to_dtype(q_dtype)?;
     let sinks = c.sinks.then(|| sink_logits(n_head));
     let sdpa = SdpaParams {
@@ -185,7 +225,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
             heads: c.heads,
         },
         &packed,
-        (&k_cache, &v_cache),
+        (&k_ref, &v_ref),
         &full_tables,
         if fp8 {
             FP8_SCALES
@@ -336,7 +376,41 @@ fn gather_decode_refuses_graph_capture() -> Result<()> {
             gather: true,
         },
         true,
+        None,
     )
+}
+
+#[test]
+fn decode_over_a_quantized_cache_matches_attention_over_its_values() -> Result<()> {
+    // fattn's loads dequantize; softcap at 64 has no fattn kernel, so that case gathers (dequantizing too)
+    for (head_dim, bits, dtype, window, softcap, gather) in [
+        (128, (8, 8), DType::F16, None, None, false),
+        (128, (6, 4), DType::BF16, None, None, false),
+        (64, (5, 3), DType::F16, Some(100), None, false),
+        (256, (4, 2), DType::BF16, None, None, false),
+        (512, (7, 5), DType::F16, None, None, false),
+        (64, (8, 4), DType::F16, None, Some(30.), true),
+    ] {
+        check_with(
+            Case {
+                head_dim,
+                heads: (N_HEAD, N_HEAD_KV),
+                block_size: 32,
+                cache_dtype: dtype,
+                full_lens: &[1, 37, 300, 64],
+                query_len: 1,
+                model_window: window,
+                layer_window: window,
+                softcap,
+                sinks: false,
+                chunk: None,
+                gather,
+            },
+            false,
+            Some(bits),
+        )?;
+    }
+    Ok(())
 }
 
 #[test]
@@ -385,6 +459,8 @@ struct PrefillCase {
     window: Option<usize>,
     sinks: bool,
     chunk: Option<usize>,
+    // a cache quantized at (K, V) bits, against attention over its dequantized values
+    kv_bits: Option<(u32, u32)>,
 }
 
 // The shape of a reference attention: each sequence's queries are the last of its rows.
@@ -510,7 +586,13 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             .to_dtype(c.cache_dtype)?
             .to_device(&dev)
     };
-    let (k_cache, v_cache) = (cache()?, cache()?);
+    let [k_cache, v_cache, k_ref, v_ref] = match c.kv_bits {
+        Some(bits) => quantized_caches(bits, (NUM_BLOCKS, N_HEAD_KV, bs, d), q_dtype, &dev)?,
+        None => {
+            let (k, v) = (cache()?, cache()?);
+            [k.clone(), v.clone(), k, v]
+        }
+    };
     // dense when every sequence has as many queries, else packed into one row
     let dense = c.query_lens.iter().all(|&l| l == c.query_lens[0]);
     let total_q: usize = c.query_lens.iter().sum();
@@ -605,7 +687,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             heads: (N_HEAD, N_HEAD_KV),
         },
         &packed,
-        (&k_cache, &v_cache),
+        (&k_ref, &v_ref),
         &tables,
         scales,
     )?;
@@ -640,6 +722,7 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
             window: None,
             sinks: false,
             chunk: None,
+            kv_bits: None,
         })?;
         // packed: sequences of their own lengths in one row
         check_prefill(PrefillCase {
@@ -651,6 +734,7 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
             window: None,
             sinks: false,
             chunk: None,
+            kv_bits: None,
         })?;
     }
     Ok(())
@@ -667,6 +751,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         window: Some(24),
         sinks: false,
         chunk: None,
+        kv_bits: None,
     })?;
     // a bidirectional prompt chunk sees every row of its sequence, and a window bounds only its left
     check_prefill(PrefillCase {
@@ -678,6 +763,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         window: None,
         sinks: false,
         chunk: None,
+        kv_bits: None,
     })?;
     check_prefill(PrefillCase {
         head_dim: 128,
@@ -688,6 +774,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         window: Some(20),
         sinks: false,
         chunk: None,
+        kv_bits: None,
     })
 }
 
@@ -733,6 +820,7 @@ fn prefix_prefill_with_sinks_matches_a_reference() -> Result<()> {
             window,
             sinks: true,
             chunk: None,
+            kv_bits: None,
         })?;
     }
     Ok(())
@@ -775,6 +863,37 @@ fn chunked_prefix_prefill_matches_a_reference() -> Result<()> {
             window: Some(chunk),
             sinks: false,
             chunk: Some(chunk),
+            kv_bits: None,
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn prefix_prefill_over_a_quantized_cache_matches_attention_over_its_values() -> Result<()> {
+    for (head_dim, bits, dtype, kv_lens, query_lens, window) in [
+        (
+            128,
+            (8, 8),
+            DType::BF16,
+            &[45usize, 20, 8][..],
+            &[8usize, 8, 8][..],
+            None,
+        ),
+        (256, (6, 4), DType::F16, &[45, 20, 70], &[5, 17, 1], None),
+        (64, (5, 3), DType::BF16, &[90, 33], &[12, 12], Some(40)),
+        (512, (4, 2), DType::F16, &[40, 70], &[9, 30], None),
+    ] {
+        check_prefill(PrefillCase {
+            head_dim,
+            cache_dtype: dtype,
+            kv_lens,
+            query_lens,
+            causal: true,
+            window,
+            sinks: false,
+            chunk: None,
+            kv_bits: Some(bits),
         })?;
     }
     Ok(())
