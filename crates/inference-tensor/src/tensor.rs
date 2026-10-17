@@ -147,6 +147,10 @@ pub(crate) fn from_storage<S: Into<Shape>>(
     op: BackpropOp,
     is_variable: bool,
 ) -> Tensor {
+    from_storage_shape(storage, shape.into(), op, is_variable)
+}
+
+fn from_storage_shape(storage: Storage, shape: Shape, op: BackpropOp, is_variable: bool) -> Tensor {
     let dtype = storage.dtype();
     let device = storage.device();
     let tensor_ = Tensor_ {
@@ -168,8 +172,11 @@ impl Tensor {
         device: &Device,
         is_variable: bool,
     ) -> Result<Self> {
+        Self::ones_shape(shape.into(), dtype, device, is_variable)
+    }
+
+    fn ones_shape(shape: Shape, dtype: DType, device: &Device, is_variable: bool) -> Result<Self> {
         let none = BackpropOp::none();
-        let shape = shape.into();
         let mut storage = unsafe { device.alloc_uninit(&shape, dtype)? };
         let layout = Layout::contiguous(shape.clone());
         storage.const_set(crate::scalar::Scalar::one(dtype), &layout)?;
@@ -218,8 +225,11 @@ impl Tensor {
         device: &Device,
         is_variable: bool,
     ) -> Result<Self> {
+        Self::zeros_shape(shape.into(), dtype, device, is_variable)
+    }
+
+    fn zeros_shape(shape: Shape, dtype: DType, device: &Device, is_variable: bool) -> Result<Self> {
         let none = BackpropOp::none();
-        let shape = shape.into();
         let storage = device.zeros(&shape, dtype)?;
         Ok(from_storage(storage, shape, none, is_variable))
     }
@@ -505,9 +515,22 @@ impl Tensor {
         is_variable: bool,
     ) -> Result<Self> {
         let shape = shape.into_shape(data.len())?;
-        let storage = device.storage_owned(data)?;
-        let none = BackpropOp::none();
-        Ok(from_storage(storage, shape, none, is_variable))
+        Self::from_cpu_storage(D::to_cpu_storage_owned(data), shape, device, is_variable)
+    }
+
+    fn from_cpu_storage(
+        storage: crate::CpuStorage,
+        shape: Shape,
+        device: &Device,
+        is_variable: bool,
+    ) -> Result<Self> {
+        let storage = device.storage_from_cpu_owned(storage)?;
+        Ok(from_storage(
+            storage,
+            shape,
+            BackpropOp::none(),
+            is_variable,
+        ))
     }
 
     /// Creates a new tensor initialized with values from the input vector. The number of elements
@@ -656,15 +679,7 @@ impl Tensor {
             }
             .bt())?
         }
-        let from_cpu_storage = |cpu_storage: &crate::CpuStorage| {
-            let data = S::cpu_storage_as_slice(cpu_storage)?;
-            Ok::<_, Error>(data[self.layout().start_offset()])
-        };
-        match &*self.storage() {
-            Storage::Cpu(cpu_storage) => from_cpu_storage(cpu_storage),
-            Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
-            Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
-        }
+        Ok(S::cpu_storage_data(self.cpu_elements()?)?[0])
     }
 
     /// An alias for `to_scalar`.
@@ -819,7 +834,10 @@ impl Tensor {
     /// Split a tensor into the specified number of chunks, this may return less chunks than
     /// specified.
     pub fn chunk<D: Dim>(&self, chunks: usize, dim: D) -> Result<Vec<Self>> {
-        let dim = dim.to_index(self.shape(), "chunk")?;
+        self.chunk_at(chunks, dim.to_index(self.shape(), "chunk")?)
+    }
+
+    fn chunk_at(&self, chunks: usize, dim: usize) -> Result<Vec<Self>> {
         let size = self.dim(dim)?;
         if size < chunks {
             (0..size).map(|i| self.narrow(dim, i, 1)).collect()
@@ -933,7 +951,10 @@ impl Tensor {
     }
 
     fn reduce_impl<D: Dim>(&self, dim: D, keepdim: bool, op: ReduceOp) -> Result<Self> {
-        let dim = dim.to_index(self.shape(), op.name())?;
+        self.reduce_at(dim.to_index(self.shape(), op.name())?, keepdim, op)
+    }
+
+    fn reduce_at(&self, dim: usize, keepdim: bool, op: ReduceOp) -> Result<Self> {
         let storage = self.storage().reduce_op(op, self.layout(), &[dim])?;
         let mut dims = self.dims().to_vec();
         dims[dim] = 1;
@@ -1070,7 +1091,11 @@ impl Tensor {
     ///
     /// The returned tensor has the same shape as the original tensors and uses `u8` elements.
     pub fn cmp<T: TensorOrScalar>(&self, rhs: T, op: CmpOp) -> Result<Self> {
-        let rhs = match rhs.to_tensor_scalar()? {
+        self.cmp_scalar(rhs.to_tensor_scalar()?, op)
+    }
+
+    fn cmp_scalar(&self, rhs: crate::scalar::TensorScalar, op: CmpOp) -> Result<Self> {
+        let rhs = match rhs {
             crate::scalar::TensorScalar::Tensor(rhs) => rhs,
             crate::scalar::TensorScalar::Scalar(rhs) => rhs
                 .to_dtype(self.dtype())?
@@ -1464,7 +1489,10 @@ impl Tensor {
     }
 
     pub fn scatter_add<D: Dim>(&self, indexes: &Self, source: &Self, dim: D) -> Result<Self> {
-        let dim = dim.to_index(self.shape(), "scatter-add")?;
+        self.scatter_add_at(indexes, source, dim.to_index(self.shape(), "scatter-add")?)
+    }
+
+    fn scatter_add_at(&self, indexes: &Self, source: &Self, dim: usize) -> Result<Self> {
         self.scatter_checks(indexes, source, dim)?;
         let shape = self.shape();
         let mut storage = unsafe { self.device().alloc_uninit(shape, self.dtype())? };
@@ -1604,8 +1632,10 @@ impl Tensor {
     /// The resulting tensor has the same shape as `indexes` and use values from `self` indexed on
     /// dimension `dim` by the values in `indexes`.
     pub fn gather<D: Dim>(&self, indexes: &Self, dim: D) -> Result<Self> {
-        let dim = dim.to_index(self.shape(), "gather")?;
+        self.gather_at(indexes, dim.to_index(self.shape(), "gather")?)
+    }
 
+    fn gather_at(&self, indexes: &Self, dim: usize) -> Result<Self> {
         let self_dims = self.dims();
         let indexes_dims = indexes.dims();
         let mismatch = if indexes_dims.len() != self_dims.len() {
@@ -1643,7 +1673,10 @@ impl Tensor {
     /// the index from `indexes`. Other dimensions have the same number of elements as the input
     /// tensor.
     pub fn index_select<D: Dim>(&self, indexes: &Self, dim: D) -> Result<Self> {
-        let dim = dim.to_index(self.shape(), "index-select")?;
+        self.index_select_at(indexes, dim.to_index(self.shape(), "index-select")?)
+    }
+
+    fn index_select_at(&self, indexes: &Self, dim: usize) -> Result<Self> {
         let indexes_len = match indexes.dims() {
             [l] => *l,
             _ => Err(Error::ShapeMismatchBinaryOp {
@@ -1681,50 +1714,39 @@ impl Tensor {
             }
             .bt())?
         }
-        let from_cpu_storage = |cpu_storage: &crate::CpuStorage| {
-            let data = S::cpu_storage_as_slice(cpu_storage)?;
-            let data = match self.layout.contiguous_offsets() {
-                Some((o1, o2)) => data[o1..o2].to_vec(),
-                None => self.strided_index().map(|i| data[i]).collect(),
-            };
-            Ok::<Vec<_>, Error>(data)
+        S::cpu_storage_data(self.cpu_elements()?)
+    }
+
+    // the elements in logical order on the host, so the dtype-generic readers only unwrap it
+    fn cpu_elements(&self) -> Result<crate::CpuStorage> {
+        let storage = self.storage();
+        let host;
+        let cpu = match &*storage {
+            Storage::Cpu(storage) => storage,
+            Storage::Cuda(storage) => {
+                host = storage.to_cpu_storage()?;
+                &host
+            }
+            Storage::Metal(storage) => {
+                host = storage.to_cpu_storage()?;
+                &host
+            }
         };
-        match &*self.storage() {
-            Storage::Cpu(storage) => from_cpu_storage(storage),
-            Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
-            Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
-        }
+        // SAFETY: copy_strided_src writes every element
+        let mut out =
+            unsafe { crate::cpu_backend::CpuDevice.alloc_uninit(self.shape(), self.dtype)? };
+        cpu.copy_strided_src(&mut out, 0, self.layout())?;
+        Ok(out)
     }
 
     /// Returns the data contained in a 2D tensor as a vector of vector of scalar values.
     pub fn to_vec2<S: crate::WithDType>(&self) -> Result<Vec<Vec<S>>> {
         let (dim1, dim2) = self.dims2()?;
-        let from_cpu_storage = |cpu_storage: &crate::CpuStorage| {
-            let data = S::cpu_storage_as_slice(cpu_storage)?;
-            let mut rows = vec![];
-            match self.layout.contiguous_offsets() {
-                Some((o1, o2)) => {
-                    let data = &data[o1..o2];
-                    for idx_row in 0..dim1 {
-                        rows.push(data[idx_row * dim2..(idx_row + 1) * dim2].to_vec())
-                    }
-                }
-                None => {
-                    let mut src_index = self.strided_index();
-                    for _idx_row in 0..dim1 {
-                        let row = (0..dim2).map(|_| data[src_index.next().unwrap()]).collect();
-                        rows.push(row)
-                    }
-                    assert!(src_index.next().is_none());
-                }
-            }
-            Ok(rows)
-        };
-        match &*self.storage() {
-            Storage::Cpu(storage) => from_cpu_storage(storage),
-            Storage::Cuda(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
-            Storage::Metal(storage) => from_cpu_storage(&storage.to_cpu_storage()?),
+        if dim2 == 0 {
+            return Ok(vec![Vec::new(); dim1]);
         }
+        let data = S::cpu_storage_data(self.cpu_elements()?)?;
+        Ok(data.chunks_exact(dim2).map(<[S]>::to_vec).collect())
     }
 
     /// Returns the data contained in a 3D tensor.
@@ -2010,8 +2032,13 @@ impl Tensor {
     /// Returns a tensor that is a transposed version of the input, the given dimensions are
     /// swapped.
     pub fn transpose<D1: Dim, D2: Dim>(&self, dim1: D1, dim2: D2) -> Result<Tensor> {
-        let dim1 = dim1.to_index(self.shape(), "transpose")?;
-        let dim2 = dim2.to_index(self.shape(), "transpose")?;
+        self.transpose_at(
+            dim1.to_index(self.shape(), "transpose")?,
+            dim2.to_index(self.shape(), "transpose")?,
+        )
+    }
+
+    fn transpose_at(&self, dim1: usize, dim2: usize) -> Result<Tensor> {
         if dim1 == dim2 {
             return Ok(self.clone());
         }
@@ -2317,10 +2344,13 @@ impl Tensor {
     /// # Ok::<(), inference_tensor::Error>(())
     /// ```
     pub fn squeeze<D: Dim>(&self, dim: D) -> Result<Self> {
+        self.squeeze_at(dim.to_index(self.shape(), "squeeze")?)
+    }
+
+    fn squeeze_at(&self, dim: usize) -> Result<Self> {
         // The PyTorch semantics are to return the same tensor if the target dimension
         // does not have a size of 1.
         let dims = self.dims();
-        let dim = dim.to_index(self.shape(), "squeeze")?;
         if dims[dim] == 1 {
             let mut dims = dims.to_vec();
             let mut strides = self.stride().to_vec();
@@ -2400,9 +2430,13 @@ impl Tensor {
             Err(Error::OpRequiresAtLeastOneTensor { op: "stack" }.bt())?
         }
         let dim = dim.to_index_plus_one(args[0].as_ref().shape(), "stack")?;
+        Self::stack_at(&args.iter().map(AsRef::as_ref).collect::<Vec<_>>(), dim)
+    }
+
+    fn stack_at(args: &[&Tensor], dim: usize) -> Result<Self> {
         let args = args
             .iter()
-            .map(|t| t.as_ref().unsqueeze(dim))
+            .map(|t| t.unsqueeze(dim))
             .collect::<Result<Vec<_>>>()?;
         Self::cat(&args, dim)
     }
@@ -2411,21 +2445,23 @@ impl Tensor {
     /// input tensor values and `right` elements after.
     pub fn pad_with_zeros<D: Dim>(&self, dim: D, left: usize, right: usize) -> Result<Self> {
         if left == 0 && right == 0 {
-            Ok(self.clone())
-        } else if left == 0 {
-            let dim = dim.to_index(self.shape(), "pad_with_zeros")?;
+            return Ok(self.clone());
+        }
+        self.pad_with_zeros_at(dim.to_index(self.shape(), "pad_with_zeros")?, left, right)
+    }
+
+    fn pad_with_zeros_at(&self, dim: usize, left: usize, right: usize) -> Result<Self> {
+        if left == 0 {
             let mut dims = self.dims().to_vec();
             dims[dim] = right;
             let right = Tensor::zeros(dims.as_slice(), self.dtype, self.device())?;
             Tensor::cat(&[self, &right], dim)
         } else if right == 0 {
-            let dim = dim.to_index(self.shape(), "pad_with_zeros")?;
             let mut dims = self.dims().to_vec();
             dims[dim] = left;
             let left = Tensor::zeros(dims.as_slice(), self.dtype, self.device())?;
             Tensor::cat(&[&left, self], dim)
         } else {
-            let dim = dim.to_index(self.shape(), "pad_with_zeros")?;
             let mut dims = self.dims().to_vec();
             dims[dim] = left;
             let left = Tensor::zeros(dims.as_slice(), self.dtype, self.device())?;
@@ -2522,6 +2558,19 @@ impl Tensor {
         ranges: &[D],
         src: &Tensor,
     ) -> Result<Self> {
+        let bounds: Vec<_> = ranges
+            .iter()
+            .map(|r| (r.start_bound().cloned(), r.end_bound().cloned()))
+            .collect();
+        self.slice_assign_bounds(&bounds, src)
+    }
+
+    fn slice_assign_bounds(
+        &self,
+        ranges: &[(std::ops::Bound<usize>, std::ops::Bound<usize>)],
+        src: &Tensor,
+    ) -> Result<Self> {
+        use std::ops::RangeBounds;
         let src_dims = src.dims();
         let self_dims = self.dims();
         if self_dims.len() != src_dims.len() {

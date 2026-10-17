@@ -2352,3 +2352,39 @@ with `file +1.83Mi, .text +1.69Mi, copies +1.65Mi` and lists `binary_impl::<Mini
 Implication: the convention goes in CLAUDE.md (a foundation crate's public generic converts its arguments and calls
 a non-generic body), and `--size` now reports when it slips. What `copies` holds today is mostly drop glue, std,
 serde_json, tokenizers and reqwest instances.
+
+## Run 69 - 2026-10-16 16:30
+
+Question: of Run 68's 4.35 MiB of `copies`, how much is ours to remove, and how much does the shim treatment take?
+
+Command: the `--size` library's text symbols grouped by name, each name compiled more than once sorted by who owns it.
+
+```
+dependencies' own generics      2.41 MiB   serde_json Value decoding x11, tokenizers x8, hashbrown rehash x38, h2
+drop glue, dependency types     0.58 MiB
+our functions                   0.74 MiB   to_vec1/to_vec2, from_vec_impl, UnVarBuilder::add, slice_assign,
+                                           index_select, pad_with_zeros, squeeze, cmp, stack, chunk, ...
+drop glue, our types            0.38 MiB   BackpropOp, Storage, Error, ~17 copies each
+dependency code over our types  0.25 MiB
+```
+
+Change: the rest of inference-tensor's generic methods convert their argument and call a non-generic body
+(`index_select`, `chunk`, `gather`, `scatter_add`, the reductions, `squeeze`, `pad_with_zeros`, `transpose`,
+`stack`, `cmp`, `slice_assign` through owned bounds, `zeros`/`ones`, `from_storage`). The dtype-generic readers
+`to_vec1`/`to_vec2`/`to_scalar` now share `cpu_elements`, which brings the elements to the host in logical order
+with `copy_strided_src`, so only `S::cpu_storage_data` is per dtype; `from_vec_impl` hands
+`D::to_cpu_storage_owned` to a non-generic upload. `UnVarBuilder::add` calls `extend`, which it duplicated.
+
+```
+                          before      after     change
+file                     108.25Mi   107.74Mi   -0.51Mi
+.text                     55.92Mi    55.49Mi   -0.43Mi
+copies                     4.35Mi     3.96Mi   -0.38Mi
+```
+
+Our share of `copies` went from 756 to 403 KiB. What's left of it is the shims themselves (`reshape` over 17 shape
+types, `from_vec_impl` over 17 dtype and shape pairs), `CudaDevice::clone_htod` called with their own element types
+from other crates, and a few non-generic functions LLVM cloned. `--lint`, `--tests` (2688) and `--cuda` (3092) pass.
+
+Implication: the remaining 3.6 MiB is dependency code and drop glue, which code changes here don't reach; rustc's
+generic sharing (opt-level "s"/"z"/1 per crate) is the lever for it.
