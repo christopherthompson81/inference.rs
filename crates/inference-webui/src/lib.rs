@@ -28,6 +28,8 @@ use crate::handlers::api::*;
 use crate::types::{AppState, GenerationParams, UiModelInfo};
 use crate::utils::get_cache_dir;
 
+const MODEL_SETTINGS_FILE: &str = "model-settings.json";
+
 mod chat;
 mod handlers;
 mod jobs;
@@ -260,6 +262,11 @@ pub async fn mount(
     Ok(app
         .route(&slash, get(|| async { Redirect::permanent(UI_ROUTE) }))
         .nest(UI_ROUTE, require(ui, auth, guard)))
+}
+
+/// Where the server keeps the model manager's loads (`ModelManagerConfig::saved_path`), beside the UI's chats and jobs.
+pub fn model_settings_path() -> std::path::PathBuf {
+    get_cache_dir().join(MODEL_SETTINGS_FILE)
 }
 
 async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> {

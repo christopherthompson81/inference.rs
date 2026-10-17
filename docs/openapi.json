@@ -1372,6 +1372,97 @@
         }
       }
     },
+    "/v1/manager/saved": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's: the loads the server keeps by model id, each model's last successful `/v1/manager/load` and whether the server loads it again at startup.",
+        "operationId": "saved",
+        "responses": {
+          "200": {
+            "description": "The kept loads",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SavedModels"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Not an admin"
+          }
+        }
+      }
+    },
+    "/v1/manager/saved/{model_id}": {
+      "put": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's: keeps a load for `model_id` without loading it, such as its settings or whether it loads at startup. The request's `model_id` becomes the path's.",
+        "operationId": "save",
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "description": "The id the load serves the model as",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SavedModel"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Kept"
+          },
+          "400": {
+            "description": "Invalid request"
+          },
+          "403": {
+            "description": "Not an admin"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "An admin's: stops keeping `model_id`'s load; a model it serves stays served.",
+        "operationId": "forget",
+        "parameters": [
+          {
+            "name": "model_id",
+            "in": "path",
+            "description": "The id the load serves the model as",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Forgotten"
+          },
+          "403": {
+            "description": "Not an admin"
+          }
+        }
+      }
+    },
     "/v1/manager/unload": {
       "post": {
         "tags": [
@@ -12520,6 +12611,40 @@
           "restricted",
           "developer"
         ]
+      },
+      "SavedModel": {
+        "type": "object",
+        "description": "A load the manager keeps under its model id: the request its last successful load used, and whether the server\nloads it again when it starts.",
+        "required": [
+          "request"
+        ],
+        "properties": {
+          "load_at_start": {
+            "type": "boolean"
+          },
+          "request": {
+            "$ref": "#/components/schemas/ManagedLoadRequest"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SavedModels": {
+        "type": "object",
+        "description": "The loads the manager keeps, by model id.",
+        "required": [
+          "saved"
+        ],
+        "properties": {
+          "saved": {
+            "type": "object",
+            "additionalProperties": {
+              "$ref": "#/components/schemas/SavedModel"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
       },
       "SearchContextSize": {
         "type": "string",

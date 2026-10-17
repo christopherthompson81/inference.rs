@@ -158,6 +158,13 @@ pub const MANAGER_DOWNLOAD_ROUTE: RouteInfo =
     RouteInfo::new("/v1/manager/download", "POST", RouteKind::InferenceRs);
 pub const MANAGER_DELETE_ROUTE: RouteInfo =
     RouteInfo::new("/v1/manager/delete", "POST", RouteKind::InferenceRs);
+pub const MANAGER_SAVED_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/manager/saved", "GET", RouteKind::InferenceRs);
+pub const MANAGER_SAVED_MODEL_ROUTE: RouteInfo = RouteInfo::new(
+    "/v1/manager/saved/{model_id}",
+    "PUT, DELETE",
+    RouteKind::InferenceRs,
+);
 pub const LAYOUT_DETECT_ROUTE: RouteInfo =
     RouteInfo::new("/v1/layout/detect", "POST", RouteKind::InferenceRs);
 
@@ -211,6 +218,8 @@ pub const MODEL_MANAGER_ROUTES: &[RouteInfo] = &[
     MANAGER_UNLOAD_ROUTE,
     MANAGER_DOWNLOAD_ROUTE,
     MANAGER_DELETE_ROUTE,
+    MANAGER_SAVED_ROUTE,
+    MANAGER_SAVED_MODEL_ROUTE,
     LAYOUT_DETECT_ROUTE,
 ];
 

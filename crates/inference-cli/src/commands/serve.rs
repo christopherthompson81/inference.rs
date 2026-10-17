@@ -287,8 +287,14 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
             folders,
             hf_cache_path: None,
             token_source,
+            saved_path: Some(inference_webui::model_settings_path()),
         },
     );
+    // the models an admin marked to load at startup, behind the server so it answers while they load
+    tokio::spawn({
+        let manager = manager.clone();
+        async move { manager.load_at_start().await }
+    });
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_model_manager(manager)

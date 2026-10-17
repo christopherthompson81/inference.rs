@@ -7,7 +7,7 @@ use axum::{
     http::{self, HeaderMap, Method, StatusCode, Uri, header::HeaderName},
     middleware,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 #[cfg(feature = "swagger-ui")]
@@ -46,13 +46,13 @@ use crate::{
         EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
         IMAGE_EDIT_ROUTE, IMAGE_GENERATION_ROUTE, LAYOUT_DETECT_ROUTE, LIST_LORA_ADAPTERS_ROUTE,
         LOAD_LORA_ADAPTER_ROUTE, MANAGER_DELETE_ROUTE, MANAGER_DOWNLOAD_ROUTE,
-        MANAGER_INVENTORY_ROUTE, MANAGER_LOAD_ROUTE, MANAGER_MODELS_ROUTE, MANAGER_UNLOAD_ROUTE,
-        MODEL_ALIAS_ROUTE, MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE,
-        MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE,
-        REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE,
-        SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE,
-        SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
-        UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
+        MANAGER_INVENTORY_ROUTE, MANAGER_LOAD_ROUTE, MANAGER_MODELS_ROUTE,
+        MANAGER_SAVED_MODEL_ROUTE, MANAGER_SAVED_ROUTE, MANAGER_UNLOAD_ROUTE, MODEL_ALIAS_ROUTE,
+        MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE,
+        RE_ISQ_ROUTE, REALTIME_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE,
+        RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE,
+        SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TRANSCRIPTION_ROUTE,
+        TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE, VOICE_ACTIVITY_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -443,7 +443,12 @@ fn init_router(
             .route(MANAGER_LOAD_ROUTE.path, post(managed::load))
             .route(MANAGER_UNLOAD_ROUTE.path, post(managed::unload))
             .route(MANAGER_DOWNLOAD_ROUTE.path, post(managed::download))
-            .route(MANAGER_DELETE_ROUTE.path, post(managed::delete));
+            .route(MANAGER_DELETE_ROUTE.path, post(managed::delete))
+            .route(MANAGER_SAVED_ROUTE.path, get(managed::saved))
+            .route(
+                MANAGER_SAVED_MODEL_ROUTE.path,
+                put(managed::save).delete(managed::forget),
+            );
         tracing::info!(
             folders = ?manager.config().folders,
             "model manager: admins load, download and delete models in these folders and the Hugging Face cache"

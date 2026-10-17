@@ -87,6 +87,17 @@
     if (started) void refreshChatModels();
   });
 
+  // a slot bar's Settings link names its slot's settings, which live on the Models tab
+  function followSettingsLink() {
+    if (location.hash.startsWith("#settings-")) show("models");
+  }
+
+  onMount(() => {
+    followSettingsLink();
+    window.addEventListener("hashchange", followSettingsLink);
+    return () => window.removeEventListener("hashchange", followSettingsLink);
+  });
+
   onMount(async () => {
     if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
       document.documentElement.classList.add("dark");

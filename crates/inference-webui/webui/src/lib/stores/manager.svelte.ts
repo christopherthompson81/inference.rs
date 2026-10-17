@@ -86,6 +86,30 @@ export interface SlotForm {
   /** The voice activity model to load beside it: unset takes the first the inventory lists, "" none. */
   vad?: string;
   device: string;
+  /** The KV cache's K and V storage (`auto`, `f8e4m3`, `q2`..`q8`); "" keeps the server's. */
+  cacheK: string;
+  cacheV: string;
+  /** Whether the server loads this slot again when it starts. */
+  loadAtStart: boolean;
+}
+
+/** The KV cache storages a slot's form offers; quantized widths may differ for K and V. */
+export const CACHE_TYPES = ["auto", "f8e4m3", "q8", "q7", "q6", "q5", "q4", "q3", "q2"] as const;
+
+const isQuantized = (cache: string) => /^q[2-8]$/.test(cache);
+
+/** The load's `paged_cache_type` for a form's K and V choices; undefined keeps the server's. */
+export function cacheType(form: SlotForm): string | undefined {
+  if (!form.cacheK) return undefined;
+  if (!isQuantized(form.cacheK) || !isQuantized(form.cacheV) || form.cacheV === form.cacheK) return form.cacheK;
+  return `${form.cacheK}/${form.cacheV}`;
+}
+
+// A `paged_cache_type` as the form's K and V choices.
+function cacheChoices(cache: string | undefined): [string, string] {
+  if (!cache) return ["", ""];
+  const [k, v] = cache.split("/");
+  return [k, v ?? k];
 }
 
 /** A load or unload under way. */
@@ -101,7 +125,18 @@ const DEFAULT_CONTEXT = 8192;
 
 function defaultForm(slot: SlotId): SlotForm {
   const contextLength = (SLOTS[slot] as Slot).defaultContext ?? DEFAULT_CONTEXT;
-  return { source: "", contextLength, maxSeqs: 0, mtp: false, mtpDrafts: 0, mmproj: "", device: "auto" };
+  return {
+    source: "",
+    contextLength,
+    maxSeqs: 0,
+    mtp: false,
+    mtpDrafts: 0,
+    mmproj: "",
+    device: "auto",
+    cacheK: "",
+    cacheV: "",
+    loadAtStart: false,
+  };
 }
 
 // every slot's form, from what this browser kept, so reading one never creates state mid-render
@@ -131,6 +166,9 @@ class ManagerStore {
   inventoryError = $state<string | null>(null);
   scanning = $state(false);
   forms = $state<Record<SlotId, SlotForm>>(storedForms());
+  /** What the server keeps per model id; a slot's form starts from its entry. */
+  saved = $state<Record<string, manager.SavedModel>>({});
+  savedError = $state<string | null>(null);
   activity = $state<Record<string, SlotActivity>>({});
   /** Bumped after each load or unload, so views that list models refresh. */
   changes = $state(0);
@@ -142,7 +180,10 @@ class ManagerStore {
     this.admin = admin;
     this.keyed = keyed;
     void this.refresh();
-    if (admin) void this.scan();
+    if (admin) {
+      void this.scan();
+      void this.readSaved(true);
+    }
     this.timer ??= setInterval(() => void this.refresh(), REFRESH_MS);
   }
 
@@ -166,6 +207,75 @@ class ManagerStore {
     } finally {
       this.scanning = false;
     }
+  }
+
+  /** Reads the server's kept loads; `apply` puts each slot's entry into its form. */
+  async readSaved(apply = false) {
+    try {
+      this.saved = await manager.savedModels();
+      this.savedError = null;
+    } catch (e) {
+      // a server without kept loads (an older one, or none configured) leaves the forms as this browser kept them
+      this.savedError = e instanceof Error ? e.message : String(e);
+      return;
+    }
+    if (!apply) return;
+    for (const slot of Object.keys(SLOTS) as SlotId[]) {
+      const kept = this.saved[SLOTS[slot].id];
+      if (!kept) continue;
+      const request = kept.request;
+      const form = this.forms[slot];
+      const [cacheK, cacheV] = cacheChoices(request.paged_cache_type);
+      Object.assign(form, {
+        source: request.source,
+        contextLength: request.paged_context_len ?? form.contextLength,
+        maxSeqs: request.max_seqs ?? 0,
+        mtp: request.mtp != null,
+        mtpDrafts: request.mtp?.n_predict ?? 0,
+        mmproj: request.mmproj ?? "",
+        vad: (SLOTS[slot] as Slot).vad ? (request.vad ?? "") : form.vad,
+        device: request.device ?? "auto",
+        cacheK,
+        cacheV,
+        loadAtStart: kept.load_at_start,
+      });
+    }
+    this.persistForms();
+  }
+
+  /** The load a slot's form describes. */
+  requestFor(slot: SlotId): manager.LoadRequest {
+    const spec = SLOTS[slot] as Slot;
+    const form = this.form(slot);
+    const request: manager.LoadRequest = { source: form.source.trim(), model_id: spec.id };
+    if (spec.chat) {
+      if (form.contextLength > 0) request.paged_context_len = form.contextLength;
+      if (form.maxSeqs > 0) request.max_seqs = form.maxSeqs;
+      if (form.mtp) request.mtp = form.mtpDrafts > 0 ? { n_predict: form.mtpDrafts } : {};
+      if (form.mmproj) request.mmproj = form.mmproj;
+      const cache = cacheType(form);
+      if (cache) request.paged_cache_type = cache;
+    }
+    if (spec.vad) {
+      const vad = form.vad ?? this.vads[0]?.path ?? "";
+      if (vad) request.vad = vad;
+    }
+    if (spec.device && form.device !== "auto") request.device = form.device;
+    return request;
+  }
+
+  /** Keeps a slot's settings on the server without loading it. */
+  async saveSettings(slot: SlotId) {
+    const form = this.form(slot);
+    this.persistForms();
+    const saved = { request: this.requestFor(slot), load_at_start: form.loadAtStart };
+    try {
+      await manager.saveModel(SLOTS[slot].id, saved);
+      this.activity[slot] = { ...this.activityOf(slot), error: null };
+    } catch (e) {
+      this.activity[slot] = { ...this.activityOf(slot), error: e instanceof Error ? e.message : String(e) };
+    }
+    await this.readSaved();
   }
 
   servedIn(slot: SlotId): ManagedModel | undefined {
@@ -213,21 +323,8 @@ class ManagerStore {
   }
 
   async load(slot: SlotId) {
-    const spec = SLOTS[slot] as Slot;
-    const form = this.form(slot);
     this.persistForms();
-    const request: manager.LoadRequest = { source: form.source.trim(), model_id: spec.id };
-    if (spec.chat) {
-      if (form.contextLength > 0) request.paged_context_len = form.contextLength;
-      if (form.maxSeqs > 0) request.max_seqs = form.maxSeqs;
-      if (form.mtp) request.mtp = form.mtpDrafts > 0 ? { n_predict: form.mtpDrafts } : {};
-      if (form.mmproj) request.mmproj = form.mmproj;
-    }
-    if (spec.vad) {
-      const vad = form.vad ?? this.vads[0]?.path ?? "";
-      if (vad) request.vad = vad;
-    }
-    if (spec.device && form.device !== "auto") request.device = form.device;
+    const request = this.requestFor(slot);
     this.activity[slot] = { busy: true, progress: null, error: null };
     try {
       await manager.loadModel(request, (progress) => {
@@ -238,6 +335,9 @@ class ManagerStore {
       this.activity[slot] = { busy: false, progress: null, error: e instanceof Error ? e.message : String(e) };
     }
     await this.refresh();
+    // the server kept this load; the slot's startup choice rides along with it
+    if (this.form(slot).loadAtStart && !this.activityOf(slot).error) await this.saveSettings(slot);
+    else await this.readSaved();
     this.changes++;
   }
 

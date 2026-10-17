@@ -1,6 +1,8 @@
 <script lang="ts">
+  import { onMount, tick } from "svelte";
   import { managerStore, SLOTS, displayName, formatBytes, baseName, fits, type SlotId } from "../stores/manager.svelte";
   import { deleteModel, downloadModel, type InventoryModel } from "../services/manager";
+  import SlotBar from "../components/SlotBar.svelte";
 
   let { onUse }: { onUse: (slot: SlotId) => void } = $props();
 
@@ -8,6 +10,23 @@
     image_generation: "image generation",
     voice_activity: "voice activity",
   };
+
+  const SETTINGS_HASH = "#settings-";
+  // the inventory, or every slot's settings (a slot bar's Settings link opens them at its slot)
+  let view = $state<"inventory" | "settings">(location.hash.startsWith(SETTINGS_HASH) ? "settings" : "inventory");
+
+  async function followHash() {
+    if (!location.hash.startsWith(SETTINGS_HASH)) return;
+    view = "settings";
+    await tick();
+    document.getElementById(location.hash.slice(1))?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  onMount(() => {
+    void followHash();
+    window.addEventListener("hashchange", followHash);
+    return () => window.removeEventListener("hashchange", followHash);
+  });
 
   let filter = $state("");
   let showProjectors = $state(false);
@@ -123,6 +142,34 @@
   </div>
 {:else}
   <div class="flex min-h-0 w-full flex-1 flex-col gap-3 overflow-hidden p-4">
+    <div class="flex gap-1" role="tablist">
+      {#each [{ id: "inventory", label: "Inventory" }, { id: "settings", label: "Slot settings" }] as item (item.id)}
+        <button
+          role="tab"
+          aria-selected={view === item.id}
+          class="rounded-md px-3 py-1 text-sm {view === item.id
+            ? 'bg-gray-200 font-medium text-gray-900 dark:bg-gray-800 dark:text-gray-100'
+            : 'text-gray-500 hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200'}"
+          onclick={() => (view = item.id as typeof view)}
+        >
+          {item.label}
+        </button>
+      {/each}
+    </div>
+  {#if view === "settings"}
+    <div class="flex min-h-0 flex-col gap-3 overflow-y-auto">
+      <p class="text-xs text-gray-500">
+        Each slot's model and how it runs. A load keeps its settings on the server, so every browser sees them, and a
+        slot marked "Load at startup" loads again when the server starts. Save keeps changes without loading.
+        {#if managerStore.savedError}<span class="text-red-600">{managerStore.savedError}</span>{/if}
+      </p>
+      <div class="grid gap-3 xl:grid-cols-2">
+        {#each Object.keys(SLOTS) as slot (slot)}
+          <SlotBar slot={slot as SlotId} full />
+        {/each}
+      </div>
+    </div>
+  {:else}
     <div class="flex flex-wrap items-center gap-2">
       <button class="rounded-md border border-gray-300 px-3 py-1.5 text-sm hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:hover:bg-gray-800" onclick={() => managerStore.scan()} disabled={managerStore.scanning}>
         {managerStore.scanning ? "Scanning..." : "Refresh"}
@@ -238,5 +285,6 @@
         </div>
       </div>
     </div>
+  {/if}
   </div>
 {/if}

@@ -10,7 +10,7 @@ use inference_core::{
 };
 use inference_selection::quant;
 use inference_tensor::Device;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::transcription_session::TranscriptionSession;
 use crate::{
@@ -401,7 +401,7 @@ pub struct PagedCacheSpec {
 }
 
 /// MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.
-#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct MtpSpec {
     /// Assistant model id or path; unset uses the checkpoint's own MTP head.
@@ -414,7 +414,7 @@ pub struct MtpSpec {
     pub draft_sampling: MtpDraftSampling,
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MtpDraftSampling {
     /// Probabilistic drafting where the model supports it, else greedy.
