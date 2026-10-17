@@ -2325,3 +2325,30 @@ non-flash path, not fail. 112 alone is 7.2 MiB of the 80.5 MiB uncompressed f16 
 Implication: not removed. They are the head sizes of models likely to be added later (MiMo, Mistral Small 4),
 so removing them now would mean adding them back. The packaging-side option from Run 65 (attention split per
 head size, rare ones downloaded) would cut their cost without dropping them.
+
+## Run 68 - 2026-10-16 15:10
+
+Question: can `--size` hold Run 63's gain, failing when generic code starts compiling again in each calling crate?
+
+Change: the bundle profile keeps the symbol table (`strip = "debuginfo"`; debug info still goes), `build_wheels.py`
+strips the copy it packages, and `bundle_size.py` measures a stripped copy of the library, so the file and section
+sizes are the shipped ones, then adds `copies`: per demangled text symbol name compiled more than once, the bytes
+past the largest copy, compared with the same limits as a section. When it grows it lists the most-copied
+functions.
+
+```
+                          before (stripped by the profile)   after (stripped copy)
+file                      108.25Mi                           108.25Mi   (+248 bytes)
+file:libinference_ffi.so   61.65Mi                            61.65Mi
+copies                    -                                    4.35Mi
+built library on disk      61.65Mi                            74.56Mi   (symbols kept)
+wheel's library            61.65Mi                            61.65Mi
+```
+
+A check of the check: with `maximum`/`minimum` put back to their generic bodies from before #479, `--size` fails
+with `file +1.83Mi, .text +1.69Mi, copies +1.65Mi` and lists `binary_impl::<Minimum>` (416 KiB),
+`binary_impl::<Maximum>` (415 KiB) and the CUDA `Binary` map (335 KiB) first. Restored, it passes.
+
+Implication: the convention goes in CLAUDE.md (a foundation crate's public generic converts its arguments and calls
+a non-generic body), and `--size` now reports when it slips. What `copies` holds today is mostly drop glue, std,
+serde_json, tokenizers and reqwest instances.

@@ -174,6 +174,14 @@ def build_library(accelerator: str, features: list[str]) -> Path:
     return REPO_ROOT / "target" / "bundle" / library_name()
 
 
+def strip(library: Path) -> None:
+    """Drops the symbol table the bundle profile keeps for the size check; the exported symbols stay."""
+    if sys.platform.startswith("linux"):
+        subprocess.run(["strip", "--strip-all", str(library)], check=True)
+    elif sys.platform == "darwin":
+        subprocess.run(["strip", "-x", str(library)], check=True)
+
+
 def stage(
     library: Path, into: Path, kernels: list[KernelFile], local_version: str | None
 ) -> Path:
@@ -189,6 +197,7 @@ def stage(
             shutil.copy2(source, into / name)
     (into / BUNDLED_DIR).mkdir()
     shutil.copy2(library, into / BUNDLED_DIR / library_name())
+    strip(into / BUNDLED_DIR / library_name())
     for kernel in kernels:
         target = into / BUNDLED_DIR / KERNEL_SUBDIR / kernel.relative
         target.parent.mkdir(parents=True, exist_ok=True)
