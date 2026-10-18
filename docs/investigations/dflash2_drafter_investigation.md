@@ -448,3 +448,39 @@ length 2.76, prefill 826 tok/s (the earlier serve had cached part of this prompt
 Implication: the 262K DFlash setup now serves the full window with ~650 MiB to spare for other GPU clients. More
 headroom: move the desktop to the integrated GPU, or lower `--prefix-cache-n` (8 retained prefixes cost ~41 MiB
 each in the drafter beside the GDN snapshots).
+
+## Run 15 - 2026-10-18 21:00
+
+Question: after #494/#495, where does a DFlash step's time go, and is a Q5_K/Q6_K tensor-core matvec the next lever?
+
+Nsight (`--cuda-graph-trace=node`), recipe A, q4k DFlash 2 at 7 drafts, the code workload; decode phase only
+(prefill chunks excluded), per draft-and-verify step (~34 ms):
+
+```
+tile-ordered IQ4_KS matvec + its activation quantize   19.9 ms   (~13 GB at ~70% of peak bandwidth)
+MMQ Q6_K, output head, 2 calls (verify + drafter)       2.9 ms   (1.46 ms per 1 GB pass, ~75% of peak)
+MMQ Q4_K, drafter projections, 20 calls                 1.7 ms   (small, latency bound)
+bf16 GEMV, 96 calls (ssm_beta, ssm_alpha per GDN layer) 1.3 ms   (~13 us each, latency bound)
+GDN speculative recurrence                              1.5 ms
+MMQ Q5_K, attn_v                                        0.14 ms
+```
+
+Implication: a Q5_K/Q6_K tensor-core matvec saves at most ~0.7 ms (the head already reads at ~75% of peak); the levers
+are the head read twice, the IQ4_KS matvec's last 15-30% of bandwidth, and latency-bound small calls.
+
+A vocabulary-pruned drafting head (the first N token ids, a free row slice of the Q6_K head): emitted tokens outside the
+first N ids on four workloads (code, explanation, story, Spanish; UI sampling), 2303 tokens:
+
+```
+N        16K     32K     65K     100K    152K
+outside  27.0%   16.9%   9.4%    3.4%    3.4%   (152K still misses <|im_end|>, id 248046)
+```
+
+Qwen's ids are not frequency ordered enough: a 32K head could not draft one emitted token in six. A frequency-ranked
+set would need a gathered copy (~137 MB at 32K, tight at 262K) and probabilistic-draft plumbing for at most ~1.2 ms per
+step before its acceptance cost: dropped.
+
+The 96 GEMVs: GGUF weights load through a weight source, which `load_packed_weights` skips, so a GDN layer's dense
+`ssm_beta`/`ssm_alpha` stayed two matmuls. `MergedDenseProjection::merge_unquantized` concatenates loaded dense
+projections and rebuilds them as views (keeping any dynamic-LoRA wrapper through `preserve_dynamic_lora`), so the
+originals' memory goes. Verify graph 26.4 -> 25.8 ms (phase timer, 409 steps); drafter unchanged at 3.9 ms.
