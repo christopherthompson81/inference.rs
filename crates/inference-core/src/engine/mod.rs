@@ -402,27 +402,22 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
                 seq.mm_features(),
             )
         {
-            let n_blocks = boundary / block_size;
             let current_owner = block_hashes.last().copied();
-            let checkpoint = current_owner.and_then(|_| {
-                get_mut_arcmutex!(self.prefix_cacher)
-                    .peek_paged_recurrent_prefix(&block_hashes[..n_blocks])
-            });
-            if let Some(checkpoint) = &checkpoint
-                && !self.snapshot_held(checkpoint)
-            {
-                get_mut_arcmutex!(self.prefix_cacher)
-                    .drop_paged_recurrent_prefix(&block_hashes[..n_blocks]);
-            } else if let Some(checkpoint) = checkpoint
+            // a snapshot with the drafter's checkpoint resumes both exactly, so any earlier one serves: an agent's
+            // next turn caches the response's blocks past the previous prompt's snapshot
+            let held = current_owner
+                .and_then(|_| self.longest_held_prefix(block_hashes, boundary / block_size));
+            if let Some((n_blocks, checkpoint)) = held
                 && checkpoint.auxiliary.is_some()
             {
+                let restored = n_blocks * block_size;
                 let replay_tokens = get_mut_arcmutex!(self.pipeline)
                     .speculative_prefix_replay()
-                    .replay_tokens(boundary);
+                    .replay_tokens(restored);
                 return Ok(self.stage_recurrent_restore(HybridPrefixRestore {
                     sequence_id,
                     slot_idx,
-                    cached_tokens: boundary,
+                    cached_tokens: restored,
                     checkpoint,
                     prefix_key: block_hashes[..n_blocks].to_vec(),
                     current_owner: current_owner
