@@ -92,6 +92,9 @@ pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
         // the crossover moves with the output width (4 for a 248K-row head, 6 for a 2K-row FFN)
         GgufType::Q6K => 4,
         GgufType::Q8_0 => 7,
+        // the ik types' MMVQ rows cost far more than the k-quants' (IQ4_KS 5.8x at 8 rows)
+        GgufType::Iq4Ks | GgufType::Iq4Kss => 2,
+        GgufType::Iq4Kt | GgufType::Iq3K | GgufType::Iq3Kt => 1,
         _ => MMVQ_MAX_BATCH,
     };
     rows <= max_rows || rows <= MMVQ_MAX_BATCH && !super::fast_mmq::supports(dtype)
