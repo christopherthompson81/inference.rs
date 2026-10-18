@@ -151,10 +151,8 @@ pub fn build_required_tool_call_grammar(
     qwen::QwenParser.required_tool_call_grammar(tools)
 }
 
-pub fn specialize_required_tool_call_grammar(
-    grammar: &mut TopLevelGrammar,
-    tok_trie: &toktrie::TokTrie,
-) {
+/// Wrapper tokens the tokenizer has as special tokens become token references in `grammar`; others stay text.
+pub fn specialize_tool_call_grammar(grammar: &mut TopLevelGrammar, tok_trie: &toktrie::TokTrie) {
     let Some(lark) = grammar
         .grammars
         .first_mut()
