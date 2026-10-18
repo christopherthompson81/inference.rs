@@ -602,7 +602,7 @@ impl GgufRawMatMul {
             .product::<usize>();
         let out = match flat_batch {
             0 => return Ok(None),
-            batch if batch <= super::fast_mmvq::MMVQ_MAX_BATCH => {
+            batch if super::fast_mmvq::prefers_mmvq(self.w.ty, batch) => {
                 super::fast_mmvq::plain(&self.w, a)?
             }
             _ if super::fast_mmq::supports_shape(self.w.ty, self.w.shape.dims2()?.1) => {

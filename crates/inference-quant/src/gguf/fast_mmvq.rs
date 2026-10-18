@@ -81,6 +81,22 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
 /// Maximum flattened batch handled by the CUDA launcher table.
 pub const MMVQ_MAX_BATCH: usize = 8;
 
+/// Whether `rows` input rows of a `dtype` weight take MMVQ rather than MMQ: MMVQ repeats its dot products and
+/// activation loads per row, while MMQ's int8 tensor-core tiles cost about the same from 1 to 8 rows, so past a
+/// per-type count MMQ is faster (`fast_mmq::bench::small_batch_mmvq_vs_mmq`, RTX 3090).
+pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
+    let dtype = dtype.into();
+    let max_rows = match dtype {
+        GgufType::Iq4Xs => 5,
+        GgufType::Q4K | GgufType::Q5K => 3,
+        // the crossover moves with the output width (4 for a 248K-row head, 6 for a 2K-row FFN)
+        GgufType::Q6K => 4,
+        GgufType::Q8_0 => 7,
+        _ => MMVQ_MAX_BATCH,
+    };
+    rows <= max_rows || rows <= MMVQ_MAX_BATCH && !super::fast_mmq::supports(dtype)
+}
+
 static WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
 
 // Launcher dispatch by weight and output dtype.

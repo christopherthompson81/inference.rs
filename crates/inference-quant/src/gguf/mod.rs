@@ -425,14 +425,13 @@ fn try_fast_forward(w: &QMatMul, a: &Tensor) -> Result<Option<Tensor>> {
     let flat_batch = a.dims()[..a.dims().len().saturating_sub(1)]
         .iter()
         .product::<usize>();
-    // decode batches take MMVQ, larger ones the MMQ prompt kernel
-    if (1..=fast_mmvq::MMVQ_MAX_BATCH).contains(&flat_batch) {
+    if flat_batch == 0 {
+        return Ok(None);
+    }
+    if fast_mmvq::prefers_mmvq(q.dtype(), flat_batch) {
         return Ok(Some(fast_mmvq::plain(q.as_ref(), a)?));
     }
-    if flat_batch > fast_mmvq::MMVQ_MAX_BATCH {
-        return Ok(Some(fast_mmq::plain(q.as_ref(), a)?));
-    }
-    Ok(None)
+    Ok(Some(fast_mmq::plain(q.as_ref(), a)?))
 }
 
 /// `a @ w^T` for a candle `QMatMul`, through this crate's GGUF kernels wherever they cover the type.
