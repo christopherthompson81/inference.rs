@@ -2470,13 +2470,16 @@ pub fn try_fused_quantized_gate_up(
     if gate_q.dtype() != up_q.dtype() {
         return Ok(None);
     }
-    if gguf::fast_mmvq::prefers_mmvq(gate_q.dtype(), flat_batch) {
+    if gguf::fast_mmvq::prefers_fused_mmvq(gate_q.dtype(), flat_batch) {
         if !gguf::fast_mmvq::supports_fused_glu(xs.dtype(), gate_q.dtype()) {
             return Ok(None);
         }
         Ok(Some(gguf::fast_mmvq::fused_glu(
             &gate_q, &up_q, xs, activation,
         )?))
+    } else if gguf::fast_mmvq::prefers_mmvq(gate_q.dtype(), flat_batch) {
+        // the tensor-core matvec has no fused form: gate and up each take it
+        Ok(None)
     } else {
         if !gguf::fast_mmq::supports(gate_q.dtype()) {
             return Ok(None);
@@ -2588,11 +2591,14 @@ pub fn try_fused_quantized_qkv(
     if dtype != k_q.dtype() || dtype != v_q.dtype() {
         return Ok(None);
     }
-    if gguf::fast_mmvq::prefers_mmvq(dtype, flat_batch) {
+    if gguf::fast_mmvq::prefers_fused_mmvq(dtype, flat_batch) {
         if !gguf::fast_mmvq::supports(dtype) {
             return Ok(None);
         }
         Ok(Some(gguf::fast_mmvq::fused_qkv(&q_q, &k_q, &v_q, xs)?))
+    } else if gguf::fast_mmvq::prefers_mmvq(dtype, flat_batch) {
+        // the tensor-core matvec has no fused form: q, k and v each take it
+        Ok(None)
     } else {
         if !gguf::fast_mmq::supports(dtype) {
             return Ok(None);

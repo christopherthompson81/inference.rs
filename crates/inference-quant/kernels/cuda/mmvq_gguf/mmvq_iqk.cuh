@@ -1134,6 +1134,27 @@ struct iqk_iq4_ks {
     vec_dot_iq4_ks_q8_1(vbq, bq8_1, kbx, iqs, result);
   }
   static __device__ __forceinline__ void vec_dot_tail(const void *, const block_q8_1 *, int, int, int, float *) {}
+  // mmvq_tc.cuh: byte j of a 32-value block holds value j (low nibble) and j+16 (high); the table is iq4k_values' half
+  static __device__ __forceinline__ float tc_row_scale(const char *row) { return *(const float *)row; }
+  static __device__ __forceinline__ int tc_word(const char *row, int ib0, int w) {
+    const block_iq4_ks *b = (const block_iq4_ks *)(row + sizeof(float)) + ib0 / 8;
+    return ((const int *)(b->qs + 16 * (ib0 % 8)))[w];
+  }
+  static __device__ __forceinline__ uint32_t tc_scale_word(const char *row, int ib0) {
+    const block_iq4_ks *b = (const block_iq4_ks *)(row + sizeof(float)) + ib0 / 8;
+    return *(const uint32_t *)(b->scales + ib0 % 8);
+  }
+  static __device__ __forceinline__ void tc_scales_from(uint32_t sc4, float row_scale, float *d, int *table) {
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      const int sc = (sc4 >> (8 * k)) & 0xff;
+      d[k] = row_scale * ((sc & 254) - 127);
+      table[k] = (sc & 1) << 4;
+    }
+  }
+  static __device__ __forceinline__ int2 tc_decode(int word, int table) {
+    return get_int_from_table_16(word, iq4k_values + table);
+  }
 };
 
 struct iqk_iq2_ks {

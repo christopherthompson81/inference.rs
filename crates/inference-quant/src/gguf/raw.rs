@@ -919,7 +919,7 @@ mod tests {
             let gpu =
                 GgufRawMatMul::new(RawGgufTensor::new(ty, &[ROWS, cols], bytes, &cuda)?, None);
             let weight = cpu.dequantize(&Device::Cpu)?;
-            for batch in [1, 3, 8, 33] {
+            for batch in [1, 2, 3, 5, 8, 33] {
                 let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
                 let expected = xs.matmul(&weight.t()?)?;
                 for dtype in [DType::F32, DType::BF16, DType::F16] {
@@ -1286,7 +1286,7 @@ mod tests {
             let gpu =
                 GgufRawMatMul::new(RawGgufTensor::new(ty, &[ROWS, cols], bytes, &metal)?, None);
             let weight = cpu.dequantize(&Device::Cpu)?;
-            for batch in [1, 3, 8, 33] {
+            for batch in [1, 2, 3, 5, 8, 33] {
                 let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
                 let expected = xs.matmul(&weight.t()?)?;
                 let peak = expected.abs()?.max_all()?.to_scalar::<f32>()?;

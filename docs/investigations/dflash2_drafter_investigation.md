@@ -171,3 +171,34 @@ DFlash 2 q8, 7               81.3 83.3 (56 ms/step)  142.9 135.3 (~34 ms/step)
 A 7-draft step now costs about ExLlamaV3's (~35 ms) and 7 drafts is the best setting, as z-lab and llama.cpp find.
 MMQ's flat cost sits at 1.25-1.6x the 1-row MMVQ, so a tensor-core GEMV built for 1-8 rows (Run 4's item 1) can
 still take the 8-row step toward the 1-row cost.
+
+## Run 6 - 2026-10-19 16:30
+
+Question: can a tensor-core matvec for 2-8 rows (ExLlamaV3's design, Run 4 item 1) take an 8-row verify step near
+the 1-row cost on recipe A (IQ4_KS bulk; qwen38_27b_weight_quant_investigation.md)?
+
+Step breakdown before (`INFERENCE_RS_CUDA_PHASE_TIMINGS=1`, recipe A, q4k drafter at 7 drafts, 32K, q3 cache): target
+verify graph 31.7 ms, DFlash drafter graph 3.8 ms, GDN transition apply 0.2 ms; a 1-row decode is 20 ms.
+
+Kernel (`mmvq_gguf/mmvq_tc.cuh`, IQ4_KS only, sm_80+): a warp covers 16 weight rows with int8 mma.m16n8k32, 8 warps
+split the row's blocks; activations quantized straight into the mma B fragment order (`mmvq_tc_quantize`). Bench on
+recipe A's tensors (time / 1-row MMVQ, 2-8 rows flat):
+
+```
+version                                         ffn_up 17408x5120   ffn_down 5120x17408   attn_qkv 10240x5120
+MMQ (reference)                                 1.46-1.51           1.41-1.45             1.37-1.41
+1. per-lane 4-byte A loads, q8_1 activations    1.53-1.66           1.66-1.73             1.56-1.68
+   (asm not volatile: no change; contiguous per-warp block runs: ~5x, reverted)
+2. warp-tile copy, row-contiguous loads         1.26 (2 rows)-1.62  1.37-1.63             1.28-1.62
+3. + activations in B fragment order            1.33 flat           1.53 flat             1.30-1.34
+4. + register double buffer                     1.65                1.96                  1.54   (76 regs, occupancy 5 -> 3 blocks; reverted)
+```
+
+IQ4_KS rows sit at 12 mod 16 bytes (a 4-byte row scale, 136-byte blocks), so 16-byte loads fault; ExLlamaV3
+repacks its weights into fragment order. Short, wide weights (ffn_down) lose: every block rereads the whole
+activation (156 KB at K=17408), about as much traffic as the weights. With the kernel only where rows >= 2 x
+columns, the verify graph measures 31.3 ms against 31.7: ~1%.
+
+Implication: the tall matrices gain ~10% each but the step barely moves. Reaching ~1.1x needs a load-time repack
+into fragment order (16-byte loads) and activation sharing across row tiles, best done with Nsight Compute counters
+(blocked here for non-admin users: ERR_NVGPUCTRPERM). Parked on branch perf/small-batch-tc-gemv.

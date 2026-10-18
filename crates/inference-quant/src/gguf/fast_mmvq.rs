@@ -81,12 +81,17 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
 /// Maximum flattened batch handled by the CUDA launcher table.
 pub const MMVQ_MAX_BATCH: usize = 8;
 
-/// Whether `rows` input rows of a `dtype` weight take MMVQ rather than MMQ: MMVQ repeats its dot products and
-/// activation loads per row, while MMQ's int8 tensor-core tiles cost about the same from 1 to 8 rows, so past a
-/// per-type count MMQ is faster (`fast_mmq::bench::small_batch_mmvq_vs_mmq`, RTX 3090).
-pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
-    let dtype = dtype.into();
-    let max_rows = match dtype {
+// sm_80's int8 mma.m16n8k32, which the tensor-core matvec (mmvq_tc.cuh) needs
+const TENSOR_CORE_MIN_CC: usize = 80;
+// mmvq_tc_quantize's bytes per 32-value block: 32 lanes' int2 fragments and 8 rows' f32 scales
+const TENSOR_CORE_ACTIVATION_BLOCK_BYTES: usize = 32 * 8 + 8 * 4;
+// output rows per input column from which the tensor-core matvec beats MMQ (ffn_up 17408x5120 yes, ffn_down no)
+const TENSOR_CORE_MIN_ROWS_PER_COL: usize = 2;
+
+// The most input rows MMVQ's dp4a kernels take before MMQ's int8 tensor-core tiles, which cost about the same from 1
+// to 8 rows, are faster (`fast_mmq::bench::small_batch_mmvq_vs_mmq`, RTX 3090).
+fn dp4a_max_rows(dtype: GgufType) -> usize {
+    match dtype {
         GgufType::Iq4Xs => 5,
         GgufType::Q4K | GgufType::Q5K => 3,
         // the crossover moves with the output width (4 for a 248K-row head, 6 for a 2K-row FFN)
@@ -96,8 +101,34 @@ pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
         GgufType::Iq4Ks | GgufType::Iq4Kss => 2,
         GgufType::Iq4Kt | GgufType::Iq3K | GgufType::Iq3Kt => 1,
         _ => MMVQ_MAX_BATCH,
-    };
-    rows <= max_rows || rows <= MMVQ_MAX_BATCH && !super::fast_mmq::supports(dtype)
+    }
+}
+
+/// Whether `rows` input rows of a `dtype` weight take MMVQ's dp4a kernels, the fused GLU and QKV forms included.
+pub fn prefers_fused_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
+    let dtype = dtype.into();
+    rows <= dp4a_max_rows(dtype) || rows <= MMVQ_MAX_BATCH && !super::fast_mmq::supports(dtype)
+}
+
+/// Whether `rows` input rows of a `dtype` weight take MMVQ (`plain`) rather than MMQ: its dp4a kernels, or for 2-8
+/// rows of a type with one, the tensor-core matvec, which reads and decodes each weight block once for all rows.
+pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
+    let dtype = dtype.into();
+    prefers_fused_mmvq(dtype, rows) || rows <= MMVQ_MAX_BATCH && has_tensor_core_rows(dtype)
+}
+
+fn tensor_core_launcher(input_ty: DType, dtype: GgufType) -> Option<PlainLauncher> {
+    match (input_ty, dtype) {
+        (DType::BF16, GgufType::Iq4Ks) => Some(ffi::launch_mmvq_tc_gguf_iq4_ks_bf16_plain),
+        (DType::F16, GgufType::Iq4Ks) => Some(ffi::launch_mmvq_tc_gguf_iq4_ks_f16_plain),
+        (DType::F32, GgufType::Iq4Ks) => Some(ffi::launch_mmvq_tc_gguf_iq4_ks_f32_plain),
+        _ => None,
+    }
+}
+
+/// Whether a `dtype` weight has the tensor-core matvec for 2-8 input rows.
+pub fn has_tensor_core_rows(dtype: impl Into<GgufType>) -> bool {
+    tensor_core_launcher(DType::F32, dtype.into()).is_some()
 }
 
 static WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
@@ -394,6 +425,18 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
         );
     }
 
+    // short, wide weights stay with MMQ: every block of the tensor-core matvec rereads the whole activation, which
+    // for them costs as much as the weights
+    let tensor_core = (b_size > 1
+        && dev.compute_cap() >= TENSOR_CORE_MIN_CC
+        && nrows >= TENSOR_CORE_MIN_ROWS_PER_COL * ncols)
+        .then(|| tensor_core_launcher(input_ty, dtype))
+        .flatten();
+    // a type whose many rows the tensor-core matvec would take, on a card without it, goes to MMQ
+    if tensor_core.is_none() && !prefers_fused_mmvq(dtype, b_size) {
+        return super::fast_mmq::plain(w, xs);
+    }
+
     let stream = dev.cuda_stream();
     let xs = xs.contiguous()?;
     let (xs_storage, xs_layout) = xs.storage_and_layout();
@@ -406,7 +449,12 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
     let k_padded = pad(k, MATRIX_ROW_PADDING);
     let num_blocks_per_row = k_padded / Q8_1_BLOCK_SIZE;
     let dst_row_bytes = num_blocks_per_row * Q8_1_TYPE_SIZE;
-    let scratch_bytes = b_size * dst_row_bytes;
+    // the tensor-core matvec's activations: per 32-value block, an int2 B fragment per lane and 8 f32 row scales
+    let scratch_bytes = if tensor_core.is_some() {
+        (k / Q8_1_BLOCK_SIZE) * TENSOR_CORE_ACTIVATION_BLOCK_BYTES
+    } else {
+        b_size * dst_row_bytes
+    };
 
     let mut workspace = WORKSPACE.ensure(&dev, scratch_bytes, &stream)?;
     let (scratch_ptr, _scratch_guard) = workspace.ptr_mut();
@@ -426,15 +474,26 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
                 let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
 
                 unsafe {
-                    ffi::launch_mmvq_gguf_quantize_q8_1_bf16(
-                        xs_ptr as *const std::ffi::c_void,
-                        scratch_ptr,
-                        k as i32,
-                        k_padded as i32,
-                        b_size as i32,
-                        stream_ptr,
-                    );
-                    let launcher = plain_launcher_bf16(dtype).expect("supports() checked");
+                    if tensor_core.is_some() {
+                        ffi::launch_mmvq_tc_quantize_bf16(
+                            xs_ptr as *const std::ffi::c_void,
+                            scratch_ptr,
+                            k as i32,
+                            b_size as i32,
+                            stream_ptr,
+                        );
+                    } else {
+                        ffi::launch_mmvq_gguf_quantize_q8_1_bf16(
+                            xs_ptr as *const std::ffi::c_void,
+                            scratch_ptr,
+                            k as i32,
+                            k_padded as i32,
+                            b_size as i32,
+                            stream_ptr,
+                        );
+                    }
+                    let launcher = tensor_core
+                        .unwrap_or_else(|| plain_launcher_bf16(dtype).expect("supports() checked"));
                     launcher(
                         weight_ptr,
                         scratch_ptr as *const std::ffi::c_void,
@@ -464,15 +523,26 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
                 let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
 
                 unsafe {
-                    ffi::launch_mmvq_gguf_quantize_q8_1_f16(
-                        xs_ptr as *const std::ffi::c_void,
-                        scratch_ptr,
-                        k as i32,
-                        k_padded as i32,
-                        b_size as i32,
-                        stream_ptr,
-                    );
-                    let launcher = plain_launcher_f16(dtype).expect("supports() checked");
+                    if tensor_core.is_some() {
+                        ffi::launch_mmvq_tc_quantize_f16(
+                            xs_ptr as *const std::ffi::c_void,
+                            scratch_ptr,
+                            k as i32,
+                            b_size as i32,
+                            stream_ptr,
+                        );
+                    } else {
+                        ffi::launch_mmvq_gguf_quantize_q8_1_f16(
+                            xs_ptr as *const std::ffi::c_void,
+                            scratch_ptr,
+                            k as i32,
+                            k_padded as i32,
+                            b_size as i32,
+                            stream_ptr,
+                        );
+                    }
+                    let launcher = tensor_core
+                        .unwrap_or_else(|| plain_launcher_f16(dtype).expect("supports() checked"));
                     launcher(
                         weight_ptr,
                         scratch_ptr as *const std::ffi::c_void,
@@ -502,15 +572,26 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
                 let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
 
                 unsafe {
-                    ffi::launch_mmvq_gguf_quantize_q8_1_f32(
-                        xs_ptr as *const std::ffi::c_void,
-                        scratch_ptr,
-                        k as i32,
-                        k_padded as i32,
-                        b_size as i32,
-                        stream_ptr,
-                    );
-                    let launcher = plain_launcher_f32(dtype).expect("supports() checked");
+                    if tensor_core.is_some() {
+                        ffi::launch_mmvq_tc_quantize_f32(
+                            xs_ptr as *const std::ffi::c_void,
+                            scratch_ptr,
+                            k as i32,
+                            b_size as i32,
+                            stream_ptr,
+                        );
+                    } else {
+                        ffi::launch_mmvq_gguf_quantize_q8_1_f32(
+                            xs_ptr as *const std::ffi::c_void,
+                            scratch_ptr,
+                            k as i32,
+                            k_padded as i32,
+                            b_size as i32,
+                            stream_ptr,
+                        );
+                    }
+                    let launcher = tensor_core
+                        .unwrap_or_else(|| plain_launcher_f32(dtype).expect("supports() checked"));
                     launcher(
                         weight_ptr,
                         scratch_ptr as *const std::ffi::c_void,
