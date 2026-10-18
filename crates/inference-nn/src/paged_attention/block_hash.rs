@@ -10,7 +10,7 @@
 //! and content in a sequence, enabling automatic prefix cache reuse.
 
 use std::{
-    hash::{DefaultHasher, Hash, Hasher},
+    hash::{Hash, Hasher},
     ops::Range,
 };
 
@@ -21,8 +21,8 @@ use crate::lora::generation::AdapterGenerationId;
 /// The hash incorporates the parent block's hash (chain hashing), the tokens in the
 /// block, and any extra keys (e.g., multimodal content hashes).
 ///
-/// Uses `u64` from `DefaultHasher` for speed. Can be upgraded to a cryptographic
-/// hash (blake3, xxhash) later if collision resistance becomes important.
+/// A `u64` from SipHash-1-3 with zero keys (`std`'s `DefaultHasher` algorithm, which `std` does not promise to keep),
+/// so hashes stay the same across builds and a persisted prefix cache can key on them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BlockHash(u64);
 
@@ -127,7 +127,7 @@ pub fn hash_block_tokens(
     block_tokens: &[u32],
     extra_keys: Option<&[ExtraHashKey]>,
 ) -> BlockHash {
-    let mut hasher = DefaultHasher::new();
+    let mut hasher = siphasher::sip::SipHasher13::new();
 
     // Chain: include parent hash (or seed for first block)
     match parent_hash {
@@ -307,6 +307,22 @@ pub fn compute_new_block_hashes(
 
 #[cfg(test)]
 mod tests {
+    // A persisted prefix cache keys on these values; one moving would orphan every saved entry
+    #[test]
+    fn block_hashes_stay_the_same_across_builds() {
+        let first = super::hash_block_tokens(None, &[1, 2, 3, 4], None);
+        let second = super::hash_block_tokens(Some(first), &[5, 6, 7, 8], None);
+        assert_eq!(first.value(), 0xa187_ac1a_49ca_2988);
+        assert_eq!(second.value(), 0x892a_bcd2_9a78_763f);
+        let mut std_hasher = std::hash::DefaultHasher::new();
+        super::NONE_HASH_SEED.hash(&mut std_hasher);
+        [1u32, 2, 3, 4].hash(&mut std_hasher);
+        assert_eq!(
+            first.value(),
+            std_hasher.finish(),
+            "the in-memory cache keeps today's hashes"
+        );
+    }
     use super::*;
 
     fn mm_key(hash: u64, policy: MultimodalAttentionPolicy) -> ExtraHashKey {

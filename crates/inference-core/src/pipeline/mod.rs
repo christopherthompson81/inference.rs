@@ -1381,6 +1381,27 @@ pub trait Pipeline:
         inference_tensor::bail!("This pipeline does not support auxiliary paged prefix state.")
     }
 
+    /// An auxiliary prefix state copied to the host, for a persisted prefix cache.
+    fn export_paged_auxiliary_prefix_state(
+        &mut self,
+        _state: &dyn PagedAuxiliaryPrefixState,
+    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>, inference_tensor::Error> {
+        Ok(None)
+    }
+
+    /// An auxiliary prefix state rebuilt from an exported one.
+    fn import_paged_auxiliary_prefix_state(
+        &mut self,
+        _data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> Result<Option<Arc<dyn PagedAuxiliaryPrefixState>>, inference_tensor::Error> {
+        Ok(None)
+    }
+
+    /// The layout an exported auxiliary prefix state has, when this pipeline keeps one.
+    fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+        None
+    }
+
     /// Called after a prompt chunk forward so a speculative proposer with its own KV cache can
     /// process the chunk. Default: nothing to do.
     fn speculative_prompt_chunk(
@@ -1480,12 +1501,103 @@ pub trait Pipeline:
         let owner = *block_hashes
             .last()
             .expect("recurrent prefix owner requires a full block");
+        if let Some(disk) = prefix_cacher.disk_tier().cloned()
+            && let Err(error) = self.write_prefix_through(
+                &disk,
+                seq,
+                &block_hashes[..n_blocks],
+                block_size,
+                snapshot,
+                auxiliary.as_deref(),
+            )
+        {
+            tracing::warn!("Failed writing a recurrent prefix to the disk store: {error}");
+        }
         prefix_cacher.add_paged_recurrent_prefix(
             owner,
             block_hashes[..n_blocks].to_vec(),
             snapshot,
             auxiliary,
         );
+        Ok(())
+    }
+
+    /// Queues a just-taken prefix for the disk store: the blocks it lacks, the recurrent state and drafter checkpoint.
+    fn write_prefix_through(
+        &mut self,
+        disk: &crate::prefix_cacher::PrefixDiskTier,
+        seq: &Sequence,
+        key: &[crate::paged_attention::block_hash::BlockHash],
+        block_size: usize,
+        snapshot: crate::kv_cache::RecurrentSnapshotSlot,
+        auxiliary: Option<&dyn PagedAuxiliaryPrefixState>,
+    ) -> Result<(), inference_tensor::Error> {
+        let key_values = key.iter().map(|hash| hash.value()).collect::<Vec<_>>();
+        if disk.store.has_entry(&key_values) {
+            return Ok(());
+        }
+        let block_ids = crate::get_mut_arcmutex!(disk.kv_cache_manager)
+            .get_block_ids(*seq.id())
+            .map(|ids| ids[..key.len().min(ids.len())].to_vec())
+            .unwrap_or_default();
+        if block_ids.len() < key.len() {
+            return Ok(());
+        }
+        let missing = (0..key.len())
+            .filter(|&i| !disk.store.has_block(key_values[i]))
+            .collect::<Vec<_>>();
+        let tokens = seq.get_toks();
+        let mut blocks = missing
+            .iter()
+            .map(|&i| crate::prefix_store::StoredBlock {
+                hash: key_values[i],
+                tokens: tokens[i * block_size..(i + 1) * block_size].to_vec(),
+                layers: Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let metadata = self.get_metadata();
+            let cache_engine = metadata.cache_engine.as_ref().ok_or_else(|| {
+                inference_tensor::Error::msg("paged prefix without a cache engine")
+            })?;
+            let kv = cache_engine.get_kv_cache().clone();
+            let ids = missing
+                .iter()
+                .map(|&i| u32::try_from(block_ids[i]))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|_| inference_tensor::Error::msg("block id exceeds u32"))?;
+            for (layer, (k, v)) in kv.iter().enumerate() {
+                if k.dim(0)? == 0 {
+                    continue;
+                }
+                let ids = Tensor::from_vec(ids.clone(), ids.len(), k.device())?;
+                let (k, v) = (
+                    k.index_select(&ids, 0)?.to_device(&Device::Cpu)?,
+                    v.index_select(&ids, 0)?.to_device(&Device::Cpu)?,
+                );
+                for (j, block) in blocks.iter_mut().enumerate() {
+                    block
+                        .layers
+                        .push((layer, k.narrow(0, j, 1)?, v.narrow(0, j, 1)?));
+                }
+            }
+        }
+        let Some(recurrent) = self.cache().hybrid().export_recurrent_snapshot(snapshot)? else {
+            return Ok(());
+        };
+        let auxiliary = match auxiliary {
+            Some(state) => match self.export_paged_auxiliary_prefix_state(state)? {
+                Some(data) => Some(data),
+                None => return Ok(()),
+            },
+            None => None,
+        };
+        disk.store.write(crate::prefix_store::PrefixWrite {
+            key: key_values,
+            blocks,
+            recurrent,
+            auxiliary,
+        });
         Ok(())
     }
 

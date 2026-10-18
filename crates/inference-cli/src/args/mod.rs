@@ -676,6 +676,17 @@ pub struct RuntimeOptions {
     #[serde(default = "default_prefix_cache_n")]
     pub prefix_cache_n: usize,
 
+    /// Directory that keeps prefix cache entries on disk too, so long sessions (agent loops) survive eviction and
+    /// restarts. Hybrid models on CUDA with paged attention.
+    #[arg(long)]
+    #[serde(default)]
+    pub prefix_cache_dir: Option<PathBuf>,
+
+    /// Most the prefix cache directory may hold, in GiB; the least recently used entries go first
+    #[arg(long)]
+    #[serde(default)]
+    pub prefix_cache_disk_gib: Option<u64>,
+
     /// Custom chat template file (.json or .jinja)
     #[arg(long, short)]
     #[serde(default)]
@@ -1041,6 +1052,8 @@ impl Default for RuntimeOptions {
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),
             no_kv_cache: false,
             prefix_cache_n: 16,
+            prefix_cache_dir: None,
+            prefix_cache_disk_gib: None,
             chat_template: None,
             jinja_explicit: None,
             matformer_config_path: None,

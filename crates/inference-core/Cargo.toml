@@ -15,6 +15,7 @@ homepage.workspace = true
 [dependencies]
 inference-protocol.workspace = true
 anyhow.workspace = true
+siphasher.workspace = true
 inference-tensor.workspace = true
 metrics.workspace = true
 serde.workspace = true

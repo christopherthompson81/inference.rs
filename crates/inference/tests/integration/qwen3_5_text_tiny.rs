@@ -479,3 +479,97 @@ async fn a_dflash_agent_turn_resumes_at_the_previous_prompt_snapshot() -> anyhow
     );
     Ok(())
 }
+
+// the writer thread stores a prefix well within this
+const STORE_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+const STORE_POLLS: usize = 200;
+
+async fn stored_model(
+    checkpoint: &std::path::Path,
+    drafter: Option<&std::path::Path>,
+    store: Option<&std::path::Path>,
+) -> anyhow::Result<Model> {
+    let mut builder = TextModelBuilder::new(checkpoint.to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+    if let Some(drafter) = drafter {
+        builder = builder.with_mtp_model(drafter.to_string_lossy(), Some(DFLASH_N_PREDICT));
+    }
+    if let Some(store) = store {
+        builder = builder.with_prefix_cache_dir(store.to_string_lossy(), None);
+    }
+    Ok(builder.build().await?)
+}
+
+fn stored_entries(store: &std::path::Path) -> usize {
+    walkdir_count(store, "key.bin")
+}
+
+fn walkdir_count(dir: &std::path::Path, name: &str) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| {
+            let path = entry.path();
+            if path.is_dir() {
+                walkdir_count(&path, name)
+            } else {
+                usize::from(path.file_name().is_some_and(|n| n == name))
+            }
+        })
+        .sum()
+}
+
+// A prefix written to the disk store restores in a fresh engine (a restart), and the next turn decodes as a cold run
+async fn check_restart_restores(drafter: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let store = tempfile::tempdir()?;
+    let first = agent_tokens(AGENT_PROMPT_LEN, 0);
+    let mut next = first.clone();
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 1));
+    {
+        let model = stored_model(checkpoint.path(), drafter, Some(store.path())).await?;
+        agent_turn(&model, &first, PREFIX_MAX_LEN).await?;
+        for _ in 0..STORE_POLLS {
+            if stored_entries(store.path()) > 0 {
+                break;
+            }
+            tokio::time::sleep(STORE_POLL).await;
+        }
+    }
+    anyhow::ensure!(
+        stored_entries(store.path()) > 0,
+        "no prefix reached the disk store"
+    );
+    let restarted = stored_model(checkpoint.path(), drafter, Some(store.path())).await?;
+    let (warm, cached) = agent_turn(&restarted, &next, PREFIX_MAX_LEN).await?;
+    drop(restarted);
+    let cold_model = stored_model(checkpoint.path(), drafter, None).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(cached > 0, "the restarted engine found no cached prefix");
+    anyhow::ensure!(
+        traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
+        "a restored prefix changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_stored_prefix_restores_after_a_restart() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    check_restart_restores(None).await
+}
+
+#[tokio::test]
+async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -> anyhow::Result<()>
+{
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    check_restart_restores(Some(drafter.path())).await
+}

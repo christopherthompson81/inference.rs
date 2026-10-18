@@ -24,6 +24,7 @@ pub struct InferenceRsBuilder {
     pub(super) code_exec_config: Option<CodeExecutionConfig>,
     pub(super) shell_config: Option<ShellConfig>,
     pub(super) defer_daemon_start: bool,
+    pub(super) prefix_store: Option<crate::PrefixStoreSettings>,
 }
 
 impl InferenceRsBuilder {
@@ -55,6 +56,7 @@ impl InferenceRsBuilder {
             code_exec_config: None,
             shell_config: None,
             defer_daemon_start: false,
+            prefix_store: None,
         }
     }
 
@@ -79,6 +81,7 @@ impl InferenceRsBuilder {
             search_callback: engine_config.search_callback,
             tool_callbacks: engine_config.tool_callbacks,
             agent_runner: engine_config.agent_runner,
+            prefix_store: engine_config.prefix_store,
             mcp_client_config,
             loader_config,
             code_exec_config,
@@ -118,6 +121,10 @@ impl InferenceRsBuilder {
     }
     pub fn with_prefix_cache_n(mut self, prefix_cache_n: usize) -> Self {
         self.prefix_cache_n = Some(prefix_cache_n);
+        self
+    }
+    pub fn with_prefix_store(mut self, prefix_store: Option<crate::PrefixStoreSettings>) -> Self {
+        self.prefix_store = prefix_store;
         self
     }
     pub fn with_disable_eos_stop(mut self, disable_eos_stop: bool) -> Self {

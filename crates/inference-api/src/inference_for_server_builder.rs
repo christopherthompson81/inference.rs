@@ -230,6 +230,7 @@ pub struct InferenceRsForServerBuilder {
 
     /// Number of prefix caches to hold on the device. Other caches are evicted to the CPU based on a LRU strategy.
     prefix_cache_n: usize,
+    prefix_store: Option<inference_core::PrefixStoreSettings>,
 
     /// NOTE: This can be omitted to use automatic device mapping!
     /// Number of device layers to load and run on GPU(s). All others will be on the CPU.
@@ -331,6 +332,7 @@ impl Default for InferenceRsForServerBuilder {
             token_source: defaults::TOKEN_SOURCE,
             interactive_mode: defaults::INTERACTIVE_MODE,
             prefix_cache_n: defaults::PREFIX_CACHE_N,
+            prefix_store: None,
             num_device_layers: defaults::NUM_DEVICE_LAYERS,
             in_situ_quant: defaults::IN_SITU_QUANT,
             hf_revision: None,
@@ -548,6 +550,15 @@ impl InferenceRsForServerBuilder {
     }
 
     /// Sets the number of prefix caches to hold on the device.
+    /// Keeps prefix cache entries on disk too; the engine fills in the model identity.
+    pub fn with_prefix_store(
+        mut self,
+        prefix_store: Option<inference_core::PrefixStoreSettings>,
+    ) -> Self {
+        self.prefix_store = prefix_store;
+        self
+    }
+
     pub fn with_prefix_cache_n(mut self, prefix_cache_n: usize) -> Self {
         self.prefix_cache_n = prefix_cache_n;
         self
@@ -828,6 +839,7 @@ impl InferenceRsForServerBuilder {
             search_callback: self.search_callback.clone(),
             tool_callbacks: self.tool_callbacks.clone(),
             agent_runner: Some(inference_agent::runner()),
+            prefix_store: self.prefix_store.clone(),
         };
         inference_core::AddModelConfig {
             engine_config,

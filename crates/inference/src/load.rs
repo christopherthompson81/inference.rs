@@ -357,6 +357,18 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Keeps prefix cache entries in `dir` too, at most `disk_gib` (the default when `None`), so long sessions
+        /// survive eviction and restarts; hybrid models on CUDA with paged attention.
+        pub fn with_prefix_cache_dir(
+            mut self,
+            dir: impl Into<String>,
+            disk_gib: Option<u64>,
+        ) -> Self {
+            self.options.runtime.prefix_cache_dir = Some(dir.into());
+            self.options.runtime.prefix_cache_disk_gib = disk_gib;
+            self
+        }
+
         pub fn with_no_kv_cache(mut self) -> Self {
             self.options.runtime.no_kv_cache = true;
             self

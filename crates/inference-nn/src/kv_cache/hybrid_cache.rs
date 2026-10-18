@@ -492,6 +492,13 @@ pub struct RecurrentStatePool {
     deferred_state: Option<GdnDeferredStatePool>,
 }
 
+/// One recurrent layer's share of a prefix snapshot on the host: its conv and recurrent state rows.
+#[derive(Clone, Debug)]
+pub struct RecurrentSnapshotState {
+    pub conv: Tensor,
+    pub recurrent: Tensor,
+}
+
 /// Initial pool capacity before dynamic growth: the pre-captured CUDA graph batch range plus the
 /// graph pad slot, so growth (which invalidates captured graphs) only happens past that.
 const INITIAL_POOL_CAPACITY: usize = 9;
@@ -2184,6 +2191,113 @@ impl HybridCache {
         self.initialized_slots[target] = true;
         self.publish_recurrent_slot_metrics();
         Ok(Some(RecurrentSnapshotSlot { slot: target, id }))
+    }
+
+    /// A held snapshot's state copied to the host, one entry per recurrent layer; `None` once the pool reclaimed it.
+    pub fn export_recurrent_snapshot(
+        &self,
+        snapshot: RecurrentSnapshotSlot,
+    ) -> Result<Option<Vec<RecurrentSnapshotState>>> {
+        if !self.recurrent_snapshot_held(snapshot) {
+            return Ok(None);
+        }
+        let row = u32::try_from(self.physical_slot(snapshot.slot, 0)?)
+            .map_err(|_| inference_tensor::Error::msg("recurrent snapshot row exceeds u32"))?;
+        let mut states = Vec::new();
+        for cache in &self.caches {
+            if let HybridLayerCache::Recurrent(pool) = cache {
+                let idx = Tensor::new(&[row], pool.device())?;
+                states.push(RecurrentSnapshotState {
+                    conv: pool.gather_conv_state(&idx)?.to_device(&Device::Cpu)?,
+                    recurrent: pool.gather_recurrent_state(&idx)?.to_device(&Device::Cpu)?,
+                });
+            }
+        }
+        Ok(Some(states))
+    }
+
+    /// A snapshot slot filled from exported state, chosen as `store_recurrent_snapshot` chooses one; `None` when no
+    /// slot is free or held by an older snapshot.
+    pub fn import_recurrent_snapshot(
+        &mut self,
+        states: &[RecurrentSnapshotState],
+    ) -> Result<Option<RecurrentSnapshotSlot>> {
+        let pools = self
+            .caches
+            .iter()
+            .filter_map(HybridLayerCache::as_recurrent_pool)
+            .collect::<Vec<_>>();
+        if pools.len() != states.len() {
+            inference_tensor::bail!(
+                "recurrent snapshot has {} layers, the cache {}",
+                states.len(),
+                pools.len()
+            );
+        }
+        for (pool, state) in pools.iter().zip(states) {
+            let fits = |tensor: &Tensor, rows: &Tensor| {
+                tensor.dims()[1..] == rows.dims()[1..] && tensor.dtype() == rows.dtype()
+            };
+            if state.conv.dim(0)? != 1
+                || state.recurrent.dim(0)? != 1
+                || !fits(&state.conv, &pool.conv_state)
+                || !fits(&state.recurrent, &pool.recurrent_state)
+            {
+                inference_tensor::bail!(
+                    "recurrent snapshot does not fit this cache's state layout"
+                );
+            }
+        }
+        let target = match self.slot_owners.iter().position(Option::is_none) {
+            Some(target) => target,
+            None => match self.oldest_snapshot_slot() {
+                Some(target) => {
+                    self.free_snapshot_slot(target)?;
+                    target
+                }
+                None => return Ok(None),
+            },
+        };
+        let row = u32::try_from(self.physical_slot(target, 0)?)
+            .map_err(|_| inference_tensor::Error::msg("recurrent snapshot row exceeds u32"))?;
+        let mut states = states.iter();
+        for cache in &mut self.caches {
+            if let HybridLayerCache::Recurrent(pool) = cache {
+                let state = states.next().expect("layer counts checked above");
+                pool.reserve_at(target)?;
+                let idx = Tensor::new(&[row], pool.device())?;
+                pool.scatter_conv_state(&idx, &state.conv.to_device(pool.device())?)?;
+                pool.scatter_recurrent_state(&idx, &state.recurrent.to_device(pool.device())?)?;
+            }
+        }
+        let id = self.next_snapshot_id;
+        self.next_snapshot_id += 1;
+        self.slot_owners[target] = Some(RecurrentSlotOwner::PrefixSnapshot { id, last_use: id });
+        self.pristine_zero_slots[target] = false;
+        self.last_released_sequence_owners[target] = None;
+        self.committed_lanes[target] = 0;
+        self.initialized_slots[target] = true;
+        self.publish_recurrent_slot_metrics();
+        Ok(Some(RecurrentSnapshotSlot { slot: target, id }))
+    }
+
+    /// The recurrent layers' state shapes, dtypes and layouts, which an exported snapshot must match.
+    pub fn recurrent_state_signature(&self) -> String {
+        self.caches
+            .iter()
+            .filter_map(HybridLayerCache::as_recurrent_pool)
+            .map(|pool| {
+                format!(
+                    "{:?}/{:?}/{:?}/{:?}/{:?}",
+                    &pool.conv_state.dims()[1..],
+                    pool.conv_state.dtype(),
+                    &pool.recurrent_state.dims()[1..],
+                    pool.recurrent_dtype(),
+                    pool.state_layout()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(";")
     }
 
     fn clear_slot_for_restore(&mut self, slot_idx: usize) -> Result<()> {

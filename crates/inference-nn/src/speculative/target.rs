@@ -185,6 +185,24 @@ pub trait SpeculativeTargetMixin {
         inference_tensor::bail!("This model does not support auxiliary paged prefix state.")
     }
 
+    fn export_paged_auxiliary_prefix_state(
+        &mut self,
+        _state: &dyn PagedAuxiliaryPrefixState,
+    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>> {
+        Ok(None)
+    }
+
+    fn import_paged_auxiliary_prefix_state(
+        &mut self,
+        _data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> Result<Option<Arc<dyn PagedAuxiliaryPrefixState>>> {
+        Ok(None)
+    }
+
+    fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+        None
+    }
+
     fn speculative_plan(&self, _batch_size: usize) -> Option<SpeculativeBatchPlan> {
         None
     }
@@ -406,6 +424,36 @@ macro_rules! delegate_speculative_target {
                             sequence_id,
                             cached_tokens,
                             state,
+                        )
+            }
+
+            fn export_paged_auxiliary_prefix_state(
+                &mut self,
+                state: &dyn $crate::kv_cache::PagedAuxiliaryPrefixState,
+            ) -> ::inference_tensor::Result<
+                Option<$crate::kv_cache::PagedAuxiliaryPrefixData>,
+            > {
+                <$inner as $crate::speculative::SpeculativeTargetMixin>::export_paged_auxiliary_prefix_state(
+                            &mut self.$field,
+                            state,
+                        )
+            }
+
+            fn import_paged_auxiliary_prefix_state(
+                &mut self,
+                data: &$crate::kv_cache::PagedAuxiliaryPrefixData,
+            ) -> ::inference_tensor::Result<
+                Option<::std::sync::Arc<dyn $crate::kv_cache::PagedAuxiliaryPrefixState>>,
+            > {
+                <$inner as $crate::speculative::SpeculativeTargetMixin>::import_paged_auxiliary_prefix_state(
+                            &mut self.$field,
+                            data,
+                        )
+            }
+
+            fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+                <$inner as $crate::speculative::SpeculativeTargetMixin>::paged_auxiliary_prefix_signature(
+                            &self.$field,
                         )
             }
 

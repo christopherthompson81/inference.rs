@@ -2604,6 +2604,8 @@ class RuntimeSpec:
     no_kv_cache: bool | None = None
     paged_attn: bool | None = None
     paged_cache: PagedCacheSpec | None = None
+    prefix_cache_dir: str | None = None
+    prefix_cache_disk_gib: int | None = None
     prefix_cache_n: int | None = None
     seed: int | None = None
     throughput_logging: bool | None = None

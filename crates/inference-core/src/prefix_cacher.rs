@@ -187,6 +187,14 @@ pub struct PrefixCacheManagerV2 {
     has_paged_attention: bool,
     // Snapshot slots of dropped entries, for the engine to hand back to the recurrent pool
     released_recurrent_snapshots: Vec<RecurrentSnapshotSlot>,
+    disk: Option<PrefixDiskTier>,
+}
+
+/// The disk store paged recurrent prefixes are written through to, and the KV manager that knows their blocks.
+#[derive(Clone)]
+pub struct PrefixDiskTier {
+    pub store: Arc<crate::prefix_store::PrefixStore>,
+    pub kv_cache_manager: Arc<tokio::sync::Mutex<crate::paged_attention::KVCacheManager>>,
 }
 
 #[derive(Clone)]
@@ -233,6 +241,7 @@ impl PrefixCacheManagerV2 {
             no_prefix_cache,
             has_paged_attention,
             released_recurrent_snapshots: Vec::new(),
+            disk: None,
         };
         manager.publish_paged_recurrent_metrics();
         metrics::counter!(
@@ -266,6 +275,14 @@ impl PrefixCacheManagerV2 {
             retention.enable();
             self.paged_block_retention = Some(retention);
         }
+    }
+
+    pub(crate) fn attach_disk_tier(&mut self, disk: PrefixDiskTier) {
+        self.disk = Some(disk);
+    }
+
+    pub(crate) fn disk_tier(&self) -> Option<&PrefixDiskTier> {
+        self.disk.as_ref()
     }
 
     fn paged_recurrent_capacity(&self) -> usize {

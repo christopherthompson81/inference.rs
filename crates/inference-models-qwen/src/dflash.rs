@@ -2880,6 +2880,69 @@ impl DFlashDraftModel {
         }
     }
 
+    /// A prefix checkpoint's pages and positions copied to the host.
+    pub fn export_paged_auxiliary_prefix_state(
+        &self,
+        state: &dyn PagedAuxiliaryPrefixState,
+    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        {
+            let (Some(state), Some(pool)) = (
+                state.as_any().downcast_ref::<DFlashPagedPrefixState>(),
+                self.windowed_pool.as_ref(),
+            ) else {
+                return Ok(None);
+            };
+            pool.lock()
+                .expect("dflash windowed pool poisoned")
+                .export_checkpoint(&state.checkpoint)
+                .map(Some)
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        {
+            let _ = state;
+            Ok(None)
+        }
+    }
+
+    /// A prefix checkpoint of this drafter's windowed pool rebuilt from exported pages.
+    pub fn import_paged_auxiliary_prefix_state(
+        &self,
+        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> Result<Option<Arc<dyn PagedAuxiliaryPrefixState>>> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        {
+            let Some(pool) = self.windowed_pool.as_ref() else {
+                return Ok(None);
+            };
+            let checkpoint = pool
+                .lock()
+                .expect("dflash windowed pool poisoned")
+                .import_checkpoint(data)?;
+            Ok(Some(Arc::new(DFlashPagedPrefixState { checkpoint })))
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        {
+            let _ = data;
+            Ok(None)
+        }
+    }
+
+    pub fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        {
+            self.windowed_pool.as_ref().map(|pool| {
+                pool.lock()
+                    .expect("dflash windowed pool poisoned")
+                    .checkpoint_signature()
+            })
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        {
+            None
+        }
+    }
+
     pub fn has_selector(&self) -> bool {
         self.selector.is_some()
     }

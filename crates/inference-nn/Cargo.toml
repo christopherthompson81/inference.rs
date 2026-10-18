@@ -16,6 +16,7 @@ homepage.workspace = true
 akin.workspace = true
 anyhow.workspace = true
 inference-tensor.workspace = true
+siphasher.workspace = true
 inference-flash-attn-v3 = { workspace = true, optional = true }
 csv.workspace = true
 float8.workspace = true

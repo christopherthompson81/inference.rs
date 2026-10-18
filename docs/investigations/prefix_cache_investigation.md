@@ -56,3 +56,38 @@ snapshot and recomputing with other chunk boundaries. `a_dflash_agent_turn_resum
 (token-exact turns on the tiny hybrid model, drafter window 128) fails on the old validator and passes now.
 
 Next: a snapshot after each reply, then the host-RAM / disk tier with a stable, salted block key.
+
+## Run 3 - 2026-10-18 17:00
+
+Question: a disk tier for paged prefix entries (hybrid models, with or without DFlash): does a long agent prefix
+survive a server restart, how fast does it restore, does it decode as a cold run, and what does write-through cost?
+
+Design (see `crates/inference-core/src/prefix_store.rs`): blocks stored once under their chain hash (now SipHash-1-3
+through `siphasher`, identical values with a stability guarantee) with their token ids; an entry is the GDN state per
+recurrent layer plus the DFlash checkpoint at a block boundary, and its chain of block hashes, the key file written
+last. Write-through when the engine takes a prefix snapshot (new blocks gathered per attention layer, state exported,
+files written by a background thread); promotion at admission when disk holds a longer prefix than the GPU cache:
+blocks allocated and filled in runs of consecutive ids, registered under their hashes, recurrent snapshot and drafter
+checkpoint imported, the prefix entry added with its retention lease, so the scheduler's ordinary match hits.
+Namespace per model setup: the loader's identity (selection, local weight files' sizes and times, dtype, ISQ, drafter)
+plus the KV, recurrent and checkpoint layouts and block size.
+
+Recipe A, q3 cache, 262K window, DFlash 2 q4k at 7 drafts, `agent_sim.py` with a ~28K-token context,
+`--prefix-cache-dir` on the data drive:
+
+```
+server 1, cold (writes through)     prompt 28455   cached -       prompt time 23.41 s
+server 2, after a restart           prompt 28455   cached 28448   prompt time  0.03 s   (restore 889 blocks, 0.23 s)
+server 2, next turn                 prompt 29054   cached 28448   prompt time  0.61 s
+store on disk                       583 MB, 1 entry
+same prompt, no store               prompt 28455   cached -       prompt time 23.36 s
+```
+
+The restored server's greedy reply equals the cold server's, tool call and arguments included. Write-through adds
+nothing measurable to the cold turn (23.41 s against 23.36 s without the store). Tests: store unit tests (round trip
+across reopen, a block with other tokens drops the entry, LRU collection keeps shared blocks, half-written entries
+removed on open) and `a_stored_prefix_restores_after_a_restart` with and without a DFlash drafter on the tiny hybrid
+model, which fail with promotion disabled.
+
+Seen in passing: Qwen3.8's tool-call grammar fails to build on this GGUF's tokenizer (`unknown special token:
+"</tool_call>"`, logged per request), an existing issue unrelated to the cache.

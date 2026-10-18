@@ -141,6 +141,21 @@ The mechanism depends on the attention mode:
 - Paged attention: sequences sharing a token prefix reuse the same reference-counted cache blocks; matching blocks of a new request are not recomputed.
 - Non-paged: completed sequences' caches are kept whole; a new request whose tokens extend a cached sequence resumes from it. Beyond `--prefix-cache-n` device entries, the oldest caches are evicted (dropped, not offloaded); a later matching request re-prefills.
 
+### Keeping prefixes on disk
+
+Long sessions, such as agent loops that resend their whole history each turn, lose their cached prefix when it is evicted or the server restarts, and the next request re-prefills everything: about 23 s for 28K tokens of Qwen3.8 27B on an RTX 3090. `--prefix-cache-dir` writes each cached prefix through to a directory as it is taken, and restores it into GPU memory when a later request starts with it (0.23 s for those 28K tokens):
+
+```bash
+inference serve -m <model> --prefix-cache-dir ~/.cache/inference-rs/prefix-cache --prefix-cache-disk-gib 64
+```
+
+- Hybrid models (Qwen3.5 and Qwen3.8's linear-attention layers) on CUDA with paged attention, text prompts; a DFlash drafter's own state is stored with each prefix.
+- Each 32-token block is stored once and shared by every prefix that contains it, so a growing conversation writes only its new blocks.
+- Entries are kept apart per model setup (weights, dtype, KV cache type and layout, drafter), and each block's tokens are checked on restore.
+- `--prefix-cache-disk-gib` (default 64) caps the directory; the least recently used prefixes go first.
+- The operating system's page cache keeps recently used entries in RAM, so a restore after a short pause usually reads no disk at all.
+- In Python set `RuntimeSpec(prefix_cache_dir=..., prefix_cache_disk_gib=...)`; in Rust `.with_prefix_cache_dir(dir, Some(gib))`.
+
 ## Memory planning for automatic device mapping
 
 Automatic device mapping reserves activation and KV memory for a worst case you declare: `--max-seq-len` (default 4096) and `--max-batch-size` (default 1). If you expect long prompts or large batches, raise these so layers are not placed too greedily; if memory is tight, the defaults already keep reservations small. See [distributed inference](/guides/perf/distributed-inference/) for manual placement.
