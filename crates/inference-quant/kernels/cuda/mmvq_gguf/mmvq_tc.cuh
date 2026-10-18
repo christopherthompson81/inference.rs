@@ -13,6 +13,27 @@
 // row h * 8 + g's bytes 4t..4t+3 of the block (values 4t..4t+3 low nibbles, 16+4t..16+4t+3 high).
 #define MMVQ_TC_GROUP_HEADER 64
 #define MMVQ_TC_SB_BYTES (128 + 8 * 256)
+// iq4k_values' lower half packed four bytes a word; the upper half is each value plus 4, which the kernel applies as
+// 4 x the block's activation sum instead of a second table
+static constexpr __host__ __device__ uint32_t tc_pack4(int a, int b, int c, int d) {
+  return (uint32_t)(uint8_t)a | (uint32_t)(uint8_t)b << 8 | (uint32_t)(uint8_t)c << 16 | (uint32_t)(uint8_t)d << 24;
+}
+#define MMVQ_TC_IQ4K_LO0 tc_pack4(-127, -104, -83, -65)
+#define MMVQ_TC_IQ4K_LO1 tc_pack4(-49, -35, -22, -10)
+#define MMVQ_TC_IQ4K_LO2 tc_pack4(1, 13, 25, 38)
+#define MMVQ_TC_IQ4K_LO3 tc_pack4(53, 69, 89, 113)
+#define MMVQ_TC_IQ4K_HI_OFFSET 4
+
+// get_int_from_table_16 with the table in immediates: eight nibbles to eight int8s
+static __device__ __forceinline__ int2 tc_decode_iq4k_lo(uint32_t q4) {
+  const uint32_t mask = 0x32103210 | ((q4 & 0x88888888) >> 1);
+  const uint32_t a3 = __byte_perm(__byte_perm(MMVQ_TC_IQ4K_LO0, MMVQ_TC_IQ4K_LO1, q4),
+                                  __byte_perm(MMVQ_TC_IQ4K_LO2, MMVQ_TC_IQ4K_LO3, q4), mask);
+  const uint32_t a4 = __byte_perm(__byte_perm(MMVQ_TC_IQ4K_LO0, MMVQ_TC_IQ4K_LO1, q4 >> 16),
+                                  __byte_perm(MMVQ_TC_IQ4K_LO2, MMVQ_TC_IQ4K_LO3, q4 >> 16), mask >> 16);
+  return make_int2(__byte_perm(a3, a4, 0x6420), __byte_perm(a3, a4, 0x7531));
+}
+
 // KSPLIT warps splitting K, GROUPS row groups per warp, PREFETCH blocks prefetched ahead
 template <typename dst_t, int KSPLIT, int GROUPS, int PREFETCH>
 static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
@@ -30,6 +51,7 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
   const int rg0 = blockIdx.x * GROUPS;
   const int2 *yq = (const int2 *)vy;
   const float2 *yd = (const float2 *)(yq + (int64_t)nb * WARP_SIZE);
+  const int2 *ys = (const int2 *)(yd + (int64_t)nb * (WARP_SIZE / 8));
 
   const char *gp[GROUPS];
   float sa[GROUPS], sb[GROUPS];
@@ -43,22 +65,41 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
   const int i0 = warp * chunk;
   const int n_blocks = max(0, min(chunk, nb - i0));
 
-  // block ib's three words for row group n: the two A halves and the scale word (rows 4t..4t+3)
-  auto load = [&](int ib, int n, uint32_t &qa, uint32_t &qb, uint32_t &sw) {
-    const char *s = gp[n] + MMVQ_TC_GROUP_HEADER + (int64_t)(ib >> 3) * MMVQ_TC_SB_BYTES;
-    const int j = ib & 7;
-    const uint32_t *q = (const uint32_t *)(s + 128 + j * 256);
-    qa = __ldcs(q + lane);
-    qb = __ldcs(q + 32 + lane);
-    sw = __ldg((const uint32_t *)s + j * 4 + t);
+  // block ib's three words for every row group: the two A halves and the scale word (rows 4t..4t+3); the offsets
+  // within a group are the same for all groups and fit 32 bits, so they are computed once per block
+  auto load_groups = [&](int ib, uint32_t (&words)[GROUPS][3]) {
+    const uint32_t sb = (uint32_t)ib >> 3;
+    const uint32_t j = (uint32_t)ib & 7;
+    const uint32_t q_off = MMVQ_TC_GROUP_HEADER + 128 + (uint32_t)ib * 256 + sb * 128 + lane * 4;
+    const uint32_t s_off = MMVQ_TC_GROUP_HEADER + sb * MMVQ_TC_SB_BYTES + (j * 4 + t) * 4;
+#pragma unroll
+    for (int n = 0; n < GROUPS; ++n) {
+      words[n][0] = __ldcs((const uint32_t *)(gp[n] + q_off));
+      words[n][1] = __ldcs((const uint32_t *)(gp[n] + q_off + 128));
+      words[n][2] = __ldg((const uint32_t *)(gp[n] + s_off));
+    }
+  };
+
+  // block ib's activations, the same for every row group: B fragment, row scales and row sums
+  struct Act {
+    int2 bq;
+    float2 dy;
+    int2 xs;
+  };
+  auto load_act = [&](int ib, Act &a) {
+    a.bq = yq[(int64_t)ib * WARP_SIZE + lane];
+    a.dy = yd[(int64_t)ib * (WARP_SIZE / 8) + t];
+    a.xs = ys[(int64_t)ib * (WARP_SIZE / 8) + t];
   };
 
   uint32_t pf[PREFETCH][GROUPS][3];
+  Act pa[PREFETCH];
 #pragma unroll
   for (int d = 0; d < PREFETCH; ++d)
-    if (d < n_blocks)
-#pragma unroll
-      for (int n = 0; n < GROUPS; ++n) load(i0 + d, n, pf[d][n][0], pf[d][n][1], pf[d][n][2]);
+    if (d < n_blocks) {
+      load_groups(i0 + d, pf[d]);
+      load_act(i0 + d, pa[d]);
+    }
 
   float acc[GROUPS][4] = {};
   for (int ib0 = 0; ib0 < n_blocks; ib0 += PREFETCH) {
@@ -66,19 +107,11 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
     for (int d = 0; d < PREFETCH; ++d) {
       const int i = ib0 + d;
       if (i >= n_blocks) break;
-      uint32_t w[GROUPS][3];
-#pragma unroll
-      for (int n = 0; n < GROUPS; ++n) {
-        w[n][0] = pf[d][n][0];
-        w[n][1] = pf[d][n][1];
-        w[n][2] = pf[d][n][2];
-      }
-      if (i + PREFETCH < n_blocks)
-#pragma unroll
-        for (int n = 0; n < GROUPS; ++n) load(i0 + i + PREFETCH, n, pf[d][n][0], pf[d][n][1], pf[d][n][2]);
-      const int ib = i0 + i;
-      const int2 bq = yq[(int64_t)ib * WARP_SIZE + lane];
-      const float2 dy = yd[(int64_t)ib * (WARP_SIZE / 8) + t];
+      // used straight from the ring slot, which is refilled once this block's math is issued
+      uint32_t (&w)[GROUPS][3] = pf[d];
+      const int2 bq = pa[d].bq;
+      const float2 dy = pa[d].dy;
+      const int2 xs = pa[d].xs;
 #pragma unroll
       for (int n = 0; n < GROUPS; ++n) {
         // the scale bytes of rows g and g + 8 sit in the words lanes with t = g / 4 and (g + 8) / 4 loaded
@@ -86,9 +119,11 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
         const uint32_t wb = __shfl_sync(0xffffffffu, w[n][2], (g + 8) >> 2);
         const int sca = (wa >> (8 * (g & 3))) & 0xff;
         const int scb = (wb >> (8 * (g & 3))) & 0xff;
-        const int2 va = get_int_from_table_16(w[n][0], iq4k_values + ((sca & 1) << 4));
-        const int2 vb = get_int_from_table_16(w[n][1], iq4k_values + ((scb & 1) << 4));
-        int c[4] = {0, 0, 0, 0};
+        const int2 va = tc_decode_iq4k_lo(w[n][0]);
+        const int2 vb = tc_decode_iq4k_lo(w[n][1]);
+        const int hia = (sca & 1) * MMVQ_TC_IQ4K_HI_OFFSET;
+        const int hib = (scb & 1) * MMVQ_TC_IQ4K_HI_OFFSET;
+        int c[4] = {hia * xs.x, hia * xs.y, hib * xs.x, hib * xs.y};
         asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, "
             "{%0, %1, %2, %3};"
             : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3])
@@ -99,6 +134,10 @@ static __global__ void __launch_bounds__(KSPLIT *WARP_SIZE)
         acc[n][1] += da * dy.y * (float)c[1];
         acc[n][2] += db * dy.x * (float)c[2];
         acc[n][3] += db * dy.y * (float)c[3];
+      }
+      if (i + PREFETCH < n_blocks) {
+        load_groups(i0 + i + PREFETCH, pf[d]);
+        load_act(i0 + i + PREFETCH, pa[d]);
       }
     }
   }
@@ -146,14 +185,14 @@ static void launch_mmvq_tc_cfg(const void *vx, const void *vy, void *dst, int nc
       (const char *)vx, vy, (dst_t *)dst, ncols_x, nrows_x, stride_col_dst, b_size);
 }
 
-// The (KSPLIT, GROUPS, PREFETCH) shapes fast_mmvq times per weight shape at load: which wins moves with the row count and K
-// (5120x17408 16x1x4, 10240x5120 8x4x2, 17408x5120 8x1x4 on an RTX 3090)
+// The (KSPLIT, GROUPS, PREFETCH) shapes fast_mmvq times per weight shape at load: wide groups win on tall weights, one
+// group (fewer registers, 3 blocks per SM) on short ones (RTX 3090: FFN 8x2x4, 6144x5120 8x1x4)
 template <typename dst_t>
 static void launch_mmvq_tc_iq4_ks(const void *vx, const void *vy, void *dst, int ncols_x, int nrows_x,
                                    int stride_col_dst, int b_size, int cfg, void *stream) {
   cudaStream_t s = static_cast<cudaStream_t>(stream);
   switch (cfg) {
-  case 1: launch_mmvq_tc_cfg<dst_t, 16, 1, 4>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;
+  case 1: launch_mmvq_tc_cfg<dst_t, 8, 1, 6>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;
   case 2: launch_mmvq_tc_cfg<dst_t, 8, 4, 2>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;
   case 3: launch_mmvq_tc_cfg<dst_t, 8, 1, 4>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;
   default: launch_mmvq_tc_cfg<dst_t, 8, 2, 4>(vx, vy, dst, ncols_x, nrows_x, stride_col_dst, b_size, s); break;
