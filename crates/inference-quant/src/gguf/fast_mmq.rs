@@ -1817,7 +1817,17 @@ mod bench {
                         let err = (&out - &reference)?.abs()?.max_all()?.to_scalar::<f32>()?
                             / reference.abs()?.max_all()?.to_scalar::<f32>()?;
                         let us = time(&dev, || fast_mmvq::plain(w, &xs))?;
-                        format!("  tiled {us:7.1} us ({:.2}x, rel err {err:.1e})", us / one)
+                        let configs = (0..fast_mmvq::TILED_CONFIGS)
+                            .map(|cfg| {
+                                time(&dev, || fast_mmvq::tiled_plain(w, &xs, cfg))
+                                    .map(|us| format!("{us:.1}"))
+                            })
+                            .collect::<Result<Vec<_>>>()?
+                            .join("/");
+                        format!(
+                            "  tiled {us:7.1} us ({:.2}x, rel err {err:.1e}; per config {configs})",
+                            us / one
+                        )
                     }
                     None => String::new(),
                 };

@@ -148,6 +148,8 @@ pub fn split_mul_and_act_order(
     }
 }
 
+type QuantProjection = Arc<dyn inference_quant::QuantMethod>;
+
 #[derive(Clone)]
 pub struct MergedDenseProjection {
     proj: Arc<dyn inference_quant::QuantMethod>,
@@ -171,7 +173,7 @@ impl MergedDenseProjection {
     /// so the originals' memory goes. `None` when any projection is quantized, biased or differs in layout.
     pub fn merge_unquantized(
         projs: &[Arc<dyn inference_quant::QuantMethod>],
-    ) -> Result<Option<(Self, Vec<Arc<dyn inference_quant::QuantMethod>>)>> {
+    ) -> Result<Option<(Self, Vec<QuantProjection>)>> {
         let mut weights = Vec::with_capacity(projs.len());
         for proj in projs {
             match proj.unquant_weight_bias() {

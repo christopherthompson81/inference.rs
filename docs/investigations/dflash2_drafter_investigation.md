@@ -484,3 +484,32 @@ The 96 GEMVs: GGUF weights load through a weight source, which `load_packed_weig
 `ssm_beta`/`ssm_alpha` stayed two matmuls. `MergedDenseProjection::merge_unquantized` concatenates loaded dense
 projections and rebuilds them as views (keeping any dynamic-LoRA wrapper through `preserve_dynamic_lora`), so the
 originals' memory goes. Verify graph 26.4 -> 25.8 ms (phase timer, 409 steps); drafter unchanged at 3.9 ms.
+
+## Run 16 - 2026-10-18 21:40
+
+Question: how much bandwidth does the tile-ordered IQ4_KS matvec leave, and what limits it?
+
+Bench (`small_batch_mmvq_vs_mmq`, recipe A tensors, 8 rows; the 1-row dp4a MMVQ for comparison), now with a column per
+kernel config:
+
+```
+shape                     tiled, 8 rows      dp4a MMVQ, 1 row   configs 8x2x4 / 16x1x4 / 8x4x2 / 8x1x4 (us)
+ffn_up    17408x5120      677 GB/s           779 GB/s           77.8 / 80.4 / 75.5 / 72.0
+ffn_down  5120x17408      704                724                73.2 / 70.4 / 77.1 / 73.3
+attn_qkv  10240x5120      673                714                44.5 / 48.0 / 41.2 / 44.7
+attn_gate 6144x5120       539                621                35.3 / 31.3 / 37.3 / 32.2
+ssm_out   5120x6144       603                655                28.2 / 29.4 / 29.8 / 29.1
+```
+
+Nsight Compute, ffn_up at 8 rows (tuned config 8x4x2): 664 GB/s (73% of peak), 127 registers per thread, 2 blocks per
+SM, theoretical occupancy 33%, achieved 29%, 1.66 waves; issue slots 43% busy, IPC 1.92; stall samples long scoreboard
+1649, wait 873, selected 653, not selected 452, math pipe throttle 326. attn_gate: 481 GB/s, 96 blocks, 0.59 waves,
+achieved occupancy 19%. But configs with 4x the blocks (one row group per warp) are slower there (35-37 us vs 31), so
+grid fill is not the limit; per-warp latency and instruction count are (~100 warp instructions per 16x32 tile).
+
+A register cap for 3 blocks per SM (`__launch_bounds__(threads, 768 / threads)`): 8x4x2 spills (ffn_up 128 us), the
+others unchanged (best per shape 71.2 vs 72.0 us): reverted.
+
+Implication: the remaining ~10-20% needs a redesign of the inner loop (fewer instructions per tile, e.g. decoding the
+4-bit table once per two halves, or a different split of decode and mma across warps), worth ~1.5-2.5 ms of a ~31 ms
+step at best.
