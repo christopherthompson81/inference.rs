@@ -202,3 +202,38 @@ columns, the verify graph measures 31.3 ms against 31.7: ~1%.
 Implication: the tall matrices gain ~10% each but the step barely moves. Reaching ~1.1x needs a load-time repack
 into fragment order (16-byte loads) and activation sharing across row tiles, best done with Nsight Compute counters
 (blocked here for non-admin users: ERR_NVGPUCTRPERM). Parked on branch perf/small-batch-tc-gemv.
+
+## Run 7 - 2026-10-20 05:00
+
+Question: with GPU counters available (`NVreg_RestrictProfilingToAdminUsers=0`), where does the tensor-core matvec
+lose to a 1-row MMVQ, and where does the rest of the 8-row verify step go?
+
+Command: `ncu` on the small-batch bench (recipe A's ffn_up 17408x5120 at 8 rows); `nsys --cuda-graph-trace=node` over
+recipe A with the q4k drafter at 7 drafts (1024 tokens x 2); phase timings for the step.
+
+```
+ffn_up, 8 rows          time     DRAM read   DRAM GB/s   L2 hit   occupancy   registers   top stall
+1-row MMVQ (1 row)      61 us    47.4 MB     790         -        91%         39          long scoreboard 13.5
+tensor-core matvec      80 us    48.3 MB     600         53%      62%         64          long scoreboard 9.6
+MMQ                     91 us    -           549         27%      17%         128         -
+
+per verify step (8 rows, 388 steps): 35.2 ms of kernels: MMQ 16.2 (235 calls: ffn_down, ssm_out, attn_gate,
+attn_output, Q5_K attn_v, Q6_K head, the drafter), tensor-core matvec 13.1 (194: ffn gate/up, attn_qkv, attn_q),
+GDN 1.7, the drafter's BF16 GEMV 1.6, attention 0.9, the rest ~2
+```
+
+The matvec reads exactly the weights (no DRAM over-fetch) but keeps fewer bytes in flight: 4 blocks/SM at 64
+registers. Shared-memory stores conflicted (32% excess wavefronts; per-lane float stores at a 4-word stride): one
+vector store per lane takes ffn_up 1.34x -> 1.29x. Tried and reverted: `__launch_bounds__` for 5-6 blocks/SM
+(48/40 registers, spills: 3.5-5.9x); one 16-row tile per warp with split-K across blocks (L2 hit 53% -> 26%, DRAM
+read 48 -> 70 MB, 2.7x: IQ4_KS rows are 4-byte aligned, so a warp's lone 64-byte row chunks waste sectors that
+neighbouring warps shared before); 8-block groups (ffn_down 1.53x -> 1.45x, ffn_up 1.29x -> 1.72x: 20 groups over
+8 warps).
+
+```
+8-row verify step (phase timer)   MMQ only 31.7 ms   first matvec 30.9 ms   + vector smem stores 30.4 ms
+```
+
+Implication: about 4% of the step, IQ4_KS only. Taking the matvec to a 1-row cost needs 16-byte loads, so a weight
+layout with aligned blocks (a load-time repack of IQ4_KS, or ExLlamaV3's fragment order), which every kernel
+reading the type would have to accept; and Q5_K/Q6_K/Q4_K versions for the rest of MMQ's 16 ms.

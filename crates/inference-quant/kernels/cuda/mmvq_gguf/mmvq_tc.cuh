@@ -10,16 +10,16 @@
 
 // weight rows one warp's mma covers
 #define MMVQ_TC_ROWS 16
-// consecutive 32-value blocks a warp reads per iteration (64 contiguous bytes a row at 4 bits)
+// consecutive 32-value blocks a warp reads per iteration (16 bytes each at 4 bits)
 #define MMVQ_TC_BLOCKS 4
-// 4-byte words of a row's group, read by 16 lanes, two rows per load
-#define MMVQ_TC_GROUP_WORDS 16
+// 4-byte words of a row's group, a lane each
+#define MMVQ_TC_GROUP_WORDS (MMVQ_TC_BLOCKS * 4)
 // loads a lane makes per group to copy the warp's 16 rows
 #define MMVQ_TC_COPIES (MMVQ_TC_ROWS * MMVQ_TC_GROUP_WORDS / WARP_SIZE)
 // warps of a block, each taking every MMVQ_TC_NWARPS-th group of blocks of the same 16 rows
 #define MMVQ_TC_NWARPS 8
-// ints between tile rows: 16 used, padded so a warp's word reads hit distinct banks
-#define MMVQ_TC_TILE_STRIDE 20
+// ints between tile rows, padded so a warp's word reads hit distinct banks
+#define MMVQ_TC_TILE_STRIDE (MMVQ_TC_GROUP_WORDS + 4)
 
 template <typename kt, typename dst_t>
 static __global__ void __launch_bounds__(MMVQ_TC_NWARPS *WARP_SIZE)
@@ -34,10 +34,10 @@ static __global__ void __launch_bounds__(MMVQ_TC_NWARPS *WARP_SIZE)
   const int row0 = blockIdx.x * MMVQ_TC_ROWS;
   const int64_t row_size = kt::row_size(ncols_x);
   // rows past the end read the last row; their results are not written
-  // for the tile copy: this lane's row (two per load) and word, and the row whose scales it reads (lanes 0-15)
+  // for the tile copy: this lane's word (and row, when a load spans several), and the row whose scales it reads
   const int copy_word = lane % MMVQ_TC_GROUP_WORDS;
   const int copy_row = lane / MMVQ_TC_GROUP_WORDS;
-  const char *xs = (const char *)vx + (int64_t)min(row0 + copy_word, nrows_x - 1) * row_size;
+  const char *xs = (const char *)vx + (int64_t)min(row0 + lane % MMVQ_TC_ROWS, nrows_x - 1) * row_size;
   const float row_scale = kt::tc_row_scale(xs);
   // the activations in mmvq_tc_quantize's layout: each block's B fragments (an int2 a lane), then the rows' scales
   const int nb = ncols_x / QK8_1;
@@ -47,11 +47,12 @@ static __global__ void __launch_bounds__(MMVQ_TC_NWARPS *WARP_SIZE)
   const int c1 = 2 * t + 1;
 
   __shared__ int tile_qs[MMVQ_TC_NWARPS][MMVQ_TC_ROWS][MMVQ_TC_TILE_STRIDE];
-  __shared__ float tile_d[MMVQ_TC_NWARPS][MMVQ_TC_ROWS][MMVQ_TC_BLOCKS];
-  __shared__ int tile_table[MMVQ_TC_NWARPS][MMVQ_TC_ROWS][MMVQ_TC_BLOCKS];
+  // a row's block scales and tables, each written by its lane as vectors (conflict-free)
+  __shared__ float4 tile_d[MMVQ_TC_NWARPS][MMVQ_TC_ROWS][MMVQ_TC_BLOCKS / 4];
+  __shared__ int4 tile_table[MMVQ_TC_NWARPS][MMVQ_TC_ROWS][MMVQ_TC_BLOCKS / 4];
   int(*qs)[MMVQ_TC_TILE_STRIDE] = tile_qs[threadIdx.y];
-  float(*ds)[MMVQ_TC_BLOCKS] = tile_d[threadIdx.y];
-  int(*tables)[MMVQ_TC_BLOCKS] = tile_table[threadIdx.y];
+  float(*ds)[MMVQ_TC_BLOCKS] = (float(*)[MMVQ_TC_BLOCKS])tile_d[threadIdx.y];
+  int(*tables)[MMVQ_TC_BLOCKS] = (int(*)[MMVQ_TC_BLOCKS])tile_table[threadIdx.y];
 
   float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
   const int ngroups = ncols_x / (QK8_1 * MMVQ_TC_BLOCKS);
@@ -60,12 +61,19 @@ static __global__ void __launch_bounds__(MMVQ_TC_NWARPS *WARP_SIZE)
     const int ib0 = gi * MMVQ_TC_BLOCKS;
 #pragma unroll
     for (int i = 0; i < MMVQ_TC_COPIES; ++i) {
-      const int row = 2 * i + copy_row;
+      const int row = i * (WARP_SIZE / MMVQ_TC_GROUP_WORDS) + copy_row;
       const char *x = (const char *)vx + (int64_t)min(row0 + row, nrows_x - 1) * row_size;
       qs[row][copy_word] = kt::tc_word(x, ib0, copy_word);
     }
     if (lane < MMVQ_TC_ROWS) {
-      kt::tc_scales_from(kt::tc_scale_word(xs, ib0), row_scale, ds[lane], tables[lane]);
+#pragma unroll
+      for (int q = 0; q < MMVQ_TC_BLOCKS / 4; ++q) {
+        float d[4];
+        int table[4];
+        kt::tc_scales_from(kt::tc_scale_word(xs, ib0 + 4 * q), row_scale, d, table);
+        ((float4 *)ds[lane])[q] = make_float4(d[0], d[1], d[2], d[3]);
+        ((int4 *)tables[lane])[q] = make_int4(table[0], table[1], table[2], table[3]);
+      }
     }
     __syncwarp();
 #pragma unroll
