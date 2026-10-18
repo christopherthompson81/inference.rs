@@ -439,11 +439,6 @@ impl ModelManager {
         if id.is_empty() {
             return Err(ApiError::invalid_request("`model_id` is empty"));
         }
-        if request.mtp.as_ref().is_some_and(|mtp| mtp.model.is_some()) {
-            return Err(ApiError::invalid_request(
-                "`mtp` drafts with the checkpoint's own head here; an assistant model is not loaded by the manager",
-            ));
-        }
         let source = self.resolve(&request.source)?;
         let kind = match &source {
             Source::Local(entry) => Some(loadable_kind(entry)?),
@@ -921,6 +916,11 @@ fn loadable_kind(entry: &InventoryModel) -> Result<ManagedKind, ApiError> {
         Some(InventoryKind::Projector) => {
             return Err(ApiError::invalid_request(
                 "a projector loads beside its text GGUF: load the GGUF with `mmproj`",
+            ));
+        }
+        Some(InventoryKind::Drafter) => {
+            return Err(ApiError::invalid_request(
+                "a drafter loads beside the model it drafts for: load that model with `mtp.model`",
             ));
         }
         None => {

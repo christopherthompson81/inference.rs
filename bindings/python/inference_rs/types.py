@@ -1609,6 +1609,7 @@ class MtpDraftSampling(str, Enum):
 class MtpSpec:
     """MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint."""
 
+    draft_isq: str | None = None
     draft_sampling: MtpDraftSampling | None = None
     model: str | None = None
     n_predict: int | None = None

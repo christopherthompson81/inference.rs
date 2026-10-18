@@ -15,6 +15,8 @@
 
   // the select's value for a source the inventory does not list: a Hugging Face repository
   const REPO = "__repo__";
+  const DRAFT_ISQ_TYPES = ["q4k", "q5k", "q6k", "q8_0"];
+  const DEFAULT_DRAFT_ISQ = "q4k";
   // the per-layer select's values: the profile or rule (the server's default), none, or typed overrides
   const LAYERS_UNIFORM = "uniform";
   const LAYERS_CUSTOM = "__custom__";
@@ -226,7 +228,7 @@
             disabled={activity.busy}
           />
         </label>
-        <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Speculative decoding with the checkpoint's own MTP head">
+        <label class="flex items-center gap-1.5 pb-1 text-xs text-gray-600 dark:text-gray-300" title="Speculative decoding, with the checkpoint's own MTP head or a drafter">
           <input type="checkbox" class="accent-blue-600" bind:checked={form.mtp} onchange={() => managerStore.persistForms()} disabled={activity.busy} />
           MTP
         </label>
@@ -243,6 +245,44 @@
               disabled={activity.busy}
             />
           </label>
+          <label class="flex flex-col gap-1" title="A DFlash drafter drafts from the model's hidden states; its own checkpoint, made for this model">
+            <span class="text-[11px] text-gray-500 dark:text-gray-400">Drafter</span>
+            <select
+              class="max-w-56 rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+              value={form.mtpDrafter}
+              onchange={(e) => {
+                form.mtpDrafter = e.currentTarget.value;
+                // a GGUF model's drafter would otherwise load at BF16; q4k keeps its acceptance at a quarter of the memory
+                if (form.mtpDrafter && !form.mtpDraftIsq) form.mtpDraftIsq = DEFAULT_DRAFT_ISQ;
+                managerStore.persistForms();
+              }}
+              disabled={activity.busy}
+            >
+              <option value="">Built-in head</option>
+              {#each managerStore.drafters as drafter (drafter.path)}
+                <option value={drafter.path}>{displayName(drafter)}</option>
+              {/each}
+              {#if form.mtpDrafter && !managerStore.drafters.some((d) => d.path === form.mtpDrafter)}
+                <option value={form.mtpDrafter}>{baseName(form.mtpDrafter)}</option>
+              {/if}
+            </select>
+          </label>
+          {#if form.mtpDrafter}
+            <label class="flex flex-col gap-1" title="The drafter's weight type; Model's takes the model's in-situ quantization (none for a GGUF, so BF16)">
+              <span class="text-[11px] text-gray-500 dark:text-gray-400">Drafter weights</span>
+              <select
+                class="rounded-md border border-gray-300 bg-white px-2 py-1 text-xs dark:border-gray-700 dark:bg-gray-950"
+                bind:value={form.mtpDraftIsq}
+                onchange={() => managerStore.persistForms()}
+                disabled={activity.busy}
+              >
+                <option value="">Model's</option>
+                {#each DRAFT_ISQ_TYPES as isq (isq)}
+                  <option value={isq}>{isq}</option>
+                {/each}
+              </select>
+            </label>
+          {/if}
         {/if}
         <label class="flex flex-col gap-1" title="How the KV cache stores keys: q8/q4 (8-bit K, 4-bit V) keeps quality at 2.5x less memory than bf16">
           <span class="text-[11px] text-gray-500 dark:text-gray-400">K cache</span>

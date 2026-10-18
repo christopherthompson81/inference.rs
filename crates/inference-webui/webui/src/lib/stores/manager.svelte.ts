@@ -82,6 +82,10 @@ export interface SlotForm {
   maxSeqs: number;
   mtp: boolean;
   mtpDrafts: number;
+  /** A drafter checkpoint (DFlash) to draft with; "" uses the model's own MTP head. */
+  mtpDrafter: string;
+  /** The drafter's weight type (`q4k`, `q8_0`); "" takes the model's (BF16 beside a GGUF). */
+  mtpDraftIsq: string;
   mmproj: string;
   /** The voice activity model to load beside it: unset takes the first the inventory lists, "" none. */
   vad?: string;
@@ -133,6 +137,8 @@ function defaultForm(slot: SlotId): SlotForm {
     maxSeqs: 0,
     mtp: false,
     mtpDrafts: 0,
+    mtpDrafter: "",
+    mtpDraftIsq: "",
     mmproj: "",
     device: "auto",
     cacheK: "",
@@ -235,6 +241,8 @@ class ManagerStore {
         maxSeqs: request.max_seqs ?? 0,
         mtp: request.mtp != null,
         mtpDrafts: request.mtp?.n_predict ?? 0,
+        mtpDrafter: request.mtp?.model ?? "",
+        mtpDraftIsq: request.mtp?.draft_isq ?? "",
         mmproj: request.mmproj ?? "",
         vad: (SLOTS[slot] as Slot).vad ? (request.vad ?? "") : form.vad,
         device: request.device ?? "auto",
@@ -255,7 +263,12 @@ class ManagerStore {
     if (spec.chat) {
       if (form.contextLength > 0) request.paged_context_len = form.contextLength;
       if (form.maxSeqs > 0) request.max_seqs = form.maxSeqs;
-      if (form.mtp) request.mtp = form.mtpDrafts > 0 ? { n_predict: form.mtpDrafts } : {};
+      if (form.mtp) {
+        request.mtp = {};
+        if (form.mtpDrafts > 0) request.mtp.n_predict = form.mtpDrafts;
+        if (form.mtpDrafter) request.mtp.model = form.mtpDrafter;
+        if (form.mtpDrafter && form.mtpDraftIsq) request.mtp.draft_isq = form.mtpDraftIsq;
+      }
       if (form.mmproj) request.mmproj = form.mmproj;
       const cache = cacheType(form);
       if (cache) request.paged_cache_type = cache;
@@ -300,6 +313,11 @@ class ManagerStore {
   }
 
   /** The inventory's models a slot can load, by name. */
+  /** The drafters (DFlash) a chat load can draft with in place of its own MTP head. */
+  get drafters(): InventoryModel[] {
+    return (this.inventory?.models ?? []).filter((model) => model.kind === "drafter");
+  }
+
   /** The voice activity models a speech recognition load can cut its long recordings with. */
   get vads(): InventoryModel[] {
     return (this.inventory?.models ?? []).filter((model) => model.kind === "voice_activity");

@@ -2020,6 +2020,7 @@ fn linear_from_weight(
     isq: Option<IsqType>,
     device: &Device,
 ) -> Result<Arc<dyn QuantMethod>> {
+    let weight = weight.to_device(device)?;
     let layer: Arc<dyn QuantMethod> = Arc::new(UnquantLinear::new(
         QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, None)),
     )?);
@@ -2248,9 +2249,21 @@ impl DFlashDraftModel {
             );
         }
         let vb = from_mmaped_safetensors(
-            weight_paths,
+            weight_paths.clone(),
             Some(dtype),
             device,
+            Vec::new(),
+            silent,
+            None,
+            |_| true,
+            Arc::new(|_| DeviceForLoadTensor::Base),
+        )?;
+        // the projections are read on the host and reach the device one at a time, already in their weight type,
+        // so a quantized drafter never holds its whole BF16 checkpoint in VRAM
+        let vb_host = from_mmaped_safetensors(
+            weight_paths,
+            Some(dtype),
+            &Device::Cpu,
             Vec::new(),
             silent,
             None,
@@ -2260,14 +2273,7 @@ impl DFlashDraftModel {
 
         // The drafter conditions on quantized target hiddens already; its own precision is a
         // tunable acceptance/speed trade (bf16 reads ~4 GB per draft block, q4k ~1.1 GB).
-        let isq = match std::env::var("INFERENCE_RS_DFLASH_ISQ").ok().as_deref() {
-            Some("none" | "bf16") => None,
-            Some(name) => Some(
-                inference_quant::parse_isq_value(name, Some(device))
-                    .map_err(inference_tensor::Error::Msg)?,
-            ),
-            None => config.draft_lm_head_isq,
-        };
+        let isq = config.drafter_isq.or(config.draft_lm_head_isq);
         let hidden = cfg.hidden_size;
         let eps = cfg.rms_norm_eps;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -2275,28 +2281,29 @@ impl DFlashDraftModel {
         for i in 0..cfg.num_hidden_layers {
             let vb_l = vb.pp("layers").pp(i);
             let vb_attn = vb_l.pp("self_attn");
+            let host_attn = vb_host.pp("layers").pp(i).pp("self_attn");
+            let host_mlp = vb_host.pp("layers").pp(i).pp("mlp");
             let (is_causal, sliding_window) = cfg.layer_attention(i);
             let q_size = cfg.num_attention_heads * head_dim;
             let kv_size = cfg.num_key_value_heads * head_dim;
-            let q_weight = vb_attn.pp("q_proj").get((q_size, hidden), "weight")?;
-            let k_weight = vb_attn.pp("k_proj").get((kv_size, hidden), "weight")?;
-            let v_weight = vb_attn.pp("v_proj").get((kv_size, hidden), "weight")?;
+            let q_weight = host_attn.pp("q_proj").get((q_size, hidden), "weight")?;
+            let k_weight = host_attn.pp("k_proj").get((kv_size, hidden), "weight")?;
+            let v_weight = host_attn.pp("v_proj").get((kv_size, hidden), "weight")?;
             let qkv_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
             context_kv_weights.push(k_weight);
             context_kv_weights.push(v_weight);
 
-            let vb_mlp = vb_l.pp("mlp");
-            let gate_weight = vb_mlp
+            let gate_weight = host_mlp
                 .pp("gate_proj")
                 .get((cfg.intermediate_size, hidden), "weight")?;
-            let up_weight = vb_mlp
+            let up_weight = host_mlp
                 .pp("up_proj")
                 .get((cfg.intermediate_size, hidden), "weight")?;
             let gate_up_weight = Tensor::cat(&[&gate_weight, &up_weight], 0)?;
             layers.push(DFlashLayer {
                 qkv_proj: linear_from_weight(qkv_weight, isq, device)?,
                 o_proj: load_linear(
-                    &vb_attn,
+                    &host_attn,
                     (cfg.num_attention_heads * head_dim, hidden),
                     "o_proj",
                     isq,
@@ -2312,7 +2319,7 @@ impl DFlashDraftModel {
                 )?,
                 gate_up_proj: linear_from_weight(gate_up_weight, isq, device)?,
                 down_proj: load_linear(
-                    &vb_mlp,
+                    &host_mlp,
                     (cfg.intermediate_size, hidden),
                     "down_proj",
                     isq,
@@ -2343,7 +2350,7 @@ impl DFlashDraftModel {
             None
         };
         let fc = load_linear(
-            &vb,
+            &vb_host,
             (target_layer_ids.len() * hidden, hidden),
             "fc",
             isq,

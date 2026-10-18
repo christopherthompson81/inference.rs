@@ -8769,6 +8769,13 @@
         "type": "object",
         "description": "MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.",
         "properties": {
+          "draft_isq": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The assistant model's weight type, e.g. `q4k` or `q8_0`; unset, the model's ISQ (none for a GGUF, so BF16)."
+          },
           "draft_sampling": {
             "$ref": "#/components/schemas/MtpDraftSampling"
           },

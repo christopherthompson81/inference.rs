@@ -34,6 +34,8 @@ const IMATRIX_GGUF_TYPE: &str = "imatrix";
 const PROJECTOR_GGUF_ARCHITECTURE: &str = "clip";
 // inference_layout's `model_type` and GGUF `general.architecture`; that crate's kernels are too heavy to depend on here
 const LAYOUT_ARCHITECTURE: &str = "pp_doclayout_v3";
+// `architectures` of the DFlash drafter checkpoints (`DFlashDraftModel`, `DFlash2DraftModel`)
+const DRAFTER_ARCHITECTURE_PREFIX: &str = "DFlash";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -59,6 +61,8 @@ pub enum InventoryKind {
     Projector,
     /// A document layout detector (PP-DocLayoutV3), loaded apart from the engine.
     Layout,
+    /// A speculative decoding drafter (DFlash), attached to the model it drafts for (`mtp.model`).
+    Drafter,
 }
 
 impl From<DetectedModelKind> for InventoryKind {
@@ -714,6 +718,14 @@ fn dir_model(dir: &Path, origin: Origin<'_>) -> InventoryModel {
             .map(str::to_string);
         if config["model_type"].as_str() == Some(LAYOUT_ARCHITECTURE) {
             model.kind = Some(InventoryKind::Layout);
+            return model;
+        }
+        if model
+            .architecture
+            .as_deref()
+            .is_some_and(|arch| arch.starts_with(DRAFTER_ARCHITECTURE_PREFIX))
+        {
+            model.kind = Some(InventoryKind::Drafter);
             return model;
         }
     }

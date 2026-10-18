@@ -60,14 +60,19 @@ pub fn external_weight_size_in_bytes(
         .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
         .collect::<Vec<_>>();
     weight_paths.sort();
-    crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
+    let bytes = crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
         .map_err(inference_tensor::Error::msg)?
         .ok_or_else(|| {
             inference_tensor::Error::msg(format!(
                 "MTP model directory {} has no safetensors weights",
                 path.display()
             ))
-        })
+        })?;
+    // the drafter quantizes each projection as it loads, so a set weight type is what stays resident
+    Ok(match config.drafter_isq {
+        Some(isq) => bytes / isq.pack_factor(target_dtype).max(1),
+        None => bytes,
+    })
 }
 
 /// Adds an external assistant's runtime weight footprint to a paged-cache memory reservation.

@@ -11,7 +11,8 @@ export type ModelKind =
   | "voice_activity"
   | "diarization"
   | "layout"
-  | "projector";
+  | "projector"
+  | "drafter";
 
 /** One loadable model the server's folders or Hugging Face cache hold. */
 export interface InventoryModel {
@@ -62,7 +63,7 @@ export interface LoadRequest {
   /** Per-layer storage on top of it: `layers=type` items (`0=q8,20-27=q6`) or `uniform`. */
   paged_cache_layers?: string;
   max_seqs?: number;
-  mtp?: { n_predict?: number };
+  mtp?: { n_predict?: number; model?: string; draft_isq?: string };
   mmproj?: string;
   vad?: string;
   device?: string;

@@ -233,7 +233,7 @@ impl ModelSpec {
         config.paged_cache_type = self.paged_cache_type;
         config.paged_cache_layers = self.paged_cache_layers;
         config.max_seqs = self.max_seqs;
-        config.mtp = self.mtp.map(MtpSpec::into_config);
+        config.mtp = self.mtp.map(MtpSpec::into_config).transpose()?;
         if let Some(bytes) = self.encoder_cache_memory_bytes {
             config = config.with_encoder_cache_memory_bytes(bytes);
         }
@@ -421,6 +421,9 @@ pub struct MtpSpec {
     pub n_predict: Option<usize>,
     #[serde(default)]
     pub draft_sampling: MtpDraftSampling,
+    /// The assistant model's weight type, e.g. `q4k` or `q8_0`; unset, the model's ISQ (none for a GGUF, so BF16).
+    #[serde(default)]
+    pub draft_isq: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize, utoipa::ToSchema)]
@@ -444,12 +447,21 @@ impl From<MtpDraftSampling> for MtpDraftSamplingMethod {
 }
 
 impl MtpSpec {
-    fn into_config(self) -> MtpConfig {
-        match self.model {
+    fn into_config(self) -> Result<MtpConfig, EngineLoadError> {
+        let draft_isq = self
+            .draft_isq
+            .map(|isq| {
+                parse_isq_value(&isq, None).map_err(|error| {
+                    EngineLoadError::InvalidSpec(format!("mtp.draft_isq `{isq}`: {error}"))
+                })
+            })
+            .transpose()?;
+        Ok(match self.model {
             Some(model) => MtpConfig::new(model, self.n_predict),
             None => MtpConfig::builtin(self.n_predict),
         }
         .with_draft_sampling_method(self.draft_sampling.into())
+        .with_drafter_isq(draft_isq))
     }
 }
 
@@ -724,7 +736,7 @@ impl EngineSpec {
             .with_paged_attn_block_size_optional(paged.block_size)
             .with_paged_attn_cache_type(paged.cache_type)
             .with_paged_cache_layers(paged.cache_layers)
-            .with_mtp_config_optional(runtime.mtp.map(MtpSpec::into_config))
+            .with_mtp_config_optional(runtime.mtp.map(MtpSpec::into_config).transpose()?)
             .with_anymoe_optional(self.anymoe);
         let agentic = self.agentic;
         if let Some(search) = agentic.search {
