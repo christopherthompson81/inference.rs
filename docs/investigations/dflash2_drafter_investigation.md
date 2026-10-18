@@ -513,3 +513,39 @@ others unchanged (best per shape 71.2 vs 72.0 us): reverted.
 Implication: the remaining ~10-20% needs a redesign of the inner loop (fewer instructions per tile, e.g. decoding the
 4-bit table once per two halves, or a different split of decode and mma across warps), worth ~1.5-2.5 ms of a ~31 ms
 step at best.
+
+## Run 17 - 2026-10-18 23:30
+
+Question: can the tile-ordered IQ4_KS matvec's inner loop close its gap to the 1-row MMVQ (~780 GB/s)?
+
+SASS of the bf16 8x4x2 kernel: ~100 instructions per 16x32 tile, 128 `LDG.E.CONSTANT` in the unrolled loop: the
+4-bit table (`iq4k_values`, a `__device__` array) loaded as four words per decode, two decodes per tile.
+
+Changes, each benched (recipe A tensors, 8 rows, best config per shape) and checked by
+`tiled_iq4_ks_matches_the_row_major_weight` (random scale bytes, so both table halves):
+
+1. The table in immediates: IQ4_KS's upper table half is the lower plus 4 at every index (-127/-123 ... 113/117), so
+   rows on the upper half decode with the lower table and add 4 x the block's activation sum, which
+   `mmvq_tc_quantize` now emits per row (8 int32 per 32-value block). Table loads gone; best times within noise to
+   -4% (ffn_up 72.0 -> 70.4 us, attn_qkv 41.2 -> 39.7).
+2. Activations prefetched with the weights (B fragment, row scales, row sums in the same ring): ncu ffn_up DRAM
+   throughput 72.9% -> 78.9%, "wait" stalls 873 -> 467; ffn_up 68.6 us.
+3. Offsets within a row group (the same for every group, under 32 bits) computed once per block instead of a 64-bit
+   multiply per load, and the ring slot used in place (refilled after the block's math): IMAD.MOV 142 -> 54 per
+   function, registers 8x2x4 104, 8x1x4 77 (3 blocks per SM).
+
+```
+shape                   before (Run 16)       after
+ffn_up    17408x5120    72.0 us (677 GB/s)    64.4 us (735 GB/s)
+ffn_down  5120x17408    70.4                  64.5    (734)
+attn_q    12288x5120    51.5                  46.9    (713)
+attn_qkv  10240x5120    41.2                  38.8    (718)
+attn_gate 6144x5120     31.3    (539)         25.9    (645)
+ssm_out   5120x6144     28.2                  25.0    (668)
+```
+
+Deeper prefetch (8x1x8, 8x2x6, 8x1x6) matches but does not beat these; slot 16x1x4, now worst everywhere, is
+replaced by 8x1x6. Target verify graph (phase timer, 441 steps) 26.4 -> 24.34 ms.
+
+Drafter (Run 15's 20 Q4_K calls per step, 1.7 ms): already fused per layer (`qkv_proj`, `gate_up_proj`), 4 dependent
+matmuls x 5 layers, ~1 GB at ~600 GB/s: bandwidth, not launch latency; a tensor-core Q4_K matvec might save 0.2-0.3 ms.

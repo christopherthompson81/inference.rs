@@ -84,8 +84,8 @@ pub const MMVQ_MAX_BATCH: usize = 8;
 
 // sm_80's int8 mma.m16n8k32, which the tensor-core matvec (mmvq_tc.cuh) needs
 const TENSOR_CORE_MIN_CC: usize = 80;
-// mmvq_tc_quantize's bytes per 32-value block: 32 lanes' int2 fragments and 8 rows' f32 scales
-const TENSOR_CORE_ACTIVATION_BLOCK_BYTES: usize = 32 * 8 + 8 * 4;
+// mmvq_tc_quantize's bytes per 32-value block: 32 lanes' int2 fragments, 8 rows' f32 scales and int32 sums
+const TENSOR_CORE_ACTIVATION_BLOCK_BYTES: usize = 32 * 8 + 8 * 4 + 8 * 4;
 
 // The most input rows MMVQ's dp4a kernels take before MMQ's int8 tensor-core tiles, which cost about the same from 1
 // to 8 rows, are faster (`fast_mmq::bench::small_batch_mmvq_vs_mmq`, RTX 3090).

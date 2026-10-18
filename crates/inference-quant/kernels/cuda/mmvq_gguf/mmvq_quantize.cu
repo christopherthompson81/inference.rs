@@ -165,11 +165,16 @@ static __global__ void mmvq_tc_quantize(const src_t *__restrict__ x, void *__res
   const float amax = warp_reduce_max_f32(fabsf(xi));
   const float d = amax / 127.0f;
   __shared__ int8_t q[MMVQ_TC_QUANTIZE_ROWS][QK8_1];
-  q[row][k] = amax == 0.0f ? 0 : (int8_t)roundf(xi / d);
+  const int8_t qi = amax == 0.0f ? 0 : (int8_t)roundf(xi / d);
+  q[row][k] = qi;
+  // the block's row sums, which the matvec scales by a table offset (IQ4_KS's upper table half is the lower plus 4)
+  const int sum = __reduce_add_sync(0xffffffffu, (int)qi);
   int2 *qs = (int2 *)vy;
   float *ds = (float *)(qs + (int64_t)nb * WARP_SIZE);
+  int *ss = (int *)(ds + (int64_t)nb * MMVQ_TC_QUANTIZE_ROWS);
   if (k == 0) {
     ds[ib * MMVQ_TC_QUANTIZE_ROWS + row] = d;
+    ss[ib * MMVQ_TC_QUANTIZE_ROWS + row] = sum;
   }
   __syncthreads();
   if (row == 0) {
