@@ -148,6 +148,8 @@ pub fn split_mul_and_act_order(
     }
 }
 
+type QuantProjection = Arc<dyn inference_quant::QuantMethod>;
+
 #[derive(Clone)]
 pub struct MergedDenseProjection {
     proj: Arc<dyn inference_quant::QuantMethod>,
@@ -164,6 +166,61 @@ impl MergedDenseProjection {
             originals: group.constituents.clone(),
             output_dims: group.rows_per_rank.clone(),
         }
+    }
+
+    /// One projection over unquantized, bias-free projections that loaded apart (a weight source, which packed loading
+    /// skips): their weights concatenated, the projections rebuilt as views of it (keeping any dynamic-LoRA wrapper),
+    /// so the originals' memory goes. `None` when any projection is quantized, biased or differs in layout.
+    pub fn merge_unquantized(
+        projs: &[Arc<dyn inference_quant::QuantMethod>],
+    ) -> Result<Option<(Self, Vec<QuantProjection>)>> {
+        let mut weights = Vec::with_capacity(projs.len());
+        for proj in projs {
+            match proj.unquant_weight_bias() {
+                Some((weight, None)) => weights.push(weight),
+                _ => return Ok(None),
+            }
+        }
+        let Some(first) = weights.first() else {
+            return Ok(None);
+        };
+        let (dtype, device, in_dim) = (first.dtype(), first.device().clone(), first.dim(1)?);
+        for weight in &weights {
+            if weight.rank() != 2
+                || weight.dtype() != dtype
+                || !weight.device().same_device(&device)
+                || weight.dim(1)? != in_dim
+            {
+                return Ok(None);
+            }
+        }
+        let output_dims = weights
+            .iter()
+            .map(|w| w.dim(0))
+            .collect::<Result<Vec<_>>>()?;
+        let merged = Tensor::cat(&weights, 0)?;
+        drop(weights);
+        let linear = |weight: Tensor| -> Result<Arc<dyn inference_quant::QuantMethod>> {
+            Ok(Arc::new(
+                <inference_quant::UnquantLinear as inference_quant::QuantMethod>::new(
+                    inference_quant::QuantMethodConfig::Unquantized(
+                        inference_tensor::nn::Linear::new(weight, None),
+                    ),
+                )?,
+            ))
+        };
+        let mut views = Vec::with_capacity(projs.len());
+        let mut offset = 0;
+        for (proj, &rows) in projs.iter().zip(&output_dims) {
+            views.push(proj.preserve_dynamic_lora(linear(merged.narrow(0, offset, rows)?)?));
+            offset += rows;
+        }
+        let merged = Self {
+            proj: linear(merged)?,
+            originals: views.clone(),
+            output_dims,
+        };
+        Ok(Some((merged, views)))
     }
 
     pub fn forward(&self, xs: &Tensor) -> Result<Vec<Tensor>> {

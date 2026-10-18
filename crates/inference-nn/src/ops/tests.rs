@@ -2095,3 +2095,40 @@ fn cast_then_scale_rms_norms_on_cuda_match_the_composite() -> inference_tensor::
     }
     Ok(())
 }
+
+// Dense projections that loaded apart (a GGUF's ssm_beta/ssm_alpha) merge into one matmul; their views compute as before
+#[test]
+fn unquantized_projections_merge_into_one_matmul() -> inference_tensor::Result<()> {
+    let dense =
+        |rows: usize, scale: f32, bias: bool| -> inference_tensor::Result<Arc<dyn QuantMethod>> {
+            let weight = (Tensor::arange(0f32, (rows * 8) as f32, &Device::Cpu)?
+                .reshape((rows, 8))?
+                * f64::from(scale))?;
+            let bias = bias
+                .then(|| Tensor::ones(rows, DType::F32, &Device::Cpu))
+                .transpose()?;
+            Ok(Arc::new(UnquantLinear::new(
+                QuantMethodConfig::Unquantized(Linear::new(weight, bias)),
+            )?))
+        };
+    let (b, a) = (dense(3, 0.1, false)?, dense(5, -0.2, false)?);
+    let xs = Tensor::arange(0f32, 16f32, &Device::Cpu)?.reshape((2, 8))?;
+    let (merged, views) = MergedDenseProjection::merge_unquantized(&[b.clone(), a.clone()])?
+        .expect("dense, bias-free");
+    let parts = merged.forward(&xs)?;
+    for ((part, view), original) in parts.iter().zip(&views).zip([&b, &a]) {
+        let expected = original.forward(&xs)?;
+        for got in [part, &view.forward(&xs)?] {
+            let diff = (got - &expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(diff < 1e-5, "merged projection differs by {diff}");
+        }
+    }
+    assert!(
+        MergedDenseProjection::merge_unquantized(&[b.clone(), dense(4, 0.3, true)?])?.is_none()
+    );
+    let wider = Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+        Linear::new(Tensor::zeros((2, 9), DType::F32, &Device::Cpu)?, None),
+    ))?) as Arc<dyn QuantMethod>;
+    assert!(MergedDenseProjection::merge_unquantized(&[b, wider])?.is_none());
+    Ok(())
+}

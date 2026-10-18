@@ -259,21 +259,30 @@ impl GdnWeights {
                         group.constituents[1].clone(),
                         Some(crate::ops::MergedDenseProjection::from_packed(group)),
                     ),
-                    None => (
-                        ReplicatedLayer::new_with_lora_spec(
+                    None => {
+                        let b = ReplicatedLayer::new_with_lora_spec(
                             b_spec,
                             cfg.quantization_config(),
                             false,
                             vb_la.pp("in_proj_b"),
-                        )?,
-                        ReplicatedLayer::new_with_lora_spec(
+                        )?;
+                        let a = ReplicatedLayer::new_with_lora_spec(
                             a_spec,
                             cfg.quantization_config(),
                             false,
                             vb_la.pp("in_proj_a"),
-                        )?,
-                        None,
-                    ),
+                        )?;
+                        // a GGUF's dense ssm_beta/ssm_alpha load apart; one matmul serves both
+                        match crate::ops::MergedDenseProjection::merge_unquantized(&[
+                            b.clone(),
+                            a.clone(),
+                        ])? {
+                            Some((merged, views)) => {
+                                (views[0].clone(), views[1].clone(), Some(merged))
+                            }
+                            None => (b, a, None),
+                        }
+                    }
                 };
                 GdnInputProjection::Split {
                     in_proj_qkv,
