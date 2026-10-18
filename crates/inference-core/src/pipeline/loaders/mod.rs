@@ -530,6 +530,9 @@ pub struct LoadOptions<'a> {
     pub mapper: DeviceMapSetting,
     pub in_situ_quant: Option<IsqType>,
     pub paged_attn_config: Option<PagedAttentionConfig>,
+    /// Decode steps run several rows a sequence (speculative verification): weights take the layouts the 2-8 row
+    /// matvecs read fastest, where those trail at one row.
+    pub multi_row_decode: bool,
 }
 
 /// The `Loader` trait abstracts the loading process. The primary entrypoint is the
@@ -549,6 +552,7 @@ pub struct LoadOptions<'a> {
 ///     mapper: DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
 ///     in_situ_quant: None,
 ///     paged_attn_config: None,
+///     multi_row_decode: false,
 /// };
 /// let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options).unwrap();
 /// ```

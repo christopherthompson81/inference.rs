@@ -83,6 +83,7 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq2Ks
             | GgufType::Iq3Ks
             | GgufType::Iq4Ks
+            | GgufType::Iq4KsTiled
             | GgufType::Iq4Kss
             | GgufType::Iq5Ks
             | GgufType::Iq2Kl
@@ -145,6 +146,7 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Iq2Ks
         | GgufType::Iq3Ks
         | GgufType::Iq4Ks
+        | GgufType::Iq4KsTiled
         | GgufType::Iq4Kss
         | GgufType::Iq5Ks
         | GgufType::Iq2Kl => 256,
@@ -189,7 +191,7 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         GgufType::Iq6K => DsLayout::D4,
         GgufType::Iq2Ks => DsLayout::D4,
         GgufType::Iq3Ks => DsLayout::D4,
-        GgufType::Iq4Ks => DsLayout::D4,
+        GgufType::Iq4Ks | GgufType::Iq4KsTiled => DsLayout::D4,
         GgufType::Iq4Kss => DsLayout::D4,
         GgufType::Iq5Ks => DsLayout::D4,
         GgufType::Iq2Kl => DsLayout::D4,
@@ -335,6 +337,7 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Iq2Ks => ffi::launch_mmq_gguf_iq2_ks,
         GgufType::Iq3Ks => ffi::launch_mmq_gguf_iq3_ks,
         GgufType::Iq4Ks => ffi::launch_mmq_gguf_iq4_ks,
+        GgufType::Iq4KsTiled => ffi::launch_mmq_gguf_iq4_ks_tiled,
         GgufType::Iq4Kss => ffi::launch_mmq_gguf_iq4_kss,
         GgufType::Iq5Ks => ffi::launch_mmq_gguf_iq5_ks,
         GgufType::Iq2Kl => ffi::launch_mmq_gguf_iq2_kl,
@@ -1798,14 +1801,28 @@ mod bench {
                 crate::gguf::raw::RawGgufTensor::new(ty, &dims, data.bytes().to_vec(), &dev)?;
             let (out_features, in_features) = (dims[0], dims[1]);
             let mut base = None;
+            let tiled = crate::gguf::raw::RawGgufTensor::can_tile(ty, &dims, &dev)
+                .then(|| crate::gguf::raw::RawGgufTensor::tiled(&dims, data.bytes(), &dev))
+                .transpose()?;
             for rows in 1..=MAX_ROWS {
                 let xs =
                     Tensor::randn(0f32, 1., (rows, in_features), &dev)?.to_dtype(DType::BF16)?;
                 let mmvq = time(&dev, || fast_mmvq::plain(&weight, &xs))?;
                 let mmq = time(&dev, || plain(&weight, &xs))?;
                 let one = *base.get_or_insert(mmvq);
+                let tiled_us = match &tiled {
+                    Some(w) => {
+                        let reference = plain(&weight, &xs)?.to_dtype(DType::F32)?;
+                        let out = fast_mmvq::plain(w, &xs)?.to_dtype(DType::F32)?;
+                        let err = (&out - &reference)?.abs()?.max_all()?.to_scalar::<f32>()?
+                            / reference.abs()?.max_all()?.to_scalar::<f32>()?;
+                        let us = time(&dev, || fast_mmvq::plain(w, &xs))?;
+                        format!("  tiled {us:7.1} us ({:.2}x, rel err {err:.1e})", us / one)
+                    }
+                    None => String::new(),
+                };
                 println!(
-                    "{name:<24} {ty:?} {out_features}x{in_features} rows {rows}: mmvq {mmvq:7.1} us ({:.2}x)  mmq {mmq:7.1} us ({:.2}x)",
+                    "{name:<24} {ty:?} {out_features}x{in_features} rows {rows}: mmvq {mmvq:7.1} us ({:.2}x)  mmq {mmq:7.1} us ({:.2}x){tiled_us}",
                     mmvq / one,
                     mmq / one
                 );

@@ -125,6 +125,7 @@ impl Loader for DiffusionLoader {
             mapper,
             in_situ_quant,
             paged_attn_config,
+            ..
         } = options;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let paths = &paths

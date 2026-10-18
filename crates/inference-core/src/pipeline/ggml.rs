@@ -138,6 +138,7 @@ impl Loader for GGMLLoader {
             mapper,
             in_situ_quant,
             mut paged_attn_config,
+            ..
         } = options;
         let _progress_guard = ProgressScopeGuard::new(silent);
         if in_situ_quant.is_some() {

@@ -628,6 +628,29 @@ inference_tensor::kernel_library! {
             stream: *mut c_void,
         );
 
+        /// BF16 / F16 / F32 -> the tensor-core matvec's activation layout (`mmvq_tc_quantize`)
+        pub fn launch_mmvq_tc_quantize_bf16(
+            x: *const c_void,
+            vy: *mut c_void,
+            kx: i32,
+            num_rows: i32,
+            stream: *mut c_void,
+        );
+        pub fn launch_mmvq_tc_quantize_f16(
+            x: *const c_void,
+            vy: *mut c_void,
+            kx: i32,
+            num_rows: i32,
+            stream: *mut c_void,
+        );
+        pub fn launch_mmvq_tc_quantize_f32(
+            x: *const c_void,
+            vy: *mut c_void,
+            kx: i32,
+            num_rows: i32,
+            stream: *mut c_void,
+        );
+
         // MMQ (prompt) kernels
 
         // MMQ quantize launchers (f32 -> block_q8_1_mmq)
@@ -1074,6 +1097,100 @@ gguf_standard_types!(
     (q6_k, "Q6_K"),
 );
 
+// The types with a tile-ordered layout for 1-8 row matvecs (mmvq_tc.cuh) and prefill (mmq) besides their own kernels
+macro_rules! gguf_iq_tc_types {
+    ($( ($t:ident, $upper:literal) ),* $(,)?) => {
+        $(
+        paste::paste! {
+            gguf_mmq_type_library! {
+                $t, $upper;
+                pub fn [<launch_dequantize_ $t _bf16>](
+                    vx: *const c_void,
+                    dst: *mut c_void,
+                    nrows: i64,
+                    ncols: i64,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_dequantize_ $t _f16>](
+                    vx: *const c_void,
+                    dst: *mut c_void,
+                    nrows: i64,
+                    ncols: i64,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_dequantize_ $t _f32>](
+                    vx: *const c_void,
+                    dst: *mut c_void,
+                    nrows: i64,
+                    ncols: i64,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_ $t _untile_rows>](
+                    src: *const c_void,
+                    ids: *const c_void,
+                    dst: *mut c_void,
+                    n: i64,
+                    ncols: i64,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_mmq_gguf_ $t _tiled>](
+                    tmp_fixup_ptr: *mut c_void,
+                    x: *const c_void,
+                    y_q8_1_mmq: *const c_void,
+                    dst: *mut c_void,
+                    ncols_x: i64,
+                    nrows_x: i64,
+                    ncols_y: i64,
+                    stride_row_x: i64,
+                    stride_col_dst: i64,
+                    cc: i32,
+                    nsm: i32,
+                    smpbo: i64,
+                    warp_size_host: i32,
+                    type_dst: i32,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_mmvq_tc_gguf_ $t _bf16_plain>](
+                    vx: *const c_void,
+                    vy: *const c_void,
+                    dst: *mut c_void,
+                    ncols_x: i32,
+                    nrows_x: i32,
+                    stride_col_dst: i32,
+                    b_size: i32,
+                    cfg: i32,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_mmvq_tc_gguf_ $t _f16_plain>](
+                    vx: *const c_void,
+                    vy: *const c_void,
+                    dst: *mut c_void,
+                    ncols_x: i32,
+                    nrows_x: i32,
+                    stride_col_dst: i32,
+                    b_size: i32,
+                    cfg: i32,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_mmvq_tc_gguf_ $t _f32_plain>](
+                    vx: *const c_void,
+                    vy: *const c_void,
+                    dst: *mut c_void,
+                    ncols_x: i32,
+                    nrows_x: i32,
+                    stride_col_dst: i32,
+                    b_size: i32,
+                    cfg: i32,
+                    stream: *mut c_void,
+                );
+            }
+        }
+        )*
+    };
+}
+
+gguf_iq_tc_types!((iq4_ks, "IQ4_KS"),);
+
 gguf_iq_types!(
     (iq4_nl, "IQ4_NL"),
     (iq4_xs, "IQ4_XS"),
@@ -1092,7 +1209,6 @@ gguf_iq_types!(
     (iq4_k, "IQ4_K"),
     (iq5_k, "IQ5_K"),
     (iq6_k, "IQ6_K"),
-    (iq4_ks, "IQ4_KS"),
     (iq2_ks, "IQ2_KS"),
     (iq4_kss, "IQ4_KSS"),
     (iq5_ks, "IQ5_KS"),

@@ -351,7 +351,7 @@ impl Loader for SpeechLoader {
             silent,
             mapper,
             in_situ_quant,
-            paged_attn_config: _,
+            ..
         } = options;
         let _progress_guard = ProgressScopeGuard::new(silent);
         let paths = paths

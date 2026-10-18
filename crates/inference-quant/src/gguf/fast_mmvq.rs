@@ -70,6 +70,7 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq5K
             | GgufType::Iq6K
             | GgufType::Iq4Ks
+            | GgufType::Iq4KsTiled
             | GgufType::Iq2Ks
             | GgufType::Iq4Kss
             | GgufType::Iq5Ks
@@ -81,12 +82,15 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
 /// Maximum flattened batch handled by the CUDA launcher table.
 pub const MMVQ_MAX_BATCH: usize = 8;
 
-/// Whether `rows` input rows of a `dtype` weight take MMVQ rather than MMQ: MMVQ repeats its dot products and
-/// activation loads per row, while MMQ's int8 tensor-core tiles cost about the same from 1 to 8 rows, so past a
-/// per-type count MMQ is faster (`fast_mmq::bench::small_batch_mmvq_vs_mmq`, RTX 3090).
-pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
-    let dtype = dtype.into();
-    let max_rows = match dtype {
+// sm_80's int8 mma.m16n8k32, which the tensor-core matvec (mmvq_tc.cuh) needs
+const TENSOR_CORE_MIN_CC: usize = 80;
+// mmvq_tc_quantize's bytes per 32-value block: 32 lanes' int2 fragments and 8 rows' f32 scales
+const TENSOR_CORE_ACTIVATION_BLOCK_BYTES: usize = 32 * 8 + 8 * 4;
+
+// The most input rows MMVQ's dp4a kernels take before MMQ's int8 tensor-core tiles, which cost about the same from 1
+// to 8 rows, are faster (`fast_mmq::bench::small_batch_mmvq_vs_mmq`, RTX 3090).
+fn dp4a_max_rows(dtype: GgufType) -> usize {
+    match dtype {
         GgufType::Iq4Xs => 5,
         GgufType::Q4K | GgufType::Q5K => 3,
         // the crossover moves with the output width (4 for a 248K-row head, 6 for a 2K-row FFN)
@@ -96,8 +100,25 @@ pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
         GgufType::Iq4Ks | GgufType::Iq4Kss => 2,
         GgufType::Iq4Kt | GgufType::Iq3K | GgufType::Iq3Kt => 1,
         _ => MMVQ_MAX_BATCH,
-    };
-    rows <= max_rows || rows <= MMVQ_MAX_BATCH && !super::fast_mmq::supports(dtype)
+    }
+}
+
+/// Whether `rows` input rows of a `dtype` weight take MMVQ's dp4a kernels, the fused GLU and QKV forms included.
+pub fn prefers_fused_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
+    let dtype = dtype.into();
+    rows <= dp4a_max_rows(dtype) || rows <= MMVQ_MAX_BATCH && !super::fast_mmq::supports(dtype)
+}
+
+/// Whether `rows` input rows of a `dtype` weight take MMVQ (`plain`) rather than MMQ: its dp4a kernels, or for 2-8
+/// rows of a type with one, the tensor-core matvec, which reads and decodes each weight block once for all rows.
+pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
+    let dtype = dtype.into();
+    prefers_fused_mmvq(dtype, rows) || rows <= MMVQ_MAX_BATCH && has_tensor_core_rows(dtype)
+}
+
+/// Whether a `dtype` weight has the tensor-core matvec for 1-8 input rows (a tile-ordered layout).
+pub fn has_tensor_core_rows(dtype: impl Into<GgufType>) -> bool {
+    dtype.into() == GgufType::Iq4KsTiled
 }
 
 static WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
@@ -392,6 +413,14 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
         inference_tensor::bail!(
             "fast_mmvq: input dtype must be BF16, F16, or F32, got {input_ty:?}"
         );
+    }
+
+    if dtype == GgufType::Iq4KsTiled {
+        let cfg = tiled_config(dev.cuda_stream().context().ordinal(), nrows, ncols);
+        return tiled_plain(w, xs, cfg);
+    }
+    if !prefers_fused_mmvq(dtype, b_size) {
+        return super::fast_mmq::plain(w, xs);
     }
 
     let stream = dev.cuda_stream();
@@ -1432,4 +1461,295 @@ pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tenso
         return out.reshape(shape);
     }
     out.narrow(0, 0, elems)?.reshape(shape)
+}
+
+// IQ4_KS block layout (ik_llama.cpp): a row is an f32 scale then 136-byte blocks of 256 values, 8 scale bytes and
+// 128 bytes of nibbles
+const IQ4_KS_ROW_SCALE_BYTES: usize = 4;
+const IQ4_KS_BLOCK_BYTES: usize = 136;
+const IQ4_KS_BLOCK_SCALES: usize = 8;
+// mmvq_tc.cuh's tile-ordered IQ4_KS: rows per group and the group's row-scale header; per superblock the block
+// scales ([block][row] bytes), then per block two halves of 8 rows x 4 words
+const TILED_GROUP_ROWS: usize = 16;
+const TILED_GROUP_HEADER: usize = 64;
+const TILED_SCALE_BYTES: usize = IQ4_KS_BLOCK_SCALES * TILED_GROUP_ROWS;
+const TILED_HALF_BYTES: usize = 128;
+const TILED_BLOCK_BYTES: usize = 2 * TILED_HALF_BYTES;
+const TILED_SB_BYTES: usize = TILED_SCALE_BYTES + IQ4_KS_BLOCK_SCALES * TILED_BLOCK_BYTES;
+// IQ4_KS nibble bytes per 32-value block, read as 4 words
+const IQ4_KS_BLOCK_QS: usize = 16;
+
+// Where row `r`'s word `t` of block `j` sits in a tiled superblock (the mma A fragment's lane order)
+fn tiled_word(j: usize, r: usize, t: usize) -> usize {
+    TILED_SCALE_BYTES + j * TILED_BLOCK_BYTES + (r / 8) * TILED_HALF_BYTES + ((r % 8) * 4 + t) * 4
+}
+
+/// IQ4_KS rows regrouped into mmvq_tc.cuh's tile order (`mmvq_tc_iq4_ks_kernel`), rows padded to 16 with zeros.
+pub(crate) fn iq4_ks_to_tiled(bytes: &[u8], nrows: usize, ncols: usize) -> Vec<u8> {
+    use rayon::prelude::*;
+    let nsb = ncols / QK_K;
+    let row_bytes = IQ4_KS_ROW_SCALE_BYTES + nsb * IQ4_KS_BLOCK_BYTES;
+    let group_bytes = TILED_GROUP_HEADER + nsb * TILED_SB_BYTES;
+    let mut out = vec![0u8; nrows.div_ceil(TILED_GROUP_ROWS) * group_bytes];
+    out.par_chunks_exact_mut(group_bytes)
+        .zip(bytes.par_chunks(TILED_GROUP_ROWS * row_bytes))
+        .for_each(|(group, rows)| {
+            for (r, src) in rows.chunks_exact(row_bytes).enumerate() {
+                group[4 * r..4 * r + 4].copy_from_slice(&src[..IQ4_KS_ROW_SCALE_BYTES]);
+                for sb in 0..nsb {
+                    let block = &src[IQ4_KS_ROW_SCALE_BYTES + sb * IQ4_KS_BLOCK_BYTES..]
+                        [..IQ4_KS_BLOCK_BYTES];
+                    let (scales, qs) = block.split_at(IQ4_KS_BLOCK_SCALES);
+                    let dst =
+                        &mut group[TILED_GROUP_HEADER + sb * TILED_SB_BYTES..][..TILED_SB_BYTES];
+                    for j in 0..IQ4_KS_BLOCK_SCALES {
+                        dst[j * TILED_GROUP_ROWS + r] = scales[j];
+                        for t in 0..4 {
+                            let (word, q) = (tiled_word(j, r, t), IQ4_KS_BLOCK_QS * j + 4 * t);
+                            dst[word..word + 4].copy_from_slice(&qs[q..q + 4]);
+                        }
+                    }
+                }
+            }
+        });
+    out
+}
+
+/// A tile-ordered IQ4_KS weight's first `nrows` rows back in IQ4_KS's row-major layout (`iq4_ks_to_tiled`'s inverse).
+pub(crate) fn iq4_ks_from_tiled(tiled: &[u8], nrows: usize, ncols: usize) -> Vec<u8> {
+    let nsb = ncols / QK_K;
+    let row_bytes = IQ4_KS_ROW_SCALE_BYTES + nsb * IQ4_KS_BLOCK_BYTES;
+    let group_bytes = TILED_GROUP_HEADER + nsb * TILED_SB_BYTES;
+    let mut out = vec![0u8; nrows * row_bytes];
+    for row in 0..nrows {
+        let dst = &mut out[row * row_bytes..(row + 1) * row_bytes];
+        let (rg, r) = (row / TILED_GROUP_ROWS, row % TILED_GROUP_ROWS);
+        let group = &tiled[rg * group_bytes..(rg + 1) * group_bytes];
+        dst[..IQ4_KS_ROW_SCALE_BYTES].copy_from_slice(&group[4 * r..4 * r + 4]);
+        for sb in 0..nsb {
+            let src = &group[TILED_GROUP_HEADER + sb * TILED_SB_BYTES..][..TILED_SB_BYTES];
+            let block =
+                &mut dst[IQ4_KS_ROW_SCALE_BYTES + sb * IQ4_KS_BLOCK_BYTES..][..IQ4_KS_BLOCK_BYTES];
+            let (scales, qs) = block.split_at_mut(IQ4_KS_BLOCK_SCALES);
+            for j in 0..IQ4_KS_BLOCK_SCALES {
+                scales[j] = src[j * TILED_GROUP_ROWS + r];
+                for t in 0..4 {
+                    let (word, q) = (tiled_word(j, r, t), IQ4_KS_BLOCK_QS * j + 4 * t);
+                    qs[q..q + 4].copy_from_slice(&src[word..word + 4]);
+                }
+            }
+        }
+    }
+    out
+}
+
+type TiledLauncher = unsafe extern "C" fn(
+    vx: *const std::ffi::c_void,
+    vy: *const std::ffi::c_void,
+    dst: *mut std::ffi::c_void,
+    ncols_x: i32,
+    nrows_x: i32,
+    stride_col_dst: i32,
+    b_size: i32,
+    cfg: i32,
+    stream: *mut std::ffi::c_void,
+);
+
+// mmvq_tc.cuh's launch_mmvq_tc_iq4_ks shapes; `tune_tiled` times each per weight shape
+pub(crate) const TILED_CONFIGS: i32 = 4;
+const TILED_TUNE_WARMUP: usize = 3;
+const TILED_TUNE_ITERS: usize = 20;
+
+// (device ordinal, rows, cols)
+type TiledShape = (usize, usize, usize);
+
+// The fastest config per shape, filled at load by `tune_tiled`
+static TILED_CONFIG: std::sync::RwLock<Vec<(TiledShape, i32)>> = std::sync::RwLock::new(Vec::new());
+
+fn tiled_launcher(input_ty: DType) -> TiledLauncher {
+    match input_ty {
+        DType::BF16 => ffi::launch_mmvq_tc_gguf_iq4_ks_bf16_plain,
+        DType::F16 => ffi::launch_mmvq_tc_gguf_iq4_ks_f16_plain,
+        _ => ffi::launch_mmvq_tc_gguf_iq4_ks_f32_plain,
+    }
+}
+
+/// Whether `dev` runs the tile-ordered IQ4_KS matvec (int8 `mma.m16n8k32`).
+pub fn tensor_core_capable(dev: &inference_tensor::CudaDevice) -> bool {
+    dev.compute_cap() >= TENSOR_CORE_MIN_CC
+}
+
+// The quantized activations and a launch of the tiled matvec with config `cfg`, on raw pointers
+struct TiledCall {
+    weight: *const std::ffi::c_void,
+    scratch: *mut std::ffi::c_void,
+    ncols: usize,
+    nrows: usize,
+    b_size: usize,
+    stream: *mut std::ffi::c_void,
+}
+
+impl TiledCall {
+    unsafe fn quantize(&self, input_ty: DType, xs: *const std::ffi::c_void) {
+        let quantize = match input_ty {
+            DType::BF16 => ffi::launch_mmvq_tc_quantize_bf16,
+            DType::F16 => ffi::launch_mmvq_tc_quantize_f16,
+            _ => ffi::launch_mmvq_tc_quantize_f32,
+        };
+        unsafe {
+            quantize(
+                xs,
+                self.scratch,
+                self.ncols as i32,
+                self.b_size as i32,
+                self.stream,
+            )
+        };
+    }
+
+    unsafe fn launch(&self, input_ty: DType, out: *mut std::ffi::c_void, cfg: i32) {
+        unsafe {
+            tiled_launcher(input_ty)(
+                self.weight,
+                self.scratch as *const std::ffi::c_void,
+                out,
+                self.ncols as i32,
+                self.nrows as i32,
+                self.nrows as i32,
+                self.b_size as i32,
+                cfg,
+                self.stream,
+            )
+        };
+    }
+}
+
+fn tiled_config(ordinal: usize, nrows: usize, ncols: usize) -> i32 {
+    let configs = TILED_CONFIG.read().unwrap_or_else(|e| e.into_inner());
+    configs
+        .iter()
+        .find(|(key, _)| *key == (ordinal, nrows, ncols))
+        .map_or(0, |(_, cfg)| *cfg)
+}
+
+/// Times the tiled matvec's configs on a tile-ordered IQ4_KS weight at 8 rows and keeps the fastest for its shape.
+pub(crate) fn tune_tiled<W: KernelWeight + ?Sized>(w: &W) -> Result<()> {
+    let Device::Cuda(dev) = w.kernel_device() else {
+        inference_tensor::bail!("tune_tiled: weight must live on CUDA");
+    };
+    let (nrows, ncols) = w.kernel_shape().dims2()?;
+    let key = (dev.cuda_stream().context().ordinal(), nrows, ncols);
+    if TILED_CONFIG
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .any(|(k, _)| *k == key)
+    {
+        return Ok(());
+    }
+    let stream = dev.cuda_stream();
+    let b_size = MMVQ_MAX_BATCH;
+    let xs = unsafe { dev.alloc::<f32>(b_size * ncols)? };
+    let mut out = unsafe { dev.alloc::<f32>(b_size * nrows)? };
+    let scratch_bytes = (ncols / Q8_1_BLOCK_SIZE) * TENSOR_CORE_ACTIVATION_BLOCK_BYTES;
+    let mut workspace = WORKSPACE.ensure(&dev, scratch_bytes, &stream)?;
+    let (scratch, _scratch_guard) = workspace.ptr_mut();
+    let (weight, _weight_guard) = w.kernel_ptr(&stream)?;
+    let (xs_ptr, _xs_guard) = slice_ptr_on_stream(&xs, 0, &stream);
+    let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+    let call = TiledCall {
+        weight: weight as *const std::ffi::c_void,
+        scratch: scratch as *mut std::ffi::c_void,
+        ncols,
+        nrows,
+        b_size,
+        stream: stream.cu_stream() as *mut std::ffi::c_void,
+    };
+    let out_ptr = out_ptr as *mut std::ffi::c_void;
+    unsafe { call.quantize(DType::F32, xs_ptr as *const std::ffi::c_void) };
+    let timing = Some(inference_tensor::cuda::cudarc::driver::sys::CUevent_flags::CU_EVENT_DEFAULT);
+    let mut best = (f32::INFINITY, 0);
+    for cfg in 0..TILED_CONFIGS {
+        for _ in 0..TILED_TUNE_WARMUP {
+            unsafe { call.launch(DType::F32, out_ptr, cfg) };
+        }
+        let start = stream
+            .record_event(timing)
+            .map_err(inference_tensor::Error::wrap)?;
+        for _ in 0..TILED_TUNE_ITERS {
+            unsafe { call.launch(DType::F32, out_ptr, cfg) };
+        }
+        let end = stream
+            .record_event(timing)
+            .map_err(inference_tensor::Error::wrap)?;
+        let ms = start
+            .elapsed_ms(&end)
+            .map_err(inference_tensor::Error::wrap)?;
+        if ms < best.0 {
+            best = (ms, cfg);
+        }
+    }
+    TILED_CONFIG
+        .write()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((key, best.1));
+    Ok(())
+}
+
+// `plain` for a tile-ordered IQ4_KS weight: the tensor-core matvec reads each weight tile once for all 1-8 rows
+pub(crate) fn tiled_plain<W: KernelWeight + ?Sized>(
+    w: &W,
+    xs: &Tensor,
+    cfg: i32,
+) -> Result<Tensor> {
+    let Device::Cuda(dev) = w.kernel_device() else {
+        inference_tensor::bail!("fast_mmvq: weight must live on CUDA");
+    };
+    let dev = &dev;
+    let (nrows, ncols) = w.kernel_shape().dims2()?;
+    let input_ty = xs.dtype();
+    let b_size = xs.elem_count() / ncols;
+    let stream = dev.cuda_stream();
+    let xs = xs.contiguous()?;
+    let (xs_storage, xs_layout) = xs.storage_and_layout();
+    let Storage::Cuda(xs_cuda) = &*xs_storage else {
+        inference_tensor::bail!("fast_mmvq: input must live on CUDA");
+    };
+    let scratch_bytes = (ncols / Q8_1_BLOCK_SIZE) * TENSOR_CORE_ACTIVATION_BLOCK_BYTES;
+    let mut workspace = WORKSPACE.ensure(dev, scratch_bytes, &stream)?;
+    let (scratch, _scratch_guard) = workspace.ptr_mut();
+    let (weight, _weight_guard) = w.kernel_ptr(&stream)?;
+    let call = TiledCall {
+        weight: weight as *const std::ffi::c_void,
+        scratch: scratch as *mut std::ffi::c_void,
+        ncols,
+        nrows,
+        b_size,
+        stream: stream.cu_stream() as *mut std::ffi::c_void,
+    };
+    macro_rules! run {
+        ($t:ty) => {{
+            let slice = xs_cuda.as_cuda_slice::<$t>()?;
+            let mut out = unsafe { dev.alloc::<$t>(nrows * b_size)? };
+            {
+                let (xs_ptr, _xs_guard) =
+                    slice_ptr_on_stream(slice, xs_layout.start_offset(), &stream);
+                let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+                unsafe {
+                    call.quantize(input_ty, xs_ptr as *const std::ffi::c_void);
+                    call.launch(input_ty, out_ptr as *mut std::ffi::c_void, cfg);
+                }
+            }
+            CudaStorage::wrap_cuda_slice(out, dev.clone())
+        }};
+    }
+    let storage = match input_ty {
+        DType::BF16 => run!(half::bf16),
+        DType::F16 => run!(half::f16),
+        _ => run!(f32),
+    };
+    Ok(Tensor::from((
+        Storage::Cuda(storage),
+        output_shape(&xs, nrows),
+    )))
 }

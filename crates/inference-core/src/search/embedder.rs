@@ -60,6 +60,7 @@ impl SearchEmbedder {
             mapper: DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
             in_situ_quant: None,
             paged_attn_config: None,
+            multi_row_decode: false,
         };
         let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options)?;
 
