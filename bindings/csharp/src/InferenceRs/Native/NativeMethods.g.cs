@@ -7,7 +7,7 @@ namespace InferenceRs.Native;
 internal static unsafe partial class NativeMethods
 {
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 25;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 26;
 
     [LibraryImport(Library)]
     internal static partial uint inference_abi_version();

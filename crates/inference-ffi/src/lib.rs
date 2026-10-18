@@ -16,10 +16,28 @@ pub mod callbacks;
 pub mod engine;
 pub mod layout;
 
-pub const ABI_VERSION_MAJOR: u32 = 0;
-pub const ABI_VERSION_MINOR: u32 = 0;
-// The ABI is not stable yet: every change bumps the patch number and callers should require an exact match.
-pub const ABI_VERSION_PATCH: u32 = 25;
+// The ABI is the release's version: not stable yet, so every release bumps the patch number and callers require an
+// exact match. include/inference.h repeats it, and a test holds the two together.
+pub const ABI_VERSION_MAJOR: u32 = version_part(env!("CARGO_PKG_VERSION_MAJOR"));
+pub const ABI_VERSION_MINOR: u32 = version_part(env!("CARGO_PKG_VERSION_MINOR"));
+pub const ABI_VERSION_PATCH: u32 = version_part(env!("CARGO_PKG_VERSION_PATCH"));
+// inference_abi_version packs each part into 8 bits
+const ABI_VERSION_PART_MAX: u32 = 255;
+
+const fn version_part(digits: &str) -> u32 {
+    let digits = digits.as_bytes();
+    let mut value = 0;
+    let mut i = 0;
+    while i < digits.len() {
+        value = value * 10 + (digits[i] - b'0') as u32;
+        i += 1;
+    }
+    assert!(
+        value <= ABI_VERSION_PART_MAX,
+        "a version part past 255 does not fit the packed ABI version"
+    );
+    value
+}
 
 /// Upper bound on `inference_backend_config.threads`; anything larger is a caller bug, not a pool size.
 pub const MAX_CPU_THREADS: i32 = 1024;

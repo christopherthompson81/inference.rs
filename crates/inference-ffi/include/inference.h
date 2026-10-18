@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 25
+#define INFERENCE_ABI_VERSION_PATCH 26
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -77,7 +77,7 @@ typedef enum inference_status {
 
 /* (major << 16) | (minor << 8) | patch of the ABI this library implements. */
 INFERENCE_API uint32_t inference_abi_version(void);
-/* Human-readable build identification, e.g. "inference.rs 0.9.3 (cuda)". Static. */
+/* Human-readable build identification, e.g. "inference.rs 0.0.26 (cuda)". Static. */
 INFERENCE_API const char *inference_build_version(void);
 /* Detail of the most recent failing inference_* call on this thread; "" after a success. Never NULL. */
 INFERENCE_API const char *inference_last_error(void);

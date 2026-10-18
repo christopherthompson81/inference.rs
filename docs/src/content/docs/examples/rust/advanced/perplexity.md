@@ -156,7 +156,11 @@ async fn main() -> Result<()> {
         let scored = model.prompt_logits(request).await?;
 
         // The first token has no prediction; the rest give the mean negative log-likelihood.
-        let logprobs: Vec<f32> = scored.token_logprobs[skip..].iter().flatten().copied().collect();
+        let logprobs: Vec<f32> = scored.token_logprobs[skip..]
+            .iter()
+            .flatten()
+            .copied()
+            .collect();
         let nll = -logprobs.iter().sum::<f32>() / logprobs.len() as f32;
         let perplexity = nll.exp();
         let end = Instant::now();

@@ -1,4 +1,4 @@
-//! The header declares exactly the functions the crate exports, and compiles as strict C99.
+//! The header declares exactly the functions the crate exports at the crate's version, and compiles as strict C99.
 
 use std::{collections::BTreeSet, fs, path::Path, process::Command};
 
@@ -56,6 +56,32 @@ fn exported() -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     exported_in(Path::new(SRC), &mut names);
     names
+}
+
+#[test]
+fn header_abi_version_is_the_crate_version() {
+    let header = fs::read_to_string(HEADER).unwrap();
+    let defined = |part: &str| -> u32 {
+        let define = format!("#define INFERENCE_ABI_VERSION_{part} ");
+        let line = header
+            .lines()
+            .find_map(|line| line.strip_prefix(define.as_str()));
+        line.unwrap_or_else(|| panic!("the header defines no {define}"))
+            .trim()
+            .parse()
+            .unwrap()
+    };
+    let header_version = format!(
+        "{}.{}.{}",
+        defined("MAJOR"),
+        defined("MINOR"),
+        defined("PATCH")
+    );
+    assert_eq!(
+        header_version,
+        env!("CARGO_PKG_VERSION"),
+        "the header's INFERENCE_ABI_VERSION_* must match Cargo.toml"
+    );
 }
 
 #[test]

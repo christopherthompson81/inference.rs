@@ -427,6 +427,7 @@ A load: what to load, the id requests will name it by, and how to run it.
 | `mmproj` | `str \| None` | optional |
 | `model_id` | `str` | required |
 | `mtp` | `MtpSpec \| None` | optional |
+| `paged_cache_layers` | `PagedCacheLayers \| None` | optional |
 | `paged_cache_type` | `PagedCacheType \| None` | optional |
 | `paged_context_len` | `int \| None` | optional |
 | `source` | `str` | required |
@@ -646,6 +647,25 @@ Answered once the model is requantized; a model not loaded with ISQ is a `requan
 | Field | Type |
 | --- | --- |
 | `ggml_type` | `str` |
+
+
+## `SavedModel`
+
+A load the manager keeps under its model id: the request its last successful load used, and whether the server loads it again when it starts.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `load_at_start` | `bool \| None` | optional |
+| `request` | `ManagedLoadRequest` | required |
+
+
+## `SavedModels`
+
+The loads the manager keeps, by model id.
+
+| Field | Type |
+| --- | --- |
+| `saved` | `dict[str, SavedModel]` |
 
 
 ## `SerializedSession`

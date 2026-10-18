@@ -349,7 +349,7 @@ pub fn prune_kernels(dry_run: bool) -> Result<Vec<Pruned>> {
     Ok(pruned)
 }
 
-// `0.9.3/` holding only `sm<arch>/` dirs: what downloads make, never another dir the cache root happens to hold
+// `0.0.26/` holding only `sm<arch>/` dirs: what downloads make, never another dir the cache root happens to hold
 fn is_version_dir(dir: &Path) -> bool {
     let name = dir
         .file_name()
