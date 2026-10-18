@@ -1097,7 +1097,7 @@ gguf_standard_types!(
     (q6_k, "Q6_K"),
 );
 
-// The types with a tensor-core matvec for 2-8 input rows (mmvq_tc.cuh) besides their own kernels
+// The types with a tile-ordered layout for 1-8 row matvecs (mmvq_tc.cuh) and prefill (mmq) besides their own kernels
 macro_rules! gguf_iq_tc_types {
     ($( ($t:ident, $upper:literal) ),* $(,)?) => {
         $(
@@ -1125,15 +1125,40 @@ macro_rules! gguf_iq_tc_types {
                     ncols: i64,
                     stream: *mut c_void,
                 );
+                pub fn [<launch_ $t _untile_rows>](
+                    src: *const c_void,
+                    ids: *const c_void,
+                    dst: *mut c_void,
+                    n: i64,
+                    ncols: i64,
+                    stream: *mut c_void,
+                );
+                pub fn [<launch_mmq_gguf_ $t _tiled>](
+                    tmp_fixup_ptr: *mut c_void,
+                    x: *const c_void,
+                    y_q8_1_mmq: *const c_void,
+                    dst: *mut c_void,
+                    ncols_x: i64,
+                    nrows_x: i64,
+                    ncols_y: i64,
+                    stride_row_x: i64,
+                    stride_col_dst: i64,
+                    cc: i32,
+                    nsm: i32,
+                    smpbo: i64,
+                    warp_size_host: i32,
+                    type_dst: i32,
+                    stream: *mut c_void,
+                );
                 pub fn [<launch_mmvq_tc_gguf_ $t _bf16_plain>](
                     vx: *const c_void,
                     vy: *const c_void,
                     dst: *mut c_void,
                     ncols_x: i32,
                     nrows_x: i32,
-                    stride_col_y: i32,
                     stride_col_dst: i32,
                     b_size: i32,
+                    cfg: i32,
                     stream: *mut c_void,
                 );
                 pub fn [<launch_mmvq_tc_gguf_ $t _f16_plain>](
@@ -1142,9 +1167,9 @@ macro_rules! gguf_iq_tc_types {
                     dst: *mut c_void,
                     ncols_x: i32,
                     nrows_x: i32,
-                    stride_col_y: i32,
                     stride_col_dst: i32,
                     b_size: i32,
+                    cfg: i32,
                     stream: *mut c_void,
                 );
                 pub fn [<launch_mmvq_tc_gguf_ $t _f32_plain>](
@@ -1153,9 +1178,9 @@ macro_rules! gguf_iq_tc_types {
                     dst: *mut c_void,
                     ncols_x: i32,
                     nrows_x: i32,
-                    stride_col_y: i32,
                     stride_col_dst: i32,
                     b_size: i32,
+                    cfg: i32,
                     stream: *mut c_void,
                 );
             }

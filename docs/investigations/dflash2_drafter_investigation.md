@@ -237,3 +237,72 @@ neighbouring warps shared before); 8-block groups (ffn_down 1.53x -> 1.45x, ffn_
 Implication: about 4% of the step, IQ4_KS only. Taking the matvec to a 1-row cost needs 16-byte loads, so a weight
 layout with aligned blocks (a load-time repack of IQ4_KS, or ExLlamaV3's fragment order), which every kernel
 reading the type would have to accept; and Q5_K/Q6_K/Q4_K versions for the rest of MMQ's 16 ms.
+
+## Run 8 - 2026-10-20 07:00
+
+Question: does prefetching more groups (cp.async, no registers) fix the matvec's latency bound, and what does
+ExLlamaV3's kernel actually do differently (read first-hand this time, exllamav3 a3bfbfd,
+`exllamav3_ext/quant/exl3_gemv_kernel.cuh`)?
+
+cp.async 3-stage pipeline into the warp tile: ffn_up 1.29x -> 1.27x at 108 registers (2 blocks/SM); capped for 3
+blocks (80 registers) 1.31x, for 4 (64) 1.77x. Reverted.
+
+ExLlamaV3's small-m GEMV: the EXL3 format is tile-major, a 16x16 weight tile one run of 8 x bits words (32 at
+4 bpw), so a warp reads a tile with one coalesced 128-byte load (a word per lane) and a lane gets its decode
+inputs by one shuffle; no shared-memory staging, no barrier in the main loop. A register prefetch ring 2-4 k-slices
+deep costs a few registers because a tile is one word per lane (64 registers, two 512-thread blocks per SM).
+Warps split K with no syncs; a block covers 32-64 output columns; one shared-memory reduction at the end; fp16
+m16n8k16 with the weights as the B operand, two per tile.
+
+Implication: the row-major IQ4_KS layout (rows 4-byte aligned) is what forces our staging and costs the prefetch
+its registers. Next: prototype a tile-ordered IQ4_KS (same bytes, regrouped per 16 rows in mma fragment order) and
+a ring-prefetch matvec for 1-8 rows, in the bench, before any integration.
+
+## Run 9 - 2026-10-20 09:30
+
+Question: does a tile-ordered IQ4_KS with ExLlamaV3's kernel structure (coalesced word loads straight into the int8
+mma fragments, a register prefetch ring, warps splitting K with no syncs) reach the 1-row cost at 2-8 rows?
+
+Layout (`fast_mmvq::iq4_ks_to_tiled`, the same bytes): per 16-row group the rows' f32 scales, then per superblock
+the block scales as [block][row] bytes and per 32-value block two 128-byte halves in A-fragment lane order. Kernel
+`mmvq_tc2_iq4_ks_kernel<KSPLIT, GROUPS, PREFETCH>`: per lane per block 3 word loads (2 A halves, 1 scale word), 2 shuffles,
+1 mma. Bench on recipe A, rows 1-8, results against MMQ within 5e-3 (q8_1 activations):
+
+```
+time / 1-row MMVQ at 8 rows     MMQ     tiled 8x2x4 (rows 1 -> 8)   best (KSPLIT, GROUPS, PREFETCH)
+ffn_down 5120x17408             1.45    1.06 -> 1.08                1.03 (16, 1, 4)
+attn_qkv 10240x5120             1.41    1.12 -> 1.13                1.06 (8, 4, 2)
+attn_gate 6144x5120             1.47    1.38 -> 1.31                1.17 (16, 1, 4)
+ffn_up 17408x5120               1.51    1.21 -> 1.25                1.20 (8, 1, 4)
+deeper prefetch (PF 8) or 4-warp blocks: 1.25-1.85, worse everywhere
+```
+
+Implication: the gate passes; per-shape configs put the IQ4_KS matvecs at 1.03-1.20x against MMQ's ~1.45x (about
+-5 ms of a 35 ms verify step). At 1 row the tiled kernel trails the dp4a MMVQ on some shapes (ffn_up 1.21x), so the
+repack belongs where decode is multi-row (speculation, batching). Integration: repack at load, choose the config per
+shape, an MMQ loader for the tiled layout (prefill), unpack on readback.
+
+## Run 10 - 2026-10-18 05:55
+
+Question: integrated (tiled IQ4_KS loaded when speculation is attached, configs timed per shape at load, MMQ reading
+the tiled layout for prefill), what does the repack buy end to end, and at what memory?
+
+Integration: `LoadOptions::multi_row_decode` (set with an MTP/DFlash config) has the GGUF weight source repack 2-D
+IQ4_KS weights on the host before upload (`RawGgufTensor::tiled`, type `Iq4KsTiled`); `fast_mmvq::tune_tiled` times
+the 4 kernel shapes at 8 rows once per (device, rows, cols); 1-8 rows take the tiled matvec, more take MMQ's tiled
+loader; embedding and readback untile. The row-major tensor-core matvec (Runs 6-7) is gone, superseded.
+
+A/B on one binary (temporary switch, removed), recipe A, q4k DFlash 2 at 7 drafts, 32K q3 cache, code workload
+2048 tokens (`spec_accept.py`, UI sampling):
+
+```
+                      decode tok/s     mean length   target verify graph   GPU memory   load
+row-major (MMQ)       123.3 128.9      4.46 4.63     32.6 ms               20378 MiB    48.3 s
+tiled                 146.2 144.9      4.59 4.52     27.6 ms               20364 MiB    49.6 s
+```
+
+First version tiled on the GPU (allocate the tiled copy, launch a tile kernel, drop the row-major copy): same speed
+but +754 MiB, the freed row-major buffers staying in the CUDA pool. Repacking on the host removes it.
+
+Implication: +15% decode at equal acceptance, no memory cost. Q5_K/Q6_K tensors (MMQ at 2-8 rows, ~1.45x) are the
+next candidates for a tile-ordered layout of their own.

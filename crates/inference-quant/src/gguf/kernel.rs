@@ -6,6 +6,8 @@ use super::archive::GgufDType;
 
 // ik_llama.cpp numbers its own types from IQ2_K
 const IQK_FIRST_ID: u32 = 137;
+/// `GgufType::Iq4KsTiled`'s id in the kernels (mmq_common.cuh `GGML_TYPE_IQ4_KS_TILED`), outside ggml's range.
+pub const IQ4_KS_TILED_ID: u32 = 240;
 
 /// A ggml tensor type; Candle's variants keep their names so the kernel tables read the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -49,6 +51,9 @@ pub enum GgufType {
     Iq5Ks,
     Iq3Ks,
     Iq2Kl,
+    /// IQ4_KS regrouped into 16-row tiles for the multi-row matvec (`fast_mmvq::iq4_ks_to_tiled`): the same bytes
+    /// in another order, held only on the GPU and never written to a file.
+    Iq4KsTiled,
 }
 
 impl From<GgmlDType> for GgufType {
@@ -144,11 +149,20 @@ impl GgufType {
             Self::Iq5Ks => 152,
             Self::Iq3Ks => 156,
             Self::Iq2Kl => 157,
+            Self::Iq4KsTiled => IQ4_KS_TILED_ID,
+        }
+    }
+
+    // the type whose block geometry this one has: a tiled layout keeps its file type's sizes
+    fn layout_id(self) -> u32 {
+        match self {
+            Self::Iq4KsTiled => Self::Iq4Ks.id(),
+            _ => self.id(),
         }
     }
 
     pub fn candle(self) -> Option<GgmlDType> {
-        GgufDType::new(self.id()).candle_dtype().ok()
+        GgufDType::new(self.layout_id()).candle_dtype().ok()
     }
 
     /// The raw-block type for a ggml id Candle cannot hold, if our kernels read it.
@@ -157,14 +171,14 @@ impl GgufType {
     }
 
     pub fn block_size(self) -> usize {
-        GgufDType::new(self.id())
+        GgufDType::new(self.layout_id())
             .block_size()
             .expect("every GgufType has a ggml block size")
     }
 
     /// Bytes per row of `cols` elements, if that is a valid row length for this type.
     pub fn row_bytes(self, cols: usize) -> Option<usize> {
-        GgufDType::new(self.id()).row_size(cols)
+        GgufDType::new(self.layout_id()).row_size(cols)
     }
 
     /// ik_llama.cpp's row-scaled types prefix each row with its scale, so their rows are the unit bytes split on.
@@ -173,7 +187,7 @@ impl GgufType {
     }
 
     pub fn row_scale_bytes(self) -> usize {
-        GgufDType::new(self.id()).row_meta_size()
+        GgufDType::new(self.layout_id()).row_meta_size()
     }
 
     pub fn is_trellis(self) -> bool {
@@ -197,7 +211,7 @@ impl GgufType {
     }
 
     pub fn type_size(self) -> usize {
-        GgufDType::new(self.id())
+        GgufDType::new(self.layout_id())
             .type_size()
             .expect("every GgufType has a ggml type size")
     }

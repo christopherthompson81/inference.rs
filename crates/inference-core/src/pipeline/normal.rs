@@ -462,6 +462,7 @@ impl Loader for NormalLoader {
             mapper,
             in_situ_quant,
             paged_attn_config,
+            ..
         } = options;
         let uqff = super::loading::UqffLoad::new(
             self.config.from_uqff.is_some(),

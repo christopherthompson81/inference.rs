@@ -81,6 +81,59 @@ impl RawGgufTensor {
         &self.shape
     }
 
+    /// The type its bytes take in a file: a tiled layout's row-major type.
+    pub fn file_type(&self) -> GgufType {
+        match self.ty {
+            GgufType::Iq4KsTiled => GgufType::Iq4Ks,
+            ty => ty,
+        }
+    }
+
+    /// Whether `tiled` takes a `ty` weight of `dims` on `device`: 2-D IQ4_KS on a GPU with int8 tensor cores.
+    #[cfg(feature = "cuda")]
+    pub fn can_tile(ty: GgufType, dims: &[usize], device: &Device) -> bool {
+        ty == GgufType::Iq4Ks
+            && dims.len() == 2
+            && matches!(device, Device::Cuda(dev) if super::fast_mmvq::tensor_core_capable(dev))
+    }
+
+    /// An IQ4_KS weight regrouped into 16-row tiles on `device`, for decode steps of 2-8 rows (speculative
+    /// verification). Repacked on the host, so the GPU never holds both layouts.
+    #[cfg(feature = "cuda")]
+    pub fn tiled(dims: &[usize], bytes: &[u8], device: &Device) -> Result<Self> {
+        if !Self::can_tile(GgufType::Iq4Ks, dims, device) {
+            inference_tensor::bail!("IQ4_KS {dims:?} cannot be tiled on {device:?}");
+        }
+        let Device::Cuda(dev) = device else {
+            unreachable!("can_tile checked the device")
+        };
+        let (rows, cols) = (dims[0], dims[1]);
+        let expected = GgufType::Iq4Ks.row_bytes(cols).map(|row| row * rows);
+        if expected != Some(bytes.len()) {
+            inference_tensor::bail!(
+                "IQ4_KS {dims:?} takes {expected:?} bytes, got {}",
+                bytes.len()
+            );
+        }
+        super::ffi::ensure_type_loaded(GgufType::Iq4Ks).map_err(inference_tensor::Error::msg)?;
+        let tiled = super::fast_mmvq::iq4_ks_to_tiled(bytes, rows, cols);
+        let padding =
+            MATRIX_ROW_PADDING * GgufType::Iq4Ks.type_size() / GgufType::Iq4Ks.block_size();
+        let mut blocks = dev.alloc_zeros::<u8>(tiled.len() + padding)?;
+        dev.memcpy_htod(&tiled, &mut blocks.slice_mut(..tiled.len()))?;
+        let weight = Self {
+            ty: GgufType::Iq4KsTiled,
+            shape: Shape::from(dims),
+            storage: RawStorage::Cuda {
+                blocks: Arc::new(blocks),
+                len: tiled.len(),
+                device: dev.clone(),
+            },
+        };
+        super::fast_mmvq::tune_tiled(&weight)?;
+        Ok(weight)
+    }
+
     // Every row of every expert, and the row length
     fn flat_dims(&self) -> (usize, usize) {
         let cols = *self.shape.dims().last().expect("rank 2 or 3");
@@ -97,6 +150,7 @@ impl RawGgufTensor {
         }
     }
 
+    /// The weight's bytes in its file layout (`file_type`).
     pub fn bytes(&self) -> Result<Vec<u8>> {
         match &self.storage {
             RawStorage::Cpu(bytes) => Ok(bytes.as_ref().clone()),
@@ -108,6 +162,10 @@ impl RawGgufTensor {
             } => {
                 let mut bytes = device.clone_dtoh(&**blocks)?;
                 bytes.truncate(*len);
+                if self.ty == GgufType::Iq4KsTiled {
+                    let (rows, cols) = self.shape.dims2()?;
+                    return Ok(super::fast_mmvq::iq4_ks_from_tiled(&bytes, rows, cols));
+                }
                 Ok(bytes)
             }
             #[cfg(feature = "metal")]
@@ -118,6 +176,9 @@ impl RawGgufTensor {
     pub fn to_device(&self, device: &Device) -> Result<Self> {
         if self.device().same_device(device) {
             return Ok(self.clone());
+        }
+        if self.ty != self.file_type() {
+            return Self::new(self.file_type(), self.shape.dims(), self.bytes()?, device);
         }
         let storage = match device {
             Device::Cpu => RawStorage::Cpu(Arc::new(self.bytes()?)),
@@ -197,7 +258,8 @@ impl RawGgufTensor {
             }
         };
         #[cfg(feature = "cuda")]
-        if gathered.device().is_cuda() && super::fast_mmvq::can_dequantize(self.ty, DType::F32) {
+        if gathered.device().is_cuda() && super::fast_mmvq::can_dequantize(gathered.ty, DType::F32)
+        {
             return super::fast_mmvq::dequantize(&gathered, DType::F32)?.reshape(dims);
         }
         gathered.dequantize(&self.device())?.reshape(dims)
@@ -227,20 +289,38 @@ impl RawGgufTensor {
             let (src_ptr, _src_guard) = blocks.device_ptr(&stream);
             let (dst_ptr, _dst_guard) =
                 crate::utils::slice_ptr_mut_on_stream(&mut rows, 0, &stream);
+            let (src, ids, dst) = (
+                src_ptr as *const std::ffi::c_void,
+                ids_ptr as *const std::ffi::c_void,
+                dst_ptr as *mut std::ffi::c_void,
+            );
+            let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
+            let (nrows, ncols) = self.flat_dims();
             unsafe {
-                super::ffi::launch_gather_rows_u8(
-                    src_ptr as *const std::ffi::c_void,
-                    ids_ptr as *const std::ffi::c_void,
-                    dst_ptr as *mut std::ffi::c_void,
-                    row_bytes as i64,
-                    self.flat_dims().0 as i64,
-                    n as i64,
-                    stream.cu_stream() as *mut std::ffi::c_void,
-                )
+                if self.ty == GgufType::Iq4KsTiled {
+                    super::ffi::launch_iq4_ks_untile_rows(
+                        src,
+                        ids,
+                        dst,
+                        n as i64,
+                        ncols as i64,
+                        stream_ptr,
+                    )
+                } else {
+                    super::ffi::launch_gather_rows_u8(
+                        src,
+                        ids,
+                        dst,
+                        row_bytes as i64,
+                        nrows as i64,
+                        n as i64,
+                        stream_ptr,
+                    )
+                }
             };
         }
         Ok(Self {
-            ty: self.ty,
+            ty: self.file_type(),
             shape: Shape::from((n, self.flat_dims().1)),
             storage: RawStorage::Cuda {
                 blocks: Arc::new(rows),
@@ -258,7 +338,7 @@ impl RawGgufTensor {
                 .metal_dequantize(DType::F32, None)?
                 .reshape(self.shape.clone());
         }
-        let values = dequantize_rows(self.ty, self.flat_dims().1, &self.bytes()?)?;
+        let values = dequantize_rows(self.file_type(), self.flat_dims().1, &self.bytes()?)?;
         Tensor::from_vec(values, self.shape.clone(), &Device::Cpu)?.to_device(device)
     }
 
@@ -290,7 +370,7 @@ impl RawGgufTensor {
                 let n = row_ids.len();
                 let row_ids = Tensor::from_vec(row_ids, n, &Device::Cuda(device.clone()))?;
                 let gathered = self.gather_cuda(&row_ids, row_bytes)?;
-                let compute = if super::fast_mmvq::can_dequantize(self.ty, dtype) {
+                let compute = if super::fast_mmvq::can_dequantize(gathered.ty, dtype) {
                     dtype
                 } else {
                     DType::F32
@@ -929,6 +1009,63 @@ mod tests {
                         similarity > 0.999,
                         "{ty:?} batch {batch} {dtype:?}: cosine {similarity}"
                     );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    // The tiled layout's rows, padding group and uneven K splits (2560 columns over 16 warps) under every config
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tiled_iq4_ks_matches_the_row_major_weight() -> Result<()> {
+        const ROWS: usize = 63;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let Device::Cuda(dev) = &cuda else {
+            unreachable!()
+        };
+        if !super::super::fast_mmvq::tensor_core_capable(dev) {
+            eprintln!("SKIP: no int8 tensor cores");
+            return Ok(());
+        }
+        let ty = GgufType::Iq4Ks;
+        for cols in [512, 2560] {
+            let bytes = random_rows(ty, ROWS, cols, 11);
+            let tiled = RawGgufTensor::tiled(&[ROWS, cols], &bytes, &cuda)?;
+            assert_eq!(tiled.bytes()?, bytes);
+            assert_eq!(tiled.to_device(&Device::Cpu)?.ty, ty);
+
+            let weight = RawGgufTensor::new(ty, &[ROWS, cols], bytes, &Device::Cpu)?
+                .dequantize(&Device::Cpu)?;
+            let ids = Tensor::new(&[62u32, 0, 17, 17], &cuda)?;
+            let rows = tiled.embedding(&ids)?.to_device(&Device::Cpu)?;
+            let diff = (rows - weight.embedding(&ids.to_device(&Device::Cpu)?)?)?
+                .abs()?
+                .max_all()?;
+            assert!(diff.to_scalar::<f32>()? < 1e-6);
+
+            let gpu = GgufRawMatMul::new(tiled, None);
+            for batch in [1, 2, 3, 5, 8, 33] {
+                let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
+                let expected = xs.matmul(&weight.t()?)?;
+                for dtype in [DType::F32, DType::BF16, DType::F16] {
+                    let xs = xs.to_dtype(dtype)?.to_device(&cuda)?;
+                    let mut outputs = vec![gpu.forward(&xs)?];
+                    if batch <= super::super::fast_mmvq::MMVQ_MAX_BATCH {
+                        for cfg in 0..super::super::fast_mmvq::TILED_CONFIGS {
+                            outputs.push(super::super::fast_mmvq::tiled_plain(&gpu.w, &xs, cfg)?);
+                        }
+                    }
+                    for actual in outputs {
+                        let similarity = cosine(&actual.to_device(&Device::Cpu)?, &expected)?;
+                        assert!(
+                            similarity > 0.999,
+                            "{cols} cols batch {batch} {dtype:?}: cosine {similarity}"
+                        );
+                    }
                 }
             }
         }

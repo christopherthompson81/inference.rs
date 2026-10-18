@@ -672,6 +672,63 @@ template <int mmq_y, bool need_check> static __device__ __forceinline__ void loa
 
 }
 
+// IQ4_KS in mmvq_tc.cuh's 16-row tile order. `x` is row 0's group (the row stride is the row-major row size, and
+// tiles start on 16-row boundaries); a group is 16 rows x stride bytes: 16 row scales, then per superblock the
+// block scales as [block][row] bytes and per 32-value block two 128-byte halves of [row % 8][word] words.
+template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_iq4_ks_tiled(
+    const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
+
+    constexpr int nwarps = mmq_get_nwarps_device();
+
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + WARP_SIZE*2);
+#else
+    constexpr tile_x_sizes txs = mmq_get_dp4a_tile_x_sizes(GGML_TYPE_IQ4_XS, mmq_y);
+    int   * x_qs = (int   *)  x_tile;
+    float * x_df = (float *) (x_qs + txs.qs);
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+
+    const int kqsx = threadIdx.x / 4;
+
+#pragma unroll
+    for (int i0 = 0; i0 < mmq_y; i0 += 4*nwarps) {
+        int i = i0 + 4*threadIdx.y + threadIdx.x%4;
+
+        if (need_check) {
+            i = min(i, i_max);
+        }
+
+        const char * group = x + (int64_t)(i / 16) * 16 * stride;
+        const int r = i % 16;
+        const char * sb = group + 64 + (int64_t)kbx0 * (128 + 8 * 256);
+        const uint8_t sc = (uint8_t)sb[kqsx * 16 + r];
+        const int ls = (sc & 254) - 127;
+        const float dscale = ((const float *)group)[r];
+
+        auto values = iq4k_values + ((sc & 1) << 4);
+        const int * q = (const int *)(sb + 128 + kqsx * 256 + (r / 8) * 128) + (r % 8) * 4;
+
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) {
+            const int2 v = get_int_from_table_16(q[j], values);
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + j + 0] = v.x;
+            x_qs[i*MMQ_MMA_TILE_X_K_Q8_0 + 8*kqsx + j + 4] = v.y;
+#else
+            x_qs[i*(2*WARP_SIZE + 1)     + 8*kqsx + j + 0] = v.x;
+            x_qs[i*(2*WARP_SIZE + 1)     + 8*kqsx + j + 4] = v.y;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        }
+#if defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+        x_df[i*MMQ_MMA_TILE_X_K_Q8_0 + kqsx] = dscale * ls;
+#else
+        x_df[i*(WARP_SIZE/4) + i/4   + kqsx] = dscale * ls;
+#endif // defined(AMD_MFMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
+    }
+
+}
+
 // mmq-instance-iq5_ks_id.cu
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_iq5_ks(
     const char * __restrict__ x, int * __restrict__ x_tile, const int kbx0, const int i_max, const int stride) {
@@ -1121,6 +1178,13 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ3_KS> {
 template <int mmq_x, int mmq_y, bool need_check>
 struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ4_KS> {
     static constexpr load_tiles_mmq_t load_tiles   = load_tiles_iq4_ks<mmq_y, need_check>;
+    static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
+    static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
+};
+
+template <int mmq_x, int mmq_y, bool need_check>
+struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ4_KS_TILED> {
+    static constexpr load_tiles_mmq_t load_tiles   = load_tiles_iq4_ks_tiled<mmq_y, need_check>;
     static constexpr vec_dot_mmq_t    vec_dot_mma  = vec_dot_q8_0_q8_1_mma<mmq_x, mmq_y, MMQ_Q8_1_DS_LAYOUT_D4>;
     static constexpr vec_dot_mmq_t    vec_dot_dp4a = vec_dot_q8_0_q8_1_dp4a<mmq_x, mmq_y>;
 };

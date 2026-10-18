@@ -204,6 +204,7 @@ impl ModelLoaderConfig {
             mapper: self.device_map_setting.clone(),
             in_situ_quant: self.isq,
             paged_attn_config: self.paged_attn_config,
+            multi_row_decode: self.mtp_config.is_some(),
         };
         let pipeline = loader.load_model_from_hf(
             self.hf_revision.clone(),

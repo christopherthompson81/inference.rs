@@ -322,11 +322,10 @@ impl GGUFLoader {
         rope_pairing: RopePairing,
     ) -> Result<PreparedSource> {
         let dtype = options.dtype.try_into_dtype(&[options.device])?;
-        let source = Arc::new(inference_quant::GgufWeightSource::new(
-            archive.clone(),
-            bindings,
-            dtype,
-        )?);
+        let source = Arc::new(
+            inference_quant::GgufWeightSource::new(archive.clone(), bindings, dtype)?
+                .with_multi_row_decode(options.multi_row_decode),
+        );
         let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
         let generation_config = self.resolve_generation_config(paths, &tokenizer);
         let chat_template =

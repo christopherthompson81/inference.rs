@@ -295,6 +295,7 @@ pub struct GgufWeightSource {
     shapes: HashMap<String, Vec<usize>>,
     output_dtypes: HashMap<String, DType>,
     dtype: DType,
+    multi_row_decode: bool,
 }
 
 struct PackedBinding {
@@ -355,7 +356,15 @@ impl GgufWeightSource {
             shapes,
             output_dtypes,
             dtype,
+            multi_row_decode: false,
         })
+    }
+
+    /// Whether IQ4_KS weights on a tensor-core GPU are regrouped for 2-8 row decode steps (`RawGgufTensor::to_tiled`),
+    /// which suits speculative verification but costs single-row decode some speed.
+    pub fn with_multi_row_decode(mut self, multi_row_decode: bool) -> Self {
+        self.multi_row_decode = multi_row_decode;
+        self
     }
 
     pub fn archive(&self) -> &Arc<GgufArchive> {
@@ -610,7 +619,7 @@ impl GgufWeightSource {
             return Ok(Arc::new(GgufMatMul::from_qtensor(weight, bias)?));
         };
         let bias = self.load_bias(key, device, range, dims.len())?;
-        quant_linear(weight, bias, device)
+        quant_linear(weight, bias, device, self.multi_row_decode)
     }
 
     fn load_structural_linear(
@@ -644,7 +653,7 @@ impl GgufWeightSource {
             packed.dims[dim] = len;
         }
         let bias = self.load_bias(key, device, range, packed.dims.len())?;
-        quant_linear(packed, bias, device).map(Some)
+        quant_linear(packed, bias, device, self.multi_row_decode).map(Some)
     }
 
     fn materialize_packed_binding(
@@ -1084,16 +1093,29 @@ fn quant_linear(
     weight: PackedBinding,
     bias: Option<Tensor>,
     device: &Device,
+    multi_row_decode: bool,
 ) -> Result<Arc<dyn QuantMethod>> {
     Ok(match weight.dtype.candle() {
         Some(dtype) => Arc::new(GgufMatMul::from_qtensor(
             qtensor_from_gguf_data(dtype, &weight.data, weight.dims, device)?,
             bias,
         )?),
-        None => Arc::new(GgufRawMatMul::new(
-            RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?,
-            bias,
-        )),
+        None => {
+            #[cfg(feature = "cuda")]
+            let raw = if multi_row_decode
+                && RawGgufTensor::can_tile(weight.dtype, &weight.dims, device)
+            {
+                RawGgufTensor::tiled(&weight.dims, &weight.data, device)?
+            } else {
+                RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?
+            };
+            #[cfg(not(feature = "cuda"))]
+            let raw = {
+                let _ = multi_row_decode;
+                RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?
+            };
+            Arc::new(GgufRawMatMul::new(raw, bias))
+        }
     })
 }
 
