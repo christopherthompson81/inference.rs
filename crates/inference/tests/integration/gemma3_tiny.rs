@@ -267,6 +267,20 @@ async fn gemma3_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Resu
     Ok(())
 }
 
+// The CPUs inference-tensor's repack_x86 gives Q8_0 kernels: AVX-512 VNNI or AVX-VNNI
+#[cfg(not(any(feature = "cuda", feature = "metal")))]
+fn repacked_q8_0() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let avx512_vnni =
+            std::is_x86_feature_detected!("avx512f") && std::is_x86_feature_detected!("avx512vnni");
+        avx512_vnni
+            || std::is_x86_feature_detected!("avxvnni") && std::is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
+}
+
 // Requantizing an ISQ load in place works from the loaded weights, so Q8_0 then Q4_0 is pinned, not a Q4_0 load.
 #[cfg(not(any(feature = "cuda", feature = "metal")))]
 #[tokio::test]
@@ -279,14 +293,26 @@ async fn gemma3_re_isq_decodes_as_recorded() -> anyhow::Result<()> {
     let (before, _) = trace(&model, image_request(PROMPT, 6)).await?;
     model.re_isq_model(IsqType::Q4_0).await?;
     let (after, _) = trace(&model, image_request(PROMPT, 6)).await?;
-    let expected_before: &[(u32, f32)] = &[
-        (11, -3.6783395),
-        (11, -3.678008),
-        (11, -3.688088),
-        (11, -3.6991017),
-        (11, -3.6988003),
-        (11, -3.6956322),
-    ];
+    // x86 with VNNI runs Q8_0 through the repacked kernels, which quantize activations per 256 values, not 32
+    let expected_before: &[(u32, f32)] = if repacked_q8_0() {
+        &[
+            (11, -3.6811638),
+            (11, -3.6759253),
+            (11, -3.687854),
+            (11, -3.6999044),
+            (11, -3.6977866),
+            (11, -3.6955354),
+        ]
+    } else {
+        &[
+            (11, -3.6783395),
+            (11, -3.678008),
+            (11, -3.688088),
+            (11, -3.6991017),
+            (11, -3.6988003),
+            (11, -3.6956322),
+        ]
+    };
     // Q4_0's NEON and AVX dot products sum in a different order
     let expected_after: &[(u32, f32)] = if cfg!(target_arch = "aarch64") {
         &[
