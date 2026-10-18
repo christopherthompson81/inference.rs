@@ -91,3 +91,39 @@ model, which fail with promotion disabled.
 
 Seen in passing: Qwen3.8's tool-call grammar fails to build on this GGUF's tokenizer (`unknown special token:
 "</tool_call>"`, logged per request), an existing issue unrelated to the cache.
+
+## Run 4 - 2026-10-18 19:00
+
+Question: does a snapshot after each reply (an engine-issued prefill of prompt + reply while the client acts on the
+reply) let the next agent turn skip recomputing the reply, and is the generated token sequence what the next turn's
+prompt re-renders?
+
+Re-render check (`rerender_check.py`, Qwen3.8 tokenizer and chat template through `transformers`, reasoning off, a
+`read_file` tool): over 4 turns of 54-58 generated tokens, each with two tool calls, prompt + generated token ids are an
+exact prefix of the next turn's rendered prompt, every token; the rendered prompt lengths equal the server's (304,
+412, 520, 629). A template that re-renders a reply differently (trimmed reasoning) only makes the reply snapshot miss,
+falling back to the prompt's.
+
+Change: when a hybrid paged sequence finishes naturally (text, no adapter) and its reply carries the snapshot past the
+prompt's, and no other request waits, the engine queues a one-token greedy completion over prompt + generated tokens
+(`NormalRequest::prefix_warmup`, response discarded), provided the prompt's snapshot is on the GPU, so it prefills only
+the reply; the existing chunk cut snapshots its last full block, and the disk tier writes it through.
+
+Tiny hybrid model, 400-token prompt + 40-token reply: the next turn resumes at 416 (the reply's snapshot) instead of 384
+(the prompt's), with and without a DFlash drafter; with the warm-up disabled the same test resumes at 384 and fails.
+Without a drafter one decode step's logprob differs from a cold run by 0.044 at the same tokens: the reply's first
+block is reused as the original request decoded it, where the cold run prefills it. Control: without the warm-up
+(resume at 384, all prefill) warm and cold agree to every bit; and tiny Llama, plain attention, reusing a decoded block
+drifts by up to 0.0024 from a cold run. The test checks the resume point and tokens exactly, logprobs within 0.1.
+
+Recipe A, DFlash 2 q4k, `agent_sim.py` at ~40K tokens, 3 s between turns:
+
+```
+turn   prompt   cached   prompt time
+0      39366    -        35.22 s
+1      39661    39392    0.30 s     (cached past the previous prompt's 39366: the reply is included)
+2      39953    39680    0.30 s
+3-4    ...      ...      0.29-0.31 s
+```
+
+Before (Run 2, 28K): follow-up turns resumed at the previous prompt's snapshot, 0.47-0.61 s, the reply recomputed.

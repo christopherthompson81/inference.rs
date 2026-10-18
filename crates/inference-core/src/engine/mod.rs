@@ -69,6 +69,7 @@ pub mod agentic_session;
 mod logger;
 mod paged_step;
 mod prefix_disk;
+mod reply_warmup;
 
 const PAGED_RECURRENT_PREFIX_VALIDATION_METRIC: &str =
     "inference_paged_recurrent_prefix_validation_total";
@@ -813,6 +814,13 @@ impl Engine {
 
     fn free_finished_scheduler_sequences(&self, scheduler: &mut dyn Scheduler) {
         scheduler.cancel_closed_response_groups();
+        // retention exists only for hybrid paged prefixes, the ones a reply's prefill can extend
+        let replies = if self.paged_block_retention_monitor.is_some() {
+            scheduler.finished_reply_prefixes()
+        } else {
+            Vec::new()
+        };
+        let block_size = scheduler.block_size();
         let finished_sequence_ids = scheduler.get_finished_sequence_ids();
         let recurrent_slots = scheduler.get_finished_recurrent_slots();
         if !finished_sequence_ids.is_empty() || !recurrent_slots.is_empty() {
@@ -840,6 +848,9 @@ impl Engine {
         scheduler.free_finished_sequence_groups();
         self.logger.set_num_running(scheduler.running_len());
         self.logger.set_num_waiting(scheduler.waiting_len());
+        if let Some(block_size) = block_size {
+            self.queue_reply_warmups(replies, block_size);
+        }
     }
 
     fn prune_revoked_paged_recurrent_prefixes(&self) {

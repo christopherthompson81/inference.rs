@@ -573,3 +573,70 @@ async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -
     let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
     check_restart_restores(Some(drafter.path())).await
 }
+
+// the prompt's snapshot sits at its last full block before the end, the reply's one block further
+const PROMPT_SNAPSHOT_TOKENS: usize = 384;
+const REPLY_SNAPSHOT_TOKENS: usize = 416;
+// The reply's first block is reused as the original request decoded it, where a cold run prefills it: the same tokens,
+// logprobs a few hundredths apart (a decoded block reused by plain prefix caching drifts the same way)
+const DECODED_KV_LOGPROB_TOLERANCE: f32 = 0.1;
+const WARMUP_POLL: std::time::Duration = std::time::Duration::from_millis(20);
+const WARMUP_POLLS: usize = 250;
+
+// After a reply, the engine prefills it on top of the prompt's snapshot, so the next turn resumes past the reply
+async fn check_reply_prefill(drafter: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = stored_model(checkpoint.path(), drafter, None).await?;
+    let first = agent_tokens(AGENT_PROMPT_LEN, 0);
+    let (reply, _) = agent_turn(&model, &first, AGENT_REPLY_LEN).await?;
+    let hits = || -> anyhow::Result<usize> {
+        Ok(model
+            .cache_stats()?
+            .data
+            .iter()
+            .map(|m| m.prefix_cache_hits)
+            .sum())
+    };
+    for _ in 0..WARMUP_POLLS {
+        if hits()? > 0 {
+            break;
+        }
+        tokio::time::sleep(WARMUP_POLL).await;
+    }
+    // the warm-up hit the prompt's snapshot; give its one decode step time to finish
+    tokio::time::sleep(WARMUP_POLL * 10).await;
+    let mut next = first;
+    next.extend(reply.iter().map(|&(token, _)| token));
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 1));
+    let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
+    drop(model);
+    let cold_model = stored_model(checkpoint.path(), drafter, None).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(
+        cached == REPLY_SNAPSHOT_TOKENS,
+        "the next turn resumed at {cached}, not past the reply ({REPLY_SNAPSHOT_TOKENS}; the prompt's snapshot is at \
+         {PROMPT_SNAPSHOT_TOKENS})"
+    );
+    anyhow::ensure!(
+        traces::close(&warm, &cold, DECODED_KV_LOGPROB_TOLERANCE),
+        "resuming past the reply changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_finished_reply_is_prefilled_for_the_next_turn() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    check_reply_prefill(None).await
+}
+
+#[tokio::test]
+async fn a_finished_reply_is_prefilled_with_a_dflash_drafter() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    check_reply_prefill(Some(drafter.path())).await
+}

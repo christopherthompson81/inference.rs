@@ -211,6 +211,8 @@ pub struct NormalRequest {
     #[serde(skip)]
     // Like a closed response channel, it isn't sent to ring or NCCL workers, whose copies keep stepping.
     pub cancellation: Option<RequestCancellation>,
+    /// An engine-issued prefill of a finished reply, so the next turn resumes after it; its reply is discarded.
+    pub prefix_warmup: bool,
 }
 
 /// The `finish_reason` of a sequence its request canceled.
@@ -365,6 +367,7 @@ impl NormalRequest {
             files: None,
             input_files: Vec::new(),
             cancellation: None,
+            prefix_warmup: false,
         }
     }
 }

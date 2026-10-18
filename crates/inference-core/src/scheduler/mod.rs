@@ -240,6 +240,11 @@ pub trait Scheduler: Send + Sync {
     fn get_finished_recurrent_slots(&self) -> Vec<(usize, usize)>;
     /// Get IDs of finished sequences before free_finished_sequence_groups removes them.
     fn get_finished_sequence_ids(&self) -> Vec<usize>;
+    /// Finished text replies worth prefilling for the next turn (prompt and generated tokens, and the prompt's length),
+    /// only while no other request waits.
+    fn finished_reply_prefixes(&self) -> Vec<(Vec<u32>, usize)> {
+        Vec::new()
+    }
 
     // PagedAttention metadata
     fn block_size(&self) -> Option<usize>;
