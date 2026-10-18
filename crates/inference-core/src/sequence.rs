@@ -240,6 +240,9 @@ pub struct Sequence {
     // Speculative
     staged_speculative_tokens: SpeculativeTokens,
     staged_speculative_distribution: Option<SpeculativeProposalDistribution>,
+    // device token counts for the CUDA paths' penalties, kept in step with the tokens
+    #[cfg(feature = "cuda")]
+    cuda_penalty_counts: std::sync::Mutex<Option<inference_nn::sampler::CudaPenaltyCounts>>,
 
     // Prefix caching
     prefill_prompt_toks: Option<PrefillTokens>,
@@ -399,6 +402,8 @@ impl Sequence {
             last_is_done: None,
             staged_speculative_tokens: SpeculativeTokens::default(),
             staged_speculative_distribution: None,
+            #[cfg(feature = "cuda")]
+            cuda_penalty_counts: std::sync::Mutex::new(None),
             scheduling_urgency: 0,
             // Multimodal data
             multimodal: MultimodalData::new(input_images, input_audios, input_videos),
@@ -1172,6 +1177,32 @@ impl Sequence {
 
     pub fn prompt_tokens(&self) -> usize {
         self.prompt_len
+    }
+
+    /// `[rows, vocab]` logits with this sequence's penalties applied on the device, or None when it has none;
+    /// row `j` also counts `drafts[..j]`, the drafted tokens before a verify row.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn cuda_penalized_logits(
+        &self,
+        logits: &Tensor,
+        drafts: Option<&Tensor>,
+    ) -> inference_tensor::Result<Option<Tensor>> {
+        let Some(penalties) = self.sampler().cuda_penalties() else {
+            return Ok(None);
+        };
+        let mut counts = self
+            .cuda_penalty_counts
+            .lock()
+            .expect("penalty counts lock poisoned");
+        inference_nn::sampler::CudaPenaltyCounts::penalize(
+            &mut counts,
+            logits,
+            self.get_toks(),
+            self.prompt_len,
+            drafts,
+            penalties,
+        )
+        .map(Some)
     }
 
     pub fn stop_strings(&self) -> &[String] {

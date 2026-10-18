@@ -166,6 +166,19 @@ inference_tensor::kernel_library! {
             repetition_penalty: f32,
             stream: i64,
         );
+        pub fn apply_dense_penalties_f32(
+            x: *const c_void,
+            dst: *mut c_void,
+            seen: *const f32,
+            generated: *const f32,
+            drafts: *const u32,
+            rows: i32,
+            vocab: i32,
+            frequency_penalty: f32,
+            presence_penalty: f32,
+            repetition_penalty: f32,
+            stream: i64,
+        );
         pub fn apply_sparse_logits_bias_f32(
             x: *const c_void,
             dst: *mut c_void,

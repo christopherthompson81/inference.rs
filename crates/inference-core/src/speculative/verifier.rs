@@ -49,7 +49,9 @@ fn sparse_rejection_plan(seq: &Sequence) -> Option<CudaSpeculativeSamplingPlan> 
     {
         return None;
     }
-    seq.sampler().cuda_speculative_sampling_plan(false)
+    // the target rows are penalized before rejection (sparse_rejection_candidate)
+    seq.sampler()
+        .cuda_speculative_sampling_plan_with_penalties(false)
 }
 
 #[cfg(feature = "cuda")]
@@ -301,6 +303,24 @@ fn sparse_rejection_candidate<'a>(
         [1, rows, _] if *rows == drafts + 1 => input.logits.clone(),
         [rows, _] if *rows == drafts + 1 => input.logits.unsqueeze(0)?,
         _ => return Ok(None),
+    };
+    let logits = if input.seq.sampler().cuda_penalties().is_some() {
+        let host_drafts;
+        let draft_tokens = match (input.proposal.as_device(), input.proposal.as_host()) {
+            (Some(tokens), _) => tokens,
+            (None, Some(tokens)) => {
+                host_drafts = Tensor::from_slice(tokens, tokens.len(), logits.device())?;
+                &host_drafts
+            }
+            (None, None) => return Ok(None),
+        };
+        let rows = logits.squeeze(0)?;
+        match input.seq.cuda_penalized_logits(&rows, Some(draft_tokens))? {
+            Some(penalized) => penalized.unsqueeze(0)?,
+            None => logits,
+        }
+    } else {
+        logits
     };
     let [_, _, vocab] = *logits.dims() else {
         unreachable!("sparse rejection logits were normalized to rank three")
