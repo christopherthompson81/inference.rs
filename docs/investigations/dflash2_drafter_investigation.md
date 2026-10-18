@@ -384,3 +384,67 @@ multi-token test.
 
 Implication: the step cost is now flat to within 5 ms out to 53K (was +32 ms); tok/s at long context follows
 acceptance. At 53K DFlash runs 93 tok/s against 41 without speculation.
+
+## Run 13 - 2026-10-18 10:30
+
+Question: speed out to the full 262K context, for the model card, at the serving settings (recipe A, q3 cache,
+`--pa-context-len 262144`, DFlash 2 q4k at 7 drafts; master after #495).
+
+`ctx_sweep.py`, 1024 tokens with DFlash, 512 without:
+
+```
+prompt    DFlash tok/s   mean length   prefill tok/s     no speculation tok/s   prefill tok/s
+    54    133.2          3.94          771               45.2                   635
+  7267    130.1          4.02         1401
+ 15016    105.9          3.37         1307
+ 29055     96.8          3.18         1160               40.5                  1130
+ 58699     95.9          3.42          929
+121221     94.4          3.97          667               31.7                   627
+173804     68.2          3.15          552
+261062    CUDA_ERROR_OUT_OF_MEMORY mid-request (HTTP 500)  24.6                   378
+```
+
+Peak GPU memory: 24,054 MiB with DFlash (the load measures 23,178), 20,989 without.
+
+Implication: the 262K DFlash setup loads but cannot serve a ~261K-token request: something on the speculative path
+grows with context past the load-time reservation, while plain decode serves the full window in 21 GiB. Run 5's "fits
+262K" was a load-time measurement. Until that growth is found, the usable DFlash context is somewhere between 174K
+and 261K. Next: find what allocates with context on the DFlash path (prefill chunks capture target hidden states for
+the drafter; its context KV is bounded), then retest at the full window.
+
+## Run 14 - 2026-10-18 13:00
+
+Question: what fills the card in Run 13's out-of-memory, and how does the 262K DFlash setup keep enough headroom?
+
+Findings, in order:
+
+- Not prompt length alone: the same 261K request passed on a fresh server under Nsight, and a replay of Run 13's
+  whole sequence (8 requests, 1024 tokens each) passed too, memory flat between requests (23,635-23,960 MiB).
+- Not a context-sized allocation: Nsight memory tracking on a 121K request shows net allocations during the request
+  peak at 156 MiB and stay flat through prefill; the stream-ordered pool is trimmed to zero after each chunk.
+- Other GPU clients move: the desktop (compositor, Plasma, Chrome's GPU process) holds 470-1,260 MiB, and the screen
+  locker's greeter adds 301 MiB while the screen is locked. The card's usable capacity is 24,145 MiB (PyTorch's
+  `mem_get_info`), not nvidia-smi's 24,576, so about 440 MiB was really free after the old load.
+- The DFlash windowed pool over-allocated: 9 live slots (one per GDN pool slot, the pool's initial capacity) where
+  the reservation counted `max_seqs + 1` = 5, and 17 prefix checkpoints (`--prefix-cache-n + 1`) where the GDN pool
+  can hold at most 8 snapshots, which a restore also needs. 12 slots x 41 MiB never usable.
+- `--max-seqs 1` saves 75 MiB (the pool stayed at 9 slots); `--prefix-cache-n 4` 480 MiB.
+
+Fix: `dflash::windowed_kv_capacities` sizes live slots as served sequences + the graph pad slot and retained
+prefixes as `min(--prefix-cache-n, GDN pool capacity - pad)`, for both the reservation and the allocation.
+
+```
+                                 live / checkpoint slots   our process at load
+before                           9 / 17                    22,441 MiB
+after                            5 / 9                     21,949 MiB (-492)
+```
+
+Verification at the full window: a 260,929-token prompt plus 1,024 generated tokens, DFlash at 7 drafts, with a
+PyTorch process holding 650 MiB beside the server (its 256 MiB context plus 400 MiB, about the locker plus Chrome
+growing): passed, card free 233 MiB at the request's start, peak 24,007 of 24,145 MiB; decode 50.6 tok/s at mean
+length 2.76, prefill 826 tok/s (the earlier serve had cached part of this prompt). Without the hog it peaks at
+23,345 MiB. Before the fix the same hog would have left the request about 490 MiB short.
+
+Implication: the 262K DFlash setup now serves the full window with ~650 MiB to spare for other GPU clients. More
+headroom: move the desktop to the integrated GPU, or lower `--prefix-cache-n` (8 retained prefixes cost ~41 MiB
+each in the drafter beside the GDN snapshots).

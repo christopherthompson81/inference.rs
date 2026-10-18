@@ -137,13 +137,15 @@ pub fn reserve_external_mtp_memory_with_runtime(
     #[cfg(all(feature = "cuda", feature = "models-qwen", target_family = "unix"))]
     let bytes = if device.is_cuda() {
         if let Some(serving_capacity) = cache_config.serving_capacity {
-            let sequence_capacity = serving_capacity
-                .checked_add(crate::pipeline::RECURRENT_GRAPH_PAD_SLOTS)
-                .ok_or_else(|| anyhow::anyhow!("DFlash serving capacity overflow"))?;
+            let (sequence_capacity, retained_prefixes) = super::dflash::windowed_kv_capacities(
+                serving_capacity,
+                crate::kv_cache::recurrent_pool_capacity(serving_capacity),
+                runtime.prefix_cache_capacity(),
+            );
             let cache_bytes = super::dflash::windowed_kv_cache_size_in_bytes(
                 &local_mtp,
                 sequence_capacity,
-                runtime.prefix_cache_capacity(),
+                retained_prefixes,
                 crate::paged_attention::DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,
             )?;
             bytes

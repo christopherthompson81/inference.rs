@@ -290,9 +290,20 @@ impl Qwen3_5TextModel {
         let block = drafter.block_size();
         let checkpoint_lanes = self.cache.hybrid().checkpoint_lanes();
         let n_predict = resolve_dflash_n_predict(config.n_predict, block, checkpoint_lanes)?;
-        let sequence_capacity = self.cache.hybrid().recurrent_capacity();
-        let windowed_kv =
-            drafter.enable_windowed_kv(sequence_capacity, runtime.prefix_cache_capacity())?;
+        let recurrent_capacity = self.cache.hybrid().recurrent_capacity();
+        let serving_capacity = self
+            .cache
+            .hybrid()
+            .fitted_serving_capacity()
+            .unwrap_or_else(|| {
+                recurrent_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS)
+            });
+        let (sequence_capacity, retained_prefixes) = crate::dflash::windowed_kv_capacities(
+            serving_capacity,
+            recurrent_capacity,
+            runtime.prefix_cache_capacity(),
+        );
+        let windowed_kv = drafter.enable_windowed_kv(sequence_capacity, retained_prefixes)?;
         self.set_dflash_tap_layers(drafter.target_layer_ids.clone());
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
         self.set_store_spec_hidden(true);
