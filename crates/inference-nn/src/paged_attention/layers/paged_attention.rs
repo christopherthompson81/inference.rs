@@ -2144,6 +2144,29 @@ impl PagedAttention {
         if block_table.dim(0)? != query.dim(0)? {
             return Ok(None);
         }
+        // a sequence's verify rows go as one causal block over its table, so each K/V tile loads once for all
+        // of them, not once per row; a chunked window's full lengths stay per row
+        let rows = ctx.dims.seq_len;
+        let per_sequence = (rows > 1 && ctx.sdpa_params.chunk.is_none())
+            .then(|| -> Result<_> {
+                let seqs = query.dim(0)? / rows;
+                let width = block_table.dim(1)?;
+                Ok((
+                    block_table
+                        .reshape((seqs, rows, width))?
+                        .narrow(1, 0, 1)?
+                        .reshape((seqs, width))?,
+                    seq_lens
+                        .reshape((seqs, rows))?
+                        .narrow(1, rows - 1, 1)?
+                        .reshape(seqs)?,
+                ))
+            })
+            .transpose()?;
+        let (block_table, seq_lens) = match &per_sequence {
+            Some((tables, lens)) => (tables, lens),
+            None => (block_table, seq_lens),
+        };
         let kv = PagedKv {
             k_cache: key_cache,
             v_cache: value_cache,
@@ -2176,7 +2199,10 @@ impl PagedAttention {
         ) else {
             return Ok(None);
         };
-        let query = rotate_for_quant(&query.unsqueeze(1)?, &opts, kv_quant::k_rotation)?;
+        let (n, h, d) = query.dims3()?;
+        let q_rows = if per_sequence.is_some() { rows } else { 1 };
+        let query = query.reshape((n / q_rows, q_rows, h, d))?;
+        let query = rotate_for_quant(&query, &opts, kv_quant::k_rotation)?;
         if !inference_fattn::supported_paged(&query, &kv, &opts)? {
             return Ok(None);
         }
@@ -2185,7 +2211,7 @@ impl PagedAttention {
             &opts,
             kv_quant::v_rotation,
         )?
-        .squeeze(1)
+        .reshape((n, h, d))
         .map(Some)
     }
 
