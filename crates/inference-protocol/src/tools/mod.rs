@@ -7,7 +7,7 @@ pub(crate) mod strategy;
 
 use anyhow::Result;
 pub use parsers::ToolCallFormat;
-pub use parsers::specialize_required_tool_call_grammar;
+pub use parsers::specialize_tool_call_grammar;
 pub use request::*;
 pub use response::*;
 use serde::de::{self, Deserializer, MapAccess, Visitor};

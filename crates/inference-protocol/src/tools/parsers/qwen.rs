@@ -58,23 +58,17 @@ impl ToolFormatParser for QwenParser {
     }
 }
 
+// The wrappers are text here; `specialize_tool_call_grammar` makes them token references where the tokenizer has
+// them as special tokens (Qwen3.5/3.8 keep them ordinary added tokens)
 fn qwen_tool_call_lark(tools: &[Tool], include_wrapper: bool) -> String {
     // Parallel calls arrive as consecutive <tool_call> blocks, so the grammar stays open for more
     let start = if include_wrapper {
         r#"start: "<tool_call>" (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))*"#
     } else {
-        r#"start: (json_call | xml_call) ("\n"? <tool_call> (json_call | xml_call))*"#
+        r#"start: (json_call | xml_call) ("\n"? "<tool_call>" (json_call | xml_call))*"#
     };
-    let json_call = if include_wrapper {
-        r#"json_call: @json_body "</tool_call>""#
-    } else {
-        "json_call: @json_body </tool_call>"
-    };
-    let xml_end = if include_wrapper {
-        r#""</tool_call>""#
-    } else {
-        "</tool_call>"
-    };
+    let json_call = r#"json_call: @json_body "</tool_call>""#;
+    let xml_end = r#""</tool_call>""#;
 
     format!(
         r#"{start}
@@ -285,7 +279,7 @@ fn lark_string(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{QwenParser, parse_qwen_tool_calls};
-    use crate::tools::parsers::{ToolFormatParser, specialize_required_tool_call_grammar};
+    use crate::tools::parsers::{ToolFormatParser, specialize_tool_call_grammar};
     use inference_mcp::{Function, ToolType};
     use serde_json::Value;
     use serde_json::json;
@@ -437,6 +431,62 @@ print(1 < 2)
         assert!(!lark.contains("\"\\n</parameter>\""));
     }
 
+    // Qwen3.5/3.8 keep the wrappers as ordinary added tokens: their bytes, no special marker
+    fn plain_wrapper_token_trie() -> toktrie::TokTrie {
+        let mut tokens = (0_u8..=127).map(|byte| vec![byte]).collect::<Vec<_>>();
+        let eos = u32::try_from(tokens.len()).expect("test vocabulary fits in u32");
+        tokens.push(b"\xff<eos>".to_vec());
+        tokens.push(b"<tool_call>".to_vec());
+        tokens.push(b"</tool_call>".to_vec());
+        let vocab_size = u32::try_from(tokens.len()).expect("test vocabulary fits in u32");
+        toktrie::TokTrie::from(&toktrie::TokRxInfo::new(vocab_size, eos), &tokens)
+    }
+
+    // After the model wrote `<tool_call>`, the continuation grammar builds for either tokenizer and ends on its close
+    #[test]
+    fn continuation_grammar_fits_plain_and_special_wrappers() {
+        let tool = crate::Tool {
+            tp: ToolType::Function,
+            function: Function {
+                name: "get_weather".to_string(),
+                description: None,
+                parameters: None,
+                strict: None,
+            },
+        };
+        for (trie, close_is_special) in [
+            (plain_wrapper_token_trie(), false),
+            (wrapper_token_trie(), true),
+        ] {
+            let mut grammar =
+                super::super::build_tool_call_grammar("<tool_call>", std::slice::from_ref(&tool))
+                    .expect("a Qwen tool call");
+            specialize_tool_call_grammar(&mut grammar, &trie);
+            let lark = grammar.grammars[0].lark_grammar.clone().unwrap();
+            assert_eq!(
+                lark.contains("@json_body </tool_call>"),
+                close_is_special,
+                "{lark}"
+            );
+            let env: toktrie::TokEnv = Arc::new(GreedyTokenizerEnv { trie });
+            let factory = llguidance::ParserFactory::new_simple(&env).unwrap();
+            let parser = factory
+                .create_parser(grammar)
+                .expect("the grammar builds for this tokenizer");
+            let mut matcher = llguidance::Matcher::new(Ok(parser));
+            let body = br#"{"name":"get_weather","arguments":{}}"#;
+            for token in env.tok_trie().greedy_tokenize(body) {
+                matcher.consume_token(token).unwrap();
+            }
+            let close = if close_is_special {
+                env.tok_trie().get_special_token("</tool_call>").unwrap()
+            } else {
+                env.tok_trie().greedy_tokenize(b"</tool_call>")[0]
+            };
+            assert!(matcher.compute_mask().unwrap().is_allowed(close));
+        }
+    }
+
     #[test]
     fn required_grammar_uses_tokenizer_special_wrappers() {
         let tool = crate::Tool {
@@ -458,7 +508,7 @@ print(1 < 2)
 
         assert!(!matcher.compute_mask().unwrap().is_allowed(start_token));
 
-        specialize_required_tool_call_grammar(&mut grammar, factory.tok_env().tok_trie());
+        specialize_tool_call_grammar(&mut grammar, factory.tok_env().tok_trie());
 
         let lark = grammar.grammars[0].lark_grammar.as_ref().unwrap();
         assert!(lark.contains("start: <tool_call> (json_call | xml_call)"));
@@ -489,8 +539,9 @@ print(1 < 2)
                 strict: None,
             },
         };
-        let grammar = QwenParser.tool_call_grammar(&[tool], "<tool_call>");
+        let mut grammar = QwenParser.tool_call_grammar(&[tool], "<tool_call>");
         let trie = wrapper_token_trie();
+        specialize_tool_call_grammar(&mut grammar, &trie);
         let start_token = trie.get_special_token("<tool_call>").unwrap();
         let end_token = trie.get_special_token("</tool_call>").unwrap();
         let eos = trie.eos_token();
