@@ -521,6 +521,97 @@ impl CudaBatchSamplingKind {
     }
 }
 
+/// Repetition, frequency and presence penalties as the CUDA paths apply them; neutral values are 1, 0 and 0.
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CudaPenalties {
+    pub repetition: f32,
+    pub frequency: f32,
+    pub presence: f32,
+}
+
+/// A sequence's token counts on the device for its penalties: every token it holds (seen) and those it generated,
+/// updated with the tokens added since the last step rather than rebuilt from the whole context.
+#[cfg(feature = "cuda")]
+pub struct CudaPenaltyCounts {
+    seen: Tensor,
+    generated: Tensor,
+    synced_len: usize,
+    last_token: Option<u32>,
+}
+
+#[cfg(feature = "cuda")]
+impl CudaPenaltyCounts {
+    fn new(vocab: usize, device: &Device) -> Result<Self> {
+        Ok(Self {
+            seen: Tensor::zeros(vocab, inference_tensor::DType::F32, device)?,
+            generated: Tensor::zeros(vocab, inference_tensor::DType::F32, device)?,
+            synced_len: 0,
+            last_token: None,
+        })
+    }
+
+    // tokens past the vocab carry no penalty, as on the host path
+    fn add(&mut self, tokens: &[u32], first_generated: usize) -> Result<()> {
+        let vocab = self.seen.dim(0)? as u32;
+        let device = self.seen.device().clone();
+        let counted = |tokens: &[u32]| -> Result<Option<(Tensor, Tensor)>> {
+            let ids: Vec<u32> = tokens.iter().copied().filter(|&t| t < vocab).collect();
+            if ids.is_empty() {
+                return Ok(None);
+            }
+            let n = ids.len();
+            Ok(Some((
+                Tensor::from_vec(ids, n, &device)?,
+                Tensor::ones(n, inference_tensor::DType::F32, &device)?,
+            )))
+        };
+        if let Some((ids, ones)) = counted(tokens)? {
+            self.seen = self.seen.index_add(&ids, &ones, 0)?;
+        }
+        if let Some((ids, ones)) = counted(&tokens[first_generated.min(tokens.len())..])? {
+            self.generated = self.generated.index_add(&ids, &ones, 0)?;
+        }
+        Ok(())
+    }
+
+    /// `[rows, vocab]` logits (any float dtype) penalized as F32 for a sequence holding `tokens`, its first
+    /// `prompt_len` the prompt; row `j` also counts `drafts[..j]`.
+    pub fn penalize(
+        counts: &mut Option<Self>,
+        logits: &Tensor,
+        tokens: &[u32],
+        prompt_len: usize,
+        drafts: Option<&Tensor>,
+        penalties: CudaPenalties,
+    ) -> Result<Tensor> {
+        let vocab = logits.dim(1)?;
+        // a shorter or rewritten history (a reset sequence) rebuilds the counts
+        let stale = counts.as_ref().is_none_or(|c| {
+            c.seen.dim(0).ok() != Some(vocab)
+                || c.synced_len > tokens.len()
+                || c.synced_len > 0 && c.last_token != tokens.get(c.synced_len - 1).copied()
+        });
+        if stale {
+            *counts = Some(Self::new(vocab, logits.device())?);
+        }
+        let state = counts.as_mut().expect("the counts were just created");
+        let start = state.synced_len;
+        if start < tokens.len() {
+            state.add(&tokens[start..], prompt_len.saturating_sub(start))?;
+            state.synced_len = tokens.len();
+            state.last_token = tokens.last().copied();
+        }
+        crate::ops::cuda_apply_dense_penalties_f32(
+            &logits.to_dtype(inference_tensor::DType::F32)?,
+            &state.seen,
+            &state.generated,
+            drafts,
+            penalties,
+        )
+    }
+}
+
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy, Debug)]
 pub struct CudaBatchSamplingPlan {
@@ -768,11 +859,31 @@ impl Sampler {
         self.temperature
     }
 
+    /// The repetition, frequency and presence penalties this sampler applies, or None when all are neutral.
+    #[cfg(feature = "cuda")]
+    pub fn cuda_penalties(&self) -> Option<CudaPenalties> {
+        let penalties = CudaPenalties {
+            repetition: self.repetition_penalty.unwrap_or(1.0),
+            frequency: self.frequency_penalty.unwrap_or(0.0),
+            presence: self.presence_penalty.unwrap_or(0.0),
+        };
+        (penalties.repetition != 1.0 || penalties.frequency != 0.0 || penalties.presence != 0.0)
+            .then_some(penalties)
+    }
+
     #[cfg(feature = "cuda")]
     pub fn cuda_batch_sampling_plan(&self, return_logprobs: bool) -> Option<CudaBatchSamplingPlan> {
-        let has_penalties = self.frequency_penalty.unwrap_or(0.0) != 0.0
-            || self.presence_penalty.unwrap_or(0.0) != 0.0
-            || self.repetition_penalty.unwrap_or(1.0) != 1.0;
+        self.cuda_sampling_plan(return_logprobs, false)
+    }
+
+    // `with_penalties`: the caller applies `cuda_penalties` to the logits itself, so they do not bar a plan
+    #[cfg(feature = "cuda")]
+    fn cuda_sampling_plan(
+        &self,
+        return_logprobs: bool,
+        with_penalties: bool,
+    ) -> Option<CudaBatchSamplingPlan> {
+        let has_penalties = !with_penalties && self.cuda_penalties().is_some();
         let has_dry_penalty = self
             .dry_params
             .as_ref()
@@ -827,7 +938,21 @@ impl Sampler {
         &self,
         return_logprobs: bool,
     ) -> Option<CudaSpeculativeSamplingPlan> {
-        let plan = self.cuda_batch_sampling_plan(return_logprobs)?;
+        self.speculative_plan(self.cuda_batch_sampling_plan(return_logprobs)?)
+    }
+
+    /// The speculative plan of a sampler whose penalties the caller applies: the verifier penalizes its target
+    /// rows, and drafts are sampled unpenalized (rejection sampling is exact for any draft distribution).
+    #[cfg(feature = "cuda")]
+    pub fn cuda_speculative_sampling_plan_with_penalties(
+        &self,
+        return_logprobs: bool,
+    ) -> Option<CudaSpeculativeSamplingPlan> {
+        self.speculative_plan(self.cuda_sampling_plan(return_logprobs, true)?)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn speculative_plan(&self, plan: CudaBatchSamplingPlan) -> Option<CudaSpeculativeSamplingPlan> {
         let top_k = match plan.kind {
             CudaBatchSamplingKind::Greedy => return None,
             CudaBatchSamplingKind::Categorical | CudaBatchSamplingKind::Nucleus => 0,
@@ -2253,6 +2378,75 @@ impl Sampler {
 mod tests {
     use super::{ModelGenerationDefaults, SamplingParams, argmax_f32, partial_sort_top_k};
     use std::collections::HashMap;
+
+    // The device penalties match the host's on every verify row, as the counts grow and when the history is rewritten.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn device_penalties_match_the_host_per_verify_row() -> inference_tensor::Result<()> {
+        use super::{CudaPenaltyCounts, Sampler};
+        use inference_tensor::{Device, Tensor};
+        crate::skip_without_cuda!();
+        const VOCAB: usize = 64;
+        const PROMPT_LEN: usize = 5;
+        let dev = Device::new_cuda(0)?;
+        let sampler = Sampler::new(
+            Some(0.7),
+            0,
+            None,
+            Some(0.3),
+            Some(0.5),
+            Some(1.25),
+            None,
+            20,
+            0.95,
+            0.0,
+            HashMap::new(),
+            vec![],
+        )
+        .unwrap();
+        let penalties = sampler.cuda_penalties().expect("penalized sampler");
+        let mut counts = None;
+        // a token past the vocab is ignored on both paths
+        let mut tokens: Vec<u32> = vec![3, 9, 3, 70, 12, 9, 40, 9];
+        let drafts = vec![12u32, 51, 3];
+        for step in 0..3 {
+            if step == 1 {
+                tokens.extend([51, 2]);
+            }
+            if step == 2 {
+                tokens.truncate(6);
+                tokens.push(33);
+            }
+            let rows = drafts.len() + 1;
+            let host: Vec<f32> = (0..rows * VOCAB)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) / 7.0)
+                .collect();
+            let logits = Tensor::from_slice(&host, (rows, VOCAB), &dev)?;
+            let draft_tensor = Tensor::from_slice(&drafts, drafts.len(), &dev)?;
+            let device = CudaPenaltyCounts::penalize(
+                &mut counts,
+                &logits,
+                &tokens,
+                PROMPT_LEN,
+                Some(&draft_tensor),
+                penalties,
+            )?
+            .to_vec2::<f32>()?;
+            for (row, device_row) in device.iter().enumerate() {
+                let mut context = tokens.clone();
+                context.extend(&drafts[..row]);
+                let mut expected = host[row * VOCAB..(row + 1) * VOCAB].to_vec();
+                sampler.apply_freq_pres_rep_penalty(&mut expected, &context, PROMPT_LEN)?;
+                for (v, (a, b)) in device_row.iter().zip(&expected).enumerate() {
+                    assert!(
+                        (a - b).abs() < 1e-5,
+                        "step {step} row {row} token {v}: {a} vs {b}"
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
 
     #[test]
     fn test_argmax() {

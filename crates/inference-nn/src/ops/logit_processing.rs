@@ -128,6 +128,130 @@ pub fn cuda_apply_sparse_penalties_f32(
     )))
 }
 
+/// Repetition, frequency and presence penalties over one sequence's `[rows, vocab]` F32 logits, from dense F32
+/// counts of the tokens it has seen and generated; row `j` also counts `drafts[..j]` (a verify row's drafted tokens).
+#[cfg(feature = "cuda")]
+pub fn cuda_apply_dense_penalties_f32(
+    logits: &Tensor,
+    seen: &Tensor,
+    generated: &Tensor,
+    drafts: Option<&Tensor>,
+    penalties: crate::sampler::CudaPenalties,
+) -> Result<Tensor> {
+    use inference_tensor::backend::BackendStorage;
+    use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+    use inference_tensor::cuda_backend::{CudaStorage, CudaStorageSlice};
+    use std::ffi::c_void;
+
+    let (rows, vocab) = logits.dims2()?;
+    if logits.dtype() != DType::F32 || seen.dtype() != DType::F32 || generated.dtype() != DType::F32
+    {
+        inference_tensor::bail!("cuda_apply_dense_penalties_f32 requires F32 logits and counts");
+    }
+    if seen.dims() != [vocab] || generated.dims() != [vocab] {
+        inference_tensor::bail!(
+            "cuda_apply_dense_penalties_f32 counts must cover the {vocab}-token vocab"
+        );
+    }
+    match drafts {
+        Some(drafts) if drafts.dtype() != DType::U32 || drafts.elem_count() + 1 < rows => {
+            inference_tensor::bail!(
+                "cuda_apply_dense_penalties_f32 needs a U32 draft per row after the first"
+            )
+        }
+        None if rows > 1 => {
+            inference_tensor::bail!(
+                "cuda_apply_dense_penalties_f32 rows after the first need their drafts"
+            )
+        }
+        _ => {}
+    }
+    let rows_i32 = i32::try_from(rows).map_err(inference_tensor::Error::wrap)?;
+    let vocab_i32 = i32::try_from(vocab).map_err(inference_tensor::Error::wrap)?;
+    let logits = logits.contiguous()?;
+    let drafts = drafts.map(Tensor::contiguous).transpose()?;
+
+    let (logits_storage, logits_layout) = logits.storage_and_layout();
+    let (seen_storage, seen_layout) = seen.storage_and_layout();
+    let (generated_storage, generated_layout) = generated.storage_and_layout();
+    let drafts_storage = drafts.as_ref().map(|d| d.storage_and_layout());
+    let (
+        inference_tensor::Storage::Cuda(logits_storage),
+        inference_tensor::Storage::Cuda(seen_storage),
+        inference_tensor::Storage::Cuda(generated_storage),
+    ) = (&*logits_storage, &*seen_storage, &*generated_storage)
+    else {
+        inference_tensor::bail!("cuda_apply_dense_penalties_f32 requires CUDA tensors");
+    };
+    let (
+        CudaStorageSlice::F32(src),
+        CudaStorageSlice::F32(seen_src),
+        CudaStorageSlice::F32(generated_src),
+    ) = (
+        &logits_storage.slice,
+        &seen_storage.slice,
+        &generated_storage.slice,
+    )
+    else {
+        inference_tensor::bail!("cuda_apply_dense_penalties_f32 requires F32 storage");
+    };
+    let dev = logits_storage.device();
+    let stream = dev.cuda_stream();
+    let mut out = unsafe { dev.alloc::<f32>(rows * vocab) }?;
+
+    let (src_ptr, src_guard) = src.device_ptr(&stream);
+    let (seen_ptr, seen_guard) = seen_src.device_ptr(&stream);
+    let (generated_ptr, generated_guard) = generated_src.device_ptr(&stream);
+    let (out_ptr, out_guard) = out.device_ptr_mut(&stream);
+    let mut drafts_guard = None;
+    let drafts_ptr = match &drafts_storage {
+        Some((storage, layout)) => {
+            let inference_tensor::Storage::Cuda(storage) = &**storage else {
+                inference_tensor::bail!("cuda_apply_dense_penalties_f32 requires CUDA drafts");
+            };
+            let CudaStorageSlice::U32(tokens) = &storage.slice else {
+                inference_tensor::bail!("cuda_apply_dense_penalties_f32 requires U32 drafts");
+            };
+            let (ptr, guard) = tokens.device_ptr(&stream);
+            drafts_guard = Some(guard);
+            unsafe { (ptr as *const u32).add(layout.start_offset()) }
+        }
+        None => std::ptr::null(),
+    };
+
+    unsafe {
+        ffi::apply_dense_penalties_f32(
+            (src_ptr as *const f32).add(logits_layout.start_offset()) as *const c_void,
+            out_ptr as *mut c_void,
+            (seen_ptr as *const f32).add(seen_layout.start_offset()),
+            (generated_ptr as *const f32).add(generated_layout.start_offset()),
+            drafts_ptr,
+            rows_i32,
+            vocab_i32,
+            penalties.frequency,
+            penalties.presence,
+            penalties.repetition,
+            stream.cu_stream() as i64,
+        );
+    }
+    drop((
+        src_guard,
+        seen_guard,
+        generated_guard,
+        out_guard,
+        drafts_guard,
+    ));
+
+    let out_storage = CudaStorage {
+        slice: CudaStorageSlice::F32(out),
+        device: dev.clone(),
+    };
+    Ok(Tensor::from((
+        inference_tensor::Storage::Cuda(out_storage),
+        logits.shape().clone(),
+    )))
+}
+
 #[cfg(feature = "cuda")]
 pub fn cuda_apply_sparse_logits_bias_f32(
     input: &Tensor,

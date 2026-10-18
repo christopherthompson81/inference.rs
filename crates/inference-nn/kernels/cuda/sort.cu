@@ -91,6 +91,51 @@ apply_sparse_penalties_f32(const void *x, void *dst, const uint32_t *token_ids,
       frequency_penalty, presence_penalty, repetition_penalty);
 }
 
+// One sequence's rows of [rows, vocab] logits penalized from its dense counts of the tokens seen (prompt and
+// generated) and generated; row j also counts drafts[0..j), the drafted tokens before it (MTP verify rows).
+__global__ void apply_dense_penalties_f32_kernel(
+    const float *__restrict__ src, float *__restrict__ dst,
+    const float *__restrict__ seen, const float *__restrict__ generated,
+    const uint32_t *__restrict__ drafts, const int rows, const int vocab,
+    const float frequency_penalty, const float presence_penalty,
+    const float repetition_penalty) {
+  const int v = blockIdx.x * blockDim.x + threadIdx.x;
+  if (v >= vocab) {
+    return;
+  }
+  float count = generated[v];
+  bool was_seen = seen[v] > 0.0f;
+  for (int j = 0; j < rows; ++j) {
+    if (j > 0 && drafts[j - 1] == static_cast<uint32_t>(v)) {
+      count += 1.0f;
+      was_seen = true;
+    }
+    const int64_t i = static_cast<int64_t>(j) * vocab + v;
+    float value = src[i];
+    value -= count * frequency_penalty + (count > 0.0f ? presence_penalty : 0.0f);
+    if (repetition_penalty != 1.0f && was_seen) {
+      value = value > 0.0f ? value / repetition_penalty : value * repetition_penalty;
+    }
+    dst[i] = value;
+  }
+}
+
+extern "C" void apply_dense_penalties_f32(
+    const void *x, void *dst, const float *seen, const float *generated,
+    const uint32_t *drafts, const int rows, const int vocab,
+    const float frequency_penalty, const float presence_penalty,
+    const float repetition_penalty, int64_t stream) {
+  if (rows <= 0 || vocab <= 0) {
+    return;
+  }
+  const int block = 256;
+  apply_dense_penalties_f32_kernel<<<(vocab + block - 1) / block, block, 0,
+                                     (cudaStream_t)stream>>>(
+      reinterpret_cast<const float *>(x), reinterpret_cast<float *>(dst), seen,
+      generated, drafts, rows, vocab, frequency_penalty, presence_penalty,
+      repetition_penalty);
+}
+
 extern "C" void apply_sparse_logits_bias_f32(
     const void *x, void *dst, const uint32_t *token_ids, const float *biases,
     const int n, const int n_tokens, int64_t stream) {

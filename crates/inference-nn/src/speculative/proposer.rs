@@ -523,7 +523,8 @@ impl CudaDraftSampler {
         for seq in sequences {
             let plan = seq
                 .sampler()
-                .cuda_speculative_sampling_plan(false)
+                // drafts are sampled unpenalized; the verifier applies the penalties to its target rows
+                .cuda_speculative_sampling_plan_with_penalties(false)
                 .filter(|_| seq.stochastic_verification_allowed());
             let Some(plan) = plan else {
                 return Ok(None);
