@@ -2383,7 +2383,7 @@ pub fn try_fused_quantized_ffn(
         }
     }
 
-    if flat_batch <= gguf::fast_mmvq::MMVQ_MAX_BATCH {
+    if gguf::fast_mmvq::prefers_mmvq(gate_q.dtype(), flat_batch) {
         return Ok(None);
     }
     if gate_q.dtype() != up_q.dtype()
@@ -2470,7 +2470,7 @@ pub fn try_fused_quantized_gate_up(
     if gate_q.dtype() != up_q.dtype() {
         return Ok(None);
     }
-    if flat_batch <= gguf::fast_mmvq::MMVQ_MAX_BATCH {
+    if gguf::fast_mmvq::prefers_mmvq(gate_q.dtype(), flat_batch) {
         if !gguf::fast_mmvq::supports_fused_glu(xs.dtype(), gate_q.dtype()) {
             return Ok(None);
         }
@@ -2588,7 +2588,7 @@ pub fn try_fused_quantized_qkv(
     if dtype != k_q.dtype() || dtype != v_q.dtype() {
         return Ok(None);
     }
-    if flat_batch <= gguf::fast_mmvq::MMVQ_MAX_BATCH {
+    if gguf::fast_mmvq::prefers_mmvq(dtype, flat_batch) {
         if !gguf::fast_mmvq::supports(dtype) {
             return Ok(None);
         }

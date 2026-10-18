@@ -1737,3 +1737,80 @@ mod tests {
         Ok(())
     }
 }
+
+// MMVQ against MMQ at decode and verify batch sizes, on a real checkpoint's weights:
+// `GGUF_BENCH_FILE=<model.gguf> cargo nextest run -p inference-quant --features cuda --run-ignored only -E
+// 'test(/small_batch_mmvq_vs_mmq/)' --no-capture`
+#[cfg(all(test, feature = "cuda"))]
+mod bench {
+    use super::*;
+    use crate::gguf::fast_mmvq;
+    use std::time::Instant;
+
+    const FILE_ENV: &str = "GGUF_BENCH_FILE";
+    // comma-separated tensor names in place of TENSORS, for checkpoints of other architectures
+    const TENSORS_ENV: &str = "GGUF_BENCH_TENSORS";
+    // one of each weight type and shape a hybrid Qwen3.8 decode step reads
+    const TENSORS: [&str; 5] = [
+        "blk.0.ffn_up.weight",
+        "blk.0.ffn_down.weight",
+        "blk.0.attn_qkv.weight",
+        "blk.0.ssm_out.weight",
+        "output.weight",
+    ];
+    const MAX_ROWS: usize = 8;
+    const WARMUP: usize = 5;
+    const ITERS: usize = 50;
+
+    fn time(dev: &Device, f: impl Fn() -> Result<Tensor>) -> Result<f64> {
+        for _ in 0..WARMUP {
+            f()?;
+        }
+        dev.synchronize()?;
+        let start = Instant::now();
+        for _ in 0..ITERS {
+            f()?;
+        }
+        dev.synchronize()?;
+        Ok(start.elapsed().as_secs_f64() * 1e6 / ITERS as f64)
+    }
+
+    #[test]
+    #[ignore]
+    fn small_batch_mmvq_vs_mmq() -> Result<()> {
+        let path = std::env::var(FILE_ENV).expect("set GGUF_BENCH_FILE to a GGUF checkpoint");
+        let dev = Device::new_cuda(0)?;
+        let archive = crate::gguf::archive::GgufArchive::open([path])?;
+        let names = std::env::var(TENSORS_ENV).ok();
+        let names: Vec<&str> = match &names {
+            Some(names) => names.split(',').collect(),
+            None => TENSORS.to_vec(),
+        };
+        for name in names {
+            let data = archive.tensor_data(name)?;
+            let ty = data
+                .info()
+                .dtype()
+                .gguf_type()
+                .expect("a kernel weight type");
+            let dims = data.info().shape().to_vec();
+            let weight =
+                crate::gguf::raw::RawGgufTensor::new(ty, &dims, data.bytes().to_vec(), &dev)?;
+            let (out_features, in_features) = (dims[0], dims[1]);
+            let mut base = None;
+            for rows in 1..=MAX_ROWS {
+                let xs =
+                    Tensor::randn(0f32, 1., (rows, in_features), &dev)?.to_dtype(DType::BF16)?;
+                let mmvq = time(&dev, || fast_mmvq::plain(&weight, &xs))?;
+                let mmq = time(&dev, || plain(&weight, &xs))?;
+                let one = *base.get_or_insert(mmvq);
+                println!(
+                    "{name:<24} {ty:?} {out_features}x{in_features} rows {rows}: mmvq {mmvq:7.1} us ({:.2}x)  mmq {mmq:7.1} us ({:.2}x)",
+                    mmvq / one,
+                    mmq / one
+                );
+            }
+        }
+        Ok(())
+    }
+}
