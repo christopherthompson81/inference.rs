@@ -141,6 +141,8 @@ The mechanism depends on the attention mode:
 - Paged attention: sequences sharing a token prefix reuse the same reference-counted cache blocks; matching blocks of a new request are not recomputed.
 - Non-paged: completed sequences' caches are kept whole; a new request whose tokens extend a cached sequence resumes from it. Beyond `--prefix-cache-n` device entries, the oldest caches are evicted (dropped, not offloaded); a later matching request re-prefills.
 
+On hybrid models (Qwen3.5, Qwen3.8), a prefix resumes only at a saved recurrent-state snapshot. After each reply, while nothing else waits, the engine prefills the reply on top of its prompt's snapshot, so the next turn (an agent's prompt, reply and tool result) resumes after the reply and computes only what is new.
+
 ### Keeping prefixes on disk
 
 Long sessions, such as agent loops that resend their whole history each turn, lose their cached prefix when it is evicted or the server restarts, and the next request re-prefills everything: about 23 s for 28K tokens of Qwen3.8 27B on an RTX 3090. `--prefix-cache-dir` writes each cached prefix through to a directory as it is taken, and restores it into GPU memory when a later request starts with it (0.23 s for those 28K tokens):

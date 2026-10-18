@@ -219,6 +219,7 @@ pub struct Sequence {
     stream_logprobs: bool,
     responder: Sender<Response>,
     cancellation: Option<RequestCancellation>,
+    prefix_warmup: bool,
     cancel_latched: bool,
     response_index: usize,
     creation_time: u64,
@@ -367,6 +368,7 @@ impl Sequence {
             seq_preallocated_cache,
             responder,
             cancellation: None,
+            prefix_warmup: false,
             cancel_latched: false,
             sampler: sampler.into(),
             sampling_rng: sampling_seed
@@ -1076,6 +1078,15 @@ impl Sequence {
 
     pub fn responder(&self) -> Sender<Response> {
         self.responder.clone()
+    }
+
+    pub(crate) fn set_prefix_warmup(&mut self, prefix_warmup: bool) {
+        self.prefix_warmup = prefix_warmup;
+    }
+
+    /// An engine-issued prefill of a finished reply (`NormalRequest::prefix_warmup`).
+    pub(crate) fn is_prefix_warmup(&self) -> bool {
+        self.prefix_warmup
     }
 
     pub(crate) fn set_cancellation(&mut self, cancellation: Option<RequestCancellation>) {

@@ -1485,6 +1485,45 @@ impl Scheduler for PagedAttentionScheduler {
         );
         slots
     }
+    fn finished_reply_prefixes(&self) -> Vec<(Vec<u32>, usize)> {
+        let others_waiting = self
+            .waiting
+            .iter()
+            .any(|seq| !get_mut_arcmutex!(seq).is_finished_paged_attn());
+        if !self.prefix_caching_enabled || others_waiting {
+            return Vec::new();
+        }
+        self.running
+            .iter()
+            .chain(self.waiting.iter())
+            .filter_map(|seq| {
+                let seq = get_mut_arcmutex!(seq);
+                let replied = matches!(
+                    seq.getstate(),
+                    SequenceState::Done(
+                        StopReason::Eos
+                            | StopReason::StopTok(_)
+                            | StopReason::StopString { .. }
+                            | StopReason::ToolCalls
+                            | StopReason::Length(_)
+                    )
+                );
+                let toks = seq.get_toks();
+                let prompt = seq.prompt_tokens();
+                // the reply has to carry the next snapshot past the prompt's last full block
+                let past_prompt_snapshot = toks.len().saturating_sub(1) / self.block_size
+                    > prompt.saturating_sub(1) / self.block_size;
+                (replied
+                    && past_prompt_snapshot
+                    && !seq.is_prefix_warmup()
+                    && !seq.return_raw_logits
+                    && seq.mm_features().is_empty()
+                    && seq.adapter_generation().is_none())
+                .then(|| (toks.to_vec(), prompt))
+            })
+            .collect()
+    }
+
     fn get_finished_sequence_ids(&self) -> Vec<usize> {
         self.running
             .iter()
