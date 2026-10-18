@@ -3011,6 +3011,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2",
+ "siphasher",
  "strum 0.28.0",
  "sysinfo",
  "tempfile",
