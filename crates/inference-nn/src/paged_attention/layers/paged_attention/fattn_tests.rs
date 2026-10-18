@@ -431,6 +431,32 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
     })
 }
 
+// A speculative verify's rows over a quantized cache, one causal block per sequence, with and without a window
+#[test]
+fn verify_rows_over_a_quantized_cache_match_attention_over_its_values() -> Result<()> {
+    for (bits, window) in [((3, 3), None), ((4, 2), Some(100))] {
+        check_with(
+            Case {
+                head_dim: 256,
+                heads: (N_HEAD, N_HEAD_KV),
+                block_size: 32,
+                cache_dtype: DType::BF16,
+                full_lens: &[8, 41, 333, 64],
+                query_len: 8,
+                model_window: window,
+                layer_window: window,
+                softcap: None,
+                sinks: false,
+                chunk: None,
+                gather: false,
+            },
+            false,
+            Some(bits),
+        )?;
+    }
+    Ok(())
+}
+
 #[test]
 fn f32_caches_fall_back_to_the_gather() -> Result<()> {
     check(Case {

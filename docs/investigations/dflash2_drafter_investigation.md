@@ -306,3 +306,81 @@ but +754 MiB, the freed row-major buffers staying in the CUDA pool. Repacking on
 
 Implication: +15% decode at equal acceptance, no memory cost. Q5_K/Q6_K tensors (MMQ at 2-8 rows, ~1.45x) are the
 next candidates for a tile-ordered layout of their own.
+
+## Run 11 - 2026-10-18 06:40
+
+Question: how does decode speed decay as the prompt grows (an 8K session, up to ~60K)?
+
+`ctx_sweep.py` (scratchpad): distinct repo sources per size plus a design-review question, UI sampling, recipe A,
+q3 cache, `--pa-context-len 65536`, master after #494. DFlash 2 q4k at 7 drafts, 1024 tokens; ms/step = mean length
+/ tok/s:
+
+```
+prompt   decode tok/s   mean length   ms/step   prefill tok/s
+    54   161.2          4.68          29.0       761
+  2007   104.7          3.14          30.0      1568
+  3832   116.8          3.64          31.2      1500
+  7267   111.6          3.72          33.3      1439
+ 15016    89.9          3.44          38.3      1339
+ 29055    69.1          3.26          47.2      1186
+ 52590    57.4          3.53          61.5       998
+```
+
+Acceptance drops from the short prompt (a different task) to ~3.3-3.7 and then holds; the step cost does the decaying.
+Split with phase timings (512 tokens per size) and against no speculation:
+
+```
+prompt   no-spec tok/s (ms/step)   DFlash tok/s, mean length   target verify graph   drafter graph
+    54   50.1 (20.0)               140.3, 4.38                 26.6 ms               3.91 ms
+  7267   47.2 (21.2)                90.7, 3.20                 30.9 ms               3.93 ms
+ 29055   45.0 (22.2)                65.4, 3.21                 44.5 ms               3.89 ms
+ 58699   41.2 (24.3)                43.2, 2.90                 62.6 ms               3.86 ms
+```
+
+Implication: at 59K a 1-row step gains 4.3 ms but the 8-row verify gains 36 ms (~8x): the verify's attention scales
+with query rows, as if each row reads and dequantizes the whole KV cache by itself. The drafter is flat. At 8K the
+loss is small (31 vs 27 ms); past 16K speculation's lead shrinks, and at 59K it barely beats plain decode. Next: find
+the attention kernel the 2-8 row verify takes with a quantized paged cache and whether its rows share KV tiles.
+
+## Run 12 - 2026-10-18 07:30
+
+Question: why does the verify's attention scale with its rows, and does sharing K/V tiles across them fix it?
+
+Cause (read from the code): the verify reaches `try_run_fattn_decode` with one block-table row and context length
+per query row (`BlockTableSnapshot::from_sequence_tables` repeats each sequence's table), so fattn runs 8 one-query
+decodes, instance `ncols1=1, ncols2=8` (8 Q heads of one KV group per CTA); every row's CTAs page in and dequantize
+the whole quantized prefix. Fix: with several rows a sequence (and no chunked window), pass Q as (sequences, rows,
+heads, dim), the first table row and the last row's length per sequence, causal; fattn then picks `ncols1=8`, one
+CTA per KV head covering 8 rows x 8 heads, each K/V tile loaded once.
+
+Phase timings, 512 tokens per size (same workload as Run 11):
+
+```
+prompt   target verify graph, per row -> per sequence   drafter
+    54   26.6 -> 26.4 ms                                3.9
+  7267   30.9 -> 27.1 ms                                3.9
+ 29055   44.5 -> 29.3 ms                                4.0
+ 58699   62.6 -> 32.3 ms                                4.0
+```
+
+Run 11's sweep again (1024 tokens), ms/step = mean length / tok/s:
+
+```
+prompt   before: tok/s, ms/step   after: tok/s, mean length, ms/step
+    54   161.2, 29.0              136.8, 3.94, 28.8
+  2007   104.7, 30.0              131.6, 3.83, 29.1
+  3832   116.8, 31.2              117.8, 3.47, 29.5
+  7267   111.6, 33.3              129.0, 3.84, 29.8
+ 15016    89.9, 38.3              108.7, 3.30, 30.4
+ 29055    69.1, 47.2               95.7, 3.06, 32.0
+ 52590    57.4, 61.5               92.8, 3.17, 34.2
+```
+
+Greedy A/B on one binary (temporary switch, removed), 3 prompts x 400 tokens: outputs split at a near-tie token
+after 160-280 characters in both directions, acceptance 4.12/4.55/5.80 per sequence against 5.41/3.88/5.87 per row:
+summation order, no direction. `verify_rows_over_a_quantized_cache_match_attention_over_its_values` pins the path at
+8 rows over q3 and windowed caches; giving each sequence its first row's length fails it and the existing
+multi-token test.
+
+Implication: the step cost is now flat to within 5 ms out to 53K (was +32 ms); tok/s at long context follows
+acceptance. At 53K DFlash runs 93 tok/s against 41 without speculation.
