@@ -716,6 +716,11 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub mtp_draft_sampling: MtpDraftSamplingArg,
 
+    /// Weight type of the MTP assistant model, e.g. q4k or q8_0; unset, the model's ISQ (a GGUF's drafter stays BF16).
+    #[arg(long)]
+    #[serde(default)]
+    pub mtp_draft_isq: Option<String>,
+
     /// Path to an MCP client configuration JSON. Also reads `MCP_CONFIG_PATH` if unset.
     #[arg(long)]
     #[serde(default)]
@@ -901,6 +906,10 @@ pub struct BenchRuntimeOptions {
     /// MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported.
     #[arg(long, value_enum, default_value_t)]
     pub mtp_draft_sampling: MtpDraftSamplingArg,
+
+    /// Weight type of the MTP assistant model, e.g. q4k or q8_0; unset, the model's ISQ (a GGUF's drafter stays BF16).
+    #[arg(long)]
+    pub mtp_draft_isq: Option<String>,
 }
 
 impl BenchRuntimeOptions {
@@ -1040,6 +1049,7 @@ impl Default for RuntimeOptions {
             mtp_model: None,
             mtp_n_predict: None,
             mtp_draft_sampling: MtpDraftSamplingArg::default(),
+            mtp_draft_isq: None,
             mcp_config: None,
             agent: false,
             enable_search: false,
@@ -1576,6 +1586,7 @@ mod tests {
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
                 runtime.mtp_draft_sampling,
+                runtime.mtp_draft_isq.clone(),
             )
             .expect("missing MTP spec")
             .draft_sampling,
@@ -1602,6 +1613,7 @@ mod tests {
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
                 runtime.mtp_draft_sampling,
+                runtime.mtp_draft_isq.clone(),
             )
             .expect("missing MTP spec")
             .draft_sampling,
@@ -1628,6 +1640,7 @@ mod tests {
                 runtime.mtp_model.clone(),
                 runtime.mtp_n_predict,
                 runtime.mtp_draft_sampling,
+                runtime.mtp_draft_isq.clone(),
             )
             .expect("missing MTP spec")
             .draft_sampling,

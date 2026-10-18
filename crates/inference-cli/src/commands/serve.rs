@@ -178,6 +178,7 @@ pub(crate) fn runtime_options_spec(
             runtime.mtp_model.clone(),
             runtime.mtp_n_predict,
             runtime.mtp_draft_sampling,
+            runtime.mtp_draft_isq.clone(),
         ),
         max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
         max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
@@ -236,11 +237,13 @@ pub(crate) fn mtp_spec(
     model: Option<String>,
     n_predict: Option<usize>,
     draft_sampling: crate::args::MtpDraftSamplingArg,
+    draft_isq: Option<String>,
 ) -> Option<MtpSpec> {
     (builtin || model.is_some()).then(|| MtpSpec {
         model: if builtin { None } else { model },
         n_predict,
         draft_sampling: draft_sampling.into(),
+        draft_isq,
     })
 }
 

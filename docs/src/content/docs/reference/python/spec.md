@@ -563,6 +563,7 @@ MTP speculative decoding, drafting with an assistant model or the head built int
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `draft_isq` | `str \| None` | optional |
 | `draft_sampling` | `MtpDraftSampling \| None` | optional |
 | `model` | `str \| None` | optional |
 | `n_predict` | `int \| None` | optional |

@@ -105,8 +105,10 @@ preserving memory for the requested paged KV cache. Pass `--mtp-n-predict` to re
 instead. Automatic CUDA serving also adapts the active depth to live load: up to 8 live DFlash
 contexts use the full reserved depth, while larger loads use up to 3 drafts. Set
 `INFERENCE_RS_DFLASH_ADAPTIVE=0` (or `false`) to disable load adaptation. The drafter's projection
-weights are requantized to the target's in-situ quantization type at load (override with the
-`INFERENCE_RS_DFLASH_ISQ` environment variable, e.g. `q6k` or `none` for bf16).
+weights are requantized to the target's in-situ quantization type at load; `--mtp-draft-isq` (`mtp.draft_isq`
+in a spec or a model manager load) picks their type instead. A GGUF target has no in-situ type, so its drafter
+stays BF16 unless one is given: on Qwen3.8 27B, `q4k` keeps the BF16 drafter's acceptance for about a quarter of
+its 3.85 GB.
 
 Acceptance is strongly content-dependent: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 accepts ~7 of 7 drafts on math/code and much less on thinking-mode reasoning traces, which are out

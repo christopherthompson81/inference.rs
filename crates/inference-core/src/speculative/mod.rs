@@ -27,6 +27,7 @@ mod tests {
             n_predict: Some(3),
             draft_sampling_method: MtpDraftSamplingMethod::Probabilistic,
             draft_lm_head_isq: None,
+            drafter_isq: None,
         };
 
         assert_eq!(config.n_predict, Some(3));

@@ -23,6 +23,8 @@ pub struct MtpConfig {
     /// ISQ type for a draft-only copy of `lm_head`, so drafting skips the promoted (wider)
     /// sensitive-tensor type; the target still verifies with the promoted head.
     pub draft_lm_head_isq: Option<inference_quant::IsqType>,
+    /// An assistant drafter's own weight type (DFlash); unset, the draft head's (`draft_lm_head_isq`).
+    pub drafter_isq: Option<inference_quant::IsqType>,
 }
 
 #[doc(hidden)]
@@ -50,6 +52,7 @@ impl MtpConfig {
             n_predict,
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
+            drafter_isq: None,
         }
     }
 
@@ -59,6 +62,7 @@ impl MtpConfig {
             n_predict,
             draft_sampling_method: MtpDraftSamplingMethod::default(),
             draft_lm_head_isq: None,
+            drafter_isq: None,
         }
     }
 
@@ -69,6 +73,11 @@ impl MtpConfig {
 
     pub fn with_draft_lm_head_isq(mut self, isq: Option<inference_quant::IsqType>) -> Self {
         self.draft_lm_head_isq = isq;
+        self
+    }
+
+    pub fn with_drafter_isq(mut self, isq: Option<inference_quant::IsqType>) -> Self {
+        self.drafter_isq = isq;
         self
     }
 
