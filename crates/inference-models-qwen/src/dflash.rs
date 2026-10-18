@@ -2062,6 +2062,21 @@ pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
         .map_err(inference_tensor::Error::msg)
 }
 
+/// Live slots and retained prefixes of the windowed pool beside a recurrent pool of `recurrent_capacity` slots serving
+/// `serving_capacity` sequences: a prefix restore needs the target's GDN snapshot too, and those share that pool.
+pub fn windowed_kv_capacities(
+    serving_capacity: usize,
+    recurrent_capacity: usize,
+    prefix_cache_capacity: usize,
+) -> (usize, usize) {
+    let pad = crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS;
+    let snapshots = recurrent_capacity.saturating_sub(pad);
+    (
+        serving_capacity.saturating_add(pad),
+        prefix_cache_capacity.min(snapshots),
+    )
+}
+
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 pub fn windowed_kv_checkpoint_capacity(retained_prefixes: usize) -> Result<usize> {
     if retained_prefixes == 0 {
@@ -3914,6 +3929,15 @@ mod tests {
     use crate::layers::{YarnRopeConfig, yarn_inv_freq_and_attention_factor};
     use crate::speculative::MtpDraftSamplingMethod;
     use crate::speculative::{SpeculativeGraphPlan, SpeculativePrefixReplay};
+
+    // Live slots follow the served sequences; retained prefixes stop at the GDN snapshots a restore also needs
+    #[test]
+    fn windowed_kv_capacities_follow_the_served_sequences_and_gdn_snapshots() {
+        assert_eq!(super::windowed_kv_capacities(4, 9, 16), (5, 8));
+        assert_eq!(super::windowed_kv_capacities(1, 9, 4), (2, 4));
+        assert_eq!(super::windowed_kv_capacities(16, 17, 16), (17, 16));
+        assert_eq!(super::windowed_kv_capacities(4, 9, 0), (5, 0));
+    }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     #[test]

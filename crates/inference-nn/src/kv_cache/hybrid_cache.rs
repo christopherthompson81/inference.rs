@@ -496,6 +496,11 @@ pub struct RecurrentStatePool {
 /// graph pad slot, so growth (which invalidates captured graphs) only happens past that.
 const INITIAL_POOL_CAPACITY: usize = 9;
 
+/// Recurrent pool slots a serving capacity reserves: the reservation only grows the initial pool.
+pub fn recurrent_pool_capacity(serving_capacity: usize) -> usize {
+    INITIAL_POOL_CAPACITY.max(serving_capacity.saturating_add(super::RECURRENT_GRAPH_PAD_SLOTS))
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum RecurrentSlotOwner {
     Sequence(usize),
