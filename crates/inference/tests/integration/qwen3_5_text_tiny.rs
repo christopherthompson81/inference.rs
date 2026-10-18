@@ -233,7 +233,7 @@ async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
 }
 
 // A v1 DFlash drafter sized to the graph fixture: it reuses the target's embeddings and head, and taps two layers.
-fn tiny_dflash() -> anyhow::Result<tempfile::TempDir> {
+fn tiny_dflash(window: usize) -> anyhow::Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
     let config = serde_json::json!({
         "architectures": ["DFlashDraftModel"],
@@ -249,7 +249,7 @@ fn tiny_dflash() -> anyhow::Result<tempfile::TempDir> {
         "block_size": DFLASH_BLOCK,
         "mask_token_id": DFLASH_MASK_TOKEN,
         "layer_types": ["sliding_attention"],
-        "sliding_window": DFLASH_WINDOW,
+        "sliding_window": window,
         "dflash_config": { "target_layer_ids": DFLASH_TAPS }
     });
     std::fs::write(dir.path().join("config.json"), config.to_string())?;
@@ -300,7 +300,7 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
         return Ok(());
     }
     let snapshotter = decode_graphs::recorder();
-    let drafter = tiny_dflash()?;
+    let drafter = tiny_dflash(DFLASH_WINDOW)?;
     let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
     let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
         .with_dtype(ModelDType::BF16)
@@ -328,7 +328,7 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
 #[cfg(feature = "metal")]
 #[tokio::test]
 async fn metal_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
-    let drafter = tiny_dflash()?;
+    let drafter = tiny_dflash(DFLASH_WINDOW)?;
     let (_checkpoint, plain) = paged_gpu_model(false).await?;
     let expected = decode_graphs::rounds(&plain, GRAPH_MAX_LEN).await?;
     drop(plain);
@@ -388,6 +388,94 @@ async fn a_repeated_prompt_restores_the_recurrent_prefix() -> anyhow::Result<()>
     anyhow::ensure!(
         traces::close(&first, &second, CACHED_LOGPROB_TOLERANCE),
         "a prefix hit changed decoding: {first:?} vs {second:?}"
+    );
+    Ok(())
+}
+
+// wider than a paged block, as real drafters' windows are (2048), so a turn's reply never spans the replay window
+const AGENT_DFLASH_WINDOW: usize = 128;
+// token-exact turns, so the reply's blocks match on the next turn: the prompt ends mid-block, its snapshot sits at
+// the last full block, and the reply carries the cache one block past it
+const AGENT_PROMPT_LEN: usize = 400;
+const AGENT_REPLY_LEN: usize = 40;
+const AGENT_FOLLOW_UP_LEN: usize = 20;
+const AGENT_TOKEN_STRIDE: usize = 7;
+
+fn agent_tokens(len: usize, offset: usize) -> Vec<u32> {
+    (0..len)
+        .map(|i| ((offset + i * AGENT_TOKEN_STRIDE) % (VOCAB - 2)) as u32)
+        .collect()
+}
+
+async fn agent_model(
+    checkpoint: &std::path::Path,
+    drafter: &std::path::Path,
+) -> anyhow::Result<Model> {
+    Ok(TextModelBuilder::new(checkpoint.to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .build()
+        .await?)
+}
+
+// A greedy completion of `prompt` token ids: each generated token with its logprob, and the cached prompt tokens
+async fn agent_turn(
+    model: &Model,
+    prompt: &[u32],
+    max_tokens: usize,
+) -> anyhow::Result<(traces::Trace, usize)> {
+    let request = serde_json::json!({
+        "model": "default", "prompt": prompt, "max_tokens": max_tokens, "temperature": 0.0,
+        "logprobs": 1, "ignore_eos": true,
+    });
+    let response: serde_json::Value = serde_json::from_str(
+        &model
+            .completion_json(request.to_string().as_bytes())
+            .await?,
+    )?;
+    let trace = response["choices"][0]["logprobs"]["content"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("no logprobs in {response}"))?
+        .iter()
+        .map(|step| {
+            let top = &step["top_logprobs"][0];
+            (
+                top["token"].as_u64().unwrap_or_default() as u32,
+                top["logprob"].as_f64().unwrap_or_default() as f32,
+            )
+        })
+        .collect();
+    let cached = response["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or_default() as usize;
+    Ok((trace, cached))
+}
+
+// An agent's next turn (prompt, reply, follow-up) caches the reply's blocks past the previous prompt's snapshot; with a
+// DFlash drafter that snapshot still restores, drafter checkpoint included, and decodes as a cold run does.
+#[tokio::test]
+async fn a_dflash_agent_turn_resumes_at_the_previous_prompt_snapshot() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = agent_model(checkpoint.path(), drafter.path()).await?;
+    let first = agent_tokens(AGENT_PROMPT_LEN, 0);
+    let (reply, _) = agent_turn(&model, &first, AGENT_REPLY_LEN).await?;
+    let mut next = first;
+    next.extend(reply.iter().map(|&(token, _)| token));
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 1));
+    let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
+    drop(model);
+    let cold_model = agent_model(checkpoint.path(), drafter.path()).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(cached > 0, "the next turn found no cached prefix");
+    anyhow::ensure!(
+        traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
+        "a prefix hit changed decoding: {warm:?} vs {cold:?}"
     );
     Ok(())
 }
