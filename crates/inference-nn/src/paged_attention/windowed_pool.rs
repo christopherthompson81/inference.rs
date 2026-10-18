@@ -838,6 +838,87 @@ impl WindowedKvPool {
         );
     }
 
+    /// A checkpoint's pages and positions copied to the host.
+    pub fn export_checkpoint(
+        &self,
+        checkpoint: &WindowedKvCheckpoint,
+    ) -> Result<crate::kv_cache::PagedAuxiliaryPrefixData> {
+        if !Arc::ptr_eq(&self.checkpoint_slots, &checkpoint.inner.slots) {
+            inference_tensor::bail!("windowed KV checkpoint belongs to a different pool");
+        }
+        let pages = self.config.pages_per_sequence();
+        let start = checkpoint.inner.pool_slot * pages;
+        let host = |cache: &Tensor| {
+            cache
+                .narrow(1, start, pages)?
+                .contiguous()?
+                .to_device(&Device::Cpu)
+        };
+        Ok(crate::kv_cache::PagedAuxiliaryPrefixData {
+            key: host(&self.key_cache)?,
+            value: host(&self.value_cache)?,
+            origin_pos: checkpoint.inner.origin_pos,
+            valid_start_pos: checkpoint.inner.valid_start_pos,
+            next_committed_pos: checkpoint.inner.next_committed_pos,
+        })
+    }
+
+    /// A checkpoint of this pool filled from exported pages, written in place so captured graphs stay valid.
+    pub fn import_checkpoint(
+        &mut self,
+        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> Result<WindowedKvCheckpoint> {
+        let pages = self.config.pages_per_sequence();
+        let mut expected = self.config.cache_shape();
+        expected[1] = pages;
+        for tensor in [&data.key, &data.value] {
+            if tensor.dims() != expected || tensor.dtype() != self.key_cache.dtype() {
+                inference_tensor::bail!(
+                    "windowed KV checkpoint {:?} {:?} does not fit this pool ({expected:?})",
+                    tensor.dims(),
+                    tensor.dtype()
+                );
+            }
+        }
+        let (pool_slot, generation) = self
+            .checkpoint_slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reserve()?;
+        let device = self.key_cache.device().clone();
+        let written = (|| -> Result<()> {
+            self.key_cache
+                .slice_set(&data.key.to_device(&device)?, 1, pool_slot * pages)?;
+            self.value_cache
+                .slice_set(&data.value.to_device(&device)?, 1, pool_slot * pages)
+        })();
+        if let Err(error) = written {
+            self.checkpoint_slots
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .release(pool_slot, generation);
+            return Err(error);
+        }
+        Ok(WindowedKvCheckpoint {
+            inner: Arc::new(WindowedKvCheckpointInner {
+                pool_slot,
+                generation,
+                origin_pos: data.origin_pos,
+                valid_start_pos: data.valid_start_pos,
+                next_committed_pos: data.next_committed_pos,
+                bytes: self.config.bytes_per_slot(),
+                slots: Arc::clone(&self.checkpoint_slots),
+            }),
+        })
+    }
+
+    /// The checkpoint page layout an exported checkpoint must match.
+    pub fn checkpoint_signature(&self) -> String {
+        let mut shape = self.config.cache_shape();
+        shape[1] = self.config.pages_per_sequence();
+        format!("{shape:?}/{:?}", self.key_cache.dtype())
+    }
+
     fn copy_pool_slot(&mut self, source_slot: usize, destination_slot: usize) -> Result<()> {
         if source_slot == destination_slot {
             inference_tensor::bail!("windowed KV pool source and destination slots alias");

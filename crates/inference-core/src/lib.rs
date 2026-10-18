@@ -22,6 +22,7 @@ use inference_tensor::Device;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
 pub use pipeline::Pipeline;
+pub use prefix_store::{PrefixStoreSettings, local_weight_stamps};
 use speculative::SpeculativeConfig;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
@@ -110,6 +111,7 @@ pub use inference_protocol::images;
 mod models;
 mod pipeline;
 mod prefix_cacher;
+mod prefix_store;
 pub use inference_protocol::reasoning_parsers;
 #[cfg(feature = "cuda")]
 pub mod kernel_fetch;

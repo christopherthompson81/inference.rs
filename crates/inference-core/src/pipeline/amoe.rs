@@ -343,6 +343,27 @@ impl Pipeline for AnyMoePipeline {
         )
     }
 
+    fn export_paged_auxiliary_prefix_state(
+        &mut self,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
+    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>, inference_tensor::Error> {
+        get_mut_arcmutex!(self.target).export_paged_auxiliary_prefix_state(state)
+    }
+
+    fn import_paged_auxiliary_prefix_state(
+        &mut self,
+        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> Result<
+        Option<std::sync::Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>,
+        inference_tensor::Error,
+    > {
+        get_mut_arcmutex!(self.target).import_paged_auxiliary_prefix_state(data)
+    }
+
+    fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+        get_mut_arcmutex!(self.target).paged_auxiliary_prefix_signature()
+    }
+
     fn speculative_prompt_chunk(
         &mut self,
         seqs: &[&mut Sequence],

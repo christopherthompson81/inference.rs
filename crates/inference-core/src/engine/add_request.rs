@@ -504,6 +504,8 @@ impl Engine {
                 }
             }
             self.assign_recurrent_slot(&mut seq)?;
+            // after the slot, which could otherwise reclaim the restored snapshot's
+            self.promote_stored_prefix(&seq);
 
             if matches!(extras.seq_step_type, SeqStepType::PromptAndDecode) {
                 self.logger.add_new_sequence();

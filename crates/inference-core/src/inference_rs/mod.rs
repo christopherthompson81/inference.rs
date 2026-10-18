@@ -696,6 +696,7 @@ impl InferenceRs {
             #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))]
             shell_config,
             defer_daemon_start,
+            prefix_store,
         } = config;
 
         Self::init_device_support(&get_mut_arcmutex!(pipeline).device());
@@ -714,6 +715,17 @@ impl InferenceRs {
         )
         .await;
 
+        let prefix_store = prefix_store.and_then(|settings| {
+            let identity = loader_config.as_ref().map(model_identity).unwrap_or_default();
+            if identity.is_empty() {
+                warn!("The prefix cache disk store needs the model's loader to tell its weights apart; it stays off");
+                return None;
+            }
+            Some(crate::PrefixStoreSettings {
+                model_identity: identity,
+                ..settings
+            })
+        });
         let engine_config = EngineConfig {
             no_kv_cache,
             no_prefix_cache,
@@ -724,6 +736,7 @@ impl InferenceRs {
             search_callback,
             tool_callbacks,
             agent_runner,
+            prefix_store,
         };
         let reboot_state = RebootState {
             pipeline: pipeline.clone(),
@@ -1177,4 +1190,22 @@ fn release_device_memory(device: &Device) {
     if let Err(error) = released {
         warn!("Failed to return an unloaded model's memory to the device: {error}");
     }
+}
+
+// The loaded weights' identity: the source's own, plus the options and drafter that change what the cache holds
+fn model_identity(config: &ModelLoaderConfig) -> String {
+    let source = config.source.identity();
+    if source.is_empty() {
+        return source;
+    }
+    let drafter = config
+        .mtp_config
+        .as_ref()
+        .and_then(|mtp| mtp.model.as_deref())
+        .map(|path| crate::local_weight_stamps(std::path::Path::new(path)).join("\n"))
+        .unwrap_or_default();
+    format!(
+        "{source}\n{:?} {:?} {:?}\n{:?}\n{drafter}",
+        config.dtype, config.isq, config.hf_revision, config.mtp_config
+    )
 }

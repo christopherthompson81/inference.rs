@@ -317,7 +317,11 @@ mod tests {
         let mut std_hasher = std::hash::DefaultHasher::new();
         super::NONE_HASH_SEED.hash(&mut std_hasher);
         [1u32, 2, 3, 4].hash(&mut std_hasher);
-        assert_eq!(first.value(), std_hasher.finish(), "the in-memory cache keeps today's hashes");
+        assert_eq!(
+            first.value(),
+            std_hasher.finish(),
+            "the in-memory cache keeps today's hashes"
+        );
     }
     use super::*;
 

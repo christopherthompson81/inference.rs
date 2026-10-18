@@ -170,6 +170,8 @@ pub(crate) fn runtime_options_spec(
     RuntimeSpec {
         max_seqs: Some(runtime.max_seqs),
         prefix_cache_n: Some(runtime.prefix_cache_n),
+        prefix_cache_dir: path_string(runtime.prefix_cache_dir.as_deref()),
+        prefix_cache_disk_gib: runtime.prefix_cache_disk_gib,
         no_kv_cache: runtime.no_kv_cache,
         chat_template: path_string(runtime.chat_template.as_deref()),
         jinja_explicit: path_string(runtime.jinja_explicit.as_deref()),

@@ -60,6 +60,8 @@ inference run [OPTIONS] [COMMAND]
 | `--max-decode-steps-before-prefill <MAX_DECODE_STEPS_BEFORE_PREFILL>` | `8` | Maximum decode steps before a waiting prefill batch is admitted |
 | `--no-kv-cache` | `false` | Disable KV cache entirely |
 | `--prefix-cache-n <PREFIX_CACHE_N>` | `16` | Number of prefix caches to hold (0 to disable) |
+| `--prefix-cache-dir <PREFIX_CACHE_DIR>` |  | Directory that keeps prefix cache entries on disk too, so long sessions (agent loops) survive eviction and restarts. Hybrid models on CUDA with paged attention |
+| `--prefix-cache-disk-gib <PREFIX_CACHE_DISK_GIB>` |  | Most the prefix cache directory may hold, in GiB; the least recently used entries go first |
 | `-c, --chat-template <CHAT_TEMPLATE>` |  | Custom chat template file (.json or .jinja) |
 | `-j, --jinja-explicit <JINJA_EXPLICIT>` |  | Explicit JINJA template override |
 | `--matformer-config-path <MATFORMER_CONFIG_PATH>` |  | Path to a MatFormer config (CSV/JSON describing available slices). See model card |

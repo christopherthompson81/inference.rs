@@ -22,11 +22,22 @@ pub use hybrid_cache::{
 };
 pub use hybrid_cache::{
     HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
-    RecurrentSnapshotSlot, RecurrentStateLayout, RecurrentStatePool, RecurrentStateSnapshot,
-    RecurrentStateSpec, recurrent_pool_capacity,
+    RecurrentSnapshotSlot, RecurrentSnapshotState, RecurrentStateLayout, RecurrentStatePool,
+    RecurrentStateSnapshot, RecurrentStateSpec, recurrent_pool_capacity,
 };
 pub use rotating_cache::{RotatingCache, RotatingCacheSnapshot};
 pub use single_cache::{SingleCache, SingleCacheSnapshot};
+
+/// An auxiliary prefix state on the host (a DFlash windowed KV checkpoint): its pages,
+/// `[layers, pages, kv heads, page size, head dim]`, and positions.
+#[derive(Clone, Debug)]
+pub struct PagedAuxiliaryPrefixData {
+    pub key: Tensor,
+    pub value: Tensor,
+    pub origin_pos: usize,
+    pub valid_start_pos: usize,
+    pub next_committed_pos: usize,
+}
 
 pub trait PagedAuxiliaryPrefixState: std::any::Any + Send + Sync {
     fn as_any(&self) -> &dyn std::any::Any;

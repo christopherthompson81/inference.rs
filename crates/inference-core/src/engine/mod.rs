@@ -68,6 +68,7 @@ pub use agent::{
 pub mod agentic_session;
 mod logger;
 mod paged_step;
+mod prefix_disk;
 
 const PAGED_RECURRENT_PREFIX_VALIDATION_METRIC: &str =
     "inference_paged_recurrent_prefix_validation_total";
@@ -267,6 +268,58 @@ struct HybridPrefixRestore {
     restore_auxiliary: bool,
     replay_tokens_avoided: usize,
     record_auxiliary_miss: bool,
+}
+
+// The disk tier for a hybrid paged model: its namespace is the model's identity plus the layout every stored tensor
+// must match (KV rows per layer, recurrent state, drafter checkpoint, block size)
+fn open_prefix_disk_tier(
+    pipeline: &Arc<Mutex<dyn Pipeline>>,
+    scheduler: &Arc<Mutex<dyn Scheduler>>,
+    settings: &crate::PrefixStoreSettings,
+) -> anyhow::Result<Option<crate::prefix_cacher::PrefixDiskTier>> {
+    let (kv_cache_manager, block_size) = {
+        let scheduler = get_mut_arcmutex!(scheduler);
+        let (Some(manager), Some(block_size)) =
+            (scheduler.kv_cache_manager(), scheduler.block_size())
+        else {
+            return Ok(None);
+        };
+        (manager, block_size)
+    };
+    let pipeline = get_mut_arcmutex!(pipeline);
+    if !pipeline.cache().is_hybrid() {
+        return Ok(None);
+    }
+    let metadata = pipeline.get_metadata();
+    let Some(cache_engine) = metadata.cache_engine.as_ref() else {
+        return Ok(None);
+    };
+    let kv_layout = cache_engine
+        .get_kv_cache()
+        .iter()
+        .map(|(k, v)| {
+            format!(
+                "{:?}{:?}/{:?}{:?}",
+                &k.dims()[1..],
+                k.dtype(),
+                &v.dims()[1..],
+                v.dtype()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(";");
+    let namespace = format!(
+        "{}\nblock {block_size}\nkv {kv_layout}\nrecurrent {}\nauxiliary {:?}",
+        settings.model_identity,
+        pipeline.cache().hybrid().recurrent_state_signature(),
+        pipeline.paged_auxiliary_prefix_signature(),
+    );
+    let store =
+        crate::prefix_store::PrefixStore::open(&settings.dir, &namespace, settings.capacity_bytes)?;
+    Ok(Some(crate::prefix_cacher::PrefixDiskTier {
+        store,
+        kv_cache_manager,
+    }))
 }
 
 impl HybridPagedPrefixValidator {
@@ -547,6 +600,7 @@ impl Engine {
                     search_callback,
                     tool_callbacks,
                     agent_runner,
+                    prefix_store,
                 },
             logger,
             session_store,
@@ -718,8 +772,14 @@ impl Engine {
 
         let mut prefix_cacher =
             PrefixCacheManagerV2::new(prefix_cache_n, no_prefix_cache, has_paged_attention);
+        let retained = paged_block_retention.is_some();
         if let Some(retention) = paged_block_retention {
             prefix_cacher.attach_paged_block_retention(retention);
+        }
+        if let Some(settings) = prefix_store.filter(|_| retained)
+            && let Some(disk) = open_prefix_disk_tier(&pipeline, &scheduler, &settings)?
+        {
+            prefix_cacher.attach_disk_tier(disk);
         }
 
         Ok(Self {

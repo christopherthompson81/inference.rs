@@ -1167,6 +1167,46 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         drafter.restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)
     }
 
+    fn export_paged_auxiliary_prefix_state(
+        &mut self,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
+    ) -> Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>> {
+        let drafter = self
+            .dflash
+            .lock()
+            .expect("dflash poisoned")
+            .as_ref()
+            .cloned();
+        drafter.map_or(Ok(None), |drafter| {
+            drafter.export_paged_auxiliary_prefix_state(state)
+        })
+    }
+
+    fn import_paged_auxiliary_prefix_state(
+        &mut self,
+        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
+        let drafter = self
+            .dflash
+            .lock()
+            .expect("dflash poisoned")
+            .as_ref()
+            .cloned();
+        drafter.map_or(Ok(None), |drafter| {
+            drafter.import_paged_auxiliary_prefix_state(data)
+        })
+    }
+
+    fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+        let drafter = self
+            .dflash
+            .lock()
+            .expect("dflash poisoned")
+            .as_ref()
+            .cloned();
+        drafter.and_then(|drafter| drafter.paged_auxiliary_prefix_signature())
+    }
+
     fn speculative_plan(&self, batch_size: usize) -> Option<SpeculativeBatchPlan> {
         let n = self.mtp_n_predict();
         if n == 0 {

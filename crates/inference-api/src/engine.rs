@@ -122,6 +122,9 @@ const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`"
 /// Sequences a model serves at once unless told otherwise, shared by `inference serve` and specs. Low, since each one
 /// holds memory for its whole life (a hybrid model's recurrent state is ~150 MB per sequence at 27B); a busy shared
 /// server raises it.
+/// The prefix cache directory's default size cap, in GiB.
+pub const DEFAULT_PREFIX_CACHE_DISK_GIB: u64 = 64;
+const BYTES_PER_GIB: u64 = 1 << 30;
 pub const DEFAULT_MAX_SEQS: usize = 4;
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor
@@ -322,6 +325,13 @@ pub struct RuntimeSpec {
     /// Prefix cache capacity in sequences; 0 disables the prefix cache.
     #[serde(default)]
     pub prefix_cache_n: Option<usize>,
+    /// Directory that keeps prefix cache entries on disk, so long sessions survive eviction and restarts (hybrid
+    /// models on CUDA with paged attention); unset keeps the cache in GPU memory only.
+    #[serde(default)]
+    pub prefix_cache_dir: Option<String>,
+    /// Most the prefix cache directory may hold, in GiB; the least recently used entries go first.
+    #[serde(default)]
+    pub prefix_cache_disk_gib: Option<u64>,
     #[serde(default)]
     pub no_kv_cache: bool,
     #[serde(default)]
@@ -689,6 +699,16 @@ impl EngineSpec {
             .with_max_seqs(runtime.max_seqs.unwrap_or(DEFAULT_MAX_SEQS));
         if let Some(prefix_cache_n) = runtime.prefix_cache_n {
             builder = builder.with_prefix_cache_n(prefix_cache_n);
+        }
+        if let Some(dir) = runtime.prefix_cache_dir {
+            builder = builder.with_prefix_store(Some(inference_core::PrefixStoreSettings {
+                dir: dir.into(),
+                capacity_bytes: runtime
+                    .prefix_cache_disk_gib
+                    .unwrap_or(DEFAULT_PREFIX_CACHE_DISK_GIB)
+                    .saturating_mul(BYTES_PER_GIB),
+                model_identity: String::new(),
+            }));
         }
         if let Some(token_source) = runtime.token_source {
             let token_source: TokenSource = token_source.parse().map_err(invalid)?;

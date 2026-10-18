@@ -1143,6 +1143,24 @@ impl Pipeline for DecoderPipeline {
             .restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)
     }
 
+    fn export_paged_auxiliary_prefix_state(
+        &mut self,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
+    ) -> inference_tensor::Result<Option<crate::kv_cache::PagedAuxiliaryPrefixData>> {
+        self.model.export_paged_auxiliary_prefix_state(state)
+    }
+
+    fn import_paged_auxiliary_prefix_state(
+        &mut self,
+        data: &crate::kv_cache::PagedAuxiliaryPrefixData,
+    ) -> inference_tensor::Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
+        self.model.import_paged_auxiliary_prefix_state(data)
+    }
+
+    fn paged_auxiliary_prefix_signature(&self) -> Option<String> {
+        self.model.paged_auxiliary_prefix_signature()
+    }
+
     fn adapter_runtime(&self) -> Option<Arc<DynamicLoraRuntime>> {
         self.core.dynamic_lora.clone()
     }

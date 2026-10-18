@@ -465,6 +465,45 @@ impl KVCacheManager {
     }
 
     /// Get the block IDs allocated for a request.
+    /// Fresh blocks for the hashes of an imported prefix no block caches yet, as `(index, block id)`; `None` when the
+    /// unreserved free blocks cannot hold them. The import holds them until `release_imported_blocks`.
+    pub fn allocate_imported_blocks(
+        &mut self,
+        block_hashes: &[BlockHash],
+    ) -> Option<Vec<(usize, usize)>> {
+        let missing = (0..block_hashes.len())
+            .filter(|&i| {
+                self.block_pool
+                    .get_common_cached_block(block_hashes[i], &self.kv_cache_group_ids)
+                    .is_none()
+            })
+            .collect::<Vec<_>>();
+        if missing.len() > self.num_unreserved_blocks() {
+            return None;
+        }
+        let ids = self.block_pool.get_new_blocks(missing.len())?;
+        Some(missing.into_iter().zip(ids).collect())
+    }
+
+    /// Registers filled imported blocks under their hashes, so prefix matches find them.
+    pub fn cache_imported_blocks(&mut self, blocks: &[(usize, usize)], block_hashes: &[BlockHash]) {
+        let ids = blocks.iter().map(|&(_, id)| id).collect::<Vec<_>>();
+        let hashes = blocks
+            .iter()
+            .map(|&(i, _)| block_hashes[i])
+            .collect::<Vec<_>>();
+        for group in self.kv_cache_group_ids.clone() {
+            self.block_pool
+                .cache_full_blocks(&ids, &hashes, 0, ids.len(), group);
+        }
+    }
+
+    /// Ends an import's hold on its blocks: a prefix retention lease keeps them, else they are cached free blocks.
+    pub fn release_imported_blocks(&mut self, blocks: &[(usize, usize)]) {
+        let ids = blocks.iter().map(|&(_, id)| id).collect::<Vec<_>>();
+        self.block_pool.free_blocks(&ids);
+    }
+
     pub fn get_block_ids(&self, request_id: usize) -> Option<&[usize]> {
         self.req_to_blocks
             .get(&request_id)

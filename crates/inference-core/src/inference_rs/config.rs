@@ -15,6 +15,8 @@ pub struct EngineConfig {
     pub tool_callbacks: tools::ToolCallbacksWithTools,
     /// Runs agentic requests (tools, web search); without one they are rejected.
     pub agent_runner: Option<Arc<dyn AgentRunner>>,
+    /// Keeps paged prefix cache entries on disk too, so long sessions survive eviction and restarts.
+    pub prefix_store: Option<crate::PrefixStoreSettings>,
 }
 
 impl Default for EngineConfig {
@@ -29,6 +31,7 @@ impl Default for EngineConfig {
             search_callback: None,
             tool_callbacks: HashMap::new(),
             agent_runner: None,
+            prefix_store: None,
         }
     }
 }
@@ -96,6 +99,12 @@ pub trait LoaderSource: Send + Sync {
         config: &ModelLoaderConfig,
         no_kv_cache: bool,
     ) -> anyhow::Result<Box<dyn Loader>>;
+
+    /// What tells this model's weights apart from any other's (the selection, local files' sizes and times), so a
+    /// persisted prefix cache never serves another model's state; empty when unknown, which keeps it off.
+    fn identity(&self) -> String {
+        String::new()
+    }
 }
 
 /// Configuration for recreating a model loader when reloading an unloaded model.

@@ -113,6 +113,20 @@ impl LoaderSource for ModelSelected {
             .with_overrides(config.overrides.clone())
             .build()
     }
+
+    fn identity(&self) -> String {
+        let selected = serde_json::to_value(self).unwrap_or_default();
+        let mut paths = Vec::new();
+        collect_strings(&selected, &mut paths);
+        std::iter::once(selected.to_string())
+            .chain(
+                paths.iter().flat_map(|path| {
+                    inference_core::local_weight_stamps(std::path::Path::new(path))
+                }),
+            )
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 fn resolve_topology(
@@ -637,6 +651,18 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         }
     };
     Ok(loader)
+}
+
+// Every string in a selection, the local paths among them stamped into its identity
+fn collect_strings(value: &serde_json::Value, out: &mut Vec<String>) {
+    match value {
+        serde_json::Value::String(text) => out.push(text.clone()),
+        serde_json::Value::Array(items) => items.iter().for_each(|item| collect_strings(item, out)),
+        serde_json::Value::Object(fields) => fields
+            .values()
+            .for_each(|field| collect_strings(field, out)),
+        _ => {}
+    }
 }
 
 #[cfg(test)]

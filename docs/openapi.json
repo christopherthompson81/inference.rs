@@ -12475,6 +12475,22 @@
           "paged_cache": {
             "$ref": "#/components/schemas/PagedCacheSpec"
           },
+          "prefix_cache_dir": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Directory that keeps prefix cache entries on disk, so long sessions survive eviction and restarts (hybrid\nmodels on CUDA with paged attention); unset keeps the cache in GPU memory only."
+          },
+          "prefix_cache_disk_gib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Most the prefix cache directory may hold, in GiB; the least recently used entries go first.",
+            "minimum": 0
+          },
           "prefix_cache_n": {
             "type": [
               "integer",
