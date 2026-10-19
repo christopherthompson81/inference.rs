@@ -1,5 +1,6 @@
 //! Command implementations for inference-cli
 
+mod agent;
 mod bench;
 mod cache;
 mod config;
@@ -18,6 +19,7 @@ mod uqff;
 #[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 pub(crate) mod tiny_support;
 
+pub use agent::{AgentModel, list_agent_sessions, run_agent};
 pub use bench::{BenchRunConfig, run_bench};
 pub use cache::{run_cache_delete, run_cache_list};
 pub use config::run_from_config;

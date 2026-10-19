@@ -143,6 +143,7 @@ export default defineConfig({
               items: [
                 'guides/agents',
                 'guides/agents/build-an-agent',
+                'guides/agents/coding-agent',
                 'guides/agents/tool-calling-basics',
                 'guides/agents/enable-code-execution',
                 'guides/agents/enable-shell',

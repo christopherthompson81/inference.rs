@@ -21,6 +21,7 @@ doc = false
 [dependencies]
 mimalloc = { workspace = true }
 inference-api = { workspace = true }
+inference-coder.workspace = true
 inference-server-core = { workspace = true }
 inference-webui = { workspace = true }
 inference-tensor.workspace = true

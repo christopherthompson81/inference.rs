@@ -2,7 +2,7 @@
 title: "inference cache"
 description: "Manage the Hugging Face model cache"
 sidebar:
-  order: 10
+  order: 11
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

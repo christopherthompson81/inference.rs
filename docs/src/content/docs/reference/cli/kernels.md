@@ -2,7 +2,7 @@
 title: "inference kernels"
 description: "Manage the CUDA kernel libraries: download them for offline use, prune old ones"
 sidebar:
-  order: 11
+  order: 12
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

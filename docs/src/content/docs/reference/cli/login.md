@@ -2,7 +2,7 @@
 title: "inference login"
 description: "Authenticate with Hugging Face Hub"
 sidebar:
-  order: 9
+  order: 10
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

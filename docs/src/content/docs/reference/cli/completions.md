@@ -2,7 +2,7 @@
 title: "inference completions"
 description: "Generate shell completions"
 sidebar:
-  order: 4
+  order: 5
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
