@@ -86,9 +86,11 @@ The same agent runs in the web UI, on the server's machine, over the UI's chat m
 admins may use it: on a keyed server the owners named with `--admin`, and on an open server a browser on the server's
 own machine.
 
-**Run demo** makes a small project in the temp directory, with two planted bugs and the tests that catch them. It
-opens a session there and sends the agent the fix-the-tests instruction, so you can watch a whole run on any model.
-The permission selector applies: in **Ask** mode you approve the edits and the test run as they come.
+**Run demo** makes a small project in the temp directory: a three-module Python package with a README describing how
+it should behave, a 19-test `unittest` suite, eight planted bugs spread across the modules, and an unimplemented
+`undo()`. It opens a session there and asks the agent to make the suite pass without changing the tests. A capable
+model takes about 8-10 rounds and 15-20 tool calls, which is a fair check of the whole loop. The permission selector
+applies: in **Ask** mode you approve each edit and test run as it comes, and **Run everything** lets you watch.
 
 To work in your own projects, start the server with `--code-root DIR` (or `code_root` under `[server]` in a config
 file). Then type a project relative to that directory and press **New session**:

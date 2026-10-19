@@ -72,7 +72,7 @@ export async function openSession(
   return (await post("open", { project, session_id: sessionId, model })).json();
 }
 
-/** Makes a demo project with two planted bugs and opens a session there; send `prompt` to watch the agent fix them. */
+/** Makes a demo project (a small package whose tests fail) and opens a session there; send `prompt` to watch the agent fix it. */
 export async function startDemo(
   model: string | null,
 ): Promise<{ session_id: string; project: string; prompt: string }> {

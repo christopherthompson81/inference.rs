@@ -29,13 +29,26 @@ use crate::types::AppState;
 const MAX_LIVE_SESSIONS: usize = 32;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 const DEMO_DIR_PREFIX: &str = "inference-code-demo-";
-const DEMO_PROMPT: &str =
-    "The tests in test_stats.py fail. Fix stats.py so they pass, then run them.";
-// two planted bugs: mean is off by one, and median ignores even-length lists
-const DEMO_STATS: &str = "def mean(values):\n    return sum(values) / len(values) + 1\n\n\n\
-def median(values):\n    ordered = sorted(values)\n    mid = len(ordered) // 2\n    return ordered[mid]\n";
-const DEMO_TESTS: &str = "from stats import mean, median\n\nassert mean([1, 2, 3]) == 2\n\
-assert median([1, 2, 3, 4]) == 2.5\nassert median([3, 1, 2]) == 2\nprint(\"ok\")\n";
+const DEMO_PROMPT: &str = "The test suite fails. Fix the stockroom package so \
+`python3 -m unittest discover -s tests -t .` passes. The tests and README.md describe the intended behaviour; \
+don't change the tests.";
+// a three-module package with eight planted bugs and a missing `undo`, failing 14 of its 19 tests
+macro_rules! demo_file {
+    ($path:literal) => {
+        ($path, include_str!(concat!("../demo/", $path)))
+    };
+}
+const DEMO_FILES: [(&str, &str); 9] = [
+    demo_file!("README.md"),
+    demo_file!("stockroom/__init__.py"),
+    demo_file!("stockroom/units.py"),
+    demo_file!("stockroom/inventory.py"),
+    demo_file!("stockroom/report.py"),
+    demo_file!("tests/__init__.py"),
+    demo_file!("tests/test_units.py"),
+    demo_file!("tests/test_inventory.py"),
+    demo_file!("tests/test_report.py"),
+];
 
 /// The projects the Code tab may open and the sessions it has loaded.
 pub(crate) struct CodeState {
@@ -241,8 +254,8 @@ pub(crate) async fn open_session(
     .into_response()
 }
 
-/// Makes a demo project in the temp directory (two planted bugs and the tests that catch them) and opens a session
-/// there; the page then sends `prompt` like any other.
+/// Makes a demo project in the temp directory (a small package whose tests fail) and opens a session there; the page
+/// then sends `prompt` like any other.
 pub(crate) async fn start_demo(
     Extension(code): Extension<Arc<CodeState>>,
     Extension(app): Extension<Arc<AppState>>,
@@ -292,8 +305,13 @@ fn make_demo_project() -> std::io::Result<PathBuf> {
     let id = uuid::Uuid::new_v4().simple().to_string();
     let project = std::env::temp_dir().join(format!("{DEMO_DIR_PREFIX}{}", &id[..8]));
     std::fs::create_dir_all(&project)?;
-    std::fs::write(project.join("stats.py"), DEMO_STATS)?;
-    std::fs::write(project.join("test_stats.py"), DEMO_TESTS)?;
+    for (path, contents) in DEMO_FILES {
+        let path = project.join(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, contents)?;
+    }
     // a repo, so `git diff` shows what the agent changed; a machine without git still gets the files
     let committed = std::process::Command::new("sh")
         .args(["-c", "git init -q && git add . && git -c user.name=demo -c user.email=demo@example.invalid commit -qm demo"])
@@ -536,5 +554,27 @@ impl AgentUi for WebUi {
         if let Some(usage) = &turn.usage {
             self.emit(json!({"type": "usage", "usage": usage}));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::make_demo_project;
+
+    #[test]
+    fn the_demo_project_fails_its_tests_as_planted() {
+        let project = make_demo_project().unwrap();
+        let suite = std::process::Command::new("python3")
+            .args(["-m", "unittest", "discover", "-s", "tests", "-t", "."])
+            .current_dir(&project)
+            .output();
+        std::fs::remove_dir_all(&project).unwrap();
+        // a machine without python can still make the demo; it just can't grade it
+        let Ok(suite) = suite else {
+            return;
+        };
+        let report = String::from_utf8_lossy(&suite.stderr);
+        assert!(report.contains("Ran 19 tests"), "{report}");
+        assert!(report.contains("FAILED (failures=7, errors=7)"), "{report}");
     }
 }
