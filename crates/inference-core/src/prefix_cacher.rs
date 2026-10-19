@@ -27,6 +27,7 @@ const PAGED_RECURRENT_PREFIX_OWNER_EVICTIONS_METRIC: &str =
     "inference_paged_recurrent_prefix_owner_evictions_total";
 const CAPACITY_EVICTION_REASON: &str = "capacity";
 const BLOCK_PRESSURE_EVICTION_REASON: &str = "block_pressure";
+const CHECKPOINT_POOL_EVICTION_REASON: &str = "checkpoint_pool";
 
 #[derive(PartialEq, Eq, Debug, Hash)]
 struct Tokens(Vec<u32>);
@@ -695,6 +696,41 @@ impl PrefixCacheManagerV2 {
     pub fn has_paged_recurrent_owner(&mut self, owner: BlockHash) -> bool {
         self.prune_revoked_paged_recurrent_entries();
         self.paged_recurrent_sequence_keys.contains_key(&owner)
+    }
+
+    /// Drops the least recently used prefix holding a drafter checkpoint, so its checkpoint slot frees; false when no
+    /// cached prefix holds one.
+    pub(crate) fn evict_oldest_auxiliary_prefix(&mut self) -> bool {
+        let Some(key) = self
+            .paged_recurrent_sequence_keys
+            .values()
+            .find(|key| {
+                self.paged_recurrent_caches
+                    .get(*key)
+                    .is_some_and(|entry| entry.auxiliary.is_some())
+            })
+            .cloned()
+        else {
+            return false;
+        };
+        let owners = self
+            .paged_recurrent_sequence_keys
+            .iter()
+            .filter(|(_, owner_key)| **owner_key == key)
+            .map(|(owner, _)| *owner)
+            .collect::<Vec<_>>();
+        for owner in owners {
+            self.paged_recurrent_sequence_keys.shift_remove(&owner);
+            self.remove_paged_recurrent_owner(owner, &key);
+        }
+        metrics::counter!("inference_prefix_cache_evictions_total").increment(1);
+        metrics::counter!(
+            PAGED_RECURRENT_PREFIX_OWNER_EVICTIONS_METRIC,
+            "reason" => CHECKPOINT_POOL_EVICTION_REASON
+        )
+        .increment(1);
+        self.publish_paged_recurrent_metrics();
+        true
     }
 
     fn remove_paged_recurrent_owner(&mut self, owner: BlockHash, key: &[BlockHash]) {
@@ -1422,6 +1458,44 @@ mod tests {
         assert!(PrefixCacheManagerV2::new(1, false, false).accepts_sequence_cache());
         assert!(!PrefixCacheManagerV2::new(1, true, false).accepts_sequence_cache());
         assert!(!PrefixCacheManagerV2::new(1, false, true).accepts_sequence_cache());
+    }
+
+    #[test]
+    fn a_full_checkpoint_pool_evicts_the_oldest_prefix_holding_one() {
+        // room for more prefixes than the drafter has checkpoint slots, as a DFlash server runs
+        let mut prefix_cacher = PrefixCacheManagerV2::new(4, false, true);
+        let drops = Arc::new(AtomicUsize::new(0));
+        let plain = block_hashes(10, 2);
+        let oldest = block_hashes(20, 2);
+        let newest = block_hashes(30, 2);
+        prefix_cacher.add_paged_recurrent_prefix(
+            *plain.last().unwrap(),
+            plain.clone(),
+            make_recurrent_snapshot(),
+            None,
+        );
+        for hashes in [&oldest, &newest] {
+            let auxiliary = Arc::new(TestAuxiliaryPrefixState {
+                bytes: 64,
+                drops: Arc::clone(&drops),
+            });
+            prefix_cacher.add_paged_recurrent_prefix(
+                *hashes.last().unwrap(),
+                hashes.clone(),
+                make_recurrent_snapshot(),
+                Some(auxiliary),
+            );
+        }
+        assert!(prefix_cacher.evict_oldest_auxiliary_prefix());
+        // the checkpoint's slot frees right away; the prefix without one stays
+        assert_eq!(drops.load(Ordering::Relaxed), 1);
+        assert!(prefix_cacher.peek_paged_recurrent_prefix(&oldest).is_none());
+        assert!(prefix_cacher.peek_paged_recurrent_prefix(&plain).is_some());
+        assert!(prefix_cacher.peek_paged_recurrent_prefix(&newest).is_some());
+        assert_eq!(prefix_cacher.paged_recurrent_bytes, 64);
+        assert!(prefix_cacher.evict_oldest_auxiliary_prefix());
+        assert!(!prefix_cacher.evict_oldest_auxiliary_prefix());
+        assert_eq!(prefix_cacher.take_released_recurrent_snapshots().len(), 2);
     }
 
     #[test]

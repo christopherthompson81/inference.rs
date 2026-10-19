@@ -1488,7 +1488,18 @@ pub trait Pipeline:
             .speculative_prefix_checkpoint_policy()
             .uses_auxiliary_state(crate::scheduler::modality_signature(seq))
         {
-            match self.capture_paged_auxiliary_prefix_state(*seq.id(), cached_tokens) {
+            // a full checkpoint pool sheds the oldest cached checkpoint; past that the prefix is cached without one
+            let mut captured = self.capture_paged_auxiliary_prefix_state(*seq.id(), cached_tokens);
+            while matches!(captured, Ok(None)) && prefix_cacher.evict_oldest_auxiliary_prefix() {
+                captured = self.capture_paged_auxiliary_prefix_state(*seq.id(), cached_tokens);
+            }
+            match captured {
+                Ok(None) => {
+                    tracing::debug!(
+                        "No drafter checkpoint slot for a {cached_tokens}-token prefix; caching it without one"
+                    );
+                    None
+                }
                 Ok(auxiliary) => auxiliary,
                 Err(err) => {
                     self.cache().hybrid().release_recurrent_snapshot(snapshot)?;

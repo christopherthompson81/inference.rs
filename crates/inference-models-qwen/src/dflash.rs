@@ -2826,6 +2826,10 @@ impl DFlashDraftModel {
                     "DFlash sequence {sequence_id} is not ready at checkpoint boundary {cached_tokens}"
                 );
             }
+            // a full pool is the caller's to make room in (or to cache this prefix without the checkpoint)
+            if pool.free_checkpoint_capacity() == 0 {
+                return Ok(None);
+            }
             let checkpoint = pool.snapshot_sequence(sequence_id)?;
             metrics::counter!("inference_speculative_prefix_cache_captures_total").increment(1);
             Ok(Some(Arc::new(DFlashPagedPrefixState { checkpoint })))
@@ -2915,10 +2919,11 @@ impl DFlashDraftModel {
             let Some(pool) = self.windowed_pool.as_ref() else {
                 return Ok(None);
             };
-            let checkpoint = pool
-                .lock()
-                .expect("dflash windowed pool poisoned")
-                .import_checkpoint(data)?;
+            let mut pool = pool.lock().expect("dflash windowed pool poisoned");
+            if pool.free_checkpoint_capacity() == 0 {
+                return Ok(None);
+            }
+            let checkpoint = pool.import_checkpoint(data)?;
             Ok(Some(Arc::new(DFlashPagedPrefixState { checkpoint })))
         }
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]

@@ -127,3 +127,40 @@ turn   prompt   cached   prompt time
 ```
 
 Before (Run 2, 28K): follow-up turns resumed at the previous prompt's snapshot, 0.47-0.61 s, the reply recomputed.
+
+## Run 5 - 2026-10-19 01:45
+
+Report: the web UI Code tab's demo stopped after its first round of tool calls, with no error shown. Server log:
+`step - Model failed with error: windowed KV checkpoint capacity 9 exhausted`.
+
+Repro (recipe A + DFlash 2 q4k, the LAN config, freshly restarted; a script posting the Code tab's demo then sending
+its prompt in `auto` mode, 4 runs back to back): runs 1 and 3 fail with "The model failed to process the request",
+runs 0 and 2 pass.
+
+Question: what holds the 9 drafter checkpoint slots (`retained_prefixes` 8 + 1 staging) when the cache keeps one
+checkpoint per entry? Reading the code: `snapshot_paged_recurrent_prefix` skips quietly when the recurrent pool has no
+idle lane, but turned a full DFlash checkpoint pool into a step error. Capacity eviction runs in
+`add_paged_recurrent_prefix`, after the capture, and is bounded by the cacher's owner capacity, not the drafter's.
+
+Change: DFlash's capture and import return `None` when the pool has no free slot; on `None` the pipeline evicts the
+least recently used cached prefix holding a checkpoint (`evict_oldest_auxiliary_prefix`, eviction reason
+`checkpoint_pool`) and retries, and once none holds one it caches the prefix without a checkpoint (a later hit replays
+the drafter). A disk import that finds the pool full skips the entry, as one finding no recurrent lane does.
+
+Same repro, 8 runs on the fix: all 8 finish and their tests pass, no `exhausted` in the log. Metrics after:
+
+```
+inference_paged_recurrent_prefix_owners_capacity              16
+inference_paged_recurrent_prefix_checkpoints_used             9
+inference_paged_recurrent_prefix_owner_evictions_total{capacity}         0
+inference_paged_recurrent_prefix_owner_evictions_total{checkpoint_pool}  50
+inference_speculative_prefix_cache_captures_total             61
+inference_speculative_prefix_cache_hits_total                 60
+inference_speculative_prefix_cache_misses_total               6
+```
+
+Cause: a sizing mismatch, not a leak. The cacher keeps up to 16 owners (`--prefix-cache-n`), the drafter backs 8
+checkpoints, so the cacher never reached its own cap (0 capacity evictions) and the 10th capture found the pool full.
+Run 4's reply warm-up roughly doubles captures per agent turn, which is why a few demo runs were enough to hit it. The
+checkpoint pool is now its own LRU bound; aligning the two capacities would also work, but the eviction keeps
+working whichever is set lower.
