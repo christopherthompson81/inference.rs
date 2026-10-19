@@ -113,6 +113,19 @@ impl Agent {
         }
     }
 
+    /// The model later requests name, for a front end whose model selection can change between prompts.
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.config.model = model.into();
+    }
+
+    /// Sets (or with `None` removes) an extra field every later request carries.
+    pub fn set_request_field(&mut self, key: &str, value: Option<Value>) {
+        match value {
+            Some(value) => self.config.request.insert(key.to_string(), value),
+            None => self.config.request.remove(key),
+        };
+    }
+
     pub fn backend(&self) -> &dyn ChatBackend {
         self.backend.as_ref()
     }

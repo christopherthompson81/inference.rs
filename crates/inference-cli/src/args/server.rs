@@ -27,6 +27,12 @@ pub struct ServerOptions {
     #[serde(default)]
     pub no_ui: bool,
 
+    /// Let the web UI's Code tab open projects in this directory (or under it); without it the tab offers only its demo.
+    /// Its coding agent reads, edits and runs commands on this machine, so only admins may use it.
+    #[arg(long, value_name = "DIR")]
+    #[serde(default)]
+    pub code_root: Option<PathBuf>,
+
     /// Let an open server's GET /v1/files list every stored file (a keyed one lists each owner's own).
     #[arg(long)]
     #[serde(default)]
@@ -130,6 +136,7 @@ impl Default for ServerOptions {
             port: 1234,
             host: "0.0.0.0".to_string(),
             no_ui: false,
+            code_root: None,
             allow_file_listing: false,
             allow_model_management: false,
             api_keys_file: None,

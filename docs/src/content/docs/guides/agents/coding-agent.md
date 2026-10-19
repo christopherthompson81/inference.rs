@@ -80,6 +80,30 @@ inference agent --resume 1792370089 -m ...
 
 In the REPL, `/sessions`, `/resume <id>` and `/clear` (start a new session) do the same.
 
+## The web UI's Code tab
+
+The same agent runs in the web UI, on the server's machine, over the UI's chat model. It runs commands there, so only
+admins may use it: on a keyed server the owners named with `--admin`, and on an open server a browser on the server's
+own machine.
+
+**Run demo** makes a small project in the temp directory, with two planted bugs and the tests that catch them. It
+opens a session there and sends the agent the fix-the-tests instruction, so you can watch a whole run on any model.
+The permission selector applies: in **Ask** mode you approve the edits and the test run as they come.
+
+To work in your own projects, start the server with `--code-root DIR` (or `code_root` under `[server]` in a config
+file). Then type a project relative to that directory and press **New session**:
+
+```bash
+inference serve -m Qwen/Qwen3-8B --code-root ~/projects
+```
+
+Calls that need approval show as cards with the edit's old and new text, the file to write, or the command. **Allow**
+runs the call once, **Always allow** covers that tool inside the project for the rest of the session, and **Deny**
+tells the model you declined. **Stop** interrupts the model or the running tool, as Ctrl-C does in the terminal.
+
+Sessions are the same files the terminal uses, so `inference agent --continue` in a project picks up a session started
+in the browser, and the other way round.
+
 ## Interrupting
 
 Ctrl-C stops the model mid-reply, or the running tool. The partial reply is kept, and calls that never ran are

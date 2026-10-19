@@ -215,6 +215,8 @@ export interface Capabilities {
   admin?: boolean;
   /** The server takes keys; without them, a browser on the server's machine is admin. */
   keyed?: boolean;
+  /** Where the Code tab opens projects; null when the server doesn't offer it. */
+  code_root?: string | null;
 }
 
 export interface Settings {

@@ -13,6 +13,7 @@
   import ImagesView from "./lib/views/ImagesView.svelte";
   import DocumentsView from "./lib/views/DocumentsView.svelte";
   import ModelsView from "./lib/views/ModelsView.svelte";
+  import CodeView from "./lib/views/CodeView.svelte";
   import { authStore } from "./lib/stores/auth.svelte";
   import { managerStore, SLOTS, type SlotId } from "./lib/stores/manager.svelte";
   import { modelStore } from "./lib/stores/models.svelte";
@@ -23,6 +24,7 @@
 
   const TABS = [
     { id: "chat", label: "Chat" },
+    { id: "code", label: "Code" },
     { id: "transcription", label: "Speech to text" },
     { id: "speech", label: "Text to speech" },
     { id: "images", label: "Images" },
@@ -192,6 +194,8 @@
         <ImagesView />
       {:else if tab === "documents"}
         <DocumentsView />
+      {:else if tab === "code"}
+        <CodeView />
       {:else}
         <ModelsView onUse={(slot) => show(SLOT_TABS[slot])} />
       {/if}

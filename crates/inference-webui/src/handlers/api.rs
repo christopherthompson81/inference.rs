@@ -683,6 +683,8 @@ pub async fn get_capabilities(
         "tool_dispatch_url": app.tool_dispatch_url,
         "signed_in": app.owner.is_some(),
         "keyed": app.keyed,
+        // where the Code tab opens projects; it needs `admin` too
+        "code_root": app.code_root,
     }))
 }
 
