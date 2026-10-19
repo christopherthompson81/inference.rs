@@ -10,7 +10,9 @@ pub mod session;
 pub mod tools;
 pub mod turn;
 
-pub use agent::{Agent, AgentConfig, AgentUi, DEFAULT_MAX_ROUNDS, Interrupt, TurnEnd};
+pub use agent::{
+    Agent, AgentConfig, AgentUi, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS, Interrupt, TurnEnd,
+};
 pub use backend::{ChatBackend, EngineBackend, HttpBackend};
 pub use permission::{Approval, PermissionMode, Permissions};
 pub use session::{Session, SessionInfo};

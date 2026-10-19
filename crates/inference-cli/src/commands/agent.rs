@@ -127,6 +127,7 @@ pub async fn run_agent(
     let config = AgentConfig {
         model: request_model,
         max_rounds: coder.max_rounds,
+        max_reply_tokens: coder.max_reply_tokens,
         request,
     };
     let mut agent = Agent::new(
@@ -191,6 +192,7 @@ async fn headless(agent: &mut Agent, prompt: &str) -> Result<()> {
         TurnEnd::Done => Ok(()),
         TurnEnd::Interrupted => bail!("interrupted"),
         TurnEnd::RoundLimit => bail!("stopped at the round limit (--max-rounds)"),
+        TurnEnd::ReplyLimit => bail!("a reply hit the token limit (--max-reply-tokens)"),
     }
 }
 
@@ -537,6 +539,9 @@ async fn repl(mut agent: Agent, sessions_dir: &Path) -> Result<()> {
             Ok(TurnEnd::Done) => {}
             Ok(TurnEnd::Interrupted) => println!("{DIM}[interrupted]{RESET}"),
             Ok(TurnEnd::RoundLimit) => println!("{RED}[stopped at the round limit]{RESET}"),
+            Ok(TurnEnd::ReplyLimit) => {
+                println!("{RED}[the reply hit the token limit, likely repeating itself]{RESET}")
+            }
             Err(error) => println!("{RED}error: {error:#}{RESET}"),
         }
         match &ui.last_usage {

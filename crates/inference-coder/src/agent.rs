@@ -18,6 +18,10 @@ use crate::turn::{ToolCall, Turn};
 
 // a runaway loop stops here; a real task rarely needs a tenth of it
 pub const DEFAULT_MAX_ROUNDS: usize = 200;
+// a reply that runs past this is cut: without a cap a looping reply fills the whole context (Qwen3's suggested length)
+pub const DEFAULT_MAX_REPLY_TOKENS: usize = 32_768;
+const LENGTH_FINISH: &str = "length";
+const REPLY_CUT: &str = "the reply was cut at the token limit";
 const INTERRUPTED: &str = "interrupted by the user";
 const DECLINED: &str = "the user declined this call";
 
@@ -74,12 +78,16 @@ pub enum TurnEnd {
     Done,
     Interrupted,
     RoundLimit,
+    /// A reply reached the per-reply token cap, usually a model stuck repeating itself.
+    ReplyLimit,
 }
 
 pub struct AgentConfig {
     /// The model name requests carry.
     pub model: String,
     pub max_rounds: usize,
+    /// The most tokens one model reply may take, reasoning included.
+    pub max_reply_tokens: usize,
     /// Extra request fields (sampling, `enable_thinking`, `reasoning_effort`), the same on every request.
     pub request: Map<String, Value>,
 }
@@ -154,6 +162,20 @@ impl Agent {
                 self.commit(&mut pending)?;
                 return Ok(TurnEnd::Interrupted);
             }
+            if turn.finish_reason.as_deref() == Some(LENGTH_FINISH) {
+                // a cut call's arguments are partial, and a cut reasoning loop would only crowd the context
+                let mut message = turn.message();
+                if let Some(message) = message.as_object_mut() {
+                    message.remove("tool_calls");
+                    message.remove("reasoning_content");
+                }
+                if turn.content.trim().is_empty() {
+                    message["content"] = Value::String(format!("({REPLY_CUT})"));
+                }
+                pending.push(message);
+                self.commit(&mut pending)?;
+                return Ok(TurnEnd::ReplyLimit);
+            }
             pending.push(turn.message());
             if turn.tool_calls.is_empty() {
                 self.commit(&mut pending)?;
@@ -193,6 +215,9 @@ impl Agent {
             .chain(pending)
             .cloned()
             .collect();
+        request
+            .entry("max_tokens")
+            .or_insert_with(|| json!(self.config.max_reply_tokens));
         request.insert("model".into(), Value::String(self.config.model.clone()));
         request.insert("messages".into(), Value::Array(messages));
         request.insert(
@@ -370,6 +395,7 @@ mod tests {
         let config = AgentConfig {
             model: "m".into(),
             max_rounds: 10,
+            max_reply_tokens: 64,
             request: Map::new(),
         };
         let mut agent = Agent::new(
@@ -424,5 +450,45 @@ mod tests {
         let last = requests[2]["messages"].as_array().unwrap();
         assert_eq!(&last[..first.len()], first.as_slice());
         assert_eq!(requests[0]["tools"], requests[2]["tools"]);
+    }
+
+    #[tokio::test]
+    async fn a_reply_cut_at_the_token_cap_ends_the_turn_without_its_partial_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        std::fs::create_dir_all(&root).unwrap();
+        let backend = Arc::new(Scripted {
+            replies: Mutex::new(vec![vec![json!({"choices": [{"delta": {
+                "reasoning_content": "let me think. let me think.",
+                "tool_calls": [{"index": 0, "id": "c1", "function": {"name": "read", "arguments": "{\"pa"}}]},
+                "finish_reason": "length"}]})]]),
+            requests: Mutex::new(Vec::new()),
+        });
+        let session = Session::create(&dir.path().join("sessions"), &root, "m", "sys").unwrap();
+        let config = AgentConfig {
+            model: "m".into(),
+            max_rounds: 10,
+            max_reply_tokens: 64,
+            request: Map::new(),
+        };
+        let mut agent = Agent::new(
+            backend.clone(),
+            default_tools(),
+            Permissions::new(PermissionMode::Auto),
+            session,
+            config,
+        );
+        let mut ui = Recorder::default();
+        let end = agent
+            .send("go", &mut ui, &Interrupt::default())
+            .await
+            .unwrap();
+        assert_eq!(end, TurnEnd::ReplyLimit);
+        assert!(ui.tools.is_empty());
+        assert_eq!(backend.requests.lock().unwrap()[0]["max_tokens"], 64);
+        let last = agent.session.messages.last().unwrap();
+        assert_eq!(last["role"], "assistant");
+        assert!(last.get("tool_calls").is_none() && last.get("reasoning_content").is_none());
+        assert!(last["content"].as_str().unwrap().contains("token limit"));
     }
 }

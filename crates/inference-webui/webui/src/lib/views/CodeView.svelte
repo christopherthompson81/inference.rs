@@ -186,6 +186,8 @@
       case "done":
         if (event.end === "interrupted") items.push({ kind: "notice", text: "Interrupted" });
         if (event.end === "round_limit") items.push({ kind: "notice", text: "Stopped at the round limit" });
+        if (event.end === "reply_limit")
+          items.push({ kind: "notice", text: "A reply hit the token limit (the model was likely repeating itself)" });
         break;
       case "error":
         error = event.message;
@@ -360,7 +362,7 @@
         class="rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-100 disabled:opacity-50 dark:border-gray-700 dark:text-gray-300 dark:hover:bg-gray-800"
         onclick={runDemo}
         disabled={running}
-        title="Make a temp project with two planted bugs and ask the agent to fix them"
+        title="Make a temp project, a small package whose tests fail, and ask the agent to fix it"
       >
         Run demo
       </button>
