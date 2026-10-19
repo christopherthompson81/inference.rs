@@ -626,10 +626,14 @@ async fn each_owner_keeps_its_own_web_ui_jobs() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn only_an_admin_reaches_the_code_tab_and_only_inside_its_root() -> anyhow::Result<()> {
+async fn only_an_admin_reaches_the_code_tab_and_only_under_its_roots() -> anyhow::Result<()> {
     let (_dir, engine) = tiny_engine().await?;
-    let root = tempfile::tempdir()?;
-    std::fs::create_dir(root.path().join("project"))?;
+    let roots = [tempfile::tempdir()?, tempfile::tempdir()?];
+    let outside = tempfile::tempdir()?;
+    let project = roots[1].path().canonicalize()?.join("project");
+    std::fs::create_dir(&project)?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(outside.path(), roots[0].path().join("escape"))?;
     let mut keys = ApiKeys::parse(KEYS)?;
     keys.set_admins(["team-a".to_string()])?;
     let auth = Auth::new(keys);
@@ -640,23 +644,36 @@ async fn only_an_admin_reaches_the_code_tab_and_only_inside_its_root() -> anyhow
         .await?;
     let options = inference_webui::UiOptions {
         auth,
-        code_root: Some(root.path().to_path_buf()),
+        code_roots: roots.iter().map(|root| root.path().to_path_buf()).collect(),
         ..Default::default()
     };
     let ui = inference_webui::mount(api, &engine, options, Default::default()).await?;
     let (_, body) = status_and_body(&ui, get("/ui/api/capabilities", BETA)).await?;
     let capabilities: Value = serde_json::from_str(&body)?;
-    assert_eq!(
-        capabilities["code_root"],
-        json!(root.path().canonicalize()?.display().to_string())
-    );
-    let sessions = "/ui/api/code/sessions?project=project";
-    let (code, _) = status_and_body(&ui, get(sessions, BETA)).await?;
+    let expected = roots
+        .iter()
+        .map(|root| Ok(root.path().canonicalize()?.display().to_string()))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    assert_eq!(capabilities["code_roots"], json!(expected));
+    let sessions = |path: &str| {
+        let query: String = url::form_urlencoded::byte_serialize(path.as_bytes()).collect();
+        format!("/ui/api/code/sessions?project={query}")
+    };
+    let (code, _) =
+        status_and_body(&ui, get(&sessions(&project.display().to_string()), BETA)).await?;
     assert_eq!(code, StatusCode::FORBIDDEN);
-    let (code, body) = status_and_body(&ui, get(sessions, ALPHA)).await?;
+    let (code, body) =
+        status_and_body(&ui, get(&sessions(&project.display().to_string()), ALPHA)).await?;
     assert_eq!(code, StatusCode::OK, "{body}");
-    let (code, body) = status_and_body(&ui, get("/ui/api/code/sessions?project=..", ALPHA)).await?;
-    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    let escapes = [
+        "project".to_string(),
+        project.join("../..").display().to_string(),
+        roots[0].path().join("escape").display().to_string(),
+    ];
+    for path in escapes {
+        let (code, body) = status_and_body(&ui, get(&sessions(&path), ALPHA)).await?;
+        assert_eq!(code, StatusCode::BAD_REQUEST, "{path}: {body}");
+    }
     let open = json!({"project": "/etc"});
     let (code, _) =
         status_and_body(&ui, send_json("POST", "/ui/api/code/open", ALPHA, open)).await?;

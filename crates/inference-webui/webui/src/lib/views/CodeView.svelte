@@ -46,7 +46,7 @@
     }
   }
 
-  let project = $state(stored(PROJECT_KEY, ""));
+  let project = $state<string>(stored(PROJECT_KEY, ""));
   let mode = $state<PermissionMode>(stored(MODE_KEY, "ask"));
   let thinking = $state<"default" | "on" | "off">("default");
   let sessions = $state<CodeSessionInfo[]>([]);
@@ -59,7 +59,8 @@
   let usage = $state<Record<string, any> | null>(null);
   let container = $state<HTMLDivElement | null>(null);
 
-  let hasRoot = $derived(!!modelStore.capabilities.code_root);
+  let roots = $derived(modelStore.capabilities.code_roots ?? []);
+  let hasRoot = $derived(roots.length > 0);
   let available = $derived(!!modelStore.capabilities.admin);
 
   function parseArgs(text: string): Record<string, unknown> {
@@ -202,7 +203,7 @@
   }
 
   async function refreshSessions() {
-    if (!hasRoot && !project) return;
+    if (!project.trim()) return;
     try {
       const listing = await code.listSessions(project);
       sessions = listing.sessions;
@@ -318,7 +319,7 @@
   });
 
   $effect(() => {
-    if (available && hasRoot && !projectPath) void refreshSessions();
+    if (available && project && !projectPath) void refreshSessions();
   });
 </script>
 
@@ -339,21 +340,25 @@
         <input
           id="code-project"
           class="min-w-0 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm dark:border-gray-700 dark:bg-gray-900"
-          placeholder="relative to the code root"
+          placeholder="absolute path, e.g. {roots[0]}/project"
           bind:value={project}
           onchange={() => refreshSessions()}
         />
       {:else}
         <p class="text-xs text-gray-500 dark:text-gray-400">
-          Start the server with <code>--code-root DIR</code> to open your own projects here.
+          Start the server with <code>--code-root DIR</code> (repeat for more) to open your own projects here.
         </p>
       {/if}
-      <p class="truncate text-xs text-gray-400" title={projectPath}>{projectPath || modelStore.capabilities.code_root || ""}</p>
+      {#if projectPath}
+        <p class="truncate text-xs text-gray-400" title={projectPath}>{projectPath}</p>
+      {:else if hasRoot}
+        <p class="text-xs text-gray-400">Projects under {roots.join(", ")}</p>
+      {/if}
       {#if hasRoot}
         <button
           class="rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
           onclick={() => open()}
-          disabled={running}
+          disabled={running || !project.trim()}
         >
           New session
         </button>
@@ -428,7 +433,7 @@
               <div class="markdown-content text-sm text-gray-800 dark:text-gray-200">{@html renderMarkdown(item.text)}</div>
             {:else if item.kind === "notice"}
               <p class="text-xs text-gray-400">{item.text}</p>
-            {:else}
+            {:else if item.kind === "tool"}
               <div
                 class="rounded-lg border text-sm {item.approval
                   ? 'border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-950/30'

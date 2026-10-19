@@ -1,5 +1,5 @@
-//! The Code tab: `inference_coder`'s agent over this server's engine, working in projects under the code root, or in a
-//! demo project it makes in the temp directory.
+//! The Code tab: `inference_coder`'s agent over this server's engine, working in projects under the code roots, or in
+//! a demo project it makes in the temp directory.
 
 use std::collections::HashSet;
 use std::convert::Infallible;
@@ -52,8 +52,8 @@ const DEMO_FILES: [(&str, &str); 9] = [
 
 /// The projects the Code tab may open and the sessions it has loaded.
 pub(crate) struct CodeState {
-    root: Option<PathBuf>,
-    /// Demo projects made since the server started, which may be opened although they are outside the root.
+    roots: Vec<PathBuf>,
+    /// Demo projects made since the server started, which may be opened although they are outside the roots.
     demos: Mutex<HashSet<PathBuf>>,
     sessions_dir: PathBuf,
     live: Mutex<IndexMap<String, Arc<LiveSession>>>,
@@ -66,41 +66,65 @@ struct LiveSession {
 }
 
 impl CodeState {
-    pub(crate) fn new(root: Option<&Path>) -> std::io::Result<Self> {
+    pub(crate) fn new(roots: &[PathBuf]) -> anyhow::Result<Self> {
+        let roots = roots
+            .iter()
+            .map(|root| {
+                let path = expand_home(root);
+                path.canonicalize()
+                    .map_err(|error| anyhow::anyhow!("code root {}: {error}", path.display()))
+            })
+            .collect::<anyhow::Result<_>>()?;
         Ok(Self {
-            root: root.map(Path::canonicalize).transpose()?,
+            roots,
             demos: Mutex::new(HashSet::new()),
             sessions_dir: inference_coder::session::default_dir(),
             live: Mutex::new(IndexMap::new()),
         })
     }
 
-    pub(crate) fn root(&self) -> Option<&Path> {
-        self.root.as_deref()
+    pub(crate) fn roots(&self) -> &[PathBuf] {
+        &self.roots
     }
 
     fn allows(&self, path: &Path) -> bool {
-        self.root
-            .as_ref()
-            .is_some_and(|root| path.starts_with(root))
+        self.roots.iter().any(|root| path.starts_with(root))
             || self.demos.lock().unwrap().contains(path)
     }
 
-    /// `project` (relative to the code root, or absolute) as a directory the Code tab may open.
+    /// `project`, an absolute path (or one under `~/`), as a directory the Code tab may open.
     fn project(&self, project: &str) -> Result<PathBuf, Refusal> {
-        let path = match &self.root {
-            Some(root) => root.join(project.trim()),
-            None => PathBuf::from(project.trim()),
-        };
+        let path = expand_home(Path::new(project.trim()));
+        if !path.is_absolute() {
+            return Err(bad_request(format!(
+                "{}: give the project as an absolute path",
+                path.display()
+            )));
+        }
+        // canonical, so `..` and symlinks can't step outside a root
         let path = path
             .canonicalize()
             .map_err(|error| bad_request(format!("{}: {error}", path.display())))?;
-        if !path.is_dir() || !self.allows(&path) {
-            let reason = match &self.root {
-                Some(root) => format!("is not a directory inside the code root {}", root.display()),
-                None => "can't be opened: the server has no code root (--code-root)".to_string(),
+        if !path.is_dir() {
+            return Err(bad_request(format!(
+                "{} is not a directory",
+                path.display()
+            )));
+        }
+        if !self.allows(&path) {
+            let reason = if self.roots.is_empty() {
+                "the server has no code roots (--code-root)".to_string()
+            } else {
+                let roots = self.roots.iter().map(|root| root.display().to_string());
+                format!(
+                    "it is not under a code root ({})",
+                    roots.collect::<Vec<_>>().join(", ")
+                )
             };
-            return Err(bad_request(format!("{} {reason}", path.display())));
+            return Err(bad_request(format!(
+                "{} can't be opened: {reason}",
+                path.display()
+            )));
         }
         Ok(path)
     }
@@ -117,6 +141,13 @@ impl CodeState {
             live.shift_remove_index(idle);
         }
         live.insert(id, session);
+    }
+}
+
+fn expand_home(path: &Path) -> PathBuf {
+    match (path.strip_prefix("~"), dirs::home_dir()) {
+        (Ok(rest), Some(home)) => home.join(rest),
+        _ => path.to_path_buf(),
     }
 }
 
@@ -207,7 +238,7 @@ pub(crate) async fn open_session(
                     Err(_) => return not_found(id),
                 };
                 if !code.allows(&session.root) {
-                    return bad_request("that session's project is outside the code root")
+                    return bad_request("that session's project is outside the code roots")
                         .into_response();
                 }
                 match load(&code, &app, session, request.model.as_deref()).await {

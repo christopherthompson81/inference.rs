@@ -20,6 +20,7 @@ inference-coder = { workspace = true }
 anyhow = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 chrono = { workspace = true }
+dirs = { workspace = true }
 futures = { workspace = true }
 include_dir = { workspace = true }
 indexmap = { workspace = true }

@@ -92,12 +92,22 @@ it should behave, a 19-test `unittest` suite, eight planted bugs spread across t
 model takes about 8-10 rounds and 15-20 tool calls, which is a fair check of the whole loop. The permission selector
 applies: in **Ask** mode you approve each edit and test run as it comes, and **Run everything** lets you watch.
 
-To work in your own projects, start the server with `--code-root DIR` (or `code_root` under `[server]` in a config
-file). Then type a project relative to that directory and press **New session**:
+To work in your own projects, name the directories they live in with `--code-root DIR`, once per directory, or with
+`code_roots` under `[server]` in a config file. A leading `~/` is the server user's home directory. Then type a
+project's absolute path (or one starting `~/`) and press **New session**. The server opens a path only when it is a
+directory under one of the roots, after following symlinks and `..`, so a link inside a root can't lead out of it:
 
 ```bash
-inference serve -m Qwen/Qwen3-8B --code-root ~/projects
+inference serve -m Qwen/Qwen3-8B --code-root ~/projects --code-root /srv/src
 ```
+
+```toml
+[server]
+code_roots = ["~/projects", "/srv/src"]
+```
+
+A root that doesn't exist stops the server at startup. A saved session whose project is no longer under a root can't be
+reopened.
 
 Calls that need approval show as cards with the edit's old and new text, the file to write, or the command. **Allow**
 runs the call once, **Always allow** covers that tool inside the project for the rest of the session, and **Deny**

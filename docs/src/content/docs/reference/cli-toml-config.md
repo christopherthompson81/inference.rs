@@ -82,7 +82,7 @@ quant = "4"
 | `host` | `--host` | `0.0.0.0` | Bind address. |
 | `port` | `-p`, `--port` | 1234 | TCP port. |
 | `no_ui` | `--no-ui` | false | Disable the built-in web UI (mounted at `/ui` by default). |
-| `code_root` | `--code-root` | none | Let the web UI's Code tab open projects in this directory or under it; without it the tab offers only its demo. Its agent reads, edits and runs commands on the server's machine, so only admins reach it. |
+| `code_roots` | `--code-root` (repeat) | none | Directories the web UI's Code tab may open projects under, given as absolute paths (a leading `~/` is the home directory); without one the tab offers only its demo. Its agent reads, edits and runs commands on the server's machine, so only admins reach it. |
 | `allow_file_listing` | `--allow-file-listing` | false | Let an open server's `GET /v1/files` list every stored file. Its store is shared by every client, so enable it only for trusted ones. A keyed server always lists each owner's own files. |
 | `allow_model_management` | `--allow-model-management` | false | Serve `POST /v1/models/add`, `/remove`, `/default` and `/alias`, which change the served models at runtime. Adding a model loads any local path or hub repo the server can reach, so enable it only for trusted clients. Only admins reach them. |
 | `model_folders` | `--model-folder` (repeat) | none | Folders of models the [model manager](/reference/http-api/#model-manager) offers admins, beside the Hugging Face cache. |

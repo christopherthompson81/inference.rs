@@ -278,7 +278,7 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     let auth = Auth::new(server.api_keys()?);
     let ui = (!server.no_ui).then(|| UiOptions {
         auth: auth.clone(),
-        code_root: server.code_root.clone(),
+        code_roots: server.code_roots.clone(),
         ..UiOptions::from_agentic(&spec.agentic)
     });
     let token_source = spec.runtime.token_source.clone();
