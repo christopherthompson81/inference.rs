@@ -2,7 +2,7 @@
 title: "inference uqff"
 description: "Inspect, report, or verify UQFF artifacts"
 sidebar:
-  order: 6
+  order: 7
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

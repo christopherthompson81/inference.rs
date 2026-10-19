@@ -2,7 +2,7 @@
 title: "inference quantize"
 description: "Generate a UQFF quantized model file, or an `asr` GGUF of a speech recogniser"
 sidebar:
-  order: 5
+  order: 6
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

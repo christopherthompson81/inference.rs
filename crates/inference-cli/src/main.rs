@@ -21,9 +21,10 @@ use args::{
     resolve_quantize_command,
 };
 use commands::{
-    BenchRunConfig, run_asr_quantize, run_bench, run_cache_delete, run_cache_list, run_doctor,
-    run_from_config, run_hidream_quantize, run_interactive, run_kernels_fetch, run_kernels_prune,
-    run_login, run_quantize, run_server, run_tune, run_uninstall, run_update, run_uqff,
+    AgentModel, BenchRunConfig, list_agent_sessions, run_agent, run_asr_quantize, run_bench,
+    run_cache_delete, run_cache_list, run_doctor, run_from_config, run_hidream_quantize,
+    run_interactive, run_kernels_fetch, run_kernels_prune, run_login, run_quantize, run_server,
+    run_tune, run_uninstall, run_update, run_uqff,
 };
 use inference_api::{LogVerbosity, initialize_inference_logging};
 
@@ -96,6 +97,33 @@ async fn main() -> Result<()> {
                 adapter,
             )
             .await?;
+        }
+
+        Command::Agent { coder, .. } if coder.sessions => list_agent_sessions(&coder)?,
+
+        Command::Agent {
+            model_type,
+            default_model,
+            runtime,
+            sandbox,
+            coder,
+            thinking,
+            reasoning_effort,
+        } => {
+            let model = match &coder.url {
+                Some(url) => AgentModel::Server {
+                    url: url.clone(),
+                    model: default_model
+                        .model_id
+                        .unwrap_or_else(|| "default".to_string()),
+                },
+                None => AgentModel::Local {
+                    model_type: Box::new(resolve_model_type(model_type, default_model)?),
+                    runtime: Box::new(runtime),
+                    sandbox,
+                },
+            };
+            run_agent(model, coder, cli.global, thinking, reasoning_effort).await?;
         }
 
         Command::Completions { shell } => {

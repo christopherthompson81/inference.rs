@@ -127,7 +127,7 @@ pub(crate) async fn require_adapter(engine: &Engine, alias: &str) -> Result<()> 
 
 /// The engine `run` chats with: no tool loop limits, adapter management or shared skill store, and no throughput
 /// lines between turns.
-fn run_spec(
+pub(crate) fn run_spec(
     model_type: &ModelType,
     runtime: &RuntimeOptions,
     sandbox: SandboxOptions,

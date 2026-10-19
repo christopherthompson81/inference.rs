@@ -7,7 +7,7 @@ description: How inference is organized. Request flow, threading, and how pieces
 
 From the outside in:
 
-**Clients.** The HTTP server (`inference-server-core`: routes, API keys, SSE, metrics, the MCP server), the web UI, the `inference` CLI and the C ABI (`inference-ffi`, with the C# and Python bindings over it). Each is a client of the engine API and knows nothing about model internals.
+**Clients.** The HTTP server (`inference-server-core`: routes, API keys, SSE, metrics, the MCP server), the web UI, the `inference` CLI (whose `agent` command runs `inference-coder`, a coding agent with a client-side tool loop over the engine or a server) and the C ABI (`inference-ffi`, with the C# and Python bindings over it). Each is a client of the engine API and knows nothing about model internals.
 
 **Engine API.** `inference-api`'s `Engine`: loading from an `EngineSpec`, the OpenAI, Anthropic and Responses operations, files, sessions, models, LoRA adapters and approvals. Every client calls the same methods, so a capability added here reaches the server, the CLI and every binding; a test in `inference-ffi` fails when an `Engine` method has no ABI entry and no listed reason for going without one.
 

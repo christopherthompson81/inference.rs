@@ -6,6 +6,9 @@ description: Configure coding agents to use a local inference.rs server.
 inference.rs can back coding-agent clients through the compatibility APIs those
 clients already speak.
 
+inference.rs also ships its own terminal coding agent, `inference agent`; see
+[Use the built-in coding agent](/guides/agents/coding-agent/).
+
 | Client | API surface | Base URL to configure |
 |---|---|---|
 | Codex | OpenAI Responses | `http://localhost:1234/v1` |

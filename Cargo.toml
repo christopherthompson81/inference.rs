@@ -29,6 +29,7 @@ members = [
 
     "crates/inference-audio",
     "crates/inference-agent",
+    "crates/inference-coder",
     "crates/inference-gguf",
     "crates/inference-selection",
     "crates/inference-mcp",
@@ -67,6 +68,7 @@ default-members = [
 
     "crates/inference-audio",
     "crates/inference-agent",
+    "crates/inference-coder",
     "crates/inference-gguf",
     "crates/inference-selection",
     "crates/inference-mcp",
@@ -149,6 +151,7 @@ rayon = "1.11.0"
 url = "2.5.8"
 utoipa = "5.4.0"
 walkdir = "2.5.0"
+ignore = "0.4"
 data-url = "0.3.2"
 float8 = "0.7.0"
 regex = "1.12.2"
@@ -256,6 +259,7 @@ inference-webui = { path = "crates/inference-webui", version = "0.0.26" }
 inference = { path = "crates/inference", version = "0.0.26", default-features = false }
 inference-audio = { path = "crates/inference-audio", version = "0.0.26" }
 inference-agent = { path = "crates/inference-agent", version = "0.0.26" }
+inference-coder = { path = "crates/inference-coder", version = "0.0.26" }
 inference-gguf = { path = "crates/inference-gguf", version = "0.0.26" }
 inference-selection = { path = "crates/inference-selection", version = "0.0.26" }
 inference-mcp = { path = "crates/inference-mcp", version = "0.0.26" }

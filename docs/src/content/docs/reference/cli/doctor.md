@@ -2,7 +2,7 @@
 title: "inference doctor"
 description: "Run system diagnostics and environment checks"
 sidebar:
-  order: 7
+  order: 8
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

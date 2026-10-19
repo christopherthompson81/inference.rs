@@ -3,12 +3,14 @@
 //! This module provides cleanly organized argument structs using clap's derive macros.
 //! Arguments are grouped logically to improve discoverability and reduce duplication.
 
+mod agent;
 mod model;
 mod paged_attn;
 mod quantize;
 mod sandbox;
 mod server;
 
+pub use agent::*;
 pub use model::*;
 pub use paged_attn::*;
 pub use quantize::*;
@@ -117,6 +119,35 @@ pub enum Command {
         /// LoRA adapter alias to use for requests. Omit to run the base model.
         #[arg(long)]
         adapter: Option<String>,
+    },
+
+    /// Coding agent: a tool loop (read, write, edit, bash, grep, glob) over the project directory, with the model in
+    /// this process or on a server (`--url`)
+    Agent {
+        #[command(subcommand)]
+        model_type: Option<ModelType>,
+
+        /// Default model options (used when model type is not specified)
+        #[command(flatten)]
+        default_model: DefaultModelOptions,
+
+        #[command(flatten)]
+        runtime: RuntimeOptions,
+
+        #[command(flatten)]
+        sandbox: SandboxOptions,
+
+        #[command(flatten)]
+        coder: CoderOptions,
+
+        /// Control thinking mode for models that support it.
+        /// Use --thinking or --thinking true to force on, --thinking false to force off.
+        #[arg(long, num_args = 0..=1, default_missing_value = "true", value_parser = clap::value_parser!(bool))]
+        thinking: Option<bool>,
+
+        /// Set reasoning effort: off, low, medium, high, or xhigh. "none" is an alias for off.
+        #[arg(long)]
+        reasoning_effort: Option<ReasoningEffort>,
     },
 
     /// Generate shell completions
@@ -1120,6 +1151,7 @@ fn default_prefix_cache_n() -> usize {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
     use std::{fs, path::Path};
 
     use super::*;
@@ -1149,6 +1181,41 @@ mod tests {
             _ => unreachable!(),
         };
         resolve_model_type(model_type, default_model)
+    }
+
+    #[test]
+    fn every_command_parses_without_flag_clashes() {
+        Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn agent_takes_run_model_options_or_a_server() {
+        let cli = Cli::try_parse_from([
+            "inference",
+            "agent",
+            "-m",
+            "org/model",
+            "--cpu",
+            "-p",
+            "fix it",
+        ])
+        .unwrap();
+        let Command::Agent { coder, .. } = cli.command else {
+            unreachable!()
+        };
+        assert_eq!(coder.prompt.as_deref(), Some("fix it"));
+        let cli = Cli::try_parse_from([
+            "inference",
+            "agent",
+            "--url",
+            "http://host:1234",
+            "--continue",
+        ])
+        .unwrap();
+        let Command::Agent { coder, .. } = cli.command else {
+            unreachable!()
+        };
+        assert!(coder.continue_session && coder.url.is_some());
     }
 
     fn resolve_run(args: &[&str]) -> anyhow::Result<ModelType> {
