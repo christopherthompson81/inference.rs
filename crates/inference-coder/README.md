@@ -13,6 +13,7 @@ take OpenAI chat JSON and stream OpenAI chunk JSON through the `ChatBackend` tra
 | `permission` | `ask` / `auto` / `read-only`, with per-tool "always" for paths inside the project |
 | `prompt` | The system prompt: base text, environment, `AGENTS.md` / `CLAUDE.md` |
 | `session` | Append-only JSONL sessions with list, find and continue-latest |
+| `changes` | What a session changed: each file as it was before the agent first wrote it, plus files a command modified, with line diffs |
 
 Design choices that keep the server's prefix cache hot:
 

@@ -160,8 +160,8 @@ pub struct AppState {
     pub tool_dispatch_url: Option<String>,
     /// The server takes keys, so its admins are the owners it names rather than browsers on its machine.
     pub keyed: bool,
-    /// The Code tab's project root, when the server offers it.
-    pub code_root: Option<String>,
+    /// The directories the Code tab may open projects under.
+    pub code_roots: Vec<String>,
 }
 
 const CHAT_FILE_EXT: &str = "json";
@@ -191,7 +191,7 @@ impl AppState {
             shell_enabled: self.shell_enabled,
             tool_dispatch_url: self.tool_dispatch_url.clone(),
             keyed: self.keyed,
-            code_root: self.code_root.clone(),
+            code_roots: self.code_roots.clone(),
         })
     }
 

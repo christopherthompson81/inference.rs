@@ -57,7 +57,7 @@ inference serve [OPTIONS] [COMMAND]
 | `-p, --port <PORT>` | `1234` | HTTP server port |
 | `--host <HOST>` | `0.0.0.0` | Bind address |
 | `--no-ui` | `false` | Disable the built-in web UI (served at /ui by default) |
-| `--code-root <DIR>` |  | Let the web UI's Code tab open projects in this directory (or under it); without it the tab offers only its demo. Its coding agent reads, edits and runs commands on this machine, so only admins may use it |
+| `--code-root <DIR>` |  | Let the web UI's Code tab open projects in this directory or under it (a leading `~/` is the home directory); repeat for more. Without one the tab offers only its demo. Its agent runs commands here, so only admins may use it |
 | `--allow-file-listing` | `false` | Let an open server's GET /v1/files list every stored file (a keyed one lists each owner's own) |
 | `--allow-model-management` | `false` | Serve the routes that add and remove models at runtime; adding one loads any path or hub repo the server reaches |
 | `--api-keys-file <API_KEYS_FILE>` |  | File of `name = key` lines; each request must carry a key and sees only its owner's data (and INFERENCE_RS_API_KEY) |

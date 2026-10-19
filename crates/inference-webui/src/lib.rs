@@ -103,6 +103,12 @@ pub(crate) const UI_CODE_INTERRUPT_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/interrupt", "POST", RouteKind::Ui);
 pub(crate) const UI_CODE_DEMO_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/demo", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_CHANGES_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/changes", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_DIFF_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/diff", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_TREE_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/tree", "GET", RouteKind::Ui);
 pub(crate) const UI_UPLOADS_ROUTE: RouteInfo = RouteInfo::new("/uploads", "GET", RouteKind::Ui);
 pub(crate) const UI_ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::Ui);
 pub(crate) const UI_STATIC_ROUTE: RouteInfo = RouteInfo::new("/{*path}", "GET", RouteKind::Ui);
@@ -195,9 +201,9 @@ pub struct UiOptions {
     pub tool_dispatch_url: Option<String>,
     /// The keys the UI's data needs, shared with the API router so a signed-in browser reaches both.
     pub auth: Option<Arc<Auth>>,
-    /// Where the Code tab may open projects; without one it offers only its demo. Its agent runs tools on this machine,
-    /// so the tab is for admins only.
-    pub code_root: Option<std::path::PathBuf>,
+    /// The directories the Code tab may open projects under; without one it offers only its demo. Its agent runs tools
+    /// on this machine, so the tab is for admins only.
+    pub code_roots: Vec<std::path::PathBuf>,
 }
 
 impl UiOptions {
@@ -208,7 +214,7 @@ impl UiOptions {
             shell: agentic.shell.is_some(),
             tool_dispatch_url: agentic.tool_dispatch_url.clone(),
             auth: None,
-            code_root: None,
+            code_roots: Vec::new(),
         }
     }
 }
@@ -300,10 +306,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .default_model_id()
         .or_else(|| chat_models(engine).keys().next().cloned());
 
-    let code = Arc::new(
-        code::CodeState::new(options.code_root.as_deref())
-            .map_err(|error| anyhow::anyhow!("code root: {error}"))?,
-    );
+    let code = Arc::new(code::CodeState::new(&options.code_roots)?);
 
     let app_state = Arc::new(AppState {
         engine: engine.clone(),
@@ -320,7 +323,11 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         shell_enabled: options.shell,
         tool_dispatch_url: options.tool_dispatch_url,
         keyed: options.auth.is_some(),
-        code_root: code.root().map(|root| root.display().to_string()),
+        code_roots: code
+            .roots()
+            .iter()
+            .map(|root| root.display().to_string())
+            .collect(),
     });
 
     let code_routes = Router::new()
@@ -330,6 +337,9 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .route(UI_CODE_APPROVE_ROUTE.path, post(code::approve))
         .route(UI_CODE_INTERRUPT_ROUTE.path, post(code::interrupt))
         .route(UI_CODE_DEMO_ROUTE.path, post(code::start_demo))
+        .route(UI_CODE_CHANGES_ROUTE.path, get(code::changes))
+        .route(UI_CODE_DIFF_ROUTE.path, get(code::diff))
+        .route(UI_CODE_TREE_ROUTE.path, get(code::tree))
         .layer(Extension(code))
         .layer(middleware::from_fn(require_admin));
     let router = Router::new()

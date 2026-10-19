@@ -80,6 +80,12 @@ inference agent --resume 1792370089 -m ...
 
 In the REPL, `/sessions`, `/resume <id>` and `/clear` (start a new session) do the same.
 
+Beside each session file, a `<id>.changes` directory keeps a copy of every file the agent edits or writes, taken just
+before its first change, so the session's changes can be shown as diffs. Once the agent has run a command, any file
+in the project modified since the session's first change also counts, skipping what `.gitignore` excludes. Such a file
+is compared with git's `HEAD` when the project tracks it, and counts as added when it was created after that first
+change. Otherwise it has no earlier copy, and only its current text can be shown.
+
 ## The web UI's Code tab
 
 The same agent runs in the web UI, on the server's machine, over the UI's chat model. It runs commands there, so only
@@ -92,12 +98,28 @@ it should behave, a 19-test `unittest` suite, eight planted bugs spread across t
 model takes about 8-10 rounds and 15-20 tool calls, which is a fair check of the whole loop. The permission selector
 applies: in **Ask** mode you approve each edit and test run as it comes, and **Run everything** lets you watch.
 
-To work in your own projects, start the server with `--code-root DIR` (or `code_root` under `[server]` in a config
-file). Then type a project relative to that directory and press **New session**:
+To work in your own projects, name the directories they live in with `--code-root DIR`, once per directory, or with
+`code_roots` under `[server]` in a config file. A leading `~/` is the server user's home directory. Then type a
+project's absolute path (or one starting `~/`) and press **New session**. The server opens a path only when it is a
+directory under one of the roots, after following symlinks and `..`, so a link inside a root can't lead out of it:
 
 ```bash
-inference serve -m Qwen/Qwen3-8B --code-root ~/projects
+inference serve -m Qwen/Qwen3-8B --code-root ~/projects --code-root /srv/src
 ```
+
+```toml
+[server]
+code_roots = ["~/projects", "/srv/src"]
+```
+
+A root that doesn't exist stops the server at startup. A saved session whose project is no longer under a root can't be
+reopened.
+
+The sidebar's **Files** tab lists what the session changed, as a tree with each file's added and removed line counts
+and each directory's totals. **All files** shows the whole project, again skipping what `.gitignore` excludes. Pick a
+file, or **diff** on an edit or write card, to open its diff in a pane beside the conversation. Drag the divider to
+resize the pane. The counts and the open diff update after every edit, write and command, so you can watch the change
+build as the agent works.
 
 Calls that need approval show as cards with the edit's old and new text, the file to write, or the command. **Allow**
 runs the call once, **Always allow** covers that tool inside the project for the rest of the session, and **Deny**
