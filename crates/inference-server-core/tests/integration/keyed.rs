@@ -681,6 +681,17 @@ async fn only_an_admin_reaches_the_code_tab_and_only_under_its_roots() -> anyhow
     let (code, _) =
         status_and_body(&ui, send_json("POST", "/ui/api/code/demo", BETA, json!({}))).await?;
     assert_eq!(code, StatusCode::FORBIDDEN);
+    for route in ["changes", "diff", "tree"] {
+        let path = format!("/ui/api/code/{route}?session_id=missing&path=");
+        assert_eq!(
+            status_and_body(&ui, get(&path, BETA)).await?.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            status_and_body(&ui, get(&path, ALPHA)).await?.0,
+            StatusCode::NOT_FOUND
+        );
+    }
     let interrupt = json!({"session_id": "missing"});
     let (code, _) = status_and_body(
         &ui,

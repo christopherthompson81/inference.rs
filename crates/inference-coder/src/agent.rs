@@ -1,8 +1,8 @@
 //! The tool loop: send the conversation, stream the reply, run the tools it calls, repeat until it answers.
 
 use std::pin::pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Result, bail};
 use futures::StreamExt;
@@ -11,6 +11,7 @@ use serde_json::{Map, Value, json};
 use tokio::sync::Notify;
 
 use crate::backend::ChatBackend;
+use crate::changes::Changes;
 use crate::permission::{Approval, Decision, Permissions};
 use crate::session::Session;
 use crate::tools::{Tool, ToolContext, ToolKind, ToolOutcome};
@@ -99,6 +100,7 @@ pub struct Agent {
     pub permissions: Permissions,
     pub session: Session,
     config: AgentConfig,
+    changes: Arc<Mutex<Changes>>,
 }
 
 impl Agent {
@@ -110,6 +112,7 @@ impl Agent {
         config: AgentConfig,
     ) -> Self {
         Self {
+            changes: Arc::new(Mutex::new(Changes::open(&session.root, &session.path))),
             backend,
             tools,
             ctx: ToolContext {
@@ -119,6 +122,11 @@ impl Agent {
             session,
             config,
         }
+    }
+
+    /// What this session has changed in its project, readable while a prompt runs.
+    pub fn changes(&self) -> Arc<Mutex<Changes>> {
+        self.changes.clone()
     }
 
     /// The model later requests name, for a front end whose model selection can change between prompts.
@@ -289,6 +297,18 @@ impl Agent {
                 Approval::Always => self.permissions.allow_always(tool.name()),
                 Approval::Deny => return ToolOutcome::error(DECLINED),
             },
+        }
+        {
+            let mut changes = self.changes.lock().unwrap();
+            // failing to keep a copy only costs that file's diff, so the call still runs
+            let _ = match tool.kind() {
+                ToolKind::Edit => tool
+                    .paths(&args, &self.ctx)
+                    .iter()
+                    .try_for_each(|path| changes.record(path)),
+                ToolKind::Execute => changes.note_command(),
+                ToolKind::Read => Ok(()),
+            };
         }
         ui.tool_start(call, &args);
         let outcome = tokio::select! {

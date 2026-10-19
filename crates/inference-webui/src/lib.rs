@@ -103,6 +103,12 @@ pub(crate) const UI_CODE_INTERRUPT_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/interrupt", "POST", RouteKind::Ui);
 pub(crate) const UI_CODE_DEMO_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/demo", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_CHANGES_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/changes", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_DIFF_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/diff", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_TREE_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/tree", "GET", RouteKind::Ui);
 pub(crate) const UI_UPLOADS_ROUTE: RouteInfo = RouteInfo::new("/uploads", "GET", RouteKind::Ui);
 pub(crate) const UI_ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::Ui);
 pub(crate) const UI_STATIC_ROUTE: RouteInfo = RouteInfo::new("/{*path}", "GET", RouteKind::Ui);
@@ -331,6 +337,9 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .route(UI_CODE_APPROVE_ROUTE.path, post(code::approve))
         .route(UI_CODE_INTERRUPT_ROUTE.path, post(code::interrupt))
         .route(UI_CODE_DEMO_ROUTE.path, post(code::start_demo))
+        .route(UI_CODE_CHANGES_ROUTE.path, get(code::changes))
+        .route(UI_CODE_DIFF_ROUTE.path, get(code::diff))
+        .route(UI_CODE_TREE_ROUTE.path, get(code::tree))
         .layer(Extension(code))
         .layer(middleware::from_fn(require_admin));
     let router = Router::new()

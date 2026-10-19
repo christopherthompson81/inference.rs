@@ -15,7 +15,7 @@ use axum::response::{IntoResponse, Response};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
-    Agent, AgentConfig, AgentUi, Approval, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS,
+    Agent, AgentConfig, AgentUi, Approval, Changes, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS,
     EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall, ToolKind,
     ToolOutcome, Turn, TurnEnd, default_tools, prompt::system_prompt,
 };
@@ -38,7 +38,9 @@ macro_rules! demo_file {
         ($path, include_str!(concat!("../demo/", $path)))
     };
 }
-const DEMO_FILES: [(&str, &str); 9] = [
+const DEMO_FILES: [(&str, &str); 10] = [
+    // so the test run's bytecode stays out of the Files tab
+    demo_file!(".gitignore"),
     demo_file!("README.md"),
     demo_file!("stockroom/__init__.py"),
     demo_file!("stockroom/units.py"),
@@ -63,6 +65,8 @@ struct LiveSession {
     agent: Arc<tokio::sync::Mutex<Agent>>,
     interrupt: Interrupt,
     approvals: Mutex<IndexMap<String, oneshot::Sender<Approval>>>,
+    // outside the agent's lock, so the page can read it while a prompt runs
+    changes: Arc<Mutex<Changes>>,
 }
 
 impl CodeState {
@@ -377,6 +381,7 @@ async fn load(
         config,
     );
     let live = Arc::new(LiveSession {
+        changes: agent.changes(),
         agent: Arc::new(tokio::sync::Mutex::new(agent)),
         interrupt: Interrupt::default(),
         approvals: Mutex::new(IndexMap::new()),
@@ -586,6 +591,66 @@ impl AgentUi for WebUi {
             self.emit(json!({"type": "usage", "usage": usage}));
         }
     }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct ChangesQuery {
+    session_id: String,
+    #[serde(default)]
+    path: String,
+}
+
+// file reads, a project scan and git run off the async threads
+async fn with_changes<T: serde::Serialize + Send + 'static>(
+    code: &CodeState,
+    id: &str,
+    read: impl FnOnce(&Changes) -> anyhow::Result<Option<T>> + Send + 'static,
+) -> Response {
+    let Some(live) = code.live(id) else {
+        return not_found(id);
+    };
+    let changes = live.changes.clone();
+    match tokio::task::spawn_blocking(move || read(&changes.lock().unwrap())).await {
+        Ok(Ok(Some(value))) => Json(value).into_response(),
+        Ok(Ok(None)) => bad_request("not a file or directory in this project").into_response(),
+        Ok(Err(error)) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+        Err(error) => (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response(),
+    }
+}
+
+/// The files the session has changed, with their line counts.
+pub(crate) async fn changes(
+    Extension(code): Extension<Arc<CodeState>>,
+    Query(query): Query<ChangesQuery>,
+) -> Response {
+    with_changes(&code, &query.session_id, |changes| {
+        changes.list().map(|files| Some(json!({"files": files})))
+    })
+    .await
+}
+
+/// One file's diff against its copy from before the session changed it.
+pub(crate) async fn diff(
+    Extension(code): Extension<Arc<CodeState>>,
+    Query(query): Query<ChangesQuery>,
+) -> Response {
+    with_changes(&code, &query.session_id, move |changes| {
+        changes.diff(&query.path)
+    })
+    .await
+}
+
+/// One directory of the project, for the file tree.
+pub(crate) async fn tree(
+    Extension(code): Extension<Arc<CodeState>>,
+    Query(query): Query<ChangesQuery>,
+) -> Response {
+    with_changes(&code, &query.session_id, move |changes| {
+        Ok(changes
+            .entries(&query.path)
+            .map(|entries| json!({"entries": entries})))
+    })
+    .await
 }
 
 #[cfg(test)]

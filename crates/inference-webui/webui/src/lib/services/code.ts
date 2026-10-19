@@ -22,7 +22,12 @@ export type Decision = "once" | "always" | "deny";
 export type CodeEvent =
   | { type: "text"; delta: string }
   | { type: "reasoning"; delta: string }
-  | { type: "tool_start"; id: string; name: string; args: Record<string, unknown> }
+  | {
+      type: "tool_start";
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+    }
   | { type: "tool_end"; id: string; text: string; is_error: boolean }
   | {
       type: "approval";
@@ -33,7 +38,10 @@ export type CodeEvent =
       kind: string;
     }
   | { type: "usage"; usage: Record<string, unknown> }
-  | { type: "done"; end: "done" | "interrupted" | "round_limit" | "reply_limit" }
+  | {
+      type: "done";
+      end: "done" | "interrupted" | "round_limit" | "reply_limit";
+    }
   | { type: "error"; message: string };
 
 function url(path: string): string {
@@ -59,7 +67,9 @@ async function post(path: string, body: unknown): Promise<Response> {
 export async function listSessions(
   project: string,
 ): Promise<{ project: string; sessions: CodeSessionInfo[] }> {
-  const res = await authedFetch(url(`sessions?project=${encodeURIComponent(project)}`));
+  const res = await authedFetch(
+    url(`sessions?project=${encodeURIComponent(project)}`),
+  );
   if (!res.ok) throw await failure(res);
   return res.json();
 }
@@ -79,8 +89,16 @@ export async function startDemo(
   return (await post("demo", { model })).json();
 }
 
-export async function approve(sessionId: string, approvalId: string, decision: Decision) {
-  await post("approve", { session_id: sessionId, approval_id: approvalId, decision });
+export async function approve(
+  sessionId: string,
+  approvalId: string,
+  decision: Decision,
+) {
+  await post("approve", {
+    session_id: sessionId,
+    approval_id: approvalId,
+    decision,
+  });
 }
 
 export async function interrupt(sessionId: string) {
@@ -96,7 +114,12 @@ export async function send(
   enableThinking: boolean | null,
   onEvent: (event: CodeEvent) => void,
 ): Promise<void> {
-  const body: Record<string, unknown> = { session_id: sessionId, prompt, mode, model };
+  const body: Record<string, unknown> = {
+    session_id: sessionId,
+    prompt,
+    mode,
+    model,
+  };
   if (enableThinking != null) body.enable_thinking = enableThinking;
   const res = await post("send", body);
   const reader = res.body?.getReader();
@@ -119,4 +142,69 @@ export async function send(
       if (data) onEvent(JSON.parse(data) as CodeEvent);
     }
   }
+}
+
+export type ChangeStatus = "added" | "modified" | "deleted" | "no_original";
+
+/** A file the session changed: relative to the project when inside it, else absolute. */
+export interface FileChange {
+  path: string;
+  status: ChangeStatus;
+  added: number;
+  removed: number;
+  binary: boolean;
+}
+
+export interface DiffLine {
+  kind: "context" | "added" | "removed";
+  old: number | null;
+  new: number | null;
+  text: string;
+}
+
+/** One file's diff; an unchanged file comes back whole as context, with no status. */
+export interface FileDiff extends Omit<FileChange, "status"> {
+  status: ChangeStatus | null;
+  too_large: boolean;
+  hunks: DiffLine[][];
+}
+
+export interface TreeEntry {
+  name: string;
+  dir: boolean;
+}
+
+async function get<T>(
+  path: string,
+  params: Record<string, string>,
+): Promise<T> {
+  const res = await authedFetch(url(`${path}?${new URLSearchParams(params)}`));
+  if (!res.ok) throw await failure(res);
+  return res.json();
+}
+
+export async function listChanges(sessionId: string): Promise<FileChange[]> {
+  return (
+    await get<{ files: FileChange[] }>("changes", { session_id: sessionId })
+  ).files;
+}
+
+export async function fileDiff(
+  sessionId: string,
+  path: string,
+): Promise<FileDiff> {
+  return get("diff", { session_id: sessionId, path });
+}
+
+/** One directory of the project (`""` is its root), directories first. */
+export async function listDir(
+  sessionId: string,
+  dir: string,
+): Promise<TreeEntry[]> {
+  return (
+    await get<{ entries: TreeEntry[] }>("tree", {
+      session_id: sessionId,
+      path: dir,
+    })
+  ).entries;
 }

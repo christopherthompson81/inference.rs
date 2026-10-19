@@ -4,6 +4,7 @@
 
 pub mod agent;
 pub mod backend;
+pub mod changes;
 pub mod permission;
 pub mod prompt;
 pub mod session;
@@ -14,6 +15,7 @@ pub use agent::{
     Agent, AgentConfig, AgentUi, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS, Interrupt, TurnEnd,
 };
 pub use backend::{ChatBackend, EngineBackend, HttpBackend};
+pub use changes::Changes;
 pub use permission::{Approval, PermissionMode, Permissions};
 pub use session::{Session, SessionInfo};
 pub use tools::{Tool, ToolContext, ToolKind, ToolOutcome, default_tools};

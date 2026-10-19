@@ -1,13 +1,30 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
+  import CodeDiff from "../components/CodeDiff.svelte";
+  import CodeFiles from "../components/CodeFiles.svelte";
   import ThinkingBlock from "../components/ThinkingBlock.svelte";
   import { modelStore } from "../stores/models.svelte";
   import { renderMarkdown } from "../utils/markdown";
   import * as code from "../services/code";
-  import type { CodeEvent, CodeMessage, CodeSessionInfo, Decision, PermissionMode } from "../services/code";
+  import type {
+    CodeEvent,
+    CodeMessage,
+    CodeSessionInfo,
+    Decision,
+    FileChange,
+    FileDiff,
+    PermissionMode,
+  } from "../services/code";
 
   const PROJECT_KEY = "inference-rs-code-project";
   const MODE_KEY = "inference-rs-code-mode";
+  const DIFF_WIDTH_KEY = "inference-rs-code-diff-width";
+  // the diff pane's share of the width, kept between these so neither side vanishes
+  const MIN_DIFF_SHARE = 0.2;
+  const MAX_DIFF_SHARE = 0.8;
+  const DEFAULT_DIFF_SHARE = 0.5;
+  // calls after which the project may have changed
+  const CHANGING_TOOLS = new Set(["edit", "write", "bash"]);
   const SUMMARY_CHARS = 100;
   // the agent's own words for a call the user turned down
   const DECLINED = "the user declined this call";
@@ -38,6 +55,11 @@
     }
   }
 
+  function storedShare(): number {
+    const share = Number(stored(DIFF_WIDTH_KEY, ""));
+    return share >= MIN_DIFF_SHARE && share <= MAX_DIFF_SHARE ? share : DEFAULT_DIFF_SHARE;
+  }
+
   function store(key: string, value: string) {
     try {
       localStorage.setItem(key, value);
@@ -58,6 +80,13 @@
   let error = $state("");
   let usage = $state<Record<string, any> | null>(null);
   let container = $state<HTMLDivElement | null>(null);
+  let sideTab = $state<"sessions" | "files">("sessions");
+  let changes = $state<FileChange[]>([]);
+  let selectedFile = $state<string | null>(null);
+  let fileDiff = $state<FileDiff | null>(null);
+  let diffError = $state("");
+  let diffShare = $state(storedShare());
+  let split = $state<HTMLDivElement | null>(null);
 
   let roots = $derived(modelStore.capabilities.code_roots ?? []);
   let hasRoot = $derived(roots.length > 0);
@@ -178,6 +207,7 @@
           tool.result = event.text;
           tool.isError = event.is_error;
           tool.running = false;
+          if (CHANGING_TOOLS.has(tool.name)) void refreshChanges();
         }
         break;
       }
@@ -214,9 +244,72 @@
     }
   }
 
+  async function refreshChanges() {
+    if (!sessionId) return;
+    const id = sessionId;
+    try {
+      const listed = await code.listChanges(id);
+      if (id === sessionId) changes = listed;
+    } catch (e) {
+      error = `${e}`;
+    }
+    if (selectedFile) await loadDiff(selectedFile);
+  }
+
+  async function loadDiff(path: string) {
+    if (!sessionId) return;
+    try {
+      const diff = await code.fileDiff(sessionId, path);
+      if (path === selectedFile) {
+        fileDiff = diff;
+        diffError = "";
+      }
+    } catch (e) {
+      if (path === selectedFile) diffError = `${e}`;
+    }
+  }
+
+  function selectFile(path: string) {
+    if (path === selectedFile) return;
+    selectedFile = path;
+    fileDiff = null;
+    diffError = "";
+    void loadDiff(path);
+  }
+
+  // a tool's path argument as the change list keys it: relative inside the project, absolute outside
+  function changeKey(path: string): string {
+    if (projectPath && path.startsWith(`${projectPath}/`)) return path.slice(projectPath.length + 1);
+    return path.replace(/^(\.\/)+/, "");
+  }
+
+  function resetFiles() {
+    changes = [];
+    selectedFile = null;
+    fileDiff = null;
+  }
+
+  function startDrag(event: PointerEvent) {
+    const handle = event.currentTarget as HTMLElement;
+    handle.setPointerCapture(event.pointerId);
+    const move = (e: PointerEvent) => {
+      if (!split) return;
+      const rect = split.getBoundingClientRect();
+      diffShare = Math.min(MAX_DIFF_SHARE, Math.max(MIN_DIFF_SHARE, (rect.right - e.clientX) / rect.width));
+    };
+    const up = () => {
+      handle.removeEventListener("pointermove", move);
+      handle.removeEventListener("pointerup", up);
+      store(DIFF_WIDTH_KEY, String(diffShare));
+    };
+    handle.addEventListener("pointermove", move);
+    handle.addEventListener("pointerup", up);
+  }
+
   async function open(id?: string) {
     try {
       const session = await code.openSession(project, modelStore.selectedModel, id);
+      if (session.session_id !== sessionId) resetFiles();
       sessionId = session.session_id;
       projectPath = session.project;
       items = fromMessages(session.messages);
@@ -224,6 +317,7 @@
       error = "";
       store(PROJECT_KEY, project);
       await refreshSessions();
+      void refreshChanges();
       void scrollDown();
     } catch (e) {
       error = `${e}`;
@@ -235,6 +329,7 @@
     try {
       const demo = await code.startDemo(modelStore.selectedModel);
       project = demo.project;
+      resetFiles();
       sessionId = demo.session_id;
       projectPath = demo.project;
       items = [];
@@ -266,6 +361,7 @@
       running = false;
       for (const item of items) if (item.kind === "tool") item.running = false;
       void refreshSessions();
+      void refreshChanges();
     }
   }
 
@@ -334,7 +430,7 @@
   </div>
 {:else}
   <div class="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row">
-    <aside class="flex shrink-0 flex-col gap-3 border-b border-gray-200 p-3 md:w-64 md:border-r md:border-b-0 dark:border-gray-800">
+    <aside class="flex max-h-[45vh] shrink-0 flex-col gap-3 border-b border-gray-200 p-3 md:max-h-none md:w-72 md:border-r md:border-b-0 dark:border-gray-800">
       {#if hasRoot}
         <label class="text-xs font-medium text-gray-500 dark:text-gray-400" for="code-project">Project</label>
         <input
@@ -371,155 +467,199 @@
       >
         Run demo
       </button>
-      <div class="min-h-0 flex-1 overflow-y-auto">
-        <!-- a session nothing was sent in is only worth listing while it's open -->
-        {#each sessions.filter((s) => s.title || s.id === sessionId) as session (session.id)}
-          <button
-            class="mb-1 block w-full rounded-md px-2 py-1.5 text-left text-sm {session.id === sessionId
-              ? 'bg-gray-200 dark:bg-gray-800'
-              : 'hover:bg-gray-100 dark:hover:bg-gray-900'}"
-            onclick={() => open(session.id)}
-            disabled={running}
-          >
-            <span class="block truncate text-gray-800 dark:text-gray-200">{session.title || "(empty session)"}</span>
-            <span class="block text-xs text-gray-400">{relativeTime(session.modified)}</span>
-          </button>
-        {:else}
-          <p class="text-xs text-gray-400">No sessions in this project yet.</p>
-        {/each}
+      <div class="flex rounded-md border border-gray-300 text-xs dark:border-gray-700" role="tablist">
+        <button
+          class="flex-1 rounded-l-md px-2 py-1 {sideTab === 'sessions' ? 'bg-gray-200 dark:bg-gray-800' : ''}"
+          role="tab"
+          aria-selected={sideTab === "sessions"}
+          onclick={() => (sideTab = "sessions")}>Sessions</button
+        >
+        <button
+          class="flex-1 rounded-r-md px-2 py-1 {sideTab === 'files' ? 'bg-gray-200 dark:bg-gray-800' : ''}"
+          role="tab"
+          aria-selected={sideTab === "files"}
+          onclick={() => (sideTab = "files")}>Files{changes.length ? ` (${changes.length})` : ""}</button
+        >
       </div>
+      {#if sideTab === "files"}
+        <CodeFiles {sessionId} {changes} selected={selectedFile} onSelect={selectFile} />
+      {:else}
+        <div class="min-h-0 flex-1 overflow-y-auto">
+          <!-- a session nothing was sent in is only worth listing while it's open -->
+          {#each sessions.filter((s) => s.title || s.id === sessionId) as session (session.id)}
+            <button
+              class="mb-1 block w-full rounded-md px-2 py-1.5 text-left text-sm {session.id === sessionId
+                ? 'bg-gray-200 dark:bg-gray-800'
+                : 'hover:bg-gray-100 dark:hover:bg-gray-900'}"
+              onclick={() => open(session.id)}
+              disabled={running}
+            >
+              <span class="block truncate text-gray-800 dark:text-gray-200">{session.title || "(empty session)"}</span>
+              <span class="block text-xs text-gray-400">{relativeTime(session.modified)}</span>
+            </button>
+          {:else}
+            <p class="text-xs text-gray-400">No sessions in this project yet.</p>
+          {/each}
+        </div>
+      {/if}
     </aside>
 
-    <section class="flex min-h-0 min-w-0 flex-1 flex-col">
-      <div class="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2 text-xs text-gray-500 dark:border-gray-800">
-        <span class="truncate">{sessionId ? `session ${sessionId}` : "no session open"}</span>
-        <span class="ml-auto"></span>
-        <select
-          class="rounded border border-gray-300 bg-white px-1 py-0.5 dark:border-gray-700 dark:bg-gray-900"
-          value={thinking}
-          onchange={(e) => (thinking = e.currentTarget.value as typeof thinking)}
-          aria-label="Thinking"
-        >
-          <option value="default">Thinking: model default</option>
-          <option value="on">Thinking: on</option>
-          <option value="off">Thinking: off</option>
-        </select>
-        <select
-          class="rounded border border-gray-300 bg-white px-1 py-0.5 dark:border-gray-700 dark:bg-gray-900"
-          value={mode}
-          onchange={(e) => setMode(e.currentTarget.value as PermissionMode)}
-          aria-label="Permission mode"
-        >
-          {#each MODES as option (option.id)}
-            <option value={option.id}>{option.label}</option>
-          {/each}
-        </select>
-      </div>
+    <div class="flex min-h-0 min-w-0 flex-1 flex-col md:flex-row" bind:this={split}>
+      <section class="flex min-h-0 min-w-0 flex-1 flex-col">
+        <div class="flex flex-wrap items-center gap-2 border-b border-gray-200 px-4 py-2 text-xs text-gray-500 dark:border-gray-800">
+          <span class="truncate">{sessionId ? `session ${sessionId}` : "no session open"}</span>
+          <span class="ml-auto"></span>
+          <select
+            class="rounded border border-gray-300 bg-white px-1 py-0.5 dark:border-gray-700 dark:bg-gray-900"
+            value={thinking}
+            onchange={(e) => (thinking = e.currentTarget.value as typeof thinking)}
+            aria-label="Thinking"
+          >
+            <option value="default">Thinking: model default</option>
+            <option value="on">Thinking: on</option>
+            <option value="off">Thinking: off</option>
+          </select>
+          <select
+            class="rounded border border-gray-300 bg-white px-1 py-0.5 dark:border-gray-700 dark:bg-gray-900"
+            value={mode}
+            onchange={(e) => setMode(e.currentTarget.value as PermissionMode)}
+            aria-label="Permission mode"
+          >
+            {#each MODES as option (option.id)}
+              <option value={option.id}>{option.label}</option>
+            {/each}
+          </select>
+        </div>
 
-      <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4" bind:this={container}>
-        <div class="mx-auto flex max-w-3xl flex-col gap-3">
-          {#if items.length === 0}
-            <p class="mt-8 text-center text-sm text-gray-400">
-              Ask for a change in {projectPath || "the project"}: the agent reads files, edits them and runs commands
-              there.
+        <div class="min-h-0 flex-1 overflow-y-auto px-4 py-4" bind:this={container}>
+          <div class="mx-auto flex max-w-3xl flex-col gap-3">
+            {#if items.length === 0}
+              <p class="mt-8 text-center text-sm text-gray-400">
+                Ask for a change in {projectPath || "the project"}: the agent reads files, edits them and runs commands
+                there.
+              </p>
+            {/if}
+            {#each items as item, index (index)}
+              {#if item.kind === "user"}
+                <div class="self-end rounded-2xl bg-blue-600 px-4 py-2 text-sm whitespace-pre-wrap text-white">{item.text}</div>
+              {:else if item.kind === "reasoning"}
+                <ThinkingBlock reasoning={item.text} streaming={running && index === items.length - 1} />
+              {:else if item.kind === "text"}
+                <div class="markdown-content text-sm text-gray-800 dark:text-gray-200">{@html renderMarkdown(item.text)}</div>
+              {:else if item.kind === "notice"}
+                <p class="text-xs text-gray-400">{item.text}</p>
+              {:else if item.kind === "tool"}
+                <div
+                  class="rounded-lg border text-sm {item.approval
+                    ? 'border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-950/30'
+                    : item.isError || item.declined
+                      ? 'border-red-200 dark:border-red-900'
+                      : 'border-gray-200 dark:border-gray-800'}"
+                  data-tool={item.name}
+                >
+                  <details>
+                    <summary class="flex cursor-pointer items-center gap-2 px-3 py-1.5 font-mono text-xs">
+                      <span
+                        class="h-2 w-2 shrink-0 rounded-full {item.running
+                          ? 'animate-pulse bg-amber-400'
+                          : item.approval
+                            ? 'bg-amber-500'
+                            : item.isError || item.declined
+                              ? 'bg-red-500'
+                              : item.result != null
+                                ? 'bg-green-500'
+                                : 'bg-gray-300'}"
+                      ></span>
+                      <span class="truncate text-gray-800 dark:text-gray-200">{summary(item.name, item.args)}</span>
+                      {#if item.declined}
+                        <span class="ml-auto shrink-0 text-red-500">declined</span>
+                      {:else if item.result != null}
+                        <span class="ml-auto shrink-0 text-gray-400">{lineCount(item.result)}</span>
+                        {#if (item.name === "edit" || item.name === "write") && !item.isError && str(item.args.path)}
+                          <button
+                            class="shrink-0 rounded px-1.5 text-blue-600 hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-950/40"
+                            onclick={(e) => {
+                              e.preventDefault();
+                              selectFile(changeKey(str(item.args.path)));
+                            }}>diff</button
+                          >
+                        {/if}
+                      {/if}
+                    </summary>
+                    {#if item.result != null}
+                      <pre class="max-h-80 overflow-auto border-t border-gray-200 px-3 py-2 text-xs dark:border-gray-800">{item.result}</pre>
+                    {/if}
+                  </details>
+                  {#if item.approval}
+                    <div class="border-t border-amber-200 px-3 py-2 dark:border-amber-800">
+                      {#if item.name === "edit"}
+                        <pre class="max-h-60 overflow-auto rounded bg-red-50 px-2 py-1 text-xs text-red-800 dark:bg-red-950/40 dark:text-red-300">{str(item.args.old_string)}</pre>
+                        <pre class="mt-1 max-h-60 overflow-auto rounded bg-green-50 px-2 py-1 text-xs text-green-800 dark:bg-green-950/40 dark:text-green-300">{str(item.args.new_string)}</pre>
+                      {:else if item.name === "write"}
+                        <pre class="max-h-60 overflow-auto rounded bg-green-50 px-2 py-1 text-xs text-green-800 dark:bg-green-950/40 dark:text-green-300">{str(item.args.content)}</pre>
+                      {:else if item.name === "bash"}
+                        <pre class="max-h-60 overflow-auto rounded bg-gray-100 px-2 py-1 text-xs dark:bg-gray-900">$ {str(item.args.command)}</pre>
+                      {/if}
+                      <div class="mt-2 flex flex-wrap gap-2">
+                        <button class="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700" onclick={() => decide(item, "once")}>Allow</button>
+                        <button class="rounded border border-gray-300 px-3 py-1 text-xs hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-800" onclick={() => decide(item, "always")}>Always allow {item.name}</button>
+                        <button class="rounded border border-gray-300 px-3 py-1 text-xs text-red-600 hover:bg-red-50 dark:border-gray-700 dark:hover:bg-red-950/30" onclick={() => decide(item, "deny")}>Deny</button>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            {/each}
+            {#if error}
+              <p class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">{error}</p>
+            {/if}
+          </div>
+        </div>
+
+        <div class="shrink-0 border-t border-gray-200 px-4 py-3 dark:border-gray-800">
+          <div class="mx-auto flex max-w-3xl items-end gap-2">
+            <textarea
+              class="min-w-0 flex-1 resize-none rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:focus:bg-gray-900"
+              rows="2"
+              placeholder="Describe a change (Enter sends, Shift+Enter for a new line)"
+              bind:value={prompt}
+              onkeydown={onKeydown}
+            ></textarea>
+            {#if running}
+              <button class="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700" onclick={stop}>Stop</button>
+            {:else}
+              <button
+                class="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                onclick={submit}
+                disabled={!prompt.trim()}
+              >
+                Send
+              </button>
+            {/if}
+          </div>
+          {#if usage}
+            <p class="mx-auto mt-1 max-w-3xl text-xs text-gray-400">
+              context {usage.total_tokens} tokens, {usage.prompt_tokens_details?.cached_tokens ?? 0} cached, prefill
+              {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s, {Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s
             </p>
           {/if}
-          {#each items as item, index (index)}
-            {#if item.kind === "user"}
-              <div class="self-end rounded-2xl bg-blue-600 px-4 py-2 text-sm whitespace-pre-wrap text-white">{item.text}</div>
-            {:else if item.kind === "reasoning"}
-              <ThinkingBlock reasoning={item.text} streaming={running && index === items.length - 1} />
-            {:else if item.kind === "text"}
-              <div class="markdown-content text-sm text-gray-800 dark:text-gray-200">{@html renderMarkdown(item.text)}</div>
-            {:else if item.kind === "notice"}
-              <p class="text-xs text-gray-400">{item.text}</p>
-            {:else if item.kind === "tool"}
-              <div
-                class="rounded-lg border text-sm {item.approval
-                  ? 'border-amber-400 bg-amber-50 dark:border-amber-600 dark:bg-amber-950/30'
-                  : item.isError || item.declined
-                    ? 'border-red-200 dark:border-red-900'
-                    : 'border-gray-200 dark:border-gray-800'}"
-                data-tool={item.name}
-              >
-                <details>
-                  <summary class="flex cursor-pointer items-center gap-2 px-3 py-1.5 font-mono text-xs">
-                    <span
-                      class="h-2 w-2 shrink-0 rounded-full {item.running
-                        ? 'animate-pulse bg-amber-400'
-                        : item.approval
-                          ? 'bg-amber-500'
-                          : item.isError || item.declined
-                            ? 'bg-red-500'
-                            : item.result != null
-                              ? 'bg-green-500'
-                              : 'bg-gray-300'}"
-                    ></span>
-                    <span class="truncate text-gray-800 dark:text-gray-200">{summary(item.name, item.args)}</span>
-                    {#if item.declined}
-                      <span class="ml-auto shrink-0 text-red-500">declined</span>
-                    {:else if item.result != null}
-                      <span class="ml-auto shrink-0 text-gray-400">{lineCount(item.result)}</span>
-                    {/if}
-                  </summary>
-                  {#if item.result != null}
-                    <pre class="max-h-80 overflow-auto border-t border-gray-200 px-3 py-2 text-xs dark:border-gray-800">{item.result}</pre>
-                  {/if}
-                </details>
-                {#if item.approval}
-                  <div class="border-t border-amber-200 px-3 py-2 dark:border-amber-800">
-                    {#if item.name === "edit"}
-                      <pre class="max-h-60 overflow-auto rounded bg-red-50 px-2 py-1 text-xs text-red-800 dark:bg-red-950/40 dark:text-red-300">{str(item.args.old_string)}</pre>
-                      <pre class="mt-1 max-h-60 overflow-auto rounded bg-green-50 px-2 py-1 text-xs text-green-800 dark:bg-green-950/40 dark:text-green-300">{str(item.args.new_string)}</pre>
-                    {:else if item.name === "write"}
-                      <pre class="max-h-60 overflow-auto rounded bg-green-50 px-2 py-1 text-xs text-green-800 dark:bg-green-950/40 dark:text-green-300">{str(item.args.content)}</pre>
-                    {:else if item.name === "bash"}
-                      <pre class="max-h-60 overflow-auto rounded bg-gray-100 px-2 py-1 text-xs dark:bg-gray-900">$ {str(item.args.command)}</pre>
-                    {/if}
-                    <div class="mt-2 flex flex-wrap gap-2">
-                      <button class="rounded bg-blue-600 px-3 py-1 text-xs font-medium text-white hover:bg-blue-700" onclick={() => decide(item, "once")}>Allow</button>
-                      <button class="rounded border border-gray-300 px-3 py-1 text-xs hover:bg-gray-100 dark:border-gray-700 dark:hover:bg-gray-800" onclick={() => decide(item, "always")}>Always allow {item.name}</button>
-                      <button class="rounded border border-gray-300 px-3 py-1 text-xs text-red-600 hover:bg-red-50 dark:border-gray-700 dark:hover:bg-red-950/30" onclick={() => decide(item, "deny")}>Deny</button>
-                    </div>
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-          {#if error}
-            <p class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">{error}</p>
-          {/if}
         </div>
-      </div>
-
-      <div class="shrink-0 border-t border-gray-200 px-4 py-3 dark:border-gray-800">
-        <div class="mx-auto flex max-w-3xl items-end gap-2">
-          <textarea
-            class="min-w-0 flex-1 resize-none rounded-xl border border-gray-300 bg-gray-50 px-4 py-2.5 text-sm outline-none focus:border-blue-400 focus:bg-white focus:ring-1 focus:ring-blue-400 dark:border-gray-600 dark:bg-gray-800 dark:focus:bg-gray-900"
-            rows="2"
-            placeholder="Describe a change (Enter sends, Shift+Enter for a new line)"
-            bind:value={prompt}
-            onkeydown={onKeydown}
-          ></textarea>
-          {#if running}
-            <button class="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-red-700" onclick={stop}>Stop</button>
-          {:else}
-            <button
-              class="rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-              onclick={submit}
-              disabled={!prompt.trim()}
-            >
-              Send
-            </button>
-          {/if}
+      </section>
+      {#if selectedFile}
+        <div
+          class="hidden w-1 shrink-0 cursor-col-resize bg-gray-200 hover:bg-blue-400 md:block dark:bg-gray-800"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize the diff"
+          onpointerdown={startDrag}
+        ></div>
+        <div
+          class="flex h-1/2 min-h-0 min-w-0 shrink-0 flex-col border-t border-gray-200 md:h-auto md:basis-(--diff-share) md:border-t-0 dark:border-gray-800"
+          style="--diff-share: {diffShare * 100}%"
+        >
+          <CodeDiff path={selectedFile} diff={fileDiff} error={diffError} onClose={() => (selectedFile = null)} />
         </div>
-        {#if usage}
-          <p class="mx-auto mt-1 max-w-3xl text-xs text-gray-400">
-            context {usage.total_tokens} tokens, {usage.prompt_tokens_details?.cached_tokens ?? 0} cached, prefill
-            {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s, {Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s
-          </p>
-        {/if}
-      </div>
-    </section>
+      {/if}
+    </div>
   </div>
 {/if}
