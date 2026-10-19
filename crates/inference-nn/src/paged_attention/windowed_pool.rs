@@ -328,7 +328,6 @@ impl WindowedKvCheckpointSlots {
         );
     }
 
-    #[cfg(test)]
     fn free_capacity(&self) -> usize {
         self.free_slots.len()
     }
@@ -665,8 +664,8 @@ impl WindowedKvPool {
         self.free_slots.len()
     }
 
-    #[cfg(test)]
-    fn free_checkpoint_capacity(&self) -> usize {
+    /// Checkpoint slots no cached prefix or restore holds, so a snapshot or import can take one.
+    pub fn free_checkpoint_capacity(&self) -> usize {
         self.checkpoint_slots
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
