@@ -16,7 +16,7 @@ use inference_api::lora_routing::DEFAULT_MODEL_ID;
 use inference_api::openai::{Modality, ModelCategory};
 use inference_api::{Engine, engine::AgenticSpec};
 use inference_server_core::{
-    auth::{Auth, Guard, Owner, require},
+    auth::{Auth, Guard, Owner, require, require_admin},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     metrics::{ObservabilityConfig, ObservabilityState, observe_http},
     route_registry::{RouteInfo, RouteKind},
@@ -31,6 +31,7 @@ use crate::utils::get_cache_dir;
 const MODEL_SETTINGS_FILE: &str = "model-settings.json";
 
 mod chat;
+mod code;
 mod handlers;
 mod jobs;
 mod types;
@@ -90,6 +91,18 @@ pub(crate) const UI_CAPABILITIES_ROUTE: RouteInfo =
     RouteInfo::new("/api/capabilities", "GET", RouteKind::Ui);
 pub(crate) const UI_MCP_TOOLS_ROUTE: RouteInfo =
     RouteInfo::new("/api/mcp_tools", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_SESSIONS_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/sessions", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_OPEN_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/open", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_SEND_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/send", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_APPROVE_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/approve", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_INTERRUPT_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/interrupt", "POST", RouteKind::Ui);
+pub(crate) const UI_CODE_DEMO_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/demo", "POST", RouteKind::Ui);
 pub(crate) const UI_UPLOADS_ROUTE: RouteInfo = RouteInfo::new("/uploads", "GET", RouteKind::Ui);
 pub(crate) const UI_ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::Ui);
 pub(crate) const UI_STATIC_ROUTE: RouteInfo = RouteInfo::new("/{*path}", "GET", RouteKind::Ui);
@@ -182,6 +195,9 @@ pub struct UiOptions {
     pub tool_dispatch_url: Option<String>,
     /// The keys the UI's data needs, shared with the API router so a signed-in browser reaches both.
     pub auth: Option<Arc<Auth>>,
+    /// Where the Code tab may open projects; without one it offers only its demo. Its agent runs tools on this machine,
+    /// so the tab is for admins only.
+    pub code_root: Option<std::path::PathBuf>,
 }
 
 impl UiOptions {
@@ -192,6 +208,7 @@ impl UiOptions {
             shell: agentic.shell.is_some(),
             tool_dispatch_url: agentic.tool_dispatch_url.clone(),
             auth: None,
+            code_root: None,
         }
     }
 }
@@ -283,6 +300,11 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .default_model_id()
         .or_else(|| chat_models(engine).keys().next().cloned());
 
+    let code = Arc::new(
+        code::CodeState::new(options.code_root.as_deref())
+            .map_err(|error| anyhow::anyhow!("code root: {error}"))?,
+    );
+
     let app_state = Arc::new(AppState {
         engine: engine.clone(),
         default_model: default_model.clone(),
@@ -298,9 +320,20 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         shell_enabled: options.shell,
         tool_dispatch_url: options.tool_dispatch_url,
         keyed: options.auth.is_some(),
+        code_root: code.root().map(|root| root.display().to_string()),
     });
 
+    let code_routes = Router::new()
+        .route(UI_CODE_SESSIONS_ROUTE.path, get(code::list_sessions))
+        .route(UI_CODE_OPEN_ROUTE.path, post(code::open_session))
+        .route(UI_CODE_SEND_ROUTE.path, post(code::send))
+        .route(UI_CODE_APPROVE_ROUTE.path, post(code::approve))
+        .route(UI_CODE_INTERRUPT_ROUTE.path, post(code::interrupt))
+        .route(UI_CODE_DEMO_ROUTE.path, post(code::start_demo))
+        .layer(Extension(code))
+        .layer(middleware::from_fn(require_admin));
     let router = Router::new()
+        .merge(code_routes)
         .route(UI_UPLOAD_IMAGE_ROUTE.path, post(upload_image))
         .route(UI_UPLOAD_VIDEO_ROUTE.path, post(upload_video))
         .route(UI_UPLOAD_TEXT_ROUTE.path, post(upload_text))

@@ -15,10 +15,12 @@ rust-version.workspace = true
 [dependencies]
 inference-api = { workspace = true }
 inference-server-core = { workspace = true }
+inference-coder = { workspace = true }
 
 anyhow = { workspace = true }
 axum = { workspace = true, features = ["multipart"] }
 chrono = { workspace = true }
+futures = { workspace = true }
 include_dir = { workspace = true }
 indexmap = { workspace = true }
 mime_guess = { workspace = true }

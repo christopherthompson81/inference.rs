@@ -624,3 +624,52 @@ async fn each_owner_keeps_its_own_web_ui_jobs() -> anyhow::Result<()> {
     assert!(!status_and_body(&app, list(&alpha)).await?.1.contains(&id));
     Ok(())
 }
+
+#[tokio::test]
+async fn only_an_admin_reaches_the_code_tab_and_only_inside_its_root() -> anyhow::Result<()> {
+    let (_dir, engine) = tiny_engine().await?;
+    let root = tempfile::tempdir()?;
+    std::fs::create_dir(root.path().join("project"))?;
+    let mut keys = ApiKeys::parse(KEYS)?;
+    keys.set_admins(["team-a".to_string()])?;
+    let auth = Auth::new(keys);
+    let api = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_auth(auth.clone())
+        .build()
+        .await?;
+    let options = inference_webui::UiOptions {
+        auth,
+        code_root: Some(root.path().to_path_buf()),
+        ..Default::default()
+    };
+    let ui = inference_webui::mount(api, &engine, options, Default::default()).await?;
+    let (_, body) = status_and_body(&ui, get("/ui/api/capabilities", BETA)).await?;
+    let capabilities: Value = serde_json::from_str(&body)?;
+    assert_eq!(
+        capabilities["code_root"],
+        json!(root.path().canonicalize()?.display().to_string())
+    );
+    let sessions = "/ui/api/code/sessions?project=project";
+    let (code, _) = status_and_body(&ui, get(sessions, BETA)).await?;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let (code, body) = status_and_body(&ui, get(sessions, ALPHA)).await?;
+    assert_eq!(code, StatusCode::OK, "{body}");
+    let (code, body) = status_and_body(&ui, get("/ui/api/code/sessions?project=..", ALPHA)).await?;
+    assert_eq!(code, StatusCode::BAD_REQUEST, "{body}");
+    let open = json!({"project": "/etc"});
+    let (code, _) =
+        status_and_body(&ui, send_json("POST", "/ui/api/code/open", ALPHA, open)).await?;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    let (code, _) =
+        status_and_body(&ui, send_json("POST", "/ui/api/code/demo", BETA, json!({}))).await?;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    let interrupt = json!({"session_id": "missing"});
+    let (code, _) = status_and_body(
+        &ui,
+        send_json("POST", "/ui/api/code/interrupt", BETA, interrupt),
+    )
+    .await?;
+    assert_eq!(code, StatusCode::FORBIDDEN);
+    Ok(())
+}
