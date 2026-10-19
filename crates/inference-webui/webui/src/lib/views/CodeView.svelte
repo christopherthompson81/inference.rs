@@ -186,6 +186,8 @@
       case "done":
         if (event.end === "interrupted") items.push({ kind: "notice", text: "Interrupted" });
         if (event.end === "round_limit") items.push({ kind: "notice", text: "Stopped at the round limit" });
+        if (event.end === "reply_limit")
+          items.push({ kind: "notice", text: "A reply hit the token limit (the model was likely repeating itself)" });
         break;
       case "error":
         error = event.message;

@@ -15,9 +15,9 @@ use axum::response::{IntoResponse, Response};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
-    Agent, AgentConfig, AgentUi, Approval, DEFAULT_MAX_ROUNDS, EngineBackend, Interrupt,
-    PermissionMode, Permissions, Session, ToolCall, ToolKind, ToolOutcome, Turn, TurnEnd,
-    default_tools, prompt::system_prompt,
+    Agent, AgentConfig, AgentUi, Approval, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS,
+    EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall, ToolKind,
+    ToolOutcome, Turn, TurnEnd, default_tools, prompt::system_prompt,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -316,6 +316,7 @@ async fn load(
     let config = AgentConfig {
         model,
         max_rounds: DEFAULT_MAX_ROUNDS,
+        max_reply_tokens: DEFAULT_MAX_REPLY_TOKENS,
         request: Map::new(),
     };
     let id = session.id.clone();
@@ -388,6 +389,7 @@ pub(crate) async fn send(
                 TurnEnd::Done => "done",
                 TurnEnd::Interrupted => "interrupted",
                 TurnEnd::RoundLimit => "round_limit",
+                TurnEnd::ReplyLimit => "reply_limit",
             }}),
             Err(error) => json!({"type": "error", "message": format!("{error:#}")}),
         };

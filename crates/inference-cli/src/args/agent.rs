@@ -39,4 +39,9 @@ pub struct CoderOptions {
     /// Model replies (each followed by its tool calls) one prompt may take before the agent stops
     #[arg(long, default_value_t = inference_coder::DEFAULT_MAX_ROUNDS)]
     pub max_rounds: usize,
+
+    /// Tokens one model reply may take, reasoning included; a reply cut there ends the prompt (a model repeating itself
+    /// otherwise runs until the context is full)
+    #[arg(long, default_value_t = inference_coder::DEFAULT_MAX_REPLY_TOKENS)]
+    pub max_reply_tokens: usize,
 }

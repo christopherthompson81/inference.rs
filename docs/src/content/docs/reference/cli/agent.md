@@ -87,6 +87,7 @@ inference agent [OPTIONS] [COMMAND]
 | `--permission-mode <PERMISSION_MODE>` | `ask` | Which tool calls ask first: ask (edits and commands ask), auto (nothing asks) or read-only (edits and commands are refused). With `-p`, calls that would ask are refused |
 | `--cwd <CWD>` |  | The project directory the tools work in (default: the current directory) |
 | `--max-rounds <MAX_ROUNDS>` | `200` | Model replies (each followed by its tool calls) one prompt may take before the agent stops |
+| `--max-reply-tokens <MAX_REPLY_TOKENS>` | `32768` | Tokens one model reply may take, reasoning included; a reply cut there ends the prompt (a model repeating itself otherwise runs until the context is full) |
 | `--thinking <THINKING>` |  | Control thinking mode for models that support it. Use --thinking or --thinking true to force on, --thinking false to force off. Possible values: `true`, `false`. |
 | `--reasoning-effort <REASONING_EFFORT>` |  | Set reasoning effort: off, low, medium, high, or xhigh. "none" is an alias for off |
 

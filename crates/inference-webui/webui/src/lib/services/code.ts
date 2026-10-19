@@ -33,7 +33,7 @@ export type CodeEvent =
       kind: string;
     }
   | { type: "usage"; usage: Record<string, unknown> }
-  | { type: "done"; end: "done" | "interrupted" | "round_limit" }
+  | { type: "done"; end: "done" | "interrupted" | "round_limit" | "reply_limit" }
   | { type: "error"; message: string };
 
 function url(path: string): string {

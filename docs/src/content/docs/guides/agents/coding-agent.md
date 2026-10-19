@@ -104,6 +104,17 @@ tells the model you declined. **Stop** interrupts the model or the running tool,
 Sessions are the same files the terminal uses, so `inference agent --continue` in a project picks up a session started
 in the browser, and the other way round.
 
+## Runaway replies
+
+Each model reply is capped at 32,768 tokens, reasoning included (`--max-reply-tokens` changes it in the terminal). A
+model can get stuck repeating a passage of reasoning. Without a cap, that reply would run until the context is full,
+which takes minutes of GPU time at long context. A reply that reaches the cap ends the prompt with a notice. Its
+partial text is kept, but its reasoning and any half-written tool call are dropped, and you can carry on with the next
+prompt.
+
+Use the model's default sampling: greedy decoding (temperature 0) makes these loops much more likely, because the
+same context always picks the same next token.
+
 ## Interrupting
 
 Ctrl-C stops the model mid-reply, or the running tool. The partial reply is kept, and calls that never ran are
