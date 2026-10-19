@@ -205,7 +205,6 @@
       const listing = await code.listSessions(project);
       sessions = listing.sessions;
       projectPath = listing.project;
-      error = "";
     } catch (e) {
       sessions = [];
       error = `${e}`;
