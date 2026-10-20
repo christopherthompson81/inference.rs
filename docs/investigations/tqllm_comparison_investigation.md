@@ -264,3 +264,81 @@ correctly. TQ3_4S-v2 is ~5x the KLD of our recipe A at about the same size, wors
 (0.079 on their method), with 88% top-1 agreement against 94%. Its 4.0 bpw is 3-bit codes plus a quarter of the bits
 in scales. Their speed numbers come from a much lossier file; decode is bandwidth bound, so the per-byte speed
 comparison in Runs 5-7 still stands, but there is no quality reason to adopt the format.
+
+## Run 9 - 2026-10-20 15:00
+
+Question: after #509, where does our draft-and-verify step still lose to tqLLM's, by kernel?
+
+Command: same session, both engines at their Run 2 / Run 5 settings (ours: recipe A IQ4_KS, q3 cache, DFlash 2 q4k at
+7 drafts, 262K; tqLLM: TQ3_4S-v2, tq3 cache, DFlash2 TQ3, 262K). Step level: specbench ui with our phase timers /
+`TQLLM_DEBUG=profile`. Kernel level: each server under `nsys launch -t cuda --cuda-graph-trace=node`, collection
+started at the 8th streamed token and stopped 2 s later (`nsys_decode.py`, scratch), buckets per step from the sqlite
+export (`nsys_step.py`, steps = main-model attention launches / 16). nsys inflates the gaps between graphs.
+
+Step level (no profiler):
+
+```
+ms a step      tq verify  draft  commit  total     ours verify  drafter  wall
+1988           20.63      2.46   0.94    24.0      24.10        3.96     29.6
+31919          22.51      2.47   0.92    25.9      26.63        3.97     31.8
+124730         28.33      2.52   1.01    31.9      33.93        3.95     39.3
+```
+
+Kernel level, ms a step:
+
+```
+                                  2K: ours   tq      125K: ours   tq
+GPU idle (nsys)                       4.69   1.13          3.94   0.99
+body weights matvec (+ tq drafter)   17.45  16.83         17.55  17.00
+drafter weights (Q4_K MMQ)            1.78      -          1.82      -
+LM heads (Q6_K MMQ x2 / u4h+i8h)      2.99   1.21          3.02   1.21
+bf16 gemv (ssm beta/alpha)            0.96      -          0.97      -
+activation quantize                   0.69      -          0.70      -
+attention                             1.11   1.97         10.88   9.50
+gdn / conv                            1.75   1.75          1.76   1.86
+norm / glu / rope / rotate            0.63   1.34          0.64   1.44
+sample / draft select                 0.21   0.29          0.20   0.30
+step                                 32.72  24.88         42.02  32.66
+```
+
+Findings:
+- We are ~23% slower a step at every length; attention is now a minor part of it (+1.4 ms at 125K, and ahead at 2K).
+- The gaps, largest first: time between kernels (~1.5 ms without the profiler: wall minus graph times; tqLLM queues
+  draft, verify and commit with one host sync); weights incl. the drafter (+2.4 ms: our file is ~4% larger, the
+  Q4_K drafter is 1.8 ms); the LM heads (+1.8: a full-vocab Q6_K head for both verify and drafter against tqLLM's
+  4-bit shortlist plus int8 re-score); unfused small kernels (+1.7: 48 bf16 gemvs and ~385 activation-quantize
+  launches a step, which tqLLM folds into its producers).
+- Not all of tqLLM's savings carry over: its verify head shortlist is not an exact argmax, and its sampled path
+  takes only the top 16. The drafter's head is the safe place for a cheaper head (it only proposes).
+Next, by size: the host gap between graphs; the drafter's head and weights (4-bit head over a draft vocabulary, the
+held idea from Run 4); fusing beta/alpha into the GDN projection and the activation quantize into its producers.
+
+## Run 10 - 2026-10-20 22:00
+
+Question: what do the time between graphs and the small unfused kernels from Run 9 really cost, and what do the
+cheap fixes take back?
+
+Graph-level nsys (`--cuda-graph-trace=graph`, which records a graph as one item; node tracing inflates
+`cuGraphLaunch`), 2K: the step is verify graph 24.06 ms, then 0.93 ms outside graphs (sampling, the drafter's input
+projection and K/V writes, ~0.45 ms of host gaps between tiny metadata copies), drafter graph 3.95 ms, 0.06 ms back.
+So the host gap is ~0.5 ms a step, not Run 9's 1.5; the bigger cheap items sit inside the verify graph.
+
+- GDN gate projections (bf16, M 96, K 5120, 48 a step): `bench_bf16_gdn_gate_projection_cuda_graph_crossover` read
+  14.3 us at batch 8 (cuBLAS 6.3). A row-tile kernel (4 rows a block, 2 past batch 4, warps split K, 16-byte loads
+  reusing each input chunk across rows) reads 5.3 us at batch 8, 4.2 at batch 4; batch 1 keeps the old kernel
+  (3.5 against 6.1). nsys: 15.0 -> 6.2 us a launch.
+- Activation quantize: each tile-ordered matvec quantized its own input, so gate/up, qkv/z and q/k,v requantized
+  one activation (384 launches a step). A first attempt keyed reuse on the tensor id and never fired (the
+  projections see reshaped views, and `ensure` cleared the tag before the claim); the kept version is an explicit
+  `with_shared_input` scope keyed by the input's address within it.
+
+Interleaved A/B (master, branch, master, branch; three 2-3K prompts each; target verify graph, all steps):
+
+```
+             steps   verify median
+master       640     24.23 ms
+branch       688     23.62 ms
+```
+
+-0.61 ms a step (2.5%). Left from Run 9: the drafter's head and Q4_K weights (~1.5-2 ms against tqLLM), the LM
+head, the remaining ~0.5 ms of host gaps.

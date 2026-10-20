@@ -1072,6 +1072,60 @@ mod tests {
         Ok(())
     }
 
+    // Inside a shared-input scope back-to-back tiled matvecs on one input reuse its quantized activations; another input,
+    // or the same one after the scope, quantizes again
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tiled_matvecs_share_one_inputs_quantized_activations() -> Result<()> {
+        const ROWS: usize = 64;
+        const COLS: usize = 2560;
+        const BATCH: usize = 8;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let Device::Cuda(dev) = &cuda else {
+            unreachable!()
+        };
+        if !super::super::fast_mmvq::tensor_core_capable(dev) {
+            eprintln!("SKIP: no int8 tensor cores");
+            return Ok(());
+        }
+        let ty = GgufType::Iq4Ks;
+        let layer = |seed| -> Result<(GgufRawMatMul, Tensor)> {
+            let bytes = random_rows(ty, ROWS, COLS, seed);
+            let weight = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), &Device::Cpu)?
+                .dequantize(&Device::Cpu)?;
+            Ok((
+                GgufRawMatMul::new(RawGgufTensor::tiled(&[ROWS, COLS], &bytes, &cuda)?, None),
+                weight,
+            ))
+        };
+        let ((gate, gate_w), (up, up_w)) = (layer(21)?, layer(22)?);
+        let input = || Tensor::randn(0f32, 1f32, (BATCH, COLS), &Device::Cpu);
+        let (a, b) = (input()?, input()?);
+        let check = |actual: &Tensor, xs: &Tensor, weight: &Tensor| -> Result<()> {
+            let similarity = cosine(&actual.to_device(&Device::Cpu)?, &xs.matmul(&weight.t()?)?)?;
+            assert!(similarity > 0.999, "cosine {similarity}");
+            Ok(())
+        };
+        let (a_gpu, b_gpu) = (
+            a.to_dtype(DType::BF16)?.to_device(&cuda)?,
+            b.to_dtype(DType::BF16)?.to_device(&cuda)?,
+        );
+        let tiled =
+            |w: &GgufRawMatMul, xs: &Tensor| super::super::fast_mmvq::tiled_plain(&w.w, xs, 0);
+        super::super::fast_mmvq::with_shared_input(|| {
+            check(&tiled(&gate, &a_gpu)?, &a, &gate_w)?;
+            check(&tiled(&up, &a_gpu)?, &a, &up_w)?;
+            check(&tiled(&gate, &b_gpu)?, &b, &gate_w)?;
+            check(&tiled(&up, &a_gpu)?, &a, &up_w)
+        })?;
+        check(&tiled(&up, &b_gpu)?, &b, &up_w)?;
+        check(&tiled(&gate, &a_gpu)?, &a, &gate_w)?;
+        Ok(())
+    }
+
     // Tied embeddings in ik's mixes are IQ*_K; one IQ4_NL row is less than the 256 elements its GPU dequantizer fills
     #[test]
     fn embedding_rows_match_the_dequantized_weight() -> Result<()> {

@@ -12,6 +12,19 @@ use inference_tensor::{CudaDevice, Result};
 
 pub(crate) struct WorkspaceSlot {
     slice: CudaSlice<u8>,
+    // what the buffer holds, for a caller that can reuse it; any other use clears it
+    holds: Option<WorkspaceContent>,
+}
+
+/// What a scratch buffer was filled from, within one shared-input scope: the input's device address, its shape and
+/// dtype.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct WorkspaceContent {
+    pub(crate) scope: u64,
+    pub(crate) input: u64,
+    pub(crate) cols: usize,
+    pub(crate) rows: usize,
+    pub(crate) dtype: inference_tensor::DType,
 }
 
 #[derive(Clone, Copy, Eq, Hash, PartialEq)]
@@ -35,6 +48,14 @@ pub(crate) struct WorkspaceGuard<'a> {
 impl WorkspaceGuard<'_> {
     pub(crate) fn ptr_mut(&mut self) -> (u64, SyncOnDrop<'_>) {
         self.slot.slice.device_ptr_mut(self.stream)
+    }
+
+    /// Whether the buffer already holds `content`; it is recorded as holding it from here on, as the caller fills it
+    /// when this returns false.
+    pub(crate) fn claim(&mut self, content: WorkspaceContent) -> bool {
+        let held = self.slot.holds == Some(content);
+        self.slot.holds = Some(content);
+        held
     }
 }
 
@@ -70,8 +91,22 @@ impl ThreadWorkspaces {
         self.slots.get_or_init(|| Mutex::new(HashMap::new()))
     }
 
-    /// This thread's buffer of at least `bytes` on `stream`, rounded up to a power of two.
+    /// This thread's buffer of at least `bytes` on `stream`, rounded up to a power of two; its contents count as
+    /// unknown from here on.
     pub(crate) fn ensure<'a>(
+        &'static self,
+        dev: &CudaDevice,
+        bytes: usize,
+        stream: &'a CudaStream,
+    ) -> Result<WorkspaceGuard<'a>> {
+        let mut guard = self.ensure_claimable(dev, bytes, stream)?;
+        guard.slot.holds = None;
+        Ok(guard)
+    }
+
+    /// `ensure` for a caller that says what it fills the buffer with (`WorkspaceGuard::claim`), so a later claim of
+    /// the same contents finds them.
+    pub(crate) fn ensure_claimable<'a>(
         &'static self,
         dev: &CudaDevice,
         bytes: usize,
@@ -91,7 +126,8 @@ impl ThreadWorkspaces {
                 Some(slot) => slot,
                 None => {
                     let slice = unsafe { dev.alloc::<u8>(capacity)? };
-                    let slot = Box::leak(Box::new(Mutex::new(WorkspaceSlot { slice })));
+                    let slot =
+                        Box::leak(Box::new(Mutex::new(WorkspaceSlot { slice, holds: None })));
                     slots.insert(key, slot);
                     THREAD_EXIT.with(|exit| {
                         let mut kinds = exit.kinds.borrow_mut();

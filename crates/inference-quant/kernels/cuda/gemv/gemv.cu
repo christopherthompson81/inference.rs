@@ -240,6 +240,126 @@ __host__ int get_optimal_block_size(int K) {
   }
 
 // ============================================================================
+// Row-tile kernel for few output rows (GDN gate projections: M = 96, K = 5120)
+// ============================================================================
+
+// A block computes ROWS output rows for every batch row; its warps split K and each lane loads 16 bytes of a
+// weight row and of every input row at a time, so an input chunk feeds all ROWS rows. The one-row-per-block kernel
+// above re-reads the inputs for every row and keeps few loads in flight, which at batch 8 costs ~14 us a projection.
+#define ROWTILE_WARPS 4
+// elements a lane loads at once: 16 bytes of 16-bit values
+#define ROWTILE_VEC 8
+// past this many rows the one-row-per-block grid already fills the GPU
+#define ROWTILE_MAX_M 1024
+// a single input row is faster on the one-row-per-block kernel (3.5 against 6.1 us at M 96, K 5120)
+#define ROWTILE_MIN_BATCH 2
+
+template <typename T, int BATCH_SIZE, int ROWTILE_ROWS>
+__global__ void __launch_bounds__(ROWTILE_WARPS *WARP_SIZE)
+    gemv_kernel_rowtile(const T *__restrict__ A, const T *__restrict__ X,
+                        const T *__restrict__ bias, T *__restrict__ Y, int M,
+                        int K, bool has_bias) {
+  const int row0 = blockIdx.x * ROWTILE_ROWS;
+  const int warp = threadIdx.x / WARP_SIZE;
+  const int lane = threadIdx.x % WARP_SIZE;
+  const int k_warp = K / ROWTILE_WARPS;
+  const int k_begin = warp * k_warp;
+
+  float acc[ROWTILE_ROWS][BATCH_SIZE];
+#pragma unroll
+  for (int r = 0; r < ROWTILE_ROWS; r++) {
+#pragma unroll
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      acc[r][b] = 0.0f;
+    }
+  }
+
+  for (int k = k_begin + lane * ROWTILE_VEC; k < k_begin + k_warp;
+       k += WARP_SIZE * ROWTILE_VEC) {
+    uint4 x[BATCH_SIZE];
+#pragma unroll
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      x[b] = __ldg(reinterpret_cast<const uint4 *>(X + (size_t)b * K + k));
+    }
+#pragma unroll
+    for (int r = 0; r < ROWTILE_ROWS; r++) {
+      const uint4 a =
+          __ldg(reinterpret_cast<const uint4 *>(A + (size_t)(row0 + r) * K + k));
+      const T *av = reinterpret_cast<const T *>(&a);
+#pragma unroll
+      for (int b = 0; b < BATCH_SIZE; b++) {
+        const T *xv = reinterpret_cast<const T *>(&x[b]);
+#pragma unroll
+        for (int e = 0; e < ROWTILE_VEC; e++) {
+          acc[r][b] = fmaf(to_float(av[e]), to_float(xv[e]), acc[r][b]);
+        }
+      }
+    }
+  }
+
+  __shared__ float partial[ROWTILE_WARPS][ROWTILE_ROWS][BATCH_SIZE];
+#pragma unroll
+  for (int r = 0; r < ROWTILE_ROWS; r++) {
+#pragma unroll
+    for (int b = 0; b < BATCH_SIZE; b++) {
+      const float v = warp_reduce_sum(acc[r][b]);
+      if (lane == 0) {
+        partial[warp][r][b] = v;
+      }
+    }
+  }
+  __syncthreads();
+  for (int i = threadIdx.x; i < ROWTILE_ROWS * BATCH_SIZE; i += blockDim.x) {
+    const int r = i / BATCH_SIZE;
+    const int b = i % BATCH_SIZE;
+    float v = has_bias ? to_float(__ldg(bias + row0 + r)) : 0.0f;
+#pragma unroll
+    for (int w = 0; w < ROWTILE_WARPS; w++) {
+      v += partial[w][r][b];
+    }
+    if constexpr (std::is_same_v<T, __half>) {
+      Y[(size_t)b * M + row0 + r] = __float2half(v);
+    }
+#if __CUDA_ARCH__ >= 800
+    else if constexpr (std::is_same_v<T, __nv_bfloat16>) {
+      Y[(size_t)b * M + row0 + r] = __float2bfloat16(v);
+    }
+#endif
+  }
+}
+
+// whether the row-tile kernel takes this shape and these pointers (its loads are 16 bytes wide)
+__host__ bool use_rowtile(const void *A, const void *X, int M, int K, int batch_size) {
+  const bool aligned = ((reinterpret_cast<uintptr_t>(A) | reinterpret_cast<uintptr_t>(X)) % 16) == 0;
+  return aligned && batch_size >= ROWTILE_MIN_BATCH && M <= ROWTILE_MAX_M && M % 4 == 0 &&
+         K % (ROWTILE_WARPS * WARP_SIZE * ROWTILE_VEC) == 0;
+}
+
+// wide batches take fewer rows a block: more blocks in flight for the same registers
+#define LAUNCH_ROWTILE(T, BATCH_SIZE)                                          \
+  if constexpr (BATCH_SIZE > 4) {                                              \
+    gemv_kernel_rowtile<T, BATCH_SIZE, 2>                                      \
+        <<<dim3(M / 2), dim3(ROWTILE_WARPS * WARP_SIZE), 0, stream>>>(         \
+            A, X, bias, Y, M, K, has_bias);                                    \
+  } else {                                                                     \
+    gemv_kernel_rowtile<T, BATCH_SIZE, 4>                                      \
+        <<<dim3(M / 4), dim3(ROWTILE_WARPS * WARP_SIZE), 0, stream>>>(         \
+            A, X, bias, Y, M, K, has_bias);                                    \
+  }
+
+#define DISPATCH_ROWTILE(T)                                                    \
+  switch (batch_size) {                                                        \
+  case 1: LAUNCH_ROWTILE(T, 1); break;                                         \
+  case 2: LAUNCH_ROWTILE(T, 2); break;                                         \
+  case 3: LAUNCH_ROWTILE(T, 3); break;                                         \
+  case 4: LAUNCH_ROWTILE(T, 4); break;                                         \
+  case 5: LAUNCH_ROWTILE(T, 5); break;                                         \
+  case 6: LAUNCH_ROWTILE(T, 6); break;                                         \
+  case 7: LAUNCH_ROWTILE(T, 7); break;                                         \
+  default: LAUNCH_ROWTILE(T, 8); break;                                        \
+  }
+
+// ============================================================================
 // Launch Functions - BF16
 // ============================================================================
 
@@ -247,6 +367,10 @@ extern "C" void launch_gemv_bf16(const __nv_bfloat16 *A, const __nv_bfloat16 *X,
                                  const __nv_bfloat16 *bias, __nv_bfloat16 *Y,
                                  int M, int K, int batch_size, bool has_bias,
                                  cudaStream_t stream) {
+  if (use_rowtile(A, X, M, K, batch_size)) {
+    DISPATCH_ROWTILE(__nv_bfloat16);
+    return;
+  }
   int block_size = get_optimal_block_size(K);
   dim3 grid(M);
 
@@ -261,6 +385,10 @@ extern "C" void launch_gemv_f16(const __half *A, const __half *X,
                                 const __half *bias, __half *Y, int M, int K,
                                 int batch_size, bool has_bias,
                                 cudaStream_t stream) {
+  if (use_rowtile(A, X, M, K, batch_size)) {
+    DISPATCH_ROWTILE(__half);
+    return;
+  }
   int block_size = get_optimal_block_size(K);
   dim3 grid(M);
 
