@@ -446,3 +446,46 @@ master 3.796, branch 3.744 tokens a step; per-prompt paired difference -0.05 +- 
 28.40 -> 27.88 ms a step (133.7 -> 134.3 tok/s). Against the dequantized f32 matmul the new kernel is no less
 accurate than MMQ (rms rel err at 8 rows: Q4_K 5.6e-3 vs MMQ 0.6-1.7e-2; Q6_K equal at 5.6e-3), so no numerics
 regression explains a drop. Single-sample prompts swing +-0.6 tokens a step; acceptance A/Bs need 24+ prompts.
+
+## Run 13 - 2026-10-20 07:40
+
+Question: before building sampled tree verify (tqLLM's greedy lead from 8K comes from its tree), how many tokens a
+step would a sampled tree add within the same 8 verify rows? The fast matvec paths stop at 8 rows
+(`MMVQ_MAX_BATCH`), as do tqLLM's (`kGdnReplayCols`), so a tree trades depth for width.
+
+Exactness: the DFlash2 selector's q at depth d is a softmax over the drafter's top 16 for that position, scored
+against the predecessor token, so a node's children are draws from a known q_d(.|parent). Siblings drawn from it
+without replacement and checked by recursive rejection (accept with min(1, p/q); on reject p <- norm(max(p - q, 0)),
+q <- q without the rejected token) keep the output distribution exact.
+
+Method: an env-gated dump in `verify_staged_batch` (not kept; patch in the scratchpad) logged each step's 7 drafts,
+the 16-candidate q per position and the top 64 target logits per verify row; recipe A, q3 cache, DFlash 2 q4k at 7
+drafts, UI sampling (temperature 0.6, top_p 0.95, top_k 20), the 18-prompt set plus 24 more wiki offsets (4672
+steps). `tree_sim.py` (scratchpad) rebuilds p exactly as `prepare_topk_distribution` does. A leaf sibling at depth d
+hangs off chain node d-1, whose verify row is already in the log, and its q is the logged q_d, so for the "chain
+plus leaf siblings" family the expectation is exact.
+
+```
+4672 steps; observed 3.567 tokens a step, chain-7 expectation 3.576
+P(depth d accepted)   0.777 0.573 0.421 0.307 0.223 0.160 0.116
+depth                 1     2     3     4     5     6     7
+P(sibling accepted | first draft rejected)
+                      0.477 0.375 0.308 0.256 0.227 0.188 0.189
+target mass inside q's 16
+                      0.973 0.926 0.876 0.817 0.769 0.720 0.689
+
+8 rows (best shapes): chain 7 3.576 | chain 6 + sibling at 1 3.556 | chain 6 + sibling at 2 3.541 | chain 5 + 2 sib 3.478
+more rows, chain 7 + best leaf siblings: 9 rows 3.672 (+2.7%), 10 rows 3.754 (+5.0%), 12 rows 3.853 (+7.7%),
+16 rows 3.970 (+11.0%)
+```
+
+Negative: at 8 rows the chain is the best tree. A node is worth the probability that its path is accepted. The
+seventh chain draft is worth 0.116 tokens. A sibling at depth 1 is worth P(reject at 1) x 0.477 = 0.106, and every
+deeper sibling is worth less. Subtrees under a sibling would score lower still, since each of their nodes is that
+0.106 times a continuation probability below 1. Best-first allocation of 7 nodes therefore picks the chain. A tree
+only pays when rows are added. Leaf siblings give +11% tokens a step at 16 rows (subtrees under them maybe a few
+points more), but every 8-row fast path (tensor-core matvecs, fattn-quant's `FQ_MAX_ROWS`, the GDN fused verify)
+would have to double. A step at 16 rows has to cost under ~11% more than at 8 to come out ahead. Not pursued; the
+sample is at temperature 0.6, and a hotter workload flattens q and could move the balance toward width.
+tqLLM's greedy tree most likely gains on near-ties, where a greedy chain rejects and the second-ranked sibling is often right (not measured here).
+That does not carry over to sampled verification.
