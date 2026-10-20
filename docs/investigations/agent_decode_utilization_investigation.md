@@ -124,3 +124,28 @@ Code tab demo over HTTP                                  97.7% (92% of samples >
 
 With top_k 20 / top_p 0.95 the target distribution is far narrower, so DFlash draft acceptance during the demo's
 reasoning rose to 33-53% (3.3-4.7 tokens a step).
+
+## Run 5 - 2026-10-20 16:40
+
+Question: Run 3 left one prefill of each reply (the reply warm-up). Can decode take the recurrent snapshot itself?
+
+Instead of a partial transition-log apply, a decode step whose committed length lands exactly on a block boundary takes
+the same snapshot a prompt boundary does (flush the pending transitions for that sequence, copy the slot, capture the
+DFlash checkpoint, which already sits at `keep_len` because the step drafts after committing). Each sequence keeps only
+its latest decode snapshot, which is never written through to the disk store; steps with a queued CUDA decode tail skip
+it, since the next forward is already behind that state. Exact hits were more frequent than expected: 40 drafter
+captures over two 1500-token replies against 4 on master, so the last one is typically a block or two from the end.
+
+`longreply.py` (raw completions, a ~700-token system prompt, a 1500-token reply, then turn 2 = prompt + reply + one
+user line; same seeded text on both binaries):
+
+```
+                       master (a8fae5c07)    decode snapshots
+turn 2 sent at once    ttft 1.09 s           0.16 s
+turn 2 after 15 s      0.08 s                0.05 s
+turn 1 decode          16.9 / 15.5 s         16.2 / 15.1 s
+```
+
+The at-once case no longer waits for a 1500-token warm-up: the warm-up still runs but restores the latest decode
+snapshot and prefills only the tail. With a prompt under one block (no prompt snapshot, so master skips the warm-up),
+master reused nothing on turn 2 while decode snapshots restored 1536 tokens with the drafter checkpoint.

@@ -745,6 +745,7 @@ impl dyn Pipeline {
                     ctx.prefix_cacher,
                     speculative_metadata.block_size,
                     end,
+                    true,
                 )?;
             }
 

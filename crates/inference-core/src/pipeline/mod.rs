@@ -1451,6 +1451,7 @@ pub trait Pipeline:
         prefix_cacher: &mut PrefixCacheManagerV2,
         block_size: usize,
         cached_tokens: usize,
+        write_through: bool,
     ) -> Result<(), inference_tensor::Error> {
         if cached_tokens == 0
             || !cached_tokens.is_multiple_of(block_size)
@@ -1512,7 +1513,8 @@ pub trait Pipeline:
         let owner = *block_hashes
             .last()
             .expect("recurrent prefix owner requires a full block");
-        if let Some(disk) = prefix_cacher.disk_tier().cloned()
+        if write_through
+            && let Some(disk) = prefix_cacher.disk_tier().cloned()
             && let Err(error) = self.write_prefix_through(
                 &disk,
                 seq,

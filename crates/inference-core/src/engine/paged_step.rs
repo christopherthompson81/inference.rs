@@ -232,7 +232,10 @@ impl Engine {
             drop(guards);
 
             #[cfg(feature = "cuda")]
-            if submission.cuda_has_tail() {
+            let decode_tail = submission.cuda_has_tail();
+            #[cfg(not(feature = "cuda"))]
+            let decode_tail = false;
+            if decode_tail {
                 let mut scheduler = get_mut_arcmutex!(self.scheduler);
                 scheduler.record_decode_continuation();
             }
@@ -286,9 +289,11 @@ impl Engine {
                     .add_decode_tokens_processed(total_processed_tokens);
             }
 
-            // Prompt steps only, as templates re-render finished turns; chunked prefill snapshots inline instead.
+            // chunked prefill snapshots inline; a decode tail has already queued the next forward behind this state
             if is_prompt && !scheduler_visible_prompt_step {
-                self.snapshot_prompt_recurrent_prefixes(&guards_mut, block_size);
+                self.snapshot_recurrent_prefixes(&mut guards_mut, block_size, false);
+            } else if !is_prompt && !decode_tail {
+                self.snapshot_recurrent_prefixes(&mut guards_mut, block_size, true);
             }
 
             if self.is_debug {
@@ -615,15 +620,20 @@ impl Engine {
         Some(duration)
     }
 
-    /// Snapshots recurrent state at full-block prompt boundaries so hybrid models can reuse it on a paged prefix hit.
-    fn snapshot_prompt_recurrent_prefixes(&self, seqs: &[&mut Sequence], block_size: usize) {
+    /// Snapshots recurrent state at full-block boundaries for paged prefix hits; a decode one replaces its predecessor.
+    fn snapshot_recurrent_prefixes(
+        &self,
+        seqs: &mut [&mut Sequence],
+        block_size: usize,
+        decode: bool,
+    ) {
         let mut pipeline = get_mut_arcmutex!(self.pipeline);
         let mut prefix_cacher = get_mut_arcmutex!(self.prefix_cacher);
         if !pipeline.cache().is_hybrid() || !prefix_cacher.accepts_paged_recurrent_prefix() {
             return;
         }
         let prefix_policy = pipeline.speculative_prefix_checkpoint_policy();
-        for seq in seqs {
+        for seq in seqs.iter_mut() {
             if matches!(
                 prefix_policy.replay_for(modality_signature(seq)),
                 crate::speculative::SpeculativePrefixReplay::Full
@@ -650,15 +660,32 @@ impl Engine {
             if prefix_cacher.has_paged_recurrent_owner(owner) {
                 continue;
             }
+            if decode && let Some(previous) = seq.decode_recurrent_prefix_owner() {
+                prefix_cacher.release_paged_recurrent_owner(previous);
+                let mut hybrid = pipeline.cache().hybrid();
+                for snapshot in prefix_cacher.take_released_recurrent_snapshots() {
+                    if let Err(e) = hybrid.release_recurrent_snapshot(snapshot) {
+                        tracing::error!("Failed to release a recurrent prefix snapshot: {e}");
+                    }
+                }
+            }
             if let Err(e) = pipeline.snapshot_paged_recurrent_prefix(
                 seq,
                 &mut prefix_cacher,
                 block_size,
                 encoded_len,
+                !decode,
             ) {
                 tracing::warn!(
                     "Failed snapshotting recurrent prefix for sequence {}: {e}",
                     seq.id()
+                );
+            }
+            if decode {
+                seq.set_decode_recurrent_prefix_owner(
+                    prefix_cacher
+                        .has_paged_recurrent_owner(owner)
+                        .then_some(owner),
                 );
             }
         }
