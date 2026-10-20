@@ -1268,6 +1268,11 @@ pub struct ChatCompletionRequest {
     #[schema(example = json!(Option::None::<bool>))]
     #[serde(default)]
     pub truncate_sequence: Option<bool>,
+    /// Seconds this prompt's prefix outlives its last use in the server's prefix cache directory; unset, the server's
+    /// default. On `/v1/messages`, Anthropic `cache_control` breakpoints set it.
+    #[schema(example = json!(Option::None::<u64>))]
+    #[serde(default)]
+    pub prefix_cache_ttl_secs: Option<u64>,
     /// Token ids that end generation, alongside `stop`.
     #[schema(example = json!(Option::None::<Vec<u32>>))]
     #[serde(default)]

@@ -782,6 +782,9 @@ async fn parse_request_inner(
             },
             adapter,
             truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
+            prefix_cache_ttl: oairequest
+                .prefix_cache_ttl_secs
+                .map(std::time::Duration::from_secs),
             ..NormalRequest::new_simple(
                 messages,
                 sampling_params,

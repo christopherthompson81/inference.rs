@@ -47,7 +47,13 @@ impl Engine {
             return Ok(());
         };
         let started = std::time::Instant::now();
-        let Some(loaded) = disk.store.load(&values[..n_blocks], tokens, block_size)? else {
+        let Some(loaded) = disk.store.load(
+            &values[..n_blocks],
+            tokens,
+            block_size,
+            seq.prefix_cache_ttl(),
+        )?
+        else {
             return Ok(());
         };
         let key = &hashes[..n_blocks];

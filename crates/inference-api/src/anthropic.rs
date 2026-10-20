@@ -45,6 +45,8 @@ const ANTHROPIC_DYNAMIC_WEB_SEARCH_TYPE: &str = "web_search_20260209";
 const ANTHROPIC_WEB_SEARCH_NAME: &str = "web_search";
 const ANTHROPIC_CODE_EXECUTION_PREFIX: &str = "code_execution_";
 const ANTHROPIC_CODE_EXECUTION_NAME: &str = "code_execution";
+// a `cache_control` breakpoint without its own `ttl` lives this long, as Anthropic's do
+const ANTHROPIC_CACHE_TTL_SECS: u64 = 300;
 const ANTHROPIC_OUTPUT_SCHEMA_NAME: &str = "anthropic_output";
 
 fn default_model() -> String {
@@ -555,7 +557,36 @@ impl AnthropicMessagesRequest {
         Ok(())
     }
 
+    /// The longest TTL this request's `cache_control` breakpoints ask for (`"5m"`, `"1h"`, or the default five
+    /// minutes), in seconds; `None` when it marks nothing.
+    fn prefix_cache_ttl_secs(&self) -> Option<u64> {
+        let system = match &self.system {
+            Some(AnthropicSystem::Blocks(blocks)) => blocks.as_slice(),
+            _ => &[],
+        };
+        let messages = self
+            .messages
+            .iter()
+            .flat_map(|message| match &message.content {
+                AnthropicMessageContent::Blocks(blocks) => blocks.as_slice(),
+                AnthropicMessageContent::Text(_) => &[],
+            });
+        system
+            .iter()
+            .chain(messages)
+            .filter_map(|block| block.cache_control.as_ref())
+            .map(|control| {
+                control
+                    .get("ttl")
+                    .and_then(Value::as_str)
+                    .and_then(parse_cache_ttl_secs)
+                    .unwrap_or(ANTHROPIC_CACHE_TTL_SECS)
+            })
+            .max()
+    }
+
     pub fn into_chat_completion_request(self) -> Result<ChatCompletionRequest> {
+        let prefix_cache_ttl_secs = self.prefix_cache_ttl_secs();
         let enable_thinking =
             resolve_anthropic_thinking(self.thinking.as_ref(), self.enable_thinking)?;
         let reasoning_effort = resolve_anthropic_effort(
@@ -657,11 +688,24 @@ impl AnthropicMessagesRequest {
             chat_template_kwargs: None,
             max_tool_rounds: self.max_tool_rounds,
             truncate_sequence: self.truncate_sequence,
+            prefix_cache_ttl_secs,
             logits_processors: self.logits_processors,
             stop_token_ids: None,
             host_tools: self.host_tools,
             parallel_tool_calls: None,
         })
+    }
+}
+
+// "30s", "5m" or "1h"
+fn parse_cache_ttl_secs(ttl: &str) -> Option<u64> {
+    let (count, unit) = ttl.split_at(ttl.len().checked_sub(1)?);
+    let count = count.parse::<u64>().ok()?;
+    match unit {
+        "s" => Some(count),
+        "m" => count.checked_mul(60),
+        "h" => count.checked_mul(3600),
+        _ => None,
     }
 }
 
@@ -1909,6 +1953,45 @@ mod tests {
                 .as_ref()
                 .and_then(MessageContent::to_text),
             Some("Hello".to_string())
+        );
+    }
+
+    // cache_control breakpoints set how long the prompt's prefix stays in the disk prefix store: five minutes unless
+    // one names a longer ttl; a request that marks nothing takes the server's default
+    #[test]
+    fn cache_control_breakpoints_set_the_prefix_cache_ttl() {
+        let request = |system: Value, content: Value| -> Option<u64> {
+            let req: AnthropicMessagesRequest = serde_json::from_value(json!({
+                "model": "default",
+                "max_tokens": 16,
+                "system": system,
+                "messages": [{"role": "user", "content": content}]
+            }))
+            .unwrap();
+            req.into_chat_completion_request()
+                .unwrap()
+                .prefix_cache_ttl_secs
+        };
+        let text =
+            |control: Value| json!([{"type": "text", "text": "hi", "cache_control": control}]);
+        assert_eq!(request(json!("plain"), json!("hi")), None);
+        assert_eq!(
+            request(text(json!({"type": "ephemeral"})), json!("hi")),
+            Some(300)
+        );
+        assert_eq!(
+            request(
+                text(json!({"type": "ephemeral"})),
+                text(json!({"type": "ephemeral", "ttl": "1h"}))
+            ),
+            Some(3600)
+        );
+        assert_eq!(
+            request(
+                json!("plain"),
+                text(json!({"type": "ephemeral", "ttl": "30s"}))
+            ),
+            Some(30)
         );
     }
 

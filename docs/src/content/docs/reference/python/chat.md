@@ -174,6 +174,7 @@ Chat completion request following OpenAI's specification
 | `model` | `str \| None` | optional |
 | `n` | `int \| None` | optional |
 | `parallel_tool_calls` | `bool \| None` | optional |
+| `prefix_cache_ttl_secs` | `int \| None` | optional |
 | `presence_penalty` | `float \| None` | optional |
 | `reasoning_effort` | `ReasoningEffort \| None` | optional |
 | `repetition_penalty` | `float \| None` | optional |

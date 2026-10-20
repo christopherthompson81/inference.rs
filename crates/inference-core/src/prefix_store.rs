@@ -2,14 +2,15 @@
 //!
 //! A block (one paged KV block of every attention layer, plus its token ids) is stored once under its chain hash; an
 //! entry is the recurrent state (and DFlash checkpoint) at a block boundary plus its chain of block hashes. The key
-//! file is written last, so an entry with one is complete.
+//! file is written last, so an entry with one is complete. An entry expires its TTL after its last use (the key
+//! file's modification time); the writer sweeps expired entries and their unshared blocks.
 
 use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, mpsc},
-    time::SystemTime,
+    time::{Duration, SystemTime},
 };
 
 use inference_tensor::{DType, Device, Result, Tensor};
@@ -21,6 +22,10 @@ const ENTRIES_DIR: &str = "entries";
 const KEY_FILE: &str = "key.bin";
 const STATE_FILE: &str = "state.safetensors";
 const NAMESPACE_FILE: &str = "namespace.txt";
+// the entry's TTL in whole seconds; an entry without one takes the store's default
+const TTL_FILE: &str = "ttl.txt";
+// how often the writer sweeps expired entries when no write wakes it
+const SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const PARTIAL_SUFFIX: &str = ".partial";
 const SAFETENSORS_EXT: &str = "safetensors";
 const TOKENS: &str = "tokens";
@@ -44,6 +49,14 @@ pub struct PrefixWrite {
     pub blocks: Vec<StoredBlock>,
     pub recurrent: Vec<RecurrentSnapshotState>,
     pub auxiliary: Option<PagedAuxiliaryPrefixData>,
+    /// How long the entry outlives its last use; `None` takes the store's default.
+    pub ttl: Option<Duration>,
+}
+
+enum StoreOp {
+    Write(PrefixWrite),
+    // a hit on a stored entry: its last use is now, under this TTL
+    Touch(Vec<u64>, Option<Duration>),
 }
 
 /// A prefix entry read back, its blocks in chain order.
@@ -57,6 +70,14 @@ struct StoredEntry {
     key: Vec<u64>,
     bytes: u64,
     last_used: SystemTime,
+    ttl: Duration,
+}
+
+impl StoredEntry {
+    fn expired(&self, now: SystemTime) -> bool {
+        now.duration_since(self.last_used)
+            .is_ok_and(|idle| idle > self.ttl)
+    }
 }
 
 #[derive(Default)]
@@ -71,11 +92,14 @@ impl StoreIndex {
     }
 }
 
-/// Where a persisted prefix cache lives, how much it may hold, and the model it serves.
+/// Where a persisted prefix cache lives, how much it may hold, how long an entry outlives its last use, and the
+/// model it serves.
 #[derive(Clone, Debug)]
 pub struct PrefixStoreSettings {
     pub dir: PathBuf,
     pub capacity_bytes: u64,
+    /// For entries whose requests name no TTL of their own.
+    pub default_ttl: Duration,
     /// Filled from the model's loader when the engine starts; entries are kept apart per identity.
     pub model_identity: String,
 }
@@ -119,7 +143,7 @@ pub struct PrefixStore {
     root: PathBuf,
     capacity_bytes: u64,
     index: Arc<Mutex<StoreIndex>>,
-    writes: Mutex<mpsc::Sender<PrefixWrite>>,
+    writes: Mutex<mpsc::Sender<StoreOp>>,
 }
 
 fn entry_id(key: &[u64]) -> String {
@@ -152,6 +176,15 @@ fn save_atomic(tensors: &HashMap<String, Tensor>, path: &Path) -> Result<()> {
     fs::rename(&partial, path).map_err(io)
 }
 
+fn read_ttl(dir: &Path) -> Option<Duration> {
+    let text = fs::read_to_string(dir.join(TTL_FILE)).ok()?;
+    text.trim().parse().ok().map(Duration::from_secs)
+}
+
+fn write_ttl(dir: &Path, ttl: Duration) {
+    let _ = fs::write(dir.join(TTL_FILE), ttl.as_secs().to_string());
+}
+
 fn read_key(path: &Path) -> Option<Vec<u64>> {
     let bytes = fs::read(path).ok()?;
     let (hashes, rest) = bytes.as_chunks::<HASH_BYTES>();
@@ -168,8 +201,13 @@ fn read_key(path: &Path) -> Option<Vec<u64>> {
 
 impl PrefixStore {
     /// The store for one model setup (`namespace`: weights, dtypes, cache layout) under `dir`, holding at most
-    /// `capacity_bytes`; entries a crash left half written are removed.
-    pub fn open(dir: &Path, namespace: &str, capacity_bytes: u64) -> Result<Arc<Self>> {
+    /// `capacity_bytes`; entries a crash left half written, and expired ones, are removed.
+    pub fn open(
+        dir: &Path,
+        namespace: &str,
+        capacity_bytes: u64,
+        default_ttl: Duration,
+    ) -> Result<Arc<Self>> {
         use std::hash::{Hash, Hasher};
         let mut hasher = siphasher::sip::SipHasher13::new();
         namespace.hash(&mut hasher);
@@ -177,20 +215,30 @@ impl PrefixStore {
         fs::create_dir_all(root.join(BLOCKS_DIR)).map_err(io)?;
         fs::create_dir_all(root.join(ENTRIES_DIR)).map_err(io)?;
         fs::write(root.join(NAMESPACE_FILE), namespace).map_err(io)?;
-        let index = Arc::new(Mutex::new(Self::scan(&root)?));
-        let (sender, receiver) = mpsc::channel::<PrefixWrite>();
+        let index = Arc::new(Mutex::new(Self::scan(&root, default_ttl)?));
+        let (sender, receiver) = mpsc::channel::<StoreOp>();
         let writer = WriterCtx {
             root: root.clone(),
             capacity_bytes,
+            default_ttl,
             index: Arc::clone(&index),
         };
+        writer.expire(&mut index.lock().expect("prefix store index poisoned"));
         std::thread::Builder::new()
             .name("prefix-store-writer".to_string())
             .spawn(move || {
-                for write in receiver {
-                    if let Err(error) = writer.write(write) {
-                        tracing::warn!("Prefix store write failed: {error}");
+                loop {
+                    match receiver.recv_timeout(SWEEP_INTERVAL) {
+                        Ok(StoreOp::Write(write)) => {
+                            if let Err(error) = writer.write(write) {
+                                tracing::warn!("Prefix store write failed: {error}");
+                            }
+                        }
+                        Ok(StoreOp::Touch(key, ttl)) => writer.touch(&key, ttl),
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
                     }
+                    writer.expire(&mut writer.index.lock().expect("prefix store index poisoned"));
                 }
             })
             .map_err(io)?;
@@ -208,7 +256,7 @@ impl PrefixStore {
         }))
     }
 
-    fn scan(root: &Path) -> Result<StoreIndex> {
+    fn scan(root: &Path, default_ttl: Duration) -> Result<StoreIndex> {
         let mut index = StoreIndex::default();
         for shard in fs::read_dir(root.join(BLOCKS_DIR)).map_err(io)?.flatten() {
             for file in fs::read_dir(shard.path()).map_err(io)?.flatten() {
@@ -243,6 +291,7 @@ impl PrefixStore {
                             key,
                             bytes,
                             last_used,
+                            ttl: read_ttl(&dir).unwrap_or(default_ttl),
                         },
                     );
                 }
@@ -274,11 +323,20 @@ impl PrefixStore {
 
     /// Queues an entry for the writer thread.
     pub fn write(&self, write: PrefixWrite) {
+        self.send(StoreOp::Write(write));
+    }
+
+    /// Marks a stored entry used now, under `ttl` (`None`: the store's default), on the writer thread.
+    pub fn touch(&self, key: &[u64], ttl: Option<Duration>) {
+        self.send(StoreOp::Touch(key.to_vec(), ttl));
+    }
+
+    fn send(&self, op: StoreOp) {
         let _ = self
             .writes
             .lock()
             .expect("prefix store queue poisoned")
-            .send(write);
+            .send(op);
     }
 
     /// The longest stored entry whose chain starts `hashes` and is longer than `min_blocks`: its block count.
@@ -292,13 +350,14 @@ impl PrefixStore {
             .max()
     }
 
-    /// The entry for the first `n_blocks` of `hashes`, its blocks checked against `tokens`; `None` (and the entry
-    /// dropped) when a block is missing or holds other tokens.
+    /// The entry for the first `n_blocks` of `hashes`, its blocks checked against `tokens`, marked used now under
+    /// `ttl`; `None` (and the entry dropped) when a block is missing or holds other tokens.
     pub fn load(
         &self,
         hashes: &[u64],
         tokens: &[u32],
         block_size: usize,
+        ttl: Option<Duration>,
     ) -> Result<Option<LoadedPrefix>> {
         let key = hashes.to_vec();
         let id = entry_id(&key);
@@ -307,13 +366,8 @@ impl PrefixStore {
         let mut index = self.index.lock().expect("prefix store index poisoned");
         match loaded {
             Ok(Some(entry)) => {
-                if let Some(stored) = index.entries.get_mut(&id) {
-                    stored.last_used = SystemTime::now();
-                }
-                let _ = fs::File::options()
-                    .write(true)
-                    .open(dir.join(KEY_FILE))
-                    .and_then(|f| f.set_modified(SystemTime::now()));
+                drop(index);
+                self.touch(&key, ttl);
                 Ok(Some(entry))
             }
             Ok(None) | Err(_) => {
@@ -426,6 +480,7 @@ impl PrefixStore {
 struct WriterCtx {
     root: PathBuf,
     capacity_bytes: u64,
+    default_ttl: Duration,
     index: Arc<Mutex<StoreIndex>>,
 }
 
@@ -481,6 +536,8 @@ impl WriterCtx {
         let key_partial = dir.join(format!("{KEY_FILE}{PARTIAL_SUFFIX}"));
         fs::write(&key_partial, key_bytes).map_err(io)?;
         fs::rename(&key_partial, dir.join(KEY_FILE)).map_err(io)?;
+        let ttl = write.ttl.unwrap_or(self.default_ttl);
+        write_ttl(&dir, ttl);
         let bytes = file_bytes(&dir.join(KEY_FILE)) + file_bytes(&dir.join(STATE_FILE));
         let mut index = self.index.lock().expect("prefix store index poisoned");
         index.entries.insert(
@@ -489,13 +546,33 @@ impl WriterCtx {
                 key: write.key,
                 bytes,
                 last_used: SystemTime::now(),
+                ttl,
             },
         );
         self.collect(&mut index);
         Ok(())
     }
 
-    // Least recently used entries go until the store fits, then the blocks no entry still names
+    fn touch(&self, key: &[u64], ttl: Option<Duration>) {
+        let id = entry_id(key);
+        let dir = self.root.join(ENTRIES_DIR).join(&id);
+        let ttl = ttl.unwrap_or(self.default_ttl);
+        let mut index = self.index.lock().expect("prefix store index poisoned");
+        let Some(entry) = index.entries.get_mut(&id) else {
+            return;
+        };
+        entry.last_used = SystemTime::now();
+        if entry.ttl != ttl {
+            entry.ttl = ttl;
+            write_ttl(&dir, ttl);
+        }
+        let _ = fs::File::options()
+            .write(true)
+            .open(dir.join(KEY_FILE))
+            .and_then(|f| f.set_modified(SystemTime::now()));
+    }
+
+    // Least recently used entries go until the store fits
     fn collect(&self, index: &mut StoreIndex) {
         if index.bytes() <= self.capacity_bytes {
             return;
@@ -510,23 +587,45 @@ impl WriterCtx {
             if index.bytes() <= self.capacity_bytes || index.entries.len() <= 1 {
                 break;
             }
-            index.entries.remove(&id);
-            let _ = fs::remove_dir_all(self.root.join(ENTRIES_DIR).join(&id));
-            let named = index
-                .entries
-                .values()
-                .flat_map(|entry| entry.key.iter().copied())
-                .collect::<HashSet<_>>();
-            let orphans = index
-                .blocks
-                .keys()
-                .filter(|hash| !named.contains(hash))
-                .copied()
-                .collect::<Vec<_>>();
-            for hash in orphans {
-                index.blocks.remove(&hash);
-                let _ = fs::remove_file(block_path(&self.root, hash));
-            }
+            self.remove_entry(index, &id);
+        }
+    }
+
+    fn expire(&self, index: &mut StoreIndex) {
+        let now = SystemTime::now();
+        let expired = index
+            .entries
+            .iter()
+            .filter(|(_, entry)| entry.expired(now))
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        if expired.is_empty() {
+            return;
+        }
+        for id in &expired {
+            self.remove_entry(index, id);
+        }
+        tracing::debug!(entries = expired.len(), "Expired prefix store entries");
+    }
+
+    // The entry, then the blocks no entry still names
+    fn remove_entry(&self, index: &mut StoreIndex, id: &str) {
+        index.entries.remove(id);
+        let _ = fs::remove_dir_all(self.root.join(ENTRIES_DIR).join(id));
+        let named = index
+            .entries
+            .values()
+            .flat_map(|entry| entry.key.iter().copied())
+            .collect::<HashSet<_>>();
+        let orphans = index
+            .blocks
+            .keys()
+            .filter(|hash| !named.contains(hash))
+            .copied()
+            .collect::<Vec<_>>();
+        for hash in orphans {
+            index.blocks.remove(&hash);
+            let _ = fs::remove_file(block_path(&self.root, hash));
         }
     }
 }
@@ -541,6 +640,8 @@ mod tests {
     // the writer thread finishes queued writes well within this
     const WRITE_WAIT: std::time::Duration = std::time::Duration::from_millis(20);
     const WRITE_POLLS: usize = 500;
+    const TTL: Duration = Duration::from_secs(3600);
+    const SHORT_TTL: Duration = Duration::from_secs(300);
 
     fn block(hash: u64, first_token: u32) -> Result<StoredBlock> {
         let row =
@@ -553,6 +654,10 @@ mod tests {
     }
 
     fn write(store: &PrefixStore, key: &[u64]) -> Result<()> {
+        write_ttl(store, key, None)
+    }
+
+    fn write_ttl(store: &PrefixStore, key: &[u64], ttl: Option<Duration>) -> Result<()> {
         let blocks = key
             .iter()
             .enumerate()
@@ -573,6 +678,7 @@ mod tests {
                 valid_start_pos: 2,
                 next_committed_pos: 3,
             }),
+            ttl,
         });
         for _ in 0..WRITE_POLLS {
             if store.has_entry(key) {
@@ -592,14 +698,16 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let key = [11, 22, 33];
         {
-            let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY)?;
+            let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
             write(&store, &key)?;
         }
-        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY)?;
+        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
         assert_eq!(store.longest_entry(&[11, 22, 33, 44], 0), Some(3));
         assert_eq!(store.longest_entry(&[11, 22, 33, 44], 3), None);
         assert_eq!(store.longest_entry(&[11, 99, 33], 0), None);
-        let loaded = store.load(&key, &tokens(3), BLOCK)?.expect("stored entry");
+        let loaded = store
+            .load(&key, &tokens(3), BLOCK, None)?
+            .expect("stored entry");
         assert_eq!(loaded.blocks.len(), 3);
         assert_eq!(loaded.blocks[1].tokens, (4..8).collect::<Vec<u32>>());
         let layers = loaded.blocks[1]
@@ -616,7 +724,7 @@ mod tests {
             (1, 2, 3)
         );
         // another setup never sees this one's entries
-        let other = PrefixStore::open(dir.path(), "another model", CAPACITY)?;
+        let other = PrefixStore::open(dir.path(), "another model", CAPACITY, TTL)?;
         assert_eq!(other.longest_entry(&key, 0), None);
         Ok(())
     }
@@ -624,11 +732,11 @@ mod tests {
     #[test]
     fn a_block_with_other_tokens_drops_the_entry() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY)?;
+        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
         write(&store, &[1, 2])?;
         let mut other = tokens(2);
         other[5] += 1;
-        assert!(store.load(&[1, 2], &other, BLOCK)?.is_none());
+        assert!(store.load(&[1, 2], &other, BLOCK, None)?.is_none());
         assert_eq!(store.longest_entry(&[1, 2], 0), None);
         Ok(())
     }
@@ -636,11 +744,11 @@ mod tests {
     #[test]
     fn a_full_store_drops_the_oldest_entry_and_its_unshared_blocks() -> Result<()> {
         let dir = tempfile::tempdir()?;
-        let probe = PrefixStore::open(dir.path(), "probe", CAPACITY)?;
+        let probe = PrefixStore::open(dir.path(), "probe", CAPACITY, TTL)?;
         write(&probe, &[1, 2])?;
         let entry_bytes = probe.index.lock().unwrap().bytes();
         // room for two two-block entries that share their first block, not a third
-        let store = PrefixStore::open(dir.path(), NAMESPACE, entry_bytes * 2)?;
+        let store = PrefixStore::open(dir.path(), NAMESPACE, entry_bytes * 2, TTL)?;
         write(&store, &[1, 2])?;
         write(&store, &[1, 3])?;
         write(&store, &[1, 4])?;
@@ -655,15 +763,73 @@ mod tests {
     fn a_half_written_entry_is_removed_on_open() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let root = {
-            let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY)?;
+            let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
             write(&store, &[5, 6])?;
             store.root.clone()
         };
         let entry = root.join(ENTRIES_DIR).join(entry_id(&[5, 6]));
         fs::remove_file(entry.join(KEY_FILE)).map_err(io)?;
-        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY)?;
+        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
         assert_eq!(store.longest_entry(&[5, 6], 0), None);
         assert!(!entry.exists());
+        Ok(())
+    }
+
+    fn wait_for(mut done: impl FnMut() -> bool) -> Result<()> {
+        for _ in 0..WRITE_POLLS {
+            if done() {
+                return Ok(());
+            }
+            std::thread::sleep(WRITE_WAIT);
+        }
+        inference_tensor::bail!("the writer never got there")
+    }
+
+    #[test]
+    fn an_entry_past_its_ttl_is_swept_with_its_unshared_blocks() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
+        write(&store, &[1, 2])?;
+        write(&store, &[1, 3])?;
+        // a hit under a zero TTL leaves the entry expired at once; the writer sweeps after every operation
+        store.touch(&[1, 2], Some(Duration::ZERO));
+        wait_for(|| !store.has_entry(&[1, 2]))?;
+        assert!(store.has_entry(&[1, 3]));
+        assert!(store.has_block(1) && !store.has_block(2) && store.has_block(3));
+        Ok(())
+    }
+
+    #[test]
+    fn an_entry_keeps_its_ttl_across_reopening() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        {
+            let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
+            write_ttl(&store, &[7, 8], Some(SHORT_TTL))?;
+        }
+        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
+        let ttl = store.index.lock().unwrap().entries[&entry_id(&[7, 8])].ttl;
+        assert_eq!(ttl, SHORT_TTL);
+        Ok(())
+    }
+
+    #[test]
+    fn an_entry_idle_past_its_ttl_is_removed_on_open() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = {
+            let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
+            write_ttl(&store, &[5, 6], Some(SHORT_TTL))?;
+            store.root.clone()
+        };
+        let entry = root.join(ENTRIES_DIR).join(entry_id(&[5, 6]));
+        let idle = SystemTime::now() - 2 * SHORT_TTL;
+        fs::File::options()
+            .write(true)
+            .open(entry.join(KEY_FILE))
+            .and_then(|f| f.set_modified(idle))
+            .map_err(io)?;
+        let store = PrefixStore::open(dir.path(), NAMESPACE, CAPACITY, TTL)?;
+        assert_eq!(store.longest_entry(&[5, 6], 0), None);
+        assert!(!entry.exists() && !store.has_block(5));
         Ok(())
     }
 }

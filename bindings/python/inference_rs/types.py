@@ -461,6 +461,7 @@ class ChatCompletionRequest:
     model: str | None = None
     n: int | None = None
     parallel_tool_calls: bool | None = None
+    prefix_cache_ttl_secs: int | None = None
     presence_penalty: float | None = None
     reasoning_effort: ReasoningEffort | None = None
     repetition_penalty: float | None = None
@@ -2606,6 +2607,7 @@ class RuntimeSpec:
     paged_cache: PagedCacheSpec | None = None
     prefix_cache_dir: str | None = None
     prefix_cache_disk_gib: int | None = None
+    prefix_cache_disk_ttl_mins: int | None = None
     prefix_cache_n: int | None = None
     seed: int | None = None
     throughput_logging: bool | None = None
