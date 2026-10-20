@@ -3096,3 +3096,49 @@ fn unsupported_prompt_paths_remain_atomic() {
         0
     );
 }
+
+// A prompt that extends a reply still being prefilled waits for its snapshot; a prompt that doesn't goes ahead
+#[test]
+fn a_prompt_extending_an_unfinished_reply_warmup_waits_for_it() {
+    let mut scheduler = test_scheduler();
+    scheduler.set_prefix_caching_enabled_sync(true);
+    let logger = IntervalLogger::new(std::time::Duration::from_secs(3600), None);
+    let block = scheduler.block_size;
+    let waiting = |seq: Arc<Mutex<Sequence>>| {
+        get_mut_arcmutex!(seq).set_state(SequenceState::Waiting);
+        seq
+    };
+
+    let next_turn = waiting(test_sequence(1, block * 6));
+    let (tx, _rx) = channel(1);
+    let unrelated = waiting(Arc::new(Mutex::new(
+        TestSequence {
+            id: 2,
+            layers: 1,
+            block_size: Some(block),
+            ..TestSequence::new(vec![2; block * 6], tx)
+        }
+        .build(),
+    )));
+    let warmup = waiting(test_sequence(3, block * 4 + 1));
+    get_mut_arcmutex!(warmup).set_prefix_warmup(true);
+    scheduler.waiting.extend([next_turn, unrelated, warmup]);
+
+    let output = scheduler.schedule(&logger, None);
+    let ids = output
+        .scheduled
+        .iter()
+        .map(|seq| *get_mut_arcmutex!(seq).id())
+        .collect::<Vec<_>>();
+    assert!(ids.contains(&2), "the unrelated prompt goes ahead: {ids:?}");
+    assert!(
+        !ids.contains(&1),
+        "the next turn waits for the warm-up: {ids:?}"
+    );
+    assert!(
+        scheduler
+            .waiting
+            .iter()
+            .any(|seq| *get_mut_arcmutex!(seq).id() == 1)
+    );
+}
