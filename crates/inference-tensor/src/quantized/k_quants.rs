@@ -198,6 +198,16 @@ pub struct BlockQ8K {
 }
 const _: () = assert!(4 + QK_K + QK_K / 16 * 2 == std::mem::size_of::<BlockQ8K>());
 
+impl BlockQ8K {
+    pub fn d(&self) -> f32 {
+        self.d
+    }
+
+    pub fn qs(&self) -> &[i8; QK_K] {
+        &self.qs
+    }
+}
+
 impl GgmlType for BlockQ4_0 {
     const DTYPE: GgmlDType = GgmlDType::Q4_0;
     const BLCK_SIZE: usize = QK4_0;

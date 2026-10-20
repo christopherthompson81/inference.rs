@@ -205,6 +205,7 @@ pub use gguf::archive::{
     GgufArchive, GgufDType, GgufEndian, GgufShardInfo, GgufTensorData, GgufTensorInfo, GgufVersion,
 };
 pub use gguf::cpu::cpu_indexed_moe_forward;
+pub use gguf::cpu_experts;
 #[cfg(feature = "cuda")]
 pub use gguf::cuda::{
     ACT_GELU_PYTORCH_TANH, ACT_SILU, IndexedMoeLoraDecode, IndexedMoeLoraWeights,
@@ -2002,6 +2003,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
     /// The weight as our GGUF CUDA kernels read it in place: Candle's types and the raw IQ, trellis and IQK ones.
     #[cfg(feature = "cuda")]
     fn kernel_weight(&self) -> Option<&dyn gguf::kernel::KernelWeight> {
+        None
+    }
+
+    /// The weight's GGUF blocks in host memory, as the CPU kernels read them in place.
+    fn cpu_gguf_blocks(&self) -> Option<gguf::cpu_experts::CpuGgufBlocks<'_>> {
         None
     }
 
