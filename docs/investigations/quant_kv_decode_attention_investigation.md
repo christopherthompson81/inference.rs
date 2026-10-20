@@ -195,3 +195,77 @@ Implication: the quantized path needs much more data in flight per SM than these
 larger raw tiles unpacked in sub-tiles, or producer warps), and lengths the host can use to size splits. Without
 counter access (ncu) each variant is a ~10 minute rebuild and an inference from timings; enabling profiling
 (NVreg_RestrictProfilingToAdminUsers=0) would cut that loop.
+
+## Run 8 - 2026-10-20 09:30
+
+Question: with ncu (counters were enabled all along: `RmProfilingAdminOnly: 0`; Runs 2-6's "no counter access" came
+from an old note, not a check), what bounds the dedicated kernel, and what do the fixes give?
+
+ncu on `bench::verify_long_context` at 128K (`ncu --kernel-name regex:flash_attn_quant_decode --launch-count 1`):
+
+```
+                          v1 rows 1   v1 rows 8 (int8 Q.K)   v3 rows 8 (f16 Q.K)
+registers / thread           255         255                    227
+warps / scheduler (theor.)   2           2                      2
+issue slots busy             30%         41%                    32%
+DRAM throughput              33%         21%                    22%
+top stalls (per issue)       wait 1.69,  wait 0.90,             math pipe 1.71,
+                             short sb    math pipe 0.71         wait 1.15
+                             0.71
+top opcodes executed         IMAD 25%,   FFMA 18%, I2F 12%      HMMA 12% (44% of stall samples)
+                             LOP3 20%    (int8 rescale)
+```
+
+Fixes, in order:
+- v2: a 32-key tile is one paged block with its rows back to back, so its K (and V) is one contiguous copy: one
+  table lookup a tile instead of an integer division and lookup per 16 bytes (v1's top IMAD/ISETP/IABS windows).
+  Rows past the sequence then hold stale bytes: V is zeroed there (a NaN would survive P = 0).
+- v3: f16 Q.K with K widened in smem, scale included: int8 Q.K needs a rescale per score and 32-value group, which
+  at 64 columns is ~64K operations a tile against ~8K for widening K.
+- v4: live splits decided on the device from the sequence length (at least 8 tiles each); the extra blocks exit and
+  the combine pass skips them. Graph capture fixes the grid, so the host cannot size it.
+
+```
+bench (us)          2K r1   2K r8   8K r1   8K r8   32K r1   32K r8   128K r1   128K r8   256K r1   256K r8
+mma staged (Run 4)   ~23     ~52     ~48     ~88    142.2    211.7    463.4     658.4     915.6    1331.7
+v1                  88.7    91.6   116.7   124.5    205.7    261.5    513.2     766.3     956.3    1485.8
+v2                  89.1    91.0   111.0   116.8    176.5    235.8    405.2     681.0     738.5    1314.1
+v3                  70.4    56.7    94.1    87.7    166.1    204.3    411.1     620.3     758.9    1217.8
+v4                  37.9    55.5    50.5    66.8    166.5    204.6    411.6     615.5     765.7    1204.7
+```
+
+End to end (this branch's binary against master's, back to back; phase-timer verify medians, specbench ui):
+
+```
+prompt    master    v4       
+1988      24.15     24.07 ms
+31919     27.08     26.49
+124730    36.10     33.91
+```
+
+Finding: the verify step's growth from 2K to 125K is 9.84 ms against master's 11.95 (tqLLM's 9.4 on this card,
+tqllm doc Run 7). Plain decode at 2K is still ~15 us a layer behind the mma kernel (fixed costs: Q load, combine).
+Next: the 8-row case is tensor-pipe bound: 48 columns padded to 64 (25% of the MMA), and Q.K accumulates in f32,
+half rate on GA102.
+
+## Run 9 - 2026-10-20 11:00
+
+Question: Q.K accumulating 64 dims at a time in f16 (GA102 runs f32 accumulation at half rate), then summing in f32:
+what does it give and cost?
+
+Bench, 128K: rows 8 615.5 -> 570.9 us, rows 1 411.6 -> 397.5; the fattn tests pass. But their scores are small
+(N(0, 1) Q and K); a temporary Q scale in the quantized tests (scores peaked like real attention) shows the cost,
+max abs error against attention over the cache's values:
+
+```
+Q scale    decode: mma path   f32-acc kernel   f16-chunk kernel      verify (two cases): mma   f32-acc   f16-chunk
+1          0.0010             -                0.0015                0.0157 0.0156  -        0.0157 0.0156
+6          0.0065             0.0061           0.0197                0.0460 0.0468  0.0460 0.0507  0.0526 0.0546
+12         0.0083             0.0094           0.0309                0.0838 0.0908  0.0824 0.0890  0.0902 0.0908
+```
+
+Finding: f16 partial sums triple the decode error once scores are peaked; f32 accumulation matches the mma path.
+Kept f32 (v4). Also tried and dropped, neutral within noise: skipping the per-score mask on fully visible tiles and
+skipping the O rescale when no row's max moved (580 against 571 us).
+Note: `FATTN_QUANT_DECODE_OFF=` (set but empty) still disables the kernel (the switch tests presence); A/B runs need
+`env -u`.
