@@ -527,3 +527,55 @@ shrinking it raises average power and the clocks drop to match. Negative: droppe
 Implications: on this card, decode speedups have to cut energy a token (fewer bytes or instructions per step, as the
 tensor-core matvec did), not idle time. Host-gap and launch-overhead work pays only on a card with power headroom.
 The TDP is a user setting (`nvidia-smi -pl`, max 390 W here).
+
+## Run 15 - 2026-10-20 09:40
+
+Question: tqLLM's prefill is ~1.5x ours (Run 5). Its large chunks dequantize each weight, requantize it to int8 with
+one scale per row, and run a cuBLASLt int8 GEMM. Would that pay here, and what does it cost in KLD?
+
+Where our prefill goes (nsys, one cold 7987-token prefill, 512-token chunks, 1341 tok/s): kernels 5844 ms of a
+5925 ms span. MMQ (IQ4_KS) 3952 ms (68%), GDN recurrence (`gated_delta_rule_recurrence_kernel_vmajor_grouped`) 789,
+attention 477, GDN prepare 121, activation quantize 102, the rest about 400. Chunk size barely matters:
+`--max-prefill-chunk-tokens` 512 / 1024 / 2048 gives 1348 / 1378 / 1398 tok/s.
+
+GEMM throughput at prefill shapes (sustained ~1.5 s per point, random data, so the card sits at its power cap as in
+real prefill; constant data reads ~15% higher):
+
+```
+MMQ, recipe A weights (new ignored bench prefill_mmq_shapes, not kept)
+  IQ4_KS 17408x5120 / 5120x17408 / 10240x5120 / 5120x6144, rows 512-2048: 93-100 TOPS
+MMQ by type, synthetic 17408x5120 and 5120x17408, rows 512 and 2048
+  Q8_0 97-100, Q4_0 98-102, Q4_K 91-94, Q6_K 77-79 TOPS
+upstream llama.cpp (8bb3cf0d2) test-backend-ops, IQ4_XS 4096x14336 n=512: 88 TOPS
+cuBLASLt i8 x i8 -> i32 (scratchpad i8gemm/bench.cu), rows 512 / 1024 / 2048
+  34816x5120 207 / 203 / 208, 5120x17408 150 / 150 / 217, 14336x5120 192 / 173 / 186, 5120x6144 137 / 152 / 197 TOPS
+```
+
+MMQ sits near 100 TOPS on every weight type, Q8_0 included, and matches upstream, so IQ4_KS decoding is not the
+limit. ncu on MMQ Q8_0 at 512 rows: tensor pipe 36.5%, issue slots 39%, 254 registers and one block per SM (16.7%
+occupancy), stalls spread over math-pipe throttle, wait, global and MIO. A plain int8 GEMM runs 1.5-2.1x faster.
+
+KLD of the int8 numerics, emulated exactly inside MMQ's entry point (dequantize, round to int8 with the given scales,
+multiply in f32; prefill batches of 256+ rows; everything but the 16 Q5_K K/V projections and the Q6_K head, which
+have no GPU dequantizer). Measured against our own MMQ output: wikitext, 40 windows of 512 tokens, the second half of
+each scored as llama-perplexity does, KLD from the baseline's top 64 plus a tail term (temporary `kld_cmp` example;
+patch and source in the scratchpad).
+
+```
+weights int8 per row, activations as             KLD vs MMQ  median   p99     same top-1  PPL
+  MMQ itself                                     0           0        0       100%        5.8265
+  bf16 (weights only)                            0.0017      0.0009   0.013   98.0%       5.8274
+  int8 per 32 (MMQ's activation blocks)          0.0018      0.0010   0.013   98.0%       5.8288
+  int8 per 128                                   0.0026      0.0013   0.022   97.7%       5.8278
+  int8 per 512                                   0.0048      0.0022   0.046   96.6%       5.8456
+  int8 per token (what a plain int8 GEMM takes)  0.0278      0.0109   0.289   92.7%       5.9072
+```
+
+Negative: a plain int8 GEMM needs one activation scale per token, and that alone adds KLD 0.028, 1.6x recipe A's
+whole quantization cost (0.0169). Outlier channels in the activations are the likely cause. Finer scales recover the
+quality, but then a scale applies inside the K loop, which cuBLASLt does not offer. A custom kernel with 128-wide
+groups would cost +0.0026 KLD (about 15% on top of the file's own), and its speed against MMQ is unknown until
+written. Requantizing the weights to one scale per row costs 0.0017 of that on its own. Not taken.
+
+The lossless lead in prefill is the GDN recurrence, at 13.5%. It is a token-sequential scan, 0.97 ms per layer per
+512-token chunk, about 1.6 TFLOPS. A chunked (WY) form on tensor cores would cut it while keeping fp32 state math.
