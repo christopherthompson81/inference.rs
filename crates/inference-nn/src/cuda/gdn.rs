@@ -70,6 +70,9 @@ const GDN_STATE_DTYPE_BF16: i32 = 1;
 const GDN_STATE_DTYPE_F32: i32 = 2;
 #[cfg(all(feature = "cuda", has_flashinfer_gdn_sm90_kernel))]
 const FLASHINFER_GDN_MIN_SEQ_LEN: usize = 32;
+// the chunked prefill overtakes the token scan between 32 and 48 tokens at 48 and at 384 heads (RTX 3090)
+#[cfg(any(feature = "cuda", test))]
+const GDN_CHUNKED_PREFILL_MIN_SEQ_LEN: usize = 48;
 
 #[cfg(any(feature = "cuda", test))]
 #[derive(Clone, Debug)]
@@ -291,6 +294,7 @@ enum GdnPrefillKernel {
     ValueMajor2,
     ValueMajor4,
     ValueMajor8,
+    Chunked,
 }
 
 #[cfg(any(feature = "cuda", test))]
@@ -323,7 +327,9 @@ fn prefill_kernel_supported(kernel: GdnPrefillKernel, policy: GdnPrefillPolicy) 
 
 #[cfg(any(feature = "cuda", test))]
 fn automatic_prefill_kernel(policy: GdnPrefillPolicy) -> GdnPrefillKernel {
-    if policy.state_blocks <= policy.multiprocessor_count {
+    if policy.seq_len >= GDN_CHUNKED_PREFILL_MIN_SEQ_LEN {
+        GdnPrefillKernel::Chunked
+    } else if policy.state_blocks <= policy.multiprocessor_count {
         GdnPrefillKernel::ValueMajor2
     } else if policy.state_blocks <= policy.multiprocessor_count.saturating_mul(4) {
         GdnPrefillKernel::ValueMajor4
@@ -353,8 +359,9 @@ fn parse_prefill_kernel(value: &str) -> std::result::Result<Option<GdnPrefillKer
         "vmajor2" => Ok(Some(GdnPrefillKernel::ValueMajor2)),
         "vmajor4" => Ok(Some(GdnPrefillKernel::ValueMajor4)),
         "vmajor8" => Ok(Some(GdnPrefillKernel::ValueMajor8)),
+        "chunked" => Ok(Some(GdnPrefillKernel::Chunked)),
         other => Err(format!(
-            "invalid GDN prefill kernel '{other}', expected auto, flashinfer-sm90, cutile, vmajor1, vmajor2, vmajor4, or vmajor8"
+            "invalid GDN prefill kernel '{other}', expected auto, flashinfer-sm90, cutile, vmajor1, vmajor2, vmajor4, vmajor8, or chunked"
         )),
     }
 }
@@ -1241,6 +1248,7 @@ enum RecurrenceKernel {
     ValueMajorWarp2,
     ValueMajorWarp4,
     ValueMajorWarp8,
+    Chunked,
 }
 
 /// `state` is `[BH, K, V]` or `[BH, V, K]` (gathered), or the matching pooled layout, mutated in place.
@@ -1263,6 +1271,7 @@ fn launch_recurrence(
             | RecurrenceKernel::ValueMajorWarp2
             | RecurrenceKernel::ValueMajorWarp4
             | RecurrenceKernel::ValueMajorWarp8
+            | RecurrenceKernel::Chunked
     ) && (k_dim != GDN_DECODE_K_DIM || v_dim != GDN_DECODE_V_DIM)
     {
         inference_tensor::bail!(
@@ -1295,6 +1304,34 @@ fn launch_recurrence(
 
     with_slot_indices(slots, |slot_ptr, batch| {
         let num_heads = bh.checked_div(batch).unwrap_or(1);
+        if matches!(kernel, RecurrenceKernel::Chunked) {
+            let floats = unsafe {
+                crate::cuda::ffi::gdn_chunked_workspace_floats(bh as i32, seq_len as i32)
+            };
+            let workspace = unsafe { dev.alloc::<f32>(floats) }?;
+            let status = unsafe {
+                crate::cuda::ffi::gdn_chunked_recurrence(
+                    q_ptr,
+                    k_ptr,
+                    v_ptr,
+                    g_ptr,
+                    beta_ptr,
+                    state_ptr,
+                    output_buf.device_ptr(output_buf.stream()).0 as *mut f32,
+                    workspace.device_ptr(workspace.stream()).0 as *mut f32,
+                    bh as i32,
+                    seq_len as i32,
+                    slot_ptr,
+                    num_heads as i32,
+                    state_dtype,
+                    stream,
+                )
+            };
+            if status != 0 {
+                inference_tensor::bail!("gdn_chunked_recurrence failed with status {status}");
+            }
+            return Ok(());
+        }
         let values_per_warp = match kernel {
             RecurrenceKernel::ValueMajorWarp2 => Some(2),
             RecurrenceKernel::ValueMajorWarp4 => Some(4),
@@ -1337,7 +1374,8 @@ fn launch_recurrence(
             }
             RecurrenceKernel::ValueMajorWarp2
             | RecurrenceKernel::ValueMajorWarp4
-            | RecurrenceKernel::ValueMajorWarp8 => unreachable!(),
+            | RecurrenceKernel::ValueMajorWarp8
+            | RecurrenceKernel::Chunked => unreachable!(),
         };
         unsafe {
             launcher(
@@ -1429,6 +1467,7 @@ fn vmajor_prefill_gated_delta_rule_recurrence_cuda_impl(
         GdnPrefillKernel::ValueMajor2 => RecurrenceKernel::ValueMajorWarp2,
         GdnPrefillKernel::ValueMajor4 => RecurrenceKernel::ValueMajorWarp4,
         GdnPrefillKernel::ValueMajor8 => RecurrenceKernel::ValueMajorWarp8,
+        GdnPrefillKernel::Chunked => RecurrenceKernel::Chunked,
         GdnPrefillKernel::FlashInferSm90 | GdnPrefillKernel::Cutile => {
             inference_tensor::bail!("fused GDN prefill providers require convolved inputs")
         }
@@ -5867,10 +5906,11 @@ mod dispatch_tests {
     fn prefill_auto_dispatch_tracks_available_parallelism() {
         for (state_blocks, seq_len, expected) in [
             (1, 2, GdnPrefillKernel::ValueMajor2),
-            (48, 64, GdnPrefillKernel::ValueMajor2),
-            (48, 8_192, GdnPrefillKernel::ValueMajor2),
-            (8 * 48, 2_048, GdnPrefillKernel::ValueMajor4),
-            (16 * 48, 2_048, GdnPrefillKernel::ValueMajor8),
+            (48, 47, GdnPrefillKernel::ValueMajor2),
+            (8 * 48, 32, GdnPrefillKernel::ValueMajor4),
+            (16 * 48, 32, GdnPrefillKernel::ValueMajor8),
+            (48, 48, GdnPrefillKernel::Chunked),
+            (16 * 48, 2_048, GdnPrefillKernel::Chunked),
         ] {
             assert_eq!(
                 automatic_prefill_kernel(sm90_prefill_policy(state_blocks, seq_len)),
@@ -5902,6 +5942,10 @@ mod dispatch_tests {
             parse_prefill_kernel("vmajor8").unwrap(),
             Some(GdnPrefillKernel::ValueMajor8)
         );
+        assert_eq!(
+            parse_prefill_kernel("chunked").unwrap(),
+            Some(GdnPrefillKernel::Chunked)
+        );
         assert!(parse_prefill_kernel("unknown").is_err());
 
         let policy = sm90_prefill_policy(48, 129);
@@ -5914,6 +5958,7 @@ mod dispatch_tests {
             GdnPrefillKernel::ValueMajor2,
             GdnPrefillKernel::ValueMajor4,
             GdnPrefillKernel::ValueMajor8,
+            GdnPrefillKernel::Chunked,
         ] {
             assert!(prefill_kernel_supported(kernel, policy));
             assert_eq!(select_prefill_kernel(policy, Some(kernel)), Ok(kernel));
