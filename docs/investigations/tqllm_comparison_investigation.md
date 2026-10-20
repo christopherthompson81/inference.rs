@@ -446,3 +446,136 @@ master 3.796, branch 3.744 tokens a step; per-prompt paired difference -0.05 +- 
 28.40 -> 27.88 ms a step (133.7 -> 134.3 tok/s). Against the dequantized f32 matmul the new kernel is no less
 accurate than MMQ (rms rel err at 8 rows: Q4_K 5.6e-3 vs MMQ 0.6-1.7e-2; Q6_K equal at 5.6e-3), so no numerics
 regression explains a drop. Single-sample prompts swing +-0.6 tokens a step; acceptance A/Bs need 24+ prompts.
+
+## Run 13 - 2026-10-20 07:40
+
+Question: before building sampled tree verify (tqLLM's greedy lead from 8K comes from its tree), how many tokens a
+step would a sampled tree add within the same 8 verify rows? The fast matvec paths stop at 8 rows
+(`MMVQ_MAX_BATCH`), as do tqLLM's (`kGdnReplayCols`), so a tree trades depth for width.
+
+Exactness: the DFlash2 selector's q at depth d is a softmax over the drafter's top 16 for that position, scored
+against the predecessor token, so a node's children are draws from a known q_d(.|parent). Siblings drawn from it
+without replacement and checked by recursive rejection (accept with min(1, p/q); on reject p <- norm(max(p - q, 0)),
+q <- q without the rejected token) keep the output distribution exact.
+
+Method: an env-gated dump in `verify_staged_batch` (not kept; patch in the scratchpad) logged each step's 7 drafts,
+the 16-candidate q per position and the top 64 target logits per verify row; recipe A, q3 cache, DFlash 2 q4k at 7
+drafts, UI sampling (temperature 0.6, top_p 0.95, top_k 20), the 18-prompt set plus 24 more wiki offsets (4672
+steps). `tree_sim.py` (scratchpad) rebuilds p exactly as `prepare_topk_distribution` does. A leaf sibling at depth d
+hangs off chain node d-1, whose verify row is already in the log, and its q is the logged q_d, so for the "chain
+plus leaf siblings" family the expectation is exact.
+
+```
+4672 steps; observed 3.567 tokens a step, chain-7 expectation 3.576
+P(depth d accepted)   0.777 0.573 0.421 0.307 0.223 0.160 0.116
+depth                 1     2     3     4     5     6     7
+P(sibling accepted | first draft rejected)
+                      0.477 0.375 0.308 0.256 0.227 0.188 0.189
+target mass inside q's 16
+                      0.973 0.926 0.876 0.817 0.769 0.720 0.689
+
+8 rows (best shapes): chain 7 3.576 | chain 6 + sibling at 1 3.556 | chain 6 + sibling at 2 3.541 | chain 5 + 2 sib 3.478
+more rows, chain 7 + best leaf siblings: 9 rows 3.672 (+2.7%), 10 rows 3.754 (+5.0%), 12 rows 3.853 (+7.7%),
+16 rows 3.970 (+11.0%)
+```
+
+Negative: at 8 rows the chain is the best tree. A node is worth the probability that its path is accepted. The
+seventh chain draft is worth 0.116 tokens. A sibling at depth 1 is worth P(reject at 1) x 0.477 = 0.106, and every
+deeper sibling is worth less. Subtrees under a sibling would score lower still, since each of their nodes is that
+0.106 times a continuation probability below 1. Best-first allocation of 7 nodes therefore picks the chain. A tree
+only pays when rows are added. Leaf siblings give +11% tokens a step at 16 rows (subtrees under them maybe a few
+points more), but every 8-row fast path (tensor-core matvecs, fattn-quant's `FQ_MAX_ROWS`, the GDN fused verify)
+would have to double. A step at 16 rows has to cost under ~11% more than at 8 to come out ahead. Not pursued; the
+sample is at temperature 0.6, and a hotter workload flattens q and could move the balance toward width.
+tqLLM's greedy tree most likely gains on near-ties, where a greedy chain rejects and the second-ranked sibling is often right (not measured here).
+That does not carry over to sampled verification.
+
+## Run 14 - 2026-10-20 08:30
+
+Question: what is in the time between our verify and drafter graphs, and how much decode does removing it buy?
+
+Graph-level nsys (`nsys launch -t cuda,osrt --cuda-graph-trace=graph`, 2 s of a 2K decode; `nsys_gap.py`,
+`nsys_gap2.py` in the scratchpad), then a temporary probe without the profiler. The probe was CUDA events after the
+verify graph, before and after the drafter graph and at the next verify launch, plus host `Instant`s at the
+rejection wait and named points in the driver (not kept; `gap_probe.patch` in the scratchpad). 64-step medians:
+
+```
+GPU   verify end -> drafter start 1.175 ms (0.34 ms of it kernels: rejection 0.13, drafter context projection 0.2)
+      drafter end -> next verify start 0.026 ms
+host  rejection result -> drafter launch 0.78 ms:
+        target recurrent commit (transition publish)   0.267
+        drafter context K/V append                     0.263
+        drafter graph inputs + launch                  0.114
+        sequence bookkeeping                           0.073
+      verify end -> host awake ~0.24 ms past the rejection result (C-states: C2 120 us, C3 1034 us exit latency)
+```
+
+The drafter does not need the target's recurrent commit, so a variant ran it after the drafter launch (only for
+batches with no finished sequence, since finishing caches the prefix with the committed state). The GPU gap dropped
+1.175 -> 0.935 ms, and output was identical, but decode did not move. A valid interleaved round: master 147.99,
+deferred 148.46 tok/s. (A second round was invalid: `pgrep -x inference` missed a binary named differently, so it
+measured a leftover server. The bench helpers now stop servers by PID.) Polling the rejection event every 100 us
+instead of sleeping keeps the core out of deep C-states. It cut the gap to 0.43 ms and the host work 3-4x, but
+decode fell 4-8% (135.7 vs 146.2 tok/s), because the verify graph itself got slower on the GPU (23.7 -> 24.6 ms).
+A plain spin wait on the same event was 4% slower too (143.3 vs 149.3 tok/s, two interleaved rounds).
+
+Why: decode on this card is power-limited. nvidia-smi during decode reads 355-359 W against a 370 W limit, SM clocks
+1590-1740 MHz against a 2115 MHz max at 63 C, with `clocks_event_reasons.sw_power_cap` Active throughout and no
+thermal or hardware slowdown. The ~1 ms gap a step is time the card spends under the cap, not lost throughput:
+shrinking it raises average power and the clocks drop to match. Negative: dropped, code reverted.
+
+Implications: on this card, decode speedups have to cut energy a token (fewer bytes or instructions per step, as the
+tensor-core matvec did), not idle time. Host-gap and launch-overhead work pays only on a card with power headroom.
+The TDP is a user setting (`nvidia-smi -pl`, max 390 W here).
+
+## Run 15 - 2026-10-20 09:40
+
+Question: tqLLM's prefill is ~1.5x ours (Run 5). Its large chunks dequantize each weight, requantize it to int8 with
+one scale per row, and run a cuBLASLt int8 GEMM. Would that pay here, and what does it cost in KLD?
+
+Where our prefill goes (nsys, one cold 7987-token prefill, 512-token chunks, 1341 tok/s): kernels 5844 ms of a
+5925 ms span. MMQ (IQ4_KS) 3952 ms (68%), GDN recurrence (`gated_delta_rule_recurrence_kernel_vmajor_grouped`) 789,
+attention 477, GDN prepare 121, activation quantize 102, the rest about 400. Chunk size barely matters:
+`--max-prefill-chunk-tokens` 512 / 1024 / 2048 gives 1348 / 1378 / 1398 tok/s.
+
+GEMM throughput at prefill shapes (sustained ~1.5 s per point, random data, so the card sits at its power cap as in
+real prefill; constant data reads ~15% higher):
+
+```
+MMQ, recipe A weights (new ignored bench prefill_mmq_shapes, not kept)
+  IQ4_KS 17408x5120 / 5120x17408 / 10240x5120 / 5120x6144, rows 512-2048: 93-100 TOPS
+MMQ by type, synthetic 17408x5120 and 5120x17408, rows 512 and 2048
+  Q8_0 97-100, Q4_0 98-102, Q4_K 91-94, Q6_K 77-79 TOPS
+upstream llama.cpp (8bb3cf0d2) test-backend-ops, IQ4_XS 4096x14336 n=512: 88 TOPS
+cuBLASLt i8 x i8 -> i32 (scratchpad i8gemm/bench.cu), rows 512 / 1024 / 2048
+  34816x5120 207 / 203 / 208, 5120x17408 150 / 150 / 217, 14336x5120 192 / 173 / 186, 5120x6144 137 / 152 / 197 TOPS
+```
+
+MMQ sits near 100 TOPS on every weight type, Q8_0 included, and matches upstream, so IQ4_KS decoding is not the
+limit. ncu on MMQ Q8_0 at 512 rows: tensor pipe 36.5%, issue slots 39%, 254 registers and one block per SM (16.7%
+occupancy), stalls spread over math-pipe throttle, wait, global and MIO. A plain int8 GEMM runs 1.5-2.1x faster.
+
+KLD of the int8 numerics, emulated exactly inside MMQ's entry point (dequantize, round to int8 with the given scales,
+multiply in f32; prefill batches of 256+ rows; everything but the 16 Q5_K K/V projections and the Q6_K head, which
+have no GPU dequantizer). Measured against our own MMQ output: wikitext, 40 windows of 512 tokens, the second half of
+each scored as llama-perplexity does, KLD from the baseline's top 64 plus a tail term (temporary `kld_cmp` example;
+patch and source in the scratchpad).
+
+```
+weights int8 per row, activations as             KLD vs MMQ  median   p99     same top-1  PPL
+  MMQ itself                                     0           0        0       100%        5.8265
+  bf16 (weights only)                            0.0017      0.0009   0.013   98.0%       5.8274
+  int8 per 32 (MMQ's activation blocks)          0.0018      0.0010   0.013   98.0%       5.8288
+  int8 per 128                                   0.0026      0.0013   0.022   97.7%       5.8278
+  int8 per 512                                   0.0048      0.0022   0.046   96.6%       5.8456
+  int8 per token (what a plain int8 GEMM takes)  0.0278      0.0109   0.289   92.7%       5.9072
+```
+
+Negative: a plain int8 GEMM needs one activation scale per token, and that alone adds KLD 0.028, 1.6x recipe A's
+whole quantization cost (0.0169). Outlier channels in the activations are the likely cause. Finer scales recover the
+quality, but then a scale applies inside the K loop, which cuBLASLt does not offer. A custom kernel with 128-wide
+groups would cost +0.0026 KLD (about 15% on top of the file's own), and its speed against MMQ is unknown until
+written. Requantizing the weights to one scale per row costs 0.0017 of that on its own. Not taken.
+
+The lossless lead in prefill is the GDN recurrence, at 13.5%. It is a token-sequential scan, 0.97 ms per layer per
+512-token chunk, about 1.6 TFLOPS. A chunked (WY) form on tensor cores would cut it while keeping fp32 state math.
