@@ -764,6 +764,37 @@ mod tests {
         Ok(f64::from(elapsed_ms) * 1_000.0 / iterations as f64)
     }
 
+    // both kernels (row tiles for batch 2-8 at M 96, the row-per-block kernel at batch 1 and at M 93) against a matmul
+    #[test]
+    fn gemv_matches_a_matmul_at_every_batch() -> Result<()> {
+        // f32 accumulation in a different order, rounded to bf16 at the end
+        const TOLERANCE: f32 = 0.05;
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        for output_dim in [GDN_GATE_OUTPUT_DIM, GDN_GATE_OUTPUT_DIM - 3] {
+            let weight = Tensor::randn(0f32, 0.02, (output_dim, BENCH_INPUT_DIM), &device)?
+                .to_dtype(DType::BF16)?;
+            let bias = Tensor::randn(0f32, 1., output_dim, &device)?.to_dtype(DType::BF16)?;
+            for batch_size in 1..=MAX_GEMV_BATCH_SIZE {
+                let input = Tensor::randn(0f32, 1., (batch_size, BENCH_INPUT_DIM), &device)?
+                    .to_dtype(DType::BF16)?;
+                let expected = input
+                    .to_dtype(DType::F32)?
+                    .matmul(&weight.to_dtype(DType::F32)?.t()?)?
+                    .broadcast_add(&bias.to_dtype(DType::F32)?)?;
+                let got = gemv(&input, &weight, Some(&bias))?.to_dtype(DType::F32)?;
+                let max_diff = (got - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    max_diff <= TOLERANCE,
+                    "output_dim={output_dim} batch={batch_size} max_diff={max_diff}"
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     #[ignore = "reports the CUDA GEMV/GEMM crossover on the installed GPU"]
     fn benchmark_bf16_gemv_gemm_crossover() -> Result<()> {
