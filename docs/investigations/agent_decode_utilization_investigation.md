@@ -72,3 +72,35 @@ after                                 9.0 s                    17.1 s
 
 The remaining ~9 s is reading the drafter's safetensors and quantizing it on 16 threads; caching the quantized
 drafter would take most of it, if restarts keep mattering.
+
+## Run 3 - 2026-10-20 13:40
+
+Question: Run 1's 1.3-4.5 s wait for each agent turn's first token: is it re-prefilling the conversation?
+
+A logging proxy between `inference agent --url` and the server (`logproxy.py`, scratchpad) records each request's
+streamed usage and time to first token. Prefix reuse is exact after short replies (cached = the previous prompt
+plus its reply, to the block). After a long reasoning reply it falls back to the previous prompt's end:
+
+```
+messages  prompt  cached  previous prompt + reply   ttft
+14        4914    3872    3692 + 186                1.02 s
+16        8145    4896    4914 + 2859 (not reused)  4.64 s
+```
+
+The engine already warms a finished reply: `queue_reply_warmups` prefills it on top of the prompt's snapshot so
+the next turn can resume after it. An agent's tools return in milliseconds, so the next request arrived while the
+warm-up was still prefilling. It found only the prompt's snapshot and prefilled the reply a second time, alongside
+the warm-up (the log's "2 running").
+
+Fix: the paged scheduler keeps a waiting prompt queued while it starts with the full blocks of an unfinished reply
+warm-up (`awaits_reply_warmup`), so it resumes from the warm-up's snapshot. Two demo runs after:
+
+```
+messages  prompt  cached  previous prompt + reply   ttft
+20        8750    8672    5966 + 2715 (reused)      2.22 s
+21        8633    8512    4638 + 3897 (reused)      3.13 s
+```
+
+A long turn now costs one prefill of its reply instead of two concurrent ones. Removing that prefill too would need a
+recurrent snapshot at block boundaries during decode (the transition log holds per-row deltas a commit could apply up
+to the boundary, snapshot, then finish).

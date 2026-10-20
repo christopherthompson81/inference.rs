@@ -883,6 +883,26 @@ impl PagedAttentionScheduler {
         );
     }
 
+    /// Whether `seq` starts with the full blocks of a reply warm-up still running, whose snapshot it should wait for.
+    fn awaits_reply_warmup(&self, seq: &Arc<Mutex<Sequence>>) -> bool {
+        let seq = get_mut_arcmutex!(seq);
+        if seq.is_prefix_warmup() {
+            return false;
+        }
+        let toks = seq.get_toks();
+        self.running.iter().chain(self.waiting.iter()).any(|other| {
+            let Ok(other) = other.try_lock() else {
+                return false;
+            };
+            if !other.is_prefix_warmup() || other.is_finished_paged_attn() {
+                return false;
+            }
+            let warmed = other.get_toks();
+            let blocks = warmed.len().saturating_sub(1) / self.block_size * self.block_size;
+            blocks > 0 && toks.len() > blocks && toks[..blocks] == warmed[..blocks]
+        })
+    }
+
     pub fn schedule(
         &mut self,
         logger: &IntervalLogger,
@@ -936,6 +956,14 @@ impl PagedAttentionScheduler {
                     "over_total_capacity",
                     &mut prefix_validator,
                 );
+                continue;
+            }
+
+            // a reply prefilled ahead of its next turn leaves the snapshot this prompt resumes from; prefilling the
+            // reply here too would do that work twice
+            if self.prefix_caching_enabled && self.awaits_reply_warmup(&seq) {
+                let seq = self.waiting.pop_front().unwrap();
+                for_waiting_again.push_back(seq);
                 continue;
             }
 
