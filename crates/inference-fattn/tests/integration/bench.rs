@@ -354,3 +354,69 @@ fn quant_vs_bf16() -> Result<()> {
     }
     Ok(())
 }
+
+// A speculative verify step over a long quantized cache: one sequence, its draft rows as queries, causal
+const VERIFY_SHAPE: Shape = Shape {
+    name: "qwen3.8-27b full attn",
+    n_head: 24,
+    n_head_kv: 4,
+    head_dim: 256,
+};
+const VERIFY_ROWS: [usize; 2] = [1, 8];
+const VERIFY_KV: [usize; 6] = [2048, 8192, 32768, 65536, 131072, 262144];
+const VERIFY_BITS: (u32, u32) = (3, 3);
+
+#[test]
+#[ignore]
+fn verify_long_context() -> Result<()> {
+    let dev = Device::new_cuda(0)?;
+    let filter = std::env::var(FILTER_ENV).unwrap_or_default();
+    let shape = VERIFY_SHAPE;
+    let (d, h_kv) = (shape.head_dim, shape.n_head_kv);
+    let (kb, vb) = VERIFY_BITS;
+    for seq_kv in VERIFY_KV {
+        let blocks = seq_kv / PAGED_BLOCK_SIZE;
+        let block_table = Tensor::from_vec((0..blocks as u32).collect(), (1, blocks), &dev)?;
+        let seq_lens = Tensor::from_vec(vec![seq_kv as u32], 1, &dev)?;
+        let (kq, vq) = (
+            quant_cache(blocks, h_kv, d, kb, &dev)?,
+            quant_cache(blocks, h_kv, d, vb, &dev)?,
+        );
+        let cache_bytes = (kq.elem_count() + vq.elem_count()) as f64;
+        for rows in VERIFY_ROWS {
+            let label = format!("{:<24} rows {rows} kv {seq_kv:>6} q{kb}/q{vb}", shape.name);
+            if !label.contains(&filter) {
+                continue;
+            }
+            let q =
+                Tensor::randn(0f32, 1., (1, rows, shape.n_head, d), &dev)?.to_dtype(DType::BF16)?;
+            // causal without a mask tensor, as the paged decode passes it
+            let opts = FattnOptions {
+                scale: 1. / (d as f32).sqrt(),
+                causal: true,
+                kv_bits: Some(KvBits { k: kb, v: vb }),
+                ..Default::default()
+            };
+            let us = time(&dev, || {
+                flash_attn_paged(&q, &paged(&kq, &vq, &block_table, &seq_lens), &opts)
+            })?;
+            let bf16 = || {
+                Tensor::randn(0f32, 1., (blocks, h_kv, PAGED_BLOCK_SIZE, d), &dev)?
+                    .to_dtype(DType::BF16)
+            };
+            let (k, v) = (bf16()?, bf16()?);
+            let bf16_opts = FattnOptions {
+                kv_bits: None,
+                ..opts.clone()
+            };
+            let bf16_us = time(&dev, || {
+                flash_attn_paged(&q, &paged(&k, &v, &block_table, &seq_lens), &bf16_opts)
+            })?;
+            println!(
+                "{label}: {us:9.1} us  {:6.1} GB/s of cache  bf16 {bf16_us:9.1} us",
+                cache_bytes / us / 1e3
+            );
+        }
+    }
+    Ok(())
+}
