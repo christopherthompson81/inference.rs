@@ -1829,6 +1829,20 @@ mod bench {
                             us / one
                         )
                     }
+                    None if fast_mmvq::has_tensor_core_rows(ty) => {
+                        let reference = plain(&weight, &xs)?.to_dtype(DType::F32)?;
+                        let out = fast_mmvq::tiled_plain(&weight, &xs, 0)?.to_dtype(DType::F32)?;
+                        let err = (&out - &reference)?.abs()?.max_all()?.to_scalar::<f32>()?
+                            / reference.abs()?.max_all()?.to_scalar::<f32>()?;
+                        let configs = (0..fast_mmvq::TILED_CONFIGS)
+                            .map(|cfg| {
+                                time(&dev, || fast_mmvq::tiled_plain(&weight, &xs, cfg))
+                                    .map(|us| format!("{us:.1}"))
+                            })
+                            .collect::<Result<Vec<_>>>()?
+                            .join("/");
+                        format!("  tc rel err {err:.1e}; per config {configs}")
+                    }
                     None => String::new(),
                 };
                 println!(
@@ -1836,6 +1850,59 @@ mod bench {
                     mmvq / one,
                     mmq / one
                 );
+            }
+        }
+        Ok(())
+    }
+
+    // The row-major tensor-core matvec against MMQ on synthetic weights of the DFlash drafter's shapes:
+    // `cargo nextest run -p inference-quant --features cuda --run-ignored only -E 'test(/row_major_tc_shapes/)' --no-capture`
+    #[test]
+    #[ignore]
+    fn row_major_tc_shapes() -> Result<()> {
+        use inference_tensor::quantized::{GgmlDType, QTensor};
+        const SHAPES: [(usize, usize); 5] = [
+            (6144, 5120),
+            (5120, 4096),
+            (34816, 5120),
+            (5120, 17408),
+            (5120, 25600),
+        ];
+        let dev = Device::new_cuda(0)?;
+        for ty in [GgmlDType::Q4K, GgmlDType::Q6K] {
+            for (out_features, in_features) in SHAPES {
+                let dense = Tensor::randn(0f32, 1., (out_features, in_features), &dev)?;
+                let weight = QTensor::quantize(&dense, ty)?;
+                drop(dense);
+                for rows in [1, 8] {
+                    let xs = Tensor::randn(0f32, 1., (rows, in_features), &dev)?
+                        .to_dtype(DType::BF16)?;
+                    let mmq = time(&dev, || plain(&weight, &xs))?;
+                    let reference = xs
+                        .to_dtype(DType::F32)?
+                        .matmul(&weight.dequantize(&dev)?.t()?)?;
+                    let rel = |out: Tensor| -> Result<f32> {
+                        let d = (out.to_dtype(DType::F32)? - &reference)?;
+                        Ok((d.sqr()?.sum_all()?.to_scalar::<f32>()?
+                            / reference.sqr()?.sum_all()?.to_scalar::<f32>()?)
+                        .sqrt())
+                    };
+                    println!(
+                        "  rms rel err mmq {:.2e} tc {:.2e}",
+                        rel(plain(&weight, &xs)?)?,
+                        rel(fast_mmvq::tiled_plain(&weight, &xs, 1)?)?
+                    );
+                    let configs = (0..fast_mmvq::TILED_CONFIGS)
+                        .map(|cfg| {
+                            time(&dev, || fast_mmvq::tiled_plain(&weight, &xs, cfg))
+                                .map(|us| format!("{us:.1}"))
+                        })
+                        .collect::<Result<Vec<_>>>()?
+                        .join("/");
+                    println!(
+                        "{ty:?} {out_features}x{in_features} rows {rows}: mmq {mmq:7.1} us  tc per config {configs}"
+                    );
+                }
             }
         }
         Ok(())

@@ -1072,6 +1072,51 @@ mod tests {
         Ok(())
     }
 
+    // Row-major Q4_K / Q6_K through the tensor-core matvec: an odd superblock count leaves every other Q6_K row 2-byte
+    // aligned, and 37 rows leave a partial 16-row group
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn row_major_tensor_core_matvecs_match_a_dense_matmul() -> Result<()> {
+        const ROWS: usize = 37;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let Device::Cuda(dev) = &cuda else {
+            unreachable!()
+        };
+        if !super::super::fast_mmvq::tensor_core_capable(dev) {
+            eprintln!("SKIP: no int8 tensor cores");
+            return Ok(());
+        }
+        use inference_tensor::quantized::{GgmlDType, QStorage, QTensor};
+        for ty in [GgmlDType::Q4K, GgmlDType::Q6K] {
+            for cols in [768, 2560] {
+                let dense = Tensor::randn(0f32, 1f32, (ROWS, cols), &Device::Cpu)?;
+                let cpu = QTensor::quantize(&dense, ty)?;
+                let weight = cpu.dequantize(&Device::Cpu)?;
+                let storage = QStorage::from_data(cpu.data()?, &cuda, ty)?;
+                let gpu = QTensor::new(storage, (ROWS, cols))?;
+                for batch in 1..=super::super::fast_mmvq::MMVQ_MAX_BATCH {
+                    let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
+                    let expected = xs.matmul(&weight.t()?)?;
+                    for dtype in [DType::F32, DType::BF16, DType::F16] {
+                        let xs = xs.to_dtype(dtype)?.to_device(&cuda)?;
+                        for cfg in 0..super::super::fast_mmvq::TILED_CONFIGS {
+                            let actual = super::super::fast_mmvq::tiled_plain(&gpu, &xs, cfg)?;
+                            let similarity = cosine(&actual.to_device(&Device::Cpu)?, &expected)?;
+                            assert!(
+                                similarity > 0.9999,
+                                "{ty:?} {cols} cols batch {batch} {dtype:?} cfg {cfg}: cosine {similarity}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     // Inside a shared-input scope back-to-back tiled matvecs on one input reuse its quantized activations; another input,
     // or the same one after the scope, quantizes again
     #[cfg(feature = "cuda")]

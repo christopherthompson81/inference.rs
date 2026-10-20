@@ -342,3 +342,107 @@ branch       688     23.62 ms
 
 -0.61 ms a step (2.5%). Left from Run 9: the drafter's head and Q4_K weights (~1.5-2 ms against tqLLM), the LM
 head, the remaining ~0.5 ms of host gaps.
+
+## Run 11 - 2026-10-20 06:00
+
+Question: how much of the drafter's ~4.0 ms graph is its LM head, and what does restricting proposals to a
+vocabulary prefix cost in acceptance? Experiment behind `INFERENCE_RS_DFLASH_DRAFT_VOCAB=base_rows:tail_start`: the
+drafter reads a row slice of the target's Q6_K head (ids `[0, 65536)` plus the special tail `[248044, vocab)`) and
+fills the gap with -inf, so top-k, the DFlash2 selector and its full-vocab codebooks see unchanged ids. The draft
+distribution is the one sampled from, so rejection sampling stays exact; only acceptance can drop.
+
+Interleaved A/B (`ab_vocab.sh`: base, 64k, base, 64k; one 2K and one 32K prompt, UI sampling, 400 tokens):
+
+```
+                 dflash_graph   2K steps  ms/step   2K tok/s   32K steps  ms/step   32K tok/s
+base (x2)        3.96 / 3.99    117       28.6-29.0 116.8/115.3 119      30.7-30.8  107.1/106.8
+64k + tail (x2)  2.89 / 2.90    114       27.6-27.7 124.3/123.6 125      29.6-29.7  105.6/105.7
+```
+
+The head is 1.08 ms of the drafter graph, and the wall step drops ~1.1 ms at both lengths. Sampling is seeded, so each
+variant repeats its step count exactly; one prompt per length is a single acceptance sample (2K got 3 steps fewer,
+32K 6 more). Next: acceptance over a mixed prompt set (12 wiki, 4 code, 2 Chinese) before deciding.
+
+Mixed prompt set (`accbench.py`: 12 wiki summaries at spread offsets, 4 code tasks, 2 Chinese essays; UI sampling,
+400 tokens; one server per variant, steps paired to requests by log gaps):
+
+```
+            base: tok/step  ms/step  tok/s     64k + tail: tok/step  ms/step  tok/s
+wiki        3.793           28.34    133.9     3.471                 27.29    127.2
+code        3.200           28.18    113.6     3.059                 27.10    112.9
+zh          2.149           28.14     76.4     1.346                 27.06     49.7
+```
+
+Negative: the step gets 1.05 ms (3.7%) cheaper, but acceptance drops 8.5% on wiki, 4.4% on code and 37% on Chinese,
+so every set is slower. The 97-99% per-token coverage measured in Run 8 does not carry over: a draft chain ends at
+its first out-of-set token, so a 1-3% miss rate over 7 positions removes far more accepted tokens than the miss rate
+suggests. A bigger static prefix would save proportionally less and still miss CJK. Dropped; the code is reverted.
+Only a per-request set (prompt ids on top of a base set) could recover wiki's rare tokens, and it still needs
+CJK coverage. Next on the list: the drafter's Q4_K weights and the verify LM head.
+
+## Run 12 - 2026-10-20 09:00
+
+Question: the Q4_K drafter (1.8 ms a step) and the Q6_K LM head (two ~1.5 ms reads a step) run MMQ at 8 rows; how
+far is that from their bandwidth floor, and does a tensor-core matvec over the row-major blocks close it?
+
+`small_batch_mmvq_vs_mmq` on recipe A's `output.weight` (Q6_K) and `token_embd.weight` (Q4_K), 248320x5120:
+
+```
+            rows 1 dp4a   rows 2 dp4a   rows 8 dp4a   rows 8 mmq
+Q6_K        1212 us       1206          1519          1515
+Q4_K         811           943          1095          1099
+```
+
+8 rows cost ~25% over the 1-row read (MMQ's tiles, or dp4a's per-row integer work). IQ4_KS's tile-ordered kernel
+(mmvq_tc.cuh) holds its 1-row time at 8 rows, but needs its own storage type, repack, untile and MMQ variant. Tried
+instead: `mmvq_tc_k.cuh`, the same mma scheme over row-major blocks. Lane (g, t) reads words 4t and 16+4t of each
+32-byte chunk, which are the A fragment's values for both nibble blocks; Q4_K is one k32 mma per block with the min
+term from the activation row sums, and Q6_K two k16 mmas per block (one per 16-value scale) with 16-bit loads, since
+its 210-byte superblocks leave every other word 2-byte aligned. Configs (KSPLIT warps over the superblocks, GROUPS
+16-row groups, register prefetch of the next superblock):
+
+```
+248320x5120, rows 8   mmq     tc 4x2    8x1     16x1    8x1 no prefetch
+Q6_K                  1510    1572      1367    1562    1429
+Q4_K                  1110    1012       874     953     904
+```
+
+ncu on Q6_K 8x1: 1.33 ms, DRAM 92.6% (843 GB/s; 7% over the weight bytes), 128 registers, 33% occupancy. Near its
+floor; the 16x1 shape is register-bound to one CTA an SM and loses 43% of issue to barrier waits on the uneven K split.
+
+Drafter shapes (synthetic weights, `row_major_tc_shapes`), rows 8, us:
+
+```
+                 Q4_K mmq  tc best (cfg)      Q6_K mmq  tc best
+6144x5120        41.6      30.1 (8x1 nopf)    52.7      41.3
+5120x4096        30.8      19.8 (4x1 nopf)    37.9      28.1
+34816x5120      175.5     133.2 (8x1)        235.0     199.0
+5120x17408       99.6      88.4 (8x1)        135.5     140.0
+5120x25600      145.1     127.5 (8x1)        202.3     211.9
+```
+
+The wide-K, short-N shapes gain least (Q6_K loses): 320 CTAs of 16 rows each reread the whole activation (24 bytes a
+lane a block against 9 of Q4_K weight), and neither more warps nor fewer registers helped. Kept: Q4_K from 2 rows
+(4x1 no prefetch at K <= 4096, else 8x1), Q6_K from 3 rows up to K 8192 (dp4a wins at 2). Test:
+`row_major_tensor_core_matvecs_match_a_dense_matmul` (37 rows, 3 and 10 superblocks, batch 1-8, every config, all
+input dtypes; cosine > 0.9999 against the dequantized matmul).
+
+Expected a step: drafter 1.88 -> 1.49 ms, heads 2 x (1.51 -> 1.37) ms, ~-0.7 ms.
+
+End to end (interleaved master, branch, master, branch; one 2K and one 32K prompt each; phase timers):
+
+```
+              dflash_graph   2K steps  ms/step   tok/s       32K steps  ms/step   tok/s
+master (x2)   3.98 / 3.99    117       28.9-29.0 115.8/115.4  119      30.7-30.8  107.4/106.9
+branch (x2)   3.48 / 3.49    112       28.1-28.4 124.0/123.1  122      30.1-30.2  106.6/106.4
+```
+
+The drafter graph drops 0.5 ms as expected, but the verify graph barely moves (23.7 -> 23.5 at 2K, flat at 32K), so
+the head's share was smaller than the nsys split suggested. A step is 0.55-0.75 ms cheaper.
+
+Acceptance: the 18-prompt set read lower on the branch (wiki 3.79 -> 3.66 tokens a step, code 3.20 -> 3.14, Chinese
+2.15 -> 1.94), so a second set of 24 new wiki offsets ran on both (`WIKI_ONLY=1 WIKI_START=30000 WIKI_N=24`):
+master 3.796, branch 3.744 tokens a step; per-prompt paired difference -0.05 +- 0.07 (SE), i.e. noise, at
+28.40 -> 27.88 ms a step (133.7 -> 134.3 tok/s). Against the dequantized f32 matmul the new kernel is no less
+accurate than MMQ (rms rel err at 8 rows: Q4_K 5.6e-3 vs MMQ 0.6-1.7e-2; Q6_K equal at 5.6e-3), so no numerics
+regression explains a drop. Single-sample prompts swing +-0.6 tokens a step; acceptance A/Bs need 24+ prompts.
