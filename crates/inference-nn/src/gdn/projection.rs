@@ -277,7 +277,7 @@ fn shared_qkv_z(
             })?;
             Ok((qkv, z))
         }
-        _ => Ok((qkv.forward(x)?, z.forward(x)?)),
+        _ => inference_quant::with_shared_input(|| Ok((qkv.forward(x)?, z.forward(x)?))),
     }
 }
 

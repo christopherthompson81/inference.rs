@@ -123,6 +123,23 @@ pub fn has_tensor_core_rows(dtype: impl Into<GgufType>) -> bool {
 
 static WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
 
+// the shared-input scope this thread is in, 0 outside one
+thread_local! {
+    static SHARED_INPUT_SCOPE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+static SHARED_INPUT_SCOPES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Runs `f` letting the tile-ordered IQ4_KS matvecs it makes on one input reuse that input's quantized activations:
+/// for a layer's projections of one input run back to back (gate and up, qkv and z), which leave the input unwritten
+/// and alive throughout.
+pub fn with_shared_input<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {
+    let scope = SHARED_INPUT_SCOPES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let outer = SHARED_INPUT_SCOPE.with(|s| s.replace(scope));
+    let out = f();
+    SHARED_INPUT_SCOPE.with(|s| s.set(outer));
+    out
+}
+
 // Launcher dispatch by weight and output dtype.
 
 type PlainLauncher = unsafe extern "C" fn(
@@ -1716,17 +1733,13 @@ pub(crate) fn tiled_plain<W: KernelWeight + ?Sized>(
         inference_tensor::bail!("fast_mmvq: input must live on CUDA");
     };
     let scratch_bytes = (ncols / Q8_1_BLOCK_SIZE) * TENSOR_CORE_ACTIVATION_BLOCK_BYTES;
-    let mut workspace = WORKSPACE.ensure(dev, scratch_bytes, &stream)?;
-    let (scratch, _scratch_guard) = workspace.ptr_mut();
-    let (weight, _weight_guard) = w.kernel_ptr(&stream)?;
-    let call = TiledCall {
-        weight: weight as *const std::ffi::c_void,
-        scratch: scratch as *mut std::ffi::c_void,
-        ncols,
-        nrows,
-        b_size,
-        stream: stream.cu_stream() as *mut std::ffi::c_void,
+    let scope = SHARED_INPUT_SCOPE.with(|s| s.get());
+    let mut workspace = if scope == 0 {
+        WORKSPACE.ensure(dev, scratch_bytes, &stream)?
+    } else {
+        WORKSPACE.ensure_claimable(dev, scratch_bytes, &stream)?
     };
+    let (weight, _weight_guard) = w.kernel_ptr(&stream)?;
     macro_rules! run {
         ($t:ty) => {{
             let slice = xs_cuda.as_cuda_slice::<$t>()?;
@@ -1735,8 +1748,28 @@ pub(crate) fn tiled_plain<W: KernelWeight + ?Sized>(
                 let (xs_ptr, _xs_guard) =
                     slice_ptr_on_stream(slice, xs_layout.start_offset(), &stream);
                 let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+                // inside a shared-input scope the first projection of this input quantizes it, the rest read the scratch
+                let quantized = scope != 0
+                    && workspace.claim(super::thread_workspace::WorkspaceContent {
+                        scope,
+                        input: xs_ptr,
+                        cols: ncols,
+                        rows: b_size,
+                        dtype: input_ty,
+                    });
+                let (scratch, _scratch_guard) = workspace.ptr_mut();
+                let call = TiledCall {
+                    weight: weight as *const std::ffi::c_void,
+                    scratch: scratch as *mut std::ffi::c_void,
+                    ncols,
+                    nrows,
+                    b_size,
+                    stream: stream.cu_stream() as *mut std::ffi::c_void,
+                };
                 unsafe {
-                    call.quantize(input_ty, xs_ptr as *const std::ffi::c_void);
+                    if !quantized {
+                        call.quantize(input_ty, xs_ptr as *const std::ffi::c_void);
+                    }
                     call.launch(input_ty, out_ptr as *mut std::ffi::c_void, cfg);
                 }
             }

@@ -348,8 +348,8 @@ pub fn quantized_ffn(
         return down.forward(&inter);
     }
 
-    let lhs = gate.forward(xs)?;
-    let rhs = up.forward(xs)?;
+    let (lhs, rhs) =
+        inference_quant::with_shared_input(|| Ok((gate.forward(xs)?, up.forward(xs)?)))?;
     if let Some(output) = try_fused_gated_projection(&lhs, &rhs, act, down)? {
         return Ok(output);
     }
@@ -383,9 +383,11 @@ pub fn qkv_projections(
         return Ok((q, k, v));
     }
 
-    Ok((
-        q_proj.forward(xs)?,
-        k_proj.forward(xs)?,
-        v_proj.forward(xs)?,
-    ))
+    inference_quant::with_shared_input(|| {
+        Ok((
+            q_proj.forward(xs)?,
+            k_proj.forward(xs)?,
+            v_proj.forward(xs)?,
+        ))
+    })
 }
