@@ -1074,6 +1074,7 @@ mod tests {
 
     // Inside a shared-input scope back-to-back tiled matvecs on one input reuse its quantized activations; another input,
     // or the same one after the scope, quantizes again
+    #[cfg(feature = "cuda")]
     #[test]
     fn tiled_matvecs_share_one_inputs_quantized_activations() -> Result<()> {
         const ROWS: usize = 64;
