@@ -54,6 +54,8 @@ fn as_t_slice<T>(data: &[u8]) -> &[T] {
     unsafe { std::slice::from_raw_parts(ptr as *const T, data.len() / size) }
 }
 
+// Blocks one quantization task takes: a few hundred thousand values, enough to outweigh scheduling it
+const QUANTIZE_BLOCKS_PER_TASK: usize = 1024;
 pub struct QTensor {
     storage: QStorage,
     shape: Shape,
@@ -486,12 +488,21 @@ impl<T: k_quants::GgmlType + Send + Sync> QuantizedType for Vec<T> {
         self.len() * core::mem::size_of::<T>()
     }
 
+    // blocks quantize independently, so runs of them go to separate threads
     fn from_float(&mut self, xs: &[f32]) {
-        T::from_float(xs, self)
+        use rayon::prelude::*;
+        xs.par_chunks(QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE)
+            .zip(self.par_chunks_mut(QUANTIZE_BLOCKS_PER_TASK))
+            .for_each(|(xs, ys)| T::from_float(xs, ys));
     }
 
+    // the importance weights index a row, so tasks take whole rows
     fn from_float_imatrix(&mut self, xs: &[f32], imatrix_weights: &[f32], n_per_row: usize) {
-        T::from_float_imatrix(xs, self, imatrix_weights, n_per_row)
+        use rayon::prelude::*;
+        let rows = (QUANTIZE_BLOCKS_PER_TASK * T::BLCK_SIZE / n_per_row).max(1);
+        xs.par_chunks(rows * n_per_row)
+            .zip(self.par_chunks_mut(rows * n_per_row / T::BLCK_SIZE))
+            .for_each(|(xs, ys)| T::from_float_imatrix(xs, ys, imatrix_weights, n_per_row));
     }
 
     fn dtype(&self) -> GgmlDType {
@@ -1230,5 +1241,59 @@ impl crate::Module for QMatMul {
                 xs.to_dtype(DType::F16)?.matmul(&w)?.to_dtype(in_dtype)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod parallel_quantize_tests {
+    use super::{GgmlDType, QTensor};
+    use crate::{Device, Tensor};
+
+    // Many tasks' worth of rows, quantized at once, give the bytes each row gets alone
+    #[test]
+    fn a_tensor_quantizes_to_its_rows_quantized_alone() -> crate::Result<()> {
+        const ROWS: usize = 300;
+        const COLS: usize = 2048;
+        let dev = Device::Cpu;
+        let src = Tensor::randn(0f32, 1., (ROWS, COLS), &dev)?;
+        let host = src.to_vec2::<f32>()?;
+        // each row in storage of its own: quantize reads a source's whole storage
+        let row = |r: usize| Tensor::from_slice(&host[r], (1, COLS), &dev);
+        let imatrix = (0..COLS).map(|i| 1.0 + (i % 7) as f32).collect::<Vec<_>>();
+        for dtype in [
+            GgmlDType::Q4_0,
+            GgmlDType::Q8_0,
+            GgmlDType::Q4K,
+            GgmlDType::Q5K,
+            GgmlDType::Q6K,
+        ] {
+            let whole = QTensor::quantize(&src, dtype)?.data()?.to_vec();
+            let mut rows = Vec::new();
+            for r in 0..ROWS {
+                rows.extend_from_slice(&QTensor::quantize(&row(r)?, dtype)?.data()?);
+            }
+            assert!(
+                whole == rows,
+                "{dtype:?} differs from its rows quantized alone"
+            );
+            // only the k-quants take importance weights
+            if !matches!(dtype, GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K) {
+                continue;
+            }
+            let weighted = QTensor::quantize_imatrix(&src, &imatrix, dtype)?
+                .data()?
+                .to_vec();
+            let mut weighted_rows = Vec::new();
+            for r in 0..ROWS {
+                weighted_rows.extend_from_slice(
+                    &QTensor::quantize_imatrix(&row(r)?, &imatrix, dtype)?.data()?,
+                );
+            }
+            assert!(
+                weighted == weighted_rows,
+                "{dtype:?} imatrix differs from its rows"
+            );
+        }
+        Ok(())
     }
 }

@@ -50,3 +50,25 @@ Code tab demo over HTTP, after                              93.9 / 92.8% (was 83
 ```
 
 Next: the 1.3-4.5 s wait for each turn's first token; then the delay between weights loading and the server serving.
+
+## Run 2 - 2026-10-20 12:50
+
+Question: after a restart the weights fill VRAM long before the server serves (about a minute). Where does that go?
+
+The serve log of a LAN restart: target weights and KV cache in place 5.6 s after loading starts, then 47 s with
+nothing logged until the DFlash drafter reports its paged KV, then graph capture (0.5 s) and ready. The drafter is a
+3.85 GB BF16 safetensors file quantized to q4k at every load (`--mtp-draft-isq q4k`). Each weight is moved to the GPU,
+copied back for `QTensor::quantize`, and `QuantizedType::from_float` walked the tensor's blocks on one thread.
+
+Blocks quantize independently, so `from_float` now hands runs of 1024 blocks to rayon tasks (the imatrix variant
+takes whole rows, since its weights index a row). The result is byte-identical; the new test quantizes a 300 x 2048
+tensor whole and row by row for Q4_0, Q8_0, Q4_K, Q5_K and Q6_K, plus the k-quants' imatrix path.
+
+```
+server start to ready (same flags)   drafter phase (log gap)   total
+before                               49.5 s                    59.2 s
+after                                 9.0 s                    17.1 s
+```
+
+The remaining ~9 s is reading the drafter's safetensors and quantizing it on 16 threads; caching the quantized
+drafter would take most of it, if restarts keep mattering.
