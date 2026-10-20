@@ -154,9 +154,10 @@ inference serve -m <model> --prefix-cache-dir ~/.cache/inference-rs/prefix-cache
 - Hybrid models (Qwen3.5 and Qwen3.8's linear-attention layers) on CUDA with paged attention, text prompts; a DFlash drafter's own state is stored with each prefix.
 - Each 32-token block is stored once and shared by every prefix that contains it, so a growing conversation writes only its new blocks.
 - Entries are kept apart per model setup (weights, dtype, KV cache type and layout, drafter), and each block's tokens are checked on restore.
-- `--prefix-cache-disk-gib` (default 64) caps the directory; the least recently used prefixes go first.
+- An entry expires an hour after its last use (`--prefix-cache-disk-ttl-mins`), and a request can name its own lifetime: an Anthropic `cache_control` breakpoint on `/v1/messages` keeps its prefix five minutes, or its `ttl` (`"1h"`); `prefix_cache_ttl_secs` does the same on `/v1/chat/completions`. The longest breakpoint in a request wins, and each hit restarts the clock. Expired entries go within a minute, and on startup.
+- `--prefix-cache-disk-gib` (default 64) caps the directory; past it, the least recently used prefixes go first.
 - The operating system's page cache keeps recently used entries in RAM, so a restore after a short pause usually reads no disk at all.
-- In Python set `RuntimeSpec(prefix_cache_dir=..., prefix_cache_disk_gib=...)`; in Rust `.with_prefix_cache_dir(dir, Some(gib))`.
+- In Python set `RuntimeSpec(prefix_cache_dir=..., prefix_cache_disk_gib=..., prefix_cache_disk_ttl_mins=...)`; in Rust `.with_prefix_cache_dir(dir, Some(gib))`.
 
 ## Memory planning for automatic device mapping
 

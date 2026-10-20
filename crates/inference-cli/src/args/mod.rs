@@ -718,6 +718,12 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub prefix_cache_disk_gib: Option<u64>,
 
+    /// Minutes a prefix cache directory entry outlives its last use, unless its request names a TTL (an Anthropic
+    /// `cache_control` breakpoint: 5 minutes, or its `ttl`); default 60
+    #[arg(long)]
+    #[serde(default)]
+    pub prefix_cache_disk_ttl_mins: Option<u64>,
+
     /// Custom chat template file (.json or .jinja)
     #[arg(long, short)]
     #[serde(default)]
@@ -1085,6 +1091,7 @@ impl Default for RuntimeOptions {
             prefix_cache_n: 16,
             prefix_cache_dir: None,
             prefix_cache_disk_gib: None,
+            prefix_cache_disk_ttl_mins: None,
             chat_template: None,
             jinja_explicit: None,
             matformer_config_path: None,

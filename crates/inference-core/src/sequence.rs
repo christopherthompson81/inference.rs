@@ -220,6 +220,7 @@ pub struct Sequence {
     responder: Sender<Response>,
     cancellation: Option<RequestCancellation>,
     prefix_warmup: bool,
+    prefix_cache_ttl: Option<std::time::Duration>,
     cancel_latched: bool,
     response_index: usize,
     creation_time: u64,
@@ -369,6 +370,7 @@ impl Sequence {
             responder,
             cancellation: None,
             prefix_warmup: false,
+            prefix_cache_ttl: None,
             cancel_latched: false,
             sampler: sampler.into(),
             sampling_rng: sampling_seed
@@ -1087,6 +1089,15 @@ impl Sequence {
     /// An engine-issued prefill of a finished reply (`NormalRequest::prefix_warmup`).
     pub(crate) fn is_prefix_warmup(&self) -> bool {
         self.prefix_warmup
+    }
+
+    pub(crate) fn set_prefix_cache_ttl(&mut self, ttl: Option<std::time::Duration>) {
+        self.prefix_cache_ttl = ttl;
+    }
+
+    /// How long this prompt's prefix outlives its last use in the disk store (`NormalRequest::prefix_cache_ttl`).
+    pub(crate) fn prefix_cache_ttl(&self) -> Option<std::time::Duration> {
+        self.prefix_cache_ttl
     }
 
     pub(crate) fn set_cancellation(&mut self, cancellation: Option<RequestCancellation>) {

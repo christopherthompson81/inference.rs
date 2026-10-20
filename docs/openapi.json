@@ -4189,6 +4189,16 @@
             "description": "`false` runs a round's tool calls one at a time, in the model's order, rather than all at once.",
             "example": null
           },
+          "prefix_cache_ttl_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds this prompt's prefix outlives its last use in the server's prefix cache directory; unset, the server's\ndefault. On `/v1/messages`, Anthropic `cache_control` breakpoints set it.",
+            "example": null,
+            "minimum": 0
+          },
           "presence_penalty": {
             "type": [
               "number",
@@ -12489,6 +12499,15 @@
             ],
             "format": "int64",
             "description": "Most the prefix cache directory may hold, in GiB; the least recently used entries go first.",
+            "minimum": 0
+          },
+          "prefix_cache_disk_ttl_mins": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Minutes a prefix cache directory entry outlives its last use, unless its request names a TTL (an Anthropic\n`cache_control` breakpoint, or `prefix_cache_ttl_secs`); default 60.",
             "minimum": 0
           },
           "prefix_cache_n": {

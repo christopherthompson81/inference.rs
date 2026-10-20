@@ -2105,6 +2105,7 @@ async fn parse_openresponses_request(
         dry_sequence_breakers: oairequest.dry_sequence_breakers,
         enable_thinking,
         truncate_sequence,
+        prefix_cache_ttl_secs: None,
         logits_processors: oairequest.logits_processors,
         stop_token_ids: None,
         host_tools: oairequest.host_tools,

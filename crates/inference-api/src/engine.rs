@@ -119,12 +119,15 @@ const CODE_EXECUTION_UNAVAILABLE: &str =
 // How an added model's spec is named in its errors.
 const ADDED_MODEL: &str = "spec";
 const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`";
+/// The prefix cache directory's default size cap, in GiB.
+pub const DEFAULT_PREFIX_CACHE_DISK_GIB: u64 = 64;
+/// Minutes a prefix cache directory entry outlives its last use when its request names no TTL of its own.
+pub const DEFAULT_PREFIX_CACHE_DISK_TTL_MINS: u64 = 60;
+const BYTES_PER_GIB: u64 = 1 << 30;
+const SECS_PER_MIN: u64 = 60;
 /// Sequences a model serves at once unless told otherwise, shared by `inference serve` and specs. Low, since each one
 /// holds memory for its whole life (a hybrid model's recurrent state is ~150 MB per sequence at 27B); a busy shared
 /// server raises it.
-/// The prefix cache directory's default size cap, in GiB.
-pub const DEFAULT_PREFIX_CACHE_DISK_GIB: u64 = 64;
-const BYTES_PER_GIB: u64 = 1 << 30;
 pub const DEFAULT_MAX_SEQS: usize = 4;
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes. With neither `model` nor
@@ -332,6 +335,10 @@ pub struct RuntimeSpec {
     /// Most the prefix cache directory may hold, in GiB; the least recently used entries go first.
     #[serde(default)]
     pub prefix_cache_disk_gib: Option<u64>,
+    /// Minutes a prefix cache directory entry outlives its last use, unless its request names a TTL (an Anthropic
+    /// `cache_control` breakpoint, or `prefix_cache_ttl_secs`); default 60.
+    #[serde(default)]
+    pub prefix_cache_disk_ttl_mins: Option<u64>,
     #[serde(default)]
     pub no_kv_cache: bool,
     #[serde(default)]
@@ -707,6 +714,12 @@ impl EngineSpec {
                     .prefix_cache_disk_gib
                     .unwrap_or(DEFAULT_PREFIX_CACHE_DISK_GIB)
                     .saturating_mul(BYTES_PER_GIB),
+                default_ttl: std::time::Duration::from_secs(
+                    runtime
+                        .prefix_cache_disk_ttl_mins
+                        .unwrap_or(DEFAULT_PREFIX_CACHE_DISK_TTL_MINS)
+                        .saturating_mul(SECS_PER_MIN),
+                ),
                 model_identity: String::new(),
             }));
         }

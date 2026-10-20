@@ -62,6 +62,7 @@ inference run [OPTIONS] [COMMAND]
 | `--prefix-cache-n <PREFIX_CACHE_N>` | `16` | Number of prefix caches to hold (0 to disable) |
 | `--prefix-cache-dir <PREFIX_CACHE_DIR>` |  | Directory that keeps prefix cache entries on disk too, so long sessions (agent loops) survive eviction and restarts. Hybrid models on CUDA with paged attention |
 | `--prefix-cache-disk-gib <PREFIX_CACHE_DISK_GIB>` |  | Most the prefix cache directory may hold, in GiB; the least recently used entries go first |
+| `--prefix-cache-disk-ttl-mins <PREFIX_CACHE_DISK_TTL_MINS>` |  | Minutes a prefix cache directory entry outlives its last use, unless its request names a TTL (an Anthropic `cache_control` breakpoint: 5 minutes, or its `ttl`); default 60 |
 | `-c, --chat-template <CHAT_TEMPLATE>` |  | Custom chat template file (.json or .jinja) |
 | `-j, --jinja-explicit <JINJA_EXPLICIT>` |  | Explicit JINJA template override |
 | `--matformer-config-path <MATFORMER_CONFIG_PATH>` |  | Path to a MatFormer config (CSV/JSON describing available slices). See model card |

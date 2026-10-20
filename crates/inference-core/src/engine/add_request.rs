@@ -469,6 +469,7 @@ impl Engine {
 
             seq.set_cancellation(request.cancellation.clone());
             seq.set_prefix_warmup(request.prefix_warmup);
+            seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
             self.enable_template_reasoning(&mut seq);
             self.prepare_multimodal_prompt(&mut seq)?;
             if request.response.is_closed() {

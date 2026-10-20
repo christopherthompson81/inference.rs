@@ -315,8 +315,12 @@ fn open_prefix_disk_tier(
         pipeline.cache().hybrid().recurrent_state_signature(),
         pipeline.paged_auxiliary_prefix_signature(),
     );
-    let store =
-        crate::prefix_store::PrefixStore::open(&settings.dir, &namespace, settings.capacity_bytes)?;
+    let store = crate::prefix_store::PrefixStore::open(
+        &settings.dir,
+        &namespace,
+        settings.capacity_bytes,
+        settings.default_ttl,
+    )?;
     Ok(Some(crate::prefix_cacher::PrefixDiskTier {
         store,
         kv_cache_manager,

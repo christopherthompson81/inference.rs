@@ -213,6 +213,9 @@ pub struct NormalRequest {
     pub cancellation: Option<RequestCancellation>,
     /// An engine-issued prefill of a finished reply, so the next turn resumes after it; its reply is discarded.
     pub prefix_warmup: bool,
+    /// How long the prompt's prefix outlives its last use in the disk prefix store; `None` takes the store's default.
+    #[serde(default)]
+    pub prefix_cache_ttl: Option<std::time::Duration>,
 }
 
 /// The `finish_reason` of a sequence its request canceled.
@@ -368,6 +371,7 @@ impl NormalRequest {
             input_files: Vec::new(),
             cancellation: None,
             prefix_warmup: false,
+            prefix_cache_ttl: None,
         }
     }
 }

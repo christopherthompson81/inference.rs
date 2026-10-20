@@ -1545,6 +1545,7 @@ pub trait Pipeline:
     ) -> Result<(), inference_tensor::Error> {
         let key_values = key.iter().map(|hash| hash.value()).collect::<Vec<_>>();
         if disk.store.has_entry(&key_values) {
+            disk.store.touch(&key_values, seq.prefix_cache_ttl());
             return Ok(());
         }
         let block_ids = crate::get_mut_arcmutex!(disk.kv_cache_manager)
@@ -1608,6 +1609,7 @@ pub trait Pipeline:
             blocks,
             recurrent,
             auxiliary,
+            ttl: seq.prefix_cache_ttl(),
         });
         Ok(())
     }
