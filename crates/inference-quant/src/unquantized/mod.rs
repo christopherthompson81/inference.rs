@@ -118,6 +118,16 @@ impl QuantMethod for UnquantLinear {
         self.w.index_select(&ids, 0)?.reshape(final_dims)
     }
 
+    #[cfg(feature = "cuda")]
+    fn to_mapped_host(&self) -> Result<Option<Arc<dyn QuantMethod>>> {
+        match self.w.to_mapped_host()? {
+            Some(w) => Ok(Some(Arc::new(Self::new(QuantMethodConfig::Unquantized(
+                Linear::new(w, self.b.clone()),
+            ))?))),
+            None => Ok(None),
+        }
+    }
+
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         // Batch matrix multiplication
         maybe_init_cublas_lt_wrapper(a.device().clone());

@@ -265,6 +265,21 @@ impl QCudaStorage {
         &self.device
     }
 
+    /// A copy in pinned host memory mapped into the device; see `CudaStorage::to_mapped_host`.
+    pub fn to_mapped_host(&self) -> Result<Self> {
+        let stream = self.device.cuda_stream();
+        let mut inner = unsafe { stream.alloc_mapped_host::<u8>(self.data.inner.len()) }.w()?;
+        stream.memcpy_dtod(&self.data.inner, &mut inner).w()?;
+        Ok(Self {
+            data: PaddedCudaSlice {
+                inner,
+                len: self.data.len,
+            },
+            dtype: self.dtype,
+            device: self.device.clone(),
+        })
+    }
+
     pub fn dequantize(&self, elem_count: usize) -> Result<CudaStorage> {
         fn deq<T: GgmlType>(buffer: &[u8], n: usize, dst: &mut [f32]) {
             let slice = unsafe { std::slice::from_raw_parts(buffer.as_ptr() as *const T, n) };

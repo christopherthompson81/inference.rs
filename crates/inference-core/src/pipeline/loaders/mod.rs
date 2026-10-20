@@ -533,6 +533,8 @@ pub struct LoadOptions<'a> {
     /// Decode steps run several rows a sequence (speculative verification): weights take the layouts the 2-8 row
     /// matvecs read fastest, where those trail at one row.
     pub multi_row_decode: bool,
+    /// An untied token embedding goes to pinned host memory the GPU gathers from over the bus, out of VRAM.
+    pub embeddings_on_host: bool,
 }
 
 /// The `Loader` trait abstracts the loading process. The primary entrypoint is the
@@ -553,6 +555,7 @@ pub struct LoadOptions<'a> {
 ///     in_situ_quant: None,
 ///     paged_attn_config: None,
 ///     multi_row_decode: false,
+///     embeddings_on_host: false,
 /// };
 /// let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options).unwrap();
 /// ```

@@ -141,6 +141,8 @@ pub struct ModelLoaderConfig {
     pub mtp_config: Option<MtpConfig>,
     /// Optional logical tensor byte budget for multimodal encoder outputs.
     pub encoder_cache_memory_bytes: Option<usize>,
+    /// An untied token embedding goes to pinned host memory, out of VRAM.
+    pub embeddings_on_host: bool,
     /// Values given inline (not by path), which a selection's paths cannot carry.
     pub overrides: LoadOverrides,
 }
@@ -214,6 +216,7 @@ impl ModelLoaderConfig {
             in_situ_quant: self.isq,
             paged_attn_config: self.paged_attn_config,
             multi_row_decode: self.mtp_config.is_some(),
+            embeddings_on_host: self.embeddings_on_host,
         };
         let pipeline = loader.load_model_from_hf(
             self.hf_revision.clone(),

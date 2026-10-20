@@ -1987,6 +1987,12 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         )
     }
 
+    /// This layer with its weight in pinned host memory mapped into its CUDA device, so an embedding table leaves
+    /// VRAM and the gather reads its rows over the bus. `None` when the layer can't move.
+    fn to_mapped_host(&self) -> Result<Option<Arc<dyn QuantMethod>>> {
+        Ok(None)
+    }
+
     /// Get the underlying QTensor if this is a GGUF quantized layer.
     /// Used for direct kernel access in grouped MoE prefill and CPU fused GEMV paths.
     fn get_qtensor(&self) -> Option<Arc<inference_tensor::quantized::QTensor>> {

@@ -675,6 +675,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `device` | `str \| None` | optional |
 | `device_layers` | `list[str] \| None` | optional |
 | `disable_eos_stop` | `bool \| None` | optional |
+| `embeddings_on_host` | `bool \| None` | optional |
 | `encoder_cache_memory_bytes` | `int \| None` | optional |
 | `hf_config_overrides` | `dict[str, Any] \| None` | optional |
 | `hf_revision` | `str \| None` | optional |

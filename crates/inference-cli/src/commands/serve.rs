@@ -185,6 +185,7 @@ pub(crate) fn runtime_options_spec(
         ),
         max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
         max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
+        embeddings_on_host: Some(!runtime.no_embeddings_on_host),
         max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
         throughput_logging: Some(throughput_logging),
         ..base

@@ -667,6 +667,7 @@ pub(crate) struct LoadSessionInputs<'a> {
     pub non_mapped_unpacked: bool,
     pub auto_device_map_params: Option<&'a AdjustAutoParams<'a>>,
     pub weight_target: &'static str,
+    pub embeddings_on_host: bool,
 }
 
 /// Devices, weight sources, device mappers and the installed ISQ plan for one load.
@@ -683,6 +684,19 @@ pub(crate) struct LoadSession {
     pub plan: super::isq_flow::IsqLoadPlan,
     pub attention: inference_nn::paged_attention::AttentionImplementation,
     pub load_parts: LoadMetadataParts,
+    pub embeddings_on_host: bool,
+}
+
+/// Whether the config declares its head untied from the token embedding (on the model or its text model), so the
+/// embedding can leave the device without the head reading it over the bus.
+fn config_unties_embeddings(config: &str) -> bool {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(config) else {
+        return false;
+    };
+    let untied = |v: &serde_json::Value| {
+        v.get("tie_word_embeddings") == Some(&serde_json::Value::Bool(false))
+    };
+    untied(&value) || value.get("text_config").is_some_and(untied)
 }
 
 /// Opens the load; the mapper it returns builds the model unless `load_model` shards it for tensor parallelism.
@@ -708,6 +722,7 @@ pub(crate) fn open_load_session(
         non_mapped_unpacked,
         auto_device_map_params,
         weight_target,
+        embeddings_on_host,
     } = inputs;
     let prepared_weight_source =
         prepared.and_then(|source| source.weights.weight_source().cloned());
@@ -718,6 +733,12 @@ pub(crate) fn open_load_session(
         available_devices,
     } = resolve_load_devices(mapped.model_config(config)?.as_ref(), device, write_uqff)?;
     let distributed = tensor_parallelism.is_enabled();
+    let embeddings_on_host = embeddings_on_host
+        && device.is_cuda()
+        && !write_uqff
+        && !distributed
+        && in_situ_quant.is_none()
+        && config_unties_embeddings(config);
     let WeightSources {
         uqff_reader,
         prepared: prepared_weight_source,
@@ -755,6 +776,7 @@ pub(crate) fn open_load_session(
                 has_lora,
                 matformer: matformer.as_ref().filter(|_| matformer_sizing),
                 non_mapped_unpacked,
+                embeddings_on_host,
             },
         },
         paged_attn_config,
@@ -838,6 +860,7 @@ pub(crate) fn open_load_session(
             plan,
             attention,
             load_parts,
+            embeddings_on_host,
         },
         mapper,
     ))
@@ -1011,6 +1034,7 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         Some(layers) => vb.with_lora_registry(layers.clone()),
         None => vb,
     };
+    let vb = vb.with_embeddings_on_host(session.embeddings_on_host);
     let tracker = vb.tracker().clone();
     let model = loader.build(
         config,
@@ -1033,6 +1057,21 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_an_explicitly_untied_head_lets_the_embedding_leave_the_device() {
+        assert!(config_unties_embeddings(
+            r#"{"tie_word_embeddings": false}"#
+        ));
+        assert!(config_unties_embeddings(
+            r#"{"text_config": {"tie_word_embeddings": false}}"#
+        ));
+        assert!(!config_unties_embeddings(
+            r#"{"tie_word_embeddings": true}"#
+        ));
+        assert!(!config_unties_embeddings(r#"{"hidden_size": 8}"#));
+        assert!(!config_unties_embeddings("not json"));
+    }
 
     fn paths_with_gen_conf(gen_conf: PathBuf) -> crate::pipeline::LocalModelPaths<PathBuf> {
         crate::pipeline::LocalModelPaths {

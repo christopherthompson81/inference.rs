@@ -200,6 +200,7 @@ pub struct InferenceRsForServerBuilder {
 
     /// Maximum chunkable CUDA text-prompt tokens in one paged-attention scheduler step.
     max_prefill_chunk_tokens: NonZeroUsize,
+    embeddings_on_host: bool,
 
     /// Maximum decode steps before a waiting prefill batch is admitted.
     max_decode_steps_before_prefill: NonZeroUsize,
@@ -318,6 +319,7 @@ impl Default for InferenceRsForServerBuilder {
             default_model_id: None,
             max_seqs: defaults::MAX_SEQS,
             max_num_batched_tokens: NonZeroUsize::new(defaults::MAX_NUM_BATCHED_TOKENS).unwrap(),
+            embeddings_on_host: true,
             max_prefill_chunk_tokens: NonZeroUsize::new(defaults::MAX_PREFILL_CHUNK_TOKENS)
                 .unwrap(),
             max_decode_steps_before_prefill: NonZeroUsize::new(
@@ -453,6 +455,12 @@ impl InferenceRsForServerBuilder {
     /// Sets the maximum number of tokens processed by one paged-attention scheduler step.
     pub fn with_max_num_batched_tokens(mut self, max_num_batched_tokens: NonZeroUsize) -> Self {
         self.max_num_batched_tokens = max_num_batched_tokens;
+        self
+    }
+
+    /// Whether an untied token embedding lives in pinned host memory the GPU gathers from, out of VRAM; on by default.
+    pub fn with_embeddings_on_host(mut self, on: bool) -> Self {
+        self.embeddings_on_host = on;
         self
     }
 
@@ -815,6 +823,7 @@ impl InferenceRsForServerBuilder {
             max_model_len: self.max_model_len,
             hf_config_overrides: self.hf_config_overrides.clone(),
             encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
+            embeddings_on_host: self.embeddings_on_host,
             requested_cache,
             max_seqs,
             limits: self.scheduler_limits(),
@@ -948,6 +957,7 @@ impl InferenceRsForServerBuilder {
             hf_config_overrides: self.hf_config_overrides,
             mtp_config: self.mtp_config.clone(),
             encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
+            embeddings_on_host: self.embeddings_on_host,
             overrides: inference_core::LoadOverrides {
                 anymoe: self.anymoe,
                 ..Default::default()
@@ -1272,6 +1282,7 @@ pub struct ModelLoadSettings {
     max_model_len: Option<usize>,
     hf_config_overrides: Option<HfConfigOverrides>,
     encoder_cache_memory_bytes: Option<usize>,
+    embeddings_on_host: bool,
     requested_cache: Option<PagedAttentionConfig>,
     max_seqs: usize,
     limits: SchedulerLimits,
@@ -1354,6 +1365,7 @@ impl ModelLoadSettings {
                 .encoder_cache_memory_bytes
                 .map(NonZeroUsize::get)
                 .or(self.encoder_cache_memory_bytes),
+            embeddings_on_host: self.embeddings_on_host,
             overrides: Default::default(),
         };
         let loader = loader_config.build_loader(self.no_kv_cache)?;

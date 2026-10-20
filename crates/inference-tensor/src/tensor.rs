@@ -2136,6 +2136,24 @@ impl Tensor {
         }
     }
 
+    /// The tensor in pinned host memory mapped into its CUDA device, read by kernels over the bus; `None` off CUDA.
+    #[cfg(feature = "cuda")]
+    pub fn to_mapped_host(&self) -> Result<Option<Tensor>> {
+        let tensor = self.contiguous()?;
+        let (storage, layout) = tensor.storage_and_layout();
+        let Storage::Cuda(cuda) = &*storage else {
+            return Ok(None);
+        };
+        if layout.start_offset() != 0 {
+            crate::bail!("to_mapped_host needs a tensor that starts its storage");
+        }
+        let mapped = cuda.to_mapped_host()?;
+        Ok(Some(Tensor::from((
+            Storage::Cuda(mapped),
+            tensor.shape().clone(),
+        ))))
+    }
+
     /// If the target device is the same as the tensor device, only a shallow copy is performed.
     pub fn to_device(&self, device: &Device) -> Result<Tensor> {
         if self.device().same_device(device) {

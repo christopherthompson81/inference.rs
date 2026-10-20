@@ -111,6 +111,34 @@ pub(crate) struct AutoDeviceMapSizingInputs<'a> {
     pub matformer: Option<&'a MatformerSliceConfig>,
     // Multimodal towers are not in a prepared quantized source or an experts-only ISQ, so they size unpacked.
     pub non_mapped_unpacked: bool,
+    // the token embedding loads into host memory, so it leaves the device budget
+    pub embeddings_on_host: bool,
+}
+
+impl AutoDeviceMapSizes {
+    // An embedding in host memory takes nothing on the devices; ISQ'd embeddings stay put, so callers skip ISQ.
+    fn without_host_embedding(
+        mut self,
+        inputs: &AutoDeviceMapSizingInputs<'_>,
+        dtype: DType,
+        pack_factor: usize,
+        quantization: Option<&AutoDeviceMapQuantization<'_>>,
+    ) -> Result<Self> {
+        if !inputs.embeddings_on_host {
+            return Ok(self);
+        }
+        if let Some(bytes) = inputs.loader.untied_embedding_size_in_bytes(
+            inputs.config,
+            dtype,
+            pack_factor,
+            quantization,
+        )? {
+            let bytes = bytes.min(self.non_mapped_size_in_bytes);
+            self.non_mapped_size_in_bytes -= bytes;
+            self.total_model_size_in_bytes -= bytes;
+        }
+        Ok(self)
+    }
 }
 
 pub(crate) struct AutoDeviceMapSizes {
@@ -193,7 +221,12 @@ pub(crate) fn auto_device_map_sizes(
                     resident.iter().sum::<usize>() + sizes.non_mapped_size_in_bytes;
                 sizes.layer_sizes_in_bytes = resident;
             }
-            Ok(sizes)
+            sizes.without_host_embedding(
+                &inputs,
+                dtype,
+                non_mapped_pack_factor,
+                Some(&quantization),
+            )
         }
         AutoDeviceMapSizing::Isq(isq) => {
             let moqe = matches!(inputs.organization, IsqOrganization::MoeExpertsOnly);
@@ -256,11 +289,14 @@ pub(crate) fn auto_device_map_sizes(
                     model_mib = inventory.total_model_size_in_bytes / (1024 * 1024),
                     "Using checkpoint tensor inventory for automatic device mapping"
                 );
-                return Ok(AutoDeviceMapSizes {
+                let pack_factor =
+                    QuantizationConfigShim::get_quant_config_pack_factor(inputs.config, dtype)?;
+                return AutoDeviceMapSizes {
                     layer_sizes_in_bytes: inventory.layer_sizes_in_bytes,
                     non_mapped_size_in_bytes: inventory.non_mapped_size_in_bytes,
                     total_model_size_in_bytes: inventory.total_model_size_in_bytes,
-                });
+                }
+                .without_host_embedding(&inputs, dtype, pack_factor, None);
             }
             // The checkpoint itself may be prequantized.
             let weight_pack_factor =
@@ -275,6 +311,12 @@ pub(crate) fn auto_device_map_sizes(
                 &inputs,
                 dtype,
                 weight_pack_factor,
+                weight_pack_factor,
+                quantization.as_ref(),
+            )?
+            .without_host_embedding(
+                &inputs,
+                dtype,
                 weight_pack_factor,
                 quantization.as_ref(),
             )

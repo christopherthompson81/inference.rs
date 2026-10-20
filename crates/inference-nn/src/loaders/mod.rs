@@ -121,6 +121,17 @@ pub trait DeviceMappedModelLoader {
         quantization: Option<&AutoDeviceMapQuantization<'_>>,
         matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize>;
+    /// The bytes of a token embedding no head shares, part of `non_mapped_size_in_bytes`, which can stay in host
+    /// memory; `None` when the loader doesn't size it apart or the head is tied.
+    fn untied_embedding_size_in_bytes(
+        &self,
+        _config: &str,
+        _dtype: DType,
+        _weight_pack_factor: usize,
+        _quantization: Option<&AutoDeviceMapQuantization<'_>>,
+    ) -> Result<Option<usize>> {
+        Ok(None)
+    }
     /// weight_pack_factor only applies to quantized weights.
     fn layer_sizes_in_bytes(
         &self,

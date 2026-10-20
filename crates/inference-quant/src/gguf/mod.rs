@@ -494,6 +494,17 @@ impl QuantMethod for GgufMatMul {
         self.w.embedding(ids)
     }
 
+    #[cfg(feature = "cuda")]
+    fn to_mapped_host(&self) -> Result<Option<Arc<dyn QuantMethod>>> {
+        let QMatMul::QTensor(w) = &self.w else {
+            return Ok(None);
+        };
+        match w.to_mapped_host()? {
+            Some(w) => Ok(Some(Arc::new(Self::from_qtensor(w, self.b.clone())?))),
+            None => Ok(None),
+        }
+    }
+
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
         self.stats.process(a)?;
         #[cfg(all(feature = "cuda", has_marlin_kernels))]
