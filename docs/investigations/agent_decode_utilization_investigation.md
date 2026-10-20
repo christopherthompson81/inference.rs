@@ -104,3 +104,23 @@ messages  prompt  cached  previous prompt + reply   ttft
 A long turn now costs one prefill of its reply instead of two concurrent ones. Removing that prefill too would need a
 recurrent snapshot at block boundaries during decode (the transition log holds per-row deltas a commit could apply up
 to the boundary, snapshot, then finish).
+
+## Run 4 - 2026-10-20 14:10
+
+Question: Run 1 found the GGUF exposes no generation defaults, so agent requests (no sampling fields) sampled at
+temperature 1.0 over the whole vocabulary. Does the file record better ones?
+
+Recipe A's metadata carries `general.sampling.temp`, `general.sampling.top_k` and `general.sampling.top_p`, the keys
+llama.cpp's converter writes from the model's generation config (as f32 / i32). With no generation_config.json
+beside a GGUF, `GenerationConfig::from_gguf_metadata` now reads them (plus `min_p` and `penalty_repeat`). The server
+reports temperature 1.0, top_k 20, top_p 0.95 for recipe A.
+
+```
+tools + no sampling fields, 1500 tokens    stream rate   util mean
+after #516                                 113 / s       99.5%
+with the GGUF defaults                     154 / s       98.2%
+Code tab demo over HTTP                                  97.7% (92% of samples >= 98%)
+```
+
+With top_k 20 / top_p 0.95 the target distribution is far narrower, so DFlash draft acceptance during the demo's
+reasoning rose to 33-53% (3.3-4.7 tokens a step).

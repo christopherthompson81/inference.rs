@@ -10,6 +10,12 @@ use tracing::{trace, warn};
 
 use crate::ModelGenerationDefaults;
 
+const GGUF_SAMPLING_TEMP: &str = "general.sampling.temp";
+const GGUF_SAMPLING_TOP_K: &str = "general.sampling.top_k";
+const GGUF_SAMPLING_TOP_P: &str = "general.sampling.top_p";
+const GGUF_SAMPLING_MIN_P: &str = "general.sampling.min_p";
+const GGUF_SAMPLING_PENALTY_REPEAT: &str = "general.sampling.penalty_repeat";
+
 const SUPPORTED_ALTERNATE_EOS: &[&str] = &[
     "<|im_end|>",      // Handle ChatML case
     "<end_of_turn>",   // Handle Gemma2 chat case
@@ -120,7 +126,7 @@ pub fn calculate_eos_tokens(
     eos_toks
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct GenerationConfig {
     #[serde(default)]
     #[serde(with = "either::serde_untagged_optional")]
@@ -169,6 +175,44 @@ impl GenerationConfig {
         conf.max_new_tokens = None;
         conf.max_length = None;
         Some(conf)
+    }
+
+    /// The sampling defaults a GGUF's own metadata records (`general.sampling.*`, as llama.cpp's converter writes
+    /// them), for a file shipped without its generation_config.json.
+    pub fn from_gguf_metadata(
+        metadata: &std::collections::HashMap<String, inference_tensor::quantized::gguf_file::Value>,
+    ) -> Option<Self> {
+        // llama.cpp writes these as f32 and i32; take any width
+        let f64_key = |key: &str| {
+            let value = metadata.get(key)?;
+            value
+                .to_f32()
+                .map(f64::from)
+                .or_else(|_| value.to_f64())
+                .ok()
+        };
+        let int_key = |key: &str| {
+            let value = metadata.get(key)?;
+            value
+                .to_i32()
+                .map(i64::from)
+                .or_else(|_| value.to_u32().map(i64::from))
+                .or_else(|_| value.to_i64())
+                .ok()
+        };
+        let conf = GenerationConfig {
+            temperature: f64_key(GGUF_SAMPLING_TEMP),
+            top_k: int_key(GGUF_SAMPLING_TOP_K)
+                .and_then(|top_k| usize::try_from(top_k).ok())
+                .filter(|top_k| *top_k > 0),
+            top_p: f64_key(GGUF_SAMPLING_TOP_P),
+            min_p: f64_key(GGUF_SAMPLING_MIN_P),
+            repetition_penalty: metadata
+                .get(GGUF_SAMPLING_PENALTY_REPEAT)
+                .and_then(|value| value.to_f32().ok()),
+            ..Default::default()
+        };
+        conf.generation_defaults().is_some().then_some(conf)
     }
 
     pub(crate) fn validate_token_ids(&self, vocab_size: usize) -> Result<()> {
@@ -228,6 +272,34 @@ mod tests {
     use tokenizers::Tokenizer;
 
     use super::{GenerationConfig, calculate_eos_tokens};
+
+    // As llama.cpp's converter writes them: f32 values and an i32 top_k
+    #[test]
+    fn gguf_sampling_metadata_gives_generation_defaults() {
+        use inference_tensor::quantized::gguf_file::Value;
+        let metadata = std::collections::HashMap::from([
+            ("general.sampling.temp".to_string(), Value::F32(0.6)),
+            ("general.sampling.top_k".to_string(), Value::I32(20)),
+            ("general.sampling.top_p".to_string(), Value::F32(0.95)),
+            (
+                "general.name".to_string(),
+                Value::String("model".to_string()),
+            ),
+        ]);
+        let defaults = GenerationConfig::from_gguf_metadata(&metadata)
+            .and_then(|conf| conf.generation_defaults())
+            .unwrap();
+        assert!((defaults.temperature.unwrap() - 0.6).abs() < 1e-6);
+        assert_eq!(defaults.top_k, Some(20));
+        assert!((defaults.top_p.unwrap() - 0.95).abs() < 1e-6);
+        assert_eq!(defaults.repetition_penalty, None);
+
+        let none = std::collections::HashMap::from([(
+            "general.name".to_string(),
+            Value::String("model".to_string()),
+        )]);
+        assert!(GenerationConfig::from_gguf_metadata(&none).is_none());
+    }
 
     #[test]
     fn generation_config_token_ids_must_fit_the_tokenizer_vocabulary() {

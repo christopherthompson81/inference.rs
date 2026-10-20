@@ -327,7 +327,9 @@ impl GGUFLoader {
                 .with_multi_row_decode(options.multi_row_decode),
         );
         let tokenizer = self.resolve_tokenizer(paths, archive.metadata())?;
-        let generation_config = self.resolve_generation_config(paths, &tokenizer);
+        let generation_config = self
+            .resolve_generation_config(paths, &tokenizer)
+            .or_else(|| GenerationConfig::from_gguf_metadata(archive.metadata()));
         let chat_template =
             if paths.get_template_filename().is_none() && self.chat_template.is_none() {
                 get_gguf_chat_template_from_metadata(archive.metadata())?
