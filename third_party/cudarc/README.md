@@ -8,6 +8,10 @@
 >   trying them first let a build for one CUDA major load another's libraries. NCCL's `.so.2` was not tried at all,
 >   so `dynamic-loading` could not find NCCL on a runtime-only install.
 >
+> - `src/driver/safe/core.rs`: `CudaStream::alloc_mapped_host` returns a `CudaSlice` over pinned host memory mapped
+>   into the device (`cuMemHostAlloc` with `DEVICEMAP`, then `cuMemHostGetDevicePointer`), so kernels read a table
+>   kept in RAM. `CudaSlice` carries the host pointer and its drop frees that with `cuMemFreeHost`.
+>
 > Everything else is upstream. To re-sync, copy a new crates.io release and reapply the changes above.
 
 # cudarc: minimal and safe api over the cuda toolkit

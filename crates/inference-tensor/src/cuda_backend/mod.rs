@@ -118,6 +118,21 @@ pub enum CudaStorageSlice {
     F8E8M0(CudaSlice<u8>),
 }
 
+struct MappedHost;
+impl Map1 for MappedHost {
+    fn f<T: DeviceRepr>(
+        &self,
+        s: &CudaSlice<T>,
+        dev: &CudaDevice,
+        _: &Layout,
+    ) -> Result<CudaSlice<T>> {
+        let stream = dev.cuda_stream();
+        let mut dst = unsafe { stream.alloc_mapped_host::<T>(s.len()) }.w()?;
+        stream.memcpy_dtod(s, &mut dst).w()?;
+        Ok(dst)
+    }
+}
+
 struct Clone;
 impl Map1 for Clone {
     fn f<T: DeviceRepr>(
@@ -1314,6 +1329,17 @@ cuda_dtype!(f64, F64);
 cuda_dtype!(float8::F8E4M3, F8E4M3);
 
 impl CudaStorage {
+    /// A copy in pinned host memory mapped into the device: kernels read it over the bus, for tables too large to keep
+    /// in VRAM of which each step touches a few rows.
+    pub fn to_mapped_host(&self) -> Result<Self> {
+        // the copy takes whole slices, so the layout is unused
+        let layout = Layout::contiguous(0usize);
+        Ok(Self {
+            slice: MappedHost.map(&self.slice, &self.device, &layout)?,
+            device: self.device.clone(),
+        })
+    }
+
     pub fn wrap_cuda_slice<T: CudaDType>(slice: CudaSlice<T>, device: CudaDevice) -> CudaStorage {
         T::wrap_cuda_slice(slice, device)
     }

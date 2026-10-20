@@ -362,6 +362,10 @@ pub struct RuntimeSpec {
     /// Layers per device, as `--device-layers` takes them: `ORD:NUM` entries, or one count for device 0.
     #[serde(default)]
     pub device_layers: Option<Vec<String>>,
+    /// An untied token embedding lives in pinned host memory the GPU reads over the bus, out of VRAM, with identical
+    /// output; on unless set to false.
+    #[serde(default)]
+    pub embeddings_on_host: Option<bool>,
     #[serde(default)]
     pub paged_cache: PagedCacheSpec,
     #[serde(default)]
@@ -730,6 +734,9 @@ impl EngineSpec {
         if let Some(tokens) = runtime.max_num_batched_tokens {
             builder =
                 builder.with_max_num_batched_tokens(nonzero("max_num_batched_tokens", tokens)?);
+        }
+        if let Some(on) = runtime.embeddings_on_host {
+            builder = builder.with_embeddings_on_host(on);
         }
         if let Some(tokens) = runtime.max_prefill_chunk_tokens {
             builder =

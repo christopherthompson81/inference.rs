@@ -847,6 +847,8 @@ pub struct CudaSlice<T> {
     pub(crate) write: Option<CudaEvent>,
     pub(crate) stream: Arc<CudaStream>,
     pub(crate) marker: PhantomData<*const T>,
+    /// The pinned host allocation behind a device-mapped slice, freed with `cuMemFreeHost`; null for device memory.
+    pub(crate) host_ptr: *mut std::ffi::c_void,
 }
 
 unsafe impl<T> Send for CudaSlice<T> {}
@@ -863,7 +865,10 @@ impl<T> Drop for CudaSlice<T> {
                 ctx.record_err(self.stream.wait(write));
             }
         }
-        if ctx.has_async_alloc {
+        if !self.host_ptr.is_null() {
+            ctx.record_err(self.stream.synchronize());
+            ctx.record_err(unsafe { result::free_host(self.host_ptr) });
+        } else if ctx.has_async_alloc {
             ctx.record_err(unsafe {
                 result::free_async(self.cu_device_ptr, self.stream.cu_stream)
             });
@@ -1614,6 +1619,7 @@ impl CudaStream {
             write: None,
             stream: self.clone(),
             marker: PhantomData,
+            host_ptr: std::ptr::null_mut(),
         })
     }
 
@@ -1645,6 +1651,47 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            host_ptr: std::ptr::null_mut(),
+        })
+    }
+
+    /// Allocates `len` elements of pinned host memory mapped into the device's address space, as a [CudaSlice]
+    /// kernels read and write over the bus. Dropping it frees the host allocation.
+    /// # Safety
+    /// This is unsafe because the memory is unset.
+    pub unsafe fn alloc_mapped_host<T: DeviceRepr>(
+        self: &Arc<Self>,
+        len: usize,
+    ) -> Result<CudaSlice<T>, DriverError> {
+        self.ctx.bind_to_thread()?;
+        let num_bytes = len
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("mapped host allocation size overflow");
+        let host_ptr = result::malloc_host(
+            num_bytes.max(1),
+            sys::CU_MEMHOSTALLOC_PORTABLE | sys::CU_MEMHOSTALLOC_DEVICEMAP,
+        )?;
+        let mut cu_device_ptr: sys::CUdeviceptr = 0;
+        if let Err(err) = sys::cuMemHostGetDevicePointer_v2(&mut cu_device_ptr, host_ptr, 0).result() {
+            let _ = result::free_host(host_ptr);
+            return Err(err);
+        }
+        let (read, write) = if self.ctx.is_event_tracking() {
+            (
+                Some(self.ctx.new_event(None)?),
+                Some(self.ctx.new_event(None)?),
+            )
+        } else {
+            (None, None)
+        };
+        Ok(CudaSlice {
+            cu_device_ptr,
+            len,
+            read,
+            write,
+            stream: self.clone(),
+            marker: PhantomData,
+            host_ptr,
         })
     }
 
@@ -2616,6 +2663,7 @@ impl CudaStream {
             write,
             stream: self.clone(),
             marker: PhantomData,
+            host_ptr: std::ptr::null_mut(),
         }
     }
 }

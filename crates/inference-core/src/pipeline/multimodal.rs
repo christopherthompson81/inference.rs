@@ -230,6 +230,7 @@ impl MultimodalLoader {
         in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
         uqff: super::loading::UqffLoad<'_>,
+        embeddings_on_host: bool,
     ) -> Result<super::loading::LoadOutcome> {
         let _progress_guard = ProgressScopeGuard::new(silent);
         let serve_written = uqff.serves_written(device);
@@ -394,6 +395,7 @@ impl MultimodalLoader {
                 non_mapped_unpacked: true,
                 auto_device_map_params: Some(&auto_device_map_params),
                 weight_target: "model",
+                embeddings_on_host,
             },
             &mut paged_attn_config,
         )?;
@@ -621,6 +623,7 @@ impl Loader for MultimodalLoader {
             mapper,
             in_situ_quant,
             paged_attn_config,
+            embeddings_on_host,
             ..
         } = options;
         let uqff = super::loading::UqffLoad::new(
@@ -637,6 +640,7 @@ impl Loader for MultimodalLoader {
                 in_situ_quant,
                 paged_attn_config,
                 uqff,
+                embeddings_on_host,
             )
         })
     }

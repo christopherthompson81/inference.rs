@@ -2590,6 +2590,7 @@ class RuntimeSpec:
     device: str | None = None
     device_layers: list[str] | None = None
     disable_eos_stop: bool | None = None
+    embeddings_on_host: bool | None = None
     encoder_cache_memory_bytes: int | None = None
     hf_config_overrides: dict[str, Any] | None = None
     hf_revision: str | None = None

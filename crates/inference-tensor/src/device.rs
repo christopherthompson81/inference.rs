@@ -534,4 +534,35 @@ mod fence_tests {
         assert_eq!(product.get(0)?.get(0)?.to_scalar::<f32>()?, 512.0);
         Ok(())
     }
+
+    // An embedding table in mapped host memory gathers the same rows as the copy in VRAM
+    #[test]
+    fn mapped_host_tables_gather_what_device_tables_do() -> crate::Result<()> {
+        use crate::quantized::{GgmlDType, QTensor};
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let table = Tensor::randn(0f32, 1., (300, 256), &device)?.to_dtype(DType::BF16)?;
+        let ids = Tensor::new(&[7u32, 0, 299, 7], &device)?;
+        let mapped = table.to_mapped_host()?.expect("a CUDA tensor maps");
+        let diff = (table.index_select(&ids, 0)? - mapped.index_select(&ids, 0)?)?
+            .to_dtype(DType::F32)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0);
+        let quantized = QTensor::quantize_onto(
+            &table.to_dtype(DType::F32)?.to_device(&Device::Cpu)?,
+            GgmlDType::Q4K,
+            &device,
+        )?;
+        let mapped = quantized.to_mapped_host()?.expect("a CUDA QTensor maps");
+        let diff = (quantized.embedding(&ids)? - mapped.embedding(&ids)?)?
+            .abs()?
+            .max_all()?
+            .to_scalar::<f32>()?;
+        assert_eq!(diff, 0.0);
+        drop(mapped);
+        device.synchronize()
+    }
 }

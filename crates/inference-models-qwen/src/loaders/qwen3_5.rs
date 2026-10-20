@@ -110,6 +110,38 @@ pub(super) fn decoder_layer_elems(
 }
 
 // The built-in MTP head sits on the non-mapped device: fc, three norms and its full-attention layers.
+/// Elements of the token embedding and of the LM head (0 when tied), as the weights will load.
+pub(super) fn embedding_and_head_elems(
+    text: &TextConfig,
+    tied: bool,
+    embedding_names: &[&str],
+    quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+    dtype: DType,
+    weight_pack_factor: usize,
+) -> Result<(usize, usize)> {
+    let (embed_tokens_pack_factor, lm_head_pack_factor) =
+        super::language_model_pack_factors_with_aliases(
+            quantization,
+            embedding_names,
+            &["lm_head.weight"],
+            tied,
+            dtype,
+            weight_pack_factor,
+        )?;
+    let embed_tokens = text.hidden_size * text.vocab_size / embed_tokens_pack_factor;
+    let lm_head = if tied {
+        0
+    } else {
+        text.hidden_size * text.vocab_size / lm_head_pack_factor
+    };
+    Ok((embed_tokens, lm_head))
+}
+
+const MULTIMODAL_EMBEDDING_NAMES: [&str; 2] = [
+    "language_model.model.embed_tokens.weight",
+    "model.language_model.embed_tokens.weight",
+];
+
 pub(super) fn mtp_head_elems(cfg: &TextConfig, weight_pack_factor: usize) -> Result<usize> {
     let fc = 2 * cfg.hidden_size * cfg.hidden_size / weight_pack_factor;
     let layer = decoder_layer_elems(cfg, LayerType::FullAttention, weight_pack_factor)?;
@@ -275,27 +307,15 @@ macro_rules! qwen3_5_loader {
                 let cfg = parse_config(config, $moe)?;
                 let tie = cfg.tie_word_embeddings;
                 let text_elems = {
-                    let cfg = &cfg.text_config;
-                    let (embed_tokens_pack_factor, lm_head_pack_factor) =
-                        super::language_model_pack_factors_with_aliases(
-                            _quantization,
-                            &[
-                                "language_model.model.embed_tokens.weight",
-                                "model.language_model.embed_tokens.weight",
-                            ],
-                            &["lm_head.weight"],
-                            tie,
-                            dtype,
-                            weight_pack_factor,
-                        )?;
-                    let embed_tokens = cfg.hidden_size * cfg.vocab_size / embed_tokens_pack_factor;
-                    let lm_head = if !tie {
-                        cfg.hidden_size * cfg.vocab_size / lm_head_pack_factor
-                    } else {
-                        0
-                    };
-                    let norm = cfg.hidden_size;
-                    embed_tokens + lm_head + norm
+                    let (embed_tokens, lm_head) = embedding_and_head_elems(
+                        &cfg.text_config,
+                        tie,
+                        &MULTIMODAL_EMBEDDING_NAMES,
+                        _quantization,
+                        dtype,
+                        weight_pack_factor,
+                    )?;
+                    embed_tokens + lm_head + cfg.text_config.hidden_size
                 };
 
                 let (patch_merger, deepstack_mergers) = {
@@ -364,6 +384,27 @@ macro_rules! qwen3_5_loader {
                     + encoder_layer * cfg.vision_config.depth;
 
                 Ok(elems * dtype.size_in_bytes())
+            }
+            fn untied_embedding_size_in_bytes(
+                &self,
+                config: &str,
+                dtype: DType,
+                weight_pack_factor: usize,
+                quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+            ) -> Result<Option<usize>> {
+                let cfg = parse_config(config, $moe)?;
+                if cfg.tie_word_embeddings {
+                    return Ok(None);
+                }
+                let (embed_tokens, _) = embedding_and_head_elems(
+                    &cfg.text_config,
+                    false,
+                    &MULTIMODAL_EMBEDDING_NAMES,
+                    quantization,
+                    dtype,
+                    weight_pack_factor,
+                )?;
+                Ok(Some(embed_tokens * dtype.size_in_bytes()))
             }
             fn layer_sizes_in_bytes(
                 &self,

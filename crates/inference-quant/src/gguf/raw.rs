@@ -173,6 +173,34 @@ impl RawGgufTensor {
         }
     }
 
+    /// The blocks in pinned host memory mapped into their CUDA device, read over the bus; `None` off CUDA.
+    #[cfg(feature = "cuda")]
+    pub fn to_mapped_host(&self) -> Result<Option<Self>> {
+        let RawStorage::Cuda {
+            blocks,
+            len,
+            device,
+        } = &self.storage
+        else {
+            return Ok(None);
+        };
+        let stream = device.cuda_stream();
+        let mut mapped = unsafe { stream.alloc_mapped_host::<u8>(blocks.len()) }
+            .map_err(inference_tensor::Error::wrap)?;
+        stream
+            .memcpy_dtod(blocks.as_ref(), &mut mapped)
+            .map_err(inference_tensor::Error::wrap)?;
+        Ok(Some(Self {
+            ty: self.ty,
+            shape: self.shape.clone(),
+            storage: RawStorage::Cuda {
+                blocks: Arc::new(mapped),
+                len: *len,
+                device: device.clone(),
+            },
+        }))
+    }
+
     pub fn to_device(&self, device: &Device) -> Result<Self> {
         if self.device().same_device(device) {
             return Ok(self.clone());
@@ -742,6 +770,14 @@ impl QuantMethod for GgufRawMatMul {
     }
 
     #[cfg(feature = "cuda")]
+    fn to_mapped_host(&self) -> Result<Option<Arc<dyn QuantMethod>>> {
+        Ok(self
+            .w
+            .to_mapped_host()?
+            .map(|w| Arc::new(Self::new(w, self.b.clone())) as Arc<dyn QuantMethod>))
+    }
+
+    #[cfg(feature = "cuda")]
     fn kernel_weight(&self) -> Option<&dyn super::kernel::KernelWeight> {
         Some(&self.w)
     }
@@ -1201,6 +1237,20 @@ mod tests {
                     diff < 1e-6,
                     "{ty:?} on {device:?}: embedding differs by {diff}"
                 );
+                #[cfg(feature = "cuda")]
+                if let Some(mapped) = weight.to_mapped_host()? {
+                    let from_host = mapped
+                        .embedding(&ids.to_device(device)?)?
+                        .to_device(&Device::Cpu)?;
+                    let diff = (from_host - &expected)?
+                        .abs()?
+                        .max_all()?
+                        .to_scalar::<f32>()?;
+                    assert!(
+                        diff < 1e-6,
+                        "{ty:?} from mapped host memory differs by {diff}"
+                    );
+                }
                 let empty = weight.embedding(&Tensor::zeros((0,), DType::U32, device)?)?;
                 assert_eq!(empty.dims(), [0, cols]);
             }

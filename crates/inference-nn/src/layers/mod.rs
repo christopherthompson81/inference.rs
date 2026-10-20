@@ -76,16 +76,30 @@ pub fn embedding(
     vb: ShardedVarBuilder,
     config: &Option<QuantizedConfig>,
 ) -> Result<Arc<dyn QuantMethod>> {
-    if matches!(config, Some(QuantizedConfig::Afq { .. }))
+    let on_host = vb.embeddings_on_host();
+    let layer: Arc<dyn QuantMethod> = if matches!(config, Some(QuantizedConfig::Afq { .. }))
         || should_apply_immediate_isq(&vb)
         || vb.weight_source().is_some()
     {
-        ReplicatedLayer::new(out_size, in_size, config, false, vb)
+        ReplicatedLayer::new(out_size, in_size, config, false, vb)?
     } else {
         let weight = vb.get_with_hints((in_size, out_size), "weight", Default::default())?;
-        Ok(Arc::new(UnquantLinear::new(
-            QuantMethodConfig::Unquantized(Linear::new(weight, None)),
-        )?))
+        Arc::new(UnquantLinear::new(QuantMethodConfig::Unquantized(
+            Linear::new(weight, None),
+        ))?)
+    };
+    if !on_host {
+        return Ok(layer);
+    }
+    match layer.to_mapped_host()? {
+        Some(mapped) => Ok(mapped),
+        None => {
+            tracing::warn!(
+                "The token embedding stays where it loaded: a {} layer has no mapped host copy.",
+                layer.name()
+            );
+            Ok(layer)
+        }
     }
 }
 

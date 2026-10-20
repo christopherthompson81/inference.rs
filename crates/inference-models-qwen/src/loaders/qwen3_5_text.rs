@@ -13,6 +13,12 @@ struct MtpFlag {
     mtp: bool,
 }
 
+const TEXT_EMBEDDING_NAMES: [&str; 3] = [
+    "model.language_model.embed_tokens.weight",
+    "language_model.model.embed_tokens.weight",
+    "model.embed_tokens.weight",
+];
+
 fn mtp_requested(config: &str) -> Result<bool> {
     Ok(serde_json::from_str::<MtpFlag>(config)?.mtp)
 }
@@ -116,31 +122,41 @@ macro_rules! qwen3_5_text_loader {
                 _matformer_config: Option<&MatformerSliceConfig>,
             ) -> Result<usize> {
                 let cfg = parse_qwen35_text_config(config, $moe)?;
-                let (embed_tokens_pack_factor, lm_head_pack_factor) =
-                    super::language_model_pack_factors_with_aliases(
-                        quantization,
-                        &[
-                            "model.language_model.embed_tokens.weight",
-                            "language_model.model.embed_tokens.weight",
-                            "model.embed_tokens.weight",
-                        ],
-                        &["lm_head.weight"],
-                        cfg.tie_word_embeddings,
-                        dtype,
-                        weight_pack_factor,
-                    )?;
-                let embed_tokens = cfg.hidden_size * cfg.vocab_size / embed_tokens_pack_factor;
-                let lm_head = if cfg.tie_word_embeddings {
-                    0
-                } else {
-                    cfg.hidden_size * cfg.vocab_size / lm_head_pack_factor
-                };
+                let (embed_tokens, lm_head) = super::qwen3_5::embedding_and_head_elems(
+                    &cfg,
+                    cfg.tie_word_embeddings,
+                    &TEXT_EMBEDDING_NAMES,
+                    quantization,
+                    dtype,
+                    weight_pack_factor,
+                )?;
                 let mtp_head = if mtp_requested(config)? {
                     super::qwen3_5::mtp_head_elems(&cfg, weight_pack_factor)?
                 } else {
                     0
                 };
                 Ok((embed_tokens + lm_head + cfg.hidden_size + mtp_head) * dtype.size_in_bytes())
+            }
+            fn untied_embedding_size_in_bytes(
+                &self,
+                config: &str,
+                dtype: DType,
+                weight_pack_factor: usize,
+                quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+            ) -> Result<Option<usize>> {
+                let cfg = parse_qwen35_text_config(config, $moe)?;
+                if cfg.tie_word_embeddings {
+                    return Ok(None);
+                }
+                let (embed_tokens, _) = super::qwen3_5::embedding_and_head_elems(
+                    &cfg,
+                    false,
+                    &TEXT_EMBEDDING_NAMES,
+                    quantization,
+                    dtype,
+                    weight_pack_factor,
+                )?;
+                Ok(Some(embed_tokens * dtype.size_in_bytes()))
             }
             fn layer_sizes_in_bytes(
                 &self,

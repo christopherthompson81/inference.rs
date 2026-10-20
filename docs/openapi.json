@@ -12382,6 +12382,13 @@
             "type": "boolean",
             "description": "Generate to `max_tokens` regardless of end-of-sequence tokens, as a benchmark needs."
           },
+          "embeddings_on_host": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "An untied token embedding lives in pinned host memory the GPU reads over the bus, out of VRAM, with identical\noutput; on unless set to false."
+          },
           "encoder_cache_memory_bytes": {
             "type": [
               "integer",

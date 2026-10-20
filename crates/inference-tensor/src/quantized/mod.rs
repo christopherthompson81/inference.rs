@@ -673,6 +673,18 @@ impl QTensor {
         }
     }
 
+    /// The weight in pinned host memory mapped into its CUDA device, read over the bus; `None` off CUDA.
+    #[cfg(feature = "cuda")]
+    pub fn to_mapped_host(&self) -> Result<Option<Self>> {
+        match &self.storage {
+            QStorage::Cuda(storage) => Ok(Some(Self::new(
+                QStorage::Cuda(storage.to_mapped_host()?),
+                self.shape.clone(),
+            )?)),
+            _ => Ok(None),
+        }
+    }
+
     pub fn embedding(&self, ids: &Tensor) -> Result<Tensor> {
         let (rows, hidden) = self.shape.dims2()?;
         if !hidden.is_multiple_of(self.dtype().block_size()) {

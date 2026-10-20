@@ -729,6 +729,7 @@ mod tests {
             hf_config_overrides: None,
             mtp_config: None,
             encoder_cache_memory_bytes: None,
+            embeddings_on_host: false,
             overrides: Default::default(),
         }
     }

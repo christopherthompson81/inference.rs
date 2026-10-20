@@ -56,6 +56,7 @@ inference run [OPTIONS] [COMMAND]
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 | `--max-seqs <MAX_SEQS>` | `4` | Maximum concurrent sequences per model; each holds memory while it runs, so raise it for a busy shared server |
 | `--max-num-batched-tokens <MAX_NUM_BATCHED_TOKENS>` | `4096` | Maximum tokens processed in one paged-attention scheduler step |
+| `--no-embeddings-on-host` | `false` | Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus |
 | `--max-prefill-chunk-tokens <MAX_PREFILL_CHUNK_TOKENS>` | `512` | CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching |
 | `--max-decode-steps-before-prefill <MAX_DECODE_STEPS_BEFORE_PREFILL>` | `8` | Maximum decode steps before a waiting prefill batch is admitted |
 | `--no-kv-cache` | `false` | Disable KV cache entirely |

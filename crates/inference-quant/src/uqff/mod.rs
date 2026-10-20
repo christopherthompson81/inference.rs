@@ -344,6 +344,7 @@ pub struct ShardedVarBuilder {
     weight_source: Option<Arc<dyn QuantizedWeightSource>>,
     shapes: Option<Arc<HashMap<String, Vec<usize>>>>,
     lora_registry: Option<Arc<crate::LoraLayerRegistry>>,
+    embeddings_on_host: bool,
 }
 
 impl ShardedVarBuilder {
@@ -354,7 +355,18 @@ impl ShardedVarBuilder {
             weight_source: None,
             shapes: None,
             lora_registry: None,
+            embeddings_on_host: false,
         }
+    }
+
+    /// Token embedding tables built from this builder go to pinned host memory the GPU reads over the bus.
+    pub fn with_embeddings_on_host(mut self, on: bool) -> Self {
+        self.embeddings_on_host = on;
+        self
+    }
+
+    pub fn embeddings_on_host(&self) -> bool {
+        self.embeddings_on_host
     }
 
     pub(crate) fn with_shapes(mut self, shapes: HashMap<String, Vec<usize>>) -> Self {
@@ -386,6 +398,7 @@ impl ShardedVarBuilder {
             weight_source: self.weight_source.clone(),
             shapes: self.shapes.clone(),
             lora_registry: self.lora_registry.clone(),
+            embeddings_on_host: self.embeddings_on_host,
         }
     }
 

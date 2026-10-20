@@ -62,6 +62,9 @@ macro_rules! delegate_to {
     (@method $i:tt embedding_forward_raw) => {
         delegate_to!(@fn $i embedding_forward_raw(ids: &Tensor) -> Result<Tensor>);
     };
+    (@method $i:tt to_mapped_host) => {
+        delegate_to!(@fn $i to_mapped_host() -> Result<Option<Arc<dyn QuantMethod>>>);
+    };
     (@method $i:tt forward_quantized) => {
         delegate_to!(@fn $i forward_quantized(a: &QuantizedActivation) -> Result<Tensor>);
     };
@@ -2009,7 +2012,7 @@ impl QuantMethod for ReplicatedLayer {
         0:
         forward_raw, embedding_forward, embedding_forward_raw, add_delta_w, dequantize_w, tracking, activations,
         forward_quantized, try_forward_fused_split_glu, unquant_weight_bias, dynamic_lora, has_bias,
-        raw_weights, apply_isq
+        raw_weights, apply_isq, to_mapped_host
     );
 }
 

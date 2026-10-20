@@ -687,6 +687,11 @@ pub struct RuntimeOptions {
     #[serde(default = "default_max_num_batched_tokens")]
     pub max_num_batched_tokens: NonZeroUsize,
 
+    /// Keep the token embedding in VRAM; by default an untied one lives in pinned host memory the GPU reads over the bus
+    #[arg(long)]
+    #[serde(default)]
+    pub no_embeddings_on_host: bool,
+
     /// CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching
     #[arg(long, default_value_t = default_max_prefill_chunk_tokens())]
     #[serde(default = "default_max_prefill_chunk_tokens")]
@@ -1085,6 +1090,7 @@ impl Default for RuntimeOptions {
         Self {
             max_seqs: DEFAULT_MAX_SEQS,
             max_num_batched_tokens: default_max_num_batched_tokens(),
+            no_embeddings_on_host: false,
             max_prefill_chunk_tokens: default_max_prefill_chunk_tokens(),
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),
             no_kv_cache: false,
