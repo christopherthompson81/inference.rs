@@ -106,3 +106,60 @@ Implication: incremental fixes inside the f16-tile mma kernel are worth ~2-3% at
 125K still costs ~10.9 ms a step against a ~2 ms bandwidth floor (16 x ~130 us); what tqLLM does differently is
 structural: K codes go to int8 in smem and score with an int8 MMA against an int8 Q in K's rotated basis (no f16
 K tile, no f32-accumulate f16 MMA), with only V widened to f16.
+
+## Run 5 - 2026-10-20 03:00
+
+Question: does scoring Q.K with int8 MMA (tqLLM's approach) beat the staged f16 path?
+
+Implementation (branch quant-kv-int8-qk-wip, inside the mma kernel, multi-stage head-256 instances): K codes unpacked
+to an int8 tile as c - 2^(bits-1); a stored value is (2 k8 + 1) * scale / 2^bits, so a 32-value group's Q.K is
+scale / 2^bits * (2 qs dot(k8, q) + qs sum(q)), one m16n8k32 per group. Q as one int8 per value missed the f16
+tolerance (decode 0.0041 over 0.004); Q as hi + lo / 254 (two int8 MMAs, ~16 bits) matches the f16 path's errors
+exactly (0.0020 decode, 0.0157 verify) and fits the f16 Q fragments' registers.
+
+Bugs on the way: an `else` before `#pragma unroll` let the f16 Q.K loop run as well (3.2 max error); writing the
+int8 Q into tile_V overwrote unread f16 Q rows at 64 columns (tile_Q is larger than the K tile there). Fixed by bracing
+and by quantizing each group in place (its 64 f16 bytes become its 32 hi + 32 lo bytes).
+
+```
+128K                     rows 1    rows 8
+staged f16 (Run 4)        463.4     658.4
+int8 hi/lo Q.K            474.6     695.5
+```
+
+Finding: no gain; the f16 MMA was not what bounds this kernel once it carries the quantized loads.
+
+## Run 6 - 2026-10-20 03:40
+
+Question: where does a quantized tile's time go? `clock64()` probes at the iteration's phase boundaries, thread
+(0, 0) of block 0, per launch (temporary; ncu has no counter access on this machine).
+
+128K, rows 1 (ncols 8, nbatch_fa 64, one 4-warp CTA per SM), cycles over 102 tiles:
+
+```
+phase                                    int8 Q.K   + 8 lookups batched   + issue inlined   + no table lookups
+wait for the copies (A)                    16K        12K                   16K               16K
+issue V's cp.async                        139K       260K                  249K              163K
+unpack K to int8                          178K       176K                  173K              174K
+Q.K (int8 MMA)                            128K       124K                  133K              134K
+softmax                                    34K        33K                   33K               33K
+wait (B) + issue next K's cp.async        158K       282K                  272K              184K
+unpack V to f16                           232-446K   459K                  241K              236K
+P.V                                        49K        42K                   45K               46K
+bench (us)                                 588        867                   743               639
+```
+
+(the unpack-V row also absorbs the barrier wait for warps still issuing, so it moves with them)
+
+Findings:
+- Issuing the cp.async copies is the largest cost, ~1,400-2,700 cycles a tile for ~14 warp-wide 16-byte copies:
+  the issuing warp stalls once the SM's outstanding requests fill, so the DRAM time lands at issue, where nothing
+  overlaps it (one CTA of 4 warps per SM: the head-256 1-row config takes 82 KB of smem with staging).
+- Block-table lookups add ~600-900 cycles a tile (identity table vs the lookup); batching them did not help.
+- The K unpack (~1,700 cycles a tile, ~8x its instruction count) and V unpack are latency bound for the same reason.
+- Q.K and P.V together are ~17%: the MMA side, int8 or f16, is not where this kernel's time goes.
+
+Implication: the llama.cpp mma kernel's tiling (nbatch_fa 64 at 1 row, f16 K and V tiles double-buffered) leaves too
+few warps per SM to overlap a quantized cache's copies and unpacks. tqLLM's kernel uses 32-key tiles and small smem,
+so several CTAs share an SM. The next step is a dedicated decode/verify kernel with that shape (or warp-specialized
+producer warps), not more changes inside this one.
