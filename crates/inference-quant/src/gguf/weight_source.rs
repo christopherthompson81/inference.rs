@@ -15,6 +15,8 @@ use crate::{
     slice_blocked_data,
 };
 
+// llama.cpp's routed expert stacks (`ffn_gate_exps.weight`, ...); the shared expert is `_shexp`
+const EXPERT_TENSOR_SUFFIX: &str = "_exps.weight";
 // No per-rank column count is a multiple of this, so tensor parallelism replicates row-scaled weights
 const ROW_SCALED_SHARD_ALIGNMENT: usize = usize::MAX;
 const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, IQ1_KT through IQ4_KT, IQ2_K through IQ6_K, and the IQ*_KS / IQ4_KSS / IQ2_KL types";
@@ -971,6 +973,32 @@ impl QuantizedWeightSource for GgufWeightSource {
                 .ok_or_else(|| Error::msg("GGUF resident byte estimate overflow"))?;
         }
         Ok((!layers.is_empty() && !layers.contains(&0)).then_some(layers))
+    }
+
+    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
+        let mut layers = Vec::<usize>::new();
+        let mut experts = None;
+        for (native_name, binding) in &self.bindings {
+            let (Some(layer), Some(source)) = (binding.text_layer_index(), binding.direct_tensor())
+            else {
+                continue;
+            };
+            if !source.ends_with(EXPERT_TENSOR_SUFFIX) {
+                continue;
+            }
+            if layers.len() <= layer {
+                layers.resize(layer + 1, 0);
+            }
+            layers[layer] += self.archive.tensor_info(source)?.exact_byte_len()?;
+            experts = experts.or_else(|| {
+                self.shapes
+                    .get(native_name)
+                    .and_then(|dims| dims.first().copied())
+            });
+        }
+        Ok(experts
+            .filter(|_| !layers.is_empty())
+            .map(|experts| (layers, experts)))
     }
 
     fn pack_factor_for(&self, key: &str, dtype: DType) -> Result<Option<usize>> {

@@ -730,6 +730,7 @@ mod tests {
             mtp_config: None,
             encoder_cache_memory_bytes: None,
             embeddings_on_host: false,
+            moe_expert_cache: None,
             overrides: Default::default(),
         }
     }

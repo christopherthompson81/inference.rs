@@ -62,6 +62,7 @@ impl SearchEmbedder {
             paged_attn_config: None,
             multi_row_decode: false,
             embeddings_on_host: false,
+            moe_expert_cache: None,
         };
         let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options)?;
 

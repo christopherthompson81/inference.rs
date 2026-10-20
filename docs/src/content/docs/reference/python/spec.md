@@ -687,6 +687,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `max_num_batched_tokens` | `int \| None` | optional |
 | `max_prefill_chunk_tokens` | `int \| None` | optional |
 | `max_seqs` | `int \| None` | optional |
+| `moe_expert_cache` | `int \| None` | optional |
 | `mtp` | `MtpSpec \| None` | optional |
 | `no_kv_cache` | `bool \| None` | optional |
 | `paged_attn` | `bool \| None` | optional |

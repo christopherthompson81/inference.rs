@@ -113,6 +113,8 @@ pub(crate) struct AutoDeviceMapSizingInputs<'a> {
     pub non_mapped_unpacked: bool,
     // the token embedding loads into host memory, so it leaves the device budget
     pub embeddings_on_host: bool,
+    /// Experts per layer kept on the GPU when MoE experts live in host memory.
+    pub moe_expert_cache: Option<usize>,
 }
 
 impl AutoDeviceMapSizes {
@@ -137,6 +139,34 @@ impl AutoDeviceMapSizes {
             self.non_mapped_size_in_bytes -= bytes;
             self.total_model_size_in_bytes -= bytes;
         }
+        Ok(self)
+    }
+}
+
+impl AutoDeviceMapSizes {
+    // Offloaded experts leave a layer's budget but for its cache slots (one more stays zeroed); the largest layer's
+    // full stack is staged on the device for prompts
+    fn without_offloaded_experts(
+        mut self,
+        inputs: &AutoDeviceMapSizingInputs<'_>,
+        source: &dyn QuantizedWeightSource,
+    ) -> Result<Self> {
+        let Some(slots) = inputs.moe_expert_cache else {
+            return Ok(self);
+        };
+        let Some((expert_bytes, experts)) = source.layer_expert_bytes()? else {
+            return Ok(self);
+        };
+        let cached = (slots + 1).min(experts + 1);
+        let mut staging = 0;
+        for (size, &bytes) in self.layer_sizes_in_bytes.iter_mut().zip(&expert_bytes) {
+            let kept = bytes / experts * cached;
+            *size = size.saturating_sub(bytes) + kept;
+            staging = staging.max(bytes);
+        }
+        self.non_mapped_size_in_bytes += staging;
+        self.total_model_size_in_bytes =
+            self.layer_sizes_in_bytes.iter().sum::<usize>() + self.non_mapped_size_in_bytes;
         Ok(self)
     }
 }
@@ -221,12 +251,14 @@ pub(crate) fn auto_device_map_sizes(
                     resident.iter().sum::<usize>() + sizes.non_mapped_size_in_bytes;
                 sizes.layer_sizes_in_bytes = resident;
             }
-            sizes.without_host_embedding(
-                &inputs,
-                dtype,
-                non_mapped_pack_factor,
-                Some(&quantization),
-            )
+            sizes
+                .without_host_embedding(
+                    &inputs,
+                    dtype,
+                    non_mapped_pack_factor,
+                    Some(&quantization),
+                )?
+                .without_offloaded_experts(&inputs, source.as_ref())
         }
         AutoDeviceMapSizing::Isq(isq) => {
             let moqe = matches!(inputs.organization, IsqOrganization::MoeExpertsOnly);

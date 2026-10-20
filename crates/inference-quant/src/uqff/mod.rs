@@ -345,6 +345,7 @@ pub struct ShardedVarBuilder {
     shapes: Option<Arc<HashMap<String, Vec<usize>>>>,
     lora_registry: Option<Arc<crate::LoraLayerRegistry>>,
     embeddings_on_host: bool,
+    moe_expert_cache: Option<usize>,
 }
 
 impl ShardedVarBuilder {
@@ -356,6 +357,7 @@ impl ShardedVarBuilder {
             shapes: None,
             lora_registry: None,
             embeddings_on_host: false,
+            moe_expert_cache: None,
         }
     }
 
@@ -367,6 +369,16 @@ impl ShardedVarBuilder {
 
     pub fn embeddings_on_host(&self) -> bool {
         self.embeddings_on_host
+    }
+
+    /// MoE experts built from this builder stay in host memory, with this many per layer cached on the GPU.
+    pub fn with_moe_expert_cache(mut self, experts: Option<usize>) -> Self {
+        self.moe_expert_cache = experts;
+        self
+    }
+
+    pub fn moe_expert_cache(&self) -> Option<usize> {
+        self.moe_expert_cache
     }
 
     pub(crate) fn with_shapes(mut self, shapes: HashMap<String, Vec<usize>>) -> Self {
@@ -399,6 +411,7 @@ impl ShardedVarBuilder {
             shapes: self.shapes.clone(),
             lora_registry: self.lora_registry.clone(),
             embeddings_on_host: self.embeddings_on_host,
+            moe_expert_cache: self.moe_expert_cache,
         }
     }
 

@@ -5,6 +5,8 @@ pub mod cpu_experts;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 #[cfg(feature = "cuda")]
+pub mod expert_stack;
+#[cfg(feature = "cuda")]
 pub mod fast_mmq;
 #[cfg(feature = "cuda")]
 pub mod fast_mmvq;

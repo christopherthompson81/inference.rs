@@ -535,6 +535,7 @@ pub struct LoadOptions<'a> {
     pub multi_row_decode: bool,
     /// An untied token embedding goes to pinned host memory the GPU gathers from over the bus, out of VRAM.
     pub embeddings_on_host: bool,
+    pub moe_expert_cache: Option<usize>,
 }
 
 /// The `Loader` trait abstracts the loading process. The primary entrypoint is the
@@ -556,6 +557,7 @@ pub struct LoadOptions<'a> {
 ///     paged_attn_config: None,
 ///     multi_row_decode: false,
 ///     embeddings_on_host: false,
+///     moe_expert_cache: None,
 /// };
 /// let pipeline = loader.load_model_from_hf(None, TokenSource::CacheToken, options).unwrap();
 /// ```

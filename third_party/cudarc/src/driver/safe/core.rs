@@ -854,6 +854,13 @@ pub struct CudaSlice<T> {
 unsafe impl<T> Send for CudaSlice<T> {}
 unsafe impl<T> Sync for CudaSlice<T> {}
 
+impl<T> CudaSlice<T> {
+    /// The host side of a slice from [CudaStream::alloc_mapped_host]; `None` for device memory.
+    pub fn mapped_host_ptr(&self) -> Option<*mut T> {
+        (!self.host_ptr.is_null()).then_some(self.host_ptr.cast())
+    }
+}
+
 impl<T> Drop for CudaSlice<T> {
     fn drop(&mut self) {
         let ctx = &self.stream.ctx;
