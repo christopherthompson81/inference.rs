@@ -902,7 +902,8 @@ pub(crate) fn can_sample_batch_cuda(seqs: &[&mut Sequence]) -> bool {
     {
         let mut categorical = None;
         for seq in seqs {
-            if !matches!(&seq.recognizer, SequenceRecognizer::None) || seq.tool_call_state.is_some()
+            if !matches!(&seq.recognizer, SequenceRecognizer::None)
+                || seq.tool_call_constrains_sampling()
             {
                 return false;
             }
@@ -985,7 +986,7 @@ struct CudaTokenBatchPlan {
 #[cfg(feature = "cuda")]
 fn cuda_token_sampling_plan(seq: &Sequence) -> Option<CudaBatchSamplingPlan> {
     if !matches!(&seq.recognizer, SequenceRecognizer::None)
-        || seq.tool_call_state.is_some()
+        || seq.tool_call_constrains_sampling()
         || seq.sampling_logprob_required()
         || seq.active_staged_speculative_len() != 0
     {
@@ -1344,7 +1345,9 @@ fn try_sample_batch_cuda(
     let mut samplers_and_plans = Vec::with_capacity(seqs.len());
     let mut sampling_logprob_required = false;
     for seq in seqs {
-        if !matches!(&seq.recognizer, SequenceRecognizer::None) || seq.tool_call_state.is_some() {
+        if !matches!(&seq.recognizer, SequenceRecognizer::None)
+            || seq.tool_call_constrains_sampling()
+        {
             return Ok(None);
         }
         let sampler = seq.sampler();

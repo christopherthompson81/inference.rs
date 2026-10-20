@@ -23,7 +23,7 @@ pub(crate) fn can_greedy_device_verify(seq: &Sequence) -> bool {
         !seq.return_logprobs()
             && !seq.sampling_logprob_required()
             && matches!(seq.recognizer, SequenceRecognizer::None)
-            && seq.tool_call_state.is_none()
+            && !seq.tool_call_constrains_sampling()
             && seq
                 .sampler()
                 .cuda_batch_sampling_plan(false)
@@ -849,6 +849,7 @@ pub(crate) async fn finish_verified_step(
     let general_metadata = pipeline.get_metadata();
     let eos_tok = seq.effective_eos_tokens(&general_metadata.eos_tok, disable_eos_stop);
     let return_logprobs = seq.return_logprobs();
+    let unconstrained = matches!(seq.recognizer, SequenceRecognizer::None);
 
     if let Some(anchor) = anchor_to_emit {
         finish_or_add_toks_to_seq(pipeline, prefix_cacher, seq, anchor, eos_tok, false).await?;
@@ -861,6 +862,23 @@ pub(crate) async fn finish_verified_step(
                 keep_len,
                 continuation_token: None,
             });
+        }
+        if tool_grammar_began(seq, unconstrained) {
+            return finish_at_tool_grammar(
+                pipeline,
+                seq,
+                prefix_cacher,
+                ToolGrammarCut {
+                    verify_logits: &verify_logits,
+                    accepted: 0,
+                    proposed: proposal.len(),
+                    base_len,
+                    eos_tok,
+                    return_logprobs,
+                    rng,
+                },
+            )
+            .await;
         }
     }
 
@@ -947,6 +965,24 @@ pub(crate) async fn finish_verified_step(
                     keep_len,
                     continuation_token: None,
                 });
+            }
+            // rows sampled on the host already applied the grammar; the device verified without it
+            if device_verification.is_some() && tool_grammar_began(seq, unconstrained) {
+                return finish_at_tool_grammar(
+                    pipeline,
+                    seq,
+                    prefix_cacher,
+                    ToolGrammarCut {
+                        verify_logits: &verify_logits,
+                        accepted,
+                        proposed: proposal.len(),
+                        base_len,
+                        eos_tok,
+                        return_logprobs,
+                        rng,
+                    },
+                )
+                .await;
             }
         } else {
             let keep_len = base_len + 1 + accepted;
@@ -1106,7 +1142,7 @@ pub(crate) fn stochastic_verification_allowed_for_sequence(seq: &Sequence) -> bo
     stochastic_verification_allowed(
         seq.sampler().is_argmax(),
         !matches!(seq.recognizer, SequenceRecognizer::None),
-        seq.tool_call_state.is_some(),
+        seq.tool_call_constrains_sampling(),
     )
 }
 
@@ -1358,6 +1394,24 @@ async fn finish_verified_step_stochastic(
                     continuation_token: None,
                 });
             }
+            // stochastic verification runs only unconstrained, so any grammar now began at this draft
+            if tool_grammar_began(seq, true) {
+                return finish_at_tool_grammar(
+                    pipeline,
+                    seq,
+                    prefix_cacher,
+                    ToolGrammarCut {
+                        verify_logits: &verify_logits,
+                        accepted,
+                        proposed: proposal.len(),
+                        base_len,
+                        eos_tok,
+                        return_logprobs,
+                        rng,
+                    },
+                )
+                .await;
+            }
             continue;
         }
 
@@ -1441,6 +1495,68 @@ async fn finish_verified_step_stochastic(
         accepted_drafts: accepted,
         proposed_drafts: proposal.len(),
         keep_len,
+        continuation_token,
+    })
+}
+
+fn tool_grammar_began(seq: &Sequence, unconstrained_at_start: bool) -> bool {
+    unconstrained_at_start && !matches!(seq.recognizer, SequenceRecognizer::None)
+}
+
+/// Where a step stops when a tool call opens at an accepted token.
+struct ToolGrammarCut<'a> {
+    verify_logits: &'a Tensor,
+    accepted: usize,
+    proposed: usize,
+    base_len: usize,
+    eos_tok: Option<&'a [u32]>,
+    return_logprobs: bool,
+    rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+}
+
+/// A tool call opened at an accepted token and its grammar now holds: the later drafts were verified without it, so
+/// they are dropped and the next token comes from the following verify row, sampled under the grammar.
+async fn finish_at_tool_grammar(
+    pipeline: &dyn Pipeline,
+    seq: &mut Sequence,
+    prefix_cacher: &mut PrefixCacheManagerV2,
+    cut: ToolGrammarCut<'_>,
+) -> Result<VerificationOutcome> {
+    let metadata = pipeline.get_metadata();
+    let row = logit_row(cut.verify_logits, cut.accepted)?;
+    let continuation = sample_sequence(
+        row,
+        seq,
+        cut.return_logprobs,
+        cut.eos_tok,
+        metadata.llg_factory.clone(),
+        metadata.max_seq_len,
+        cut.rng,
+        false,
+        false,
+        false,
+    )
+    .await?;
+    let token = continuation.token;
+    finish_or_add_toks_to_seq(
+        pipeline,
+        prefix_cacher,
+        seq,
+        continuation,
+        cut.eos_tok,
+        false,
+    )
+    .await?;
+    let continuation_token = if matches!(seq.getstate(), SequenceState::Done(_)) {
+        seq.clear_staged_speculative_tokens();
+        None
+    } else {
+        Some(token)
+    };
+    Ok(VerificationOutcome {
+        accepted_drafts: cut.accepted,
+        proposed_drafts: cut.proposed,
+        keep_len: cut.base_len + 1 + cut.accepted,
         continuation_token,
     })
 }

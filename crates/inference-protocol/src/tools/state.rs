@@ -124,6 +124,12 @@ impl ToolCallState {
         self.strategy.has_reasoning()
     }
 
+    /// Whether this state shapes the next token: a tool grammar holds, or a required call is still owed (stop tokens
+    /// are blocked and a grammar may be forced). Otherwise it only reads the text, and any sampler may run.
+    pub fn constrains_sampling(&self) -> bool {
+        self.grammar != ToolGrammarState::Inactive || self.required_tool_call_unsatisfied()
+    }
+
     pub fn required_tool_call_unsatisfied(&self) -> bool {
         self.obligation
             .unsatisfied(self.matcher.requires_tool_call())
@@ -361,6 +367,21 @@ mod tests {
 
     fn lark(grammar: &TopLevelGrammar) -> &str {
         grammar.grammars[0].lark_grammar.as_ref().unwrap()
+    }
+
+    // An optional tool call leaves sampling free until its grammar starts; a required one holds it until satisfied
+    #[test]
+    fn only_an_active_grammar_or_an_owed_call_constrains_sampling() {
+        let tools = vec![tool("get_weather")];
+        let mut auto = ToolCallState::new(ToolChoice::Auto, Some(&tools), None).unwrap();
+        assert!(!auto.constrains_sampling());
+        auto.mark_grammar_active(false);
+        assert!(auto.constrains_sampling());
+        assert!(auto.clear_active_grammar());
+        assert!(!auto.constrains_sampling());
+
+        let required = ToolCallState::new(ToolChoice::Required, Some(&tools), None).unwrap();
+        assert!(required.constrains_sampling());
     }
 
     #[test]

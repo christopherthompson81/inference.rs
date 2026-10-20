@@ -1197,6 +1197,13 @@ impl Sequence {
         get_mut_group!(self).sampling_logprob_required()
     }
 
+    /// Whether tool calling shapes the next token, so sampling must run where the grammar and stop rules apply.
+    pub(crate) fn tool_call_constrains_sampling(&self) -> bool {
+        self.tool_call_state
+            .as_ref()
+            .is_some_and(|state| state.constrains_sampling())
+    }
+
     pub fn prompt_tokens(&self) -> usize {
         self.prompt_len
     }
