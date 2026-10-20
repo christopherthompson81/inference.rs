@@ -214,6 +214,7 @@ impl EmbeddingLoader {
                 auto_device_map_params: None,
                 weight_target: self.load_context.weight_target(),
                 embeddings_on_host: false,
+                moe_expert_cache: None,
             },
             &mut paged_attn_config,
         )?;

@@ -1704,6 +1704,35 @@ impl FastExpertsWeights {
         ) else {
             return Ok(None);
         };
+        indexed_mmvq_with([gate, up, down], forward, config)
+    }
+
+    /// Grouped MoE forward for CUDA prefill. Returns Ok(Some) on success, Ok(None) to fall back.
+    #[cfg(feature = "cuda")]
+    pub(super) fn forward_grouped(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        let (Some(gate), Some(up), Some(down)) = (
+            self.fused_gate_proj.kernel_weight(),
+            self.fused_up_proj.kernel_weight(),
+            self.fused_down_proj.kernel_weight(),
+        ) else {
+            return Ok(None);
+        };
+        grouped_with([gate, up, down], forward, config)
+    }
+}
+
+/// The expert-indexed matvec over `[gate, up, down]` kernel weights, for decode-sized batches.
+#[cfg(feature = "cuda")]
+pub(super) fn indexed_mmvq_with(
+    [gate, up, down]: [&dyn inference_quant::KernelWeight; 3],
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+) -> Result<Option<Tensor>> {
+    {
         let Some(activation) = glu_activation(config.act) else {
             return Ok(None);
         };
@@ -1725,27 +1754,21 @@ impl FastExpertsWeights {
         let out = weighted_reduce_f32(forward, &routed, config.num_experts_per_tok)?;
         Ok(Some(out.to_dtype(forward.original_dtype)?))
     }
+}
 
-    /// Grouped MoE forward for CUDA prefill. Returns Ok(Some) on success, Ok(None) to fall back.
-    #[cfg(feature = "cuda")]
-    pub(super) fn forward_grouped(
-        &self,
-        forward: &MoEForward,
-        config: MoEForwardConfig,
-    ) -> Result<Option<Tensor>> {
+/// The grouped mmq over `[gate, up, down]` kernel weights, for prefill-sized batches.
+#[cfg(feature = "cuda")]
+pub(super) fn grouped_with(
+    [gate_qt, up_qt, down_qt]: [&dyn inference_quant::KernelWeight; 3],
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+) -> Result<Option<Tensor>> {
+    {
         let topk = config.num_experts_per_tok;
         let num_experts = config.num_experts;
         let total_assignments = forward.shape.num_tokens * topk;
 
         let dev = forward.xs_flat.device().as_cuda_device()?;
-
-        let (Some(gate_qt), Some(up_qt), Some(down_qt)) = (
-            self.fused_gate_proj.kernel_weight(),
-            self.fused_up_proj.kernel_weight(),
-            self.fused_down_proj.kernel_weight(),
-        ) else {
-            return Ok(None);
-        };
 
         // a weight grouped mmq cannot read runs the gather path
         if ![gate_qt, up_qt, down_qt]
@@ -1922,7 +1945,7 @@ impl FastExpertsWeights {
     }
 }
 
-fn glu_activation(act: Activation) -> Option<inference_quant::GluActivationType> {
+pub(super) fn glu_activation(act: Activation) -> Option<inference_quant::GluActivationType> {
     match act {
         Activation::Silu | Activation::Swish => Some(inference_quant::GluActivationType::Silu),
         Activation::NewGelu | Activation::GeluPytorchTanh => {

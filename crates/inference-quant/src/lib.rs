@@ -120,6 +120,12 @@ pub trait QuantizedWeightSource: Send + Sync {
     fn layer_resident_bytes(&self, _dtype: DType) -> Result<Option<Vec<usize>>> {
         Ok(None)
     }
+
+    /// Bytes of each text layer's routed MoE experts (indexed by layer, 0 for a dense one) and the experts a layer
+    /// holds; `None` when the source cannot tell or holds no experts.
+    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
+        Ok(None)
+    }
 }
 
 impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
@@ -134,6 +140,10 @@ impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
         shard: Shard,
     ) -> Result<Option<Arc<dyn QuantMethod>>> {
         (**self).load_linear(key, device, shard)
+    }
+
+    fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
+        (**self).layer_expert_bytes()
     }
 
     fn load_optional_tensor(&self, name: &str, device: &Device) -> Result<Option<Tensor>> {
@@ -213,6 +223,8 @@ pub use gguf::cuda::{
     moe_weighted_reduce_flat_bf16, moe_weighted_reduce_flat_same_dtype,
 };
 #[cfg(feature = "cuda")]
+pub use gguf::expert_stack::{DeviceExpertStack, HostExpertStack};
+#[cfg(feature = "cuda")]
 pub use gguf::fast_mmq::{
     grouped as grouped_moe_mmq, grouped_from_glu_packed as grouped_moe_mmq_from_glu_packed,
     grouped_from_glu_pair as grouped_moe_mmq_from_glu_pair, grouped_pair as grouped_moe_mmq_pair,
@@ -223,6 +235,7 @@ pub use gguf::fast_mmq::{
 pub use gguf::fast_mmvq::{
     moe_decode as indexed_moe_mmvq, supports_moe as supports_indexed_moe_mmvq, with_shared_input,
 };
+pub use gguf::kernel::GgufType;
 /// Runs `f`; without CUDA there are no tile-ordered matvecs to share an input's quantized activations.
 #[cfg(not(feature = "cuda"))]
 pub fn with_shared_input<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {

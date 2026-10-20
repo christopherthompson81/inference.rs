@@ -2602,6 +2602,7 @@ class RuntimeSpec:
     max_num_batched_tokens: int | None = None
     max_prefill_chunk_tokens: int | None = None
     max_seqs: int | None = None
+    moe_expert_cache: int | None = None
     mtp: MtpSpec | None = None
     no_kv_cache: bool | None = None
     paged_attn: bool | None = None

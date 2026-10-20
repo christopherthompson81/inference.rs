@@ -9,6 +9,8 @@ mod checkpoint;
 pub use checkpoint::{expert_stack_available, rebuild_expert_projection};
 mod config;
 mod forward;
+#[cfg(feature = "cuda")]
+mod offload;
 
 use inference_quant::{
     IsqType, LoraExpertExecution, LoraExpertProjectionNames, LoraExpertSiteHandle,
@@ -55,6 +57,8 @@ enum MoEExpertsBackendImpl {
     #[cfg(feature = "cuda")]
     Cutlass(CutlassExpertsWeights),
     Fast(FastExpertsWeights),
+    #[cfg(feature = "cuda")]
+    Offloaded(Box<offload::OffloadedExperts>),
 }
 
 impl MoEExpertsBackendImpl {
@@ -74,6 +78,10 @@ impl MoEExpertsBackendImpl {
                 .forward_impl(forward, config)
                 .map_err(|err| err.context("moe experts cutlass")),
             Self::Fast(w) => w.forward_impl(forward, config),
+            #[cfg(feature = "cuda")]
+            Self::Offloaded(w) => w
+                .forward(forward, config)
+                .map_err(|err| err.context("moe experts offloaded")),
         }
     }
 }
@@ -105,6 +113,19 @@ impl MoEExperts {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Self> {
+        #[cfg(feature = "cuda")]
+        if let (Some(slots), Some(device)) =
+            (vb.moe_expert_cache(), offload::cuda_device(&layer_device))
+            && let Some(offloaded) = Self::load_offloaded(cfg, &vb, comm, slots, device, act)?
+        {
+            return Ok(Self::from_backend(
+                MoEExpertsBackendImpl::Offloaded(offloaded),
+                None,
+                cfg,
+                comm,
+                act,
+            ));
+        }
         let experts_vb = vb.pp("experts").set_device(layer_device.clone());
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
@@ -256,6 +277,55 @@ impl MoEExperts {
         let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, lora_sharded)?;
 
         Ok(Self::from_backend(backend_impl, lora_site, cfg, comm, act))
+    }
+
+    // GGUF experts read on the host, kept there in pinned memory with a device cache of `slots` per projection
+    #[cfg(feature = "cuda")]
+    fn load_offloaded(
+        cfg: &MoEExpertsConfig,
+        vb: &ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+        slots: usize,
+        device: &inference_tensor::CudaDevice,
+        act: Activation,
+    ) -> Result<Option<Box<offload::OffloadedExperts>>> {
+        let Some(glu) = backends::glu_activation(act) else {
+            return Ok(None);
+        };
+        if comm.world_size() > 1 {
+            return Ok(None);
+        }
+        let host_vb = vb.pp("experts").set_device(Device::Cpu);
+        let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &host_vb, comm)? else {
+            return Ok(None);
+        };
+        let mut stacks = Vec::with_capacity(3);
+        for projection in [
+            &fast.fused_gate_proj,
+            &fast.fused_up_proj,
+            &fast.fused_down_proj,
+        ] {
+            let Some(blocks) = projection.cpu_gguf_blocks() else {
+                return Ok(None);
+            };
+            let Ok(dims) = <[usize; 3]>::try_from(blocks.dims) else {
+                return Ok(None);
+            };
+            if !inference_quant::cpu_experts::supports(blocks.ty, dims[2]) {
+                return Ok(None);
+            }
+            stacks.push(inference_quant::HostExpertStack::new(
+                blocks.ty,
+                dims,
+                &blocks.bytes,
+                device,
+            )?);
+        }
+        let [gate, up, down]: [inference_quant::HostExpertStack; 3] = stacks
+            .try_into()
+            .map_err(|_| inference_tensor::Error::msg("three expert projections"))?;
+        offload::OffloadedExperts::new([gate, up, down], slots, device, glu)
+            .map(|experts| Some(Box::new(experts)))
     }
 
     fn from_backend(

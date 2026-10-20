@@ -10,7 +10,8 @@
 >
 > - `src/driver/safe/core.rs`: `CudaStream::alloc_mapped_host` returns a `CudaSlice` over pinned host memory mapped
 >   into the device (`cuMemHostAlloc` with `DEVICEMAP`, then `cuMemHostGetDevicePointer`), so kernels read a table
->   kept in RAM. `CudaSlice` carries the host pointer and its drop frees that with `cuMemFreeHost`.
+>   kept in RAM. `CudaSlice` carries the host pointer and its drop frees that with `cuMemFreeHost`; `CudaSlice::mapped_host_ptr`
+>   hands that pointer out, so the CPU reads the same bytes.
 >
 > Everything else is upstream. To re-sync, copy a new crates.io release and reapply the changes above.
 

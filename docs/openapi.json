@@ -12469,6 +12469,14 @@
             ],
             "minimum": 0
           },
+          "moe_expert_cache": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "MoE experts (GGUF, on CUDA) stay in host memory with this many per layer cached on the GPU, the CPU running\nthe rest; unset keeps every expert in VRAM.",
+            "minimum": 0
+          },
           "mtp": {
             "oneOf": [
               {

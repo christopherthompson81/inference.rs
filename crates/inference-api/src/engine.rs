@@ -366,6 +366,10 @@ pub struct RuntimeSpec {
     /// output; on unless set to false.
     #[serde(default)]
     pub embeddings_on_host: Option<bool>,
+    /// MoE experts (GGUF, on CUDA) stay in host memory with this many per layer cached on the GPU, the CPU running
+    /// the rest; unset keeps every expert in VRAM.
+    #[serde(default)]
+    pub moe_expert_cache: Option<usize>,
     #[serde(default)]
     pub paged_cache: PagedCacheSpec,
     #[serde(default)]
@@ -738,6 +742,7 @@ impl EngineSpec {
         if let Some(on) = runtime.embeddings_on_host {
             builder = builder.with_embeddings_on_host(on);
         }
+        builder = builder.with_moe_expert_cache(runtime.moe_expert_cache);
         if let Some(tokens) = runtime.max_prefill_chunk_tokens {
             builder =
                 builder.with_max_prefill_chunk_tokens(nonzero("max_prefill_chunk_tokens", tokens)?);

@@ -692,6 +692,11 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub no_embeddings_on_host: bool,
 
+    /// Keep MoE experts (GGUF, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs the rest
+    #[arg(long, value_name = "EXPERTS")]
+    #[serde(default)]
+    pub moe_expert_cache: Option<usize>,
+
     /// CUDA prompt-token quantum used while decode is resident and for recurrent prefill batching
     #[arg(long, default_value_t = default_max_prefill_chunk_tokens())]
     #[serde(default = "default_max_prefill_chunk_tokens")]
@@ -1091,6 +1096,7 @@ impl Default for RuntimeOptions {
             max_seqs: DEFAULT_MAX_SEQS,
             max_num_batched_tokens: default_max_num_batched_tokens(),
             no_embeddings_on_host: false,
+            moe_expert_cache: None,
             max_prefill_chunk_tokens: default_max_prefill_chunk_tokens(),
             max_decode_steps_before_prefill: default_max_decode_steps_before_prefill(),
             no_kv_cache: false,

@@ -668,6 +668,7 @@ pub(crate) struct LoadSessionInputs<'a> {
     pub auto_device_map_params: Option<&'a AdjustAutoParams<'a>>,
     pub weight_target: &'static str,
     pub embeddings_on_host: bool,
+    pub moe_expert_cache: Option<usize>,
 }
 
 /// Devices, weight sources, device mappers and the installed ISQ plan for one load.
@@ -685,6 +686,7 @@ pub(crate) struct LoadSession {
     pub attention: inference_nn::paged_attention::AttentionImplementation,
     pub load_parts: LoadMetadataParts,
     pub embeddings_on_host: bool,
+    pub moe_expert_cache: Option<usize>,
 }
 
 /// Whether the config declares its head untied from the token embedding (on the model or its text model), so the
@@ -723,6 +725,7 @@ pub(crate) fn open_load_session(
         auto_device_map_params,
         weight_target,
         embeddings_on_host,
+        moe_expert_cache,
     } = inputs;
     let prepared_weight_source =
         prepared.and_then(|source| source.weights.weight_source().cloned());
@@ -739,6 +742,8 @@ pub(crate) fn open_load_session(
         && !distributed
         && in_situ_quant.is_none()
         && config_unties_embeddings(config);
+    let moe_expert_cache =
+        moe_expert_cache.filter(|_| device.is_cuda() && !write_uqff && !distributed);
     let WeightSources {
         uqff_reader,
         prepared: prepared_weight_source,
@@ -777,6 +782,7 @@ pub(crate) fn open_load_session(
                 matformer: matformer.as_ref().filter(|_| matformer_sizing),
                 non_mapped_unpacked,
                 embeddings_on_host,
+                moe_expert_cache,
             },
         },
         paged_attn_config,
@@ -861,6 +867,7 @@ pub(crate) fn open_load_session(
             attention,
             load_parts,
             embeddings_on_host,
+            moe_expert_cache,
         },
         mapper,
     ))
@@ -1034,7 +1041,9 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
         Some(layers) => vb.with_lora_registry(layers.clone()),
         None => vb,
     };
-    let vb = vb.with_embeddings_on_host(session.embeddings_on_host);
+    let vb = vb
+        .with_embeddings_on_host(session.embeddings_on_host)
+        .with_moe_expert_cache(session.moe_expert_cache);
     let tracker = vb.tracker().clone();
     let model = loader.build(
         config,

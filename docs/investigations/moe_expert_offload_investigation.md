@@ -174,3 +174,77 @@ Full lint and CPU / CUDA suites pass. Two recorded-logit tests moved by design: 
 (the conv now accumulates in F32, where the BF16 tensor path rounded every tap) and the Gemma3 Q8_0 recording, which
 gains a plain-AVX2 case (prompt rows tiled with per-256 activation scales, decode rows on the per-32 gemv). The
 aarch64 BF16 snapshot will move with the conv too and needs recording on a Mac.
+
+## Run 8 - 2026-10-20 19:30
+
+Question: does a first offloaded backend (experts in pinned host memory, an LRU slot cache per layer on the GPU, misses
+on the CPU) hold quality, and what does it reach?
+
+Prototype behind `INFERENCE_RS_MOE_OFFLOAD_SLOTS=<slots per layer>` (CUDA graphs off, as every offloaded layer syncs
+with the host). Decode (up to 8 tokens): the top-k ids and weights come to the host, cached experts run through the
+indexed matvec over the slot stack with remapped ids (misses get weight 0), the CPU runs the misses at the same time,
+and each missed expert is copied into the least recently used free slot on a side stream after the work queued so
+far; a slot serves once its copy's event completes. Larger batches stage the layer's whole expert stack into one
+buffer the layers share and run the grouped kernels.
+
+First perplexity check (`examples/perplexity --gguf <35B> --llama-cpp-ctx 512`, 14 KB of repo docs; the split path
+forced for whole prompts so it is the one scored):
+
+```
+resident                      1.5454
+staged prompt path            1.5454 (same kernels)
+all experts on the CPU        1.5524
+64 slots, split forced        1.8745   <- wrong
+256 slots, split forced       1.6842   <- wrong
+```
+
+A temporary check ran each forward's cache hits on the CPU as well: relative differences up to 957. The misses' picks
+pointed at slot 0 with weight 0, and slot 0 could be mid-copy for an admission, so a half-written block's scale could
+be non-finite and 0 times it is not 0. Slot 0 now stays zeroed and is never a victim (one slot more is allocated):
+hits agree with the CPU to a median 2.5% (the two activation quantizations), and both 64 and 256 slots score 1.5480
+(+0.17% over resident).
+
+`inference bench --prompt-len 512 --gen-len 128` (graphs off for the offloaded rows):
+
+```
+                                   decode tok/s   prompt 512 tok/s
+resident, graphs on                158.3          4180
+resident, graphs off               95.0           4157
+offload, 256 slots                 78.1           394
+offload, 128 slots (7.2 GiB)       70.0           395
+offload, 64 slots (3.6 GiB)        60.1           394
+offload, 0 slots (all CPU)         25.5           392
+llama.cpp -ncmoe 20 (about 7 GiB)  53.7           744
+llama.cpp -ncmoe 40                32.3           448
+```
+
+The prompt rate is the PCIe copy of every layer's full expert stack (about 14 GB a forward over gen3). Next: skip
+copying experts a layer already caches and overlap the next layer's copy with the current layer's compute; trim the
+per-layer host round trips (the 256-slot row is 2.3 ms a token behind resident-without-graphs); then the real flag and the
+device-map planner.
+
+## Run 9 - 2026-10-20 19:50
+
+Question: graphs gave resident decode 6.3 ms a token against 10.5 without; the CPU split rules them out, as every
+offloaded layer waits on the host. Would the GPU reading missed experts straight from host memory (no host sync, so
+graphs stay) do better?
+
+The host expert stacks are now mapped pinned memory (`alloc_mapped_host`, with a new `CudaSlice::mapped_host_ptr` in
+the vendored cudarc so the CPU reads the same bytes), which is also a `KernelWeight`. A temporary switch ran every
+expert of every layer through the indexed matvec straight from host memory:
+
+```
+all experts read over PCIe, graphs off   18.2 tok/s (54.9 ms)
+all experts read over PCIe, graphs on    19.5 tok/s (51.3 ms)
+all experts on the CPU, graphs off       25.5 tok/s (39.3 ms)
+```
+
+About 45 ms for a token's 450 MB of experts: 10 GB/s of zero-copy reads over gen3, about the CPU's rate. With a cache,
+a miss read over the bus still has to be copied in to be cached, so PCIe carries every miss twice; the CPU split keeps
+the bus for fills only. Projected at 128 slots (8% misses): about 100 tok/s zero-copy with graphs against 70 measured
+for the split, at 64 slots about even, both before counting the fills' share of the bus.
+
+The split keeps its place. Getting graphs back for it means capturing the host side too: async copies into pinned
+buffers, the hit/miss mapping and CPU experts as a host function node (no CUDA calls inside), and cache fills issued
+between steps with a host-function flag marking when they land. That is a later phase; first the flag, the planner
+and the prompt-side copies.

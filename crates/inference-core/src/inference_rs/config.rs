@@ -143,6 +143,7 @@ pub struct ModelLoaderConfig {
     pub encoder_cache_memory_bytes: Option<usize>,
     /// An untied token embedding goes to pinned host memory, out of VRAM.
     pub embeddings_on_host: bool,
+    pub moe_expert_cache: Option<usize>,
     /// Values given inline (not by path), which a selection's paths cannot carry.
     pub overrides: LoadOverrides,
 }
@@ -217,6 +218,7 @@ impl ModelLoaderConfig {
             paged_attn_config: self.paged_attn_config,
             multi_row_decode: self.mtp_config.is_some(),
             embeddings_on_host: self.embeddings_on_host,
+            moe_expert_cache: self.moe_expert_cache,
         };
         let pipeline = loader.load_model_from_hf(
             self.hf_revision.clone(),
