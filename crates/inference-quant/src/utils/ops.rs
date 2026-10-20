@@ -1865,7 +1865,7 @@ fn cpu_sigmoid(x: f32) -> f32 {
     1.0 / (1.0 + (-x).exp())
 }
 
-fn apply_cpu_activation(x: f32, activation: GluActivationType) -> f32 {
+pub(crate) fn apply_cpu_activation(x: f32, activation: GluActivationType) -> f32 {
     match activation {
         GluActivationType::Silu => cpu_silu(x),
         GluActivationType::Gelu => cpu_gelu(x),

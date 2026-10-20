@@ -1,5 +1,7 @@
 pub mod archive;
 pub mod cpu;
+mod cpu_dot;
+pub mod cpu_experts;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda;
 #[cfg(feature = "cuda")]
@@ -567,6 +569,20 @@ impl QuantMethod for GgufMatMul {
             inference_tensor::quantized::QMatMul::QTensor(qt) => Some(qt.as_ref()),
             _ => None,
         }
+    }
+
+    fn cpu_gguf_blocks(&self) -> Option<cpu_experts::CpuGgufBlocks<'_>> {
+        let inference_tensor::quantized::QMatMul::QTensor(qt) = &self.w else {
+            return None;
+        };
+        if self.b.is_some() || !qt.device().is_cpu() {
+            return None;
+        }
+        Some(cpu_experts::CpuGgufBlocks {
+            ty: qt.dtype().into(),
+            dims: qt.shape().dims(),
+            bytes: qt.data().ok()?,
+        })
     }
 
     #[cfg(all(feature = "cuda", has_marlin_kernels))]

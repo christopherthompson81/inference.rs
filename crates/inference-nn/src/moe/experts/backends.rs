@@ -8,7 +8,6 @@ use inference_tensor::{D, DType, Device, Result, Tensor};
 use std::sync::Arc;
 
 use crate::cuda::moe;
-#[cfg(feature = "cuda")]
 use crate::layers::Activation;
 
 use super::checkpoint::ExpertCheckpoint;
@@ -1244,6 +1243,11 @@ impl FastExpertsWeights {
         {
             return Ok(result);
         }
+        if self.fused_gate_proj.stats_snapshot().is_none()
+            && let Some(result) = self.forward_cpu_blocks(forward, config)?
+        {
+            return Ok(result);
+        }
 
         self.forward_gather(forward, config)
     }
@@ -1328,6 +1332,74 @@ impl FastExpertsWeights {
             ]
             .iter()
             .any(|projection| projection.name() == "NVFP4")
+    }
+
+    // GGUF experts in host memory run from their blocks; the gather path would dequantize every expert it touches
+    fn forward_cpu_blocks(
+        &self,
+        forward: &MoEForward,
+        config: MoEForwardConfig,
+    ) -> Result<Option<Tensor>> {
+        use inference_quant::cpu_experts::{CpuExpertRoute, CpuExperts, supports};
+        if !forward.xs.device().is_cpu() {
+            return Ok(None);
+        }
+        let Some(act) = glu_activation(config.act) else {
+            return Ok(None);
+        };
+        let (Some(gate), Some(up), Some(down)) = (
+            self.fused_gate_proj.cpu_gguf_blocks(),
+            self.fused_up_proj.cpu_gguf_blocks(),
+            self.fused_down_proj.cpu_gguf_blocks(),
+        ) else {
+            return Ok(None);
+        };
+        let (Some(gate), Some(up), Some(down)) = (
+            gate.expert_projection(),
+            up.expert_projection(),
+            down.expert_projection(),
+        ) else {
+            return Ok(None);
+        };
+        if ![gate, up, down].iter().all(|p| supports(p.ty, p.cols)) {
+            return Ok(None);
+        }
+        let xs = forward
+            .xs_flat
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let ids = forward
+            .topk_ids
+            .to_dtype(DType::U32)?
+            .flatten_all()?
+            .to_vec1::<u32>()?;
+        let weights = forward
+            .topk_weights
+            .to_dtype(DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        let routes = ids
+            .iter()
+            .zip(&weights)
+            .enumerate()
+            .map(|(i, (&expert, &weight))| CpuExpertRoute {
+                token: i / config.num_experts_per_tok,
+                expert: expert as usize,
+                weight,
+            })
+            .collect::<Vec<_>>();
+        let mut out = vec![0f32; xs.len()];
+        CpuExperts {
+            gate,
+            up,
+            down,
+            act,
+        }
+        .forward(&xs, &routes, &mut out)?;
+        Tensor::from_vec(out, forward.shape.flat(), &Device::Cpu)?
+            .to_dtype(forward.original_dtype)
+            .map(Some)
     }
 
     pub(super) fn forward_gather(
@@ -1850,7 +1922,6 @@ impl FastExpertsWeights {
     }
 }
 
-#[cfg(feature = "cuda")]
 fn glu_activation(act: Activation) -> Option<inference_quant::GluActivationType> {
     match act {
         Activation::Silu | Activation::Swish => Some(inference_quant::GluActivationType::Silu),
@@ -2055,6 +2126,87 @@ mod nvfp4_tests {
             let output = experts.forward_gather(&forward, config)?.to_vec2::<f32>()?;
             assert_eq!(output, vec![vec![204.0; FEATURES], vec![816.0; FEATURES]]);
         }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cpu_block_tests {
+    use super::*;
+    use crate::moe::experts::forward::MoEForwardShape;
+    use inference_quant::GgufMatMul;
+    use inference_tensor::quantized::{GgmlDType, QTensor};
+
+    const EXPERTS: usize = 4;
+    const HIDDEN: usize = 256;
+    const INTER: usize = 256;
+    const TOKENS: usize = 3;
+    const TOPK: usize = 2;
+
+    // fixed values, so the activations' Q8_K rounding is the same on every run
+    fn patterned(dims: &[usize], salt: usize, scale: f32) -> Result<Tensor> {
+        let len = dims.iter().product::<usize>();
+        let values = (0..len)
+            .map(|i| {
+                let step = u16::try_from((i * 37 + salt * 17) % 257).expect("below 257");
+                (f32::from(step) / 128.0 - 1.0) * scale
+            })
+            .collect::<Vec<_>>();
+        Tensor::from_vec(values, dims, &Device::Cpu)
+    }
+
+    fn projection(
+        rows: usize,
+        cols: usize,
+        ty: GgmlDType,
+        salt: usize,
+    ) -> Result<Arc<dyn QuantMethod>> {
+        let dense = patterned(&[EXPERTS, rows, cols], salt, 0.1)?;
+        let qtensor = QTensor::quantize(&dense, ty)?;
+        Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
+            q_weight: Arc::new(qtensor),
+            b: None,
+        })?))
+    }
+
+    #[test]
+    fn block_forward_matches_gather_routing() -> Result<()> {
+        let experts = FastExpertsWeights {
+            fused_gate_proj: projection(INTER, HIDDEN, GgmlDType::Q4K, 1)?,
+            fused_up_proj: projection(INTER, HIDDEN, GgmlDType::Q4K, 2)?,
+            fused_down_proj: projection(HIDDEN, INTER, GgmlDType::Q6K, 3)?,
+            sharded: false,
+        };
+        let xs = patterned(&[1, TOKENS, HIDDEN], 4, 1.0)?;
+        let xs_flat = xs.reshape((TOKENS, HIDDEN))?;
+        let ids = Tensor::new(&[[3u32, 0], [1, 3], [2, 1]], &Device::Cpu)?;
+        let weights = Tensor::new(&[[0.6f32, 0.4], [0.9, 0.1], [0.5, 0.5]], &Device::Cpu)?;
+        let forward = MoEForward {
+            xs: &xs,
+            xs_flat: &xs_flat,
+            topk_weights: &weights,
+            topk_ids: &ids,
+            original_dtype: DType::F32,
+            shape: MoEForwardShape::new(1, TOKENS, HIDDEN),
+            lora: None,
+        };
+        let config = MoEForwardConfig {
+            num_experts: EXPERTS,
+            num_experts_per_tok: TOPK,
+            act: Activation::Silu,
+        };
+        let blocks = experts
+            .forward_cpu_blocks(&forward, config)?
+            .expect("k-quant experts run from their blocks");
+        let gathered = experts.forward_gather(&forward, config)?;
+        let err = (&blocks - &gathered)?
+            .sqr()?
+            .sum_all()?
+            .sqrt()?
+            .to_scalar::<f32>()?;
+        let norm = gathered.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
+        // the block path quantizes its activations to Q8_K
+        assert!(err < 0.02 * norm, "relative error {}", err / norm);
         Ok(())
     }
 }

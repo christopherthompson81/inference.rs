@@ -10,7 +10,7 @@ use super::kernel::GgufType;
 use crate::{IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde};
 
 // ggml's IQ4_NL / IQ4_XS codebook (`kvalues_iq4nl` in ggml-common.h)
-const KVALUES_IQ4NL: [i8; 16] = [
+pub(super) const KVALUES_IQ4NL: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 const IQ4_NL_BLOCK: usize = 32;
@@ -780,6 +780,17 @@ impl QuantMethod for GgufRawMatMul {
     #[cfg(feature = "cuda")]
     fn kernel_weight(&self) -> Option<&dyn super::kernel::KernelWeight> {
         Some(&self.w)
+    }
+
+    fn cpu_gguf_blocks(&self) -> Option<super::cpu_experts::CpuGgufBlocks<'_>> {
+        match &self.w.storage {
+            RawStorage::Cpu(bytes) if self.b.is_none() => Some(super::cpu_experts::CpuGgufBlocks {
+                ty: self.w.ty,
+                dims: self.w.shape.dims(),
+                bytes: std::borrow::Cow::Borrowed(bytes.as_slice()),
+            }),
+            _ => None,
+        }
     }
 
     // One expert dequantized at a time, then its matmul over the inputs routed to it; `a` is per token or per slot
