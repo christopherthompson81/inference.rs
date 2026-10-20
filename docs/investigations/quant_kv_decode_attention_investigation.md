@@ -163,3 +163,35 @@ Implication: the llama.cpp mma kernel's tiling (nbatch_fa 64 at 1 row, f16 K and
 few warps per SM to overlap a quantized cache's copies and unpacks. tqLLM's kernel uses 32-key tiles and small smem,
 so several CTAs share an SM. The next step is a dedicated decode/verify kernel with that shape (or warp-specialized
 producer warps), not more changes inside this one.
+
+## Run 7 - 2026-10-20 06:30
+
+Question: does a dedicated decode/verify kernel with tqLLM's shape (small tiles, two blocks an SM) beat the mma
+kernel over a quantized cache?
+
+Implementation (`fattn-quant.cuh`, branch quant-kv-int8-qk-wip): one block per (split, K/V head, sequence), 4 warps,
+32-key tiles; raw K/V rows cp.async'd into two slots sized by the layer's bits; K unpacked to int8, V to f16 in
+smem; Q quantized from global straight into int8 hi/lo A fragments (amax and sums over the 4 lanes sharing a
+row); Q.K by m16n8k32 int8, online softmax in exp2, P.V by m16n8k8 f16 from the score fragments with
+ldmatrix.trans of V; every warp's partial is a split of a workspace merged by a combine kernel. Paged, batched,
+causal and window only; anything else falls to the mma kernel. ~45 KB smem at q3, so two blocks an SM. Passed the
+quantized-cache fattn tests on its first working build.
+
+```
+128K (us)                         rows 1    rows 8
+mma kernel, staged (Run 4)         468.1     682.3
+dedicated kernel                   513.2     766.3
+  unpack skipped                   401.7     665.5
+  Q.K, softmax and P.V skipped     418.9     438.2
+2K                                  88.7      91.6    (mma kernel ~23 / ~52)
+```
+
+Findings:
+- With no math at all the kernel streams the q3 cache at ~280 GB/s; the copy, not the arithmetic, is the ceiling.
+  The bf16 mma path streams ~780 GB/s through the same cp.async, with ~32 KB tiles in flight against our ~7 KB.
+- At 2K the fixed costs dominate: 4 x SMs / (K/V heads x sequences) splits regardless of length (device-side lengths
+  leave the host blind under graph capture), and the combine pass.
+Implication: the quantized path needs much more data in flight per SM than these tiles give (deeper raw pipeline,
+larger raw tiles unpacked in sub-tiles, or producer warps), and lengths the host can use to size splits. Without
+counter access (ncu) each variant is a ~10 minute rebuild and an inference from timings; enabling profiling
+(NVreg_RestrictProfilingToAdminUsers=0) would cut that loop.
