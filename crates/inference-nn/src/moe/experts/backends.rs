@@ -2143,14 +2143,25 @@ mod cpu_block_tests {
     const TOKENS: usize = 3;
     const TOPK: usize = 2;
 
+    // fixed values, so the activations' Q8_K rounding is the same on every run
+    fn patterned(dims: &[usize], salt: usize, scale: f32) -> Result<Tensor> {
+        let len = dims.iter().product::<usize>();
+        let values = (0..len)
+            .map(|i| {
+                let step = u16::try_from((i * 37 + salt * 17) % 257).expect("below 257");
+                (f32::from(step) / 128.0 - 1.0) * scale
+            })
+            .collect::<Vec<_>>();
+        Tensor::from_vec(values, dims, &Device::Cpu)
+    }
+
     fn projection(
         rows: usize,
         cols: usize,
         ty: GgmlDType,
-        offset: f64,
+        salt: usize,
     ) -> Result<Arc<dyn QuantMethod>> {
-        let dense =
-            Tensor::rand(-0.1f32, 0.1, (EXPERTS, rows, cols), &Device::Cpu)?.affine(1.0, offset)?;
+        let dense = patterned(&[EXPERTS, rows, cols], salt, 0.1)?;
         let qtensor = QTensor::quantize(&dense, ty)?;
         Ok(Arc::new(GgufMatMul::new(QuantMethodConfig::Gguf {
             q_weight: Arc::new(qtensor),
@@ -2161,12 +2172,12 @@ mod cpu_block_tests {
     #[test]
     fn block_forward_matches_gather_routing() -> Result<()> {
         let experts = FastExpertsWeights {
-            fused_gate_proj: projection(INTER, HIDDEN, GgmlDType::Q4K, 0.001)?,
-            fused_up_proj: projection(INTER, HIDDEN, GgmlDType::Q4K, 0.002)?,
-            fused_down_proj: projection(HIDDEN, INTER, GgmlDType::Q6K, 0.003)?,
+            fused_gate_proj: projection(INTER, HIDDEN, GgmlDType::Q4K, 1)?,
+            fused_up_proj: projection(INTER, HIDDEN, GgmlDType::Q4K, 2)?,
+            fused_down_proj: projection(HIDDEN, INTER, GgmlDType::Q6K, 3)?,
             sharded: false,
         };
-        let xs = Tensor::rand(-1f32, 1., (1, TOKENS, HIDDEN), &Device::Cpu)?;
+        let xs = patterned(&[1, TOKENS, HIDDEN], 4, 1.0)?;
         let xs_flat = xs.reshape((TOKENS, HIDDEN))?;
         let ids = Tensor::new(&[[3u32, 0], [1, 3], [2, 1]], &Device::Cpu)?;
         let weights = Tensor::new(&[[0.6f32, 0.4], [0.9, 0.1], [0.5, 0.5]], &Device::Cpu)?;
