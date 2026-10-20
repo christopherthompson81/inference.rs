@@ -26,6 +26,10 @@
   // calls after which the project may have changed
   const CHANGING_TOOLS = new Set(["edit", "write", "bash"]);
   const SUMMARY_CHARS = 100;
+  // how often the agent clock redraws while a prompt runs
+  const CLOCK_TICK_MS = 1000;
+  // an activity line names this many files before it counts them instead
+  const LABEL_FILES = 2;
   // the agent's own words for a call the user turned down
   const DECLINED = "the user declined this call";
   const MODES: { id: PermissionMode; label: string }[] = [
@@ -79,6 +83,12 @@
   let running = $state(false);
   let error = $state("");
   let usage = $state<Record<string, any> | null>(null);
+  // time the agent worked on the last prompt, less the time it waited for an approval
+  let agentMs = $state(0);
+  let activeSince = $state<number | null>(null);
+  let now = $state(Date.now());
+  let agentSeconds = $derived((agentMs + (activeSince != null ? now - activeSince : 0)) / 1000);
+  let blocks = $derived(groupActivity(items));
   let container = $state<HTMLDivElement | null>(null);
   let sideTab = $state<"sessions" | "files">("sessions");
   let changes = $state<FileChange[]>([]);
@@ -150,6 +160,90 @@
   function findTool(list: Item[], id: string): ToolItem | undefined {
     return list.findLast((item): item is ToolItem => item.kind === "tool" && item.id === id);
   }
+
+  type Entry = { item: Item; index: number };
+  type Block = { kind: "one"; entry: Entry } | { kind: "activity"; entries: Entry[]; key: number };
+
+  // Thinking and the tool calls after it fold into one line until the next text, as Claude Code shows them
+  function groupActivity(list: Item[]): Block[] {
+    const out: Block[] = [];
+    let run: Entry[] = [];
+    const flush = () => {
+      if (run.some((entry) => entry.item.kind === "tool")) out.push({ kind: "activity", entries: run, key: run[0].index });
+      else for (const entry of run) out.push({ kind: "one", entry });
+      run = [];
+    };
+    list.forEach((item, index) => {
+      if (item.kind === "reasoning" || item.kind === "tool") {
+        run.push({ item, index });
+      } else {
+        flush();
+        out.push({ kind: "one", entry: { item, index } });
+      }
+    });
+    flush();
+    return out;
+  }
+
+  function toolsOf(entries: Entry[]): ToolItem[] {
+    return entries.map((entry) => entry.item).filter((item): item is ToolItem => item.kind === "tool");
+  }
+
+  function activityLabel(entries: Entry[]): string {
+    const tools = toolsOf(entries);
+    const of = (names: string[]) => tools.filter((tool) => names.includes(tool.name));
+    const files = (list: ToolItem[]) => [
+      ...new Set(list.map((tool) => str(tool.args.path).split("/").pop() ?? "").filter(Boolean)),
+    ];
+    const named = (verb: string, list: ToolItem[]) => {
+      const names = files(list);
+      if (names.length > 0 && names.length <= LABEL_FILES) return `${verb} ${names.join(", ")}`;
+      const count = Math.max(names.length, list.length);
+      return `${verb} ${count} file${count === 1 ? "" : "s"}`;
+    };
+    const counted = (verb: string, noun: string, n: number) => `${verb} ${n} ${noun}${n === 1 ? "" : "s"}`;
+    const parts: string[] = [];
+    const reads = of(["read"]);
+    const edits = of(["edit", "write"]);
+    const searches = of(["grep", "glob"]);
+    const commands = of(["bash"]);
+    if (reads.length) parts.push(named("read", reads));
+    if (edits.length) parts.push(named("edited", edits));
+    if (searches.length) parts.push(counted("searched", "pattern", searches.length));
+    if (commands.length) parts.push(counted("ran", "command", commands.length));
+    const known = new Set(["read", "edit", "write", "grep", "glob", "bash"]);
+    for (const name of new Set(tools.filter((tool) => !known.has(tool.name)).map((tool) => tool.name))) parts.push(`used ${name}`);
+    const text = parts.join(", ");
+    return `${text.charAt(0).toUpperCase()}${text.slice(1)} (${tools.length})`;
+  }
+
+  function activityState(entries: Entry[]): "running" | "waiting" | "error" | "done" {
+    const tools = toolsOf(entries);
+    if (tools.some((tool) => tool.approval)) return "waiting";
+    if (tools.some((tool) => tool.running) || (running && entries[entries.length - 1].index === items.length - 1))
+      return "running";
+    if (tools.some((tool) => tool.isError || tool.declined)) return "error";
+    return "done";
+  }
+
+  // runs while a prompt does, paused while an approval waits on the user
+  function syncClock() {
+    const t = Date.now();
+    const waiting = items.some((item) => item.kind === "tool" && item.approval);
+    if (running && !waiting) {
+      if (activeSince == null) activeSince = t;
+    } else if (activeSince != null) {
+      agentMs += t - activeSince;
+      activeSince = null;
+    }
+    now = t;
+  }
+
+  $effect(() => {
+    if (!running) return;
+    const timer = setInterval(() => (now = Date.now()), CLOCK_TICK_MS);
+    return () => clearInterval(timer);
+  });
 
   function appendText(kind: "text" | "reasoning", delta: string) {
     const last = items[items.length - 1];
@@ -224,6 +318,7 @@
         error = event.message;
         break;
     }
+    syncClock();
     void scrollDown();
   }
 
@@ -314,6 +409,7 @@
       projectPath = session.project;
       items = fromMessages(session.messages);
       usage = null;
+      agentMs = 0;
       error = "";
       store(PROJECT_KEY, project);
       await refreshSessions();
@@ -334,6 +430,7 @@
       projectPath = demo.project;
       items = [];
       usage = null;
+      agentMs = 0;
       error = "";
       await refreshSessions();
       prompt = demo.prompt;
@@ -352,6 +449,9 @@
     error = "";
     items.push({ kind: "user", text });
     running = true;
+    agentMs = 0;
+    activeSince = null;
+    syncClock();
     void scrollDown();
     try {
       await code.send(sessionId, modelStore.selectedModel, text, mode, thinking === "default" ? null : thinking === "on", onEvent);
@@ -360,6 +460,7 @@
     } finally {
       running = false;
       for (const item of items) if (item.kind === "tool") item.running = false;
+      syncClock();
       void refreshSessions();
       void refreshChanges();
     }
@@ -370,6 +471,7 @@
     const approvalId = tool.approval.id;
     tool.approval = null;
     if (decision === "deny") tool.declined = true;
+    syncClock();
     try {
       await code.approve(sessionId, approvalId, decision);
     } catch (e) {
@@ -539,7 +641,7 @@
                 there.
               </p>
             {/if}
-            {#each items as item, index (index)}
+            {#snippet entryView(item: Item, index: number)}
               {#if item.kind === "user"}
                 <div class="self-end rounded-2xl bg-blue-600 px-4 py-2 text-sm whitespace-pre-wrap text-white">{item.text}</div>
               {:else if item.kind === "reasoning"}
@@ -609,6 +711,39 @@
                   {/if}
                 </div>
               {/if}
+            {/snippet}
+            {#each blocks as block (block.kind === "one" ? `o${block.entry.index}` : `a${block.key}`)}
+              {#if block.kind === "one"}
+                {@render entryView(block.entry.item, block.entry.index)}
+              {:else}
+                {@const phase = activityState(block.entries)}
+                <details
+                  class="group/act rounded-lg border border-gray-200 dark:border-gray-800"
+                  open={phase === "waiting"}
+                  data-activity
+                >
+                  <summary class="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-sm text-gray-600 select-none hover:text-gray-800 dark:text-gray-400 dark:hover:text-gray-200">
+                    <svg class="h-3.5 w-3.5 shrink-0 transition-transform group-open/act:rotate-90" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7" />
+                    </svg>
+                    <span
+                      class="h-2 w-2 shrink-0 rounded-full {phase === 'running'
+                        ? 'animate-pulse bg-amber-400'
+                        : phase === 'waiting'
+                          ? 'bg-amber-500'
+                          : phase === 'error'
+                            ? 'bg-red-500'
+                            : 'bg-green-500'}"
+                    ></span>
+                    <span class="truncate">{activityLabel(block.entries)}</span>
+                  </summary>
+                  <div class="flex flex-col gap-2 border-t border-gray-200 px-2 py-2 dark:border-gray-800">
+                    {#each block.entries as entry (entry.index)}
+                      {@render entryView(entry.item, entry.index)}
+                    {/each}
+                  </div>
+                </details>
+              {/if}
             {/each}
             {#if error}
               <p class="rounded-md bg-red-50 px-3 py-2 text-sm text-red-700 dark:bg-red-950/40 dark:text-red-300">{error}</p>
@@ -637,10 +772,12 @@
               </button>
             {/if}
           </div>
-          {#if usage}
-            <p class="mx-auto mt-1 max-w-3xl text-xs text-gray-400">
-              context {usage.total_tokens} tokens, {usage.prompt_tokens_details?.cached_tokens ?? 0} cached, prefill
-              {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s, {Number(usage.avg_compl_tok_per_sec ?? 0).toFixed(1)} tok/s
+          {#if usage || agentSeconds > 0}
+            <p class="mx-auto mt-1 max-w-3xl text-xs text-gray-400" data-agent-seconds={agentSeconds.toFixed(1)}>
+              agent {agentSeconds.toFixed(1)} s{#if usage}, context {usage.total_tokens} tokens, {usage.prompt_tokens_details
+                  ?.cached_tokens ?? 0} cached, prefill {Number(usage.total_prompt_time_sec ?? 0).toFixed(1)} s, {Number(
+                  usage.avg_compl_tok_per_sec ?? 0,
+                ).toFixed(1)} tok/s{/if}
             </p>
           {/if}
         </div>
