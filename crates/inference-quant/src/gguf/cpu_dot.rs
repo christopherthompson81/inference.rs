@@ -63,15 +63,9 @@ fn f16_at(block: &[u8], at: usize) -> f32 {
     half::f16::from_le_bytes([block[at], block[at + 1]]).to_f32()
 }
 
+#[cfg(target_arch = "x86_64")]
 fn has_avx2_fma() -> bool {
-    #[cfg(target_arch = "x86_64")]
-    {
-        std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
-    }
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        false
-    }
+    std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma")
 }
 
 fn iq4_xs(row: &[u8], ys: &[BlockQ8K]) -> f32 {
