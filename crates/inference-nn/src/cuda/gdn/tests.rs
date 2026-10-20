@@ -649,10 +649,11 @@ fn value_major_grouped_prefill_preserves_pooled_padding() -> Result<()> {
     let reference_output = flat(&reference)?;
     let reference_state = flat(&reference_state)?;
 
-    for kernel in [
-        RecurrenceKernel::ValueMajorWarp2,
-        RecurrenceKernel::ValueMajorWarp4,
-        RecurrenceKernel::ValueMajorWarp8,
+    for (kernel, tol) in [
+        (RecurrenceKernel::ValueMajorWarp2, 0.0),
+        (RecurrenceKernel::ValueMajorWarp4, 0.0),
+        (RecurrenceKernel::ValueMajorWarp8, 0.0),
+        (RecurrenceKernel::Chunked, CHUNKED_TOLERANCE),
     ] {
         let mut state = initial.copy()?;
         let output = launch_recurrence(kernel, inputs, &mut state, slots)?;
@@ -660,14 +661,14 @@ fn value_major_grouped_prefill_preserves_pooled_padding() -> Result<()> {
             &format!("{kernel:?} pooled output"),
             &flat(&output)?,
             &reference_output,
-            0.0,
+            tol,
         );
         let state_host = flat(&state)?;
         assert_close(
             &format!("{kernel:?} pooled state"),
             &state_host,
             &reference_state,
-            0.0,
+            tol,
         );
         assert_zero(
             &format!("{kernel:?} padding output"),
@@ -682,6 +683,91 @@ fn value_major_grouped_prefill_preserves_pooled_padding() -> Result<()> {
                 0.0,
             );
         }
+    }
+    Ok(())
+}
+
+// the chunked form sums in another order than the token-by-token scan
+const CHUNKED_TOLERANCE: f32 = 2.0e-5;
+
+// Normalized q and k, unit-scale v and decays down to exp(-3) a token, as the model's prepare kernel produces.
+fn realistic_recurrence_inputs(
+    bh: usize,
+    seq_len: usize,
+    dev: &Device,
+) -> Result<(Tensor, Tensor, Tensor, Tensor, Tensor)> {
+    const HEAD_DIM: usize = 128;
+    let unit_rows = |salt: usize| -> Result<Tensor> {
+        let rows = tensor3(
+            patterned(bh * seq_len * HEAD_DIM, salt, 1.0, 0.0),
+            (bh, seq_len, HEAD_DIM),
+            dev,
+        )?;
+        rows.broadcast_div(&rows.sqr()?.sum_keepdim(2)?.sqrt()?)
+    };
+    let q = (unit_rows(140)? * (HEAD_DIM as f64).powf(-0.5))?;
+    let k = unit_rows(141)?;
+    let v = tensor3(
+        patterned(bh * seq_len * HEAD_DIM, 142, 1.0, 0.0),
+        (bh, seq_len, HEAD_DIM),
+        dev,
+    )?;
+    let g = tensor2(patterned(bh * seq_len, 143, 1.5, -1.5), (bh, seq_len), dev)?;
+    let beta = tensor2(patterned(bh * seq_len, 144, 0.45, 0.5), (bh, seq_len), dev)?;
+    Ok((q, k, v, g, beta))
+}
+
+#[test]
+fn chunked_prefill_matches_sequential_recurrence() -> Result<()> {
+    skip_without_cuda!();
+    const BH: usize = 48;
+    const HEAD_DIM: usize = 128;
+    let dev = Device::new_cuda(0)?;
+    for seq_len in [1usize, 63, 64, 65, 200, 512] {
+        let (q, k, v, g, beta) = realistic_recurrence_inputs(BH, seq_len, &dev)?;
+        let inputs = RecurrenceInputs {
+            q: &q,
+            k: &k,
+            v: &v,
+            g: &g,
+            beta: &beta,
+        };
+        let initial = Tensor::from_vec(
+            patterned(BH * HEAD_DIM * HEAD_DIM, 145, 0.5, 0.0),
+            (BH, HEAD_DIM, HEAD_DIM),
+            &dev,
+        )?;
+        let mut reference_state = initial.copy()?;
+        let reference = launch_recurrence(
+            RecurrenceKernel::ValueMajorWarp,
+            inputs,
+            &mut reference_state,
+            GdnStateSlots::Gathered,
+        )?;
+        let mut state = initial.copy()?;
+        let output = launch_recurrence(
+            RecurrenceKernel::Chunked,
+            inputs,
+            &mut state,
+            GdnStateSlots::Gathered,
+        )?;
+        // relative to the largest reference value, which grows with the state
+        let reference = flat(&reference)?;
+        let scale = reference.iter().fold(1.0f32, |m, x| m.max(x.abs()));
+        assert_close(
+            &format!("chunked S={seq_len} output"),
+            &flat(&output)?,
+            &reference,
+            CHUNKED_TOLERANCE * scale,
+        );
+        let reference_state = flat(&reference_state)?;
+        let scale = reference_state.iter().fold(1.0f32, |m, x| m.max(x.abs()));
+        assert_close(
+            &format!("chunked S={seq_len} state"),
+            &flat(&state)?,
+            &reference_state,
+            CHUNKED_TOLERANCE * scale,
+        );
     }
     Ok(())
 }
@@ -4549,6 +4635,48 @@ fn deferred_decode_matches_eager_across_wrap_and_flush_cuda() -> Result<()> {
             &initial_state_host[slot * slot_elements..(slot + 1) * slot_elements],
             0.0,
         );
+    }
+    Ok(())
+}
+
+// Chunked against the token scan by sequence length, 48 heads:
+// `cargo nextest run -p inference-nn --features cuda --run-ignored only -E 'test(/chunked_prefill_crossover/)' --no-capture`
+#[test]
+#[ignore]
+fn chunked_prefill_crossover() -> Result<()> {
+    const HEAD_DIM: usize = 128;
+    const ITERS: usize = 20;
+    let dev = Device::new_cuda(0)?;
+    for (bh, token_scan) in [
+        (48usize, RecurrenceKernel::ValueMajorWarp2),
+        (384, RecurrenceKernel::ValueMajorWarp4),
+    ] {
+        for seq_len in [16usize, 32, 48, 64, 128, 512] {
+            let (q, k, v, g, beta) = realistic_recurrence_inputs(bh, seq_len, &dev)?;
+            let inputs = RecurrenceInputs {
+                q: &q,
+                k: &k,
+                v: &v,
+                g: &g,
+                beta: &beta,
+            };
+            let mut times = Vec::new();
+            for kernel in [token_scan, RecurrenceKernel::Chunked] {
+                let mut state = Tensor::zeros((bh, HEAD_DIM, HEAD_DIM), DType::F32, &dev)?;
+                launch_recurrence(kernel, inputs, &mut state, GdnStateSlots::Gathered)?;
+                dev.synchronize()?;
+                let start = std::time::Instant::now();
+                for _ in 0..ITERS {
+                    launch_recurrence(kernel, inputs, &mut state, GdnStateSlots::Gathered)?;
+                }
+                dev.synchronize()?;
+                times.push(start.elapsed().as_secs_f64() * 1e6 / ITERS as f64);
+            }
+            println!(
+                "BH={bh} S={seq_len:5}: token scan {:8.1} us, chunked {:8.1} us",
+                times[0], times[1]
+            );
+        }
     }
     Ok(())
 }

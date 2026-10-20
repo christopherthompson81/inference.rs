@@ -579,3 +579,64 @@ written. Requantizing the weights to one scale per row costs 0.0017 of that on i
 
 The lossless lead in prefill is the GDN recurrence, at 13.5%. It is a token-sequential scan, 0.97 ms per layer per
 512-token chunk, about 1.6 TFLOPS. A chunked (WY) form on tensor cores would cut it while keeping fp32 state math.
+
+## Run 16 - 2026-10-20 11:30
+
+Question: Run 15 left the GDN recurrence (13.5% of prefill, a token-sequential scan) as the lossless prefill lead.
+Does a chunked form pay on this card in fp32?
+
+`gdn_chunked.cu`, chunks of 64 tokens. Per chunk with start state S0 and cumulative log decay G:
+A = beta exp(G_t - G_j) k_t.k_j below the diagonal, W = (I + A)^-1 beta exp(G) k and U = (I + A)^-1 beta v, so
+Delta = U - W S0. Then y = exp(G) q S0 + M Delta with M = exp(G_t - G_j) q_t.k_j on and below the diagonal, and
+S = exp(G_L) S0 + (exp(G_L - G_t) k_t)^T Delta. A prepare kernel builds W^T, Q^T, U, M^T and G for every chunk in
+parallel, solving (I + A) by forward substitution with one column per thread. A scan kernel walks the chunks of one
+head and one 16-value tile. Everything is fp32 SIMT. TF32 rounds to 10 mantissa bits, and 3xTF32 runs no faster
+than SIMT on GA102.
+
+Iterations, ncu at 48 heads x 512 tokens (prepare + scan, against the token scan's 970 us):
+
+```
+first version (scalar smem loads)                       257 + 366   (end to end: GDN 789 -> 623 ms of an 8K prefill)
+register tiles + float4 loads                            182 + 601   transposing slice stores hit 32-way bank conflicts
+prepare writes W^T, Q^T, M^T so the scan copies slices   217 + 275
+prepare streams K/Q in halves (2 blocks an SM)           260 + 339
+  + padded transposes, staged M^T                        246 + 338   56% of prepare's global sectors were excess
+  + right-hand sides loaded before the substitution      188 + 339   long-scoreboard stalls on 64 dependent loads
+scan prefetches its next slice into registers            194 + 290
+scan on 16-value tiles (384 blocks)                      189 + 283
+```
+
+A 256-thread scan (2x4 tiles) was slower (412 us) and was dropped. Underflow: the first version divided
+exp(G_L) by exp(G_t), which goes 0/0 once a few dozen tokens of strong decay underflow. Carrying G and taking
+exp(G_L - G_t) fixed it. The scan sits at ~30% of fp32 peak. The chunked form does ~2-3x the token scan's
+arithmetic (three [C, K] x [K, V] products a chunk), so more would need tensor cores.
+
+Crossover (`chunked_prefill_crossover`, ignored bench, includes the workspace allocation):
+
+```
+tokens          16     32     48     64     128    512
+48 heads  scan  34     65     96     126    261    1021 us
+          chunk 81     81     83     84     155    571
+384 heads scan  206    414    634    779    1443   6263
+          chunk 532    532    546    558    1034   4228
+```
+
+Auto-selected from 48 tokens. Accuracy: against the token scan on the model's real inputs (48 layers of a 512-token
+wikitext prefill, decays down to exp(-42) a token, beta up to 1.0), the outputs differ by 3e-7 to 1.6e-6 RMS
+relative, 1e-6 to 8e-6 max. End to end against the token-scan baseline of Run 15: KLD 0.00122, PPL 5.8287 against
+5.8265. To set that against noise, the token scan's own output multiplied by (1 + 2^-20) gives KLD 0.00120, PPL
+5.8230. Any rounding-level change in this model lands near 0.0012 against a fixed baseline, because bf16
+activations amplify it over 64 layers. The chunked kernel sits on that floor, so it is equivalent.
+
+Correction to Run 15: its KLDs were measured the same way and include this ~0.0012 floor. Above the floor, the
+weight-only int8 is ~0.0005, the per-128 activation groups ~0.0014, and the per-token scale (0.028) is unchanged.
+
+Prefill, interleaved cold A/B (same binary, `INFERENCE_RS_GDN_PREFILL_KERNEL=vmajor2` against auto, no disk cache,
+two rounds):
+
+```
+            token scan               chunked
+2K (x3)     1377 1360 1437 / 1373 1367 1429    1474 1416 1549 / 1440 1444 1512   +6%
+8K (x2)     1375 1368 / 1377 1368              1483 1488 / 1458 1461             +7%
+32K         1138 / 1142                        1205 / 1196                       +5%
+```
