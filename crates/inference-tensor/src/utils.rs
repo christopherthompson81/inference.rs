@@ -384,7 +384,13 @@ pub fn init_global_threadpool() {
         .build_global();
 }
 
+// counting physical cores reads /proc and /sys, too slow for the per-op calls that ask
 fn default_num_threads() -> usize {
+    static DEFAULT: OnceLock<usize> = OnceLock::new();
+    *DEFAULT.get_or_init(detect_num_threads)
+}
+
+fn detect_num_threads() -> usize {
     let physical = {
         #[cfg(target_os = "macos")]
         {

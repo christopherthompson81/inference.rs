@@ -1297,3 +1297,120 @@ mod parallel_quantize_tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod cpu_matmul_tests {
+    use super::{GgmlDType, QMatMul, QTensor};
+    use crate::{Device, Module, Tensor};
+
+    // the tiled CPU kernels (taken past one row, and for every row count of Q4_K) against a dequantized matmul
+    #[test]
+    fn quantized_matmuls_match_their_dequantized_weights() -> crate::Result<()> {
+        const K: usize = 512;
+        const N: usize = 48;
+        let dev = Device::Cpu;
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q6K, GgmlDType::Q8_0] {
+            let w = Tensor::randn(0f32, 1., (N, K), &dev)?;
+            let qw = QTensor::quantize(&w, dtype)?;
+            let dense = qw.dequantize(&dev)?;
+            let qmm = QMatMul::from_qtensor(qw)?;
+            for m in [1, 3, 9, 33] {
+                let x = Tensor::randn(0f32, 1., (m, K), &dev)?;
+                let expected = x.matmul(&dense.t()?)?;
+                let actual = qmm.forward(&x)?;
+                let err = (&actual - &expected)?
+                    .sqr()?
+                    .sum_all()?
+                    .sqrt()?
+                    .to_scalar::<f32>()?;
+                let norm = expected.sqr()?.sum_all()?.sqrt()?.to_scalar::<f32>()?;
+                // the activations are quantized to Q8_K or Q8_0 on these paths
+                assert!(
+                    err < 0.02 * norm,
+                    "{dtype:?} m={m}: relative error {}",
+                    err / norm
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod cpu_matvec_bench {
+    use super::*;
+    use crate::{Device, Module, Tensor};
+
+    // decode- and prompt-shaped matmuls of a 35B-A3B's dense layers, weights far larger than L3
+    #[test]
+    #[ignore = "benchmark"]
+    fn decode_matvec_bandwidth() -> crate::Result<()> {
+        for (dtype, k, n, iters) in [
+            (GgmlDType::Q8_0, 2048, 8192, 200),
+            (GgmlDType::Q8_0, 4096, 2048, 400),
+            (GgmlDType::Q6K, 2048, 32768, 100),
+            (GgmlDType::Q4K, 2048, 8192, 200),
+        ] {
+            let copies = 8;
+            let mats = (0..copies)
+                .map(|i| {
+                    let w = Tensor::rand(-1f32, 1., (n, k), &Device::Cpu)?
+                        .affine(1.0, i as f64 * 1e-3)?;
+                    QMatMul::from_qtensor(QTensor::quantize(&w, dtype)?)
+                })
+                .collect::<crate::Result<Vec<_>>>()?;
+            let x = Tensor::rand(-1f32, 1., (1, k), &Device::Cpu)?;
+            for m in &mats {
+                m.forward(&x)?;
+            }
+            let prompt = Tensor::rand(-1f32, 1., (512, k), &Device::Cpu)?;
+            let start = std::time::Instant::now();
+            mats[0].forward(&prompt)?;
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "{dtype:?} {k}x{n} x512: {:.1} ms, {:.0} GFLOP/s",
+                secs * 1e3,
+                (2 * 512 * n * k) as f64 / secs / 1e9
+            );
+            let start = std::time::Instant::now();
+            for i in 0..iters {
+                mats[i % copies].forward(&x)?;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            let bytes = n * k / dtype.block_size() * dtype.type_size();
+            println!(
+                "{dtype:?} {k}x{n}: {:.0} us, {:.1} GB/s",
+                secs / iters as f64 * 1e6,
+                (bytes * iters) as f64 / secs / 1e9
+            );
+        }
+        Ok(())
+    }
+
+    // a router-shaped F32 matvec
+    #[test]
+    #[ignore = "benchmark"]
+    fn router_matvec_bandwidth() -> crate::Result<()> {
+        let (k, n, copies, iters) = (2048, 256, 40, 8000);
+        let mats = (0..copies)
+            .map(|_| {
+                Ok(crate::nn::Linear::new(
+                    Tensor::rand(-1f32, 1., (n, k), &Device::Cpu)?,
+                    None,
+                ))
+            })
+            .collect::<crate::Result<Vec<_>>>()?;
+        let x = Tensor::rand(-1f32, 1., (1, k), &Device::Cpu)?;
+        let start = std::time::Instant::now();
+        for i in 0..iters {
+            mats[i % copies].forward(&x)?;
+        }
+        let secs = start.elapsed().as_secs_f64();
+        println!(
+            "F32 {k}x{n}: {:.0} us, {:.1} GB/s",
+            secs / iters as f64 * 1e6,
+            (n * k * 4 * iters) as f64 / secs / 1e9
+        );
+        Ok(())
+    }
+}

@@ -3,15 +3,14 @@
 use inference_tensor::quantized::GgmlType;
 use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
 use inference_tensor::{Result, bail};
-use rayon::prelude::*;
 
 use super::cpu_dot;
+
+// Tokens one expert row is dotted against per pass, decoding its blocks once for all of them
+const DOT_TOKENS: usize = 4;
 use super::kernel::GgufType;
 use crate::GluActivationType;
 use crate::utils::apply_cpu_activation;
-
-// Output rows a rayon task computes; one row of a 2048-wide IQ3_S expert is under 1 KB
-const ROWS_PER_TASK: usize = 32;
 
 /// A weight's GGUF blocks in host memory, with its logical dims (outermost first).
 pub struct CpuGgufBlocks<'a> {
@@ -95,12 +94,28 @@ pub struct CpuExpertRoute {
     pub weight: f32,
 }
 
-fn quantize_rows(xs: &[f32], cols: usize) -> Vec<BlockQ8K> {
+fn quantize_rows(xs: &[f32]) -> Vec<BlockQ8K> {
     let mut ys = vec![BlockQ8K::zeros(); xs.len() / QK_K];
-    ys.par_chunks_mut(cols / QK_K)
-        .zip(xs.par_chunks(cols))
-        .for_each(|(ys, xs)| BlockQ8K::from_float(xs, ys));
+    BlockQ8K::from_float(xs, &mut ys);
     ys
+}
+
+// The quantized matmuls' barrier pool spins between calls, so a second pool here would fight it for the cores
+fn for_each_parallel(n_items: usize, f: impl Fn(usize) + Sync) {
+    inference_tensor::utils::barrier_pool().execute_chunked(n_items, |range| range.for_each(&f));
+}
+
+/// A shared output each parallel item writes its own disjoint elements of.
+struct DisjointOut(*mut f32);
+
+// SAFETY: every writer stores to indices no other item touches, and the buffer outlives the parallel call
+unsafe impl Sync for DisjointOut {}
+
+impl DisjointOut {
+    // SAFETY: `i` is in bounds and written by this item alone
+    unsafe fn set(&self, i: usize, value: f32) {
+        unsafe { *self.0.add(i) = value };
+    }
 }
 
 impl CpuExperts<'_> {
@@ -122,39 +137,67 @@ impl CpuExperts<'_> {
         if routes.is_empty() {
             return Ok(());
         }
-        let q8 = quantize_rows(xs, hidden);
+        let q8 = quantize_rows(xs);
         let blocks = hidden / QK_K;
+        // routes grouped by expert, so each weight row is read once for every token sent to it
+        let mut order = (0..routes.len()).collect::<Vec<_>>();
+        order.sort_by_key(|&r| routes[r].expert);
+        let groups = order
+            .chunk_by(|&a, &b| routes[a].expert == routes[b].expert)
+            .collect::<Vec<_>>();
 
         let mut gated = vec![0f32; routes.len() * inter];
-        gated
-            .par_chunks_mut(ROWS_PER_TASK)
-            .enumerate()
-            .for_each(|(task, values)| {
-                for (i, value) in values.iter_mut().enumerate() {
-                    let flat = task * ROWS_PER_TASK + i;
-                    let (route, row) = (&routes[flat / inter], flat % inter);
-                    let x = &q8[route.token * blocks..][..blocks];
-                    let gate = cpu_dot::vec_dot(self.gate.ty, self.gate.row(route.expert, row), x);
-                    let up = cpu_dot::vec_dot(self.up.ty, self.up.row(route.expert, row), x);
-                    *value = apply_cpu_activation(gate, self.act) * up;
+        let gated_out = DisjointOut(gated.as_mut_ptr());
+        for_each_parallel(groups.len() * inter, |item| {
+            let (group, row) = (groups[item / inter], item % inter);
+            let expert = routes[group[0]].expert;
+            let (gate_row, up_row) = (self.gate.row(expert, row), self.up.row(expert, row));
+            let x = |r: usize| &q8[routes[r].token * blocks..][..blocks];
+            let store = |r: usize, gate: f32, up: f32| {
+                // SAFETY: route r's row `row` belongs to this item alone
+                unsafe {
+                    gated_out.set(r * inter + row, apply_cpu_activation(gate, self.act) * up)
+                };
+            };
+            let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
+            for quad in quads {
+                let xs = quad.map(x);
+                let gate = cpu_dot::vec_dot_x4(self.gate.ty, gate_row, xs);
+                let up = cpu_dot::vec_dot_x4(self.up.ty, up_row, xs);
+                for (k, &r) in quad.iter().enumerate() {
+                    store(r, gate[k], up[k]);
                 }
-            });
+            }
+            for &r in rest {
+                let (gate, up) = (
+                    cpu_dot::vec_dot(self.gate.ty, gate_row, x(r)),
+                    cpu_dot::vec_dot(self.up.ty, up_row, x(r)),
+                );
+                store(r, gate, up);
+            }
+        });
 
-        let gated = quantize_rows(&gated, inter);
+        let gated = quantize_rows(&gated);
         let inter_blocks = inter / QK_K;
         let mut routed = vec![0f32; routes.len() * hidden];
-        routed
-            .par_chunks_mut(ROWS_PER_TASK)
-            .enumerate()
-            .for_each(|(task, values)| {
-                for (i, value) in values.iter_mut().enumerate() {
-                    let flat = task * ROWS_PER_TASK + i;
-                    let (r, row) = (flat / hidden, flat % hidden);
-                    let h = &gated[r * inter_blocks..][..inter_blocks];
-                    *value =
-                        cpu_dot::vec_dot(self.down.ty, self.down.row(routes[r].expert, row), h);
+        let routed_out = DisjointOut(routed.as_mut_ptr());
+        for_each_parallel(groups.len() * hidden, |item| {
+            let (group, row) = (groups[item / hidden], item % hidden);
+            let down_row = self.down.row(routes[group[0]].expert, row);
+            let h = |r: usize| &gated[r * inter_blocks..][..inter_blocks];
+            // SAFETY: as above, for the down projection's rows
+            let store = |r: usize, value: f32| unsafe { routed_out.set(r * hidden + row, value) };
+            let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
+            for quad in quads {
+                let ys = cpu_dot::vec_dot_x4(self.down.ty, down_row, quad.map(h));
+                for (k, &r) in quad.iter().enumerate() {
+                    store(r, ys[k]);
                 }
-            });
+            }
+            for &r in rest {
+                store(r, cpu_dot::vec_dot(self.down.ty, down_row, h(r)));
+            }
+        });
 
         for (route, y) in routes.iter().zip(routed.chunks_exact(hidden)) {
             for (o, v) in out[route.token * hidden..][..hidden].iter_mut().zip(y) {

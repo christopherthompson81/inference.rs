@@ -91,3 +91,86 @@ llama.cpp -ngl 0 -t 8    60.2               9.35
 Greedy chat reply ("capital of France ... river", thinking off) is identical on both paths. Experts are now about 26
 ms of the 196 ms CPU token; the rest (attention, GDN, shared experts, lm head on the CPU) is where llama.cpp leads,
 and offload keeps all of that on the GPU, so it is not pursued here.
+
+## Run 5 - 2026-10-20 16:00
+
+Question: Run 4 left a CPU token at about 196 ms against llama.cpp's 107. Where is the rest going?
+
+Temporary timers (wall time per part, decode-dominated `bench --cpu --prompt-len 8 --gen-len 128`):
+
+```
+gdn 72 ms (project 38, recurrence 18, finish 11.7, conv 4) | experts 39 | router 14.6 | attn 13 | lm_head 14 | shared 6
+```
+
+Isolated matvec benchmarks put the dense Q8_0 / Q6_K / Q4_K decode shapes at 20-26 GB/s, so those layers were near
+bandwidth; the outliers were the router (F32 2048 x 256 at 6 GB/s), the experts (0.95 ms a layer against 0.64 in
+isolation) and the GDN recurrence (0.6 ms a layer for about 4 MB of state).
+
+Findings, in the order they showed up:
+
+- The CPU expert path ran on rayon while the quantized matmuls run on the tensor crate's barrier pool, whose workers
+  spin for a while after each call; the two pools fought over the same 8 cores. Moving the expert rows onto the barrier
+  pool: experts 39 -> 24 ms.
+- The F32 router stayed slow, and the isolated benchmark swung between 75 and 330 us with nothing but whether
+  `RAYON_NUM_THREADS` was set. With it unset, `get_num_threads()` falls back to `num_cpus::get_physical()`, which reads
+  /proc and /sys on every call, and every CPU F32 matmul asks: about 200 us per matmul. Cached in a OnceLock: the router
+  2048 x 256 went 277 -> 73 us.
+- `gemm`'s single-row path then reached 16 GB/s; a threaded column-split F32 matvec (barrier pool, 16-lane dot) reaches
+  28.6 GB/s, so it stays for single-row matmuls past 256K weights.
+
+```
+                                 decode tok/s   prompt 64 tok/s   router   experts   gdn
+Run 4                            5.1            13.6              14.6     39        72
+pool + thread count + F32 gemv   7.2            17.0              3.3      24        64
+llama.cpp -ngl 0 -t 8            9.35           60.2
+```
+
+Left: the GDN recurrence (18 ms, about 3x its traffic), and prefill, where the expert path reads each expert's rows
+once per routed token instead of once per expert.
+
+## Run 6 - 2026-10-20 17:10
+
+Question: what holds CPU prefill at 15.7 tok/s (512 tokens in 32.6 s) against llama.cpp's 60?
+
+Per-forward timers on a 512-token prompt: GDN 15.4 s (projection 6.5, conv 3.2, recurrence 3.7, output 2.0), experts
+13.2 s, attention 2.7 s, shared expert 1.2 s. In turn:
+
+- Experts read each expert row once per routed token. Grouping the routes by expert and dotting each row against four
+  tokens per pass (hand-written AVX2 x4 kernels; a const-generic version compiled to slower code than the one-token
+  kernel, 3.0 vs 4.05 GB/s a token) gives IQ3_S 5.7 and IQ4_XS 7.8 GB/s a token on one thread: experts 13.2 -> 9.0 s.
+- The GDN conv's fused CPU kernel was fine; around it the input was transposed to [b, conv, seq], concatenated with the
+  state twice and handed on as a transposed view. A conv straight over [b, seq, conv] (channels innermost, barrier pool)
+  that builds the next state directly: conv 3.3 -> 0.25 s, and the recurrence after it 3.7 -> 1.3 s, as it no longer
+  copies a strided input.
+- Q8_0 GEMM at 512 rows ran at 81-123 GFLOP/s against Q4_K / Q6_K's 500: the tiled x86 kernels skipped Q8_0 on pure
+  AVX2 because its +128 weights overflow maddubs' i16 pairs. Moving the weight's sign onto the activation (|w| <= 128
+  unsigned, Q8_K activations within +-127, as ggml's mul_add_epi8 does) keeps the packed layout and fits: 401-444
+  GFLOP/s, so GDN projection 6.3 -> 1.1 s, output 2.0 -> 0.5, attention 2.7 -> 0.8, shared expert 1.2 -> 0.25. The
+  tiled kernels had no test; one now compares Q4_K / Q6_K / Q8_0 at 1, 3, 9 and 33 rows with a dequantized matmul.
+
+```
+bench --cpu                      prompt 64 tok/s   prompt 512 tok/s   decode tok/s
+Run 4                            13.6              -                  5.1
+Run 5                            17.0              15.7               7.2
+this run                         34.0              36.3               7.3
+llama.cpp -ngl 0 -t 8            60.2              -                  9.35
+```
+
+A 512-token forward is now experts 9.05 s of about 14; the x4 kernels reach about 112 GOPS against tiled Q8_0's 400,
+so the next step there is decoding an expert's rows once into a cache-sized int8 tile and running the group's tokens
+over it.
+
+## Run 7 - 2026-10-20 17:40
+
+Question: the decode recurrence took 0.6 ms a layer for about 4 MB of state; why?
+
+`decode_recurrence_cpu_from_convolved` ran on rayon and looped over the value columns with the key rows innermost, a
+128-float stride through each head's state. Row-wise passes (decay and read k^T S, then the rank-1 update and q
+readout, as the prefill scan does) on the barrier pool: recurrence 17.7 -> 5.5 ms a token, decode 7.3 -> 8.0 tok/s
+(125.8 ms a token against llama.cpp's 107).
+
+The remaining decode parts run near bandwidth (GDN projections 30.6 ms for about 780 MB, experts 25.5, LM head 14).
+Full lint and CPU / CUDA suites pass. Two recorded-logit tests moved by design: the x86 Qwen3.5 MoE BF16 snapshot
+(the conv now accumulates in F32, where the BF16 tensor path rounded every tap) and the Gemma3 Q8_0 recording, which
+gains a plain-AVX2 case (prompt rows tiled with per-256 activation scales, decode rows on the per-32 gemv). The
+aarch64 BF16 snapshot will move with the conv too and needs recording on a Mac.

@@ -53,8 +53,8 @@ pub(crate) fn select(dtype: super::GgmlDType, m: usize, n: usize, k: usize) -> b
         // Keep Q6K GEMV on compact weights; expanded tiles cost bandwidth
         // without reuse across multiple activation rows.
         D::Q6K => m > 1,
-        // pure avx2 maddubs overflows on the +128 u8 range; q8_0 needs real dpbusd
-        D::Q8_0 => lv != X86Level::Avx2,
+        // without dpbusd the sign-moved maddubs costs more than the compact gemv at one row
+        D::Q8_0 => lv != X86Level::Avx2 || m > 1,
         _ => false,
     }
 }
@@ -429,13 +429,15 @@ unsafe fn matmul_unit_256(
                 }
                 PackedX86::Q8_0(tiles) => {
                     for s in (0..8).step_by(2) {
-                        kernels256::q8_0_tile2_avxvnni(
+                        let (t0, t1) = (
                             &tiles[nt * (kb * 8) + b * 8 + s],
                             &tiles[nt * (kb * 8) + b * 8 + s + 1],
-                            &act_refs[..mt],
-                            s,
-                            &mut acc,
                         );
+                        if vnni {
+                            kernels256::q8_0_tile2_avxvnni(t0, t1, &act_refs[..mt], s, &mut acc);
+                        } else {
+                            kernels256::q8_0_tile2_avx2(t0, t1, &act_refs[..mt], s, &mut acc);
+                        }
                     }
                 }
             }
@@ -1079,7 +1081,63 @@ mod kernels256 {
     q6k_tile_256!(q6k_tile_avxvnni, dp_vnni, "avx2,avxvnni,fma");
     q6k_tile_256!(q6k_tile_avx2, dp_avx2, "avx2,fma");
 
-    // q8_0 needs true dpbusd (u8 range overflows maddubs' i16 pairs), so vnni only.
+    // +128 weights overflow maddubs' i16 pairs, so |w| takes the unsigned side and its sign moves to the activation
+    #[target_feature(enable = "avx2,fma")]
+    pub(crate) unsafe fn q8_0_tile2_avx2(
+        t0: &TileQ8_0,
+        t1: &TileQ8_0,
+        acts: &[&BlockQ8K],
+        sub32: usize,
+        acc: &mut [[__m256; 2]],
+    ) {
+        unsafe {
+            let offset = _mm256_set1_epi8(i8::MIN);
+            let ones = _mm256_set1_epi16(1);
+            let mut isum_a = [[_mm256_setzero_si256(); 2]; MAX_MT];
+            let mut isum_b = [[_mm256_setzero_si256(); 2]; MAX_MT];
+            for g4 in 0..8 {
+                for h in 0..2 {
+                    let wa = _mm256_xor_si256(
+                        _mm256_loadu_si256(t0.qs.as_ptr().add(g4 * TILE_N * 4 + h * 32) as *const _),
+                        offset,
+                    );
+                    let wb = _mm256_xor_si256(
+                        _mm256_loadu_si256(t1.qs.as_ptr().add(g4 * TILE_N * 4 + h * 32) as *const _),
+                        offset,
+                    );
+                    let (abs_a, abs_b) = (_mm256_sign_epi8(wa, wa), _mm256_sign_epi8(wb, wb));
+                    for (m, act) in acts.iter().enumerate() {
+                        let xa = _mm256_sign_epi8(bcast4_256(&act.qs, sub32 * 32 + g4 * 4), wa);
+                        let xb =
+                            _mm256_sign_epi8(bcast4_256(&act.qs, (sub32 + 1) * 32 + g4 * 4), wb);
+                        isum_a[m][h] = _mm256_add_epi32(
+                            isum_a[m][h],
+                            _mm256_madd_epi16(_mm256_maddubs_epi16(abs_a, xa), ones),
+                        );
+                        isum_b[m][h] = _mm256_add_epi32(
+                            isum_b[m][h],
+                            _mm256_madd_epi16(_mm256_maddubs_epi16(abs_b, xb), ones),
+                        );
+                    }
+                }
+            }
+            for (isum, tile) in [(&isum_a, t0), (&isum_b, t1)] {
+                for h in 0..2 {
+                    let dw =
+                        _mm256_cvtph_ps(_mm_loadu_si128(tile.d.as_ptr().add(h * 8) as *const _));
+                    for (m, act) in acts.iter().enumerate() {
+                        acc[m][h] = _mm256_fmadd_ps(
+                            _mm256_cvtepi32_ps(isum[m][h]),
+                            _mm256_mul_ps(dw, _mm256_set1_ps(act.d)),
+                            acc[m][h],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // q8_0 with dpbusd takes the +128 weights as they are and corrects through the bsums
     #[target_feature(enable = "avx2,avxvnni,fma")]
     pub(crate) unsafe fn q8_0_tile2_avxvnni(
         t0: &TileQ8_0,
