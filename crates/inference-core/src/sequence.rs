@@ -255,6 +255,8 @@ pub struct Sequence {
     block_hash_revision: u64,
     /// Number of logical tokens represented in model/cache state.
     num_computed_tokens: usize,
+    // the owner of the latest recurrent prefix snapshot taken during decode, which the next one replaces
+    decode_recurrent_prefix_owner: Option<crate::paged_attention::block_hash::BlockHash>,
     /// Denoising-loop time inside the latest block-generation step; booked as completion
     /// time even when the step was a prompt step (the encoder prefill is the prompt part).
     pending_denoise_time_ms: u128,
@@ -392,6 +394,7 @@ impl Sequence {
             prefix_cache_hit_recorded: false,
             block_hash_revision: 0,
             num_computed_tokens: 0,
+            decode_recurrent_prefix_owner: None,
             pending_denoise_time_ms: 0,
             suffix,
             prefix,
@@ -841,6 +844,19 @@ impl Sequence {
 
     pub fn advance_num_computed_tokens(&mut self, amount: usize) {
         self.set_num_computed_tokens(self.num_computed_tokens.saturating_add(amount));
+    }
+
+    pub fn decode_recurrent_prefix_owner(
+        &self,
+    ) -> Option<crate::paged_attention::block_hash::BlockHash> {
+        self.decode_recurrent_prefix_owner
+    }
+
+    pub fn set_decode_recurrent_prefix_owner(
+        &mut self,
+        owner: Option<crate::paged_attention::block_hash::BlockHash>,
+    ) {
+        self.decode_recurrent_prefix_owner = owner;
     }
 
     pub fn num_uncomputed_tokens(&self) -> usize {

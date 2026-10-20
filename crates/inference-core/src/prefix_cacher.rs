@@ -733,6 +733,14 @@ impl PrefixCacheManagerV2 {
         true
     }
 
+    /// Drops an owner's prefix; its snapshot is released unless another owner still holds the entry.
+    pub(crate) fn release_paged_recurrent_owner(&mut self, owner: BlockHash) {
+        if let Some(key) = self.paged_recurrent_sequence_keys.shift_remove(&owner) {
+            self.remove_paged_recurrent_owner(owner, &key);
+            self.publish_paged_recurrent_metrics();
+        }
+    }
+
     fn remove_paged_recurrent_owner(&mut self, owner: BlockHash, key: &[BlockHash]) {
         let remove_entry = self
             .paged_recurrent_caches
@@ -1150,6 +1158,30 @@ mod tests {
                 .is_some()
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn released_owner_frees_its_snapshot_unless_shared() -> inference_tensor::Result<()> {
+        let mut prefix_cacher = PrefixCacheManagerV2::new(4, false, true);
+        let hashes = block_hashes(10, 3);
+        let (owner_a, owner_b) = (hashes[2], block_hashes(20, 1)[0]);
+        let snapshot = make_recurrent_snapshot();
+        prefix_cacher.add_paged_recurrent_prefix(owner_a, hashes.clone(), snapshot, None);
+        prefix_cacher.add_paged_recurrent_prefix(owner_b, hashes.clone(), snapshot, None);
+        prefix_cacher.take_released_recurrent_snapshots();
+
+        prefix_cacher.release_paged_recurrent_owner(owner_a);
+        assert!(!prefix_cacher.has_paged_recurrent_owner(owner_a));
+        assert!(prefix_cacher.paged_recurrent_caches.contains_key(&hashes));
+        assert!(prefix_cacher.take_released_recurrent_snapshots().is_empty());
+
+        prefix_cacher.release_paged_recurrent_owner(owner_b);
+        assert!(prefix_cacher.paged_recurrent_caches.is_empty());
+        assert_eq!(
+            prefix_cacher.take_released_recurrent_snapshots(),
+            vec![snapshot]
+        );
         Ok(())
     }
 
