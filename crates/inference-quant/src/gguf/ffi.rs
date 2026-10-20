@@ -950,13 +950,60 @@ macro_rules! gguf_mmq_type_library {
     };
 }
 
-// the standard types, with fused gate/up and Q/K/V matvecs
+// the standard types, with fused gate/up and Q/K/V matvecs; `tc` adds the row-major tensor-core matvec (mmvq_tc_k.cuh)
 macro_rules! gguf_standard_types {
-    ($( ($t:ident, $upper:literal) ),* $(,)?) => {
-        $(
+    ($( ($t:ident, $upper:literal $(, $tc:ident)?) ),* $(,)?) => {
+        $( gguf_standard_type!($t, $upper; $($tc)?); )*
+    };
+}
+
+macro_rules! gguf_standard_type {
+    ($t:ident, $upper:literal; tc) => {
+        gguf_standard_type! {
+            @lib $t, $upper;
+            pub fn [<launch_mmvq_tc_gguf_ $t _bf16_plain>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_dst: i32,
+                b_size: i32,
+                cfg: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_tc_gguf_ $t _f16_plain>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_dst: i32,
+                b_size: i32,
+                cfg: i32,
+                stream: *mut c_void,
+            );
+            pub fn [<launch_mmvq_tc_gguf_ $t _f32_plain>](
+                vx: *const c_void,
+                vy: *const c_void,
+                dst: *mut c_void,
+                ncols_x: i32,
+                nrows_x: i32,
+                stride_col_dst: i32,
+                b_size: i32,
+                cfg: i32,
+                stream: *mut c_void,
+            );
+        }
+    };
+    ($t:ident, $upper:literal;) => {
+        gguf_standard_type! { @lib $t, $upper; }
+    };
+    (@lib $t:ident, $upper:literal; $($extra:tt)*) => {
         paste::paste! {
             gguf_mmq_type_library! {
                 $t, $upper;
+                $($extra)*
                 pub fn [<launch_mmvq_gguf_ $t _bf16_fused_glu>](
                     vx_gate: *const c_void,
                     vx_up: *const c_void,
@@ -1046,7 +1093,6 @@ macro_rules! gguf_standard_types {
                 );
             }
         }
-        )*
     };
 }
 
@@ -1092,9 +1138,9 @@ gguf_standard_types!(
     (q8_0, "Q8_0"),
     (q2_k, "Q2_K"),
     (q3_k, "Q3_K"),
-    (q4_k, "Q4_K"),
+    (q4_k, "Q4_K", tc),
     (q5_k, "Q5_K"),
-    (q6_k, "Q6_K"),
+    (q6_k, "Q6_K", tc),
 );
 
 // The types with a tile-ordered layout for 1-8 row matvecs (mmvq_tc.cuh) and prefill (mmq) besides their own kernels

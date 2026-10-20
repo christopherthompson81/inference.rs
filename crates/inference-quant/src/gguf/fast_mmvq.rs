@@ -116,9 +116,15 @@ pub fn prefers_mmvq(dtype: impl Into<GgufType>, rows: usize) -> bool {
     prefers_fused_mmvq(dtype, rows) || rows <= MMVQ_MAX_BATCH && has_tensor_core_rows(dtype)
 }
 
-/// Whether a `dtype` weight has the tensor-core matvec for 1-8 input rows (a tile-ordered layout).
+/// Whether a `dtype` weight has the tensor-core matvec for 1-8 input rows: tile-ordered IQ4_KS, or row-major Q4_K and
+/// Q6_K on a device that runs it (`plain` falls back to MMQ elsewhere).
 pub fn has_tensor_core_rows(dtype: impl Into<GgufType>) -> bool {
-    dtype.into() == GgufType::Iq4KsTiled
+    let dtype = dtype.into();
+    dtype == GgufType::Iq4KsTiled || has_row_major_tensor_core_rows(dtype)
+}
+
+fn has_row_major_tensor_core_rows(dtype: GgufType) -> bool {
+    matches!(dtype, GgufType::Q4K | GgufType::Q6K)
 }
 
 static WORKSPACE: ThreadWorkspaces = ThreadWorkspaces::new();
@@ -434,6 +440,11 @@ pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
 
     if dtype == GgufType::Iq4KsTiled {
         let cfg = tiled_config(dev.cuda_stream().context().ordinal(), nrows, ncols);
+        return tiled_plain(w, xs, cfg);
+    }
+    if let Some(cfg) = row_major_tc_config(dtype, b_size, ncols)
+        && tensor_core_capable(&dev)
+    {
         return tiled_plain(w, xs, cfg);
     }
     if !prefers_fused_mmvq(dtype, b_size) {
@@ -1583,10 +1594,34 @@ type TiledShape = (usize, usize, usize);
 // The fastest config per shape, filled at load by `tune_tiled`
 static TILED_CONFIG: std::sync::RwLock<Vec<(TiledShape, i32)>> = std::sync::RwLock::new(Vec::new());
 
-fn tiled_launcher(input_ty: DType) -> TiledLauncher {
-    match input_ty {
-        DType::BF16 => ffi::launch_mmvq_tc_gguf_iq4_ks_bf16_plain,
-        DType::F16 => ffi::launch_mmvq_tc_gguf_iq4_ks_f16_plain,
+// Q6_K's widest weights stay on MMQ: each 16-row CTA rereads all activations, which outweighs the weight read there
+const ROW_MAJOR_TC_Q6K_MAX_COLS: usize = 8192;
+const ROW_MAJOR_TC_NARROW_COLS: usize = 4096;
+
+// mmvq_tc_k.cuh's config for `rows` input rows of a row-major Q4_K / Q6_K weight, None where dp4a or MMQ are faster
+// (`fast_mmq::bench::row_major_tc_shapes` and `small_batch_mmvq_vs_mmq`, RTX 3090)
+fn row_major_tc_config(dtype: GgufType, rows: usize, ncols: usize) -> Option<i32> {
+    match dtype {
+        GgufType::Q4K if rows >= 2 => Some(if ncols <= ROW_MAJOR_TC_NARROW_COLS {
+            2
+        } else {
+            1
+        }),
+        GgufType::Q6K if rows >= 3 && ncols <= ROW_MAJOR_TC_Q6K_MAX_COLS => Some(1),
+        _ => None,
+    }
+}
+
+fn tiled_launcher(dtype: GgufType, input_ty: DType) -> TiledLauncher {
+    match (dtype, input_ty) {
+        (GgufType::Q4K, DType::BF16) => ffi::launch_mmvq_tc_gguf_q4_k_bf16_plain,
+        (GgufType::Q4K, DType::F16) => ffi::launch_mmvq_tc_gguf_q4_k_f16_plain,
+        (GgufType::Q4K, _) => ffi::launch_mmvq_tc_gguf_q4_k_f32_plain,
+        (GgufType::Q6K, DType::BF16) => ffi::launch_mmvq_tc_gguf_q6_k_bf16_plain,
+        (GgufType::Q6K, DType::F16) => ffi::launch_mmvq_tc_gguf_q6_k_f16_plain,
+        (GgufType::Q6K, _) => ffi::launch_mmvq_tc_gguf_q6_k_f32_plain,
+        (_, DType::BF16) => ffi::launch_mmvq_tc_gguf_iq4_ks_bf16_plain,
+        (_, DType::F16) => ffi::launch_mmvq_tc_gguf_iq4_ks_f16_plain,
         _ => ffi::launch_mmvq_tc_gguf_iq4_ks_f32_plain,
     }
 }
@@ -1598,6 +1633,7 @@ pub fn tensor_core_capable(dev: &inference_tensor::CudaDevice) -> bool {
 
 // The quantized activations and a launch of the tiled matvec with config `cfg`, on raw pointers
 struct TiledCall {
+    dtype: GgufType,
     weight: *const std::ffi::c_void,
     scratch: *mut std::ffi::c_void,
     ncols: usize,
@@ -1626,7 +1662,7 @@ impl TiledCall {
 
     unsafe fn launch(&self, input_ty: DType, out: *mut std::ffi::c_void, cfg: i32) {
         unsafe {
-            tiled_launcher(input_ty)(
+            tiled_launcher(self.dtype, input_ty)(
                 self.weight,
                 self.scratch as *const std::ffi::c_void,
                 out,
@@ -1675,6 +1711,7 @@ pub(crate) fn tune_tiled<W: KernelWeight + ?Sized>(w: &W) -> Result<()> {
     let (xs_ptr, _xs_guard) = slice_ptr_on_stream(&xs, 0, &stream);
     let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
     let call = TiledCall {
+        dtype: w.gguf_type(),
         weight: weight as *const std::ffi::c_void,
         scratch: scratch as *mut std::ffi::c_void,
         ncols,
@@ -1713,7 +1750,8 @@ pub(crate) fn tune_tiled<W: KernelWeight + ?Sized>(w: &W) -> Result<()> {
     Ok(())
 }
 
-// `plain` for a tile-ordered IQ4_KS weight: the tensor-core matvec reads each weight tile once for all 1-8 rows
+// `plain` for a tile-ordered IQ4_KS or row-major Q4_K / Q6_K weight: the tensor-core matvec reads each weight block
+// once for all 1-8 rows
 pub(crate) fn tiled_plain<W: KernelWeight + ?Sized>(
     w: &W,
     xs: &Tensor,
@@ -1759,6 +1797,7 @@ pub(crate) fn tiled_plain<W: KernelWeight + ?Sized>(
                     });
                 let (scratch, _scratch_guard) = workspace.ptr_mut();
                 let call = TiledCall {
+                    dtype: w.gguf_type(),
                     weight: weight as *const std::ffi::c_void,
                     scratch: scratch as *mut std::ffi::c_void,
                     ncols,
