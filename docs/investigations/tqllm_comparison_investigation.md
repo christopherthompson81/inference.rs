@@ -489,3 +489,41 @@ would have to double. A step at 16 rows has to cost under ~11% more than at 8 to
 sample is at temperature 0.6, and a hotter workload flattens q and could move the balance toward width.
 tqLLM's greedy tree most likely gains on near-ties, where a greedy chain rejects and the second-ranked sibling is often right (not measured here).
 That does not carry over to sampled verification.
+
+## Run 14 - 2026-10-20 08:30
+
+Question: what is in the time between our verify and drafter graphs, and how much decode does removing it buy?
+
+Graph-level nsys (`nsys launch -t cuda,osrt --cuda-graph-trace=graph`, 2 s of a 2K decode; `nsys_gap.py`,
+`nsys_gap2.py` in the scratchpad), then a temporary probe without the profiler. The probe was CUDA events after the
+verify graph, before and after the drafter graph and at the next verify launch, plus host `Instant`s at the
+rejection wait and named points in the driver (not kept; `gap_probe.patch` in the scratchpad). 64-step medians:
+
+```
+GPU   verify end -> drafter start 1.175 ms (0.34 ms of it kernels: rejection 0.13, drafter context projection 0.2)
+      drafter end -> next verify start 0.026 ms
+host  rejection result -> drafter launch 0.78 ms:
+        target recurrent commit (transition publish)   0.267
+        drafter context K/V append                     0.263
+        drafter graph inputs + launch                  0.114
+        sequence bookkeeping                           0.073
+      verify end -> host awake ~0.24 ms past the rejection result (C-states: C2 120 us, C3 1034 us exit latency)
+```
+
+The drafter does not need the target's recurrent commit, so a variant ran it after the drafter launch (only for
+batches with no finished sequence, since finishing caches the prefix with the committed state). The GPU gap dropped
+1.175 -> 0.935 ms, and output was identical, but decode did not move. A valid interleaved round: master 147.99,
+deferred 148.46 tok/s. (A second round was invalid: `pgrep -x inference` missed a binary named differently, so it
+measured a leftover server. The bench helpers now stop servers by PID.) Polling the rejection event every 100 us
+instead of sleeping keeps the core out of deep C-states. It cut the gap to 0.43 ms and the host work 3-4x, but
+decode fell 4-8% (135.7 vs 146.2 tok/s), because the verify graph itself got slower on the GPU (23.7 -> 24.6 ms).
+A plain spin wait on the same event was 4% slower too (143.3 vs 149.3 tok/s, two interleaved rounds).
+
+Why: decode on this card is power-limited. nvidia-smi during decode reads 355-359 W against a 370 W limit, SM clocks
+1590-1740 MHz against a 2115 MHz max at 63 C, with `clocks_event_reasons.sw_power_cap` Active throughout and no
+thermal or hardware slowdown. The ~1 ms gap a step is time the card spends under the cap, not lost throughput:
+shrinking it raises average power and the clocks drop to match. Negative: dropped, code reverted.
+
+Implications: on this card, decode speedups have to cut energy a token (fewer bytes or instructions per step, as the
+tensor-core matvec did), not idle time. Host-gap and launch-overhead work pays only on a card with power headroom.
+The TDP is a user setting (`nvidia-smi -pl`, max 390 W here).
