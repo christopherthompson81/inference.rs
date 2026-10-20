@@ -312,3 +312,33 @@ Findings:
   takes only the top 16. The drafter's head is the safe place for a cheaper head (it only proposes).
 Next, by size: the host gap between graphs; the drafter's head and weights (4-bit head over a draft vocabulary, the
 held idea from Run 4); fusing beta/alpha into the GDN projection and the activation quantize into its producers.
+
+## Run 10 - 2026-10-20 22:00
+
+Question: what do the time between graphs and the small unfused kernels from Run 9 really cost, and what do the
+cheap fixes take back?
+
+Graph-level nsys (`--cuda-graph-trace=graph`, which records a graph as one item; node tracing inflates
+`cuGraphLaunch`), 2K: the step is verify graph 24.06 ms, then 0.93 ms outside graphs (sampling, the drafter's input
+projection and K/V writes, ~0.45 ms of host gaps between tiny metadata copies), drafter graph 3.95 ms, 0.06 ms back.
+So the host gap is ~0.5 ms a step, not Run 9's 1.5; the bigger cheap items sit inside the verify graph.
+
+- GDN gate projections (bf16, M 96, K 5120, 48 a step): `bench_bf16_gdn_gate_projection_cuda_graph_crossover` read
+  14.3 us at batch 8 (cuBLAS 6.3). A row-tile kernel (4 rows a block, 2 past batch 4, warps split K, 16-byte loads
+  reusing each input chunk across rows) reads 5.3 us at batch 8, 4.2 at batch 4; batch 1 keeps the old kernel
+  (3.5 against 6.1). nsys: 15.0 -> 6.2 us a launch.
+- Activation quantize: each tile-ordered matvec quantized its own input, so gate/up, qkv/z and q/k,v requantized
+  one activation (384 launches a step). A first attempt keyed reuse on the tensor id and never fired (the
+  projections see reshaped views, and `ensure` cleared the tag before the claim); the kept version is an explicit
+  `with_shared_input` scope keyed by the input's address within it.
+
+Interleaved A/B (master, branch, master, branch; three 2-3K prompts each; target verify graph, all steps):
+
+```
+             steps   verify median
+master       640     24.23 ms
+branch       688     23.62 ms
+```
+
+-0.61 ms a step (2.5%). Left from Run 9: the drafter's head and Q4_K weights (~1.5-2 ms against tqLLM), the LM
+head, the remaining ~0.5 ms of host gaps.
