@@ -187,9 +187,9 @@ fn qwen3_5_moe_prefill_bf16() -> Result<()> {
         // the fused output gate rounds sigmoid(gate) * y to BF16 once
         by_arch(
             Snapshot {
-                probes: [-1.078125, -0.73828125, 4.25, 6.65625],
-                sum: 32.03015,
-                l2: 52.32299,
+                probes: [-0.98828125, -0.65234375, 4.28125, 6.5625],
+                sum: 32.401794,
+                l2: 52.123123,
             },
             Snapshot {
                 probes: [-1.0546875, -0.61328125, 4.3125, 6.53125],

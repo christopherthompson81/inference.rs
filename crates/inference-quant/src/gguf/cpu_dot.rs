@@ -72,7 +72,7 @@ fn iq4_xs(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above
-        return unsafe { avx2::iq4_xs(row, ys) };
+        return unsafe { avx2::iq4_xs_one(row, ys) };
     }
     iq4_xs_generic(row, ys)
 }
@@ -81,9 +81,23 @@ fn iq3_s(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
         // SAFETY: AVX2 and FMA were detected above
-        return unsafe { avx2::iq3_s(row, ys) };
+        return unsafe { avx2::iq3_s_one(row, ys) };
     }
     iq3_s_generic(row, ys)
+}
+
+/// `vec_dot` of one row against four activation rows, decoding the row's blocks once for all of them.
+pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        match ty {
+            // SAFETY: AVX2 and FMA were detected above
+            GgufType::Iq3S => return unsafe { avx2::iq3_s_x4(row, ys) },
+            GgufType::Iq4Xs => return unsafe { avx2::iq4_xs_x4(row, ys) },
+            _ => {}
+        }
+    }
+    ys.map(|y| vec_dot(ty, row, y))
 }
 
 fn iq4_xs_sub_scale(block: &[u8], ib: usize) -> i32 {
@@ -192,7 +206,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
-    pub(super) fn iq4_xs(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+    pub(super) fn iq4_xs_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
         // SAFETY: the codebook holds 16 bytes
         let values = unsafe { _mm_loadu_si128(KVALUES_IQ4NL.as_ptr().cast()) };
         let m4 = _mm_set1_epi8(0x0f);
@@ -219,7 +233,7 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
-    pub(super) fn iq3_s(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+    pub(super) fn iq3_s_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
         let sign_bytes = load(&SIGN_BYTES);
         let sign_bits = load(&SIGN_BITS);
         let mut acc = _mm256_setzero_ps();
@@ -267,6 +281,144 @@ mod avx2 {
             acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
         }
         hsum(acc)
+    }
+
+    // four activation rows at once: the weight sub-block is decoded once and each row adds one maddubs
+    macro_rules! four_rows {
+        ($acc:ident, $sumi:ident, $yb:ident, $q8_at:expr, $dot:expr) => {
+            for t in 0..4 {
+                let q8 = load_q8(&$yb[t].qs()[$q8_at..]);
+                $sumi[t] = _mm256_add_epi32($sumi[t], $dot(q8));
+            }
+        };
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq4_xs_x4(row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
+        // SAFETY: the codebook holds 16 bytes
+        let values = unsafe { _mm_loadu_si128(KVALUES_IQ4NL.as_ptr().cast()) };
+        let m4 = _mm_set1_epi8(0x0f);
+        let (mut a0, mut a1, mut a2, mut a3) = (
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+        );
+        for (i, block) in row.as_chunks::<IQ4_XS_BYTES>().0.iter().enumerate() {
+            let yb = [&ys[0][i], &ys[1][i], &ys[2][i], &ys[3][i]];
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            for ib in 0..QK_K / 32 {
+                // SAFETY: a sub-block's 16 nibble bytes lie inside the block
+                let bits = unsafe { _mm_loadu_si128(block[IQ4_XS_QS + 16 * ib..].as_ptr().cast()) };
+                let q4 = _mm256_set_m128i(
+                    _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4)),
+                    _mm_shuffle_epi8(values, _mm_and_si128(bits, m4)),
+                );
+                let abs_q4 = _mm256_sign_epi8(q4, q4);
+                let scale = _mm256_set1_epi16(iq4_xs_sub_scale(block, ib) as i16);
+                four_rows!(a, sumi, yb, 32 * ib, |q8| _mm256_madd_epi16(
+                    _mm256_maddubs_epi16(abs_q4, _mm256_sign_epi8(q8, q4)),
+                    scale
+                ));
+            }
+            let d = f16_at(block, 0);
+            a0 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[0].d()),
+                _mm256_cvtepi32_ps(sumi[0]),
+                a0,
+            );
+            a1 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[1].d()),
+                _mm256_cvtepi32_ps(sumi[1]),
+                a1,
+            );
+            a2 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[2].d()),
+                _mm256_cvtepi32_ps(sumi[2]),
+                a2,
+            );
+            a3 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[3].d()),
+                _mm256_cvtepi32_ps(sumi[3]),
+                a3,
+            );
+        }
+        [hsum(a0), hsum(a1), hsum(a2), hsum(a3)]
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq3_s_x4(row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
+        let sign_bytes = load(&SIGN_BYTES);
+        let sign_bits = load(&SIGN_BITS);
+        let (mut a0, mut a1, mut a2, mut a3) = (
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+            _mm256_setzero_ps(),
+        );
+        for (i, block) in row.as_chunks::<IQ3_S_BYTES>().0.iter().enumerate() {
+            let yb = [&ys[0][i], &ys[1][i], &ys[2][i], &ys[3][i]];
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            for ib32 in 0..QK_K / 32 {
+                let qs: &[u8; 8] = block[IQ3_S_QS + 8 * ib32..][..8]
+                    .try_into()
+                    .expect("8 grid bytes");
+                let qh = u32::from(block[IQ3_S_QH + ib32]);
+                // the index is 9 bits: a qs byte plus one qh bit
+                let grid = |k: usize| {
+                    IQ3S_GRID[(u32::from(qs[k]) | ((qh << (8 - k)) & 256)) as usize & 511] as i32
+                };
+                let q3 = _mm256_set_epi32(
+                    grid(7),
+                    grid(6),
+                    grid(5),
+                    grid(4),
+                    grid(3),
+                    grid(2),
+                    grid(1),
+                    grid(0),
+                );
+                let signs: &[u8; 4] = block[IQ3_S_SIGNS + 4 * ib32..][..4]
+                    .try_into()
+                    .expect("4 sign bytes");
+                let spread = _mm256_and_si256(
+                    _mm256_shuffle_epi8(
+                        _mm256_set1_epi32(u32::from_le_bytes(*signs) as i32),
+                        sign_bytes,
+                    ),
+                    sign_bits,
+                );
+                let negate = _mm256_cmpeq_epi8(spread, sign_bits);
+                let scale = block[IQ3_S_SCALES + ib32 / 2] >> (4 * (ib32 % 2)) & 0xf;
+                let scale = _mm256_set1_epi16(2 * i16::from(scale) + 1);
+                four_rows!(a, sumi, yb, 32 * ib32, |q8| _mm256_madd_epi16(
+                    _mm256_maddubs_epi16(q3, _mm256_sub_epi8(_mm256_xor_si256(negate, q8), negate)),
+                    scale
+                ));
+            }
+            let d = f16_at(block, 0);
+            a0 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[0].d()),
+                _mm256_cvtepi32_ps(sumi[0]),
+                a0,
+            );
+            a1 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[1].d()),
+                _mm256_cvtepi32_ps(sumi[1]),
+                a1,
+            );
+            a2 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[2].d()),
+                _mm256_cvtepi32_ps(sumi[2]),
+                a2,
+            );
+            a3 = _mm256_fmadd_ps(
+                _mm256_set1_ps(d * yb[3].d()),
+                _mm256_cvtepi32_ps(sumi[3]),
+                a3,
+            );
+        }
+        [hsum(a0), hsum(a1), hsum(a2), hsum(a3)]
     }
 }
 
@@ -341,6 +493,11 @@ mod tests {
                     (dispatched - expected).abs() < tolerance,
                     "{ty:?} {dispatched} vs {expected}"
                 );
+                let [many, ..] = vec_dot_x4(ty, &row, [&ys[..]; 4]);
+                assert!(
+                    (many - dispatched).abs() < 1e-5 * expected.abs().max(1.0),
+                    "{ty:?} {many}"
+                );
             }
         }
     }
@@ -370,6 +527,16 @@ mod bench {
                 }
             }
             let secs = start.elapsed().as_secs_f64();
+            let start4 = std::time::Instant::now();
+            for _ in 0..200 {
+                for row in bytes.chunks_exact(8 * size) {
+                    acc += vec_dot_x4(ty, row, [&ys[..]; 4])[3];
+                }
+            }
+            println!(
+                "{ty:?} x4: {:.2} GB/s per token one thread",
+                (4 * 200 * bytes.len()) as f64 / start4.elapsed().as_secs_f64() / 1e9
+            );
             println!(
                 "{ty:?}: {:.2} GB/s one thread ({acc})",
                 (200 * bytes.len()) as f64 / secs / 1e9

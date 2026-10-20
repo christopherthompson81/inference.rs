@@ -1302,6 +1302,22 @@ impl Map2 for ConvTranspose2D<'_> {
 
 struct MatMul((usize, usize, usize, usize));
 
+// Weight elements past which a single-row F32 matmul is split across threads
+const GEMV_THREADED_MIN_ELEMS: usize = 1 << 18;
+const DOT_LANES: usize = 16;
+
+fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
+    let mut acc = [0f32; DOT_LANES];
+    let (a_lanes, a_tail) = a.as_chunks::<DOT_LANES>();
+    let (b_lanes, b_tail) = b.as_chunks::<DOT_LANES>();
+    for (x, y) in a_lanes.iter().zip(b_lanes) {
+        for lane in 0..DOT_LANES {
+            acc[lane] = x[lane].mul_add(y[lane], acc[lane]);
+        }
+    }
+    acc.iter().sum::<f32>() + a_tail.iter().zip(b_tail).map(|(x, y)| x * y).sum::<f32>()
+}
+
 impl MatMul {
     fn striding_error(&self, lhs_l: &Layout, rhs_l: &Layout, msg: &'static str) -> Error {
         Error::MatMulUnexpectedStriding(Box::new(crate::error::MatMulUnexpectedStriding {
@@ -1394,6 +1410,35 @@ impl Map2 for MatMul {
         } else {
             (b, m, n, k)
         };
+        // gemm's single-row path reaches about half the bandwidth; a row-major weight splits by output columns
+        if T::DTYPE == DType::F32
+            && b == 1
+            && m == 1
+            && lhs_cs == 1
+            && rhs_rs == 1
+            && num_threads > 1
+            && n * k >= GEMV_THREADED_MIN_ELEMS
+        {
+            // SAFETY: T is f32, checked above
+            let (lhs, rhs, dst_f32) = unsafe {
+                (
+                    std::slice::from_raw_parts(lhs.as_ptr().cast::<f32>(), k),
+                    std::slice::from_raw_parts(rhs.as_ptr().cast::<f32>(), (n - 1) * rhs_cs + k),
+                    std::slice::from_raw_parts_mut(dst.as_mut_ptr().cast::<f32>(), n),
+                )
+            };
+            let dst_ptr = dst_f32.as_mut_ptr() as usize;
+            // the quantized matmuls' pool, whose workers are already spinning
+            crate::utils::barrier_pool().execute_chunked(n, |cols| {
+                for col in cols {
+                    // SAFETY: the chunks are disjoint columns of `dst`, which outlives the call
+                    unsafe {
+                        *(dst_ptr as *mut f32).add(col) = dot_f32(lhs, &rhs[col * rhs_cs..][..k])
+                    };
+                }
+            });
+            return Ok(dst);
+        }
         for step in 0..b {
             let lhs_p = &lhs[step * a_skip..];
             let rhs_p = &rhs[step * b_skip..];

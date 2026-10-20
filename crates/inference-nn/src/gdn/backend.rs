@@ -16,7 +16,6 @@ const RECURRENCE_CHUNK_THRESHOLD: usize = 64;
 const QK_NORM_EPS: f64 = 1e-6;
 const QK_NORM_EPS_F32: f32 = 1e-6;
 const SOFTPLUS_LINEAR_THRESHOLD: f32 = 20.0;
-const DECODE_STACK_HEAD_K_DIM: usize = 256;
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 enum RecurrenceOutput {
@@ -298,72 +297,77 @@ fn decode_recurrence_cpu_from_convolved(
     let q_scale = 1.0f32 / (dims.head_k_dim as f32).sqrt();
     let state_head_len = dims.head_k_dim * dims.head_v_dim;
 
-    state
-        .par_chunks_mut(state_head_len)
-        .zip(output.par_chunks_mut(dims.head_v_dim))
-        .enumerate()
-        .for_each(|(gate_idx, (state_head, out_head))| {
-            let bidx = gate_idx / dims.num_v_heads;
-            let hv = gate_idx % dims.num_v_heads;
-            let hk = dims.k_head_for_v_head(hv);
-            let row = bidx * dims.conv_dim;
-            let q_base = row + hk * dims.head_k_dim;
-            let k_base = row + dims.key_dim + hk * dims.head_k_dim;
-            let v_base = row + 2 * dims.key_dim + hv * dims.head_v_dim;
+    let (state_ptr, out_ptr) = (state.as_mut_ptr() as usize, output.as_mut_ptr() as usize);
+    // row-wise passes over each head's state keep the inner loops on contiguous value columns
+    inference_tensor::utils::barrier_pool().execute_chunked(
+        batch_size * dims.num_v_heads,
+        |heads| {
+            let mut kv_mem = vec![0f32; dims.head_v_dim];
+            let mut delta = vec![0f32; dims.head_v_dim];
+            let mut q_buf = vec![0f32; dims.head_k_dim];
+            let mut k_buf = vec![0f32; dims.head_k_dim];
+            for gate_idx in heads {
+                // SAFETY: each head's state and output rows are touched by this item alone, and both outlive the call
+                let (state_head, out_head) = unsafe {
+                    (
+                        std::slice::from_raw_parts_mut(
+                            (state_ptr as *mut f32).add(gate_idx * state_head_len),
+                            state_head_len,
+                        ),
+                        std::slice::from_raw_parts_mut(
+                            (out_ptr as *mut f32).add(gate_idx * dims.head_v_dim),
+                            dims.head_v_dim,
+                        ),
+                    )
+                };
+                let bidx = gate_idx / dims.num_v_heads;
+                let hv = gate_idx % dims.num_v_heads;
+                let hk = dims.k_head_for_v_head(hv);
+                let row = bidx * dims.conv_dim;
+                let q_in = &mixed[row + hk * dims.head_k_dim..][..dims.head_k_dim];
+                let k_in = &mixed[row + dims.key_dim + hk * dims.head_k_dim..][..dims.head_k_dim];
+                let v_in =
+                    &mixed[row + 2 * dims.key_dim + hv * dims.head_v_dim..][..dims.head_v_dim];
 
-            let mut q_sum = 0.0f32;
-            let mut k_sum = 0.0f32;
-            for d in 0..dims.head_k_dim {
-                let q = mixed[q_base + d];
-                let k = mixed[k_base + d];
-                q_sum += q * q;
-                k_sum += k * k;
-            }
-
-            let q_mul = q_scale / (q_sum + QK_NORM_EPS_F32).sqrt();
-            let k_mul = 1.0f32 / (k_sum + QK_NORM_EPS_F32).sqrt();
-            let mut q_stack = [0.0f32; DECODE_STACK_HEAD_K_DIM];
-            let mut k_stack = [0.0f32; DECODE_STACK_HEAD_K_DIM];
-            let mut q_heap;
-            let mut k_heap;
-            let (q_buf, k_buf) = if dims.head_k_dim <= DECODE_STACK_HEAD_K_DIM {
-                (
-                    &mut q_stack[..dims.head_k_dim],
-                    &mut k_stack[..dims.head_k_dim],
-                )
-            } else {
-                q_heap = vec![0.0f32; dims.head_k_dim];
-                k_heap = vec![0.0f32; dims.head_k_dim];
-                (q_heap.as_mut_slice(), k_heap.as_mut_slice())
-            };
-            for d in 0..dims.head_k_dim {
-                q_buf[d] = mixed[q_base + d] * q_mul;
-                k_buf[d] = mixed[k_base + d] * k_mul;
-            }
-
-            let beta = sigmoid_f32(b[gate_idx]);
-            let decay = (-a_log[hv].exp() * softplus_f32(a[gate_idx] + dt_bias[hv])).exp();
-
-            for v_idx in 0..dims.head_v_dim {
-                let mut kv_mem = 0.0f32;
-                for (k_idx, &k) in k_buf.iter().enumerate() {
-                    let state_idx = k_idx * dims.head_v_dim + v_idx;
-                    let s = state_head[state_idx] * decay;
-                    state_head[state_idx] = s;
-                    kv_mem += s * k;
+                let q_sum = q_in.iter().map(|q| q * q).sum::<f32>();
+                let k_sum = k_in.iter().map(|k| k * k).sum::<f32>();
+                let q_mul = q_scale / (q_sum + QK_NORM_EPS_F32).sqrt();
+                let k_mul = 1.0f32 / (k_sum + QK_NORM_EPS_F32).sqrt();
+                for (buf, x) in q_buf.iter_mut().zip(q_in) {
+                    *buf = x * q_mul;
                 }
-
-                let delta = (mixed[v_base + v_idx] - kv_mem) * beta;
-                let mut y = 0.0f32;
-                for (k_idx, (&k, &q)) in k_buf.iter().zip(q_buf.iter()).enumerate() {
-                    let state_idx = k_idx * dims.head_v_dim + v_idx;
-                    let s = state_head[state_idx] + k * delta;
-                    state_head[state_idx] = s;
-                    y += s * q;
+                for (buf, x) in k_buf.iter_mut().zip(k_in) {
+                    *buf = x * k_mul;
                 }
-                out_head[v_idx] = y;
+                let beta = sigmoid_f32(b[gate_idx]);
+                let decay = (-a_log[hv].exp() * softplus_f32(a[gate_idx] + dt_bias[hv])).exp();
+
+                // pass 1: decay the state and read k^T S
+                kv_mem.fill(0.0);
+                for (state_row, &kd) in state_head.chunks_exact_mut(dims.head_v_dim).zip(&k_buf) {
+                    for (s, mem) in state_row.iter_mut().zip(kv_mem.iter_mut()) {
+                        *s *= decay;
+                        *mem += *s * kd;
+                    }
+                }
+                for ((d, &v), &mem) in delta.iter_mut().zip(v_in).zip(&kv_mem) {
+                    *d = (v - mem) * beta;
+                }
+                // pass 2: rank-1 update and the q readout
+                out_head.fill(0.0);
+                for ((state_row, &kd), &qd) in state_head
+                    .chunks_exact_mut(dims.head_v_dim)
+                    .zip(&k_buf)
+                    .zip(&q_buf)
+                {
+                    for ((s, &d), y) in state_row.iter_mut().zip(&delta).zip(out_head.iter_mut()) {
+                        *s += kd * d;
+                        *y += *s * qd;
+                    }
+                }
             }
-        });
+        },
+    );
 
     cache.recurrent_state = Tensor::from_vec(
         state,
@@ -894,7 +898,10 @@ fn causal_conv1d_full(
     dims: &GdnDims,
     cache: &mut GdnLayerCache,
 ) -> Result<Tensor> {
-    let (batch_size, seq_len, conv_dim) = x.dims3()?;
+    let seq_len = x.dim(1)?;
+    if x.device().is_cpu() {
+        return causal_conv1d_full_cpu(x, conv1d_weight, dims, cache);
+    }
 
     #[cfg(feature = "cuda")]
     if x.device().is_cuda() {
@@ -954,10 +961,6 @@ fn causal_conv1d_full(
 
     let weight = conv1d_weight.squeeze(1)?.to_dtype(padded_t.dtype())?;
 
-    if padded_t.device().is_cpu() && padded_t.dtype() == inference_tensor::DType::F32 {
-        return causal_conv1d_full_cpu_f32(&padded_t, &weight, batch_size, conv_dim, seq_len, dims);
-    }
-
     let mut conv_outputs = Vec::with_capacity(seq_len);
     for i in 0..seq_len {
         let window = padded_t.narrow(2, i, dims.conv_kernel_size)?;
@@ -967,45 +970,87 @@ fn causal_conv1d_full(
     inference_tensor::nn::ops::silu(&Tensor::stack(&conv_outputs, 2)?)?.transpose(1, 2)
 }
 
-// Direct depthwise causal conv + silu over the padded [b, c, k-1+seq] rows: one fused pass
-// on the barrier pool instead of a narrow/mul/sum tensor-op chain per timestep.
-fn causal_conv1d_full_cpu_f32(
-    padded_t: &Tensor,
-    weight: &Tensor,
-    batch_size: usize,
-    conv_dim: usize,
-    seq_len: usize,
+// Depthwise causal conv + silu over the `[b, seq, conv]` input as is; transposing it cost more than the conv
+fn causal_conv1d_full_cpu(
+    x: &Tensor,
+    conv1d_weight: &Tensor,
     dims: &GdnDims,
+    cache: &mut GdnLayerCache,
 ) -> Result<Tensor> {
+    let (batch_size, seq_len, conv_dim) = x.dims3()?;
     let ksize = dims.conv_kernel_size;
-    let padded = padded_t.contiguous()?;
-    let src = padded.flatten_all()?.to_vec1::<f32>()?;
-    let w = weight.to_vec2::<f32>()?;
-    let padded_len = ksize - 1 + seq_len;
+    if cache.conv_state.dim(2)? != ksize {
+        inference_tensor::bail!(
+            "GDN convolution state width is {}, expected {ksize}",
+            cache.conv_state.dim(2)?
+        );
+    }
+    let (dev, dtype) = (x.device().clone(), x.dtype());
+    let x = x.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+    // taps innermost-channel: [k, conv]
+    let w = conv1d_weight
+        .to_dtype(DType::F32)?
+        .reshape((conv_dim, ksize))?
+        .t()?
+        .contiguous()?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let state = cache
+        .conv_state
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    // input at time j of batch b, reaching back into the state ([b, conv, k]) for j < 0
+    let input = |b: usize, j: isize, c: usize| -> f32 {
+        if j >= 0 {
+            x[(b * seq_len + j as usize) * conv_dim + c]
+        } else {
+            state[(b * conv_dim + c) * ksize + (ksize as isize + j) as usize]
+        }
+    };
 
-    let mut out = vec![0f32; batch_size * conv_dim * seq_len];
+    let mut out = vec![0f32; batch_size * seq_len * conv_dim];
     let out_ptr = out.as_mut_ptr() as usize;
-    let src = src.as_slice();
-
-    inference_tensor::utils::barrier_pool().execute_chunked(batch_size * conv_dim, |range| {
-        let out_ptr = out_ptr as *mut f32;
-        for bc in range {
-            let c = bc % conv_dim;
-            let row = &src[bc * padded_len..(bc + 1) * padded_len];
-            let wc = &w[c];
-            let dst = unsafe { std::slice::from_raw_parts_mut(out_ptr.add(bc * seq_len), seq_len) };
-            for (t, d) in dst.iter_mut().enumerate() {
-                let mut acc = 0f32;
-                for (k, &wk) in wc.iter().enumerate() {
-                    acc += wk * row[t + k];
+    inference_tensor::utils::barrier_pool().execute_chunked(batch_size * seq_len, |rows| {
+        for bt in rows {
+            let (b, t) = (bt / seq_len, bt % seq_len);
+            // SAFETY: each (b, t) row of `out` is written by this item alone, and `out` outlives the call
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut((out_ptr as *mut f32).add(bt * conv_dim), conv_dim)
+            };
+            for k in 0..ksize {
+                let j = t as isize + k as isize - (ksize as isize - 1);
+                let wk = &w[k * conv_dim..][..conv_dim];
+                if j >= 0 {
+                    let src = &x[(b * seq_len + j as usize) * conv_dim..][..conv_dim];
+                    for ((d, &wc), &xc) in dst.iter_mut().zip(wk).zip(src) {
+                        *d += wc * xc;
+                    }
+                } else {
+                    for (c, (d, &wc)) in dst.iter_mut().zip(wk).enumerate() {
+                        *d += wc * input(b, j, c);
+                    }
                 }
-                // silu
-                *d = acc / (1.0 + crate::attention::fast_exp(-acc));
+            }
+            for d in dst.iter_mut() {
+                *d /= 1.0 + crate::attention::fast_exp(-*d);
             }
         }
     });
 
-    Tensor::from_vec(out, (batch_size, conv_dim, seq_len), padded.device())?.transpose(1, 2)
+    // the last k inputs of state ++ x, per channel
+    let mut new_state = vec![0f32; batch_size * conv_dim * ksize];
+    for b in 0..batch_size {
+        for c in 0..conv_dim {
+            for k in 0..ksize {
+                let j = seq_len as isize - ksize as isize + k as isize;
+                new_state[(b * conv_dim + c) * ksize + k] = input(b, j, c);
+            }
+        }
+    }
+    cache.conv_state = Tensor::from_vec(new_state, (batch_size, conv_dim, ksize), &dev)?
+        .to_dtype(cache.conv_state.dtype())?;
+    Tensor::from_vec(out, (batch_size, seq_len, conv_dim), &dev)?.to_dtype(dtype)
 }
 
 #[cfg(test)]
@@ -1906,6 +1951,14 @@ mod tests {
             pending_transitions: None,
             deferred_state: None,
         };
+        let mut stepped_cache = GdnLayerCache {
+            conv_state: conv_state.clone(),
+            recurrent_state: recurrent_state.clone(),
+            state_layout: RecurrentStateLayout::GdnKeyMajor,
+            slots: None,
+            pending_transitions: None,
+            deferred_state: None,
+        };
         let mut chunked_cache = GdnLayerCache {
             conv_state,
             recurrent_state,
@@ -1925,7 +1978,16 @@ mod tests {
             &mut chunked_cache,
         )?;
 
+        // the decode update is a separate implementation, one token at a time
+        let stepped = (0..seq_len)
+            .map(|t| {
+                causal_conv1d_update_cpu(&x.narrow(1, t, 1)?, &weight, &dims, &mut stepped_cache)
+            })
+            .collect::<CandleResult<Vec<_>>>()?;
+
         assert_close(&one_shot, &Tensor::cat(&[first, second], 1)?)?;
+        assert_close(&one_shot, &Tensor::cat(&stepped, 1)?)?;
+        assert_close(&one_shot_cache.conv_state, &stepped_cache.conv_state)?;
         assert_close(&one_shot_cache.conv_state, &chunked_cache.conv_state)
     }
 
