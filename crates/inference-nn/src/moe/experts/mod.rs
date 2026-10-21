@@ -324,8 +324,14 @@ impl MoEExperts {
         let [gate, up, down]: [inference_quant::HostExpertStack; 3] = stacks
             .try_into()
             .map_err(|_| inference_tensor::Error::msg("three expert projections"))?;
-        offload::OffloadedExperts::new([gate, up, down], slots, device, glu)
-            .map(|experts| Some(Box::new(experts)))
+        offload::OffloadedExperts::new(
+            [gate, up, down],
+            slots,
+            cfg.num_experts_per_tok,
+            device,
+            glu,
+        )
+        .map(|experts| Some(Box::new(experts)))
     }
 
     fn from_backend(
