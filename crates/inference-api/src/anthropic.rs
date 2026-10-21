@@ -626,6 +626,18 @@ impl AnthropicMessagesRequest {
         for message in self.messages {
             append_anthropic_message(&mut messages, message)?;
         }
+        // chat templates take one system message, first; a later one (Claude Code's environment block) joins it
+        let mut system_texts = Vec::new();
+        messages.retain(|message| {
+            if message.role != "system" {
+                return true;
+            }
+            system_texts.extend(message.content.as_ref().and_then(MessageContent::as_text));
+            false
+        });
+        if !system_texts.is_empty() {
+            messages.insert(0, message_with_text("system", system_texts.join("\n\n")));
+        }
 
         let mut tools = converted_tools.tools.map(|tools| {
             tools
@@ -2046,7 +2058,15 @@ mod tests {
                 .iter()
                 .map(|message| message.role.as_str())
                 .collect::<Vec<_>>(),
-            ["system", "user", "assistant", "tool", "system"]
+            ["system", "user", "assistant", "tool"]
+        );
+        assert_eq!(
+            messages[0]
+                .content
+                .as_ref()
+                .and_then(MessageContent::as_text)
+                .as_deref(),
+            Some("You are a coding agent.\n\nKeep the final answer short.")
         );
         assert_eq!(
             messages[2].reasoning_content.as_deref(),

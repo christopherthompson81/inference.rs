@@ -2,7 +2,7 @@
 title: "inference agent"
 description: "Coding agent: a tool loop (read, write, edit, bash, grep, glob) over the project directory, with the model in this process or on a server (`--url`)"
 sidebar:
-  order: 4
+  order: 5
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

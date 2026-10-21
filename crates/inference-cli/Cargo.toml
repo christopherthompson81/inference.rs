@@ -22,6 +22,7 @@ doc = false
 mimalloc = { workspace = true }
 inference-api = { workspace = true }
 inference-coder.workspace = true
+inference-mcp.workspace = true
 inference-server-core = { workspace = true }
 inference-webui = { workspace = true }
 inference-tensor.workspace = true
@@ -41,6 +42,7 @@ regex = { workspace = true }
 comfy-table = "7"
 uuid = { workspace = true, features = ["v4"] }
 dirs = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
 crossterm = "0.29"
 fuzzy-matcher = "0.3"
 

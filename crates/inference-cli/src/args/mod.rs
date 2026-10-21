@@ -42,6 +42,27 @@ pub struct Cli {
     pub global: GlobalOptions,
 }
 
+/// A coding agent `inference launch` runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum LaunchAgent {
+    /// Claude Code, over the Anthropic Messages API
+    Claude,
+    /// opencode, over the OpenAI-compatible chat API
+    Opencode,
+    /// Codex, over the OpenAI Responses API
+    Codex,
+}
+
+impl LaunchAgent {
+    pub fn program(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Opencode => "opencode",
+            Self::Codex => "codex",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 pub enum Command {
     /// Start HTTP/MCP server and (optionally) the UI at /ui
@@ -119,6 +140,34 @@ pub enum Command {
         /// LoRA adapter alias to use for requests. Omit to run the base model.
         #[arg(long)]
         adapter: Option<String>,
+    },
+
+    /// Run Claude Code, opencode or Codex against an inference server, configured through their environment (no agent config
+    /// file is written): a running server (`--url`, or localhost:1234), or one started from `--config` and stopped after
+    Launch {
+        /// The agent to run
+        agent: LaunchAgent,
+
+        /// Server to use (default http://127.0.0.1:1234, or the `--config` server's port)
+        #[arg(long)]
+        url: Option<String>,
+
+        /// Server config, as `from-config` takes, to start when nothing answers yet (and stop when the agent exits)
+        #[arg(long)]
+        config: Option<PathBuf>,
+
+        /// File holding the server API key (first line: the key or `name=key`); unset, `INFERENCE_API_KEY`, then the
+        /// `--config` server's keys file
+        #[arg(long)]
+        api_key_file: Option<PathBuf>,
+
+        /// Model id on the server; unset, its default model
+        #[arg(long)]
+        model: Option<String>,
+
+        /// Arguments passed to the agent, after `--`
+        #[arg(last = true)]
+        agent_args: Vec<String>,
     },
 
     /// Coding agent: a tool loop (read, write, edit, bash, grep, glob) over the project directory, with the model in
