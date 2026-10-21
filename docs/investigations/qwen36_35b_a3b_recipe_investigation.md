@@ -496,3 +496,29 @@ no host store               8                           63,648
 ```
 
 (Both lower than Run 13's pair; the card had other allocations this run, the pair is what compares.)
+
+## Run 15 - 2026-10-21 19:40
+
+Question: the GDN state pool is 9 slots at any `--max-seqs` (the initial capacity, from when graphs covered 8
+sequences); its spare slots hold GPU prefix snapshots. With a host prefix store holding the rest, how much does sizing
+it as sequences + graph pad + 2 snapshot slots give back?
+
+Change: `PagedAttentionConfig::recurrent_snapshot_slots`, set to `HOST_BACKED_GPU_PREFIXES` (2, now also the
+drafter's GPU prefix count) when a host store is configured. The load-time reservation fits the sequences to the
+memory budget as before, then adds the snapshot slots, never past the pool size without them; the hybrid cache's
+reservation floor (the initial 9) is lowered to that, the only way a reservation shrinks the pool.
+
+A first version counted the snapshot slots inside the budget check, so on a tight card the budget took them from
+sequences: `fitted_seqs=2` of 4, served context unchanged. Master never hit that, as its check covers sequences +
+pad and the 9-slot floor is then allocated past it. The snapshot slots now come after the check.
+
+`pool_ab.sh` (scratchpad; master LAN binary against this branch, back to back, IQ4_KSS, DFlash 5, q3 KV,
+`--prefix-cache-ram-gib 16`):
+
+```
+                  pool slots   context
+4 sequences       9 -> 7       182,016 -> 216,032
+1 sequence        9 -> 4       213,568 -> 292,192
+```
+
+No fewer-sequences warning; the tiny-model DFlash restore tests (memory and disk) pass with the smaller pool.

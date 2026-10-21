@@ -197,6 +197,8 @@ pub struct PagedAttentionConfig {
     /// Per-layer storage on top of `cache_type`; the default takes the model's profile or the general rule.
     pub cache_layers: PagedCacheLayers,
     pub serving_capacity: Option<usize>,
+    /// Recurrent pool slots for prefix snapshots beyond the serving ones; `None` keeps the initial pool's spare slots.
+    pub recurrent_snapshot_slots: Option<usize>,
     pub base_device_memory_reservation_bytes: usize,
     pub primary_activation_memory_reservation_bytes: usize,
     pub mapped_activation_memory_reservation_bytes: usize,
@@ -223,6 +225,7 @@ impl PagedAttentionConfig {
             cache_type,
             cache_layers: PagedCacheLayers::default(),
             serving_capacity: None,
+            recurrent_snapshot_slots: None,
             base_device_memory_reservation_bytes: 0,
             primary_activation_memory_reservation_bytes: 0,
             mapped_activation_memory_reservation_bytes: 0,
@@ -243,6 +246,11 @@ impl PagedAttentionConfig {
         }
         self.serving_capacity = Some(serving_capacity);
         Ok(self)
+    }
+
+    pub fn with_recurrent_snapshot_slots(mut self, slots: Option<usize>) -> Self {
+        self.recurrent_snapshot_slots = slots;
+        self
     }
 
     /// Reserves primary-device memory for components loaded after the paged cache is sized.
