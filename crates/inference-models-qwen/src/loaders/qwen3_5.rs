@@ -445,7 +445,8 @@ macro_rules! qwen3_5_loader {
 
                 Ok(Box::new(
                     HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
-                        .with_uniform_prefix_prefill_attention_features(Default::default()),
+                        .with_uniform_prefix_prefill_attention_features(Default::default())
+                        .with_recurrent_state_bytes(cfg.recurrent_state_bytes()),
                 ))
             }
 

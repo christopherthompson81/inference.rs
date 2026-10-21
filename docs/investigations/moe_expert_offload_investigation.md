@@ -424,3 +424,42 @@ Caps 1-4 are one plateau on real text: 64-slot DFlash +38-48%, 64-slot MTP +9%, 
 speculation unchanged. The synthetic ids (little routing locality) lose at 128 slots below 4, so the constant is 4.
 With it DFlash is the best speculation at 64 slots too (85-102 against MTP's 79-86), which removes Run 9's "fewer
 drafts as slots shrink" rule from the planner's inputs, at least down to 64 slots.
+
+## Run 16 - 2026-10-21 21:30
+
+Question: can the loader choose expert offload and a cache size itself when a GGUF MoE model does not fit, as the
+queue's "automatic planner" item asked?
+
+Before: an automatic map that could not fit every layer put the rest on the CPU and then turned paged attention off.
+
+Change: `ExpertCachePlan` in `resolve_map_setting` (an automatic map on one CUDA GPU, no `--moe-expert-cache`,
+experts the source reports as offloadable). It plans for 32K tokens or the model's window if shorter, or more when
+`--max-seq-len` or `--pa-context-len` asks; if the weights fit resident beside that it does nothing, otherwise it takes
+the most experts per layer (sixteenths of a layer's experts, then 0) that fit, and else plans for the requested map's
+context. `layer_expert_bytes` now reports no offloadable experts when a stack's type has no CPU kernels (those load
+resident, which the explicit flag's sizing also assumed wrongly).
+
+Dead ends on the fit test:
+
+- Running the automatic map per trial with a `ContextSize` cache: it fit every candidate, as the map shrinks a paged
+  cache to what is left (17.1 GB of weights + 5.4 GB of KV on a 23 GB card "fit").
+- Adding the GDN recurrent pool (now `recurrent_state_bytes_per_sequence` on the model config, about 63 MB a slot for
+  35B-A3B) still left a 1.2 GB shortfall: the default `Utilization(0.9)` sizes the cache as `0.9 x cap - used`, so 10%
+  of the device stays free that the trial had counted.
+
+The fit is now computed directly: weights (with the cache and staging) + activations (for the requested map; prompts
+run in chunks) + KV for the context + post-load reservations + recurrent pool + the utilization share `<=` the device
+cap. Unit tests cover the search order (resident, largest fitting step, fallback context, nothing fits).
+
+Qwen3.6 35B-A3B IQ4_KSS + MTP block on RTX 3090:
+
+```
+flags                                           planned slots   context
+(none)                                          resident        103,424
+--max-seq-len 131072                            224             199,488
+--max-seq-len 262144 (BF16 cache)               176             344,800
+--max-seq-len 262144 --pa-cache-type q3 +DFlash 224             567,872
+--pa-context-len 262144                         224             262,112
+```
+
+Every planned context is at least its target; the estimate is about one step (16 slots, ~1 GB) conservative.

@@ -164,6 +164,11 @@ pub trait ModelConfigLike {
     fn layer_has_paged_kv_cache(&self, _layer_idx: usize) -> bool {
         true
     }
+    /// Bytes of one sequence's recurrent state (a hybrid model's conv and recurrent rows over its linear layers),
+    /// which the recurrent pool holds per slot beside the paged cache.
+    fn recurrent_state_bytes_per_sequence(&self) -> usize {
+        0
+    }
     /// Paged KV elements per token for one layer, or `None` when the layer keeps no paged cache.
     fn layer_kv_cache_elements_per_token(&self, layer_idx: usize) -> Option<usize> {
         self.layer_has_paged_kv_cache(layer_idx)
@@ -302,6 +307,7 @@ pub struct HybridPagedKvCacheConfig {
     base: ModelConfigMetadata,
     paged_layers: Vec<bool>,
     prefix_prefill_attention_features: Vec<Option<PrefixPrefillAttentionFeatures>>,
+    recurrent_state_bytes: usize,
 }
 
 impl HybridPagedKvCacheConfig {
@@ -311,7 +317,13 @@ impl HybridPagedKvCacheConfig {
             base,
             paged_layers,
             prefix_prefill_attention_features: vec![None; num_layers],
+            recurrent_state_bytes: 0,
         }
+    }
+
+    pub fn with_recurrent_state_bytes(mut self, bytes: usize) -> Self {
+        self.recurrent_state_bytes = bytes;
+        self
     }
 
     pub fn with_uniform_prefix_prefill_attention_features(
@@ -332,6 +344,10 @@ impl HybridPagedKvCacheConfig {
 }
 
 impl ModelConfigLike for HybridPagedKvCacheConfig {
+    fn recurrent_state_bytes_per_sequence(&self) -> usize {
+        self.recurrent_state_bytes
+    }
+
     fn max_seq_len(&self) -> usize {
         self.base.max_seq_len()
     }

@@ -430,6 +430,16 @@ impl AutoDeviceMapParams {
         }
     }
 
+    pub fn with_max_seq_len(&self, tokens: usize) -> Self {
+        let mut params = self.clone();
+        match &mut params {
+            Self::Text { max_seq_len, .. } | Self::Multimodal { max_seq_len, .. } => {
+                *max_seq_len = tokens
+            }
+        }
+        params
+    }
+
     pub fn max_seq_len(&self) -> usize {
         match self {
             Self::Text { max_seq_len, .. } | Self::Multimodal { max_seq_len, .. } => *max_seq_len,
