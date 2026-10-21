@@ -18,6 +18,10 @@ const IQ3_S_QS: usize = 2;
 const IQ3_S_QH: usize = 66;
 const IQ3_S_SIGNS: usize = 74;
 const IQ3_S_SCALES: usize = 106;
+const IQ4_KSS_BYTES: usize = 128;
+const IQ4_KSS_ROW_SCALE: usize = 4;
+// ik's shifted IQ4_K table is the IQ4_NL one plus this, picked by a sub-block scale code's low bit
+const IQ4_KSS_SHIFT: i8 = 4;
 
 /// Whether `vec_dot` serves this type.
 pub(crate) fn supports(ty: GgufType) -> bool {
@@ -25,6 +29,7 @@ pub(crate) fn supports(ty: GgufType) -> bool {
         ty,
         GgufType::Iq3S
             | GgufType::Iq4Xs
+            | GgufType::Iq4Kss
             | GgufType::Q2K
             | GgufType::Q3K
             | GgufType::Q4K
@@ -33,12 +38,13 @@ pub(crate) fn supports(ty: GgufType) -> bool {
     )
 }
 
-/// `row` holds `ys.len()` super-blocks of `ty`, one per Q8_K block.
+/// `row` holds `ys.len()` super-blocks of `ty`, one per Q8_K block, after the row scale of a type that has one.
 pub(crate) fn vec_dot(ty: GgufType, row: &[u8], ys: &[BlockQ8K]) -> f32 {
     let n = ys.len() * QK_K;
     match ty {
         GgufType::Iq3S => iq3_s(row, ys),
         GgufType::Iq4Xs => iq4_xs(row, ys),
+        GgufType::Iq4Kss => iq4_kss(row, ys),
         GgufType::Q2K => BlockQ2K::vec_dot(n, blocks(row), ys),
         GgufType::Q3K => BlockQ3K::vec_dot(n, blocks(row), ys),
         GgufType::Q4K => BlockQ4K::vec_dot(n, blocks(row), ys),
@@ -86,6 +92,15 @@ fn iq3_s(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     iq3_s_generic(row, ys)
 }
 
+fn iq4_kss(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    if has_avx2_fma() {
+        // SAFETY: AVX2 and FMA were detected above
+        return unsafe { avx2::iq4_kss_one(row, ys) };
+    }
+    iq4_kss_generic(row, ys)
+}
+
 /// `vec_dot` of one row against four activation rows, decoding the row's blocks once for all of them.
 pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
     #[cfg(target_arch = "x86_64")]
@@ -94,6 +109,7 @@ pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32
             // SAFETY: AVX2 and FMA were detected above
             GgufType::Iq3S => return unsafe { avx2::iq3_s_x4(row, ys) },
             GgufType::Iq4Xs => return unsafe { avx2::iq4_xs_x4(row, ys) },
+            GgufType::Iq4Kss => return unsafe { avx2::iq4_kss_x4(row, ys) },
             _ => {}
         }
     }
@@ -104,22 +120,28 @@ pub(crate) fn vec_dot_x4(ty: GgufType, row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32
 pub(crate) fn tile_supports(ty: GgufType) -> bool {
     #[cfg(target_arch = "x86_64")]
     if has_avx2_fma() {
-        return matches!(ty, GgufType::Iq3S | GgufType::Iq4Xs);
+        return matches!(ty, GgufType::Iq3S | GgufType::Iq4Xs | GgufType::Iq4Kss);
     }
     let _ = ty;
     false
 }
 
-/// Decodes whole rows of `ty` into i16 weights with each sub-block's scale folded in, plus each block's scale.
-pub(crate) fn decode_tile(ty: GgufType, rows: &[u8], w: &mut [i16], d: &mut [f32]) {
+/// Decodes whole rows of `cols` values of `ty` into i16 weights with each sub-block's scale folded in, plus each
+/// block's scale (the row scale, for a type that has one).
+pub(crate) fn decode_tile(ty: GgufType, rows: &[u8], cols: usize, w: &mut [i16], d: &mut [f32]) {
+    let row_bytes = ty.row_scale_bytes() + cols / QK_K * ty.type_size();
     assert!(
-        tile_supports(ty) && w.len() == d.len() * QK_K && rows.len() == d.len() * ty.type_size()
+        tile_supports(ty)
+            && w.len() == d.len() * QK_K
+            && w.len().is_multiple_of(cols)
+            && rows.len() == w.len() / cols * row_bytes
     );
     #[cfg(target_arch = "x86_64")]
     // SAFETY: tile_supports checked AVX2 and FMA
     unsafe {
         match ty {
             GgufType::Iq3S => avx2::decode_iq3_s(rows, w, d),
+            GgufType::Iq4Kss => avx2::decode_iq4_kss(rows, row_bytes, cols, w, d),
             _ => avx2::decode_iq4_xs(rows, w, d),
         }
     }
@@ -186,6 +208,53 @@ fn iq4_xs_generic(row: &[u8], ys: &[BlockQ8K]) -> f32 {
     sumf
 }
 
+fn row_scale(row: &[u8]) -> f32 {
+    f32::from_le_bytes(row[..IQ4_KSS_ROW_SCALE].try_into().expect("f32 row scale"))
+}
+
+// sub-block `ib`'s eight u16 codes: their low bits are its scale code, the rest its nibbles once unmixed
+fn iq4_kss_codes(block: &[u8], ib: usize) -> ([u8; 16], u8) {
+    let (mut nibbles, mut ls) = ([0u8; 16], 0u8);
+    for k in 0..8 {
+        let q = u16::from_le_bytes([block[16 * ib + 2 * k], block[16 * ib + 2 * k + 1]]);
+        let a = q & 0xfffe;
+        nibbles[2 * k..2 * k + 2].copy_from_slice(&(a ^ (a >> 1)).to_le_bytes());
+        ls |= ((q & 1) as u8) << k;
+    }
+    (nibbles, ls)
+}
+
+fn iq4_kss_sub_scale(ls: u8) -> i32 {
+    i32::from(ls & 254) - 127
+}
+
+fn iq4_kss_shift(ls: u8) -> i8 {
+    IQ4_KSS_SHIFT * (ls & 1) as i8
+}
+
+fn iq4_kss_generic(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+    let blocks = row[IQ4_KSS_ROW_SCALE..].as_chunks::<IQ4_KSS_BYTES>().0;
+    let mut sumf = 0f32;
+    for (block, y) in blocks.iter().zip(ys) {
+        let q8 = y.qs();
+        let mut bsum = 0i32;
+        for ib in 0..QK_K / 32 {
+            let (qs, ls) = iq4_kss_codes(block, ib);
+            let value = |code: u8| i32::from(KVALUES_IQ4NL[usize::from(code)] + iq4_kss_shift(ls));
+            let q8 = &q8[32 * ib..][..32];
+            let sumi = (0..16)
+                .map(|j| {
+                    i32::from(q8[j]) * value(qs[j] & 0xf)
+                        + i32::from(q8[j + 16]) * value(qs[j] >> 4)
+                })
+                .sum::<i32>();
+            bsum += iq4_kss_sub_scale(ls) * sumi;
+        }
+        sumf += y.d() * bsum as f32;
+    }
+    row_scale(row) * sumf
+}
+
 fn iq3_s_grid_index(block: &[u8], ib32: usize, k: usize) -> usize {
     let qh = usize::from(block[IQ3_S_QH + ib32]);
     usize::from(block[IQ3_S_QS + 8 * ib32 + k]) | ((qh << (8 - k)) & 256)
@@ -229,8 +298,9 @@ mod avx2 {
     use inference_tensor::quantized::k_quants::{BlockQ8K, QK_K};
 
     use super::{
-        IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID, IQ4_XS_BYTES,
-        IQ4_XS_QS, KVALUES_IQ4NL, TileRow, f16_at, iq4_xs_sub_scale,
+        IQ3_S_BYTES, IQ3_S_QH, IQ3_S_QS, IQ3_S_SCALES, IQ3_S_SIGNS, IQ3S_GRID, IQ4_KSS_BYTES,
+        IQ4_KSS_ROW_SCALE, IQ4_KSS_SHIFT, IQ4_XS_BYTES, IQ4_XS_QS, KVALUES_IQ4NL, TileRow, f16_at,
+        iq4_xs_sub_scale, row_scale,
     };
 
     // byte b of each 32-bit sign word spread over lanes 8b..8b+8, then each lane's bit
@@ -289,6 +359,125 @@ mod avx2 {
             acc = _mm256_fmadd_ps(d, _mm256_cvtepi32_ps(sumi), acc);
         }
         hsum(acc)
+    }
+
+    // the IQ4_NL codebook in both lanes, and each u16 code's place in its sub-block's scale code
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn iq4_kss_consts() -> (__m256i, __m256i) {
+        // SAFETY: the codebook holds 16 bytes
+        let values = unsafe { _mm_loadu_si128(KVALUES_IQ4NL.as_ptr().cast()) };
+        let places = _mm256_setr_epi16(1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128);
+        (_mm256_broadcastsi128_si256(values), places)
+    }
+
+    // a block's codes as four loads, each holding sub-blocks 2p and 2p + 1 in its two lanes
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn iq4_kss_codes(block: &[u8; IQ4_KSS_BYTES]) -> [__m256i; 4] {
+        [
+            load(&block[..]),
+            load(&block[32..]),
+            load(&block[64..]),
+            load(&block[96..]),
+        ]
+    }
+
+    // the eight sub-blocks' scales as i16 pairs and table shifts as bytes: i32 k of a lane is sub-block 2k + lane
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn iq4_kss_scales(codes: &[__m256i; 4], places: __m256i) -> (__m256i, __m256i) {
+        // each code's low bit at its place; the madds' partial sums add up across a lane into its scale code
+        let low = _mm256_set1_epi16(1);
+        let m0 = _mm256_madd_epi16(_mm256_and_si256(codes[0], low), places);
+        let m1 = _mm256_madd_epi16(_mm256_and_si256(codes[1], low), places);
+        let m2 = _mm256_madd_epi16(_mm256_and_si256(codes[2], low), places);
+        let m3 = _mm256_madd_epi16(_mm256_and_si256(codes[3], low), places);
+        let ls = _mm256_hadd_epi32(_mm256_hadd_epi32(m0, m1), _mm256_hadd_epi32(m2, m3));
+        let scale = _mm256_sub_epi32(
+            _mm256_and_si256(ls, _mm256_set1_epi32(254)),
+            _mm256_set1_epi32(127),
+        );
+        let scale = _mm256_or_si256(
+            _mm256_and_si256(scale, _mm256_set1_epi32(0xffff)),
+            _mm256_slli_epi32::<16>(scale),
+        );
+        let one = _mm256_set1_epi32(1);
+        let shifted = _mm256_cmpeq_epi32(_mm256_and_si256(ls, one), one);
+        (
+            scale,
+            _mm256_and_si256(shifted, _mm256_set1_epi8(IQ4_KSS_SHIFT)),
+        )
+    }
+
+    // i32 `p` of each lane in all of that lane
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn lane_broadcast(v: __m256i, p: usize) -> __m256i {
+        match p {
+            0 => _mm256_shuffle_epi32::<0x00>(v),
+            1 => _mm256_shuffle_epi32::<0x55>(v),
+            2 => _mm256_shuffle_epi32::<0xaa>(v),
+            _ => _mm256_shuffle_epi32::<0xff>(v),
+        }
+    }
+
+    // pair `p`'s values (lane = sub-block): its low nibbles, then its high, and its scale
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn iq4_kss_pair(
+        codes: &[__m256i; 4],
+        (scales, shifts): (__m256i, __m256i),
+        p: usize,
+        values: __m256i,
+    ) -> [__m256i; 3] {
+        let a = _mm256_and_si256(codes[p], _mm256_set1_epi16(0xfffe_u16 as i16));
+        let a = _mm256_xor_si256(a, _mm256_srli_epi16(a, 1));
+        let m4 = _mm256_set1_epi8(0x0f);
+        let shift = lane_broadcast(shifts, p);
+        let lo = _mm256_add_epi8(_mm256_shuffle_epi8(values, _mm256_and_si256(a, m4)), shift);
+        let hi = _mm256_add_epi8(
+            _mm256_shuffle_epi8(values, _mm256_and_si256(_mm256_srli_epi16(a, 4), m4)),
+            shift,
+        );
+        [lo, hi, lane_broadcast(scales, p)]
+    }
+
+    // pair `p`'s activations laid out as `iq4_kss_pair` lays out its values
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn iq4_kss_q8(qs: &[i8], p: usize) -> [__m256i; 2] {
+        let (a, b) = (load_q8(&qs[64 * p..]), load_q8(&qs[64 * p + 32..]));
+        [
+            _mm256_permute2x128_si256::<0x20>(a, b),
+            _mm256_permute2x128_si256::<0x31>(a, b),
+        ]
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,fma")]
+    fn iq4_kss_dot([lo, hi, scale]: [__m256i; 3], [qlo, qhi]: [__m256i; 2]) -> __m256i {
+        let plo = _mm256_maddubs_epi16(_mm256_sign_epi8(lo, lo), _mm256_sign_epi8(qlo, lo));
+        let phi = _mm256_maddubs_epi16(_mm256_sign_epi8(hi, hi), _mm256_sign_epi8(qhi, hi));
+        _mm256_add_epi32(_mm256_madd_epi16(plo, scale), _mm256_madd_epi16(phi, scale))
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq4_kss_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
+        let (values, places) = iq4_kss_consts();
+        let mut acc = _mm256_setzero_ps();
+        let blocks = row[IQ4_KSS_ROW_SCALE..].as_chunks::<IQ4_KSS_BYTES>().0;
+        for (block, y) in blocks.iter().zip(ys) {
+            let codes = iq4_kss_codes(block);
+            let scales = iq4_kss_scales(&codes, places);
+            let mut sumi = _mm256_setzero_si256();
+            for p in 0..QK_K / 64 {
+                let pair = iq4_kss_pair(&codes, scales, p, values);
+                sumi = _mm256_add_epi32(sumi, iq4_kss_dot(pair, iq4_kss_q8(y.qs(), p)));
+            }
+            acc = _mm256_fmadd_ps(_mm256_set1_ps(y.d()), _mm256_cvtepi32_ps(sumi), acc);
+        }
+        row_scale(row) * hsum(acc)
     }
 
     #[target_feature(enable = "avx2,fma")]
@@ -366,6 +555,40 @@ mod avx2 {
                 let hi = _mm_shuffle_epi8(values, _mm_and_si128(_mm_srli_epi16(bits, 4), m4));
                 store_scaled(&mut w[32 * ib..], lo, scale);
                 store_scaled(&mut w[32 * ib + 16..], hi, scale);
+            }
+        }
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub(super) fn decode_iq4_kss(
+        rows: &[u8],
+        row_bytes: usize,
+        cols: usize,
+        w: &mut [i16],
+        d: &mut [f32],
+    ) {
+        let (values, places) = iq4_kss_consts();
+        for ((row, w), d) in rows
+            .chunks_exact(row_bytes)
+            .zip(w.chunks_exact_mut(cols))
+            .zip(d.chunks_exact_mut(cols / QK_K))
+        {
+            let scale = row_scale(row);
+            let blocks = row[IQ4_KSS_ROW_SCALE..].as_chunks::<IQ4_KSS_BYTES>().0;
+            for ((block, w), d) in blocks.iter().zip(w.as_chunks_mut::<QK_K>().0).zip(d) {
+                *d = scale;
+                let codes = iq4_kss_codes(block);
+                let scales = iq4_kss_scales(&codes, places);
+                for p in 0..QK_K / 64 {
+                    let [lo, hi, sub] = iq4_kss_pair(&codes, scales, p, values);
+                    let s0 = _mm256_permute2x128_si256::<0x00>(sub, sub);
+                    let s1 = _mm256_permute2x128_si256::<0x11>(sub, sub);
+                    let w = &mut w[64 * p..];
+                    store_scaled(w, _mm256_castsi256_si128(lo), s0);
+                    store_scaled(&mut w[16..], _mm256_castsi256_si128(hi), s0);
+                    store_scaled(&mut w[32..], _mm256_extracti128_si256::<1>(lo), s1);
+                    store_scaled(&mut w[48..], _mm256_extracti128_si256::<1>(hi), s1);
+                }
             }
         }
     }
@@ -545,6 +768,42 @@ mod avx2 {
     }
 
     #[target_feature(enable = "avx2,fma")]
+    pub(super) fn iq4_kss_x4(row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
+        let (values, places) = iq4_kss_consts();
+        let mut acc = [_mm256_setzero_ps(); 4];
+        let blocks = row[IQ4_KSS_ROW_SCALE..].as_chunks::<IQ4_KSS_BYTES>().0;
+        for (i, block) in blocks.iter().enumerate() {
+            let yb = [&ys[0][i], &ys[1][i], &ys[2][i], &ys[3][i]];
+            let codes = iq4_kss_codes(block);
+            let scales = iq4_kss_scales(&codes, places);
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            for p in 0..QK_K / 64 {
+                // the weights are reordered once into whole sub-blocks, so the four rows load as they lie
+                let [lo, hi, scale] = iq4_kss_pair(&codes, scales, p, values);
+                let q0 = _mm256_permute2x128_si256::<0x20>(lo, hi);
+                let q1 = _mm256_permute2x128_si256::<0x31>(lo, hi);
+                let s0 = _mm256_permute2x128_si256::<0x00>(scale, scale);
+                let s1 = _mm256_permute2x128_si256::<0x11>(scale, scale);
+                let (a0, a1) = (_mm256_sign_epi8(q0, q0), _mm256_sign_epi8(q1, q1));
+                for (sumi, y) in sumi.iter_mut().zip(yb) {
+                    let x0 = load_q8(&y.qs()[64 * p..]);
+                    let x1 = load_q8(&y.qs()[64 * p + 32..]);
+                    let p0 =
+                        _mm256_madd_epi16(_mm256_maddubs_epi16(a0, _mm256_sign_epi8(x0, q0)), s0);
+                    let p1 =
+                        _mm256_madd_epi16(_mm256_maddubs_epi16(a1, _mm256_sign_epi8(x1, q1)), s1);
+                    *sumi = _mm256_add_epi32(*sumi, _mm256_add_epi32(p0, p1));
+                }
+            }
+            for ((acc, sumi), y) in acc.iter_mut().zip(sumi).zip(yb) {
+                *acc = _mm256_fmadd_ps(_mm256_set1_ps(y.d()), _mm256_cvtepi32_ps(sumi), *acc);
+            }
+        }
+        let d = row_scale(row);
+        acc.map(|a| d * hsum(a))
+    }
+
+    #[target_feature(enable = "avx2,fma")]
     pub(super) fn iq3_s_x4(row: &[u8], ys: [&[BlockQ8K]; 4]) -> [f32; 4] {
         let sign_bytes = load(&SIGN_BYTES);
         let sign_bits = load(&SIGN_BITS);
@@ -651,6 +910,13 @@ mod tests {
         row
     }
 
+    // random blocks behind a sane f32 row scale
+    fn row_scaled(block_bytes: usize, seed: u32) -> Vec<u8> {
+        let mut row = 0.003f32.to_le_bytes().to_vec();
+        row.extend(bytes(block_bytes * BLOCKS, seed));
+        row
+    }
+
     fn activations() -> Vec<BlockQ8K> {
         let xs = (0..BLOCKS * QK_K)
             .map(|i| ((i * 37 % 101) as f32 - 50.0) / 13.0)
@@ -673,12 +939,17 @@ mod tests {
         for (ty, block_bytes) in [
             (GgufType::Iq4Xs, IQ4_XS_BYTES),
             (GgufType::Iq3S, IQ3_S_BYTES),
+            (GgufType::Iq4Kss, IQ4_KSS_BYTES),
         ] {
             for seed in 0..4 {
-                let row = row(block_bytes, seed);
+                let row = match ty {
+                    GgufType::Iq4Kss => row_scaled(block_bytes, seed),
+                    _ => row(block_bytes, seed),
+                };
                 let expected = dequantized_dot(ty, &row, &ys);
                 let generic = match ty {
                     GgufType::Iq4Xs => iq4_xs_generic(&row, &ys),
+                    GgufType::Iq4Kss => iq4_kss_generic(&row, &ys),
                     _ => iq3_s_generic(&row, &ys),
                 };
                 let tolerance = 1e-3 * expected.abs().max(1.0);
@@ -699,6 +970,42 @@ mod tests {
             }
         }
     }
+
+    // a decoded tile dotted against the activations matches the row dot, two rows so the pair kernel runs
+    #[test]
+    fn tiles_match_row_dots() {
+        let ys = activations();
+        let mut qs = vec![0i16; BLOCKS * QK_K];
+        widen_into(&ys, &mut qs);
+        let token = TileRow {
+            qs: &qs,
+            blocks: &ys,
+        };
+        for (ty, block_bytes) in [
+            (GgufType::Iq4Xs, IQ4_XS_BYTES),
+            (GgufType::Iq3S, IQ3_S_BYTES),
+            (GgufType::Iq4Kss, IQ4_KSS_BYTES),
+        ] {
+            if !tile_supports(ty) {
+                continue;
+            }
+            let rows = [0, 1].map(|seed| match ty {
+                GgufType::Iq4Kss => row_scaled(block_bytes, seed),
+                _ => row(block_bytes, seed),
+            });
+            let (mut w, mut d) = (vec![0i16; 2 * BLOCKS * QK_K], vec![0f32; 2 * BLOCKS]);
+            decode_tile(ty, &rows.concat(), BLOCKS * QK_K, &mut w, &mut d);
+            let mut out = [0f32; 2];
+            tile_dot(&w, &d, &[token], &mut out);
+            for (row, out) in rows.iter().zip(out) {
+                let expected = vec_dot(ty, row, &ys);
+                assert!(
+                    (out - expected).abs() < 1e-4 * expected.abs().max(1.0),
+                    "{ty:?} tile {out} vs {expected}"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -711,23 +1018,25 @@ mod bench {
         for (ty, size) in [
             (GgufType::Iq3S, IQ3_S_BYTES),
             (GgufType::Iq4Xs, IQ4_XS_BYTES),
+            (GgufType::Iq4Kss, IQ4_KSS_BYTES),
         ] {
             let rows = 512;
-            let bytes = vec![3u8; rows * 8 * size];
+            let row_bytes = ty.row_scale_bytes() + 8 * size;
+            let bytes = vec![3u8; rows * row_bytes];
             let xs = vec![0.5f32; 8 * QK_K];
             let mut ys = vec![BlockQ8K::zeros(); 8];
             BlockQ8K::from_float(&xs, &mut ys);
             let start = std::time::Instant::now();
             let mut acc = 0f32;
             for _ in 0..200 {
-                for row in bytes.chunks_exact(8 * size) {
+                for row in bytes.chunks_exact(row_bytes) {
                     acc += vec_dot(ty, row, &ys);
                 }
             }
             let secs = start.elapsed().as_secs_f64();
             let start4 = std::time::Instant::now();
             for _ in 0..200 {
-                for row in bytes.chunks_exact(8 * size) {
+                for row in bytes.chunks_exact(row_bytes) {
                     acc += vec_dot_x4(ty, row, [&ys[..]; 4])[3];
                 }
             }
@@ -752,15 +1061,16 @@ mod bench {
         for (ty, size, cols) in [
             (GgufType::Iq3S, IQ3_S_BYTES, 2048),
             (GgufType::Iq4Xs, IQ4_XS_BYTES, 512),
+            (GgufType::Iq4Kss, IQ4_KSS_BYTES, 2048),
         ] {
             let blocks = cols / QK_K;
-            let bytes = (0..ROWS * blocks * size)
+            let bytes = (0..ROWS * (ty.row_scale_bytes() + blocks * size))
                 .map(|i| (i * 7 % 251) as u8)
                 .collect::<Vec<_>>();
             let (mut w, mut d) = (vec![0i16; ROWS * cols], vec![0f32; ROWS * blocks]);
             let start = std::time::Instant::now();
             for _ in 0..ITERS {
-                decode_tile(ty, std::hint::black_box(&bytes), &mut w, &mut d);
+                decode_tile(ty, std::hint::black_box(&bytes), cols, &mut w, &mut d);
             }
             let decode = start.elapsed().as_secs_f64() / ITERS as f64;
             let mut q8 = vec![BlockQ8K::zeros(); TOKENS * blocks];

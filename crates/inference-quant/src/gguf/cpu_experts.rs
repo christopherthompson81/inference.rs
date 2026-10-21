@@ -68,7 +68,7 @@ pub struct CpuExpertProjection<'a> {
 
 impl CpuExpertProjection<'_> {
     fn row_bytes(&self) -> usize {
-        self.cols / QK_K * self.ty.type_size()
+        self.ty.row_scale_bytes() + self.cols / QK_K * self.ty.type_size()
     }
 
     fn row(&self, expert: usize, row: usize) -> &[u8] {
@@ -205,7 +205,7 @@ impl Tile {
         self.d.resize(rows * p.cols / QK_K, 0.0);
         self.out[slot].resize(rows * tokens.len(), 0.0);
         let bytes = &p.bytes[(expert * p.rows + row0) * row_bytes..][..rows * row_bytes];
-        cpu_dot::decode_tile(p.ty, bytes, &mut self.w, &mut self.d);
+        cpu_dot::decode_tile(p.ty, bytes, p.cols, &mut self.w, &mut self.d);
         cpu_dot::tile_dot(&self.w, &self.d, tokens, &mut self.out[slot]);
     }
 }
@@ -423,13 +423,21 @@ mod tests {
             .collect()
     }
 
-    // random blocks whose leading f16 scale is small and finite
+    // random blocks whose leading f16 scale, or the row's f32 one, is small and finite
     fn projection_bytes(ty: GgufType, rows: usize, cols: usize, seed: u32) -> Vec<u8> {
         let size = ty.type_size();
-        let mut bytes = random_bytes(EXPERTS * rows * cols / QK_K * size, seed);
-        for (i, block) in bytes.chunks_exact_mut(size).enumerate() {
-            let d = half::f16::from_f32(0.002 + 0.0001 * (i % 7) as f32).to_le_bytes();
-            block[..2].copy_from_slice(&d);
+        let meta = ty.row_scale_bytes();
+        let row_bytes = meta + cols / QK_K * size;
+        let mut bytes = random_bytes(EXPERTS * rows * row_bytes, seed);
+        for (r, row) in bytes.chunks_exact_mut(row_bytes).enumerate() {
+            let d = 0.002 + 0.0001 * (r % 7) as f32;
+            if meta > 0 {
+                row[..meta].copy_from_slice(&(d / 64.0).to_le_bytes());
+                continue;
+            }
+            for block in row.chunks_exact_mut(size) {
+                block[..2].copy_from_slice(&half::f16::from_f32(d).to_le_bytes());
+            }
         }
         bytes
     }
@@ -450,25 +458,42 @@ mod tests {
             .collect()
     }
 
+    // the expert types each test runs: Unsloth's 35B-A3B mix, and IQ4_KSS throughout (its rows carry a scale)
+    const TYPE_SETS: [[GgufType; 2]; 2] = [
+        [GgufType::Iq3S, GgufType::Iq4Xs],
+        [GgufType::Iq4Kss, GgufType::Iq4Kss],
+    ];
+
     fn check_against_dense(tokens: usize, routes: &[CpuExpertRoute]) -> Result<()> {
-        let gate = projection_bytes(GgufType::Iq3S, INTER, HIDDEN, 1);
-        let up = projection_bytes(GgufType::Iq3S, INTER, HIDDEN, 2);
-        let down = projection_bytes(GgufType::Iq4Xs, HIDDEN, INTER, 3);
+        for types in TYPE_SETS {
+            check_types_against_dense(types, tokens, routes)?;
+        }
+        Ok(())
+    }
+
+    fn check_types_against_dense(
+        [gate_up_ty, down_ty]: [GgufType; 2],
+        tokens: usize,
+        routes: &[CpuExpertRoute],
+    ) -> Result<()> {
+        let gate = projection_bytes(gate_up_ty, INTER, HIDDEN, 1);
+        let up = projection_bytes(gate_up_ty, INTER, HIDDEN, 2);
+        let down = projection_bytes(down_ty, HIDDEN, INTER, 3);
         let experts = CpuExperts {
             gate: CpuExpertProjection {
-                ty: GgufType::Iq3S,
+                ty: gate_up_ty,
                 bytes: &gate,
                 rows: INTER,
                 cols: HIDDEN,
             },
             up: CpuExpertProjection {
-                ty: GgufType::Iq3S,
+                ty: gate_up_ty,
                 bytes: &up,
                 rows: INTER,
                 cols: HIDDEN,
             },
             down: CpuExpertProjection {
-                ty: GgufType::Iq4Xs,
+                ty: down_ty,
                 bytes: &down,
                 rows: HIDDEN,
                 cols: INTER,
@@ -513,7 +538,7 @@ mod tests {
             // both activations are quantized to Q8_K on this path
             assert!(
                 err < 0.02 * norm,
-                "token {t}: relative error {}",
+                "{gate_up_ty:?} / {down_ty:?} token {t}: relative error {}",
                 err / norm
             );
         }
