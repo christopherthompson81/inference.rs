@@ -412,12 +412,14 @@ __device__ __forceinline__ void vec_dot_iq4_ks_q8_1(
     const int32_t  * q8 = (const int *)bq8_1[ib32].qs;
     const uint32_t * q4 = (const uint32_t *)bq4->qs + 4*ib32;
     const float dl = scale * ((bq4->scales[ib32] & 254) - 127);
-    auto values = iq4k_values + ((bq4->scales[ib32] & 1) << 4);
+    // the high table half as a packed byte add (see vec_dot_iq4_k_q8_1), so every thread reads the same table words
+    const int add = 0x04040404 & -(bq4->scales[ib32] & 1);
     int sumi = 0;
+#pragma unroll
     for (int j = 0; j < 4; ++j) {
-        auto v = get_int_from_table_16(q4[j], values);
-        sumi = ggml_cuda_dp4a(v.x, q8[j+0], sumi);
-        sumi = ggml_cuda_dp4a(v.y, q8[j+4], sumi);
+        const int2 v = get_int_from_table_16(q4[j], kvalues_iq4nl);
+        sumi = ggml_cuda_dp4a(v.x + add, q8[j+0], sumi);
+        sumi = ggml_cuda_dp4a(v.y + add, q8[j+4], sumi);
     }
     *result += dl * __low2float(bq8_1[ib32].ds) * sumi;
 }
@@ -518,14 +520,15 @@ __device__ __forceinline__ void vec_dot_iq4_kss_q8_1(
     uint32_t s32 = (q4[0] & 0x00010001) | ((q4[1] & 0x00010001) << 2) | ((q4[2] & 0x00010001) << 4) | ((q4[3] & 0x00010001) << 6);
     uint8_t ls = (s32 | (s32 >> 15)) & 0xff;
     const float dl = scale * ((ls & 254) - 127);
-    auto values = iq4k_values + ((ls & 1) << 4);
+    const int add = 0x04040404 & -(ls & 1);
     int sumi = 0;
+#pragma unroll
     for (int j = 0; j < 4; ++j) {
         uint32_t aux32 = q4[j] & 0xfffefffe;
         aux32 ^= (aux32 >> 1);
-        auto v = get_int_from_table_16(aux32, values);
-        sumi = ggml_cuda_dp4a(v.x, q8[j+0], sumi);
-        sumi = ggml_cuda_dp4a(v.y, q8[j+4], sumi);
+        const int2 v = get_int_from_table_16(aux32, kvalues_iq4nl);
+        sumi = ggml_cuda_dp4a(v.x + add, q8[j+0], sumi);
+        sumi = ggml_cuda_dp4a(v.y + add, q8[j+4], sumi);
     }
     *result += dl * __low2float(bq8_1[ib32].ds) * sumi;
 }
