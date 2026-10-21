@@ -19,6 +19,7 @@ pub use engine::{
 use hf_hub::Cache;
 use inference_nn::matformer;
 use inference_tensor::Device;
+pub use kv_cache::HOST_BACKED_GPU_PREFIXES;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
 pub use pipeline::Pipeline;

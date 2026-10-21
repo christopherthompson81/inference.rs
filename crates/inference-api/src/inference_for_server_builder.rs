@@ -818,7 +818,11 @@ impl InferenceRsForServerBuilder {
             !paged_attn,
         )?
         .map(|config| config.with_cache_layers(self.paged_cache_layers))
-        .map(|config| config.with_serving_capacity(self.max_seqs))
+        .map(|config| {
+            config
+                .with_recurrent_snapshot_slots(self.host_backed_gpu_prefixes())
+                .with_serving_capacity(self.max_seqs)
+        })
         .transpose()?;
         let max_seqs = self.max_seqs;
         Ok(ModelLoadSettings {
@@ -871,6 +875,13 @@ impl InferenceRsForServerBuilder {
         }
     }
 
+    // A host prefix store holds most prefixes, so only a few keep their state on the GPU
+    fn host_backed_gpu_prefixes(&self) -> Option<usize> {
+        self.prefix_store
+            .as_ref()
+            .map(|_| inference_core::HOST_BACKED_GPU_PREFIXES)
+    }
+
     fn scheduler_limits(&self) -> SchedulerLimits {
         SchedulerLimits {
             max_num_batched_tokens: self.max_num_batched_tokens.get(),
@@ -916,6 +927,7 @@ impl InferenceRsForServerBuilder {
             MtpRuntimeConfig::for_prefix_cache(self.prefix_cache_n, self.prefix_store.is_some());
         let add_model_config = self.shared_model_config();
         let limits = self.scheduler_limits();
+        let host_backed_gpu_prefixes = self.host_backed_gpu_prefixes();
         let model = self.model.context("Model was None")?;
 
         let dtype = get_model_dtype(&model)?;
@@ -940,7 +952,11 @@ impl InferenceRsForServerBuilder {
                 !paged_attn,
             )?
             .map(|config| config.with_cache_layers(self.paged_cache_layers))
-            .map(|config| config.with_serving_capacity(self.max_seqs))
+            .map(|config| {
+                config
+                    .with_recurrent_snapshot_slots(host_backed_gpu_prefixes)
+                    .with_serving_capacity(self.max_seqs)
+            })
             .transpose()?,
             self.mtp_config.as_ref(),
             mtp_runtime,
@@ -1429,6 +1445,14 @@ impl ModelLoadSettings {
             .await
     }
 
+    fn host_backed_gpu_prefixes(&self) -> Option<usize> {
+        self.add_model_config
+            .engine_config
+            .prefix_store
+            .as_ref()
+            .map(|_| inference_core::HOST_BACKED_GPU_PREFIXES)
+    }
+
     fn model_max_seqs(&self, model_config: &ModelConfig) -> usize {
         model_config.max_seqs.unwrap_or(self.max_seqs)
     }
@@ -1441,7 +1465,11 @@ impl ModelLoadSettings {
         mtp: Option<&MtpConfig>,
     ) -> Result<Option<PagedAttentionConfig>> {
         let mut cache = planned
-            .map(|cache| cache.with_serving_capacity(self.model_max_seqs(model_config)))
+            .map(|cache| {
+                cache
+                    .with_recurrent_snapshot_slots(self.host_backed_gpu_prefixes())
+                    .with_serving_capacity(self.model_max_seqs(model_config))
+            })
             .transpose()?;
         match (cache.as_mut(), model_config.paged_context_len) {
             (Some(cache), Some(tokens)) => cache.mem_gpu = MemoryGpuConfig::ContextSize(tokens),

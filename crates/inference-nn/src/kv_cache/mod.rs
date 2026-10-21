@@ -6,6 +6,9 @@ use crate::get_mut_arcmutex;
 
 // Recurrent state slots reserved past serving capacity for CUDA graph padding rows.
 pub const RECURRENT_GRAPH_PAD_SLOTS: usize = 1;
+/// Prefixes whose recurrent snapshot and drafter state stay on the GPU when a host prefix store holds the rest: a hit
+/// past them restores from the store, and each one held costs a recurrent state slot and a drafter window of VRAM.
+pub const HOST_BACKED_GPU_PREFIXES: usize = 2;
 
 mod full_cache;
 mod hybrid_cache;

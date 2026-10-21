@@ -756,6 +756,19 @@ fn reserve_recurrent_serving_capacity(
     cache
         .hybrid()
         .set_fitted_serving_capacity(capacity - RECURRENT_GRAPH_PAD_SLOTS);
+    // prefix snapshots never take a sequence's slot: a set count comes on top of what the budget fitted, never past
+    // the initial pool's size; without one the initial pool's spare slots serve them
+    let pool_capacity = match paged_attn_config.recurrent_snapshot_slots {
+        Some(slots) => {
+            let pool = crate::kv_cache::recurrent_pool_capacity(
+                capacity - RECURRENT_GRAPH_PAD_SLOTS,
+                Some(slots),
+            );
+            cache.hybrid().set_recurrent_capacity_floor(pool);
+            pool
+        }
+        None => capacity,
+    };
     let checkpoint_lanes = if auto_lanes {
         let mut lanes = paged_attn_config.recurrent_checkpoint_lanes;
         for device in budget(capacity)? {
@@ -776,11 +789,11 @@ fn reserve_recurrent_serving_capacity(
     Ok(if transition_log {
         cache
             .hybrid()
-            .reserve_recurrent_transition_layout(capacity, checkpoint_lanes)?
+            .reserve_recurrent_transition_layout(pool_capacity, checkpoint_lanes)?
     } else {
         cache
             .hybrid()
-            .reserve_recurrent_layout(capacity, checkpoint_lanes)?
+            .reserve_recurrent_layout(pool_capacity, checkpoint_lanes)?
     })
 }
 

@@ -504,8 +504,12 @@ pub struct RecurrentSnapshotState {
 const INITIAL_POOL_CAPACITY: usize = 9;
 
 /// Recurrent pool slots a serving capacity reserves: the reservation only grows the initial pool.
-pub fn recurrent_pool_capacity(serving_capacity: usize) -> usize {
-    INITIAL_POOL_CAPACITY.max(serving_capacity.saturating_add(super::RECURRENT_GRAPH_PAD_SLOTS))
+/// Slots a recurrent pool reserves for `serving_capacity` sequences: theirs, the graph pad, and the initial capacity's
+/// spare slots for prefix snapshots, or with `snapshot_slots` at most that many.
+pub fn recurrent_pool_capacity(serving_capacity: usize, snapshot_slots: Option<usize>) -> usize {
+    let serving = serving_capacity.saturating_add(super::RECURRENT_GRAPH_PAD_SLOTS);
+    let initial = INITIAL_POOL_CAPACITY.max(serving);
+    snapshot_slots.map_or(initial, |slots| serving.saturating_add(slots).min(initial))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1110,6 +1114,8 @@ pub struct HybridCache {
     recurrent_storage_locked: bool,
     // Sequences the load-time reservation found room for, below the requested maximum when memory ran short
     fitted_serving_capacity: Option<usize>,
+    // a load-time reservation never sizes the pool below this
+    recurrent_capacity_floor: usize,
     // Scratch slot CUDA graph pad rows write into; allocated on first use, dropped on reset
     graph_pad_slot: Option<usize>,
     next_snapshot_id: u64,
@@ -1175,6 +1181,7 @@ impl HybridCache {
             recurrent_storage_generation: 0,
             recurrent_storage_locked: false,
             fitted_serving_capacity: None,
+            recurrent_capacity_floor: INITIAL_POOL_CAPACITY,
             graph_pad_slot: None,
             next_snapshot_id: 0,
         };
@@ -1442,6 +1449,11 @@ impl HybridCache {
         self.state_indices = indices;
         self.state_indices_host = physical_host;
         self.cache_device_state_indices();
+    }
+
+    /// Lowers (or raises) the slots a load-time reservation keeps at least, so one can shrink the initial pool.
+    pub fn set_recurrent_capacity_floor(&mut self, slots: usize) {
+        self.recurrent_capacity_floor = slots;
     }
 
     pub fn set_fitted_serving_capacity(&mut self, sequences: usize) {
@@ -1898,7 +1910,7 @@ impl HybridCache {
             );
         }
 
-        let capacity = current_capacity.max(min_capacity);
+        let capacity = min_capacity.max(self.recurrent_capacity_floor);
         let physical_lanes = speculative_storage.physical_lanes(checkpoint_lanes);
         let changed = capacity != current_capacity
             || checkpoint_lanes != self.checkpoint_lanes
@@ -3434,6 +3446,30 @@ mod tests {
         }
         assert!(cache.configure_checkpoint_lanes(4).is_err());
         assert!(cache.reserve_recurrent_layout(17, 3).is_err());
+        Ok(())
+    }
+
+    // a host prefix store's serving setup: two sequences, the graph pad and two snapshot slots, below the initial pool
+    #[test]
+    fn a_lowered_capacity_floor_lets_the_reservation_shrink_the_pool() -> Result<()> {
+        const SNAPSHOTS: usize = 2;
+        let capacity = recurrent_pool_capacity(2, Some(SNAPSHOTS));
+        assert!(capacity < INITIAL_POOL_CAPACITY);
+        assert_eq!(recurrent_pool_capacity(2, None), INITIAL_POOL_CAPACITY);
+        // never past the pool a setup without a set snapshot count gets
+        assert_eq!(recurrent_pool_capacity(16, Some(SNAPSHOTS)), 17);
+        let mut cache = HybridCache::new(
+            config(vec![HybridLayerType::Recurrent]),
+            DType::F32,
+            &[Device::Cpu],
+        )?;
+        cache.set_recurrent_capacity_floor(capacity);
+        assert!(cache.reserve_recurrent_layout(capacity, 1)?);
+        assert_eq!(cache.recurrent_capacity(), capacity);
+        let HybridLayerCache::Recurrent(pool) = cache.get(0).unwrap() else {
+            unreachable!()
+        };
+        assert_eq!(pool.conv_state.dim(0)?, capacity);
         Ok(())
     }
 
