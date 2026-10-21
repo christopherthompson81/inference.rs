@@ -173,6 +173,9 @@ type PrefixAdmissionCommit =
 pub struct PagedPrefixCacheValidation {
     valid_tokens: usize,
     commit: Option<PrefixAdmissionCommit>,
+    reason: &'static str,
+    // why the entry a shorter result fell short of went, when the prefix cache remembers
+    cause: Option<&'static str>,
 }
 
 impl PagedPrefixCacheValidation {
@@ -180,6 +183,8 @@ impl PagedPrefixCacheValidation {
         Self {
             valid_tokens,
             commit: None,
+            reason: "ready",
+            cause: None,
         }
     }
 
@@ -190,7 +195,27 @@ impl PagedPrefixCacheValidation {
         Self {
             valid_tokens,
             commit: Some(Box::new(commit)),
+            reason: "validated",
+            cause: None,
         }
+    }
+
+    pub fn with_reason(mut self, reason: &'static str) -> Self {
+        self.reason = reason;
+        self
+    }
+
+    pub fn with_cause(mut self, cause: Option<&'static str>) -> Self {
+        self.cause = cause;
+        self
+    }
+
+    pub fn reason(&self) -> &'static str {
+        self.reason
+    }
+
+    pub fn cause(&self) -> Option<&'static str> {
+        self.cause
     }
 
     pub fn valid_tokens(&self) -> usize {

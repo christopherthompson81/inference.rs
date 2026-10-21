@@ -12,6 +12,7 @@ mod cache_layers;
 mod config;
 /// Encoder output cache for multimodal models (vision/audio encoder outputs).
 pub mod encoder_cache;
+pub mod eviction_log;
 pub mod input_metadata;
 /// KV Cache Manager: high-level block allocation, prefix cache lookups, per-request tracking.
 pub mod kv_cache_manager;
