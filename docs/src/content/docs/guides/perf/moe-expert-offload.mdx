@@ -20,13 +20,14 @@ The freed VRAM goes to the KV cache: the planner leaves the offloaded experts ou
 | 35B-A3B (IQ4_XS), RTX 3090 | experts in VRAM | decode tok/s | available context |
 |---|---|---|---|
 | resident | 14.4 GiB | 180 | 100K tokens |
-| `--moe-expert-cache 128` | 7.2 GiB | 72-78 | 467K tokens |
-| `--moe-expert-cache 64` | 3.6 GiB | 52-58 | 652K tokens |
+| `--moe-expert-cache 128` | 7.2 GiB | 98 | 467K tokens |
+| `--moe-expert-cache 64` | 3.6 GiB | 52-63 | 652K tokens |
 
 Decode speed depends on how fast the CPU reads memory (misses) and on the cache's hit rate; prompts copy each layer's experts to the GPU in turn, so their speed is bounded by the PCIe link (about 400 tokens a second on PCIe gen3 x16 for this model).
 
 ## Notes
 
-- CUDA graphs are off while experts are offloaded: every MoE layer waits for the host mid-step, which a captured graph cannot replay.
+- Decode steps stay inside CUDA graphs: the GPU finds each expert's slot in a table in pinned host memory and runs the cached experts while a host function on a side stream runs the misses.
+- Output can differ between runs at the same seed: whether a pick is served from the cache or by the CPU depends on when its background copy lands, and the two round activations differently.
 - Perplexity moves by a fraction of a percent: the CPU quantizes its activations per 256 values, the GPU kernels per 32.
 - LoRA adapters on the experts and tensor parallelism are not supported with offloaded experts.

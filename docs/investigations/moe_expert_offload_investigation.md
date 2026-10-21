@@ -248,3 +248,32 @@ The split keeps its place. Getting graphs back for it means capturing the host s
 buffers, the hit/miss mapping and CPU experts as a host function node (no CUDA calls inside), and cache fills issued
 between steps with a host-function flag marking when they land. That is a later phase; first the flag, the planner
 and the prompt-side copies.
+
+## Run 10 - 2026-10-20 21:10
+
+Question: can a decode step with offloaded experts stay in a CUDA graph, and does that recover the graphs' share?
+
+#524 synced with the host in every offloaded layer, so it ruled graphs out. Now nothing waits on the host: the picks,
+weights and hidden rows go to mapped pinned buffers with async copies, a host function (`cuLaunchHostFunc`, captured
+like any stream op, no CUDA calls inside) runs the CPU side, and its result comes back with an async copy. Fills
+moved to one worker thread (host functions may not call CUDA); a second host function queued on the copy stream after
+a fill opens the slot.
+
+```
+serve, greedy 400-token replies     128 slots   64 slots
+#524 (graphs off)                   72-78       52-58
+host function in the step           84-86       51-58
+GPU slot lookup, CPU on a side      98          52-63
+resident                            180-185
+```
+
+With the host function inline the GPU idled through it: per layer the host function took 68 us and the gap between
+two layers' host functions was 234 us, against about 137 us for a resident layer. The slot lookup moved to the GPU:
+a table in mapped host memory maps each expert to its slot or 0, the zeroed slot, so the cached experts run on the
+stream straight after routing with the original weights (a miss adds exactly 0), while a side stream copies the picks
+out, runs the misses in a host function and copies their sum back; the stream waits for it only to add the two. The
+host function now reads which picks the GPU served from the copied slot ids, so the two sides cannot both serve a
+pick, and evictions clear the table before their copies start.
+
+Greedy replies are coherent but differ between runs at the same seed (two graph runs part at character 99): whether a
+pick is served by the cache or the CPU depends on when its fill lands, and the two quantize activations differently.

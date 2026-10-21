@@ -1,11 +1,17 @@
 //! MoE experts kept in host memory: a per-layer VRAM cache of recently routed experts serves decode while the CPU
 //! runs the misses, and prefill stages the whole layer on the GPU.
+//!
+//! A decode step never waits on the host, so it can be captured in a CUDA graph: the GPU looks each pick's slot up in a
+//! table in mapped host memory (0, the zeroed slot, for a miss) and runs the cached experts, while on a side stream the
+//! picks are copied into pinned buffers and a host function runs the misses on the CPU, and the two outputs are added.
+//! Cache fills run on a worker thread and a copy stream, and the table opens a slot once its copy has landed.
 
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{Receiver, Sender};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_quant::cpu_experts::{CpuExpertProjection, CpuExpertRoute, CpuExperts};
 use inference_quant::{DeviceExpertStack, GluActivationType, HostExpertStack, KernelWeight};
-use inference_tensor::cuda::cudarc::driver::{CudaEvent, CudaStream};
+use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtr, result};
 use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 
 use super::backends::{grouped_with, indexed_mmvq_with};
@@ -13,7 +19,8 @@ use super::forward::{MoEForward, MoEForwardConfig};
 
 // Largest batch the cache and CPU split serves; past it the layer is staged whole on the GPU
 const SPLIT_MAX_TOKENS: usize = 8;
-// A slot left zeroed for the picks the CPU serves (weight zeroed too): a slot mid-copy could hold non-finite scales
+// The slot a miss maps to: left zeroed, so the GPU's share of a CPU-served pick is exactly 0 (a slot mid-copy could
+// hold non-finite scales)
 const MISS_SLOT: u32 = 0;
 
 /// Which projection of a layer, in `[gate, up, down]` order.
@@ -57,7 +64,7 @@ struct CacheState {
     // slot -> expert it holds or is receiving
     expert_in: Vec<Option<usize>>,
     last_use: Vec<u64>,
-    pending: Vec<(usize, CudaEvent)>,
+    pending: Vec<bool>,
     clock: u64,
 }
 
@@ -67,55 +74,277 @@ impl CacheState {
             slot_of: vec![None; experts],
             expert_in: vec![None; slots],
             last_use: vec![0; slots],
-            pending: Vec::new(),
+            pending: vec![false; slots],
             clock: 0,
         }
-    }
-
-    // copies that have landed make their slots usable
-    fn retire(&mut self) {
-        let expert_in = &self.expert_in;
-        let slot_of = &mut self.slot_of;
-        self.pending.retain(|(slot, event)| {
-            if event.is_complete() {
-                if let Some(expert) = expert_in[*slot] {
-                    slot_of[expert] = Some(*slot);
-                }
-                false
-            } else {
-                true
-            }
-        });
     }
 
     // the least recently used slot no in-flight copy targets and this forward does not read
     fn victim(&self, in_use: &[bool]) -> Option<usize> {
         (0..self.expert_in.len())
-            .filter(|&s| {
-                s != MISS_SLOT as usize && !in_use[s] && !self.pending.iter().any(|(p, _)| *p == s)
-            })
+            .filter(|&s| s != MISS_SLOT as usize && !in_use[s] && !self.pending[s])
             .min_by_key(|&s| (self.expert_in[s].is_some(), self.last_use[s]))
     }
 }
 
-pub(super) struct OffloadedExperts {
+/// Pinned buffers a decode step's routes and results pass through, sized for the largest split batch.
+struct Exchange {
+    ids: CudaSlice<u32>,
+    weights: CudaSlice<f32>,
+    slots: CudaSlice<u32>,
+    xs: CudaSlice<f32>,
+    ys: CudaSlice<f32>,
+}
+
+fn pinned<T: inference_tensor::cuda::cudarc::driver::DeviceRepr>(
+    stream: &Arc<CudaStream>,
+    len: usize,
+) -> Result<CudaSlice<T>> {
+    // SAFETY: a step writes each buffer before it reads it
+    unsafe { stream.alloc_mapped_host(len) }.map_err(inference_tensor::Error::wrap)
+}
+
+// A pinned buffer's host side; the stream orders every access to it
+#[allow(clippy::mut_from_ref)]
+fn host<T>(buffer: &CudaSlice<T>, len: usize) -> &mut [T] {
+    let ptr = buffer.mapped_host_ptr().expect("mapped allocation");
+    assert!(len <= buffer.len());
+    // SAFETY: the buffer is pinned host memory of at least `len` elements, touched only in stream order
+    unsafe { std::slice::from_raw_parts_mut(ptr, len) }
+}
+
+/// What a layer's host functions and fill worker share.
+struct Shared {
     host: [HostExpertStack; PROJECTIONS],
     cache: [DeviceExpertStack; PROJECTIONS],
     state: Mutex<CacheState>,
+    exchange: Exchange,
+    // expert -> slot in mapped host memory, which the GPU reads and only `state`'s holder writes
+    table: Tensor,
     copy_stream: Arc<CudaStream>,
-    device: CudaDevice,
+    host_stream: Arc<CudaStream>,
     act: GluActivationType,
+    topk: usize,
+}
+
+impl Shared {
+    fn cpu_experts(&self) -> CpuExperts<'_> {
+        fn projection(h: &HostExpertStack) -> CpuExpertProjection<'_> {
+            let [_, rows, cols] = h.dims();
+            CpuExpertProjection {
+                ty: h.ty(),
+                bytes: h.bytes(),
+                rows,
+                cols,
+            }
+        }
+        CpuExperts {
+            gate: projection(&self.host[0]),
+            up: projection(&self.host[1]),
+            down: projection(&self.host[2]),
+            act: self.act,
+        }
+    }
+
+    fn hidden(&self) -> usize {
+        self.host[0].dims()[2]
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn table(&self) -> &mut [u32] {
+        let (storage, _) = self.table.storage_and_layout();
+        let inference_tensor::Storage::Cuda(cuda) = &*storage else {
+            unreachable!("the slot table is built on CUDA")
+        };
+        let slice = cuda.as_cuda_slice::<u32>().expect("a u32 slot table");
+        let ptr = slice
+            .mapped_host_ptr()
+            .expect("the slot table is mapped host memory");
+        // SAFETY: the table outlives the layer, and its writers hold `state`
+        unsafe { std::slice::from_raw_parts_mut(ptr, slice.len()) }
+    }
+
+    // On the side stream's host thread: the picks the GPU found no slot for run on the CPU, and their experts are queued
+    // for the slots least recently used
+    fn split(self: &Arc<Self>, tokens: usize) -> Result<()> {
+        let (picks, hidden) = (tokens * self.topk, self.hidden());
+        let ex = &self.exchange;
+        let (ids, weights, slots) = (
+            host(&ex.ids, picks),
+            host(&ex.weights, picks),
+            host(&ex.slots, picks),
+        );
+        let ys = host(&ex.ys, tokens * hidden);
+        let mut state = self.state.lock().expect("expert cache poisoned");
+        state.clock += 1;
+        let clock = state.clock;
+        let mut in_use = vec![false; state.expert_in.len()];
+        let mut misses = Vec::new();
+        for i in 0..picks {
+            if slots[i] == MISS_SLOT {
+                misses.push(CpuExpertRoute {
+                    token: i / self.topk,
+                    expert: ids[i] as usize,
+                    weight: weights[i],
+                });
+            } else {
+                let slot = slots[i] as usize;
+                in_use[slot] = true;
+                state.last_use[slot] = clock;
+            }
+        }
+        ys.fill(0.0);
+        if !misses.is_empty() {
+            self.cpu_experts()
+                .forward(host(&ex.xs, tokens * hidden), &misses, ys)?;
+        }
+
+        let mut experts = misses.iter().map(|m| m.expert).collect::<Vec<_>>();
+        experts.sort_unstable();
+        experts.dedup();
+        for expert in experts {
+            if state.expert_in.contains(&Some(expert)) {
+                continue;
+            }
+            let Some(slot) = state.victim(&in_use) else {
+                break;
+            };
+            if let Some(old) = state.expert_in[slot].take() {
+                state.slot_of[old] = None;
+                self.table()[old] = MISS_SLOT;
+            }
+            state.expert_in[slot] = Some(expert);
+            state.last_use[slot] = clock;
+            state.pending[slot] = true;
+            in_use[slot] = true;
+            fills()
+                .send(Fill {
+                    shared: self.clone(),
+                    slot,
+                    expert,
+                })
+                .ok();
+        }
+        Ok(())
+    }
+
+    // On the fill worker: the copy, then a host function that opens the slot once the copy has landed
+    fn fill(self: Arc<Self>, slot: usize, expert: usize) -> Result<()> {
+        self.copy_stream
+            .context()
+            .bind_to_thread()
+            .map_err(inference_tensor::Error::wrap)?;
+        for (host, cache) in self.host.iter().zip(&self.cache) {
+            let size = host.expert_bytes();
+            let src = &host.bytes()[expert * size..][..size];
+            // SAFETY: host experts live as long as the layer, and the slot is unread until the copy has landed
+            unsafe { cache.fill_async(slot, src, &self.copy_stream)? };
+        }
+        let stream = self.copy_stream.cu_stream();
+        let landed = Box::into_raw(Box::new(Fill {
+            shared: self,
+            slot,
+            expert,
+        }));
+        // SAFETY: `landed` is reclaimed once by `fill_landed`
+        unsafe { result::stream::launch_host_function(stream, fill_landed, landed.cast()) }
+            .map_err(inference_tensor::Error::wrap)
+    }
+}
+
+struct Fill {
+    shared: Arc<Shared>,
+    slot: usize,
+    expert: usize,
+}
+
+unsafe extern "C" fn fill_landed(data: *mut std::ffi::c_void) {
+    // SAFETY: `data` is the box `Shared::fill` leaked for this call
+    let Fill {
+        shared,
+        slot,
+        expert,
+    } = *unsafe { Box::from_raw(data.cast::<Fill>()) };
+    let mut state = shared.state.lock().expect("expert cache poisoned");
+    state.pending[slot] = false;
+    if state.expert_in[slot] == Some(expert) {
+        state.slot_of[expert] = Some(slot);
+        shared.table()[expert] = u32::try_from(slot).expect("slot ids fit u32");
+    }
+}
+
+// One thread issues every layer's cache fills: host functions may not call CUDA themselves
+fn fills() -> &'static Sender<Fill> {
+    static FILLS: OnceLock<Sender<Fill>> = OnceLock::new();
+    FILLS.get_or_init(|| {
+        let (send, receive): (Sender<Fill>, Receiver<Fill>) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .name("moe-expert-fills".into())
+            .spawn(move || {
+                for Fill {
+                    shared,
+                    slot,
+                    expert,
+                } in receive
+                {
+                    if let Err(err) = shared.fill(slot, expert) {
+                        tracing::error!("MoE expert cache fill failed: {err}");
+                    }
+                }
+            })
+            .expect("spawn the MoE expert fill thread");
+        send
+    })
+}
+
+/// A host function's view of one split batch size; the layer's list of them never changes, so a captured graph's
+/// pointer to one stays valid.
+struct SplitCall {
+    shared: Arc<Shared>,
+    tokens: usize,
+}
+
+unsafe extern "C" fn split_host(data: *mut std::ffi::c_void) {
+    // SAFETY: `data` is a `SplitCall` the layer owns for its whole life
+    let call = unsafe { &*data.cast::<SplitCall>() };
+    if let Err(err) = call.shared.split(call.tokens) {
+        // the misses then add nothing rather than stale values
+        tracing::error!("offloaded MoE experts failed on the host: {err}");
+        host(&call.shared.exchange.ys, call.tokens * call.shared.hidden()).fill(0.0);
+    }
+}
+
+pub(super) struct OffloadedExperts {
+    shared: Arc<Shared>,
+    calls: Vec<SplitCall>,
+    device: CudaDevice,
+}
+
+// A contiguous CUDA tensor's first element, for copies queued on `stream`
+fn tensor_ptr<T: inference_tensor::cuda_backend::CudaDType>(
+    tensor: &Tensor,
+    stream: &CudaStream,
+) -> Result<u64> {
+    let (storage, layout) = tensor.storage_and_layout();
+    let inference_tensor::Storage::Cuda(cuda) = &*storage else {
+        inference_tensor::bail!("offloaded experts expect CUDA tensors");
+    };
+    let slice = cuda.as_cuda_slice::<T>()?;
+    let (ptr, _guard) = slice.device_ptr(stream);
+    Ok(ptr + (layout.start_offset() * std::mem::size_of::<T>()) as u64)
 }
 
 impl OffloadedExperts {
-    /// `host` holds `[gate, up, down]`; `slots` experts of each stay cached on `device`.
+    /// `host` holds `[gate, up, down]`; `slots` experts of each stay cached on `device`, `topk` routed per token.
     pub(super) fn new(
         host: [HostExpertStack; PROJECTIONS],
         slots: usize,
+        topk: usize,
         device: &CudaDevice,
         act: GluActivationType,
     ) -> Result<Self> {
         let experts = host[0].dims()[0];
+        let hidden = host[0].dims()[2];
         let layout = |h: &HostExpertStack| {
             let [_, rows, cols] = h.dims();
             (h.ty(), rows, cols)
@@ -126,29 +355,62 @@ impl OffloadedExperts {
             .expect("expert layouts poisoned")
             .push(layouts);
         let slots = slots.min(experts) + 1;
-        crate::perf_flags::rule_out_cuda_graphs();
         let cache = |p: usize| DeviceExpertStack::zeros(&[layouts[p]], slots, device);
-        Ok(Self {
+        let stream = device.cuda_stream();
+        let picks = SPLIT_MAX_TOKENS * topk;
+        let exchange = Exchange {
+            ids: pinned(&stream, picks)?,
+            weights: pinned(&stream, picks)?,
+            slots: pinned(&stream, picks)?,
+            xs: pinned(&stream, SPLIT_MAX_TOKENS * hidden)?,
+            ys: pinned(&stream, SPLIT_MAX_TOKENS * hidden)?,
+        };
+        let table = Tensor::zeros(experts, DType::U32, &Device::Cuda(device.clone()))?
+            .to_mapped_host()?
+            .ok_or_else(|| inference_tensor::Error::msg("the slot table needs a CUDA device"))?;
+        let shared = Arc::new(Shared {
             cache: [cache(0)?, cache(1)?, cache(2)?],
             host,
             state: Mutex::new(CacheState::new(experts, slots)),
-            copy_stream: device
-                .cuda_stream()
+            exchange,
+            table,
+            copy_stream: stream
                 .context()
                 .new_stream()
                 .map_err(inference_tensor::Error::wrap)?,
-            device: device.clone(),
+            host_stream: stream
+                .context()
+                .new_stream()
+                .map_err(inference_tensor::Error::wrap)?,
             act,
+            topk,
+        });
+        let calls = (1..=SPLIT_MAX_TOKENS)
+            .map(|tokens| SplitCall {
+                shared: shared.clone(),
+                tokens,
+            })
+            .collect();
+        Ok(Self {
+            shared,
+            calls,
+            device: device.clone(),
         })
     }
 
     fn experts(&self) -> usize {
-        self.host[0].dims()[0]
+        self.shared.host[0].dims()[0]
     }
 
     pub(super) fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
         if forward.lora.is_some() {
             inference_tensor::bail!("offloaded MoE experts do not take LoRA adapters");
+        }
+        if config.num_experts_per_tok != self.shared.topk {
+            inference_tensor::bail!(
+                "offloaded MoE experts were built for top-{} routing",
+                self.shared.topk
+            );
         }
         if forward.shape.num_tokens <= SPLIT_MAX_TOKENS {
             self.forward_split(forward, config)
@@ -157,168 +419,88 @@ impl OffloadedExperts {
         }
     }
 
-    fn cpu_experts(&self) -> Result<CpuExperts<'_>> {
-        fn projection(h: &HostExpertStack) -> Result<CpuExpertProjection<'_>> {
-            let [_, rows, cols] = h.dims();
-            Ok(CpuExpertProjection {
-                ty: h.ty(),
-                bytes: h.bytes(),
-                rows,
-                cols,
-            })
-        }
-        Ok(CpuExperts {
-            gate: projection(&self.host[0])?,
-            up: projection(&self.host[1])?,
-            down: projection(&self.host[2])?,
-            act: self.act,
-        })
-    }
-
-    // cached experts on the GPU and the rest on the CPU at the same time, then the misses are copied in
+    // the cached experts on the stream, the misses through a host function on the side stream, joined at the end
     fn forward_split(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
-        let topk = config.num_experts_per_tok;
         let (tokens, hidden) = forward.shape.flat();
-        let ids = forward
-            .topk_ids
-            .to_dtype(DType::U32)?
-            .flatten_all()?
-            .to_vec1::<u32>()?;
-        let weights = forward
-            .topk_weights
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-
-        let mut state = self.state.lock().expect("expert cache poisoned");
-        state.retire();
-        state.clock += 1;
-        let clock = state.clock;
-        let mut slot_ids = vec![MISS_SLOT; ids.len()];
-        let mut hit_weights = vec![0f32; ids.len()];
-        let mut in_use = vec![false; state.expert_in.len()];
-        let mut misses = Vec::new();
-        for (i, (&expert, &weight)) in ids.iter().zip(&weights).enumerate() {
-            match state.slot_of[expert as usize] {
-                Some(slot) => {
-                    slot_ids[i] = u32::try_from(slot).expect("slot ids fit u32");
-                    hit_weights[i] = weight;
-                    in_use[slot] = true;
-                    state.last_use[slot] = clock;
-                }
-                None => misses.push(CpuExpertRoute {
-                    token: i / topk,
-                    expert: expert as usize,
-                    weight,
-                }),
-            }
-        }
-
-        let gpu = if misses.len() < ids.len() {
-            let device = forward.xs.device();
-            let slot_ids = Tensor::from_vec(slot_ids, (tokens, topk), device)?;
-            let hit_weights = Tensor::from_vec(hit_weights, (tokens, topk), device)?;
-            let hits = MoEForward {
-                xs: forward.xs,
-                xs_flat: forward.xs_flat,
-                topk_weights: &hit_weights,
-                topk_ids: &slot_ids,
-                original_dtype: forward.original_dtype,
-                shape: forward.shape,
-                lora: None,
-            };
-            let cache = [
-                &self.cache[0] as &dyn KernelWeight,
-                &self.cache[1],
-                &self.cache[2],
-            ];
-            let hit_config = MoEForwardConfig {
-                num_experts: self.cache[0].slots(),
-                ..config
-            };
-            let routed = if tokens <= SPLIT_MAX_TOKENS {
-                indexed_mmvq_with(cache, &hits, hit_config)?
-            } else {
-                grouped_with(cache, &hits, hit_config)?
-            };
-            Some(routed.ok_or_else(|| {
-                inference_tensor::Error::msg("cached experts cannot run the GGUF kernels")
-            })?)
-        } else {
-            None
-        };
-
-        let cpu = if misses.is_empty() {
-            None
-        } else {
-            let xs = forward
-                .xs_flat
-                .to_dtype(DType::F32)?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
-            let mut out = vec![0f32; tokens * hidden];
-            self.cpu_experts()?.forward(&xs, &misses, &mut out)?;
-            Some(
-                Tensor::from_vec(out, (tokens, hidden), forward.xs.device())?
-                    .to_dtype(forward.original_dtype)?,
-            )
-        };
-
-        self.admit(&mut state, &misses, &mut in_use)?;
-        drop(state);
-        match (gpu, cpu) {
-            (Some(gpu), Some(cpu)) => gpu + cpu,
-            (Some(y), None) | (None, Some(y)) => Ok(y),
-            (None, None) => unreachable!("every pick is a hit or a miss"),
-        }
-    }
-
-    // each missed expert takes the least recently used slot, copied on the side stream after the work queued so far
-    fn admit(
-        &self,
-        state: &mut CacheState,
-        misses: &[CpuExpertRoute],
-        in_use: &mut [bool],
-    ) -> Result<()> {
-        let mut experts = misses.iter().map(|m| m.expert).collect::<Vec<_>>();
-        experts.sort_unstable();
-        experts.dedup();
-        if experts.is_empty() {
-            return Ok(());
-        }
+        let picks = tokens * self.shared.topk;
+        let device = forward.xs.device();
         let main = self.device.cuda_stream();
-        let queued = main
-            .record_event(None)
-            .map_err(inference_tensor::Error::wrap)?;
-        self.copy_stream
-            .wait(&queued)
-            .map_err(inference_tensor::Error::wrap)?;
-        for expert in experts {
-            if state.expert_in.contains(&Some(expert)) {
-                continue;
-            }
-            let Some(slot) = state.victim(in_use) else {
-                break;
-            };
-            if let Some(old) = state.expert_in[slot].take() {
-                state.slot_of[old] = None;
-            }
-            for (host, cache) in self.host.iter().zip(&self.cache) {
-                let size = host.expert_bytes();
-                let src = &host.bytes()[expert * size..][..size];
-                // SAFETY: host experts live as long as the layer, and the slot is unread until its event completes
-                unsafe { cache.fill_async(slot, src, &self.copy_stream)? };
-            }
-            let landed = self
-                .copy_stream
-                .record_event(None)
-                .map_err(inference_tensor::Error::wrap)?;
-            state.expert_in[slot] = Some(expert);
-            state.last_use[slot] = state.clock;
-            state.pending.push((slot, landed));
-            in_use[slot] = true;
+        let side = &self.shared.host_stream;
+        let ex = &self.shared.exchange;
+        let ids = forward.topk_ids.to_dtype(DType::U32)?.contiguous()?;
+        let weights = forward.topk_weights.to_dtype(DType::F32)?.contiguous()?;
+        let xs = forward.xs_flat.to_dtype(DType::F32)?.contiguous()?;
+        let slot_ids = self
+            .shared
+            .table
+            .index_select(&ids.flatten_all()?, 0)?
+            .reshape((tokens, self.shared.topk))?;
+        let ys = Tensor::zeros((tokens, hidden), DType::F32, device)?;
+        let wrap = inference_tensor::Error::wrap;
+        // SAFETY: the pinned buffers hold the largest split batch; the copies out precede the event the side stream
+        // waits on, the host function reads them after it, and the stream waits for the side stream's copy of the
+        // CPU result before it moves on, so the next step cannot overwrite a buffer still in use
+        unsafe {
+            let cu = main.cu_stream();
+            result::memcpy_dtoh_async(host(&ex.ids, picks), tensor_ptr::<u32>(&ids, &main)?, cu)
+                .map_err(wrap)?;
+            result::memcpy_dtoh_async(
+                host(&ex.weights, picks),
+                tensor_ptr::<f32>(&weights, &main)?,
+                cu,
+            )
+            .map_err(wrap)?;
+            result::memcpy_dtoh_async(
+                host(&ex.slots, picks),
+                tensor_ptr::<u32>(&slot_ids, &main)?,
+                cu,
+            )
+            .map_err(wrap)?;
+            result::memcpy_dtoh_async(
+                host(&ex.xs, tokens * hidden),
+                tensor_ptr::<f32>(&xs, &main)?,
+                cu,
+            )
+            .map_err(wrap)?;
+            side.wait(&main.record_event(None).map_err(wrap)?)
+                .map_err(wrap)?;
+            let call = &self.calls[tokens - 1] as *const SplitCall as *mut std::ffi::c_void;
+            result::stream::launch_host_function(side.cu_stream(), split_host, call)
+                .map_err(wrap)?;
+            result::memcpy_htod_async(
+                tensor_ptr::<f32>(&ys, side)?,
+                host(&ex.ys, tokens * hidden),
+                side.cu_stream(),
+            )
+            .map_err(wrap)?;
         }
-        Ok(())
+        let cpu_done = side.record_event(None).map_err(wrap)?;
+
+        let hits = MoEForward {
+            xs: forward.xs,
+            xs_flat: forward.xs_flat,
+            topk_weights: forward.topk_weights,
+            topk_ids: &slot_ids,
+            original_dtype: forward.original_dtype,
+            shape: forward.shape,
+            lora: None,
+        };
+        let cache = &self.shared.cache;
+        let cache = [&cache[0] as &dyn KernelWeight, &cache[1], &cache[2]];
+        let hit_config = MoEForwardConfig {
+            num_experts: cache[0].kernel_shape().dims()[0],
+            ..config
+        };
+        let routed = if tokens <= SPLIT_MAX_TOKENS {
+            indexed_mmvq_with(cache, &hits, hit_config)?
+        } else {
+            grouped_with(cache, &hits, hit_config)?
+        };
+        let gpu = routed.ok_or_else(|| {
+            inference_tensor::Error::msg("cached experts cannot run the GGUF kernels")
+        })?;
+        main.wait(&cpu_done).map_err(wrap)?;
+        gpu + ys.to_dtype(forward.original_dtype)?
     }
 
     // the whole layer copied into the shared staging, then the grouped kernels as for a resident layer
@@ -330,7 +512,7 @@ impl OffloadedExperts {
         };
         let main = self.device.cuda_stream();
         let mut views = Vec::with_capacity(PROJECTIONS);
-        for (host, stack) in self.host.iter().zip(&staging.stacks) {
+        for (host, stack) in self.shared.host.iter().zip(&staging.stacks) {
             let [_, rows, cols] = host.dims();
             let view = stack.view(host.ty(), experts, rows, cols)?;
             // SAFETY: host experts live as long as the layer; the main stream orders this copy after the previous
@@ -459,6 +641,7 @@ mod tests {
         let offloaded = OffloadedExperts::new(
             [host(0)?, host(1)?, host(2)?],
             SLOTS,
+            TOPK,
             cuda,
             GluActivationType::Silu,
         )?;
