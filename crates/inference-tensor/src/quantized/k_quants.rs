@@ -199,10 +199,12 @@ pub struct BlockQ8K {
 const _: () = assert!(4 + QK_K + QK_K / 16 * 2 == std::mem::size_of::<BlockQ8K>());
 
 impl BlockQ8K {
+    #[inline]
     pub fn d(&self) -> f32 {
         self.d
     }
 
+    #[inline]
     pub fn qs(&self) -> &[i8; QK_K] {
         &self.qs
     }

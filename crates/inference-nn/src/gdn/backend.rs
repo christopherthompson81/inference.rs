@@ -229,9 +229,9 @@ pub fn apply_recurrence_from_convolved(
         );
     }
 
-    if seq_len == 1 && mixed_qkv.device().is_cpu() {
-        return decode_recurrence_cpu_from_convolved(
-            mixed_qkv, b, a, a_log, dt_bias, dims, batch_size, cache, dtype,
+    if mixed_qkv.device().is_cpu() {
+        return recurrence_cpu_from_convolved(
+            mixed_qkv, b, a, a_log, dt_bias, dims, batch_size, seq_len, cache, dtype,
         );
     }
 
@@ -252,7 +252,7 @@ pub fn apply_recurrence_from_convolved(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn decode_recurrence_cpu_from_convolved(
+fn recurrence_cpu_from_convolved(
     mixed_qkv: &Tensor,
     b: &Tensor,
     a: &Tensor,
@@ -260,6 +260,7 @@ fn decode_recurrence_cpu_from_convolved(
     dt_bias: &Tensor,
     dims: &GdnDims,
     batch_size: usize,
+    seq_len: usize,
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
@@ -293,7 +294,7 @@ fn decode_recurrence_cpu_from_convolved(
         .flatten_all()?
         .to_vec1::<f32>()?;
 
-    let mut output = vec![0.0f32; batch_size * dims.num_v_heads * dims.head_v_dim];
+    let mut output = vec![0.0f32; batch_size * seq_len * dims.num_v_heads * dims.head_v_dim];
     let q_scale = 1.0f32 / (dims.head_k_dim as f32).sqrt();
     let state_head_len = dims.head_k_dim * dims.head_v_dim;
 
@@ -306,63 +307,72 @@ fn decode_recurrence_cpu_from_convolved(
             let mut delta = vec![0f32; dims.head_v_dim];
             let mut q_buf = vec![0f32; dims.head_k_dim];
             let mut k_buf = vec![0f32; dims.head_k_dim];
-            for gate_idx in heads {
+            for head in heads {
                 // SAFETY: each head's state and output rows are touched by this item alone, and both outlive the call
-                let (state_head, out_head) = unsafe {
-                    (
-                        std::slice::from_raw_parts_mut(
-                            (state_ptr as *mut f32).add(gate_idx * state_head_len),
-                            state_head_len,
-                        ),
+                let state_head = unsafe {
+                    std::slice::from_raw_parts_mut(
+                        (state_ptr as *mut f32).add(head * state_head_len),
+                        state_head_len,
+                    )
+                };
+                let bidx = head / dims.num_v_heads;
+                let hv = head % dims.num_v_heads;
+                let hk = dims.k_head_for_v_head(hv);
+                for t in 0..seq_len {
+                    let token = bidx * seq_len + t;
+                    let gate_idx = token * dims.num_v_heads + hv;
+                    // SAFETY: as above
+                    let out_head = unsafe {
                         std::slice::from_raw_parts_mut(
                             (out_ptr as *mut f32).add(gate_idx * dims.head_v_dim),
                             dims.head_v_dim,
-                        ),
-                    )
-                };
-                let bidx = gate_idx / dims.num_v_heads;
-                let hv = gate_idx % dims.num_v_heads;
-                let hk = dims.k_head_for_v_head(hv);
-                let row = bidx * dims.conv_dim;
-                let q_in = &mixed[row + hk * dims.head_k_dim..][..dims.head_k_dim];
-                let k_in = &mixed[row + dims.key_dim + hk * dims.head_k_dim..][..dims.head_k_dim];
-                let v_in =
-                    &mixed[row + 2 * dims.key_dim + hv * dims.head_v_dim..][..dims.head_v_dim];
+                        )
+                    };
+                    let row = token * dims.conv_dim;
+                    let q_in = &mixed[row + hk * dims.head_k_dim..][..dims.head_k_dim];
+                    let k_in =
+                        &mixed[row + dims.key_dim + hk * dims.head_k_dim..][..dims.head_k_dim];
+                    let v_in =
+                        &mixed[row + 2 * dims.key_dim + hv * dims.head_v_dim..][..dims.head_v_dim];
 
-                let q_sum = q_in.iter().map(|q| q * q).sum::<f32>();
-                let k_sum = k_in.iter().map(|k| k * k).sum::<f32>();
-                let q_mul = q_scale / (q_sum + QK_NORM_EPS_F32).sqrt();
-                let k_mul = 1.0f32 / (k_sum + QK_NORM_EPS_F32).sqrt();
-                for (buf, x) in q_buf.iter_mut().zip(q_in) {
-                    *buf = x * q_mul;
-                }
-                for (buf, x) in k_buf.iter_mut().zip(k_in) {
-                    *buf = x * k_mul;
-                }
-                let beta = sigmoid_f32(b[gate_idx]);
-                let decay = (-a_log[hv].exp() * softplus_f32(a[gate_idx] + dt_bias[hv])).exp();
-
-                // pass 1: decay the state and read k^T S
-                kv_mem.fill(0.0);
-                for (state_row, &kd) in state_head.chunks_exact_mut(dims.head_v_dim).zip(&k_buf) {
-                    for (s, mem) in state_row.iter_mut().zip(kv_mem.iter_mut()) {
-                        *s *= decay;
-                        *mem += *s * kd;
+                    let q_sum = q_in.iter().map(|q| q * q).sum::<f32>();
+                    let k_sum = k_in.iter().map(|k| k * k).sum::<f32>();
+                    let q_mul = q_scale / (q_sum + QK_NORM_EPS_F32).sqrt();
+                    let k_mul = 1.0f32 / (k_sum + QK_NORM_EPS_F32).sqrt();
+                    for (buf, x) in q_buf.iter_mut().zip(q_in) {
+                        *buf = x * q_mul;
                     }
-                }
-                for ((d, &v), &mem) in delta.iter_mut().zip(v_in).zip(&kv_mem) {
-                    *d = (v - mem) * beta;
-                }
-                // pass 2: rank-1 update and the q readout
-                out_head.fill(0.0);
-                for ((state_row, &kd), &qd) in state_head
-                    .chunks_exact_mut(dims.head_v_dim)
-                    .zip(&k_buf)
-                    .zip(&q_buf)
-                {
-                    for ((s, &d), y) in state_row.iter_mut().zip(&delta).zip(out_head.iter_mut()) {
-                        *s += kd * d;
-                        *y += *s * qd;
+                    for (buf, x) in k_buf.iter_mut().zip(k_in) {
+                        *buf = x * k_mul;
+                    }
+                    let beta = sigmoid_f32(b[gate_idx]);
+                    let decay = (-a_log[hv].exp() * softplus_f32(a[gate_idx] + dt_bias[hv])).exp();
+
+                    // pass 1: decay the state and read k^T S
+                    kv_mem.fill(0.0);
+                    for (state_row, &kd) in state_head.chunks_exact_mut(dims.head_v_dim).zip(&k_buf)
+                    {
+                        for (s, mem) in state_row.iter_mut().zip(kv_mem.iter_mut()) {
+                            *s *= decay;
+                            *mem += *s * kd;
+                        }
+                    }
+                    for ((d, &v), &mem) in delta.iter_mut().zip(v_in).zip(&kv_mem) {
+                        *d = (v - mem) * beta;
+                    }
+                    // pass 2: rank-1 update and the q readout
+                    out_head.fill(0.0);
+                    for ((state_row, &kd), &qd) in state_head
+                        .chunks_exact_mut(dims.head_v_dim)
+                        .zip(&k_buf)
+                        .zip(&q_buf)
+                    {
+                        for ((s, &d), y) in
+                            state_row.iter_mut().zip(&delta).zip(out_head.iter_mut())
+                        {
+                            *s += kd * d;
+                            *y += *s * qd;
+                        }
                     }
                 }
             }
@@ -383,7 +393,7 @@ fn decode_recurrence_cpu_from_convolved(
 
     Tensor::from_vec(
         output,
-        (batch_size, 1, dims.num_v_heads, dims.head_v_dim),
+        (batch_size, seq_len, dims.num_v_heads, dims.head_v_dim),
         dev,
     )?
     .to_dtype(dtype)
@@ -1263,21 +1273,20 @@ mod tests {
         )
     }
 
-    fn run_decode_case(dims: GdnDims, batch_size: usize) -> CandleResult<()> {
+    fn run_recurrence_case(dims: GdnDims, batch_size: usize, seq_len: usize) -> CandleResult<()> {
         let dev = Device::Cpu;
-        let seq_len = 1;
         let mixed = Tensor::from_vec(
-            patterned(batch_size * dims.conv_dim, 1, 0.08, 0.01),
+            patterned(batch_size * seq_len * dims.conv_dim, 1, 0.08, 0.01),
             (batch_size, seq_len, dims.conv_dim),
             &dev,
         )?;
         let b = Tensor::from_vec(
-            patterned(batch_size * dims.num_v_heads, 2, 0.2, 0.1),
+            patterned(batch_size * seq_len * dims.num_v_heads, 2, 0.2, 0.1),
             (batch_size, seq_len, dims.num_v_heads),
             &dev,
         )?;
         let a = Tensor::from_vec(
-            patterned(batch_size * dims.num_v_heads, 3, 0.2, -0.05),
+            patterned(batch_size * seq_len * dims.num_v_heads, 3, 0.2, -0.05),
             (batch_size, seq_len, dims.num_v_heads),
             &dev,
         )?;
@@ -1319,7 +1328,7 @@ mod tests {
             pending_transitions: None,
             deferred_state: None,
         };
-        let fast = decode_recurrence_cpu_from_convolved(
+        let fast = recurrence_cpu_from_convolved(
             &mixed,
             &b,
             &a,
@@ -1327,6 +1336,7 @@ mod tests {
             &dt_bias,
             &dims,
             batch_size,
+            seq_len,
             &mut fast_cache,
             DType::F32,
         )?;
@@ -1992,9 +2002,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_recurrence_cpu_matches_tensor_path() -> CandleResult<()> {
-        run_decode_case(dims(2, 4, 5, 3), 2)?;
-        run_decode_case(dims(3, 3, 4, 2), 1)?;
-        run_decode_case(dims_with_layout(2, 4, 5, 3, GdnVHeadLayout::Tiled), 2)
+    fn recurrence_cpu_matches_tensor_path() -> CandleResult<()> {
+        for seq_len in [1, 5] {
+            run_recurrence_case(dims(2, 4, 5, 3), 2, seq_len)?;
+            run_recurrence_case(dims(3, 3, 4, 2), 1, seq_len)?;
+            run_recurrence_case(
+                dims_with_layout(2, 4, 5, 3, GdnVHeadLayout::Tiled),
+                2,
+                seq_len,
+            )?;
+        }
+        Ok(())
     }
 }

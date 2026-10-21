@@ -306,3 +306,58 @@ slot can be evicted under it), gathers only the experts it routes to into the sh
 their slots, the rest over the bus, consecutive uncached ids in one copy) and runs the grouped kernels on that compact
 stack with remapped ids. These prompts ran with no decoding between them, so the cache was cold and 128 and 64 slots
 tie; with decode in between the cached share comes over at device speed.
+
+## Run 12 - 2026-10-20 23:30
+
+Question: CPU prefill experts ran at about 112 GOPS (9.4 s of a 15.9 s 512-token forward, 32.1 tok/s against
+llama.cpp's 60). Does decoding each expert row once into a tile and running its tokens over it close that?
+
+New `prefill_layer_rate` benchmark (one 35B-A3B layer's 256 experts, 512 tokens x 8 picks; `SKEW` piles routes onto
+a few experts) and a temporary single-thread split of decode vs dot. In order:
+
+```
+                                                         uniform    skewed     whole model (bench --cpu, 512)
+x4 kernels (before)                                      -          -          experts 9.37 s, 32.1 tok/s
+i16 tiles (sub-block scale folded in, madd 2 rows x 4)   80 ms      162 ms     experts 4.6 s, 56.6 tok/s
+busy experts split into spans of <= 32 routes            89         104
+BlockQ8K::d()/qs() #[inline]                             81         -
+quantize, widen, final sum on the pool; scratch reused   65         80
+                                                                               experts 2.6 s, 78.6 tok/s
+```
+
+- Tile size (4-16 rows a work item, min tokens 4-16) moved prefill by 1-2%. Weights resident in L3 (8 experts) gave
+  only 10%, and 1 / 4 / 8 threads scale 63 / 221 / 410 GOPS, so it is not memory-bound.
+- The skewed case lost to load imbalance: the pool's chunked loop handed one thread a whole busy expert. Spans plus a
+  shared cursor taking 16 items at a time fixed it. Taking items one at a time instead cost 25% on uniform routing,
+  as neighbouring row tiles on different cores wrote into the same output cache lines.
+- `BlockQ8K::d()` was a call through the GOT in every block (no `#[inline]`, no cross-crate inlining in dev), which
+  spilled all eight accumulators around it. Inlining it doubled the existing x4 kernels too (IQ3_S 5.7 -> 11.5 GB/s a
+  token on one thread).
+- Gathering the IQ3_S grid with vector-built indices in place of eight scalar lookups changed nothing.
+- On one thread the dot is 70% (64 GMAC/s, the isolated kernel's rate) and the tile decode 30%. A maddubs form would
+  save only the adds; both forms issue two port-0/1 ops per 32 MACs.
+
+Decode moved 8.5 -> 9.1 tok/s (109.6 ms a token; llama.cpp 9.35) with the inlined accessors. The "GDN recurrence/conv
+prefill regression" noted at the end of Run 11 was the warm-up forward: steady forwards give recurrence 1.05-1.1 s and
+conv 0.2 s, as in Run 6.
+
+Now (ms of a 512-token forward): GDN projection 1000, conv 205, recurrence 1055, finish 465, experts 2540, attention
+740, shared 215.
+
+## Run 13 - 2026-10-21 00:20
+
+Question: the GDN recurrence took 1.07 s of a 512-token forward for about 63 GFLOP; where does it go?
+
+Temporary timers inside it: 244 ms narrowing, head expansion (`repeat`), gating and `l2_norm` as tensor ops, 271 ms
+transposing to [b, h, t, d] and copying to vectors, 521 ms the scan, 37 ms back. The decode path already fused all of
+that for one token (reading q / k / v straight from the convolved rows, normalizing and gating per head), so it now
+loops each head over the prompt's tokens and serves every CPU length: recurrence 1073 -> 530 ms, prompt 78.6 -> 86.6
+tok/s. Its test now checks 1 and 5 tokens against the tensor path. The Qwen3.5 MoE snapshots moved (F32 by 1e-4 of the
+sum; BF16 more, as q / k normalization and gating no longer round through BF16) and were re-recorded; the aarch64 BF16
+one will move too.
+
+Dead ends on the expert dot (one thread, 64 GMAC/s, about 9 cycles a 16-value step where the ports allow about 5):
+aligning the tile to 64 bytes, and token quads outermost (both within noise).
+
+Now (ms of a 512-token forward): experts 2470, GDN projection 1020, attention 740, recurrence 530, finish 495, shared
+215, conv 205.
