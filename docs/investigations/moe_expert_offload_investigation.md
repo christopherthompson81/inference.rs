@@ -277,3 +277,32 @@ pick, and evictions clear the table before their copies start.
 
 Greedy replies are coherent but differ between runs at the same seed (two graph runs part at character 99): whether a
 pick is served by the cache or the CPU depends on when its fill lands, and the two quantize activations differently.
+
+## Run 11 - 2026-10-20 22:00
+
+Question: prompts copied every layer's whole expert stack (about 30 ms a layer over gen3) whatever their length. What
+should a prompt batch do instead?
+
+`prompt_ttft.py` (raw completions, `max_tokens` 1, no prefix cache, best of three; first with a sixteen-word synthetic
+text, then with real guide text):
+
+```
+synthetic text, 128 slots        73 tok     288 tok    758 tok
+whole-layer staging              1196 ms    1260 ms    2514 ms
+cache + CPU split for prompts    178 ms     263 ms     506 ms
+
+real text                        73 tok     288 tok    758 tok    2648 tok
+whole-layer staging (synthetic)  1196 ms    1260 ms    2514 ms    7629 ms (2965 tok)
+split, 128 slots                 852 ms     1780 ms    2974 ms    8632 ms
+split, 64 slots                  800 ms     2415 ms    6392 ms    30277 ms
+sparse staging, 128 or 64 slots  403 ms     747 ms     1477 ms    5364 ms
+```
+
+The synthetic text routed to so few experts that 128 slots held nearly all of them, which flattered the split; real
+text spreads over the experts, and the CPU's cost per routed token (about 57 us) makes it lose once an expert has more
+than one token, as copying the expert over the bus takes about 127 us. So the split stays at decode sizes (up to 8
+tokens), and a larger batch now reads its routes on the host (which also waits out any queued host function, so no
+slot can be evicted under it), gathers only the experts it routes to into the shared staging (cached ones copied from
+their slots, the rest over the bus, consecutive uncached ids in one copy) and runs the grouped kernels on that compact
+stack with remapped ids. These prompts ran with no decoding between them, so the cache was cold and 128 and 64 slots
+tie; with decode in between the cached share comes over at device speed.

@@ -23,7 +23,7 @@ The freed VRAM goes to the KV cache: the planner leaves the offloaded experts ou
 | `--moe-expert-cache 128` | 7.2 GiB | 98 | 467K tokens |
 | `--moe-expert-cache 64` | 3.6 GiB | 52-63 | 652K tokens |
 
-Decode speed depends on how fast the CPU reads memory (misses) and on the cache's hit rate; prompts copy each layer's experts to the GPU in turn, so their speed is bounded by the PCIe link (about 400 tokens a second on PCIe gen3 x16 for this model).
+Decode speed depends on how fast the CPU reads memory (misses) and on the cache's hit rate. A prompt batch copies the experts it routes to onto the GPU (cached ones from VRAM, the rest over PCIe), so short prompts are cheap and long ones run at about 500 tokens a second on PCIe gen3 x16 for this model.
 
 ## Notes
 
