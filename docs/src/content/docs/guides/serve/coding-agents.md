@@ -17,6 +17,32 @@ inference.rs also ships its own terminal coding agent, `inference agent`; see
 Use `default` for a single-model server. With multi-model serving, use a model
 id exactly as it appears in `GET /v1/models`.
 
+## Launch an agent in one command
+
+`inference launch` runs Claude Code, opencode or Codex against a server, with its
+provider set through the agent's environment or command line, so none of the
+agent's own configuration files are written:
+
+```bash
+inference launch claude                                  # the server on localhost:1234
+inference launch opencode --url http://gpu-box:1234 --api-key-file ~/.config/inference-rs/my-key
+inference launch codex --config serve.toml -- exec "add a unit test for utils.py"
+```
+
+- `--url` names a running server; without it the launcher uses `localhost:1234`,
+  or the port in `--config`.
+- `--config` (a `from-config` file) starts that server when nothing answers yet,
+  logging to `~/.cache/inference-rs/launch-server.log`, and stops it when the
+  agent exits.
+- The model is `--model`, or the server's default model; its context window comes
+  from `GET /v1/models` and is passed to the agent.
+- The key is read from `--api-key-file` (the first line: the key or `name=key`),
+  `INFERENCE_API_KEY`, or the `--config` server's keys file.
+- Arguments after `--` go to the agent; the agent's exit status is the
+  launcher's.
+
+The sections below set the same providers up by hand.
+
 ## Start inference.rs
 
 Start a model that is tuned for tool use and code:
@@ -168,7 +194,7 @@ Copyable config snippets live in `examples/server/`:
 | Claude Code returns 404 | Remove `/v1` from `ANTHROPIC_BASE_URL`. |
 | The client requests an Anthropic model id | Use `default`, or map Claude Code default model env vars to your local ids. |
 | Claude Code warns that the model context window is unknown | Set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` to the loaded model's context window. |
-| A remote server accepts any key | Put authentication in a reverse proxy. inference.rs does not validate compatibility API keys. |
+| A server reachable from other machines accepts any request | Start it with [API keys](/reference/http-api/#authentication) (`--api-keys-file`); every API surface, the compatibility ones included, then requires one. |
 | Claude Code sends beta fields your proxy rejects | Set `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` in Claude Code. |
 | Long streams time out | Raise Codex `stream_idle_timeout_ms` or Claude Code `API_TIMEOUT_MS`. |
 

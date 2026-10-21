@@ -2,7 +2,7 @@
 title: "inference tune"
 description: "Recommend quantization + device mapping for a model. Rejects `--quant auto`; pass `--quant <level>` or `--isq <level>` to bias the recommendation toward a specific quantization target. Adapter options are rejected because adapter memory is not included in the estimate"
 sidebar:
-  order: 9
+  order: 10
 ---
 
 <!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->

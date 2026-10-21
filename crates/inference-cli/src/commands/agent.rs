@@ -145,7 +145,7 @@ pub async fn run_agent(
 }
 
 /// A bare key, or the first key of a `serve` keys file (`name = key` lines).
-fn read_api_key(text: &str) -> Result<String> {
+pub(crate) fn read_api_key(text: &str) -> Result<String> {
     let line = text
         .lines()
         .map(str::trim)

@@ -13,6 +13,7 @@ sidebar:
 |---|---|
 | [`inference serve`](/reference/cli/serve/) | Start HTTP/MCP server and (optionally) the UI at /ui |
 | [`inference run`](/reference/cli/run/) | Run model in interactive mode, or one-shot mode with `-i` |
+| [`inference launch`](/reference/cli/launch/) | Run Claude Code, opencode or Codex against an inference server, configured through their environment (no agent config file is written): a running server (`--url`, or localhost:1234), or one started from `--config` and stopped after |
 | [`inference agent`](/reference/cli/agent/) | Coding agent: a tool loop (read, write, edit, bash, grep, glob) over the project directory, with the model in this process or on a server (`--url`) |
 | [`inference completions`](/reference/cli/completions/) | Generate shell completions |
 | [`inference quantize`](/reference/cli/quantize/) | Generate a UQFF quantized model file, or an `asr` GGUF of a speech recogniser |
