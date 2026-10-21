@@ -165,6 +165,7 @@ pub fn forward_packed_gdn(
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
         outputs.push(inference_quant::with_lora_execution_row_range(
             segment.token_range.clone(),

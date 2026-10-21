@@ -1,4 +1,4 @@
-use inference_tensor::{DType, Device, Result, Tensor};
+use inference_tensor::{DType, Device, Result, Tensor, TensorId};
 
 use crate::kv_cache::{
     GdnDeferredStatePool, GdnPendingTransitionPool, RecurrentStateLayout, RecurrentStatePool,
@@ -17,6 +17,9 @@ pub struct GdnLayerCache {
     pub slots: Option<Tensor>,
     pub pending_transitions: Option<GdnPendingTransitionPool>,
     pub deferred_state: Option<GdnDeferredStatePool>,
+    /// A CPU checkout of one pool row hands out views of it; their ids, so `commit` skips a state the kernels
+    /// updated in place and copies back only one that was replaced.
+    pub pool_views: Option<[TensorId; 2]>,
 }
 
 impl GdnLayerCache {
@@ -47,6 +50,7 @@ impl GdnLayerCache {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         }
     }
 
@@ -63,6 +67,7 @@ impl GdnLayerCache {
             slots: Some(slots),
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         }
     }
 
@@ -78,6 +83,16 @@ impl GdnLayerCache {
             );
             cache.pending_transitions = pool.pending_transitions().cloned();
             cache.deferred_state = pool.deferred_state().cloned();
+            return Ok(cache);
+        }
+        if indices.dims1()? == 1 {
+            let row = indices.to_vec1::<u32>()?[0] as usize;
+            let mut cache = Self::gathered(
+                pool.conv_state.narrow(0, row, 1)?,
+                pool.recurrent_state.narrow(0, row, 1)?,
+                pool.state_layout(),
+            );
+            cache.pool_views = Some([cache.conv_state.id(), cache.recurrent_state.id()]);
             return Ok(cache);
         }
         Ok(Self::gathered(
@@ -96,8 +111,18 @@ impl GdnLayerCache {
         if self.slots.is_some() {
             return Ok(());
         }
-        pool.scatter_conv_state_with_host_indices(indices, host_indices, &self.conv_state)?;
-        pool.scatter_recurrent_state_with_host_indices(indices, host_indices, &self.recurrent_state)
+        let [conv_view, recurrent_view] = self.pool_views.map_or([None; 2], |ids| ids.map(Some));
+        if conv_view != Some(self.conv_state.id()) {
+            pool.scatter_conv_state_with_host_indices(indices, host_indices, &self.conv_state)?;
+        }
+        if recurrent_view != Some(self.recurrent_state.id()) {
+            pool.scatter_recurrent_state_with_host_indices(
+                indices,
+                host_indices,
+                &self.recurrent_state,
+            )?;
+        }
+        Ok(())
     }
 
     pub fn reset(&mut self) -> Result<()> {
@@ -116,6 +141,7 @@ impl Clone for GdnLayerCache {
             slots: self.slots.clone(),
             pending_transitions: self.pending_transitions.clone(),
             deferred_state: self.deferred_state.clone(),
+            pool_views: self.pool_views,
         }
     }
 }

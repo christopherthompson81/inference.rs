@@ -361,3 +361,27 @@ aligning the tile to 64 bytes, and token quads outermost (both within noise).
 
 Now (ms of a 512-token forward): experts 2470, GDN projection 1020, attention 740, recurrence 530, finish 495, shared
 215, conv 205.
+
+## Run 14 - 2026-10-21 00:50
+
+Question: a CPU decode token took 111 ms of wall time with 99 ms inside the timed sections; where are the other 12?
+
+More timers: checking out each GDN layer's state took 5.3 ms a token and committing it 3.2 ms. On the CPU a checkout
+gathered the pool row (index_select), the conv and recurrence copied it to a Vec and built a new tensor, and the
+commit scattered that back: four copies of about 2 MB a layer. Now a CPU checkout of one row hands out `narrow` views
+of the pool and records their tensor ids; the conv update and recurrence write a view in place (an `InplaceOp1` over
+the F32 row), and the commit copies back only a state that was replaced (the prompt conv still builds a new one).
+In-place writes are limited to those recorded views: tests clone one state into two caches, which an unconditional
+in-place write broke, and production tensors can share storage the same way.
+
+The decode conv moved off rayon onto the barrier pool; run inline it went 2.6 -> 8.3 ms, as each channel's SiLU is an
+exp.
+
+```
+decode, ms a token        checkout  commit  conv  recurrence  wall
+before                    5.3       3.2     2.6   4.9         111
+in place                  0.03      0.01    1.3   2.9         96.8
+```
+
+CPU decode 9.1 -> 10.1 tok/s (99 ms; llama.cpp 9.35). The remaining sections each read their weights at about 30 GB/s
+(GDN projections 27 ms, experts 19, LM head 12.7, GDN output 11, attention 10.8).
