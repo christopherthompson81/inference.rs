@@ -42,6 +42,7 @@ fn bench_spec(
                 runtime.mtp_draft_sampling,
                 runtime.mtp_draft_isq.clone(),
             ),
+            moe_expert_cache: runtime.moe_expert_cache,
             log: None,
             ..model_runtime
         },

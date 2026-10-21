@@ -968,6 +968,10 @@ pub struct BenchRuntimeOptions {
     /// Weight type of the MTP assistant model, e.g. q4k or q8_0; unset, the model's ISQ (a GGUF's drafter stays BF16).
     #[arg(long)]
     pub mtp_draft_isq: Option<String>,
+
+    /// Keep MoE experts (GGUF, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs the rest
+    #[arg(long, value_name = "EXPERTS")]
+    pub moe_expert_cache: Option<usize>,
 }
 
 impl BenchRuntimeOptions {
