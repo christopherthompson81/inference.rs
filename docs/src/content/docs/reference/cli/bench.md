@@ -62,6 +62,7 @@ inference bench [OPTIONS] [COMMAND]
 | `--mtp-n-predict <MTP_N_PREDICT>` |  | Number of MTP draft tokens to propose per target step |
 | `--mtp-draft-sampling <MTP_DRAFT_SAMPLING>` | `auto` | MTP draft sampling policy. Auto uses probabilistic DFlash2 drafting when supported. Possible values: `auto`, `greedy`, `probabilistic`. |
 | `--mtp-draft-isq <MTP_DRAFT_ISQ>` |  | Weight type of the MTP assistant model, e.g. q4k or q8_0; unset, the model's ISQ (a GGUF's drafter stays BF16) |
+| `--moe-expert-cache <EXPERTS>` |  | Keep MoE experts (GGUF, on CUDA) in host memory and cache this many per layer on the GPU; the CPU runs the rest |
 | `--adapter <ADAPTER>` |  | LoRA adapter alias to benchmark. Omit to benchmark the base model |
 | `--prompt-len <PROMPT_LEN>` | `512` | Input lengths used to measure time to first token. Zero skips TTFT. Accepts comma-separated values for sweeps |
 | `--gen-len <GEN_LEN>` | `128` | Output tokens per decode request. Values below 2 skip decode metrics |
