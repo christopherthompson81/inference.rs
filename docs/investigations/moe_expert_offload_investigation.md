@@ -385,3 +385,42 @@ in place                  0.03      0.01    1.3   2.9         96.8
 
 CPU decode 9.1 -> 10.1 tok/s (99 ms; llama.cpp 9.35). The remaining sections each read their weights at about 30 GB/s
 (GDN projections 27 ms, experts 19, LM head 12.7, GDN output 11, attention 10.8).
+
+## Run 15 - 2026-10-21 12:30
+
+Question: with speculation at 64 slots, decode fell to about 49 tok/s (recipe doc Run 8) and `MoE expert cache fill
+failed` errors printed after the bench. Does the fill queue back up?
+
+A split admits every expert its misses route to, up to the layer's slots, so at 64 slots each of 40 layers can have
+63 copies in flight (about 1.5 MB an IQ4_KSS expert: up to 3.8 GB, 0.3 s of PCIe gen3). An 8-token verify misses far
+more experts than land before they are evicted again. The errors came at process exit, while the fill thread was
+still issuing copies and the driver tore its contexts down; this session's runs showed none even uncapped.
+
+Change: a layer stops admitting misses once `MAX_PENDING_FILLS` of its copies are in flight, and the experts most of
+a step's tokens missed go first. A temporary `MOE_FILL_CAP` swept the cap. Qwen3.6 35B-A3B IQ4_KSS file, RTX 3090.
+
+`inference bench` (synthetic ids, decode tok/s, +/- 13-65):
+
+```
+cap          64 slots DFlash 5   64 slots none   128 slots DFlash 5
+unbounded    75.9                79.9            171.0
+16           98.0                76.8            175.9
+4            120.1               83.9            152.7
+1            99.3                87.5            116.1
+```
+
+Real text (`mixbench.py`, wiki / code / zh, q3 KV for DFlash):
+
+```
+cap          64 slots DFlash 3      64 slots MTP 1 draft   128 slots DFlash 3     128 slots none
+unbounded    61.3 / 70.5 / 68.7     72.5 / 74.0 / 79.3     139.5 / 153.5 / 150.4  95.9 / 106.3 / 104.8
+8            73.3 / 84.7 / 86.4     74.4 / 73.1 / 75.8     141.7 / 160.7 / 148.3
+4            84.9 / 102.1 / 101.8   78.8 / 80.8 / 86.1     143.6 / 170.2 / 148.3  96.4 / 108.8 / 101.2
+2            88.9 / 104.0 / 103.8                          145.9 / 167.7 / 157.6
+1            92.2 / 104.5 / 92.2                           149.7 / 167.1 / 146.4
+```
+
+Caps 1-4 are one plateau on real text: 64-slot DFlash +38-48%, 64-slot MTP +9%, 128-slot DFlash +0-10%, no
+speculation unchanged. The synthetic ids (little routing locality) lose at 128 slots below 4, so the constant is 4.
+With it DFlash is the best speculation at 64 slots too (85-102 against MTP's 79-86), which removes Run 9's "fewer
+drafts as slots shrink" rule from the planner's inputs, at least down to 64 slots.
