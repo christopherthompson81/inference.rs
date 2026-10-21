@@ -253,3 +253,101 @@ verify batch shared across its tokens.
 
 Next: real-text decode (a served request) for resident DFlash 2 and for 128 slots, the memory left for context
 resident, and draft count at 128 / 64 slots.
+
+## Run 9 - 2026-10-21 05:30
+
+Question: Runs 6-8 used synthetic ids. What does decode do on real text, per configuration, and how much context
+does each leave?
+
+Command: `mixbench.py` (scratchpad) against `inference serve -p 1240 --format gguf -f <IQ4_XS + MTP file> ...`,
+one server per configuration (`mixrun.sh`): 4 wiki summaries (~2K-token prompts), 4 code tasks, 2 Chinese essays,
+UI sampling (0.6 / 0.95 / 20, seed 7), 400 tokens, streamed, decode = (tokens - 1) / (last - first delta); median
+per kind. Context is the engine's "available context length" at load (default 16 prefix caches, 4 sequences).
+
+```
+config                      wiki    code    zh      accept len   context
+resident, none (BF16 KV)    170.8   172.5   172.4                85,664
+resident, none, q4 KV       168.1   170.5   170.4                279,808
+resident, MTP (2 drafts)    152.8   157.6   159.1   2.48         58,496
+resident, MTP 1 draft       145.9   151.8   153.4   1.88         58,496
+resident, DFlash 7          205.1   204.2   193.2   3.52         24,832
+resident, DFlash 7, q4 KV   195.6   204.2   203.2   3.58         81,216
+resident, DFlash 7, q3 KV   213.2   205.4   204.9   3.57         99,488
+resident, DFlash 5, q4 KV   212.0   233.7   210.7   3.49         86,560
+128 slots, none              94.9   102.8   101.7                502,752
+128 slots, MTP              125.1   132.1   130.2   2.49         446,592
+128 slots, DFlash 7         111.3   138.6   126.0   3.52         445,184
+128 slots, DFlash 5         130.6   160.5   134.2   3.32
+128 slots, DFlash 3         135.2   157.2   138.9   2.77         446,816
+128 slots, DFlash 2         136.8   149.1   142.4   2.43
+64 slots, none               56.6    60.3    61.7                715,744
+64 slots, MTP                65.8    70.9    74.2   2.49         643,200
+64 slots, MTP 1 draft        70.6    71.8    74.0   1.91
+64 slots, DFlash 3           52.5    68.8    66.3   2.47         658,176
+```
+
+Raw findings:
+
+- Synthetic ids overstated acceptance (MTP 2.74 there, 2.48 here; DFlash 4.26 there, 3.5 here) and MTP's gain.
+- Resident, the built-in MTP head loses to no speculation (153 vs 171): on a MoE a k-token verify reads close to k
+  tokens' worth of distinct experts, so a 1.5-2.5-token gain does not pay for it. DFlash 2 at 5 drafts wins (+24-37%)
+  as its acceptance is higher; 7 drafts is no better than 5 (the 7 extra-long tails rarely land).
+- Offloaded, the best draft count falls with the slots: 128 slots DFlash 2-5 (+35-55% over none, 5 best on code),
+  64 slots MTP 1 draft (+15-25%); DFlash at 64 slots is no better than none. A planner choosing slots should choose
+  the speculation too.
+- KV q4 / q3 costs nothing measurable in speed here.
+- No `cache fill failed` errors on any served run (Run 8's came at bench teardown).
+- Offloaded 2K-token prompts take 2.4-4.3 s (first request cold) against 0.55 s resident.
+
+Resident DFlash leaves only 486 MB of KV room (BF16 81K-token cache cut to 25K). The external-drafter reservation
+(`reserve_external_mtp_memory_with_runtime`) counts the q4k drafter's weights (about 260 MB, the ISQ pack factor is
+applied) plus its windowed KV: (live sequences + retained prefixes) x 2048-token window x 6 layers, about 50 MB each,
+with retained prefixes = min(prefix caches, GDN snapshots) = 8. The GDN pool (capacity 9, about 63 MB a state)
+reserves its snapshots either way.
+
+```
+resident, DFlash 5, q3 KV        wiki    code    zh      post-load reserve   context
+16 prefix caches (default)       232.2   241.2   209.9   1,028 MB            106,048
+--prefix-cache-n 4               231.2   237.9   208.1   830 MB              146,592
+--prefix-cache-n 2               230.0   238.4   208.2   731 MB              166,880
+--prefix-cache-n 2 --max-seqs 1  229.5   238.6   207.8   583 MB              197,184
+```
+
+Next: 262K resident wants about 330 MB more. IQ4_KSS all (17.75 GiB without MTP, KLD 0.0216) is 0.79 GiB smaller
+and needs no CPU kernels when resident; measure its GPU decode and context.
+
+## Run 10 - 2026-10-21 06:10
+
+Question: does IQ4_KSS all (0.79 GiB smaller) reach the full 262K resident with DFlash, and at what speed?
+
+`graft_mtp.py` now imports ik_llama.cpp's gguf-py (mainline's has no ik type ids; 146 = IQ4_KSS, file type 148).
+The grafted IQ4_KSS file is 18.15 GiB, KLD 0.021642 as in Run 5. Same `mixrun.sh` / `mixbench.py`.
+
+```
+resident, q3 KV                    wiki    code    zh      accept len   context
+IQ4_XS, none (q4 KV)               168.1   170.5   170.4                279,808
+IQ4_KSS, none                      163.7   166.2   166.2                506,624
+IQ4_XS, DFlash 5                   232.2   241.2   209.9   3.50         106,048
+IQ4_KSS, DFlash 5                  211.9   231.8   188.7   3.58         269,888
+IQ4_KSS, DFlash 5, p2, 1 seq       209.6   231.8   189.2   3.57         361,024
+```
+
+Raw findings:
+
+- IQ4_KSS reaches the model's 262K at default serving settings (4 sequences, 16 prefix caches) with DFlash 5 and a
+  q3 cache: the 0.79 GiB is 164K tokens of q3 cache (5.0 KB a token).
+- It costs 2-3% decode without speculation but 4-10% with DFlash: the 6-row verify is where IQ4_KSS's MMVQ rows
+  cost more than IQ4_XS's (`dp4a_max_rows` already gives the ik types 2 rows against IQ4_XS's 5, noting their rows
+  cost 5.8x a k-quant's at 8 rows). The MoE matvec for a 6-token verify is the place to look.
+- KLD 0.0216 against 0.0168.
+
+So two resident recipes, both with Unsloth's non-expert choices and their MTP block, DFlash 2 at 5 drafts, q3 KV:
+
+- IQ4_XS experts, 18.94 GiB: 232 / 241 / 210 tok/s, 106K context by default, 197K with `--prefix-cache-n 2
+  --max-seqs 1`. Also the offload file (CPU paths serve it).
+- IQ4_KSS experts, 18.15 GiB: 212 / 232 / 189 tok/s, 262K at default settings. Resident only until IQ4_KSS has CPU
+  kernels.
+
+Next candidates: the IQ4_KSS small-batch MoE matvec (would close the gap), the DFlash reservation (retained
+drafter prefixes are about 50 MB each, the GDN snapshot pool about 570 MB at any prefix count), or a mixed file
+(IQ4_KSS on some layers' experts) sized to reach 262K at default settings.
