@@ -441,3 +441,30 @@ Real text (Run 9 settings, IQ4_KSS): 128 slots DFlash 3 137.9 / 159.4 / 156.2, D
 
 So the IQ4_KSS file (18.15 GiB, KLD 0.0216) now serves every configuration: resident 262K with DFlash 2, and
 offloaded or CPU-only at least as fast as IQ4_XS.
+
+## Run 13 - 2026-10-21 16:45
+
+Question: resident DFlash reserves a drafter window per retained prefix (about 50 MB each, up to 8). With a disk
+store (`--prefix-cache-dir`), which already restores a prefix's drafter checkpoint, how much VRAM does keeping only 2
+on the GPU give back, and do the dropped ones still restore?
+
+Change: `MtpRuntimeConfig::for_prefix_cache` gives the drafter `min(prefix caches, 2)` retained prefixes when a disk
+store is configured (unchanged without one); the builders and the reload path use it.
+
+Same build, back to back, IQ4_KSS file, DFlash 5, q3 KV, default serving settings, the desktop holding 668 MiB:
+
+```
+                        post-load reserve   KV cache   context
+no disk store           1,028 MB            496 MB     101,536
+--prefix-cache-dir      731 MB              793 MB     162,368
+```
+
+(Run 10's 269,888 for this configuration had a quieter desktop.)
+
+A served check (four ~2.7K-token prompts, then the first extended) could not tell hits apart: hybrid snapshots sit at
+block boundaries and `/v1/completions` reported no `cached_tokens`. So a tiny-model integration test does it
+(`a_prefix_the_drafter_dropped_restores_from_the_disk_store`): four prompts with a disk store, then the first
+extended; it asserts cached tokens and decoding as a cold run. It failed: the disk restore's
+`import_paged_auxiliary_prefix_state` returned `None` on a full checkpoint pool and the restore gave up, where a
+captured prefix sheds the oldest cached checkpoint first. The restore now evicts the same way (releasing the evicted
+entries' recurrent snapshots) and the test passes, as it did with the old limit.
