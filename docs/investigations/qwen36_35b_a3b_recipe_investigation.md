@@ -218,3 +218,38 @@ The cost is 1.98 GiB: 128 slots of it take more VRAM than of the UD file, and it
 
 Open: decode on real text rather than synthetic ids (routing locality sets the hit rate); IQ4_KSS all (17.75 GiB,
 0.0216) would trade KLD for 0.8 GiB but needs CPU kernels; tqLLM's `--moe-host-mb` on the same file.
+
+## Run 8 - 2026-10-21 04:35
+
+Question: there is a DFlash 2 drafter for this model (incoai/Qwen3.6-35B-A3B-DFlash2, Apache-2.0, 1.05 GB BF16:
+6 layers, block size 8, taps on target layers 1/6/11/16/22/27/32/37, the target's embedding and head). The card
+reports accept length 4.3-5.3 against built-in MTP's 4.3-5.0 at 7 drafts. Does it beat MTP here, resident and
+offloaded?
+
+Command: Run 6 bench on the IQ4_XS + MTP-block file with `--mtp-model <drafter> --mtp-n-predict 7
+--mtp-draft-isq q4k` (the Qwen3.8 27B serving setup).
+
+```
+                        resident           128 slots          64 slots
+                        prompt  decode     prompt  decode     prompt  decode
+built-in MTP            4279    198.6      1004    150.8      703     104.5
+DFlash 2, 7 drafts      4361    249.3      1038    163.9      626     49.0
+```
+
+Raw findings:
+
+- Resident, DFlash 2 gives +26% over MTP (accept 46.6%, 4.26 tokens a step on synthetic prompts). The engine
+  loads it against the MoE target with no changes.
+- Offloaded, the gain shrinks at 128 slots (+9%, +/- 75 between iterations) and turns into a loss at 64 (49 tok/s):
+  an 8-token verify routes up to 64 distinct experts a layer, so a small cache thrashes and the misses' CPU work
+  grows with the draft length.
+- At 64 slots, 22 `MoE expert cache fill failed` errors (CUDA_ERROR_INVALID_VALUE, then NOT_PERMITTED) print after
+  the bench finishes: fills still queued on the global `moe-expert-fills` thread run after the context is torn down.
+  None at 128 slots. Log noise at exit, but it shows the fill queue backs up under speculation.
+
+Implications: for this model on 24 GB, resident with DFlash 2 is the fast configuration (the 18.94 GiB file plus the
+q4k drafter and KV). Offloaded, speculation wants fewer drafts as slots shrink (a planner input), or the misses of a
+verify batch shared across its tokens.
+
+Next: real-text decode (a served request) for resident DFlash 2 and for 128 slots, the memory left for context
+resident, and draft count at 128 / 64 slots.
