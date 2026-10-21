@@ -20,6 +20,9 @@ use super::forward::{MoEForward, MoEForwardConfig};
 // Largest batch the cache and CPU split serves (the indexed matvec's limit); a larger one stages the experts it routes
 // to on the GPU, since copying an expert costs about what the CPU takes for one token through it
 const SPLIT_MAX_TOKENS: usize = 8;
+// Copies a layer has in flight before its misses stop being admitted: a speculative verify misses far more experts than
+// the copy stream lands before they are evicted again, so a deeper queue only delays every fill
+const MAX_PENDING_FILLS: usize = 4;
 // The slot a miss maps to: left zeroed, so the GPU's share of a CPU-served pick is exactly 0 (a slot mid-copy could
 // hold non-finite scales)
 const MISS_SLOT: u32 = 0;
@@ -200,16 +203,26 @@ impl Shared {
                 .forward(host(&ex.xs, tokens * hidden), &misses, ys)?;
         }
 
+        // the experts most of this step's tokens missed are admitted first
         let mut experts = misses.iter().map(|m| m.expert).collect::<Vec<_>>();
         experts.sort_unstable();
-        experts.dedup();
-        for expert in experts {
+        let mut runs = experts
+            .chunk_by(|a, b| a == b)
+            .map(|run| (run.len(), run[0]))
+            .collect::<Vec<_>>();
+        runs.sort_by_key(|&(n, _)| std::cmp::Reverse(n));
+        let mut pending = state.pending.iter().filter(|&&p| p).count();
+        for (_, expert) in runs {
+            if pending >= MAX_PENDING_FILLS {
+                break;
+            }
             if state.expert_in.contains(&Some(expert)) {
                 continue;
             }
             let Some(slot) = state.victim(&in_use) else {
                 break;
             };
+            pending += 1;
             if let Some(old) = state.expert_in[slot].take() {
                 state.slot_of[old] = None;
                 self.table()[old] = MISS_SLOT;
