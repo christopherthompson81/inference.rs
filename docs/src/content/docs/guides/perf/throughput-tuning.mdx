@@ -143,7 +143,7 @@ The mechanism depends on the attention mode:
 
 On hybrid models (Qwen3.5, Qwen3.8), a prefix resumes only at a saved recurrent-state snapshot. After each reply, while nothing else waits, the engine prefills the reply on top of its prompt's snapshot, so the next turn (an agent's prompt, reply and tool result) resumes after the reply and computes only what is new.
 
-### Keeping prefixes on disk
+### Keeping prefixes in host memory or on disk
 
 Long sessions, such as agent loops that resend their whole history each turn, lose their cached prefix when it is evicted or the server restarts, and the next request re-prefills everything: about 23 s for 28K tokens of Qwen3.8 27B on an RTX 3090. `--prefix-cache-dir` writes each cached prefix through to a directory as it is taken, and restores it into GPU memory when a later request starts with it (0.23 s for those 28K tokens):
 
@@ -157,7 +157,9 @@ inference serve -m <model> --prefix-cache-dir ~/.cache/inference-rs/prefix-cache
 - An entry expires an hour after its last use (`--prefix-cache-disk-ttl-mins`), and a request can name its own lifetime: an Anthropic `cache_control` breakpoint on `/v1/messages` keeps its prefix five minutes, or its `ttl` (`"1h"`); `prefix_cache_ttl_secs` does the same on `/v1/chat/completions`. The longest breakpoint in a request wins, and each hit restarts the clock. Expired entries go within a minute, and on startup.
 - `--prefix-cache-disk-gib` (default 64) caps the directory; past it, the least recently used prefixes go first.
 - The operating system's page cache keeps recently used entries in RAM, so a restore after a short pause usually reads no disk at all.
-- In Python set `RuntimeSpec(prefix_cache_dir=..., prefix_cache_disk_gib=..., prefix_cache_disk_ttl_mins=...)`; in Rust `.with_prefix_cache_dir(dir, Some(gib))`.
+- `--prefix-cache-ram-gib` keeps entries in host memory, under the same block sharing, checks and lifetimes. With a directory it sits in front: each prefix goes to both, a restore reads memory first, and a prefix restored from disk is copied back into memory. Without one the cache lives in memory alone and leaves no files, for machines with more RAM than disk to spare; it does not survive a restart.
+- With either tier a DFlash drafter keeps its state for only two prefixes on the GPU (instead of one per cached prefix, about 50 MB each for Qwen3.6 35B-A3B), and the rest restore from the host: on a 24 GB card that is tens of thousands more tokens of context.
+- In Python set `RuntimeSpec(prefix_cache_dir=..., prefix_cache_disk_gib=..., prefix_cache_ram_gib=..., prefix_cache_disk_ttl_mins=...)`; in Rust `.with_prefix_cache_dir(dir, Some(gib))` and `.with_prefix_cache_ram(gib)`.
 
 ## Memory planning for automatic device mapping
 

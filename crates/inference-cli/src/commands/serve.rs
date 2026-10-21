@@ -172,6 +172,7 @@ pub(crate) fn runtime_options_spec(
         prefix_cache_n: Some(runtime.prefix_cache_n),
         prefix_cache_dir: path_string(runtime.prefix_cache_dir.as_deref()),
         prefix_cache_disk_gib: runtime.prefix_cache_disk_gib,
+        prefix_cache_ram_gib: runtime.prefix_cache_ram_gib,
         prefix_cache_disk_ttl_mins: runtime.prefix_cache_disk_ttl_mins,
         no_kv_cache: runtime.no_kv_cache,
         chat_template: path_string(runtime.chat_template.as_deref()),
