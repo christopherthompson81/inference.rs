@@ -165,9 +165,9 @@ fn qwen3_5_moe_prefill() -> Result<()> {
         digest,
         0xdcb1_500e_458e_6eb2,
         Snapshot {
-            probes: [-1.1597177, -0.7348413, 4.277955, 6.7439075],
-            sum: 32.445145,
-            l2: 52.39406,
+            probes: [-1.1597177, -0.73483646, 4.277953, 6.743806],
+            sum: 32.44188,
+            l2: 52.393734,
         },
     )
 }
@@ -187,9 +187,9 @@ fn qwen3_5_moe_prefill_bf16() -> Result<()> {
         // the fused output gate rounds sigmoid(gate) * y to BF16 once
         by_arch(
             Snapshot {
-                probes: [-0.98828125, -0.65234375, 4.28125, 6.5625],
-                sum: 32.401794,
-                l2: 52.123123,
+                probes: [-1.03125, -0.6015625, 4.34375, 6.59375],
+                sum: 29.774658,
+                l2: 52.17139,
             },
             Snapshot {
                 probes: [-1.0546875, -0.61328125, 4.3125, 6.53125],

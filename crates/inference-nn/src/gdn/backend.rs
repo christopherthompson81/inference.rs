@@ -1,5 +1,4 @@
-use inference_tensor::{D, DType, Result, Storage, Tensor};
-use rayon::prelude::*;
+use inference_tensor::{D, DType, Result, Storage, Tensor, TensorId};
 
 use super::cache::GdnLayerCache;
 use super::config::{GdnDims, GdnVHeadLayout};
@@ -16,6 +15,8 @@ const RECURRENCE_CHUNK_THRESHOLD: usize = 64;
 const QK_NORM_EPS: f64 = 1e-6;
 const QK_NORM_EPS_F32: f32 = 1e-6;
 const SOFTPLUS_LINEAR_THRESHOLD: f32 = 20.0;
+// Channels one pool item of the decode conv steps
+const CONV_DECODE_CHANNELS: usize = 512;
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 enum RecurrenceOutput {
@@ -229,9 +230,9 @@ pub fn apply_recurrence_from_convolved(
         );
     }
 
-    if seq_len == 1 && mixed_qkv.device().is_cpu() {
-        return decode_recurrence_cpu_from_convolved(
-            mixed_qkv, b, a, a_log, dt_bias, dims, batch_size, cache, dtype,
+    if mixed_qkv.device().is_cpu() {
+        return recurrence_cpu_from_convolved(
+            mixed_qkv, b, a, a_log, dt_bias, dims, batch_size, seq_len, cache, dtype,
         );
     }
 
@@ -252,7 +253,7 @@ pub fn apply_recurrence_from_convolved(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn decode_recurrence_cpu_from_convolved(
+fn recurrence_cpu_from_convolved(
     mixed_qkv: &Tensor,
     b: &Tensor,
     a: &Tensor,
@@ -260,6 +261,7 @@ fn decode_recurrence_cpu_from_convolved(
     dt_bias: &Tensor,
     dims: &GdnDims,
     batch_size: usize,
+    seq_len: usize,
     cache: &mut GdnLayerCache,
     dtype: DType,
 ) -> Result<Tensor> {
@@ -286,104 +288,124 @@ fn decode_recurrence_cpu_from_convolved(
     let a_log = cpu_f32_slice(&a_log_storage, a_log_layout.start_offset(), "a_log")?;
     let (dt_bias_storage, dt_bias_layout) = dt_bias_f32.storage_and_layout();
     let dt_bias = cpu_f32_slice(&dt_bias_storage, dt_bias_layout.start_offset(), "dt_bias")?;
-    let mut state = cache
-        .recurrent_state
-        .to_dtype(DType::F32)?
-        .contiguous()?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
 
-    let mut output = vec![0.0f32; batch_size * dims.num_v_heads * dims.head_v_dim];
+    let mut output = vec![0.0f32; batch_size * seq_len * dims.num_v_heads * dims.head_v_dim];
     let q_scale = 1.0f32 / (dims.head_k_dim as f32).sqrt();
     let state_head_len = dims.head_k_dim * dims.head_v_dim;
 
-    let (state_ptr, out_ptr) = (state.as_mut_ptr() as usize, output.as_mut_ptr() as usize);
-    // row-wise passes over each head's state keep the inner loops on contiguous value columns
-    inference_tensor::utils::barrier_pool().execute_chunked(
-        batch_size * dims.num_v_heads,
-        |heads| {
-            let mut kv_mem = vec![0f32; dims.head_v_dim];
-            let mut delta = vec![0f32; dims.head_v_dim];
-            let mut q_buf = vec![0f32; dims.head_k_dim];
-            let mut k_buf = vec![0f32; dims.head_k_dim];
-            for gate_idx in heads {
-                // SAFETY: each head's state and output rows are touched by this item alone, and both outlive the call
-                let (state_head, out_head) = unsafe {
-                    (
+    let out_ptr = output.as_mut_ptr() as usize;
+    let run = |state: &mut [f32]| {
+        let state_ptr = state.as_mut_ptr() as usize;
+        // row-wise passes over each head's state keep the inner loops on contiguous value columns
+        inference_tensor::utils::barrier_pool().execute_chunked(
+            batch_size * dims.num_v_heads,
+            |heads| {
+                let mut kv_mem = vec![0f32; dims.head_v_dim];
+                let mut delta = vec![0f32; dims.head_v_dim];
+                let mut q_buf = vec![0f32; dims.head_k_dim];
+                let mut k_buf = vec![0f32; dims.head_k_dim];
+                for head in heads {
+                    // SAFETY: each head's state and output rows are touched by this item alone, and both outlive the call
+                    let state_head = unsafe {
                         std::slice::from_raw_parts_mut(
-                            (state_ptr as *mut f32).add(gate_idx * state_head_len),
+                            (state_ptr as *mut f32).add(head * state_head_len),
                             state_head_len,
-                        ),
-                        std::slice::from_raw_parts_mut(
-                            (out_ptr as *mut f32).add(gate_idx * dims.head_v_dim),
-                            dims.head_v_dim,
-                        ),
-                    )
-                };
-                let bidx = gate_idx / dims.num_v_heads;
-                let hv = gate_idx % dims.num_v_heads;
-                let hk = dims.k_head_for_v_head(hv);
-                let row = bidx * dims.conv_dim;
-                let q_in = &mixed[row + hk * dims.head_k_dim..][..dims.head_k_dim];
-                let k_in = &mixed[row + dims.key_dim + hk * dims.head_k_dim..][..dims.head_k_dim];
-                let v_in =
-                    &mixed[row + 2 * dims.key_dim + hv * dims.head_v_dim..][..dims.head_v_dim];
+                        )
+                    };
+                    let bidx = head / dims.num_v_heads;
+                    let hv = head % dims.num_v_heads;
+                    let hk = dims.k_head_for_v_head(hv);
+                    for t in 0..seq_len {
+                        let token = bidx * seq_len + t;
+                        let gate_idx = token * dims.num_v_heads + hv;
+                        // SAFETY: as above
+                        let out_head = unsafe {
+                            std::slice::from_raw_parts_mut(
+                                (out_ptr as *mut f32).add(gate_idx * dims.head_v_dim),
+                                dims.head_v_dim,
+                            )
+                        };
+                        let row = token * dims.conv_dim;
+                        let q_in = &mixed[row + hk * dims.head_k_dim..][..dims.head_k_dim];
+                        let k_in =
+                            &mixed[row + dims.key_dim + hk * dims.head_k_dim..][..dims.head_k_dim];
+                        let v_in = &mixed[row + 2 * dims.key_dim + hv * dims.head_v_dim..]
+                            [..dims.head_v_dim];
 
-                let q_sum = q_in.iter().map(|q| q * q).sum::<f32>();
-                let k_sum = k_in.iter().map(|k| k * k).sum::<f32>();
-                let q_mul = q_scale / (q_sum + QK_NORM_EPS_F32).sqrt();
-                let k_mul = 1.0f32 / (k_sum + QK_NORM_EPS_F32).sqrt();
-                for (buf, x) in q_buf.iter_mut().zip(q_in) {
-                    *buf = x * q_mul;
-                }
-                for (buf, x) in k_buf.iter_mut().zip(k_in) {
-                    *buf = x * k_mul;
-                }
-                let beta = sigmoid_f32(b[gate_idx]);
-                let decay = (-a_log[hv].exp() * softplus_f32(a[gate_idx] + dt_bias[hv])).exp();
+                        let q_sum = q_in.iter().map(|q| q * q).sum::<f32>();
+                        let k_sum = k_in.iter().map(|k| k * k).sum::<f32>();
+                        let q_mul = q_scale / (q_sum + QK_NORM_EPS_F32).sqrt();
+                        let k_mul = 1.0f32 / (k_sum + QK_NORM_EPS_F32).sqrt();
+                        for (buf, x) in q_buf.iter_mut().zip(q_in) {
+                            *buf = x * q_mul;
+                        }
+                        for (buf, x) in k_buf.iter_mut().zip(k_in) {
+                            *buf = x * k_mul;
+                        }
+                        let beta = sigmoid_f32(b[gate_idx]);
+                        let decay =
+                            (-a_log[hv].exp() * softplus_f32(a[gate_idx] + dt_bias[hv])).exp();
 
-                // pass 1: decay the state and read k^T S
-                kv_mem.fill(0.0);
-                for (state_row, &kd) in state_head.chunks_exact_mut(dims.head_v_dim).zip(&k_buf) {
-                    for (s, mem) in state_row.iter_mut().zip(kv_mem.iter_mut()) {
-                        *s *= decay;
-                        *mem += *s * kd;
+                        // pass 1: decay the state and read k^T S
+                        kv_mem.fill(0.0);
+                        for (state_row, &kd) in
+                            state_head.chunks_exact_mut(dims.head_v_dim).zip(&k_buf)
+                        {
+                            for (s, mem) in state_row.iter_mut().zip(kv_mem.iter_mut()) {
+                                *s *= decay;
+                                *mem += *s * kd;
+                            }
+                        }
+                        for ((d, &v), &mem) in delta.iter_mut().zip(v_in).zip(&kv_mem) {
+                            *d = (v - mem) * beta;
+                        }
+                        // pass 2: rank-1 update and the q readout
+                        out_head.fill(0.0);
+                        for ((state_row, &kd), &qd) in state_head
+                            .chunks_exact_mut(dims.head_v_dim)
+                            .zip(&k_buf)
+                            .zip(&q_buf)
+                        {
+                            for ((s, &d), y) in
+                                state_row.iter_mut().zip(&delta).zip(out_head.iter_mut())
+                            {
+                                *s += kd * d;
+                                *y += *s * qd;
+                            }
+                        }
                     }
                 }
-                for ((d, &v), &mem) in delta.iter_mut().zip(v_in).zip(&kv_mem) {
-                    *d = (v - mem) * beta;
-                }
-                // pass 2: rank-1 update and the q readout
-                out_head.fill(0.0);
-                for ((state_row, &kd), &qd) in state_head
-                    .chunks_exact_mut(dims.head_v_dim)
-                    .zip(&k_buf)
-                    .zip(&q_buf)
-                {
-                    for ((s, &d), y) in state_row.iter_mut().zip(&delta).zip(out_head.iter_mut()) {
-                        *s += kd * d;
-                        *y += *s * qd;
-                    }
-                }
-            }
-        },
-    );
-
-    cache.recurrent_state = Tensor::from_vec(
-        state,
-        (
-            batch_size,
-            dims.num_v_heads,
-            dims.head_k_dim,
-            dims.head_v_dim,
-        ),
-        dev,
-    )?
-    .to_dtype(cache.recurrent_state.dtype())?;
+            },
+        );
+    };
+    if !cpu_f32_in_place(
+        &cache.recurrent_state,
+        cache.pool_views.map(|[_, state]| state),
+        run,
+    )? {
+        let mut state = cache
+            .recurrent_state
+            .to_dtype(DType::F32)?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        run(&mut state);
+        cache.recurrent_state = Tensor::from_vec(
+            state,
+            (
+                batch_size,
+                dims.num_v_heads,
+                dims.head_k_dim,
+                dims.head_v_dim,
+            ),
+            dev,
+        )?
+        .to_dtype(cache.recurrent_state.dtype())?;
+    }
 
     Tensor::from_vec(
         output,
-        (batch_size, 1, dims.num_v_heads, dims.head_v_dim),
+        (batch_size, seq_len, dims.num_v_heads, dims.head_v_dim),
         dev,
     )?
     .to_dtype(dtype)
@@ -399,6 +421,42 @@ fn cpu_f32_slice<'a>(
     };
     let data = cpu.as_slice::<f32>()?;
     Ok(&data[start_offset..])
+}
+
+struct CpuF32InPlace<F>(std::cell::Cell<Option<F>>);
+
+impl<F: FnOnce(&mut [f32])> inference_tensor::InplaceOp1 for CpuF32InPlace<F> {
+    fn name(&self) -> &'static str {
+        "gdn-cpu-f32-in-place"
+    }
+
+    fn cpu_fwd(
+        &self,
+        storage: &mut inference_tensor::CpuStorage,
+        layout: &inference_tensor::Layout,
+    ) -> Result<()> {
+        let inference_tensor::CpuStorage::F32(data) = storage else {
+            inference_tensor::bail!("in-place GDN state is not F32");
+        };
+        let f = self.0.take().expect("an in-place op runs once");
+        f(&mut data[layout.start_offset()..][..layout.shape().elem_count()]);
+        Ok(())
+    }
+}
+
+// Runs `f` on `t`'s values in place when `t` is the pool row view `view` the cache checked out (other tensors may
+// share their storage) and is contiguous F32 on the CPU; reports whether it did
+fn cpu_f32_in_place(
+    t: &Tensor,
+    view: Option<TensorId>,
+    f: impl FnOnce(&mut [f32]),
+) -> Result<bool> {
+    if view != Some(t.id()) || !t.device().is_cpu() || t.dtype() != DType::F32 || !t.is_contiguous()
+    {
+        return Ok(false);
+    }
+    t.inplace_op1(&CpuF32InPlace(std::cell::Cell::new(Some(f))))?;
+    Ok(true)
 }
 
 fn sigmoid_f32(x: f32) -> f32 {
@@ -855,35 +913,62 @@ fn causal_conv1d_update_cpu(
         weight_layout.start_offset(),
         "conv1d_weight",
     )?;
-    let mut state = cache
-        .conv_state
-        .to_dtype(DType::F32)?
-        .contiguous()?
-        .flatten_all()?
-        .to_vec1::<f32>()?;
     let mut output = vec![0.0f32; batch_size * conv_dim];
-
-    state
-        .par_chunks_mut(dims.conv_kernel_size)
-        .zip(output.par_iter_mut())
-        .enumerate()
-        .for_each(|(idx, (state_channel, output))| {
-            let cidx = idx % conv_dim;
-            for kidx in 1..dims.conv_kernel_size {
-                state_channel[kidx - 1] = state_channel[kidx];
-            }
-            state_channel[dims.conv_kernel_size - 1] = x[idx];
-
-            let weight_base = cidx * dims.conv_kernel_size;
-            let mut sum = 0.0f32;
-            for kidx in 0..dims.conv_kernel_size {
-                sum += state_channel[kidx] * weight[weight_base + kidx];
-            }
-            *output = silu_f32(sum);
-        });
-
-    cache.conv_state = Tensor::from_vec(state, (batch_size, conv_dim, dims.conv_kernel_size), dev)?
-        .to_dtype(cache.conv_state.dtype())?;
+    let out_ptr = output.as_mut_ptr() as usize;
+    let k = dims.conv_kernel_size;
+    let step = |state: &mut [f32]| {
+        let state_ptr = state.as_mut_ptr() as usize;
+        let channels = batch_size * conv_dim;
+        inference_tensor::utils::barrier_pool().execute_chunked(
+            channels.div_ceil(CONV_DECODE_CHANNELS),
+            |chunks| {
+                let range = chunks.start * CONV_DECODE_CHANNELS
+                    ..channels.min(chunks.end * CONV_DECODE_CHANNELS);
+                // SAFETY: each chunk's channels (state windows and outputs) belong to it alone
+                let (state, output) = unsafe {
+                    (
+                        std::slice::from_raw_parts_mut(
+                            (state_ptr as *mut f32).add(range.start * k),
+                            range.len() * k,
+                        ),
+                        std::slice::from_raw_parts_mut(
+                            (out_ptr as *mut f32).add(range.start),
+                            range.len(),
+                        ),
+                    )
+                };
+                for ((idx, state_channel), output) in
+                    range.zip(state.chunks_exact_mut(k)).zip(output)
+                {
+                    state_channel.copy_within(1.., 0);
+                    state_channel[k - 1] = x[idx];
+                    let weight = &weight[idx % conv_dim * k..][..k];
+                    let sum = state_channel
+                        .iter()
+                        .zip(weight)
+                        .map(|(s, w)| s * w)
+                        .sum::<f32>();
+                    *output = silu_f32(sum);
+                }
+            },
+        );
+    };
+    if !cpu_f32_in_place(
+        &cache.conv_state,
+        cache.pool_views.map(|[conv, _]| conv),
+        step,
+    )? {
+        let mut state = cache
+            .conv_state
+            .to_dtype(DType::F32)?
+            .contiguous()?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        step(&mut state);
+        cache.conv_state =
+            Tensor::from_vec(state, (batch_size, conv_dim, dims.conv_kernel_size), dev)?
+                .to_dtype(cache.conv_state.dtype())?;
+    }
 
     Tensor::from_vec(output, (batch_size, 1, conv_dim), dev)?.to_dtype(dtype)
 }
@@ -1263,21 +1348,20 @@ mod tests {
         )
     }
 
-    fn run_decode_case(dims: GdnDims, batch_size: usize) -> CandleResult<()> {
+    fn run_recurrence_case(dims: GdnDims, batch_size: usize, seq_len: usize) -> CandleResult<()> {
         let dev = Device::Cpu;
-        let seq_len = 1;
         let mixed = Tensor::from_vec(
-            patterned(batch_size * dims.conv_dim, 1, 0.08, 0.01),
+            patterned(batch_size * seq_len * dims.conv_dim, 1, 0.08, 0.01),
             (batch_size, seq_len, dims.conv_dim),
             &dev,
         )?;
         let b = Tensor::from_vec(
-            patterned(batch_size * dims.num_v_heads, 2, 0.2, 0.1),
+            patterned(batch_size * seq_len * dims.num_v_heads, 2, 0.2, 0.1),
             (batch_size, seq_len, dims.num_v_heads),
             &dev,
         )?;
         let a = Tensor::from_vec(
-            patterned(batch_size * dims.num_v_heads, 3, 0.2, -0.05),
+            patterned(batch_size * seq_len * dims.num_v_heads, 3, 0.2, -0.05),
             (batch_size, seq_len, dims.num_v_heads),
             &dev,
         )?;
@@ -1318,8 +1402,9 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
-        let fast = decode_recurrence_cpu_from_convolved(
+        let fast = recurrence_cpu_from_convolved(
             &mixed,
             &b,
             &a,
@@ -1327,6 +1412,7 @@ mod tests {
             &dt_bias,
             &dims,
             batch_size,
+            seq_len,
             &mut fast_cache,
             DType::F32,
         )?;
@@ -1349,6 +1435,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
         let reference = gated_delta_rule_recurrence(
             &q,
@@ -1522,6 +1609,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
         let mut tiled_cache = GdnLayerCache {
             conv_state: runtime_from_grouped(&conv_state_grouped, 1, &conv_runtime_to_grouped)?,
@@ -1534,6 +1622,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
 
         let prefill_mixed_grouped = Tensor::from_vec(
@@ -1816,6 +1905,7 @@ mod tests {
                 slots: None,
                 pending_transitions: None,
                 deferred_state: None,
+                pool_views: None,
             })
         };
         // a prefill, then a decode step from the state it leaves
@@ -1889,6 +1979,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
         let mut reference_cache = GdnLayerCache {
             conv_state: initial_state,
@@ -1897,6 +1988,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
 
         let fast = causal_conv1d_update_cpu(&x, &weight, &dims, &mut fast_cache)?;
@@ -1904,6 +1996,105 @@ mod tests {
 
         assert_close(&fast, &reference)?;
         assert_close(&fast_cache.conv_state, &reference_cache.conv_state)
+    }
+
+    // a decode step on views of one pool row writes that row in place and matches the same step on a copy of it
+    #[test]
+    fn pool_row_views_update_in_place() -> CandleResult<()> {
+        const ROWS: usize = 3;
+        const ROW: usize = 1;
+        let dev = Device::Cpu;
+        let dims = dims(2, 4, 5, 3);
+        let x = Tensor::from_vec(
+            patterned(dims.conv_dim, 7, 0.08, 0.01),
+            (1, 1, dims.conv_dim),
+            &dev,
+        )?;
+        let weight = Tensor::from_vec(
+            patterned(dims.conv_dim * dims.conv_kernel_size, 8, 0.05, -0.01),
+            (dims.conv_dim, 1, dims.conv_kernel_size),
+            &dev,
+        )?;
+        let gates = |seed| {
+            Tensor::from_vec(
+                patterned(dims.num_v_heads, seed, 0.2, 0.1),
+                (1, 1, dims.num_v_heads),
+                &dev,
+            )
+        };
+        let (b, a) = (gates(2)?, gates(3)?);
+        let a_log = Tensor::from_vec(
+            patterned(dims.num_v_heads, 4, 0.05, -0.2),
+            (dims.num_v_heads,),
+            &dev,
+        )?;
+        let dt_bias = Tensor::from_vec(
+            patterned(dims.num_v_heads, 5, 0.1, 0.3),
+            (dims.num_v_heads,),
+            &dev,
+        )?;
+        let conv_pool = Tensor::from_vec(
+            patterned(ROWS * dims.conv_dim * dims.conv_kernel_size, 9, 0.03, 0.0),
+            (ROWS, dims.conv_dim, dims.conv_kernel_size),
+            &dev,
+        )?;
+        let state_pool = Tensor::from_vec(
+            patterned(
+                ROWS * dims.num_v_heads * dims.head_k_dim * dims.head_v_dim,
+                6,
+                0.02,
+                0.0,
+            ),
+            (ROWS, dims.num_v_heads, dims.head_k_dim, dims.head_v_dim),
+            &dev,
+        )?;
+        let (conv_before, state_before) = (conv_pool.copy()?, state_pool.copy()?);
+        let step = |cache: &mut GdnLayerCache| -> CandleResult<Tensor> {
+            let convolved = causal_conv1d_update_cpu(&x, &weight, &dims, cache)?;
+            recurrence_cpu_from_convolved(
+                &convolved,
+                &b,
+                &a,
+                &a_log,
+                &dt_bias,
+                &dims,
+                1,
+                1,
+                cache,
+                DType::F32,
+            )
+        };
+
+        let mut copied = GdnLayerCache::gathered(
+            conv_pool.narrow(0, ROW, 1)?.copy()?,
+            state_pool.narrow(0, ROW, 1)?.copy()?,
+            RecurrentStateLayout::GdnKeyMajor,
+        );
+        let expected = step(&mut copied)?;
+        let mut views = GdnLayerCache::gathered(
+            conv_pool.narrow(0, ROW, 1)?,
+            state_pool.narrow(0, ROW, 1)?,
+            RecurrentStateLayout::GdnKeyMajor,
+        );
+        let ids = [views.conv_state.id(), views.recurrent_state.id()];
+        views.pool_views = Some(ids);
+        let actual = step(&mut views)?;
+
+        assert_close(&actual, &expected)?;
+        assert_eq!([views.conv_state.id(), views.recurrent_state.id()], ids);
+        assert_close(&conv_pool.narrow(0, ROW, 1)?, &copied.conv_state)?;
+        assert_close(&state_pool.narrow(0, ROW, 1)?, &copied.recurrent_state)?;
+        for row in [0, 2] {
+            assert_close(
+                &conv_pool.narrow(0, row, 1)?,
+                &conv_before.narrow(0, row, 1)?,
+            )?;
+            assert_close(
+                &state_pool.narrow(0, row, 1)?,
+                &state_before.narrow(0, row, 1)?,
+            )?;
+        }
+        Ok(())
     }
 
     #[test]
@@ -1950,6 +2141,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
         let mut stepped_cache = GdnLayerCache {
             conv_state: conv_state.clone(),
@@ -1958,6 +2150,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
         let mut chunked_cache = GdnLayerCache {
             conv_state,
@@ -1966,6 +2159,7 @@ mod tests {
             slots: None,
             pending_transitions: None,
             deferred_state: None,
+            pool_views: None,
         };
 
         let one_shot = causal_conv1d_full(&x, &weight, &dims, &mut one_shot_cache)?;
@@ -1992,9 +2186,16 @@ mod tests {
     }
 
     #[test]
-    fn decode_recurrence_cpu_matches_tensor_path() -> CandleResult<()> {
-        run_decode_case(dims(2, 4, 5, 3), 2)?;
-        run_decode_case(dims(3, 3, 4, 2), 1)?;
-        run_decode_case(dims_with_layout(2, 4, 5, 3, GdnVHeadLayout::Tiled), 2)
+    fn recurrence_cpu_matches_tensor_path() -> CandleResult<()> {
+        for seq_len in [1, 5] {
+            run_recurrence_case(dims(2, 4, 5, 3), 2, seq_len)?;
+            run_recurrence_case(dims(3, 3, 4, 2), 1, seq_len)?;
+            run_recurrence_case(
+                dims_with_layout(2, 4, 5, 3, GdnVHeadLayout::Tiled),
+                2,
+                seq_len,
+            )?;
+        }
+        Ok(())
     }
 }
