@@ -396,3 +396,48 @@ IQ4_KSS no-speculation decode now equals IQ4_XS's; with DFlash this run accepted
 So IQ4_KSS experts, 18.15 GiB with the MTP block, are the resident recipe: 262K context at default serving
 settings with DFlash 5 and a q3 cache, at IQ4_XS's speed, KLD 0.0216. IQ4_XS (18.94 GiB, KLD 0.0168) stays the
 offload file until IQ4_KSS has CPU kernels.
+
+## Run 12 - 2026-10-21 10:30
+
+Question: can the IQ4_KSS file run offloaded (CPU kernels for the misses) at IQ4_XS's speed?
+
+`cpu_dot` gains IQ4_KSS (generic and AVX2 row dot, four-row dot, tile decode); `CpuExpertProjection::row_bytes`
+and `decode_tile` count the f32 row scale that ik's row-scaled types put before each row. The shifted half of the
+IQ4_K table is the IQ4_NL table plus 4, so one 16-entry `pshufb` serves both, as in Run 11. Tests: row dots against
+the dequantized row (generic, AVX2, x4), tiles against row dots, and the routed / tiled expert forward against dense
+experts with IQ4_KSS throughout; a shift of 0 in place of 4 fails three of the four.
+
+`cpu_dot::bench` (one thread, debug assertions off), in steps:
+
+```
+IQ4_KSS                                          row dot      x4 dot (per token)   tile decode (8 x 2048)
+scale code via movemask + scalar bit packing     1.52 GB/s    8.37 GB/s            2.21 us
+scales in-lane, activations permuted             6.22         7.82                 2.74
+weights permuted per sub-block pair              4.84         5.36
+one sub-block a load (both lanes)                4.27         5.58                 2.12
+block-wide scales (madd + hadd tree)             4.5          7.0                  3.1
+  ... without the `[__m256i; 4]::map` closure    9.08         8.46                 2.2
+  x4 weights permuted, written out               8.9          8.9
+  tile decode written out (no array iterator)                                      1.05
+IQ4_XS for reference                             5.0          13.5                 0.44 (8 x 512)
+```
+
+Raw findings: the closure passed to `[__m256i; 4]::map` inside a `#[target_feature]` function was not inlined (a
+closure does not inherit the target features): `objdump` showed a call per block with the vectors through memory.
+The step-two to step-four regressions were measured with that call in place, so they do not rank those layouts.
+Iterating an array of vectors (`into_iter().enumerate()`) also kept them in memory.
+
+Engine (`speed.sh`, synthetic ids, same session):
+
+```
+                     128 slots          64 slots           CPU only
+                     prompt  decode     prompt  decode     prompt  decode
+IQ4_KSS + MTP block  1034    110.0      737     76.5       78.9    9.4
+IQ4_XS + MTP block   1002    98.2       708     66.1       77.3    9.1
+```
+
+Real text (Run 9 settings, IQ4_KSS): 128 slots DFlash 3 137.9 / 159.4 / 156.2, DFlash 5 131.7 / 156.3 / 125.8;
+64 slots MTP one draft 71.4 / 73.1 / 77.3, none 55.0 / 62.4 / 64.5; no fill errors. Within noise of IQ4_XS's.
+
+So the IQ4_KSS file (18.15 GiB, KLD 0.0216) now serves every configuration: resident 262K with DFlash 2, and
+offloaded or CPU-only at least as fast as IQ4_XS.
