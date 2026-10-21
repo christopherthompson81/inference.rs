@@ -497,8 +497,10 @@ mod tests {
             }
         }
         for (t, (out, expected)) in out
-            .chunks_exact(HIDDEN)
-            .zip(expected.chunks_exact(HIDDEN))
+            .as_chunks::<HIDDEN>()
+            .0
+            .iter()
+            .zip(expected.as_chunks::<HIDDEN>().0)
             .enumerate()
         {
             let norm = expected.iter().map(|v| v * v).sum::<f32>().sqrt();

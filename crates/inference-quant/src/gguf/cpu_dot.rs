@@ -134,7 +134,7 @@ pub(crate) struct TileRow<'a> {
 
 /// Widens Q8_K values to i16, as `TileRow::qs` takes them.
 pub(crate) fn widen_into(blocks: &[BlockQ8K], qs: &mut [i16]) {
-    for (b, qs) in blocks.iter().zip(qs.chunks_exact_mut(QK_K)) {
+    for (b, qs) in blocks.iter().zip(qs.as_chunks_mut::<QK_K>().0) {
         for (q, &v) in qs.iter_mut().zip(b.qs()) {
             *q = i16::from(v);
         }
@@ -356,7 +356,7 @@ mod avx2 {
         let values = unsafe { _mm_loadu_si128(KVALUES_IQ4NL.as_ptr().cast()) };
         let m4 = _mm_set1_epi8(0x0f);
         let blocks = rows.as_chunks::<IQ4_XS_BYTES>().0;
-        for ((block, w), d) in blocks.iter().zip(w.chunks_exact_mut(QK_K)).zip(d) {
+        for ((block, w), d) in blocks.iter().zip(w.as_chunks_mut::<QK_K>().0).zip(d) {
             *d = f16_at(block, 0);
             for ib in 0..QK_K / 32 {
                 // SAFETY: a sub-block's 16 nibble bytes lie inside the block
@@ -377,7 +377,7 @@ mod avx2 {
         let qh_shifts = _mm256_setr_epi32(8, 7, 6, 5, 4, 3, 2, 1);
         let bit8 = _mm256_set1_epi32(256);
         let blocks = rows.as_chunks::<IQ3_S_BYTES>().0;
-        for ((block, w), d) in blocks.iter().zip(w.chunks_exact_mut(QK_K)).zip(d) {
+        for ((block, w), d) in blocks.iter().zip(w.as_chunks_mut::<QK_K>().0).zip(d) {
             *d = f16_at(block, 0);
             for ib32 in 0..QK_K / 32 {
                 // the 9-bit grid indices: 8 qs bytes, each with its qh bit as bit 8
@@ -416,6 +416,7 @@ mod avx2 {
 
     // two decoded rows against four tokens: each activation load feeds both rows' madds
     #[target_feature(enable = "avx2,fma")]
+    #[allow(clippy::needless_range_loop)]
     unsafe fn dot_2x4(w: [*const i16; 2], d: [&[f32]; 2], tokens: [&TileRow; 4]) -> [[f32; 4]; 2] {
         let blocks = d[0].len();
         let mut facc = [_mm256_setzero_ps(); 8];

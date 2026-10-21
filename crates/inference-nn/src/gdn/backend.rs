@@ -916,7 +916,7 @@ fn causal_conv1d_update_cpu(
     let mut output = vec![0.0f32; batch_size * conv_dim];
     let out_ptr = output.as_mut_ptr() as usize;
     let k = dims.conv_kernel_size;
-    let mut step = |state: &mut [f32]| {
+    let step = |state: &mut [f32]| {
         let state_ptr = state.as_mut_ptr() as usize;
         let channels = batch_size * conv_dim;
         inference_tensor::utils::barrier_pool().execute_chunked(
@@ -956,7 +956,7 @@ fn causal_conv1d_update_cpu(
     if !cpu_f32_in_place(
         &cache.conv_state,
         cache.pool_views.map(|[conv, _]| conv),
-        &mut step,
+        step,
     )? {
         let mut state = cache
             .conv_state
