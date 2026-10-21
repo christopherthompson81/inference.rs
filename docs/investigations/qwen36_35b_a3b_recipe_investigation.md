@@ -351,3 +351,48 @@ So two resident recipes, both with Unsloth's non-expert choices and their MTP bl
 Next candidates: the IQ4_KSS small-batch MoE matvec (would close the gap), the DFlash reservation (retained
 drafter prefixes are about 50 MB each, the GDN snapshot pool about 570 MB at any prefix count), or a mixed file
 (IQ4_KSS on some layers' experts) sized to reach 262K at default settings.
+
+## Run 11 - 2026-10-21 08:30
+
+Question: why are IQ4_KSS experts slower than IQ4_XS in a DFlash verify, when they read 6% fewer bytes?
+
+Command: `nsys profile --cuda-graph-trace=node -t cuda` around `inference bench` (DFlash 5, q3 KV, 64-token prompt,
+256 tokens, 2 iterations) on each file; `nsys stats --report cuda_gpu_kern_sum`.
+
+```
+MoE matvec, mean per launch          IQ4_XS (mmvq_gguf_iq4_xs_moe)   IQ4_KSS (mmvq_rows_moe_kernel<iqk_iq4_kss>)
+gate/up (fused GLU)                  90.0 us                         106.2 us
+down                                 61.8 us                         65.8 us
+```
+
+The two kernels share their shape (a block per routed pair, 2 rows a block, 4 warps); the difference is the block
+dot. `vec_dot_iq4_kss_q8_1` and `vec_dot_iq4_ks_q8_1` pick the 32-entry `iq4k_values` half with each block's shift
+bit, so threads of a warp read different table words; `vec_dot_iq4_k_q8_1` already used the uniform 16-entry table
+plus a packed `+4` (the high half is the low half + 4 and no entry reaches 0xFC). The same for KS / KSS, with the
+4-step loop unrolled:
+
+```
+IQ4_KSS                              before      after
+gate/up                              106.2 us    87.9 us
+down                                 65.8 us     60.7 us
+```
+
+Same trace (launch counts equal). `gguf::raw` tests on CUDA pass (indexed MMVQ, dequantization, kernels against the
+dequantized weight, 15 of 15). Real text (Run 9 settings, q3 KV):
+
+```
+IQ4_KSS                    wiki    code    zh      accept len
+none, before               163.7   166.2   166.2
+none, after                168.6   171.2   171.3
+DFlash 5, before           211.9   231.8   188.7   3.58
+DFlash 5, after            227.6   245.8   199.3   3.34
+IQ4_XS, DFlash 5 (Run 10)  232.2   241.2   209.9   3.50
+```
+
+IQ4_KSS no-speculation decode now equals IQ4_XS's; with DFlash this run accepted fewer tokens, and per verify step
+(tok/s over accept length) it is 3% faster than IQ4_XS. Qwen3.8 27B recipe A (IQ4_KS, no speculation, `bench`
+512 / 128): 49.5 -> 51.1 tok/s, though the old number is the LAN binary (debug assertions on).
+
+So IQ4_KSS experts, 18.15 GiB with the MTP block, are the resident recipe: 262K context at default serving
+settings with DFlash 5 and a q3 cache, at IQ4_XS's speed, KLD 0.0216. IQ4_XS (18.94 GiB, KLD 0.0168) stays the
+offload file until IQ4_KSS has CPU kernels.
