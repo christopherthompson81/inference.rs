@@ -838,7 +838,10 @@ impl InferenceRsForServerBuilder {
             limits: self.scheduler_limits(),
             no_kv_cache: self.no_kv_cache,
             add_model_config: self.shared_model_config(),
-            mtp_runtime: MtpRuntimeConfig::new(self.prefix_cache_n),
+            mtp_runtime: MtpRuntimeConfig::for_prefix_cache(
+                self.prefix_cache_n,
+                self.prefix_store.is_some(),
+            ),
         })
     }
 
@@ -909,7 +912,8 @@ impl InferenceRsForServerBuilder {
 
     /// Build a single-model instance (legacy mode)
     async fn build_single_model(self) -> Result<SharedInferenceRsState> {
-        let mtp_runtime = MtpRuntimeConfig::new(self.prefix_cache_n);
+        let mtp_runtime =
+            MtpRuntimeConfig::for_prefix_cache(self.prefix_cache_n, self.prefix_store.is_some());
         let add_model_config = self.shared_model_config();
         let limits = self.scheduler_limits();
         let model = self.model.context("Model was None")?;

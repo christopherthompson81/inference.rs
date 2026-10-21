@@ -1,5 +1,9 @@
 use std::path::PathBuf;
 
+// Prefixes whose drafter state stays on the GPU when a disk store holds the rest: a hit past them restores from disk,
+// and each held one costs a drafter window of VRAM (about 50 MB for Qwen3.6 35B-A3B's DFlash 2)
+const DISK_BACKED_DRAFTER_PREFIXES: usize = 2;
+
 #[derive(Clone, Debug)]
 pub enum SpeculativeConfig {
     Off,
@@ -38,6 +42,16 @@ impl MtpRuntimeConfig {
         Self {
             prefix_cache_capacity,
         }
+    }
+
+    /// The drafter's share of a prefix cache of `prefix_cache_n` entries, fewer when a disk store backs it.
+    pub fn for_prefix_cache(prefix_cache_n: usize, disk_backed: bool) -> Self {
+        let capacity = if disk_backed {
+            prefix_cache_n.min(DISK_BACKED_DRAFTER_PREFIXES)
+        } else {
+            prefix_cache_n
+        };
+        Self::new(capacity)
     }
 
     pub fn prefix_cache_capacity(self) -> usize {

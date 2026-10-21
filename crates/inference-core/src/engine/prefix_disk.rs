@@ -103,10 +103,25 @@ impl Engine {
         let mut pipeline = get_mut_arcmutex!(self.pipeline);
         write_imported_blocks(&*pipeline, imported, &loaded)?;
         let auxiliary = match &loaded.auxiliary {
-            Some(data) => match pipeline.import_paged_auxiliary_prefix_state(data)? {
-                Some(state) => Some(state),
-                None => return Ok(None),
-            },
+            Some(data) => {
+                // a full checkpoint pool sheds the oldest cached checkpoint, as a captured prefix's does
+                let mut state = pipeline.import_paged_auxiliary_prefix_state(data)?;
+                if state.is_none() {
+                    let mut prefix_cacher = get_mut_arcmutex!(self.prefix_cacher);
+                    while state.is_none() && prefix_cacher.evict_oldest_auxiliary_prefix() {
+                        let mut hybrid = pipeline.cache().hybrid();
+                        for snapshot in prefix_cacher.take_released_recurrent_snapshots() {
+                            hybrid.release_recurrent_snapshot(snapshot)?;
+                        }
+                        drop(hybrid);
+                        state = pipeline.import_paged_auxiliary_prefix_state(data)?;
+                    }
+                }
+                match state {
+                    Some(state) => Some(state),
+                    None => return Ok(None),
+                }
+            }
             None if pipeline
                 .speculative_prefix_checkpoint_policy()
                 .uses_auxiliary_state(modality) =>

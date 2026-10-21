@@ -574,6 +574,50 @@ async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -
     check_restart_restores(Some(drafter.path())).await
 }
 
+// distinct prompts sent before the first is extended: more than a disk-backed drafter keeps on the GPU
+const EVICTING_PROMPTS: usize = 4;
+
+// With a disk store the drafter keeps few prefixes on the GPU; one it dropped restores from disk, drafter checkpoint
+// included, and its next turn decodes as a cold run does
+#[tokio::test]
+async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let store = tempfile::tempdir()?;
+    let model = stored_model(checkpoint.path(), Some(drafter.path()), Some(store.path())).await?;
+    let prompts = (0..EVICTING_PROMPTS)
+        .map(|i| agent_tokens(AGENT_PROMPT_LEN, 1 + i))
+        .collect::<Vec<_>>();
+    for prompt in &prompts {
+        agent_turn(&model, prompt, PREFIX_MAX_LEN).await?;
+    }
+    for _ in 0..STORE_POLLS {
+        if stored_entries(store.path()) >= EVICTING_PROMPTS {
+            break;
+        }
+        tokio::time::sleep(STORE_POLL).await;
+    }
+    anyhow::ensure!(
+        stored_entries(store.path()) >= EVICTING_PROMPTS,
+        "the prompts did not all reach the disk store"
+    );
+    let mut next = prompts[0].clone();
+    next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 0));
+    let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
+    drop(model);
+    let cold_model = stored_model(checkpoint.path(), Some(drafter.path()), None).await?;
+    let (cold, _) = agent_turn(&cold_model, &next, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(cached > 0, "the dropped prefix did not restore");
+    anyhow::ensure!(
+        traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
+        "a restored prefix changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
 // the prompt's snapshot sits at its last full block before the end, the reply's one block further
 const PROMPT_SNAPSHOT_TOKENS: usize = 384;
 const REPLY_SNAPSHOT_TOKENS: usize = 416;

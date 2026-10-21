@@ -516,7 +516,13 @@ impl InferenceRs {
             unloaded_state.engine_config.prefix_cache_n
         };
         let pipeline = loader_config
-            .load(&*loader, MtpRuntimeConfig::new(prefix_cache_capacity))
+            .load(
+                &*loader,
+                MtpRuntimeConfig::for_prefix_cache(
+                    prefix_cache_capacity,
+                    unloaded_state.engine_config.prefix_store.is_some(),
+                ),
+            )
             .await
             .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to load model: {e}")))?;
         let realized_cache_config = pipeline.lock().await.get_metadata().cache_config.clone();
