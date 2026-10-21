@@ -1,5 +1,5 @@
 //! MoE experts kept in host memory: a per-layer VRAM cache of recently routed experts serves decode while the CPU
-//! runs the misses, and prefill stages the whole layer on the GPU.
+//! runs the misses, and prefill stages the experts each batch routes to on the GPU.
 //!
 //! A decode step never waits on the host, so it can be captured in a CUDA graph: the GPU looks each pick's slot up in a
 //! table in mapped host memory (0, the zeroed slot, for a miss) and runs the cached experts, while on a side stream the
@@ -17,7 +17,8 @@ use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 use super::backends::{grouped_with, indexed_mmvq_with};
 use super::forward::{MoEForward, MoEForwardConfig};
 
-// Largest batch the cache and CPU split serves; past it the layer is staged whole on the GPU
+// Largest batch the cache and CPU split serves (the indexed matvec's limit); a larger one stages the experts it routes
+// to on the GPU, since copying an expert costs about what the CPU takes for one token through it
 const SPLIT_MAX_TOKENS: usize = 8;
 // The slot a miss maps to: left zeroed, so the GPU's share of a CPU-served pick is exactly 0 (a slot mid-copy could
 // hold non-finite scales)
@@ -491,37 +492,97 @@ impl OffloadedExperts {
             num_experts: cache[0].kernel_shape().dims()[0],
             ..config
         };
-        let routed = if tokens <= SPLIT_MAX_TOKENS {
-            indexed_mmvq_with(cache, &hits, hit_config)?
-        } else {
-            grouped_with(cache, &hits, hit_config)?
-        };
-        let gpu = routed.ok_or_else(|| {
-            inference_tensor::Error::msg("cached experts cannot run the GGUF kernels")
+        let gpu = indexed_mmvq_with(cache, &hits, hit_config)?.ok_or_else(|| {
+            inference_tensor::Error::msg("cached experts cannot run the indexed matvec")
         })?;
         main.wait(&cpu_done).map_err(wrap)?;
         gpu + ys.to_dtype(forward.original_dtype)?
     }
 
-    // the whole layer copied into the shared staging, then the grouped kernels as for a resident layer
+    // the experts this batch routes to, gathered into the shared staging (cached ones from their slots, the rest over
+    // the bus), then the grouped kernels over that compact stack
     fn forward_staged(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+        let (tokens, topk) = (forward.shape.num_tokens, self.shared.topk);
         let experts = self.experts();
         let staging = {
             let layouts = LAYOUTS.lock().expect("expert layouts poisoned").clone();
             staging(&self.device, &layouts, experts)?
         };
+        // reading the routes waits for all earlier work, so no host function can still evict a slot read below
+        let ids = forward
+            .topk_ids
+            .to_dtype(DType::U32)?
+            .flatten_all()?
+            .to_vec1::<u32>()?;
+        let mut position = vec![None; experts];
+        let mut used = ids.iter().map(|&e| e as usize).collect::<Vec<_>>();
+        used.sort_unstable();
+        used.dedup();
+        for (p, &e) in used.iter().enumerate() {
+            position[e] = Some(p);
+        }
         let main = self.device.cuda_stream();
         let mut views = Vec::with_capacity(PROJECTIONS);
-        for (host, stack) in self.shared.host.iter().zip(&staging.stacks) {
-            let [_, rows, cols] = host.dims();
-            let view = stack.view(host.ty(), experts, rows, cols)?;
-            // SAFETY: host experts live as long as the layer; the main stream orders this copy after the previous
-            // layer's reads of the staging and before this layer's
-            unsafe { view.fill_async(0, host.bytes(), &main)? };
-            views.push(view);
+        {
+            let state = self.shared.state.lock().expect("expert cache poisoned");
+            for ((host, stack), cache) in self
+                .shared
+                .host
+                .iter()
+                .zip(&staging.stacks)
+                .zip(&self.shared.cache)
+            {
+                let [_, rows, cols] = host.dims();
+                let view = stack.view(host.ty(), used.len(), rows, cols)?;
+                let size = host.expert_bytes();
+                let mut p = 0;
+                while p < used.len() {
+                    if let Some(slot) = state.slot_of[used[p]] {
+                        // SAFETY: a landed slot changes only through a host function, and none is queued (see above)
+                        unsafe { view.copy_slot_async(p, cache, slot, &main)? };
+                        p += 1;
+                        continue;
+                    }
+                    // uncached experts with consecutive ids are one copy
+                    let mut end = p + 1;
+                    while end < used.len()
+                        && used[end] == used[end - 1] + 1
+                        && state.slot_of[used[end]].is_none()
+                    {
+                        end += 1;
+                    }
+                    let src = &host.bytes()[used[p] * size..used[end - 1] * size + size];
+                    // SAFETY: host experts live as long as the layer; the stream orders this copy after the previous
+                    // layer's reads of the staging and before this layer's
+                    unsafe { view.fill_async(p, src, &main)? };
+                    p = end;
+                }
+                views.push(view);
+            }
         }
+        let remapped = ids
+            .iter()
+            .map(|&e| {
+                u32::try_from(position[e as usize].expect("every routed expert is staged"))
+                    .expect("fits u32")
+            })
+            .collect::<Vec<_>>();
+        let remapped = Tensor::from_vec(remapped, (tokens, topk), forward.xs.device())?;
+        let staged = MoEForward {
+            xs: forward.xs,
+            xs_flat: forward.xs_flat,
+            topk_weights: forward.topk_weights,
+            topk_ids: &remapped,
+            original_dtype: forward.original_dtype,
+            shape: forward.shape,
+            lora: None,
+        };
+        let staged_config = MoEForwardConfig {
+            num_experts: used.len(),
+            ..config
+        };
         let weights = [&views[0] as &dyn KernelWeight, &views[1], &views[2]];
-        grouped_with(weights, forward, config)?.ok_or_else(|| {
+        grouped_with(weights, &staged, staged_config)?.ok_or_else(|| {
             inference_tensor::Error::msg("staged experts cannot run the grouped kernels")
         })
     }

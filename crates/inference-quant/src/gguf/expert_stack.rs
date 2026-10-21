@@ -191,6 +191,38 @@ impl DeviceExpertStack {
     }
 }
 
+impl DeviceExpertStack {
+    /// Queues a copy of `src`'s expert in `src_slot` into this stack's `dst_slot` on `stream`.
+    /// # Safety
+    /// Nothing may write the source slot or read the destination slot until the copy completes on `stream`.
+    pub unsafe fn copy_slot_async(
+        &self,
+        dst_slot: usize,
+        src: &DeviceExpertStack,
+        src_slot: usize,
+        stream: &CudaStream,
+    ) -> Result<()> {
+        if src.expert_bytes != self.expert_bytes
+            || dst_slot >= self.slots()
+            || src_slot >= src.slots()
+        {
+            inference_tensor::bail!("expert slot copy between mismatched stacks");
+        }
+        let (dst, _dst_guard) = self.blocks.device_ptr(stream);
+        let (src_base, _src_guard) = src.blocks.device_ptr(stream);
+        let offset = |slot: usize| (slot * self.expert_bytes) as u64;
+        unsafe {
+            result::memcpy_dtod_async(
+                dst + offset(dst_slot),
+                src_base + offset(src_slot),
+                self.expert_bytes,
+                stream.cu_stream(),
+            )
+        }
+        .map_err(inference_tensor::Error::wrap)
+    }
+}
+
 impl KernelWeight for DeviceExpertStack {
     fn gguf_type(&self) -> GgufType {
         self.ty
