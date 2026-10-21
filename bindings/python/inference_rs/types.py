@@ -2611,6 +2611,7 @@ class RuntimeSpec:
     prefix_cache_disk_gib: int | None = None
     prefix_cache_disk_ttl_mins: int | None = None
     prefix_cache_n: int | None = None
+    prefix_cache_ram_gib: int | None = None
     seed: int | None = None
     throughput_logging: bool | None = None
     token_source: str | None = None

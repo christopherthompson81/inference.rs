@@ -329,13 +329,17 @@ pub struct RuntimeSpec {
     #[serde(default)]
     pub prefix_cache_n: Option<usize>,
     /// Directory that keeps prefix cache entries on disk, so long sessions survive eviction and restarts (hybrid
-    /// models on CUDA with paged attention); unset keeps the cache in GPU memory only.
+    /// models on CUDA with paged attention); unset, and without `prefix_cache_ram_gib`, the cache stays in GPU memory.
     #[serde(default)]
     pub prefix_cache_dir: Option<String>,
     /// Most the prefix cache directory may hold, in GiB; the least recently used entries go first.
     #[serde(default)]
     pub prefix_cache_disk_gib: Option<u64>,
-    /// Minutes a prefix cache directory entry outlives its last use, unless its request names a TTL (an Anthropic
+    /// Host memory for prefix cache entries, in GiB: in front of `prefix_cache_dir`, or on its own without one;
+    /// unset or 0 keeps none in memory.
+    #[serde(default)]
+    pub prefix_cache_ram_gib: Option<u64>,
+    /// Minutes a host prefix cache entry (in memory or on disk) outlives its last use, unless its request names a TTL (an Anthropic
     /// `cache_control` breakpoint, or `prefix_cache_ttl_secs`); default 60.
     #[serde(default)]
     pub prefix_cache_disk_ttl_mins: Option<u64>,
@@ -715,9 +719,14 @@ impl EngineSpec {
         if let Some(prefix_cache_n) = runtime.prefix_cache_n {
             builder = builder.with_prefix_cache_n(prefix_cache_n);
         }
-        if let Some(dir) = runtime.prefix_cache_dir {
+        let memory_bytes = runtime
+            .prefix_cache_ram_gib
+            .unwrap_or_default()
+            .saturating_mul(BYTES_PER_GIB);
+        if runtime.prefix_cache_dir.is_some() || memory_bytes > 0 {
             builder = builder.with_prefix_store(Some(inference_core::PrefixStoreSettings {
-                dir: dir.into(),
+                dir: runtime.prefix_cache_dir.map(Into::into),
+                memory_bytes,
                 capacity_bytes: runtime
                     .prefix_cache_disk_gib
                     .unwrap_or(DEFAULT_PREFIX_CACHE_DISK_GIB)

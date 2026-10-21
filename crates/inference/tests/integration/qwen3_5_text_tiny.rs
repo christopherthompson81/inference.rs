@@ -577,33 +577,45 @@ async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -
 // distinct prompts sent before the first is extended: more than a disk-backed drafter keeps on the GPU
 const EVICTING_PROMPTS: usize = 4;
 
-// With a disk store the drafter keeps few prefixes on the GPU; one it dropped restores from disk, drafter checkpoint
-// included, and its next turn decodes as a cold run does
-#[tokio::test]
-async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::Result<()> {
-    if !cfg!(feature = "cuda") {
-        return Ok(());
-    }
+// a host store's size in GiB for the tiny model: far more than its prefixes take
+const TINY_RAM_STORE_GIB: u64 = 1;
+
+// With a host store the drafter keeps few prefixes on the GPU; one it dropped restores from the store (a directory,
+// or memory alone), drafter checkpoint included, and its next turn decodes as a cold run does
+async fn check_dropped_prefix_restores(in_memory: bool) -> anyhow::Result<()> {
     let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
     let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
     let store = tempfile::tempdir()?;
-    let model = stored_model(checkpoint.path(), Some(drafter.path()), Some(store.path())).await?;
+    let model = if in_memory {
+        TextModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+            .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT))
+            .with_prefix_cache_ram(TINY_RAM_STORE_GIB)
+            .build()
+            .await?
+    } else {
+        stored_model(checkpoint.path(), Some(drafter.path()), Some(store.path())).await?
+    };
     let prompts = (0..EVICTING_PROMPTS)
         .map(|i| agent_tokens(AGENT_PROMPT_LEN, 1 + i))
         .collect::<Vec<_>>();
     for prompt in &prompts {
         agent_turn(&model, prompt, PREFIX_MAX_LEN).await?;
     }
-    for _ in 0..STORE_POLLS {
-        if stored_entries(store.path()) >= EVICTING_PROMPTS {
-            break;
+    if !in_memory {
+        for _ in 0..STORE_POLLS {
+            if stored_entries(store.path()) >= EVICTING_PROMPTS {
+                break;
+            }
+            tokio::time::sleep(STORE_POLL).await;
         }
-        tokio::time::sleep(STORE_POLL).await;
+        anyhow::ensure!(
+            stored_entries(store.path()) >= EVICTING_PROMPTS,
+            "the prompts did not all reach the disk store"
+        );
     }
-    anyhow::ensure!(
-        stored_entries(store.path()) >= EVICTING_PROMPTS,
-        "the prompts did not all reach the disk store"
-    );
     let mut next = prompts[0].clone();
     next.extend(agent_tokens(AGENT_FOLLOW_UP_LEN, 0));
     let (warm, cached) = agent_turn(&model, &next, PREFIX_MAX_LEN).await?;
@@ -616,6 +628,22 @@ async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::
         "a restored prefix changed decoding: {warm:?} vs {cold:?}"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn a_prefix_the_drafter_dropped_restores_from_the_disk_store() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    check_dropped_prefix_restores(false).await
+}
+
+#[tokio::test]
+async fn a_prefix_the_drafter_dropped_restores_from_the_memory_store() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    check_dropped_prefix_restores(true).await
 }
 
 // the prompt's snapshot sits at its last full block before the end, the reply's one block further

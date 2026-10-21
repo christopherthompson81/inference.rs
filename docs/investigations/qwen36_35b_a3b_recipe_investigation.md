@@ -468,3 +468,31 @@ extended; it asserts cached tokens and decoding as a cold run. It failed: the di
 `import_paged_auxiliary_prefix_state` returned `None` on a full checkpoint pool and the restore gave up, where a
 captured prefix sheds the oldest cached checkpoint first. The restore now evicts the same way (releasing the evicted
 entries' recurrent snapshots) and the test passes, as it did with the old limit.
+
+## Run 14 - 2026-10-21 18:30
+
+Question: Run 13's saving needs a prefix cache directory. Can a host-memory tier give the same without a disk, and
+sit in front of one when there is?
+
+Change: the prefix store gains a memory tier (`--prefix-cache-ram-gib`): entries kept as the disk keeps them (each
+block once per chain hash, least recently used first, the same TTLs and token checks), without files. With a
+directory it is in front: a write goes to memory at once and to disk through the writer thread (with every block of
+its chain the disk lacks, since a write carries only the blocks memory lacks), a restore reads memory first, and a
+disk hit is copied into memory. The drafter's two-prefix GPU limit applies with either tier.
+
+Write-through to disk was chosen over write-back (disk only on memory eviction): a restart keeps restoring the newest
+prefixes, at the cost of the disk writes it already did.
+
+Tests: memory-only round trip and token check, memory eviction with unshared blocks, a write's chain reaching disk
+whole (fails when the facade forwards only the write's own blocks), a disk hit returning to memory, and the Run 13
+tiny-model restore with a memory-only store (fails when memory loads always miss).
+
+Same build, back to back (IQ4_KSS, DFlash 5, q3 KV, default serving settings):
+
+```
+                            retained drafter prefixes   context
+no host store               8                           63,648
+--prefix-cache-ram-gib 16   2                           125,696
+```
+
+(Both lower than Run 13's pair; the card had other allocations this run, the pair is what compares.)

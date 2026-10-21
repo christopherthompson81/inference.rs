@@ -369,6 +369,12 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Keeps prefix cache entries in this much host memory, in front of a prefix cache directory or on its own.
+        pub fn with_prefix_cache_ram(mut self, gib: u64) -> Self {
+            self.options.runtime.prefix_cache_ram_gib = Some(gib);
+            self
+        }
+
         pub fn with_no_kv_cache(mut self) -> Self {
             self.options.runtime.no_kv_cache = true;
             self

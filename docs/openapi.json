@@ -12505,7 +12505,7 @@
               "string",
               "null"
             ],
-            "description": "Directory that keeps prefix cache entries on disk, so long sessions survive eviction and restarts (hybrid\nmodels on CUDA with paged attention); unset keeps the cache in GPU memory only."
+            "description": "Directory that keeps prefix cache entries on disk, so long sessions survive eviction and restarts (hybrid\nmodels on CUDA with paged attention); unset, and without `prefix_cache_ram_gib`, the cache stays in GPU memory."
           },
           "prefix_cache_disk_gib": {
             "type": [
@@ -12522,7 +12522,7 @@
               "null"
             ],
             "format": "int64",
-            "description": "Minutes a prefix cache directory entry outlives its last use, unless its request names a TTL (an Anthropic\n`cache_control` breakpoint, or `prefix_cache_ttl_secs`); default 60.",
+            "description": "Minutes a host prefix cache entry (in memory or on disk) outlives its last use, unless its request names a TTL (an Anthropic\n`cache_control` breakpoint, or `prefix_cache_ttl_secs`); default 60.",
             "minimum": 0
           },
           "prefix_cache_n": {
@@ -12531,6 +12531,15 @@
               "null"
             ],
             "description": "Prefix cache capacity in sequences; 0 disables the prefix cache.",
+            "minimum": 0
+          },
+          "prefix_cache_ram_gib": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Host memory for prefix cache entries, in GiB: in front of `prefix_cache_dir`, or on its own without one;\nunset or 0 keeps none in memory.",
             "minimum": 0
           },
           "seed": {

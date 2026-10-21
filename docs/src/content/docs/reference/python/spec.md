@@ -696,6 +696,7 @@ How much the paged-attention KV cache holds; at most one of `context_len`, `memo
 | `prefix_cache_disk_gib` | `int \| None` | optional |
 | `prefix_cache_disk_ttl_mins` | `int \| None` | optional |
 | `prefix_cache_n` | `int \| None` | optional |
+| `prefix_cache_ram_gib` | `int \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `throughput_logging` | `bool \| None` | optional |
 | `token_source` | `str \| None` | optional |
