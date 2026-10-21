@@ -122,7 +122,8 @@ pub trait QuantizedWeightSource: Send + Sync {
     }
 
     /// Bytes of each text layer's routed MoE experts (indexed by layer, 0 for a dense one) and the experts a layer
-    /// holds; `None` when the source cannot tell or holds no experts.
+    /// holds; `None` when the source cannot tell, holds no experts, or holds a type the CPU expert path cannot run
+    /// (such experts load resident).
     fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
         Ok(None)
     }

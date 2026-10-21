@@ -14,7 +14,7 @@ pub(crate) use drive::{
 pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
 pub(crate) use plan::{
-    AutoDeviceMapSizes, AutoDeviceMapSizingInputs, IsqLoadPlan, IsqPlanInputs,
+    AutoDeviceMapSizes, AutoDeviceMapSizing, AutoDeviceMapSizingInputs, IsqLoadPlan, IsqPlanInputs,
     auto_device_map_sizes, resolve_and_install_isq_plan, resolve_auto_device_map_sizing,
     resolve_weight_load_dtype,
 };

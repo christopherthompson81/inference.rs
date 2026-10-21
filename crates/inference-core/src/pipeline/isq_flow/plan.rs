@@ -98,6 +98,7 @@ pub(crate) enum AutoDeviceMapSizing {
     Checkpoint,
 }
 
+#[derive(Clone, Copy)]
 pub(crate) struct AutoDeviceMapSizingInputs<'a> {
     pub loader: &'a dyn DeviceMappedModelLoader,
     pub config: &'a str,

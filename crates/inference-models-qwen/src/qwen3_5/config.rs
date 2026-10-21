@@ -465,6 +465,24 @@ impl TextConfig {
         2 * self.linear_key_dim() + self.linear_value_dim()
     }
 
+    /// One sequence's recurrent state over the linear-attention layers, as the hybrid cache keeps it (conv rows in the
+    /// activation dtype, taken as BF16 since they are a small share).
+    pub fn recurrent_state_bytes(&self) -> usize {
+        let linear = self
+            .layer_types()
+            .into_iter()
+            .filter(|ty| *ty == LayerType::LinearAttention)
+            .count();
+        let state = self.linear_num_value_heads
+            * self.linear_key_head_dim
+            * self.linear_value_head_dim
+            * self.mamba_ssm_dtype.dtype().size_in_bytes();
+        let conv = self.linear_conv_dim()
+            * self.linear_conv_kernel_dim
+            * inference_tensor::DType::BF16.size_in_bytes();
+        linear * (state + conv)
+    }
+
     pub fn rot_dim(&self) -> usize {
         (self.head_dim as f64 * self.partial_rotary_factor()) as usize
     }

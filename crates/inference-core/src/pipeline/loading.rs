@@ -12,7 +12,7 @@ use tracing::{info, warn};
 
 use crate::{
     PagedAttentionConfig, Topology, TryIntoDType,
-    device_map::{self, DeviceMapSetting, DeviceMapper},
+    device_map::{self, AutoDeviceMapParams, DeviceMapSetting, DeviceMapper},
     distributed::{self, TensorParallelism, WorkerTransferData},
     matformer::{MatformerConfig, MatformerSliceConfig},
     paged_attention::ModelConfigLike,
@@ -459,6 +459,170 @@ pub(crate) struct ResolvedMapSetting {
     pub setting: DeviceMapSetting,
     /// The KV tokens an automatic map planned for; `None` for a manual, dummy or tensor-parallel map.
     pub max_kv_tokens: Option<usize>,
+    /// Experts per layer an automatic map chose to cache on the GPU, keeping the rest in host memory.
+    pub planned_moe_expert_cache: Option<usize>,
+}
+
+// Context an automatic map keeps room for before it moves MoE experts to host memory (or less, for a model with a
+// shorter window); a longer `max_seq_len` asks for more
+const PLANNED_OFFLOAD_CONTEXT: usize = 32 * 1024;
+// The planner tries caching each multiple of 1/this of a layer's experts, most first, and then none (every expert
+// on the CPU)
+const PLANNED_SLOT_STEPS: usize = 16;
+
+struct ExpertCachePlan<'a> {
+    sizing: super::isq_flow::AutoDeviceMapSizingInputs<'a>,
+    devices: &'a [Device],
+    dtype: DType,
+    paged_attn_config: &'a Option<PagedAttentionConfig>,
+}
+
+// A hybrid model's recurrent pool, allocated after the map beside the paged cache, at the slots its reservation takes
+fn recurrent_pool_bytes(
+    model: &dyn ModelConfigLike,
+    paged_attn_config: &PagedAttentionConfig,
+) -> usize {
+    let slots = crate::kv_cache::recurrent_pool_capacity(
+        paged_attn_config.serving_capacity.unwrap_or(1),
+        paged_attn_config.recurrent_snapshot_slots,
+    );
+    slots.saturating_mul(model.recurrent_state_bytes_per_sequence())
+}
+
+impl ExpertCachePlan<'_> {
+    // Whether the weights with `slots` experts per layer cached (`None`: all resident) fit the primary GPU beside the
+    // context `params` asks for, `activations`, the post-load reservations, a hybrid model's recurrent pool and the
+    // share a utilization limit keeps free. Computed directly: an automatic map shrinks a paged cache to fit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn fits(
+        &self,
+        slots: Option<usize>,
+        params: &AutoDeviceMapParams,
+        activations: usize,
+    ) -> Result<bool> {
+        let (loader, config) = (self.sizing.loader, self.sizing.config);
+        let sizes = super::isq_flow::auto_device_map_sizes(
+            super::isq_flow::AutoDeviceMapSizingInputs {
+                moe_expert_cache: slots,
+                ..self.sizing
+            },
+            self.dtype,
+        )?;
+        let model = loader.model_config(config)?;
+        let primary = &self.devices[0];
+        let cap = crate::paged_attention::device_memory_cap(
+            crate::MemoryUsage.query(primary)?.available(),
+            primary,
+        );
+        let tokens = params.max_seq_len() * params.max_batch_size();
+        let cache = match self.paged_attn_config {
+            Some(cfg) => {
+                let plan =
+                    crate::paged_attention::cache_plan(cfg.cache_type, &cfg.cache_layers, &*model);
+                let (num, den) =
+                    crate::paged_attention::kv_bytes_per_token(&plan, self.dtype, &*model);
+                let held_back = match cfg.mem_gpu {
+                    crate::MemoryGpuConfig::Utilization(fraction) => {
+                        (cap as f64 * (1.0 - f64::from(fraction)).max(0.0)) as usize
+                    }
+                    _ => 0,
+                };
+                (tokens * num).div_ceil(den)
+                    + held_back
+                    + cfg.base_device_memory_reservation_bytes
+                    + recurrent_pool_bytes(&*model, cfg)
+            }
+            None => tokens * model.total_kv_cache_elements_per_token() * self.dtype.size_in_bytes(),
+        };
+        Ok(sizes.total_model_size_in_bytes + activations + cache <= cap)
+    }
+
+    // The most experts per layer to cache when a GGUF MoE model's layers do not all fit on the GPU beside a usable
+    // context, its routed experts staying in host memory; `None` when it fits resident or cannot offload.
+    fn slots(&self, params: &AutoDeviceMapParams) -> Result<Option<usize>> {
+        // one GPU: the fit is the primary device's, as a split across GPUs would map layers instead
+        let gpus = self.devices.iter().filter(|d| d.is_cuda()).count();
+        if self.sizing.moe_expert_cache.is_some()
+            || gpus != 1
+            || !self.devices.first().is_some_and(Device::is_cuda)
+            || !matches!(
+                self.sizing.sizing,
+                super::isq_flow::AutoDeviceMapSizing::PreparedWeightSource
+                    | super::isq_flow::AutoDeviceMapSizing::Uqff
+            )
+        {
+            return Ok(None);
+        }
+        let Some(source) = self.sizing.weight_source else {
+            return Ok(None);
+        };
+        let Some((_, experts)) = source.layer_expert_bytes()? else {
+            return Ok(None);
+        };
+        let window = self
+            .sizing
+            .loader
+            .model_config(self.sizing.config)?
+            .max_seq_len();
+        // activations as the load reserves them, for the requested map rather than the longer planned context (prompts
+        // run in chunks)
+        let (loader, config) = (self.sizing.loader, self.sizing.config);
+        let activations = loader
+            .mapped_max_act_size_elems(config, params)?
+            .max(loader.non_mapped_max_act_size_elems(config, params)?)
+            * self.dtype.size_in_bytes();
+        // a paged cache sized by its context asks for that many tokens too
+        let requested = match self.paged_attn_config.as_ref().map(|cfg| cfg.mem_gpu) {
+            Some(crate::MemoryGpuConfig::ContextSize(tokens)) => tokens,
+            _ => 0,
+        };
+        let target = params.with_max_seq_len(
+            params
+                .max_seq_len()
+                .max(requested)
+                .max(PLANNED_OFFLOAD_CONTEXT.min(window)),
+        );
+        let plan = plan_expert_slots(experts, [&target, params], |slots, params| {
+            self.fits(slots, params, activations)
+        })?;
+        if let Some((slots, params)) = plan {
+            info!(
+                slots,
+                experts,
+                context = params.max_seq_len(),
+                "MoE experts do not fit on the GPU beside the context; keeping them in host memory with this many per \
+                 layer cached (`--moe-expert-cache` chooses)"
+            );
+        }
+        Ok(plan.map(|(slots, _)| slots))
+    }
+}
+
+// The most experts per layer to cache (with the context it fits), trying each multiple of 1/PLANNED_SLOT_STEPS of a
+// layer's experts and then none, for the longer context first; `None` when the weights fit resident beside the first
+// context, or nothing fits at all
+fn plan_expert_slots<C: Copy>(
+    experts: usize,
+    contexts: [C; 2],
+    mut fits: impl FnMut(Option<usize>, C) -> Result<bool>,
+) -> Result<Option<(usize, C)>> {
+    if fits(None, contexts[0])? {
+        return Ok(None);
+    }
+    let step = (experts / PLANNED_SLOT_STEPS).max(1);
+    let candidates = (1..experts.div_ceil(step))
+        .rev()
+        .map(|k| k * step)
+        .chain([0])
+        .collect::<Vec<_>>();
+    for context in contexts {
+        for &slots in &candidates {
+            if fits(Some(slots), context)? {
+                return Ok(Some((slots, context)));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// UQFF writing loads unmapped, tensor parallelism shards instead of mapping, and an automatic map is sized here.
@@ -478,6 +642,7 @@ pub(crate) fn resolve_map_setting(
         return Ok(ResolvedMapSetting {
             setting: DeviceMapSetting::dummy(),
             max_kv_tokens: None,
+            planned_moe_expert_cache: None,
         });
     }
     if distributed {
@@ -486,16 +651,29 @@ pub(crate) fn resolve_map_setting(
                 nm_device: available_devices[0].clone(),
             },
             max_kv_tokens: None,
+            planned_moe_expert_cache: None,
         });
     }
     let DeviceMapSetting::Auto(params) = &setting else {
         return Ok(ResolvedMapSetting {
             setting,
             max_kv_tokens: None,
+            planned_moe_expert_cache: None,
         });
     };
     let max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
     let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
+    let planned_moe_expert_cache = ExpertCachePlan {
+        sizing,
+        devices: available_devices,
+        dtype,
+        paged_attn_config,
+    }
+    .slots(params)?;
+    let sizing = super::isq_flow::AutoDeviceMapSizingInputs {
+        moe_expert_cache: sizing.moe_expert_cache.or(planned_moe_expert_cache),
+        ..sizing
+    };
     let (loader, config) = (sizing.loader, sizing.config);
     let super::isq_flow::AutoDeviceMapSizes {
         layer_sizes_in_bytes,
@@ -517,6 +695,7 @@ pub(crate) fn resolve_map_setting(
     Ok(ResolvedMapSetting {
         setting: DeviceMapSetting::Map(map),
         max_kv_tokens,
+        planned_moe_expert_cache,
     })
 }
 
@@ -758,6 +937,7 @@ pub(crate) fn open_load_session(
     let ResolvedMapSetting {
         setting: mapper,
         max_kv_tokens,
+        planned_moe_expert_cache,
     } = resolve_map_setting(
         MapSettingInputs {
             setting: mapper,
@@ -867,7 +1047,7 @@ pub(crate) fn open_load_session(
             attention,
             load_parts,
             embeddings_on_host,
-            moe_expert_cache,
+            moe_expert_cache: moe_expert_cache.or(planned_moe_expert_cache),
         },
         mapper,
     ))
@@ -1139,5 +1319,42 @@ mod tests {
             "{error}"
         );
         assert!(load_matformer_slice(None, None).unwrap().is_none());
+    }
+}
+
+#[cfg(test)]
+mod expert_slot_plan_tests {
+    use super::plan_expert_slots;
+
+    const EXPERTS: usize = 256;
+
+    // a model whose weights fit with `cached` experts per layer at the long context, or `short` at the short one
+    fn plan(cached: Option<usize>, short: Option<usize>) -> Option<(usize, u8)> {
+        plan_expert_slots(EXPERTS, [0u8, 1], |slots, context| {
+            let limit = if context == 0 { cached } else { short };
+            Ok(match (slots, limit) {
+                (None, _) => limit == Some(EXPERTS),
+                (Some(slots), Some(limit)) => slots <= limit,
+                (Some(_), None) => false,
+            })
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn a_model_that_fits_resident_caches_nothing() {
+        assert_eq!(plan(Some(EXPERTS), None), None);
+    }
+
+    #[test]
+    fn the_most_slots_that_fit_win_in_sixteenths_of_the_experts() {
+        assert_eq!(plan(Some(200), None), Some((192, 0)));
+        assert_eq!(plan(Some(15), None), Some((0, 0)));
+    }
+
+    #[test]
+    fn the_shorter_context_is_tried_only_when_the_longer_fits_nothing() {
+        assert_eq!(plan(None, Some(100)), Some((96, 1)));
+        assert_eq!(plan(None, None), None);
     }
 }

@@ -986,10 +986,25 @@ impl QuantizedWeightSource for GgufWeightSource {
             if !source.ends_with(EXPERT_TENSOR_SUFFIX) {
                 continue;
             }
+            let info = self.archive.tensor_info(source)?;
+            // a stack the CPU expert path cannot run loads resident, so the layers do not offload
+            let cols = self
+                .shapes
+                .get(native_name)
+                .and_then(|dims| dims.get(2))
+                .copied();
+            let runs_on_cpu = info
+                .dtype()
+                .gguf_type()
+                .zip(cols)
+                .is_some_and(|(ty, cols)| super::cpu_experts::supports(ty, cols));
+            if !runs_on_cpu {
+                return Ok(None);
+            }
             if layers.len() <= layer {
                 layers.resize(layer + 1, 0);
             }
-            layers[layer] += self.archive.tensor_info(source)?.exact_byte_len()?;
+            layers[layer] += info.exact_byte_len()?;
             experts = experts.or_else(|| {
                 self.shapes
                     .get(native_name)
