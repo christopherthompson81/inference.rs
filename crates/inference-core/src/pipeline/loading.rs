@@ -493,6 +493,7 @@ impl ExpertCachePlan<'_> {
     // Whether the weights with `slots` experts per layer cached (`None`: all resident) fit the primary GPU beside the
     // context `params` asks for, `activations`, the post-load reservations, a hybrid model's recurrent pool and the
     // share a utilization limit keeps free. Computed directly: an automatic map shrinks a paged cache to fit.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
     fn fits(
         &self,
         slots: Option<usize>,
