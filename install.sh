@@ -62,14 +62,9 @@ remote_download_size() {
 
 # Banner
 print_banner() {
-    printf "${BOLD}"
-    echo "  __  __ _     _             _              "
-    echo " |  \\/  (_)___| |_ _ __ __ _| |  _ __ ___   "
-    echo " | |\\/| | / __| __| '__/ _\` | | | '__/ __|  "
-    echo " | |  | | \\__ \\ |_| | | (_| | |_| |  \\__ \\  "
-    echo " |_|  |_|_|___/\\__|_|  \\__,_|_(_)_|  |___/  "
     echo ""
-    printf "${NC}${BLUE}Fast, flexible LLM inference.${NC}\n"
+    printf "${BOLD}inference.rs${NC}\n"
+    printf "${BLUE}One Rust engine for text, vision, speech and images.${NC}\n"
     echo ""
 }
 
