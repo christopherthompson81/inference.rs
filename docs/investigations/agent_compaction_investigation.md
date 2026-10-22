@@ -117,3 +117,29 @@ reports `snapshot_beyond_match`.
 
 Also found: `run3.sh` backgrounded `cd ... && ./inference ... &`, so `$!` was the subshell and each run left its
 server running; fixed. The server itself stops on SIGTERM in 2 s.
+
+## Run 5 - 2026-10-22 01:30
+
+Question: with a second recurrent checkpoint where a chat's final message starts (the template's turn-start token,
+learned once from a probe render and accepted only when it is a special token), does Run 1's 194K compaction hit?
+
+Command: Run 1's sequence again (64K, 128K, 194K on one server, empty disk store), this build.
+
+```
+history     prompt    warm (cold) TTFT   compaction TTFT   cached      summary tokens
+64K         65,395    68 s               0.41 s            65,376      12,403
+128K        125,780   182 s              1.29 s            125,760     20,000 (cap)
+200K        193,826   363 s              0.53 s            193,792     4,042
+```
+
+The 194K compaction now resumes at the block before the final message (6056 blocks, the last one short of it) instead
+of re-prefilling 6 minutes. No `checkpoint_unavailable` lookup in the log. The tiny-model test
+`a_new_final_message_resumes_at_the_previous_one` reuses 0 tokens with the boundary disabled, the history with it.
+
+Also fixed: `inference_prefix_cache_misses_total{reason="recurrent_and_auxiliary"}` (2 here) counted hits that reuse
+one block less than they matched (the drafter's replay), which the log already skipped; the counter now takes only the
+lookups that lose 1,024 tokens or more, find nothing cached, or lost a block to eviction. The two
+`no_replay_boundary` / `snapshot_beyond_match` ones were the shared 32-token preamble of each new session.
+
+Next: progressive snapshots (every 16-32K tokens to the host / disk tier), so a divergence earlier than the final
+message (an edited earlier turn, context editing that clears old tool results) costs at most one interval.

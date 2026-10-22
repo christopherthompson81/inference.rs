@@ -358,6 +358,7 @@ impl PagedAttentionScheduler {
             block_align,
             self.prefix_policy.replay_for(modality_signature(seq)),
             seq.mm_features(),
+            seq.final_message_start(),
         )
     }
 

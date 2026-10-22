@@ -187,6 +187,8 @@ pub struct Engine {
     file_store: crate::files::FileStore,
     // Re-runs the decode graph precapture after the recurrent pool grows and drops every graph
     pub(crate) graph_precapture_ctx: Option<DecodeGraphPrecaptureCtx>,
+    // the chat template's turn-start token, learned on the first chat request a hybrid model admits
+    turn_start_token: std::sync::OnceLock<Option<u32>>,
     #[cfg(feature = "cuda")]
     cuda_decode_enabled: bool,
 }
@@ -830,6 +832,7 @@ impl Engine {
             session_store,
             file_store,
             graph_precapture_ctx,
+            turn_start_token: std::sync::OnceLock::new(),
             #[cfg(feature = "cuda")]
             cuda_decode_enabled,
         })
