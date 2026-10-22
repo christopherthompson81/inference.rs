@@ -229,7 +229,8 @@ pub fn build_cache_root() -> Option<std::path::PathBuf> {
         .or_else(|| Some(user_cache()?.join(CACHE_SUBDIR).join(BUILT_SUBDIR)))
 }
 
-fn user_cache() -> Option<std::path::PathBuf> {
+/// The user's cache directory (`XDG_CACHE_HOME`, else `~/.cache`).
+pub fn user_cache() -> Option<std::path::PathBuf> {
     std::env::var_os("XDG_CACHE_HOME")
         .map(std::path::PathBuf::from)
         .or_else(|| {

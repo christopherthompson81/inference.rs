@@ -87,15 +87,16 @@ pub(crate) fn fp8_tensor_cores(device: &inference_tensor::Device) -> bool {
 
 pub use safetensors::{Shard, ShardedSafeTensors, TensorShapes};
 pub use uqff::{
-    BiasShard, QuantizationIssue, QuantizationReport, QuantizedExpertKeys, ShardedVarBuilder,
-    TrackedModule, Tracker, UQFF_REPORT_JSON, UQFF_VERSION_MAJOR, UQFF_VERSION_MINOR,
-    UQFF_VERSION_PATCH, UqffArtifactFile, UqffArtifactGroup, UqffArtifacts, UqffExpertKeys,
-    UqffFallbackReport, UqffGeneratedBy, UqffInspection, UqffLayerReport, UqffMetadataSummary,
-    UqffOutputReport, UqffReader, UqffReport, UqffReportOptions, UqffTensor, UqffTensorSummary,
-    UqffVerifyOptions, UqffVerifyResult, bias_shard, build_output_report_from_layers,
-    build_uqff_report, build_uqff_report_from_artifacts, inspect_uqff_artifacts, inspect_uqff_path,
-    shard_range, slice_blocked_data, stored_type_from_tensors, uqff_version_tensors,
-    verify_uqff_artifacts, verify_uqff_path, write_uqff_report,
+    BiasShard, IsqCache, QuantizationIssue, QuantizationReport, QuantizedExpertKeys,
+    ShardedVarBuilder, TrackedModule, Tracker, UQFF_REPORT_JSON, UQFF_VERSION_MAJOR,
+    UQFF_VERSION_MINOR, UQFF_VERSION_PATCH, UqffArtifactFile, UqffArtifactGroup, UqffArtifacts,
+    UqffExpertKeys, UqffFallbackReport, UqffGeneratedBy, UqffInspection, UqffLayerReport,
+    UqffMetadataSummary, UqffOutputReport, UqffReader, UqffReport, UqffReportOptions, UqffTensor,
+    UqffTensorSummary, UqffVerifyOptions, UqffVerifyResult, bias_shard,
+    build_output_report_from_layers, build_uqff_report, build_uqff_report_from_artifacts,
+    inspect_uqff_artifacts, inspect_uqff_path, shard_range, slice_blocked_data,
+    stored_type_from_tensors, uqff_version_tensors, verify_uqff_artifacts, verify_uqff_path,
+    write_uqff_report,
 };
 
 pub trait QuantizedWeightSource: Send + Sync {

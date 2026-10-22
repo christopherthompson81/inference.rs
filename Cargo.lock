@@ -3159,6 +3159,7 @@ dependencies = [
  "safetensors",
  "serde",
  "serde_json",
+ "siphasher",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",

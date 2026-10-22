@@ -43,6 +43,8 @@ use crate::paged_attention::windowed_pool::{
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 16;
+// under the user's cache directory: a quantized drafter's weights, so a restart skips quantizing them (~6 s at q4k)
+const DRAFTER_CACHE_DIR: &str = "inference-rs/drafters";
 pub const DEFAULT_MAX_DRAFTS: usize = 7;
 // Eager forwards use this cache; CUDA graphs derive RoPE from their replayed position inputs.
 const ROPE_CACHE_LEN: usize = 65536;
@@ -2004,15 +2006,83 @@ impl DFlashCudaGraphState {
     }
 }
 
-fn load_linear(
-    vb: &ShardedVarBuilder,
-    shape: (usize, usize),
-    name: &str,
+// The drafter's projections, read from its quantized-weight cache when an earlier load wrote one
+struct DrafterLinears<'a> {
     isq: Option<IsqType>,
-    device: &Device,
-) -> Result<Arc<dyn QuantMethod>> {
-    let weight = vb.pp(name).get((shape.1, shape.0), "weight")?;
-    linear_from_weight(weight, isq, device)
+    cache: Option<inference_quant::IsqCache>,
+    device: &'a Device,
+}
+
+impl<'a> DrafterLinears<'a> {
+    fn new(
+        isq: Option<IsqType>,
+        weight_paths: &[std::path::PathBuf],
+        dtype: DType,
+        device: &'a Device,
+    ) -> Self {
+        let cache = isq.and_then(|ty| {
+            let dir = inference_tensor::kernel_library::user_cache()?.join(DRAFTER_CACHE_DIR);
+            let stamps = weight_paths
+                .iter()
+                .map(|path| {
+                    let meta = fs::metadata(path).ok()?;
+                    Some(format!(
+                        "{} {} {:?}",
+                        path.display(),
+                        meta.len(),
+                        meta.modified().ok()?
+                    ))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let key = format!(
+                "dflash {}\nisq {ty:?}\ndtype {dtype:?}\n{}",
+                env!("CARGO_PKG_VERSION"),
+                stamps.join("\n")
+            );
+            let group = weight_paths.first()?.parent()?.display().to_string();
+            Some(inference_quant::IsqCache::open(&dir, &group, &key))
+        });
+        Self { isq, cache, device }
+    }
+
+    fn cached(&self) -> bool {
+        self.cache
+            .as_ref()
+            .is_some_and(inference_quant::IsqCache::is_complete)
+    }
+
+    fn linear(
+        &mut self,
+        name: &str,
+        weight: impl FnOnce() -> Result<Tensor>,
+    ) -> Result<Arc<dyn QuantMethod>> {
+        let (isq, device) = (self.isq, self.device);
+        match (&mut self.cache, isq) {
+            (Some(cache), Some(ty)) => cache.linear(name, ty, device, || {
+                linear_from_weight(weight()?, isq, device)
+            }),
+            _ => linear_from_weight(weight()?, isq, device),
+        }
+    }
+
+    // a fresh cache is written off the load path: about 1 GB at q4k
+    fn finish(self) {
+        let Some(cache) = self.cache else {
+            return;
+        };
+        let path = cache.path().to_path_buf();
+        if cache.is_complete() {
+            tracing::info!("Read the quantized drafter from {}", path.display());
+            return;
+        }
+        std::thread::spawn(move || match cache.finish() {
+            Ok(()) => tracing::info!("Kept the quantized drafter in {}", path.display()),
+            Err(error) => tracing::warn!(
+                "Failed keeping the quantized drafter in {}: {error}",
+                path.display()
+            ),
+        });
+    }
 }
 
 fn linear_from_weight(
@@ -2020,7 +2090,11 @@ fn linear_from_weight(
     isq: Option<IsqType>,
     device: &Device,
 ) -> Result<Arc<dyn QuantMethod>> {
-    let weight = weight.to_device(device)?;
+    // quantization reads a host copy, so a quantized projection uploads only its packed weight
+    let weight = match isq {
+        Some(_) => weight,
+        None => weight.to_device(device)?,
+    };
     let layer: Arc<dyn QuantMethod> = Arc::new(UnquantLinear::new(
         QuantMethodConfig::Unquantized(inference_tensor::nn::Linear::new(weight, None)),
     )?);
@@ -2276,7 +2350,7 @@ impl DFlashDraftModel {
         // the projections are read on the host and reach the device one at a time, already in their weight type,
         // so a quantized drafter never holds its whole BF16 checkpoint in VRAM
         let vb_host = from_mmaped_safetensors(
-            weight_paths,
+            weight_paths.clone(),
             Some(dtype),
             &Device::Cpu,
             Vec::new(),
@@ -2289,6 +2363,8 @@ impl DFlashDraftModel {
         // The drafter conditions on quantized target hiddens already; its own precision is a
         // tunable acceptance/speed trade (bf16 reads ~4 GB per draft block, q4k ~1.1 GB).
         let isq = config.drafter_isq.or(config.draft_lm_head_isq);
+        let mut linears = DrafterLinears::new(isq, &weight_paths, dtype, device);
+        let cached = linears.cached();
         let hidden = cfg.hidden_size;
         let eps = cfg.rms_norm_eps;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -2301,29 +2377,39 @@ impl DFlashDraftModel {
             let (is_causal, sliding_window) = cfg.layer_attention(i);
             let q_size = cfg.num_attention_heads * head_dim;
             let kv_size = cfg.num_key_value_heads * head_dim;
-            let q_weight = host_attn.pp("q_proj").get((q_size, hidden), "weight")?;
-            let k_weight = host_attn.pp("k_proj").get((kv_size, hidden), "weight")?;
-            let v_weight = host_attn.pp("v_proj").get((kv_size, hidden), "weight")?;
-            let qkv_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
-            context_kv_weights.push(k_weight);
-            context_kv_weights.push(v_weight);
-
-            let gate_weight = host_mlp
-                .pp("gate_proj")
-                .get((cfg.intermediate_size, hidden), "weight")?;
-            let up_weight = host_mlp
-                .pp("up_proj")
-                .get((cfg.intermediate_size, hidden), "weight")?;
-            let gate_up_weight = Tensor::cat(&[&gate_weight, &up_weight], 0)?;
+            // a cached drafter reads none of these, its context projection included
+            if !cached {
+                context_kv_weights.push(host_attn.pp("k_proj").get((kv_size, hidden), "weight")?);
+                context_kv_weights.push(host_attn.pp("v_proj").get((kv_size, hidden), "weight")?);
+            }
+            let qkv_proj = linears.linear(&format!("layers.{i}.qkv_proj"), || {
+                let q_weight = host_attn.pp("q_proj").get((q_size, hidden), "weight")?;
+                let (k_weight, v_weight) = (
+                    &context_kv_weights[context_kv_weights.len() - 2],
+                    &context_kv_weights[context_kv_weights.len() - 1],
+                );
+                Tensor::cat(&[&q_weight, k_weight, v_weight], 0)
+            })?;
+            let o_proj = linears.linear(&format!("layers.{i}.o_proj"), || {
+                host_attn.pp("o_proj").get((hidden, q_size), "weight")
+            })?;
+            let gate_up_proj = linears.linear(&format!("layers.{i}.gate_up_proj"), || {
+                let gate_weight = host_mlp
+                    .pp("gate_proj")
+                    .get((cfg.intermediate_size, hidden), "weight")?;
+                let up_weight = host_mlp
+                    .pp("up_proj")
+                    .get((cfg.intermediate_size, hidden), "weight")?;
+                Tensor::cat(&[&gate_weight, &up_weight], 0)
+            })?;
+            let down_proj = linears.linear(&format!("layers.{i}.down_proj"), || {
+                host_mlp
+                    .pp("down_proj")
+                    .get((hidden, cfg.intermediate_size), "weight")
+            })?;
             layers.push(DFlashLayer {
-                qkv_proj: linear_from_weight(qkv_weight, isq, device)?,
-                o_proj: load_linear(
-                    &host_attn,
-                    (cfg.num_attention_heads * head_dim, hidden),
-                    "o_proj",
-                    isq,
-                    device,
-                )?,
+                qkv_proj,
+                o_proj,
                 q_norm: RmsNorm::new(head_dim, eps, vb_attn.pp("q_norm"))?,
                 k_norm: RmsNorm::new(head_dim, eps, vb_attn.pp("k_norm"))?,
                 input_layernorm: RmsNorm::new(hidden, eps, vb_l.pp("input_layernorm"))?,
@@ -2332,14 +2418,8 @@ impl DFlashDraftModel {
                     eps,
                     vb_l.pp("post_attention_layernorm"),
                 )?,
-                gate_up_proj: linear_from_weight(gate_up_weight, isq, device)?,
-                down_proj: load_linear(
-                    &host_mlp,
-                    (cfg.intermediate_size, hidden),
-                    "down_proj",
-                    isq,
-                    device,
-                )?,
+                gate_up_proj,
+                down_proj,
                 attention_conv: cfg
                     .is_v2()
                     .then(|| DynamicConv::load(vb_l.pp("attention_conv"), &cfg))
@@ -2352,8 +2432,9 @@ impl DFlashDraftModel {
                 sliding_window,
             });
         }
-        let context_kv_weight = Tensor::cat(&context_kv_weights.iter().collect::<Vec<_>>(), 0)?;
-        let context_kv_proj = linear_from_weight(context_kv_weight, isq, device)?;
+        let context_kv_proj = linears.linear("context_kv_proj", || {
+            Tensor::cat(&context_kv_weights.iter().collect::<Vec<_>>(), 0)
+        })?;
         #[cfg(feature = "cuda")]
         let context_k_norm_weights = if device.is_cuda() {
             let weights = layers
@@ -2364,13 +2445,12 @@ impl DFlashDraftModel {
         } else {
             None
         };
-        let fc = load_linear(
-            &vb_host,
-            (target_layer_ids.len() * hidden, hidden),
-            "fc",
-            isq,
-            device,
-        )?;
+        let fc = linears.linear("fc", || {
+            vb_host
+                .pp("fc")
+                .get((hidden, target_layer_ids.len() * hidden), "weight")
+        })?;
+        linears.finish();
         let selector = cfg
             .is_v2()
             .then(|| CandidateSelector::load(vb.pp("candidate_selector"), &cfg))

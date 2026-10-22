@@ -826,3 +826,81 @@ async fn a_prompt_diverging_early_resumes_at_a_progressive_checkpoint() -> anyho
     );
     Ok(())
 }
+
+// the tiny drafter's 64-wide rows take a 32-element block type
+const CACHED_DRAFTER_ISQ: &str = "q8_0";
+const DRAFTER_CACHE_DIR: &str = "inference-rs/drafters";
+
+async fn quantized_drafter_model(
+    checkpoint: &std::path::Path,
+    drafter: &std::path::Path,
+) -> anyhow::Result<Model> {
+    Ok(TextModelBuilder::new(checkpoint.to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .with_mtp_draft_isq(CACHED_DRAFTER_ISQ)
+        .build()
+        .await?)
+}
+
+// A quantized drafter's weights are kept in the user's cache on its first load and read back on the next, which
+// decodes exactly as the first did
+#[tokio::test]
+async fn a_quantized_drafter_is_read_back_from_the_cache() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let cache = tempfile::tempdir()?;
+    // nextest runs each test in its own process, so no other thread reads the environment
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache.path()) };
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let prompt = agent_tokens(AGENT_PROMPT_LEN, 0);
+    let first = quantized_drafter_model(checkpoint.path(), drafter.path()).await?;
+    let (cold, _) = agent_turn(&first, &prompt, PREFIX_MAX_LEN).await?;
+    drop(first);
+    let kept = cache.path().join(DRAFTER_CACHE_DIR);
+    for _ in 0..STORE_POLLS {
+        if walkdir_count_ext(&kept, "uqff") > 0 {
+            break;
+        }
+        tokio::time::sleep(STORE_POLL).await;
+    }
+    anyhow::ensure!(
+        walkdir_count_ext(&kept, "uqff") == 1,
+        "no quantized drafter was kept"
+    );
+    let written = kept_modified(&kept)?;
+    let second = quantized_drafter_model(checkpoint.path(), drafter.path()).await?;
+    let (warm, _) = agent_turn(&second, &prompt, PREFIX_MAX_LEN).await?;
+    drop(second);
+    // a load that missed would quantize again and replace the file in the background
+    tokio::time::sleep(STORE_POLL * 4).await;
+    anyhow::ensure!(
+        walkdir_count_ext(&kept, "uqff") == 1 && kept_modified(&kept)? == written,
+        "the second load quantized the drafter again"
+    );
+    anyhow::ensure!(
+        warm == cold,
+        "the cached drafter changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}
+
+fn kept_modified(dir: &std::path::Path) -> anyhow::Result<std::time::SystemTime> {
+    let entry = std::fs::read_dir(dir)?
+        .flatten()
+        .find(|entry| entry.path().extension().is_some_and(|ext| ext == "uqff"))
+        .ok_or_else(|| anyhow::anyhow!("no kept drafter in {}", dir.display()))?;
+    Ok(entry.metadata()?.modified()?)
+}
+
+fn walkdir_count_ext(dir: &std::path::Path, extension: &str) -> usize {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == extension))
+        .count()
+}
