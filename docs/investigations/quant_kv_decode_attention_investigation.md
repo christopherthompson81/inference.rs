@@ -269,3 +269,57 @@ Kept f32 (v4). Also tried and dropped, neutral within noise: skipping the per-sc
 skipping the O rescale when no row's max moved (580 against 571 us).
 Note: `FATTN_QUANT_DECODE_OFF=` (set but empty) still disables the kernel (the switch tests presence); A/B runs need
 `env -u`.
+
+## Run 10 - 2026-10-22 08:40
+
+Question: long-context decode is ~25% slower than at 2K on summaries, and the slowdown is all verify step time (the
+lookup drafting doc, Run 4). With ncu, what bounds the dedicated kernel at 8 rows now?
+
+Command: `FATTN_BENCH_FILTER="rows 8 kv 131072" ncu --kernel-name regex:flash_attn_quant_decode --launch-skip 3
+--launch-count 1 --set full <fattn integration binary> bench::verify_long_context --ignored --exact` (clocks locked by
+ncu, so 653 us against the bench's 616).
+
+```
+flash_attn_quant_decode<256, 64>   grid (64, 4, 1) x (32, 4, 1), 227 registers, 48 KB smem
+block limit (registers, smem)      2 an SM
+waves per SM                       1.56
+SM active / elapsed cycles         973K / 1,141K (85%)
+tensor pipe active                 42% of active cycles
+top stalls (per issue)             math pipe 1.71, wait 1.15, short scoreboard 0.52
+combine pass                       24 us
+```
+
+Finding: the grid is 64 splits x 4 K/V heads = 256 blocks on 82 SMs x 2 = 164 slots. The launcher meant two whole waves
+(`4*nsm / kv_heads` = 82 splits) but `FQ_MAX_SPLITS` 64 capped it to 1.56, so the second wave runs 92 blocks on 164
+slots. Sized to whole waves from `cudaOccupancyMaxActiveBlocksPerMultiprocessor` instead (`FQ_WAVES` env, temporary):
+
+```
+bench (us)     32K r1   32K r8   64K r1   64K r8   128K r1   128K r8   256K r1   256K r8
+master         166.0    203.9    261.9    361.1    410.2     615.8     763.2     1212.6
+1 wave (41)    108.0    157.5    195.5    281.0    314.8     484.5     593.7      958.2
+2 waves (82)     -        -        -        -      352.2     506.4       -        962.4
+```
+
+2K and 8K are unchanged (the device-side minimum of 8 tiles a split already bounds them). One wave beats two: same work
+a block, half the combine inputs. Kept one wave, no split cap; the fattn tests pass (53).
+Next: the tensor pipe at 42% with math-pipe stalls; Q.K still pads 48 columns to 64 (4 warps cannot split 3 m tiles).
+
+End to end (sampled compaction summaries, the lookup drafting doc's Run 4 setup; step ms = tok/step / tok/s, since
+sampled acceptance moves tok/s run to run):
+
+```
+history  target   master step ms   one wave step ms
+wiki     2K       28.5             28.2
+code     2K       28.4             28.2
+wiki     64K      33.6             32.4
+code     64K      32.4             31.5
+wiki     125K     38.3             36.2
+code     125K     36.7             35.0
+```
+
+-1.0 ms a step at 64K and -1.9 ms at 125K (the bench predicted 1.3 and 2.1 over 16 layers): 3% and 5% faster decode.
+
+Where the rest goes (ncu SASS stall samples, master kernel): HMMA 43.5% (Q.K's f32-accumulate m16n8k16 29%, P.V's
+f16 m16n8k8 14%), then IMAD/SHF/LOP3 address and unpack math. The executed MMA counts match the padded shape exactly:
+8.6e9 multiply-adds each for Q.K and P.V where 48 real columns need 6.4e9. Removing the padding needs Q as the 8-wide
+operand (6 exact n tiles, K and V as the 16-wide one), a transposed kernel; f16 accumulation for Q.K stays out (Run 9).

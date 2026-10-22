@@ -13,7 +13,6 @@
 #define FQ_GROUP       32   // values a quantization scale covers
 #define FQ_MAX_ROWS    8
 #define FQ_MAX_COLS    64   // Q rows x Q heads of one K/V head
-#define FQ_MAX_SPLITS  64
 // tiles a split takes at least: short caches use fewer splits than the grid has, decided on the device (graph capture
 // fixes the grid, the lengths stay device-side)
 #define FQ_MIN_SPLIT_TILES 8
@@ -489,15 +488,10 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
     const int ncols_pad = ncols <= 16 ? 16 : ncols <= 32 ? 32 : 64;
     const int ksplit = FQ_WARPS / (ncols_pad/16);
     const int nsm = ggml_cuda_info().devices[ggml_cuda_get_device()].nsm;
-    // two blocks an SM, two waves: device-side lengths leave the work per block unknown, so split to fill the GPU
-    const int splits = std::max(1, std::min(FQ_MAX_SPLITS, 4*nsm / std::max(1, kv_heads*n_seq)));
-
-    ggml_cuda_pool_alloc<float> part(ctx.pool(), size_t(n_seq)*kv_heads*ncols*splits*ksplit*(D + 2));
     const float log2e = 1.4426950408889634f;
     const bool Q_bf16 = Q->type == GGML_TYPE_BF16;
     const bool dst_bf16 = dst->type == GGML_TYPE_BF16;
     cudaStream_t stream = ctx.stream();
-    const dim3 grid(splits, kv_heads, n_seq);
     const dim3 block(WARP_SIZE, FQ_WARPS);
 
     auto launch = [&](auto d_c, auto ncols_c) {
@@ -511,6 +505,16 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
             CUDA_CHECK(cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem));
             raised[ctx.device] = smem;
         }
+        // one whole wave: device-side lengths hide the work per block, and a partial second wave idles most of the GPU
+        static int occ_smem[GGML_CUDA_MAX_DEVICES] = {0};
+        static int per_sm[GGML_CUDA_MAX_DEVICES] = {0};
+        if (occ_smem[ctx.device] != smem) {
+            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm[ctx.device], kernel, WARP_SIZE*FQ_WARPS, smem));
+            occ_smem[ctx.device] = smem;
+        }
+        const int splits = std::max(1, std::max(1, per_sm[ctx.device])*nsm / std::max(1, kv_heads*n_seq));
+        ggml_cuda_pool_alloc<float> part(ctx.pool(), size_t(n_seq)*kv_heads*ncols*splits*ksplit*(D + 2));
+        const dim3 grid(splits, kv_heads, n_seq);
         kernel<<<grid, block, smem, stream>>>((const char *) Q->data, (const char *) K->data, (const char *) V->data,
             part.ptr, scale*log2e, rows, gqa, Q->nb[1], Q->nb[2], Q->nb[3], K->nb[1], K->nb[2], K->nb[3],
             V->nb[1], V->nb[2], V->nb[3], Q_bf16, lay);
