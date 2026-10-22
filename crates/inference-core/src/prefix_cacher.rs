@@ -28,6 +28,15 @@ const PAGED_RECURRENT_PREFIX_OWNER_EVICTIONS_METRIC: &str =
 const CAPACITY_EVICTION_REASON: &str = "capacity";
 const BLOCK_PRESSURE_EVICTION_REASON: &str = "block_pressure";
 const CHECKPOINT_POOL_EVICTION_REASON: &str = "checkpoint_pool";
+// the recurrent pool took the entry's snapshot slot back for a running sequence
+const SNAPSHOT_RECLAIMED_REASON: &str = "snapshot_reclaimed";
+// a later snapshot of the same sequence took the entry's place
+const REPLACED_REASON: &str = "replaced";
+/// The recurrent pool had no idle slot, so a prefix's state was never kept.
+pub const NO_SNAPSHOT_SLOT_REASON: &str = "no_snapshot_slot";
+// the only snapshot along these blocks sits past where the prompt diverges from them (a prompt's snapshot is at its last
+// full block, which a different final message can share only in part)
+const SNAPSHOT_BEYOND_MATCH: &str = "snapshot_beyond_match";
 
 #[derive(PartialEq, Eq, Debug, Hash)]
 struct Tokens(Vec<u32>);
@@ -189,6 +198,8 @@ pub struct PrefixCacheManagerV2 {
     // Snapshot slots of dropped entries, for the engine to hand back to the recurrent pool
     released_recurrent_snapshots: Vec<RecurrentSnapshotSlot>,
     disk: Option<PrefixDiskTier>,
+    // why recent recurrent entries went, keyed by their key's last block
+    entry_evictions: inference_nn::paged_attention::eviction_log::EvictionLog<BlockHash>,
 }
 
 /// The disk store paged recurrent prefixes are written through to, and the KV manager that knows their blocks.
@@ -243,6 +254,9 @@ impl PrefixCacheManagerV2 {
             has_paged_attention,
             released_recurrent_snapshots: Vec::new(),
             disk: None,
+            entry_evictions: inference_nn::paged_attention::eviction_log::EvictionLog::new(
+                inference_nn::paged_attention::eviction_log::EVICTION_LOG_CAPACITY,
+            ),
         };
         manager.publish_paged_recurrent_metrics();
         metrics::counter!(
@@ -332,6 +346,10 @@ impl PrefixCacheManagerV2 {
                 continue;
             };
             removed_entries += 1;
+            if let Some(last) = key.last() {
+                self.entry_evictions
+                    .record(*last, BLOCK_PRESSURE_EVICTION_REASON);
+            }
             self.paged_recurrent_bytes = self
                 .paged_recurrent_bytes
                 .saturating_sub(Self::checkpoint_bytes(entry.auxiliary.as_deref()));
@@ -387,6 +405,10 @@ impl PrefixCacheManagerV2 {
         let Some(entry) = self.paged_recurrent_caches.shift_remove(key) else {
             return;
         };
+        if let Some(last) = key.last() {
+            self.entry_evictions
+                .record(*last, SNAPSHOT_RECLAIMED_REASON);
+        }
         self.paged_recurrent_bytes = self
             .paged_recurrent_bytes
             .saturating_sub(Self::checkpoint_bytes(entry.auxiliary.as_deref()));
@@ -550,6 +572,9 @@ impl PrefixCacheManagerV2 {
         snapshot: RecurrentSnapshotSlot,
         auxiliary: Option<Arc<dyn PagedAuxiliaryPrefixState>>,
     ) {
+        if let Some(last) = key.last() {
+            self.entry_evictions.forget(last);
+        }
         if self.no_prefix_cache
             || !self.has_paged_attention
             || self.paged_recurrent_capacity() == 0
@@ -606,6 +631,9 @@ impl PrefixCacheManagerV2 {
             else {
                 break;
             };
+            if let Some(last) = evicted_key.last() {
+                self.entry_evictions.record(*last, CAPACITY_EVICTION_REASON);
+            }
             self.remove_paged_recurrent_owner(evicted_owner, &evicted_key);
             capacity_evictions += 1;
         }
@@ -698,6 +726,26 @@ impl PrefixCacheManagerV2 {
         self.paged_recurrent_sequence_keys.contains_key(&owner)
     }
 
+    /// Notes why the prefix ending at `last` holds no recurrent entry, for a later lookup that misses it.
+    pub(crate) fn record_entry_cause(&mut self, last: BlockHash, cause: &'static str) {
+        self.entry_evictions.record(last, cause);
+    }
+
+    /// Why these prefix blocks hold no recurrent entry: the cause the log recorded for the longest that went, or that
+    /// the only entry along them lies past their end.
+    pub fn eviction_cause(&self, block_hashes: &[BlockHash]) -> Option<&'static str> {
+        block_hashes
+            .iter()
+            .rev()
+            .find_map(|hash| self.entry_evictions.cause(hash))
+            .or_else(|| {
+                self.paged_recurrent_caches
+                    .keys()
+                    .any(|key| key.len() > block_hashes.len() && key.starts_with(block_hashes))
+                    .then_some(SNAPSHOT_BEYOND_MATCH)
+            })
+    }
+
     /// Drops the least recently used prefix holding a drafter checkpoint, so its checkpoint slot frees; false when no
     /// cached prefix holds one.
     pub(crate) fn evict_oldest_auxiliary_prefix(&mut self) -> bool {
@@ -719,6 +767,10 @@ impl PrefixCacheManagerV2 {
             .filter(|(_, owner_key)| **owner_key == key)
             .map(|(owner, _)| *owner)
             .collect::<Vec<_>>();
+        if let Some(last) = key.last() {
+            self.entry_evictions
+                .record(*last, CHECKPOINT_POOL_EVICTION_REASON);
+        }
         for owner in owners {
             self.paged_recurrent_sequence_keys.shift_remove(&owner);
             self.remove_paged_recurrent_owner(owner, &key);
@@ -736,6 +788,9 @@ impl PrefixCacheManagerV2 {
     /// Drops an owner's prefix; its snapshot is released unless another owner still holds the entry.
     pub(crate) fn release_paged_recurrent_owner(&mut self, owner: BlockHash) {
         if let Some(key) = self.paged_recurrent_sequence_keys.shift_remove(&owner) {
+            if let Some(last) = key.last() {
+                self.entry_evictions.record(*last, REPLACED_REASON);
+            }
             self.remove_paged_recurrent_owner(owner, &key);
             self.publish_paged_recurrent_metrics();
         }
@@ -1490,6 +1545,31 @@ mod tests {
         assert!(PrefixCacheManagerV2::new(1, false, false).accepts_sequence_cache());
         assert!(!PrefixCacheManagerV2::new(1, true, false).accepts_sequence_cache());
         assert!(!PrefixCacheManagerV2::new(1, false, true).accepts_sequence_cache());
+    }
+
+    #[test]
+    fn a_lookup_names_why_its_blocks_hold_no_entry() {
+        let mut prefix_cacher = PrefixCacheManagerV2::new(4, false, true);
+        let key = block_hashes(10, 3);
+        prefix_cacher.add_paged_recurrent_prefix(
+            *key.last().unwrap(),
+            key.clone(),
+            make_recurrent_snapshot(),
+            None,
+        );
+        // a prompt that diverges inside the entry's last block matches only the blocks before it
+        assert_eq!(
+            prefix_cacher.eviction_cause(&key[..2]),
+            Some(super::SNAPSHOT_BEYOND_MATCH)
+        );
+        assert_eq!(prefix_cacher.eviction_cause(&key), None);
+        prefix_cacher.evict_oldest_auxiliary_prefix();
+        prefix_cacher.release_paged_recurrent_owner(*key.last().unwrap());
+        assert_eq!(
+            prefix_cacher.eviction_cause(&key),
+            Some(super::REPLACED_REASON)
+        );
+        assert_eq!(prefix_cacher.eviction_cause(&block_hashes(40, 2)), None);
     }
 
     #[test]

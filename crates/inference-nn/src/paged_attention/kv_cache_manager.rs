@@ -171,6 +171,11 @@ impl KVCacheManager {
         );
     }
 
+    /// Why the block with this hash left the cache, while the pool's log remembers it.
+    pub fn eviction_cause(&self, hash: &BlockHash) -> Option<&'static str> {
+        self.block_pool.eviction_cause(hash)
+    }
+
     /// Find the longest prefix cache hit for a request.
     ///
     /// Walks the request's block hashes and checks for cached blocks.

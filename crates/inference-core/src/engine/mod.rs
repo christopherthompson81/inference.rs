@@ -376,9 +376,17 @@ impl HybridPagedPrefixValidator {
             record_paged_recurrent_prefix_validation("miss", validation_reason);
             Ok(())
         })
+        .with_reason(validation_reason)
     }
 
     fn stage_recurrent_restore(&self, restore: HybridPrefixRestore) -> PagedPrefixCacheValidation {
+        let reason = if restore.restore_auxiliary {
+            "recurrent_and_auxiliary"
+        } else if restore.record_auxiliary_miss {
+            "recurrent_without_auxiliary"
+        } else {
+            "recurrent"
+        };
         let pipeline = Arc::clone(&self.pipeline);
         let prefix_cacher = Arc::clone(&self.prefix_cacher);
         PagedPrefixCacheValidation::staged(restore.cached_tokens, move |seq| {
@@ -411,14 +419,7 @@ impl HybridPagedPrefixValidator {
             drop(pipeline);
             get_mut_arcmutex!(prefix_cacher)
                 .promote_paged_recurrent_prefix(&restore.prefix_key, restore.current_owner);
-            let validation_reason = if restore.restore_auxiliary {
-                "recurrent_and_auxiliary"
-            } else if restore.record_auxiliary_miss {
-                "recurrent_without_auxiliary"
-            } else {
-                "recurrent"
-            };
-            record_paged_recurrent_prefix_validation("hit", validation_reason);
+            record_paged_recurrent_prefix_validation("hit", reason);
             if restore.restore_auxiliary {
                 metrics::counter!("inference_speculative_prefix_cache_hits_total").increment(1);
                 metrics::counter!("inference_speculative_prefix_replay_tokens_avoided_total")
@@ -428,6 +429,7 @@ impl HybridPagedPrefixValidator {
             }
             Ok(())
         })
+        .with_reason(reason)
     }
 }
 
@@ -439,11 +441,44 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
         cached_tokens: usize,
         block_size: usize,
     ) -> inference_tensor::Result<PagedPrefixCacheValidation> {
+        let validation = self.validate(seq, block_hashes, cached_tokens, block_size)?;
+        let matched = &block_hashes[..(cached_tokens / block_size).min(block_hashes.len())];
+        let cause = (validation.valid_tokens() < cached_tokens)
+            .then(|| get_mut_arcmutex!(self.prefix_cacher).eviction_cause(matched))
+            .flatten();
+        Ok(validation.with_cause(cause))
+    }
+
+    fn release_recurrent_state(
+        &mut self,
+        sequence_id: usize,
+        slot_idx: usize,
+    ) -> inference_tensor::Result<bool> {
+        let mut pipeline = get_mut_arcmutex!(self.pipeline);
+        pipeline.release_speculative_sequences(&[sequence_id])?;
+
+        if pipeline.cache().is_hybrid() {
+            pipeline.cache().hybrid().release_seq(sequence_id, slot_idx)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+impl HybridPagedPrefixValidator {
+    fn validate(
+        &mut self,
+        seq: &crate::sequence::Sequence,
+        block_hashes: &[BlockHash],
+        cached_tokens: usize,
+        block_size: usize,
+    ) -> inference_tensor::Result<PagedPrefixCacheValidation> {
         let Some(slot_idx) = seq.recurrent_state_idx() else {
             return Ok(PagedPrefixCacheValidation::staged(0, |_| {
                 record_paged_recurrent_prefix_validation("miss", "missing_slot");
                 Ok(())
-            }));
+            })
+            .with_reason("missing_slot"));
         };
         let sequence_id = *seq.id();
 
@@ -531,17 +566,15 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
 
         let pipeline = get_mut_arcmutex!(self.pipeline);
         if !pipeline.cache().is_hybrid() {
-            return Ok(PagedPrefixCacheValidation::staged(
-                cached_tokens,
-                move |_| {
-                    record_paged_recurrent_prefix_validation("hit", "attention_only");
-                    if record_auxiliary_miss {
-                        metrics::counter!("inference_speculative_prefix_cache_misses_total")
-                            .increment(1);
-                    }
-                    Ok(())
-                },
-            ));
+            return Ok(PagedPrefixCacheValidation::staged(cached_tokens, move |_| {
+                record_paged_recurrent_prefix_validation("hit", "attention_only");
+                if record_auxiliary_miss {
+                    metrics::counter!("inference_speculative_prefix_cache_misses_total")
+                        .increment(1);
+                }
+                Ok(())
+            })
+            .with_reason("attention_only"));
         }
         drop(pipeline);
         Ok(self.stage_recurrent_restore(HybridPrefixRestore {
@@ -557,21 +590,6 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
             replay_tokens_avoided: 0,
             record_auxiliary_miss,
         }))
-    }
-
-    fn release_recurrent_state(
-        &mut self,
-        sequence_id: usize,
-        slot_idx: usize,
-    ) -> inference_tensor::Result<bool> {
-        let mut pipeline = get_mut_arcmutex!(self.pipeline);
-        pipeline.release_speculative_sequences(&[sequence_id])?;
-
-        if pipeline.cache().is_hybrid() {
-            pipeline.cache().hybrid().release_seq(sequence_id, slot_idx)
-        } else {
-            Ok(false)
-        }
     }
 }
 

@@ -56,6 +56,85 @@ struct PromptBatch {
 
 /// Allow sequences to wait for 64 scheduling passes before warning of deprivation.
 const WAITING_TIMEOUT: usize = 64;
+// a prompt's blocks past its match that were never cached: the new tail of a turn, not a miss
+const NOT_CACHED: &str = "not_cached";
+const EVICTED: &str = "evicted";
+// cached tokens a lookup must lose before it is logged above debug: a hit replays a block, a shared preamble restores
+// nothing
+const LOST_TOKENS_TO_REPORT: usize = 1024;
+
+/// One admitted prompt's prefix lookup: its cacheable tokens, those the KV blocks matched and those reused.
+struct PrefixLookup {
+    seq_id: usize,
+    prompt_tokens: usize,
+    matched: usize,
+    reused: usize,
+    block_size: usize,
+    // why the block after the matched run left the cache, when the pool remembers
+    next_block_cause: Option<&'static str>,
+    // the recurrent validation's reason and the cause of the entry it lacked
+    validation: Option<(&'static str, Option<&'static str>)>,
+}
+
+// Why a prompt reused less than its cacheable blocks: the recurrent validation cut the match, or the KV blocks stopped
+// (evicted, with the cause the pool recorded, or never cached)
+fn prefix_miss_reason(lookup: &PrefixLookup) -> Option<(&'static str, Option<&'static str>)> {
+    let cacheable = lookup.prompt_tokens.saturating_sub(1) / lookup.block_size * lookup.block_size;
+    if lookup.reused >= cacheable {
+        return None;
+    }
+    if lookup.reused < lookup.matched
+        && let Some(validation) = lookup.validation
+    {
+        return Some(validation);
+    }
+    Some(match lookup.next_block_cause {
+        Some(cause) => (EVICTED, Some(cause)),
+        None => (NOT_CACHED, None),
+    })
+}
+
+fn report_prefix_lookup(lookup: PrefixLookup) {
+    let Some((reason, cause)) = prefix_miss_reason(&lookup) else {
+        return;
+    };
+    let cause_label = cause.unwrap_or("unknown");
+    let PrefixLookup {
+        seq_id,
+        prompt_tokens,
+        matched,
+        reused,
+        ..
+    } = lookup;
+    let lost = matched.saturating_sub(reused);
+    // a hit reuses one block less than it matched (the drafter's replay): only real losses count as misses
+    let minor = reason != NOT_CACHED && reason != EVICTED && lost < LOST_TOKENS_TO_REPORT;
+    if !minor {
+        metrics::counter!("inference_prefix_cache_misses_total", "reason" => reason, "cause" => cause_label)
+            .increment(1);
+    }
+    if reason == NOT_CACHED || minor {
+        tracing::debug!(
+            seq_id,
+            prompt_tokens,
+            matched,
+            reused,
+            reason,
+            cause = cause_label,
+            "Prefix cache lookup"
+        );
+    } else {
+        info!(
+            seq_id,
+            prompt_tokens,
+            matched,
+            reused,
+            reason,
+            cause = cause_label,
+            "Prefix cache reused less than the cached prefix"
+        );
+    }
+}
 
 pub struct PagedAttentionSchedulerOutput {
     /// Either ALL prompt or ALL completion.
@@ -1051,6 +1130,20 @@ impl PagedAttentionScheduler {
             }
 
             let num_computed = computed.num_computed_tokens;
+            if self.prefix_caching_enabled && !return_raw_logits {
+                let next_block_cause = block_hashes
+                    .get(matched_prefix_tokens / self.block_size)
+                    .and_then(|hash| get_mut_arcmutex!(self.kv_cache_manager).eviction_cause(hash));
+                report_prefix_lookup(PrefixLookup {
+                    seq_id,
+                    prompt_tokens: num_tokens,
+                    matched: matched_prefix_tokens,
+                    reused: num_computed,
+                    block_size: self.block_size,
+                    next_block_cause,
+                    validation: prefix_validation.as_ref().map(|v| (v.reason(), v.cause())),
+                });
+            }
             let computed_block_count = num_computed / self.block_size;
             let computed_blocks = &computed.block_ids[..computed_block_count];
             let mut kv_mgr = get_mut_arcmutex!(self.kv_cache_manager);
@@ -1621,3 +1714,50 @@ impl Scheduler for PagedAttentionScheduler {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod prefix_miss_tests {
+    use super::{EVICTED, NOT_CACHED, PrefixLookup, prefix_miss_reason};
+
+    const BLOCK: usize = 32;
+
+    fn lookup(
+        matched: usize,
+        reused: usize,
+        next_block_cause: Option<&'static str>,
+    ) -> PrefixLookup {
+        PrefixLookup {
+            seq_id: 0,
+            prompt_tokens: 10 * BLOCK + 1,
+            matched,
+            reused,
+            block_size: BLOCK,
+            next_block_cause,
+            validation: Some(("checkpoint_unavailable", Some("snapshot_reclaimed"))),
+        }
+    }
+
+    #[test]
+    fn a_full_reuse_is_no_miss_and_a_never_cached_tail_is_not_an_eviction() {
+        assert_eq!(
+            prefix_miss_reason(&lookup(10 * BLOCK, 10 * BLOCK, None)),
+            None
+        );
+        assert_eq!(
+            prefix_miss_reason(&lookup(6 * BLOCK, 6 * BLOCK, None)),
+            Some((NOT_CACHED, None))
+        );
+    }
+
+    #[test]
+    fn an_evicted_block_names_its_cause_and_a_validation_cut_wins() {
+        assert_eq!(
+            prefix_miss_reason(&lookup(6 * BLOCK, 6 * BLOCK, Some("block_pressure"))),
+            Some((EVICTED, Some("block_pressure")))
+        );
+        assert_eq!(
+            prefix_miss_reason(&lookup(10 * BLOCK, 0, None)),
+            Some(("checkpoint_unavailable", Some("snapshot_reclaimed")))
+        );
+    }
+}

@@ -1496,6 +1496,10 @@ pub trait Pipeline:
             .hybrid()
             .store_recurrent_snapshot(*seq.id(), slot_idx)?
         else {
+            if let Some(last) = block_hashes[..n_blocks].last() {
+                prefix_cacher
+                    .record_entry_cause(*last, crate::prefix_cacher::NO_SNAPSHOT_SLOT_REASON);
+            }
             return Ok(());
         };
         let auxiliary = if self

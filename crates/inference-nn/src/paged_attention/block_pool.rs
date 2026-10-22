@@ -555,6 +555,7 @@ pub struct BlockPool {
     null_block_id: usize,
     /// The block size (number of tokens per block) for hash computation.
     hash_block_size: usize,
+    evictions: super::eviction_log::EvictionLog<BlockHash>,
 }
 
 impl BlockPool {
@@ -595,6 +596,9 @@ impl BlockPool {
             num_gpu_blocks,
             null_block_id: 0, // Will be set below
             hash_block_size,
+            evictions: super::eviction_log::EvictionLog::new(
+                super::eviction_log::EVICTION_LOG_CAPACITY,
+            ),
         };
 
         // Pop the first block as the null block (placeholder, never freed)
@@ -908,6 +912,10 @@ impl BlockPool {
             let Some(released_hashes) = retention.revoke_oldest(&published_revision) else {
                 break;
             };
+            for hash in &released_hashes {
+                self.evictions
+                    .record(*hash, super::eviction_log::BLOCK_PRESSURE);
+            }
             self.release_retained_hashes(&released_hashes);
             pressure_evictions += 1;
         }
@@ -982,11 +990,17 @@ impl BlockPool {
             self.blocks[block_id].block_hashes.push(hash_with_group);
             self.cached_block_hash_to_block
                 .insert(hash_with_group, block_id);
+            self.evictions.forget(&hash_with_group.block_hash);
             if self.retained_hashes.contains(&hash_with_group.block_hash) {
                 self.reconcile_retained_hash_block(hash_with_group.block_hash);
             }
         }
         self.publish_retained_block_metrics();
+    }
+
+    /// Why the block with this hash left the cache, while the log remembers it.
+    pub fn eviction_cause(&self, hash: &BlockHash) -> Option<&'static str> {
+        self.evictions.cause(hash)
     }
 
     /// Evict a cached block's hash from the cache map and reset its hash.
@@ -1001,6 +1015,8 @@ impl BlockPool {
         }
         for hash in &block_hashes {
             self.cached_block_hash_to_block.pop(hash, block_id);
+            self.evictions
+                .record(hash.block_hash, super::eviction_log::BLOCK_REUSED);
         }
         if !block_hashes.is_empty() {
             metrics::counter!("inference_prefix_cache_evictions_total")
