@@ -1,85 +1,78 @@
-//! Labels for the agent's activity: what a run of its tool calls was for, in a few words the session's model writes
-//! after a prompt is answered. A front end shows its own summary of the calls until a label arrives, and after a
-//! reply it can't use.
-
-use std::collections::BTreeMap;
+//! Labels for the agent's activity: what a run of its thinking and tool calls was for, in a few words the session's
+//! model writes as soon as the run closes. The label request is small (the task, the run's thinking and calls, no
+//! history, no thinking of its own, a few tokens), so it shares only a handful of the agent's steps. A front end shows
+//! its own summary of the calls until a label arrives, and after a reply it can't use.
 
 use anyhow::{Result, bail};
 use futures::StreamExt;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::backend::ChatBackend;
 use crate::turn::Turn;
 
-pub const LABEL_WORDS: usize = 8;
+pub const LABEL_WORDS: usize = 10;
+const LABEL_TOKENS: usize = 20;
 // a reply's label past this is cut, so a rambling one can't crowd the line it heads
 const LABEL_CHARS: usize = 80;
-pub(crate) const TOKENS_PER_LABEL: usize = 24;
-// room for a thinking model's reasoning before the labels; turning thinking off would reword its system prompt
-pub(crate) const THINKING_TOKENS: usize = 1024;
-// how much of a call's main argument the instruction quotes
+// the end of a run's thinking the request quotes, where the reasoning toward its calls is
+const THINKING_CHARS: usize = 1500;
+// how much of a call's main argument the request quotes
 const ARG_CHARS: usize = 80;
 const ARG_KEYS: [&str; 4] = ["path", "command", "pattern", "url"];
 const LABEL_EXAMPLE: &str = "Checked how undo should behave";
 
-/// The groups whose calls are all in `messages`: an interrupted reply's calls never reach the session.
-pub fn recorded_groups(messages: &[Value], groups: Vec<Vec<String>>) -> Vec<Vec<String>> {
-    let ids = call_ids(messages);
-    groups
-        .into_iter()
-        .filter(|group| !group.is_empty() && group.iter().all(|id| ids.contains(id.as_str())))
-        .collect()
+/// A run of thinking and tool calls that visible text, the next prompt or the end of the turn closed.
+#[derive(Debug, Default)]
+pub struct Run {
+    pub thinking: String,
+    /// Each call's id and how the request names it, e.g. `read(src/undo.py)`.
+    pub calls: Vec<(String, String)>,
 }
 
-fn call_ids(messages: &[Value]) -> std::collections::HashSet<&str> {
-    messages
-        .iter()
-        .filter_map(|message| message.get("tool_calls")?.as_array())
-        .flatten()
-        .filter_map(|call| call.get("id")?.as_str())
-        .collect()
+impl Run {
+    /// The id the run's label is kept and shown under: its first call's.
+    pub fn key(&self) -> Option<&str> {
+        self.calls.first().map(|(id, _)| id.as_str())
+    }
 }
 
-/// The user message asking for one label per group, each group the ids of a run of tool calls in `messages`; None
-/// when a group is empty or names a call `messages` doesn't hold.
-pub fn instruction(messages: &[Value], groups: &[Vec<String>]) -> Option<String> {
-    let calls = messages
-        .iter()
-        .filter_map(|message| message.get("tool_calls")?.as_array())
-        .flatten()
-        .filter_map(|call| Some((call.get("id")?.as_str()?, call.get("function")?)))
-        .collect::<BTreeMap<_, _>>();
-    let mut lines = Vec::with_capacity(groups.len());
-    for (n, group) in groups.iter().enumerate() {
-        if group.is_empty() {
+/// Follows an agent's stream and hands back each run of thinking and tool calls as it closes, folded as the Code tab
+/// folds them: a run takes the thinking and calls until text the user sees.
+#[derive(Default)]
+pub struct RunTracker {
+    run: Run,
+}
+
+impl RunTracker {
+    pub fn reasoning(&mut self, delta: &str) {
+        self.run.thinking.push_str(delta);
+    }
+
+    pub fn call(&mut self, id: &str, name: &str, args: &Value) {
+        if self.run.calls.iter().all(|(known, _)| known != id) {
+            self.run.calls.push((id.to_string(), describe(name, args)));
+        }
+    }
+
+    /// Visible text closes the run before it; thinking with no call after it belongs to no run.
+    pub fn text(&mut self, delta: &str) -> Option<Run> {
+        if delta.trim().is_empty() {
             return None;
         }
-        let described = group
-            .iter()
-            .map(|id| calls.get(id.as_str()).map(|function| describe(function)))
-            .collect::<Option<Vec<_>>>()?;
-        lines.push(format!("{}. {}", n + 1, described.join(", ")));
+        self.finish()
     }
-    Some(format!(
-        "Label each numbered group of your tool calls above with what it was for, as a past-tense phrase of at most \
-         {LABEL_WORDS} words (for example \"{LABEL_EXAMPLE}\"). Answer at once with only a JSON array of {} strings, in order.\n{}",
-        groups.len(),
-        lines.join("\n")
-    ))
+
+    /// The run still open when the turn ends.
+    pub fn finish(&mut self) -> Option<Run> {
+        let run = std::mem::take(&mut self.run);
+        (!run.calls.is_empty()).then_some(run)
+    }
 }
 
-fn describe(function: &Value) -> String {
-    let name = function
-        .get("name")
-        .and_then(Value::as_str)
-        .unwrap_or("tool");
-    let args = function
-        .get("arguments")
-        .and_then(Value::as_str)
-        .and_then(|args| serde_json::from_str::<Value>(args).ok());
+fn describe(name: &str, args: &Value) -> String {
     let arg = ARG_KEYS
         .iter()
-        .find_map(|key| args.as_ref()?.get(*key)?.as_str())
+        .find_map(|key| args.get(*key)?.as_str())
         .map(|arg| {
             arg.lines()
                 .next()
@@ -94,26 +87,58 @@ fn describe(function: &Value) -> String {
     }
 }
 
-/// The labels in a reply: a JSON array of exactly `groups` strings, wherever it sits in the text.
-pub fn parse(reply: &str, groups: usize) -> Option<Vec<String>> {
-    let start = reply.find('[')?;
-    let end = reply.rfind(']')?;
-    let labels = serde_json::from_str::<Vec<String>>(reply.get(start..=end)?).ok()?;
-    if labels.len() != groups {
-        return None;
+/// The request for `run`'s label: the task it serves, the end of its thinking and its calls, answered with thinking
+/// off in at most a few tokens.
+pub fn label_request(model: &str, task: &str, run: &Run) -> Value {
+    let thinking = run.thinking.trim();
+    let skip = thinking.chars().count().saturating_sub(THINKING_CHARS);
+    let thinking = thinking.chars().skip(skip).collect::<String>();
+    let mut parts = vec![format!("Task: {task}")];
+    if !thinking.is_empty() {
+        parts.push(format!("Reasoning (abridged): {thinking}"));
     }
-    labels
-        .into_iter()
-        .map(|label| {
-            let label = label.trim().trim_end_matches('.').trim();
-            (!label.is_empty()).then(|| label.chars().take(LABEL_CHARS).collect())
-        })
-        .collect()
+    let calls = run
+        .calls
+        .iter()
+        .map(|(_, call)| call.as_str())
+        .collect::<Vec<_>>();
+    parts.push(format!("Tool calls: {}", calls.join(", ")));
+    // framed as text to label, so a model doesn't carry the task on instead
+    let content = format!(
+        "Here is a step of a coding agent's work:\n\n<activity>\n{}\n</activity>\n\nIn at most {LABEL_WORDS} words, in \
+         the past tense and without \"I\", say what these tool calls were for (for example \"{LABEL_EXAMPLE}\"). \
+         Reply with only the phrase.",
+        parts.join("\n\n")
+    );
+    json!({
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "max_tokens": LABEL_TOKENS,
+        "temperature": 0,
+        "enable_thinking": false,
+        "stream": true,
+    })
 }
 
-/// The text of a streamed reply to `request`.
-pub async fn reply_text(backend: &dyn ChatBackend, request: Value) -> Result<String> {
-    let mut stream = backend.stream(request).await?;
+/// The label in a reply: its first line, without quotes or a closing period; None when nothing is left.
+pub fn clean_label(reply: &str) -> Option<String> {
+    let line = reply.trim().lines().next()?;
+    let label = line
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '*')
+        .trim_end_matches('.')
+        .trim();
+    (!label.is_empty()).then(|| label.chars().take(LABEL_CHARS).collect())
+}
+
+/// The label for `run` from the session's model.
+pub async fn label(
+    backend: &dyn ChatBackend,
+    model: &str,
+    task: &str,
+    run: &Run,
+) -> Result<Option<String>> {
+    let mut stream = backend.stream(label_request(model, task, run)).await?;
     let mut turn = Turn::default();
     while let Some(chunk) = stream.next().await {
         turn.apply(&chunk?);
@@ -121,58 +146,57 @@ pub async fn reply_text(backend: &dyn ChatBackend, request: Value) -> Result<Str
     if turn.finish_reason.is_none() {
         bail!("the label reply ended before it finished");
     }
-    Ok(turn.content)
+    Ok(clean_label(&turn.content))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{instruction, parse, recorded_groups};
+    use super::{RunTracker, clean_label, label_request};
     use serde_json::json;
 
-    fn call(id: &str, name: &str, args: serde_json::Value) -> serde_json::Value {
-        json!({"id": id, "type": "function", "function": {"name": name, "arguments": args.to_string()}})
+    #[test]
+    fn a_run_closes_at_visible_text_or_the_end_of_the_turn() {
+        let mut tracker = RunTracker::default();
+        tracker.reasoning("The README says undo pops the last change.");
+        assert!(tracker.text("   ").is_none());
+        tracker.call("c1", "read", &json!({"path": "src/undo.py"}));
+        tracker.call("c1", "read", &json!({"path": "src/undo.py"}));
+        tracker.call(
+            "c2",
+            "bash",
+            &json!({"command": "python3 -m unittest\nmore"}),
+        );
+        let run = tracker.text("Found it.").unwrap();
+        assert_eq!(run.key(), Some("c1"));
+        assert_eq!(run.calls[1].1, "bash(python3 -m unittest)");
+        assert!(run.thinking.starts_with("The README"));
+        // thinking with no call after it is no run
+        tracker.reasoning("Done, I think.");
+        assert!(tracker.text("All tests pass.").is_none());
+        tracker.call("c3", "glob", &json!({}));
+        assert_eq!(tracker.finish().unwrap().calls[0].1, "glob");
+        assert!(tracker.finish().is_none());
     }
 
     #[test]
-    fn the_instruction_lists_each_group_by_its_calls() {
-        let messages = vec![
-            json!({"role": "assistant", "content": "", "tool_calls": [
-                call("c1", "read", json!({"path": "src/undo.py"})),
-                call("c2", "bash", json!({"command": "python3 -m unittest\nmore"})),
-            ]}),
-            json!({"role": "assistant", "content": "", "tool_calls": [call("c3", "glob", json!({}))]}),
-        ];
-        let groups = vec![
-            vec!["c1".to_string(), "c2".to_string()],
-            vec!["c3".to_string()],
-        ];
-        let text = instruction(&messages, &groups).unwrap();
-        assert!(
-            text.ends_with("\n1. read(src/undo.py), bash(python3 -m unittest)\n2. glob"),
-            "{text}"
-        );
-        assert!(instruction(&messages, &[vec!["missing".to_string()]]).is_none());
-        let kept = recorded_groups(
-            &messages,
-            vec![
-                vec!["c3".to_string()],
-                vec!["c1".to_string(), "gone".to_string()],
-            ],
-        );
-        assert_eq!(kept, [vec!["c3".to_string()]]);
+    fn the_request_carries_the_run_and_asks_for_few_tokens_without_thinking() {
+        let mut tracker = RunTracker::default();
+        tracker.reasoning(&"x".repeat(5000));
+        tracker.call("c1", "read", &json!({"path": "README.md"}));
+        let request = label_request("m", "fix the tests", &tracker.finish().unwrap());
+        let prompt = request["messages"][0]["content"].as_str().unwrap();
+        assert!(prompt.contains("fix the tests") && prompt.contains("read(README.md)"));
+        assert!(prompt.len() < 2000, "the thinking is trimmed");
+        assert_eq!(request["enable_thinking"], json!(false));
+        assert_eq!(request["max_tokens"], json!(20));
     }
 
     #[test]
-    fn a_reply_parses_only_as_one_label_a_group() {
+    fn a_label_keeps_its_first_line_without_quotes_or_period() {
         assert_eq!(
-            parse("Sure:\n[\"Found the failing test.\", \" Fixed undo \"]", 2),
-            Some(vec![
-                "Found the failing test".to_string(),
-                "Fixed undo".to_string()
-            ])
+            clean_label("\"Found the failing test.\"\nmore").as_deref(),
+            Some("Found the failing test")
         );
-        assert_eq!(parse("[\"one\"]", 2), None);
-        assert_eq!(parse("no labels here", 1), None);
-        assert_eq!(parse("[\"\"]", 1), None);
+        assert_eq!(clean_label("  \n"), None);
     }
 }

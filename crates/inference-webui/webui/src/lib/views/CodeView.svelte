@@ -76,7 +76,7 @@
   let project = $state<string>(stored(PROJECT_KEY, ""));
   let mode = $state<PermissionMode>(stored(MODE_KEY, "ask"));
   let thinking = $state<"default" | "on" | "off">("default");
-  // the model's words for what each activity line was for, by its first call; the calls' own summary until then
+  // the model's words for what each activity line was for, by its first call, sent as each run closes
   let describe = $state(stored<"on" | "off">(DESCRIBE_KEY, "on") !== "off");
   let labels = $state<Record<string, string>>({});
   let sessions = $state<CodeSessionInfo[]>([]);
@@ -314,6 +314,9 @@
       case "usage":
         usage = event.usage;
         break;
+      case "label":
+        labels[event.id] = event.label;
+        break;
       case "done":
         if (event.end === "interrupted") items.push({ kind: "notice", text: "Interrupted" });
         if (event.end === "round_limit") items.push({ kind: "notice", text: "Stopped at the round limit" });
@@ -462,7 +465,7 @@
     syncClock();
     void scrollDown();
     try {
-      await code.send(sessionId, modelStore.selectedModel, text, mode, thinking === "default" ? null : thinking === "on", onEvent);
+      await code.send(sessionId, modelStore.selectedModel, text, mode, thinking === "default" ? null : thinking === "on", describe, onEvent);
     } catch (e) {
       error = `${e}`;
     } finally {
@@ -471,31 +474,12 @@
       syncClock();
       void refreshSessions();
       void refreshChanges();
-      void describeActivity();
-    }
-  }
-
-  // once a prompt is answered, so the labels never share the GPU with the agent's own decoding
-  async function describeActivity() {
-    if (!describe || !sessionId || running) return;
-    const groups = blocks
-      .filter((block) => block.kind === "activity")
-      .map((block) => toolsOf(block.entries).map((tool) => tool.id))
-      .filter((ids) => ids.length > 0 && !labels[ids[0]]);
-    if (groups.length === 0) return;
-    const id = sessionId;
-    try {
-      const described = await code.labelActivity(id, groups);
-      if (id === sessionId) labels = { ...labels, ...described };
-    } catch {
-      // the calls' own summary stays
     }
   }
 
   function setDescribe(on: boolean) {
     describe = on;
     store(DESCRIBE_KEY, on ? "on" : "off");
-    void describeActivity();
   }
 
   async function decide(tool: ToolItem, decision: Decision) {

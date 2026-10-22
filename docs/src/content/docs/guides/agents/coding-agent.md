@@ -122,11 +122,11 @@ resize the pane. The counts and the open diff update after every edit, write and
 build as the agent works.
 
 Thinking and the tool calls after it fold into one line per run, which expands to the full blocks, such as "Read 8
-files, ran 1 command (9)". With **Describe activity** checked (the default), once a prompt is answered the session's
-model replaces each line's summary with what the run was for, such as "Ran tests to confirm all pass (1)". It is one
-request after the answer, over the conversation the server already has cached, so the agent never shares the GPU with
-it; on Qwen3.8 27B the labels arrive about 2 s after the answer. They are kept in the session file, and the summary
-stays when the setting is off or the model's reply can't be read.
+files, ran 1 command (9)". With **Describe activity** checked (the default), the session's model replaces each line's
+summary with what the run was for, such as "Ran tests to confirm all pass (1)", as soon as the run ends. Each label is
+a small request of its own (the task, the run's thinking and calls, no history, thinking off, a few tokens), so it costs
+the agent well under a second; on Qwen3.8 27B a label arrives 0.5-2.5 s after its run. Labels are kept in the session
+file, and the summary stays when the setting is off or a reply can't be used.
 
 Calls that need approval show as cards with the edit's old and new text, the file to write, or the command. **Allow**
 runs the call once, **Always allow** covers that tool inside the project for the rest of the session, and **Deny**

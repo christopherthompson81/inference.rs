@@ -15,9 +15,12 @@ use axum::response::{IntoResponse, Response};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
-    Agent, AgentConfig, AgentUi, Approval, Changes, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS,
-    EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall, ToolKind,
-    ToolOutcome, Turn, TurnEnd, default_tools, prompt::system_prompt,
+    Agent, AgentConfig, AgentUi, Approval, Changes, ChatBackend, DEFAULT_MAX_REPLY_TOKENS,
+    DEFAULT_MAX_ROUNDS, EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall,
+    ToolKind, ToolOutcome, Turn, TurnEnd,
+    activity::{Run, RunTracker},
+    default_tools,
+    prompt::system_prompt,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -28,8 +31,6 @@ use crate::types::AppState;
 // sessions kept loaded at once; the least recently opened idle one goes first
 const MAX_LIVE_SESSIONS: usize = 32;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
-// runs of tool calls labelled in one request; a session's older ones wait for later turns
-const MAX_LABEL_GROUPS: usize = 16;
 const DEMO_DIR_PREFIX: &str = "inference-code-demo-";
 const DEMO_PROMPT: &str = "The test suite fails. Fix the stockroom package so \
 `python3 -m unittest discover -s tests -t .` passes. The tests and README.md describe the intended behaviour; \
@@ -295,70 +296,6 @@ pub(crate) async fn open_session(
     .into_response()
 }
 
-#[derive(Deserialize)]
-pub(crate) struct LabelsRequest {
-    session_id: String,
-    /// Each group the ids of a run of tool calls, as the page folds them.
-    groups: Vec<Vec<String>>,
-}
-
-/// Asks the session's model what each group of tool calls was for, keeps the answers with the session and returns
-/// them by each group's first call; the page shows its own summary of the calls until then.
-pub(crate) async fn label_activity(
-    Extension(code): Extension<Arc<CodeState>>,
-    Json(request): Json<LabelsRequest>,
-) -> Response {
-    let Some(live) = code.live(&request.session_id) else {
-        return not_found(&request.session_id);
-    };
-    let groups = {
-        let labels = live.labels.lock().unwrap();
-        request
-            .groups
-            .into_iter()
-            .filter(|group| group.first().is_some_and(|id| !labels.contains_key(id)))
-            .take(MAX_LABEL_GROUPS)
-            .collect::<Vec<_>>()
-    };
-    if groups.is_empty() {
-        return Json(json!({"labels": {}})).into_response();
-    }
-    // built under the agent's lock and sent without it, so the next prompt need not wait for the labels
-    let (label_request, backend, groups) = {
-        let Ok(agent) = live.agent.try_lock() else {
-            return (StatusCode::CONFLICT, "a prompt is running in this session").into_response();
-        };
-        let groups = inference_coder::activity::recorded_groups(&agent.session.messages, groups);
-        if groups.is_empty() {
-            return Json(json!({"labels": {}})).into_response();
-        }
-        let Some(label_request) = agent.label_request(&groups) else {
-            return bad_request("a group names a call this session doesn't hold").into_response();
-        };
-        (label_request, agent.shared_backend(), groups)
-    };
-    let reply = match inference_coder::activity::reply_text(backend.as_ref(), label_request).await {
-        Ok(reply) => reply,
-        Err(error) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
-        }
-    };
-    let Some(labels) = inference_coder::activity::parse(&reply, groups.len()) else {
-        tracing::debug!("activity labels unreadable in {reply:?}");
-        return (StatusCode::BAD_GATEWAY, "the model's reply held no labels").into_response();
-    };
-    let labels = groups
-        .iter()
-        .zip(labels)
-        .map(|(group, label)| (group[0].clone(), label))
-        .collect::<BTreeMap<_, _>>();
-    if let Err(error) = Session::append_labels(&live.path, &labels) {
-        tracing::warn!("Failed keeping activity labels: {error:#}");
-    }
-    live.labels.lock().unwrap().extend(labels.clone());
-    Json(json!({"labels": labels})).into_response()
-}
-
 /// Makes a demo project in the temp directory (a small package whose tests fail) and opens a session there; the page
 /// then sends `prompt` like any other.
 pub(crate) async fn start_demo(
@@ -472,6 +409,9 @@ pub(crate) struct SendRequest {
     enable_thinking: Option<bool>,
     #[serde(default)]
     model: Option<String>,
+    /// Label each run of thinking and tool calls as it closes, with the session's model.
+    #[serde(default)]
+    describe_activity: bool,
 }
 
 /// Runs a prompt to its answer, streaming the agent's text, tool calls and approval requests as SSE.
@@ -500,6 +440,11 @@ pub(crate) async fn send(
             .into_response();
     };
     agent.permissions.mode = mode;
+    let labeller = request.describe_activity.then(|| Labeller {
+        backend: agent.shared_backend(),
+        model: model.clone(),
+        task: request.prompt.clone(),
+    });
     agent.set_model(model);
     agent.set_request_field("enable_thinking", request.enable_thinking.map(Value::Bool));
     live.interrupt.reset();
@@ -508,8 +453,13 @@ pub(crate) async fn send(
         let mut ui = WebUi {
             events: events.clone(),
             live: live.clone(),
+            labeller,
+            runs: RunTracker::default(),
         };
         let result = agent.send(&request.prompt, &mut ui, &live.interrupt).await;
+        if let Some(run) = ui.runs.finish() {
+            ui.label(run);
+        }
         let event = match result {
             Ok(end) => json!({"type": "done", "end": match end {
                 TurnEnd::Done => "done",
@@ -593,9 +543,46 @@ pub(crate) async fn interrupt(
 struct WebUi {
     events: mpsc::UnboundedSender<Value>,
     live: Arc<LiveSession>,
+    labeller: Option<Labeller>,
+    runs: RunTracker,
+}
+
+// what a run's label request needs, for a task of its own beside the agent's
+struct Labeller {
+    backend: Arc<dyn ChatBackend>,
+    model: String,
+    task: String,
 }
 
 impl WebUi {
+    // the label reaches the page on the prompt's stream, which stays open until it does
+    fn label(&self, run: Run) {
+        let (Some(labeller), Some(key)) = (&self.labeller, run.key()) else {
+            return;
+        };
+        let key = key.to_string();
+        let (backend, model, task) = (
+            labeller.backend.clone(),
+            labeller.model.clone(),
+            labeller.task.clone(),
+        );
+        let (events, live) = (self.events.clone(), self.live.clone());
+        tokio::spawn(async move {
+            match inference_coder::activity::label(backend.as_ref(), &model, &task, &run).await {
+                Ok(Some(label)) => {
+                    let labels = BTreeMap::from([(key.clone(), label.clone())]);
+                    if let Err(error) = Session::append_labels(&live.path, &labels) {
+                        tracing::warn!("Failed keeping an activity label: {error:#}");
+                    }
+                    live.labels.lock().unwrap().extend(labels);
+                    let _ = events.send(json!({"type": "label", "id": key, "label": label}));
+                }
+                Ok(None) => {}
+                Err(error) => tracing::debug!("No activity label: {error:#}"),
+            }
+        });
+    }
+
     fn emit(&self, event: Value) -> bool {
         let sent = self.events.send(event).is_ok();
         if !sent {
@@ -607,14 +594,19 @@ impl WebUi {
 
 impl AgentUi for WebUi {
     fn text(&mut self, delta: &str) {
+        if let Some(run) = self.runs.text(delta) {
+            self.label(run);
+        }
         self.emit(json!({"type": "text", "delta": delta}));
     }
 
     fn reasoning(&mut self, delta: &str) {
+        self.runs.reasoning(delta);
         self.emit(json!({"type": "reasoning", "delta": delta}));
     }
 
     fn tool_start(&mut self, call: &ToolCall, args: &Value) {
+        self.runs.call(&call.id, &call.name, args);
         self.emit(json!({"type": "tool_start", "id": call.id, "name": call.name, "args": args}));
     }
 
@@ -631,6 +623,7 @@ impl AgentUi for WebUi {
         args: &'a Value,
         kind: ToolKind,
     ) -> BoxFuture<'a, Approval> {
+        self.runs.call(&call.id, &call.name, args);
         Box::pin(async move {
             let approval_id = uuid::Uuid::new_v4().simple().to_string();
             let (sender, receiver) = oneshot::channel();

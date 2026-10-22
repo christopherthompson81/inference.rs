@@ -692,14 +692,6 @@ async fn only_an_admin_reaches_the_code_tab_and_only_under_its_roots() -> anyhow
             StatusCode::NOT_FOUND
         );
     }
-    let labels = json!({"session_id": "missing", "groups": [["call_1"]]});
-    for (owner, expected) in [
-        (BETA, StatusCode::FORBIDDEN),
-        (ALPHA, StatusCode::NOT_FOUND),
-    ] {
-        let request = send_json("POST", "/ui/api/code/labels", owner, labels.clone());
-        assert_eq!(status_and_body(&ui, request).await?.0, expected);
-    }
     let interrupt = json!({"session_id": "missing"});
     let (code, _) = status_and_body(
         &ui,

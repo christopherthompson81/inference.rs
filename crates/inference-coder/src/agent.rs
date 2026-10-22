@@ -146,24 +146,9 @@ impl Agent {
         self.backend.as_ref()
     }
 
-    /// The backend, for a request a front end sends while no lock on the agent is held.
+    /// The backend, for a request a front end sends beside the agent's own, such as an activity label.
     pub fn shared_backend(&self) -> Arc<dyn ChatBackend> {
         self.backend.clone()
-    }
-
-    /// The request asking the model what each group of its tool calls was for ([`crate::activity`]): this session's
-    /// next request (its prompt, tools, history and thinking setting, so it reuses the prefix cache; a template may
-    /// word its system prompt by the thinking setting) with the instruction as the user's message, answered without
-    /// tool calls. None when a group names no call in the session.
-    pub fn label_request(&self, groups: &[Vec<String>]) -> Option<Value> {
-        let text = crate::activity::instruction(&self.session.messages, groups)?;
-        let mut request = self.request(&[json!({"role": "user", "content": text})]);
-        let tokens =
-            groups.len() * crate::activity::TOKENS_PER_LABEL + crate::activity::THINKING_TOKENS;
-        request["max_tokens"] = json!(tokens);
-        request["temperature"] = json!(0);
-        request["tool_choice"] = json!("none");
-        Some(request)
     }
 
     /// Runs one user prompt to its answer. Messages reach the session a round at a time, each assistant reply with its
@@ -428,9 +413,6 @@ mod tests {
                 vec![
                     json!({"choices": [{"delta": {"content": "Done."}, "finish_reason": "stop"}]}),
                 ],
-                vec![
-                    json!({"choices": [{"delta": {"content": LABELS_REPLY}, "finish_reason": "stop"}]}),
-                ],
             ]),
             requests: Mutex::new(Vec::new()),
         });
@@ -487,37 +469,13 @@ mod tests {
             Session::open(&agent.session.path).unwrap().messages,
             agent.session.messages
         );
-        let tools = {
-            let requests = backend.requests.lock().unwrap();
-            // each request extends the previous one, so the cached prefix carries over
-            let first = requests[0]["messages"].as_array().unwrap();
-            let last = requests[2]["messages"].as_array().unwrap();
-            assert_eq!(&last[..first.len()], first.as_slice());
-            assert_eq!(requests[0]["tools"], requests[2]["tools"]);
-            requests[0]["tools"].clone()
-        };
-
-        // the labels ask the same session, so their request extends the last one as well
-        let groups = vec![vec!["c1".to_string()], vec!["c2".to_string()]];
-        let request = agent.label_request(&groups).unwrap();
-        let history = agent.session.messages.as_slice();
-        let messages = request["messages"].as_array().unwrap();
-        assert_eq!(&messages[..history.len()], history);
-        assert_eq!(request["tools"], tools);
-        assert_eq!(request["tool_choice"], json!("none"));
-        let reply = crate::activity::reply_text(agent.backend(), request)
-            .await
-            .unwrap();
-        assert_eq!(
-            crate::activity::parse(&reply, groups.len()),
-            Some(vec![
-                "Read the notes".to_string(),
-                "Updated the notes".to_string()
-            ])
-        );
+        let requests = backend.requests.lock().unwrap();
+        // each request extends the previous one, so the cached prefix carries over
+        let first = requests[0]["messages"].as_array().unwrap();
+        let last = requests[2]["messages"].as_array().unwrap();
+        assert_eq!(&last[..first.len()], first.as_slice());
+        assert_eq!(requests[0]["tools"], requests[2]["tools"]);
     }
-
-    const LABELS_REPLY: &str = "[\"Read the notes\", \"Updated the notes\"]";
 
     #[tokio::test]
     async fn a_reply_cut_at_the_token_cap_ends_the_turn_without_its_partial_call() {

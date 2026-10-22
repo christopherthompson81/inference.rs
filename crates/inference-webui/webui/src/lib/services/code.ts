@@ -38,6 +38,8 @@ export type CodeEvent =
       kind: string;
     }
   | { type: "usage"; usage: Record<string, unknown> }
+  /** What a run of thinking and tool calls was for, by the id of its first call; may follow `done`. */
+  | { type: "label"; id: string; label: string }
   | {
       type: "done";
       end: "done" | "interrupted" | "round_limit" | "reply_limit";
@@ -88,14 +90,6 @@ export async function openSession(
   return (await post("open", { project, session_id: sessionId, model })).json();
 }
 
-/** Asks the session's model what each group of tool calls (their ids) was for; labels by each group's first id. */
-export async function labelActivity(
-  sessionId: string,
-  groups: string[][],
-): Promise<Record<string, string>> {
-  return (await (await post("labels", { session_id: sessionId, groups })).json()).labels;
-}
-
 /** Makes a demo project (a small package whose tests fail) and opens a session there; send `prompt` to watch the agent fix it. */
 export async function startDemo(
   model: string | null,
@@ -126,6 +120,7 @@ export async function send(
   prompt: string,
   mode: PermissionMode,
   enableThinking: boolean | null,
+  describeActivity: boolean,
   onEvent: (event: CodeEvent) => void,
 ): Promise<void> {
   const body: Record<string, unknown> = {
@@ -133,6 +128,7 @@ export async function send(
     prompt,
     mode,
     model,
+    describe_activity: describeActivity,
   };
   if (enableThinking != null) body.enable_thinking = enableThinking;
   const res = await post("send", body);
