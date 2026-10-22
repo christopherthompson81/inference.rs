@@ -1127,7 +1127,7 @@ impl Engine {
                 .iter()
                 .map(|seq| seq.lock().unwrap())
                 .collect::<Vec<_>>();
-            let guards_mut = guards.iter_mut().map(|seq| &mut **seq).collect::<Vec<_>>();
+            let mut guards_mut = guards.iter_mut().map(|seq| &mut **seq).collect::<Vec<_>>();
             let lookahead = if allow_lookahead {
                 StepLookahead::OneToken
             } else {
@@ -1143,11 +1143,37 @@ impl Engine {
                 rng,
             )? {
                 CudaTailSubmission::Submitted(submission) => submission,
-                CudaTailSubmission::Unsupported(mut unsupported) => {
-                    unsupported.synchronize()?;
-                    inference_tensor::bail!(
-                        "leased CUDA decode batch no longer supports resident completion"
-                    );
+                // a row's sampling turned constrained (a tool call began): the host sampler takes this step and the
+                // lease ends, so the next step runs the ordinary path
+                CudaTailSubmission::Unsupported(unsupported) => {
+                    let logits = unsupported.into_causal_logits()?;
+                    for seq in &mut guards_mut {
+                        seq.advance_num_computed_tokens(1);
+                    }
+                    self.logger.add_decode_tokens_processed(guards_mut.len());
+                    let mut live = Vec::with_capacity(guards_mut.len());
+                    let mut live_logits = Vec::with_capacity(guards_mut.len());
+                    for (row, (seq, commit)) in guards_mut.iter_mut().zip(&commit_rows).enumerate()
+                    {
+                        if *commit {
+                            live.push(&mut **seq);
+                            live_logits.push(logits.get(row)?);
+                        }
+                    }
+                    pipeline
+                        .sample_causal_gen(
+                            &mut live,
+                            live_logits,
+                            &mut *get_mut_arcmutex!(self.prefix_cacher),
+                            self.disable_eos_stop,
+                            rng.clone(),
+                        )
+                        .await?;
+                    let step_duration = started.elapsed();
+                    for seq in &mut live {
+                        seq.finish_completion_timing(step_duration);
+                    }
+                    return Ok(None);
                 }
             }
         };

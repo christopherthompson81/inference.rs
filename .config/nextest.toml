@@ -15,7 +15,7 @@ metal-model = { max-threads = 4 }
 [profile.default]
 default-filter = """
 not (
-    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|gguf_iq)::/))
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
 )
@@ -29,7 +29,7 @@ threads-required = 'num-test-threads'
 [profile.cuda]
 default-filter = """
 not (
-    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|gguf_iq)::/))
+    (package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
     | (package(inference-ffi) & test(detections))
     | (package(inference-server-core) & test(/^flux::/))
 )
@@ -37,7 +37,7 @@ not (
 
 [profile.deep]
 default-filter = """
-(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|gguf_iq)::/))
+(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call|gguf_iq)::/))
 | (package(inference-ffi) & test(detections))
 | (package(inference-server-core) & test(/^flux::/))
 """
@@ -50,7 +50,7 @@ threads-required = 'num-test-threads'
 priority = 100
 
 [[profile.deep.overrides]]
-filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp)::/))'
+filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp|qwen3_5_tool_call)::/))'
 test-group = 'gpu-model'
 
 # Metal keeps the default profile's filter; only the memory-hungry tests are held back.
