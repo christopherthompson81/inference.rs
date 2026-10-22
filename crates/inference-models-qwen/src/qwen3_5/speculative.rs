@@ -117,17 +117,16 @@ struct DraftRow {
 
 fn resolve_dflash_n_predict(
     requested: Option<usize>,
-    block_size: usize,
+    max_drafts: usize,
     checkpoint_lanes: usize,
 ) -> Result<usize> {
-    let max_drafts = block_size
-        .checked_sub(1)
-        .filter(|max_drafts| *max_drafts > 0)
-        .ok_or_else(|| inference_tensor::Error::msg("DFlash block size must be at least 2"))?;
+    if max_drafts == 0 {
+        inference_tensor::bail!("DFlash drafter yields no drafts per block");
+    }
     let configured = requested.unwrap_or(max_drafts.min(crate::dflash::DEFAULT_MAX_DRAFTS));
     if configured == 0 || configured > max_drafts {
         inference_tensor::bail!(
-            "requested {configured} draft tokens but this DFlash drafter's block size is {block_size} (max {max_drafts} drafts)"
+            "requested {configured} draft tokens but this DFlash drafter yields at most {max_drafts} per block"
         );
     }
     if checkpoint_lanes == 1 {
@@ -138,7 +137,7 @@ fn resolve_dflash_n_predict(
     })?;
     if reserved > max_drafts {
         inference_tensor::bail!(
-            "reserved {checkpoint_lanes} recurrent checkpoint lanes but this DFlash drafter's block size is {block_size} (max {} lanes)",
+            "reserved {checkpoint_lanes} recurrent checkpoint lanes but this DFlash drafter yields at most {max_drafts} drafts per block (max {} lanes)",
             max_drafts + 1
         );
     }
@@ -287,9 +286,9 @@ impl Qwen3_5TextModel {
             },
             false,
         )?;
-        let block = drafter.block_size();
         let checkpoint_lanes = self.cache.hybrid().checkpoint_lanes();
-        let n_predict = resolve_dflash_n_predict(config.n_predict, block, checkpoint_lanes)?;
+        let n_predict =
+            resolve_dflash_n_predict(config.n_predict, drafter.max_drafts(), checkpoint_lanes)?;
         let recurrent_capacity = self.cache.hybrid().recurrent_capacity();
         let serving_capacity = self
             .cache
@@ -322,11 +321,7 @@ impl Qwen3_5TextModel {
         let max_live_sequences =
             sequence_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS);
         let adaptive = adaptive && drafter.enable_adaptive(n_predict, max_live_sequences);
-        let kind = if drafter.has_selector() {
-            "DFlash2"
-        } else {
-            "DFlash"
-        };
+        let kind = drafter.kind();
         let draft_sampling = match drafter.draft_sampling_method() {
             crate::speculative::MtpDraftSamplingMethod::Auto => {
                 unreachable!("DFlash draft sampling is resolved during loading")
@@ -340,26 +335,27 @@ impl Qwen3_5TextModel {
             format!("depth {n_predict}")
         };
         let name = format!(
-            "{kind} `{}` (block {block}, {depth}, {draft_sampling}, taps {:?})",
+            "{kind} `{}` (block of {}, {depth}, {draft_sampling}, taps {:?})",
             config.model.as_deref().unwrap_or("dflash"),
+            drafter.max_drafts(),
             drafter.target_layer_ids
         );
         *self.dflash.lock().expect("dflash poisoned") = Some(std::sync::Arc::new(drafter));
         Ok(Some(SpeculativeAttachInfo::mtp(name, n_predict)))
     }
 
-    /// `[batch, n + 1, hidden]` noise rows `[anchor, mask * n]`, embedded in one call.
+    /// The noise rows `[anchor, mask, ...]` that draft `n` tokens, `[batch, rows, hidden]`, embedded in one call.
     fn dflash_noise_embedding(
         &self,
         drafter: &DFlashDraftModel,
         anchors: &[u32],
         n: usize,
     ) -> Result<Tensor> {
-        let block = n + 1;
+        let block = drafter.query_rows(n);
         let mut ids = Vec::with_capacity(anchors.len() * block);
         for anchor in anchors {
             ids.push(*anchor);
-            ids.extend(std::iter::repeat_n(drafter.mask_token_id(), n));
+            ids.extend(std::iter::repeat_n(drafter.mask_token_id(), block - 1));
         }
         let ids = Tensor::from_vec(ids, (anchors.len(), block), &self.device)?;
         let mut emb = self.embed_tokens(&ids)?;
@@ -1379,20 +1375,20 @@ mod tests {
 
     #[test]
     fn auto_dflash_depth_follows_reserved_checkpoint_lanes() {
-        assert_eq!(resolve_dflash_n_predict(None, 8, 8).unwrap(), 7);
-        assert_eq!(resolve_dflash_n_predict(None, 8, 4).unwrap(), 3);
+        assert_eq!(resolve_dflash_n_predict(None, 7, 8).unwrap(), 7);
+        assert_eq!(resolve_dflash_n_predict(None, 7, 4).unwrap(), 3);
     }
 
     #[test]
     fn replay_sentinel_keeps_configured_or_default_dflash_depth() {
-        assert_eq!(resolve_dflash_n_predict(None, 8, 1).unwrap(), 7);
-        assert_eq!(resolve_dflash_n_predict(Some(3), 8, 1).unwrap(), 3);
+        assert_eq!(resolve_dflash_n_predict(None, 7, 1).unwrap(), 7);
+        assert_eq!(resolve_dflash_n_predict(Some(3), 7, 1).unwrap(), 3);
     }
 
     #[test]
     fn explicit_dflash_depth_must_match_reserved_checkpoint_lanes() {
-        assert_eq!(resolve_dflash_n_predict(Some(3), 8, 4).unwrap(), 3);
-        let error = resolve_dflash_n_predict(Some(3), 8, 8)
+        assert_eq!(resolve_dflash_n_predict(Some(3), 7, 4).unwrap(), 3);
+        let error = resolve_dflash_n_predict(Some(3), 7, 8)
             .expect_err("explicit depth must match the reserved lanes");
         assert!(error.to_string().contains(
             "requested 3 draft tokens require 4 recurrent checkpoint lanes, but 8 lanes were reserved"
@@ -1401,7 +1397,7 @@ mod tests {
 
     #[test]
     fn reserved_dflash_depth_must_fit_the_drafter_block() {
-        let error = resolve_dflash_n_predict(None, 8, 9)
+        let error = resolve_dflash_n_predict(None, 7, 9)
             .expect_err("reserved lanes must fit the drafter block");
         assert!(
             error

@@ -120,6 +120,9 @@ const DFLASH_WEIGHT_STEP: f32 = 0.37;
 // every drafter layer windowed, which its decode graphs need
 const DFLASH_WINDOW: usize = 32;
 const DFLASH_COMPONENT: &str = "dflash";
+// DSpark drafts from the anchor row too, so its block of 3 rows yields as many drafts as DFlash's 4
+const DSPARK_BLOCK: usize = 3;
+const DSPARK_MARKOV_RANK: usize = 8;
 
 async fn paged_gpu_model(mtp: bool) -> anyhow::Result<(tempfile::TempDir, Model)> {
     let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, mtp)?;
@@ -234,9 +237,43 @@ async fn hybrid_builtin_mtp_replays_verify_graphs() -> anyhow::Result<()> {
 
 // A v1 DFlash drafter sized to the graph fixture: it reuses the target's embeddings and head, and taps two layers.
 fn tiny_dflash(window: usize) -> anyhow::Result<tempfile::TempDir> {
+    tiny_drafter(
+        serde_json::json!({
+            "architectures": ["DFlashDraftModel"],
+            "block_size": DFLASH_BLOCK,
+            "layer_types": ["sliding_attention"],
+            "sliding_window": window,
+        }),
+        None,
+    )
+}
+
+// A DSpark drafter on the same backbone: a Markov head, drafts from the anchor row, windowed or full attention.
+fn tiny_dspark(window: Option<usize>) -> anyhow::Result<tempfile::TempDir> {
+    let layer_type = if window.is_some() {
+        "sliding_attention"
+    } else {
+        "full_attention"
+    };
+    tiny_drafter(
+        serde_json::json!({
+            "architectures": ["DSparkDraftModel"],
+            "block_size": DSPARK_BLOCK,
+            "layer_types": [layer_type],
+            "sliding_window": window,
+            "markov_rank": DSPARK_MARKOV_RANK,
+            "markov_head_type": "vanilla",
+        }),
+        Some(DSPARK_MARKOV_RANK),
+    )
+}
+
+fn tiny_drafter(
+    overrides: serde_json::Value,
+    markov_rank: Option<usize>,
+) -> anyhow::Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
-    let config = serde_json::json!({
-        "architectures": ["DFlashDraftModel"],
+    let mut config = serde_json::json!({
         "hidden_size": HIDDEN,
         "intermediate_size": DFLASH_INTERMEDIATE,
         "num_hidden_layers": 1,
@@ -246,12 +283,15 @@ fn tiny_dflash(window: usize) -> anyhow::Result<tempfile::TempDir> {
         "rms_norm_eps": 1e-6,
         "vocab_size": VOCAB,
         "rope_theta": 10000,
-        "block_size": DFLASH_BLOCK,
         "mask_token_id": DFLASH_MASK_TOKEN,
-        "layer_types": ["sliding_attention"],
-        "sliding_window": window,
         "dflash_config": { "target_layer_ids": DFLASH_TAPS }
     });
+    for (key, value) in overrides
+        .as_object()
+        .expect("drafter overrides are an object")
+    {
+        config[key] = value.clone();
+    }
     std::fs::write(dir.path().join("config.json"), config.to_string())?;
     let device = inference_tensor::Device::Cpu;
     let ramp = |rows: usize, cols: usize| {
@@ -289,6 +329,14 @@ fn tiny_dflash(window: usize) -> anyhow::Result<tempfile::TempDir> {
     );
     tensors.insert("hidden_norm.weight".to_string(), ones(HIDDEN)?);
     tensors.insert("norm.weight".to_string(), ones(HIDDEN)?);
+    if let Some(rank) = markov_rank {
+        for name in [
+            "markov_head.markov_w1.weight",
+            "markov_head.markov_w2.weight",
+        ] {
+            tensors.insert(name.to_string(), ramp(VOCAB, rank)?);
+        }
+    }
     inference_tensor::safetensors::save(&tensors, dir.path().join("model.safetensors"))?;
     Ok(dir)
 }
@@ -320,6 +368,61 @@ async fn hybrid_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
         .map(|m| m.drafts)
         .sum();
     assert!(drafts > 0, "DFlash never drafted");
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+// A windowed DSpark drafter chains its Markov head inside the drafter's decode graph, and greedy output holds.
+#[tokio::test]
+async fn hybrid_dspark_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let drafter = tiny_dspark(Some(DFLASH_WINDOW))?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DSPARK_BLOCK))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let counters = decode_graphs::Counters::take(&snapshotter);
+    decode_graphs::assert_component_replayed(&counters, DFLASH_COMPONENT);
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "DSpark never drafted");
+    decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+// A full-attention DSpark drafter, the published shape, drafts on the eager path and greedy output holds.
+#[tokio::test]
+async fn hybrid_dspark_with_full_attention_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dspark(None)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DSPARK_BLOCK))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "DSpark never drafted");
     decode_graphs::assert_traces(&rounds, &GRAPH_TRACES);
     Ok(())
 }

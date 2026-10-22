@@ -121,7 +121,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
     // DFlash drafters exist only for Qwen3.5 targets
     #[cfg(feature = "models-qwen")]
     if let Some(dflash_config) = super::dflash::peek_config(&local_mtp)? {
-        let max_drafts = dflash_config.block_size().saturating_sub(1);
+        let max_drafts = dflash_config.max_drafts();
         let drafts = mtp_config
             .n_predict
             .unwrap_or(max_drafts.min(super::dflash::DEFAULT_MAX_DRAFTS));
