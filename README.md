@@ -36,12 +36,12 @@ bindings over that ABI, so every surface does the same things.
 
 | | |
 |---|---|
-| **Text** | Llama, Qwen 2-3.6, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
-| **Vision and video** | Qwen-VL 2-3.6, Gemma 3/3n/4, Llama 3.2 Vision and Llama 4, LLaVA, Idefics, SmolVLM, Phi-4-multimodal, MiniCPM-o, PaddleOCR-VL |
+| **Text** | Llama, Qwen 2-3.8 and Qwen3-Next, Gemma 1-4, Mistral, Phi, DeepSeek V2/V3/R1, GLM-4, GPT-OSS, Granite 4, HunYuan, LFM2 and more, dense and MoE; block-diffusion text with DiffusionGemma |
+| **Vision and video** | Qwen-VL 2-3.6, Gemma 3/3n/4, Llama 3.2 Vision and Llama 4, Mistral Small 3, Muse Glimmer, LLaVA, Idefics, SmolVLM, Phi-4-multimodal, MiniCPM-o, PaddleOCR-VL |
 | **Speech recognition** | NVIDIA Parakeet (CTC, RNN-T, TDT) and Nemotron streaming ASR, from transformers, `.nemo` or GGUF, with word timestamps and beam search; Voxtral Realtime |
 | **Speaker and voice activity** | Nemotron-3 Diarization and Streaming Sortformer (who speaks when), Silero VAD |
 | **Speech synthesis** | Kokoro (9 languages) and Dia |
-| **Image generation** | FLUX.1, from safetensors or GGUF |
+| **Image generation** | FLUX.1 and HiDream-O1-Image (text to image, editing and subject references), from safetensors or GGUF |
 | **Embeddings and documents** | EmbeddingGemma, Qwen3 Embedding; PP-DocLayoutV3 document layout detection |
 
 The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** lists every architecture
@@ -60,7 +60,8 @@ irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/
 ```
 
 The installer falls back to a source build when no binary matches. Standard acceleration needs neither Rust nor the
-CUDA toolkit. [Manual installation and other platforms](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx).
+CUDA toolkit: the CUDA kernels ship as one library per GPU architecture, and any that are missing download on first
+use (`inference kernels` fetches them ahead of time for offline machines). [Manual installation and other platforms](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx).
 
 **Chat**, interactively or with one prompt:
 
@@ -71,12 +72,23 @@ inference run -m unsloth/Qwen3.5-4B-GGUF --quant 4          # a published 4-bit 
 inference run --agent -m Qwen/Qwen3-4B                      # with web search, Python and a shell
 ```
 
-**Serve** a model, then use any OpenAI or Anthropic client against `http://localhost:1234/v1`. The web UI is at
-`http://localhost:1234/ui`.
+**Code** with a local model, in the terminal or through an existing coding agent:
+
+```bash
+inference agent -m Qwen/Qwen3-4B                            # read, write, edit, bash, grep and glob in this directory
+inference launch claude                                     # Claude Code (or opencode, codex) against localhost:1234
+```
+
+**Serve** a model, then use any OpenAI or Anthropic client against `http://localhost:1234/v1`:
 
 ```bash
 inference serve -m google/gemma-4-E4B-it
 ```
+
+The [web UI](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/with-web-ui.md)
+at `http://localhost:1234/ui` has a tab per job: chat, a coding agent, speech to text, text to speech, images and
+document OCR, each with its own model. Started with no `-m`, the server loads nothing until you pick models in the UI's
+model manager, which also downloads from the Hugging Face Hub.
 
 The same command serves the other model kinds through their OpenAI-style endpoints:
 
@@ -109,13 +121,15 @@ models at runtime.
 
 | Area | Endpoints |
 |---|---|
-| Chat and text | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, Anthropic `/v1/messages` |
-| Audio | `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/audio/diarization`, `/v1/audio/vad` |
-| Images and embeddings | `/v1/images/generations`, `/v1/embeddings` |
-| Agents and files | `/v1/files`, `/v1/skills`, `/v1/sessions`, agent approvals |
-| Operations | `/v1/models` (add, unload, reload, tune), `/metrics` (Prometheus), `/v1/system/doctor` |
+| Chat and text | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, Anthropic `/v1/messages` and `count_tokens` |
+| Audio | `/v1/audio/transcriptions`, `/v1/audio/speech`, `/v1/audio/diarization`, `/v1/audio/vad`, Realtime WebSocket transcription at `/v1/realtime` |
+| Images, documents and embeddings | `/v1/images/generations`, `/v1/images/edits`, `/v1/layout/detect`, `/v1/embeddings` |
+| Agents and files | `/v1/files`, `/v1/containers`, `/v1/skills`, `/v1/sessions`, agent approvals |
+| Operations | `/v1/models` (add, unload, reload, alias, tune), `/v1/manager` (inventory, download, load), `/metrics` (Prometheus), `/v1/system/doctor` |
 
-- **API keys:** keyed mode gives each client its own sessions and files.
+- **API keys:** keyed mode gives each client its own sessions and files. Without keys, admin actions are open to
+  browsers on the server's own machine.
+- **Config files:** `inference from-config` starts a server from a TOML file, with any number of models or none.
 - **MCP:** the server can expose itself as an MCP server, and it can call out to MCP tools.
 - **Details:** the [HTTP API reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/http-api.md) and the
   [OpenAI compatibility notes](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/openai-compatibility.md) say what each endpoint
@@ -137,9 +151,12 @@ another language gets everything the HTTP server can do.
 
 - **Batching and caching:** continuous batching everywhere. [PagedAttention](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/paged-attention.mdx) and prefix caching (multimodal included) on CUDA and Apple Silicon.
 - **Attention kernels:** FlashAttention on CUDA, including FP8 and paged variants; Metal kernels on macOS.
-- **Scaling and decoding:** [multi-GPU and distributed inference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/distributed-inference.mdx) (tensor parallel, layer mapping, multi-node), and [speculative decoding](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/speculative-decoding.mdx).
+- **Speculative decoding:** [DFlash and DFlash 2 block drafters and built-in MTP heads](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/speculative-decoding.mdx) for Qwen3.5/3.8 and Gemma 4, with drafting, sampling and verification on the GPU. A 27B Qwen3.8 decodes at about 100 tok/s across a 262K window on one RTX 3090.
+- **Long context:** a [quantized KV cache](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/paged-attention.mdx#kv-cache-quantization) at 2-8 bits, K and V set separately and per layer. A prefix cache in host memory and on disk lets agent sessions resume after eviction and restarts, including the recurrent state of hybrid models.
+- **MoE offload:** a GGUF MoE model's [experts can stay in host memory](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/moe-expert-offload.mdx) behind a GPU cache, chosen automatically when they would crowd out the context.
+- **Scaling:** [multi-GPU and distributed inference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/distributed-inference.mdx) (tensor parallel, layer mapping, multi-node).
 - **Quantization:**
-  - [GGUF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/gguf-support.md) at 2-8 bits, including the IQ and trellis types;
+  - [GGUF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/gguf-support.md) at 2-8 bits, including the IQ and trellis types and ik_llama.cpp's IQ_K family (IQ4_KS, IQ4_KSS, ...);
   - GPTQ, AWQ, HQQ, FP8 and bitsandbytes checkpoints;
   - [in-situ quantization](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/quantization/quantize-a-model.mdx) of any Hugging Face model at load;
   - prebuilt [UQFF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/uqff-format.md) files.
@@ -152,6 +169,7 @@ another language gets everything the HTTP server can do.
 - **Tool calls:** [tool calling](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/tool-calling-basics.mdx) with grammar-constrained arguments and strict schemas. Structured output through JSON Schema, regex or Lark grammars.
 - **Agentic loop:** a server-side [agentic loop](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/index.md) that runs tools and feeds results back. It comes with sandboxed [Python](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/enable-code-execution.mdx) and [shell](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/enable-shell.mdx) sessions, [web search](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/web-search.mdx), approvals and persistent sessions.
 - **Compatible features:** OpenAI-compatible [Skills](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/skills.mdx) and [file inputs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/file-inputs.mdx), and an [MCP client](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx).
+- **Coding agents:** [`inference agent`](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/coding-agent.md) is a terminal coding agent over a local model or a server, the same one the web UI's Code tab runs. [`inference launch`](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/coding-agents.md) runs Claude Code, opencode or Codex against a server without touching their config files.
 - **Adapters:** [LoRA adapters](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/customize/lora-adapters.mdx), chosen per request and hot-swapped live.
 
 ## Building from source
@@ -168,7 +186,7 @@ CUDA build. [Architecture](https://github.com/christopherthompson81/inference.rs
 ## Documentation
 
 - [Quickstart](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx): install, first run, first server
-- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `bench`, `tune`, `quantize`, `doctor` and the rest
+- [CLI reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md): `run`, `serve`, `agent`, `launch`, `bench`, `tune`, `quantize`, `kernels`, `doctor` and the rest
 - [Speech models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-speech-models.mdx), [image generation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-image-generation.mdx), [multimodal input](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/multimodal-input.mdx), [embeddings](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-embeddings.mdx)
 - [Quantization types](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md) and [hardware support](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/hardware-support.md)
 - [Troubleshooting](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/troubleshooting.md) and [environment variables](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/environment-variables.md)
