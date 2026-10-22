@@ -163,6 +163,17 @@ impl CudaDecodeTail {
     pub(crate) fn drain(mut self) -> inference_tensor::Result<()> {
         self.synchronize()
     }
+
+    /// The finished forward's `[batch, vocab]` logits, for a step the host sampler takes over.
+    pub(crate) fn into_causal_logits(
+        mut self,
+    ) -> inference_tensor::Result<inference_tensor::Tensor> {
+        self.synchronize()?;
+        match self.take_result().output {
+            ForwardInputsResult::CausalGeneration { logits } => Ok(logits),
+            _ => inference_tensor::bail!("CUDA decode tail does not contain causal logits"),
+        }
+    }
 }
 
 #[cfg(feature = "cuda")]
