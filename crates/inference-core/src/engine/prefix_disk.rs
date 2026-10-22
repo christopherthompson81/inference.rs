@@ -31,9 +31,9 @@ impl Engine {
         };
         let tokens = seq.get_toks();
         let hashes = compute_block_hashes(tokens, block_size, &[], &[]);
-        let Some(&owner) = hashes.last() else {
+        if hashes.is_empty() {
             return Ok(());
-        };
+        }
         // a hit leaves the last token to compute, as the scheduler's match does
         let usable = (tokens.len().saturating_sub(1) / block_size).min(hashes.len());
         let on_gpu = get_mut_arcmutex!(self.prefix_cacher)
@@ -65,8 +65,9 @@ impl Engine {
             self.fill_imported_prefix(crate::scheduler::modality_signature(seq), &imported, loaded);
         if let Ok(Some((snapshot, auxiliary))) = &restored {
             get_mut_arcmutex!(disk.kv_cache_manager).cache_imported_blocks(&imported, key);
+            // owned by the key's last block, as a captured snapshot is
             get_mut_arcmutex!(self.prefix_cacher).add_paged_recurrent_prefix(
-                owner,
+                key[n_blocks - 1],
                 key.to_vec(),
                 *snapshot,
                 auxiliary.clone(),

@@ -782,6 +782,12 @@ pub struct RuntimeOptions {
     #[serde(default)]
     pub prefix_cache_ram_gib: Option<u64>,
 
+    /// Tokens between a long prompt's recurrent checkpoints in the host prefix cache, so a request that diverges early
+    /// in it (an edited earlier turn) redoes at most this many; default 16384, 0 keeps only the final ones
+    #[arg(long)]
+    #[serde(default)]
+    pub prefix_cache_checkpoint_tokens: Option<usize>,
+
     /// Minutes a host prefix cache entry (in memory or on disk) outlives its last use, unless its request names a TTL (an Anthropic
     /// `cache_control` breakpoint: 5 minutes, or its `ttl`); default 60
     #[arg(long)]
@@ -1162,6 +1168,7 @@ impl Default for RuntimeOptions {
             prefix_cache_dir: None,
             prefix_cache_disk_gib: None,
             prefix_cache_ram_gib: None,
+            prefix_cache_checkpoint_tokens: None,
             prefix_cache_disk_ttl_mins: None,
             chat_template: None,
             jinja_explicit: None,

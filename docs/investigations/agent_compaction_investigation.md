@@ -143,3 +143,35 @@ lookups that lose 1,024 tokens or more, find nothing cached, or lost a block to 
 
 Next: progressive snapshots (every 16-32K tokens to the host / disk tier), so a divergence earlier than the final
 message (an edited earlier turn, context editing that clears old tool results) costs at most one interval.
+
+## Run 6 - 2026-10-22 01:00
+
+Question: with progressive checkpoints (a long prompt's recurrent state every 16,384 tokens, written to the host / disk
+store; new `--prefix-cache-checkpoint-tokens`, 0 turns them off), what does a request that diverges in the middle of
+a long cached session reuse, and what do the extra checkpoints cost the prefill that takes them?
+
+Command: `editbench.py` (scratchpad): Run 1's 200K history warmed once (`Reply with OK.`), then the same history with
+the tool result at message 70 of 141 replaced by other text (an edited earlier turn), same final message. Fresh server,
+empty disk store, the LAN configuration.
+
+```
+warm (cold) TTFT      371.9 s   (Run 5, last block + final message only: 363 s)
+edited prompt         194,693 tokens, KV matched 95,936
+edited reused         81,920 (the 5th checkpoint; the 6th, 98,304, is past the divergence)
+edited TTFT           277.3 s   (cold: about 372 s)
+restore               2,560 blocks from the disk store in 0.34 s (the GPU keeps only the session's last 2)
+```
+
+Raw findings:
+
+- The resume reuses 42% of the prompt (the edit sat halfway) but saves only 25% of the time, as it should: prefill
+  per token slows with depth, so the reused front is the cheap part. The cold runs reach 65K in 67 s and 126K in
+  179 s, which puts 82K at about 95 s; 372 - 95 = 277 s, the measured TTFT.
+- A divergence now costs at most one interval of redo before it (14,016 tokens here), plus the prompt after it, which
+  nothing can save.
+- The 11 extra checkpoints cost about 9 s on a 6-minute prefill (2.4%), roughly 0.8 s each (recurrent state and
+  drafter checkpoint exported to the host). A 32K interval would halve that and double the worst-case redo (about 60 s
+  at this depth); 16K stays the default.
+- Restores come from the store, not the GPU: with a host tier the GPU keeps 2 entries (#536), the session's newest.
+- Before comparing logprobs, the tiny-model test splits its cold run at the same checkpoints: BF16 prefill drifts by
+  about 0.02 in logprob between chunkings, while a restored checkpoint matches a cold run with the same splits to 1e-3.

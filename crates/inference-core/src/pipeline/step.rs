@@ -526,7 +526,7 @@ impl dyn Pipeline {
                         block_align,
                         prefix_policy.replay_for(modality_signature(seq)),
                         seq.mm_features(),
-                        seq.final_message_start(),
+                        seq.checkpoint_hints(),
                     )
                 })
                 .collect(),
@@ -563,7 +563,7 @@ impl dyn Pipeline {
                     hybrid_recurrent.then_some(block_size),
                     prefix_policy.replay_for(modality_signature(seq)),
                     seq.mm_features(),
-                    seq.final_message_start(),
+                    seq.checkpoint_hints(),
                 )
             })
             .collect::<Vec<_>>();

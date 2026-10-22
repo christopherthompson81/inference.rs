@@ -476,9 +476,7 @@ impl Engine {
             seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
             self.enable_template_reasoning(&mut seq);
             self.prepare_multimodal_prompt(&mut seq)?;
-            if is_chat {
-                seq.set_final_message_start(self.final_message_start(seq.get_toks()));
-            }
+            seq.set_checkpoint_hints(self.checkpoint_hints(&seq, is_chat));
             if request.response.is_closed() {
                 return Ok(());
             }
@@ -613,6 +611,23 @@ impl Engine {
         get_mut_arcmutex!(self.pipeline)
             .get_chat_template()
             .and_then(|chat_template| chat_template.tool_call_format())
+    }
+
+    fn checkpoint_hints(&self, seq: &Sequence, is_chat: bool) -> crate::pipeline::CheckpointHints {
+        // progressive checkpoints are worth their copies only where the store keeps them, which takes plain text only
+        let stored = seq.mm_features().is_empty()
+            && seq.adapter_generation().is_none()
+            && !seq.return_raw_logits;
+        let interval = get_mut_arcmutex!(self.prefix_cacher)
+            .disk_tier()
+            .map(|tier| tier.checkpoint_tokens)
+            .filter(|tokens| stored && *tokens > 0);
+        crate::pipeline::CheckpointHints {
+            final_message_start: is_chat
+                .then(|| self.final_message_start(seq.get_toks()))
+                .flatten(),
+            interval,
+        }
     }
 
     // Where a chat prompt's final message starts, so a hybrid model also checkpoints its recurrent state there: the

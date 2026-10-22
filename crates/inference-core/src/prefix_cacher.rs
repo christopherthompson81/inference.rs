@@ -207,6 +207,7 @@ pub struct PrefixCacheManagerV2 {
 pub struct PrefixDiskTier {
     pub store: Arc<crate::prefix_store::PrefixStore>,
     pub kv_cache_manager: Arc<tokio::sync::Mutex<crate::paged_attention::KVCacheManager>>,
+    pub checkpoint_tokens: usize,
 }
 
 #[derive(Clone)]

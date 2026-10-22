@@ -327,6 +327,7 @@ fn open_prefix_disk_tier(
     Ok(Some(crate::prefix_cacher::PrefixDiskTier {
         store,
         kv_cache_manager,
+        checkpoint_tokens: settings.checkpoint_tokens,
     }))
 }
 
