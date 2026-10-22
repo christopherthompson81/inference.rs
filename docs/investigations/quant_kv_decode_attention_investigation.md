@@ -348,3 +348,72 @@ can: K and V as the 16-row operand, Q as the 8-wide B operand, 48 columns = 6 n 
 (2 key m tiles x 6 n tiles), one a warp in 12-warp blocks, 3 warps a scheduler, each holding 8 columns (32 registers
 of Q, 32 of O). Scores come out keys x columns; P.V needs P^T as the B operand, an 8x8 transpose per fragment
 (movmatrix.trans).
+
+## Run 12 - 2026-10-22 13:30
+
+Question: does the transposed kernel (Run 11's plan) recover the padding, and what shape does it need?
+
+Implementation (`flash_attn_quant_decode_t<D, n_tiles, nw>`): S^T = K Q^T by m16n8k16 with K's rows as A (ldmatrix x4)
+and Q as B from registers; online softmax per column over a warp's 16 keys (shuffles over the 8 lanes sharing a column);
+P^T as B from the score fragment by `movmatrix.trans` per 8x8 block; O^T = V^T P^T with V^T as A (ldmatrix x4 .trans), f16
+accumulators. Staging and unpack stride by the block's threads instead of FQ_WARPS. A Qwen3.8-shaped case (6 Q heads a
+K/V head, 48 columns at 8 rows) joined `verify_rows_over_a_quantized_cache_match_attention_over_its_values` at head 256
+and 128; before it no test reached 48 columns (8 heads on 2 is 32). nsys confirms both instances run in it. Every
+variant below passed it on the first build.
+
+Shapes, bench at 8 rows (us; wall clock, this card's clocks drift ~7% between runs, so pairs only):
+
+```
+variant (n tiles a warp, warps, f16 tiles)     2K      32K     128K    256K
+m-tile kernel (Run 10)                          57.3   155.8   485.1    973.3
+1 a warp, 12 warps, single                      69.1   268.6   845.8   1631.8
+1 a warp, 12 warps, double-buffered             41.8   175.3   550.6   1105.3
+2 a warp, 6 warps, single                       52.8   154.7   455.2    856.7
+2 a warp, 6 warps, double                       37.8   195.8   624.9   1227.2
+3 a warp, 4 warps, single                       51.7   146.1   424.8    797.1
+3 a warp, 4 warps, double                       44.6   216.2   674.2   1312.7
+```
+
+- One tile a warp: each K/V fragment from smem feeds one MMA (LSU 31%), and 384-thread blocks at 140 registers fit one
+  an SM, so every warp unpacks, then every warp multiplies (barrier stalls 1.43 per issue). Double buffering the f16 tiles
+  (one barrier a tile, warps drift between unpack and MMA) helps only there.
+- Three tiles a warp: 4 warps (one a scheduler), 2 blocks an SM, 251 registers, no spills; fragments feed 3 MMAs. Best.
+  Double buffering takes the second block (82 KB smem) and loses.
+
+Then the short contexts: 8K read 74-80 us against the m-tile kernel's 66. The two key halves each write a partial, so at
+8K (32 live splits) a block writes 99 KB, 12.7 MB in all, and the combine reads it back. Fixes, timed under ncu at base
+clocks from here on (`abtime.sh`: decode + combine, repeatable within 1%):
+
+```
+us (decode + combine)                      2K     8K     32K    128K    256K
+master (m-tile, one wave)                  63.6   71.9   160.6   531.7  1026.5
+transposed, two partials a block           66.1   81.5   160.0   460.6   860.2
+  + halves merged in registers via smem    58.5   66.7   144.5   476.9   914.6
+  + merge, unpack out of line              58.2   66.2   139.5   450.7   861.1
+cooperative merge (2 passes, coalesced)    69.0   77.1   150.6   461.4   871.2
+partials stored f16                        84.6+  127+   218+    489+    876+    (wall clock; scattered 2-byte stores)
+min 16 tiles a split instead of 8          88.7   115    160-178 488     833     (wall clock; serial tiles double)
+merge, epilogue loops not unrolled         87.6   158    1897    3764            (O to local memory)
+```
+
+- The register merge alone cost 3-6% at 128K and up. Its HMMA region is the same as the no-merge build's (96 HMMA in a
+  576-instruction span either way); what moved was the unpack's code (HADD2 622 against 430, PRMT 640 against 883): the
+  compiler scheduled the inlined unpack differently beside the epilogue. With the unpack in a `__noinline__` wrapper (no
+  stack, no local memory) the merge keeps its short-context gain and loses nothing at long context.
+- Kept: transposed for 33-48 columns (6 n tiles, 3 a warp, merge, out-of-line unpack), head 256 (250 registers) and 128
+  (200). 32 columns and fewer stay on the m-tile kernel (no padding at 32; 64 would need 4 tiles a warp, too many
+  registers). Against master: -8% at 2K and 8K, -13% at 32K, -15% at 128K, -16% at 256K. `--size`: fattn library +0.05 MiB.
+
+End to end (Qwen3.8 27B + DFlash 2, `verify_pair.sh`: phase-timer medians of the 8-row target graph, specbench ui, one
+request a length, this branch and master's binary alternating twice in one session):
+
+```
+prompt    master (#544)        transposed
+2K        23.84  23.66 ms      23.64  23.55
+32K       25.24  25.23         24.81  24.92
+125K      31.01  30.95         29.73  29.72
+```
+
+-1.25 ms a verify step at 125K (the bench predicted 1.3 over 16 layers), -0.37 at 32K, ~0 at 2K: with the drafter's
+3.5 ms, a 125K step goes 34.5 -> 33.2 ms, ~4% faster decode on top of Run 10. (The sampled compaction runs could not show
+it: their step times moved 0.8 ms at 2K between sessions, where attention costs a few us.)

@@ -13,6 +13,9 @@
 #define FQ_GROUP       32   // values a quantization scale covers
 #define FQ_MAX_ROWS    8
 #define FQ_MAX_COLS    64   // Q rows x Q heads of one K/V head
+// the transposed kernel's 8-column n tiles, and how many a warp holds (each costs 64 registers at head 256)
+#define FQ_T_TILES       6
+#define FQ_T_TILES_WARP  3
 // tiles a split takes at least: short caches use fewer splits than the grid has, decided on the device (graph capture
 // fixes the grid, the lengths stay device-side)
 #define FQ_MIN_SPLIT_TILES 8
@@ -74,6 +77,7 @@ static __device__ __forceinline__ void fq_stage_tile(
         const uint8_t * K, const uint8_t * V, const fattn_kv_rows & rk, const fattn_kv_rows & rv,
         const int stride_K, const int stride_V, uint8_t * slot, const int k0) {
     const int tid = threadIdx.y*WARP_SIZE + threadIdx.x;
+    const int nthreads = blockDim.y*WARP_SIZE;
 #pragma unroll
     for (int part = 0; part < 2; ++part) {
         const fattn_kv_rows & rows = part ? rv : rk;
@@ -86,7 +90,7 @@ static __device__ __forceinline__ void fq_stage_tile(
         // a tile inside one paged block whose rows sit back to back, staged as packed: one contiguous copy
         if ((1 << rows.block_size_log2) >= FQ_TILE && stride == row_bytes && 4*stride_src == row_bytes) {
             const uint8_t * src = src_base + 4*fattn_kv_row(rows, k0, stride_src);
-            for (int c = 16*tid; c < FQ_TILE*row_bytes; c += 16*FQ_WARPS*WARP_SIZE) {
+            for (int c = 16*tid; c < FQ_TILE*row_bytes; c += 16*nthreads) {
                 cp_async_cg_16<0>(dst_32 + c, src + c);
             }
             continue;
@@ -94,16 +98,16 @@ static __device__ __forceinline__ void fq_stage_tile(
         const int unit  = row_bytes % 16 == 0 ? 16 : 4;
         const int units = row_bytes / unit;
         const int items = FQ_TILE*units;
-        for (int item0 = tid; item0 < items; item0 += FQ_WARPS*WARP_SIZE*FQ_LOOKUPS) {
+        for (int item0 = tid; item0 < items; item0 += nthreads*FQ_LOOKUPS) {
             int64_t row[FQ_LOOKUPS];
 #pragma unroll
             for (int k = 0; k < FQ_LOOKUPS; ++k) {
-                const int item = item0 + k*FQ_WARPS*WARP_SIZE;
+                const int item = item0 + k*nthreads;
                 row[k] = item < items ? 4*fattn_kv_row(rows, k0 + item/units, stride_src) : 0;
             }
 #pragma unroll
             for (int k = 0; k < FQ_LOOKUPS; ++k) {
-                const int item = item0 + k*FQ_WARPS*WARP_SIZE;
+                const int item = item0 + k*nthreads;
                 if (item >= items) {
                     break;
                 }
@@ -129,7 +133,7 @@ static __device__ __forceinline__ void fq_unpack_f16(const uint8_t * raw, const 
     constexpr int stride = (D*bits/8 + D/16 + 15) & ~15;
     const half2 bias = __float2half2_rn(1024.0f + float(1 << bits));
     const int tid = threadIdx.y*WARP_SIZE + threadIdx.x;
-    for (int item = tid; item < FQ_TILE*groups; item += FQ_WARPS*WARP_SIZE) {
+    for (int item = tid; item < FQ_TILE*groups; item += blockDim.y*WARP_SIZE) {
         const int i = item / groups;
         const int g = item - i*groups;
         const uint8_t * row = raw + i*stride;
@@ -174,6 +178,13 @@ static __device__ __forceinline__ void fq_unpack_rows(const int bits, const uint
         case 7: fq_unpack_f16<D, 7>(raw, data_bytes, f16, valid); break;
         default: fq_unpack_f16<D, 8>(raw, data_bytes, f16, valid); break;
     }
+}
+
+// the transposed kernel's unpack, kept out of line so the kernel's epilogue cannot reshape its schedule
+template<int D>
+static __device__ __noinline__ void fq_unpack_rows_ool(const int bits, const uint8_t * raw, const int data_bytes,
+        uint8_t * f16, const int valid) {
+    fq_unpack_rows<D>(bits, raw, data_bytes, f16, valid);
 }
 
 static __device__ __forceinline__ void fq_mma_f16_k8(half2 * d, const half2 a0, const half2 a1, const uint32_t b) {
@@ -424,6 +435,317 @@ static __global__ void __launch_bounds__(FQ_WARPS*WARP_SIZE, 2) flash_attn_quant
 #endif // defined(AMPERE_MMA_AVAILABLE) && defined(CP_ASYNC_AVAILABLE)
 }
 
+static __device__ __forceinline__ void fq_ldmatrix_x4(uint32_t * r, const void * smem_row) {
+#ifdef TURING_MMA_AVAILABLE
+    const unsigned int addr = ggml_cuda_cvta_generic_to_shared((void *) smem_row);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];"
+        : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
+#else
+    GGML_UNUSED_VARS(r, smem_row);
+    NO_DEVICE_CODE;
+#endif // TURING_MMA_AVAILABLE
+}
+
+static __device__ __forceinline__ uint32_t fq_movmatrix_trans(const uint32_t x) {
+#ifdef AMPERE_MMA_AVAILABLE
+    uint32_t y;
+    asm("movmatrix.sync.aligned.m8n8.trans.b16 %0, %1;" : "=r"(y) : "r"(x));
+    return y;
+#else
+    GGML_UNUSED(x);
+    NO_DEVICE_CODE;
+    return 0;
+#endif // AMPERE_MMA_AVAILABLE
+}
+
+// m16n8k16, f16 inputs; f32 or f16 accumulators
+static __device__ __forceinline__ void fq_mma_f32_k16(float * c, const uint32_t * a, const uint32_t b0, const uint32_t b1) {
+#ifdef AMPERE_MMA_AVAILABLE
+    asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};"
+        : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    GGML_UNUSED_VARS(c, a, b0, b1);
+    NO_DEVICE_CODE;
+#endif // AMPERE_MMA_AVAILABLE
+}
+
+static __device__ __forceinline__ void fq_mma_f16_k16(uint32_t * c, const uint32_t * a, const uint32_t b0, const uint32_t b1) {
+#ifdef AMPERE_MMA_AVAILABLE
+    asm("mma.sync.aligned.m16n8k16.row.col.f16.f16.f16.f16 {%0, %1}, {%2, %3, %4, %5}, {%6, %7}, {%0, %1};"
+        : "+r"(c[0]), "+r"(c[1])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+#else
+    GGML_UNUSED_VARS(c, a, b0, b1);
+    NO_DEVICE_CODE;
+#endif // AMPERE_MMA_AVAILABLE
+}
+
+// Transposed: K and V are the 16-row operand and Q the 8-wide one, so 48 columns pad to 48, not 64. A warp holds 16
+// keys of every tile (km) against nw n tiles: two key halves x n_tiles/nw groups spread the columns over all schedulers.
+template<int D, int n_tiles, int nw>
+static __global__ void __launch_bounds__(2*n_tiles/nw*WARP_SIZE, 2) flash_attn_quant_decode_t(
+        const char * __restrict__ Q, const char * __restrict__ K, const char * __restrict__ V, float * __restrict__ part,
+        const float scale_log2, const int rows, const int gqa,
+        const int nb01, const int nb02, const int64_t nb03,
+        const int nb11, const int nb12, const int64_t nb13,
+        const int nb21, const int nb22, const int64_t nb23,
+        const bool Q_bf16, const fattn_layout lay) {
+#if defined(AMPERE_MMA_AVAILABLE) && defined(CP_ASYNC_AVAILABLE)
+    static_assert(n_tiles % nw == 0, "n tiles split evenly over a key half's warps");
+    constexpr int groups = n_tiles/nw;
+    using S = fq_smem<D>;
+    const int raw_slot = fq_raw_slot(D, lay.k_bits, lay.v_bits);
+
+    const int split    = blockIdx.x;
+    const int splits   = gridDim.x;
+    const int kv_head  = blockIdx.y;
+    const int sequence = blockIdx.z;
+    const int warp     = threadIdx.y;
+    const int lane     = threadIdx.x;
+    const int km       = warp / groups;
+    const int nt0      = (warp % groups)*nw;
+    const int ncols    = rows*gqa;
+    const int g        = lane / 4;
+    const int tq       = lane % 4;
+
+    extern __shared__ __align__(16) uint8_t smem[];
+    uint8_t * raw = smem + S::fixed;
+
+    const fattn_kv_rows rk = fattn_sequence_rows(lay, sequence, false);
+    const fattn_kv_rows rv = fattn_sequence_rows(lay, sequence, true);
+    const int kv_len = rk.len;
+    const int ntiles = (kv_len + FQ_TILE - 1) / FQ_TILE;
+    const int live = fq_live_splits(kv_len, splits);
+    if (split >= live) {
+        return;
+    }
+    const int t0 = int(int64_t(ntiles)*split/live);
+    const int t1 = int(int64_t(ntiles)*(split + 1)/live);
+
+    const uint8_t * Kh = (const uint8_t *) K + nb13*sequence + int64_t(nb12)*kv_head;
+    const uint8_t * Vh = (const uint8_t *) V + nb23*sequence + int64_t(nb22)*kv_head;
+    const int stride_K = nb11/4;
+    const int stride_V = nb21/4;
+    const int v_raw = FQ_TILE*fq_raw_stride(D, rk.bits);
+
+    if (t0 < t1) {
+        fq_stage_tile<D>(Kh, Vh, rk, rv, stride_K, stride_V, raw, t0*FQ_TILE);
+    }
+    fq_cp_async_commit();
+
+    // Q column g of each n tile as B fragments per 16 dims: b0 dims 2 tq + 0..1, b1 dims 8 + 2 tq + 0..1
+    uint32_t q[nw][D/16][2];
+#pragma unroll
+    for (int i = 0; i < nw; ++i) {
+        const int j = (nt0 + i)*8 + g;
+        const bool j_live = j < ncols;
+        const int r = j_live ? j / gqa : 0;
+        const int h = j_live ? j - r*gqa : 0;
+        const char * q_row = Q + nb03*sequence + int64_t(nb02)*(kv_head*gqa + h) + int64_t(nb01)*r;
+#pragma unroll
+        for (int kb = 0; kb < D/16; ++kb) {
+#pragma unroll
+            for (int part_k = 0; part_k < 2; ++part_k) {
+                const int d = kb*16 + 8*part_k + 2*tq;
+                float2 x = make_float2(0.0f, 0.0f);
+                if (j_live) {
+                    x = Q_bf16 ? __bfloat1622float2(*(const nv_bfloat162 *) (q_row + 2*d)) : *(const float2 *) (q_row + 4*d);
+                }
+                const half2 v = __floats2half2_rn(x.x*scale_log2, x.y*scale_log2);
+                q[i][kb][part_k] = *(const uint32_t *) &v;
+            }
+        }
+    }
+
+    // O^T for dims 16 md + g (+ 8) and columns 2 tq + 0..1 of each n tile, f16 accumulators
+    uint32_t O[nw][D/16][2];
+    float m_run[nw][2];
+    float l_run[nw][2];
+    int qp[nw][2];
+#pragma unroll
+    for (int i = 0; i < nw; ++i) {
+#pragma unroll
+        for (int md = 0; md < D/16; ++md) {
+            O[i][md][0] = 0;
+            O[i][md][1] = 0;
+        }
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+            m_run[i][e] = -INFINITY;
+            l_run[i][e] = 0.0f;
+            qp[i][e] = kv_len - rows + min(((nt0 + i)*8 + 2*tq + e) / gqa, rows - 1);
+        }
+    }
+
+    const int key0 = 16*km;
+    // ldmatrix row addresses: K as A (x4: keys 0-7 / 8-15 by lane bit 3, dims 0-7 / 8-15 by bit 4), V^T as A
+    // (.trans: keys 0-7 / 8-15 by bit 4, dims 0-7 / 8-15 by bit 3)
+    const int li = lane / 8;
+    const int lr = lane % 8;
+    const int k_off = (key0 + lr + 8*(li % 2))*S::f16_stride + 2*8*(li / 2);
+    const int v_off = S::f16_bytes + (key0 + lr + 8*(li / 2))*S::f16_stride + 2*8*(li % 2);
+
+    for (int t = t0; t < t1; ++t) {
+        uint8_t * slot = raw + (t - t0)%2*raw_slot;
+        if (t + 1 < t1) {
+            fq_stage_tile<D>(Kh, Vh, rk, rv, stride_K, stride_V, raw + (t + 1 - t0)%2*raw_slot, (t + 1)*FQ_TILE);
+        }
+        fq_cp_async_commit();
+        fq_cp_async_wait_prev();
+        __syncthreads();
+        fq_unpack_rows_ool<D>(rk.bits, slot, rk.data_bytes, smem, kv_len - t*FQ_TILE);
+        fq_unpack_rows_ool<D>(rv.bits, slot + v_raw, rv.data_bytes, smem + S::f16_bytes, kv_len - t*FQ_TILE);
+        __syncthreads();
+        const uint8_t * k_addr = smem + k_off;
+        const uint8_t * v_addr = smem + v_off;
+
+        // S^T: keys g, g + 8 against columns 2 tq + 0..1
+        float s[nw][4];
+#pragma unroll
+        for (int i = 0; i < nw; ++i) {
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                s[i][l] = 0.0f;
+            }
+        }
+#pragma unroll
+        for (int kb = 0; kb < D/16; ++kb) {
+            uint32_t a[4];
+            fq_ldmatrix_x4(a, k_addr + 2*16*kb);
+#pragma unroll
+            for (int i = 0; i < nw; ++i) {
+                fq_mma_f32_k16(s[i], a, q[i][kb][0], q[i][kb][1]);
+            }
+        }
+
+        uint32_t pb[nw][2];
+#pragma unroll
+        for (int i = 0; i < nw; ++i) {
+            float tile_max[2] = {-INFINITY, -INFINITY};
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                const int e = l % 2;
+                const int kp = t*FQ_TILE + key0 + g + 8*(l / 2);
+                const bool visible = kp < kv_len && (!lay.causal || kp <= qp[i][e]) &&
+                    (lay.window_left < 0 || qp[i][e] - kp <= lay.window_left);
+                s[i][l] = visible ? s[i][l] : -INFINITY;
+                tile_max[e] = fmaxf(tile_max[e], s[i][l]);
+            }
+            float corr[2];
+            float tile_sum[2] = {0.0f, 0.0f};
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+#pragma unroll
+                for (int x = 4; x < WARP_SIZE; x *= 2) {
+                    tile_max[e] = fmaxf(tile_max[e], __shfl_xor_sync(0xffffffff, tile_max[e], x));
+                }
+                const float m_new = fmaxf(m_run[i][e], tile_max[e]);
+                corr[e] = m_new == -INFINITY ? 1.0f : exp2f(m_run[i][e] - m_new);
+                m_run[i][e] = m_new;
+            }
+            float p[4];
+#pragma unroll
+            for (int l = 0; l < 4; ++l) {
+                const int e = l % 2;
+                p[l] = m_run[i][e] == -INFINITY ? 0.0f : exp2f(s[i][l] - m_run[i][e]);
+                tile_sum[e] += p[l];
+            }
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+#pragma unroll
+                for (int x = 4; x < WARP_SIZE; x *= 2) {
+                    tile_sum[e] += __shfl_xor_sync(0xffffffff, tile_sum[e], x);
+                }
+                l_run[i][e] = l_run[i][e]*corr[e] + tile_sum[e];
+            }
+            const half2 c2 = __floats2half2_rn(corr[0], corr[1]);
+#pragma unroll
+            for (int md = 0; md < D/16; ++md) {
+                *(half2 *) &O[i][md][0] = __hmul2(*(const half2 *) &O[i][md][0], c2);
+                *(half2 *) &O[i][md][1] = __hmul2(*(const half2 *) &O[i][md][1], c2);
+            }
+            // P^T as B: each 8x8 score block (keys g, columns 2 tq) transposed to (keys 2 tq, column g)
+            const half2 p0 = __floats2half2_rn(p[0], p[1]);
+            const half2 p1 = __floats2half2_rn(p[2], p[3]);
+            pb[i][0] = fq_movmatrix_trans(*(const uint32_t *) &p0);
+            pb[i][1] = fq_movmatrix_trans(*(const uint32_t *) &p1);
+        }
+
+#pragma unroll
+        for (int md = 0; md < D/16; ++md) {
+            uint32_t a[4];
+            fq_ldmatrix_x4_trans(a, v_addr + 2*16*md);
+#pragma unroll
+            for (int i = 0; i < nw; ++i) {
+                fq_mma_f16_k16(O[i][md], a, pb[i][0], pb[i][1]);
+            }
+        }
+    }
+    cp_async_wait_all();
+
+    // the key halves merge through smem (the tiles are done), so each block writes one split
+    constexpr int words = nw*(D/16)*2 + nw*4;
+    uint32_t * xchg = (uint32_t *) smem + ((warp % groups)*WARP_SIZE + lane)*words;
+    __syncthreads();
+    if (km == 1) {
+#pragma unroll
+        for (int i = 0; i < nw; ++i) {
+#pragma unroll
+            for (int md = 0; md < D/16; ++md) {
+                xchg[(i*(D/16) + md)*2 + 0] = O[i][md][0];
+                xchg[(i*(D/16) + md)*2 + 1] = O[i][md][1];
+            }
+#pragma unroll
+            for (int e = 0; e < 2; ++e) {
+                xchg[nw*(D/16)*2 + i*4 + e    ] = __float_as_uint(m_run[i][e]);
+                xchg[nw*(D/16)*2 + i*4 + e + 2] = __float_as_uint(l_run[i][e]);
+            }
+        }
+    }
+    __syncthreads();
+    if (km == 1) {
+        return;
+    }
+
+    // this block's split: columns 2 tq + 0..1 of each n tile, dims 16 md + g (+ 8)
+#pragma unroll
+    for (int i = 0; i < nw; ++i) {
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+            const int j = (nt0 + i)*8 + 2*tq + e;
+            if (j >= ncols) {
+                continue;
+            }
+            const float m1 = __uint_as_float(xchg[nw*(D/16)*2 + i*4 + e]);
+            const float l1 = __uint_as_float(xchg[nw*(D/16)*2 + i*4 + e + 2]);
+            const float m = fmaxf(m_run[i][e], m1);
+            const float w0 = m == -INFINITY ? 0.0f : exp2f(m_run[i][e] - m);
+            const float w1 = m == -INFINITY ? 0.0f : exp2f(m1 - m);
+            float * dst = part + ((int64_t(sequence)*gridDim.y + kv_head)*ncols + j)*int64_t(splits)*(D + 2) +
+                int64_t(split)*(D + 2);
+#pragma unroll
+            for (int md = 0; md < D/16; ++md) {
+#pragma unroll
+                for (int hr = 0; hr < 2; ++hr) {
+                    const uint32_t o1 = xchg[(i*(D/16) + md)*2 + hr];
+                    dst[16*md + g + 8*hr] = w0*__half2float(((const half *) &O[i][md][hr])[e]) +
+                        w1*__half2float(((const half *) &o1)[e]);
+                }
+            }
+            if (g == 0) {
+                dst[D + 0] = m;
+                dst[D + 1] = l_run[i][e]*w0 + l1*w1;
+            }
+        }
+    }
+#else
+    GGML_UNUSED_VARS(Q, K, V, part, scale_log2, rows, gqa, nb01, nb02, nb03, nb11, nb12, nb13, nb21, nb22, nb23,
+        Q_bf16, lay);
+    NO_DEVICE_CODE;
+#endif // defined(AMPERE_MMA_AVAILABLE) && defined(CP_ASYNC_AVAILABLE)
+}
+
 // Merges a Q column's splits and writes its row of dst ([sequence*rows + row][head][D], f32 or bf16).
 template<int D>
 static __global__ void flash_attn_quant_combine(
@@ -485,19 +807,29 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
     const int n_seq    = Q->ne[3];
     const int kv_heads = K->ne[2];
     const int ncols    = rows*gqa;
+    // above 32 columns the m-tile kernel pads to 64, the transposed one to 8*FQ_T_TILES
+    const bool transposed = ncols > 32 && ncols <= 8*FQ_T_TILES;
     const int ncols_pad = ncols <= 16 ? 16 : ncols <= 32 ? 32 : 64;
-    const int ksplit = FQ_WARPS / (ncols_pad/16);
     const int nsm = ggml_cuda_info().devices[ggml_cuda_get_device()].nsm;
     const float log2e = 1.4426950408889634f;
     const bool Q_bf16 = Q->type == GGML_TYPE_BF16;
     const bool dst_bf16 = dst->type == GGML_TYPE_BF16;
     cudaStream_t stream = ctx.stream();
-    const dim3 block(WARP_SIZE, FQ_WARPS);
 
-    auto launch = [&](auto d_c, auto ncols_c) {
+    // NC: the m-tile kernel's padded columns; T: the transposed kernel
+    auto launch = [&](auto d_c, auto ncols_c, auto t_c) {
         constexpr int DD = decltype(d_c)::value;
         constexpr int NC = decltype(ncols_c)::value;
-        auto kernel = flash_attn_quant_decode<DD, NC>;
+        constexpr bool T = decltype(t_c)::value;
+        constexpr int warps  = T ? 2*FQ_T_TILES/FQ_T_TILES_WARP : FQ_WARPS;
+        constexpr int ksplit = T ? 1 : FQ_WARPS/(NC/16);
+        auto kernel = [] {
+            if constexpr (T) {
+                return flash_attn_quant_decode_t<DD, FQ_T_TILES, FQ_T_TILES_WARP>;
+            } else {
+                return flash_attn_quant_decode<DD, NC>;
+            }
+        }();
         const int smem = fq_smem<DD>::fixed + 2*fq_raw_slot(DD, lay.k_bits, lay.v_bits);
         // the raw slots follow the bits, so the limit follows the largest launch seen
         static int raised[GGML_CUDA_MAX_DEVICES] = {0};
@@ -509,12 +841,13 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
         static int occ_smem[GGML_CUDA_MAX_DEVICES] = {0};
         static int per_sm[GGML_CUDA_MAX_DEVICES] = {0};
         if (occ_smem[ctx.device] != smem) {
-            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm[ctx.device], kernel, WARP_SIZE*FQ_WARPS, smem));
+            CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per_sm[ctx.device], kernel, WARP_SIZE*warps, smem));
             occ_smem[ctx.device] = smem;
         }
         const int splits = std::max(1, std::max(1, per_sm[ctx.device])*nsm / std::max(1, kv_heads*n_seq));
         ggml_cuda_pool_alloc<float> part(ctx.pool(), size_t(n_seq)*kv_heads*ncols*splits*ksplit*(D + 2));
         const dim3 grid(splits, kv_heads, n_seq);
+        const dim3 block(WARP_SIZE, warps);
         kernel<<<grid, block, smem, stream>>>((const char *) Q->data, (const char *) K->data, (const char *) V->data,
             part.ptr, scale*log2e, rows, gqa, Q->nb[1], Q->nb[2], Q->nb[3], K->nb[1], K->nb[2], K->nb[3],
             V->nb[1], V->nb[2], V->nb[3], Q_bf16, lay);
@@ -528,10 +861,14 @@ static bool ggml_cuda_flash_attn_ext_quant(ggml_backend_cuda_context & ctx, ggml
     using n16 = std::integral_constant<int, 16>;
     using n32 = std::integral_constant<int, 32>;
     using n64 = std::integral_constant<int, 64>;
+    using mtile = std::false_type;
+    using trans = std::true_type;
     if (D == 128) {
-        ncols_pad == 16 ? launch(c128{}, n16{}) : ncols_pad == 32 ? launch(c128{}, n32{}) : launch(c128{}, n64{});
+        transposed ? launch(c128{}, n64{}, trans{}) : ncols_pad == 16 ? launch(c128{}, n16{}, mtile{}) :
+            ncols_pad == 32 ? launch(c128{}, n32{}, mtile{}) : launch(c128{}, n64{}, mtile{});
     } else {
-        ncols_pad == 16 ? launch(c256{}, n16{}) : ncols_pad == 32 ? launch(c256{}, n32{}) : launch(c256{}, n64{});
+        transposed ? launch(c256{}, n64{}, trans{}) : ncols_pad == 16 ? launch(c256{}, n16{}, mtile{}) :
+            ncols_pad == 32 ? launch(c256{}, n32{}, mtile{}) : launch(c256{}, n64{}, mtile{});
     }
     return true;
 }
