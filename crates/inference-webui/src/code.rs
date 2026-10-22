@@ -1,7 +1,7 @@
 //! The Code tab: `inference_coder`'s agent over this server's engine, working in projects under the code roots, or in
 //! a demo project it makes in the temp directory.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -15,9 +15,12 @@ use axum::response::{IntoResponse, Response};
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_coder::{
-    Agent, AgentConfig, AgentUi, Approval, Changes, DEFAULT_MAX_REPLY_TOKENS, DEFAULT_MAX_ROUNDS,
-    EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall, ToolKind,
-    ToolOutcome, Turn, TurnEnd, default_tools, prompt::system_prompt,
+    Agent, AgentConfig, AgentUi, Approval, Changes, ChatBackend, DEFAULT_MAX_REPLY_TOKENS,
+    DEFAULT_MAX_ROUNDS, EngineBackend, Interrupt, PermissionMode, Permissions, Session, ToolCall,
+    ToolKind, ToolOutcome, Turn, TurnEnd,
+    activity::{Run, RunTracker},
+    default_tools,
+    prompt::system_prompt,
 };
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
@@ -67,6 +70,9 @@ struct LiveSession {
     approvals: Mutex<IndexMap<String, oneshot::Sender<Approval>>>,
     // outside the agent's lock, so the page can read it while a prompt runs
     changes: Arc<Mutex<Changes>>,
+    // activity labels by their group's first call, also outside the lock, and the file they are kept in
+    labels: Mutex<BTreeMap<String, String>>,
+    path: PathBuf,
 }
 
 impl CodeState {
@@ -285,6 +291,7 @@ pub(crate) async fn open_session(
         "project": session.root,
         // the system prompt is the harness's, not part of the conversation shown
         "messages": session.messages.iter().skip(1).collect::<Vec<_>>(),
+        "labels": *live.labels.lock().unwrap(),
     }))
     .into_response()
 }
@@ -381,6 +388,8 @@ async fn load(
         config,
     );
     let live = Arc::new(LiveSession {
+        labels: Mutex::new(agent.session.labels.clone()),
+        path: agent.session.path.clone(),
         changes: agent.changes(),
         agent: Arc::new(tokio::sync::Mutex::new(agent)),
         interrupt: Interrupt::default(),
@@ -400,6 +409,9 @@ pub(crate) struct SendRequest {
     enable_thinking: Option<bool>,
     #[serde(default)]
     model: Option<String>,
+    /// Label each run of thinking and tool calls as it closes, with the session's model.
+    #[serde(default)]
+    describe_activity: bool,
 }
 
 /// Runs a prompt to its answer, streaming the agent's text, tool calls and approval requests as SSE.
@@ -428,6 +440,11 @@ pub(crate) async fn send(
             .into_response();
     };
     agent.permissions.mode = mode;
+    let labeller = request.describe_activity.then(|| Labeller {
+        backend: agent.shared_backend(),
+        model: model.clone(),
+        task: request.prompt.clone(),
+    });
     agent.set_model(model);
     agent.set_request_field("enable_thinking", request.enable_thinking.map(Value::Bool));
     live.interrupt.reset();
@@ -436,8 +453,13 @@ pub(crate) async fn send(
         let mut ui = WebUi {
             events: events.clone(),
             live: live.clone(),
+            labeller,
+            runs: RunTracker::default(),
         };
         let result = agent.send(&request.prompt, &mut ui, &live.interrupt).await;
+        if let Some(run) = ui.runs.finish() {
+            ui.label(run);
+        }
         let event = match result {
             Ok(end) => json!({"type": "done", "end": match end {
                 TurnEnd::Done => "done",
@@ -521,9 +543,46 @@ pub(crate) async fn interrupt(
 struct WebUi {
     events: mpsc::UnboundedSender<Value>,
     live: Arc<LiveSession>,
+    labeller: Option<Labeller>,
+    runs: RunTracker,
+}
+
+// what a run's label request needs, for a task of its own beside the agent's
+struct Labeller {
+    backend: Arc<dyn ChatBackend>,
+    model: String,
+    task: String,
 }
 
 impl WebUi {
+    // the label reaches the page on the prompt's stream, which stays open until it does
+    fn label(&self, run: Run) {
+        let (Some(labeller), Some(key)) = (&self.labeller, run.key()) else {
+            return;
+        };
+        let key = key.to_string();
+        let (backend, model, task) = (
+            labeller.backend.clone(),
+            labeller.model.clone(),
+            labeller.task.clone(),
+        );
+        let (events, live) = (self.events.clone(), self.live.clone());
+        tokio::spawn(async move {
+            match inference_coder::activity::label(backend.as_ref(), &model, &task, &run).await {
+                Ok(Some(label)) => {
+                    let labels = BTreeMap::from([(key.clone(), label.clone())]);
+                    if let Err(error) = Session::append_labels(&live.path, &labels) {
+                        tracing::warn!("Failed keeping an activity label: {error:#}");
+                    }
+                    live.labels.lock().unwrap().extend(labels);
+                    let _ = events.send(json!({"type": "label", "id": key, "label": label}));
+                }
+                Ok(None) => {}
+                Err(error) => tracing::debug!("No activity label: {error:#}"),
+            }
+        });
+    }
+
     fn emit(&self, event: Value) -> bool {
         let sent = self.events.send(event).is_ok();
         if !sent {
@@ -535,14 +594,19 @@ impl WebUi {
 
 impl AgentUi for WebUi {
     fn text(&mut self, delta: &str) {
+        if let Some(run) = self.runs.text(delta) {
+            self.label(run);
+        }
         self.emit(json!({"type": "text", "delta": delta}));
     }
 
     fn reasoning(&mut self, delta: &str) {
+        self.runs.reasoning(delta);
         self.emit(json!({"type": "reasoning", "delta": delta}));
     }
 
     fn tool_start(&mut self, call: &ToolCall, args: &Value) {
+        self.runs.call(&call.id, &call.name, args);
         self.emit(json!({"type": "tool_start", "id": call.id, "name": call.name, "args": args}));
     }
 
@@ -559,6 +623,7 @@ impl AgentUi for WebUi {
         args: &'a Value,
         kind: ToolKind,
     ) -> BoxFuture<'a, Approval> {
+        self.runs.call(&call.id, &call.name, args);
         Box::pin(async move {
             let approval_id = uuid::Uuid::new_v4().simple().to_string();
             let (sender, receiver) = oneshot::channel();

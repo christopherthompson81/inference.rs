@@ -146,6 +146,11 @@ impl Agent {
         self.backend.as_ref()
     }
 
+    /// The backend, for a request a front end sends beside the agent's own, such as an activity label.
+    pub fn shared_backend(&self) -> Arc<dyn ChatBackend> {
+        self.backend.clone()
+    }
+
     /// Runs one user prompt to its answer. Messages reach the session a round at a time, each assistant reply with its
     /// tool results, so the history on disk never holds a call without a result.
     pub async fn send(

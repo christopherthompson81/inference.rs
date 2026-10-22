@@ -19,6 +19,7 @@
   const PROJECT_KEY = "inference-rs-code-project";
   const MODE_KEY = "inference-rs-code-mode";
   const DIFF_WIDTH_KEY = "inference-rs-code-diff-width";
+  const DESCRIBE_KEY = "inference-rs-code-describe-activity";
   // the diff pane's share of the width, kept between these so neither side vanishes
   const MIN_DIFF_SHARE = 0.2;
   const MAX_DIFF_SHARE = 0.8;
@@ -75,6 +76,9 @@
   let project = $state<string>(stored(PROJECT_KEY, ""));
   let mode = $state<PermissionMode>(stored(MODE_KEY, "ask"));
   let thinking = $state<"default" | "on" | "off">("default");
+  // the model's words for what each activity line was for, by its first call, sent as each run closes
+  let describe = $state(stored<"on" | "off">(DESCRIBE_KEY, "on") !== "off");
+  let labels = $state<Record<string, string>>({});
   let sessions = $state<CodeSessionInfo[]>([]);
   let sessionId = $state<string | null>(null);
   let projectPath = $state("");
@@ -191,6 +195,8 @@
 
   function activityLabel(entries: Entry[]): string {
     const tools = toolsOf(entries);
+    const described = describe && tools.length > 0 ? labels[tools[0].id] : undefined;
+    if (described) return `${described} (${tools.length})`;
     const of = (names: string[]) => tools.filter((tool) => names.includes(tool.name));
     const files = (list: ToolItem[]) => [
       ...new Set(list.map((tool) => str(tool.args.path).split("/").pop() ?? "").filter(Boolean)),
@@ -308,6 +314,9 @@
       case "usage":
         usage = event.usage;
         break;
+      case "label":
+        labels[event.id] = event.label;
+        break;
       case "done":
         if (event.end === "interrupted") items.push({ kind: "notice", text: "Interrupted" });
         if (event.end === "round_limit") items.push({ kind: "notice", text: "Stopped at the round limit" });
@@ -408,6 +417,7 @@
       sessionId = session.session_id;
       projectPath = session.project;
       items = fromMessages(session.messages);
+      labels = session.labels ?? {};
       usage = null;
       agentMs = 0;
       error = "";
@@ -429,6 +439,7 @@
       sessionId = demo.session_id;
       projectPath = demo.project;
       items = [];
+      labels = {};
       usage = null;
       agentMs = 0;
       error = "";
@@ -454,7 +465,7 @@
     syncClock();
     void scrollDown();
     try {
-      await code.send(sessionId, modelStore.selectedModel, text, mode, thinking === "default" ? null : thinking === "on", onEvent);
+      await code.send(sessionId, modelStore.selectedModel, text, mode, thinking === "default" ? null : thinking === "on", describe, onEvent);
     } catch (e) {
       error = `${e}`;
     } finally {
@@ -464,6 +475,11 @@
       void refreshSessions();
       void refreshChanges();
     }
+  }
+
+  function setDescribe(on: boolean) {
+    describe = on;
+    store(DESCRIBE_KEY, on ? "on" : "off");
   }
 
   async function decide(tool: ToolItem, decision: Decision) {
@@ -621,6 +637,10 @@
             <option value="on">Thinking: on</option>
             <option value="off">Thinking: off</option>
           </select>
+          <label class="flex items-center gap-1" title="The model says in a few words what each run of tool calls was for">
+            <input type="checkbox" checked={describe} onchange={(e) => setDescribe(e.currentTarget.checked)} />
+            Describe activity
+          </label>
           <select
             class="rounded border border-gray-300 bg-white px-1 py-0.5 dark:border-gray-700 dark:bg-gray-900"
             value={mode}
