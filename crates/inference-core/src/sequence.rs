@@ -257,6 +257,8 @@ pub struct Sequence {
     num_computed_tokens: usize,
     // the owner of the latest recurrent prefix snapshot taken during decode, which the next one replaces
     decode_recurrent_prefix_owner: Option<crate::paged_attention::block_hash::BlockHash>,
+    // the prompt token where a chat request's final message starts, a second recurrent checkpoint for hybrid models
+    final_message_start: Option<usize>,
     /// Denoising-loop time inside the latest block-generation step; booked as completion
     /// time even when the step was a prompt step (the encoder prefill is the prompt part).
     pending_denoise_time_ms: u128,
@@ -395,6 +397,7 @@ impl Sequence {
             block_hash_revision: 0,
             num_computed_tokens: 0,
             decode_recurrent_prefix_owner: None,
+            final_message_start: None,
             pending_denoise_time_ms: 0,
             suffix,
             prefix,
@@ -844,6 +847,14 @@ impl Sequence {
 
     pub fn advance_num_computed_tokens(&mut self, amount: usize) {
         self.set_num_computed_tokens(self.num_computed_tokens.saturating_add(amount));
+    }
+
+    pub fn final_message_start(&self) -> Option<usize> {
+        self.final_message_start
+    }
+
+    pub fn set_final_message_start(&mut self, start: Option<usize>) {
+        self.final_message_start = start;
     }
 
     pub fn decode_recurrent_prefix_owner(

@@ -1527,8 +1527,10 @@ pub trait Pipeline:
         } else {
             None
         };
-        let owner = *block_hashes
+        // the key's own last block, so a sequence's checkpoints at several boundaries are separate owners
+        let owner = block_hashes[..n_blocks]
             .last()
+            .copied()
             .expect("recurrent prefix owner requires a full block");
         if write_through
             && let Some(disk) = prefix_cacher.disk_tier().cloned()

@@ -574,6 +574,52 @@ async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -
     check_restart_restores(Some(drafter.path())).await
 }
 
+// a ChatML-style template over the fixture tokenizer's special `<|begin_of_sentence|>`, so each turn opens with one token
+const TURN_TEMPLATE: &str = "{%- for message in messages -%}<|begin_of_sentence|>{{ message['role'] }}: \
+{{ message['content'] }}\n{%- endfor -%}{%- if add_generation_prompt -%}<|begin_of_sentence|>assistant: {%- endif -%}";
+const SHARED_HISTORY_CHARS: usize = 300;
+const FINAL_MESSAGE_CHARS: usize = 120;
+
+async fn chat_cached_tokens(model: &Model, history: &str, last: &str) -> anyhow::Result<usize> {
+    let request = serde_json::json!({
+        "model": "default", "max_tokens": 2, "temperature": 0.0,
+        "messages": [
+            {"role": "user", "content": history},
+            {"role": "assistant", "content": "noted"},
+            {"role": "user", "content": last},
+        ],
+    });
+    let response: serde_json::Value = serde_json::from_str(
+        &model
+            .chat_json(request.to_string().as_bytes(), Default::default())
+            .await?,
+    )?;
+    Ok(response["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or_default() as usize)
+}
+
+// A request that replaces only the final message resumes where that message starts, not at its first token: the
+// previous prompt's recurrent state is also kept there, short of the last full block the final message runs into
+#[tokio::test]
+async fn a_new_final_message_resumes_at_the_previous_one() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    std::fs::write(checkpoint.path().join("chat_template.jinja"), TURN_TEMPLATE)?;
+    let model = stored_model(checkpoint.path(), None, None).await?;
+    let history = "abc ".repeat(SHARED_HISTORY_CHARS / 4);
+    chat_cached_tokens(&model, &history, &"first ".repeat(FINAL_MESSAGE_CHARS / 6)).await?;
+    let cached =
+        chat_cached_tokens(&model, &history, &"other ".repeat(FINAL_MESSAGE_CHARS / 6)).await?;
+    anyhow::ensure!(
+        cached >= SHARED_HISTORY_CHARS / 2,
+        "the changed final message reused only {cached} tokens"
+    );
+    Ok(())
+}
+
 // distinct prompts sent before the first is extended: more than a disk-backed drafter keeps on the GPU
 const EVICTING_PROMPTS: usize = 4;
 

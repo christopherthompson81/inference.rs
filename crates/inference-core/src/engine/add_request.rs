@@ -315,6 +315,10 @@ impl Engine {
         let needs_tool_call_state =
             has_tools || uses_channel_tool_call_strategy || validates_forced_tool_choice;
 
+        let is_chat = matches!(
+            request.messages,
+            RequestMessage::Chat { .. } | RequestMessage::MultimodalChat { .. }
+        );
         let (prompt_tokens, prompt_text) = self.render_prompt(
             request.messages,
             request.tools.as_deref(),
@@ -472,6 +476,9 @@ impl Engine {
             seq.set_prefix_cache_ttl(request.prefix_cache_ttl);
             self.enable_template_reasoning(&mut seq);
             self.prepare_multimodal_prompt(&mut seq)?;
+            if is_chat {
+                seq.set_final_message_start(self.final_message_start(seq.get_toks()));
+            }
             if request.response.is_closed() {
                 return Ok(());
             }
@@ -606,6 +613,60 @@ impl Engine {
         get_mut_arcmutex!(self.pipeline)
             .get_chat_template()
             .and_then(|chat_template| chat_template.tool_call_format())
+    }
+
+    // Where a chat prompt's final message starts, so a hybrid model also checkpoints its recurrent state there: the
+    // second-to-last turn-start token, the last opening the generation prompt
+    fn final_message_start(&self, tokens: &[u32]) -> Option<usize> {
+        let turn = self.turn_start_token()?;
+        tokens
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, token)| **token == turn)
+            .nth(1)
+            .map(|(pos, _)| pos)
+            .filter(|pos| *pos > 0)
+    }
+
+    // The token the template opens a turn with: the first of the generation prompt it appends to a probe turn
+    fn turn_start_token(&self) -> Option<u32> {
+        *self.turn_start_token.get_or_init(|| {
+            let pipeline = &*get_mut_arcmutex!(self.pipeline);
+            if !pipeline.cache().is_hybrid() {
+                return None;
+            }
+            let probe = || {
+                vec![indexmap::IndexMap::from([
+                    ("role".to_string(), Either::Left("user".to_string())),
+                    ("content".to_string(), Either::Left("x".to_string())),
+                ])]
+            };
+            let render = |generation_prompt| {
+                pipeline
+                    .get_processor()
+                    .process(
+                        pipeline,
+                        probe(),
+                        generation_prompt,
+                        true,
+                        None,
+                        None,
+                        Vec::new(),
+                    )
+                    .ok()
+                    .map(|(ids, _)| ids)
+            };
+            let (with, without) = (render(true)?, render(false)?);
+            let turn = (with.len() > without.len() && with.starts_with(&without))
+                .then(|| with[without.len()])?;
+            // a template without a marker token (`role: text` lines) gives a word, which starts no turn
+            pipeline
+                .tokenizer()?
+                .get_added_tokens_decoder()
+                .contains_key(&turn)
+                .then_some(turn)
+        })
     }
 
     fn render_prompt(

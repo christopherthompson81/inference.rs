@@ -13,7 +13,7 @@ use super::{
     CacheBackendMetadata, CacheInstruction, ForwardInputsResult, ForwardStepResult,
     InputProcessorOutput, Pipeline, SpeculativePromptChunk, SpeculativePromptRow, StepLookahead,
     StepSubmission, next_pipeline_prompt_chunk_group, prompt_chunk_is_final,
-    prompt_chunks::{PromptChunkPlan, build_prompt_chunk_plan, recurrent_checkpoint_boundary},
+    prompt_chunks::{PromptChunkPlan, build_prompt_chunk_plan, recurrent_checkpoint_boundaries},
     response, sampling, should_sample_step, should_try_speculative_sampling,
 };
 #[cfg(feature = "cuda")]
@@ -526,6 +526,7 @@ impl dyn Pipeline {
                         block_align,
                         prefix_policy.replay_for(modality_signature(seq)),
                         seq.mm_features(),
+                        seq.final_message_start(),
                     )
                 })
                 .collect(),
@@ -552,16 +553,17 @@ impl dyn Pipeline {
             .iter()
             .map(|seq| (seq.get_toks().to_vec(), seq.prefix_cache_len()))
             .collect::<Vec<_>>();
-        let recurrent_checkpoint_boundaries = input_seqs
+        let checkpoint_boundaries = input_seqs
             .iter()
             .zip(&originals)
             .map(|(seq, (tokens, prefix_len))| {
-                recurrent_checkpoint_boundary(
+                recurrent_checkpoint_boundaries(
                     tokens.len(),
                     *prefix_len,
                     hybrid_recurrent.then_some(block_size),
                     prefix_policy.replay_for(modality_signature(seq)),
                     seq.mm_features(),
+                    seq.final_message_start(),
                 )
             })
             .collect::<Vec<_>>();
@@ -599,7 +601,7 @@ impl dyn Pipeline {
                 let seq = &mut input_seqs[seq_idx];
                 seq.set_prefix_cache_len(chunk.start);
                 seq.set_prefill_toks(originals[seq_idx].0[..chunk.end].to_vec());
-                if recurrent_checkpoint_boundaries[seq_idx] == Some(chunk.end) {
+                if checkpoint_boundaries[seq_idx].contains(&chunk.end) {
                     recurrent_boundaries.push((seq_idx, chunk.end));
                 }
                 prompt_chunk.rows.push(SpeculativePromptRow {
