@@ -323,3 +323,28 @@ Where the rest goes (ncu SASS stall samples, master kernel): HMMA 43.5% (Q.K's f
 f16 m16n8k8 14%), then IMAD/SHF/LOP3 address and unpack math. The executed MMA counts match the padded shape exactly:
 8.6e9 multiply-adds each for Q.K and P.V where 48 real columns need 6.4e9. Removing the padding needs Q as the 8-wide
 operand (6 exact n tiles, K and V as the 16-wide one), a transposed kernel; f16 accumulation for Q.K stays out (Run 9).
+
+## Run 11 - 2026-10-22 10:10
+
+Question: how much of the 48-to-64 column padding is on the critical path? At 64 columns each of the 4 warps owns one
+16-column m tile for all 32 keys of a tile, so with 48 real columns warp 3 computes only padding.
+
+ncu after Run 10 (128K, rows 8): 515 us at ncu's locked clocks, 164 blocks, SMs active 99% of elapsed, tensor pipe
+active 45% of elapsed, top stall still math pipe throttle (1.79 per issue).
+
+Experiment: warp 3 skips its Q.K, softmax and P.V when its m tile is all padding (temporary env switch):
+
+```
+bench (us)        64K r8   128K r8   256K r8
+all warps         267.9    483.6     971.0
+padding skipped   247.9    466.8     936.9
+```
+
+Finding: -3.5% at 128K for a quarter of the tensor work. Warp w runs on scheduler w % 4, so freeing one scheduler's MMA
+leaves the other three carrying a full 16-column tile each, and the block waits on them at every tile barrier. The
+padding only pays when the 48 columns are spread evenly over all four schedulers. The current orientation (Q as the
+16-row A operand) cannot: a warp covering fewer columns needs all of Q's fragments, ~192 registers. The transposed one
+can: K and V as the 16-row operand, Q as the 8-wide B operand, 48 columns = 6 n tiles; a 32-key tile is 12 units
+(2 key m tiles x 6 n tiles), one a warp in 12-warp blocks, 3 warps a scheduler, each holding 8 columns (32 registers
+of Q, 32 of O). Scores come out keys x columns; P.V needs P^T as the B operand, an 8x8 transpose per fragment
+(movmatrix.trans).
