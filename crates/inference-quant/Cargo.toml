@@ -15,6 +15,7 @@ homepage.workspace = true
 [dependencies]
 inference-tensor.workspace = true
 half.workspace = true
+siphasher.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 paste.workspace = true

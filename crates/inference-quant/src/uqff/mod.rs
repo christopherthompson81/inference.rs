@@ -7,11 +7,13 @@ use safetensors::tensor::Dtype;
 
 use crate::{QuantizedSerdeType, QuantizedWeightSource, Shard, ShardedSafeTensors};
 
+mod cache;
 mod reader;
 mod report;
 mod tensor;
 mod tracker;
 
+pub use cache::IsqCache;
 pub use reader::UqffReader;
 pub use report::{
     QuantizationIssue, QuantizationReport, UQFF_REPORT_JSON, UqffArtifactFile, UqffArtifactGroup,

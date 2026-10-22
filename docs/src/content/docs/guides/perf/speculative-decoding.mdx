@@ -110,6 +110,11 @@ in a spec or a model manager load) picks their type instead. A GGUF target has n
 stays BF16 unless one is given: on Qwen3.8 27B, `q4k` keeps the BF16 drafter's acceptance for about a quarter of
 its 3.85 GB.
 
+A quantized DFlash drafter is kept in `~/.cache/inference-rs/drafters/` (under `XDG_CACHE_HOME` when set) after its
+first load, so later starts read it instead of quantizing again: on Qwen3.8 27B at `q4k` that cuts a start from about
+15 s to 7 s. A changed checkpoint, weight type or inference.rs version quantizes again and replaces the drafter's old
+file; deleting the directory is always safe.
+
 Acceptance is strongly content-dependent: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 accepts ~7 of 7 drafts on math/code and much less on thinking-mode reasoning traces, which are out
 of its training distribution. As everywhere in this engine, drafts are verified by the target:

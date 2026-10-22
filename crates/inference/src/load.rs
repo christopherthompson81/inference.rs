@@ -346,6 +346,15 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// The MTP assistant's weight type, e.g. `q4k`; applies to the MTP set before it. A quantized drafter is kept in
+        /// the user's cache, so later loads skip quantizing it.
+        pub fn with_mtp_draft_isq(mut self, isq: impl Into<String>) -> Self {
+            if let Some(mtp) = self.options.runtime.mtp.as_mut() {
+                mtp.draft_isq = Some(isq.into());
+            }
+            self
+        }
+
         pub fn with_max_num_seqs(mut self, max_num_seqs: usize) -> Self {
             self.options.runtime.max_seqs = Some(max_num_seqs);
             self
