@@ -158,12 +158,15 @@ empty disk store, the LAN configuration.
 warm (cold) TTFT      371.9 s   (Run 5, last block + final message only: 363 s)
 edited prompt         194,693 tokens, KV matched 95,936
 edited reused         81,920 (the 5th checkpoint; the 6th, 98,304, is past the divergence)
-edited TTFT           277.3 s   (with nothing reused it would be about 372 s)
+edited TTFT           277.3 s   (cold: about 372 s)
 restore               2,560 blocks from the disk store in 0.34 s (the GPU keeps only the session's last 2)
 ```
 
 Raw findings:
 
+- The resume reuses 42% of the prompt (the edit sat halfway) but saves only 25% of the time, as it should: prefill
+  per token slows with depth, so the reused front is the cheap part. The cold runs reach 65K in 67 s and 126K in
+  179 s, which puts 82K at about 95 s; 372 - 95 = 277 s, the measured TTFT.
 - A divergence now costs at most one interval of redo before it (14,016 tokens here), plus the prompt after it, which
   nothing can save.
 - The 11 extra checkpoints cost about 9 s on a 6-minute prefill (2.4%), roughly 0.8 s each (recurrent state and
