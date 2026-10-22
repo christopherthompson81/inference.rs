@@ -758,3 +758,71 @@ async fn a_finished_reply_is_prefilled_with_a_dflash_drafter() -> anyhow::Result
     let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
     check_reply_prefill(Some(drafter.path())).await
 }
+
+// two blocks apart, so the prompt below diverges between checkpoints, past the last one before its own
+const PROGRESSIVE_CHECKPOINT_TOKENS: usize = 64;
+const PROGRESSIVE_DIVERGENCE: usize = 300;
+const PROGRESSIVE_RAM_GIB: u64 = 1;
+
+async fn progressive_model(
+    checkpoint: &std::path::Path,
+    drafter: &std::path::Path,
+    checkpoint_tokens: usize,
+) -> anyhow::Result<Model> {
+    Ok(TextModelBuilder::new(checkpoint.to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .with_prefix_cache_ram(PROGRESSIVE_RAM_GIB)
+        .with_prefix_cache_checkpoint_tokens(checkpoint_tokens)
+        .build()
+        .await?)
+}
+
+// A prompt that diverges from a cached one well before its end resumes at the last progressive checkpoint before the
+// divergence, and decodes as a cold run does; with none it starts over
+#[tokio::test]
+async fn a_prompt_diverging_early_resumes_at_a_progressive_checkpoint() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let first = agent_tokens(AGENT_PROMPT_LEN, 0);
+    let mut diverged = first[..PROGRESSIVE_DIVERGENCE].to_vec();
+    diverged.extend(agent_tokens(AGENT_PROMPT_LEN - PROGRESSIVE_DIVERGENCE, 3));
+    let resumed = |checkpoint_tokens| {
+        let (checkpoint, drafter, first, diverged) =
+            (checkpoint.path(), drafter.path(), &first, &diverged);
+        async move {
+            let model = progressive_model(checkpoint, drafter, checkpoint_tokens).await?;
+            agent_turn(&model, first, PREFIX_MAX_LEN).await?;
+            agent_turn(&model, diverged, PREFIX_MAX_LEN).await
+        }
+    };
+    let (_, without) = resumed(0).await?;
+    let (warm, cached) = resumed(PROGRESSIVE_CHECKPOINT_TOKENS).await?;
+    // a cold run split at the same checkpoints: BF16 prefill drifts about 0.02 in logprob between chunkings
+    let cold_model = progressive_model(
+        checkpoint.path(),
+        drafter.path(),
+        PROGRESSIVE_CHECKPOINT_TOKENS,
+    )
+    .await?;
+    let (cold, _) = agent_turn(&cold_model, &diverged, PREFIX_MAX_LEN).await?;
+    anyhow::ensure!(
+        without == 0,
+        "a prompt with no checkpoint before its divergence reused {without} tokens"
+    );
+    anyhow::ensure!(
+        cached > PROGRESSIVE_DIVERGENCE - 2 * PROGRESSIVE_CHECKPOINT_TOKENS
+            && cached <= PROGRESSIVE_DIVERGENCE,
+        "the diverged prompt reused {cached} tokens"
+    );
+    anyhow::ensure!(
+        traces::close(&warm, &cold, CACHED_LOGPROB_TOLERANCE),
+        "a progressive checkpoint changed decoding: {warm:?} vs {cold:?}"
+    );
+    Ok(())
+}

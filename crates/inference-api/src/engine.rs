@@ -123,6 +123,8 @@ const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`"
 pub const DEFAULT_PREFIX_CACHE_DISK_GIB: u64 = 64;
 /// Minutes a prefix cache directory entry outlives its last use when its request names no TTL of its own.
 pub const DEFAULT_PREFIX_CACHE_DISK_TTL_MINS: u64 = 60;
+/// Tokens between a long prompt's recurrent checkpoints in the host prefix cache, the most a divergence redoes.
+pub const DEFAULT_PREFIX_CACHE_CHECKPOINT_TOKENS: usize = 16_384;
 const BYTES_PER_GIB: u64 = 1 << 30;
 const SECS_PER_MIN: u64 = 60;
 /// Sequences a model serves at once unless told otherwise, shared by `inference serve` and specs. Low, since each one
@@ -339,6 +341,10 @@ pub struct RuntimeSpec {
     /// unset or 0 keeps none in memory.
     #[serde(default)]
     pub prefix_cache_ram_gib: Option<u64>,
+    /// Tokens between a long prompt's recurrent checkpoints in the host prefix cache, so a request that diverges early
+    /// in it (an edited earlier turn) redoes at most this many; default 16384, 0 keeps only the final ones.
+    #[serde(default)]
+    pub prefix_cache_checkpoint_tokens: Option<usize>,
     /// Minutes a host prefix cache entry (in memory or on disk) outlives its last use, unless its request names a TTL (an Anthropic
     /// `cache_control` breakpoint, or `prefix_cache_ttl_secs`); default 60.
     #[serde(default)]
@@ -737,6 +743,9 @@ impl EngineSpec {
                         .unwrap_or(DEFAULT_PREFIX_CACHE_DISK_TTL_MINS)
                         .saturating_mul(SECS_PER_MIN),
                 ),
+                checkpoint_tokens: runtime
+                    .prefix_cache_checkpoint_tokens
+                    .unwrap_or(DEFAULT_PREFIX_CACHE_CHECKPOINT_TOKENS),
                 model_identity: String::new(),
             }));
         }

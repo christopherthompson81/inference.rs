@@ -31,6 +31,7 @@ mod paths;
 mod phonemizer_data;
 pub(crate) mod processing;
 pub(crate) mod prompt_chunks;
+pub(crate) use prompt_chunks::CheckpointHints;
 mod response;
 pub(crate) mod sampling;
 mod speech;

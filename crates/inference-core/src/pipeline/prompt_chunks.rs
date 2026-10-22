@@ -142,16 +142,25 @@ pub(crate) fn effective_recurrent_prefix_boundary(
     (minimum_exclusive < replay_boundary).then_some(replay_boundary)
 }
 
-/// Where a prompt's recurrent state is checkpointed for later prefix hits, ascending: its last full block, and the
-/// block where its final message starts (`final_message_start`), so a request that changes only that message still
-/// resumes before it.
+/// Where a request asks for recurrent checkpoints besides its prompt's last full block.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CheckpointHints {
+    /// The token where a chat's final message starts, so a request that changes only that message resumes before it.
+    pub(crate) final_message_start: Option<usize>,
+    /// Tokens between progressive checkpoints, set when a host or disk store keeps them, so a divergence earlier in a
+    /// long prompt costs at most one interval.
+    pub(crate) interval: Option<usize>,
+}
+
+/// Where a prompt's recurrent state is checkpointed for later prefix hits, ascending: every `hints.interval` tokens,
+/// the block where its final message starts, and its last full block.
 pub(crate) fn recurrent_checkpoint_boundaries(
     total_len: usize,
     prefix_len: usize,
     block_size: Option<usize>,
     replay: SpeculativePrefixReplay,
     features: &[MultiModalFeature],
-    final_message_start: Option<usize>,
+    hints: CheckpointHints,
 ) -> Vec<usize> {
     let Some(block_size) = block_size.filter(|size| *size > 0) else {
         return Vec::new();
@@ -166,11 +175,23 @@ pub(crate) fn recurrent_checkpoint_boundaries(
         )
         .filter(|boundary| *boundary < total_len)
     };
-    let last = boundary(total_len.saturating_sub(1));
-    let message = final_message_start
-        .and_then(boundary)
-        .filter(|start| last.is_some_and(|last| *start < last));
-    message.into_iter().chain(last).collect()
+    let Some(last) = boundary(total_len.saturating_sub(1)) else {
+        return Vec::new();
+    };
+    let progressive = hints
+        .interval
+        .filter(|interval| *interval > 0)
+        .into_iter()
+        .flat_map(|interval| (interval..last).step_by(interval));
+    let mut boundaries = progressive
+        .chain(hints.final_message_start)
+        .filter_map(boundary)
+        .filter(|start| *start < last)
+        .collect::<Vec<_>>();
+    boundaries.push(last);
+    boundaries.sort_unstable();
+    boundaries.dedup();
+    boundaries
 }
 
 fn cap_at_reusable_boundary(pos: usize, end: usize, boundaries: &[usize]) -> usize {
@@ -191,18 +212,12 @@ pub(crate) fn build_prompt_chunk_plan(
     block_align: Option<usize>,
     replay: SpeculativePrefixReplay,
     features: &[MultiModalFeature],
-    final_message_start: Option<usize>,
+    hints: CheckpointHints,
 ) -> Vec<PromptChunkPlan> {
     let mut pos = prefix_len.min(total_len);
     let mut chunks = Vec::new();
-    let reusable_boundaries = recurrent_checkpoint_boundaries(
-        total_len,
-        pos,
-        block_align,
-        replay,
-        features,
-        final_message_start,
-    );
+    let reusable_boundaries =
+        recurrent_checkpoint_boundaries(total_len, pos, block_align, replay, features, hints);
     let mut features = features
         .iter()
         .filter(|feature| feature.offset < total_len && feature.end() > pos)
@@ -413,7 +428,7 @@ mod tests {
             None,
             SpeculativePrefixReplay::NotRequired,
             &[feature(10, 6, MultimodalAttentionPolicy::NonCausal)],
-            None,
+            CheckpointHints::default(),
         );
 
         assert_eq!(
@@ -462,7 +477,7 @@ mod tests {
                 None,
                 SpeculativePrefixReplay::NotRequired,
                 &[unsplittable],
-                None,
+                CheckpointHints::default(),
             )),
             vec![
                 (0, 2, MultimodalAttentionPolicy::Causal),
@@ -478,7 +493,7 @@ mod tests {
                 None,
                 SpeculativePrefixReplay::NotRequired,
                 &[splittable],
-                None,
+                CheckpointHints::default(),
             )),
             vec![
                 (0, 2, MultimodalAttentionPolicy::Causal),
@@ -504,7 +519,7 @@ mod tests {
                 None,
                 SpeculativePrefixReplay::NotRequired,
                 &[unsplittable, splittable],
-                None,
+                CheckpointHints::default(),
             )),
             vec![
                 (0, 2, MultimodalAttentionPolicy::Causal),
@@ -526,7 +541,7 @@ mod tests {
                 feature(4, 8, MultimodalAttentionPolicy::NonCausal),
                 feature(8, 4, MultimodalAttentionPolicy::NonCausal),
             ],
-            None,
+            CheckpointHints::default(),
         );
 
         assert_eq!(
@@ -552,7 +567,7 @@ mod tests {
                 feature(8, 6, MultimodalAttentionPolicy::NonCausal),
                 feature(13, 5, MultimodalAttentionPolicy::NonCausal),
             ],
-            None,
+            CheckpointHints::default(),
         );
 
         assert_eq!(
@@ -577,7 +592,7 @@ mod tests {
                 feature(2, 8, MultimodalAttentionPolicy::Causal),
                 feature(4, 4, MultimodalAttentionPolicy::NonCausal),
             ],
-            None,
+            CheckpointHints::default(),
         );
 
         assert_eq!(
@@ -608,7 +623,7 @@ mod tests {
                 Some(32),
                 SpeculativePrefixReplay::NotRequired,
                 &[],
-                None,
+                CheckpointHints::default(),
             )),
             vec![(0, 64), (64, 65)]
         );
@@ -620,7 +635,7 @@ mod tests {
                 Some(32),
                 SpeculativePrefixReplay::NotRequired,
                 &[],
-                None,
+                CheckpointHints::default(),
             )),
             vec![(0, 32), (32, 64)]
         );
@@ -633,7 +648,7 @@ mod tests {
                 Some(32),
                 SpeculativePrefixReplay::NotRequired,
                 &[],
-                None,
+                CheckpointHints::default(),
             )),
             vec![(0, 20)]
         );
@@ -645,7 +660,7 @@ mod tests {
                 Some(32),
                 SpeculativePrefixReplay::NotRequired,
                 &[],
-                None,
+                CheckpointHints::default(),
             )),
             vec![(0, 4096), (4096, 6688), (6688, 6712)]
         );
@@ -657,7 +672,7 @@ mod tests {
                 None,
                 SpeculativePrefixReplay::NotRequired,
                 &[],
-                None,
+                CheckpointHints::default(),
             )),
             vec![(0, 65)]
         );
@@ -672,7 +687,7 @@ mod tests {
             Some(32),
             SpeculativePrefixReplay::NotRequired,
             &[],
-            None,
+            CheckpointHints::default(),
         )
         .into_iter()
         .map(|chunk| (chunk.start, chunk.end))
@@ -688,13 +703,17 @@ mod tests {
     #[test]
     fn target_checkpoint_boundary_handles_aligned_and_unaligned_prompts() {
         let boundaries = |total, final_message_start| {
+            let hints = CheckpointHints {
+                final_message_start,
+                interval: None,
+            };
             recurrent_checkpoint_boundaries(
                 total,
                 0,
                 Some(32),
                 SpeculativePrefixReplay::NotRequired,
                 &[],
-                final_message_start,
+                hints,
             )
         };
         assert_eq!(boundaries(65_536, None), [65_504]);
@@ -713,26 +732,76 @@ mod tests {
             Some(32),
             SpeculativePrefixReplay::NotRequired,
             &[],
-            Some(1500),
+            CheckpointHints {
+                final_message_start: Some(1500),
+                interval: None,
+            },
         );
         let ends = chunks.iter().map(|chunk| chunk.end).collect::<Vec<_>>();
         assert!(ends.contains(&1472) && ends.contains(&4064), "{ends:?}");
     }
 
     #[test]
+    fn a_long_prompt_checkpoints_every_interval() {
+        let boundaries = recurrent_checkpoint_boundaries(
+            70_000,
+            20_000,
+            Some(32),
+            SpeculativePrefixReplay::NotRequired,
+            &[],
+            CheckpointHints {
+                final_message_start: Some(66_000),
+                interval: Some(16_384),
+            },
+        );
+        // the cached prefix needs none below it, and one landing on the message's block is taken once
+        assert_eq!(boundaries, [32_768, 49_152, 65_536, 65_984, 69_984]);
+    }
+
+    #[test]
     fn suffix_replay_checkpoint_boundary_handles_aligned_and_unaligned_prompts() {
         let replay = SpeculativePrefixReplay::Suffix(2048);
         assert_eq!(
-            recurrent_checkpoint_boundaries(65_536, 0, Some(32), replay, &[], None),
+            recurrent_checkpoint_boundaries(
+                65_536,
+                0,
+                Some(32),
+                replay,
+                &[],
+                CheckpointHints::default()
+            ),
             [63_456]
         );
         assert_eq!(
-            recurrent_checkpoint_boundaries(65_537, 0, Some(32), replay, &[], None),
+            recurrent_checkpoint_boundaries(
+                65_537,
+                0,
+                Some(32),
+                replay,
+                &[],
+                CheckpointHints::default()
+            ),
             [63_488]
         );
 
-        let aligned = build_prompt_chunk_plan(65_536, 0, 4096, Some(32), replay, &[], None);
-        let unaligned = build_prompt_chunk_plan(65_537, 0, 4096, Some(32), replay, &[], None);
+        let aligned = build_prompt_chunk_plan(
+            65_536,
+            0,
+            4096,
+            Some(32),
+            replay,
+            &[],
+            CheckpointHints::default(),
+        );
+        let unaligned = build_prompt_chunk_plan(
+            65_537,
+            0,
+            4096,
+            Some(32),
+            replay,
+            &[],
+            CheckpointHints::default(),
+        );
         assert!(aligned.iter().any(|chunk| chunk.end == 63_456));
         assert!(unaligned.iter().any(|chunk| chunk.end == 63_488));
     }
@@ -746,7 +815,7 @@ mod tests {
                 Some(32),
                 SpeculativePrefixReplay::Full,
                 &[],
-                None
+                CheckpointHints::default()
             ),
             Vec::<usize>::new()
         );
@@ -761,7 +830,7 @@ mod tests {
             Some(8),
             SpeculativePrefixReplay::NotRequired,
             &[feature(50, 10, MultimodalAttentionPolicy::Causal)],
-            None,
+            CheckpointHints::default(),
         );
         let spans = chunks
             .into_iter()

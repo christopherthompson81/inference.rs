@@ -2607,6 +2607,7 @@ class RuntimeSpec:
     no_kv_cache: bool | None = None
     paged_attn: bool | None = None
     paged_cache: PagedCacheSpec | None = None
+    prefix_cache_checkpoint_tokens: int | None = None
     prefix_cache_dir: str | None = None
     prefix_cache_disk_gib: int | None = None
     prefix_cache_disk_ttl_mins: int | None = None

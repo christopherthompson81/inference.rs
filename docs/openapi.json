@@ -12500,6 +12500,14 @@
           "paged_cache": {
             "$ref": "#/components/schemas/PagedCacheSpec"
           },
+          "prefix_cache_checkpoint_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Tokens between a long prompt's recurrent checkpoints in the host prefix cache, so a request that diverges early\nin it (an edited earlier turn) redoes at most this many; default 16384, 0 keeps only the final ones.",
+            "minimum": 0
+          },
           "prefix_cache_dir": {
             "type": [
               "string",

@@ -82,6 +82,7 @@ inference serve [OPTIONS] [COMMAND]
 | `--prefix-cache-dir <PREFIX_CACHE_DIR>` |  | Directory that keeps prefix cache entries on disk too, so long sessions (agent loops) survive eviction and restarts. Hybrid models on CUDA with paged attention |
 | `--prefix-cache-disk-gib <PREFIX_CACHE_DISK_GIB>` |  | Most the prefix cache directory may hold, in GiB; the least recently used entries go first |
 | `--prefix-cache-ram-gib <PREFIX_CACHE_RAM_GIB>` |  | Host memory for prefix cache entries, in GiB: in front of `--prefix-cache-dir`, or on its own without one |
+| `--prefix-cache-checkpoint-tokens <PREFIX_CACHE_CHECKPOINT_TOKENS>` |  | Tokens between a long prompt's recurrent checkpoints in the host prefix cache, so a request that diverges early in it (an edited earlier turn) redoes at most this many; default 16384, 0 keeps only the final ones |
 | `--prefix-cache-disk-ttl-mins <PREFIX_CACHE_DISK_TTL_MINS>` |  | Minutes a host prefix cache entry (in memory or on disk) outlives its last use, unless its request names a TTL (an Anthropic `cache_control` breakpoint: 5 minutes, or its `ttl`); default 60 |
 | `-c, --chat-template <CHAT_TEMPLATE>` |  | Custom chat template file (.json or .jinja) |
 | `-j, --jinja-explicit <JINJA_EXPLICIT>` |  | Explicit JINJA template override |

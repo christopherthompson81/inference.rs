@@ -375,6 +375,13 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Checkpoints a long prompt's recurrent state in the host prefix cache every `tokens` (0 keeps only the final
+        /// ones), so a request that diverges early in it redoes at most that many.
+        pub fn with_prefix_cache_checkpoint_tokens(mut self, tokens: usize) -> Self {
+            self.options.runtime.prefix_cache_checkpoint_tokens = Some(tokens);
+            self
+        }
+
         pub fn with_no_kv_cache(mut self) -> Self {
             self.options.runtime.no_kv_cache = true;
             self

@@ -104,6 +104,9 @@ pub struct PrefixStoreSettings {
     pub memory_bytes: u64,
     /// For entries whose requests name no TTL of their own.
     pub default_ttl: Duration,
+    /// Tokens between a long prompt's recurrent checkpoints written here, so a request diverging early in it redoes at
+    /// most this many; 0 keeps only the final ones.
+    pub checkpoint_tokens: usize,
     /// Filled from the model's loader when the engine starts; entries are kept apart per identity.
     pub model_identity: String,
 }
