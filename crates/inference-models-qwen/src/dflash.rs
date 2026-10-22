@@ -6,6 +6,8 @@
 //! Context keys accumulate in a per-sequence cache; only accepted positions are ever appended, so
 //! a rejected tail needs no drafter rollback. DFlash 2 adds two-tap grouped dynamic convolutions
 //! around each sublayer and a candidate path selector over the top-k logits per position.
+//! DSpark (DeepSpec, SpecForge) drafts from every row, anchor included, and chains a low-rank Markov bias keyed on
+//! the previous pick across the block.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -46,6 +48,7 @@ const DEFAULT_BLOCK_SIZE: usize = 16;
 // under the user's cache directory: a quantized drafter's weights, so a restart skips quantizing them (~6 s at q4k)
 const DRAFTER_CACHE_DIR: &str = "inference-rs/drafters";
 pub const DEFAULT_MAX_DRAFTS: usize = 7;
+const DSPARK_MARKOV_HEAD_TYPE: &str = "vanilla";
 // Eager forwards use this cache; CUDA graphs derive RoPE from their replayed position inputs.
 const ROPE_CACHE_LEN: usize = 65536;
 const MASK_CACHE_CAP: usize = 64;
@@ -149,6 +152,7 @@ fn dflash_graph_precapture_shapes(
     plans: &[crate::speculative::SpeculativeGraphPlan],
     batches: impl IntoIterator<Item = usize>,
     sequence_capacity: usize,
+    draft_row_offset: usize,
 ) -> Vec<(usize, usize)> {
     let batches = batches.into_iter().collect::<Vec<_>>();
     let mut shapes = Vec::new();
@@ -158,7 +162,7 @@ fn dflash_graph_precapture_shapes(
             .unwrap_or(sequence_capacity)
             .min(sequence_capacity);
         for batch in batches.iter().copied().filter(|batch| *batch <= max_batch) {
-            shapes.push((batch, plan.proposal_len + 1));
+            shapes.push((batch, plan.proposal_len + draft_row_offset));
         }
     }
     shapes.sort_unstable();
@@ -187,6 +191,22 @@ fn dflash_prefix_replay(
     } else {
         SpeculativePrefixReplay::Suffix(required)
     }
+}
+
+/// Whether an `architectures` entry names a drafter this module loads: DFlash, DFlash 2 or DSpark.
+pub fn is_dflash_architecture(name: &str) -> bool {
+    name.contains("DFlash") || name.contains("Dflash") || name.contains("DSpark")
+}
+
+fn config_names_dflash(value: &serde_json::Value) -> bool {
+    value
+        .get("architectures")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|architectures| {
+            architectures
+                .iter()
+                .any(|architecture| architecture.as_str().is_some_and(is_dflash_architecture))
+        })
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -224,6 +244,12 @@ pub struct DFlashConfig {
     // v1 checkpoints keep some fields at the top level instead of inside `dflash_config`
     pub block_size: Option<usize>,
     pub mask_token_id: Option<u32>,
+    pub target_layer_ids: Option<Vec<usize>>,
+    // DSpark: the Markov head's rank (0 or absent: no head), and whether row 0 (the anchor) drafts
+    pub markov_rank: Option<usize>,
+    pub markov_head_type: Option<String>,
+    pub sample_from_anchor: Option<bool>,
+    pub draft_vocab_size: Option<usize>,
     #[serde(default)]
     pub dflash_config: DFlashSpecificConfig,
 }
@@ -238,9 +264,22 @@ pub struct DFlashLoadTarget<'a> {
 
 impl DFlashConfig {
     pub fn is_dflash(&self) -> bool {
-        self.architectures
-            .iter()
-            .any(|a| a.contains("DFlash") || a.contains("Dflash"))
+        self.architectures.iter().any(|a| is_dflash_architecture(a))
+    }
+
+    fn is_dspark(&self) -> bool {
+        self.architectures.iter().any(|a| a.contains("DSpark"))
+    }
+
+    /// The first noise row that drafts: DSpark's row j predicts position j + 1, DFlash's row j predicts position j.
+    fn draft_row_offset(&self) -> usize {
+        let sample_from_anchor = self.sample_from_anchor.unwrap_or(self.is_dspark());
+        usize::from(!sample_from_anchor)
+    }
+
+    /// The most drafts one block yields, so a verify is one wider.
+    pub fn max_drafts(&self) -> usize {
+        self.block_size().saturating_sub(self.draft_row_offset())
     }
 
     fn is_v2(&self) -> bool {
@@ -263,9 +302,10 @@ impl DFlashConfig {
             .unwrap_or(1e7)
     }
 
-    fn validate_rope_type(&self) -> Result<()> {
+    /// The drafter's own YaRN scaling (DSpark ships one), or None for default RoPE; other scalings are rejected.
+    fn draft_yarn_rope_config(&self) -> Result<Option<YarnRopeConfig>> {
         let Some(parameters) = self.rope_parameters.as_ref() else {
-            return Ok(());
+            return Ok(None);
         };
         let parameters = parameters.as_object().ok_or_else(|| {
             inference_tensor::Error::msg("DFlash rope_parameters must be a JSON object")
@@ -296,12 +336,72 @@ impl DFlashConfig {
             );
         }
         let rope_type = rope_type.or(legacy_type).unwrap_or("default");
-        if rope_type != "default" {
-            inference_tensor::bail!(
+        match rope_type {
+            "default" => Ok(None),
+            "yarn" => {
+                let field = |name: &str| parameters.get(name).and_then(serde_json::Value::as_f64);
+                let required = |name: &str| {
+                    field(name).ok_or_else(|| {
+                        inference_tensor::Error::msg(format!(
+                            "DFlash draft-side YaRN needs rope_parameters.{name}"
+                        ))
+                    })
+                };
+                let max_position_embeddings = self.max_position_embeddings.ok_or_else(|| {
+                    inference_tensor::Error::msg(
+                        "DFlash draft-side YaRN needs max_position_embeddings",
+                    )
+                })?;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                Ok(Some(YarnRopeConfig {
+                    base: self.rope_theta() as f32,
+                    head_dim: self.head_dim(),
+                    max_position_embeddings,
+                    original_max_position_embeddings: required("original_max_position_embeddings")?
+                        as usize,
+                    factor: required("factor")? as f32,
+                    beta_fast: field("beta_fast").unwrap_or(32.0) as f32,
+                    beta_slow: field("beta_slow").unwrap_or(1.0) as f32,
+                    mscale: field("mscale").unwrap_or(1.0) as f32,
+                    mscale_all_dim: field("mscale_all_dim").unwrap_or(0.0) as f32,
+                    attention_factor: field("attention_factor").map(|value| value as f32),
+                }))
+            }
+            _ => inference_tensor::bail!(
                 "DFlash draft-side RoPE type `{rope_type}` is unsupported; configure RoPE scaling on the target model"
+            ),
+        }
+    }
+
+    /// The drafter's YaRN: its own when it ships one (and the target then must not scale too), else the target's.
+    fn rope_yarn(&self, target: Option<&YarnRopeConfig>) -> Result<Option<YarnRopeConfig>> {
+        match (self.draft_yarn_rope_config()?, target) {
+            (Some(_), Some(_)) => inference_tensor::bail!(
+                "DFlash drafter and target both scale RoPE with YaRN; this combination is unsupported"
+            ),
+            (Some(draft), None) => Ok(Some(draft)),
+            (None, target) => self.yarn_rope_config(target),
+        }
+    }
+
+    /// DSpark's Markov head rank, or None when the drafter has no head; only the vanilla head exists.
+    fn markov_rank(&self) -> Result<Option<usize>> {
+        let rank = self.markov_rank.filter(|rank| *rank > 0);
+        if rank.is_some()
+            && let Some(kind) = self.markov_head_type.as_deref()
+            && kind != DSPARK_MARKOV_HEAD_TYPE
+        {
+            inference_tensor::bail!("DSpark markov_head_type `{kind}` is unsupported");
+        }
+        if let Some(draft_vocab) = self.draft_vocab_size
+            && draft_vocab != self.vocab_size
+        {
+            inference_tensor::bail!(
+                "DSpark drafts over a reduced vocabulary ({draft_vocab} of {}), which is unsupported",
+                self.vocab_size
             );
         }
-        Ok(())
+        Ok(rank)
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -342,7 +442,12 @@ impl DFlashConfig {
     }
 
     pub fn target_layer_ids(&self) -> Result<Vec<usize>> {
-        if let Some(ids) = &self.dflash_config.target_layer_ids {
+        if let Some(ids) = self
+            .dflash_config
+            .target_layer_ids
+            .as_ref()
+            .or(self.target_layer_ids.as_ref())
+        {
             return Ok(ids.clone());
         }
         let Some(num_target_layers) = self.num_target_layers else {
@@ -373,6 +478,43 @@ impl DFlashConfig {
         let sliding = layer_type == "sliding_attention";
         let is_causal = self.is_causal.unwrap_or(sliding);
         (is_causal, sliding.then_some(self.sliding_window).flatten())
+    }
+}
+
+/// DSpark's low-rank bigram bias: draft i's logits gain `w2 . w1[prev]`, prev being the anchor for the first draft
+/// and the previous biased pick after it, so the picks chain greedily across the block as in the reference.
+struct MarkovHead {
+    // [vocab, rank]
+    w1: Tensor,
+    w2: Arc<dyn QuantMethod>,
+}
+
+impl MarkovHead {
+    fn load(vb: ShardedVarBuilder, vocab: usize, rank: usize, device: &Device) -> Result<Self> {
+        Ok(Self {
+            w1: vb.pp("markov_w1").get((vocab, rank), "weight")?,
+            w2: linear_from_weight(
+                vb.pp("markov_w2").get((vocab, rank), "weight")?,
+                None,
+                device,
+            )?,
+        })
+    }
+
+    /// Greedy picks `[batch, drafts]` from base logits `[batch, drafts, vocab]` and each row's anchor `[batch]`.
+    fn chain_greedy(&self, logits: &Tensor, anchors: &Tensor) -> Result<Tensor> {
+        let drafts = logits.dim(1)?;
+        let mut prev = anchors.clone();
+        let mut picks = Vec::with_capacity(drafts);
+        for i in 0..drafts {
+            let bias = self
+                .w2
+                .forward(&self.w1.index_select(&prev, 0)?)?
+                .to_dtype(logits.dtype())?;
+            prev = (logits.i((.., i))? + bias)?.argmax(D::Minus1)?;
+            picks.push(prev.clone());
+        }
+        Tensor::stack(&picks, 1)
     }
 }
 
@@ -1280,7 +1422,10 @@ pub struct DFlashDraftModel {
     rope_attention_factor: f32,
     pub target_layer_ids: Vec<usize>,
     mask_token_id: u32,
+    // noise rows per block; the first `draft_row_offset` of them only condition, the rest draft
     block_size: usize,
+    draft_row_offset: usize,
+    markov: Option<MarkovHead>,
     input_embedding_scale: f64,
     output_multiplier: f64,
     num_heads: usize,
@@ -1359,7 +1504,11 @@ impl DFlashCudaGraphBuffers {
             (key.batch_bucket + 1,),
             device,
         )?;
-        let output_tokens = Var::zeros((key.batch_bucket, key.block - 1), DType::U32, device)?;
+        let output_tokens = Var::zeros(
+            (key.batch_bucket, key.block - model.draft_row_offset),
+            DType::U32,
+            device,
+        )?;
         let (
             selector_inverse_temperatures,
             selector_uniforms,
@@ -2118,17 +2267,7 @@ pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
     })?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
-    let is_dflash = value
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                architecture
-                    .as_str()
-                    .is_some_and(|name| name.contains("DFlash") || name.contains("Dflash"))
-            })
-        });
-    if !is_dflash {
+    if !config_names_dflash(&value) {
         return Ok(None);
     }
     serde_json::from_value(value)
@@ -2187,17 +2326,7 @@ pub fn windowed_kv_cache_size_in_bytes(
         .map_err(|err| inference_tensor::Error::msg(format!("failed to read MTP config: {err}")))?;
     let value: serde_json::Value =
         serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
-    let is_dflash = value
-        .get("architectures")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|architectures| {
-            architectures.iter().any(|architecture| {
-                architecture
-                    .as_str()
-                    .is_some_and(|name| name.contains("DFlash") || name.contains("Dflash"))
-            })
-        });
-    if !is_dflash {
+    if !config_names_dflash(&value) {
         return Ok(0);
     }
     let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(inference_tensor::Error::msg)?;
@@ -2287,7 +2416,8 @@ impl DFlashDraftModel {
                 cfg.architectures
             );
         }
-        cfg.validate_rope_type()?;
+        let yarn = cfg.rope_yarn(yarn_rope_config)?;
+        let markov_rank = cfg.markov_rank()?;
         if cfg.hidden_size != target_hidden_size {
             inference_tensor::bail!(
                 "DFlash hidden size {} does not match target hidden size {target_hidden_size}",
@@ -2303,13 +2433,13 @@ impl DFlashDraftModel {
             );
         }
         let head_dim = cfg.head_dim();
-        let (inv_freq, rope_attention_factor) = match cfg.yarn_rope_config(yarn_rope_config)? {
+        let (inv_freq, rope_attention_factor) = match yarn {
             Some(yarn) => {
                 tracing::info!(
                     factor = yarn.factor,
                     original_max_position_embeddings = yarn.original_max_position_embeddings,
                     max_position_embeddings = yarn.max_position_embeddings,
-                    "Using target YaRN scaling for DFlash rotary embeddings"
+                    "Using YaRN scaling for DFlash rotary embeddings"
                 );
                 yarn_inv_freq_and_attention_factor(&yarn, device)?
             }
@@ -2455,6 +2585,9 @@ impl DFlashDraftModel {
             .is_v2()
             .then(|| CandidateSelector::load(vb.pp("candidate_selector"), &cfg))
             .transpose()?;
+        let markov = markov_rank
+            .map(|rank| MarkovHead::load(vb.pp("markov_head"), cfg.vocab_size, rank, device))
+            .transpose()?;
         let selector_capability = match selector.as_ref() {
             None => Err("a DFlash2 checkpoint with a candidate selector is required".to_string()),
             #[cfg(feature = "cuda")]
@@ -2490,6 +2623,8 @@ impl DFlashDraftModel {
             target_layer_ids,
             mask_token_id: cfg.mask_token_id()?,
             block_size: cfg.block_size(),
+            draft_row_offset: cfg.draft_row_offset(),
+            markov,
             input_embedding_scale: cfg.dflash_config.input_embedding_scale.unwrap_or(1.0),
             output_multiplier: cfg.dflash_config.output_multiplier.unwrap_or(1.0),
             num_heads: cfg.num_attention_heads,
@@ -2608,9 +2743,10 @@ impl DFlashDraftModel {
             &self.graph_plans(max_n),
             crate::cuda::graph_capture::cuda_graph_precapture_batches(
                 CudaGraphComponent::DFlash,
-                max_n.saturating_add(1),
+                self.query_rows(max_n),
             ),
             sequence_capacity,
+            self.draft_row_offset,
         );
         let Some(max_batch) = shapes.iter().map(|(batch, _)| *batch).max() else {
             return Ok(());
@@ -2723,7 +2859,7 @@ impl DFlashDraftModel {
             {
                 return Ok(None);
             }
-            let block = n_predict + 1;
+            let block = self.query_rows(n_predict);
             if block > self.block_size || !dflash_graph_positions_fit(start_positions, block) {
                 return Ok(None);
             }
@@ -2854,8 +2990,14 @@ impl DFlashDraftModel {
         self.ctx_cache.lock().expect("dflash cache poisoned").len()
     }
 
-    pub fn block_size(&self) -> usize {
-        self.block_size
+    /// The most drafts one block yields.
+    pub fn max_drafts(&self) -> usize {
+        self.block_size - self.draft_row_offset
+    }
+
+    /// Noise rows (`[anchor, mask, ...]`) that draft `drafts` tokens.
+    pub fn query_rows(&self, drafts: usize) -> usize {
+        drafts + self.draft_row_offset
     }
 
     pub fn prefix_replay(&self) -> SpeculativePrefixReplay {
@@ -3025,6 +3167,14 @@ impl DFlashDraftModel {
         #[cfg(not(all(feature = "cuda", target_family = "unix")))]
         {
             None
+        }
+    }
+
+    pub fn kind(&self) -> &'static str {
+        match (&self.markov, &self.selector) {
+            (Some(_), _) => "DSpark",
+            (None, Some(_)) => "DFlash2",
+            (None, None) => "DFlash",
         }
     }
 
@@ -3554,7 +3704,7 @@ impl DFlashDraftModel {
         )?;
 
         let hs = self.norm.forward(&hs)?;
-        hs.narrow(1, 1, block - 1)
+        hs.narrow(1, self.draft_row_offset, block - self.draft_row_offset)
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -3817,7 +3967,7 @@ impl DFlashDraftModel {
             },
         )?;
         let hs = self.norm.forward(&hs)?;
-        hs.narrow(1, 1, block - 1)
+        hs.narrow(1, self.draft_row_offset, block - self.draft_row_offset)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -3860,7 +4010,7 @@ impl DFlashDraftModel {
         let anchors = buffers.anchors.as_detached_tensor();
         match key.selector_mode {
             DFlashSelectorMode::Disabled => Ok(DFlashCudaGraphOutput {
-                tokens: logits.argmax(D::Minus1)?.contiguous()?,
+                tokens: self.pick_greedy(&logits, &anchors)?.contiguous()?,
                 candidate_ids: None,
                 candidate_probs: None,
             }),
@@ -3975,9 +4125,20 @@ impl DFlashDraftModel {
 
         let tokens_per_seq = match &self.selector {
             Some(selector) => selector.select_greedy_batch(hidden, &logits, anchors)?,
-            None => logits.argmax(D::Minus1)?.to_vec2::<u32>()?,
+            None => {
+                let anchors = Tensor::from_vec(anchors.to_vec(), (batch,), logits.device())?;
+                self.pick_greedy(&logits, &anchors)?.to_vec2::<u32>()?
+            }
         };
         Ok(DFlashProposalBatch::Tokens(tokens_per_seq))
+    }
+
+    /// Greedy drafts `[batch, drafts]` without a selector: DSpark chains its Markov bias, DFlash takes the argmax.
+    fn pick_greedy(&self, logits: &Tensor, anchors: &Tensor) -> Result<Tensor> {
+        match &self.markov {
+            Some(markov) => markov.chain_greedy(logits, anchors),
+            None => logits.argmax(D::Minus1),
+        }
     }
 
     fn geometry_mask(
@@ -4055,13 +4216,14 @@ mod tests {
     use inference_tensor::{D, Device, Result, Tensor};
 
     use super::{
-        ADAPT_FULL_DEPTH_MAX_BATCH, DFlashConfig, DFlashGraphHostInput, DFlashSamplingInputs,
-        DFlashSequenceEviction, contiguous_row_range, copy_dflash_graph_output_rows,
-        dflash_adaptive_env_value, dflash_adaptive_supported, dflash_graph_host_rows,
-        dflash_graph_plans, dflash_graph_positions_fit, dflash_graph_precapture_shapes,
-        dflash_prefix_replay, dflash_rope_from_positions, drain_dflash_lru_entries,
-        gather_ctx_taps, linear_from_weight, resolve_dflash_sampling_policy, select_ctx_kv_rows,
-        select_dflash_depth, update_dormant_sequences,
+        ADAPT_FULL_DEPTH_MAX_BATCH, DEFAULT_BLOCK_SIZE, DFlashConfig, DFlashGraphHostInput,
+        DFlashSamplingInputs, DFlashSequenceEviction, MarkovHead, contiguous_row_range,
+        copy_dflash_graph_output_rows, dflash_adaptive_env_value, dflash_adaptive_supported,
+        dflash_graph_host_rows, dflash_graph_plans, dflash_graph_positions_fit,
+        dflash_graph_precapture_shapes, dflash_prefix_replay, dflash_rope_from_positions,
+        drain_dflash_lru_entries, gather_ctx_taps, linear_from_weight,
+        resolve_dflash_sampling_policy, select_ctx_kv_rows, select_dflash_depth,
+        update_dormant_sequences,
     };
     #[cfg(feature = "cuda")]
     use super::{CandidateSelectorCudaSpec, validate_candidate_selector_cuda};
@@ -4403,7 +4565,7 @@ mod tests {
     fn graph_precapture_shapes_follow_depth_batch_limits_and_pool_capacity() {
         let batches = (1..=8).chain(std::iter::once(16)).collect::<Vec<_>>();
         assert_eq!(
-            dflash_graph_precapture_shapes(&dflash_graph_plans(false, 7), batches.clone(), 16),
+            dflash_graph_precapture_shapes(&dflash_graph_plans(false, 7), batches.clone(), 16, 1),
             vec![
                 (1, 8),
                 (2, 8),
@@ -4417,7 +4579,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            dflash_graph_precapture_shapes(&dflash_graph_plans(true, 7), batches, 16),
+            dflash_graph_precapture_shapes(&dflash_graph_plans(true, 7), batches, 16, 1),
             vec![
                 (1, 4),
                 (1, 8),
@@ -4447,6 +4609,7 @@ mod tests {
             &dflash_graph_plans(false, 7),
             cuda_graph_precapture_batches(CudaGraphComponent::DFlash, 8),
             CUDA_GRAPH_MAX_BATCH_BUCKET,
+            1,
         );
         assert_eq!(
             shapes.len(),
@@ -4622,15 +4785,15 @@ mod tests {
     }
 
     #[test]
-    fn dflash_rejects_draft_side_rope_scaling() {
+    fn dflash_rejects_draft_side_rope_scalings_other_than_yarn() {
         for key in ["rope_type", "type"] {
             let mut cfg = qwen35_dflash_config();
             cfg.rope_parameters = Some(serde_json::json!({
                 "rope_theta": 10_000_000,
-                (key): "yarn",
+                (key): "linear",
             }));
             let error = cfg
-                .validate_rope_type()
+                .draft_yarn_rope_config()
                 .expect_err("draft-side scaling must not be silently ignored");
             assert!(
                 error
@@ -4648,9 +4811,105 @@ mod tests {
             "type": "yarn",
         }));
         let error = cfg
-            .validate_rope_type()
+            .draft_yarn_rope_config()
             .expect_err("conflicting aliases must not be accepted");
         assert!(error.to_string().contains("conflicts with legacy type"));
+    }
+
+    // RadixArk/Qwen3.8-27B-DSpark's settings: block 7 drafting from the anchor, a rank-256 head, YaRN 32x over 8K
+    fn qwen38_dspark_config() -> DFlashConfig {
+        serde_json::from_str(
+            r#"{
+                "architectures": ["DSparkDraftModel"],
+                "hidden_size": 5120,
+                "intermediate_size": 17408,
+                "num_hidden_layers": 5,
+                "num_attention_heads": 32,
+                "num_key_value_heads": 8,
+                "head_dim": 128,
+                "max_position_embeddings": 262144,
+                "rms_norm_eps": 1e-6,
+                "vocab_size": 248320,
+                "draft_vocab_size": 248320,
+                "block_size": 7,
+                "mask_token_id": 248070,
+                "markov_rank": 256,
+                "markov_head_type": "vanilla",
+                "target_layer_ids": [5, 19, 33, 47, 61],
+                "rope_parameters": {
+                    "rope_theta": 10000000, "rope_type": "yarn", "factor": 32.0,
+                    "original_max_position_embeddings": 8192, "beta_fast": 32.0, "beta_slow": 1.0
+                },
+                "layer_types": ["full_attention", "full_attention", "full_attention", "full_attention", "full_attention"]
+            }"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn dspark_drafts_from_the_anchor_row_with_its_markov_head() -> Result<()> {
+        let cfg = qwen38_dspark_config();
+        assert!(cfg.is_dflash());
+        assert_eq!(cfg.draft_row_offset(), 0);
+        assert_eq!(cfg.max_drafts(), 7);
+        assert_eq!(cfg.markov_rank()?, Some(256));
+        assert_eq!(cfg.target_layer_ids()?, vec![5, 19, 33, 47, 61]);
+        assert_eq!(cfg.layer_attention(0), (false, None));
+        // a DFlash 2 block drafts from rows 1.., one fewer than it runs
+        let dflash = qwen35_dflash_config();
+        assert_eq!(dflash.draft_row_offset(), 1);
+        assert_eq!(dflash.max_drafts(), DEFAULT_BLOCK_SIZE - 1);
+        assert_eq!(dflash.markov_rank()?, None);
+        Ok(())
+    }
+
+    #[test]
+    fn dspark_rejects_heads_and_vocabularies_it_cannot_run() {
+        let mut cfg = qwen38_dspark_config();
+        cfg.markov_head_type = Some("gated".to_string());
+        assert!(cfg.markov_rank().is_err());
+        let mut cfg = qwen38_dspark_config();
+        cfg.draft_vocab_size = Some(32_000);
+        assert!(cfg.markov_rank().is_err());
+    }
+
+    #[test]
+    fn dspark_uses_its_own_yarn_and_refuses_a_second_scaling() -> Result<()> {
+        let cfg = qwen38_dspark_config();
+        let yarn = cfg
+            .rope_yarn(None)?
+            .expect("the drafter scales RoPE itself");
+        assert_eq!(yarn.factor, 32.0);
+        assert_eq!(yarn.original_max_position_embeddings, 8192);
+        assert_eq!(yarn.max_position_embeddings, 262_144);
+        assert_eq!(yarn.base, 10_000_000.0);
+        assert_eq!(yarn.head_dim, 128);
+        let error = cfg
+            .rope_yarn(Some(&qwen35_target_yarn()))
+            .expect_err("two YaRN scalings must not compose silently");
+        assert!(error.to_string().contains("both scale RoPE"));
+        Ok(())
+    }
+
+    #[test]
+    fn markov_head_chains_each_pick_into_the_next_bias() -> Result<()> {
+        let device = Device::Cpu;
+        // rank 1 over a vocabulary of 3: only token 1 has a latent, and its bias favours token 2
+        let w1 = Tensor::new(&[[0f32], [1.0], [0.0]], &device)?;
+        let w2 = Tensor::new(&[[0f32], [0.0], [4.0]], &device)?;
+        let head = MarkovHead {
+            w1,
+            w2: linear_from_weight(w2, None, &device)?,
+        };
+        // anchor 0 adds nothing (draft 0 is the base argmax, 1), pick 1 tips draft 1 to 2, pick 2 adds nothing again
+        let logits = Tensor::new(
+            &[[[0f32, 3.0, 0.0], [0.0, 3.0, 0.0], [0.0, 3.0, 0.0]]],
+            &device,
+        )?;
+        let anchors = Tensor::new(&[0u32], &device)?;
+        let picks = head.chain_greedy(&logits, &anchors)?.to_vec2::<u32>()?;
+        assert_eq!(picks, vec![vec![1, 2, 1]]);
+        Ok(())
     }
 
     #[allow(clippy::cast_precision_loss)]

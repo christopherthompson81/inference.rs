@@ -129,3 +129,4 @@ Text, multimodal, speech, and embedding models support ISQ at load time. Diffusi
 |---|---|---|---|
 | MTP | `Gemma4` | Gemma 4 assistant checkpoints, PagedAttention required | [Speculative decoding (MTP)](/guides/perf/speculative-decoding/) |
 | MTP | `Qwen3_5`, `Qwen3_5Moe`, `Qwen3.8` | Built-in `mtp.*` head (`--mtp`), PagedAttention required | [Speculative decoding (MTP)](/guides/perf/speculative-decoding/) |
+| DFlash / DSpark | `Qwen3_5`, `Qwen3_5Moe`, `Qwen3.8` | DFlash, DFlash 2 and DSpark drafters (`--mtp-model`), PagedAttention required | [Speculative decoding (DFlash)](/guides/perf/speculative-decoding/) |

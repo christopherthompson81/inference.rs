@@ -66,7 +66,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 |---|---|---|---|
 | MTP | Gemma 4 | Gemma 4 assistant checkpoints (`--mtp-model`) | Supported with paged attention |
 | MTP | Qwen3.5 (dense and MoE), Qwen3.8 | Built into the checkpoint (`--mtp`) | Supported with paged attention |
-| DFlash / DFlash 2 | Qwen3.5, Qwen3.8 | DFlash draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8 | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
 
@@ -119,6 +119,27 @@ Acceptance is strongly content-dependent: [incoai/Qwen3.8-27B-DFlash2](https://h
 accepts ~7 of 7 drafts on math/code and much less on thinking-mode reasoning traces, which are out
 of its training distribution. As everywhere in this engine, drafts are verified by the target:
 greedy output is byte-identical to non-speculative decoding.
+
+## DSpark (Qwen3.5 / Qwen3.8)
+
+DSpark drafters (DeepSeek's DeepSpec, also trained with SpecForge) are DFlash drafters with a low-rank Markov head:
+each draft's logits gain a bias keyed on the previous token, so the drafts chain across the block. They draft from
+every row of the block, the anchor included, so a block of 7 yields 7 drafts and an 8-wide verify. Pass one as
+`--mtp-model`; inference.rs detects it from `architectures` (`DSparkDraftModel`, `Qwen3DSparkModel`):
+
+```bash
+inference serve -m Qwen/Qwen3.8-27B --quant 4 \
+  --mtp-model RadixArk/Qwen3.8-27B-DSpark --mtp-n-predict 7
+```
+
+Drafting is greedy (the Markov chain picks the argmax at each position, as the reference does), and a drafter that
+ships its own YaRN scaling uses it. Not yet supported: the confidence head's early cutoff (the head loads but is
+unused), the speculators export format (`DSparkSpeculator`), reduced draft vocabularies, and non-Qwen3 backbones.
+
+Published DSpark drafters attend to the whole context rather than a window, so they run without CUDA graphs and keep
+about 20 KB of drafter cache per context token on Qwen3.8 27B (5 layers, 8 KV heads), more than a q3 target cache.
+On the RTX 3090 they accept about as many tokens per step as DFlash 2 (3.0 against 3.5 on the same coding and
+review prompts) and decode slower, so DFlash 2 stays the better choice where one exists.
 
 ## Gemma 4
 
