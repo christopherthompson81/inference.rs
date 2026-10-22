@@ -1,7 +1,7 @@
 //! The Code tab: `inference_coder`'s agent over this server's engine, working in projects under the code roots, or in
 //! a demo project it makes in the temp directory.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::convert::Infallible;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,8 @@ use crate::types::AppState;
 // sessions kept loaded at once; the least recently opened idle one goes first
 const MAX_LIVE_SESSIONS: usize = 32;
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
+// runs of tool calls labelled in one request; a session's older ones wait for later turns
+const MAX_LABEL_GROUPS: usize = 16;
 const DEMO_DIR_PREFIX: &str = "inference-code-demo-";
 const DEMO_PROMPT: &str = "The test suite fails. Fix the stockroom package so \
 `python3 -m unittest discover -s tests -t .` passes. The tests and README.md describe the intended behaviour; \
@@ -67,6 +69,9 @@ struct LiveSession {
     approvals: Mutex<IndexMap<String, oneshot::Sender<Approval>>>,
     // outside the agent's lock, so the page can read it while a prompt runs
     changes: Arc<Mutex<Changes>>,
+    // activity labels by their group's first call, also outside the lock, and the file they are kept in
+    labels: Mutex<BTreeMap<String, String>>,
+    path: PathBuf,
 }
 
 impl CodeState {
@@ -285,8 +290,73 @@ pub(crate) async fn open_session(
         "project": session.root,
         // the system prompt is the harness's, not part of the conversation shown
         "messages": session.messages.iter().skip(1).collect::<Vec<_>>(),
+        "labels": *live.labels.lock().unwrap(),
     }))
     .into_response()
+}
+
+#[derive(Deserialize)]
+pub(crate) struct LabelsRequest {
+    session_id: String,
+    /// Each group the ids of a run of tool calls, as the page folds them.
+    groups: Vec<Vec<String>>,
+}
+
+/// Asks the session's model what each group of tool calls was for, keeps the answers with the session and returns
+/// them by each group's first call; the page shows its own summary of the calls until then.
+pub(crate) async fn label_activity(
+    Extension(code): Extension<Arc<CodeState>>,
+    Json(request): Json<LabelsRequest>,
+) -> Response {
+    let Some(live) = code.live(&request.session_id) else {
+        return not_found(&request.session_id);
+    };
+    let groups = {
+        let labels = live.labels.lock().unwrap();
+        request
+            .groups
+            .into_iter()
+            .filter(|group| group.first().is_some_and(|id| !labels.contains_key(id)))
+            .take(MAX_LABEL_GROUPS)
+            .collect::<Vec<_>>()
+    };
+    if groups.is_empty() {
+        return Json(json!({"labels": {}})).into_response();
+    }
+    // built under the agent's lock and sent without it, so the next prompt need not wait for the labels
+    let (label_request, backend, groups) = {
+        let Ok(agent) = live.agent.try_lock() else {
+            return (StatusCode::CONFLICT, "a prompt is running in this session").into_response();
+        };
+        let groups = inference_coder::activity::recorded_groups(&agent.session.messages, groups);
+        if groups.is_empty() {
+            return Json(json!({"labels": {}})).into_response();
+        }
+        let Some(label_request) = agent.label_request(&groups) else {
+            return bad_request("a group names a call this session doesn't hold").into_response();
+        };
+        (label_request, agent.shared_backend(), groups)
+    };
+    let reply = match inference_coder::activity::reply_text(backend.as_ref(), label_request).await {
+        Ok(reply) => reply,
+        Err(error) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("{error:#}")).into_response();
+        }
+    };
+    let Some(labels) = inference_coder::activity::parse(&reply, groups.len()) else {
+        tracing::debug!("activity labels unreadable in {reply:?}");
+        return (StatusCode::BAD_GATEWAY, "the model's reply held no labels").into_response();
+    };
+    let labels = groups
+        .iter()
+        .zip(labels)
+        .map(|(group, label)| (group[0].clone(), label))
+        .collect::<BTreeMap<_, _>>();
+    if let Err(error) = Session::append_labels(&live.path, &labels) {
+        tracing::warn!("Failed keeping activity labels: {error:#}");
+    }
+    live.labels.lock().unwrap().extend(labels.clone());
+    Json(json!({"labels": labels})).into_response()
 }
 
 /// Makes a demo project in the temp directory (a small package whose tests fail) and opens a session there; the page
@@ -381,6 +451,8 @@ async fn load(
         config,
     );
     let live = Arc::new(LiveSession {
+        labels: Mutex::new(agent.session.labels.clone()),
+        path: agent.session.path.clone(),
         changes: agent.changes(),
         agent: Arc::new(tokio::sync::Mutex::new(agent)),
         interrupt: Interrupt::default(),

@@ -121,6 +121,13 @@ file, or **diff** on an edit or write card, to open its diff in a pane beside th
 resize the pane. The counts and the open diff update after every edit, write and command, so you can watch the change
 build as the agent works.
 
+Thinking and the tool calls after it fold into one line per run, which expands to the full blocks, such as "Read 8
+files, ran 1 command (9)". With **Describe activity** checked (the default), once a prompt is answered the session's
+model replaces each line's summary with what the run was for, such as "Ran tests to confirm all pass (1)". It is one
+request after the answer, over the conversation the server already has cached, so the agent never shares the GPU with
+it; on Qwen3.8 27B the labels arrive about 2 s after the answer. They are kept in the session file, and the summary
+stays when the setting is off or the model's reply can't be read.
+
 Calls that need approval show as cards with the edit's old and new text, the file to write, or the command. **Allow**
 runs the call once, **Always allow** covers that tool inside the project for the rest of the session, and **Deny**
 tells the model you declined. **Stop** interrupts the model or the running tool, as Ctrl-C does in the terminal.

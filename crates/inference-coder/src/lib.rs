@@ -2,6 +2,7 @@
 //! definitions, runs the tool calls that come back on the user's machine (asking first where the permission mode says
 //! to) and sends the results, over the engine in this process or any OpenAI-compatible server.
 
+pub mod activity;
 pub mod agent;
 pub mod backend;
 pub mod changes;

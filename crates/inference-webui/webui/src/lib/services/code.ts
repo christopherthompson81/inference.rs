@@ -78,8 +78,22 @@ export async function openSession(
   project: string,
   model: string | null,
   sessionId?: string,
-): Promise<{ session_id: string; project: string; messages: CodeMessage[] }> {
+): Promise<{
+  session_id: string;
+  project: string;
+  messages: CodeMessage[];
+  /** What each run of tool calls was for, by the id of its first call. */
+  labels: Record<string, string>;
+}> {
   return (await post("open", { project, session_id: sessionId, model })).json();
+}
+
+/** Asks the session's model what each group of tool calls (their ids) was for; labels by each group's first id. */
+export async function labelActivity(
+  sessionId: string,
+  groups: string[][],
+): Promise<Record<string, string>> {
+  return (await (await post("labels", { session_id: sessionId, groups })).json()).labels;
 }
 
 /** Makes a demo project (a small package whose tests fail) and opens a session there; send `prompt` to watch the agent fix it. */

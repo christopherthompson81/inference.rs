@@ -1,5 +1,6 @@
 //! Sessions on disk: one JSONL file each, a header line then one line per message, only ever appended to.
 
+use std::collections::BTreeMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 const SESSION_EXT: &str = "jsonl";
 const HEADER_TYPE: &str = "session";
 const MESSAGE_TYPE: &str = "message";
+const LABELS_TYPE: &str = "labels";
 const FORMAT_VERSION: u64 = 1;
 // how much of the first prompt a listing shows
 const TITLE_CHARS: usize = 60;
@@ -30,6 +32,8 @@ pub struct Session {
     pub path: PathBuf,
     pub root: PathBuf,
     pub messages: Vec<Value>,
+    /// What each run of tool calls was for, by the id of its first call ([`crate::activity`]).
+    pub labels: BTreeMap<String, String>,
     file: File,
 }
 
@@ -69,6 +73,7 @@ impl Session {
             path,
             root: root.to_path_buf(),
             messages: Vec::new(),
+            labels: BTreeMap::new(),
             file,
         };
         session.write_line(
@@ -85,6 +90,7 @@ impl Session {
         );
         let mut header = None;
         let mut messages = Vec::new();
+        let mut labels = BTreeMap::new();
         for line in reader.lines() {
             let line = line?;
             if line.trim().is_empty() {
@@ -97,6 +103,15 @@ impl Session {
             match entry.get("type").and_then(Value::as_str) {
                 Some(HEADER_TYPE) => header = Some(entry),
                 Some(MESSAGE_TYPE) => messages.extend(entry.get("message").cloned()),
+                Some(LABELS_TYPE) => {
+                    if let Some(entries) = entry.get("labels").and_then(Value::as_object) {
+                        for (call, label) in entries {
+                            if let Some(label) = label.as_str() {
+                                labels.insert(call.clone(), label.to_string());
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -115,6 +130,7 @@ impl Session {
             path: path.to_path_buf(),
             root: PathBuf::from(field("root")),
             messages,
+            labels,
             file: OpenOptions::new().append(true).open(path)?,
         })
     }
@@ -123,6 +139,18 @@ impl Session {
         self.write_line(&json!({"type": MESSAGE_TYPE, "message": message}))?;
         self.messages.push(message);
         Ok(())
+    }
+
+    /// Adds activity labels to the session at `path`, through a handle of its own so a prompt running in the session
+    /// keeps appending meanwhile; one short line, which an append writes whole.
+    pub fn append_labels(path: &Path, labels: &BTreeMap<String, String>) -> Result<()> {
+        let mut line = serde_json::to_string(&json!({"type": LABELS_TYPE, "labels": labels}))?;
+        line.push('\n');
+        OpenOptions::new()
+            .append(true)
+            .open(path)
+            .and_then(|mut file| file.write_all(line.as_bytes()))
+            .with_context(|| format!("writing {}", path.display()))
     }
 
     fn write_line(&mut self, entry: &Value) -> Result<()> {
@@ -246,5 +274,19 @@ mod tests {
             .and_then(|mut f| std::io::Write::write_all(&mut f, b"{\"type\":\"mess"))
             .unwrap();
         assert_eq!(Session::open(&session.path).unwrap().messages.len(), 2);
+    }
+
+    #[test]
+    fn labels_written_beside_a_session_read_back_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = Session::create(dir.path(), dir.path(), "m", "s").unwrap();
+        let labels = [("call_1".to_string(), "Found the failing test".to_string())].into();
+        Session::append_labels(&session.path, &labels).unwrap();
+        session
+            .append(json!({"role": "user", "content": "next"}))
+            .unwrap();
+        let reopened = Session::open(&session.path).unwrap();
+        assert_eq!(reopened.labels, labels);
+        assert_eq!(reopened.messages, session.messages);
     }
 }

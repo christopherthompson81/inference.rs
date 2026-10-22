@@ -109,6 +109,8 @@ pub(crate) const UI_CODE_DIFF_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/diff", "GET", RouteKind::Ui);
 pub(crate) const UI_CODE_TREE_ROUTE: RouteInfo =
     RouteInfo::new("/api/code/tree", "GET", RouteKind::Ui);
+pub(crate) const UI_CODE_LABELS_ROUTE: RouteInfo =
+    RouteInfo::new("/api/code/labels", "POST", RouteKind::Ui);
 pub(crate) const UI_UPLOADS_ROUTE: RouteInfo = RouteInfo::new("/uploads", "GET", RouteKind::Ui);
 pub(crate) const UI_ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::Ui);
 pub(crate) const UI_STATIC_ROUTE: RouteInfo = RouteInfo::new("/{*path}", "GET", RouteKind::Ui);
@@ -340,6 +342,7 @@ async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> 
         .route(UI_CODE_CHANGES_ROUTE.path, get(code::changes))
         .route(UI_CODE_DIFF_ROUTE.path, get(code::diff))
         .route(UI_CODE_TREE_ROUTE.path, get(code::tree))
+        .route(UI_CODE_LABELS_ROUTE.path, post(code::label_activity))
         .layer(Extension(code))
         .layer(middleware::from_fn(require_admin));
     let router = Router::new()
