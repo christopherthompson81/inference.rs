@@ -73,13 +73,8 @@ function Warn-IfShadowed {
 # Banner
 function Show-Banner {
     Write-Host ""
-    Write-Host "  __  __ _     _             _              " -ForegroundColor Cyan
-    Write-Host " |  \/  (_)___| |_ _ __ __ _| |  _ __ ___   " -ForegroundColor Cyan
-    Write-Host " | |\/| | / __| __| '__/ `` | | | '__/ __|  " -ForegroundColor Cyan
-    Write-Host " | |  | | \__ \ |_| | | (_| | |_| |  \__ \  " -ForegroundColor Cyan
-    Write-Host " |_|  |_|_|___/\__|_|  \__,_|_(_)_|  |___/  " -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "Fast, flexible LLM inference." -ForegroundColor Blue
+    Write-Host "inference.rs" -ForegroundColor Cyan
+    Write-Host "One Rust engine for text, vision, speech and images." -ForegroundColor Blue
     Write-Host ""
 }
 
@@ -334,7 +329,7 @@ function Get-Features {
 }
 
 # Install inference-cli
-function Install-MistralRS {
+function Install-InferenceRs {
     param([string]$Features)
     $script:SourceInstallRoot = Join-Path $env:TEMP "inference-cargo-install-$([guid]::NewGuid().ToString())"
     $script:SourceInferenceRs = Join-Path $script:SourceInstallRoot "bin\inference.exe"
@@ -616,7 +611,7 @@ function Main {
     }
 
     Write-Host ""
-    Install-MistralRS -Features $features
+    Install-InferenceRs -Features $features
     Install-SourceFromStaging
     Remove-DuplicateInstalls
 
