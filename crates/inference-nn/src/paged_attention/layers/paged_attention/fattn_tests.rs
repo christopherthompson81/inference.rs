@@ -434,11 +434,18 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
 // A speculative verify's rows over a quantized cache, one causal block per sequence, with and without a window
 #[test]
 fn verify_rows_over_a_quantized_cache_match_attention_over_its_values() -> Result<()> {
-    for (bits, window) in [((3, 3), None), ((4, 2), Some(100))] {
+    // 6 Q heads a K/V head: 8 rows are 48 columns, which take the transposed kernel
+    for (head_dim, bits, window, heads) in [
+        (256, (3, 3), None, (N_HEAD, N_HEAD_KV)),
+        (256, (4, 2), Some(100), (N_HEAD, N_HEAD_KV)),
+        (256, (3, 3), None, (12, 2)),
+        (256, (4, 2), Some(100), (12, 2)),
+        (128, (3, 3), None, (12, 2)),
+    ] {
         check_with(
             Case {
-                head_dim: 256,
-                heads: (N_HEAD, N_HEAD_KV),
+                head_dim,
+                heads,
                 block_size: 32,
                 cache_dtype: DType::BF16,
                 full_lens: &[8, 41, 333, 64],
