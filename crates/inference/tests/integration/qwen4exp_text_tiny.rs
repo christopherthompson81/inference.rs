@@ -6,6 +6,8 @@ use inference_nn::paged_attention::AttentionImplementation;
 
 #[path = "../support/recording.rs"]
 mod recording;
+#[path = "../support/tiny_drafter.rs"]
+mod tiny_drafter;
 #[path = "../support/traces.rs"]
 mod traces;
 
@@ -31,6 +33,13 @@ const LONG_PROMPT_STRIDE: usize = 7;
 const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;
 // how much more BF16 error a split model may show than the model all on the GPU
 const SPLIT_ERROR_RATIO: f32 = 1.25;
+// speculative verification against plain decode, both BF16
+const SPECULATIVE_LOGPROB_TOLERANCE: f32 = 0.06;
+const DFLASH_TAPS: [usize; 2] = [1, 3];
+const DFLASH_BLOCK: usize = 4;
+const DFLASH_N_PREDICT: usize = 2;
+// every drafter layer windowed, which its decode graphs need
+const DFLASH_WINDOW: usize = 32;
 // above every test's context, so QSA keeps every key
 const DENSE_BUDGET: usize = 1024;
 // two blocks of 4: QSA selects from the 12th token on
@@ -275,6 +284,69 @@ async fn flash_next_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::R
     anyhow::ensure!(
         scored.len() == expected.len() && split_error <= on_gpu * SPLIT_ERROR_RATIO,
         "the split model scores worse: mean logprob error {split_error} against {on_gpu} on the GPU"
+    );
+    Ok(())
+}
+
+// A DFlash drafter on Flash-Next drafts from the mean of the hyper-connection streams, and greedy output holds up to
+// BF16 near ties (verification batches rows unlike plain decode): rejected drafts leave PLE's conv state, QSA's pooled
+// keys and the indexer cache to be undone.
+#[tokio::test]
+async fn flash_next_dflash_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    for budget in [DENSE_BUDGET, SPARSE_BUDGET] {
+        dflash_keeps_greedy_output(budget).await?;
+    }
+    Ok(())
+}
+
+async fn dflash_keeps_greedy_output(budget: usize) -> anyhow::Result<()> {
+    let checkpoint = tiny_flash_next(budget)?;
+    let plain = paged_prefix_model(&checkpoint).await?;
+    let (expected, _) = complete(&plain, &PROMPT, GENERATED).await?;
+    drop(plain);
+    let drafter = tiny_drafter::tiny_drafter(
+        &tiny_drafter::DrafterTarget {
+            hidden: HIDDEN,
+            vocab: VOCAB,
+            taps: &DFLASH_TAPS,
+        },
+        serde_json::json!({
+            "architectures": ["DFlashDraftModel"],
+            "block_size": DFLASH_BLOCK,
+            "layer_types": ["sliding_attention"],
+            "sliding_window": DFLASH_WINDOW,
+        }),
+        None,
+    )?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DFLASH_N_PREDICT))
+        .build()
+        .await?;
+    let (actual, _) = complete(&model, &PROMPT, GENERATED).await?;
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    anyhow::ensure!(drafts > 0, "DFlash never drafted");
+    for (step, (got, want)) in actual.iter().zip(&expected).enumerate() {
+        anyhow::ensure!(
+            (got.1 - want.1).abs() < SPECULATIVE_LOGPROB_TOLERANCE,
+            "budget {budget}, step {step}: speculative {actual:?} against plain {expected:?}"
+        );
+        if got.0 != want.0 {
+            return Ok(());
+        }
+    }
+    anyhow::ensure!(
+        actual.len() == expected.len(),
+        "decode ended early: {actual:?}"
     );
     Ok(())
 }

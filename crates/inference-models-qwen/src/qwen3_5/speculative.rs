@@ -1051,13 +1051,13 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             *self.dflash.lock().expect("dflash poisoned") = None;
             return Ok(None);
         };
-        if self.hyper_streams() > 1 {
-            inference_tensor::bail!(
-                "speculative decoding is not supported yet for Qwen3.8-Flash-Next's hyper-connection residual"
-            );
-        }
         if !config.is_builtin() {
             return self.attach_dflash(config, runtime);
+        }
+        if self.hyper_streams() > 1 {
+            inference_tensor::bail!(
+                "built-in MTP is not supported yet for Qwen3.8-Flash-Next's hyper-connection residual"
+            );
         }
         if self.mtp.is_none() {
             inference_tensor::bail!(
@@ -1350,30 +1350,9 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             .iter()
             .map(|row| (row.batch_idx, row.keep_rows))
             .collect::<Vec<_>>();
-        if self.cache.hybrid().uses_recurrent_transition_log() {
-            if !self.stage_recurrent_prefixes(rows)? {
-                self.replay_recurrent_prefixes(&checkpoint_rows)?;
-            }
-            self.clear_gdn_replay_stash();
-            return Ok(());
-        }
-        let checkpointed = {
-            let mut cache = self.cache.hybrid();
-            self.supports_recurrent_speculative_checkpoints_with_cache(&cache)
-                && cache.commit_speculative_rows(&checkpoint_rows)?
-        };
-        if checkpointed {
-            self.clear_gdn_replay_stash();
-            return Ok(());
-        }
-        let rejected = rows
-            .iter()
-            .filter(|row| !row.accepted_all)
-            .map(|row| (row.batch_idx, row.keep_rows))
-            .collect::<Vec<_>>();
-        self.replay_recurrent_prefixes(&rejected)?;
-        self.clear_gdn_replay_stash();
-        Ok(())
+        self.commit_recurrent_prefixes(rows, &checkpoint_rows)?;
+        // after the GDN commit, which may rewrite every recurrent pool's state from its checkpoints
+        self.commit_ple_prefixes(&checkpoint_rows)
     }
 
     fn take_speculative_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
@@ -1394,6 +1373,40 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
 
 // The wrapper adds media inputs only; speculative decoding is the text model's.
 inference_nn::delegate_speculative_target!(Qwen3_5Model, text: Qwen3_5TextModel);
+
+impl Qwen3_5TextModel {
+    // The GDN layers' recurrent state at each row's kept prefix: staged transitions, pool checkpoints, or a replay.
+    fn commit_recurrent_prefixes(
+        &self,
+        rows: &[SpeculativeCommitRow],
+        checkpoint_rows: &[(usize, usize)],
+    ) -> Result<()> {
+        if self.cache.hybrid().uses_recurrent_transition_log() {
+            if !self.stage_recurrent_prefixes(rows)? {
+                self.replay_recurrent_prefixes(checkpoint_rows)?;
+            }
+            self.clear_gdn_replay_stash();
+            return Ok(());
+        }
+        let checkpointed = {
+            let mut cache = self.cache.hybrid();
+            self.supports_recurrent_speculative_checkpoints_with_cache(&cache)
+                && cache.commit_speculative_rows(checkpoint_rows)?
+        };
+        if checkpointed {
+            self.clear_gdn_replay_stash();
+            return Ok(());
+        }
+        let rejected = rows
+            .iter()
+            .filter(|row| !row.accepted_all)
+            .map(|row| (row.batch_idx, row.keep_rows))
+            .collect::<Vec<_>>();
+        self.replay_recurrent_prefixes(&rejected)?;
+        self.clear_gdn_replay_stash();
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {

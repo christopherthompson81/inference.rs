@@ -1,6 +1,6 @@
 //! Qwen3.8-Flash-Next's QSA: a small indexer scores each complete block of `compress_ratio` keys by its pooled key,
 //! and a query past the budget attends only to its top blocks plus the incomplete tail. The indexer's per-token keys
-//! live in an auxiliary paged layer: raw keys in K, and in V at a block's first cell the block's pooled key.
+//! live in an auxiliary paged layer: raw keys in K, and in V at a block's last cell the block's pooled key.
 
 use std::sync::Arc;
 
@@ -55,13 +55,14 @@ pub(super) struct QsaStep {
 }
 
 struct Pooling {
-    // the members' cells in block order, then each block's first cell (where its pooled key goes)
+    // the members' cells in block order, then each block's last cell (where its pooled key goes, so the first cell's
+    // V keeps the cos | sin the block rotates with when a rejected draft's pooling is redone)
     members: Tensor,
-    firsts: Tensor,
+    lasts: Tensor,
 }
 
 struct Selection {
-    // (batch, pools) cells of each sequence's block starts
+    // (batch, pools) cells of each sequence's block ends, where the pooled keys are
     pool_cells: Tensor,
     // (batch, query_len) positions, QSA_PADDED_ROW on padding
     positions: Tensor,
@@ -208,9 +209,9 @@ impl QsaIndexer {
             .reshape((blocks, self.cfg.compress_ratio, d))?
             .narrow(1, 0, 1)?
             .reshape((1, blocks, d))?;
-        let first = members
+        let last = members
             .reshape((blocks, self.cfg.compress_ratio, d))?
-            .narrow(1, 0, 1)?
+            .narrow(1, self.cfg.compress_ratio - 1, 1)?
             .reshape((1, 1, blocks, d))?;
         // the reference means in f32, then norms and rotates to the block's first position
         let pooled = members
@@ -227,13 +228,13 @@ impl QsaIndexer {
                 rotation.narrow(D::Minus1, half, half)?,
             ),
         )?;
-        // K keeps the first member's raw key; V takes the pooled key
+        // K keeps the last member's raw key; V takes the pooled key
         paged_attn.write_rows(
-            &first,
+            &last,
             &pooled.contiguous()?,
             k_cache,
             v_cache,
-            &pooling.firsts.to_device(k_cache.device())?,
+            &pooling.lasts.to_device(k_cache.device())?,
         )
     }
 
@@ -447,6 +448,16 @@ impl QsaStep {
             })
             .ok_or_else(|| inference_tensor::Error::msg("QSA needs the paged block tables"))?
             .to_device(device)?;
+        // a verify step gives each query token its own table row, each covering up to its token; a sequence's last
+        // row covers all of it
+        let per_token = query_len > 1 && table.dim(0)? == rows.len() * query_len;
+        let table_row = move |row: usize| {
+            if per_token {
+                row * query_len + query_len - 1
+            } else {
+                row
+            }
+        };
 
         // blocks whose last cell this step writes
         let completed = rows
@@ -454,7 +465,7 @@ impl QsaStep {
             .enumerate()
             .flat_map(|(row, r)| {
                 (r.start.saturating_sub(ratio - 1).div_ceil(ratio)..(r.start + r.len) / ratio)
-                    .map(move |block| (row, block))
+                    .map(move |block| (table_row(row), block))
             })
             .collect::<Vec<_>>();
         let pooling = if completed.is_empty() {
@@ -465,12 +476,12 @@ impl QsaStep {
                 .flat_map(|&(row, block)| (0..ratio).map(move |m| (row, block * ratio + m)))
                 .collect::<Vec<_>>();
             let members = cells(&table, block_size, &members)?;
-            let firsts = members
+            let lasts = members
                 .reshape((completed.len(), ratio))?
-                .narrow(1, 0, 1)?
+                .narrow(1, ratio - 1, 1)?
                 .flatten_all()?
                 .to_dtype(DType::I64)?;
-            Some(Pooling { members, firsts })
+            Some(Pooling { members, lasts })
         };
 
         let longest = rows.iter().map(|r| r.start + r.len).max().unwrap_or(0);
@@ -480,8 +491,12 @@ impl QsaStep {
                 .flat_map(|row| {
                     let complete = (rows[row].start + rows[row].len) / ratio;
                     // past a row's own blocks, any valid cell: the kernel never reads them
-                    (0..pools)
-                        .map(move |block| (if block < complete { row } else { 0 }, block * ratio))
+                    (0..pools).map(move |block| {
+                        (
+                            if block < complete { table_row(row) } else { 0 },
+                            block * ratio + ratio - 1,
+                        )
+                    })
                 })
                 .collect::<Vec<_>>();
             let pool_cells =
@@ -502,8 +517,9 @@ impl QsaStep {
                 .iter()
                 .map(|r| (r.start + r.len) as u32)
                 .collect::<Vec<_>>();
-            let gather = (rows.len() * query_len <= QSA_GATHER_ROWS)
-                .then(|| gather_plan(&cfg, &table, block_size, &positions))
+            // the mask path reads one table row per sequence
+            let gather = (per_token || rows.len() * query_len <= QSA_GATHER_ROWS)
+                .then(|| gather_plan(&cfg, &table, block_size, &positions, query_len, per_token))
                 .transpose()?;
             Some(Selection {
                 pool_cells,
@@ -520,17 +536,19 @@ impl QsaStep {
     }
 }
 
-// The gather's per-row inputs for `positions` (batch-major, `query_len` per sequence of `table`).
+// The gather's per-row inputs for `positions` (batch-major, `query_len` per sequence), whose `table` rows are the
+// sequences' or, `per_token`, the query tokens' own.
 fn gather_plan(
     cfg: &QsaConfig,
     table: &Tensor,
     block_size: usize,
     positions: &[u32],
+    query_len: usize,
+    per_token: bool,
 ) -> Result<Gather> {
     let ratio = cfg.compress_ratio;
     let k = cfg.budget / ratio;
     let device = table.device();
-    let query_len = positions.len() / table.dim(0)?;
     // past the budget a row keeps exactly k blocks and its tail; before it, everything up to its position
     let kept = positions
         .iter()
@@ -547,7 +565,7 @@ fn gather_plan(
         })
         .collect::<Vec<_>>();
     let sequence_of = (0..positions.len())
-        .map(|row| (row / query_len) as u32)
+        .map(|row| (if per_token { row } else { row / query_len }) as u32)
         .collect::<Vec<_>>();
     let pages = qsa_cells_width(k, ratio).div_ceil(block_size);
     let compact = (0..(positions.len() * pages) as u32).collect::<Vec<_>>();

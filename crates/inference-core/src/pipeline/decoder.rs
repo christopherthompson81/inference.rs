@@ -333,11 +333,9 @@ impl PreProcessingMixin for DecoderPipeline {
             return Some(media.preprocessor_config.clone() as Arc<dyn Any>);
         }
         match &self.model {
-            DecoderModel::Text(model) if model.token_window() > 0 => {
-                Some(Arc::new(crate::model::TokenWindowRequest {
-                    preceding: model.token_window(),
-                }))
-            }
+            DecoderModel::Text(model) => model.token_window().map(|preceding| {
+                Arc::new(crate::model::TokenWindowRequest { preceding }) as Arc<dyn Any>
+            }),
             _ => None,
         }
     }

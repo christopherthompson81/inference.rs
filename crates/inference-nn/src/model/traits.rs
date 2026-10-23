@@ -35,9 +35,10 @@ pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin 
     fn cache(&self) -> &EitherCache;
     fn max_seq_len(&self) -> usize;
     fn config(&self) -> &ModelConfigMetadata;
-    /// How many tokens before each chunk the forward reads from `ModelForwardContext::token_window`; 0 for none.
-    fn token_window(&self) -> usize {
-        0
+    /// How many tokens before each chunk the forward reads from `ModelForwardContext::token_window`; `None` when it
+    /// reads no window.
+    fn token_window(&self) -> Option<usize> {
+        None
     }
     /// True only when the full forward handles packed prompts and never treats physical rows as logical requests.
     fn supports_packed_prefill(&self) -> bool {

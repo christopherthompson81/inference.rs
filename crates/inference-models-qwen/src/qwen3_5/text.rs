@@ -409,7 +409,7 @@ impl FullAttention {
                             inference_tensor::Error::msg("paged attention has no slot mapping")
                         })?;
                     paged_attn.write_rows(&k, &v, &key_cache, &value_cache, slots)?;
-                    indexer.attend(QsaAttention {
+                    let y = indexer.attend(QsaAttention {
                         q_index,
                         query: &q,
                         input: qsa,
@@ -418,7 +418,13 @@ impl FullAttention {
                         paged_attn,
                         input_metadata,
                         sdpa_params: &self.sdpa_params,
-                    })?
+                    })?;
+                    // without a mask the output is read tokens first, as paged decode leaves it
+                    if matches!(attention_mask, AttentionMask::None) {
+                        y.transpose(1, 2)?
+                    } else {
+                        y
+                    }
                 }
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
                     &q,
@@ -926,6 +932,11 @@ pub(super) struct SpecCapture {
 
 /// Per-GDN-layer inputs and pre-forward states of the last multi-token decode, so a rejected tail
 /// can be undone by replaying only the accepted prefix.
+struct PleStash {
+    indices: Tensor,
+    history: Tensor,
+}
+
 #[derive(Clone)]
 pub(super) struct GdnReplayStash {
     pub(super) slots: Vec<u32>,
@@ -1342,6 +1353,8 @@ pub struct Qwen3_5TextModel {
     // Every row of the last forward, so a proposer can catch up over a prompt chunk
     last_full_capture: Mutex<Option<SpecCapture>>,
     gdn_replay_stash: Mutex<Option<GdnReplayStash>>,
+    // PLE's conv history over the last multi-token decode, which a speculative commit narrows to the kept rows
+    ple_stash: Mutex<Option<PleStash>>,
     // Target layers whose outputs a DFlash drafter consumes; empty when none is attached
     dflash_tap_layers: Mutex<Vec<usize>>,
     pub(super) yarn_rope_config: Option<YarnRopeConfig>,
@@ -1706,6 +1719,7 @@ impl Qwen3_5TextModel {
             last_spec_capture: Mutex::new(None),
             last_full_capture: Mutex::new(None),
             gdn_replay_stash: Mutex::new(None),
+            ple_stash: Mutex::new(None),
             dflash_tap_layers: Mutex::new(Vec::new()),
             yarn_rope_config,
         })
@@ -1723,6 +1737,7 @@ impl Qwen3_5TextModel {
                 .lock()
                 .expect("spec capture poisoned") = None;
             *self.gdn_replay_stash.lock().expect("gdn stash poisoned") = None;
+            *self.ple_stash.lock().expect("ple stash poisoned") = None;
         }
     }
 
@@ -2390,6 +2405,35 @@ impl Qwen3_5TextModel {
         *self.gdn_replay_stash.lock().expect("gdn stash poisoned") = None;
     }
 
+    /// After a verify step, PLE's conv state of each `(batch row, kept rows)` from the stashed history: the forward
+    /// wrote the state past every drafted row, rejected ones included.
+    pub(super) fn commit_ple_prefixes(&self, rows: &[(usize, usize)]) -> Result<()> {
+        let Some(stash) = self.ple_stash.lock().expect("ple stash poisoned").take() else {
+            return Ok(());
+        };
+        let Some(ple) = self.layers.iter().find_map(|layer| layer.ple.as_ref()) else {
+            return Ok(());
+        };
+        let mut cache = self.cache.hybrid();
+        let Some(HybridLayerCache::Recurrent(pool)) = cache.get_mut(self.layer_types.len()) else {
+            inference_tensor::bail!("PLE state is missing from the hybrid cache");
+        };
+        ple.commit_kept_rows(&stash.history, &stash.indices, rows, pool)
+    }
+
+    // a drafter's feature from a completed layer: the residual, or with hyper-connections the mean of its streams
+    // (what Flash-Next's DFlash 2 drafter was trained on)
+    fn dflash_tap(&self, xs: &Tensor) -> Result<Tensor> {
+        if self.hyper_streams == 1 {
+            return Ok(xs.clone());
+        }
+        let (b, s, width) = xs.dims3()?;
+        xs.to_dtype(DType::F32)?
+            .reshape((b, s, self.hyper_streams, width / self.hyper_streams))?
+            .mean(2)?
+            .to_dtype(xs.dtype())
+    }
+
     pub(super) fn set_dflash_tap_layers(&self, layers: Vec<usize>) {
         *self.dflash_tap_layers.lock().expect("dflash taps poisoned") = layers;
     }
@@ -2778,7 +2822,17 @@ impl Qwen3_5TextModel {
                     else {
                         inference_tensor::bail!("PLE state is missing from the hybrid cache");
                     };
-                    xs = (&xs + ple.forward(&xs, window, pool, &indices)?)?;
+                    let keep_history =
+                        self.store_spec_hidden.load(Ordering::Relaxed) && xs.dim(1)? > 1;
+                    let (added, history) =
+                        ple.forward(&xs, window, pool, &indices, keep_history)?;
+                    if let Some(history) = history {
+                        *self.ple_stash.lock().expect("ple stash poisoned") = Some(PleStash {
+                            indices: indices.clone(),
+                            history,
+                        });
+                    }
+                    xs = (&xs + added)?;
                     normalized_x = None;
                 }
 
@@ -2936,7 +2990,7 @@ impl Qwen3_5TextModel {
                     }
                 }
                 if capture_taps && tap_layers.contains(&i) {
-                    taps_all.push(self.mapper.cast_nm_device(&xs, false)?);
+                    taps_all.push(self.mapper.cast_nm_device(&self.dflash_tap(&xs)?, false)?);
                 }
             }
             if self.store_spec_hidden.load(Ordering::Relaxed) {
@@ -3148,11 +3202,14 @@ impl NormalModel for Qwen3_5TextModel {
         SUPPORTS_CUDA_DECODE_GRAPHS && !self.has_ple()
     }
 
-    fn token_window(&self) -> usize {
-        self.layers
+    fn token_window(&self) -> Option<usize> {
+        let ple = self
+            .layers
             .iter()
             .find_map(|layer| layer.ple.as_ref())
-            .map_or(0, PleLayer::preceding_tokens)
+            .map(PleLayer::preceding_tokens);
+        // QSA reads each row's start and length from the window too
+        ple.or(self.qsa.is_some().then_some(0))
     }
 }
 

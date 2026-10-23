@@ -442,3 +442,71 @@ wake, the upload), not the miss count, is what to measure next.
 Implication: graphs (PLE and QSA on the device) would save about 4 ms of 67; set aside. Next: time the miss round
 trip's parts and cut its fixed cost. Separately, an explicit expert cache that does not fit should fail or shrink,
 never spill layers to the CPU.
+
+## Run 13 - 2026-10-23 13:04
+
+Question: what speculative decoding can Qwen3.8-Flash-Next use here, built-in MTP or a DFlash drafter, and what do
+the published weights expect?
+
+The unsloth UD-IQ4_XS GGUF has blocks 0-47 and no MTP layer. Fetched (public repositories, no token):
+- unsloth's `MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf` (2.6 GB, their recommended head): one block, `blk.48`,
+  with the attention, MoE and hyper-connection tensors of a full-attention layer plus `nextn.eh_proj` (5120 to
+  2560), `nextn.enorm` (2560), `nextn.hnorm` (10240, the four streams) and its own mixer `nextn.hc_head_{down,up,
+  norm}`; `qwen4exp.nextn_shared_target_tensors` true (it borrows the target's token embedding and output head),
+  `nextn_predict_layers` 1, `block_count` 49. Their measurement: 1.67x single stream greedy on a B200 at 2 drafts,
+  66% acceptance, a net loss at concurrency 8.
+- incoai's `Qwen3.8-Flash-Next-DFlash2` (bf16 safetensors, 1.2 GB): a 5-layer Qwen3 drafter (hidden 2560, sliding
+  window 2048, block 8, selector rank 256 / top-k 16, mask token 248077) over target layers [5, 15, 25, 35, 45] of
+  48. Its capture patch: completed zero-based layer outputs averaged over the four hyper-connection streams, 5 x
+  2560 = 12800 features. Their table (GB300, block 4 "limited by the current QSA implementation"): acceptance
+  length 2.83-3.26 against MTP's 2.50-3.08.
+
+Ours: DFlash 2 runs for Qwen3.8 27B; the Qwen3.5 forward pushes `xs` at each tap layer, which for Flash-Next is the
+10240-wide stream state, not the 2560 stream mean the drafter was trained on.
+
+Plan: DFlash 2 first (the drafter type exists; the capture needs the stream mean), then MTP (a head with its own
+hyper-connection mixer, the GGUF `nextn` bindings and borrowed embedding and head).
+
+## Run 14 - 2026-10-23 13:36
+
+Question: does incoai's DFlash 2 drafter run on Flash-Next, and what breaks when a verify step's drafts are rejected?
+
+Attaching any drafter bailed ("not supported yet for Qwen3.8-Flash-Next's hyper-connection residual"). The guard now
+covers built-in MTP only. The drafter taps take the mean of the four streams at each tap layer (incoai's capture).
+Then, bottom-up on the tiny Flash-Next with a tiny DFlash drafter (`flash_next_dflash_drafts_and_keeps_greedy_output`,
+plain greedy decode against speculative, BF16 on CUDA, up to near ties):
+
+1. "token window 18..21 is outside a 19-token sequence": a verify step runs drafts staged past the sequence's tokens,
+   which PLE's and QSA's token window did not include. The window now appends the staged tokens.
+2. Dense budget, then step 2: same token, logprob 0.37 off. With PLE off the test passed (after fixing a QSA model
+   without PLE, which never requested its token window: `token_window()` is now `Option`). Cause: PLE's conv state
+   was written past every drafted row. The PLE forward now stashes its conv history in multi-token decode, and
+   `speculative_commit` sets each row's state to the window ending at its kept rows, after the GDN commit.
+3. Sparse budget 8, step 1. Scoring both continuations with a prefill showed the speculative one wrong. The selected
+   cells and the attention output of every verify row 0 matched plain decode's. Cause: without a mask the layer reads
+   the attention output tokens first (`reshape` without a transpose), as paged decode leaves it, and QSA returned
+   `(b, heads, s, d)`; one-token decode reads the same either way. QSA's output is transposed on maskless steps. (Also:
+   a verify step's metadata gives each token its own block table row, so QSA maps its sequence rows to their last
+   token row and always takes the gather there.)
+4. Sparse, step 7, by 1.7 nats. A pooled key overwrote the V row at its block's first cell, which holds the cos | sin
+   the block rotates with. A rejected draft completing a block destroyed it, and redoing the pooling then rotated with
+   the pooled key. Pooled keys now go to the block's last cell, whose V the token's own write restores first.
+
+Both budgets pass; the sparse transformers parity is unchanged (KL 9.08e-05).
+
+Real GGUF, `--moe-expert-cache 64`, two greedy chat prompts of 400 tokens (a coding task, an explanation):
+
+```
+base                 13.5 / 12.9 tok/s   (an earlier, colder run: 10.4 / 11.6)
+DFlash 2, depth 2    14.7 / 12.2         accept 65-71%, length 2.3-2.4
+DFlash 2, depth 3    15.8 / 11.6         accept 41-95%, length 2.2-3.9
+DFlash 2, depth 5    14.0 /  9.5         accept 41-47%, length 3.1-3.3
+```
+
+A verify step routes several tokens, so more experts miss the cache and run on the CPU; with offloaded experts the
+drafts barely pay (+17% at best on the code prompt, a loss on prose). The outputs match plain greedy until a late
+divergence (bytes 488 to 1220) where both continuations read as near ties ("compute the index" against "compute
+$h(k)$"), as the tiny model's BF16 ties.
+
+Implication: correct, but little gain while experts are offloaded. The pooled-key move changes what a stored prefix
+holds in the indexer layer, so prefix entries written before it are stale for this model.
