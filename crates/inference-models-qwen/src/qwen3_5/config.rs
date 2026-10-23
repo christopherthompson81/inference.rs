@@ -740,14 +740,11 @@ impl TextConfig {
     }
 
     /// QSA's indexer keys: one auxiliary paged layer per full-attention layer of the main stack, after the model's own.
-    pub fn qsa_auxiliary_layers(&self) -> Option<AuxiliaryPagedLayers> {
+    pub fn qsa_auxiliary_layers(&self, mtp: bool) -> Option<AuxiliaryPagedLayers> {
         let qsa = self.qsa()?;
         Some(AuxiliaryPagedLayers {
-            count: self
-                .layer_types()
-                .iter()
-                .filter(|ty| **ty == LayerType::FullAttention)
-                .count(),
+            // the main stack's full-attention layers, then the MTP blocks' (each one QSA layer)
+            count: self.full_attention_layers() + self.mtp_layers(mtp),
             num_attn_heads: qsa.n_heads,
             num_kv_heads: qsa.kv_heads,
             head_dim: qsa.head_dim,
@@ -755,6 +752,18 @@ impl TextConfig {
     }
 
     /// The paged cache layer holding `layer_idx`'s indexer keys.
+    fn full_attention_layers(&self) -> usize {
+        self.layer_types()
+            .iter()
+            .filter(|ty| **ty == LayerType::FullAttention)
+            .count()
+    }
+
+    /// The paged layer of the first MTP block's indexer keys, after the main stack's.
+    pub fn mtp_qsa_cache_layer(&self) -> usize {
+        self.num_hidden_layers + self.mtp_num_hidden_layers + self.full_attention_layers()
+    }
+
     pub fn qsa_cache_layer(&self, layer_idx: usize, mtp: bool) -> usize {
         let rank = self.layer_types()[..layer_idx]
             .iter()

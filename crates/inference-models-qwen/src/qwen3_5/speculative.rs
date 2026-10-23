@@ -34,7 +34,8 @@ use crate::{
 
 use super::{
     Qwen3_5Model,
-    mtp::{MtpAttentionInputs, Qwen3_5MtpHead},
+    mtp::{MtpAttentionInputs, MtpDraft, Qwen3_5MtpHead},
+    qsa::{QsaLayerInput, QsaRow, QsaStep, QsaStepInput},
     text::{Qwen3_5TextModel, SpecCapture, SpecGraphState},
 };
 
@@ -174,44 +175,87 @@ impl Qwen3_5TextModel {
             .ok_or_else(|| inference_tensor::Error::msg("Qwen3.5 MTP head is not loaded"))
     }
 
-    /// Runs the drafter over `rows` (all sequences flattened, `[1, rows]`) and returns the normed
-    /// hidden state per row `[1, rows, hidden]`, writing drafter KV at each row's position.
+    /// Runs the drafter over `rows` (all sequences flattened, `[1, rows]`) and returns its outputs per row
+    /// `[1, rows, _]`, writing drafter KV at each row's position.
     fn drafter_forward(
         &self,
         head: &Qwen3_5MtpHead,
         rows: &[DraftRow],
         target_hidden: &Tensor,
-        kv_cache: &(Tensor, Tensor),
+        kv_cache: &[(Tensor, Tensor)],
         paged_meta: &crate::paged_attention::PagedAttentionMeta,
-    ) -> Result<Tensor> {
+    ) -> Result<MtpDraft> {
         let device = head.device();
         let n = rows.len();
+        let mtp_kv = kv_cache
+            .get(head.kv_layer_idx())
+            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
+            .clone();
+        let seq_ids = rows.iter().map(|row| row.seq_id).collect::<Vec<_>>();
+        let context_lens = rows.iter().map(|row| row.position + 1).collect::<Vec<_>>();
+        let metadata = make_paged_rows_metadata(&seq_ids, &context_lens, paged_meta, device)?;
+        let qsa = head.qsa();
+        // QSA plans each sequence's rows together, so a QSA head runs its rows as a batch of one-row sequences
+        let shape = if qsa.is_some() { (n, 1) } else { (1, n) };
         let tokens = Tensor::from_vec(
             rows.iter().map(|row| row.token).collect::<Vec<_>>(),
-            (1, n),
+            shape,
             device,
         )?;
         let mut mrope = Vec::with_capacity(MROPE_DIMS * n);
         for dim in 0..MROPE_DIMS {
             mrope.extend(rows.iter().map(|row| row.mrope[dim]));
         }
-        let positions = Tensor::from_vec(mrope, (MROPE_DIMS, 1, n), device)?;
-        let seq_ids = rows.iter().map(|row| row.seq_id).collect::<Vec<_>>();
-        let context_lens = rows.iter().map(|row| row.position + 1).collect::<Vec<_>>();
-        let metadata = make_paged_rows_metadata(&seq_ids, &context_lens, paged_meta, device)?;
+        let positions = Tensor::from_vec(mrope, (MROPE_DIMS, shape.0, shape.1), device)?;
         let embeds = self.embed_tokens(&tokens)?.to_dtype(head.dtype())?;
         let target_hidden = target_hidden.to_device(device)?.to_dtype(head.dtype())?;
-        head.forward(
+        let target_hidden = target_hidden.reshape((shape.0, shape.1, ()))?;
+        let step = qsa
+            .map(|(cfg, _)| {
+                let qsa_rows = rows
+                    .iter()
+                    .map(|row| QsaRow {
+                        start: row.position,
+                        len: 1,
+                    })
+                    .collect::<Vec<_>>();
+                QsaStep::new(QsaStepInput {
+                    cfg,
+                    rows: &qsa_rows,
+                    query_len: 1,
+                    input_metadata: &metadata,
+                    device,
+                })
+            })
+            .transpose()?;
+        let qsa_cache = qsa
+            .map(|(_, layer)| {
+                kv_cache
+                    .get(layer)
+                    .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP QSA layer"))
+            })
+            .transpose()?;
+        let draft = head.forward(
             &embeds,
             &target_hidden,
             &positions,
             MtpAttentionInputs {
-                kv_cache: kv_cache.clone(),
+                kv_cache: mtp_kv,
                 metadata: &metadata,
                 attention_mask: &AttentionMask::None,
                 flash_params: &FlashParams::empty(false),
             },
-        )
+            step.as_ref()
+                .zip(qsa_cache)
+                .map(|(step, (k, v))| QsaLayerInput {
+                    step,
+                    cache: (k, v),
+                }),
+        )?;
+        Ok(MtpDraft {
+            logits_hidden: draft.logits_hidden.reshape((1, n, ()))?,
+            chain_hidden: draft.chain_hidden.reshape((1, n, ()))?,
+        })
     }
 
     /// Catch the drafter up over a whole prompt chunk with the target's own attention inputs: one causal
@@ -223,9 +267,13 @@ impl Qwen3_5TextModel {
         ctx: &SpeculativePrefillCtx<'_>,
         target: TargetAttentionInputs<'_>,
         capture: &SpecCapture,
-        kv_cache: &(Tensor, Tensor),
+        kv_cache: &[(Tensor, Tensor)],
     ) -> Result<()> {
         let device = head.device();
+        let mtp_kv = kv_cache
+            .get(head.kv_layer_idx())
+            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
+            .clone();
         let (batch, seq_len, _) = capture.hidden.dims3()?;
         if batch != ctx.chunk_ranges.len() {
             inference_tensor::bail!(
@@ -260,16 +308,49 @@ impl Qwen3_5TextModel {
         } else {
             AttentionMask::None
         };
+        let qsa = head.qsa();
+        let step = qsa
+            .map(|(cfg, _)| {
+                let qsa_rows = ctx
+                    .chunk_ranges
+                    .iter()
+                    .map(|(start, end)| QsaRow {
+                        start: *start,
+                        len: end - start,
+                    })
+                    .collect::<Vec<_>>();
+                QsaStep::new(QsaStepInput {
+                    cfg,
+                    rows: &qsa_rows,
+                    query_len: seq_len,
+                    input_metadata: target.metadata,
+                    device,
+                })
+            })
+            .transpose()?;
+        let qsa_cache = qsa
+            .map(|(_, layer)| {
+                kv_cache
+                    .get(layer)
+                    .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP QSA layer"))
+            })
+            .transpose()?;
         head.forward(
             &embeds,
             &target_hidden,
             &positions,
             MtpAttentionInputs {
-                kv_cache: kv_cache.clone(),
+                kv_cache: mtp_kv,
                 metadata: target.metadata,
                 attention_mask: &attention_mask,
                 flash_params: target.flash_params,
             },
+            step.as_ref()
+                .zip(qsa_cache)
+                .map(|(step, (k, v))| QsaLayerInput {
+                    step,
+                    cache: (k, v),
+                }),
         )?;
         Ok(())
     }
@@ -727,10 +808,6 @@ impl Qwen3_5TextModel {
             metadata: paged_meta,
             kv_cache,
         } = ctx.cache;
-        let kv_cache = kv_cache
-            .get(head.kv_layer_idx())
-            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
-            .clone();
         let Some(capture) = self.last_spec_capture() else {
             return Ok(None);
         };
@@ -793,13 +870,16 @@ impl Qwen3_5TextModel {
         pending_tails.retain(|seq_id, _| ctx.seq_ids.contains(seq_id));
         drop(pending_tails);
         let target_hidden = Tensor::cat(&hidden_rows, 1)?;
-        let normed = self.drafter_forward(head, &rows, &target_hidden, &kv_cache, paged_meta)?;
+        let draft = self.drafter_forward(head, &rows, &target_hidden, kv_cache, paged_meta)?;
         let last_idx = Tensor::from_vec(
             last_row_idx.iter().map(|i| *i as u32).collect::<Vec<_>>(),
             (batch,),
-            normed.device(),
+            draft.logits_hidden.device(),
         )?;
-        let mut hidden = normed.index_select(&last_idx, 1)?;
+        let mut hidden = MtpDraft {
+            logits_hidden: draft.logits_hidden.index_select(&last_idx, 1)?,
+            chain_hidden: draft.chain_hidden.index_select(&last_idx, 1)?,
+        };
         let mut cursor = last_row_idx
             .iter()
             .map(|i| (rows[*i].position, rows[*i].mrope))
@@ -816,13 +896,13 @@ impl Qwen3_5TextModel {
         let cuda_sampler = crate::speculative::proposer::CudaDraftSampler::new(
             ctx.sequences,
             n_predict,
-            hidden.device(),
+            hidden.logits_hidden.device(),
             &ctx.rng,
         )?;
         #[cfg(feature = "cuda")]
         let mut cuda_samples = Vec::with_capacity(n_predict);
         for step in 0..n_predict {
-            let step_logits = self.draft_logits(&hidden)?;
+            let step_logits = self.draft_logits(&hidden.logits_hidden)?;
             #[cfg(feature = "cuda")]
             let drafts = match &cuda_sampler {
                 Some(sampler) => {
@@ -869,7 +949,8 @@ impl Qwen3_5TextModel {
                     }
                 })
                 .collect::<Vec<_>>();
-            hidden = self.drafter_forward(head, &chained, &hidden, &kv_cache, paged_meta)?;
+            hidden =
+                self.drafter_forward(head, &chained, &hidden.chain_hidden, kv_cache, paged_meta)?;
         }
 
         #[cfg(feature = "cuda")]
@@ -916,10 +997,6 @@ impl Qwen3_5TextModel {
             metadata: paged_meta,
             kv_cache,
         } = ctx.cache;
-        let kv_cache = kv_cache
-            .get(head.kv_layer_idx())
-            .ok_or_else(|| inference_tensor::Error::msg("paged cache has no MTP layer"))?
-            .clone();
         let Some(capture) = self.last_full_capture() else {
             return Ok(());
         };
@@ -981,13 +1058,13 @@ impl Qwen3_5TextModel {
         }
         drop(pending_tails);
         if let Some(target) = ctx.target_attention {
-            return self.drafter_prefill_chunk(head, &ctx, target, &capture, &kv_cache);
+            return self.drafter_prefill_chunk(head, &ctx, target, &capture, kv_cache);
         }
         if rows.is_empty() {
             return Ok(());
         }
         let target_hidden = Tensor::cat(&hidden_rows, 1)?;
-        self.drafter_forward(head, &rows, &target_hidden, &kv_cache, paged_meta)?;
+        self.drafter_forward(head, &rows, &target_hidden, kv_cache, paged_meta)?;
         Ok(())
     }
 }
@@ -1053,11 +1130,6 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         };
         if !config.is_builtin() {
             return self.attach_dflash(config, runtime);
-        }
-        if self.hyper_streams() > 1 {
-            inference_tensor::bail!(
-                "built-in MTP is not supported yet for Qwen3.8-Flash-Next's hyper-connection residual"
-            );
         }
         if self.mtp.is_none() {
             inference_tensor::bail!(

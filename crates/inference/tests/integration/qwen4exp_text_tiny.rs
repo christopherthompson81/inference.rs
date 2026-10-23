@@ -38,6 +38,7 @@ const SPECULATIVE_LOGPROB_TOLERANCE: f32 = 0.06;
 const DFLASH_TAPS: [usize; 2] = [1, 3];
 const DFLASH_BLOCK: usize = 4;
 const DFLASH_N_PREDICT: usize = 2;
+const MTP_N_PREDICT: usize = 2;
 // every drafter layer windowed, which its decode graphs need
 const DFLASH_WINDOW: usize = 32;
 // above every test's context, so QSA keeps every key
@@ -46,6 +47,11 @@ const DENSE_BUDGET: usize = 1024;
 const SPARSE_BUDGET: usize = 8;
 
 fn tiny_flash_next(budget: usize) -> anyhow::Result<tempfile::TempDir> {
+    tiny_flash_next_with(budget, false)
+}
+
+// With `mtp`, the checkpoint carries a built-in MTP head (one QSA + MoE block with its own mixer).
+fn tiny_flash_next_with(budget: usize, mtp: bool) -> anyhow::Result<tempfile::TempDir> {
     let mut config = serde_json::json!({
         "architectures": ["Qwen4ExpForCausalLM"],
         "model_type": "qwen4_exp_text",
@@ -97,7 +103,7 @@ fn tiny_flash_next(budget: usize) -> anyhow::Result<tempfile::TempDir> {
         "eos_token_id": EOS,
         "bos_token_id": 1,
         "tie_word_embeddings": false,
-        "mtp_num_hidden_layers": 0
+        "mtp_num_hidden_layers": usize::from(mtp)
     });
     let serde_json::Value::Object(flash_next) = flash_next else {
         unreachable!("a json! object literal")
@@ -117,8 +123,9 @@ fn tiny_flash_next(budget: usize) -> anyhow::Result<tempfile::TempDir> {
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
     let cfg: TextConfig = serde_json::from_value(config)?;
     let shapes = (0..NUM_LAYERS)
-        .flat_map(|layer| {
-            let p = format!("{EXPERTS_PREFIX}.{layer}.mlp.experts");
+        .map(|layer| format!("{EXPERTS_PREFIX}.{layer}.mlp.experts"))
+        .chain(mtp.then(|| "mtp.layers.0.mlp.experts".to_string()))
+        .flat_map(|p| {
             [
                 (
                     format!("{p}.gate_up_proj"),
@@ -136,7 +143,7 @@ fn tiny_flash_next(budget: usize) -> anyhow::Result<tempfile::TempDir> {
             &cfg,
             vb,
             false,
-            false,
+            mtp,
             metadata,
             AttentionImplementation::Eager,
         )
@@ -335,10 +342,20 @@ async fn dflash_keeps_greedy_output(budget: usize) -> anyhow::Result<()> {
         .map(|m| m.drafts)
         .sum();
     anyhow::ensure!(drafts > 0, "DFlash never drafted");
-    for (step, (got, want)) in actual.iter().zip(&expected).enumerate() {
+    same_up_to_ties(&actual, &expected, &format!("DFlash, budget {budget}"))
+}
+
+// A speculative trace matches plain decode's until both pick different tokens at near-equal logprobs (a BF16 tie
+// that verification's batching breaks the other way).
+fn same_up_to_ties(
+    actual: &traces::Trace,
+    expected: &traces::Trace,
+    label: &str,
+) -> anyhow::Result<()> {
+    for (step, (got, want)) in actual.iter().zip(expected).enumerate() {
         anyhow::ensure!(
             (got.1 - want.1).abs() < SPECULATIVE_LOGPROB_TOLERANCE,
-            "budget {budget}, step {step}: speculative {actual:?} against plain {expected:?}"
+            "{label}, step {step}: speculative {actual:?} against plain {expected:?}"
         );
         if got.0 != want.0 {
             return Ok(());
@@ -346,8 +363,39 @@ async fn dflash_keeps_greedy_output(budget: usize) -> anyhow::Result<()> {
     }
     anyhow::ensure!(
         actual.len() == expected.len(),
-        "decode ended early: {actual:?}"
+        "{label}: decode ended early: {actual:?}"
     );
+    Ok(())
+}
+
+// Flash-Next's built-in MTP head drafts from the target's pre-mixer streams through its own QSA + MoE block and
+// mixer, and greedy output holds up to BF16 near ties.
+#[tokio::test]
+async fn flash_next_builtin_mtp_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    for budget in [DENSE_BUDGET, SPARSE_BUDGET] {
+        let checkpoint = tiny_flash_next_with(budget, true)?;
+        let plain = paged_prefix_model(&checkpoint).await?;
+        let (expected, _) = complete(&plain, &PROMPT, GENERATED).await?;
+        drop(plain);
+        let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+            .with_builtin_mtp(Some(MTP_N_PREDICT))
+            .build()
+            .await?;
+        let (actual, _) = complete(&model, &PROMPT, GENERATED).await?;
+        let drafts: usize = model
+            .speculative_stats()?
+            .data
+            .iter()
+            .map(|m| m.drafts)
+            .sum();
+        anyhow::ensure!(drafts > 0, "MTP never drafted at budget {budget}");
+        same_up_to_ties(&actual, &expected, &format!("MTP, budget {budget}"))?;
+    }
     Ok(())
 }
 

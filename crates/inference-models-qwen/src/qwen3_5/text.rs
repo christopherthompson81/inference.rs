@@ -18,7 +18,7 @@ use inference_quant::{
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::{
-    config::{LayerType, PleHash, QsaConfig, TextConfig},
+    config::{HyperConnections, LayerType, PleHash, QsaConfig, TextConfig},
     feed_forward::FeedForward,
     hyper::{GatedResidual, HyperRead},
     mtp::Qwen3_5MtpHead,
@@ -102,7 +102,7 @@ pub(super) struct FullAttention {
     pub(super) rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
-    indexer: Option<QsaIndexer>,
+    pub(super) indexer: Option<QsaIndexer>,
 }
 
 enum AttentionInput<'a> {
@@ -541,6 +541,13 @@ pub(super) enum OutputNorm {
 }
 
 impl OutputNorm {
+    pub(super) fn residual_tensors(&self, uvb: &UnVarBuilder, rms_name: &str, mixer_name: &str) {
+        match self {
+            Self::Rms(norm) => uvb.pp(rms_name).add(norm),
+            Self::Mixer(mixer) => mixer.residual_tensors(&uvb.pp(mixer_name)),
+        }
+    }
+
     fn rms(&self) -> Option<&GemmaRmsNorm> {
         match self {
             Self::Rms(norm) => Some(norm),
@@ -548,7 +555,7 @@ impl OutputNorm {
         }
     }
 
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+    pub(super) fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             Self::Rms(norm) => norm.forward(x),
             Self::Mixer(mixer) => mixer.collapse(x),
@@ -725,6 +732,80 @@ impl DecoderLayer {
         })
     }
 
+    /// A Flash-Next MTP block: QSA attention (its indexer keys in paged layer `qsa_cache_layer`) and the MoE, each
+    /// read and written through its hyper-connection; the `vb`s are the block's prefix on the head's device.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn load_hyper_qsa(
+        vb_quant: ShardedVarBuilder,
+        vb_plain: ShardedVarBuilder,
+        cfg: &TextConfig,
+        hc: HyperConnections,
+        qsa: QsaConfig,
+        qsa_cache_layer: usize,
+        rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
+        paged_attn: Option<PagedAttention>,
+        mlp: FeedForward,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
+        let mut attn = FullAttention::load_with(
+            vb_quant.pp("self_attn"),
+            vb_plain.pp("self_attn"),
+            cfg,
+            rotary_emb,
+            paged_attn,
+            comm,
+        )?;
+        attn.indexer = Some(QsaIndexer::load(
+            vb_quant.pp("self_attn").pp("indexer"),
+            vb_plain.pp("self_attn").pp("indexer"),
+            cfg,
+            qsa,
+            qsa_cache_layer,
+        )?);
+        let load =
+            |name: &str| GatedResidual::load(cfg, hc, vb_quant.pp(name), vb_plain.pp(name), true);
+        Ok(Self {
+            layer_impl: LayerImpl::FullAttention(attn),
+            norms: LayerNorms::Hyper {
+                attention: load("attn_hyper_connection")?,
+                mlp: load("mlp_hyper_connection")?,
+            },
+            mlp,
+            ple: None,
+        })
+    }
+
+    /// Attention then the feed-forward over `x`, with QSA's selection where `qsa` is given.
+    pub(super) fn forward_attention_qsa(
+        &self,
+        x: &Tensor,
+        attention_mask: &AttentionMask,
+        cos_sin: &(Tensor, Tensor),
+        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
+        flash_params: &FlashParams,
+        qsa: Option<QsaLayerInput<'_>>,
+    ) -> Result<Tensor> {
+        self.forward_attention_output(
+            x,
+            None,
+            attention_mask,
+            cos_sin,
+            None,
+            metadata,
+            flash_params,
+            qsa,
+        )?
+        .add()
+    }
+
+    /// The QSA indexer's paged layer, on a QSA full-attention layer.
+    pub(super) fn qsa_cache_layer(&self) -> Option<usize> {
+        match &self.layer_impl {
+            LayerImpl::FullAttention(attn) => attn.indexer.as_ref().map(QsaIndexer::cache_layer),
+            LayerImpl::LinearAttention(_) => None,
+        }
+    }
+
     pub(super) fn rotary_emb(&self) -> Option<&Arc<Qwen3VLRotaryEmbedding>> {
         match &self.layer_impl {
             LayerImpl::FullAttention(attn) => Some(&attn.rotary_emb),
@@ -733,28 +814,6 @@ impl DecoderLayer {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn forward_attention(
-        &self,
-        x: &Tensor,
-        attention_mask: &AttentionMask,
-        cos_sin: &(Tensor, Tensor),
-        kv_cache: Option<&mut KvCache>,
-        metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        self.forward_attention_output(
-            x,
-            None,
-            attention_mask,
-            cos_sin,
-            kv_cache,
-            metadata,
-            flash_params,
-            None,
-        )?
-        .add()
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn forward_attention_output(
         &self,
@@ -920,8 +979,9 @@ enum TextWeightPrefix {
     Model,
 }
 
-/// Target activations captured for the MTP proposer: hidden states after the final norm and their
-/// text RoPE or MRoPE position ids, `[b, rows, hidden]` / `[b, rows]` or `[3, b, rows]`.
+/// Target activations captured for the MTP proposer: hidden states after the final norm (with hyper-connections
+/// the streams before the mixer) and their text RoPE or MRoPE position ids, `[b, rows, hidden]` / `[b, rows]` or
+/// `[3, b, rows]`.
 #[derive(Clone)]
 pub(super) struct SpecCapture {
     pub(super) hidden: Tensor,
@@ -1693,7 +1753,7 @@ impl Qwen3_5TextModel {
             cache: EitherCache::Hybrid(pipeline_cache),
             max_seq_len: cfg.supported_context_len(qsa.is_some()),
             qsa,
-            qsa_layers: cfg.qsa_auxiliary_layers(),
+            qsa_layers: cfg.qsa_auxiliary_layers(mtp.is_some()),
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.supported_context_len(qsa.is_some()),
                 num_layers: cfg.num_hidden_layers + cfg.mtp_layers(mtp.is_some()),
@@ -2559,10 +2619,6 @@ impl Qwen3_5TextModel {
             .clone()
     }
 
-    pub(super) fn hyper_streams(&self) -> usize {
-        self.hyper_streams
-    }
-
     fn has_ple(&self) -> bool {
         self.layers.iter().any(|layer| layer.ple.is_some())
     }
@@ -2996,6 +3052,11 @@ impl Qwen3_5TextModel {
             if self.store_spec_hidden.load(Ordering::Relaxed) {
                 *self.gdn_replay_stash.lock().expect("gdn stash poisoned") = gdn_stash;
             }
+            let store_spec = self.store_spec_hidden.load(Ordering::Relaxed);
+            // an MTP head over hyper-connections reads the streams before the mixer
+            let streams = (store_spec && self.hyper_streams > 1)
+                .then(|| self.mapper.cast_nm_device(&xs, false))
+                .transpose()?;
             let xs = match normalized_x {
                 Some(prepared) if prepared.device().same_device(&self.device) => prepared
                     .dense()
@@ -3005,7 +3066,6 @@ impl Qwen3_5TextModel {
                     .norm
                     .forward(&self.mapper.cast_nm_device(&xs, false)?)?,
             };
-            let store_spec = self.store_spec_hidden.load(Ordering::Relaxed);
             if store_spec {
                 let full_capture = if recurrent_metadata
                     .as_ref()
@@ -3017,7 +3077,7 @@ impl Qwen3_5TextModel {
                         rank => inference_tensor::bail!("unexpected Qwen3.5 position rank {rank}"),
                     };
                     Some(SpecCapture {
-                        hidden: xs.clone(),
+                        hidden: streams.clone().unwrap_or_else(|| xs.clone()),
                         positions,
                         taps: taps_all.clone(),
                     })
@@ -3044,11 +3104,15 @@ impl Qwen3_5TextModel {
                     .iter()
                     .map(|t| ctx.logits(t))
                     .collect::<Result<Vec<_>>>()?;
+                let hidden = match &streams {
+                    Some(streams) => ctx.logits(streams)?,
+                    None => xs.clone(),
+                };
                 *self
                     .last_spec_capture
                     .lock()
                     .expect("spec capture poisoned") = Some(SpecCapture {
-                    hidden: xs.clone(),
+                    hidden,
                     positions,
                     taps,
                 });

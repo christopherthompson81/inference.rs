@@ -25,6 +25,10 @@ use memmap2::{Mmap, MmapOptions};
 use super::repack;
 
 pub(crate) const DEFAULT_ALIGNMENT: usize = 32;
+// an MTP head file's keys that describe the model it extends
+const BLOCK_COUNT_SUFFIX: &str = ".block_count";
+const NEXTN_KEY: &str = ".nextn_";
+const NEXTN_PREDICT_LAYERS_SUFFIX: &str = ".nextn_predict_layers";
 const MAX_STRING_LENGTH: u64 = 1 << 30;
 const MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
 // GGML stops at 4; ComfyUI-GGUF keeps a 3D conv at its 5-dim shape, and the cap only bounds a crafted header
@@ -482,6 +486,16 @@ impl AsRef<[u8]> for GgufTensorData<'_> {
     }
 }
 
+// A file holding only a built-in MTP head: `nextn` metadata and no split keys
+fn is_mtp_head(shard: &ParsedShard) -> bool {
+    !shard.metadata.contains_key(SPLIT_NO)
+        && !shard.metadata.contains_key(SPLIT_COUNT)
+        && shard
+            .metadata
+            .keys()
+            .any(|key| key.ends_with(NEXTN_PREDICT_LAYERS_SUFFIX))
+}
+
 fn parse_shards<I, P>(paths: I) -> Result<Vec<ParsedShard>>
 where
     I: IntoIterator<Item = P>,
@@ -526,7 +540,54 @@ impl GgufArchive {
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        Self::from_parsed(parse_shards(paths)?)
+        let parsed = parse_shards(paths)?;
+        // a built-in MTP head shipped as its own file (llama.cpp's draft head) extends the model it is listed with
+        let (heads, model): (Vec<_>, Vec<_>) = if parsed.len() > 1 {
+            parsed.into_iter().partition(is_mtp_head)
+        } else {
+            (Vec::new(), parsed)
+        };
+        let mut archive = Self::from_parsed(model)?;
+        for head in heads {
+            archive.merge_mtp_head(Self::from_parsed(vec![head])?)?;
+        }
+        Ok(archive)
+    }
+
+    // The head's block count (the model's blocks and its own) and `nextn` keys describe the model it extends; every
+    // other key it shares keeps the model's value (a head file repeats some, e.g. one layer's compress ratios).
+    fn merge_mtp_head(&mut self, head: Self) -> Result<()> {
+        for (key, value) in &head.metadata {
+            if key.starts_with(GENERAL_PREFIX) || key.starts_with(SPLIT_PREFIX) {
+                continue;
+            }
+            if key.ends_with(BLOCK_COUNT_SUFFIX) || key.contains(NEXTN_KEY) {
+                self.metadata.insert(key.clone(), value.clone());
+            } else {
+                self.metadata
+                    .entry(key.clone())
+                    .or_insert_with(|| value.clone());
+            }
+        }
+        let shard_offset = self.shards.len();
+        let Self {
+            mappings,
+            shards,
+            tensors,
+            ..
+        } = head;
+        for (name, mut tensor) in tensors {
+            if self.tensors.contains_key(&name) {
+                inference_tensor::bail!(
+                    "GGUF tensor `{name}` is in both the model and its MTP head"
+                );
+            }
+            tensor.shard_index += shard_offset;
+            self.tensors.insert(name, tensor);
+        }
+        self.mappings.extend(mappings);
+        self.shards.extend(shards);
+        Ok(())
     }
 
     /// Opens independent GGUF components while keeping adjacent split shards in one archive.
@@ -1625,6 +1686,55 @@ pub(crate) mod tests {
         file.write_all(&bytes).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    // An MTP head file listed after the model: its block count and `nextn` keys describe the merged model, any other
+    // key it repeats keeps the model's value, and its tensors join the model's.
+    #[test]
+    fn an_mtp_head_file_extends_the_model_it_is_listed_with() -> Result<()> {
+        let f32_data = (0..8)
+            .flat_map(|value| (value as f32).to_le_bytes())
+            .collect::<Vec<_>>();
+        let tensor = |name| TestTensor {
+            name,
+            shape: vec![8],
+            dtype: 0,
+            data: f32_data.clone(),
+            offset: None,
+        };
+        let mut model_metadata = base_metadata();
+        model_metadata.push(("qwen3.block_count", Value::U32(2)));
+        model_metadata.push(("qwen3.context_length", Value::U32(4096)));
+        let model = write_test_gguf(
+            &model_metadata,
+            &[tensor("blk.1.attn_norm.weight")],
+            DEFAULT_ALIGNMENT,
+        );
+        let mut head_metadata = base_metadata();
+        head_metadata.push(("qwen3.block_count", Value::U32(3)));
+        head_metadata.push(("qwen3.nextn_predict_layers", Value::U32(1)));
+        head_metadata.push(("qwen3.context_length", Value::U32(1)));
+        let head = write_test_gguf(
+            &head_metadata,
+            &[tensor("blk.2.nextn.enorm.weight")],
+            DEFAULT_ALIGNMENT,
+        );
+
+        let archive = GgufArchive::open([model.path(), head.path()])?;
+        let value = |key| archive.metadata_value(key).cloned();
+        assert!(matches!(value("qwen3.block_count"), Some(Value::U32(3))));
+        assert!(matches!(
+            value("qwen3.nextn_predict_layers"),
+            Some(Value::U32(1))
+        ));
+        assert!(matches!(
+            value("qwen3.context_length"),
+            Some(Value::U32(4096))
+        ));
+        assert!(archive.tensors().contains_key("blk.1.attn_norm.weight"));
+        assert!(archive.tensors().contains_key("blk.2.nextn.enorm.weight"));
+        assert_eq!(archive.shards().len(), 2);
+        Ok(())
     }
 
     fn base_metadata() -> Vec<(&'static str, Value)> {
