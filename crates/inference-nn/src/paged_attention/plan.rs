@@ -506,8 +506,8 @@ pub fn prompt_prefill_workspace(
     let mut fa3_pool = crate::flashinfer::Fa3PrefillPoolBytes::default();
     let mut max_layer_transient = 0usize;
     let mut gather_workspace_bytes = 0usize;
-    for layer_idx in
-        (0..model.num_layers()).filter(|&layer_idx| model.layer_has_paged_kv_cache(layer_idx))
+    let own_layers = model.num_layers() - model.auxiliary_paged_layers();
+    for layer_idx in (0..own_layers).filter(|&layer_idx| model.layer_has_paged_kv_cache(layer_idx))
     {
         let fa3_num_sm = input.fa3_num_sm_by_layer.get(layer_idx).copied().flatten();
         let features = model.prefix_prefill_attention_features(layer_idx);

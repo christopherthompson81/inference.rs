@@ -26,6 +26,8 @@ use serde::Deserialize;
 
 use crate::kv_cache::PagedAuxiliaryPrefixState;
 use crate::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+use crate::paged_attention::AuxiliaryPagedLayers;
 use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
 use crate::utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors};
 
@@ -280,6 +282,24 @@ impl DFlashConfig {
     /// The most drafts one block yields, so a verify is one wider.
     pub fn max_drafts(&self) -> usize {
         self.block_size().saturating_sub(self.draft_row_offset())
+    }
+
+    /// The paged layers a drafter with a full-attention layer keeps in the target's cache, or None when the windowed
+    /// pool holds it (every layer windowed) or the paged kernels can't run its head size.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    pub fn auxiliary_paged_layers(&self) -> Option<AuxiliaryPagedLayers> {
+        let layers = (0..self.num_hidden_layers)
+            .map(|layer| self.layer_attention(layer))
+            .collect::<Vec<_>>();
+        let windowed = windowed_kv_fits_fattn(self.head_dim(), self.block_size(), layers);
+        (!windowed && crate::attention::fattn_supports(self.head_dim(), false)).then(|| {
+            AuxiliaryPagedLayers {
+                count: self.num_hidden_layers,
+                num_attn_heads: self.num_attention_heads,
+                num_kv_heads: self.num_key_value_heads,
+                head_dim: self.head_dim(),
+            }
+        })
     }
 
     fn is_v2(&self) -> bool {
@@ -1406,6 +1426,13 @@ struct DFlashWindowedForward<'a> {
     metadata: &'a WindowedKvBatchTensors,
 }
 
+/// The target's paged cache, for a drafter whose layers live in it: every layer's K/V and the block manager.
+#[derive(Clone, Copy)]
+pub struct DFlashPagedCache<'a> {
+    pub kv_cache: &'a [(Tensor, Tensor)],
+    pub metadata: &'a crate::paged_attention::PagedAttentionMeta,
+}
+
 pub struct DFlashDraftModel {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     cuda_graphs: Mutex<DFlashCudaGraphState>,
@@ -1426,6 +1453,10 @@ pub struct DFlashDraftModel {
     block_size: usize,
     draft_row_offset: usize,
     markov: Option<MarkovHead>,
+    // a full-attention drafter keeps its layers in the target's paged cache, from this layer index on
+    full_attention: bool,
+    paged_first_layer: Option<usize>,
+    paged_next_pos: Mutex<HashMap<usize, usize>>,
     input_embedding_scale: f64,
     output_multiplier: f64,
     num_heads: usize,
@@ -2625,6 +2656,12 @@ impl DFlashDraftModel {
             block_size: cfg.block_size(),
             draft_row_offset: cfg.draft_row_offset(),
             markov,
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            full_attention: cfg.auxiliary_paged_layers().is_some(),
+            #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+            full_attention: false,
+            paged_first_layer: None,
+            paged_next_pos: Mutex::new(HashMap::new()),
             input_embedding_scale: cfg.dflash_config.input_embedding_scale.unwrap_or(1.0),
             output_multiplier: cfg.dflash_config.output_multiplier.unwrap_or(1.0),
             num_heads: cfg.num_attention_heads,
@@ -2641,6 +2678,20 @@ impl DFlashDraftModel {
             mask_cache: Mutex::new(HashMap::new()),
             adaptive: Mutex::new(None),
         })
+    }
+
+    /// Keeps a full-attention drafter's context in the target's paged cache from `first_layer` on, where the
+    /// speculative config declared its layers before load; false when the windowed pool or the eager path holds it.
+    pub fn enable_paged_kv(&mut self, first_layer: usize) -> bool {
+        if !self.full_attention || !self.device.is_cuda() {
+            return false;
+        }
+        self.paged_first_layer = Some(first_layer);
+        true
+    }
+
+    pub fn uses_paged_kv(&self) -> bool {
+        self.paged_first_layer.is_some()
     }
 
     pub fn enable_windowed_kv(
@@ -3001,6 +3052,10 @@ impl DFlashDraftModel {
     }
 
     pub fn prefix_replay(&self) -> SpeculativePrefixReplay {
+        // paged layers save and restore with the target's blocks
+        if self.uses_paged_kv() {
+            return SpeculativePrefixReplay::NotRequired;
+        }
         dflash_prefix_replay(self.layers.iter().map(|layer| layer.sliding_window))
     }
 
@@ -3196,6 +3251,14 @@ impl DFlashDraftModel {
 
     /// Absolute position of the next context token a sequence expects, or None if unseen.
     pub fn ctx_next_pos(&self, seq_id: usize) -> Option<usize> {
+        if self.uses_paged_kv() {
+            return self
+                .paged_next_pos
+                .lock()
+                .expect("dflash paged positions poisoned")
+                .get(&seq_id)
+                .copied();
+        }
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if let Some(pool) = &self.windowed_pool {
             return pool
@@ -3212,6 +3275,13 @@ impl DFlashDraftModel {
     }
 
     pub fn contexts_ready_for_draft(&self, seq_ids: &[usize]) -> bool {
+        if self.uses_paged_kv() {
+            let positions = self
+                .paged_next_pos
+                .lock()
+                .expect("dflash paged positions poisoned");
+            return seq_ids.iter().all(|seq_id| positions.contains_key(seq_id));
+        }
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if let Some(pool) = &self.windowed_pool {
             let pool = pool.lock().expect("dflash windowed pool poisoned");
@@ -3232,8 +3302,13 @@ impl DFlashDraftModel {
             }
         }
         let mut ctx_cache = self.ctx_cache.lock().expect("dflash cache poisoned");
+        let mut paged = self
+            .paged_next_pos
+            .lock()
+            .expect("dflash paged positions poisoned");
         for seq_id in seq_ids {
             ctx_cache.remove(seq_id);
+            paged.remove(seq_id);
         }
     }
 
@@ -3279,6 +3354,10 @@ impl DFlashDraftModel {
             .lock()
             .expect("dflash cache poisoned")
             .clear();
+        self.paged_next_pos
+            .lock()
+            .expect("dflash paged positions poisoned")
+            .clear();
         self.dormant_seqs
             .lock()
             .expect("dflash dormant set poisoned")
@@ -3315,6 +3394,7 @@ impl DFlashDraftModel {
         taps: &[Tensor],
         flat_row_indices: Vec<u32>,
         entries: &[CtxAppend],
+        paged: Option<DFlashPagedCache<'_>>,
     ) -> Result<()> {
         let total = entries.iter().map(|entry| entry.rows).sum::<usize>();
         if total == 0 {
@@ -3324,7 +3404,7 @@ impl DFlashDraftModel {
         let row_indices = (0..total)
             .map(|row| u32::try_from(row).map_err(inference_tensor::Error::wrap))
             .collect::<Result<Vec<_>>>()?;
-        self.commit_prepared_ctx_batch(&prepared, row_indices, entries)
+        self.commit_prepared_ctx_batch(&prepared, row_indices, entries, paged)
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -3431,6 +3511,7 @@ impl DFlashDraftModel {
         prepared: &DFlashPreparedContext,
         row_indices: Vec<u32>,
         entries: &[CtxAppend],
+        paged: Option<DFlashPagedCache<'_>>,
     ) -> Result<()> {
         let rows = entries.iter().map(|entry| entry.rows).collect::<Vec<_>>();
         let total = rows.iter().sum::<usize>();
@@ -3445,7 +3526,7 @@ impl DFlashDraftModel {
             inference_tensor::bail!("DFlash prepared context row selection is invalid");
         }
         let (k_all, v_all) = select_ctx_kv_rows(&prepared.k, &prepared.v, &row_indices)?;
-        self.append_projected_ctx_batch(entries, &rows, &k_all, &v_all)
+        self.append_projected_ctx_batch(entries, &rows, &k_all, &v_all, paged)
     }
 
     fn append_projected_ctx_batch(
@@ -3454,7 +3535,19 @@ impl DFlashDraftModel {
         rows: &[usize],
         k_all: &Tensor,
         v_all: &Tensor,
+        paged: Option<DFlashPagedCache<'_>>,
     ) -> Result<()> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if self.uses_paged_kv() {
+            let paged = paged.ok_or_else(|| {
+                inference_tensor::Error::msg(
+                    "a paged DFlash drafter needs the target's paged cache",
+                )
+            })?;
+            return self.append_ctx_paged(entries, rows, k_all, v_all, paged);
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        let _ = paged;
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if self.windowed_pool.is_some() {
             return self.append_ctx_windowed(entries, rows, k_all, v_all);
@@ -3519,6 +3612,180 @@ impl DFlashDraftModel {
             }
         }
         Ok(())
+    }
+
+    /// The paged layers' K and V for `layer` of this drafter.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn paged_layer(&self, paged: DFlashPagedCache<'_>, layer: usize) -> Result<(Tensor, Tensor)> {
+        let first = self
+            .paged_first_layer
+            .expect("paged layers checked by the caller");
+        let (k, v) = paged.kv_cache.get(first + layer).ok_or_else(|| {
+            inference_tensor::Error::msg(format!(
+                "the paged cache has no DFlash layer {}, so it was sized without the drafter",
+                first + layer
+            ))
+        })?;
+        Ok((k.clone(), v.clone()))
+    }
+
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn append_ctx_paged(
+        &self,
+        entries: &[CtxAppend],
+        rows: &[usize],
+        k_all: &Tensor,
+        v_all: &Tensor,
+        paged: DFlashPagedCache<'_>,
+    ) -> Result<()> {
+        let mut slots = Vec::with_capacity(rows.iter().sum());
+        {
+            let manager = crate::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
+            for (entry, rows) in entries.iter().zip(rows) {
+                let mapping = manager
+                    .get_slot_mapping(entry.seq_id, entry.start_pos, *rows)
+                    .ok_or_else(|| {
+                        inference_tensor::Error::msg(format!(
+                            "DFlash context for sequence {} at {}..{} has no paged slots",
+                            entry.seq_id,
+                            entry.start_pos,
+                            entry.start_pos + rows
+                        ))
+                    })?;
+                slots.extend(mapping);
+            }
+        }
+        let slot_mapping = Tensor::from_vec(slots, (k_all.dim(2)?,), &self.device)?;
+        for layer in 0..self.layers.len() {
+            let (key_cache, value_cache) = self.paged_layer(paged, layer)?;
+            // [kv_heads, tokens, head_dim] -> [tokens, kv_heads, head_dim], row-major even for one token
+            let k = k_all.i(layer)?.transpose(0, 1)?.force_contiguous()?;
+            let v = v_all.i(layer)?.transpose(0, 1)?.force_contiguous()?;
+            inference_paged_attn::reshape_and_cache_flashinfer(
+                &k,
+                &v,
+                &key_cache,
+                &value_cache,
+                &slot_mapping,
+                inference_paged_attn::DEFAULT_FP8_KV_CACHE_SCALES,
+            )?;
+        }
+        let mut positions = self
+            .paged_next_pos
+            .lock()
+            .expect("dflash paged positions poisoned");
+        for (entry, rows) in entries.iter().zip(rows) {
+            positions.insert(entry.seq_id, entry.start_pos + rows);
+        }
+        Ok(())
+    }
+
+    /// One draft over the paged context: the noise rows' K/V go into the slots reserved for the verify positions,
+    /// which the committed context later overwrites, and every row attends the whole block.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn draft_hidden_paged(
+        &self,
+        seq_ids: &[usize],
+        noise_embedding: &Tensor,
+        start_positions: &[usize],
+        paged: DFlashPagedCache<'_>,
+    ) -> Result<Tensor> {
+        let (batch, block, _) = noise_embedding.dims3()?;
+        let (block_tables, width, slots, kv_lens) = {
+            let mut manager = crate::get_mut_arcmutex!(paged.metadata.kv_cache_manager);
+            let page = manager.block_size();
+            let width = start_positions
+                .iter()
+                .map(|start| (start + block).div_ceil(page))
+                .max()
+                .unwrap_or(1);
+            let mut tables = Vec::with_capacity(batch * width);
+            let mut slots = Vec::with_capacity(batch * block);
+            let mut kv_lens = Vec::with_capacity(batch);
+            for (seq_id, start) in seq_ids.iter().zip(start_positions) {
+                if manager
+                    .allocate_slots(*seq_id, start + block, &[])
+                    .is_none()
+                {
+                    inference_tensor::bail!("no paged blocks left for DFlash draft rows");
+                }
+                let mapping = manager
+                    .get_slot_mapping(*seq_id, *start, block)
+                    .ok_or_else(|| {
+                        inference_tensor::Error::msg("DFlash draft rows have no slots")
+                    })?;
+                slots.extend(mapping);
+                let table = manager.get_block_table(*seq_id, width).ok_or_else(|| {
+                    inference_tensor::Error::msg("DFlash draft has no block table")
+                })?;
+                tables.extend(table.into_iter().map(|block| block.max(0).unsigned_abs()));
+                kv_lens.push(u32::try_from(start + block).map_err(inference_tensor::Error::wrap)?);
+            }
+            (tables, width, slots, kv_lens)
+        };
+        let block_tables = Tensor::from_vec(block_tables, (batch, width), &self.device)?;
+        let slot_mapping = Tensor::from_vec(slots, (batch * block,), &self.device)?;
+        let seq_lens = Tensor::from_vec(kv_lens, (batch,), &self.device)?;
+        let block_u32 = u32::try_from(block).map_err(inference_tensor::Error::wrap)?;
+        let cumulative_query_lens = Tensor::from_vec(
+            (0..=batch)
+                .map(|row| u32::try_from(row).map(|row| row * block_u32))
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(inference_tensor::Error::wrap)?,
+            (batch + 1,),
+            &self.device,
+        )?;
+        let (q_cos, q_sin) = {
+            let mut coss = Vec::with_capacity(batch);
+            let mut sins = Vec::with_capacity(batch);
+            for start in start_positions {
+                let (c, s) = self.cos_sin(*start, block)?;
+                coss.push(c);
+                sins.push(s);
+            }
+            (Tensor::stack(&coss, 0)?, Tensor::stack(&sins, 0)?)
+        };
+        #[allow(clippy::cast_precision_loss)]
+        let scale = 1f32 / (self.head_dim as f32).sqrt();
+        let hs = self.run_draft_layers(
+            noise_embedding,
+            &q_cos,
+            &q_sin,
+            DraftAttentionLayout::TokensFirst,
+            |layer_idx, layer, q, k_noise, v_noise| {
+                let (key_cache, value_cache) = self.paged_layer(paged, layer_idx)?;
+                inference_paged_attn::reshape_and_cache_flashinfer(
+                    k_noise,
+                    v_noise,
+                    &key_cache,
+                    &value_cache,
+                    &slot_mapping,
+                    inference_paged_attn::DEFAULT_FP8_KV_CACHE_SCALES,
+                )?;
+                let q = q.reshape((batch * block, self.num_heads, self.head_dim))?;
+                let opts = inference_fattn::FattnOptions {
+                    scale,
+                    causal: layer.is_causal,
+                    window_left: layer.sliding_window.map(|window| window - 1),
+                    ..Default::default()
+                };
+                let kv = inference_fattn::PagedKv {
+                    k_cache: &key_cache,
+                    v_cache: &value_cache,
+                    block_table: &block_tables,
+                    seq_lens: &seq_lens,
+                    full_lens: None,
+                };
+                let q_seqs = inference_fattn::Packed {
+                    cu_seqlens: &cumulative_query_lens,
+                    max_len: block,
+                };
+                let out = inference_fattn::flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?;
+                out.reshape((batch, block, self.num_heads * self.head_dim))
+            },
+        )?;
+        let hs = self.norm.forward(&hs)?;
+        hs.narrow(1, self.draft_row_offset, block - self.draft_row_offset)
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -3592,8 +3859,20 @@ impl DFlashDraftModel {
         seq_ids: &[usize],
         noise_embedding: &Tensor,
         start_positions: &[usize],
+        paged: Option<DFlashPagedCache<'_>>,
     ) -> Result<Tensor> {
         let (b, block, _) = noise_embedding.dims3()?;
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if self.uses_paged_kv() {
+            let paged = paged.ok_or_else(|| {
+                inference_tensor::Error::msg(
+                    "a paged DFlash drafter needs the target's paged cache",
+                )
+            })?;
+            return self.draft_hidden_paged(seq_ids, noise_embedding, start_positions, paged);
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        let _ = paged;
         #[cfg(all(feature = "cuda", target_family = "unix"))]
         if self.windowed_pool.is_some() {
             return self.draft_hidden_windowed(seq_ids, noise_embedding, start_positions, b, block);

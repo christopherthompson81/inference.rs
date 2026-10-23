@@ -136,10 +136,13 @@ Drafting is greedy (the Markov chain picks the argmax at each position, as the r
 ships its own YaRN scaling uses it. Not yet supported: the confidence head's early cutoff (the head loads but is
 unused), the speculators export format (`DSparkSpeculator`), reduced draft vocabularies, and non-Qwen3 backbones.
 
-Published DSpark drafters attend to the whole context rather than a window, so they run without CUDA graphs and keep
-about 20 KB of drafter cache per context token on Qwen3.8 27B (5 layers, 8 KV heads), more than a q3 target cache.
-On the RTX 3090 they accept about as many tokens per step as DFlash 2 (3.0 against 3.5 on the same coding and
-review prompts) and decode slower, so DFlash 2 stays the better choice where one exists.
+Published DSpark drafters attend to the whole context rather than a window. On CUDA such a drafter (and any DFlash
+drafter with a full-attention layer) keeps its context in the target's paged KV cache as extra layers, at the model's
+dtype beside a quantized target cache: the KV planner counts it (about 20 KB per context token for Qwen3.8 27B's
+drafter, 5 layers of 8 KV heads, more than a q3 target cache), and the prefix cache saves and restores it with the
+target's blocks, so a cache hit needs no replay. These drafters don't use CUDA graphs yet. On the RTX 3090 Qwen3.8's
+DSpark drafter accepts 2.9-3.0 tokens per step on coding and review prompts against DFlash 2's 3.5, at about the
+same step time, so DFlash 2 stays the better choice where one exists.
 
 ## Gemma 4
 

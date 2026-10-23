@@ -115,6 +115,17 @@ struct DraftRow {
     mrope: [u32; MROPE_DIMS],
 }
 
+/// The target's paged cache for a drafter that keeps its layers there.
+fn dflash_paged_cache<'a>(
+    drafter: &DFlashDraftModel,
+    cache: &SpeculativeKvCache<'a>,
+) -> Option<crate::dflash::DFlashPagedCache<'a>> {
+    let SpeculativeKvCache::Paged { metadata, kv_cache } = *cache;
+    drafter
+        .uses_paged_kv()
+        .then_some(crate::dflash::DFlashPagedCache { kv_cache, metadata })
+}
+
 fn resolve_dflash_n_predict(
     requested: Option<usize>,
     max_drafts: usize,
@@ -303,6 +314,8 @@ impl Qwen3_5TextModel {
             runtime.prefix_cache_capacity(),
         );
         let windowed_kv = drafter.enable_windowed_kv(sequence_capacity, retained_prefixes)?;
+        // the target's own paged layers (and the MTP head's) come first; the speculative config put the drafter's after
+        let paged_kv = !windowed_kv && drafter.enable_paged_kv(self.cfg.num_layers);
         self.set_dflash_tap_layers(drafter.target_layer_ids.clone());
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
         self.set_store_spec_hidden(true);
@@ -329,13 +342,18 @@ impl Qwen3_5TextModel {
             crate::speculative::MtpDraftSamplingMethod::Greedy => "greedy draft",
             crate::speculative::MtpDraftSamplingMethod::Probabilistic => "probabilistic draft",
         };
+        let context = match (windowed_kv, paged_kv) {
+            (true, _) => "windowed",
+            (false, true) => "paged",
+            (false, false) => "eager",
+        };
         let depth = if adaptive {
             format!("batch-adaptive depth <= {n_predict}")
         } else {
             format!("depth {n_predict}")
         };
         let name = format!(
-            "{kind} `{}` (block of {}, {depth}, {draft_sampling}, taps {:?})",
+            "{kind} `{}` (block of {}, {depth}, {draft_sampling}, {context} context, taps {:?})",
             config.model.as_deref().unwrap_or("dflash"),
             drafter.max_drafts(),
             drafter.target_layer_ids
@@ -497,7 +515,12 @@ impl Qwen3_5TextModel {
             Some((prepared, row_indices, appends))
         });
         if let Some((prepared, row_indices, appends)) = prepared_commit {
-            drafter.commit_prepared_ctx_batch(&prepared.context, row_indices, &appends)?;
+            drafter.commit_prepared_ctx_batch(
+                &prepared.context,
+                row_indices,
+                &appends,
+                dflash_paged_cache(&drafter, &ctx.cache),
+            )?;
         } else {
             let source_rows = capture.taps[0].dim(1)?;
             let mut appends = Vec::with_capacity(batch);
@@ -535,7 +558,12 @@ impl Qwen3_5TextModel {
                     });
                 }
             }
-            drafter.append_ctx_batch(&capture.taps, flat_row_indices, &appends)?;
+            drafter.append_ctx_batch(
+                &capture.taps,
+                flat_row_indices,
+                &appends,
+                dflash_paged_cache(&drafter, &ctx.cache),
+            )?;
         }
         if !drafter.contexts_ready_for_draft(ctx.seq_ids) {
             return Ok(None);
@@ -607,7 +635,12 @@ impl Qwen3_5TextModel {
             CudaGraphEventGuard::new(CudaGraphComponent::DFlash, CudaGraphEvent::EagerFallback);
         let fallback_result = (|| {
             let noise = self.dflash_noise_embedding(&drafter, ctx.sampled_tokens, n_predict)?;
-            let hidden = drafter.draft_hidden_batch(ctx.seq_ids, &noise, ctx.base_lens)?;
+            let hidden = drafter.draft_hidden_batch(
+                ctx.seq_ids,
+                &noise,
+                ctx.base_lens,
+                dflash_paged_cache(&drafter, &ctx.cache),
+            )?;
             dflash_speculative_batch(drafter.finish_proposals(
                 &hidden,
                 ctx.sampled_tokens,
@@ -659,7 +692,12 @@ impl Qwen3_5TextModel {
             });
         }
         let flat_row_indices = routing.flat_row_indices()?;
-        drafter.append_ctx_batch(&capture.taps, flat_row_indices, &appends)
+        drafter.append_ctx_batch(
+            &capture.taps,
+            flat_row_indices,
+            &appends,
+            dflash_paged_cache(&drafter, &ctx.cache),
+        )
     }
 
     fn mtp_propose(

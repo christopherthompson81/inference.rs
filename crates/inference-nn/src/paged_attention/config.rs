@@ -164,6 +164,11 @@ pub trait ModelConfigLike {
     fn layer_has_paged_kv_cache(&self, _layer_idx: usize) -> bool {
         true
     }
+    /// Paged layers after the model's own that another component (a drafter) reads and writes; the model's
+    /// prefill never touches them and the KV profiles don't describe them.
+    fn auxiliary_paged_layers(&self) -> usize {
+        0
+    }
     /// Bytes of one sequence's recurrent state (a hybrid model's conv and recurrent rows over its linear layers),
     /// which the recurrent pool holds per slot beside the paged cache.
     fn recurrent_state_bytes_per_sequence(&self) -> usize {
@@ -419,10 +424,164 @@ impl ModelConfigLike for HybridPagedKvCacheConfig {
     }
 }
 
+/// Geometry of the auxiliary paged layers a drafter keeps in the target's cache, declared before the cache exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AuxiliaryPagedLayers {
+    pub count: usize,
+    pub num_attn_heads: usize,
+    pub num_kv_heads: usize,
+    pub head_dim: usize,
+}
+
+impl AuxiliaryPagedLayers {
+    /// K and V bytes one token takes over every auxiliary layer, at `value_bytes` per element.
+    pub fn bytes_per_token(&self, value_bytes: usize) -> usize {
+        self.count * 2 * self.num_kv_heads * self.head_dim * value_bytes
+    }
+}
+
+/// A model's cache config with auxiliary paged layers appended after its own.
+pub struct AuxiliaryPagedKvCacheConfig {
+    base: std::sync::Arc<dyn ModelConfigLike + Send + Sync>,
+    auxiliary: AuxiliaryPagedLayers,
+}
+
+impl AuxiliaryPagedKvCacheConfig {
+    pub fn new(
+        base: std::sync::Arc<dyn ModelConfigLike + Send + Sync>,
+        auxiliary: AuxiliaryPagedLayers,
+    ) -> Self {
+        Self { base, auxiliary }
+    }
+
+    fn is_auxiliary(&self, layer_idx: usize) -> bool {
+        layer_idx >= self.base.num_layers()
+    }
+}
+
+impl ModelConfigLike for AuxiliaryPagedKvCacheConfig {
+    fn max_seq_len(&self) -> usize {
+        self.base.max_seq_len()
+    }
+    fn num_layers(&self) -> usize {
+        self.base.num_layers() + self.auxiliary.count
+    }
+    fn hidden_size(&self) -> usize {
+        self.base.hidden_size()
+    }
+    fn num_kv_heads(&self) -> usize {
+        self.base.num_kv_heads()
+    }
+    fn num_attn_heads(&self) -> usize {
+        self.base.num_attn_heads()
+    }
+    fn k_head_dim(&self) -> usize {
+        self.base.k_head_dim()
+    }
+    fn v_head_dim(&self) -> usize {
+        self.base.v_head_dim()
+    }
+    fn num_attn_heads_for_layer(&self, layer_idx: usize) -> usize {
+        if self.is_auxiliary(layer_idx) {
+            self.auxiliary.num_attn_heads
+        } else {
+            self.base.num_attn_heads_for_layer(layer_idx)
+        }
+    }
+    fn num_kv_heads_for_layer(&self, layer_idx: usize) -> usize {
+        if self.is_auxiliary(layer_idx) {
+            self.auxiliary.num_kv_heads
+        } else {
+            self.base.num_kv_heads_for_layer(layer_idx)
+        }
+    }
+    fn k_head_dim_for_layer(&self, layer_idx: usize) -> usize {
+        if self.is_auxiliary(layer_idx) {
+            self.auxiliary.head_dim
+        } else {
+            self.base.k_head_dim_for_layer(layer_idx)
+        }
+    }
+    fn v_head_dim_for_layer(&self, layer_idx: usize) -> usize {
+        if self.is_auxiliary(layer_idx) {
+            self.auxiliary.head_dim
+        } else {
+            self.base.v_head_dim_for_layer(layer_idx)
+        }
+    }
+    // a sharing base keeps its topology; auxiliary layers always own their cache
+    fn has_kv_cache_sharing(&self) -> bool {
+        self.base.has_kv_cache_sharing()
+    }
+    fn kv_cache_topology(&self) -> KvCacheTopology {
+        let base = self.base.kv_cache_topology();
+        let owners = (0..self.num_layers())
+            .map(|layer| {
+                if self.is_auxiliary(layer) {
+                    layer
+                } else {
+                    base.owner_for_layer(layer)
+                }
+            })
+            .collect();
+        KvCacheTopology::from_layer_owners(owners)
+    }
+    fn layer_has_paged_kv_cache(&self, layer_idx: usize) -> bool {
+        self.is_auxiliary(layer_idx) || self.base.layer_has_paged_kv_cache(layer_idx)
+    }
+    fn auxiliary_paged_layers(&self) -> usize {
+        self.base.auxiliary_paged_layers() + self.auxiliary.count
+    }
+    fn recurrent_state_bytes_per_sequence(&self) -> usize {
+        self.base.recurrent_state_bytes_per_sequence()
+    }
+    fn layer_kv_cache_elements_per_token(&self, layer_idx: usize) -> Option<usize> {
+        if self.is_auxiliary(layer_idx) {
+            Some(2 * self.auxiliary.num_kv_heads * self.auxiliary.head_dim)
+        } else {
+            self.base.layer_kv_cache_elements_per_token(layer_idx)
+        }
+    }
+    fn attention_backend_kind(&self) -> AttentionBackendKind {
+        self.base.attention_backend_kind()
+    }
+    fn attention_backend_kind_for_layer(&self, layer_idx: usize) -> AttentionBackendKind {
+        if self.is_auxiliary(layer_idx) {
+            select_attention_backend_for_layer(self, layer_idx)
+        } else {
+            self.base.attention_backend_kind_for_layer(layer_idx)
+        }
+    }
+    fn kv_cache_layout(&self) -> KvCacheLayout {
+        self.base.kv_cache_layout()
+    }
+    fn kv_cache_layout_for_layer(&self, layer_idx: usize) -> KvCacheLayout {
+        if self.is_auxiliary(layer_idx) {
+            select_kv_cache_layout_for_layer(KvCacheLayout::Standard, self, layer_idx)
+        } else {
+            self.base.kv_cache_layout_for_layer(layer_idx)
+        }
+    }
+    fn kv_cache_elements_per_token(&self) -> usize {
+        self.base.kv_cache_elements_per_token()
+    }
+    fn prefix_prefill_attention_features(
+        &self,
+        layer_idx: usize,
+    ) -> Option<PrefixPrefillAttentionFeatures> {
+        if self.is_auxiliary(layer_idx) {
+            None
+        } else {
+            self.base.prefix_prefill_attention_features(layer_idx)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        AttentionBackendKind, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
+        AttentionBackendKind, AuxiliaryPagedKvCacheConfig, AuxiliaryPagedLayers, KvCacheLayout,
+        KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
     };
 
     #[test]
@@ -441,6 +600,48 @@ mod tests {
         assert!(topology.uses_own_kv_cache_for_layer(1));
         assert!(!topology.uses_own_kv_cache_for_layer(2));
         assert_eq!(topology.owner_for_layer(3), 1);
+    }
+
+    #[test]
+    fn auxiliary_layers_follow_the_model_with_their_own_geometry() {
+        let base = ModelConfigMetadata {
+            max_seq_len: 32_768,
+            num_layers: 4,
+            hidden_size: 896,
+            num_kv_heads: 2,
+            num_attn_heads: 16,
+            sliding_window: None,
+            k_head_dim: 128,
+            v_head_dim: 128,
+            kv_cache_layout: KvCacheLayout::Standard,
+        };
+        let base_total = base.total_kv_cache_elements_per_token();
+        let hybrid = super::HybridPagedKvCacheConfig::new(base, vec![true, false, false, true]);
+        let config = AuxiliaryPagedKvCacheConfig::new(
+            std::sync::Arc::new(hybrid),
+            AuxiliaryPagedLayers {
+                count: 2,
+                num_attn_heads: 8,
+                num_kv_heads: 4,
+                head_dim: 64,
+            },
+        );
+        assert_eq!(config.num_layers(), 6);
+        assert_eq!(config.auxiliary_paged_layers(), 2);
+        assert!(!config.layer_has_paged_kv_cache(1));
+        assert!(config.layer_has_paged_kv_cache(5));
+        assert_eq!(config.num_kv_heads_for_layer(4), 4);
+        assert_eq!(config.k_head_dim_for_layer(5), 64);
+        assert_eq!(config.num_kv_heads_for_layer(0), 2);
+        assert_eq!(
+            config.layer_kv_cache_elements_per_token(4),
+            Some(2 * 4 * 64)
+        );
+        assert_eq!(
+            config.total_kv_cache_elements_per_token(),
+            base_total / 2 + 2 * (2 * 4 * 64)
+        );
+        assert!(config.prefix_prefill_attention_features(4).is_none());
     }
 
     #[test]

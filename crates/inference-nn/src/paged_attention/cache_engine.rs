@@ -316,7 +316,6 @@ impl CacheEngine {
             .cache_type
             .validate(dtype, model_config, device, &layer_devices)
             .map_err(inference_tensor::Error::msg)?;
-        let dtype = cache_config.cache_type.to_dtype(dtype);
         let gpu_cache =
             Self::allocate_gpu_cache(model_config, cache_config, dtype, device, layer_devices)?;
         #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -347,7 +346,7 @@ impl CacheEngine {
     fn allocate_gpu_cache(
         model_config: &dyn ModelConfigLike,
         cache_config: &CacheConfig,
-        dtype: DType,
+        model_dtype: DType,
         device: &Device,
         layer_devices: Vec<Option<Device>>,
     ) -> Result<Vec<KVCache>> {
@@ -359,6 +358,8 @@ impl CacheEngine {
             .map(|x| x.as_ref().unwrap_or(device))
             .enumerate()
         {
+            // a drafter's auxiliary layers keep the model dtype beside a quantized cache
+            let dtype = cache_config.layer_type(layer_idx).to_dtype(model_dtype);
             // Hybrid models keep no paged cache on linear/recurrent layers, but the vec stays indexed
             // by absolute layer index, so those get an empty tensor of the right rank instead.
             let num_gpu_blocks = if model_config.layer_has_paged_kv_cache(layer_idx) {
