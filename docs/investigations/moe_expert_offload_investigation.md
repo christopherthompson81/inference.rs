@@ -631,3 +631,53 @@ during prefill 2 to 10 direct-reclaim stalls and 7 to 30 compaction stalls a sec
 pinned copy of the GPU layers' experts and the 88 GB mapping do not both fit in 125 GB, so every activation buffer a
 CPU op allocates waits on reclaim. Real-model timings mean nothing until the experts stop being copied (pageable
 copies from the mapping, as llama.cpp does).
+
+## Run 21 - 2026-10-23 11:35
+
+Question: can offloaded experts stay in the GGUF mapping as pageable memory, as llama.cpp keeps them, instead of the
+57 GiB pinned copy that left this 125 GB machine reclaiming (Run 20)?
+
+What the host stacks are for: the source of device cache fills (the fill worker) and of prompt staging (the forward
+thread), and the CPU's input for missed experts. No kernel reads a host stack, so page-locking only buys asynchronous
+copies. `HostExpertStack::from_mapped` now keeps the mapping as `HostBlocks::Pageable` when the driver will not
+register it (here `CUDA_ERROR_NOT_SUPPORTED`, read-only file-backed memory) instead of copying it into pinned memory.
+Copies from it are synchronous through the driver's staging buffer.
+
+```
+inference bench --format gguf -m <Flash-Next UD-IQ4_XS> --moe-expert-cache 64 --pa-context-len 8192 --prompt-len 3000
+    --gen-len 64
+pinned copy (Runs 12, 18):  weights load 43 s, 57 GiB pinned           TTFT ~17 s (3000)   decode 67.5 ms
+pageable, first run (cold file pages):  weights load 3.4 s, RSS 9 GB at start, peak 45 GB of file pages
+                                        TTFT 30.5 s   decode 92.3 ms
+pageable, warm (2 iterations):          TTFT 13.7 s   decode 72.2 ms   111 GB available throughout
+forced split -n "0:43", 512 tokens (pageable, F32 CPU layers, 2 iterations): TTFT 10.7 s, decode 106 ms
+    (Run 18, BF16 CPU layers and the pinned copy: 14.6 s, 104 ms)
+```
+
+Prefill is as fast as from the pinned copy once the pages are warm; decode gives up about 7% to the synchronous
+fills. The file pages stay reclaimable, so the split runs no longer stall on reclaim, and Run 20's F32 CPU layers
+show their gain on the real model: 27% off the split's prefill.
+
+Test: `mapped_experts_fill_device_slots_with_their_file_bytes` writes a GGUF expert stack, reads it through the
+mapping (pageable here, registered where the driver allows) and checks a filled device slot holds the file's bytes.
+
+Open: a pinned bounce ring on the fill worker (memcpy from the mapping, then an async copy) could win back the 7%.
+
+## Run 22 - 2026-10-23 11:47
+
+Question: would a pinned bounce buffer on the fill worker win back Run 21's 7% decode gap (72.2 ms against 67.5 ms)?
+
+```
+cargo nextest run -p inference-quant --features cuda --run-ignored only -E 'test(/expert_copy_bandwidth/)' --no-capture
+(720 KiB copies, about one Flash-Next expert projection, each waited for as the fill worker waits)
+pageable    115.4 us a copy, 6.39 GB/s
+pinned       62.3 us a copy, 11.83 GB/s
+bounce/2    115.3 us a copy, 6.40 GB/s   (chunks memcpy'd into two pinned halves, each DMA queued before the next memcpy)
+bounce/4    115.5 us a copy, 6.38 GB/s
+bounce/8    134.1 us a copy, 5.50 GB/s
+```
+
+Pageable copies run at half the pinned bandwidth, and a bounce does not help: the single-threaded memcpy out of the
+page cache is the bound (about 6.4 GB/s), not the DMA. A threaded memcpy could approach the pinned rate, but those
+threads are the ones the CPU's missed experts run on, for at most 4.5 ms a token. Dead end at this size; kept the
+benchmark.

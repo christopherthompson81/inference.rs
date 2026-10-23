@@ -1,4 +1,4 @@
-//! Expert matrices of one MoE projection, in pinned host memory or in device slots the GGUF kernels read in place.
+//! Expert matrices of one MoE projection, in host memory (pinned, or the GGUF mapping itself) or in device slots.
 
 use std::sync::{Arc, Mutex, Weak};
 
@@ -30,6 +30,9 @@ enum HostBlocks {
         blocks: super::mapped::MappedBlocks,
         shard: Arc<ShardRegistration>,
     },
+    // read in place from the GGUF mapping as ordinary pageable memory: a copy source for the device cache and the
+    // CPU's input, never read by a kernel
+    Pageable(super::mapped::MappedBlocks),
 }
 
 /// A GGUF shard's whole mapping page-locked and mapped into one device: a registration may not overlap another, and
@@ -85,8 +88,8 @@ impl ShardRegistration {
         }
         .result()
         {
-            crate::log::once_log_warn(format!(
-                "GGUF experts are copied to pinned memory: registering the file mapping failed ({err:?})"
+            crate::log::once_log_info(format!(
+                "GGUF experts stay pageable in the file mapping: registering it with the device failed ({err:?})"
             ));
             return None;
         }
@@ -151,9 +154,8 @@ impl HostExpertStack {
         })
     }
 
-    /// The experts read in place from their GGUF mapping, its shard page-locked and mapped into `device`; copied as
-    /// `new` does when the shard cannot be registered or the blocks end too near the mapping's end for the kernels'
-    /// whole-tile reads.
+    /// The experts read in place from their GGUF mapping, its shard page-locked and mapped into `device` when it can
+    /// be registered, else as pageable memory (copies from it to the device are synchronous, and nothing is pinned).
     pub fn from_mapped(blocks: super::mapped::MappedBlocks, device: &CudaDevice) -> Result<Self> {
         let Ok(dims) = <[usize; 3]>::try_from(blocks.dims.as_slice()) else {
             inference_tensor::bail!(
@@ -166,9 +168,6 @@ impl HostExpertStack {
         let shard = (blocks.trailing() >= padding)
             .then(|| ShardRegistration::for_blocks(&blocks, device))
             .flatten();
-        let Some(shard) = shard else {
-            return Self::new(ty, dims, blocks.bytes(), device);
-        };
         super::ffi::ensure_type_loaded(ty).map_err(inference_tensor::Error::msg)?;
         let [experts, rows, cols] = dims;
         let expected = ty.row_bytes(cols).map(|row| row * rows * experts);
@@ -178,14 +177,26 @@ impl HostExpertStack {
                 blocks.bytes().len()
             );
         }
-        crate::log::once_log_info(
-            "GGUF experts are read in place from the file mapping, page-locked",
-        );
+        let len = blocks.bytes().len();
+        let storage = match shard {
+            Some(shard) => {
+                crate::log::once_log_info(
+                    "GGUF experts are read in place from the file mapping, page-locked",
+                );
+                HostBlocks::Mapped { blocks, shard }
+            }
+            None => {
+                crate::log::once_log_info(
+                    "GGUF experts are read in place from the file mapping, pageable",
+                );
+                HostBlocks::Pageable(blocks)
+            }
+        };
         Ok(Self {
             ty,
             shape: Shape::from((experts, rows, cols)),
-            len: blocks.bytes().len(),
-            storage: HostBlocks::Mapped { blocks, shard },
+            len,
+            storage,
             device: device.clone(),
         })
     }
@@ -212,7 +223,7 @@ impl HostExpertStack {
                 // SAFETY: filled at construction and never written again; the device only reads it
                 unsafe { std::slice::from_raw_parts(host, self.len) }
             }
-            HostBlocks::Mapped { blocks, .. } => blocks.bytes(),
+            HostBlocks::Mapped { blocks, .. } | HostBlocks::Pageable(blocks) => blocks.bytes(),
         }
     }
 }
@@ -244,6 +255,9 @@ impl KernelWeight for HostExpertStack {
                     SyncOnDrop::Record(None),
                 ))
             }
+            HostBlocks::Pageable(_) => inference_tensor::bail!(
+                "pageable host experts are no kernel weight; copy them to the device"
+            ),
         }
     }
 }
@@ -400,5 +414,168 @@ impl KernelWeight for DeviceExpertStack {
     fn kernel_ptr<'a>(&'a self, stream: &'a CudaStream) -> Result<(*const u8, SyncOnDrop<'a>)> {
         let (ptr, guard) = self.blocks.device_ptr(stream);
         Ok((ptr as *const u8, guard))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gguf::archive::GgufArchive;
+    use crate::gguf::archive::tests::{TestTensor, write_test_gguf};
+
+    const EXPERTS: usize = 4;
+    const ROWS: usize = 32;
+    const COLS: usize = 64;
+    const NAME: &str = "blk.0.ffn_down_exps.weight";
+    // GGUF's type id of IQ4_NL
+    const IQ4_NL_ID: u32 = 20;
+
+    // Experts read from their GGUF mapping (page-locked where the driver registers it, else pageable) fill device slots
+    // with their file bytes.
+    #[test]
+    fn mapped_experts_fill_device_slots_with_their_file_bytes() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cuda = device.as_cuda_device()?;
+        let ty = GgufType::Iq4Nl;
+        let expert = ty.row_bytes(COLS).expect("whole blocks") * ROWS;
+        let data = (0..EXPERTS * expert)
+            .map(|i| u8::try_from(i * 31 % 251).expect("below 251"))
+            .collect::<Vec<_>>();
+        let file = write_test_gguf(
+            &[],
+            &[TestTensor {
+                name: NAME,
+                shape: [EXPERTS, ROWS, COLS].map(|d| d as u64).to_vec(),
+                dtype: IQ4_NL_ID,
+                data: data.clone(),
+                offset: None,
+            }],
+            super::super::archive::DEFAULT_ALIGNMENT,
+        );
+        let archive = Arc::new(GgufArchive::open_file(file.path())?);
+        let (shard, range) = archive.mapped_range(NAME).expect("a mapped tensor");
+        let blocks = super::super::mapped::MappedBlocks::new(
+            ty,
+            vec![EXPERTS, ROWS, COLS],
+            archive,
+            shard,
+            range,
+        );
+        let host = HostExpertStack::from_mapped(blocks, cuda)?;
+        assert_eq!(host.bytes(), data.as_slice());
+        let slots =
+            DeviceExpertStack::zeros(&[(ty, ROWS, COLS)], 2, cuda)?.view(ty, 2, ROWS, COLS)?;
+        let stream = cuda.cuda_stream();
+        // SAFETY: `host` outlives the synchronize below, and nothing reads the slot before it
+        unsafe { slots.fill_async(1, &host.bytes()[2 * expert..3 * expert], &stream)? };
+        stream
+            .synchronize()
+            .map_err(inference_tensor::Error::wrap)?;
+        let back = stream
+            .clone_dtoh(&*slots.blocks)
+            .map_err(inference_tensor::Error::wrap)?;
+        assert_eq!(&back[expert..2 * expert], &data[2 * expert..3 * expert]);
+        Ok(())
+    }
+
+    // host-to-device copies of one expert's size from pageable and from pinned memory, synchronously as the fill
+    // worker waits on them
+    #[test]
+    #[ignore = "benchmark"]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn expert_copy_bandwidth() -> Result<()> {
+        const EXPERT_BYTES: usize = 720 * 1024;
+        const COPIES: usize = 2000;
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cuda = device.as_cuda_device()?;
+        let stream = cuda.cuda_stream();
+        let dst = cuda.alloc_zeros::<u8>(EXPERT_BYTES)?;
+        let pageable = (0..EXPERT_BYTES * COPIES / 8)
+            .map(|i| i as u8)
+            .collect::<Vec<_>>();
+        // SAFETY: filled below before any copy reads it
+        let pinned = unsafe { stream.alloc_mapped_host::<u8>(EXPERT_BYTES * 8) }
+            .map_err(inference_tensor::Error::wrap)?;
+        let pinned_host = pinned.mapped_host_ptr().expect("mapped allocation");
+        // SAFETY: the allocation just made spans this
+        unsafe { std::slice::from_raw_parts_mut(pinned_host, EXPERT_BYTES * 8).fill(1) };
+        let (dst_ptr, _guard) = dst.device_ptr(&stream);
+        let time = |label: &str, src: &dyn Fn(usize) -> *const u8| -> Result<()> {
+            let start = std::time::Instant::now();
+            for i in 0..COPIES {
+                // SAFETY: each source spans EXPERT_BYTES live bytes, and the stream is synchronized per copy
+                unsafe {
+                    let src = std::slice::from_raw_parts(src(i), EXPERT_BYTES);
+                    result::memcpy_htod_async(dst_ptr, src, stream.cu_stream())
+                        .map_err(inference_tensor::Error::wrap)?;
+                }
+                stream
+                    .synchronize()
+                    .map_err(inference_tensor::Error::wrap)?;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "{label:<10} {:6.1} us a copy, {:5.2} GB/s",
+                secs / COPIES as f64 * 1e6,
+                (EXPERT_BYTES * COPIES) as f64 / secs / 1e9
+            );
+            Ok(())
+        };
+        let span = pageable.len() - EXPERT_BYTES;
+        time("pageable", &|i| {
+            pageable[(i * EXPERT_BYTES * 7) % span..].as_ptr()
+        })?;
+        time("pinned", &|i| unsafe {
+            pinned_host.add((i % 8) * EXPERT_BYTES)
+        })?;
+        // a bounce through pinned memory: chunks memcpy'd into two pinned halves, each copy queued before the next memcpy
+        for chunks in [2, 4, 8] {
+            let chunk = EXPERT_BYTES / chunks;
+            let start = std::time::Instant::now();
+            for i in 0..COPIES {
+                let src = &pageable[(i * EXPERT_BYTES * 7) % span..][..EXPERT_BYTES];
+                let mut events: [Option<inference_tensor::cuda_backend::cudarc::driver::CudaEvent>;
+                    2] = [None, None];
+                for c in 0..chunks {
+                    let half = c % 2;
+                    if let Some(event) = events[half].take() {
+                        event.synchronize().map_err(inference_tensor::Error::wrap)?;
+                    }
+                    // SAFETY: half `half` of the pinned buffer is no longer read (its last copy's event passed)
+                    let staged = unsafe {
+                        std::slice::from_raw_parts_mut(pinned_host.add(half * chunk), chunk)
+                    };
+                    staged.copy_from_slice(&src[c * chunk..][..chunk]);
+                    // SAFETY: `staged` stays untouched until its event passes
+                    unsafe {
+                        result::memcpy_htod_async(
+                            dst_ptr + (c * chunk) as u64,
+                            &*staged,
+                            stream.cu_stream(),
+                        )
+                        .map_err(inference_tensor::Error::wrap)?;
+                    }
+                    events[half] = Some(
+                        stream
+                            .record_event(None)
+                            .map_err(inference_tensor::Error::wrap)?,
+                    );
+                }
+                stream
+                    .synchronize()
+                    .map_err(inference_tensor::Error::wrap)?;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "bounce/{chunks:<3} {:6.1} us a copy, {:5.2} GB/s",
+                secs / COPIES as f64 * 1e6,
+                (EXPERT_BYTES * COPIES) as f64 / secs / 1e9
+            );
+        }
+        Ok(())
     }
 }
