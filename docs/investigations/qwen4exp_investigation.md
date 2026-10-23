@@ -406,3 +406,39 @@ the gain loosely; the direction holds at every depth.
 Implication: keep the gather for decode and verification. Prefill past the budget still pays dense compute under the
 mask; a gathered prefill would need per-row caches of up to 2051 cells each (rows x 4 MB at bf16), so it would want a
 kernel that reads the cell list in place instead of copying.
+
+## Run 12 - 2026-10-23 07:42
+
+Question: PLE gathers on the host, so decode runs without CUDA graphs. How much would graphs recover?
+
+Scope found first: PLE is not the only blocker. QSA's step plan also builds host tensors every step (pool cells,
+positions, the gather inputs), and the pool count grows every 4 tokens, so the shapes change with the context. Graphs
+would need both moved to the device with fixed shapes.
+
+```
+nsys profile -t cuda,osrt --cuda-graph-trace=node inference bench ... --moe-expert-cache 64 --pa-context-len 8192
+    --prompt-len 3000 --gen-len 64        (decode 67.5 ms/token; last 3.5 s of the trace, about 52 tokens)
+GPU busy 45% (kernels 25%; H2D 12.9 GB, about 250 MB a token of expert fills)
+191K kernel launches (about 3,700 a token), 49K copies
+idle gaps: < 200 us   226 ms total  (about 4 ms a token: what graphs could take)
+           0.2-5 ms 1685 ms total  (about 40 a token, one per MoE layer: 32 ms a token)
+long gaps: 1186 ms start after moe_weighted_reduce_flat_kernel, 1459 ms end with a 10,240 B H2D copy
+           (2560 f32: one token's CPU expert output)
+```
+
+The long gaps are the offload miss round trip: the GPU finishes its cached experts, then waits for the CPU to run the
+missed ones and upload the sum, once per MoE layer. Launch overhead is about 6% of a token.
+
+```
+--moe-expert-cache 64    decode 67.5 ms/token
+--moe-expert-cache 128   decode 66.6 ms/token, TTFT 17.0 s for 3000 tokens
+--moe-expert-cache 160   does not fit: the automatic map put layers 43-47 on the CPU and turned paged attention off,
+                         silently (13 min load, single-threaded CPU decode, GPU at 0%); killed
+```
+
+A bigger cache barely moves decode, so the round trip's fixed cost (routing read back, host function, CPU thread
+wake, the upload), not the miss count, is what to measure next.
+
+Implication: graphs (PLE and QSA on the device) would save about 4 ms of 67; set aside. Next: time the miss round
+trip's parts and cut its fixed cost. Separately, an explicit expert cache that does not fit should fail or shrink,
+never spill layers to the CPU.

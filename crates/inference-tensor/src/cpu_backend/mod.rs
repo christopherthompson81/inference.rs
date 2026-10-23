@@ -1305,6 +1305,81 @@ struct MatMul((usize, usize, usize, usize));
 // Weight elements past which a single-row F32 matmul is split across threads
 const GEMV_THREADED_MIN_ELEMS: usize = 1 << 18;
 const DOT_LANES: usize = 16;
+// BF16 matmuls of at most this many rows read the weight as is; more widen it to F32 for gemm
+const BF16_GEMV_MAX_ROWS: usize = 4;
+// BF16 elements one thread widens at a time
+const WIDEN_CHUNK: usize = 1 << 16;
+
+fn dot_bf16(a: &[f32], b: &[bf16]) -> f32 {
+    let mut acc = [0f32; DOT_LANES];
+    let (a_lanes, a_tail) = a.as_chunks::<DOT_LANES>();
+    let (b_lanes, b_tail) = b.as_chunks::<DOT_LANES>();
+    for (x, y) in a_lanes.iter().zip(b_lanes) {
+        for lane in 0..DOT_LANES {
+            acc[lane] = x[lane].mul_add(y[lane].to_f32(), acc[lane]);
+        }
+    }
+    acc.iter().sum::<f32>()
+        + a_tail
+            .iter()
+            .zip(b_tail)
+            .map(|(x, y)| x * y.to_f32())
+            .sum::<f32>()
+}
+
+// The span of `v` a layout reaches, widened to F32 across threads, with the layout rebased onto it
+fn widen_bf16(v: &[bf16], l: &Layout) -> (Vec<f32>, Layout) {
+    let start = l.start_offset();
+    let reach = l
+        .dims()
+        .iter()
+        .zip(l.stride())
+        .map(|(&dim, &stride)| dim.saturating_sub(1) * stride)
+        .sum::<usize>();
+    let span = &v[start..(start + reach + 1).min(v.len())];
+    let mut out = vec![0f32; span.len()];
+    out.par_chunks_mut(WIDEN_CHUNK)
+        .zip(span.par_chunks(WIDEN_CHUNK))
+        .for_each(|(dst, src)| src.convert_to_f32_slice(dst));
+    (out, Layout::new(l.shape().clone(), l.stride().to_vec(), 0))
+}
+
+// `lhs` rows against a weight whose rows run along k (`rhs` k-stride 1), each output column a dot over threads
+fn bf16_gemv(
+    lhs: &[bf16],
+    lhs_l: &Layout,
+    rhs: &[bf16],
+    rhs_l: &Layout,
+    (m, n, k): (usize, usize, usize),
+) -> Vec<bf16> {
+    let rank = lhs_l.stride().len();
+    let lhs_rs = lhs_l.stride()[rank - 2];
+    let rhs_cs = rhs_l.stride()[rank - 1];
+    let rhs = &rhs[rhs_l.start_offset()..];
+    let rows = (0..m)
+        .map(|row| {
+            let at = lhs_l.start_offset() + row * lhs_rs;
+            lhs[at..at + k]
+                .iter()
+                .map(|v| v.to_f32())
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut dst = vec![bf16::ZERO; m * n];
+    let dst_ptr = dst.as_mut_ptr() as usize;
+    crate::utils::barrier_pool().execute_chunked(n, |cols| {
+        for col in cols {
+            let w = &rhs[col * rhs_cs..][..k];
+            for (row, x) in rows.iter().enumerate() {
+                // SAFETY: the chunks are disjoint columns of `dst`, which outlives the call
+                unsafe {
+                    *(dst_ptr as *mut bf16).add(row * n + col) = bf16::from_f32(dot_bf16(x, w))
+                };
+            }
+        }
+    });
+    dst
+}
 
 fn dot_f32(a: &[f32], b: &[f32]) -> f32 {
     let mut acc = [0f32; DOT_LANES];
@@ -3002,11 +3077,22 @@ impl BackendStorage for CpuStorage {
         lhs_l: &Layout,
         rhs_l: &Layout,
     ) -> Result<Self> {
-        // no bf16 gemm kernel yet: widen to f32, multiply, narrow back
+        // no bf16 gemm kernel yet: a few rows read the weight as is; more widen to f32, multiply, narrow back
         if let (Self::BF16(lhs_v), Self::BF16(rhs_v)) = (self, rhs) {
-            let lhs32 = Self::F32(lhs_v.to_f32_vec());
-            let rhs32 = Self::F32(rhs_v.to_f32_vec());
-            let out = MatMul(bmnk).map(&lhs32, lhs_l, &rhs32, rhs_l)?;
+            let (b, m, n, k) = bmnk;
+            let rank = lhs_l.stride().len();
+            if b == 1
+                && m <= BF16_GEMV_MAX_ROWS
+                && lhs_l.stride()[rank - 1] == 1
+                && rhs_l.stride()[rank - 2] == 1
+                && crate::utils::get_num_threads() > 1
+                && n * k >= GEMV_THREADED_MIN_ELEMS
+            {
+                return Ok(Self::BF16(bf16_gemv(lhs_v, lhs_l, rhs_v, rhs_l, (m, n, k))));
+            }
+            let (lhs32, lhs_l) = widen_bf16(lhs_v, lhs_l);
+            let (rhs32, rhs_l) = widen_bf16(rhs_v, rhs_l);
+            let out = MatMul(bmnk).map(&Self::F32(lhs32), &lhs_l, &Self::F32(rhs32), &rhs_l)?;
             let Self::F32(out_v) = out else {
                 crate::bail!("matmul dtype mismatch")
             };
@@ -3361,7 +3447,28 @@ macro_rules! map_dtype {
 
 #[cfg(test)]
 mod tests {
-    use crate::{Device, IndexOp, Result, Tensor};
+    use crate::{DType, Device, IndexOp, Result, Tensor};
+
+    // a few rows read the bf16 weight in place, more widen it; both on a weight narrowed out of a larger buffer
+    #[test]
+    fn bf16_matmul_matches_f32_for_few_and_many_rows() -> Result<()> {
+        let dev = Device::Cpu;
+        let (n, k) = (1024, 512);
+        let weight = Tensor::randn(0f32, 1., (n + 64, k), &dev)?
+            .to_dtype(DType::BF16)?
+            .narrow(0, 32, n)?;
+        for m in [1, super::BF16_GEMV_MAX_ROWS, 37] {
+            let x = Tensor::randn(0f32, 1., (m, k), &dev)?.to_dtype(DType::BF16)?;
+            let got = x.matmul(&weight.t()?)?.to_dtype(DType::F32)?;
+            let want = x
+                .to_dtype(DType::F32)?
+                .matmul(&weight.to_dtype(DType::F32)?.t()?)?;
+            let err = (&got - &want)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(err <= scale / 64., "{m} rows: max error {err} of {scale}");
+        }
+        Ok(())
+    }
 
     // Each batch on its own against the batched call, for the layouts the GEMM batch folding looks at
     #[test]

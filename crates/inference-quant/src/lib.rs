@@ -2036,6 +2036,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    /// The layer a lazily quantized wrapper stands for, once it resolves; `None` for a layer that is its own.
+    fn resolved_layer(&self) -> Option<Arc<dyn QuantMethod>> {
+        None
+    }
+
     #[cfg(all(feature = "cuda", has_marlin_kernels))]
     #[doc(hidden)]
     fn prepare_gguf_affine_raw(

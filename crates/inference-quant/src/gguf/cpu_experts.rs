@@ -58,11 +58,6 @@ pub fn supports(ty: GgufType, cols: usize) -> bool {
         || (cpu_dot::supports_32(ty) && cols.is_multiple_of(QK32))
 }
 
-/// Whether resident CPU experts take this path: Candle runs a resident Q8_0 itself, so only offloaded ones come here.
-pub fn runs_resident(ty: GgufType, cols: usize) -> bool {
-    supports(ty, cols) && ty != GgufType::Q8_0
-}
-
 /// One projection of every expert: `experts` matrices of `rows x cols`, expert-major, as GGUF stores `*_exps`.
 #[derive(Clone, Copy)]
 pub struct CpuExpertProjection<'a> {
@@ -216,7 +211,7 @@ struct Tile {
 }
 
 impl Tile {
-    // rows `row0..row0 + rows_per_item(p.cols)` of `expert` against `tokens`, into `self.out[slot]` as `[row][token]`
+    // rows `row0..row0 + rows_per_item(p.rows, p.cols)` of `expert` against `tokens`, into `self.out[slot]` as `[row][token]`
     fn project(
         &mut self,
         slot: usize,
@@ -226,7 +221,7 @@ impl Tile {
         tokens: &[TileRow],
     ) {
         let row_bytes = p.row_bytes();
-        let rows = rows_per_item(p.cols);
+        let rows = rows_per_item(p.rows, p.cols);
         self.w.resize(rows * p.cols, 0);
         self.d.resize(rows * p.cols / QK_K, 0.0);
         self.out[slot].resize(rows * tokens.len(), 0.0);
@@ -254,9 +249,10 @@ fn tile_rows<'a>(
         .collect()
 }
 
-// the rows one item of a projection with `cols` columns covers
-fn rows_per_item(cols: usize) -> usize {
-    1 << (TILE_ELEMS / cols).clamp(2, QK_K).ilog2()
+// the rows one item of a projection with `cols` columns covers: a power of two dividing `rows`, so the items cover
+// every row of a small expert too
+fn rows_per_item(rows: usize, cols: usize) -> usize {
+    (1 << (TILE_ELEMS / cols).clamp(2, QK_K).ilog2()).min(1 << rows.trailing_zeros())
 }
 
 impl CpuExperts<'_> {
@@ -313,7 +309,7 @@ impl CpuExperts<'_> {
         let (mut gated_rows, mut routed) = SCRATCH.take();
         gated_rows.resize(routes.len() * inter, 0.0);
         let gated_out = Disjoint(gated_rows.as_mut_ptr());
-        let item_rows = rows_per_item(hidden);
+        let item_rows = rows_per_item(inter, hidden);
         let chunks = inter / item_rows;
         for_each_parallel(groups.len() * chunks, |item| {
             let (g, row0) = (item / chunks, item % chunks * item_rows);
@@ -402,7 +398,7 @@ impl CpuExperts<'_> {
         });
         routed.resize(routes.len() * hidden, 0.0);
         let routed_out = Disjoint(routed.as_mut_ptr());
-        let item_rows = rows_per_item(inter);
+        let item_rows = rows_per_item(hidden, inter);
         let chunks = hidden / item_rows;
         for_each_parallel(groups.len() * chunks, |item| {
             let (g, row0) = (item / chunks, item % chunks * item_rows);
@@ -565,36 +561,46 @@ mod tests {
     }
 
     fn check_types_against_dense(
-        [gate_up_ty, down_ty]: [GgufType; 2],
+        types: [GgufType; 2],
         inter: usize,
         tokens: usize,
         routes: &[CpuExpertRoute],
     ) -> Result<()> {
-        let gate = projection_bytes(gate_up_ty, inter, HIDDEN, 1);
-        let up = projection_bytes(gate_up_ty, inter, HIDDEN, 2);
-        let down = projection_bytes(down_ty, HIDDEN, inter, 3);
+        check_types_against_dense_dims(types, HIDDEN, inter, tokens, routes)
+    }
+
+    fn check_types_against_dense_dims(
+        [gate_up_ty, down_ty]: [GgufType; 2],
+        hidden: usize,
+        inter: usize,
+        tokens: usize,
+        routes: &[CpuExpertRoute],
+    ) -> Result<()> {
+        let gate = projection_bytes(gate_up_ty, inter, hidden, 1);
+        let up = projection_bytes(gate_up_ty, inter, hidden, 2);
+        let down = projection_bytes(down_ty, hidden, inter, 3);
         let experts = CpuExperts {
             gate: CpuExpertProjection {
                 ty: gate_up_ty,
                 bytes: &gate,
                 rows: inter,
-                cols: HIDDEN,
+                cols: hidden,
             },
             up: CpuExpertProjection {
                 ty: gate_up_ty,
                 bytes: &up,
                 rows: inter,
-                cols: HIDDEN,
+                cols: hidden,
             },
             down: CpuExpertProjection {
                 ty: down_ty,
                 bytes: &down,
-                rows: HIDDEN,
+                rows: hidden,
                 cols: inter,
             },
             act: GluActivationType::Silu,
         };
-        let xs = (0..tokens * HIDDEN)
+        let xs = (0..tokens * hidden)
             .map(|i| ((i * 29 % 97) as f32 - 48.0) / 24.0)
             .collect::<Vec<_>>();
         let mut out = vec![0f32; xs.len()];
@@ -602,7 +608,7 @@ mod tests {
 
         let mut expected = vec![0f32; xs.len()];
         for route in routes {
-            let x = &xs[route.token * HIDDEN..][..HIDDEN];
+            let x = &xs[route.token * hidden..][..hidden];
             let g = matvec(&dense(&experts.gate, route.expert), x);
             let u = matvec(&dense(&experts.up, route.expert), x);
             let h = g
@@ -611,15 +617,13 @@ mod tests {
                 .map(|(g, u)| apply_cpu_activation(*g, GluActivationType::Silu) * u)
                 .collect::<Vec<_>>();
             let y = matvec(&dense(&experts.down, route.expert), &h);
-            for (e, v) in expected[route.token * HIDDEN..][..HIDDEN].iter_mut().zip(y) {
+            for (e, v) in expected[route.token * hidden..][..hidden].iter_mut().zip(y) {
                 *e += route.weight * v;
             }
         }
         for (t, (out, expected)) in out
-            .as_chunks::<HIDDEN>()
-            .0
-            .iter()
-            .zip(expected.as_chunks::<HIDDEN>().0)
+            .chunks_exact(hidden)
+            .zip(expected.chunks_exact(hidden))
             .enumerate()
         {
             let norm = expected.iter().map(|v| v * v).sum::<f32>().sqrt();
@@ -647,6 +651,26 @@ mod tests {
             weight,
         };
         check_against_dense(2, &[route(0, 3, 0.7), route(0, 1, 0.3), route(1, 3, 1.0)])
+    }
+
+    // experts smaller than one work item's rows (a tiny test model's), and a row count no larger power of two divides
+    #[test]
+    fn small_experts_match_dense_experts() -> Result<()> {
+        let route = |token, expert, weight| CpuExpertRoute {
+            token,
+            expert,
+            weight,
+        };
+        let routes = [route(0, 3, 0.7), route(0, 1, 0.3), route(1, 3, 1.0)];
+        for types in [
+            [GgufType::Q8_0, GgufType::Q8_0],
+            [GgufType::Iq4Nl, GgufType::Iq4Nl],
+        ] {
+            for (hidden, inter) in [(64, 32), (64, 64), (96, 64), (32 * 7, 32 * 3)] {
+                check_types_against_dense_dims(types, hidden, inter, 2, &routes)?;
+            }
+        }
+        Ok(())
     }
 
     // expert 2 gets enough tokens to run from a decoded tile, with an odd count so the last quad is short
@@ -771,5 +795,145 @@ mod tests {
             let u = ((i * 2_654_435_761) % 65_536) as f64 / 65_536.0;
             (BENCH_EXPERTS as f64 * u * u * u) as usize
         })
+    }
+
+    // process CPU seconds, to tell how many threads a run kept busy
+    fn cpu_seconds() -> f64 {
+        let stat = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+        let fields = stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let ticks = |i: usize| {
+            fields
+                .get(i)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.)
+        };
+        (ticks(11) + ticks(12)) / 100.
+    }
+
+    fn timed(label: &str, iters: usize, mut run: impl FnMut()) {
+        let (wall, cpu) = (std::time::Instant::now(), cpu_seconds());
+        for _ in 0..iters {
+            run();
+        }
+        let secs = wall.elapsed().as_secs_f64();
+        println!(
+            "{label:<44} {:>10.2} ms   {:>5.1} cores",
+            secs / iters as f64 * 1e3,
+            (cpu_seconds() - cpu) / secs
+        );
+    }
+
+    // one Qwen3.8-Flash-Next layer whose down experts are Q8_0 (IQ3_S gate/up, 512 experts over 640 x 2560): the
+    // block kernels against the gather fallback a resident CPU layer of these types takes
+    #[test]
+    #[ignore = "benchmark"]
+    fn flash_next_q8_0_down_layer() -> Result<()> {
+        use crate::QuantMethod;
+        use inference_tensor::{DType, Device, Tensor};
+        const N_EXPERTS: usize = 512;
+        const TOP_K: usize = 10;
+        let (hidden, inter) = (2560, INTER_32);
+        let bytes = |ty: GgufType, rows: usize, cols: usize, seed| {
+            let mut b = random_bytes(
+                N_EXPERTS * rows * cols / ty.block_size() * ty.type_size(),
+                seed,
+            );
+            for block in b.chunks_exact_mut(ty.type_size()) {
+                block[..2].copy_from_slice(&half::f16::from_f32(0.002).to_le_bytes());
+            }
+            b
+        };
+        let (gate, up, down) = (
+            bytes(GgufType::Iq3S, inter, hidden, 1),
+            bytes(GgufType::Iq3S, inter, hidden, 2),
+            bytes(GgufType::Q8_0, hidden, inter, 3),
+        );
+        fn projection(
+            ty: GgufType,
+            bytes: &[u8],
+            rows: usize,
+            cols: usize,
+        ) -> CpuExpertProjection<'_> {
+            CpuExpertProjection {
+                ty,
+                bytes,
+                rows,
+                cols,
+            }
+        }
+        let experts = CpuExperts {
+            gate: projection(GgufType::Iq3S, &gate, inter, hidden),
+            up: projection(GgufType::Iq3S, &up, inter, hidden),
+            down: projection(GgufType::Q8_0, &down, hidden, inter),
+            act: GluActivationType::Silu,
+        };
+        let raw_gate = super::super::raw::GgufRawMatMul::new(
+            super::super::raw::RawGgufTensor::new(
+                GgufType::Iq3S,
+                &[N_EXPERTS, inter, hidden],
+                gate.clone(),
+                &Device::Cpu,
+            )?,
+            None,
+        );
+        let q8_down = super::super::GgufMatMul::from_qtensor(
+            super::super::archive::qtensor_from_gguf_data(
+                inference_tensor::quantized::GgmlDType::Q8_0,
+                &down,
+                vec![N_EXPERTS, hidden, inter],
+                &Device::Cpu,
+            )?,
+            None,
+        )?;
+        for tokens in [1, 32] {
+            let routes = (0..tokens * TOP_K)
+                .map(|i| CpuExpertRoute {
+                    token: i / TOP_K,
+                    expert: (i * 37 + i / TOP_K * 11) % N_EXPERTS,
+                    weight: 0.1,
+                })
+                .collect::<Vec<_>>();
+            let xs = vec![0.01f32; tokens * hidden];
+            let mut out = vec![0f32; xs.len()];
+            let iters = if tokens == 1 { 50 } else { 5 };
+            timed(
+                &format!("{tokens} tok: block kernels, whole layer"),
+                iters,
+                || {
+                    experts.forward(&xs, &routes, &mut out).unwrap();
+                },
+            );
+            let ids = Tensor::from_vec(
+                routes.iter().map(|r| r.expert as u32).collect::<Vec<_>>(),
+                (tokens, TOP_K),
+                &Device::Cpu,
+            )?;
+            for dtype in [DType::BF16, DType::F32] {
+                let x =
+                    Tensor::full(0.01f32, (tokens, 1, hidden), &Device::Cpu)?.to_dtype(dtype)?;
+                let h =
+                    Tensor::full(0.01f32, (tokens, TOP_K, inter), &Device::Cpu)?.to_dtype(dtype)?;
+                timed(
+                    &format!("{tokens} tok: fallback IQ3_S gate gather, {dtype:?}"),
+                    2,
+                    || {
+                        raw_gate.gather_forward(&x, &ids).unwrap();
+                    },
+                );
+                timed(
+                    &format!("{tokens} tok: fallback Q8_0 down gather, {dtype:?}"),
+                    2,
+                    || {
+                        q8_down.gather_forward(&h, &ids).unwrap();
+                    },
+                );
+            }
+        }
+        Ok(())
     }
 }
