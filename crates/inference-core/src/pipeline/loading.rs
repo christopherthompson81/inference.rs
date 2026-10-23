@@ -531,6 +531,9 @@ impl ExpertCachePlan<'_> {
                     + held_back
                     + cfg.base_device_memory_reservation_bytes
                     + recurrent_pool_bytes(&*model, cfg)
+                    + cfg.auxiliary_layers.map_or(0, |layers| {
+                        tokens * layers.bytes_per_token(self.dtype.size_in_bytes())
+                    })
             }
             None => tokens * model.total_kv_cache_elements_per_token() * self.dtype.size_in_bytes(),
         };

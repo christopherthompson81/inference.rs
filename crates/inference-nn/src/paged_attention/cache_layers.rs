@@ -144,7 +144,7 @@ pub struct KvFingerprint {
 impl KvFingerprint {
     fn of(model: &dyn ModelConfigLike) -> Self {
         Self {
-            layers: model.num_layers(),
+            layers: model.num_layers() - model.auxiliary_paged_layers(),
             hidden: model.hidden_size(),
             heads: model.num_attn_heads(),
             kv_heads: model.num_kv_heads(),
@@ -271,6 +271,11 @@ pub fn plan(
     if layers.has_overrides() {
         source = format!("{source}, then {layers}");
     }
+    // a drafter's auxiliary layers stay at the model dtype: its attention reads them unquantized
+    let own = model.num_layers() - model.auxiliary_paged_layers();
+    for slot in &mut types[own..] {
+        *slot = PagedCacheType::Auto;
+    }
     CachePlan {
         layers: types,
         source,
@@ -304,6 +309,35 @@ mod tests {
 
     const Q4: PagedCacheType = PagedCacheType::Quant { k: 4, v: 4 };
     const Q8: PagedCacheType = PagedCacheType::Quant { k: 8, v: 8 };
+
+    #[test]
+    fn auxiliary_layers_keep_the_model_dtype_and_the_base_fingerprint() {
+        let base = model(8, 1024, 16, 4, 128);
+        let fingerprint = KvFingerprint::of(&base);
+        let with_drafter = crate::paged_attention::AuxiliaryPagedKvCacheConfig::new(
+            std::sync::Arc::new(base),
+            crate::paged_attention::AuxiliaryPagedLayers {
+                count: 3,
+                num_attn_heads: 32,
+                num_kv_heads: 8,
+                head_dim: 128,
+            },
+        );
+        assert_eq!(KvFingerprint::of(&with_drafter), fingerprint);
+        let layers: PagedCacheLayers = "0-10=q6".parse().unwrap();
+        let plan = plan(Q4, &layers, &with_drafter);
+        assert_eq!(plan.layers.len(), 11);
+        assert!(
+            plan.layers[..8]
+                .iter()
+                .all(|cache| *cache != PagedCacheType::Auto)
+        );
+        assert!(
+            plan.layers[8..]
+                .iter()
+                .all(|cache| *cache == PagedCacheType::Auto)
+        );
+    }
 
     #[test]
     fn layer_overrides_parse_and_print_back() {

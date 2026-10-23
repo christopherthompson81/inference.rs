@@ -132,6 +132,13 @@ pub fn reserve_external_mtp_memory_with_runtime(
         }
         cache_config = cache_config.with_recurrent_checkpoint_lanes(drafts + 1)?;
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
+        // a full-attention drafter keeps its context in the target's blocks, which only the CUDA kernels read
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if device.is_cuda()
+            && let Some(layers) = dflash_config.auxiliary_paged_layers()
+        {
+            cache_config = cache_config.with_auxiliary_layers(layers);
+        }
     }
     let bytes = external_weight_size_in_bytes(mtp_config, dtype)?;
     #[cfg(all(feature = "cuda", feature = "models-qwen", target_family = "unix"))]

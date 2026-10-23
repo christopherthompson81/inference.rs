@@ -31,7 +31,8 @@ pub use cache_layers::{
     CachePlan, KvFingerprint, PagedCacheLayers, plan as cache_plan, profile_name as kv_profile_name,
 };
 pub use config::{
-    HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
+    AuxiliaryPagedKvCacheConfig, AuxiliaryPagedLayers, HybridPagedKvCacheConfig, KvCacheLayout,
+    KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
 };
 use inference_tensor::{DType, Device};
 pub use input_metadata::{PagedAttentionInputMetadata, PagedAttentionMeta};
@@ -206,6 +207,8 @@ pub struct PagedAttentionConfig {
     pub recurrent_checkpoint_lanes: usize,
     pub recurrent_checkpoint_lanes_auto: bool,
     pub resolve_memory_utilization_after_load: bool,
+    /// Paged layers a drafter keeps after the model's own, so its context shares the target's blocks.
+    pub auxiliary_layers: Option<AuxiliaryPagedLayers>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -233,7 +236,24 @@ impl PagedAttentionConfig {
             recurrent_checkpoint_lanes: 1,
             recurrent_checkpoint_lanes_auto: false,
             resolve_memory_utilization_after_load: true,
+            auxiliary_layers: None,
         })
+    }
+
+    pub fn with_auxiliary_layers(mut self, layers: AuxiliaryPagedLayers) -> Self {
+        self.auxiliary_layers = Some(layers);
+        self
+    }
+
+    /// The model's cache config as the cache engine and the planner size it: with the auxiliary layers appended.
+    pub fn cache_model_config(
+        &self,
+        model: std::sync::Arc<dyn ModelConfigLike + Send + Sync>,
+    ) -> std::sync::Arc<dyn ModelConfigLike + Send + Sync> {
+        match self.auxiliary_layers {
+            Some(layers) => std::sync::Arc::new(AuxiliaryPagedKvCacheConfig::new(model, layers)),
+            None => model,
+        }
     }
 
     pub fn with_cache_layers(mut self, cache_layers: PagedCacheLayers) -> Self {
@@ -421,8 +441,15 @@ pub fn calculate_cache_config(
         anyhow::bail!("Block size must be in {SUPPORTED_BLOCK_SIZE:?}, got {block_size}");
     }
     let plan = cache_plan(cache_type, cache_layers, config);
-    let distinct = plan.distinct(config);
-    // a cache engine allocates one element type, so only quantized widths (all u8 rows) can differ by layer
+    // the model's own layers share one element type (only quantized widths, all u8 rows, differ); a drafter's
+    // auxiliary layers keep the model dtype beside them
+    let own_layers = config.num_layers() - config.auxiliary_paged_layers();
+    let mut distinct = Vec::new();
+    for (idx, cache) in plan.layers.iter().enumerate().take(own_layers) {
+        if config.layer_has_paged_kv_cache(idx) && !distinct.contains(cache) {
+            distinct.push(*cache);
+        }
+    }
     let quantized = |cache: &PagedCacheType| matches!(cache, PagedCacheType::Quant { .. });
     if distinct.len() > 1 && !distinct.iter().all(quantized) {
         anyhow::bail!(

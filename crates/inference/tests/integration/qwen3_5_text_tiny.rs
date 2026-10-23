@@ -427,6 +427,45 @@ async fn hybrid_dspark_with_full_attention_keeps_greedy_output() -> anyhow::Resu
     Ok(())
 }
 
+// Beside a quantized target cache, a full-attention drafter's layers stay BF16, and greedy output matches the target's
+#[tokio::test]
+async fn a_full_attention_drafter_runs_beside_a_quantized_cache() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let paged = || {
+        inference::PagedAttentionMetaBuilder::default()
+            .with_paged_cache_type(inference::PagedCacheType::Quant { k: 8, v: 8 })
+            .build()
+    };
+    let checkpoint = tiny_qwen3_5_text(GRAPH_HEAD_DIM, false)?;
+    let plain = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(paged()?)
+        .build()
+        .await?;
+    let expected = decode_graphs::rounds(&plain, GRAPH_MAX_LEN).await?;
+    drop(plain);
+    let drafter = tiny_dspark(None)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(paged()?)
+        .with_mtp_model(drafter.path().to_string_lossy(), Some(DSPARK_BLOCK))
+        .build()
+        .await?;
+    let rounds = decode_graphs::rounds(&model, GRAPH_MAX_LEN).await?;
+    let drafts: usize = model
+        .speculative_stats()?
+        .data
+        .iter()
+        .map(|m| m.drafts)
+        .sum();
+    assert!(drafts > 0, "DSpark never drafted");
+    let expected: Vec<&[(u32, f32)]> = expected.last().unwrap().iter().map(Vec::as_slice).collect();
+    decode_graphs::assert_traces(&rounds, &expected);
+    Ok(())
+}
+
 // On Metal the drafter's RoPE runs through the Metal rotary kernels, with per-batch caches.
 #[cfg(feature = "metal")]
 #[tokio::test]
@@ -674,6 +713,17 @@ async fn a_stored_prefix_restores_with_its_dflash_checkpoint_after_a_restart() -
         return Ok(());
     }
     let drafter = tiny_dflash(AGENT_DFLASH_WINDOW)?;
+    check_restart_restores(Some(drafter.path())).await
+}
+
+// A full-attention drafter's context sits in the target's blocks, so the disk store keeps it and a restart restores it
+#[tokio::test]
+async fn a_stored_prefix_restores_with_a_full_attention_drafter_after_a_restart()
+-> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let drafter = tiny_dspark(None)?;
     check_restart_restores(Some(drafter.path())).await
 }
 

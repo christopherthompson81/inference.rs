@@ -393,7 +393,10 @@ impl NormalLoader {
             model: LoadedModelView {
                 target: &*model,
                 cache: model.cache(),
-                config: model.model_config(),
+                config: match paged_attn_config {
+                    Some(config) => config.cache_model_config(model.model_config()),
+                    None => model.model_config(),
+                },
                 max_seq_len: model.max_seq_len(),
                 sliding_window: model.config().sliding_window,
                 block_diffusion: false,
