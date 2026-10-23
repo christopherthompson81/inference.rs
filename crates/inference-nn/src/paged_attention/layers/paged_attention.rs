@@ -1,4 +1,4 @@
-use super::SelectedAttention;
+use super::{GatheredAttention, SelectedAttention};
 use crate::attention::FlashKMeta;
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
@@ -2497,6 +2497,68 @@ impl PagedAttention {
         {
             let _ = call;
             inference_tensor::bail!("selected attention runs on CUDA only")
+        }
+    }
+
+    /// Attends each query row over only its kept cells: copies them out of the paged caches into a compact cache and
+    /// runs fattn's paged kernel over it unmasked, so the cost follows the cells kept, not the context.
+    pub fn attend_gathered(&self, call: GatheredAttention<'_>) -> Result<Tensor> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        {
+            let GatheredAttention {
+                query,
+                cells,
+                kept,
+                block_table,
+                compact_table,
+                key_cache,
+                value_cache,
+                sdpa_params,
+            } = call;
+            let pages = compact_table.dim(1)?;
+            let gather = |cache: &Tensor| {
+                crate::cuda::qsa::qsa_gather_cells(cache, block_table, cells, pages)
+            };
+            let (k_cache, v_cache) = (gather(key_cache)?, gather(value_cache)?);
+            let kv = PagedKv {
+                k_cache: &k_cache,
+                v_cache: &v_cache,
+                block_table: compact_table,
+                seq_lens: kept,
+                full_lens: None,
+            };
+            let d = query.dim(inference_tensor::D::Minus1)?;
+            let opts = FattnOptions {
+                scale: sdpa_params.softmax_scale,
+                softcap: sdpa_params.softcap.unwrap_or(0.),
+                kv_scales: (key_cache.dtype() == DType::F8E4M3).then(|| {
+                    let scales = self.cache_scales(key_cache).flashinfer(key_cache);
+                    FattnKvScales {
+                        k: scales.k,
+                        v: scales.v,
+                    }
+                }),
+                sinks: fattn_sinks(sdpa_params.sinks.as_ref())?,
+                ..Default::default()
+            };
+            let opts = with_quant_bits(opts, key_cache, value_cache, d).ok_or_else(|| {
+                inference_tensor::Error::msg("gathered attention cannot read this quantized cache")
+            })?;
+            let q = rotate_for_quant(&query.transpose(1, 2)?, &opts, kv_quant::k_rotation)?;
+            if !inference_fattn::supported_paged(&q, &kv, &opts)? {
+                inference_tensor::bail!("fattn's paged kernels do not run this gathered attention");
+            }
+            rotate_for_quant(
+                &inference_fattn::flash_attn_paged(&q, &kv, &opts)?,
+                &opts,
+                kv_quant::v_rotation,
+            )?
+            .transpose(1, 2)
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        {
+            let _ = call;
+            inference_tensor::bail!("gathered attention runs on CUDA only")
         }
     }
 

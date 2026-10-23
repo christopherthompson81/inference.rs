@@ -37,7 +37,7 @@ pub use config::{
 use inference_tensor::{DType, Device};
 pub use input_metadata::{PagedAttentionInputMetadata, PagedAttentionMeta};
 pub use kv_cache_manager::KVCacheManager;
-pub use layers::{PagedAttention, SelectedAttention};
+pub use layers::{GatheredAttention, PagedAttention, SelectedAttention};
 pub use scales::{Fp8AttentionScales, load_fp8_attention_scales};
 
 use crate::utils::memory_usage::MemoryUsage;

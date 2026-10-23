@@ -82,6 +82,31 @@ inference_tensor::kernel_library! {
             ratio: i32,
             stream: i64,
         ) -> i32;
+        pub fn qsa_select_cells(
+            scores: *const f32,
+            positions: *const u32,
+            cells: *mut u32,
+            rows: i32,
+            n_pool: i32,
+            width: i32,
+            k: i32,
+            ratio: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn qsa_gather_cells(
+            cache: *const c_void,
+            table: *const u32,
+            cells: *const u32,
+            out: *mut c_void,
+            rows: i32,
+            width: i32,
+            table_width: i32,
+            blocks_per_row: i32,
+            heads: i32,
+            block_size: i32,
+            row_bytes: i32,
+            stream: i64,
+        ) -> i32;
         pub fn adain_act_f32(
             xs: *const c_void,
             h: *const c_void,

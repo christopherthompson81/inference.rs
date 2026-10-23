@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use inference_nn::cuda::qsa::{QSA_PADDED_ROW, qsa_select_mask};
+use inference_nn::cuda::qsa::{QSA_PADDED_ROW, qsa_cells_width, qsa_select_cells, qsa_select_mask};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use inference_tensor::{D, DType, Device, Result, Tensor};
 
@@ -12,12 +12,16 @@ use super::config::{QsaConfig, TextConfig};
 use crate::{
     attention::SdpaParams,
     layers::GemmaRmsNorm,
-    paged_attention::{PagedAttention, PagedAttentionInputMetadata, SelectedAttention},
+    paged_attention::{
+        GatheredAttention, PagedAttention, PagedAttentionInputMetadata, SelectedAttention,
+    },
     utils::unvarbuilder::UnVarBuilder,
 };
 
 // query rows scored and attended at once: bounds the score and mask buffers of a long prefill chunk
 const QSA_QUERY_SLICE: usize = 128;
+// steps with at most this many query rows (decode, verification) gather each row's kept cells instead of masking
+const QSA_GATHER_ROWS: usize = 16;
 
 enum IndexerProjection {
     // the checkpoint's `index_qk_proj`: the queries' heads, then the key
@@ -63,6 +67,14 @@ struct Selection {
     positions: Tensor,
     seq_lens: Tensor,
     n_kv: usize,
+    gather: Option<Gather>,
+}
+
+// Per query row (batch-major): its sequence's block table row, the cells it keeps, and the compact cache's table.
+struct Gather {
+    table: Tensor,
+    kept: Tensor,
+    compact_table: Tensor,
 }
 
 /// A batch row of this step: its first position and how many real tokens it carries.
@@ -253,29 +265,60 @@ impl QsaIndexer {
             .transpose(1, 2)?
             .contiguous()?;
         let positions = selection.positions.to_device(device)?;
-        let seq_lens = selection.seq_lens.to_device(device)?;
         let scale = 1. / (d as f64).sqrt();
-        let mut outputs = Vec::with_capacity(s.div_ceil(QSA_QUERY_SLICE));
-        for start in (0..s).step_by(QSA_QUERY_SLICE) {
-            let rows = QSA_QUERY_SLICE.min(s - start);
+        let scores = |start: usize, rows: usize| -> Result<Tensor> {
             let q = q_index
                 .narrow(2, start, rows)?
                 .transpose(1, 2)?
                 .reshape((b, rows * heads, d))?
                 .to_dtype(DType::F32)?;
-            let scores = (q
-                .matmul(&pooled)?
+            (q.matmul(&pooled)?
                 .relu()?
                 .reshape((b, rows, heads, pools))?
                 .sum(2)?
                 * scale)?
-                .reshape((b * rows, pools))?;
+                .reshape((b * rows, pools))
+        };
+        let k = self.cfg.budget / self.cfg.compress_ratio;
+        if let Some(gather) = &selection.gather {
+            let cells = qsa_select_cells(
+                &scores(0, s)?,
+                &positions.flatten_all()?,
+                k,
+                self.cfg.compress_ratio,
+            )?;
+            // each query row attends alone, as its own one-token sequence
+            let (_, q_heads, _, q_dim) = query.dims4()?;
+            let rows_query = query
+                .transpose(1, 2)?
+                .reshape((b * s, 1, q_heads, q_dim))?
+                .transpose(1, 2)?;
+            let out = paged_attn.attend_gathered(GatheredAttention {
+                query: &rows_query,
+                cells: &cells,
+                kept: &gather.kept.to_device(device)?,
+                block_table: &gather.table.to_device(device)?,
+                compact_table: &gather.compact_table.to_device(device)?,
+                key_cache,
+                value_cache,
+                sdpa_params,
+            })?;
+            return out
+                .transpose(1, 2)?
+                .reshape((b, s, q_heads, ()))?
+                .transpose(1, 2);
+        }
+        let seq_lens = selection.seq_lens.to_device(device)?;
+        let mut outputs = Vec::with_capacity(s.div_ceil(QSA_QUERY_SLICE));
+        for start in (0..s).step_by(QSA_QUERY_SLICE) {
+            let rows = QSA_QUERY_SLICE.min(s - start);
+            let scores = scores(start, rows)?;
             let row_positions = positions.narrow(1, start, rows)?.flatten_all()?;
             let mask = qsa_select_mask(
                 &scores,
                 &row_positions,
                 selection.n_kv,
-                self.cfg.budget / self.cfg.compress_ratio,
+                k,
                 self.cfg.compress_ratio,
             )?;
             outputs.push(paged_attn.attend_selected(SelectedAttention {
@@ -459,16 +502,60 @@ impl QsaStep {
                 .iter()
                 .map(|r| (r.start + r.len) as u32)
                 .collect::<Vec<_>>();
+            let gather = (rows.len() * query_len <= QSA_GATHER_ROWS)
+                .then(|| gather_plan(&cfg, &table, block_size, &positions))
+                .transpose()?;
             Some(Selection {
                 pool_cells,
                 positions: Tensor::new(positions.as_slice(), device)?
                     .reshape((rows.len(), query_len))?,
                 seq_lens: Tensor::new(seq_lens.as_slice(), device)?,
                 n_kv: PagedAttention::selected_kv_len(input_metadata, device)?,
+                gather,
             })
         } else {
             None
         };
         Ok(Self { pooling, selection })
     }
+}
+
+// The gather's per-row inputs for `positions` (batch-major, `query_len` per sequence of `table`).
+fn gather_plan(
+    cfg: &QsaConfig,
+    table: &Tensor,
+    block_size: usize,
+    positions: &[u32],
+) -> Result<Gather> {
+    let ratio = cfg.compress_ratio;
+    let k = cfg.budget / ratio;
+    let device = table.device();
+    let query_len = positions.len() / table.dim(0)?;
+    // past the budget a row keeps exactly k blocks and its tail; before it, everything up to its position
+    let kept = positions
+        .iter()
+        .map(|&p| {
+            if p == QSA_PADDED_ROW {
+                return 1;
+            }
+            let seen = p as usize + 1;
+            (if seen / ratio <= k {
+                seen
+            } else {
+                k * ratio + seen % ratio
+            }) as u32
+        })
+        .collect::<Vec<_>>();
+    let sequence_of = (0..positions.len())
+        .map(|row| (row / query_len) as u32)
+        .collect::<Vec<_>>();
+    let pages = qsa_cells_width(k, ratio).div_ceil(block_size);
+    let compact = (0..(positions.len() * pages) as u32).collect::<Vec<_>>();
+    Ok(Gather {
+        table: table
+            .index_select(&Tensor::new(sequence_of.as_slice(), device)?, 0)?
+            .contiguous()?,
+        kept: Tensor::new(kept.as_slice(), device)?,
+        compact_table: Tensor::from_vec(compact, (positions.len(), pages), device)?,
+    })
 }

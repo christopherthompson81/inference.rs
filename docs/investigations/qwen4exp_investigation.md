@@ -346,3 +346,63 @@ server: prompts of 9, 467, 1460 and 3365 tokens all decode
 
 Open: CPU and GPU experts without pinning, as llama.cpp maps them (pageable copies from the file mapping; read-only
 registration is not supported here); the n-gram table stays host-side, so decode graphs stay off with PLE.
+
+## Run 11 - 2026-10-23 07:00
+
+Question: decode past the budget masks QSA's selection over every cached cell, so attention costs the whole context.
+Does a gather of the kept cells pay, and does it decode the same tokens?
+
+Baseline first, master 2a9e56a4b on the real GGUF (UD-IQ4_XS, 64 cached experts, bf16 paged cache, block size 32):
+
+```
+inference bench --format gguf -m <dir> -f <3 shards> --moe-expert-cache 64 --pa-context-len 70000
+    --prompt-len 512 --gen-len 32 --depth 2048,16384,65536 --iterations 1 --warmup 0
+TTFT (512)            3697 ms
+decode @ d2048        82.6 ms/token (12.1 tok/s)
+decode @ d16384       68.1 ms/token (14.7 tok/s)
+decode @ d65536       77.2 ms/token (13.0 tok/s)
+prefill at depth      ~250 tok/s
+```
+
+Decode does not grow with depth: it is bound by the offloaded experts (CPU misses). Dense attention over 64K in the
+12 full-attention layers reads about 12 x 64K x 2 x 2 x 256 x 2 B = 0.8 GB a token, about 1 ms at this card's
+bandwidth, inside the run-to-run noise above. So the gather is for scaling (262K, a resident or smaller model,
+batched decode), not for this machine's single-stream number.
+
+Built: `qsa_select_cells` (the mask kernel's selection, written as each row's kept positions in order: the chosen
+blocks' cells, then the tail; slots past the last kept one repeat the first, so a gathered row is always finite),
+`qsa_gather_cells` (a warp per (row, slot, head) copies raw cache rows, 16-byte, word or byte copies by row size, so
+bf16, fp8 and the quantized u8 caches all gather), and `PagedAttention::attend_gathered` (fattn's paged kernel over
+the compact cache, no mask, each row's length its kept count, computed on the host from the position). Steps with at
+most 16 query rows take it; each query row is its own one-token sequence, so it also serves verification steps.
+Longer prefill chunks keep the mask.
+
+```
+cargo nextest run --profile cuda --features cuda ... -E 'test(/qsa/) | test(/qwen4exp/) | test(/flash_next/)'
+  10 passed (new: cells == the mask's kept cells in order; CUDA cells == CPU; gather == the paged rows;
+  CUDA gather == CPU for f32 rows of 3 and 4, bf16 and u8)
+scripts/qwen4exp_tiny_parity.py --device cuda:0 --budget 8
+  mean KL 9.08e-05, top-1 1.000, max logit diff 0.0978; teacher-forced gaps 0 except the known 0.116 near tie
+  (identical to Run 5's mask path)
+negative control, kept count + 2 (two duplicated cells attended):
+  greedy diverges from step 3 (gaps 0.055, 0.003) -> the decode steps do run the gather
+```
+
+Same bench with the gather (one run each; every depth's prompt is past the budget, 2048 + 512 > 2051):
+
+```
+                 mask (master)   gather
+decode @ d2048   82.6 ms         71.0 ms   (-14%)
+decode @ d16384  68.1 ms         52.9 ms   (-22%)
+decode @ d65536  77.2 ms         69.1 ms   (-11%)
+TTFT (512)       3697 ms         3601 ms   (prefill keeps the mask; noise)
+```
+
+More than the 1 ms the bandwidth estimate allows: the mask path also builds an n_kv-wide f16 mask per layer and
+fattn reads it, and both paths repeat each depth's content, so routing and expert misses match pair by pair. Single
+runs, and depth order is non-monotonic in both columns (content changes the experts' hit rate), so take the size of
+the gain loosely; the direction holds at every depth.
+
+Implication: keep the gather for decode and verification. Prefill past the budget still pays dense compute under the
+mask; a gathered prefill would need per-row caches of up to 2051 cells each (rows x 4 MB at bf16), so it would want a
+kernel that reads the cell list in place instead of copying.
