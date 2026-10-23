@@ -1065,6 +1065,8 @@ impl InferenceRs {
     }
 
     pub fn maybe_log_error(this: Arc<Self>, err: &dyn Error) {
+        // a client sees only a generic error, so the cause always reaches the log
+        tracing::error!("error response: {err}");
         if let Some(file) = &this.log {
             let mut f = OpenOptions::new()
                 .append(true)

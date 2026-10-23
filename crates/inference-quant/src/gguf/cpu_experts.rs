@@ -25,7 +25,7 @@ const QUANT_ITEM_BLOCKS: usize = 64;
 // Tokens one item of the final weighted sum adds up
 const SUM_ITEM_TOKENS: usize = 8;
 
-use super::cpu_dot::TileRow;
+use super::cpu_dot::{Q8Block32, QK32, TileRow};
 use super::kernel::GgufType;
 use crate::GluActivationType;
 use crate::utils::apply_cpu_activation;
@@ -54,7 +54,13 @@ impl CpuGgufBlocks<'_> {
 
 /// Whether the CPU expert path runs this type at this width.
 pub fn supports(ty: GgufType, cols: usize) -> bool {
-    cpu_dot::supports(ty) && cols.is_multiple_of(QK_K)
+    (cpu_dot::supports(ty) && cols.is_multiple_of(QK_K))
+        || (cpu_dot::supports_32(ty) && cols.is_multiple_of(QK32))
+}
+
+/// Whether resident CPU experts take this path: Candle runs a resident Q8_0 itself, so only offloaded ones come here.
+pub fn runs_resident(ty: GgufType, cols: usize) -> bool {
+    supports(ty, cols) && ty != GgufType::Q8_0
 }
 
 /// One projection of every expert: `experts` matrices of `rows x cols`, expert-major, as GGUF stores `*_exps`.
@@ -68,7 +74,12 @@ pub struct CpuExpertProjection<'a> {
 
 impl CpuExpertProjection<'_> {
     fn row_bytes(&self) -> usize {
-        self.ty.row_scale_bytes() + self.cols / QK_K * self.ty.type_size()
+        self.ty.row_scale_bytes() + self.cols / self.ty.block_size() * self.ty.type_size()
+    }
+
+    // a 32-wide type, whose activations are Q8 blocks of 32 rather than Q8_K
+    fn is_32(&self) -> bool {
+        cpu_dot::supports_32(self.ty)
     }
 
     fn row(&self, expert: usize, row: usize) -> &[u8] {
@@ -142,6 +153,21 @@ fn quantize_rows(xs: &[f32], wide: bool) -> (Vec<BlockQ8K>, Vec<i16>) {
         run(blocks, ys, qs);
     });
     (ys, qs)
+}
+
+// Q8 blocks of 32 of `xs`, for the projections of a 32-wide type
+fn quantize_rows_32(xs: &[f32]) -> Vec<Q8Block32> {
+    let n = xs.len() / QK32;
+    let mut ys = vec![Q8Block32::ZERO; n];
+    let out = Disjoint(ys.as_mut_ptr());
+    let item_blocks = QUANT_ITEM_BLOCKS * QK_K / QK32;
+    for_each_parallel(n.div_ceil(item_blocks), |item| {
+        let blocks = item * item_blocks..n.min((item + 1) * item_blocks);
+        // SAFETY: each item's blocks belong to it alone
+        let ys = unsafe { out.slice(blocks.start, blocks.len()) };
+        Q8Block32::quantize(&xs[blocks.start * QK32..blocks.end * QK32], ys);
+    });
+    ys
 }
 
 // The quantized matmuls' barrier pool spins between calls, so a second pool here would fight it for the cores.
@@ -267,7 +293,18 @@ impl CpuExperts<'_> {
         let tiled_gate_up = tiled(&self.gate) && tiled(&self.up);
         let tiled_down = tiled(&self.down);
 
-        let (q8, q16) = quantize_rows(xs, tiled_gate_up);
+        let gate_up_32 = self.gate.is_32() || self.up.is_32();
+        let (q8, q16) = if self.gate.is_32() && self.up.is_32() {
+            (Vec::new(), Vec::new())
+        } else {
+            quantize_rows(xs, tiled_gate_up)
+        };
+        let q32 = if gate_up_32 {
+            quantize_rows_32(xs)
+        } else {
+            Vec::new()
+        };
+        let hidden_32 = hidden / QK32;
         let gate_up_rows = tile_rows(&groups, tiled_gate_up, |r| TileRow {
             qs: &q16[routes[r].token * hidden..][..hidden],
             blocks: &q8[routes[r].token * blocks..][..blocks],
@@ -302,6 +339,31 @@ impl CpuExperts<'_> {
                 return;
             }
             let x = |r: usize| &q8[routes[r].token * blocks..][..blocks];
+            if gate_up_32 {
+                let dot = |p: &CpuExpertProjection, w: &[u8], r: usize| {
+                    if p.is_32() {
+                        cpu_dot::vec_dot_32(
+                            p.ty,
+                            w,
+                            &q32[routes[r].token * hidden_32..][..hidden_32],
+                        )
+                    } else {
+                        cpu_dot::vec_dot(p.ty, w, x(r))
+                    }
+                };
+                for row in row0..row0 + item_rows {
+                    let (gate_row, up_row) = (self.gate.row(expert, row), self.up.row(expert, row));
+                    for &r in group {
+                        store(
+                            r,
+                            row,
+                            dot(&self.gate, gate_row, r),
+                            dot(&self.up, up_row, r),
+                        );
+                    }
+                }
+                return;
+            }
             for row in row0..row0 + item_rows {
                 let (gate_row, up_row) = (self.gate.row(expert, row), self.up.row(expert, row));
                 let (quads, rest) = group.as_chunks::<DOT_TOKENS>();
@@ -323,8 +385,17 @@ impl CpuExperts<'_> {
             }
         });
 
-        let (gated, gated16) = quantize_rows(&gated_rows, tiled_down);
-        let inter_blocks = inter / QK_K;
+        let (gated, gated16) = if self.down.is_32() {
+            (Vec::new(), Vec::new())
+        } else {
+            quantize_rows(&gated_rows, tiled_down)
+        };
+        let gated32 = if self.down.is_32() {
+            quantize_rows_32(&gated_rows)
+        } else {
+            Vec::new()
+        };
+        let (inter_blocks, inter_32) = (inter / QK_K, inter / QK32);
         let down_rows = tile_rows(&groups, tiled_down, |r| TileRow {
             qs: &gated16[r * inter..][..inter],
             blocks: &gated[r * inter_blocks..][..inter_blocks],
@@ -351,6 +422,16 @@ impl CpuExperts<'_> {
                         }
                     }
                 });
+                return;
+            }
+            if self.down.is_32() {
+                for row in row0..row0 + item_rows {
+                    let down_row = self.down.row(expert, row);
+                    for &r in group {
+                        let h = &gated32[r * inter_32..][..inter_32];
+                        store(r, row, cpu_dot::vec_dot_32(self.down.ty, down_row, h));
+                    }
+                }
                 return;
             }
             let h = |r: usize| &gated[r * inter_blocks..][..inter_blocks];
@@ -427,7 +508,7 @@ mod tests {
     fn projection_bytes(ty: GgufType, rows: usize, cols: usize, seed: u32) -> Vec<u8> {
         let size = ty.type_size();
         let meta = ty.row_scale_bytes();
-        let row_bytes = meta + cols / QK_K * size;
+        let row_bytes = meta + cols / ty.block_size() * size;
         let mut bytes = random_bytes(EXPERTS * rows * row_bytes, seed);
         for (r, row) in bytes.chunks_exact_mut(row_bytes).enumerate() {
             let d = 0.002 + 0.0001 * (r % 7) as f32;
@@ -444,12 +525,18 @@ mod tests {
 
     fn dense(projection: &CpuExpertProjection, expert: usize) -> Vec<f32> {
         let expert_bytes = projection.rows * projection.row_bytes();
-        super::super::raw::dequantize_rows(
-            projection.ty,
-            projection.cols,
-            &projection.bytes[expert * expert_bytes..][..expert_bytes],
-        )
-        .unwrap()
+        let bytes = &projection.bytes[expert * expert_bytes..][..expert_bytes];
+        if projection.ty == GgufType::Q8_0 {
+            // Candle holds Q8_0, so the raw dequantizer does not; its block is an f16 scale and 32 i8 values
+            return bytes
+                .chunks_exact(projection.ty.type_size())
+                .flat_map(|block| {
+                    let d = half::f16::from_le_bytes([block[0], block[1]]).to_f32();
+                    block[2..].iter().map(move |&q| d * f32::from(q as i8))
+                })
+                .collect();
+        }
+        super::super::raw::dequantize_rows(projection.ty, projection.cols, bytes).unwrap()
     }
 
     fn matvec(w: &[f32], x: &[f32]) -> Vec<f32> {
@@ -458,45 +545,52 @@ mod tests {
             .collect()
     }
 
-    // the expert types each test runs: Unsloth's 35B-A3B mix, and IQ4_KSS throughout (its rows carry a scale)
-    const TYPE_SETS: [[GgufType; 2]; 2] = [
-        [GgufType::Iq3S, GgufType::Iq4Xs],
-        [GgufType::Iq4Kss, GgufType::Iq4Kss],
+    // a down projection's width that fills no Q8_K super-block, as Qwen3.8-Flash-Next's 640
+    const INTER_32: usize = 640;
+
+    // the expert types each test runs, with the experts' width: Unsloth's 35B-A3B mix, IQ4_KSS throughout (its rows
+    // carry a scale), and Unsloth's Flash-Next mixes (IQ4_NL or Q8_0 down over 640)
+    const TYPE_SETS: [([GgufType; 2], usize); 4] = [
+        ([GgufType::Iq3S, GgufType::Iq4Xs], INTER),
+        ([GgufType::Iq4Kss, GgufType::Iq4Kss], INTER),
+        ([GgufType::Iq3S, GgufType::Iq4Nl], INTER_32),
+        ([GgufType::Iq4Xs, GgufType::Q8_0], INTER_32),
     ];
 
     fn check_against_dense(tokens: usize, routes: &[CpuExpertRoute]) -> Result<()> {
-        for types in TYPE_SETS {
-            check_types_against_dense(types, tokens, routes)?;
+        for (types, inter) in TYPE_SETS {
+            check_types_against_dense(types, inter, tokens, routes)?;
         }
         Ok(())
     }
 
     fn check_types_against_dense(
         [gate_up_ty, down_ty]: [GgufType; 2],
+        inter: usize,
         tokens: usize,
         routes: &[CpuExpertRoute],
     ) -> Result<()> {
-        let gate = projection_bytes(gate_up_ty, INTER, HIDDEN, 1);
-        let up = projection_bytes(gate_up_ty, INTER, HIDDEN, 2);
-        let down = projection_bytes(down_ty, HIDDEN, INTER, 3);
+        let gate = projection_bytes(gate_up_ty, inter, HIDDEN, 1);
+        let up = projection_bytes(gate_up_ty, inter, HIDDEN, 2);
+        let down = projection_bytes(down_ty, HIDDEN, inter, 3);
         let experts = CpuExperts {
             gate: CpuExpertProjection {
                 ty: gate_up_ty,
                 bytes: &gate,
-                rows: INTER,
+                rows: inter,
                 cols: HIDDEN,
             },
             up: CpuExpertProjection {
                 ty: gate_up_ty,
                 bytes: &up,
-                rows: INTER,
+                rows: inter,
                 cols: HIDDEN,
             },
             down: CpuExpertProjection {
                 ty: down_ty,
                 bytes: &down,
                 rows: HIDDEN,
-                cols: INTER,
+                cols: inter,
             },
             act: GluActivationType::Silu,
         };

@@ -1,9 +1,9 @@
 //! Expert matrices of one MoE projection, in pinned host memory or in device slots the GGUF kernels read in place.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, Weak};
 
 use inference_tensor::cuda_backend::cudarc::driver::{
-    CudaSlice, CudaStream, DevicePtr, SyncOnDrop, result,
+    CudaContext, CudaSlice, CudaStream, DevicePtr, SyncOnDrop, result, sys,
 };
 use inference_tensor::{CudaDevice, Device, Result, Shape};
 
@@ -18,8 +18,98 @@ pub struct HostExpertStack {
     ty: GgufType,
     shape: Shape,
     len: usize,
-    bytes: CudaSlice<u8>,
+    storage: HostBlocks,
     device: CudaDevice,
+}
+
+enum HostBlocks {
+    // copied into a pinned allocation, padding included
+    Pinned(CudaSlice<u8>),
+    // read in place from the GGUF mapping, whose shard is registered with the device
+    Mapped {
+        blocks: super::mapped::MappedBlocks,
+        shard: Arc<ShardRegistration>,
+    },
+}
+
+/// A GGUF shard's whole mapping page-locked and mapped into one device: a registration may not overlap another, and
+/// neighbouring tensors share pages, so every stack in a shard shares one.
+struct ShardRegistration {
+    key: ((usize, usize), usize),
+    host: *mut std::ffi::c_void,
+    device_base: sys::CUdeviceptr,
+    context: Arc<CudaContext>,
+    // keeps the mapping alive while it is registered
+    _blocks: super::mapped::MappedBlocks,
+}
+
+// SAFETY: the registered range is read-only, and the context handle is shareable
+unsafe impl Send for ShardRegistration {}
+unsafe impl Sync for ShardRegistration {}
+
+impl Drop for ShardRegistration {
+    fn drop(&mut self) {
+        if self.context.bind_to_thread().is_ok() {
+            // SAFETY: `host` was registered by `register` and nothing reads it once the last stack drops
+            let _ = unsafe { sys::cuMemHostUnregister(self.host) };
+        }
+    }
+}
+
+static SHARD_REGISTRATIONS: Mutex<Vec<Weak<ShardRegistration>>> = Mutex::new(Vec::new());
+
+impl ShardRegistration {
+    // the shard holding `blocks`, registered with `device` once and shared after
+    fn for_blocks(blocks: &super::mapped::MappedBlocks, device: &CudaDevice) -> Option<Arc<Self>> {
+        let key = (blocks.shard_key(), device.cuda_stream().context().ordinal());
+        let mut registry = SHARD_REGISTRATIONS.lock().ok()?;
+        registry.retain(|weak| weak.strong_count() > 0);
+        if let Some(found) = registry
+            .iter()
+            .filter_map(Weak::upgrade)
+            .find(|reg| reg.key == key)
+        {
+            return Some(found);
+        }
+        let context = device.cuda_stream().context().clone();
+        context.bind_to_thread().ok()?;
+        let (mapping, _) = blocks.shard_mapping();
+        let host = mapping.as_ptr().cast_mut().cast::<std::ffi::c_void>();
+        // SAFETY: the mapping stays alive (held below) and is only read through the registration
+        if let Err(err) = unsafe {
+            sys::cuMemHostRegister_v2(
+                host,
+                mapping.len(),
+                sys::CU_MEMHOSTREGISTER_DEVICEMAP | sys::CU_MEMHOSTREGISTER_READ_ONLY,
+            )
+        }
+        .result()
+        {
+            crate::log::once_log_warn(format!(
+                "GGUF experts are copied to pinned memory: registering the file mapping failed ({err:?})"
+            ));
+            return None;
+        }
+        let mut device_base: sys::CUdeviceptr = 0;
+        // SAFETY: `host` was just registered with the device map flag
+        if unsafe { sys::cuMemHostGetDevicePointer_v2(&mut device_base, host, 0) }
+            .result()
+            .is_err()
+        {
+            // SAFETY: registered just above
+            let _ = unsafe { sys::cuMemHostUnregister(host) };
+            return None;
+        }
+        let registration = Arc::new(Self {
+            key,
+            host,
+            device_base,
+            context,
+            _blocks: blocks.clone(),
+        });
+        registry.push(Arc::downgrade(&registration));
+        Some(registration)
+    }
 }
 
 impl HostExpertStack {
@@ -56,7 +146,46 @@ impl HostExpertStack {
             ty,
             shape: Shape::from((experts, rows, cols)),
             len: bytes.len(),
-            bytes: mapped,
+            storage: HostBlocks::Pinned(mapped),
+            device: device.clone(),
+        })
+    }
+
+    /// The experts read in place from their GGUF mapping, its shard page-locked and mapped into `device`; copied as
+    /// `new` does when the shard cannot be registered or the blocks end too near the mapping's end for the kernels'
+    /// whole-tile reads.
+    pub fn from_mapped(blocks: super::mapped::MappedBlocks, device: &CudaDevice) -> Result<Self> {
+        let Ok(dims) = <[usize; 3]>::try_from(blocks.dims.as_slice()) else {
+            inference_tensor::bail!(
+                "expert blocks must be [experts, rows, cols], got {:?}",
+                blocks.dims
+            );
+        };
+        let ty = blocks.ty;
+        let padding = ROW_PADDING_ELEMENTS * ty.type_size() / ty.block_size();
+        let shard = (blocks.trailing() >= padding)
+            .then(|| ShardRegistration::for_blocks(&blocks, device))
+            .flatten();
+        let Some(shard) = shard else {
+            return Self::new(ty, dims, blocks.bytes(), device);
+        };
+        super::ffi::ensure_type_loaded(ty).map_err(inference_tensor::Error::msg)?;
+        let [experts, rows, cols] = dims;
+        let expected = ty.row_bytes(cols).map(|row| row * rows * experts);
+        if expected != Some(blocks.bytes().len()) {
+            inference_tensor::bail!(
+                "{ty:?} {dims:?} experts take {expected:?} bytes, got {}",
+                blocks.bytes().len()
+            );
+        }
+        crate::log::once_log_info(
+            "GGUF experts are read in place from the file mapping, page-locked",
+        );
+        Ok(Self {
+            ty,
+            shape: Shape::from((experts, rows, cols)),
+            len: blocks.bytes().len(),
+            storage: HostBlocks::Mapped { blocks, shard },
             device: device.clone(),
         })
     }
@@ -77,9 +206,14 @@ impl HostExpertStack {
 
     /// Every expert's blocks.
     pub fn bytes(&self) -> &[u8] {
-        let host = self.bytes.mapped_host_ptr().expect("mapped allocation");
-        // SAFETY: filled at construction and never written again; the device only reads it
-        unsafe { std::slice::from_raw_parts(host, self.len) }
+        match &self.storage {
+            HostBlocks::Pinned(pinned) => {
+                let host = pinned.mapped_host_ptr().expect("mapped allocation");
+                // SAFETY: filled at construction and never written again; the device only reads it
+                unsafe { std::slice::from_raw_parts(host, self.len) }
+            }
+            HostBlocks::Mapped { blocks, .. } => blocks.bytes(),
+        }
     }
 }
 
@@ -97,8 +231,20 @@ impl KernelWeight for HostExpertStack {
     }
 
     fn kernel_ptr<'a>(&'a self, stream: &'a CudaStream) -> Result<(*const u8, SyncOnDrop<'a>)> {
-        let (ptr, guard) = self.bytes.device_ptr(stream);
-        Ok((ptr as *const u8, guard))
+        match &self.storage {
+            HostBlocks::Pinned(pinned) => {
+                let (ptr, guard) = pinned.device_ptr(stream);
+                Ok((ptr as *const u8, guard))
+            }
+            // read-only memory the device never writes, so nothing to order against
+            HostBlocks::Mapped { blocks, shard } => {
+                let (_, offset) = blocks.shard_mapping();
+                Ok((
+                    (shard.device_base + offset as sys::CUdeviceptr) as *const u8,
+                    SyncOnDrop::Record(None),
+                ))
+            }
+        }
     }
 }
 
@@ -192,6 +338,21 @@ impl DeviceExpertStack {
 }
 
 impl DeviceExpertStack {
+    /// Queues zeroing the kernels' read padding past this view's first `slots` experts on `stream`: the buffer is
+    /// shared by views of other types, whose stale blocks read as this type could hold an Inf or NaN scale.
+    /// # Safety
+    /// Nothing may read those bytes until the memset completes on `stream`.
+    pub unsafe fn zero_padding_async(&self, slots: usize, stream: &CudaStream) -> Result<()> {
+        let padding = ROW_PADDING_ELEMENTS * self.ty.type_size() / self.ty.block_size();
+        let start = slots * self.expert_bytes;
+        if start + padding > self.blocks.len() {
+            inference_tensor::bail!("{slots} experts and their padding overflow the expert stack");
+        }
+        let (base, _guard) = self.blocks.device_ptr(stream);
+        unsafe { result::memset_d8_async(base + start as u64, 0, padding, stream.cu_stream()) }
+            .map_err(inference_tensor::Error::wrap)
+    }
+
     /// Queues a copy of `src`'s expert in `src_slot` into this stack's `dst_slot` on `stream`.
     /// # Safety
     /// Nothing may write the source slot or read the destination slot until the copy completes on `stream`.

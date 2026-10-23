@@ -296,6 +296,29 @@ impl MoEExperts {
             return Ok(None);
         }
         let host_vb = vb.pp("experts").set_device(Device::Cpu);
+        // read in place from a GGUF mapping when the source holds the stacks there, sparing two copies of each
+        if let Some(source) = host_vb.weight_source() {
+            let keys = inference_quant::QuantizedExpertKeys::new(&host_vb.prefix());
+            let mapped = [&keys.gate, &keys.up, &keys.down].map(|key| source.mapped_blocks(key));
+            if let [Some(gate), Some(up), Some(down)] = mapped
+                && [&gate, &up, &down].iter().all(|blocks| {
+                    blocks.dims.len() == 3
+                        && inference_quant::cpu_experts::supports(blocks.ty, blocks.dims[2])
+                })
+            {
+                let stacks = [gate, up, down]
+                    .map(|blocks| inference_quant::HostExpertStack::from_mapped(blocks, device));
+                let [gate, up, down] = stacks;
+                return offload::OffloadedExperts::new(
+                    [gate?, up?, down?],
+                    slots,
+                    cfg.num_experts_per_tok,
+                    device,
+                    glu,
+                )
+                .map(|experts| Some(Box::new(experts)));
+            }
+        }
         let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &host_vb, comm)? else {
             return Ok(None);
         };

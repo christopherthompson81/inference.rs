@@ -570,6 +570,8 @@ impl OffloadedExperts {
                     unsafe { view.fill_async(p, src, &main)? };
                     p = end;
                 }
+                // SAFETY: as the copies above, ordered on `main` before this layer's reads
+                unsafe { view.zero_padding_async(used.len(), &main)? };
                 views.push(view);
             }
         }
@@ -691,6 +693,153 @@ mod tests {
             shape: MoEForwardShape::new(1, tokens, HIDDEN),
             _device: device,
         })
+    }
+
+    // random blocks with a small leading f16 scale per block (or the row's f32 one), as GGUF lays them out
+    fn random_blocks(
+        ty: inference_quant::GgufType,
+        rows: usize,
+        cols: usize,
+        salt: u32,
+    ) -> Vec<u8> {
+        let row_bytes = ty.row_bytes(cols).expect("whole blocks");
+        let mut state = salt.wrapping_mul(2_654_435_761).wrapping_add(7);
+        let mut bytes = (0..EXPERTS * rows * row_bytes)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state.to_le_bytes()[0]
+            })
+            .collect::<Vec<_>>();
+        let meta = ty.row_scale_bytes();
+        for row in bytes.chunks_exact_mut(row_bytes) {
+            if meta > 0 {
+                row[..meta].copy_from_slice(&(0.002f32 / 64.0).to_le_bytes());
+                continue;
+            }
+            for block in row.chunks_exact_mut(ty.type_size()) {
+                block[..2].copy_from_slice(&half::f16::from_f32(0.002).to_le_bytes());
+            }
+        }
+        bytes
+    }
+
+    // Unsloth's Flash-Next mix: IQ3_S gate/up and IQ4_NL down over a width no Q8_K super-block fills; the staged
+    // prompt path and the cached decode path against the CPU expert path, which tests check against dense math
+    #[test]
+    fn offloaded_32_wide_experts_match_the_cpu_path() -> Result<()> {
+        crate::skip_without_cuda!();
+        const INTER_32: usize = 640;
+        let device = Device::new_cuda(0)?;
+        let cuda = device.as_cuda_device()?;
+        let types = [
+            inference_quant::GgufType::Iq3S,
+            inference_quant::GgufType::Iq3S,
+            inference_quant::GgufType::Iq4Nl,
+        ];
+        let dims = [
+            [EXPERTS, INTER_32, HIDDEN],
+            [EXPERTS, INTER_32, HIDDEN],
+            [EXPERTS, HIDDEN, INTER_32],
+        ];
+        let bytes = [0, 1, 2].map(|p| {
+            random_blocks(
+                types[p],
+                dims[p][1],
+                dims[p][2],
+                u32::try_from(p).expect("three") + 1,
+            )
+        });
+        let host = |p: usize| HostExpertStack::new(types[p], dims[p], &bytes[p], cuda);
+        let offloaded = OffloadedExperts::new(
+            [host(0)?, host(1)?, host(2)?],
+            SLOTS,
+            TOPK,
+            cuda,
+            GluActivationType::Silu,
+        )?;
+        let config = MoEForwardConfig {
+            num_experts: EXPERTS,
+            num_experts_per_tok: TOPK,
+            act: Activation::Silu,
+        };
+        let projection = |p: usize| inference_quant::cpu_experts::CpuExpertProjection {
+            ty: types[p],
+            bytes: &bytes[p],
+            rows: dims[p][1],
+            cols: dims[p][2],
+        };
+        let cpu = inference_quant::cpu_experts::CpuExperts {
+            gate: projection(0),
+            up: projection(1),
+            down: projection(2),
+            act: GluActivationType::Silu,
+        };
+        // what another layer left in the shared staging past the experts a prompt stages: 0xFF reads as NaN scales
+        let layouts = LAYOUTS.lock().expect("expert layouts poisoned").clone();
+        for (p, stack) in staging(cuda, &layouts, EXPERTS)?.stacks.iter().enumerate() {
+            let [_, rows, cols] = dims[p];
+            let view = stack.view(types[p], EXPERTS, rows, cols)?;
+            let poison =
+                vec![0xFF_u8; EXPERTS * rows * types[p].row_bytes(cols).expect("whole blocks")];
+            // SAFETY: `poison` outlives the synchronize below, and nothing reads the staging before it
+            unsafe { view.fill_async(0, &poison, &cuda.cuda_stream())? };
+        }
+        cuda.cuda_stream()
+            .synchronize()
+            .map_err(inference_tensor::Error::wrap)?;
+        for tokens in [1, 2, PROMPT] {
+            let mut run = run(&device, tokens, tokens)?;
+            if tokens == PROMPT {
+                // two of the experts, so the staged stack ends short of the poisoned bytes
+                let ids = (0..tokens * TOPK)
+                    .map(|i| u32::try_from(i % TOPK).expect("few experts"))
+                    .collect::<Vec<_>>();
+                run.ids = Tensor::from_vec(ids, (tokens, TOPK), &device)?;
+            }
+            let actual = offloaded.forward(&run.forward(), config)?;
+            let xs = run
+                .xs_flat
+                .to_device(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let ids = run
+                .ids
+                .to_device(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<u32>()?;
+            let weights = run
+                .weights
+                .to_device(&Device::Cpu)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            let routes = ids
+                .iter()
+                .zip(&weights)
+                .enumerate()
+                .map(
+                    |(i, (&expert, &weight))| inference_quant::cpu_experts::CpuExpertRoute {
+                        token: i / TOPK,
+                        expert: expert as usize,
+                        weight,
+                    },
+                )
+                .collect::<Vec<_>>();
+            let mut expected = vec![0f32; xs.len()];
+            cpu.forward(&xs, &routes, &mut expected)?;
+            let expected = Tensor::from_vec(expected, (tokens, HIDDEN), &Device::Cpu)?;
+            let actual = actual.to_device(&Device::Cpu)?.reshape((tokens, HIDDEN))?;
+            let values = actual.flatten_all()?.to_vec1::<f32>()?;
+            assert!(
+                values.iter().all(|v| v.is_finite()),
+                "{tokens} tokens: non-finite output"
+            );
+            let err = relative_error(&actual, &expected)?;
+            // the CPU quantizes activations to Q8_K or Q8 blocks of 32, the GPU kernels to Q8_1
+            assert!(err < 0.03, "{tokens} tokens: relative error {err}");
+        }
+        Ok(())
     }
 
     // the cache, its misses on the CPU and the staged prompt path against every expert resident on the device
