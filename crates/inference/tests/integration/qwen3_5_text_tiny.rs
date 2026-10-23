@@ -462,7 +462,8 @@ async fn a_full_attention_drafter_runs_beside_a_quantized_cache() -> anyhow::Res
         .sum();
     assert!(drafts > 0, "DSpark never drafted");
     let expected: Vec<&[(u32, f32)]> = expected.last().unwrap().iter().map(Vec::as_slice).collect();
-    decode_graphs::assert_traces(&rounds, &expected);
+    // speculative verification batches rows unlike plain decode, and this checkpoint has near ties
+    decode_graphs::assert_traces_up_to_ties(&rounds, &expected);
     Ok(())
 }
 

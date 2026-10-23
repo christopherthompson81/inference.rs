@@ -57,6 +57,38 @@ pub fn assert_traces(rounds: &[Vec<Trace>], expected: &[&[(u32, f32)]]) {
     }
 }
 
+/// As [`assert_traces`], except that a step where the two pick different tokens at logprobs within tolerance of each
+/// other (a BF16 near tie that another batching breaks the other way) ends that trace's comparison.
+pub fn assert_traces_up_to_ties(rounds: &[Vec<Trace>], expected: &[&[(u32, f32)]]) {
+    for (round, batch) in rounds.iter().zip(GRAPH_BATCHES) {
+        assert_eq!(round.len(), batch, "{rounds:?}");
+        for (trace, expected) in round.iter().zip(expected) {
+            assert_trace_up_to_tie(trace, expected, rounds);
+        }
+    }
+}
+
+fn assert_trace_up_to_tie(
+    trace: &[(u32, f32)],
+    expected: &[(u32, f32)],
+    context: &(impl std::fmt::Debug + ?Sized),
+) {
+    for (step, (got, want)) in trace.iter().zip(expected).enumerate() {
+        assert!(
+            (got.1 - want.1).abs() < BF16_LOGPROB_TOLERANCE,
+            "decode moved at step {step}: {context:?}"
+        );
+        if got.0 != want.0 {
+            return;
+        }
+    }
+    assert_eq!(
+        trace.len(),
+        expected.len(),
+        "decode ended early: {context:?}"
+    );
+}
+
 /// `trace` has `expected`'s ids, each step's logprob within tolerance; `context` is printed on a mismatch.
 pub fn assert_trace(
     trace: &[(u32, f32)],
