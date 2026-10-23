@@ -35,14 +35,15 @@ impl QwenMultimodalFamily {
             Self::Qwen3Vl => MultimodalLoaderType::Qwen3VL,
             Self::Qwen3VlMoe => MultimodalLoaderType::Qwen3VLMoE,
             Self::Qwen35 => MultimodalLoaderType::Qwen3_5,
-            Self::Qwen35Moe | Self::Qwen4Exp => MultimodalLoaderType::Qwen3_5Moe,
+            Self::Qwen35Moe => MultimodalLoaderType::Qwen3_5Moe,
+            Self::Qwen4Exp => MultimodalLoaderType::Qwen4Exp,
         }
     }
 
     fn uses_qwen3_vision(self) -> bool {
         matches!(
             self,
-            Self::Qwen3Vl | Self::Qwen3VlMoe | Self::Qwen35 | Self::Qwen35Moe
+            Self::Qwen3Vl | Self::Qwen3VlMoe | Self::Qwen35 | Self::Qwen35Moe | Self::Qwen4Exp
         )
     }
 
@@ -151,9 +152,14 @@ pub fn build_qwen_multimodal_bindings(archive: &GgufArchive) -> Result<GgufBindi
         deepstack_layers.as_deref(),
         gdn,
     )?;
+    if family == QwenMultimodalFamily::Qwen4Exp {
+        bind_flash_next(archive, &inventory, &mut bindings)?;
+    }
     if matches!(
         family,
-        QwenMultimodalFamily::Qwen35 | QwenMultimodalFamily::Qwen35Moe
+        QwenMultimodalFamily::Qwen35
+            | QwenMultimodalFamily::Qwen35Moe
+            | QwenMultimodalFamily::Qwen4Exp
     ) {
         bind_mtp(archive, &inventory, family, &mut bindings)?;
     }
@@ -166,7 +172,9 @@ pub fn normalize_qwen_multimodal_config(
 ) -> Result<String> {
     if !matches!(
         loader_type,
-        MultimodalLoaderType::Qwen3_5 | MultimodalLoaderType::Qwen3_5Moe
+        MultimodalLoaderType::Qwen3_5
+            | MultimodalLoaderType::Qwen3_5Moe
+            | MultimodalLoaderType::Qwen4Exp
     ) {
         return Ok(config.to_string());
     }
@@ -458,6 +466,11 @@ fn qwen_family_from_names(
         "qwen35moe" => {
             require_projector(projector, QWEN3VL_PROJECTOR)?;
             QwenMultimodalFamily::Qwen35Moe
+        }
+        // Qwen3.8-Flash-Next's vision tower is Qwen3-VL's
+        "qwen4exp" => {
+            require_projector(projector, QWEN3VL_PROJECTOR)?;
+            QwenMultimodalFamily::Qwen4Exp
         }
         other => bail!("unsupported Qwen multimodal GGUF architecture `{other}`"),
     };
@@ -1205,6 +1218,11 @@ mod tests {
                 Some(QWEN3VL_PROJECTOR),
                 MultimodalLoaderType::Qwen3_5Moe,
             ),
+            (
+                "qwen4exp",
+                Some(QWEN3VL_PROJECTOR),
+                MultimodalLoaderType::Qwen4Exp,
+            ),
         ];
         for (architecture, projector, expected) in cases {
             assert_eq!(
@@ -1660,6 +1678,7 @@ mod tests {
         for loader_type in [
             MultimodalLoaderType::Qwen3_5,
             MultimodalLoaderType::Qwen3_5Moe,
+            MultimodalLoaderType::Qwen4Exp,
         ] {
             let config = normalize_qwen_multimodal_config(
                 &loader_type,

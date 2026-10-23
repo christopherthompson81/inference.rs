@@ -39,6 +39,10 @@ const MOE_HIDDEN: usize = 128;
 // moe_gemm takes expert widths in multiples of 64
 const MOE_INTERMEDIATE: usize = 64;
 const DENSE_INTERMEDIATE: usize = 128;
+// above every test's context, so QSA keeps every key
+const FLASH_NEXT_INDEXER_BUDGET: usize = 1024;
+// the fixture tokenizer's EOS, which also cuts the PLE n-grams
+const FLASH_NEXT_EOS: u32 = 259;
 // The MLX layout the constructors probe for; reporting it absent selects the HF tensor names.
 const MLX_PROBES: &[&str] = &[
     "vision_tower.patch_embed.proj.weight",
@@ -110,6 +114,74 @@ pub fn tiny_qwen3_vl_moe() -> anyhow::Result<tempfile::TempDir> {
         |vb, metadata| {
             Qwen3VLMoEModel::new(&cfg, vb, true, metadata, AttentionImplementation::Eager)
                 .map(|_| ())
+        },
+    )
+}
+
+/// The Qwen3.5-MoE checkpoint as a Qwen3.8-Flash-Next (qwen4exp): hyper-connections, PLE on a GDN layer, a QSA
+/// indexer on the full-attention layer, fused experts and a vision tower without deepstack.
+pub fn tiny_flash_next_vl() -> anyhow::Result<tempfile::TempDir> {
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
+        "{QWEN3_5_MOE}/config.json"
+    ))?)?;
+    config["architectures"] = serde_json::json!(["Qwen4ExpForConditionalGeneration"]);
+    config["model_type"] = "qwen4_exp".into();
+    config["vision_config"]["deepstack_visual_indexes"] = serde_json::json!([]);
+    let text = config["text_config"].as_object_mut().unwrap();
+    let serde_json::Value::Object(flash_next) = serde_json::json!({
+        "model_type": "qwen4_exp_text",
+        "mtp_num_hidden_layers": 0,
+        "hc_count": 4,
+        "hc_lowrank": 8,
+        "output_gate_type": "sigmoid",
+        "ple_layer_ids": [2],
+        "ple_embed_dim": 64,
+        "ple_conv_kernel_size": 4,
+        "ngram_size": 3,
+        "heads_per_ngram": 8,
+        "ngram_vocab_size_base": 1000,
+        "make_ngram_vocab_size_divisible_by": 128,
+        "split_ngram_parts": 1,
+        "indexer_n_heads": 2,
+        "indexer_kv_heads": 1,
+        "indexer_head_dim": 16,
+        "indexer_budget": FLASH_NEXT_INDEXER_BUDGET,
+        "indexer_compress_ratio": 4,
+        "eos_token_id": FLASH_NEXT_EOS
+    }) else {
+        unreachable!("a json! object literal")
+    };
+    text.extend(flash_next);
+    let cfg: Qwen3_5Config = serde_json::from_value(config.clone())?;
+    let shapes = (0..MOE_LAYERS)
+        .flat_map(|layer| {
+            let p = format!("model.language_model.layers.{layer}.mlp.experts");
+            [
+                (
+                    format!("{p}.gate_up_proj"),
+                    vec![MOE_EXPERTS, 2 * MOE_INTERMEDIATE, MOE_HIDDEN],
+                ),
+                (
+                    format!("{p}.down_proj"),
+                    vec![MOE_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE],
+                ),
+            ]
+        })
+        .collect();
+    let scratch = tempfile::tempdir()?;
+    let config_path = scratch.path().join("config.json");
+    std::fs::write(&config_path, config.to_string())?;
+    let mut files = files(QWEN3_5_MOE)?;
+    files.retain(|path| path.file_name() != Some("config.json".as_ref()));
+    files.push(config_path);
+    let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
+    recording::record_checkpoint_seeded_with_shapes(
+        &files,
+        MOE_LAYERS,
+        MLX_PROBES,
+        shapes,
+        |vb, metadata| {
+            Qwen3_5Model::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
         },
     )
 }

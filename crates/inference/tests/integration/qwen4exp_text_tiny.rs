@@ -138,17 +138,23 @@ fn tiny_flash_next_with(budget: usize, mtp: bool) -> anyhow::Result<tempfile::Te
             ]
         })
         .collect();
-    recording::record_checkpoint_seeded_with_shapes(&files, NUM_LAYERS, shapes, |vb, metadata| {
-        Qwen3_5TextModel::new(
-            &cfg,
-            vb,
-            false,
-            mtp,
-            metadata,
-            AttentionImplementation::Eager,
-        )
-        .map(|_| ())
-    })
+    recording::record_checkpoint_seeded_with_shapes(
+        &files,
+        NUM_LAYERS,
+        &[],
+        shapes,
+        |vb, metadata| {
+            Qwen3_5TextModel::new(
+                &cfg,
+                vb,
+                false,
+                mtp,
+                metadata,
+                AttentionImplementation::Eager,
+            )
+            .map(|_| ())
+        },
+    )
 }
 
 // the CUDA recurrence kernels take f16/bf16

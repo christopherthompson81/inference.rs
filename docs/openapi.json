@@ -8830,6 +8830,7 @@
           "qwen3vlmoe",
           "qwen3_5",
           "qwen3_5moe",
+          "qwen4exp",
           "voxtral",
           "gemma4",
           "muse_glimmer",

@@ -619,7 +619,7 @@ impl GGUFLoader {
                 build_gemma4_bindings(&archive)?,
                 RopePairing::HalfSplit,
             ),
-            "qwen2vl" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe" => (
+            "qwen2vl" | "qwen3vl" | "qwen3vlmoe" | "qwen35" | "qwen35moe" | "qwen4exp" => (
                 qwen_multimodal_loader_type(&archive)?,
                 build_qwen_multimodal_bindings(&archive)?,
                 RopePairing::HalfSplit,
@@ -986,6 +986,7 @@ mod tests {
             MultimodalLoaderType::Qwen3VLMoE,
             MultimodalLoaderType::Qwen3_5,
             MultimodalLoaderType::Qwen3_5Moe,
+            MultimodalLoaderType::Qwen4Exp,
         ] {
             let config = prepare_native_multimodal_config(&loader_type, raw).unwrap();
             let config: serde_json::Value = serde_json::from_str(&config).unwrap();
@@ -1007,7 +1008,9 @@ mod tests {
             assert_eq!(config["vision_config"]["hidden_size"], 64);
             if matches!(
                 loader_type,
-                MultimodalLoaderType::Qwen3_5 | MultimodalLoaderType::Qwen3_5Moe
+                MultimodalLoaderType::Qwen3_5
+                    | MultimodalLoaderType::Qwen3_5Moe
+                    | MultimodalLoaderType::Qwen4Exp
             ) {
                 assert_eq!(config["text_config"][GDN_V_HEAD_LAYOUT_CONFIG_KEY], "tiled");
             }

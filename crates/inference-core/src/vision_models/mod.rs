@@ -75,6 +75,7 @@ pub struct ModelInputs {
     pub flash_meta: FlashParams,
     pub recurrent_batch_kind: RecurrentBatchKind,
     pub adapter_leases: Arc<[Option<crate::AdapterLease>]>,
+    pub token_window: Option<crate::model::TokenWindow>,
 }
 
 pub(crate) fn adapter_leases(

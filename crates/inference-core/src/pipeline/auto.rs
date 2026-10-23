@@ -888,6 +888,7 @@ mod tests {
             MultimodalLoaderType::Qwen3VLMoE,
             MultimodalLoaderType::Qwen3_5,
             MultimodalLoaderType::Qwen3_5Moe,
+            MultimodalLoaderType::Qwen4Exp,
             MultimodalLoaderType::Gemma3,
             MultimodalLoaderType::Gemma3n,
             MultimodalLoaderType::Idefics3,
