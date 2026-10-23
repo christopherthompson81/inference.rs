@@ -479,4 +479,103 @@ mod tests {
         assert_eq!(&back[expert..2 * expert], &data[2 * expert..3 * expert]);
         Ok(())
     }
+
+    // host-to-device copies of one expert's size from pageable and from pinned memory, synchronously as the fill
+    // worker waits on them
+    #[test]
+    #[ignore = "benchmark"]
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn expert_copy_bandwidth() -> Result<()> {
+        const EXPERT_BYTES: usize = 720 * 1024;
+        const COPIES: usize = 2000;
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let cuda = device.as_cuda_device()?;
+        let stream = cuda.cuda_stream();
+        let dst = cuda.alloc_zeros::<u8>(EXPERT_BYTES)?;
+        let pageable = (0..EXPERT_BYTES * COPIES / 8)
+            .map(|i| i as u8)
+            .collect::<Vec<_>>();
+        // SAFETY: filled below before any copy reads it
+        let pinned = unsafe { stream.alloc_mapped_host::<u8>(EXPERT_BYTES * 8) }
+            .map_err(inference_tensor::Error::wrap)?;
+        let pinned_host = pinned.mapped_host_ptr().expect("mapped allocation");
+        // SAFETY: the allocation just made spans this
+        unsafe { std::slice::from_raw_parts_mut(pinned_host, EXPERT_BYTES * 8).fill(1) };
+        let (dst_ptr, _guard) = dst.device_ptr(&stream);
+        let time = |label: &str, src: &dyn Fn(usize) -> *const u8| -> Result<()> {
+            let start = std::time::Instant::now();
+            for i in 0..COPIES {
+                // SAFETY: each source spans EXPERT_BYTES live bytes, and the stream is synchronized per copy
+                unsafe {
+                    let src = std::slice::from_raw_parts(src(i), EXPERT_BYTES);
+                    result::memcpy_htod_async(dst_ptr, src, stream.cu_stream())
+                        .map_err(inference_tensor::Error::wrap)?;
+                }
+                stream
+                    .synchronize()
+                    .map_err(inference_tensor::Error::wrap)?;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "{label:<10} {:6.1} us a copy, {:5.2} GB/s",
+                secs / COPIES as f64 * 1e6,
+                (EXPERT_BYTES * COPIES) as f64 / secs / 1e9
+            );
+            Ok(())
+        };
+        let span = pageable.len() - EXPERT_BYTES;
+        time("pageable", &|i| {
+            pageable[(i * EXPERT_BYTES * 7) % span..].as_ptr()
+        })?;
+        time("pinned", &|i| unsafe {
+            pinned_host.add((i % 8) * EXPERT_BYTES)
+        })?;
+        // a bounce through pinned memory: chunks memcpy'd into two pinned halves, each copy queued before the next memcpy
+        for chunks in [2, 4, 8] {
+            let chunk = EXPERT_BYTES / chunks;
+            let start = std::time::Instant::now();
+            for i in 0..COPIES {
+                let src = &pageable[(i * EXPERT_BYTES * 7) % span..][..EXPERT_BYTES];
+                let mut events: [Option<inference_tensor::cuda_backend::cudarc::driver::CudaEvent>;
+                    2] = [None, None];
+                for c in 0..chunks {
+                    let half = c % 2;
+                    if let Some(event) = events[half].take() {
+                        event.synchronize().map_err(inference_tensor::Error::wrap)?;
+                    }
+                    // SAFETY: half `half` of the pinned buffer is no longer read (its last copy's event passed)
+                    let staged = unsafe {
+                        std::slice::from_raw_parts_mut(pinned_host.add(half * chunk), chunk)
+                    };
+                    staged.copy_from_slice(&src[c * chunk..][..chunk]);
+                    // SAFETY: `staged` stays untouched until its event passes
+                    unsafe {
+                        result::memcpy_htod_async(
+                            dst_ptr + (c * chunk) as u64,
+                            &*staged,
+                            stream.cu_stream(),
+                        )
+                        .map_err(inference_tensor::Error::wrap)?;
+                    }
+                    events[half] = Some(
+                        stream
+                            .record_event(None)
+                            .map_err(inference_tensor::Error::wrap)?,
+                    );
+                }
+                stream
+                    .synchronize()
+                    .map_err(inference_tensor::Error::wrap)?;
+            }
+            let secs = start.elapsed().as_secs_f64();
+            println!(
+                "bounce/{chunks:<3} {:6.1} us a copy, {:5.2} GB/s",
+                secs / COPIES as f64 * 1e6,
+                (EXPERT_BYTES * COPIES) as f64 / secs / 1e9
+            );
+        }
+        Ok(())
+    }
 }

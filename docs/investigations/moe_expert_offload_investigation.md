@@ -662,3 +662,22 @@ Test: `mapped_experts_fill_device_slots_with_their_file_bytes` writes a GGUF exp
 mapping (pageable here, registered where the driver allows) and checks a filled device slot holds the file's bytes.
 
 Open: a pinned bounce ring on the fill worker (memcpy from the mapping, then an async copy) could win back the 7%.
+
+## Run 22 - 2026-10-23 11:47
+
+Question: would a pinned bounce buffer on the fill worker win back Run 21's 7% decode gap (72.2 ms against 67.5 ms)?
+
+```
+cargo nextest run -p inference-quant --features cuda --run-ignored only -E 'test(/expert_copy_bandwidth/)' --no-capture
+(720 KiB copies, about one Flash-Next expert projection, each waited for as the fill worker waits)
+pageable    115.4 us a copy, 6.39 GB/s
+pinned       62.3 us a copy, 11.83 GB/s
+bounce/2    115.3 us a copy, 6.40 GB/s   (chunks memcpy'd into two pinned halves, each DMA queued before the next memcpy)
+bounce/4    115.5 us a copy, 6.38 GB/s
+bounce/8    134.1 us a copy, 5.50 GB/s
+```
+
+Pageable copies run at half the pinned bandwidth, and a bounce does not help: the single-threaded memcpy out of the
+page cache is the bound (about 6.4 GB/s), not the DMA. A threaded memcpy could approach the pinned rate, but those
+threads are the ones the CPU's missed experts run on, for at most 4.5 ms a token. Dead end at this size; kept the
+benchmark.
