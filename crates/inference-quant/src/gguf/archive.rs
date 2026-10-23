@@ -24,7 +24,7 @@ use memmap2::{Mmap, MmapOptions};
 
 use super::repack;
 
-const DEFAULT_ALIGNMENT: usize = 32;
+pub(crate) const DEFAULT_ALIGNMENT: usize = 32;
 const MAX_STRING_LENGTH: u64 = 1 << 30;
 const MAX_ARRAY_ELEMENTS: u64 = 1 << 30;
 // GGML stops at 4; ComfyUI-GGUF keeps a 3D conv at its 5-dim shape, and the cap only bounds a crafted header
@@ -1502,7 +1502,7 @@ fn align_up(value: usize, alignment: usize) -> Result<usize> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{fs, io::Write, sync::Arc};
 
     use byteorder::{LittleEndian, WriteBytesExt};
@@ -1511,12 +1511,12 @@ mod tests {
 
     use super::*;
 
-    struct TestTensor {
-        name: &'static str,
-        shape: Vec<u64>,
-        dtype: u32,
-        data: Vec<u8>,
-        offset: Option<u64>,
+    pub(crate) struct TestTensor {
+        pub(crate) name: &'static str,
+        pub(crate) shape: Vec<u64>,
+        pub(crate) dtype: u32,
+        pub(crate) data: Vec<u8>,
+        pub(crate) offset: Option<u64>,
     }
 
     fn write_string(writer: &mut impl Write, value: &str) {
@@ -1572,7 +1572,7 @@ mod tests {
         }
     }
 
-    fn write_test_gguf(
+    pub(crate) fn write_test_gguf(
         metadata: &[(&str, Value)],
         tensors: &[TestTensor],
         alignment: usize,
