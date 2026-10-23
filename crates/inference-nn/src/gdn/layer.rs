@@ -266,6 +266,8 @@ impl GatedDeltaNet {
             && self.dims.conv_kernel_size <= crate::cuda::gdn::GDN_SPEC_CHECKPOINT_MAX_CONV_WIDTH
             && self.norm.weight.dtype() == activation_dtype
             && self.norm.weight.device().same_device(pool.device())
+            // the deferred kernel fuses a SiLU output gate
+            && self.norm.gate() == super::GdnOutputGate::Silu
     }
 
     pub fn deferred_decode_supported(
@@ -281,6 +283,8 @@ impl GatedDeltaNet {
             && self.dims.head_v_dim == crate::cuda::gdn::GDN_DECODE_V_DIM
             && self.norm.weight.dtype() == activation_dtype
             && self.norm.weight.device().same_device(pool.device())
+            // the deferred kernel fuses a SiLU output gate
+            && self.norm.gate() == super::GdnOutputGate::Silu
     }
 
     pub fn transition_commit_config(&self, pool: &RecurrentStatePool) -> GdnTransitionCommitConfig {
@@ -825,7 +829,8 @@ impl GatedDeltaNet {
             && self.dims.head_v_dim == crate::cuda::gdn::GDN_DECODE_V_DIM
             && seq_len <= crate::cuda::gdn::GDN_SPEC_FUSED_MAX_TOKENS
             && projected.z.dtype() == mixed_qkv.dtype()
-            && self.norm.weight.dtype() == mixed_qkv.dtype();
+            && self.norm.weight.dtype() == mixed_qkv.dtype()
+            && self.norm.gate() == super::GdnOutputGate::Silu;
         let post_op = fused_norm.then_some(crate::cuda::gdn::GdnSpeculativeRmsNormGate {
             gate: &projected.z,
             weight: &self.norm.weight,

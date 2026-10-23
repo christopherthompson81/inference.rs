@@ -205,10 +205,14 @@ impl Qwen3_5MtpHead {
             .add(&self.pre_fc_norm_hidden);
         uvb_mtp.pp("norm").add(&self.norm);
         let uvb_l = uvb_mtp.pp("layers").pp(0);
-        uvb_l.pp("input_layernorm").add(&self.layer.input_layernorm);
-        uvb_l
-            .pp("post_attention_layernorm")
-            .add(&self.layer.post_attention_layernorm);
+        if let super::text::LayerNorms::Rms {
+            input,
+            post_attention,
+        } = &self.layer.norms
+        {
+            uvb_l.pp("input_layernorm").add(input);
+            uvb_l.pp("post_attention_layernorm").add(post_attention);
+        }
         if let super::text::LayerImpl::FullAttention(attn) = &self.layer.layer_impl {
             uvb_l.pp("self_attn").pp("q_norm").add(&attn.q_norm);
             uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);

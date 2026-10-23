@@ -11,7 +11,7 @@ pub fn build_normal_bindings(
 ) -> Result<GgufBindingMap> {
     if matches!(
         loader,
-        NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe
+        NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe | NormalLoaderType::Qwen4Exp
     ) {
         return super::qwen_multimodal_bindings::build_qwen35_text_bindings(archive);
     }

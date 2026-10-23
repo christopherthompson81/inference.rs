@@ -895,6 +895,7 @@ impl Model {
                 },
                 recurrent_dtype: Some(cfg.mamba_ssm_dtype.dtype()),
             },
+            auxiliary: Vec::new(),
         };
         let layer_devices = (0..hybrid_cache_config.layer_types.len())
             .map(|layer_idx| {

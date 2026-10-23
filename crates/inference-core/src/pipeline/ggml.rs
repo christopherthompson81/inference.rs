@@ -372,6 +372,7 @@ impl Pipeline for GGMLPipeline {
             flash_meta: _,
             recurrent_batch_kind: _,
             adapter_leases: _adapter_leases,
+            token_window: _,
         } = *inputs.downcast().expect("Downcast failed.");
         let logits = self
             .model

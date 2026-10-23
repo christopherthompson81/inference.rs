@@ -74,10 +74,12 @@ macro_rules! qwen3_5_text_loader {
 
         impl IsqModelLoader for $loader {
             fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-                isq_regexes(&[
+                let mut regexes = isq_regexes(&[
                     r"^(model\.language_model|language_model\.model|model)\.embed_tokens\.weight$",
                     r"^lm_head\.(weight|bias)$",
-                ])
+                ])?;
+                regexes.extend(super::qwen3_5::flash_next_promoted_regexes()?);
+                Ok(regexes)
             }
 
             fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
@@ -168,12 +170,14 @@ macro_rules! qwen3_5_text_loader {
                 let cfg = parse_qwen35_text_config(config, $moe)?;
                 cfg.layer_types()
                     .into_iter()
-                    .map(|layer_type| {
-                        Ok(super::qwen3_5::decoder_layer_elems(
+                    .enumerate()
+                    .map(|(layer_idx, layer_type)| {
+                        Ok((super::qwen3_5::decoder_layer_elems(
                             &cfg,
                             layer_type,
                             weight_pack_factor,
-                        )? * dtype.size_in_bytes())
+                        )? + super::qwen3_5::layer_extra_elems(&cfg, layer_idx)?)
+                            * dtype.size_in_bytes())
                     })
                     .collect()
             }
@@ -185,7 +189,7 @@ macro_rules! qwen3_5_text_loader {
                 let cfg = parse_qwen35_text_config(config, $moe)?;
                 let mtp = mtp_requested(config)?;
                 let base = ModelConfigMetadata {
-                    max_seq_len: cfg.max_position_embeddings,
+                    max_seq_len: cfg.supported_context_len(true),
                     num_layers: cfg.num_hidden_layers + cfg.mtp_layers(mtp),
                     hidden_size: cfg.hidden_size,
                     num_kv_heads: cfg.num_key_value_heads,
@@ -195,7 +199,8 @@ macro_rules! qwen3_5_text_loader {
                     v_head_dim: cfg.head_dim,
                     kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
                 };
-                Ok(Box::new(
+                Ok(super::qwen3_5::with_qsa_layers(
+                    &cfg,
                     HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
                         .with_uniform_prefix_prefill_attention_features(Default::default())
                         .with_recurrent_state_bytes(cfg.recurrent_state_bytes()),

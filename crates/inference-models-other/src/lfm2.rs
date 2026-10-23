@@ -1136,6 +1136,7 @@ impl Model {
                     state: crate::kv_cache::RecurrentStateSpec::Opaque { dims: Vec::new() },
                     recurrent_dtype: None,
                 },
+                auxiliary: Vec::new(),
             },
             vb_m.dtype(),
             &layer_devices,

@@ -1051,6 +1051,11 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
             *self.dflash.lock().expect("dflash poisoned") = None;
             return Ok(None);
         };
+        if self.hyper_streams() > 1 {
+            inference_tensor::bail!(
+                "speculative decoding is not supported yet for Qwen3.8-Flash-Next's hyper-connection residual"
+            );
+        }
         if !config.is_builtin() {
             return self.attach_dflash(config, runtime);
         }

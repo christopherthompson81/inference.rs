@@ -223,6 +223,11 @@ __device__ __forceinline__ float gdn_silu(float x) {
   return x * ex / (1.0f + ex);
 }
 
+// the GDN output gate: SiLU (Qwen3.5) or sigmoid (Qwen3.8-Flash-Next)
+__device__ __forceinline__ float gdn_output_gate(float x, int sigmoid_gate) {
+  return sigmoid_gate ? 1.0f / (1.0f + __expf(-x)) : gdn_silu(x);
+}
+
 __device__ __forceinline__ float gdn_warp_max(float value, int width = 32) {
 #pragma unroll
   for (int offset = width / 2; offset > 0; offset >>= 1) {

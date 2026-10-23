@@ -23,6 +23,8 @@ enum QwenMultimodalFamily {
     Qwen3VlMoe,
     Qwen35,
     Qwen35Moe,
+    // Qwen3.8-Flash-Next: Qwen3.5 MoE with hyper-connections and PLE, text only for now
+    Qwen4Exp,
 }
 
 impl QwenMultimodalFamily {
@@ -33,7 +35,7 @@ impl QwenMultimodalFamily {
             Self::Qwen3Vl => MultimodalLoaderType::Qwen3VL,
             Self::Qwen3VlMoe => MultimodalLoaderType::Qwen3VLMoE,
             Self::Qwen35 => MultimodalLoaderType::Qwen3_5,
-            Self::Qwen35Moe => MultimodalLoaderType::Qwen3_5Moe,
+            Self::Qwen35Moe | Self::Qwen4Exp => MultimodalLoaderType::Qwen3_5Moe,
         }
     }
 
@@ -49,7 +51,7 @@ impl QwenMultimodalFamily {
     }
 
     fn has_gemma_norm_offsets(self) -> bool {
-        matches!(self, Self::Qwen35 | Self::Qwen35Moe)
+        matches!(self, Self::Qwen35 | Self::Qwen35Moe | Self::Qwen4Exp)
     }
 }
 
@@ -192,14 +194,130 @@ pub fn build_qwen35_text_bindings(archive: &GgufArchive) -> Result<GgufBindingMa
     let family = match architecture {
         "qwen35" => QwenMultimodalFamily::Qwen35,
         "qwen35moe" => QwenMultimodalFamily::Qwen35Moe,
+        "qwen4exp" => QwenMultimodalFamily::Qwen4Exp,
         _ => bail!("Qwen3.5 text binding does not support `{architecture}`"),
     };
     let inventory = TensorInventory::from_archive(archive);
     let mut bindings = GgufBindingMap::new();
     let gdn = Some(read_gdn_metadata(archive)?);
     bind_text(&inventory, family, gdn, &mut bindings)?;
+    if family == QwenMultimodalFamily::Qwen4Exp {
+        bind_flash_next(archive, &inventory, &mut bindings)?;
+        return Ok(bindings);
+    }
     bind_mtp(archive, &inventory, family, &mut bindings)?;
     Ok(bindings)
+}
+
+// Qwen3.8-Flash-Next's hyper-connections (`hc_*`, `output_hc_*`) and PLE (`ple_*`, the n-gram table).
+fn bind_flash_next(
+    archive: &GgufArchive,
+    inventory: &TensorInventory,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    let family = QwenMultimodalFamily::Qwen4Exp;
+    let model = "model.language_model";
+    let hyper = |bindings: &mut GgufBindingMap, native: &str, source: &str| {
+        bind_text_norm(
+            inventory,
+            bindings,
+            family,
+            format!("{native}.hc_norm.weight"),
+            format!("{source}_norm.weight"),
+        );
+        for (target, role) in [
+            ("input_mix_weight_down", "down"),
+            ("input_mix_weight_up", "up"),
+            ("block_inject_weight", "inject"),
+        ] {
+            bind(
+                inventory,
+                bindings,
+                format!("{native}.{target}.weight"),
+                format!("{source}_{role}.weight"),
+            );
+        }
+    };
+    hyper(
+        bindings,
+        &format!("{model}.hyper_connection_mixer"),
+        "output_hc",
+    );
+    for layer in inventory.layer_indices("blk.") {
+        let native = format!("{model}.layers.{layer}");
+        hyper(
+            bindings,
+            &format!("{native}.attn_hyper_connection"),
+            &format!("blk.{layer}.hc_attn"),
+        );
+        hyper(
+            bindings,
+            &format!("{native}.mlp_hyper_connection"),
+            &format!("blk.{layer}.hc_ffn"),
+        );
+        for (target, role) in [("key_proj", "ple_key"), ("value_proj", "ple_value")] {
+            bind(
+                inventory,
+                bindings,
+                format!("{native}.ple.{target}.weight"),
+                format!("blk.{layer}.{role}.weight"),
+            );
+        }
+        for (target, role) in [
+            ("norm_key", "ple_norm_key"),
+            ("norm_query", "ple_norm_query"),
+            ("norm_conv", "ple_norm_conv"),
+        ] {
+            bind_text_norm(
+                inventory,
+                bindings,
+                family,
+                format!("{native}.ple.{target}.weight"),
+                format!("blk.{layer}.{role}.weight"),
+            );
+        }
+        // llama.cpp splits the indexer's fused `index_qk_proj` into its query and key halves
+        let indexer = format!("{native}.self_attn.indexer");
+        for (target, role) in [("index_q_proj", "q_proj"), ("index_k_proj", "k_proj")] {
+            bind(
+                inventory,
+                bindings,
+                format!("{indexer}.{target}.weight"),
+                format!("blk.{layer}.indexer.{role}.weight"),
+            );
+        }
+        for (target, role) in [("q_layernorm", "q_norm"), ("k_layernorm", "k_norm")] {
+            bind_text_norm(
+                inventory,
+                bindings,
+                family,
+                format!("{indexer}.{target}.weight"),
+                format!("blk.{layer}.indexer.{role}.weight"),
+            );
+        }
+        // llama.cpp squeezes the depthwise conv's unit dimension
+        let conv = format!("blk.{layer}.ple_conv1d.weight");
+        if inventory.contains(&conv) {
+            let binding = match inventory.shape(&conv)? {
+                [channels, kernel] => {
+                    GgufTensorBinding::tensor(&conv).reshape(vec![*channels, 1, *kernel])
+                }
+                [_, 1, _] => GgufTensorBinding::tensor(&conv),
+                shape => bail!("PLE conv `{conv}` has an unexpected shape {shape:?}"),
+            };
+            bindings.insert(format!("{native}.ple.conv1d.weight"), binding);
+        }
+    }
+    let ple_layers = metadata_usize_values(archive, "qwen4exp.ple.layers")?;
+    if let [layer] = ple_layers.as_slice() {
+        bind(
+            inventory,
+            bindings,
+            format!("{model}.layers.{layer}.ple.ple_embedding.ngram_embedding.weight"),
+            "per_layer_token_embd.weight",
+        );
+    }
+    Ok(())
 }
 
 // llama.cpp stores the built-in MTP head as the blocks after the main stack, plus `nextn` fc and norm tensors.
@@ -373,6 +491,24 @@ fn metadata_usize(archive: &GgufArchive, key: &str) -> Result<usize> {
         _ => bail!("GGUF metadata `{key}` must be a nonnegative integer"),
     };
     usize::try_from(value).with_context(|| format!("GGUF metadata `{key}` does not fit usize"))
+}
+
+fn metadata_usize_values(archive: &GgufArchive, key: &str) -> Result<Vec<usize>> {
+    let Some(Value::Array(values)) = archive.metadata_value(key) else {
+        bail!("GGUF metadata `{key}` must be an integer array");
+    };
+    values
+        .iter()
+        .map(|value| match value {
+            Value::U32(value) => Ok(*value as usize),
+            Value::I32(value) if *value >= 0 => Ok(*value as usize),
+            Value::U64(value) => usize::try_from(*value).map_err(anyhow::Error::from),
+            Value::I64(value) if *value >= 0 => {
+                usize::try_from(*value).map_err(anyhow::Error::from)
+            }
+            _ => bail!("GGUF metadata `{key}` must hold nonnegative integers"),
+        })
+        .collect()
 }
 
 fn read_gdn_metadata(archive: &GgufArchive) -> Result<GdnMetadata> {

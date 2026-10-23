@@ -30,6 +30,13 @@ const EXPERTS_ISQ: &[&str] = &[
 ];
 const SHARED_EXPERT_ISQ: &[&str] =
     &[r"\.mlp\.shared_expert\.(gate_proj|up_proj|down_proj)\.(weight|bias)$"];
+// Qwen3.8-Flash-Next's hyper-connections, PLE projections and QSA indexer, which ISQ promotes: they run every token
+const FLASH_NEXT_ISQ: &[&str] = &[
+    r"\.(attn|mlp)_hyper_connection\.(input_mix_weight_down|input_mix_weight_up|block_inject_weight)\.weight$",
+    r"\.ple\.(key_proj|value_proj)\.weight$",
+    r"\.self_attn\.indexer\.(index_qk_proj|index_q_proj|index_k_proj)\.weight$",
+];
+const FLASH_NEXT_MIXER_ISQ: &str = r"^(language_model\.model|model\.language_model|model)\.hyper_connection_mixer\.(input_mix_weight_down|input_mix_weight_up)\.weight$";
 const MTP_LAYERS: &str = r"^mtp\.layers\.(\d+)";
 
 // Every pattern under both the main stack's and the built-in MTP head's layer prefixes.
@@ -48,6 +55,14 @@ pub(super) fn isq_layer_regexes(moe: bool) -> Result<Vec<Regex>> {
     } else {
         layer_regexes(&[ATTENTION_ISQ, DENSE_MLP_ISQ])?
     });
+    regexes.extend(flash_next_promoted_regexes()?);
+    Ok(regexes)
+}
+
+/// The Flash-Next layers ISQ quantizes at the promoted type; they match nothing in other Qwen3.5 checkpoints.
+pub(super) fn flash_next_promoted_regexes() -> Result<Vec<Regex>> {
+    let mut regexes = layer_regexes(&[FLASH_NEXT_ISQ])?;
+    regexes.extend(isq_regexes(&[FLASH_NEXT_MIXER_ISQ])?);
     Ok(regexes)
 }
 
@@ -70,7 +85,11 @@ fn full_attention_elems(cfg: &TextConfig, weight_pack_factor: usize) -> usize {
     let kv_dim = cfg.head_dim * cfg.num_key_value_heads;
     // q_proj carries the output gate, so it is twice q_dim wide
     let projections = cfg.hidden_size * (q_dim * 2 + kv_dim * 2) + q_dim * cfg.hidden_size;
-    projections / weight_pack_factor + cfg.head_dim * 2
+    // QSA's indexer projections count unpacked, as ISQ promotes them
+    let indexer = cfg.qsa().map_or(0, |qsa| {
+        cfg.hidden_size * (qsa.n_heads + qsa.kv_heads) * qsa.head_dim + 2 * qsa.head_dim
+    });
+    projections / weight_pack_factor + cfg.head_dim * 2 + indexer
 }
 
 fn linear_attention_elems(cfg: &TextConfig, weight_pack_factor: usize) -> usize {
@@ -106,7 +125,44 @@ pub(super) fn decoder_layer_elems(
         LayerType::FullAttention => full_attention_elems(cfg, weight_pack_factor),
         LayerType::LinearAttention => linear_attention_elems(cfg, weight_pack_factor),
     };
-    Ok(cfg.hidden_size * 2 + attention + feed_forward_elems(cfg, weight_pack_factor)?)
+    Ok(layer_norm_elems(cfg) + attention + feed_forward_elems(cfg, weight_pack_factor)?)
+}
+
+// the two RMSNorms, or Qwen3.8-Flash-Next's two hyper-connections (grouped norm, low-rank mix, write-back weights)
+// the hyper-connections' matrices count unpacked: ISQ promotes them, and a GGUF may keep them wider than the bulk
+fn layer_norm_elems(cfg: &TextConfig) -> usize {
+    match cfg.hyper_connections() {
+        Some(hc) => {
+            let width = hc.streams * cfg.hidden_size;
+            2 * (width + 2 * width * hc.lowrank + width * hc.streams)
+        }
+        None => cfg.hidden_size * 2,
+    }
+}
+
+/// What layer `layer_idx` adds beyond `decoder_layer_elems`: PLE's projections (unpacked, as ISQ promotes them),
+/// norms and conv, its table aside (it stays in host memory).
+pub(super) fn layer_extra_elems(cfg: &TextConfig, layer_idx: usize) -> Result<usize> {
+    let Some(ple) = cfg.ple()?.filter(|ple| ple.layer == layer_idx) else {
+        return Ok(0);
+    };
+    let width = cfg.residual_size();
+    let projections = ple.embed_dim * (width + cfg.hidden_size);
+    Ok(projections + 3 * width + width * ple.conv_kernel)
+}
+
+/// The cache config with QSA's indexer keys appended as auxiliary layers, when the model has an indexer.
+pub(super) fn with_qsa_layers(
+    cfg: &TextConfig,
+    config: impl ModelConfigLike + Send + Sync + 'static,
+) -> Box<dyn ModelConfigLike> {
+    match cfg.qsa_auxiliary_layers() {
+        Some(layers) => Box::new(crate::paged_attention::AuxiliaryPagedKvCacheConfig::new(
+            std::sync::Arc::new(config),
+            layers,
+        )),
+        None => Box::new(config),
+    }
 }
 
 // The built-in MTP head sits on the non-mapped device: fc, three norms and its full-attention layers.
@@ -212,10 +268,12 @@ macro_rules! qwen3_5_loader {
 
         impl IsqModelLoader for $loader {
             fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-                isq_regexes(&[
+                let mut regexes = isq_regexes(&[
                     r"^(language_model\.model|model\.language_model)\.embed_tokens\.weight$",
                     r"^lm_head\.(weight|bias)$",
-                ])
+                ])?;
+                regexes.extend(flash_next_promoted_regexes()?);
+                Ok(regexes)
             }
             fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
                 isq_layer_regexes($moe)
@@ -416,8 +474,10 @@ macro_rules! qwen3_5_loader {
                 let cfg = parse_config(config, $moe)?.text_config;
                 cfg.layer_types()
                     .into_iter()
-                    .map(|layer_type| {
-                        Ok(decoder_layer_elems(&cfg, layer_type, weight_pack_factor)?
+                    .enumerate()
+                    .map(|(layer_idx, layer_type)| {
+                        Ok((decoder_layer_elems(&cfg, layer_type, weight_pack_factor)?
+                            + layer_extra_elems(&cfg, layer_idx)?)
                             * dtype.size_in_bytes())
                     })
                     .collect()
@@ -432,7 +492,7 @@ macro_rules! qwen3_5_loader {
                 let cfg = &cfg.text_config;
 
                 let base = ModelConfigMetadata {
-                    max_seq_len: cfg.max_position_embeddings,
+                    max_seq_len: cfg.supported_context_len(true),
                     num_layers: cfg.num_hidden_layers + cfg.mtp_layers(mtp),
                     hidden_size: cfg.hidden_size,
                     num_kv_heads: cfg.num_key_value_heads,
@@ -443,7 +503,8 @@ macro_rules! qwen3_5_loader {
                     kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
                 };
 
-                Ok(Box::new(
+                Ok(with_qsa_layers(
+                    cfg,
                     HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
                         .with_uniform_prefix_prefill_attention_features(Default::default())
                         .with_recurrent_state_bytes(cfg.recurrent_state_bytes()),

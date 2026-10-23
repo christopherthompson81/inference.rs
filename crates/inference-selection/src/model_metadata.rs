@@ -187,6 +187,11 @@ impl SupportedArch for NormalLoaderType {
                 modalities: m,
                 examples: &[],
             },
+            Self::Qwen4Exp => ArchMetadata {
+                families: &["Qwen3.8-Flash-Next"],
+                modalities: m,
+                examples: &[],
+            },
             Self::Lfm2 => ArchMetadata {
                 families: &["LFM2", "LFM2.5"],
                 modalities: m,

@@ -18,10 +18,13 @@ use inference_quant::{
 use inference_tensor::{D, DType, Device, Module, Result, Tensor};
 
 use super::{
-    config::{LayerType, TextConfig},
+    config::{LayerType, PleHash, QsaConfig, TextConfig},
     feed_forward::FeedForward,
+    hyper::{GatedResidual, HyperRead},
     mtp::Qwen3_5MtpHead,
     packed_gdn::{forward_packed_gdn, packed_gdn_layout},
+    ple::PleLayer,
+    qsa::{QsaAttention, QsaIndexer, QsaLayerInput, QsaRow, QsaStep, QsaStepInput},
 };
 use crate::gdn::RecurrentBatchKind;
 use crate::{
@@ -41,8 +44,9 @@ use crate::{
     layers::{self, CausalMasker, GemmaRmsNorm, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
     model::{ForwardMaskCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
-        AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
-        PagedAttention, load_fp8_attention_scales,
+        AttentionImplementation, AuxiliaryPagedKvCacheConfig, AuxiliaryPagedLayers,
+        HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata, PagedAttention,
+        load_fp8_attention_scales,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -77,6 +81,9 @@ impl GdnConfig for TextConfig {
     fn v_head_layout(&self) -> GdnVHeadLayout {
         self.gdn_v_head_layout
     }
+    fn output_gate(&self) -> crate::gdn::GdnOutputGate {
+        self.flash_next.output_gate_type.unwrap_or_default()
+    }
 }
 
 // Full Attention layer with MRoPE
@@ -95,6 +102,7 @@ pub(super) struct FullAttention {
     pub(super) rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
+    indexer: Option<QsaIndexer>,
 }
 
 enum AttentionInput<'a> {
@@ -112,6 +120,7 @@ impl FullAttention {
         loading_isq: bool,
         rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
         use_paged_attention: bool,
+        qsa_cache_layer: usize,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let vb_sa = mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq);
@@ -126,7 +135,21 @@ impl FullAttention {
         } else {
             None
         };
-        Self::load_with(vb_sa, vb_sa_norms, cfg, rotary_emb, paged_attn, comm)
+        let indexer = cfg
+            .qsa()
+            .map(|qsa| {
+                QsaIndexer::load(
+                    vb_sa.pp("indexer"),
+                    vb_sa_norms.pp("indexer"),
+                    cfg,
+                    qsa,
+                    qsa_cache_layer,
+                )
+            })
+            .transpose()?;
+        let mut attn = Self::load_with(vb_sa, vb_sa_norms, cfg, rotary_emb, paged_attn, comm)?;
+        attn.indexer = indexer;
+        Ok(attn)
     }
 
     /// `vb_sa` and `vb_sa_norms` are already placed on the layer's device.
@@ -241,6 +264,7 @@ impl FullAttention {
                 sinks: None,
                 chunk: None,
             },
+            indexer: None,
         })
     }
 
@@ -271,7 +295,17 @@ impl FullAttention {
         kv_cache: Option<&mut KvCache>,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
+        qsa: Option<QsaLayerInput<'_>>,
     ) -> Result<Tensor> {
+        let q_index = match (&self.indexer, qsa, &metadata, &self.paged_attn) {
+            (Some(indexer), Some(qsa), Some((_, input_metadata)), Some(paged_attn)) => {
+                let AttentionInput::Dense(x) = &input else {
+                    inference_tensor::bail!("QSA's indexer reads the dense attention input");
+                };
+                indexer.prepare(x, cos_sin, qsa, paged_attn, input_metadata)?
+            }
+            _ => None,
+        };
         let (b_sz, seq_len, _) = match input {
             AttentionInput::Dense(x) => x.dims3()?,
             AttentionInput::Quantized(activation) => {
@@ -358,6 +392,28 @@ impl FullAttention {
         // Standard attention
         let mut y = match &self.paged_attn {
             Some(paged_attn) => match metadata {
+                Some(((key_cache, value_cache), input_metadata))
+                    if let (Some(q_index), Some(indexer), Some(qsa)) =
+                        (&q_index, &self.indexer, qsa) =>
+                {
+                    let slots = input_metadata
+                        .slot_mappings
+                        .get(&q.device().location())
+                        .ok_or_else(|| {
+                            inference_tensor::Error::msg("paged attention has no slot mapping")
+                        })?;
+                    paged_attn.write_rows(&k, &v, &key_cache, &value_cache, slots)?;
+                    indexer.attend(QsaAttention {
+                        q_index,
+                        query: &q,
+                        input: qsa,
+                        key_cache: &key_cache,
+                        value_cache: &value_cache,
+                        paged_attn,
+                        input_metadata,
+                        sdpa_params: &self.sdpa_params,
+                    })?
+                }
                 Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
                     &q,
                     &k,
@@ -438,9 +494,54 @@ pub(super) enum LayerImpl {
 
 pub(super) struct DecoderLayer {
     pub(super) layer_impl: LayerImpl,
-    pub(super) input_layernorm: GemmaRmsNorm,
-    pub(super) post_attention_layernorm: GemmaRmsNorm,
+    pub(super) norms: LayerNorms,
     pub(super) mlp: FeedForward,
+    // Qwen3.8-Flash-Next's n-gram embeddings, added to this layer's input
+    pub(super) ple: Option<PleLayer>,
+}
+
+/// What reads each sublayer's input: the two RMSNorms, or Qwen3.8-Flash-Next's hyper-connections.
+pub(super) enum LayerNorms {
+    Rms {
+        input: GemmaRmsNorm,
+        post_attention: GemmaRmsNorm,
+    },
+    Hyper {
+        attention: GatedResidual,
+        mlp: GatedResidual,
+    },
+}
+
+impl LayerNorms {
+    /// The norm a previous layer can fuse into its residual add, when there is one.
+    fn input_norm(&self) -> Option<&GemmaRmsNorm> {
+        match self {
+            Self::Rms { input, .. } => Some(input),
+            Self::Hyper { .. } => None,
+        }
+    }
+}
+
+/// The model's last read of its residual: the output norm, or the hyper-connection mixer.
+pub(super) enum OutputNorm {
+    Rms(GemmaRmsNorm),
+    Mixer(GatedResidual),
+}
+
+impl OutputNorm {
+    fn rms(&self) -> Option<&GemmaRmsNorm> {
+        match self {
+            Self::Rms(norm) => Some(norm),
+            Self::Mixer(_) => None,
+        }
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Rms(norm) => norm.forward(x),
+            Self::Mixer(mixer) => mixer.collapse(x),
+        }
+    }
 }
 
 struct DecoderLayerOutput {
@@ -603,9 +704,12 @@ impl DecoderLayer {
         )?;
         Ok(Self {
             layer_impl: LayerImpl::FullAttention(attn),
-            input_layernorm,
-            post_attention_layernorm,
+            norms: LayerNorms::Rms {
+                input: input_layernorm,
+                post_attention: post_attention_layernorm,
+            },
             mlp,
+            ple: None,
         })
     }
 
@@ -634,6 +738,7 @@ impl DecoderLayer {
             kv_cache,
             metadata,
             flash_params,
+            None,
         )?
         .add()
     }
@@ -648,6 +753,7 @@ impl DecoderLayer {
         kv_cache: Option<&mut KvCache>,
         metadata: Option<((Tensor, Tensor), &PagedAttentionInputMetadata)>,
         flash_params: &FlashParams,
+        qsa: Option<QsaLayerInput<'_>>,
     ) -> Result<DecoderLayerOutput> {
         let attn = match &self.layer_impl {
             LayerImpl::FullAttention(attn) => attn,
@@ -655,14 +761,21 @@ impl DecoderLayer {
         };
         let residual = x;
         let normalized_storage;
-        let input = match normalized_x {
-            Some(PreparedLayerInput::Dense(normalized)) => AttentionInput::Dense(normalized),
-            Some(PreparedLayerInput::Quantized { activation, .. }) => {
-                AttentionInput::Quantized(activation)
+        let (input, hyper) = match (&self.norms, normalized_x) {
+            (_, Some(PreparedLayerInput::Dense(normalized))) => {
+                (AttentionInput::Dense(normalized), None)
             }
-            None => {
-                normalized_storage = self.input_layernorm.forward(x)?;
-                AttentionInput::Dense(&normalized_storage)
+            (_, Some(PreparedLayerInput::Quantized { activation, .. })) => {
+                (AttentionInput::Quantized(activation), None)
+            }
+            (LayerNorms::Rms { input, .. }, None) => {
+                normalized_storage = input.forward(x)?;
+                (AttentionInput::Dense(&normalized_storage), None)
+            }
+            (LayerNorms::Hyper { attention, .. }, None) => {
+                let read = attention.read(x)?;
+                normalized_storage = read.input.clone();
+                (AttentionInput::Dense(&normalized_storage), Some(read))
             }
         };
         let attn_out = attn.forward(
@@ -672,16 +785,41 @@ impl DecoderLayer {
             kv_cache,
             metadata,
             flash_params,
+            qsa,
         )?;
-        let (x, ffn_out) = self.mlp.forward_with_add_rms_norm(
-            &attn_out,
-            residual,
-            &self.post_attention_layernorm,
-        )?;
-        Ok(DecoderLayerOutput {
-            branch: ffn_out,
-            residual: x,
-        })
+        self.finish_with_mlp(&attn_out, residual, hyper)
+    }
+
+    /// Adds the mixer's output to the residual and runs the feed-forward on the result.
+    fn finish_with_mlp(
+        &self,
+        mixer_out: &Tensor,
+        residual: &Tensor,
+        hyper: Option<HyperRead>,
+    ) -> Result<DecoderLayerOutput> {
+        match (&self.norms, hyper) {
+            (LayerNorms::Rms { post_attention, .. }, None) => {
+                let (x, ffn_out) =
+                    self.mlp
+                        .forward_with_add_rms_norm(mixer_out, residual, post_attention)?;
+                Ok(DecoderLayerOutput {
+                    branch: ffn_out,
+                    residual: x,
+                })
+            }
+            (LayerNorms::Hyper { mlp, .. }, Some(read)) => {
+                let x = (read.streams_in() + read.injection(mixer_out)?)?;
+                let read = mlp.read(&x)?;
+                let ffn_out = self.mlp.forward(&read.input)?;
+                Ok(DecoderLayerOutput {
+                    branch: read.injection(&ffn_out)?,
+                    residual: x,
+                })
+            }
+            _ => inference_tensor::bail!(
+                "a hyper-connection layer's input is read by the layer itself, not prepared"
+            ),
+        }
     }
 
     fn forward_linear_with_stash(
@@ -704,19 +842,29 @@ impl DecoderLayer {
         };
         let residual = x;
         let normalized_storage;
-        let (normalized_x, quantized_x) = match normalized_x {
-            Some(PreparedLayerInput::Dense(normalized)) => (normalized, None),
-            Some(PreparedLayerInput::Quantized {
-                normalized,
-                activation,
-            }) => (
+        let mut hyper = None;
+        let (normalized_x, quantized_x) = match (&self.norms, normalized_x) {
+            (_, Some(PreparedLayerInput::Dense(normalized))) => (normalized, None),
+            (
+                _,
+                Some(PreparedLayerInput::Quantized {
+                    normalized,
+                    activation,
+                }),
+            ) => (
                 normalized
                     .as_ref()
                     .expect("quantized GDN input requires dense normalized values"),
                 Some(activation),
             ),
-            None => {
-                normalized_storage = self.input_layernorm.forward(x)?;
+            (LayerNorms::Rms { input, .. }, None) => {
+                normalized_storage = input.forward(x)?;
+                (&normalized_storage, None)
+            }
+            (LayerNorms::Hyper { attention, .. }, None) => {
+                let read = attention.read(x)?;
+                normalized_storage = read.input.clone();
+                hyper = Some(read);
                 (&normalized_storage, None)
             }
         };
@@ -747,15 +895,7 @@ impl DecoderLayer {
                 },
             )?
         };
-        let (x, ffn_out) = self.mlp.forward_with_add_rms_norm(
-            &gdn_out,
-            residual,
-            &self.post_attention_layernorm,
-        )?;
-        Ok(DecoderLayerOutput {
-            branch: ffn_out,
-            residual: x,
-        })
+        self.finish_with_mlp(&gdn_out, residual, hyper)
     }
 }
 
@@ -1172,7 +1312,9 @@ impl crate::speculative::SpeculativeGraphState for SpecGraphState {
 
 pub struct Qwen3_5TextModel {
     embed_tokens: Arc<dyn QuantMethod>,
-    pub(super) norm: GemmaRmsNorm,
+    pub(super) norm: OutputNorm,
+    // the residual's hyper-connection streams, 1 without them
+    hyper_streams: usize,
     layers: Vec<DecoderLayer>,
     pub(super) layer_types: Vec<LayerType>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
@@ -1182,6 +1324,10 @@ pub struct Qwen3_5TextModel {
     pub(super) device: Device,
     pub(super) dtype: DType,
     pub(super) max_seq_len: usize,
+    // QSA's sparse selection, where it runs (paged attention on CUDA); past its budget the context is capped without
+    qsa: Option<QsaConfig>,
+    // the indexer's auxiliary paged layers, declared whenever the model has QSA
+    qsa_layers: Option<AuxiliaryPagedLayers>,
     weight_prefix: TextWeightPrefix,
     pub(super) mtp: Option<Qwen3_5MtpHead>,
     store_spec_hidden: AtomicBool,
@@ -1294,6 +1440,27 @@ impl Qwen3_5TextModel {
             });
         }
 
+        let ple = cfg.ple()?.map(|ple| {
+            let hash = cfg
+                .flash_next
+                .ple_hash
+                .clone()
+                .unwrap_or_else(|| PleHash::derive(cfg, &ple, 0));
+            (ple, hash)
+        });
+        let ple = ple.as_ref();
+        let qsa = cfg.qsa().filter(|_| {
+            matches!(attention_mechanism, AttentionImplementation::PagedAttention)
+                && normal_loading_metadata.real_device.is_cuda()
+        });
+        if cfg.supported_context_len(qsa.is_some()) < cfg.max_position_embeddings {
+            tracing::warn!(
+                "QSA's sparse attention runs on paged attention on CUDA: the context is capped at {} tokens, where it \
+                 equals dense attention (the model's window is {})",
+                cfg.supported_context_len(false),
+                cfg.max_position_embeddings
+            );
+        }
         let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
@@ -1320,6 +1487,7 @@ impl Qwen3_5TextModel {
                         normal_loading_metadata.loading_isq,
                         rotary_emb,
                         matches!(attention_mechanism, AttentionImplementation::PagedAttention),
+                        cfg.qsa_cache_layer(layer_idx, mtp.is_some()),
                         &comm,
                     )?)
                 }
@@ -1334,20 +1502,47 @@ impl Qwen3_5TextModel {
                 )?),
             };
 
-            let input_layernorm = GemmaRmsNorm::new(
-                cfg.hidden_size,
-                cfg.rms_norm_eps,
-                mapper.set_device(layer_idx, vb_l.pp(layer_idx).pp("input_layernorm"), false),
-            )?;
-            let post_attention_layernorm = GemmaRmsNorm::new(
-                cfg.hidden_size,
-                cfg.rms_norm_eps,
-                mapper.set_device(
-                    layer_idx,
-                    vb_l.pp(layer_idx).pp("post_attention_layernorm"),
-                    false,
-                ),
-            )?;
+            let norms = match cfg.hyper_connections() {
+                Some(hc) => {
+                    let load = |name: &str| {
+                        GatedResidual::load(
+                            cfg,
+                            hc,
+                            mapper.set_device(
+                                layer_idx,
+                                vb_l.pp(layer_idx).pp(name),
+                                normal_loading_metadata.loading_isq,
+                            ),
+                            mapper.set_device(layer_idx, vb_l.pp(layer_idx).pp(name), false),
+                            true,
+                        )
+                    };
+                    LayerNorms::Hyper {
+                        attention: load("attn_hyper_connection")?,
+                        mlp: load("mlp_hyper_connection")?,
+                    }
+                }
+                None => LayerNorms::Rms {
+                    input: GemmaRmsNorm::new(
+                        cfg.hidden_size,
+                        cfg.rms_norm_eps,
+                        mapper.set_device(
+                            layer_idx,
+                            vb_l.pp(layer_idx).pp("input_layernorm"),
+                            false,
+                        ),
+                    )?,
+                    post_attention: GemmaRmsNorm::new(
+                        cfg.hidden_size,
+                        cfg.rms_norm_eps,
+                        mapper.set_device(
+                            layer_idx,
+                            vb_l.pp(layer_idx).pp("post_attention_layernorm"),
+                            false,
+                        ),
+                    )?,
+                },
+            };
 
             let mlp = FeedForward::load(
                 cfg,
@@ -1364,19 +1559,48 @@ impl Qwen3_5TextModel {
                 &comm,
             )?;
 
+            let ple = match (ple, cfg.hyper_connections()) {
+                (Some((ple, hash)), Some(hc)) if ple.layer == layer_idx => Some(PleLayer::load(
+                    cfg,
+                    *ple,
+                    hash.clone(),
+                    hc.streams,
+                    mapper.set_device(
+                        layer_idx,
+                        vb_l.pp(layer_idx).pp("ple"),
+                        normal_loading_metadata.loading_isq,
+                    ),
+                    mapper.set_device(layer_idx, vb_l.pp(layer_idx).pp("ple"), false),
+                    vb_l.pp(layer_idx).pp("ple").set_device(Device::Cpu),
+                )?),
+                _ => None,
+            };
+
             Ok(DecoderLayer {
                 layer_impl,
-                input_layernorm,
-                post_attention_layernorm,
+                norms,
                 mlp,
+                ple,
             })
         })?;
 
-        let norm = GemmaRmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
-        )?;
+        let norm = match cfg.hyper_connections() {
+            Some(hc) => OutputNorm::Mixer(GatedResidual::load(
+                cfg,
+                hc,
+                mapper.set_nm_device(
+                    vb_m.pp("hyper_connection_mixer"),
+                    normal_loading_metadata.loading_isq,
+                ),
+                mapper.set_nm_device(vb_m.pp("hyper_connection_mixer"), false),
+                false,
+            )?),
+            None => OutputNorm::Rms(GemmaRmsNorm::new(
+                cfg.hidden_size,
+                cfg.rms_norm_eps,
+                mapper.set_nm_device(vb_m.pp("norm"), false),
+            )?),
+        };
         let lm_head = if !tie {
             ReplicatedLayer::new(
                 cfg.hidden_size,
@@ -1411,6 +1635,19 @@ impl Qwen3_5TextModel {
                 },
                 recurrent_dtype: Some(cfg.mamba_ssm_dtype.dtype()),
             },
+            auxiliary: layers
+                .iter()
+                .enumerate()
+                .filter_map(|(layer, decoder)| {
+                    decoder
+                        .ple
+                        .as_ref()
+                        .map(|ple| crate::kv_cache::AuxiliaryRecurrent {
+                            layer,
+                            config: ple.state_config(),
+                        })
+                })
+                .collect(),
         };
         let layer_devices = (0..hybrid_cache_config.layer_types.len())
             .map(|layer_idx| {
@@ -1430,13 +1667,16 @@ impl Qwen3_5TextModel {
         Ok(Self {
             embed_tokens,
             norm,
+            hyper_streams: cfg.hyper_connections().map_or(1, |hc| hc.streams),
             layers,
             layer_types: layer_types.clone(),
             lm_head,
             cache: EitherCache::Hybrid(pipeline_cache),
-            max_seq_len: cfg.max_position_embeddings,
+            max_seq_len: cfg.supported_context_len(qsa.is_some()),
+            qsa,
+            qsa_layers: cfg.qsa_auxiliary_layers(),
             cfg: ModelConfigMetadata {
-                max_seq_len: cfg.max_position_embeddings,
+                max_seq_len: cfg.supported_context_len(qsa.is_some()),
                 num_layers: cfg.num_hidden_layers + cfg.mtp_layers(mtp.is_some()),
                 hidden_size: cfg.hidden_size,
                 num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
@@ -2269,6 +2509,14 @@ impl Qwen3_5TextModel {
             .clone()
     }
 
+    pub(super) fn hyper_streams(&self) -> usize {
+        self.hyper_streams
+    }
+
+    fn has_ple(&self) -> bool {
+        self.layers.iter().any(|layer| layer.ple.is_some())
+    }
+
     pub(super) fn lm_head(&self) -> &Arc<dyn QuantMethod> {
         &self.lm_head
     }
@@ -2290,10 +2538,48 @@ impl Qwen3_5TextModel {
 
     /// Paged KV only for the full-attention layers and the MTP head's layer.
     pub(super) fn paged_kv_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
-        Arc::new(
+        let config = Arc::new(
             HybridPagedKvCacheConfig::new(self.cfg.clone(), self.paged_kv_layers())
                 .with_uniform_prefix_prefill_attention_features(Default::default()),
-        )
+        );
+        match self.qsa_layers {
+            Some(layers) => Arc::new(AuxiliaryPagedKvCacheConfig::new(config, layers)),
+            None => config,
+        }
+    }
+
+    // The step's QSA plan, shared by its QSA layers; none where QSA's selection does not run.
+    fn qsa_step(&self, xs: &Tensor, ctx: &ModelForwardContext<'_>) -> Result<Option<QsaStep>> {
+        let (Some(cfg), Some(input_metadata)) = (self.qsa, ctx.paged_input_metadata()) else {
+            return Ok(None);
+        };
+        let window = ctx
+            .token_window()
+            .ok_or_else(|| inference_tensor::Error::msg("QSA reads the batch's token window"))?;
+        let offsets = ctx.seqlen_offsets();
+        if offsets.len() != window.rows.len() {
+            inference_tensor::bail!(
+                "QSA has {} sequence offsets for {} batch rows",
+                offsets.len(),
+                window.rows.len()
+            );
+        }
+        let rows = offsets
+            .iter()
+            .zip(&window.rows)
+            .map(|(&start, row)| QsaRow {
+                start,
+                len: row.tokens.len() - row.preceding,
+            })
+            .collect::<Vec<_>>();
+        QsaStep::new(QsaStepInput {
+            cfg,
+            rows: &rows,
+            query_len: xs.dim(1)?,
+            input_metadata,
+            device: xs.device(),
+        })
+        .map(Some)
     }
 
     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
@@ -2311,6 +2597,9 @@ impl Qwen3_5TextModel {
         visual_pos_masks: Option<&Tensor>,
         deepstack_visual_embeds: Option<&[Tensor]>,
     ) -> Result<Tensor> {
+        if self.hyper_streams > 1 {
+            xs = xs.repeat((1, 1, self.hyper_streams))?;
+        }
         let mut hybrid_cache = self.cache.hybrid();
         let checkpoint_lanes = hybrid_cache.checkpoint_lanes();
         let batch_size = xs.dim(0)?;
@@ -2353,6 +2642,7 @@ impl Qwen3_5TextModel {
         };
 
         let attention_mask = DeviceMappedMask::new(attention_mask.clone(), &*self.mapper)?;
+        let qsa_step = self.qsa_step(&xs, ctx)?;
 
         let speculative_gdn = checkpoint_lanes > 1
             && (1..=checkpoint_lanes).contains(&query_len)
@@ -2465,6 +2755,25 @@ impl Qwen3_5TextModel {
                 {
                     normalized_x = None;
                 }
+                if let Some(ple) = &layer.ple {
+                    let window = ctx.token_window().ok_or_else(|| {
+                        inference_tensor::Error::msg("PLE needs the batch's token window")
+                    })?;
+                    // the one PLE state follows the layers' caches
+                    let state = self.layer_types.len();
+                    let indices =
+                        hybrid_cache
+                            .state_indices_for_layer(state)?
+                            .ok_or_else(|| {
+                                inference_tensor::Error::msg("PLE state has no recurrent slots")
+                            })?;
+                    let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(state)
+                    else {
+                        inference_tensor::bail!("PLE state is missing from the hybrid cache");
+                    };
+                    xs = (&xs + ple.forward(&xs, window, pool, &indices)?)?;
+                    normalized_x = None;
+                }
 
                 let layer_output = match &self.layer_types[i] {
                     LayerType::FullAttention => {
@@ -2474,6 +2783,19 @@ impl Qwen3_5TextModel {
                                 "Hybrid cache layer {i} is not attention for a full-attention layer."
                             );
                         };
+                        let qsa_cache = match (&qsa_step, &layer.layer_impl) {
+                            (Some(_), LayerImpl::FullAttention(attn)) => attn
+                                .indexer
+                                .as_ref()
+                                .and_then(|indexer| ctx.paged_layer(indexer.cache_layer())),
+                            _ => None,
+                        };
+                        let qsa = qsa_step.as_ref().zip(qsa_cache.as_ref()).map(
+                            |(step, ((k_cache, v_cache), _))| QsaLayerInput {
+                                step,
+                                cache: (k_cache, v_cache),
+                            },
+                        );
                         layer.forward_attention_output(
                             &xs,
                             normalized_x.as_ref(),
@@ -2482,6 +2804,7 @@ impl Qwen3_5TextModel {
                             Some(kv_cache),
                             ctx.paged_layer(i),
                             ctx.flash_params(),
+                            qsa,
                         )?
                     }
                     LayerType::LinearAttention => {
@@ -2585,14 +2908,15 @@ impl Qwen3_5TextModel {
                     normalized_x = None;
                 } else {
                     let next_layer = self.layers.get(i + 1);
-                    let next_norm = next_layer
-                        .map(|next| &next.input_layernorm)
-                        .unwrap_or(&self.norm);
-                    if next_norm
-                        .weight()
-                        .device()
-                        .same_device(layer_output.residual.device())
-                    {
+                    let next_norm = match next_layer {
+                        Some(next) => next.norms.input_norm(),
+                        None => self.norm.rms(),
+                    };
+                    if let Some(next_norm) = next_norm.filter(|norm| {
+                        norm.weight()
+                            .device()
+                            .same_device(layer_output.residual.device())
+                    }) {
                         let plan = next_layer
                             .filter(|_| packed_layout.is_none())
                             .and_then(|next| next.input_quantization_plan(&layer_output.residual));
@@ -2616,7 +2940,7 @@ impl Qwen3_5TextModel {
                     .dense()
                     .expect("final normalized model input must remain dense")
                     .clone(),
-                _ => xs.to_device(&self.device)?.apply(&self.norm)?,
+                _ => self.norm.forward(&xs.to_device(&self.device)?)?,
             };
             let store_spec = self.store_spec_hidden.load(Ordering::Relaxed);
             if store_spec {
@@ -2680,19 +3004,36 @@ impl IsqModel for Qwen3_5TextModel {
             TextWeightPrefix::Model => uvb.pp("model"),
         };
         uvb_lm.pp("embed_tokens").add(&self.embed_tokens);
-        uvb_lm.pp("norm").add(&self.norm);
+        match &self.norm {
+            OutputNorm::Rms(norm) => uvb_lm.pp("norm").add(norm),
+            OutputNorm::Mixer(mixer) => {
+                mixer.residual_tensors(&uvb_lm.pp("hyper_connection_mixer"))
+            }
+        }
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let uvb_l = uvb_lm.pp("layers").pp(layer_idx);
-            uvb_l.pp("input_layernorm").add(&layer.input_layernorm);
-            uvb_l
-                .pp("post_attention_layernorm")
-                .add(&layer.post_attention_layernorm);
+            match &layer.norms {
+                LayerNorms::Rms {
+                    input,
+                    post_attention,
+                } => {
+                    uvb_l.pp("input_layernorm").add(input);
+                    uvb_l.pp("post_attention_layernorm").add(post_attention);
+                }
+                LayerNorms::Hyper { attention, mlp } => {
+                    attention.residual_tensors(&uvb_l.pp("attn_hyper_connection"));
+                    mlp.residual_tensors(&uvb_l.pp("mlp_hyper_connection"));
+                }
+            }
 
             match &layer.layer_impl {
                 LayerImpl::FullAttention(attn) => {
                     uvb_l.pp("self_attn").pp("q_norm").add(&attn.q_norm);
                     uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
+                    if let Some(indexer) = &attn.indexer {
+                        indexer.residual_tensors(&uvb_l.pp("self_attn").pp("indexer"));
+                    }
                 }
                 LayerImpl::LinearAttention(gdn) => {
                     uvb_l
@@ -2711,6 +3052,9 @@ impl IsqModel for Qwen3_5TextModel {
                 }
             }
             layer.mlp.residual_tensors(&uvb_l.pp("mlp"));
+            if let Some(ple) = &layer.ple {
+                ple.residual_tensors(&uvb_l.pp("ple"));
+            }
         }
         if let Some(mtp) = &self.mtp {
             mtp.residual_tensors(&uvb);
@@ -2785,12 +3129,21 @@ impl NormalModel for Qwen3_5TextModel {
     }
 
     fn supports_packed_prefill(&self) -> bool {
-        true
+        // PLE pairs each batch row with its own token history
+        !self.has_ple()
     }
 
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        SUPPORTS_CUDA_DECODE_GRAPHS
+        // PLE reads each step's token history on the host
+        SUPPORTS_CUDA_DECODE_GRAPHS && !self.has_ple()
+    }
+
+    fn token_window(&self) -> usize {
+        self.layers
+            .iter()
+            .find_map(|layer| layer.ple.as_ref())
+            .map_or(0, PleLayer::preceding_tokens)
     }
 }
 

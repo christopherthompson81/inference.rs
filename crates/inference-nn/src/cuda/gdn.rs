@@ -5452,7 +5452,13 @@ fn normalize_gdn_rmsnorm_layout(
 
 /// CUDA RMSNorm with a SiLU gate; packed final dimensions are split by the norm weight width.
 #[cfg(feature = "cuda")]
-pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
+pub fn rmsnorm_gated_cuda(
+    x: &Tensor,
+    gate: &Tensor,
+    weight: &Tensor,
+    eps: f64,
+    output_gate: crate::gdn::GdnOutputGate,
+) -> Result<Tensor> {
     use core::ffi::c_void;
     use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
 
@@ -5465,6 +5471,7 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
         weight: &Tensor,
         eps: f64,
         dtype_code: i32,
+        sigmoid_gate: i32,
     ) -> Result<Tensor> {
         let weight = weight.contiguous()?;
         let hidden_dim = weight.dims1()?;
@@ -5524,6 +5531,7 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
                 gate_stride[3] as i64,
                 eps as f32,
                 dtype_code,
+                sigmoid_gate,
                 stream,
             );
         }
@@ -5536,9 +5544,10 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
         )))
     }
 
+    let sigmoid_gate = i32::from(output_gate == crate::gdn::GdnOutputGate::Sigmoid);
     match x.dtype() {
-        DType::F16 => cuda_fwd::<half::f16>(x, gate, weight, eps, 0),
-        DType::BF16 => cuda_fwd::<half::bf16>(x, gate, weight, eps, 1),
+        DType::F16 => cuda_fwd::<half::f16>(x, gate, weight, eps, 0, sigmoid_gate),
+        DType::BF16 => cuda_fwd::<half::bf16>(x, gate, weight, eps, 1, sigmoid_gate),
         other => {
             inference_tensor::bail!("rmsnorm_gated_cuda only supports f16/bf16, got {:?}", other)
         }
@@ -5549,12 +5558,12 @@ pub fn rmsnorm_gated_cuda(x: &Tensor, gate: &Tensor, weight: &Tensor, eps: f64) 
 pub fn rmsnorm_gated_quantized_cuda(
     x: &Tensor,
     gate: &Tensor,
-    weight: &Tensor,
-    eps: f64,
+    norm: &crate::gdn::norm::RmsNormGated,
     spec: &GdnFp8OutputSpec,
     num_v_heads: usize,
     head_v_dim: usize,
 ) -> Result<QuantizedActivation> {
+    let (weight, eps, output_gate) = (&norm.weight, norm.eps(), norm.gate());
     use core::ffi::c_void;
     use float8::F8E4M3;
     use inference_tensor::cuda_backend::cudarc::driver::DevicePtr;
@@ -5649,6 +5658,7 @@ pub fn rmsnorm_gated_quantized_cuda(
             gate_stride[2] as i64,
             gate_stride[3] as i64,
             eps as f32,
+            i32::from(output_gate == crate::gdn::GdnOutputGate::Sigmoid),
             stream,
         );
     }
@@ -5682,6 +5692,7 @@ pub fn rmsnorm_gated_cuda(
     _gate: &Tensor,
     _weight: &Tensor,
     _eps: f64,
+    _output_gate: crate::gdn::GdnOutputGate,
 ) -> Result<Tensor> {
     inference_tensor::bail!("rmsnorm_gated_cuda requires the cuda feature")
 }

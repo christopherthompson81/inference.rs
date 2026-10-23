@@ -2034,8 +2034,13 @@ fn speculative_checkpoint_kernels_match_serial_cuda() -> Result<()> {
                     .reshape((batch_size, num_v_heads, seq_len, head_v_dim))?
                     .transpose(1, 2)?
                     .to_dtype(DType::BF16)?;
-                let expected_normalized =
-                    rmsnorm_gated_cuda(&expected_normalized, &gate, &norm_weight, norm_eps)?;
+                let expected_normalized = rmsnorm_gated_cuda(
+                    &expected_normalized,
+                    &gate,
+                    &norm_weight,
+                    norm_eps,
+                    crate::gdn::GdnOutputGate::Silu,
+                )?;
                 let actual_normalized =
                     speculative_recurrence_checkpoints_cuda(GdnSpeculativeRecurrenceCheckpoints {
                         mixed_qkv: &mixed_qkv,
@@ -3517,7 +3522,7 @@ fn rmsnorm_gated_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
         }
     }
 
-    let actual = rmsnorm_gated_cuda(&x, &gate, &weight, eps)?;
+    let actual = rmsnorm_gated_cuda(&x, &gate, &weight, eps, crate::gdn::GdnOutputGate::Silu)?;
     assert_eq!(actual.shape(), x.shape());
     assert!(actual.is_contiguous());
     assert_close(
@@ -3553,29 +3558,38 @@ fn rmsnorm_gated_hidden128_matches_reference_cuda() -> Result<()> {
         let gate_host = flat(&gate.to_dtype(DType::F32)?)?;
         let weight_host = flat(&weight.to_dtype(DType::F32)?)?;
         let eps = 1.0e-6;
-        let mut expected = vec![0.0f32; rows * hidden_dim];
-        for row in 0..rows {
-            let base = row * hidden_dim;
-            let mean_square = x_host[base..base + hidden_dim]
-                .iter()
-                .map(|value| value * value)
-                .sum::<f32>()
-                / hidden_dim as f32;
-            let inv_rms = (mean_square + eps as f32).sqrt().recip();
-            for col in 0..hidden_dim {
-                let gate_value = gate_host[base + col];
-                let silu_gate = gate_value / (1.0 + (-gate_value).exp());
-                expected[base + col] = x_host[base + col] * inv_rms * weight_host[col] * silu_gate;
+        for output_gate in [
+            crate::gdn::GdnOutputGate::Silu,
+            crate::gdn::GdnOutputGate::Sigmoid,
+        ] {
+            let mut expected = vec![0.0f32; rows * hidden_dim];
+            for row in 0..rows {
+                let base = row * hidden_dim;
+                let mean_square = x_host[base..base + hidden_dim]
+                    .iter()
+                    .map(|value| value * value)
+                    .sum::<f32>()
+                    / hidden_dim as f32;
+                let inv_rms = (mean_square + eps as f32).sqrt().recip();
+                for col in 0..hidden_dim {
+                    let gate_value = gate_host[base + col];
+                    let sigmoid = 1.0 / (1.0 + (-gate_value).exp());
+                    let gated = match output_gate {
+                        crate::gdn::GdnOutputGate::Silu => gate_value * sigmoid,
+                        crate::gdn::GdnOutputGate::Sigmoid => sigmoid,
+                    };
+                    expected[base + col] = x_host[base + col] * inv_rms * weight_host[col] * gated;
+                }
             }
-        }
 
-        let actual = rmsnorm_gated_cuda(&x, &gate, &weight, eps)?;
-        assert_close(
-            &format!("hidden-128 gated RMSNorm {dtype:?}"),
-            &flat(&actual.to_dtype(DType::F32)?)?,
-            &expected,
-            2.0e-3,
-        );
+            let actual = rmsnorm_gated_cuda(&x, &gate, &weight, eps, output_gate)?;
+            assert_close(
+                &format!("hidden-128 gated RMSNorm {dtype:?} {output_gate:?}"),
+                &flat(&actual.to_dtype(DType::F32)?)?,
+                &expected,
+                2.0e-3,
+            );
+        }
     }
     Ok(())
 }
@@ -3699,7 +3713,8 @@ fn rmsnorm_gated_quantized_matches_bf16_rounding_cuda() -> Result<()> {
         let weight =
             Tensor::from_vec(patterned(HEAD_DIM, seq_len + 403, 0.1, 1.0), HEAD_DIM, &dev)?
                 .to_dtype(DType::BF16)?;
-        let expected = rmsnorm_gated_cuda(&x, &gate, &weight, EPS)?;
+        let expected =
+            rmsnorm_gated_cuda(&x, &gate, &weight, EPS, crate::gdn::GdnOutputGate::Silu)?;
         for scale_layout in [
             ActivationScaleLayout::RowMajor,
             ActivationScaleLayout::GroupMajor {
@@ -3721,8 +3736,7 @@ fn rmsnorm_gated_quantized_matches_bf16_rounding_cuda() -> Result<()> {
             let actual = rmsnorm_gated_quantized_cuda(
                 &x,
                 &gate,
-                &weight,
-                EPS,
+                &crate::gdn::norm::RmsNormGated::from_parts(weight.clone(), EPS),
                 &spec,
                 NUM_V_HEADS,
                 HEAD_DIM,
@@ -4428,7 +4442,13 @@ fn deferred_decode_matches_eager_across_wrap_and_flush_cuda() -> Result<()> {
             slots: GdnStateSlots::Pooled(&active_slots),
         })?
         .reshape((BATCH_SIZE, 1, NUM_V_HEADS, HEAD_DIM))?;
-        let eager_output = rmsnorm_gated_cuda(&eager_raw, &gate_step, &norm_weight, NORM_EPS)?;
+        let eager_output = rmsnorm_gated_cuda(
+            &eager_raw,
+            &gate_step,
+            &norm_weight,
+            NORM_EPS,
+            crate::gdn::GdnOutputGate::Silu,
+        )?;
         let deferred_output = deferred_recurrence_rmsnorm_gate_cuda(GdnDeferredRecurrence {
             mixed_qkv: &mixed_step,
             b: &b_step,

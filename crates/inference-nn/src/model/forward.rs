@@ -163,6 +163,26 @@ impl PastKvLenCache for ForwardMaskCache<'_> {
     }
 }
 
+/// Each batch row's tokens, led by up to `preceding` tokens from before the chunk, for a model that hashes recent
+/// token history (Qwen3.8-Flash-Next's n-gram embedding).
+#[derive(Clone, Debug, Default)]
+pub struct TokenWindow {
+    pub rows: Vec<TokenWindowRow>,
+}
+
+#[derive(Clone, Debug)]
+pub struct TokenWindowRow {
+    pub tokens: Vec<u32>,
+    // how many of `tokens` precede the chunk; fewer than requested at the sequence's start
+    pub preceding: usize,
+}
+
+/// What a model asks the text inputs processor for: this many tokens before every chunk.
+#[derive(Clone, Copy, Debug)]
+pub struct TokenWindowRequest {
+    pub preceding: usize,
+}
+
 pub struct ModelForwardContext<'a> {
     cache: ForwardCache<'a>,
     positions: ForwardPositions<'a>,
@@ -174,6 +194,7 @@ pub struct ModelForwardContext<'a> {
     recurrent_metadata: Option<RecurrentMetadata>,
     recurrent_batch_kind: Option<RecurrentBatchKind>,
     requires_full_prefill_queries: bool,
+    token_window: Option<&'a TokenWindow>,
 }
 
 impl<'a> ModelForwardContext<'a> {
@@ -195,6 +216,7 @@ impl<'a> ModelForwardContext<'a> {
             recurrent_metadata: None,
             recurrent_batch_kind: None,
             requires_full_prefill_queries: false,
+            token_window: None,
         }
     }
 
@@ -216,6 +238,7 @@ impl<'a> ModelForwardContext<'a> {
             recurrent_metadata: None,
             recurrent_batch_kind: None,
             requires_full_prefill_queries: false,
+            token_window: None,
         }
     }
 
@@ -312,6 +335,15 @@ impl<'a> ModelForwardContext<'a> {
 
     pub fn recurrent_batch_kind(&self) -> Option<RecurrentBatchKind> {
         self.recurrent_batch_kind
+    }
+
+    pub fn with_token_window(mut self, token_window: Option<&'a TokenWindow>) -> Self {
+        self.token_window = token_window;
+        self
+    }
+
+    pub fn token_window(&self) -> Option<&TokenWindow> {
+        self.token_window
     }
 
     pub fn prompt_chunk_attention_policy(&self) -> MultimodalAttentionPolicy {

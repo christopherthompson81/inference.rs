@@ -43,7 +43,7 @@ pub struct NormalConfigBuilder {
     build: BuilderFn,
 }
 
-pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 27] = &[
+pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 28] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::Mistral,
         build: build_mistral,
@@ -143,6 +143,10 @@ pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 27] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::Qwen3_5Moe,
         build: build_qwen35_moe,
+    },
+    NormalConfigBuilder {
+        loader: NormalLoaderType::Qwen4Exp,
+        build: build_qwen4exp,
     },
     NormalConfigBuilder {
         loader: NormalLoaderType::Lfm2,
@@ -570,6 +574,13 @@ impl<'a> MetadataView<'a> {
             )));
         }
         uniform_value(self, suffix, &nonzero)
+    }
+
+    fn optional_usize_values(&self, suffix: &str) -> SynthesisResult<Option<Vec<usize>>> {
+        if self.value(suffix).is_none() {
+            return Ok(None);
+        }
+        self.required_usize_values(suffix).map(Some)
     }
 
     fn required_usize_values(&self, suffix: &str) -> SynthesisResult<Vec<usize>> {
@@ -1925,6 +1936,97 @@ fn qwen35_text_config(
     Ok(config)
 }
 
+// Qwen3.8-Flash-Next: the Qwen3.5 MoE fields, plus hyper-connections, PLE with its hash constants, the QSA indexer and
+// a sigmoid GDN output gate (which llama.cpp implies by the architecture)
+fn build_qwen4exp(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
+    let JsonValue::Object(mut config) = build_qwen35_moe(metadata)? else {
+        unreachable!("the Qwen3.5 MoE builder returns an object");
+    };
+    config.insert(
+        "hc_count".into(),
+        json!(metadata.required_usize("hyper_connection.count")?),
+    );
+    config.insert(
+        "hc_lowrank".into(),
+        json!(metadata.required_usize("hyper_connection.low_rank")?),
+    );
+    config.insert("output_gate_type".into(), json!("sigmoid"));
+    if let Some(layers) = metadata.optional_usize_values("ple.layers")? {
+        let ngram_size = metadata.required_usize("ple.ngram_size")?;
+        let heads_per_ngram = metadata.required_usize("ple.heads_per_ngram")?;
+        let head_dim = metadata.required_usize("embedding_length_per_layer_input")?;
+        config.insert(
+            "ple_layer_ids".into(),
+            json!(layers.iter().map(|layer| layer + 1).collect::<Vec<_>>()),
+        );
+        config.insert(
+            "ple_embed_dim".into(),
+            json!((ngram_size - 1) * heads_per_ngram * head_dim),
+        );
+        config.insert("ngram_size".into(), json!(ngram_size));
+        config.insert("heads_per_ngram".into(), json!(heads_per_ngram));
+        config.insert(
+            "ple_conv_kernel_size".into(),
+            json!(metadata.required_usize("ple.conv_kernel")?),
+        );
+        config.insert(
+            "eos_token_id".into(),
+            json!(metadata.required_usize("ple.eos_token_id")?),
+        );
+        config.insert(
+            "_inference_ple_hash".into(),
+            json!({
+                "layer_multipliers": metadata.required_usize_values("ple.layer_multipliers")?,
+                "head_offsets": metadata.required_usize_values("ple.head_offsets")?,
+                "head_vocab_sizes": metadata.required_usize_values("ple.head_vocab_sizes")?,
+            }),
+        );
+    }
+    if let Some(heads) = metadata.optional_usize("attention.indexer.head_count")? {
+        let ratios = metadata.required_usize_values("attention.compress_ratios")?;
+        let ratio = ratios
+            .iter()
+            .copied()
+            .find(|ratio| *ratio > 0)
+            .ok_or_else(|| {
+                NormalConfigSynthesisError::new(
+                    "Qwen3.8-Flash-Next names no compressed attention layer",
+                )
+            })?;
+        if ratios.iter().any(|r| *r != 0 && *r != ratio) {
+            return Err(NormalConfigSynthesisError::new(
+                "Qwen3.8-Flash-Next's QSA layers must share one compress ratio",
+            ));
+        }
+        // the QSA layers are the full-attention ones, whatever the interval says
+        config.insert(
+            "layer_types".into(),
+            json!(
+                ratios
+                    .iter()
+                    .map(|r| if *r > 0 {
+                        "full_attention"
+                    } else {
+                        "linear_attention"
+                    })
+                    .collect::<Vec<_>>()
+            ),
+        );
+        config.insert("indexer_n_heads".into(), json!(heads));
+        config.insert("indexer_kv_heads".into(), json!(1));
+        config.insert(
+            "indexer_head_dim".into(),
+            json!(metadata.required_usize("attention.indexer.key_length")?),
+        );
+        config.insert(
+            "indexer_budget".into(),
+            json!(metadata.required_usize("attention.indexer.top_k")?),
+        );
+        config.insert("indexer_compress_ratio".into(), json!(ratio));
+    }
+    Ok(JsonValue::Object(config))
+}
+
 fn build_lfm2(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     build_lfm(metadata, false)
 }
@@ -2632,6 +2734,7 @@ mod tests {
                 | NormalLoaderType::HunYuanMoEV1
                 | NormalLoaderType::Qwen3Next
                 | NormalLoaderType::Qwen3_5Moe
+                | NormalLoaderType::Qwen4Exp
                 | NormalLoaderType::Lfm2Moe
         )
     }
@@ -2745,6 +2848,7 @@ mod tests {
             NormalLoaderType::Qwen3Next
                 | NormalLoaderType::Qwen3_5
                 | NormalLoaderType::Qwen3_5Moe
+                | NormalLoaderType::Qwen4Exp
                 | NormalLoaderType::GraniteMoeHybrid
         ) {
             insert_u32(&mut metadata, architecture, "ssm.conv_kernel", 4);
@@ -2756,7 +2860,10 @@ mod tests {
 
         if matches!(
             loader,
-            NormalLoaderType::Qwen3Next | NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe
+            NormalLoaderType::Qwen3Next
+                | NormalLoaderType::Qwen3_5
+                | NormalLoaderType::Qwen3_5Moe
+                | NormalLoaderType::Qwen4Exp
         ) {
             insert_u32(&mut metadata, architecture, "full_attention_interval", 4);
             tensors.extend(
@@ -2764,7 +2871,14 @@ mod tests {
                     .into_iter()
                     .map(str::to_string),
             );
-            if architecture == CanonicalGgufArchitecture::Qwen35Moe {
+            if architecture == CanonicalGgufArchitecture::Qwen4Exp {
+                insert_u32(&mut metadata, architecture, "hyper_connection.count", 4);
+                insert_u32(&mut metadata, architecture, "hyper_connection.low_rank", 32);
+            }
+            if matches!(
+                architecture,
+                CanonicalGgufArchitecture::Qwen35Moe | CanonicalGgufArchitecture::Qwen4Exp
+            ) {
                 tensors.extend(
                     ["blk.1.ssm_alpha.weight", "blk.1.ssm_beta.weight"]
                         .into_iter()
@@ -2773,7 +2887,9 @@ mod tests {
             }
             if matches!(
                 architecture,
-                CanonicalGgufArchitecture::Qwen35 | CanonicalGgufArchitecture::Qwen35Moe
+                CanonicalGgufArchitecture::Qwen35
+                    | CanonicalGgufArchitecture::Qwen35Moe
+                    | CanonicalGgufArchitecture::Qwen4Exp
             ) {
                 insert_u32_array(
                     &mut metadata,
@@ -2923,7 +3039,9 @@ mod tests {
             NormalLoaderType::Qwen3Next => {
                 assert_deserializes(loader, config, models::qwen3_next::Config::from_json)
             }
-            NormalLoaderType::Qwen3_5 | NormalLoaderType::Qwen3_5Moe => assert_deserializes(
+            NormalLoaderType::Qwen3_5
+            | NormalLoaderType::Qwen3_5Moe
+            | NormalLoaderType::Qwen4Exp => assert_deserializes(
                 loader,
                 config,
                 inference_models_qwen::qwen3_5::TextConfig::from_json,
