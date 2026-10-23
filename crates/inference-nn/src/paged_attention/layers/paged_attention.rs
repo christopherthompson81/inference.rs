@@ -1,3 +1,4 @@
+use super::SelectedAttention;
 use crate::attention::FlashKMeta;
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
@@ -96,6 +97,18 @@ struct FattnPrefillCall<'call, 'ctx> {
     query_lens: &'call [usize],
     cu_kv: &'call Tensor,
     causal: bool,
+}
+
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+fn selected_block_table(
+    input_metadata: &PagedAttentionInputMetadata,
+    device: &Device,
+) -> Result<Tensor> {
+    let tables = input_metadata
+        .block_tables
+        .as_ref()
+        .ok_or_else(|| inference_tensor::Error::msg("selected attention needs block tables"))?;
+    resolve_tensor_for_device(tables, device, "block_tables")
 }
 
 #[derive(Clone, Copy)]
@@ -2407,6 +2420,105 @@ impl PagedAttention {
             flash_params,
             true,
         )
+    }
+
+    /// Writes `(b, heads, s, head_dim)` K/V rows into a paged cache at `slot_mapping`, as `forward` does.
+    pub fn write_rows(
+        &self,
+        key: &Tensor,
+        value: &Tensor,
+        key_cache: &Tensor,
+        value_cache: &Tensor,
+        slot_mapping: &Tensor,
+    ) -> Result<()> {
+        let (mut key_cache, mut value_cache) = (key_cache.clone(), value_cache.clone());
+        write_kv_cache(
+            &key.transpose(1, 2)?,
+            &value.transpose(1, 2)?,
+            self.cache_scales(&key_cache),
+            &mut key_cache,
+            &mut value_cache,
+            &slot_mapping.flatten_all()?,
+        )
+    }
+
+    /// Attends over the cached cells `call.mask` keeps, through fattn's paged kernels; the step's K/V are already
+    /// written ([`Self::write_rows`]).
+    pub fn attend_selected(&self, call: SelectedAttention<'_>) -> Result<Tensor> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        {
+            let SelectedAttention {
+                query,
+                mask,
+                key_cache,
+                value_cache,
+                input_metadata,
+                seq_lens,
+                sdpa_params,
+            } = call;
+            let block_table = selected_block_table(input_metadata, query.device())?;
+            let kv = PagedKv {
+                k_cache: key_cache,
+                v_cache: value_cache,
+                block_table: &block_table,
+                seq_lens,
+                full_lens: None,
+            };
+            let (b, _, s, d) = query.dims4()?;
+            let opts = FattnOptions {
+                scale: sdpa_params.softmax_scale,
+                softcap: sdpa_params.softcap.unwrap_or(0.),
+                kv_scales: (key_cache.dtype() == DType::F8E4M3).then(|| {
+                    let scales = self.cache_scales(key_cache).flashinfer(key_cache);
+                    FattnKvScales {
+                        k: scales.k,
+                        v: scales.v,
+                    }
+                }),
+                mask: Some(mask.reshape((b, s, ()))?),
+                sinks: fattn_sinks(sdpa_params.sinks.as_ref())?,
+                ..Default::default()
+            };
+            let opts = with_quant_bits(opts, key_cache, value_cache, d).ok_or_else(|| {
+                inference_tensor::Error::msg("selected attention cannot read this quantized cache")
+            })?;
+            let q = rotate_for_quant(&query.transpose(1, 2)?, &opts, kv_quant::k_rotation)?;
+            if !inference_fattn::supported_paged(&q, &kv, &opts)? {
+                inference_tensor::bail!("fattn's paged kernels do not run this selected attention");
+            }
+            rotate_for_quant(
+                &inference_fattn::flash_attn_paged(&q, &kv, &opts)?,
+                &opts,
+                kv_quant::v_rotation,
+            )?
+            .transpose(1, 2)
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        {
+            let _ = call;
+            inference_tensor::bail!("selected attention runs on CUDA only")
+        }
+    }
+
+    /// The cells a [`Self::attend_selected`] mask spans: the block tables' width, padded as fattn reads it.
+    pub fn selected_kv_len(
+        input_metadata: &PagedAttentionInputMetadata,
+        device: &Device,
+    ) -> Result<usize> {
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        {
+            let block_size = input_metadata
+                .block_size
+                .ok_or_else(|| inference_tensor::Error::msg("paged metadata has no block size"))?;
+            Ok(inference_fattn::varlen_kv_len(
+                selected_block_table(input_metadata, device)?.dim(1)? * block_size,
+            ))
+        }
+        #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+        {
+            let _ = (input_metadata, device);
+            inference_tensor::bail!("selected attention runs on CUDA only")
+        }
     }
 
     /// Read-only paged attention against a donor layer's cache. Identical to

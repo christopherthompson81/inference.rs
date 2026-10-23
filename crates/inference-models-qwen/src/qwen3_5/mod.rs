@@ -29,9 +29,12 @@ use crate::{
 
 pub mod config;
 mod feed_forward;
+mod hyper;
 pub mod mtp;
 pub mod packed_gdn;
 pub mod packed_visual;
+mod ple;
+mod qsa;
 pub mod speculative;
 pub mod text;
 

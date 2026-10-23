@@ -42,6 +42,15 @@ impl GdnVHeadLayout {
     }
 }
 
+/// The activation on the gate of the GDN output's gated RMSNorm.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GdnOutputGate {
+    #[default]
+    Silu,
+    Sigmoid,
+}
+
 pub trait GdnConfig {
     fn hidden_size(&self) -> usize;
     fn rms_norm_eps(&self) -> f64;
@@ -53,6 +62,9 @@ pub trait GdnConfig {
     fn quantization_config(&self) -> &Option<QuantizedConfig>;
     fn v_head_layout(&self) -> GdnVHeadLayout {
         GdnVHeadLayout::Grouped
+    }
+    fn output_gate(&self) -> GdnOutputGate {
+        GdnOutputGate::Silu
     }
 
     fn linear_key_dim(&self) -> usize {

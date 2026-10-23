@@ -6,13 +6,15 @@ mod backend;
 mod cache;
 mod config;
 mod layer;
-mod norm;
+pub(crate) mod norm;
 mod packed;
 mod projection;
 mod weights;
 
 pub use cache::GdnLayerCache;
-pub use config::{GDN_V_HEAD_LAYOUT_CONFIG_KEY, GdnConfig, GdnStateDType, GdnVHeadLayout};
+pub use config::{
+    GDN_V_HEAD_LAYOUT_CONFIG_KEY, GdnConfig, GdnOutputGate, GdnStateDType, GdnVHeadLayout,
+};
 pub use layer::GdnForwardContext;
 pub use layer::{
     GatedDeltaNet, GdnForwardStash, GdnSpeculativeStash, GdnTransitionCommitConfig,

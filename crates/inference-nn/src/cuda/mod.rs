@@ -7,6 +7,7 @@ pub mod dynamic_conv;
 pub mod ffi;
 #[cfg(feature = "cuda")]
 pub mod lstm;
+pub mod qsa;
 
 /// Opens every CUDA kernel library a model can launch, so a missing one fails at model load rather than mid-run.
 #[cfg(feature = "cuda")]

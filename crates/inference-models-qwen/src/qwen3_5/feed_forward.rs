@@ -69,6 +69,14 @@ impl FeedForward {
         }
     }
 
+    /// The feed-forward over an already normalized input.
+    pub(super) fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Dense(mlp) => mlp.forward(x),
+            Self::Sparse(moe) => moe.forward(x),
+        }
+    }
+
     pub(super) fn residual_tensors(&self, uvb_mlp: &UnVarBuilder) {
         if let Self::Sparse(moe) = self {
             uvb_mlp

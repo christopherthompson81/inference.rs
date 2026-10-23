@@ -1,3 +1,15 @@
+/// One `PagedAttention::attend_selected` call: `(b, heads, s, head_dim)` queries, the `(b * s, n_kv)` additive f16
+/// mask (causality included), and each sequence's cached rows, `(b,)` u32.
+pub struct SelectedAttention<'a> {
+    pub query: &'a inference_tensor::Tensor,
+    pub mask: &'a inference_tensor::Tensor,
+    pub key_cache: &'a inference_tensor::Tensor,
+    pub value_cache: &'a inference_tensor::Tensor,
+    pub input_metadata: &'a crate::paged_attention::PagedAttentionInputMetadata,
+    pub seq_lens: &'a inference_tensor::Tensor,
+    pub sdpa_params: &'a crate::attention::SdpaParams,
+}
+
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
 pub mod paged_attention;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
@@ -69,6 +81,28 @@ pub mod paged_attention {
             _head_dim: usize,
             _dtype: inference_tensor::DType,
         ) -> Result<(Tensor, Tensor)> {
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
+        }
+
+        pub fn write_rows(
+            &self,
+            _key: &Tensor,
+            _value: &Tensor,
+            _key_cache: &Tensor,
+            _value_cache: &Tensor,
+            _slot_mapping: &Tensor,
+        ) -> Result<()> {
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
+        }
+
+        pub fn attend_selected(&self, _call: super::SelectedAttention<'_>) -> Result<Tensor> {
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
+        }
+
+        pub fn selected_kv_len(
+            _input_metadata: &PagedAttentionInputMetadata,
+            _device: &Device,
+        ) -> Result<usize> {
             inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 

@@ -1072,12 +1072,22 @@ pub struct RecurrentLayerConfig {
     pub recurrent_dtype: Option<DType>,
 }
 
+/// A recurrent state of its own size kept after the layers' caches (Qwen3.8-Flash-Next's PLE conv), on the device of
+/// the model layer that reads it.
+#[derive(Clone, Debug)]
+pub struct AuxiliaryRecurrent {
+    pub layer: usize,
+    pub config: RecurrentLayerConfig,
+}
+
 /// Configuration for creating a hybrid cache
 #[derive(Clone, Debug)]
 pub struct HybridCacheConfig {
     pub layer_types: Vec<HybridLayerType>,
     pub max_seq_len: usize,
     pub recurrent: RecurrentLayerConfig,
+    /// Cached at `layer_types.len()` on, in order.
+    pub auxiliary: Vec<AuxiliaryRecurrent>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1138,6 +1148,20 @@ impl HybridCache {
         }
         let mut caches = Vec::with_capacity(config.layer_types.len());
 
+        let recurrent_pool = |recurrent: &RecurrentLayerConfig, device: &Device| -> Result<_> {
+            let (state_dims, state_layout) = recurrent.state.physical_layout(dtype, device)?;
+            Ok(HybridLayerCache::Recurrent(RecurrentStatePool::new(
+                RecurrentStatePoolConfig {
+                    conv_dim: recurrent.conv_dim,
+                    conv_width: recurrent.conv_width,
+                    state_dims,
+                    state_layout,
+                    conv_dtype: dtype,
+                    recurrent_dtype: recurrent.recurrent_dtype.unwrap_or(dtype),
+                    device,
+                },
+            )?))
+        };
         for (layer_type, device) in config.layer_types.iter().zip(layer_devices) {
             let cache = match layer_type {
                 HybridLayerType::Attention => HybridLayerCache::Attention(KvCache::new_normal(
@@ -1145,23 +1169,19 @@ impl HybridCache {
                     config.max_seq_len,
                     Self::CACHE_GROW_SIZE,
                 )),
-                HybridLayerType::Recurrent => {
-                    let (state_dims, state_layout) =
-                        config.recurrent.state.physical_layout(dtype, device)?;
-                    HybridLayerCache::Recurrent(RecurrentStatePool::new(
-                        RecurrentStatePoolConfig {
-                            conv_dim: config.recurrent.conv_dim,
-                            conv_width: config.recurrent.conv_width,
-                            state_dims,
-                            state_layout,
-                            conv_dtype: dtype,
-                            recurrent_dtype: config.recurrent.recurrent_dtype.unwrap_or(dtype),
-                            device,
-                        },
-                    )?)
-                }
+                HybridLayerType::Recurrent => recurrent_pool(&config.recurrent, device)?,
             };
             caches.push(cache);
+        }
+        for auxiliary in &config.auxiliary {
+            let device = layer_devices.get(auxiliary.layer).ok_or_else(|| {
+                inference_tensor::Error::msg(format!(
+                    "auxiliary recurrent state reads layer {} of {}",
+                    auxiliary.layer,
+                    layer_devices.len()
+                ))
+            })?;
+            caches.push(recurrent_pool(&auxiliary.config, device)?);
         }
 
         let cache = Self {
@@ -2758,6 +2778,7 @@ mod tests {
                 state: RecurrentStateSpec::Opaque { dims: vec![2, 2] },
                 recurrent_dtype: None,
             },
+            auxiliary: Vec::new(),
         }
     }
 
@@ -2775,6 +2796,7 @@ mod tests {
                 },
                 recurrent_dtype: Some(DType::F32),
             },
+            auxiliary: Vec::new(),
         }
     }
 

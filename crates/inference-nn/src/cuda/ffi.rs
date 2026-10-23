@@ -71,6 +71,17 @@ inference_tensor::kernel_library! {
             width: i32,
             stream: i64,
         ) -> i32;
+        pub fn qsa_select_mask(
+            scores: *const f32,
+            positions: *const u32,
+            mask: *mut c_void,
+            rows: i32,
+            n_pool: i32,
+            n_kv: i32,
+            k: i32,
+            ratio: i32,
+            stream: i64,
+        ) -> i32;
         pub fn adain_act_f32(
             xs: *const c_void,
             h: *const c_void,
@@ -1203,6 +1214,7 @@ inference_tensor::kernel_library! {
             gate_stride_3: i64,
             eps: f32,
             dtype: i32,
+            sigmoid_gate: i32,
             stream: i64,
         );
         pub fn gdn_rmsnorm_gated_quantized_bf16(
@@ -1226,6 +1238,7 @@ inference_tensor::kernel_library! {
             gate_stride_2: i64,
             gate_stride_3: i64,
             eps: f32,
+            sigmoid_gate: i32,
             stream: i64,
         );
         pub fn gdn_prepare_recurrence(

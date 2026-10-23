@@ -1,7 +1,8 @@
 use inference_quant::QuantizedConfig;
 
-use crate::gdn::{GdnStateDType, GdnVHeadLayout};
+use crate::gdn::{GdnOutputGate, GdnStateDType, GdnVHeadLayout};
 use crate::layers::{Activation, YarnRopeConfig};
+use crate::paged_attention::AuxiliaryPagedLayers;
 use crate::serde_default_fn;
 
 // Re-export vision config from qwen3_vl
@@ -14,6 +15,12 @@ serde_default_fn!(f64, default_rope_theta, 10_000_000.0);
 serde_default_fn!(f64, default_yarn_beta_fast, 32.0);
 serde_default_fn!(f64, default_yarn_beta_slow, 1.0);
 serde_default_fn!(bool, default_true, true);
+serde_default_fn!(usize, default_ple_conv_kernel, 4);
+serde_default_fn!(usize, default_ngram_size, 3);
+serde_default_fn!(usize, default_heads_per_ngram, 8);
+serde_default_fn!(u64, default_ngram_seed, 1234);
+serde_default_fn!(u64, default_ngram_vocab_base, 20_000_000);
+serde_default_fn!(usize, default_ngram_vocab_divisor, 128);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,8 +34,130 @@ pub enum RopeType {
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LayerType {
+    // Qwen3.8-Flash-Next names its QSA layers `indexed_attention` in transformers
+    #[serde(alias = "indexed_attention")]
     FullAttention,
     LinearAttention,
+}
+
+/// Qwen3.8-Flash-Next's additions to the Qwen3.5 MoE text model; all absent on Qwen3.5 and Qwen3.8 checkpoints.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct FlashNextConfig {
+    // hyper-connections: `hc_count` residual streams in place of every layer norm
+    #[serde(default)]
+    pub hc_count: Option<usize>,
+    #[serde(default)]
+    pub hc_lowrank: Option<usize>,
+    #[serde(default)]
+    pub output_gate_type: Option<GdnOutputGate>,
+    // PLE: hashed n-gram embeddings into the streams before these layers, 1-based as in the checkpoint
+    #[serde(default)]
+    pub ple_layer_ids: Vec<usize>,
+    #[serde(default)]
+    pub ple_embed_dim: Option<usize>,
+    #[serde(default = "default_ple_conv_kernel")]
+    pub ple_conv_kernel_size: usize,
+    #[serde(default = "default_ngram_size")]
+    pub ngram_size: usize,
+    #[serde(default = "default_heads_per_ngram")]
+    pub heads_per_ngram: usize,
+    #[serde(default)]
+    pub eos_token_id: Option<EosTokenId>,
+    #[serde(default = "default_ngram_seed")]
+    pub seed: u64,
+    #[serde(default = "default_ngram_vocab_base")]
+    pub ngram_vocab_size_base: u64,
+    #[serde(default = "default_ngram_vocab_divisor")]
+    pub make_ngram_vocab_size_divisible_by: usize,
+    // the hash constants a GGUF carries; absent, they are derived from the fields above as the reference does
+    #[serde(default, rename = "_inference_ple_hash")]
+    pub ple_hash: Option<PleHash>,
+    // QSA: a block indexer selecting attention keys on the full-attention layers
+    #[serde(default)]
+    pub indexer_n_heads: Option<usize>,
+    #[serde(default)]
+    pub indexer_kv_heads: Option<usize>,
+    #[serde(default)]
+    pub indexer_head_dim: Option<usize>,
+    #[serde(default)]
+    pub indexer_budget: Option<usize>,
+    #[serde(default)]
+    pub indexer_compress_ratio: Option<usize>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(untagged)]
+pub enum EosTokenId {
+    One(u32),
+    Many(Vec<u32>),
+}
+
+impl EosTokenId {
+    // the reference resets its n-grams on the first
+    fn primary(&self) -> Option<u32> {
+        match self {
+            Self::One(id) => Some(*id),
+            Self::Many(ids) => ids.first().copied(),
+        }
+    }
+}
+
+/// PLE's n-gram hash: one odd multiplier per n-gram position, and each hash head's table size (a prime) and offset.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct PleHash {
+    pub layer_multipliers: Vec<u64>,
+    pub head_offsets: Vec<u64>,
+    pub head_vocab_sizes: Vec<u64>,
+}
+
+/// The hyper-connection streams and their mixing rank.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HyperConnections {
+    pub streams: usize,
+    pub lowrank: usize,
+}
+
+/// PLE geometry: which layer reads it, the n-gram heads and their embedding width, the conv and the EOS it resets on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PleConfig {
+    pub layer: usize,
+    pub embed_dim: usize,
+    pub ngram_size: usize,
+    pub heads_per_ngram: usize,
+    pub conv_kernel: usize,
+    pub eos_token_id: u32,
+}
+
+impl PleConfig {
+    pub fn ngram_heads(&self) -> usize {
+        (self.ngram_size - 1) * self.heads_per_ngram
+    }
+
+    pub fn head_dim(&self) -> usize {
+        self.embed_dim / self.ngram_heads()
+    }
+
+    // the conv's dilation is the n-gram size, so it reaches back (kernel - 1) * ngram_size positions
+    pub fn conv_state_len(&self) -> usize {
+        (self.conv_kernel - 1) * self.ngram_size
+    }
+}
+
+/// The QSA indexer on the full-attention layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QsaConfig {
+    pub n_heads: usize,
+    pub kv_heads: usize,
+    pub head_dim: usize,
+    pub budget: usize,
+    pub compress_ratio: usize,
+}
+
+impl QsaConfig {
+    /// The longest context over which QSA keeps every key: all complete blocks fit the budget, plus a partial tail.
+    pub fn dense_context_len(&self) -> usize {
+        self.budget + self.compress_ratio - 1
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -269,6 +398,8 @@ pub struct TextConfig {
     pub mtp_num_hidden_layers: usize,
     #[serde(default)]
     pub mtp_use_dedicated_embeddings: bool,
+    #[serde(flatten)]
+    pub flash_next: FlashNextConfig,
 }
 
 impl TextConfig {
@@ -362,7 +493,114 @@ impl TextConfig {
         }
         self.validate_feed_forward()?;
         self.validate_rope_scaling()?;
+        self.validate_flash_next()?;
         Ok(())
+    }
+
+    fn validate_flash_next(&self) -> inference_tensor::Result<()> {
+        let fields = &self.flash_next;
+        if fields.hc_count.is_some() != fields.hc_lowrank.is_some()
+            || fields.hc_count == Some(0)
+            || fields.hc_lowrank == Some(0)
+        {
+            inference_tensor::bail!(
+                "Qwen3.8-Flash-Next needs a nonzero hc_count and hc_lowrank together"
+            );
+        }
+        let qsa = [
+            fields.indexer_n_heads,
+            fields.indexer_kv_heads,
+            fields.indexer_head_dim,
+            fields.indexer_budget,
+            fields.indexer_compress_ratio,
+        ];
+        if qsa.iter().any(Option::is_some) && qsa.iter().any(|field| field.is_none_or(|v| v == 0)) {
+            inference_tensor::bail!(
+                "Qwen3.8-Flash-Next's QSA indexer needs every indexer_* field, nonzero"
+            );
+        }
+        if let Some(qsa) = self.qsa()
+            && (qsa.kv_heads != 1 || qsa.compress_ratio < 2 || qsa.budget % qsa.compress_ratio != 0)
+        {
+            inference_tensor::bail!(
+                "QSA takes one indexer key head and a block size above 1 that divides the budget, got {qsa:?}"
+            );
+        }
+        if let Some(ple) = self.ple()? {
+            if self.hyper_connections().is_none() {
+                inference_tensor::bail!(
+                    "PLE writes into hyper-connection streams, which this config lacks"
+                );
+            }
+            if self.layer_types().get(ple.layer) != Some(&LayerType::LinearAttention) {
+                inference_tensor::bail!(
+                    "PLE layer {} must be a linear-attention layer",
+                    ple.layer + 1
+                );
+            }
+            if ple.ngram_size < 2
+                || ple.heads_per_ngram == 0
+                || ple.conv_kernel == 0
+                || !ple.embed_dim.is_multiple_of(ple.ngram_heads())
+            {
+                inference_tensor::bail!(
+                    "PLE embedding width {} must split evenly over {} n-gram heads",
+                    ple.embed_dim,
+                    ple.ngram_heads()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    pub fn hyper_connections(&self) -> Option<HyperConnections> {
+        Some(HyperConnections {
+            streams: self.flash_next.hc_count?,
+            lowrank: self.flash_next.hc_lowrank?,
+        })
+    }
+
+    /// The residual's width: `hc_count` streams of `hidden_size`, or one.
+    pub fn residual_size(&self) -> usize {
+        self.hyper_connections().map_or(1, |hc| hc.streams) * self.hidden_size
+    }
+
+    pub fn ple(&self) -> inference_tensor::Result<Option<PleConfig>> {
+        let fields = &self.flash_next;
+        match fields.ple_layer_ids.as_slice() {
+            [] => Ok(None),
+            [layer] if (1..=self.num_hidden_layers).contains(layer) => Ok(Some(PleConfig {
+                layer: layer - 1,
+                embed_dim: fields.ple_embed_dim.unwrap_or(self.hidden_size),
+                ngram_size: fields.ngram_size,
+                heads_per_ngram: fields.heads_per_ngram,
+                conv_kernel: fields.ple_conv_kernel_size,
+                eos_token_id: fields
+                    .eos_token_id
+                    .as_ref()
+                    .and_then(EosTokenId::primary)
+                    .ok_or_else(|| {
+                        inference_tensor::Error::msg(
+                            "PLE resets its n-grams on EOS, which the config lacks",
+                        )
+                    })?,
+            })),
+            layers => inference_tensor::bail!(
+                "PLE on layers {layers:?} is unsupported: only one layer, in 1..={}",
+                self.num_hidden_layers
+            ),
+        }
+    }
+
+    pub fn qsa(&self) -> Option<QsaConfig> {
+        let fields = &self.flash_next;
+        Some(QsaConfig {
+            n_heads: fields.indexer_n_heads?,
+            kv_heads: fields.indexer_kv_heads?,
+            head_dim: fields.indexer_head_dim?,
+            budget: fields.indexer_budget?,
+            compress_ratio: fields.indexer_compress_ratio?,
+        })
     }
 
     fn validate_feed_forward(&self) -> inference_tensor::Result<()> {
@@ -480,7 +718,49 @@ impl TextConfig {
         let conv = self.linear_conv_dim()
             * self.linear_conv_kernel_dim
             * inference_tensor::DType::BF16.size_in_bytes();
-        linear * (state + conv)
+        // PLE keeps its conv's last positions of every stream channel, and a one-value placeholder state
+        let ple = self.ple().ok().flatten().map_or(0, |ple| {
+            self.residual_size()
+                * ple.conv_state_len()
+                * inference_tensor::DType::BF16.size_in_bytes()
+                + inference_tensor::DType::F32.size_in_bytes()
+        });
+        linear * (state + conv) + ple
+    }
+
+    /// The longest context the model runs exactly: without QSA's sparse selection (paged attention on CUDA), only
+    /// as far as QSA keeps every key.
+    pub fn supported_context_len(&self, sparse_attention: bool) -> usize {
+        match self.qsa() {
+            Some(qsa) if !sparse_attention => {
+                qsa.dense_context_len().min(self.max_position_embeddings)
+            }
+            _ => self.max_position_embeddings,
+        }
+    }
+
+    /// QSA's indexer keys: one auxiliary paged layer per full-attention layer of the main stack, after the model's own.
+    pub fn qsa_auxiliary_layers(&self) -> Option<AuxiliaryPagedLayers> {
+        let qsa = self.qsa()?;
+        Some(AuxiliaryPagedLayers {
+            count: self
+                .layer_types()
+                .iter()
+                .filter(|ty| **ty == LayerType::FullAttention)
+                .count(),
+            num_attn_heads: qsa.n_heads,
+            num_kv_heads: qsa.kv_heads,
+            head_dim: qsa.head_dim,
+        })
+    }
+
+    /// The paged cache layer holding `layer_idx`'s indexer keys.
+    pub fn qsa_cache_layer(&self, layer_idx: usize, mtp: bool) -> usize {
+        let rank = self.layer_types()[..layer_idx]
+            .iter()
+            .filter(|ty| **ty == LayerType::FullAttention)
+            .count();
+        self.num_hidden_layers + self.mtp_layers(mtp) + rank
     }
 
     pub fn rot_dim(&self) -> usize {

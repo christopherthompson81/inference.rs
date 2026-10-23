@@ -1275,6 +1275,54 @@ pub mod text_models_inputs_processor {
         pub flash_meta: FlashParams,
         pub recurrent_batch_kind: RecurrentBatchKind,
         pub adapter_leases: Arc<[Option<AdapterLease>]>,
+        pub token_window: Option<crate::model::TokenWindow>,
+    }
+
+    /// Each row's chunk `seqlen_offset..position_id` of its sequence, led by up to `preceding` earlier tokens.
+    fn token_window(
+        input_seqs: &[&mut Sequence],
+        seq_indices: &[usize],
+        seqlen_offsets: &[usize],
+        position_ids: &[usize],
+        preceding: usize,
+    ) -> Result<crate::model::TokenWindow> {
+        let mut rows = Vec::with_capacity(seq_indices.len());
+        for ((&index, &start), &end) in seq_indices.iter().zip(seqlen_offsets).zip(position_ids) {
+            let toks = input_seqs[index].get_toks();
+            if end > toks.len() || start > end {
+                anyhow::bail!(
+                    "token window {start}..{end} is outside a {}-token sequence",
+                    toks.len()
+                );
+            }
+            let first = start.saturating_sub(preceding);
+            rows.push(crate::model::TokenWindowRow {
+                tokens: toks[first..end].to_vec(),
+                preceding: start - first,
+            });
+        }
+        Ok(crate::model::TokenWindow { rows })
+    }
+
+    fn requested_token_window(
+        other_config: Option<&Arc<dyn Any>>,
+        input_seqs: &[&mut Sequence],
+        seq_indices: &[usize],
+        seqlen_offsets: &[usize],
+        position_ids: &[usize],
+    ) -> Result<Option<crate::model::TokenWindow>> {
+        other_config
+            .and_then(|config| config.downcast_ref::<crate::model::TokenWindowRequest>())
+            .map(|request| {
+                token_window(
+                    input_seqs,
+                    seq_indices,
+                    seqlen_offsets,
+                    position_ids,
+                    request.preceding,
+                )
+            })
+            .transpose()
     }
 
     fn adapter_leases<S: std::ops::Deref<Target = Sequence>>(
@@ -1301,7 +1349,7 @@ pub mod text_models_inputs_processor {
             last_n_context_len: Option<(usize, usize)>,
             return_raw_logits: bool,
             sliding_window: Option<usize>,
-            _: Option<Arc<dyn Any>>,
+            other_config: Option<Arc<dyn Any>>,
             mut paged_attn_metadata: Option<PagedAttentionMeta>,
             mapper: Option<&dyn DeviceMapper>,
         ) -> Result<InputProcessorOutput> {
@@ -1333,6 +1381,13 @@ pub mod text_models_inputs_processor {
                     seq_indices,
                 } = metadata;
                 let adapter_leases = adapter_leases(input_seqs, &seq_indices);
+                let token_window = requested_token_window(
+                    other_config.as_ref(),
+                    input_seqs,
+                    &seq_indices,
+                    &seqlen_offsets,
+                    &position_ids,
+                )?;
                 let inputs: Box<dyn Any> = Box::new(ModelInputs {
                     input_ids,
                     seqlen_offsets,
@@ -1342,6 +1397,7 @@ pub mod text_models_inputs_processor {
                     flash_meta,
                     recurrent_batch_kind: RecurrentBatchKind::Prefill,
                     adapter_leases,
+                    token_window,
                 });
                 Ok(InputProcessorOutput {
                     inputs,
@@ -1379,6 +1435,13 @@ pub mod text_models_inputs_processor {
                     seq_indices,
                 } = metadata;
                 let adapter_leases = adapter_leases(input_seqs, &seq_indices);
+                let token_window = requested_token_window(
+                    other_config.as_ref(),
+                    input_seqs,
+                    &seq_indices,
+                    &seqlen_offsets,
+                    &position_ids,
+                )?;
                 let inputs: Box<dyn Any> = Box::new(ModelInputs {
                     input_ids,
                     seqlen_offsets,
@@ -1388,6 +1451,7 @@ pub mod text_models_inputs_processor {
                     flash_meta,
                     recurrent_batch_kind,
                     adapter_leases,
+                    token_window,
                 });
                 Ok(InputProcessorOutput {
                     inputs,

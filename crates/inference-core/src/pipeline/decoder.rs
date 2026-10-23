@@ -280,6 +280,7 @@ struct StepInputs {
     flash_meta: FlashParams,
     recurrent_batch_kind: RecurrentBatchKind,
     adapter_leases: Arc<[Option<crate::AdapterLease>]>,
+    token_window: Option<crate::model::TokenWindow>,
 }
 
 impl StepInputs {
@@ -300,6 +301,7 @@ impl StepInputs {
                     flash_meta: inputs.flash_meta,
                     recurrent_batch_kind: inputs.recurrent_batch_kind,
                     adapter_leases: inputs.adapter_leases,
+                    token_window: inputs.token_window,
                 }
             }
             DecoderModel::Multimodal(_) => {
@@ -315,6 +317,7 @@ impl StepInputs {
                     flash_meta: inputs.flash_meta,
                     recurrent_batch_kind: inputs.recurrent_batch_kind,
                     adapter_leases: inputs.adapter_leases,
+                    token_window: None,
                 }
             }
         }
@@ -326,9 +329,17 @@ impl PreProcessingMixin for DecoderPipeline {
         Some(self.core.chat_template.clone())
     }
     fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
-        self.media
-            .as_ref()
-            .map(|media| media.preprocessor_config.clone() as Arc<dyn Any>)
+        if let Some(media) = &self.media {
+            return Some(media.preprocessor_config.clone() as Arc<dyn Any>);
+        }
+        match &self.model {
+            DecoderModel::Text(model) if model.token_window() > 0 => {
+                Some(Arc::new(crate::model::TokenWindowRequest {
+                    preceding: model.token_window(),
+                }))
+            }
+            _ => None,
+        }
     }
     fn get_processor(&self) -> Arc<dyn super::Processor> {
         match &self.media {
@@ -1189,6 +1200,7 @@ impl Pipeline for DecoderPipeline {
             flash_meta,
             recurrent_batch_kind,
             adapter_leases,
+            token_window,
         } = StepInputs::from_processor_output(&self.model, inputs);
         let lora_execution = super::resolve_lora_execution(
             self.core.dynamic_lora.as_deref(),
@@ -1283,7 +1295,8 @@ impl Pipeline for DecoderPipeline {
                 .map(|(kv_cache, meta)| (kv_cache.as_slice(), meta)),
             &flash_meta,
         )
-        .with_recurrent_cache(self.model.cache(), recurrent_batch_kind);
+        .with_recurrent_cache(self.model.cache(), recurrent_batch_kind)
+        .with_token_window(token_window.as_ref());
         let eager_result = inference_quant::with_lora_execution(lora_execution, || {
             self.model
                 .forward(&input_ids, pixel_values, model_specific_args, &mut ctx)

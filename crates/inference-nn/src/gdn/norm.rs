@@ -3,23 +3,31 @@ use inference_quant::QuantizedActivation;
 use inference_quant::ShardedVarBuilder;
 use inference_tensor::{D, DType, Device, Result, Tensor};
 
+use super::GdnOutputGate;
+
 #[cfg(feature = "cuda")]
 use crate::cuda::gdn::GdnFp8OutputSpec;
 
 pub struct RmsNormGated {
     pub weight: Tensor,
     eps: f64,
+    gate: GdnOutputGate,
 }
 
 impl RmsNormGated {
     #[cfg(test)]
     pub fn from_parts(weight: Tensor, eps: f64) -> Self {
-        Self { weight, eps }
+        Self {
+            weight,
+            eps,
+            gate: GdnOutputGate::Silu,
+        }
     }
 
     pub fn new(
         size: usize,
         eps: f64,
+        gate: GdnOutputGate,
         vb: ShardedVarBuilder,
         isq_target_device: Option<&Device>,
     ) -> Result<Self> {
@@ -27,7 +35,11 @@ impl RmsNormGated {
         if let Some(target_dev) = isq_target_device {
             weight = weight.to_device(target_dev)?;
         }
-        Ok(Self { weight, eps })
+        Ok(Self { weight, eps, gate })
+    }
+
+    pub fn gate(&self) -> GdnOutputGate {
+        self.gate
     }
 
     #[cfg(feature = "cuda")]
@@ -46,13 +58,22 @@ impl RmsNormGated {
             && self.weight.dtype() == x.dtype()
             && matches!(x.dtype(), DType::F16 | DType::BF16)
         {
-            return crate::cuda::gdn::rmsnorm_gated_cuda(x, gate, &self.weight, self.eps);
+            return crate::cuda::gdn::rmsnorm_gated_cuda(
+                x,
+                gate,
+                &self.weight,
+                self.eps,
+                self.gate,
+            );
         }
 
         let dtype = x.dtype();
         let x = x.to_dtype(DType::F32)?;
         let gate = gate.reshape(x.shape().clone())?.to_dtype(DType::F32)?;
-        let gate = inference_tensor::nn::ops::silu(&gate)?;
+        let gate = match self.gate {
+            GdnOutputGate::Silu => inference_tensor::nn::ops::silu(&gate)?,
+            GdnOutputGate::Sigmoid => inference_tensor::nn::ops::sigmoid(&gate)?,
+        };
         let variance = x.sqr()?.mean_keepdim(D::Minus1)?;
         let normed = x.broadcast_div(&(variance + self.eps)?.sqrt()?)?;
         let out = normed
@@ -70,14 +91,6 @@ impl RmsNormGated {
         num_v_heads: usize,
         head_v_dim: usize,
     ) -> Result<QuantizedActivation> {
-        crate::cuda::gdn::rmsnorm_gated_quantized_cuda(
-            x,
-            gate,
-            &self.weight,
-            self.eps,
-            spec,
-            num_v_heads,
-            head_v_dim,
-        )
+        crate::cuda::gdn::rmsnorm_gated_quantized_cuda(x, gate, self, spec, num_v_heads, head_v_dim)
     }
 }

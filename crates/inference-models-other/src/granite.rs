@@ -2086,6 +2086,7 @@ impl GraniteMoeHybrid {
                 },
                 recurrent_dtype: None,
             },
+            auxiliary: Vec::new(),
         };
 
         let pipeline_cache = Arc::new(Mutex::new(
