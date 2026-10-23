@@ -272,11 +272,21 @@ impl GdnWeights {
                             false,
                             vb_la.pp("in_proj_a"),
                         )?;
-                        // a GGUF's dense ssm_beta/ssm_alpha load apart; one matmul serves both
-                        match crate::ops::MergedDenseProjection::merge_unquantized(&[
-                            b.clone(),
-                            a.clone(),
-                        ])? {
+                        // a GGUF's dense ssm_beta/ssm_alpha load apart; one matmul serves both. Not under pending
+                        // ISQ, which quantizes b and a apart later and would leave the merged copy running unquantized
+                        let isq_pending = inference_quant::get_immediate_isq().is_some()
+                            || ["in_proj_b", "in_proj_a"].iter().any(|name| {
+                                inference_quant::should_apply_immediate_isq(&vb_la.pp(name))
+                            });
+                        let merged = if isq_pending {
+                            None
+                        } else {
+                            crate::ops::MergedDenseProjection::merge_unquantized(&[
+                                b.clone(),
+                                a.clone(),
+                            ])?
+                        };
+                        match merged {
                             Some((merged, views)) => {
                                 (views[0].clone(), views[1].clone(), Some(merged))
                             }

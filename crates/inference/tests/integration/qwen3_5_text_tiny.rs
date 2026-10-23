@@ -1057,3 +1057,44 @@ fn walkdir_count_ext(dir: &std::path::Path, extension: &str) -> usize {
         .filter(|entry| entry.path().extension().is_some_and(|ext| ext == extension))
         .count()
 }
+
+const UQFF_PROMPT: &str = "a short prompt for the round trip";
+const UQFF_MAX_LEN: usize = 8;
+const UQFF_LOGPROB_TOLERANCE: f32 = 1e-5;
+
+// The UQFF an ISQ load writes holds the layers it runs: GDN's in_proj_b/in_proj_a included, which a merge of their
+// unquantized weights once kept running at full precision beside the quantized copies the file got.
+#[tokio::test]
+async fn an_isq_load_and_a_reload_of_its_uqff_decode_alike() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_5_text(HEAD_DIM, false)?;
+    let uqff = tempfile::tempdir()?;
+    let request = || {
+        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, UQFF_PROMPT))
+    };
+    let quantized = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::F32)
+        .with_force_cpu()
+        .with_isq(IsqType::Q8_0)
+        .write_uqff(uqff.path().join("model.uqff"))
+        .build()
+        .await?;
+    let (expected, _) = traces::greedy(&quantized, request(), UQFF_MAX_LEN).await?;
+    drop(quantized);
+    let written = traces::uqff_files(uqff.path())?;
+    anyhow::ensure!(!written.is_empty(), "no UQFF written");
+    let reloaded = inference::UqffTextModelBuilder::new(
+        checkpoint.path().to_string_lossy(),
+        vec![written[0].clone()],
+    )
+    .into_inner()
+    .with_dtype(ModelDType::F32)
+    .with_force_cpu()
+    .build()
+    .await?;
+    let (actual, _) = traces::greedy(&reloaded, request(), UQFF_MAX_LEN).await?;
+    anyhow::ensure!(
+        traces::close(&expected, &actual, UQFF_LOGPROB_TOLERANCE),
+        "the UQFF reload decodes differently: {expected:?} vs {actual:?}"
+    );
+    Ok(())
+}
