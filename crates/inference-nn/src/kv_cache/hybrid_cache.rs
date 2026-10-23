@@ -560,6 +560,12 @@ struct RecurrentStatePoolConfig<'a> {
     device: &'a Device,
 }
 
+// a decode graph's pad rows (`GDN_PAD_SLOT`) read the last slot of `states`; their outputs are dropped
+#[allow(clippy::cast_precision_loss)]
+fn readable_slots(state_indices: &Tensor, states: &Tensor) -> Result<Tensor> {
+    state_indices.minimum(states.dim(0)?.saturating_sub(1) as f64)
+}
+
 impl RecurrentStatePool {
     /// Create a new recurrent state pool.
     ///
@@ -805,12 +811,14 @@ impl RecurrentStatePool {
 
     /// Gather conv states for the given slot indices
     pub fn gather_conv_state(&self, state_indices: &Tensor) -> Result<Tensor> {
-        self.conv_state.index_select(state_indices, 0)
+        self.conv_state
+            .index_select(&readable_slots(state_indices, &self.conv_state)?, 0)
     }
 
     /// Gather recurrent states for the given slot indices
     pub fn gather_recurrent_state(&self, state_indices: &Tensor) -> Result<Tensor> {
-        self.recurrent_state.index_select(state_indices, 0)
+        self.recurrent_state
+            .index_select(&readable_slots(state_indices, &self.recurrent_state)?, 0)
     }
 
     /// Scatter conv states back to the pool for the given slot indices

@@ -80,6 +80,7 @@ impl InplaceOp3 for IndexedRowCopy {
     }
 }
 
+/// Copies row `i` of `src` into row `dst_rows[i]` of `dst`, skipping rows aimed at `GDN_PAD_SLOT` (a graph's pad).
 pub fn copy_rows(src: &Tensor, dst: &Tensor, dst_rows: &Tensor) -> Result<()> {
     if !src.device().is_cuda()
         || !src.device().same_device(dst.device())

@@ -3,6 +3,9 @@
 #include <cuda_runtime.h>
 #include <cstdint>
 
+// a decode graph's pad rows (GDN_PAD_SLOT) write nowhere
+constexpr uint32_t kPadRow = UINT32_MAX;
+
 template <typename T>
 __global__ void indexed_row_copy_kernel(const T *src, T *dst,
                                         const uint32_t *dst_rows, int rows,
@@ -13,6 +16,9 @@ __global__ void indexed_row_copy_kernel(const T *src, T *dst,
     return;
   }
   int row = static_cast<int>(idx / row_elements);
+  if (dst_rows[row] == kPadRow) {
+    return;
+  }
   int64_t column = idx - static_cast<int64_t>(row) * row_elements;
   dst[static_cast<int64_t>(dst_rows[row]) * row_elements + column] = src[idx];
 }

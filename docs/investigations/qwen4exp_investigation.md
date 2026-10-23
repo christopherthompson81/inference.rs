@@ -581,3 +581,121 @@ cargo nextest run -p inference [--features cuda] -E 'test(/flash_next_text_and_i
 The tiny checkpoint is the Qwen3.5-MoE VL fixture with the Flash-Next text fields. Its random text decode has a
 near tie at step 2 that BF16 on the GPU breaks the other way (logprob -0.95 against -0.98 pinned), so the GPU run
 pins only the image decode.
+
+## Run 17 - 2026-10-23 15:40
+
+Question: what keeps Flash-Next decode out of CUDA graphs, and what fixed-shape form can each part take?
+
+Read: `qwen3_5/{ple,qsa}.rs`, `pipeline/cuda_graph.rs`, `inference-nn/src/cuda/{graph_capture,qsa}.rs`,
+`moe/experts/offload.rs`. A capture freezes every host-to-device copy into a constant
+(`enable_cuda_graph_htod_cache`), and core refreshes only its own persistent buffers (ids, slot mappings, block
+tables, context lens, rope positions, recurrent state slots) before a replay. Graphs are off when the model has PLE
+(`SUPPORTS_CUDA_DECODE_GRAPHS && !has_ple()`); a QSA model without PLE would capture QSA's host plan (none exists).
+
+- PLE: the n-gram table is `per_layer_token_embd` IQ4_NL `[160, 320001536]`, 27,466 MiB, so it stays on the host.
+  Each decode token hashes its last 3 tokens into 16 rows. The step needs the token window, which only the host
+  has.
+- QSA, host-built per step: pooling only on steps that complete a 4-cell block, pool count growing with the
+  context, dense attention until the 2048 budget, and the cells of each from the host rows and block table.
+
+Fixed shapes:
+- QSA decode plan on the device, one small kernel from the block table and context lens: pool the block holding
+  each row's position on every step (a not-yet-complete block writes its future last cell, which that token's own
+  write replaces before any read), pools sized from the table width (graph tables are bucketed, and the selection
+  kernels only look at `(position + 1) / ratio` blocks), kept counts by the gather plan's formula. A bucket whose
+  table capacity is within the dense length stays dense; past it, selection with the gather (which keeps every
+  cell while `visible <= k`). Eager decode takes the same plan, so decode has one path.
+- PLE decode: core stages a `[rows, ngram - 1 + 1]` device token window (missing tokens as the model's fill token)
+  into a graph buffer like the rope positions; the layer copies it into mapped host memory, a host function on a
+  side stream hashes and gathers the rows, and they come back to the device. This is #525's offload pattern, which
+  records into a graph as it runs eagerly.
+
+Prior estimate (Run 12): graphs save ~4 ms of 67 ms per token here; the expert misses (~32 ms) stay.
+
+Plan: (1) QSA plan kernel with a CPU twin and a parity test against the host plan, (2) device token window + PLE
+host-function decode with a parity test, (3) graphs on for plain decode, graph against eager on the tiny
+checkpoint, (4) the real model.
+
+## Run 18 - 2026-10-23 16:32
+
+Question: with Run 17's plan built, do Flash-Next decode steps capture and replay, and do they decode as eager steps?
+
+Built:
+- `qsa_decode_plan` (kernel plus CPU twin, `inference-nn/src/cuda/qsa.rs`): one u32 row per decode row, the current
+  block's cells, the position, the kept count and the pool cells. `QsaStep::decode` takes it whenever a step's rows are
+  one token and the metadata has device context lens; pools are `table width * block size / 4`. The text model's
+  decode step no longer needs the host window for QSA.
+- Device token window: `TokenWindow::decode_rows` lays each one-token row out as `[real preceding, tokens...]`;
+  `ModelForwardContext::decode_token_window` carries it. Core builds it for a graph step, pads it like the other inputs,
+  stages it per replay through the graph's host staging, and gives the warmup and the captured forward the device copy.
+  A window model graphs only one-token steps, and skips the one-token lookahead continuation (its token is on the
+  device only, and the window comes from the host).
+- PLE decode on CUDA: the window goes to mapped memory, a host function on a side stream hashes it and gathers the
+  rows, they come back (`ple.rs` `host_gather`). The mapped-buffer helpers moved out of the MoE offload into
+  `inference-nn/src/cuda/mapped.rs`, which both use.
+
+Checks:
+```
+cuda decode plan matches the CPU twin (random tables, 5 rows)          pass
+eager decode takes the device plan: 44 of 44 steps, table width 64      probe
+PLE host gather on every CUDA decode step: 33 calls in the prefix test  probe
+graph decode against prefill scoring, BF16, 24 steps
+  graph and eager: identical per-step differences to 4 decimals at both budgets
+  master: the same differences (up to 0.39 dense, 4.57 sparse at step 4)
+```
+Decode against prefill is the wrong check for this checkpoint: master shows the same BF16 gaps (the sparse one a top-k
+pick that flips on near-tied block scores). The graph test compares against pinned eager traces instead: token prompts
+of 18, 6, 2, 30 and 11 tokens, rounds of 1, 3 and 5 concurrent requests, 24 steps, sparse budget.
+
+Failures on the way:
+1. Every step skipped graphs as `model_unsupported`: QSA's auxiliary indexer layer (1 kv head) fails the fattn paged
+   shape check in `cuda_decode_graph_supported_for_model`, though no attention kernel reads it. Fix:
+   `AuxiliaryPagedLayers::attended` (false for QSA's) and `ModelConfigLike::layer_is_attended`, which the check
+   filters on.
+2. Precapture at load then hit `CUDA_ERROR_ILLEGAL_ADDRESS`. memcheck pointed at the indexer cache reads, but flags
+   every access to that cache as "potentially before allocated", eager runs included (noise). A device-wide
+   synchronize before precapture changed nothing. Bisecting: precapture of bucket 1 alone passes, bucket 2 (the first
+   padded bucket) faults. Padded rows carry `GDN_PAD_SLOT` (`u32::MAX`) as their recurrent slot; the GDN kernels skip
+   it, but PLE's conv state goes through the pool's plain `index_select` gather and the indexed row copy, which read
+   and write row `u32::MAX`. (Inline PLE had looked like a fix only because it rejects the device window and ends the
+   precapture early.) Fix: the pool's gathers clamp a pad row to the last slot, and the row copy skips pad rows.
+
+```
+cargo nextest run -p inference --features cuda -E 'test(/flash_next_decode_.*cuda_graphs/)'   2 pass
+  (graphs: captures and replays, no eager fallback; both decode the pinned traces up to BF16 ties)
+qwen4exp_text_tiny, qwen_vl_tiny, qwen3_5_text_tiny, qwen3_5_mtp on CUDA                     44 pass
+inference-nn indexed_copy, hybrid_cache, qsa, offload, forward on CUDA                        54 pass
+```
+
+## Run 19 - 2026-10-23 16:51
+
+Question: what do graphs give on real weights, the 4-layer real-width checkpoint (resident) and the UD-IQ4_XS model
+(experts offloaded)?
+
+First real-model run: graphs on 87 ms per token, graphs off a device-side assert in `index_select`
+(`ids[id_i] < src_dim_size`), reproduced in seconds on the real-width checkpoint. A probe of the decode plan's inputs:
+`context_lens [0]`, rows `[start 0, len 1]`: a one-token prompt is a decode-shaped step whose context lens leave out
+its own token, so the plan's position wrapped to `u32::MAX` and its cells were garbage (2,728,887,231 in an
+8,192-row cache). The plan now runs only on completion steps (`!is_first_prompt_chunk && num_cached_tokens.is_none()`,
+the graph path's own prompt test). The graph test's 2-token prompt is now 1 token; without the gate both graph tests
+fail, with it both pass.
+
+That first graphs-on run had also never exited (it logged expert-fill `CUDA_ERROR_NOT_PERMITTED` errors at its end and
+held the GPU), so every real-model number taken while it lived is void. Clean runs exit normally with no fill errors.
+
+```
+inference bench -m widegen (4 layers, 2560 wide, BF16, resident) --prompt-len 512 --gen-len 64, alternating
+  graphs   3.26 / 3.25 ms per token
+  eager    6.25 / 6.26 ms per token
+inference bench --format gguf (UD-IQ4_XS) --moe-expert-cache 64 --pa-context-len 8192 --prompt-len 512 --gen-len 64
+  --iterations 3, three alternating rounds (master is the LAN copy of aa567b860)
+              round 1   round 2   round 3   mean
+  master      81.90     73.10     73.26     76.1 ms
+  eager       74.59     75.47     79.37     76.5 ms
+  graphs      71.11     68.22     76.86     72.1 ms
+  GPU 56-59 C, throttle reasons 0x400 / 0x600 throughout
+```
+
+Graphs halve a resident step and take about 4 ms (5%) off an offloaded one, as Run 12 estimated: the miss round trip
+per MoE layer still sets the offloaded step. Eager decode, which now always takes the host-function gather and the
+device plan, is within noise of master.

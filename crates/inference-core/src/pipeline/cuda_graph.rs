@@ -102,6 +102,8 @@ pub(crate) struct CudaGraphDecodeStep {
     pub(crate) metadata: PagedAttentionInputMetadata,
     pub(crate) state_indices: Option<Vec<u32>>,
     pub(crate) real_batch: usize,
+    // `[batch, TokenWindow::decode_width]` u32 on the host, for a model that reads the token window
+    pub(crate) token_window: Option<Tensor>,
 }
 
 pub(crate) struct CudaGraphDecodeStepInputs<'a> {
@@ -112,6 +114,7 @@ pub(crate) struct CudaGraphDecodeStepInputs<'a> {
     pub(crate) metadata: &'a PagedAttentionInputMetadata,
     pub(crate) state_indices: Option<&'a [u32]>,
     pub(crate) pad_slot: Option<u32>,
+    pub(crate) token_window: Option<&'a Tensor>,
 }
 
 impl CudaGraphDecodeStep {
@@ -129,6 +132,7 @@ impl CudaGraphDecodeStep {
             metadata,
             state_indices,
             pad_slot,
+            token_window,
         } = inputs;
         let real_batch = input_ids.dim(0)?;
         if real_batch == batch {
@@ -140,6 +144,7 @@ impl CudaGraphDecodeStep {
                 metadata: metadata.clone(),
                 state_indices: state_indices.map(<[u32]>::to_vec),
                 real_batch,
+                token_window: token_window.cloned(),
             }));
         }
         let Some(rows) = metadata.decode_rows.as_ref() else {
@@ -176,6 +181,9 @@ impl CudaGraphDecodeStep {
             );
         }
         let metadata = rows.build().map_err(inference_tensor::Error::msg)?;
+        let token_window = token_window
+            .map(|window| Tensor::cat(&[window, &window.narrow(0, 0, 1)?.repeat((pad, 1))?], 0))
+            .transpose()?;
         Ok(Some(Self {
             input_ids,
             seqlen_offsets,
@@ -184,6 +192,7 @@ impl CudaGraphDecodeStep {
             metadata,
             state_indices,
             real_batch,
+            token_window,
         }))
     }
 
@@ -202,6 +211,10 @@ impl CudaGraphDecodeStep {
     }
 
     fn one_token_continuation(&self, input_ids: Tensor) -> inference_tensor::Result<Option<Self>> {
+        // the token the device just sampled is not on the host, where the next window comes from
+        if self.token_window.is_some() {
+            return Ok(None);
+        }
         let (batch, q_len) = input_ids.dims2()?;
         let Some(rows) = self.metadata.decode_rows.as_ref() else {
             return Ok(None);
@@ -321,6 +334,7 @@ impl CudaGraphDecodeStep {
             metadata,
             state_indices: self.state_indices.clone(),
             real_batch: self.real_batch,
+            token_window: None,
         }))
     }
 }
@@ -392,6 +406,7 @@ impl CudaGraphPrecaptureInputs {
         &'a self,
         state_indices: Option<&'a [u32]>,
         pad_slot: Option<u32>,
+        token_window: Option<&'a Tensor>,
     ) -> CudaGraphDecodeStepInputs<'a> {
         CudaGraphDecodeStepInputs {
             input_ids: &self.input_ids,
@@ -401,6 +416,7 @@ impl CudaGraphPrecaptureInputs {
             metadata: &self.metadata,
             state_indices,
             pad_slot,
+            token_window,
         }
     }
 }
@@ -484,6 +500,7 @@ pub(crate) struct CudaDecodeGraphCaptureCtx<'a> {
     pub(crate) warmup_logits: &'a Tensor,
     pub(crate) state_indices: Option<CudaGraphVarMap>,
     pub(crate) real_batch: usize,
+    pub(crate) token_window: Option<&'a Tensor>,
 }
 
 struct CudaDecodeGraphMetadataInput<'a> {
@@ -1049,6 +1066,7 @@ pub(crate) struct CudaDecodeGraphEntry {
     input_ids: Var,
     metadata_buffers: CudaDecodeGraphMetadataBuffers,
     state_indices: Option<CudaGraphVarMap>,
+    token_window: Option<Var>,
     _metadata: PagedAttentionInputMetadata,
     logits: Tensor,
     // Proposer-facing graph outputs refreshed by replay.
@@ -1187,6 +1205,7 @@ impl CudaDecodeGraphEntry {
             input_ids,
             metadata_buffers,
             state_indices,
+            token_window,
             _metadata,
             logits,
             spec_state,
@@ -1219,6 +1238,7 @@ impl CudaDecodeGraphEntry {
             "state indices",
             &mut release_result,
         );
+        drop_cuda_graph_entry_resource(token_window, &stream, "token window", &mut release_result);
         drop_cuda_graph_entry_resource(
             metadata_buffers,
             &stream,
@@ -1425,9 +1445,22 @@ impl CudaDecodeGraphState {
             let (_, seq_len) = step.input_ids.dims2()?;
             let metadata_buffers = &mut entry.metadata_buffers;
             let state_indices = &entry.state_indices;
+            let token_window = &entry.token_window;
             entry
                 .host_staging
                 .update(|host_staging| {
+                    match (token_window, &step.token_window) {
+                        (Some(dst), Some(src)) => host_staging.copy_from(
+                            "token_window",
+                            dst.device().location(),
+                            src,
+                            dst,
+                        )?,
+                        (None, None) => {}
+                        _ => inference_tensor::bail!(
+                            "the token window changed optional state during CUDA graph replay"
+                        ),
+                    }
                     metadata_buffers.copy_from(
                         &step.metadata,
                         &step.position_ids,
@@ -1655,7 +1688,11 @@ pub(crate) fn capture_cuda_decode_graph<F>(
     forward: F,
 ) -> inference_tensor::Result<CudaDecodeGraphEntry>
 where
-    F: FnOnce(&Tensor, &PagedAttentionInputMetadata) -> inference_tensor::Result<Tensor>,
+    F: FnOnce(
+        &Tensor,
+        &PagedAttentionInputMetadata,
+        Option<&Tensor>,
+    ) -> inference_tensor::Result<Tensor>,
 {
     let CudaDecodeGraphCaptureCtx {
         key,
@@ -1669,6 +1706,7 @@ where
         warmup_logits,
         state_indices,
         real_batch,
+        token_window,
     } = ctx;
     let materialized_metadata = metadata
         .materialize_decode_tensors()
@@ -1687,6 +1725,10 @@ where
             activation_dtype,
         })?;
     let graph_input_ids = input_ids.as_detached_tensor();
+    let token_window = token_window
+        .map(|window| Var::from_tensor(&window.to_device(graph_input_ids.device())?))
+        .transpose()?;
+    let graph_token_window = token_window.as_ref().map(Var::as_detached_tensor);
     let Device::Cuda(cuda_device) = graph_input_ids.device() else {
         inference_tensor::bail!("CUDA graph decode expected CUDA input ids");
     };
@@ -1709,7 +1751,7 @@ where
         return Err(err.context("FA3 decode preparation capture failed"));
     }
 
-    let logits = match forward(&graph_input_ids, &metadata) {
+    let logits = match forward(&graph_input_ids, &metadata, graph_token_window.as_ref()) {
         Ok(logits) => logits,
         Err(err) => {
             end_cuda_capture_discard(&stream);
@@ -1759,6 +1801,7 @@ where
         input_ids,
         metadata_buffers,
         state_indices,
+        token_window,
         _metadata: metadata,
         logits,
         spec_state: None,
@@ -1782,12 +1825,14 @@ pub(crate) fn cuda_decode_graph_supported_for_model(
     };
     #[cfg(target_family = "unix")]
     {
-        (0..metadata.num_layers()).all(|layer_idx| {
-            !DecodePlan::requires_host_context_lengths(
-                metadata.attention_backend_kind_for_layer(layer_idx),
-                metadata.attention_layer_spec(layer_idx),
-            )
-        })
+        (0..metadata.num_layers())
+            .filter(|&layer_idx| metadata.layer_is_attended(layer_idx))
+            .all(|layer_idx| {
+                !DecodePlan::requires_host_context_lengths(
+                    metadata.attention_backend_kind_for_layer(layer_idx),
+                    metadata.attention_layer_spec(layer_idx),
+                )
+            })
     }
     #[cfg(not(target_family = "unix"))]
     {
@@ -3078,6 +3123,7 @@ mod tests {
             metadata: rows.build_graph_staged()?,
             state_indices: Some(vec![2, 5]),
             real_batch: 1,
+            token_window: None,
         };
         let continuation = step
             .one_token_continuation(step.input_ids.clone())?
@@ -3121,6 +3167,7 @@ mod tests {
             metadata: rows.build_graph_staged()?,
             state_indices: None,
             real_batch: 1,
+            token_window: None,
         };
         assert!(
             step.one_token_continuation(step.input_ids.clone())?
@@ -3164,8 +3211,9 @@ mod tests {
                 warmup_logits: &warmup_logits,
                 state_indices: None,
                 real_batch: 1,
+                token_window: None,
             },
-            |input_ids, _| input_ids.to_dtype(DType::F32),
+            |input_ids, _, _| input_ids.to_dtype(DType::F32),
         )?;
         let mut state = CudaDecodeGraphState::default();
         state.insert(entry);
@@ -3179,6 +3227,7 @@ mod tests {
                 metadata: metadata.clone(),
                 state_indices: None,
                 real_batch: 1,
+                token_window: None,
             })
         };
         let host_step = step(7)?;

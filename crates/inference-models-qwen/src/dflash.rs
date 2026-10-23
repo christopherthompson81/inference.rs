@@ -298,6 +298,7 @@ impl DFlashConfig {
                 num_attn_heads: self.num_attention_heads,
                 num_kv_heads: self.num_key_value_heads,
                 head_dim: self.head_dim(),
+                attended: true,
             }
         })
     }

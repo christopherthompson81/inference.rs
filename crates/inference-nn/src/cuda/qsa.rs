@@ -467,6 +467,174 @@ pub fn qsa_gather_cells(
     )
 }
 
+struct QsaDecodePlan {
+    block_size: usize,
+    ratio: usize,
+    k: usize,
+    pools: usize,
+}
+
+impl QsaDecodePlan {
+    fn width(&self) -> usize {
+        self.ratio + 2 + self.pools
+    }
+
+    // (rows, table width)
+    fn check(&self, table: &Layout, context_lens: &Layout) -> Result<(usize, usize)> {
+        let (rows, table_width) = table.shape().dims2()?;
+        if context_lens.shape().dims1()? != rows
+            || !table.is_contiguous()
+            || !context_lens.is_contiguous()
+            || self.ratio == 0
+            || !self.block_size.is_multiple_of(self.ratio)
+        {
+            inference_tensor::bail!(
+                "a QSA decode plan takes a contiguous (rows, blocks) table and (rows,) context lens, with blocks of \
+                 {} tiling {}-cell pages, got {:?} and {:?}",
+                self.ratio,
+                self.block_size,
+                table.shape(),
+                context_lens.shape()
+            );
+        }
+        Ok((rows, table_width))
+    }
+
+    // The kernel's semantics for one row.
+    #[allow(clippy::cast_possible_truncation)]
+    fn row(&self, table: &[u32], seen: u32, out: &mut [u32]) {
+        let (bs, ratio) = (self.block_size as u32, self.ratio as u32);
+        let cell = |t: u32| table[(t / bs) as usize] * bs + t % bs;
+        let position = seen - 1;
+        let first = position / ratio * ratio;
+        for (m, slot) in out[..self.ratio].iter_mut().enumerate() {
+            *slot = cell(first + m as u32);
+        }
+        out[self.ratio] = position;
+        out[self.ratio + 1] = if seen / ratio <= self.k as u32 {
+            seen
+        } else {
+            self.k as u32 * ratio + seen % ratio
+        };
+        let complete = seen / ratio;
+        for (j, slot) in out[self.ratio + 2..].iter_mut().enumerate() {
+            let j = j as u32;
+            *slot = cell(if j < complete {
+                j * ratio + ratio - 1
+            } else {
+                ratio - 1
+            });
+        }
+    }
+}
+
+impl CustomOp2 for QsaDecodePlan {
+    fn name(&self) -> &'static str {
+        "qsa-decode-plan"
+    }
+
+    fn cpu_fwd(
+        &self,
+        table: &CpuStorage,
+        table_l: &Layout,
+        context_lens: &CpuStorage,
+        context_lens_l: &Layout,
+    ) -> Result<(CpuStorage, Shape)> {
+        let (rows, table_width) = self.check(table_l, context_lens_l)?;
+        let (CpuStorage::U32(table), CpuStorage::U32(context_lens)) = (table, context_lens) else {
+            inference_tensor::bail!("a QSA decode plan takes u32 block tables and context lens");
+        };
+        let table = &table[table_l.start_offset()..];
+        let context_lens = &context_lens[context_lens_l.start_offset()..];
+        let width = self.width();
+        let mut plan = vec![0u32; rows * width];
+        for (row, out) in plan.chunks_mut(width).enumerate() {
+            let row_table = &table[row * table_width..(row + 1) * table_width];
+            self.row(row_table, context_lens[row], out);
+        }
+        Ok((CpuStorage::U32(plan), Shape::from((rows, width))))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_fwd(
+        &self,
+        table: &inference_tensor::CudaStorage,
+        table_l: &Layout,
+        context_lens: &inference_tensor::CudaStorage,
+        context_lens_l: &Layout,
+    ) -> Result<(inference_tensor::CudaStorage, Shape)> {
+        use inference_tensor::backend::BackendStorage;
+        use inference_tensor::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
+
+        let (rows, table_width) = self.check(table_l, context_lens_l)?;
+        let width = self.width();
+        let device = table.device();
+        let stream = device.cuda_stream();
+        let table = table
+            .as_cuda_slice::<u32>()?
+            .slice(table_l.start_offset()..);
+        let context_lens = context_lens
+            .as_cuda_slice::<u32>()?
+            .slice(context_lens_l.start_offset()..);
+        let mut plan = unsafe { device.alloc::<u32>(rows * width)? };
+        let int = |value: usize| i32::try_from(value).map_err(inference_tensor::Error::wrap);
+        let (table_ptr, table_guard) = table.device_ptr(&stream);
+        let (lens_ptr, lens_guard) = context_lens.device_ptr(&stream);
+        let (plan_ptr, plan_guard) = plan.device_ptr_mut(&stream);
+        let status = unsafe {
+            super::ffi::qsa_decode_plan(
+                table_ptr as *const u32,
+                lens_ptr as *const u32,
+                plan_ptr as *mut u32,
+                int(rows)?,
+                int(table_width)?,
+                int(self.block_size)?,
+                int(self.ratio)?,
+                int(self.k)?,
+                int(self.pools)?,
+                stream.cu_stream() as i64,
+            )
+        };
+        drop(plan_guard);
+        drop(lens_guard);
+        drop(table_guard);
+        if status != 0 {
+            inference_tensor::bail!("{} failed with status {status}", self.name());
+        }
+        Ok((
+            inference_tensor::CudaStorage::wrap_cuda_slice(plan, device.clone()),
+            Shape::from((rows, width)),
+        ))
+    }
+}
+
+/// One decode step's QSA plan from each row's block `table` row and context length (its tokens, this one included),
+/// built on the device so a captured step replays it: per row, `ratio` cells of the block holding its position
+/// (pooled every step; until the block completes the pool lands in its future last cell, which that token's own
+/// write replaces), the position, the kept count of [`qsa_gather_cells`], then `pools` pool cells, past the row's
+/// complete blocks any valid cell.
+pub fn qsa_decode_plan(
+    table: &Tensor,
+    context_lens: &Tensor,
+    block_size: usize,
+    ratio: usize,
+    k: usize,
+    pools: usize,
+) -> Result<Tensor> {
+    if table.dtype() != DType::U32 || context_lens.dtype() != DType::U32 {
+        inference_tensor::bail!("a QSA decode plan takes u32 block tables and context lens");
+    }
+    table.contiguous()?.apply_op2_no_bwd(
+        &context_lens.contiguous()?,
+        &QsaDecodePlan {
+            block_size,
+            ratio,
+            k,
+            pools,
+        },
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod tests {
@@ -510,6 +678,51 @@ mod tests {
         assert_eq!(kept(&mask, 0)?, expected);
         assert_eq!(kept(&mask, 1)?, (0..=9).collect::<Vec<_>>());
         assert_eq!(kept(&mask, 2)?, vec![0]);
+        Ok(())
+    }
+
+    #[test]
+    fn a_decode_plan_pools_the_current_block_and_lists_every_pool() -> Result<()> {
+        // two rows of 8-cell pages: row 0 at position 13 (pages 5, 2), row 1 at 3 (page 7)
+        let table = Tensor::new(&[[5u32, 2], [7, 0]], &Device::Cpu)?;
+        let lens = Tensor::new(&[14u32, 4], &Device::Cpu)?;
+        let plan = qsa_decode_plan(&table, &lens, 8, RATIO, K, 4)?.to_vec2::<u32>()?;
+        // block 3 is cells 12..16 of page 2; three blocks complete, under the budget of 3 so all 14 kept
+        assert_eq!(plan[0], vec![20, 21, 22, 23, 13, 14, 43, 47, 19, 43]);
+        // a full first block: k blocks keep everything
+        assert_eq!(plan[1], vec![56, 57, 58, 59, 3, 4, 59, 59, 59, 59]);
+        let lens = Tensor::new(&[16u32, 4], &Device::Cpu)?;
+        let plan = qsa_decode_plan(&table, &lens, 8, RATIO, K, 4)?.to_vec2::<u32>()?;
+        // four complete blocks are past the budget: k blocks plus an empty tail
+        assert_eq!(plan[0][RATIO + 1], (K * RATIO) as u32);
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_decode_plan_matches_the_reference() -> Result<()> {
+        let Ok(device) = Device::new_cuda(0) else {
+            return Ok(());
+        };
+        let rows = 5;
+        let width = 6;
+        let table = (0..rows * width)
+            .map(|i| ((i * 7) % 31) as u32)
+            .collect::<Vec<_>>();
+        let table = Tensor::from_vec(table, (rows, width), &Device::Cpu)?;
+        let lens = Tensor::new(&[1u32, 4, 17, 33, 48], &Device::Cpu)?;
+        let pools = width * 8 / RATIO;
+        let expected = qsa_decode_plan(&table, &lens, 8, RATIO, K, pools)?.to_vec2::<u32>()?;
+        let actual = qsa_decode_plan(
+            &table.to_device(&device)?,
+            &lens.to_device(&device)?,
+            8,
+            RATIO,
+            K,
+            pools,
+        )?
+        .to_vec2::<u32>()?;
+        assert_eq!(actual, expected);
         Ok(())
     }
 

@@ -72,6 +72,7 @@ struct CudaDecodeGraphForwardInput<'a> {
     flash_meta: &'a FlashParams,
     model_specific_args: Option<&'a dyn Any>,
     recurrent_batch_kind: RecurrentBatchKind,
+    token_window: Option<&'a crate::model::TokenWindow>,
 }
 #[cfg(any(feature = "cuda", test))]
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -249,6 +250,14 @@ pub struct DecoderPipeline {
 }
 
 impl DecoderPipeline {
+    // how many tokens before each chunk the model reads from the token window
+    fn token_window_preceding(&self) -> Option<usize> {
+        match &self.model {
+            DecoderModel::Text(model) => model.token_window(),
+            DecoderModel::Multimodal(model) => model.token_window(),
+        }
+    }
+
     pub(crate) fn new(model: DecoderModel, core: DecoderCore, media: Option<MediaState>) -> Self {
         Self {
             model,
@@ -329,10 +338,7 @@ impl PreProcessingMixin for DecoderPipeline {
         Some(self.core.chat_template.clone())
     }
     fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
-        let preceding = match &self.model {
-            DecoderModel::Text(model) => model.token_window(),
-            DecoderModel::Multimodal(model) => model.token_window(),
-        };
+        let preceding = self.token_window_preceding();
         let token_window =
             preceding.map(|preceding| crate::model::TokenWindowRequest { preceding });
         match (&self.media, token_window) {
@@ -561,6 +567,7 @@ impl DecoderPipeline {
             flash_meta,
             model_specific_args,
             recurrent_batch_kind,
+            token_window,
         } = input;
         if !cuda_decode_graphs_enabled() {
             record_cuda_graph_dispatch(
@@ -627,6 +634,25 @@ impl DecoderPipeline {
             );
             return Ok(None);
         }
+        // a replay reads the window in its one-token layout, refreshed from the host
+        let token_window = match self.token_window_preceding() {
+            None => None,
+            Some(preceding) => {
+                let Some(rows) = token_window
+                    .filter(|_| q_len == 1)
+                    .and_then(|window| window.decode_rows(preceding))
+                else {
+                    record_cuda_graph_dispatch(
+                        CudaGraphComponent::Target,
+                        CudaGraphDispatchMode::Skipped,
+                        CudaGraphDispatchReason::IncompatibleShape,
+                    );
+                    return Ok(None);
+                };
+                let width = crate::model::TokenWindow::decode_width(preceding);
+                Some(Tensor::from_vec(rows, (batch, width), &Device::Cpu)?)
+            }
+        };
         // With a proposer attached every step is a fixed-width verify; the model must expose the
         // outputs the proposer reads so a replay can refresh them.
         if speculative && self.model.take_speculative_graph_state().is_none() {
@@ -688,6 +714,7 @@ impl DecoderPipeline {
                 metadata,
                 state_indices: hybrid_slots.as_ref().map(|slots| slots.real.as_slice()),
                 pad_slot: graph_pad_slot,
+                token_window: token_window.as_ref(),
             },
             bucket,
         )?
@@ -774,7 +801,15 @@ impl DecoderPipeline {
             .filter(|plan| cuda_graph_startup_capture_allowed(1 + plan.proposal_len))
             .collect::<Vec<_>>();
         let mut widths = vec![(1usize, usize::MAX)];
-        for plan in graph_plans {
+        let token_window = self
+            .token_window_preceding()
+            .map(|preceding| {
+                let width = crate::model::TokenWindow::decode_width(preceding);
+                Tensor::zeros((1, width), DType::U32, &Device::Cpu)
+            })
+            .transpose()?;
+        // a window model graphs only one-token steps
+        for plan in graph_plans.iter().filter(|_| token_window.is_none()) {
             if plan.proposal_len > 0 {
                 widths.push((
                     1 + plan.proposal_len,
@@ -862,7 +897,7 @@ impl DecoderPipeline {
                 .filter(|bucket| *bucket <= max_bucket.min(width_max_bucket))
             {
                 let Some(step) = CudaGraphDecodeStep::padded(
-                    inputs.step_inputs(live.as_deref(), graph_pad_slot),
+                    inputs.step_inputs(live.as_deref(), graph_pad_slot, token_window.as_ref()),
                     bucket,
                 )?
                 else {
@@ -962,6 +997,11 @@ impl DecoderPipeline {
         let mut warm_spec_metadata = None;
         let mut warm_live_spec_state = None;
         let mut graph_spec_state = None;
+        let warm_token_window = step
+            .token_window
+            .as_ref()
+            .map(|window| window.to_device(step.input_ids.device()))
+            .transpose()?;
         let capture_attempt: inference_tensor::Result<_> = (|| {
             let state_index_buffers = match &step.state_indices {
                 Some(host) => Some(install_hybrid_graph_state_indices(
@@ -977,7 +1017,8 @@ impl DecoderPipeline {
                 Some((kv_cache, &metadata)),
                 flash_meta,
             )
-            .with_recurrent_cache(self.model.cache(), recurrent_batch_kind);
+            .with_recurrent_cache(self.model.cache(), recurrent_batch_kind)
+            .with_decode_token_window(warm_token_window.as_ref());
             let warmup_logits = self.model.forward(&step.input_ids, None, None, &mut ctx)?;
             warm_spec_state = speculative
                 .then(|| self.model.take_speculative_graph_state())
@@ -1015,8 +1056,9 @@ impl DecoderPipeline {
                     warmup_logits: &warmup_logits,
                     state_indices: state_index_buffers,
                     real_batch: step.real_batch,
+                    token_window: step.token_window.as_ref(),
                 },
-                |graph_input_ids, graph_metadata| {
+                |graph_input_ids, graph_metadata, graph_token_window| {
                     let mut ctx = ModelForwardContext::new(
                         &step.seqlen_offsets,
                         &step.context_lens,
@@ -1024,7 +1066,8 @@ impl DecoderPipeline {
                         Some((kv_cache, graph_metadata)),
                         flash_meta,
                     )
-                    .with_recurrent_cache(self.model.cache(), recurrent_batch_kind);
+                    .with_recurrent_cache(self.model.cache(), recurrent_batch_kind)
+                    .with_decode_token_window(graph_token_window);
                     let logits = self.model.forward(graph_input_ids, None, None, &mut ctx)?;
                     if let Some(expected) = warm_spec_metadata.as_deref() {
                         let captured =
@@ -1258,6 +1301,7 @@ impl Pipeline for DecoderPipeline {
                 flash_meta: &flash_meta,
                 model_specific_args: model_specific_args.as_deref(),
                 recurrent_batch_kind,
+                token_window: token_window.as_ref(),
             }) {
                 Ok(Some(replay)) => {
                     return Ok(ForwardStepResult::cuda_decode(
