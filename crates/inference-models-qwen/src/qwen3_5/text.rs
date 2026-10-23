@@ -371,10 +371,16 @@ impl FullAttention {
             .unfold(D::Minus1, self.head_dim, self.head_dim)?
             .transpose(1, 2)?;
 
-        let cos_sin = &(
-            cos_sin.0.to_device(q.device())?,
-            cos_sin.1.to_device(q.device())?,
-        );
+        // a CPU layer beside the GPU runs in F32 (the mapper's cast), the table in the model dtype
+        let here = |t: &Tensor| -> Result<Tensor> {
+            let t = t.to_device(q.device())?;
+            if q.dtype() == DType::F32 && t.dtype() != DType::F32 {
+                t.to_dtype(DType::F32)
+            } else {
+                Ok(t)
+            }
+        };
+        let cos_sin = &(here(&cos_sin.0)?, here(&cos_sin.1)?);
         let tokens_first = metadata
             .as_ref()
             .is_some_and(|(_, input_metadata)| input_metadata.is_decode_step());
@@ -2620,13 +2626,14 @@ impl Qwen3_5TextModel {
             None
         };
 
-        // Compute MRoPE cos/sin using first full-attention layer's rotary embedding
+        // Compute MRoPE cos/sin using first full-attention layer's rotary embedding, on that layer's device
         let cos_sin = {
             let first_attn_idx = self
                 .layer_types
                 .iter()
                 .position(|lt| *lt == LayerType::FullAttention)
                 .expect("No full attention layer found");
+            let position_ids = &self.mapper.map(position_ids.clone(), first_attn_idx)?;
             match &self.layers[first_attn_idx].layer_impl {
                 LayerImpl::FullAttention(attn) => match position_ids.rank() {
                     2 => attn
@@ -2929,7 +2936,7 @@ impl Qwen3_5TextModel {
                     }
                 }
                 if capture_taps && tap_layers.contains(&i) {
-                    taps_all.push(xs.to_device(&self.device)?);
+                    taps_all.push(self.mapper.cast_nm_device(&xs, false)?);
                 }
             }
             if self.store_spec_hidden.load(Ordering::Relaxed) {
@@ -2940,7 +2947,9 @@ impl Qwen3_5TextModel {
                     .dense()
                     .expect("final normalized model input must remain dense")
                     .clone(),
-                _ => self.norm.forward(&xs.to_device(&self.device)?)?,
+                _ => self
+                    .norm
+                    .forward(&self.mapper.cast_nm_device(&xs, false)?)?,
             };
             let store_spec = self.store_spec_hidden.load(Ordering::Relaxed);
             if store_spec {

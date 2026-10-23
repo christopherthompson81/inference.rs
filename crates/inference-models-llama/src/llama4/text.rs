@@ -875,7 +875,8 @@ impl TextModel {
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
             |device| {
-                Llama3RotaryEmbedding::new(vb_m.dtype(), cfg.rope_spec(), device, is_gptx, None)
+                let dtype = mapper.activation_dtype_on(device).unwrap_or(vb_m.dtype());
+                Llama3RotaryEmbedding::new(dtype, cfg.rope_spec(), device, is_gptx, None)
             },
         )?;
         let blocks = NiceProgressBar::<_, 'b'>(
@@ -1053,7 +1054,7 @@ impl TextModel {
                 block_idx,
             )?;
         }
-        let x = x.to_device(&self.device)?;
+        let x = self.mapper.cast_nm_device(&x, false)?;
         let x = self.ln_f.forward(&x)?;
         let x = ctx.logits(&x)?;
         ctx.lm_head(&*self.lm_head, &x)

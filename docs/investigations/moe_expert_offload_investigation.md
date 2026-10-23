@@ -560,3 +560,74 @@ inference bench ... --moe-expert-cache 160 --pa-context-len 8192 --prompt-len 30
 
 Open: a CPU layer's attention and GDN still run Candle's generic CPU ops (the forced split's TTFT is 4x the
 all-GPU one); the GGUF dense CPU layers were not profiled past the experts.
+
+## Run 19 - 2026-10-23 09:57
+
+Question: what is left of a CPU layer's prefill cost once the experts run on the block kernels (Run 18's forced split
+prefills 512 tokens in 14.6 s against 3.7 s all on the GPU)?
+
+Bottom-up on the real-width checkpoint (Flash-Next widths, 3 GDN + 1 attention layer, 4 experts of 32, Qwen
+tokenizer), CPU only, sampled from inside gdb (a Python timer reads per-thread CPU from /proc, interrupts once a
+second, and backtraces the threads that were busy):
+
+```
+inference bench --cpu -m <checkpoint> --prompt-len 512 --gen-len 8
+bf16                prefill 5.12-5.27 s    decode 134-137 ms (500 ms before Run 18's BF16 matmul)
+f32                 prefill 3.13 s         decode 144 ms
+bf16 --isq q8_0     prefill 3.91 s         decode 55.6 ms
+f32  --isq q8_0     prefill 2.26 s         decode 47.9 ms
+```
+
+f32 prefill samples (2000 tokens, 12.0 s) sit in gemm's f32 microkernels across the threads: real work, at about 100
+GFLOP/s. bf16 with Q8_0 weights (the GGUF path; 2000 tokens, 15.8 s) has no dominant site: BF16 sum reductions (the
+hyper-connection mean), unary maps (sigmoid), and the CPU attention's BF16 dot/mad, each converting element by element
+on one thread. BF16 activations cost 1.7x over F32 on the same quantized weights. The real split's CPU layers come to
+about 2.2 s a layer for 512 tokens: about 1.2 s of experts and 1 s of the rest, as here.
+
+Implication: no single-thread stall is left; the remaining cost is BF16 activations on the CPU. llama.cpp computes CPU
+layers in F32 activations. Options: run CPU-mapped layers in F32 (cast at the device boundary, F32 norms and small
+dense weights), or vectorize and thread the BF16 reduce and unary ops one by one.
+
+## Run 20 - 2026-10-23 11:06
+
+Question: do CPU layers beside a GPU run faster in F32 activations (Run 19's choice), and what breaks when one map
+carries two activation dtypes?
+
+Built: the layer mapper learns the model dtype (`DeviceMapper::set_model_dtype`, called once the load dtype is
+resolved); on a map that mixes the CPU with an accelerator and a non-F32 dtype, `map` casts float activations to F32
+on the way into a CPU layer and back on the way out, `cast_nm_device` back to the model dtype, and `set_device` gives
+a CPU layer's VarBuilder F32 (on the ISQ path too, where the device is set later). `activation_dtype_on(device)` tells
+per-device builders the dtype.
+
+What the split tests found, in order (a tiny Flash-Next and a tiny Llama, half their layers on the CPU, BF16):
+- Qwen3.5/Flash-Next computed RoPE cos/sin with the first full-attention layer's table but the GPU's position ids;
+  with that layer on the CPU the devices clashed (`device mismatch in mul`), on master too. Position ids now map to
+  that layer, and each layer casts the table up when it runs in F32.
+- Hidden states reached the final norm through `to_device`, skipping the cast: Qwen3.5 and the shared decoder, then
+  the same in ten bespoke models (llama4, gemma3n, quantized llama, voxtral, lfm2, mllama, gpt-oss, hunyuan,
+  qwen3-next, granite). All go through `cast_nm_device` now.
+- Per-device RoPE tables were built in the model dtype; the shared decoder and the five bespoke models that build them
+  with `per_layer_device` take `activation_dtype_on(device)`.
+- The per-sequence KV cache is preallocated in the model dtype; an empty buffer now takes its first write's dtype.
+- GGUF (and other weight sources) hand back unquantized layers in the model dtype whatever the VarBuilder asks:
+  `QuantMethod::unquantized_in` converts them, applied where weight-source linears load.
+- Prompt scoring reported a `CompletionModelError` as "prompt scoring did not return logits"; it is now logged like a
+  chat model error.
+
+Tests: `flash_next_split_across_gpu_and_cpu_scores_as_on_the_gpu` and `a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu`
+compare the split's mean logprob error against an F32 CPU reference with the all-GPU BF16 model's (this random
+Flash-Next checkpoint amplifies BF16 error at a few positions: worst 2.2 nats either way, mean 0.24, so a per-token
+bar fails both).
+
+```
+inference bench -m <real-width 4-layer checkpoint> --dtype bf16 -n "0:2" --prompt-len 512 --gen-len 16 (alternating)
+CPU layers BF16: TTFT 2387, 2268 ms   decode 30.1, 25.5 ms
+CPU layers F32:  TTFT 1472, 1463 ms   decode 28.4, 25.9 ms   (prefill -37%)
+```
+
+Dead end, the real GGUF split (`-n "0:43"`): TTFT 94, 292 and 272 s with F32 CPU layers, 93 s without, and master
+itself 67 and 179 s, where it measured 14.6 s in Run 18. Not the code: about 1 GB free, 108 GB of page cache, and
+during prefill 2 to 10 direct-reclaim stalls and 7 to 30 compaction stalls a second, at 1 to 6 cores. The 57 GiB
+pinned copy of the GPU layers' experts and the 88 GB mapping do not both fit in 125 GB, so every activation buffer a
+CPU op allocates waits on reclaim. Real-model timings mean nothing until the experts stop being copied (pageable
+copies from the mapping, as llama.cpp does).

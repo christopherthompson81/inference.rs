@@ -103,7 +103,13 @@ impl SingleCache {
         let seq_len = src.dim(self.dim)?;
         // This doesn't seem very idiomatic but because the creation can fail, it's tricky to use
         // self.all_data.get_or_insert_with.
-        if self.all_data.is_none() {
+        // an empty buffer preallocated in the model dtype takes the first write's, as a CPU layer beside the GPU's F32
+        let stale = self.current_seq_len == 0
+            && self
+                .all_data
+                .as_ref()
+                .is_some_and(|ad| ad.dtype() != src.dtype());
+        if self.all_data.is_none() || stale {
             let mut shape = src.dims().to_vec();
             shape[self.dim] = self.capacity_seq_len;
             let ad = Tensor::zeros(shape, src.dtype(), src.device())?;

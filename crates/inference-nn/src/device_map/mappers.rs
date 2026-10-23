@@ -23,6 +23,24 @@ pub trait DeviceMapper: Debug {
     fn get_comm_for(&self, layer_idx: usize) -> Result<Arc<inference_quant::Comm>>;
 
     fn get_min_dtype(&self, dtype: &dyn TryIntoDType) -> Result<DType>;
+
+    /// Tells the mapper the model's activation dtype, so CPU layers beside an accelerator can depart from it.
+    fn set_model_dtype(&mut self, _dtype: DType) {}
+
+    /// The activation dtype on `device` when it differs from the model's: F32 on the CPU layers of a map that also
+    /// uses an accelerator, since the CPU kernels have no fast BF16 or F16 arithmetic.
+    fn activation_dtype_on(&self, _device: &Device) -> Option<DType> {
+        None
+    }
+}
+
+// Casts a float activation between the model dtype and the CPU layers' F32; other tensors (ids, positions) pass
+fn cast_activation(x: Tensor, model: DType, to: DType) -> Result<Tensor> {
+    if x.dtype() != to && (x.dtype() == model || x.dtype() == DType::F32) {
+        x.to_dtype(to)
+    } else {
+        Ok(x)
+    }
 }
 
 #[derive(Debug)]
@@ -30,6 +48,8 @@ pub struct LayerDeviceMapper {
     mappings: Vec<Device>,
     nm_device: Device,
     cuda_peer_access: CudaPeerAccess,
+    // the model dtype, when CPU layers run in F32 beside an accelerator
+    cpu_f32_from: Option<DType>,
 }
 
 impl LayerDeviceMapper {
@@ -42,14 +62,24 @@ impl LayerDeviceMapper {
             mappings,
             nm_device,
             cuda_peer_access,
+            cpu_f32_from: None,
         }
+    }
+
+    fn dtype_on(&self, device: &Device) -> Option<(DType, DType)> {
+        let model = self.cpu_f32_from?;
+        Some((model, if device.is_cpu() { DType::F32 } else { model }))
     }
 }
 
 impl DeviceMapper for LayerDeviceMapper {
     fn map(&self, input: Tensor, layer: usize) -> Result<Tensor> {
-        self.cuda_peer_access
-            .to_device(&input, &self.mappings[layer])
+        let device = &self.mappings[layer];
+        let x = self.cuda_peer_access.to_device(&input, device)?;
+        match self.dtype_on(device) {
+            Some((model, to)) => cast_activation(x, model, to),
+            None => Ok(x),
+        }
     }
     fn set_device(
         &self,
@@ -57,10 +87,16 @@ impl DeviceMapper for LayerDeviceMapper {
         varbuilder: ShardedVarBuilder,
         loading_isq: bool,
     ) -> ShardedVarBuilder {
+        let device = &self.mappings[layer];
+        // an ISQ layer loads where it is quantized and moves later, but in its layer's dtype
+        let varbuilder = match self.dtype_on(device) {
+            Some((_, to)) => varbuilder.set_dtype(to),
+            None => varbuilder,
+        };
         if loading_isq {
             return varbuilder;
         }
-        varbuilder.set_device(self.mappings[layer].clone())
+        varbuilder.set_device(device.clone())
     }
     fn device_for(&self, layer: usize, loading_isq: bool) -> Option<&Device> {
         if loading_isq {
@@ -78,22 +114,40 @@ impl DeviceMapper for LayerDeviceMapper {
     }
     fn cast_nm_device(&self, x: &Tensor, loading_isq: bool) -> Result<Tensor> {
         if loading_isq {
-            x.to_device(&Device::Cpu)
-        } else {
-            self.cuda_peer_access.to_device(x, &self.nm_device)
+            return x.to_device(&Device::Cpu);
+        }
+        let x = self.cuda_peer_access.to_device(x, &self.nm_device)?;
+        match self.dtype_on(&self.nm_device) {
+            Some((model, to)) => cast_activation(x, model, to),
+            None => Ok(x),
         }
     }
     fn set_nm_device(&self, varbuilder: ShardedVarBuilder, loading_isq: bool) -> ShardedVarBuilder {
         if loading_isq {
-            varbuilder
-        } else {
-            varbuilder.set_device(self.nm_device.clone())
+            return varbuilder;
+        }
+        let varbuilder = varbuilder.set_device(self.nm_device.clone());
+        match self.dtype_on(&self.nm_device) {
+            Some((_, to)) => varbuilder.set_dtype(to),
+            None => varbuilder,
         }
     }
     fn get_min_dtype(&self, dtype: &dyn TryIntoDType) -> Result<DType> {
         dtype
             .try_into_dtype(&self.mappings.iter().collect::<Vec<_>>())
             .map_err(inference_tensor::Error::msg)
+    }
+    fn set_model_dtype(&mut self, dtype: DType) {
+        let devices = self.mappings.iter().chain([&self.nm_device]);
+        let (cpu, accelerator) = devices.fold((false, false), |(cpu, acc), d| {
+            (cpu || d.is_cpu(), acc || !d.is_cpu())
+        });
+        self.cpu_f32_from = (cpu && accelerator && dtype != DType::F32).then_some(dtype);
+    }
+    fn activation_dtype_on(&self, device: &Device) -> Option<DType> {
+        self.dtype_on(device)
+            .map(|(_, to)| to)
+            .filter(|&to| Some(to) != self.cpu_f32_from)
     }
     fn num_device_mapping_layers(&self) -> usize {
         self.mappings.len()

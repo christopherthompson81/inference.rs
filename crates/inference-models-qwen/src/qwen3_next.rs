@@ -1091,7 +1091,7 @@ impl Model {
             }
         }
 
-        let x = x.to_device(&self.device)?;
+        let x = self.mapper.cast_nm_device(&x, false)?;
         let x = self.norm.forward(&x)?;
 
         let x = ctx.logits(&x)?;

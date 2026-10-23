@@ -54,8 +54,8 @@ pub(crate) fn materialize_device_mapper(
             inputs.available_devices,
         )
     };
-    let pipeline_mapper = build()?;
-    let mapper = build()?;
+    let mut pipeline_mapper = build()?;
+    let mut mapper = build()?;
     let layer_devices = (0..inputs.num_layers)
         .map(|layer| mapper.device_for(layer, false).cloned())
         .collect();
@@ -65,6 +65,8 @@ pub(crate) fn materialize_device_mapper(
         inputs.available_devices,
         inputs.write_uqff,
     )?;
+    mapper.set_model_dtype(dtype);
+    pipeline_mapper.set_model_dtype(dtype);
 
     // get_device_layers already keeps PagedAttention off the CPU; a manual map can still mix devices
     if paged_attn_config.is_some() && mapper.get_unique_devices().iter().any(Device::is_cpu) {

@@ -900,7 +900,7 @@ impl Model {
                     cfg.max_position_embeddings,
                     device,
                     is_gptx,
-                    vb_m.dtype(),
+                    mapper.activation_dtype_on(device).unwrap_or(vb_m.dtype()),
                 )
             },
         )?;
@@ -1021,7 +1021,7 @@ impl Model {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?;
         }
-        let xs = xs.to_device(&self.device)?;
+        let xs = self.mapper.cast_nm_device(&xs, false)?;
         let xs = xs.apply(&self.norm)?;
         let xs = ctx.logits(&xs)?;
         ctx.lm_head(&*self.lm_head, &xs)

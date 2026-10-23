@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use inference::{
-    IsqType, LoraModelBuilder, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages,
-    TextModelBuilder, UqffTextModelBuilder,
+    IsqType, LoraModelBuilder, Model, ModelDType, PromptInput, PromptLogitsRequest, RequestBuilder,
+    TextMessageRole, TextMessages, TextModelBuilder, UqffTextModelBuilder,
 };
 use inference_tensor::{Device, Tensor};
 
@@ -36,6 +36,10 @@ const F32_LOGPROB_TOLERANCE: f32 = 1e-2;
 const CPU_PIN_TOLERANCE: f32 = 1e-5;
 // Cached KV comes from a different prefill than a recompute, so logprobs match only to rounding.
 const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;
+// how much more BF16 error a split model may show than the model all on the GPU
+const SPLIT_ERROR_RATIO: f32 = 1.25;
+// token ids the split test scores, inside the tiny vocabulary
+const SPLIT_TOKENS: [u32; 12] = [1, 15, 40, 7, 99, 3, 61, 22, 8, 130, 5, 77];
 // Part of the engine's refusal to requantize a model with no tracked layers.
 const NOT_AN_ISQ_LOAD: &str = "loaded with ISQ";
 
@@ -410,4 +414,58 @@ async fn paged_gpu_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
         return Ok(());
     }
     decode_graphs::assert_rounds_without_graphs(paged_gpu_rounds, &GRAPH_TRACES).await
+}
+
+// Each position's logprob of the next of `tokens`, as one prefill scores them.
+async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(tokens.to_vec()),
+            output: Default::default(),
+        })
+        .await?;
+    Ok(scored
+        .token_logprobs
+        .iter()
+        .skip(1)
+        .map(|logprob| logprob.unwrap_or(f32::NAN))
+        .collect())
+}
+
+// A layer on the CPU beside the GPU runs in F32 and hands BF16 back: the split model scores the F32 reference no worse
+// than the model all on the GPU in BF16 does.
+#[tokio::test]
+async fn a_model_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let checkpoint = tiny_llama_checkpoint()?;
+    let expected = score(
+        &cpu_text_builder(checkpoint.path()).build().await?,
+        &SPLIT_TOKENS,
+    )
+    .await?;
+    let mean_error = |scored: &[f32]| {
+        expected
+            .iter()
+            .zip(scored)
+            .map(|(e, a)| (e - a).abs())
+            .sum::<f32>()
+            / expected.len() as f32
+    };
+    let bf16 =
+        || TextModelBuilder::new(checkpoint.path().to_string_lossy()).with_dtype(ModelDType::BF16);
+    let on_gpu = mean_error(&score(&bf16().build().await?, &SPLIT_TOKENS).await?);
+    let split = bf16()
+        .with_device_layers(vec![format!("0:{}", TINY_LAYERS / 2)])
+        .build()
+        .await?;
+    let scored = score(&split, &SPLIT_TOKENS).await?;
+    let split_error = mean_error(&scored);
+    anyhow::ensure!(
+        scored.len() == expected.len() && split_error <= on_gpu * SPLIT_ERROR_RATIO,
+        "the split model scores worse: mean logprob error {split_error} against {on_gpu} on the GPU"
+    );
+    Ok(())
 }

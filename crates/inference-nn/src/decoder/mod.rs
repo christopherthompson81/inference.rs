@@ -1285,7 +1285,10 @@ impl DecoderStack {
                         mapper,
                         spec.num_layers(),
                         real_device,
-                        |device| spec.rope(kind, &vb_rope, device, is_gptx, dtype),
+                        |device| {
+                            let dtype = mapper.activation_dtype_on(device).unwrap_or(dtype);
+                            spec.rope(kind, &vb_rope, device, is_gptx, dtype)
+                        },
                     )
                 };
                 Ok(StandardLayers {
@@ -1492,7 +1495,7 @@ impl<A: LayerAttention, F: LayerFfn> DecoderStack<A, F> {
             )?;
             xs = after_layer(i, xs)?;
         }
-        self.norm.forward(&xs.to_device(&self.device)?)
+        self.norm.forward(&self.mapper.cast_nm_device(&xs, false)?)
     }
 
     /// The tensors ISQ leaves alone, under the stack's own prefix; `with_projections` for MoE-experts-only ISQ.

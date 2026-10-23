@@ -609,7 +609,7 @@ impl VoxtralModel {
                     cfg.model_max_length,
                     device,
                     false, // !is_gptx: consolidated.safetensors stores Q/K in interleaved layout
-                    vb.dtype(),
+                    mapper.activation_dtype_on(device).unwrap_or(vb.dtype()),
                 )
             },
         )?;
@@ -868,7 +868,7 @@ impl VoxtralModel {
                 i,
             )?;
         }
-        let xs = xs.to_device(&self.device)?;
+        let xs = self.mapper.cast_nm_device(&xs, false)?;
         let xs = xs.apply(&self.norm)?;
 
         let xs = ctx.logits(&xs)?;

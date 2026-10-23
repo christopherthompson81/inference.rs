@@ -895,7 +895,7 @@ impl Model {
             xs = layer.forward(&xs, &layer_mask, &mut cache[i], i, ctx)?;
         }
 
-        xs = xs.to_device(&self.device)?;
+        xs = self.mapper.cast_nm_device(&xs, false)?;
         xs = self.norm.forward(&xs)?;
         let xs = ctx.logits(&xs)?;
 
