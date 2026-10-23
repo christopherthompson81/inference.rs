@@ -12,8 +12,8 @@ use inference_tensor::{Device, Tensor};
 #[path = "../support/qwen_vl_tiny.rs"]
 mod support;
 use support::{
-    tiny_qwen2_5_vl, tiny_qwen2_vl, tiny_qwen3_5_moe, tiny_qwen3_5_moe_mtp, tiny_qwen3_5_mtp,
-    tiny_qwen3_vl, tiny_qwen3_vl_moe,
+    tiny_flash_next_vl, tiny_qwen2_5_vl, tiny_qwen2_vl, tiny_qwen3_5_moe, tiny_qwen3_5_moe_mtp,
+    tiny_qwen3_5_mtp, tiny_qwen3_vl, tiny_qwen3_vl_moe,
 };
 
 const PROMPT: &str = "describe";
@@ -369,6 +369,57 @@ async fn qwen3_5_moe_text_and_image() -> anyhow::Result<()> {
                 .all(|(d, e)| d.0 == e.0 && (d.1 - e.1).abs() < tolerance);
         anyhow::ensure!(close, "decode moved: {decode:?}, pinned {expected:?}");
     }
+    Ok(())
+}
+
+// Flash-Next reads each row's token window (PLE n-grams, QSA spans) beside the image inputs. The F32 CPU decode is
+// pinned; on the GPU only the image decode is, within BF16 rounding, since the random text decode has a near tie at
+// its second step that BF16 breaks the other way.
+#[tokio::test]
+async fn flash_next_text_and_image() -> anyhow::Result<()> {
+    let checkpoint = tiny_flash_next_vl()?;
+    let expected_text = [
+        (181, -2.2262557),
+        (177, -0.9776185),
+        (208, -1.7997849),
+        (79, -1.2319181),
+        (147, -2.196763),
+        (161, -1.2565179),
+    ];
+    let expected_image = [
+        (40, -2.2087302),
+        (133, -0.34926957),
+        (55, -1.8613057),
+        (106, -1.1794639),
+        (241, -1.7585764),
+        (261, -1.5969937),
+    ];
+    let (model, tolerance) = if ON_GPU {
+        let model = builder(checkpoint.path())
+            .with_dtype(ModelDType::BF16)
+            .build()
+            .await?;
+        (model, BF16_LOGPROB_TOLERANCE)
+    } else {
+        (build(checkpoint.path()).await?, LOGPROB_TOLERANCE)
+    };
+    let [text, image] = qwen3_5_moe_traces(&model).await?;
+    let mut pinned = vec![(&image, &expected_image)];
+    if !ON_GPU {
+        pinned.push((&text, &expected_text));
+    }
+    for (decode, expected) in pinned {
+        let close = decode.len() == expected.len()
+            && decode
+                .iter()
+                .zip(expected)
+                .all(|(d, e)| d.0 == e.0 && (d.1 - e.1).abs() < tolerance);
+        anyhow::ensure!(close, "decode moved: {decode:?}, pinned {expected:?}");
+    }
+    anyhow::ensure!(
+        text.len() == expected_text.len(),
+        "the text decode stopped early: {text:?}"
+    );
     Ok(())
 }
 

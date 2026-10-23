@@ -1638,6 +1638,7 @@ class MultimodalLoaderType(str, Enum):
     QWEN3VLMOE = "qwen3vlmoe"
     QWEN3_5 = "qwen3_5"
     QWEN3_5MOE = "qwen3_5moe"
+    QWEN4EXP = "qwen4exp"
     VOXTRAL = "voxtral"
     GEMMA4 = "gemma4"
     MUSE_GLIMMER = "muse_glimmer"

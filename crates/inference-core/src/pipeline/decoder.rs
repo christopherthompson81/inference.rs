@@ -317,7 +317,7 @@ impl StepInputs {
                     flash_meta: inputs.flash_meta,
                     recurrent_batch_kind: inputs.recurrent_batch_kind,
                     adapter_leases: inputs.adapter_leases,
-                    token_window: None,
+                    token_window: inputs.token_window,
                 }
             }
         }
@@ -329,14 +329,21 @@ impl PreProcessingMixin for DecoderPipeline {
         Some(self.core.chat_template.clone())
     }
     fn get_input_processor_config(&self) -> Option<Arc<dyn Any>> {
-        if let Some(media) = &self.media {
-            return Some(media.preprocessor_config.clone() as Arc<dyn Any>);
-        }
-        match &self.model {
-            DecoderModel::Text(model) => model.token_window().map(|preceding| {
-                Arc::new(crate::model::TokenWindowRequest { preceding }) as Arc<dyn Any>
-            }),
-            _ => None,
+        let preceding = match &self.model {
+            DecoderModel::Text(model) => model.token_window(),
+            DecoderModel::Multimodal(model) => model.token_window(),
+        };
+        let token_window =
+            preceding.map(|preceding| crate::model::TokenWindowRequest { preceding });
+        match (&self.media, token_window) {
+            (Some(media), None) => Some(media.preprocessor_config.clone() as Arc<dyn Any>),
+            (Some(media), Some(token_window)) => Some(Arc::new(
+                crate::vision_models::media_host::MediaInputsConfig {
+                    preprocessor: media.preprocessor_config.clone(),
+                    token_window,
+                },
+            ) as Arc<dyn Any>),
+            (None, token_window) => token_window.map(|request| Arc::new(request) as Arc<dyn Any>),
         }
     }
     fn get_processor(&self) -> Arc<dyn super::Processor> {

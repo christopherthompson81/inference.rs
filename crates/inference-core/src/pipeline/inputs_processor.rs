@@ -1279,7 +1279,7 @@ pub mod text_models_inputs_processor {
     }
 
     /// Each row's chunk `seqlen_offset..position_id` of its sequence, led by up to `preceding` earlier tokens.
-    fn token_window(
+    pub(crate) fn token_window(
         input_seqs: &[&mut Sequence],
         seq_indices: &[usize],
         seqlen_offsets: &[usize],

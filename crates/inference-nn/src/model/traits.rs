@@ -96,6 +96,10 @@ pub trait MultimodalModel:
     fn supports_mixed_media_batches(&self) -> bool {
         false
     }
+    /// As `NormalModel::token_window`.
+    fn token_window(&self) -> Option<usize> {
+        None
+    }
     fn device(&self) -> &Device;
     fn cache(&self) -> &EitherCache;
     fn max_seq_len(&self) -> usize;

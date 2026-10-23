@@ -207,6 +207,7 @@ pub(super) fn supports_dynamic_lora_loader(loader: &MultimodalLoaderType) -> boo
             | MultimodalLoaderType::Qwen3VLMoE
             | MultimodalLoaderType::Qwen3_5
             | MultimodalLoaderType::Qwen3_5Moe
+            | MultimodalLoaderType::Qwen4Exp
             | MultimodalLoaderType::Gemma3
             | MultimodalLoaderType::Gemma3n
             | MultimodalLoaderType::Idefics3

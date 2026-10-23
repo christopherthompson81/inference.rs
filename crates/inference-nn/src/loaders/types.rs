@@ -217,6 +217,7 @@ macro_rules! multimodal_loader_table {
             Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader, feature: "models-qwen" },
             Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader, feature: "models-qwen" },
             Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
+            Qwen4Exp { cli: "qwen4exp", hf: "Qwen4ExpForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
             Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader, feature: "models-llama" },
             Gemma4 {
                 cli: "gemma4",

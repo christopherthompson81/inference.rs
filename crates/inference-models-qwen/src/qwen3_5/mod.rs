@@ -17,7 +17,7 @@ use crate::{
     kv_cache::EitherCache,
     layers::CausalMasker,
     layers::masker::PastKvLenCache,
-    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
+    model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
         AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
         encoder_cache::{CacheModality, EncoderCacheManager},
@@ -423,7 +423,11 @@ impl crate::model::BlockDiffusionMixin for Qwen3_5Model {}
 
 impl MultimodalModel for Qwen3_5Model {
     fn supports_packed_prefill(&self) -> bool {
-        true
+        NormalModel::supports_packed_prefill(&self.text)
+    }
+
+    fn token_window(&self) -> Option<usize> {
+        NormalModel::token_window(&self.text)
     }
 
     fn supports_mixed_media_batches(&self) -> bool {
@@ -492,13 +496,14 @@ impl MultimodalModel for Qwen3_5Model {
     }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        true
+        NormalModel::supports_cuda_decode_graphs(&self.text)
     }
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs_for_args(&self, model_specific_args: &dyn Any) -> bool {
-        model_specific_args
-            .downcast_ref::<Qwen2VLVisionSpecificArgs>()
-            .is_some()
+        self.supports_cuda_decode_graphs()
+            && model_specific_args
+                .downcast_ref::<Qwen2VLVisionSpecificArgs>()
+                .is_some()
     }
     fn config(&self) -> &ModelConfigMetadata {
         &self.text.cfg

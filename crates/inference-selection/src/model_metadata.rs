@@ -319,6 +319,11 @@ impl SupportedArch for MultimodalLoaderType {
                     ex!("Qwen/Qwen3.6-35B-A3B", "3.6"),
                 ],
             },
+            Self::Qwen4Exp => ArchMetadata {
+                families: &["Qwen3.8-Flash-Next"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("Qwen/Qwen3.8-Flash-Next")],
+            },
             Self::Voxtral => ArchMetadata {
                 families: &["Voxtral"],
                 modalities: &[Text, Audio],

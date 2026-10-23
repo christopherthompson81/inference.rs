@@ -124,10 +124,11 @@ pub fn record_checkpoint_seeded_by_name(
 pub fn record_checkpoint_seeded_with_shapes(
     files: &[&Path],
     num_layers: usize,
+    absent: &[&str],
     shapes: HashMap<String, Vec<usize>>,
     build: impl FnOnce(ShardedVarBuilder, NormalLoadingMetadata) -> CandleResult<()>,
 ) -> anyhow::Result<tempfile::TempDir> {
-    record(files, num_layers, &[], shapes, true, build)
+    record(files, num_layers, absent, shapes, true, build)
 }
 
 /// As [`record_checkpoint`], with the shapes of tensors the loader inspects before reading them.

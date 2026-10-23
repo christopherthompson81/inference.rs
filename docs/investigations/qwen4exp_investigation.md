@@ -542,3 +542,42 @@ Acceptance is far above unsloth's 66%, but no speedup: a draft step runs the hea
 the verify's wider routing, and both miss the expert cache. The outputs diverge from plain greedy at the same bytes,
 with the same continuations, as both DFlash 2 runs (488 and 1220): a near tie in plain decode that verification
 breaks the other way, not a fault in either drafter.
+
+## Run 16 - 2026-10-23 15:19
+
+Question: does Flash-Next read images, from the unsloth projector GGUF and from the HF checkpoint layout?
+
+Probe: the UD-IQ4_XS GGUF with `--mmproj mmproj-BF16.gguf` (clip, `qwen3vl_merger`, 27 blocks of 1152, projection
+2560, patch 16, no deepstack) and the published tokenizer, then an OCR crop and a small table image (fixtures).
+
+1. The GGUF multimodal path did not know `qwen4exp`: added it to the Qwen family names (Qwen3-VL vision, Flash-Next
+   text bindings, the MTP bindings). Loads.
+2. Every request then failed "QSA reads the batch's token window": the multimodal inputs carried no window, and
+   `MultimodalModel` had no `token_window()`. Added it (the Qwen3.5 VL model delegates to its text model, as it now
+   does for packed prefill and decode graphs, both of which PLE rules out). The media inputs processor builds the
+   window when the model asks for one, beside the preprocessor config.
+3. Then decode failed "token window 113..51 is outside a 114-token sequence": a completion's `position_ids` carry
+   the M-RoPE delta (51 = 113 less the image's position savings), not token indices. A completion's chunk runs to
+   the sequence's end plus its staged drafts, so the window takes that end; prompt positions are plain.
+
+```
+ocr:   The quick brown fox jumps 42 times.
+table: The table presents data on two types of fruit, apples and lemons, categorized by their respective colors
+       (red for apples and yellow for lemons) and the count of each (12 apples and 7 lemons).
+```
+
+Image tokens and PLE: llama.cpp feeds an image as an embedding batch with no ids and stands in
+`qwen4exp.ple.image_token_id` (248056) for each image position, which it says is what the reference hashes. Ours
+hashes the sequence's own ids, and image positions there are `<|image_pad|>`, id 248056 in the tokenizer: the same.
+
+HF safetensors: the published index has `model.language_model.*` (the Flash-Next text tensors) and `model.visual.*`
+(Qwen3-VL blocks and merger), the Qwen3.5-MoE VL layout. Added a `Qwen4ExpForConditionalGeneration` multimodal row
+on `Qwen3_5MoeLoader`; the GGUF family now reports it too.
+
+```
+cargo nextest run -p inference [--features cuda] -E 'test(/flash_next_text_and_image/)'   pass, CPU and CUDA
+```
+
+The tiny checkpoint is the Qwen3.5-MoE VL fixture with the Flash-Next text fields. Its random text decode has a
+near tie at step 2 that BF16 on the GPU breaks the other way (logprob -0.95 against -0.98 pinned), so the GPU run
+pins only the image decode.

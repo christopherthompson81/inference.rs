@@ -27,7 +27,7 @@ use crate::{
         InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
         text_models_inputs_processor::{
             ModelInputs as TextModelInputs, TextInputsProcessor, get_completion_input,
-            get_completion_input_windowed, get_prompt_input,
+            get_completion_input_windowed, get_prompt_input, token_window,
         },
     },
     sequence::Sequence,
@@ -366,7 +366,27 @@ impl InputsHost for EngineInputsHost {
     }
 }
 
-/// Runs a model's `MultimodalInputsProcessor` as the engine's `InputsProcessor`, adding the adapter leases.
+/// The preprocessor config of a multimodal model that also reads a token window.
+pub(crate) struct MediaInputsConfig {
+    pub(crate) preprocessor: Arc<dyn Any + Send + Sync>,
+    pub(crate) token_window: crate::model::TokenWindowRequest,
+}
+
+fn split_media_config(other_config: Option<Arc<dyn Any>>) -> (Option<Arc<dyn Any>>, Option<usize>) {
+    if let Some(config) = other_config
+        .as_ref()
+        .and_then(|config| config.downcast_ref::<MediaInputsConfig>())
+    {
+        return (
+            Some(config.preprocessor.clone()),
+            Some(config.token_window.preceding),
+        );
+    }
+    (other_config, None)
+}
+
+/// Runs a model's `MultimodalInputsProcessor` as the engine's `InputsProcessor`, adding the adapter leases and the
+/// token window.
 pub(crate) struct MediaInputsProcessor(pub(crate) Arc<dyn MultimodalInputsProcessor>);
 
 impl InputsProcessor for MediaInputsProcessor {
@@ -382,7 +402,7 @@ impl InputsProcessor for MediaInputsProcessor {
             tokenizer,
             &mut media_views(input_seqs),
             device,
-            other_config,
+            split_media_config(other_config).0,
             paged_attn_metadata,
         )
     }
@@ -401,6 +421,7 @@ impl InputsProcessor for MediaInputsProcessor {
         paged_attn_metadata: Option<PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
     ) -> Result<InputProcessorOutput> {
+        let (other_config, preceding) = split_media_config(other_config);
         let InputProcessorOutput {
             inputs,
             seq_indices,
@@ -433,6 +454,23 @@ impl InputsProcessor for MediaInputsProcessor {
                 flash_meta,
                 recurrent_batch_kind,
             } = *media;
+            let token_window = preceding
+                .map(|preceding| {
+                    // a completion's positions carry the M-RoPE delta; its chunk runs to the sequence's end
+                    let ends = if is_prompt {
+                        position_ids.clone()
+                    } else {
+                        seq_indices
+                            .iter()
+                            .map(|&index| {
+                                let seq = &input_seqs[index];
+                                seq.len() + seq.active_staged_speculative_tokens().len()
+                            })
+                            .collect()
+                    };
+                    token_window(input_seqs, &seq_indices, &seqlen_offsets, &ends, preceding)
+                })
+                .transpose()?;
             Box::new(ModelInputs {
                 input_ids,
                 seqlen_offsets,
@@ -444,6 +482,7 @@ impl InputsProcessor for MediaInputsProcessor {
                 flash_meta,
                 recurrent_batch_kind,
                 adapter_leases: super::adapter_leases(input_seqs, &seq_indices),
+                token_window,
             }) as Box<dyn Any>
         };
         Ok(InputProcessorOutput {
