@@ -169,6 +169,10 @@ pub trait ModelConfigLike {
     fn auxiliary_paged_layers(&self) -> usize {
         0
     }
+    /// Whether an attention kernel reads `layer_idx`'s paged cache, so its shape decides the attention backend.
+    fn layer_is_attended(&self, _layer_idx: usize) -> bool {
+        true
+    }
     /// Bytes of one sequence's recurrent state (a hybrid model's conv and recurrent rows over its linear layers),
     /// which the recurrent pool holds per slot beside the paged cache.
     fn recurrent_state_bytes_per_sequence(&self) -> usize {
@@ -431,6 +435,8 @@ pub struct AuxiliaryPagedLayers {
     pub num_attn_heads: usize,
     pub num_kv_heads: usize,
     pub head_dim: usize,
+    // false for layers no attention kernel reads (QSA's indexer keys, which it copies out cell by cell)
+    pub attended: bool,
 }
 
 impl AuxiliaryPagedLayers {
@@ -532,6 +538,13 @@ impl ModelConfigLike for AuxiliaryPagedKvCacheConfig {
     fn auxiliary_paged_layers(&self) -> usize {
         self.base.auxiliary_paged_layers() + self.auxiliary.count
     }
+    fn layer_is_attended(&self, layer_idx: usize) -> bool {
+        if self.is_auxiliary(layer_idx) {
+            self.auxiliary.attended
+        } else {
+            self.base.layer_is_attended(layer_idx)
+        }
+    }
     fn recurrent_state_bytes_per_sequence(&self) -> usize {
         self.base.recurrent_state_bytes_per_sequence()
     }
@@ -624,6 +637,7 @@ mod tests {
                 num_attn_heads: 8,
                 num_kv_heads: 4,
                 head_dim: 64,
+                attended: true,
             },
         );
         assert_eq!(config.num_layers(), 6);

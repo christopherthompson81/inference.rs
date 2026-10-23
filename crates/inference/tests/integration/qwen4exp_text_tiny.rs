@@ -4,6 +4,8 @@ use inference::{Model, ModelDType, PromptInput, PromptLogitsRequest, TextModelBu
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
 
+#[path = "../support/decode_graphs.rs"]
+mod decode_graphs;
 #[path = "../support/recording.rs"]
 mod recording;
 #[path = "../support/tiny_drafter.rs"]
@@ -45,6 +47,12 @@ const DFLASH_WINDOW: usize = 32;
 const DENSE_BUDGET: usize = 1024;
 // two blocks of 4: QSA selects from the 12th token on
 const SPARSE_BUDGET: usize = 8;
+// past several of QSA's 4-token blocks, so decode pools and selects at the sparse budget
+const GRAPH_MAX_LEN: usize = 24;
+// rows at different positions, one a single token (a one-token prompt is a decode-shaped step that is not one)
+const GRAPH_PROMPT_LENS: [usize; 5] = [18, 6, 1, 30, 11];
+// rounds of concurrent requests, so the decode batches fill different graph buckets
+const GRAPH_BATCHES: [usize; 3] = [1, 3, 5];
 
 fn tiny_flash_next(budget: usize) -> anyhow::Result<tempfile::TempDir> {
     tiny_flash_next_with(budget, false)
@@ -235,6 +243,199 @@ async fn flash_next_decode_matches_prefill_scoring() -> anyhow::Result<()> {
             "step {step}: decode logprob {decode}, prefill {prefill}"
         );
     }
+    Ok(())
+}
+
+// Each prompt's trace, per round of concurrent requests (batches of 1, 3, then 5 rows at different positions).
+async fn sparse_paged_rounds() -> anyhow::Result<decode_graphs::Rounds> {
+    let checkpoint = tiny_flash_next(SPARSE_BUDGET)?;
+    let model = TextModelBuilder::new(checkpoint.path().to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
+        .build()
+        .await?;
+    let prompts = graph_prompts();
+    let mut rounds = Vec::new();
+    for batch in GRAPH_BATCHES {
+        let traces = futures::future::try_join_all(
+            prompts[..batch]
+                .iter()
+                .map(|prompt| complete(&model, prompt, GRAPH_MAX_LEN)),
+        )
+        .await?;
+        rounds.push(traces.into_iter().map(|(trace, _)| trace).collect());
+    }
+    Ok(rounds)
+}
+
+// prompts of different lengths, each from a different offset of the long prompt
+fn graph_prompts() -> Vec<Vec<u32>> {
+    let long = long_prompt();
+    GRAPH_PROMPT_LENS
+        .iter()
+        .enumerate()
+        .map(|(i, &len)| long[i * LONG_PROMPT_STRIDE..i * LONG_PROMPT_STRIDE + len].to_vec())
+        .collect()
+}
+
+// Each GRAPH_PROMPTS entry's greedy (token, logprob) per step, at the sparse budget.
+const GRAPH_TRACES: [&[(u32, f32)]; GRAPH_PROMPT_LENS.len()] = [
+    &[
+        (60, -2.7754397),
+        (70, -2.3045204),
+        (146, -2.4595416),
+        (57, -1.9080108),
+        (38, -2.070974),
+        (2, -1.9178662),
+        (174, -2.0139015),
+        (54, -2.0943105),
+        (246, -1.6725147),
+        (154, -2.0765722),
+        (36, -2.6791108),
+        (114, -1.1617093),
+        (38, -0.77665764),
+        (200, -2.1637232),
+        (12, -1.0869504),
+        (164, -2.353417),
+        (184, -1.5384706),
+        (258, -1.7711354),
+        (12, -2.6411786),
+        (223, -2.120865),
+        (66, -1.2155454),
+        (188, -1.8191451),
+        (5, -1.7128062),
+        (39, -2.0306034),
+    ],
+    &[
+        (40, -2.0891964),
+        (81, -2.1105914),
+        (264, -1.9559274),
+        (147, -2.5456686),
+        (227, -0.27145144),
+        (82, -2.3851016),
+        (78, -1.9823914),
+        (107, -1.8044693),
+        (231, -1.9629831),
+        (101, -2.4542363),
+        (223, -1.5837301),
+        (254, -2.2863955),
+        (248, -1.4719763),
+        (60, -0.8847507),
+        (122, -1.8515077),
+        (72, -1.405152),
+        (12, -2.0949738),
+        (122, -1.5231004),
+        (248, -1.2966919),
+        (183, -1.8631635),
+        (68, -2.3594034),
+        (168, -2.4198334),
+        (252, -1.8162934),
+        (12, -1.6859657),
+    ],
+    &[
+        (142, -0.79610795),
+        (130, -2.478674),
+        (128, -2.7200146),
+        (9, -1.814753),
+        (186, -1.407036),
+        (103, -2.5106306),
+        (104, -2.6413653),
+        (104, -2.039918),
+        (250, -1.1279429),
+        (12, -2.812635),
+        (96, -2.1321661),
+        (215, -1.3301358),
+        (122, -1.9185348),
+        (12, -1.8068423),
+        (107, -1.9403114),
+        (214, -1.8179992),
+        (9, -1.9948335),
+        (8, -2.1047947),
+        (9, -1.8423927),
+        (39, -2.2129474),
+        (33, -2.4767978),
+        (9, -2.3248875),
+        (188, -1.0888505),
+        (23, -2.267458),
+    ],
+    &[
+        (103, -1.8091991),
+        (101, -1.4583523),
+        (79, -2.1835215),
+        (61, -2.3571737),
+        (127, -1.9114931),
+        (9, -0.71740574),
+        (247, -1.5026131),
+        (101, -2.6195085),
+        (239, -1.9591839),
+        (214, -2.5655687),
+        (185, -1.3893226),
+        (15, -2.3685029),
+        (229, -1.4274267),
+        (54, -2.0446246),
+        (61, -1.1703922),
+        (138, -2.7512558),
+        (35, -2.1604328),
+        (265, -2.0923183),
+        (122, -2.4234695),
+        (19, -1.7338909),
+        (115, -1.7299356),
+        (135, -2.281396),
+        (143, -2.2849739),
+        (198, -1.6848037),
+    ],
+    &[
+        (168, -2.167865),
+        (185, -1.80428),
+        (172, -2.3003151),
+        (173, -1.6746423),
+        (93, -1.9781379),
+        (231, -1.5851281),
+        (211, -1.955335),
+        (122, -2.0977235),
+        (184, -1.126856),
+        (183, -2.203089),
+        (253, -2.2203863),
+        (200, -1.6282051),
+        (174, -2.555776),
+        (210, -2.2463508),
+        (242, -2.0143116),
+        (123, -1.4788254),
+        (167, -2.1838171),
+        (152, -2.3181276),
+        (64, -2.4066541),
+        (93, -1.5008768),
+        (13, -2.7022696),
+        (36, -0.85658437),
+        (174, -1.9465433),
+        (105, -1.409693),
+    ],
+];
+
+// Decode steps replay captured graphs (PLE's rows gathered by a host function, QSA's plan built on the device), in
+// batches of rows at different positions, and decode as the eager steps do.
+#[tokio::test]
+async fn flash_next_decode_replays_cuda_graphs() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    let snapshotter = decode_graphs::recorder();
+    let rounds = sparse_paged_rounds().await?;
+    decode_graphs::assert_replayed(&decode_graphs::Counters::take(&snapshotter));
+    decode_graphs::assert_traces_up_to_ties(&rounds, &GRAPH_TRACES);
+    Ok(())
+}
+
+#[tokio::test]
+async fn flash_next_decode_without_cuda_graphs_matches() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") {
+        return Ok(());
+    }
+    decode_graphs::disable_graphs();
+    let snapshotter = decode_graphs::recorder();
+    let rounds = sparse_paged_rounds().await?;
+    decode_graphs::assert_disabled(&decode_graphs::Counters::take(&snapshotter));
+    decode_graphs::assert_traces_up_to_ties(&rounds, &GRAPH_TRACES);
     Ok(())
 }
 

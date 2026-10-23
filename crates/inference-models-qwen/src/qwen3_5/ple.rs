@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use inference_quant::{QuantMethod, ShardedVarBuilder};
-use inference_tensor::{D, Device, Result, Tensor};
+use inference_tensor::{D, DType, Device, Result, Tensor};
 
 use super::config::{PleConfig, PleHash, TextConfig};
 use super::hyper::GroupedRmsNorm;
@@ -20,6 +20,9 @@ const SPLITMIX_M2: u64 = 0x94D0_49BB_1331_11EB;
 const LAYER_SEED_PRIME: u64 = 10_007;
 // the reference keeps the gate's square root away from zero
 const GATE_FLOOR: f64 = 1e-6;
+// decode rows one host gather serves: every graph batch bucket
+#[cfg(feature = "cuda")]
+const PLE_HOST_ROWS: usize = inference_nn::cuda::graph_capture::CUDA_GRAPH_MAX_BATCH_BUCKET;
 
 fn splitmix64(value: u64) -> u64 {
     let value = value.wrapping_add(SPLITMIX_GAMMA);
@@ -150,6 +153,21 @@ fn ngram_rows(
     Ok((ids, real_lens))
 }
 
+/// What hashing a window into table rows and gathering them needs, shared with the host gather.
+struct NgramLookup {
+    cfg: PleConfig,
+    hash: PleHash,
+    table: NgramTable,
+}
+
+impl NgramLookup {
+    // `[rows * chunk_len * heads, head_dim]` f32 on the host, with each row's real length
+    fn rows(&self, window: &TokenWindow, chunk_len: usize) -> Result<(Tensor, Vec<usize>)> {
+        let (ids, real_lens) = ngram_rows(window, &self.hash, &self.cfg, chunk_len)?;
+        Ok((self.table.gather(&ids, DType::F32)?, real_lens))
+    }
+}
+
 /// The n-gram table, one tensor (GGUF) or the checkpoint's row shards, kept on the host.
 struct NgramTable {
     // (first row, rows, the shard)
@@ -247,11 +265,20 @@ impl NgramTable {
     }
 }
 
+/// Where a forward's token window is: the host's, or a decode step's in `TokenWindow::decode_rows`' layout on the
+/// device (a captured step's, refreshed before each replay).
+#[derive(Clone, Copy)]
+pub(super) enum PleTokens<'a> {
+    Host(&'a TokenWindow),
+    Device(&'a Tensor),
+}
+
 pub(super) struct PleLayer {
     cfg: PleConfig,
-    hash: PleHash,
     // the n-gram table stays on the host; each forward gathers its rows there
-    table: NgramTable,
+    lookup: Arc<NgramLookup>,
+    #[cfg(feature = "cuda")]
+    host_gather: std::sync::OnceLock<host_gather::HostGather>,
     key_proj: Arc<dyn QuantMethod>,
     value_proj: Arc<dyn QuantMethod>,
     norm_key: GroupedRmsNorm,
@@ -288,13 +315,20 @@ impl PleLayer {
         let conv = vb_plain
             .pp("conv1d")
             .get((width, 1, ple.conv_kernel), "weight")?;
+        let table = NgramTable::load(
+            cfg,
+            rows,
+            ple.head_dim(),
+            vb_table.pp("ple_embedding").pp("ngram_embedding"),
+        )?;
         Ok(Self {
-            table: NgramTable::load(
-                cfg,
-                rows,
-                ple.head_dim(),
-                vb_table.pp("ple_embedding").pp("ngram_embedding"),
-            )?,
+            lookup: Arc::new(NgramLookup {
+                cfg: ple,
+                hash,
+                table,
+            }),
+            #[cfg(feature = "cuda")]
+            host_gather: std::sync::OnceLock::new(),
             key_proj: linear(vb_quant.pp("key_proj"), ple.embed_dim, width)?,
             value_proj: linear(vb_quant.pp("value_proj"), ple.embed_dim, cfg.hidden_size)?,
             norm_key: GroupedRmsNorm::new(
@@ -317,7 +351,6 @@ impl PleLayer {
             )?,
             conv: conv.squeeze(1)?,
             cfg: ple,
-            hash,
             streams,
             hidden: cfg.hidden_size,
         })
@@ -344,25 +377,17 @@ impl PleLayer {
     pub(super) fn forward(
         &self,
         xs: &Tensor,
-        window: &TokenWindow,
+        tokens: PleTokens<'_>,
         pool: &mut RecurrentStatePool,
         indices: &Tensor,
         keep_history: bool,
     ) -> Result<(Tensor, Option<Tensor>)> {
         let (batch, len, width) = xs.dims3()?;
-        if window.rows.len() != batch {
-            inference_tensor::bail!(
-                "PLE has {} token rows for a {batch}-row batch",
-                window.rows.len()
-            );
-        }
         let heads = self.cfg.ngram_heads();
-        let (ids, real_lens) = ngram_rows(window, &self.hash, &self.cfg, len)?;
-        let embeddings = self
-            .table
-            .gather(&ids, xs.dtype())?
+        let (embeddings, real_lens) = self.embeddings(tokens, batch, len, xs.device())?;
+        let embeddings = embeddings
             .reshape((batch, len, heads * self.cfg.head_dim()))?
-            .to_device(xs.device())?;
+            .to_dtype(xs.dtype())?;
 
         let split = (batch, len, self.streams, self.hidden);
         let key = self
@@ -429,6 +454,67 @@ impl PleLayer {
         Ok((out, keep_history.then_some(history)))
     }
 
+    // `[batch * len * heads, head_dim]` f32 on `device`, with each row's real length
+    fn embeddings(
+        &self,
+        tokens: PleTokens<'_>,
+        batch: usize,
+        len: usize,
+        device: &Device,
+    ) -> Result<(Tensor, Vec<usize>)> {
+        // a CUDA decode step gathers in a host function, so it never waits on the host and a graph can replay it
+        #[cfg(feature = "cuda")]
+        if let Device::Cuda(cuda) = device
+            && len == 1
+            && batch <= PLE_HOST_ROWS
+        {
+            let preceding = self.preceding_tokens();
+            let window = match tokens {
+                PleTokens::Device(window) => Some(window.clone()),
+                PleTokens::Host(window) => window
+                    .decode_rows(preceding)
+                    .map(|rows| {
+                        Tensor::from_vec(
+                            rows,
+                            (batch, TokenWindow::decode_width(preceding)),
+                            device,
+                        )
+                    })
+                    .transpose()?,
+            };
+            if let Some(window) = window {
+                return Ok((self.host_gather(cuda)?.gather(&window)?, vec![1; batch]));
+            }
+        }
+        let window = match tokens {
+            PleTokens::Host(window) => window,
+            PleTokens::Device(window) => inference_tensor::bail!(
+                "PLE reads a device token window ({:?}) only on a CUDA decode step",
+                window.shape()
+            ),
+        };
+        if window.rows.len() != batch {
+            inference_tensor::bail!(
+                "PLE has {} token rows for a {batch}-row batch",
+                window.rows.len()
+            );
+        }
+        let (rows, real_lens) = self.lookup.rows(window, len)?;
+        Ok((rows.to_device(device)?, real_lens))
+    }
+
+    #[cfg(feature = "cuda")]
+    fn host_gather(
+        &self,
+        device: &inference_tensor::CudaDevice,
+    ) -> Result<&host_gather::HostGather> {
+        if let Some(gather) = self.host_gather.get() {
+            return Ok(gather);
+        }
+        let gather = host_gather::HostGather::new(self.lookup.clone(), device)?;
+        Ok(self.host_gather.get_or_init(|| gather))
+    }
+
     /// Sets each listed row's conv state to the window ending at its kept rows of a stashed `history`.
     pub(super) fn commit_kept_rows(
         &self,
@@ -458,6 +544,146 @@ impl PleLayer {
             "weight",
             self.conv.unsqueeze(1).expect("conv weight is 2-D"),
         );
+    }
+}
+
+#[cfg(feature = "cuda")]
+mod host_gather {
+    use std::sync::Arc;
+
+    use inference_nn::cuda::mapped::{mapped_buffer, mapped_host, tensor_ptr};
+    use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, result};
+    use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
+
+    use super::{NgramLookup, PLE_HOST_ROWS, TokenWindow};
+
+    /// What the host function reads and writes: the lookup and the mapped window and rows.
+    struct Shared {
+        lookup: Arc<NgramLookup>,
+        window: CudaSlice<u32>,
+        rows: CudaSlice<f32>,
+    }
+
+    impl Shared {
+        fn width(&self) -> usize {
+            TokenWindow::decode_width(self.lookup.cfg.ngram_size - 1)
+        }
+
+        fn row_len(&self) -> usize {
+            self.lookup.cfg.ngram_heads() * self.lookup.cfg.head_dim()
+        }
+
+        fn gather(&self, batch: usize) -> Result<()> {
+            let preceding = self.lookup.cfg.ngram_size - 1;
+            let window = TokenWindow::from_decode_rows(
+                mapped_host(&self.window, batch * self.width()),
+                preceding,
+            );
+            let (rows, _) = self.lookup.rows(&window, 1)?;
+            let rows = rows.flatten_all()?.to_vec1::<f32>()?;
+            mapped_host(&self.rows, rows.len()).copy_from_slice(&rows);
+            Ok(())
+        }
+    }
+
+    /// One batch size's host function argument; the layer owns it, so a pointer to one stays valid.
+    struct Call {
+        shared: Arc<Shared>,
+        batch: usize,
+    }
+
+    unsafe extern "C" fn gather_host(data: *mut std::ffi::c_void) {
+        // SAFETY: `data` is a `Call` the layer owns for its whole life
+        let call = unsafe { &*data.cast::<Call>() };
+        if let Err(err) = call.shared.gather(call.batch) {
+            // the step then adds nothing rather than stale rows
+            tracing::error!("PLE failed to gather its n-gram rows on the host: {err}");
+            mapped_host(&call.shared.rows, call.batch * call.shared.row_len()).fill(0.0);
+        }
+    }
+
+    /// A decode step's rows gathered on the host without the stream waiting: the window goes out to mapped memory,
+    /// a host function on a side stream hashes and gathers, and the rows come back, joined before the stream moves on.
+    pub(super) struct HostGather {
+        shared: Arc<Shared>,
+        calls: Vec<Call>,
+        side: Arc<CudaStream>,
+        device: CudaDevice,
+    }
+
+    impl HostGather {
+        pub(super) fn new(lookup: Arc<NgramLookup>, device: &CudaDevice) -> Result<Self> {
+            let stream = device.cuda_stream();
+            let width = TokenWindow::decode_width(lookup.cfg.ngram_size - 1);
+            let row_len = lookup.cfg.ngram_heads() * lookup.cfg.head_dim();
+            let shared = Arc::new(Shared {
+                lookup,
+                window: mapped_buffer(&stream, PLE_HOST_ROWS * width)?,
+                rows: mapped_buffer(&stream, PLE_HOST_ROWS * row_len)?,
+            });
+            let calls = (1..=PLE_HOST_ROWS)
+                .map(|batch| Call {
+                    shared: shared.clone(),
+                    batch,
+                })
+                .collect();
+            Ok(Self {
+                shared,
+                calls,
+                side: stream
+                    .context()
+                    .new_stream()
+                    .map_err(inference_tensor::Error::wrap)?,
+                device: device.clone(),
+            })
+        }
+
+        /// The rows of each window row, `[batch * heads, head_dim]` f32.
+        pub(super) fn gather(&self, window: &Tensor) -> Result<Tensor> {
+            let (batch, width) = window.dims2()?;
+            if batch == 0 || batch > PLE_HOST_ROWS || width != self.shared.width() {
+                inference_tensor::bail!(
+                    "a PLE host gather serves up to {PLE_HOST_ROWS} rows of {} tokens, got {:?}",
+                    self.shared.width(),
+                    window.shape()
+                );
+            }
+            let cfg = &self.shared.lookup.cfg;
+            let window = window.to_dtype(DType::U32)?.contiguous()?;
+            let out = Tensor::zeros(
+                (batch * cfg.ngram_heads(), cfg.head_dim()),
+                DType::F32,
+                &Device::Cuda(self.device.clone()),
+            )?;
+            let main = self.device.cuda_stream();
+            let side = &self.side;
+            let wrap = inference_tensor::Error::wrap;
+            // SAFETY: the mapped buffers hold the largest batch; the window's copy out precedes the event the side
+            // stream waits on, the host function reads it after that, and the stream waits for the side stream's copy
+            // of the rows before it moves on, so the next step cannot overwrite a buffer still in use
+            unsafe {
+                result::memcpy_dtoh_async(
+                    mapped_host(&self.shared.window, batch * width),
+                    tensor_ptr::<u32>(&window, &main)?,
+                    main.cu_stream(),
+                )
+                .map_err(wrap)?;
+                side.wait(&main.record_event(None).map_err(wrap)?)
+                    .map_err(wrap)?;
+                let call = &self.calls[batch - 1] as *const Call as *mut std::ffi::c_void;
+                result::stream::launch_host_function(side.cu_stream(), gather_host, call)
+                    .map_err(wrap)?;
+                result::memcpy_htod_async(
+                    tensor_ptr::<f32>(&out, side)?,
+                    mapped_host(&self.shared.rows, batch * self.shared.row_len()),
+                    side.cu_stream(),
+                )
+                .map_err(wrap)?;
+            }
+            main.wait(&side.record_event(None).map_err(wrap)?)
+                .map_err(wrap)?;
+            Ok(out)
+        }
     }
 }
 

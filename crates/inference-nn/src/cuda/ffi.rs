@@ -93,6 +93,18 @@ inference_tensor::kernel_library! {
             ratio: i32,
             stream: i64,
         ) -> i32;
+        pub fn qsa_decode_plan(
+            table: *const u32,
+            context_lens: *const u32,
+            plan: *mut u32,
+            rows: i32,
+            table_width: i32,
+            block_size: i32,
+            ratio: i32,
+            k: i32,
+            pools: i32,
+            stream: i64,
+        ) -> i32;
         pub fn qsa_gather_cells(
             cache: *const c_void,
             table: *const u32,

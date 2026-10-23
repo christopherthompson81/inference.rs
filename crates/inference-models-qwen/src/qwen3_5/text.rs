@@ -23,7 +23,7 @@ use super::{
     hyper::{GatedResidual, HyperRead},
     mtp::Qwen3_5MtpHead,
     packed_gdn::{forward_packed_gdn, packed_gdn_layout},
-    ple::PleLayer,
+    ple::{PleLayer, PleTokens},
     qsa::{QsaAttention, QsaIndexer, QsaLayerInput, QsaRow, QsaStep, QsaStepInput},
 };
 use crate::gdn::RecurrentBatchKind;
@@ -2659,6 +2659,22 @@ impl Qwen3_5TextModel {
         let (Some(cfg), Some(input_metadata)) = (self.qsa, ctx.paged_input_metadata()) else {
             return Ok(None);
         };
+        // a decode step's plan reads only the device's tables, so it needs no window (a captured step has none)
+        if xs.dim(1)? == 1 {
+            let rows = ctx
+                .seqlen_offsets()
+                .iter()
+                .map(|&start| QsaRow { start, len: 1 })
+                .collect::<Vec<_>>();
+            return QsaStep::new(QsaStepInput {
+                cfg,
+                rows: &rows,
+                query_len: 1,
+                input_metadata,
+                device: xs.device(),
+            })
+            .map(Some);
+        }
         let window = ctx
             .token_window()
             .ok_or_else(|| inference_tensor::Error::msg("QSA reads the batch's token window"))?;
@@ -2863,9 +2879,13 @@ impl Qwen3_5TextModel {
                     normalized_x = None;
                 }
                 if let Some(ple) = &layer.ple {
-                    let window = ctx.token_window().ok_or_else(|| {
-                        inference_tensor::Error::msg("PLE needs the batch's token window")
-                    })?;
+                    let tokens = match (ctx.decode_token_window(), ctx.token_window()) {
+                        (Some(window), _) => PleTokens::Device(window),
+                        (None, Some(window)) => PleTokens::Host(window),
+                        (None, None) => {
+                            inference_tensor::bail!("PLE needs the batch's token window")
+                        }
+                    };
                     // the one PLE state follows the layers' caches
                     let state = self.layer_types.len();
                     let indices =
@@ -2881,7 +2901,7 @@ impl Qwen3_5TextModel {
                     let keep_history =
                         self.store_spec_hidden.load(Ordering::Relaxed) && xs.dim(1)? > 1;
                     let (added, history) =
-                        ple.forward(&xs, window, pool, &indices, keep_history)?;
+                        ple.forward(&xs, tokens, pool, &indices, keep_history)?;
                     if let Some(history) = history {
                         *self.ple_stash.lock().expect("ple stash poisoned") = Some(PleStash {
                             indices: indices.clone(),
@@ -3262,8 +3282,7 @@ impl NormalModel for Qwen3_5TextModel {
 
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs(&self) -> bool {
-        // PLE reads each step's token history on the host
-        SUPPORTS_CUDA_DECODE_GRAPHS && !self.has_ple()
+        SUPPORTS_CUDA_DECODE_GRAPHS
     }
 
     fn token_window(&self) -> Option<usize> {

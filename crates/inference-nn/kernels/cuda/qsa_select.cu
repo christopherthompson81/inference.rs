@@ -282,7 +282,51 @@ int qsa_gather_cells_launch(const void *cache, const uint32_t *table,
   return static_cast<int>(cudaGetLastError());
 }
 
+// One decode row's QSA plan (see qsa_decode_plan in qsa.rs): the cells of the
+// block holding its position, the position, its kept count, then every pool's
+// cell, any valid cell past the row's complete blocks.
+__global__ void qsa_decode_plan_kernel(const uint32_t *__restrict__ table,
+                                       const uint32_t *__restrict__ context_lens,
+                                       uint32_t *__restrict__ plan,
+                                       int table_width, int block_size,
+                                       int ratio, int k, int pools) {
+  const int row = blockIdx.x;
+  const uint32_t *row_table = table + static_cast<int64_t>(row) * table_width;
+  uint32_t *out = plan + static_cast<int64_t>(row) * (ratio + 2 + pools);
+  const uint32_t seen = context_lens[row];
+  const uint32_t position = seen - 1;
+  auto cell = [&](uint32_t t) {
+    return row_table[t / block_size] * static_cast<uint32_t>(block_size) +
+           t % block_size;
+  };
+  const uint32_t first = position / ratio * ratio;
+  for (int m = threadIdx.x; m < ratio; m += blockDim.x) {
+    out[m] = cell(first + m);
+  }
+  if (threadIdx.x == 0) {
+    out[ratio] = position;
+    out[ratio + 1] = seen / ratio <= static_cast<uint32_t>(k)
+                         ? seen
+                         : static_cast<uint32_t>(k * ratio) + seen % ratio;
+  }
+  const int complete = static_cast<int>(seen / ratio);
+  for (int j = threadIdx.x; j < pools; j += blockDim.x) {
+    out[ratio + 2 + j] =
+        cell(j < complete ? j * ratio + ratio - 1 : ratio - 1);
+  }
+}
+
 } // namespace
+
+extern "C" int qsa_decode_plan(const uint32_t *table,
+                               const uint32_t *context_lens, uint32_t *plan,
+                               int rows, int table_width, int block_size,
+                               int ratio, int k, int pools, int64_t stream) {
+  qsa_decode_plan_kernel<<<rows, 256, 0,
+                           reinterpret_cast<cudaStream_t>(stream)>>>(
+      table, context_lens, plan, table_width, block_size, ratio, k, pools);
+  return static_cast<int>(cudaGetLastError());
+}
 
 extern "C" int qsa_select_mask(const float *scores, const uint32_t *positions,
                                void *mask, int rows, int n_pool, int n_kv,

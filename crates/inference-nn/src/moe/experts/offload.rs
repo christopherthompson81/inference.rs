@@ -11,7 +11,9 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_quant::cpu_experts::{CpuExpertProjection, CpuExpertRoute, CpuExperts};
 use inference_quant::{DeviceExpertStack, GluActivationType, HostExpertStack, KernelWeight};
-use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtr, result};
+use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, result};
+
+use crate::cuda::mapped::{mapped_buffer, mapped_host, tensor_ptr};
 use inference_tensor::{CudaDevice, DType, Device, Result, Tensor};
 
 use super::backends::{grouped_with, indexed_mmvq_with};
@@ -100,23 +102,6 @@ struct Exchange {
     ys: CudaSlice<f32>,
 }
 
-fn pinned<T: inference_tensor::cuda::cudarc::driver::DeviceRepr>(
-    stream: &Arc<CudaStream>,
-    len: usize,
-) -> Result<CudaSlice<T>> {
-    // SAFETY: a step writes each buffer before it reads it
-    unsafe { stream.alloc_mapped_host(len) }.map_err(inference_tensor::Error::wrap)
-}
-
-// A pinned buffer's host side; the stream orders every access to it
-#[allow(clippy::mut_from_ref)]
-fn host<T>(buffer: &CudaSlice<T>, len: usize) -> &mut [T] {
-    let ptr = buffer.mapped_host_ptr().expect("mapped allocation");
-    assert!(len <= buffer.len());
-    // SAFETY: the buffer is pinned host memory of at least `len` elements, touched only in stream order
-    unsafe { std::slice::from_raw_parts_mut(ptr, len) }
-}
-
 /// What a layer's host functions and fill worker share.
 struct Shared {
     host: [HostExpertStack; PROJECTIONS],
@@ -174,11 +159,11 @@ impl Shared {
         let (picks, hidden) = (tokens * self.topk, self.hidden());
         let ex = &self.exchange;
         let (ids, weights, slots) = (
-            host(&ex.ids, picks),
-            host(&ex.weights, picks),
-            host(&ex.slots, picks),
+            mapped_host(&ex.ids, picks),
+            mapped_host(&ex.weights, picks),
+            mapped_host(&ex.slots, picks),
         );
-        let ys = host(&ex.ys, tokens * hidden);
+        let ys = mapped_host(&ex.ys, tokens * hidden);
         let mut state = self.state.lock().expect("expert cache poisoned");
         state.clock += 1;
         let clock = state.clock;
@@ -200,7 +185,7 @@ impl Shared {
         ys.fill(0.0);
         if !misses.is_empty() {
             self.cpu_experts()
-                .forward(host(&ex.xs, tokens * hidden), &misses, ys)?;
+                .forward(mapped_host(&ex.xs, tokens * hidden), &misses, ys)?;
         }
 
         // the experts most of this step's tokens missed are admitted first
@@ -324,7 +309,7 @@ unsafe extern "C" fn split_host(data: *mut std::ffi::c_void) {
     if let Err(err) = call.shared.split(call.tokens) {
         // the misses then add nothing rather than stale values
         tracing::error!("offloaded MoE experts failed on the host: {err}");
-        host(&call.shared.exchange.ys, call.tokens * call.shared.hidden()).fill(0.0);
+        mapped_host(&call.shared.exchange.ys, call.tokens * call.shared.hidden()).fill(0.0);
     }
 }
 
@@ -332,20 +317,6 @@ pub(super) struct OffloadedExperts {
     shared: Arc<Shared>,
     calls: Vec<SplitCall>,
     device: CudaDevice,
-}
-
-// A contiguous CUDA tensor's first element, for copies queued on `stream`
-fn tensor_ptr<T: inference_tensor::cuda_backend::CudaDType>(
-    tensor: &Tensor,
-    stream: &CudaStream,
-) -> Result<u64> {
-    let (storage, layout) = tensor.storage_and_layout();
-    let inference_tensor::Storage::Cuda(cuda) = &*storage else {
-        inference_tensor::bail!("offloaded experts expect CUDA tensors");
-    };
-    let slice = cuda.as_cuda_slice::<T>()?;
-    let (ptr, _guard) = slice.device_ptr(stream);
-    Ok(ptr + (layout.start_offset() * std::mem::size_of::<T>()) as u64)
 }
 
 impl OffloadedExperts {
@@ -373,11 +344,11 @@ impl OffloadedExperts {
         let stream = device.cuda_stream();
         let picks = SPLIT_MAX_TOKENS * topk;
         let exchange = Exchange {
-            ids: pinned(&stream, picks)?,
-            weights: pinned(&stream, picks)?,
-            slots: pinned(&stream, picks)?,
-            xs: pinned(&stream, SPLIT_MAX_TOKENS * hidden)?,
-            ys: pinned(&stream, SPLIT_MAX_TOKENS * hidden)?,
+            ids: mapped_buffer(&stream, picks)?,
+            weights: mapped_buffer(&stream, picks)?,
+            slots: mapped_buffer(&stream, picks)?,
+            xs: mapped_buffer(&stream, SPLIT_MAX_TOKENS * hidden)?,
+            ys: mapped_buffer(&stream, SPLIT_MAX_TOKENS * hidden)?,
         };
         let table = Tensor::zeros(experts, DType::U32, &Device::Cuda(device.clone()))?
             .to_mapped_host()?
@@ -456,22 +427,26 @@ impl OffloadedExperts {
         // CPU result before it moves on, so the next step cannot overwrite a buffer still in use
         unsafe {
             let cu = main.cu_stream();
-            result::memcpy_dtoh_async(host(&ex.ids, picks), tensor_ptr::<u32>(&ids, &main)?, cu)
-                .map_err(wrap)?;
             result::memcpy_dtoh_async(
-                host(&ex.weights, picks),
+                mapped_host(&ex.ids, picks),
+                tensor_ptr::<u32>(&ids, &main)?,
+                cu,
+            )
+            .map_err(wrap)?;
+            result::memcpy_dtoh_async(
+                mapped_host(&ex.weights, picks),
                 tensor_ptr::<f32>(&weights, &main)?,
                 cu,
             )
             .map_err(wrap)?;
             result::memcpy_dtoh_async(
-                host(&ex.slots, picks),
+                mapped_host(&ex.slots, picks),
                 tensor_ptr::<u32>(&slot_ids, &main)?,
                 cu,
             )
             .map_err(wrap)?;
             result::memcpy_dtoh_async(
-                host(&ex.xs, tokens * hidden),
+                mapped_host(&ex.xs, tokens * hidden),
                 tensor_ptr::<f32>(&xs, &main)?,
                 cu,
             )
@@ -483,7 +458,7 @@ impl OffloadedExperts {
                 .map_err(wrap)?;
             result::memcpy_htod_async(
                 tensor_ptr::<f32>(&ys, side)?,
-                host(&ex.ys, tokens * hidden),
+                mapped_host(&ex.ys, tokens * hidden),
                 side.cu_stream(),
             )
             .map_err(wrap)?;

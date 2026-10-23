@@ -177,6 +177,46 @@ pub struct TokenWindowRow {
     pub preceding: usize,
 }
 
+impl TokenWindow {
+    /// The u32s of a one-token row in [`Self::decode_rows`]: its count of real preceding tokens, then `preceding`
+    /// slots holding them right-aligned, then the step's token.
+    pub fn decode_width(preceding: usize) -> usize {
+        preceding + 2
+    }
+
+    /// Every row in the fixed layout of [`Self::decode_width`], or `None` unless each row carries one token.
+    pub fn decode_rows(&self, preceding: usize) -> Option<Vec<u32>> {
+        let width = Self::decode_width(preceding);
+        let mut out = vec![0u32; self.rows.len() * width];
+        for (row, slots) in self.rows.iter().zip(out.chunks_mut(width)) {
+            if row.tokens.len() != row.preceding + 1 {
+                return None;
+            }
+            let real = row.preceding.min(preceding);
+            slots[0] = u32::try_from(real).ok()?;
+            slots[width - 1 - real..].copy_from_slice(&row.tokens[row.tokens.len() - 1 - real..]);
+        }
+        Some(out)
+    }
+
+    /// The window [`Self::decode_rows`] laid out.
+    pub fn from_decode_rows(rows: &[u32], preceding: usize) -> Self {
+        let width = Self::decode_width(preceding);
+        Self {
+            rows: rows
+                .chunks(width)
+                .map(|slots| {
+                    let real = (slots[0] as usize).min(preceding);
+                    TokenWindowRow {
+                        tokens: slots[width - 1 - real..].to_vec(),
+                        preceding: real,
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
 /// What a model asks the text inputs processor for: this many tokens before every chunk.
 #[derive(Clone, Copy, Debug)]
 pub struct TokenWindowRequest {
@@ -195,6 +235,8 @@ pub struct ModelForwardContext<'a> {
     recurrent_batch_kind: Option<RecurrentBatchKind>,
     requires_full_prefill_queries: bool,
     token_window: Option<&'a TokenWindow>,
+    // a captured decode step's window, `[rows, TokenWindow::decode_width]` u32 on the device
+    decode_token_window: Option<&'a Tensor>,
 }
 
 impl<'a> ModelForwardContext<'a> {
@@ -217,6 +259,7 @@ impl<'a> ModelForwardContext<'a> {
             recurrent_batch_kind: None,
             requires_full_prefill_queries: false,
             token_window: None,
+            decode_token_window: None,
         }
     }
 
@@ -239,6 +282,7 @@ impl<'a> ModelForwardContext<'a> {
             recurrent_batch_kind: None,
             requires_full_prefill_queries: false,
             token_window: None,
+            decode_token_window: None,
         }
     }
 
@@ -344,6 +388,16 @@ impl<'a> ModelForwardContext<'a> {
 
     pub fn token_window(&self) -> Option<&TokenWindow> {
         self.token_window
+    }
+
+    pub fn with_decode_token_window(mut self, window: Option<&'a Tensor>) -> Self {
+        self.decode_token_window = window;
+        self
+    }
+
+    /// A captured decode step's window in [`TokenWindow::decode_rows`]' layout, refreshed before each replay.
+    pub fn decode_token_window(&self) -> Option<&Tensor> {
+        self.decode_token_window
     }
 
     pub fn prompt_chunk_attention_policy(&self) -> MultimodalAttentionPolicy {
@@ -704,6 +758,38 @@ mod tests {
     use inference_tensor::{Device, Result, Tensor};
 
     use super::*;
+
+    #[test]
+    fn a_decode_window_keeps_each_rows_real_tokens() {
+        let row = |tokens: &[u32], preceding| TokenWindowRow {
+            tokens: tokens.to_vec(),
+            preceding,
+        };
+        // a full row, one at the sequence's start, and one that brought more history than asked
+        let window = TokenWindow {
+            rows: vec![row(&[7, 8, 9], 2), row(&[5], 0), row(&[1, 2, 3, 4], 3)],
+        };
+        let rows = window.decode_rows(2).unwrap();
+        assert_eq!(rows, vec![2, 7, 8, 9, 0, 0, 0, 5, 2, 2, 3, 4]);
+        let back = TokenWindow::from_decode_rows(&rows, 2);
+        let tokens = back
+            .rows
+            .iter()
+            .map(|r| (r.tokens.clone(), r.preceding))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            tokens,
+            vec![(vec![7, 8, 9], 2), (vec![5], 0), (vec![2, 3, 4], 2)]
+        );
+        // a prompt chunk has no decode layout
+        assert!(
+            TokenWindow {
+                rows: vec![row(&[1, 2], 0)]
+            }
+            .decode_rows(2)
+            .is_none()
+        );
+    }
 
     #[test]
     fn ordinary_batch_expands_each_sequence_offset() -> Result<()> {

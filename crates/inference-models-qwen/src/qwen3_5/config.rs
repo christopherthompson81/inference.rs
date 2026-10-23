@@ -748,6 +748,7 @@ impl TextConfig {
             num_attn_heads: qsa.n_heads,
             num_kv_heads: qsa.kv_heads,
             head_dim: qsa.head_dim,
+            attended: false,
         })
     }
 

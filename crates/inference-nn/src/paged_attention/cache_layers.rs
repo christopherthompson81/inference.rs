@@ -321,6 +321,7 @@ mod tests {
                 num_attn_heads: 32,
                 num_kv_heads: 8,
                 head_dim: 128,
+                attended: true,
             },
         );
         assert_eq!(KvFingerprint::of(&with_drafter), fingerprint);
