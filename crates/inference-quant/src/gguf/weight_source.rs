@@ -975,6 +975,21 @@ impl QuantizedWeightSource for GgufWeightSource {
         Ok((!layers.is_empty() && !layers.contains(&0)).then_some(layers))
     }
 
+    fn mapped_blocks(&self, key: &str) -> Option<crate::MappedBlocks> {
+        let native = self.weight_name(key);
+        let source = self.bindings.get(&native)?.direct_tensor()?;
+        let (shard, range) = self.archive.mapped_range(source)?;
+        let ty = self.archive.tensor_info(source).ok()?.dtype().gguf_type()?;
+        let dims = self.shapes.get(&native)?.clone();
+        Some(crate::MappedBlocks::new(
+            ty,
+            dims,
+            self.archive.clone(),
+            shard,
+            range,
+        ))
+    }
+
     fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
         let mut layers = Vec::<usize>::new();
         let mut experts = None;

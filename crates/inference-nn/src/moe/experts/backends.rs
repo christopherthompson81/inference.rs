@@ -1340,7 +1340,7 @@ impl FastExpertsWeights {
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
-        use inference_quant::cpu_experts::{CpuExpertRoute, CpuExperts, supports};
+        use inference_quant::cpu_experts::{CpuExpertRoute, CpuExperts, runs_resident};
         if !forward.xs.device().is_cpu() {
             return Ok(None);
         }
@@ -1361,7 +1361,7 @@ impl FastExpertsWeights {
         ) else {
             return Ok(None);
         };
-        if ![gate, up, down].iter().all(|p| supports(p.ty, p.cols)) {
+        if ![gate, up, down].iter().all(|p| runs_resident(p.ty, p.cols)) {
             return Ok(None);
         }
         let xs = forward

@@ -463,3 +463,36 @@ flags                                           planned slots   context
 ```
 
 Every planned context is at least its target; the estimate is about one step (16 slots, ~1 GB) conservative.
+
+## Run 17 - 2026-10-22 23:37
+
+Question: why did a large MoE GGUF (88 GB, 512 experts per layer, Qwen3.8-Flash-Next UD-IQ4_XS) refuse expert offload,
+load ever more slowly, and then produce NaN once offloaded?
+
+Refused offload: `layer_expert_bytes` returns None when any expert stack is a type the CPU expert path cannot run, and
+that path only ran 256-value super-block types with columns a multiple of 256. This file's down experts are IQ4_NL (43
+layers) and Q8_0 (5) over 640 columns, so the automatic map put layers 16-47 on the CPU, paged attention turned off,
+and the CPU layers ran at about one core with the GPU idle. Added: activations as Q8 blocks of 32 and IQ4_NL / Q8_0
+dots against them (`cpu_dot::vec_dot_32`), row sizes from the type's block size, tests against dense weights for an
+IQ3_S/IQ4_NL and an IQ4_XS/Q8_0 mix at 640 (a broken IQ4_NL dot fails them). Resident CPU MoE keeps Candle's Q8_0
+(`runs_resident`); only offloaded Q8_0 takes the new dot.
+
+Load (67 s, then 89, 150, 294 s of weight loading): 56 GiB pinned expert stacks, 27 GiB of heap, 19 GiB of file pages
+resident on a 125 GB machine, so each load re-read what the copies evicted; each expert stack was copied twice (into
+an owned buffer, then into pinned memory). `QuantizedWeightSource::mapped_blocks` now hands out a GGUF tensor's blocks
+in place in the mapping (`MappedBlocks`), and `HostExpertStack::from_mapped` registers the shard read-only and mapped
+(one shared registration per shard) or copies once from the mapping. Here registration fails with
+`CUDA_ERROR_NOT_SUPPORTED` (read-only file-backed memory), so it copies once: weight loading 43 s.
+
+NaN: prompts from about 10 tokens gave `invalid CUDA top-1 output: max_logit=NaN`, deterministic, the same at 32 and 64
+cached experts. One layer's routed output had NaN only in the down projection's last row. The prompt staging every
+offloaded layer shares is viewed per type; the grouped kernels read whole tiles past the last staged expert into bytes
+a larger fill of another type left there, which read as IQ4_NL can hold an Inf/NaN scale (NaN times zero activations
+is NaN). `DeviceExpertStack::zero_padding_async` after each staging fixes it;
+`offloaded_32_wide_experts_match_the_cpu_path` poisons the staging with 0xFF and fails without the fix.
+
+Also: `maybe_log_error` logs every internal error (a client sees "Internal server error." only), the SDK gains
+`with_moe_expert_cache`, and the perplexity example takes split GGUFs, `--moe-expert-cache`, and paged attention
+sized to its window. With these the model scores within 0.4% of llama.cpp (the model's own doc, Run 10).
+
+Open: experts without pinning, as llama.cpp maps them (pageable copies from the mapping) to spare the 57 GiB copy.

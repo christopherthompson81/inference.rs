@@ -54,6 +54,85 @@ pub(crate) fn vec_dot(ty: GgufType, row: &[u8], ys: &[BlockQ8K]) -> f32 {
     }
 }
 
+/// Values per block of the 32-wide family (IQ4_NL, Q8_0), whose rows need not fill a Q8_K super-block.
+pub(crate) const QK32: usize = 32;
+const IQ4_NL_BYTES: usize = 18;
+const Q8_0_BYTES: usize = 34;
+// both blocks open with their f16 scale
+const BLOCK32_QS: usize = 2;
+const Q8_MAX: f32 = 127.0;
+
+/// Whether `vec_dot_32` serves this type.
+pub(crate) fn supports_32(ty: GgufType) -> bool {
+    matches!(ty, GgufType::Iq4Nl | GgufType::Q8_0)
+}
+
+/// 32 activations quantized to i8 under one scale, as ggml's Q8_0 with an f32 scale.
+#[derive(Clone, Copy)]
+pub(crate) struct Q8Block32 {
+    d: f32,
+    qs: [i8; QK32],
+}
+
+impl Q8Block32 {
+    pub(crate) const ZERO: Self = Self {
+        d: 0.0,
+        qs: [0; QK32],
+    };
+
+    /// `xs` in blocks of 32, into `ys`.
+    pub(crate) fn quantize(xs: &[f32], ys: &mut [Self]) {
+        for (x, y) in xs.as_chunks::<QK32>().0.iter().zip(ys) {
+            let amax = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let d = amax / Q8_MAX;
+            let id = if d == 0.0 { 0.0 } else { 1.0 / d };
+            y.d = d;
+            for (q, v) in y.qs.iter_mut().zip(x) {
+                // within [-127, 127] by the scale's choice
+                *q = (v * id).round() as i8;
+            }
+        }
+    }
+}
+
+/// `row` holds `ys.len()` blocks of a 32-wide `ty`.
+pub(crate) fn vec_dot_32(ty: GgufType, row: &[u8], ys: &[Q8Block32]) -> f32 {
+    match ty {
+        GgufType::Iq4Nl => row
+            .as_chunks::<IQ4_NL_BYTES>()
+            .0
+            .iter()
+            .zip(ys)
+            .map(|(block, y)| {
+                let qs = &block[BLOCK32_QS..];
+                let sum = (0..QK32 / 2)
+                    .map(|j| {
+                        i32::from(KVALUES_IQ4NL[usize::from(qs[j] & 0x0F)]) * i32::from(y.qs[j])
+                            + i32::from(KVALUES_IQ4NL[usize::from(qs[j] >> 4)])
+                                * i32::from(y.qs[j + QK32 / 2])
+                    })
+                    .sum::<i32>();
+                f16_at(block, 0) * y.d * sum as f32
+            })
+            .sum(),
+        GgufType::Q8_0 => row
+            .as_chunks::<Q8_0_BYTES>()
+            .0
+            .iter()
+            .zip(ys)
+            .map(|(block, y)| {
+                let sum = block[BLOCK32_QS..]
+                    .iter()
+                    .zip(&y.qs)
+                    .map(|(&w, &x)| i32::from(w as i8) * i32::from(x))
+                    .sum::<i32>();
+                f16_at(block, 0) * y.d * sum as f32
+            })
+            .sum(),
+        _ => unreachable!("cpu_dot::supports_32({ty:?}) is false"),
+    }
+}
+
 fn blocks<T>(row: &[u8]) -> &[T] {
     let size = std::mem::size_of::<T>();
     assert!(

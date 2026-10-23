@@ -294,6 +294,12 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// MoE experts (GGUF, on CUDA) stay in host memory with this many per layer cached on the GPU.
+        pub fn with_moe_expert_cache(mut self, experts: usize) -> Self {
+            self.options.runtime.moe_expert_cache = Some(experts);
+            self
+        }
+
         /// Most tokens one scheduler step batches across sequences.
         pub fn with_max_num_batched_tokens(mut self, tokens: usize) -> Self {
             self.options.runtime.max_num_batched_tokens = Some(tokens);

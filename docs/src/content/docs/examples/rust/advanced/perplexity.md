@@ -22,10 +22,13 @@ use anyhow::Context;
 use anyhow::Result;
 use clap::Parser;
 use inference::{
-    GgufModelBuilder, LogitsOutput, Model, ModelBuilder, PagedAttentionMetaBuilder, PagedCacheType,
-    PromptInput, PromptLogitsRequest, api::operations::TokenizeRequest,
+    GgufModelBuilder, LogitsOutput, MemoryGpuConfig, Model, ModelBuilder,
+    PagedAttentionMetaBuilder, PagedCacheType, PromptInput, PromptLogitsRequest,
+    api::operations::TokenizeRequest,
 };
 
+// tokens past a scored window the cache is planned for
+const WINDOW_HEADROOM: usize = 256;
 const PROMPT_CHUNKSIZE: usize = 1024;
 // llama-perplexity scores a window's second half, so a window needs a few tokens on each side
 const MIN_LLAMA_CPP_CTX: usize = 4;
@@ -50,9 +53,13 @@ struct Args {
     #[arg(short, long)]
     calibration_file: Option<PathBuf>,
 
-    /// A local GGUF file to score instead of `--model-id`.
+    /// Local GGUF files to score instead of `--model-id`: one file, or every shard of a split one.
+    #[arg(long, num_args = 1..)]
+    gguf: Vec<PathBuf>,
+
+    /// MoE experts kept in host memory with this many per layer cached on the GPU.
     #[arg(long)]
-    gguf: Option<PathBuf>,
+    moe_expert_cache: Option<usize>,
 
     /// The paged KV cache's storage (`auto`, `f8e4m3`, `q4`, `q8/q4`, ...).
     #[arg(long)]
@@ -85,14 +92,33 @@ fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let model = match &args.gguf {
-        Some(gguf) => {
-            let dir = gguf.parent().context("the GGUF path has no directory")?;
-            let name = gguf.file_name().context("the GGUF path has no file name")?;
-            GgufModelBuilder::new(dir.to_string_lossy(), vec![name.to_string_lossy()])
-                .with_logging()
-                .build()
-                .await?
+    let model = match args.gguf.first() {
+        Some(first) => {
+            let dir = first.parent().context("the GGUF path has no directory")?;
+            let names = args
+                .gguf
+                .iter()
+                .map(|gguf| {
+                    gguf.file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .context("a GGUF path has no file name")
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let mut builder = GgufModelBuilder::new(dir.to_string_lossy(), names).with_logging();
+            if let Some(experts) = args.moe_expert_cache {
+                builder = builder.with_moe_expert_cache(experts);
+            }
+            if let Some(cache_type) = args.pa_cache_type {
+                let mut paged =
+                    PagedAttentionMetaBuilder::default().with_paged_cache_type(cache_type);
+                // the cache holds the scored window whole
+                if let Some(ctx) = args.llama_cpp_ctx {
+                    paged =
+                        paged.with_gpu_memory(MemoryGpuConfig::ContextSize(ctx + WINDOW_HEADROOM));
+                }
+                builder = builder.with_paged_attn(paged.build()?);
+            }
+            builder.build().await?
         }
         None => {
             let mut model_builder = ModelBuilder::new(&args.model_id).with_logging();

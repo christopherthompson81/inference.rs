@@ -128,6 +128,11 @@ pub trait QuantizedWeightSource: Send + Sync {
     fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
         Ok(None)
     }
+
+    /// `key`'s weight as GGUF blocks read in place from the source's file mapping; `None` when it is not stored so.
+    fn mapped_blocks(&self, _key: &str) -> Option<MappedBlocks> {
+        None
+    }
 }
 
 impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
@@ -166,6 +171,10 @@ impl<T: QuantizedWeightSource + ?Sized> QuantizedWeightSource for Arc<T> {
 
     fn layer_resident_bytes(&self, dtype: DType) -> Result<Option<Vec<usize>>> {
         (**self).layer_resident_bytes(dtype)
+    }
+
+    fn mapped_blocks(&self, key: &str) -> Option<MappedBlocks> {
+        (**self).mapped_blocks(key)
     }
 }
 
@@ -238,6 +247,7 @@ pub use gguf::fast_mmvq::{
     moe_decode as indexed_moe_mmvq, supports_moe as supports_indexed_moe_mmvq, with_shared_input,
 };
 pub use gguf::kernel::GgufType;
+pub use gguf::mapped::MappedBlocks;
 /// Runs `f`; without CUDA there are no tile-ordered matvecs to share an input's quantized activations.
 #[cfg(not(feature = "cuda"))]
 pub fn with_shared_input<T>(f: impl FnOnce() -> Result<T>) -> Result<T> {

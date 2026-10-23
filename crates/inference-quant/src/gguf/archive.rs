@@ -725,6 +725,25 @@ impl GgufArchive {
         Ok(GgufTensorData { info, bytes })
     }
 
+    /// A tensor's blocks as they sit in its shard's mapping (shard, byte range), when stored as read: little-endian
+    /// and not CPU-repacked.
+    pub fn mapped_range(&self, name: &str) -> Option<(usize, Range<usize>)> {
+        let info = self.tensors.get(name)?;
+        let little = self.shards.get(info.shard_index)?.endian == GgufEndian::Little;
+        (little && info.stored_dtype == info.dtype)
+            .then(|| {
+                info.data_range
+                    .clone()
+                    .map(|range| (info.shard_index, range))
+            })
+            .flatten()
+    }
+
+    /// Every byte of shard `shard`'s mapping.
+    pub fn shard_bytes(&self, shard: usize) -> &[u8] {
+        &self.mappings[shard]
+    }
+
     pub fn load_qtensor(&self, name: &str, device: &Device) -> Result<QTensor> {
         let data = self.tensor_data(name)?;
         let info = data.info();
