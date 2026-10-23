@@ -510,3 +510,35 @@ $h(k)$"), as the tiny model's BF16 ties.
 
 Implication: correct, but little gain while experts are offloaded. The pooled-key move changes what a stored prefix
 holds in the indexer layer, so prefix entries written before it are stale for this model.
+
+## Run 15 - 2026-10-23 14:27
+
+Question: does Qwen3.8-Flash-Next's built-in MTP head run on our types, from unsloth's separate head GGUF?
+
+Built, after upstream mistral.rs's head (3f2515e9b `qwen4_exp/mtp.rs`, vLLM's `Qwen4ExpMultiTokenPredictor`):
+- `Qwen3_5MtpHead` takes either input: one `fc` over concat(norm(embedding), norm(hidden)) (Qwen3.5, and a GGUF's
+  `eh_proj`, applied per stream) or Flash-Next's `fc_embedding` and `fc_hidden`. `pre_fc_norm_hidden` norms all
+  four streams at once. The block is `DecoderLayer::load_hyper_qsa` (QSA attention with its own indexer in one more
+  auxiliary paged layer, hyper-connections, the MoE); the head's own mixer collapses for `lm_head`; `MtpDraft`
+  keeps the two outputs apart (`lm_head` reads the collapse, the next chained draft the streams).
+- The target captures its pre-mixer streams for the head when it has hyper-connections.
+- Draft rows run as a batch of one-row sequences on a QSA head, so QSA's per-sequence step plan applies; the prompt
+  chunk catch-up plans its chunk ranges.
+- GGUF: `GgufArchive::open` merges a file holding only an MTP head (`nextn` metadata, no split keys) into the model
+  it is listed with. The head's block count and `nextn` keys win, any other key it repeats keeps the model's.
+  Bindings: `blk.48.hc_attn/hc_ffn`, the head's indexer, and `nextn.hc_head_*` as the head's mixer, beside the
+  generic `nextn` bindings (`eh_proj` as `mtp.fc`, `enorm`, `hnorm`).
+
+```
+cargo nextest run ... -E 'test(/flash_next_builtin_mtp/)'   pass, dense and sparse budget (greedy against plain,
+                                                             up to near ties; the head's weights recorded at random)
+cargo nextest run ... -E 'test(/an_mtp_head_file/)'         pass
+real GGUF + MTP/mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf, --mtp --mtp-n-predict 2, 64 cached experts:
+  coding prompt   13.0 tok/s (base 13.5)   accept 88-98%, length 2.8-3.0
+  prose prompt    12.2 tok/s (base 12.9)   accept 70-82%, length 2.4-2.6
+```
+
+Acceptance is far above unsloth's 66%, but no speedup: a draft step runs the head's own 512-expert MoE as well as
+the verify's wider routing, and both miss the expert cache. The outputs diverge from plain greedy at the same bytes,
+with the same continuations, as both DFlash 2 runs (488 and 1220): a near tie in plain decode that verification
+breaks the other way, not a fault in either drafter.

@@ -154,9 +154,10 @@ pub(super) fn layer_extra_elems(cfg: &TextConfig, layer_idx: usize) -> Result<us
 /// The cache config with QSA's indexer keys appended as auxiliary layers, when the model has an indexer.
 pub(super) fn with_qsa_layers(
     cfg: &TextConfig,
+    mtp: bool,
     config: impl ModelConfigLike + Send + Sync + 'static,
 ) -> Box<dyn ModelConfigLike> {
-    match cfg.qsa_auxiliary_layers() {
+    match cfg.qsa_auxiliary_layers(mtp) {
         Some(layers) => Box::new(crate::paged_attention::AuxiliaryPagedKvCacheConfig::new(
             std::sync::Arc::new(config),
             layers,
@@ -505,6 +506,7 @@ macro_rules! qwen3_5_loader {
 
                 Ok(with_qsa_layers(
                     cfg,
+                    mtp,
                     HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
                         .with_uniform_prefix_prefill_attention_features(Default::default())
                         .with_recurrent_state_bytes(cfg.recurrent_state_bytes()),

@@ -203,7 +203,6 @@ pub fn build_qwen35_text_bindings(archive: &GgufArchive) -> Result<GgufBindingMa
     bind_text(&inventory, family, gdn, &mut bindings)?;
     if family == QwenMultimodalFamily::Qwen4Exp {
         bind_flash_next(archive, &inventory, &mut bindings)?;
-        return Ok(bindings);
     }
     bind_mtp(archive, &inventory, family, &mut bindings)?;
     Ok(bindings)
@@ -238,11 +237,52 @@ fn bind_flash_next(
             );
         }
     };
+    // llama.cpp splits the indexer's fused `index_qk_proj` into its query and key halves
+    let indexer = |bindings: &mut GgufBindingMap, native: &str, source: &str| {
+        let indexer = format!("{native}.self_attn.indexer");
+        for (target, role) in [("index_q_proj", "q_proj"), ("index_k_proj", "k_proj")] {
+            bind(
+                inventory,
+                bindings,
+                format!("{indexer}.{target}.weight"),
+                format!("{source}.indexer.{role}.weight"),
+            );
+        }
+        for (target, role) in [("q_layernorm", "q_norm"), ("k_layernorm", "k_norm")] {
+            bind_text_norm(
+                inventory,
+                bindings,
+                family,
+                format!("{indexer}.{target}.weight"),
+                format!("{source}.indexer.{role}.weight"),
+            );
+        }
+    };
     hyper(
         bindings,
         &format!("{model}.hyper_connection_mixer"),
         "output_hc",
     );
+    // the built-in MTP head's block (after the main stack, in the model's file or its own) and its own mixer
+    if let Some(first) = mtp_first_block(archive)? {
+        let source = format!("blk.{first}");
+        hyper(
+            bindings,
+            "mtp.layers.0.attn_hyper_connection",
+            &format!("{source}.hc_attn"),
+        );
+        hyper(
+            bindings,
+            "mtp.layers.0.mlp_hyper_connection",
+            &format!("{source}.hc_ffn"),
+        );
+        indexer(bindings, "mtp.layers.0", &source);
+        hyper(
+            bindings,
+            "mtp.hyper_connection_mixer",
+            &format!("{source}.nextn.hc_head"),
+        );
+    }
     for layer in inventory.layer_indices("blk.") {
         let native = format!("{model}.layers.{layer}");
         hyper(
@@ -276,25 +316,7 @@ fn bind_flash_next(
                 format!("blk.{layer}.{role}.weight"),
             );
         }
-        // llama.cpp splits the indexer's fused `index_qk_proj` into its query and key halves
-        let indexer = format!("{native}.self_attn.indexer");
-        for (target, role) in [("index_q_proj", "q_proj"), ("index_k_proj", "k_proj")] {
-            bind(
-                inventory,
-                bindings,
-                format!("{indexer}.{target}.weight"),
-                format!("blk.{layer}.indexer.{role}.weight"),
-            );
-        }
-        for (target, role) in [("q_layernorm", "q_norm"), ("k_layernorm", "k_norm")] {
-            bind_text_norm(
-                inventory,
-                bindings,
-                family,
-                format!("{indexer}.{target}.weight"),
-                format!("blk.{layer}.indexer.{role}.weight"),
-            );
-        }
+        indexer(bindings, &native, &format!("blk.{layer}"));
         // llama.cpp squeezes the depthwise conv's unit dimension
         let conv = format!("blk.{layer}.ple_conv1d.weight");
         if inventory.contains(&conv) {
@@ -318,6 +340,24 @@ fn bind_flash_next(
         );
     }
     Ok(())
+}
+
+// The first MTP block: the `nextn` blocks are the last of the block count
+fn mtp_first_block(archive: &GgufArchive) -> Result<Option<usize>> {
+    let architecture = metadata_string(archive, GENERAL_ARCHITECTURE)?
+        .context("GGUF metadata is missing `general.architecture`")?;
+    let nextn_key = format!("{architecture}.nextn_predict_layers");
+    if archive.metadata().get(&nextn_key).is_none() {
+        return Ok(None);
+    }
+    let block_count = metadata_usize(archive, &format!("{architecture}.block_count"))?;
+    let nextn_layers = metadata_usize(archive, &nextn_key)?;
+    block_count
+        .checked_sub(nextn_layers)
+        .map(Some)
+        .with_context(|| {
+            format!("`{nextn_key}` ({nextn_layers}) exceeds the block count {block_count}")
+        })
 }
 
 // llama.cpp stores the built-in MTP head as the blocks after the main stack, plus `nextn` fc and norm tensors.

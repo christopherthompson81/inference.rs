@@ -65,8 +65,8 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
 | Mode | Target models | Assistant model | Status |
 |---|---|---|---|
 | MTP | Gemma 4 | Gemma 4 assistant checkpoints (`--mtp-model`) | Supported with paged attention |
-| MTP | Qwen3.5 (dense and MoE), Qwen3.8 | Built into the checkpoint (`--mtp`) | Supported with paged attention |
-| DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8 | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
+| MTP | Qwen3.5 (dense and MoE), Qwen3.8, Qwen3.8-Flash-Next | Built into the checkpoint (`--mtp`), or a GGUF head file | Supported with paged attention |
+| DFlash / DFlash 2 / DSpark | Qwen3.5, Qwen3.8, Qwen3.8-Flash-Next | DFlash and DSpark draft checkpoints (`--mtp-model`) | Supported with paged attention |
 
 Legacy target/draft speculative decoding has been removed. New speculative decoding features use the MTP proposer/target path.
 
@@ -79,6 +79,19 @@ inference serve -m Qwen/Qwen3.8-27B --quant 4 --mtp
 ```
 
 The head keeps its own paged KV cache alongside the target's, so the KV budget grows by one attention layer. `--mtp-n-predict` defaults to 2 for these heads. Greedy output is equivalent to non-MTP decoding up to floating-point tie-breaks in the hybrid recurrent layers. UQFF artifacts must include the `mtp.*` tensors to use `--mtp`.
+
+A GGUF that leaves the head out can take it from a separate file, as llama.cpp's MTP heads ship (for example
+unsloth's `mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf`): list it after the model's files and pass `--mtp`. The head file's
+`nextn` block extends the model it is listed with and borrows its embeddings and `lm_head`:
+
+```bash
+inference serve --format gguf -m <dir> \
+  -f "Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf;Qwen3.8-Flash-Next-UD-IQ4_XS-00002-of-00003.gguf;Qwen3.8-Flash-Next-UD-IQ4_XS-00003-of-00003.gguf;mtp-Qwen3.8-Flash-Next-shared-Q8_0.gguf" \
+  --mtp
+```
+
+Qwen3.8-Flash-Next's head drafts from the target's hyper-connection streams before the final mixer, through one QSA
+and MoE block with its own mixer. Its DFlash 2 drafter taps the mean of the four streams.
 
 ## DFlash and DFlash 2 (Qwen3.5 / Qwen3.8)
 

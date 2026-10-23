@@ -201,6 +201,7 @@ macro_rules! qwen3_5_text_loader {
                 };
                 Ok(super::qwen3_5::with_qsa_layers(
                     &cfg,
+                    mtp,
                     HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
                         .with_uniform_prefix_prefill_attention_features(Default::default())
                         .with_recurrent_state_bytes(cfg.recurrent_state_bytes()),
