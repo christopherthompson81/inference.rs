@@ -806,7 +806,10 @@ impl MLlamaTextModel {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Llama3RotaryEmbedding::new(vb.dtype(), rope_spec, device, is_gptx, None),
+            |device| {
+                let dtype = mapper.activation_dtype_on(device).unwrap_or(vb.dtype());
+                Llama3RotaryEmbedding::new(dtype, rope_spec, device, is_gptx, None)
+            },
         )?;
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
@@ -965,7 +968,7 @@ impl MLlamaTextModel {
             }
         }
 
-        hidden_states = hidden_states.to_device(&self.device)?;
+        hidden_states = self.mapper.cast_nm_device(&hidden_states, false)?;
         hidden_states = self.norm.forward(&hidden_states)?;
 
         hidden_states = ctx.lm_head(&*self.lm_head, &ctx.logits(&hidden_states)?)?;

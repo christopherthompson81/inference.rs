@@ -2282,7 +2282,7 @@ impl GraniteMoeHybrid {
             }
         }
 
-        let x = x.to_device(&self.device)?;
+        let x = self.mapper.cast_nm_device(&x, false)?;
         let x = self.ln_f.forward(&x)?;
         let x = ctx.logits(&x)?;
 

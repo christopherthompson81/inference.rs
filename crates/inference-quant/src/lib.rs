@@ -2041,6 +2041,11 @@ pub trait QuantMethod: Send + Sync + Debug + QuantizedSerde {
         None
     }
 
+    /// This unquantized layer's weights in `dtype`; `None` for a quantized layer or one already in it.
+    fn unquantized_in(&self, _dtype: DType) -> Result<Option<Arc<dyn QuantMethod>>> {
+        Ok(None)
+    }
+
     #[cfg(all(feature = "cuda", has_marlin_kernels))]
     #[doc(hidden)]
     fn prepare_gguf_affine_raw(

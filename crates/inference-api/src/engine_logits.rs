@@ -136,7 +136,7 @@ pub(crate) async fn prompt_logits(
             InferenceRs::maybe_log_error(state.clone(), error.as_ref());
             return Err(ApiError::from_error(error.as_ref(), ApiErrorKind::Internal));
         }
-        Some(Response::ModelError(message, _)) => {
+        Some(Response::ModelError(message, _) | Response::CompletionModelError(message, _)) => {
             InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(message));
             return Err(ApiError::model_error());
         }

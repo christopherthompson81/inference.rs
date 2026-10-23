@@ -29,6 +29,8 @@ const PREFIX_CACHE_SEQS: usize = 4;
 const LONG_PROMPT_LEN: usize = 100;
 const LONG_PROMPT_STRIDE: usize = 7;
 const CACHED_LOGPROB_TOLERANCE: f32 = 1e-3;
+// how much more BF16 error a split model may show than the model all on the GPU
+const SPLIT_ERROR_RATIO: f32 = 1.25;
 // above every test's context, so QSA keeps every key
 const DENSE_BUDGET: usize = 1024;
 // two blocks of 4: QSA selects from the 12th token on
@@ -211,6 +213,69 @@ async fn flash_next_decode_matches_prefill_scoring() -> anyhow::Result<()> {
             "step {step}: decode logprob {decode}, prefill {prefill}"
         );
     }
+    Ok(())
+}
+
+// Each position's logprob of the next token of `tokens`, as one prefill scores them.
+async fn score(model: &Model, tokens: &[u32]) -> anyhow::Result<Vec<f32>> {
+    let scored = model
+        .prompt_logits(PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens(tokens.to_vec()),
+            output: Default::default(),
+        })
+        .await?;
+    Ok(scored
+        .token_logprobs
+        .iter()
+        .skip(1)
+        .map(|logprob| logprob.unwrap_or(f32::NAN))
+        .collect())
+}
+
+// Layers on the CPU beside the GPU run in F32 and hand BF16 back: a split model scores the F32 reference no worse
+// than the model all on the GPU in BF16 does (this random checkpoint amplifies BF16 error at a few positions, so
+// the comparison is of the mean).
+#[tokio::test]
+async fn flash_next_split_across_gpu_and_cpu_scores_as_on_the_gpu() -> anyhow::Result<()> {
+    if !cfg!(feature = "cuda") || inference_tensor::Device::new_cuda(0).is_err() {
+        return Ok(());
+    }
+    let checkpoint = tiny_flash_next(DENSE_BUDGET)?;
+    let tokens = long_prompt();
+    let build = |builder: TextModelBuilder| async move { builder.build().await };
+    let path = checkpoint.path().to_string_lossy().to_string();
+    let reference = build(
+        TextModelBuilder::new(&path)
+            .with_dtype(ModelDType::F32)
+            .with_force_cpu(),
+    )
+    .await?;
+    let expected = score(&reference, &tokens).await?;
+    drop(reference);
+    let mean_error = |scored: &[f32]| {
+        expected
+            .iter()
+            .zip(scored)
+            .map(|(e, a)| (e - a).abs())
+            .sum::<f32>()
+            / expected.len() as f32
+    };
+    let gpu = build(TextModelBuilder::new(&path).with_dtype(ModelDType::BF16)).await?;
+    let on_gpu = mean_error(&score(&gpu, &tokens).await?);
+    drop(gpu);
+    let split = build(
+        TextModelBuilder::new(&path)
+            .with_dtype(ModelDType::BF16)
+            .with_device_layers(vec![format!("0:{}", NUM_LAYERS / 2)]),
+    )
+    .await?;
+    let scored = score(&split, &tokens).await?;
+    let split_error = mean_error(&scored);
+    anyhow::ensure!(
+        scored.len() == expected.len() && split_error <= on_gpu * SPLIT_ERROR_RATIO,
+        "the split model scores worse: mean logprob error {split_error} against {on_gpu} on the GPU"
+    );
     Ok(())
 }
 

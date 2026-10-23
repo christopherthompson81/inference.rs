@@ -343,6 +343,17 @@ impl QuantMethod for UnquantLinear {
         (self.w.dtype(), self.w.device().clone())
     }
 
+    fn unquantized_in(&self, dtype: DType) -> Result<Option<Arc<dyn QuantMethod>>> {
+        if self.w.dtype() == dtype {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(Self {
+            w: self.w.to_dtype(dtype)?,
+            b: self.b.as_ref().map(|b| b.to_dtype(dtype)).transpose()?,
+            stats: self.stats.clone(),
+        })))
+    }
+
     fn plan_isq(&self, request: &crate::IsqRequest) -> Result<crate::IsqPlanParams> {
         if self.w.rank() == 3 && request.ty.is_some_and(|ty| !ty.supports_stacked_gather()) {
             inference_tensor::bail!(

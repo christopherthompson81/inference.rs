@@ -1887,7 +1887,7 @@ impl TextModel {
                 &mut layer_ctx,
             )?;
         }
-        xs = xs.to_device(&self.device)?;
+        xs = self.mapper.cast_nm_device(&xs, false)?;
 
         let target_magnitude = xs
             .i(0)?

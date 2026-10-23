@@ -438,7 +438,14 @@ pub fn new_family_model<T: FamilyAttention>(
                 mapper,
                 cfg.num_hidden_layers,
                 real_device,
-                |device| T::rope(cfg, dtype, device, is_gptx),
+                |device| {
+                    T::rope(
+                        cfg,
+                        mapper.activation_dtype_on(device).unwrap_or(dtype),
+                        device,
+                        is_gptx,
+                    )
+                },
             )?;
             Ok(FamilyLayers::<T> {
                 cfg,

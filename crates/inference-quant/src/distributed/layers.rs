@@ -157,7 +157,13 @@ fn load_weight_source_linear_shard(
         return Ok(None);
     };
 
-    source.load_linear(&vb.prefix(), &crate::weight_source_load_device(vb), shard)
+    let Some(layer) =
+        source.load_linear(&vb.prefix(), &crate::weight_source_load_device(vb), shard)?
+    else {
+        return Ok(None);
+    };
+    // sources hold unquantized layers in the model dtype; a CPU layer beside the GPU asks for F32
+    Ok(Some(layer.unquantized_in(vb.dtype())?.unwrap_or(layer)))
 }
 
 fn load_weight_source_dense(
