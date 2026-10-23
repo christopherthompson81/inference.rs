@@ -496,3 +496,67 @@ Also: `maybe_log_error` logs every internal error (a client sees "Internal serve
 sized to its window. With these the model scores within 0.4% of llama.cpp (the model's own doc, Run 10).
 
 Open: experts without pinning, as llama.cpp maps them (pageable copies from the mapping) to spare the 57 GiB copy.
+
+## Run 18 - 2026-10-23 09:01
+
+Question: an explicit `--moe-expert-cache 160` on Qwen3.8-Flash-Next did not fit, the automatic map put layers 43-47
+on the CPU, and the run sat at one CPU thread with the GPU at 0% (13 min load, no prefill progress). Why is a CPU
+fallback that slow, and why would the map fall back at all?
+
+Method, after a wasted stretch sampling the whole 88 GB model under gdb (each load took 4 to 13 minutes): start from
+one layer and work up until the one-thread behaviour shows.
+
+Rung 1, one layer's experts (`cpu_experts::tests::flash_next_q8_0_down_layer`, IQ3_S gate/up and Q8_0 down, 512
+experts over 640 x 2560, as the file's layers 2, 4, 30, 46 and 47):
+
+```
+                                          1 token          32 tokens
+block kernels, whole layer               2.36 ms 7.9 cores    75 ms 7.9 cores
+fallback IQ3_S gate gather, BF16          77 ms  2.3 cores  2490 ms 2.2 cores
+fallback Q8_0 down gather, BF16         4159 ms  1.0 cores  5134 ms 1.0 cores
+```
+
+A resident CPU layer took the block kernels only when all three projections were types `runs_resident` allowed, and
+it excluded Q8_0 (Run 17 kept resident Q8_0 on Candle). Layers 46 and 47 have Q8_0 down experts, so they took Candle's
+indexed fallback, which dequantizes every expert single-threaded on each call: seconds a token on one core. The
+exclusion had a reason: lifting it broke `flash_next_isq_load_and_a_reload_of_its_uqff_decode_alike` (greedy decodes
+diverged from the first token).
+
+Rung 2, the kernels at the tiny model's sizes (a temporary sweep against dense math): Q8_0 and IQ4_NL were wrong at
+hidden 64 x inter 32, 64 x 64 and 96 x 64 (relative error exactly 1: zero output), right from 16K weights an expert.
+`rows_per_item(cols)` picks up to 256 rows an item with no regard to the projection's rows, so `inter / item_rows`
+was 0 and no item ran; a row count no power of two up to the item size divides also dropped its last rows. Now
+`rows_per_item(rows, cols)` is a power of two dividing `rows`; `small_experts_match_dense_experts` covers it.
+
+Rung 3, block path against gather inside the tiny model (temporary print): after the fix they agree to 1.8 to 2.1%
+(the block kernels quantize activations to Q8, Candle's fallback multiplies in f32), but only the reload ran blocks:
+the ISQ load's experts are `PendingIsqLayer`s, which delegate everything except `cpu_gguf_blocks` (and, on CUDA,
+`kernel_weight`), so it ran Candle's gather. `QuantMethod::resolved_layer` now hands out what a pending layer resolves
+to, and the fast experts swap their pending projections for it before dispatch; both sides run the same kernels and
+the round trip passes.
+
+Rung 4, load: a CPU layer copied its stacks out of the mapping (into an owned buffer, then a QTensor), which on a
+125 GB machine already holding 57 GiB of pinned experts evicted the very file pages it read: layers 46 and 47 took
+119 s and 136 s each. `MappedCpuExperts` runs the block kernels over the GGUF mapping itself (no ISQ, LoRA or
+sharding): the forced split (`-n "0:43"`, 64 cached) now loads in about 80 s.
+
+Rung 5, the rest of a CPU layer, on a checkpoint with Flash-Next's widths but 4 layers and tiny experts (CPU, 512
+tokens: prefill 5.05 s, decode 500 ms a token): the busy thread sat in the CPU backend's BF16 matmul, which widened
+the whole storage of both operands to F32 on one thread every call (the lm_head's 1.27 GB a token). BF16 matmuls of
+up to 4 rows now read the weight in place across the barrier pool; larger ones widen only the span the view reaches,
+across threads (`bf16_matmul_matches_f32_for_few_and_many_rows`).
+
+Planner: an explicit cache that does not fit now shrinks to the most slots that fit (in sixteenths of the experts,
+warning), instead of the map moving layers to the CPU; only when no slots fit does a layer move.
+
+```
+inference bench --format gguf -m <Flash-Next UD-IQ4_XS> --moe-expert-cache 64 -n "0:43" --prompt-len 512
+    before: load 4 to 13 min, then one thread and no prefill progress in minutes, GPU 0%
+    after:  load about 40 s, TTFT 14.6 s (512 tokens), decode 104 ms/token (all on the GPU: 3.7 s, 70 ms)
+inference bench ... --moe-expert-cache 160 --pa-context-len 8192 --prompt-len 3000 (automatic map)
+    "the requested MoE expert cache does not fit ...; caching fewer experts per layer requested=160 slots=128"
+    Layers 0-47: cuda[0]; TTFT 16.9 s, decode 67.2 ms/token (as an explicit 128)
+```
+
+Open: a CPU layer's attention and GDN still run Candle's generic CPU ops (the forced split's TTFT is 4x the
+all-GPU one); the GGUF dense CPU layers were not profiled past the experts.

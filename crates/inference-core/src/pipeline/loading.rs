@@ -459,7 +459,8 @@ pub(crate) struct ResolvedMapSetting {
     pub setting: DeviceMapSetting,
     /// The KV tokens an automatic map planned for; `None` for a manual, dummy or tensor-parallel map.
     pub max_kv_tokens: Option<usize>,
-    /// Experts per layer an automatic map chose to cache on the GPU, keeping the rest in host memory.
+    /// Experts per layer an automatic map chose to cache on the GPU, keeping the rest in host memory (fewer than the
+    /// requested cache when that does not fit).
     pub planned_moe_expert_cache: Option<usize>,
 }
 
@@ -541,12 +542,12 @@ impl ExpertCachePlan<'_> {
     }
 
     // The most experts per layer to cache when a GGUF MoE model's layers do not all fit on the GPU beside a usable
-    // context, its routed experts staying in host memory; `None` when it fits resident or cannot offload.
+    // context, its routed experts staying in host memory; `None` when it fits resident or cannot offload. A requested
+    // cache that does not fit shrinks to one that does: the map would otherwise move whole layers to the CPU.
     fn slots(&self, params: &AutoDeviceMapParams) -> Result<Option<usize>> {
         // one GPU: the fit is the primary device's, as a split across GPUs would map layers instead
         let gpus = self.devices.iter().filter(|d| d.is_cuda()).count();
-        if self.sizing.moe_expert_cache.is_some()
-            || gpus != 1
+        if gpus != 1
             || !self.devices.first().is_some_and(Device::is_cuda)
             || !matches!(
                 self.sizing.sizing,
@@ -579,6 +580,30 @@ impl ExpertCachePlan<'_> {
             Some(crate::MemoryGpuConfig::ContextSize(tokens)) => tokens,
             _ => 0,
         };
+        if let Some(asked) = self.sizing.moe_expert_cache {
+            // the context the map and a context-sized paged cache ask for, not the planner's longer default
+            let context = params.with_max_seq_len(params.max_seq_len().max(requested));
+            if self.fits(Some(asked), &context, activations)? {
+                return Ok(None);
+            }
+            let fitting = shrink_expert_slots(asked, experts, |slots| {
+                self.fits(Some(slots), &context, activations)
+            })?;
+            match fitting {
+                Some(slots) => warn!(
+                    requested = asked,
+                    slots,
+                    context = context.max_seq_len(),
+                    "the requested MoE expert cache does not fit on the GPU beside the context; caching fewer experts \
+                     per layer"
+                ),
+                None => warn!(
+                    requested = asked,
+                    "MoE layers do not fit on the GPU even with no experts cached; the map moves layers to the CPU"
+                ),
+            }
+            return Ok(fitting);
+        }
         let target = params.with_max_seq_len(
             params
                 .max_seq_len()
@@ -623,6 +648,25 @@ fn plan_expert_slots<C: Copy>(
             if fits(Some(slots), context)? {
                 return Ok(Some((slots, context)));
             }
+        }
+    }
+    Ok(None)
+}
+
+// The most experts per layer, below `requested`, that `fits`: each multiple of 1/PLANNED_SLOT_STEPS of a layer's
+// experts and then none; `None` when not even that fits
+fn shrink_expert_slots(
+    requested: usize,
+    experts: usize,
+    mut fits: impl FnMut(usize) -> Result<bool>,
+) -> Result<Option<usize>> {
+    let step = (experts / PLANNED_SLOT_STEPS).max(1);
+    for slots in (0..requested.min(experts).div_ceil(step))
+        .rev()
+        .map(|k| k * step)
+    {
+        if fits(slots)? {
+            return Ok(Some(slots));
         }
     }
     Ok(None)
@@ -674,7 +718,7 @@ pub(crate) fn resolve_map_setting(
     }
     .slots(params)?;
     let sizing = super::isq_flow::AutoDeviceMapSizingInputs {
-        moe_expert_cache: sizing.moe_expert_cache.or(planned_moe_expert_cache),
+        moe_expert_cache: planned_moe_expert_cache.or(sizing.moe_expert_cache),
         ..sizing
     };
     let (loader, config) = (sizing.loader, sizing.config);
@@ -1050,7 +1094,7 @@ pub(crate) fn open_load_session(
             attention,
             load_parts,
             embeddings_on_host,
-            moe_expert_cache: moe_expert_cache.or(planned_moe_expert_cache),
+            moe_expert_cache: planned_moe_expert_cache.or(moe_expert_cache),
         },
         mapper,
     ))
@@ -1327,7 +1371,7 @@ mod tests {
 
 #[cfg(test)]
 mod expert_slot_plan_tests {
-    use super::plan_expert_slots;
+    use super::{plan_expert_slots, shrink_expert_slots};
 
     const EXPERTS: usize = 256;
 
@@ -1359,5 +1403,20 @@ mod expert_slot_plan_tests {
     fn the_shorter_context_is_tried_only_when_the_longer_fits_nothing() {
         assert_eq!(plan(None, Some(100)), Some((96, 1)));
         assert_eq!(plan(None, None), None);
+    }
+
+    #[test]
+    fn a_requested_cache_shrinks_to_the_most_slots_below_it_that_fit() {
+        let shrink = |requested, limit: Option<usize>| {
+            shrink_expert_slots(requested, EXPERTS, |slots| {
+                Ok(limit.is_some_and(|l| slots <= l))
+            })
+            .unwrap()
+        };
+        assert_eq!(shrink(160, Some(150)), Some(144));
+        // never more than requested, even when more would fit
+        assert_eq!(shrink(40, Some(200)), Some(32));
+        assert_eq!(shrink(160, Some(0)), Some(0));
+        assert_eq!(shrink(160, None), None);
     }
 }

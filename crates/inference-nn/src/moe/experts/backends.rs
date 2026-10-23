@@ -1207,11 +1207,34 @@ impl CutileExpertsWeights {
 }
 
 impl FastExpertsWeights {
+    // pending ISQ layers swapped for what they resolve to, so the fused and block paths see the quantized weights
+    fn resolved(&self) -> Option<Self> {
+        let resolved = [
+            &self.fused_gate_proj,
+            &self.fused_up_proj,
+            &self.fused_down_proj,
+        ]
+        .map(|projection| projection.resolved_layer());
+        if resolved.iter().all(Option::is_none) {
+            return None;
+        }
+        let [gate, up, down] = resolved;
+        Some(Self {
+            fused_gate_proj: gate.unwrap_or_else(|| self.fused_gate_proj.clone()),
+            fused_up_proj: up.unwrap_or_else(|| self.fused_up_proj.clone()),
+            fused_down_proj: down.unwrap_or_else(|| self.fused_down_proj.clone()),
+            sharded: self.sharded,
+        })
+    }
+
     pub(super) fn forward_impl(
         &self,
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Tensor> {
+        if let Some(resolved) = self.resolved() {
+            return resolved.forward_impl(forward, config);
+        }
         if forward.lora.is_some() {
             #[cfg(feature = "cuda")]
             if self.fused_gate_proj.stats_snapshot().is_none() {
@@ -1340,7 +1363,7 @@ impl FastExpertsWeights {
         forward: &MoEForward,
         config: MoEForwardConfig,
     ) -> Result<Option<Tensor>> {
-        use inference_quant::cpu_experts::{CpuExpertRoute, CpuExperts, runs_resident};
+        use inference_quant::cpu_experts::{CpuExperts, supports};
         if !forward.xs.device().is_cpu() {
             return Ok(None);
         }
@@ -1361,45 +1384,20 @@ impl FastExpertsWeights {
         ) else {
             return Ok(None);
         };
-        if ![gate, up, down].iter().all(|p| runs_resident(p.ty, p.cols)) {
+        if ![gate, up, down].iter().all(|p| supports(p.ty, p.cols)) {
             return Ok(None);
         }
-        let xs = forward
-            .xs_flat
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let ids = forward
-            .topk_ids
-            .to_dtype(DType::U32)?
-            .flatten_all()?
-            .to_vec1::<u32>()?;
-        let weights = forward
-            .topk_weights
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let routes = ids
-            .iter()
-            .zip(&weights)
-            .enumerate()
-            .map(|(i, (&expert, &weight))| CpuExpertRoute {
-                token: i / config.num_experts_per_tok,
-                expert: expert as usize,
-                weight,
-            })
-            .collect::<Vec<_>>();
-        let mut out = vec![0f32; xs.len()];
-        CpuExperts {
-            gate,
-            up,
-            down,
-            act,
-        }
-        .forward(&xs, &routes, &mut out)?;
-        Tensor::from_vec(out, forward.shape.flat(), &Device::Cpu)?
-            .to_dtype(forward.original_dtype)
-            .map(Some)
+        run_cpu_experts(
+            &CpuExperts {
+                gate,
+                up,
+                down,
+                act,
+            },
+            forward,
+            config,
+        )
+        .map(Some)
     }
 
     pub(super) fn forward_gather(
@@ -2232,4 +2230,42 @@ mod cpu_block_tests {
         assert!(err < 0.02 * norm, "relative error {}", err / norm);
         Ok(())
     }
+}
+
+// The block kernels over `forward`'s routes, on the host
+pub(super) fn run_cpu_experts(
+    experts: &inference_quant::cpu_experts::CpuExperts,
+    forward: &MoEForward,
+    config: MoEForwardConfig,
+) -> Result<Tensor> {
+    let xs = forward
+        .xs_flat
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let ids = forward
+        .topk_ids
+        .to_dtype(DType::U32)?
+        .flatten_all()?
+        .to_vec1::<u32>()?;
+    let weights = forward
+        .topk_weights
+        .to_dtype(DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
+    let routes = ids
+        .iter()
+        .zip(&weights)
+        .enumerate()
+        .map(
+            |(i, (&expert, &weight))| inference_quant::cpu_experts::CpuExpertRoute {
+                token: i / config.num_experts_per_tok,
+                expert: expert as usize,
+                weight,
+            },
+        )
+        .collect::<Vec<_>>();
+    let mut out = vec![0f32; xs.len()];
+    experts.forward(&xs, &routes, &mut out)?;
+    Tensor::from_vec(out, forward.shape.flat(), &Device::Cpu)?.to_dtype(forward.original_dtype)
 }

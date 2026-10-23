@@ -57,8 +57,37 @@ enum MoEExpertsBackendImpl {
     #[cfg(feature = "cuda")]
     Cutlass(CutlassExpertsWeights),
     Fast(FastExpertsWeights),
+    MappedCpu(Box<MappedCpuExperts>),
     #[cfg(feature = "cuda")]
     Offloaded(Box<offload::OffloadedExperts>),
+}
+
+/// Resident CPU experts read in place from a GGUF mapping: the block kernels over the file's own bytes, so loading
+/// copies nothing and the pages stay reclaimable.
+struct MappedCpuExperts {
+    // gate, up, down; each `[experts, rows, cols]`
+    stacks: [inference_quant::MappedBlocks; 3],
+    act: inference_quant::GluActivationType,
+}
+
+impl MappedCpuExperts {
+    fn forward(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
+        let [gate, up, down] = self.stacks.each_ref().map(|blocks| {
+            inference_quant::cpu_experts::CpuExpertProjection {
+                ty: blocks.ty,
+                bytes: blocks.bytes(),
+                rows: blocks.dims[1],
+                cols: blocks.dims[2],
+            }
+        });
+        let experts = inference_quant::cpu_experts::CpuExperts {
+            gate,
+            up,
+            down,
+            act: self.act,
+        };
+        backends::run_cpu_experts(&experts, forward, config)
+    }
 }
 
 impl MoEExpertsBackendImpl {
@@ -78,6 +107,9 @@ impl MoEExpertsBackendImpl {
                 .forward_impl(forward, config)
                 .map_err(|err| err.context("moe experts cutlass")),
             Self::Fast(w) => w.forward_impl(forward, config),
+            Self::MappedCpu(w) => w
+                .forward(forward, config)
+                .map_err(|err| err.context("moe experts mapped cpu")),
             #[cfg(feature = "cuda")]
             Self::Offloaded(w) => w
                 .forward(forward, config)
@@ -127,6 +159,17 @@ impl MoEExperts {
             ));
         }
         let experts_vb = vb.pp("experts").set_device(layer_device.clone());
+        if layer_device.is_cpu()
+            && let Some(mapped) = Self::load_mapped_cpu(&experts_vb, comm, act)
+        {
+            return Ok(Self::from_backend(
+                MoEExpertsBackendImpl::MappedCpu(Box::new(mapped)),
+                None,
+                cfg,
+                comm,
+                act,
+            ));
+        }
         if let Some(fast) = FastExpertsWeights::from_weight_source(cfg, &experts_vb, comm)? {
             let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, fast.sharded)?;
             return Ok(Self::from_backend(
@@ -277,6 +320,33 @@ impl MoEExperts {
         let lora_site = Self::register_lora_site(cfg, &experts_vb, comm, lora_sharded)?;
 
         Ok(Self::from_backend(backend_impl, lora_site, cfg, comm, act))
+    }
+
+    // GGUF stacks the block kernels run, left in the mapping; not when ISQ, LoRA or sharding needs layers of its own
+    fn load_mapped_cpu(
+        experts_vb: &ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+        act: Activation,
+    ) -> Option<MappedCpuExperts> {
+        let act = backends::glu_activation(act)?;
+        if comm.world_size() > 1
+            || inference_quant::get_immediate_isq().is_some()
+            || experts_vb.lora_registry().is_some()
+        {
+            return None;
+        }
+        let source = experts_vb.weight_source()?;
+        let keys = inference_quant::QuantizedExpertKeys::new(&experts_vb.prefix());
+        let [gate, up, down] = [&keys.gate, &keys.up, &keys.down].map(|key| {
+            source.mapped_blocks(key).filter(|blocks| {
+                blocks.dims.len() == 3
+                    && inference_quant::cpu_experts::supports(blocks.ty, blocks.dims[2])
+            })
+        });
+        Some(MappedCpuExperts {
+            stacks: [gate?, up?, down?],
+            act,
+        })
     }
 
     // GGUF experts read on the host, kept there in pinned memory with a device cache of `slots` per projection

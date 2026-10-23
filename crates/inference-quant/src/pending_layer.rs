@@ -125,6 +125,10 @@ impl QuantMethod for PendingIsqLayer {
         self.resolve()?.forward_raw(a)
     }
 
+    fn resolved_layer(&self) -> Option<Arc<dyn QuantMethod>> {
+        self.resolve().ok()
+    }
+
     fn forward(&self, a: &Tensor) -> Result<Tensor> {
         self.resolve()?.forward(a)
     }
