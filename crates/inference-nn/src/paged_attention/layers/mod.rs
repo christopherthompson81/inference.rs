@@ -10,6 +10,20 @@ pub struct SelectedAttention<'a> {
     pub sdpa_params: &'a crate::attention::SdpaParams,
 }
 
+/// One `PagedAttention::attend_gathered` call: `(rows, heads, 1, head_dim)` queries, each over the leading `kept[row]`
+/// of its row of `cells` (`(rows, width)` u32 positions, read through `block_table`'s row), all `(rows,)` u32 for
+/// `kept`; `compact_table` is the `(rows, pages)` u32 identity table of the compact cache the cells go into.
+pub struct GatheredAttention<'a> {
+    pub query: &'a inference_tensor::Tensor,
+    pub cells: &'a inference_tensor::Tensor,
+    pub kept: &'a inference_tensor::Tensor,
+    pub block_table: &'a inference_tensor::Tensor,
+    pub compact_table: &'a inference_tensor::Tensor,
+    pub key_cache: &'a inference_tensor::Tensor,
+    pub value_cache: &'a inference_tensor::Tensor,
+    pub sdpa_params: &'a crate::attention::SdpaParams,
+}
+
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
 pub mod paged_attention;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
@@ -96,6 +110,10 @@ pub mod paged_attention {
         }
 
         pub fn attend_selected(&self, _call: super::SelectedAttention<'_>) -> Result<Tensor> {
+            inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
+        }
+
+        pub fn attend_gathered(&self, _call: super::GatheredAttention<'_>) -> Result<Tensor> {
             inference_tensor::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
