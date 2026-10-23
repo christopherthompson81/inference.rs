@@ -338,7 +338,8 @@ impl PleLayer {
         }
     }
 
-    /// What PLE adds to the streams `xs` `[b, len, streams * hidden]`, updating each sequence's conv state.
+    /// What PLE adds to the streams `xs` `[b, len, streams * hidden]`, updating each sequence's conv state; with
+    /// `keep_history`, also the conv history (`[b, state + len, width]`) a speculative commit narrows to the kept rows.
     #[allow(clippy::cast_precision_loss)]
     pub(super) fn forward(
         &self,
@@ -346,7 +347,8 @@ impl PleLayer {
         window: &TokenWindow,
         pool: &mut RecurrentStatePool,
         indices: &Tensor,
-    ) -> Result<Tensor> {
+        keep_history: bool,
+    ) -> Result<(Tensor, Option<Tensor>)> {
         let (batch, len, width) = xs.dims3()?;
         if window.rows.len() != batch {
             inference_tensor::bail!(
@@ -423,7 +425,29 @@ impl PleLayer {
             .to_dtype(pool.conv_dtype())?
             .contiguous()?;
         pool.scatter_conv_state(indices, &next_state)?;
-        (gated + conv)?.broadcast_mul(&mask)
+        let out = (gated + conv)?.broadcast_mul(&mask)?;
+        Ok((out, keep_history.then_some(history)))
+    }
+
+    /// Sets each listed row's conv state to the window ending at its kept rows of a stashed `history`.
+    pub(super) fn commit_kept_rows(
+        &self,
+        history: &Tensor,
+        indices: &Tensor,
+        rows: &[(usize, usize)],
+        pool: &mut RecurrentStatePool,
+    ) -> Result<()> {
+        let state_len = self.cfg.conv_state_len();
+        for &(row, keep) in rows {
+            let state = history
+                .narrow(0, row, 1)?
+                .narrow(1, keep, state_len)?
+                .transpose(1, 2)?
+                .to_dtype(pool.conv_dtype())?
+                .contiguous()?;
+            pool.scatter_conv_state(&indices.narrow(0, row, 1)?, &state)?;
+        }
+        Ok(())
     }
 
     pub(super) fn residual_tensors(&self, uvb: &UnVarBuilder) {

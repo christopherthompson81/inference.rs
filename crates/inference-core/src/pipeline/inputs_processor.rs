@@ -1288,16 +1288,32 @@ pub mod text_models_inputs_processor {
     ) -> Result<crate::model::TokenWindow> {
         let mut rows = Vec::with_capacity(seq_indices.len());
         for ((&index, &start), &end) in seq_indices.iter().zip(seqlen_offsets).zip(position_ids) {
-            let toks = input_seqs[index].get_toks();
-            if end > toks.len() || start > end {
+            let seq = &input_seqs[index];
+            // a verify step runs the drafts staged past the sequence's tokens
+            let staged = match seq.active_staged_speculative_tokens() {
+                crate::speculative::SpeculativeTokens::Host(tokens) => tokens.clone(),
+                crate::speculative::SpeculativeTokens::Device(tokens) => tokens
+                    .to_dtype(inference_tensor::DType::U32)?
+                    .flatten_all()?
+                    .to_vec1::<u32>()?,
+            };
+            let toks = seq.get_toks();
+            if end > toks.len() + staged.len() || start > end {
                 anyhow::bail!(
-                    "token window {start}..{end} is outside a {}-token sequence",
-                    toks.len()
+                    "token window {start}..{end} is outside a {}-token sequence with {} staged",
+                    toks.len(),
+                    staged.len()
                 );
             }
             let first = start.saturating_sub(preceding);
             rows.push(crate::model::TokenWindowRow {
-                tokens: toks[first..end].to_vec(),
+                tokens: toks
+                    .iter()
+                    .chain(&staged)
+                    .skip(first)
+                    .take(end - first)
+                    .copied()
+                    .collect(),
                 preceding: start - first,
             });
         }
