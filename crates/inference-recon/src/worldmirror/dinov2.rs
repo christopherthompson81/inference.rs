@@ -46,7 +46,9 @@ impl Dinov2 {
         };
         let proj = vb.pp("patch_embed").pp("proj");
         Ok(Self {
-            proj_weight: proj.get((dim, 3, patch, patch), "weight")?.to_dtype(dtype)?,
+            proj_weight: proj
+                .get((dim, 3, patch, patch), "weight")?
+                .to_dtype(dtype)?,
             proj_bias: proj.get(dim, "bias")?.to_dtype(dtype)?,
             cls_token: vb.get((1, 1, dim), "cls_token")?,
             register_tokens: vb.get((1, registers, dim), "register_tokens")?,
@@ -75,9 +77,9 @@ impl Dinov2 {
         let cls = self.cls_token.broadcast_as((frames, 1, dim))?;
         let pos = self.pos_embed(hp, wp)?;
         let tokens = Tensor::cat(&[&cls, &patches], 1)?.broadcast_add(&pos)?;
-        let registers = self
-            .register_tokens
-            .broadcast_as((frames, self.register_tokens.dim(1)?, dim))?;
+        let registers =
+            self.register_tokens
+                .broadcast_as((frames, self.register_tokens.dim(1)?, dim))?;
         let mut xs = Tensor::cat(
             &[
                 &tokens.narrow(1, 0, CLS_TOKENS)?,

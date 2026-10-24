@@ -1,8 +1,9 @@
 # HY-World 2.0 investigation
 
 Native support for Tencent's HY-World 2.0 models (WorldMirror 2.0 first, then WorldStereo-2), with the Tencent Python
-code as the reference. Local branch only: the model license limits use and distribution to a territory that excludes
-the EU, UK and South Korea, so nothing derived from it is pushed.
+code as the reference. The model license's territory terms cover its Materials (the model, its outputs and derivative
+models); this engine implementation is not treated as one of them. Weights, sample outputs and reference dumps are
+never committed.
 
 ## Run 1 - 2026-10-24 12:12
 
@@ -54,3 +55,33 @@ norm2 3.9e-4, MLP 3.1e-3, output 1.25e-2
 The block's parts all agree to bf16 rounding, and rebuilding the reference's output from its own parts with our
 formula gives it exactly; the output is small next to its terms (rms: input 0.215, ls2 x MLP 0.184, output 0.055), so
 the MLP's 0.3% becomes ~1.2% of the output. That is the reference's own bf16 noise, not a port error.
+
+## Run 3 - 2026-10-24 12:40
+
+Question: do the camera head, the four DPT heads and the Gaussian parameters match, and is any end-to-end gap theirs
+or the trunk's?
+
+Camera head (f32; 4 refinement steps of adaptive-modulation blocks attending across frames) and decode
+(`decode_cameras`: quaternion scaled by 2/|q|^2, world-to-camera inverted in closed form, intrinsics from the two
+fields of view, principal point at the centre):
+```
+camera params rel rms 1.2e-3 (max 1.6e-3); camera-to-world max err 1.8e-5 / 4.2e-4 / 6.2e-4; fx rel err <= 1.8e-3
+frame 0 decodes to the identity pose (t ~ 1e-4, q ~ (0, 0, 0, 1)): the world frame is the first camera's
+```
+DPT heads (`dpt.rs`, f32; the residual units' skip is relu(x), as the reference's in-place ReLU makes it) and the
+Gaussian parameters (`gaussians.rs`), rel rms against the reference:
+```
+                     whole model   heads on the reference's trunk features
+depth                1.1e-2        2.2e-4
+depth mask logits    1.8e-2        3.9e-4
+points               2.4e-2        6.4e-4
+normals              1.4e-2        1.2e-4
+gs depth             6.8e-3        1.4e-4
+splat means          6.4e-3        1.3e-4
+splat quats          3.9e-2        1.2e-3
+splat scales         4.9e-2        8.4e-4
+splat opacities      1.6e-2        2.3e-4
+splat SH DC          4.0e-3        2.3e-4
+```
+On the same features the heads agree to f32 convolution order (PyTorch's cuDNN path uses TF32 on Ampere); the
+whole-model gap is the trunk's bf16 noise (Run 2) carried through, largest in the quaternions and scales.

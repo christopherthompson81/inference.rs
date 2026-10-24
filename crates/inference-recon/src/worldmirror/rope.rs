@@ -61,8 +61,14 @@ impl RopeTable {
     /// `t * cos + rotate_half(t) * sin` for `t` `[b, heads, n, head_dim]`, its `n` tokens at `cells` (`[n]` u32).
     pub(crate) fn apply(&self, t: &Tensor, cells: &Tensor) -> Result<Tensor> {
         let n = cells.dim(0)?;
-        let cos = self.cos.index_select(cells, 0)?.reshape((1, 1, n, 2 * self.half))?;
-        let sin = self.sin.index_select(cells, 0)?.reshape((1, 1, n, 2 * self.half))?;
+        let cos = self
+            .cos
+            .index_select(cells, 0)?
+            .reshape((1, 1, n, 2 * self.half))?;
+        let sin = self
+            .sin
+            .index_select(cells, 0)?
+            .reshape((1, 1, n, 2 * self.half))?;
         let first = t.narrow(3, 0, self.half)?;
         let second = t.narrow(3, self.half, self.half)?;
         let rotated = Tensor::cat(&[&second.neg()?, &first], 3)?;

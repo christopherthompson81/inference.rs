@@ -37,7 +37,11 @@ pub(crate) struct Trunk {
 }
 
 impl Trunk {
-    pub(crate) fn load(cfg: &super::WorldMirrorConfig, dtype: DType, vb: VarBuilder) -> Result<Self> {
+    pub(crate) fn load(
+        cfg: &super::WorldMirrorConfig,
+        dtype: DType,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         let dim = cfg.embed_dim;
         let spec = BlockSpec {
             dim,
@@ -85,7 +89,14 @@ impl Trunk {
     ) -> Result<Tensor> {
         let dim = xs.dim(2)?;
         let specials = CAMERA_TOKENS + self.reg_token.dim(2)? + PRIOR_TOKENS;
-        let rope = RopeTable::new(hp + 1, wp + 1, dim / self.heads, self.rope_base, self.dtype, xs.device())?;
+        let rope = RopeTable::new(
+            hp + 1,
+            wp + 1,
+            dim / self.heads,
+            self.rope_base,
+            self.dtype,
+            xs.device(),
+        )?;
         let cells = Tensor::new(frame_cells(specials, hp, wp).as_slice(), xs.device())?;
         self.frame_blocks[0].forward_inspect(xs, Some((&rope, &cells)), inspect)
     }
@@ -133,10 +144,18 @@ impl Trunk {
         let frame_cells = Tensor::new(cells.as_slice(), device)?;
         let global_cells = Tensor::new(cells.repeat(frames).as_slice(), device)?;
         let mut features = Vec::with_capacity(HEAD_LAYERS.len());
-        for (i, (frame_block, global_block)) in self.frame_blocks.iter().zip(&self.global_blocks).enumerate() {
+        for (i, (frame_block, global_block)) in self
+            .frame_blocks
+            .iter()
+            .zip(&self.global_blocks)
+            .enumerate()
+        {
             let local = frame_block.forward(&xs, Some((&rope, &frame_cells)))?;
             let global = global_block
-                .forward(&local.reshape((1, frames * tokens, dim))?, Some((&rope, &global_cells)))?
+                .forward(
+                    &local.reshape((1, frames * tokens, dim))?,
+                    Some((&rope, &global_cells)),
+                )?
                 .reshape((frames, tokens, dim))?;
             inspect(i, &local, &global);
             if HEAD_LAYERS.contains(&i) {
@@ -151,5 +170,4 @@ impl Trunk {
             wp,
         })
     }
-
 }

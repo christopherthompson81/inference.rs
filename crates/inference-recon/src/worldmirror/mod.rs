@@ -1,7 +1,10 @@
 //! Tencent's WorldMirror 2.0: feed-forward reconstruction of cameras, depth, normals, points and Gaussian splats from a
 //! set of images or video frames.
 
+mod camera;
 mod dinov2;
+mod dpt;
+mod gaussians;
 mod layers;
 mod rope;
 mod trunk;
@@ -12,6 +15,13 @@ use inference_tensor::nn::VarBuilder;
 use inference_tensor::{DType, Device, Result, Tensor};
 use serde::Deserialize;
 
+pub use camera::{Camera, decode_cameras};
+pub use gaussians::{Splats, unproject};
+
+// The camera head's transformer depth, heads and refinement steps
+const CAMERA_DEPTH: usize = 4;
+const CAMERA_HEADS: usize = 16;
+const CAMERA_STEPS: usize = 4;
 // ImageNet statistics the trunk normalizes its [0, 1] input with
 const IMAGE_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 const IMAGE_STD: [f32; 3] = [0.229, 0.224, 0.225];
@@ -37,7 +47,34 @@ impl WorldMirrorConfig {
 
 pub struct WorldMirror {
     trunk: trunk::Trunk,
+    camera: camera::CameraHead,
+    depth: dpt::DptHead,
+    points: dpt::DptHead,
+    normals: dpt::DptHead,
+    gs_depth: dpt::DptHead,
+    gaussians: gaussians::GaussianParams,
     device: Device,
+}
+
+/// What one forward predicts for `frames` images of `height x width`; per-pixel maps are `[frames, H, W, ...]`.
+pub struct Prediction {
+    /// `[frames, 9]`: translation, quaternion (scalar last), vertical and horizontal field of view (world-to-camera).
+    pub camera_params: Tensor,
+    pub cameras: Vec<Camera>,
+    /// z-depth `[frames, H, W, 1]`, its confidence and the validity mask's logits `[frames, H, W]`
+    pub depth: Tensor,
+    pub depth_conf: Tensor,
+    pub depth_mask_logits: Tensor,
+    /// world points `[frames, H, W, 3]` from the point head
+    pub points: Tensor,
+    /// unit normals in camera coordinates `[frames, H, W, 3]`
+    pub normals: Tensor,
+    /// the Gaussian head's own depth, which places the splats, and its mask logits
+    pub gs_depth: Tensor,
+    pub gs_depth_mask_logits: Tensor,
+    pub splats: Splats,
+    pub height: usize,
+    pub width: usize,
 }
 
 impl WorldMirror {
@@ -47,11 +84,91 @@ impl WorldMirror {
         let cfg = WorldMirrorConfig::from_dir(dir)?;
         // SAFETY: the checkpoint file is not modified while the model is loaded
         let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[dir.join("model.safetensors")], DType::F32, device)?
+            VarBuilder::from_mmaped_safetensors(
+                &[dir.join("model.safetensors")],
+                DType::F32,
+                device,
+            )?
         };
+        let (dim, patch) = (2 * cfg.embed_dim, cfg.patch_size);
         Ok(Self {
             trunk: trunk::Trunk::load(&cfg, trunk_dtype, vb.pp("visual_geometry_transformer"))?,
+            camera: camera::CameraHead::load(
+                2 * cfg.embed_dim,
+                CAMERA_HEADS,
+                CAMERA_DEPTH,
+                CAMERA_STEPS,
+                vb.pp("cam_head"),
+            )?,
+            depth: dpt::DptHead::load(
+                dim,
+                patch,
+                dpt::Activation::DepthWithMask,
+                false,
+                vb.pp("depth_head"),
+            )?,
+            points: dpt::DptHead::load(
+                dim,
+                patch,
+                dpt::Activation::Points,
+                false,
+                vb.pp("pts_head"),
+            )?,
+            normals: dpt::DptHead::load(
+                dim,
+                patch,
+                dpt::Activation::Normals,
+                false,
+                vb.pp("norm_head"),
+            )?,
+            gs_depth: dpt::DptHead::load(
+                dim,
+                patch,
+                dpt::Activation::DepthWithMask,
+                true,
+                vb.pp("gs_head"),
+            )?,
+            gaussians: gaussians::GaussianParams::load(dpt::HEAD_FEATURES, vb.pp("gs_renderer"))?,
             device: device.clone(),
+        })
+    }
+
+    /// Predicts everything for images `[frames, 3, H, W]` in [0, 1].
+    pub fn predict(&self, images: &Tensor) -> Result<Prediction> {
+        let images = images.to_device(&self.device)?.to_dtype(DType::F32)?;
+        let out = self.trunk(&images, &mut |_, _, _| {})?;
+        self.heads(&out.features, out.patch_start, &images)
+    }
+
+    // every head over the trunk's four feature maps `[frames, tokens, 2 * dim]` and the [0, 1] images on the device
+    fn heads(&self, features: &[Tensor], start: usize, images: &Tensor) -> Result<Prediction> {
+        let (_, _, height, width) = images.dims4()?;
+        let last = features
+            .last()
+            .expect("the trunk returns its head features");
+        let camera_params = self.camera.forward(last)?;
+        let cameras = decode_cameras(&camera_params, height, width)?;
+        let images = images.clone();
+        let depth = self.depth.forward(features, start, &images)?;
+        let points = self.points.forward(features, start, &images)?;
+        let normals = self.normals.forward(features, start, &images)?;
+        let gs = self.gs_depth.forward(features, start, &images)?;
+        let splats = self
+            .gaussians
+            .forward(&gs.fused, &images, &gs.attr, &cameras)?;
+        Ok(Prediction {
+            camera_params,
+            cameras,
+            depth: depth.attr,
+            depth_conf: depth.conf,
+            depth_mask_logits: depth.mask_logits.expect("the depth head predicts a mask"),
+            points: points.attr,
+            normals: normals.attr,
+            gs_depth: gs.attr,
+            gs_depth_mask_logits: gs.mask_logits.expect("the Gaussian head predicts a mask"),
+            splats,
+            height,
+            width,
         })
     }
 

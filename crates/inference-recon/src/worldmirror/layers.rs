@@ -3,7 +3,7 @@
 
 use inference_nn::attention::{AttentionMask, FlashParams, Sdpa, SdpaParams};
 use inference_tensor::nn::{LayerNorm, Linear, Module, VarBuilder};
-use inference_tensor::{D, DType, Result, Tensor};
+use inference_tensor::{DType, Result, Tensor};
 
 use super::rope::RopeTable;
 
@@ -34,7 +34,7 @@ impl AmpLinear {
     }
 
     pub(crate) fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.inner.forward(&xs.to_dtype(self.dtype)?)
+        self.inner.forward(&xs.to_dtype(self.dtype)?.contiguous()?)
     }
 }
 
@@ -59,9 +59,19 @@ pub(crate) struct Mlp {
 
 impl Mlp {
     pub(crate) fn load(dim: usize, hidden: usize, dtype: DType, vb: VarBuilder) -> Result<Self> {
+        Self::load_with_hidden(dim, hidden, dim, dtype, vb)
+    }
+
+    pub(crate) fn load_with_hidden(
+        dim: usize,
+        hidden: usize,
+        out: usize,
+        dtype: DType,
+        vb: VarBuilder,
+    ) -> Result<Self> {
         Ok(Self {
             fc1: AmpLinear::load(dim, hidden, true, dtype, vb.pp("fc1"))?,
-            fc2: AmpLinear::load(hidden, dim, true, dtype, vb.pp("fc2"))?,
+            fc2: AmpLinear::load(hidden, out, true, dtype, vb.pp("fc2"))?,
         })
     }
 
@@ -105,7 +115,11 @@ impl Attention {
         })
     }
 
-    pub(crate) fn forward(&self, xs: &Tensor, rope: Option<(&RopeTable, &Tensor)>) -> Result<Tensor> {
+    pub(crate) fn forward(
+        &self,
+        xs: &Tensor,
+        rope: Option<(&RopeTable, &Tensor)>,
+    ) -> Result<Tensor> {
         self.forward_inspect(xs, rope, &mut |_, _| {})
     }
 
@@ -196,7 +210,11 @@ impl Block {
         })
     }
 
-    pub(crate) fn forward(&self, xs: &Tensor, rope: Option<(&RopeTable, &Tensor)>) -> Result<Tensor> {
+    pub(crate) fn forward(
+        &self,
+        xs: &Tensor,
+        rope: Option<(&RopeTable, &Tensor)>,
+    ) -> Result<Tensor> {
         self.forward_inspect(xs, rope, &mut |_, _| {})
     }
 
@@ -218,10 +236,4 @@ impl Block {
         inspect("mlp_out", &mlp);
         xs + mlp.to_dtype(DType::F32)?.broadcast_mul(&self.ls2)?
     }
-}
-
-/// `x / ||x||` over the last dimension.
-#[allow(dead_code)]
-pub(crate) fn l2_normalize(xs: &Tensor) -> Result<Tensor> {
-    xs.broadcast_div(&xs.sqr()?.sum_keepdim(D::Minus1)?.sqrt()?)
 }
