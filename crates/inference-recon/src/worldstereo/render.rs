@@ -110,3 +110,88 @@ pub fn render(
     }
     Render { rgb, empty }
 }
+
+#[cfg(test)]
+mod parity {
+    use inference_tensor::{DType, Device};
+
+    use super::super::panorama::{PanoDepth, Rgb8};
+    use super::super::scene::Scene;
+    use super::super::trajectory::{self, Mat4};
+
+    // PANO_REF, WORLDSTEREO_SCENE_REF and WORLDSTEREO_RENDER_REF: PyTorch3D renders of the scene's point cloud along two
+    // of its trajectories
+    #[test]
+    #[ignore = "needs the pano-depth, scene and render reference dumps"]
+    fn renders_match_the_reference() -> inference_tensor::Result<()> {
+        let (Some(pano_ref), Some(scene_ref), Some(render_ref)) = (
+            std::env::var_os("PANO_REF"),
+            std::env::var_os("WORLDSTEREO_SCENE_REF"),
+            std::env::var_os("WORLDSTEREO_RENDER_REF"),
+        ) else {
+            return Ok(());
+        };
+        let p = inference_tensor::safetensors::load(pano_ref, &Device::Cpu)?;
+        let s = inference_tensor::safetensors::load(scene_ref, &Device::Cpu)?;
+        let r = inference_tensor::safetensors::load(render_ref, &Device::Cpu)?;
+        let (h, w, _) = p["pano"].dims3()?;
+        let pano = Rgb8 {
+            width: w,
+            height: h,
+            pixels: p["pano"].flatten_all()?.to_vec1::<u8>()?,
+        };
+        let depth = PanoDepth {
+            width: w,
+            height: h,
+            distance: p["distance"].flatten_all()?.to_vec1::<f32>()?,
+            mask: p["mask"]
+                .flatten_all()?
+                .to_vec1::<u8>()?
+                .iter()
+                .map(|&m| m > 0)
+                .collect(),
+        };
+        let scene = Scene::new(&pano, &depth, Some(true));
+        let (vw, vh) = trajectory::view_size();
+        let k = trajectory::intrinsics(
+            vw,
+            vh,
+            trajectory::VIEW_FOV_X_DEG,
+            trajectory::VIEW_FOV_Y_DEG,
+        );
+        for key in ["view0.traj2", "view1.traj0"] {
+            let c2ws = s[&format!("{key}.c2w")]
+                .to_dtype(DType::F64)?
+                .to_vec3::<f64>()?;
+            let want_rgb = r[&format!("{key}.rgb")].flatten_all()?.to_vec1::<f32>()?;
+            let want_mask = r[&format!("{key}.mask")].flatten_all()?.to_vec1::<f32>()?;
+            let plane = vw * vh;
+            let (mut flips, mut sq, mut n, mut worst) = (0usize, 0f64, 0usize, 0f32);
+            let start = std::time::Instant::now();
+            for (f, c2w) in c2ws.iter().enumerate() {
+                let c2w: Mat4 = std::array::from_fn(|i| std::array::from_fn(|j| c2w[i][j]));
+                let w2c = crate::geometry::invert4(&c2w);
+                let out = super::render(&scene.points, &scene.colors, &w2c, &k, (vw, vh));
+                for p in 0..plane {
+                    let m = want_mask[f * plane + p];
+                    flips += usize::from((out.empty[p] > 0.5) != (m > 0.5));
+                    if m < 0.5 && out.empty[p] < 0.5 {
+                        for c in 0..3 {
+                            let d = out.rgb[c * plane + p] - want_rgb[(f * 3 + c) * plane + p];
+                            sq += f64::from(d * d);
+                            worst = worst.max(d.abs());
+                            n += 1;
+                        }
+                    }
+                }
+            }
+            println!(
+                "{key}: {:.2} s for 21 frames; mask flips {:.4}%; rgb where both cover: rms {:.3e} max {worst:.3e}",
+                start.elapsed().as_secs_f64(),
+                100.0 * flips as f64 / (21 * plane) as f64,
+                (sq / n as f64).sqrt()
+            );
+        }
+        Ok(())
+    }
+}

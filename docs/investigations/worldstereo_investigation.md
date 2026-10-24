@@ -194,3 +194,25 @@ full pano depth (our views, our MoGe):   distance rel rms 7.6e-4, max 6.8e-2    
 reference: 32 s
 ```
 The merge's LSMR on the CPU is the slow part; a later move to the GPU.
+
+## Run 9 - 2026-10-24 16:49
+
+Question: do the native scene preparation, regular trajectories and point renders reproduce the reference's?
+
+`worldstereo/{scene,trajectory,render,memory}.rs`. Reference scripts (scratch) call the reference's own functions on the
+pano-depth dump: `dump_ws_scene.py` (traj_generate Stage 1 inline: edge mask, 0.99 clip, outdoor contraction, point
+cloud, mesh, start views, get_c2w with the mesh and the kd-tree) and `dump_ws_render.py` (point_rendering through
+PyTorch3D, built from source into the venv). Sky is "not valid in any MoGe view" on both sides (the reference
+segments it with GroundingDINO + ZIM), and each view gets fresh moves on both sides: the reference mutates its shared
+aerial move in place when it collides, which would shrink later views' aerial moves.
+```
+scene_and_trajectories_match_the_reference
+cleaned distance max diff 0; excluded flips 0; points 1,826,759 both; median 1.00920 both
+start views: 0.012-0.016% of values differ (max 4 levels); view median depths identical (1.10703, 1.00569, 0.71590)
+all 9 trajectories: 21 poses, max |c2w diff| <= 1.0e-6, with the reference's shortenings (0 to 3 per trajectory)
+renders_match_the_reference (CPU, tiles of 16 px, top 20 per pixel)
+view0.traj2: 0.95 s / 21 frames; hole-mask flips 0.0001%; rgb where both cover rms 1.5e-4 (max 0.23)
+view1.traj0: 0.83 s / 21 frames; hole-mask flips 0.0008%; rgb rms 1.7e-4 (max 0.12)
+```
+Collision checks reproduced a reference detail: only the first check measures distance to the mesh; the checks after
+a shortening use the mean distance to the 5 nearest cloud points.
