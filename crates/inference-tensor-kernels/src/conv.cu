@@ -550,63 +550,34 @@ __device__ void upsample_bilinear2d(
     const size_t dst_h = (dst_i / w_out) % h_out;
     const size_t dst_w = dst_i % w_out;
     
-    // Calculate scale factors following PyTorch's area_pixel_compute_scale logic
-    double h_scale, w_scale;
+    // PyTorch's CUDA kernel: scale and source index in float (its accumulate type for float, half and bf16), the
+    // lambdas taken from the truncated index, the four taps blended in its order
+    float h_scale, w_scale;
     if (align_corners) {
-        h_scale = (h_out > 1) ? static_cast<double>(h_in - 1) / (h_out - 1) : 0.0;
-        w_scale = (w_out > 1) ? static_cast<double>(w_in - 1) / (w_out - 1) : 0.0;
+        h_scale = (h_out > 1) ? static_cast<float>(h_in - 1) / (h_out - 1) : 0.0f;
+        w_scale = (w_out > 1) ? static_cast<float>(w_in - 1) / (w_out - 1) : 0.0f;
     } else {
-        // PyTorch's compute_scales_value logic
-        h_scale = has_scale_h ? (1.0 / scale_h_factor) : (static_cast<double>(h_in) / h_out);
-        w_scale = has_scale_w ? (1.0 / scale_w_factor) : (static_cast<double>(w_in) / w_out);
+        h_scale = has_scale_h ? static_cast<float>(1.0 / scale_h_factor) : static_cast<float>(h_in) / h_out;
+        w_scale = has_scale_w ? static_cast<float>(1.0 / scale_w_factor) : static_cast<float>(w_in) / w_out;
     }
-    
-    // Compute source position (floating point)
-    double src_h_fp, src_w_fp;
-    if (align_corners) {
-        src_h_fp = h_scale * dst_h;
-        src_w_fp = w_scale * dst_w;
-    } else {
-        src_h_fp = h_scale * (dst_h + 0.5) - 0.5;
-        src_w_fp = w_scale * (dst_w + 0.5) - 0.5;
-    }
-    
-    // Clamp to valid range
-    src_h_fp = fmax(0.0, src_h_fp);
-    src_w_fp = fmax(0.0, src_w_fp);
-    
-    // Get integer indices
-    size_t h0 = static_cast<size_t>(floor(src_h_fp));
-    size_t w0 = static_cast<size_t>(floor(src_w_fp));
-    size_t h1 = min(h0 + 1, h_in - 1);
-    size_t w1 = min(w0 + 1, w_in - 1);
-    
-    // Compute interpolation weights
-    double weight_h = src_h_fp - h0;
-    double weight_w = src_w_fp - w0;
-    weight_h = fmin(fmax(weight_h, 0.0), 1.0);
-    weight_w = fmin(fmax(weight_w, 0.0), 1.0);
-    
-    // Get base index
+    const float src_h_fp = align_corners ? h_scale * dst_h : fmaxf(h_scale * (dst_h + 0.5f) - 0.5f, 0.0f);
+    const float src_w_fp = align_corners ? w_scale * dst_w : fmaxf(w_scale * (dst_w + 0.5f) - 0.5f, 0.0f);
+    const size_t h0 = static_cast<size_t>(src_h_fp);
+    const size_t w0 = static_cast<size_t>(src_w_fp);
+    const size_t h1 = (h0 < h_in - 1) ? h0 + 1 : h0;
+    const size_t w1 = (w0 < w_in - 1) ? w0 + 1 : w0;
+    const float lambda_h1 = src_h_fp - h0;
+    const float lambda_w1 = src_w_fp - w0;
+    const float lambda_h0 = 1.0f - lambda_h1;
+    const float lambda_w0 = 1.0f - lambda_w1;
+
     const size_t base = b_idx * src_s[0] + c_idx * src_s[1];
-    
-    // Read four neighboring pixels
-    const scalar_t v00 = src[base + h0 * src_s[2] + w0 * src_s[3]];
-    const scalar_t v10 = src[base + h0 * src_s[2] + w1 * src_s[3]];
-    const scalar_t v01 = src[base + h1 * src_s[2] + w0 * src_s[3]];
-    const scalar_t v11 = src[base + h1 * src_s[2] + w1 * src_s[3]];
-    
-    // Bilinear interpolation
-    // Convert to double for computation to avoid type issues with __half and __nv_bfloat16
-    const double v00_d = static_cast<double>(v00);
-    const double v10_d = static_cast<double>(v10);
-    const double v01_d = static_cast<double>(v01);
-    const double v11_d = static_cast<double>(v11);
-    
-    const double v_top = v00_d * (1.0 - weight_w) + v10_d * weight_w;
-    const double v_bottom = v01_d * (1.0 - weight_w) + v11_d * weight_w;
-    const double value = v_top * (1.0 - weight_h) + v_bottom * weight_h;
-    
+    const float v00 = static_cast<float>(src[base + h0 * src_s[2] + w0 * src_s[3]]);
+    const float v01 = static_cast<float>(src[base + h0 * src_s[2] + w1 * src_s[3]]);
+    const float v10 = static_cast<float>(src[base + h1 * src_s[2] + w0 * src_s[3]]);
+    const float v11 = static_cast<float>(src[base + h1 * src_s[2] + w1 * src_s[3]]);
+    const float value = lambda_h0 * (lambda_w0 * v00 + lambda_w1 * v01) + lambda_h1 * (lambda_w0 * v10 + lambda_w1 * v11);
+
     dst[dst_i] = static_cast<scalar_t>(value);
 }
 

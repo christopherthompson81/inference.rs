@@ -85,3 +85,28 @@ splat SH DC          4.0e-3        2.3e-4
 ```
 On the same features the heads agree to f32 convolution order (PyTorch's cuDNN path uses TF32 on Ampere); the
 whole-model gap is the trunk's bf16 noise (Run 2) carried through, largest in the quaternions and scales.
+
+## Run 4 - 2026-10-24 12:57
+
+Question: does the forward fit and run at the repo's 32-frame size (504 x 504, 41,696 global-attention tokens), and
+where does its time go?
+
+`thirty_two_frames_forward` (ignored bench, random input, trunk and heads timed apart):
+```
+first try         heads OOM even at 16 frames: every head returned its full-resolution fused features for all
+                  frames (4.2 GB a head at 32 frames) and the splat convs ran on all frames at once; the CUDA conv2d
+                  (no cuDNN in our builds) is im2col, so a 3x3 conv over 8 full-resolution frames needs a ~9 GB column
+fixed             only the Gaussian head keeps its fused features, the splats are built per chunk of frames, chunks of 2
+                  32 frames: trunk 9.5 s, heads 18.6 s, peak 13.0 GB (chunks of 1: heads 32.7 s, peak 10.5 GB)
+position embed    built from two separable sin/cos tables on the GPU, not 32M CPU sin/cos per call: heads 11.9 s
+1x1 conv, convT   pointwise convs and the stride-equals-kernel transposed convs as one matmul per frame: heads 9.2 s
+bilinear kernel   inference-tensor's upsample_bilinear2d computed in double (1/64 rate on GA102) with 64-bit
+                  divisions; now PyTorch's CUDA formula in float: heads 8.1 s (kernel 1.9 -> 0.47 s)
+3x3 convs in bf16 heads 7.3 s, but head parity 8x worse (depth rel rms 2.2e-4 -> 1.7e-3); reverted
+```
+Parity on the reference's trunk features is unchanged by the kept changes (depth 2.2e-4, normals 1.2e-4, splat means
+1.3e-4). nsys per 32-frame forward (18.1 s of kernels): fattn's flash_attn_ext_f16 5.8 s (72 calls, mostly the 24
+global attentions over 41.7K tokens, ~40% of the 3090's bf16 tensor peak), im2col_f32 3.8 s (its layout reads across
+channel planes, five 64-bit divisions an element), f32 sgemm 1.9 s, trunk bf16 GEMMs 1.1 s. Reference: 7.8 s forward
+(FlashAttention-2, cuDNN convs). Next for speed: a long-sequence non-causal attention path and a better im2col or
+direct 3x3 conv.

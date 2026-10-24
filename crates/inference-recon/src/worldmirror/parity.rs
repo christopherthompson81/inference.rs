@@ -187,3 +187,43 @@ fn dense_outputs_match_the_reference() -> Result<()> {
     }
     Ok(())
 }
+
+// One forward over WORLDMIRROR_FRAMES (default 32) frames of 504 x 504, the trunk and heads timed apart
+#[test]
+#[ignore = "benchmark: needs the WorldMirror checkpoint and a GPU"]
+fn thirty_two_frames_forward() -> Result<()> {
+    let Some((dir, _)) = paths() else {
+        return Ok(());
+    };
+    let frames = std::env::var("WORLDMIRROR_FRAMES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(32);
+    let device = Device::new_cuda(0)?;
+    let model = WorldMirror::load(&dir, DType::BF16, &device)?;
+    let used = || -> String {
+        inference_nn::utils::memory_usage::MemoryUsage
+            .query(&device)
+            .map(|m| format!("{} MiB used", (m.total() - m.available()) >> 20))
+            .unwrap_or_default()
+    };
+    println!("loaded: {}", used());
+    let images = Tensor::rand(0f32, 1f32, (frames, 3, 504, 504), &device)?;
+    for round in 0..2 {
+        device.synchronize()?;
+        let start = std::time::Instant::now();
+        let out = model.trunk(&images, &mut |_, _, _| {})?;
+        device.synchronize()?;
+        let trunk = start.elapsed().as_secs_f64();
+        println!("round {round}: trunk {trunk:.2} s, {}", used());
+        let pred = model.heads(&out.features, out.patch_start, &images)?;
+        device.synchronize()?;
+        println!(
+            "round {round}: heads {:.2} s, {} splats, {}",
+            start.elapsed().as_secs_f64() - trunk,
+            pred.splats.means.dim(0)?,
+            used()
+        );
+    }
+    Ok(())
+}

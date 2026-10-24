@@ -149,13 +149,29 @@ impl WorldMirror {
         let camera_params = self.camera.forward(last)?;
         let cameras = decode_cameras(&camera_params, height, width)?;
         let images = images.clone();
-        let depth = self.depth.forward(features, start, &images)?;
-        let points = self.points.forward(features, start, &images)?;
-        let normals = self.normals.forward(features, start, &images)?;
-        let gs = self.gs_depth.forward(features, start, &images)?;
-        let splats = self
-            .gaussians
-            .forward(&gs.fused, &images, &gs.attr, &cameras)?;
+        let none = &mut |_: usize, _: &dpt::DptOutput| Ok(());
+        let depth = self.depth.forward(features, start, &images, none)?;
+        let points = self.points.forward(features, start, &images, none)?;
+        let normals = self.normals.forward(features, start, &images, none)?;
+        // the splats a chunk of frames at a time, from the Gaussian head's fused features of that chunk
+        let mut splats = Vec::new();
+        let gs = self
+            .gs_depth
+            .forward(features, start, &images, &mut |first, chunk| {
+                let fused = chunk
+                    .fused
+                    .as_ref()
+                    .expect("a chunk carries its fused features");
+                let frames = fused.dim(0)?;
+                splats.push(self.gaussians.forward(
+                    fused,
+                    &images.narrow(0, first, frames)?,
+                    &chunk.attr,
+                    &cameras[first..first + frames],
+                )?);
+                Ok(())
+            })?;
+        let splats = Splats::cat(&splats)?;
         Ok(Prediction {
             camera_params,
             cameras,

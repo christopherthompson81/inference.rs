@@ -19,7 +19,7 @@ const POS_EMBED_OMEGA: f64 = 100.0;
 // The Gaussian head's image branch: a 7x7 conv over the raw pixels
 const IMAGE_KERNEL: usize = 7;
 // Frames run through a head together, bounding the full-resolution activations
-pub(crate) const FRAMES_PER_CHUNK: usize = 8;
+pub(crate) const FRAMES_PER_CHUNK: usize = 1;
 
 /// How a head turns its last channels into its outputs.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -71,7 +71,18 @@ impl Conv {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let ys = xs.conv2d(&self.weight, self.padding, self.stride, 1, 1)?;
+        let (cout, cin, kh, kw) = self.weight.dims4()?;
+        // a pointwise conv is a matmul per frame, with no im2col copy
+        let ys = if (kh, kw, self.stride, self.padding) == (1, 1, 1, 0) {
+            let (frames, _, h, w) = xs.dims4()?;
+            let weight = self.weight.reshape((cout, cin))?;
+            let per_frame = (0..frames)
+                .map(|f| weight.matmul(&xs.get(f)?.reshape((cin, h * w))?))
+                .collect::<Result<Vec<_>>>()?;
+            Tensor::stack(&per_frame, 0)?.reshape((frames, cout, h, w))?
+        } else {
+            xs.conv2d(&self.weight, self.padding, self.stride, 1, 1)?
+        };
         match &self.bias {
             Some(b) => ys.broadcast_add(&b.reshape((1, (), 1, 1))?),
             None => Ok(ys),
@@ -79,25 +90,44 @@ impl Conv {
     }
 }
 
-// A transposed conv whose stride equals its kernel: each input pixel paints one k x k output block
+// A transposed conv whose stride equals its kernel: each input pixel paints its own k x k output block, so it is one
+// matmul per frame, `[cout * k * k, cin] x [cin, h * w]`, and a reshuffle
 struct Upsample {
+    // the kernel `[cin, cout, k, k]` as `[cout * k * k, cin]`
     weight: Tensor,
     bias: Tensor,
-    stride: usize,
+    channels: usize,
+    kernel: usize,
 }
 
 impl Upsample {
     fn load(channels: usize, kernel: usize, vb: VarBuilder) -> Result<Self> {
+        let weight = vb
+            .get((channels, channels, kernel, kernel), "weight")?
+            .reshape((channels, channels * kernel * kernel))?
+            .t()?
+            .contiguous()?;
         Ok(Self {
-            weight: vb.get((channels, channels, kernel, kernel), "weight")?,
+            weight,
             bias: vb.get(channels, "bias")?,
-            stride: kernel,
+            channels,
+            kernel,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        xs.conv_transpose2d(&self.weight, 0, 0, self.stride, 1)?
-            .broadcast_add(&self.bias.reshape((1, (), 1, 1))?)
+        let (frames, cin, h, w) = xs.dims4()?;
+        let (c, k) = (self.channels, self.kernel);
+        let per_frame = (0..frames)
+            .map(|f| {
+                self.weight
+                    .matmul(&xs.get(f)?.reshape((cin, h * w))?)?
+                    .reshape((c, k, k, h, w))?
+                    .permute((0, 3, 1, 4, 2))?
+                    .reshape((c, h * k, w * k))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Tensor::stack(&per_frame, 0)?.broadcast_add(&self.bias.reshape((1, (), 1, 1))?)
     }
 }
 
@@ -176,7 +206,8 @@ impl FusionBlock {
 
 /// A head's fused full-resolution features `[frames, 128, H, W]` and its decoded outputs, each `[frames, H, W, ...]`.
 pub(crate) struct DptOutput {
-    pub fused: Tensor,
+    /// only in the chunks `forward` hands its callback; the whole-input output leaves it out
+    pub fused: Option<Tensor>,
     pub attr: Tensor,
     pub conf: Tensor,
     pub mask_logits: Option<Tensor>,
@@ -294,35 +325,31 @@ impl DptHead {
         features: &[Tensor],
         patch_start: usize,
         images: &Tensor,
+        per_chunk: &mut dyn FnMut(usize, &DptOutput) -> Result<()>,
     ) -> Result<DptOutput> {
         let frames = images.dim(0)?;
-        let mut chunks = Vec::new();
+        let (mut attr, mut conf, mut masks) = (Vec::new(), Vec::new(), Vec::new());
         for start in (0..frames).step_by(FRAMES_PER_CHUNK) {
             let n = FRAMES_PER_CHUNK.min(frames - start);
             let chunk = features
                 .iter()
                 .map(|f| f.narrow(0, start, n))
                 .collect::<Result<Vec<_>>>()?;
-            chunks.push(self.forward_frames(&chunk, patch_start, &images.narrow(0, start, n)?)?);
+            let out = self.forward_frames(&chunk, patch_start, &images.narrow(0, start, n)?)?;
+            per_chunk(start, &out)?;
+            attr.push(out.attr);
+            conf.push(out.conf);
+            masks.extend(out.mask_logits);
         }
-        let cat = |pick: fn(&DptOutput) -> &Tensor| -> Result<Tensor> {
-            Tensor::cat(&chunks.iter().map(pick).collect::<Vec<_>>(), 0)
-        };
-        let mask_logits = match chunks[0].mask_logits {
-            Some(_) => Some(Tensor::cat(
-                &chunks
-                    .iter()
-                    .map(|c| c.mask_logits.as_ref().expect("every chunk has a mask"))
-                    .collect::<Vec<_>>(),
-                0,
-            )?),
-            None => None,
-        };
         Ok(DptOutput {
-            fused: cat(|c| &c.fused)?,
-            attr: cat(|c| &c.attr)?,
-            conf: cat(|c| &c.conf)?,
-            mask_logits,
+            fused: None,
+            attr: Tensor::cat(&attr, 0)?,
+            conf: Tensor::cat(&conf, 0)?,
+            mask_logits: if masks.is_empty() {
+                None
+            } else {
+                Some(Tensor::cat(&masks, 0)?)
+            },
         })
     }
 
@@ -371,7 +398,7 @@ impl DptHead {
             None => fused,
         };
         Ok(DptOutput {
-            fused,
+            fused: Some(fused),
             attr,
             conf,
             mask_logits,
@@ -439,18 +466,26 @@ fn add_pos_embed(xs: &Tensor, aspect: f64) -> Result<Tensor> {
     let omega = (0..quarter)
         .map(|k| 1.0 / POS_EMBED_OMEGA.powf(k as f64 / quarter as f64))
         .collect::<Vec<_>>();
-    let mut emb = vec![0f32; channels * h * w];
-    for (y, &v) in vs.iter().enumerate() {
-        for (x, &u) in us.iter().enumerate() {
-            let pixel = y * w + x;
-            for (k, &o) in omega.iter().enumerate() {
-                let values = [(u * o).sin(), (u * o).cos(), (v * o).sin(), (v * o).cos()];
-                for (part, value) in values.iter().enumerate() {
-                    emb[(part * quarter + k) * h * w + pixel] = (*value * POS_EMBED_RATIO) as f32;
-                }
-            }
-        }
-    }
-    let emb = Tensor::from_vec(emb, (1, channels, h, w), &Device::Cpu)?.to_device(xs.device())?;
+    // sin then cos of each coordinate at each frequency: [2 * quarter, n], separable over the grid's two axes
+    let table = |coords: &[f64]| -> Vec<f32> {
+        [f64::sin, f64::cos]
+            .iter()
+            .flat_map(|f| {
+                omega.iter().flat_map(move |&o| {
+                    coords
+                        .iter()
+                        .map(move |&c| (f(c * o) * POS_EMBED_RATIO) as f32)
+                })
+            })
+            .collect()
+    };
+    let device = xs.device();
+    let u = Tensor::from_vec(table(&us), (2 * quarter, 1, w), &Device::Cpu)?
+        .to_device(device)?
+        .broadcast_as((2 * quarter, h, w))?;
+    let v = Tensor::from_vec(table(&vs), (2 * quarter, h, 1), &Device::Cpu)?
+        .to_device(device)?
+        .broadcast_as((2 * quarter, h, w))?;
+    let emb = Tensor::cat(&[&u, &v], 0)?.unsqueeze(0)?;
     xs.to_dtype(DType::F32)?.broadcast_add(&emb)
 }

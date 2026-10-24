@@ -34,6 +34,23 @@ pub struct Splats {
     pub weights: Tensor,
 }
 
+impl Splats {
+    // the splats of consecutive frame chunks, in order
+    pub(crate) fn cat(chunks: &[Splats]) -> Result<Self> {
+        let field = |pick: fn(&Splats) -> &Tensor| -> Result<Tensor> {
+            Tensor::cat(&chunks.iter().map(pick).collect::<Vec<_>>(), 0)
+        };
+        Ok(Self {
+            means: field(|s| &s.means)?,
+            quats: field(|s| &s.quats)?,
+            scales: field(|s| &s.scales)?,
+            opacities: field(|s| &s.opacities)?,
+            sh_dc: field(|s| &s.sh_dc)?,
+            weights: field(|s| &s.weights)?,
+        })
+    }
+}
+
 pub(crate) struct GaussianParams {
     conv1: Tensor,
     conv2: Tensor,
