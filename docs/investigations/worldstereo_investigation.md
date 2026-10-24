@@ -41,6 +41,12 @@ attention, ControlNet, camera and mask embeddings, block by block, (5) quantizat
 (6) DMD sampler end to end on dumped reference inputs, (7) the orchestration around it (cameras, point-cloud renders,
 memory bank, MoGe-2, sky mask, trajectories).
 
+Orchestrator requirement (user, 2026-10-24): it loads and unloads models by available VRAM, prerequisite data and
+timings. Each stage declares its model, measured footprint, inputs and typical duration; work that does not depend on
+earlier clips is batched per model (every caption through umT5 up front, then freed), while the per-trajectory loop is
+sequential (clip k's memory retrieval needs clip k-1's depth alignment), so the transformer stays resident through it
+and the small helpers (VAE, MoGe-2, sky mask) sit beside it or swap in by measured headroom.
+
 ## Run 2 - 2026-10-24 14:40
 
 Question: does a single-frame port of the Wan VAE reproduce the reference keyframe encode/decode?
@@ -77,3 +83,25 @@ reference autocast against reference f32: rel rms 1.9e-1
 The 0..255 inputs make the reference's own bf16 run 19% off its f32 run; ours in bf16 sits inside that noise. The
 encoder runs in f32: one 632M-parameter forward per clip, and the precise values rather than another draw of rounding.
 Next: umT5-XXL.
+
+## Run 4 - 2026-10-24 15:14
+
+Question: does the native transformer (Wan I2V blocks with joint memory attention, camera tokens, ControlNet,
+embedders, output head) reproduce the reference forward?
+
+`wan/{ops,transformer,controlnet,sampler}.rs`. Reference: `dump_ws_small.py` (scratch) builds WorldStereoRefSModel
+with the checkpoint's first N blocks, the full ControlNet and embedders, on small random inputs (3 latent frames at
+16 x 24, 2 memory frames at ref_index [0, 1], t = 937.5), under bf16 autocast with FlashAttention 2, as `video_gen.py`
+runs it. (It needs RANK/WORLD_SIZE set for its import-time process group, and loguru/decord in the venv.)
+```
+wan::parity::small_transformer_matches_the_reference
+2 blocks: prediction max 6.25e-2 rel rms 4.7e-3     (prediction rms 1.83)
+6 blocks: prediction max 6.25e-2 rel rms 5.0e-3     (prediction rms 2.10)
+```
+bf16-level agreement that does not grow with depth. Also: the DMD schedule matches the reference's printed timesteps
+(1000, 937.5, 833.3, 625), and the camera inputs (`worldstereo::cameras`, ray embedding and quaternion + translation)
+match the reference functions on a synthetic 21-frame trajectory to 1.3e-6.
+
+Fitting 24 GB: each forward is compute-bound (joint attention over ~45K tokens in 40 blocks), so the bf16 blocks can
+stay in host memory and stream in one at a time (`WorldStereoTransformer::new_streamed`); quantization becomes a speed
+option rather than a requirement. Next: time a real-size streamed step.

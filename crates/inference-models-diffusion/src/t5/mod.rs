@@ -100,6 +100,15 @@ pub struct Config {
     pub pad_token_id: usize,
     pub eos_token_id: usize,
     pub decoder_start_token_id: Option<usize>,
+    /// `umt5` gives every layer its own relative position bias; T5 computes it in the first layer and shares it
+    #[serde(default)]
+    pub model_type: Option<String>,
+}
+
+impl Config {
+    fn per_layer_position_bias(&self) -> bool {
+        self.model_type.as_deref() == Some("umt5")
+    }
 }
 
 impl Default for Config {
@@ -128,6 +137,7 @@ impl Default for Config {
             pad_token_id: 0,
             eos_token_id: 1,
             decoder_start_token_id: Some(0),
+            model_type: None,
         }
     }
 }
@@ -628,6 +638,7 @@ impl T5Block {
 #[derive(Debug, Clone)]
 struct T5Stack {
     block: Vec<T5Block>,
+    per_layer_position_bias: bool,
     shared: Arc<Embedding>,
     final_layer_norm: T5LayerNorm,
     device: Device,
@@ -644,7 +655,10 @@ impl T5Stack {
         offloaded: bool,
     ) -> Result<Self> {
         let block = (0..cfg.num_layers)
-            .map(|i| T5Block::load(i == 0, decoder, vb.pp(format!("block.{i}")), cfg))
+            .map(|i| {
+                let has_bias = i == 0 || cfg.per_layer_position_bias();
+                T5Block::load(has_bias, decoder, vb.pp(format!("block.{i}")), cfg)
+            })
             .collect::<Result<Vec<_>>>()?;
         let final_layer_norm = T5LayerNorm::load(
             cfg.d_model,
@@ -653,6 +667,7 @@ impl T5Stack {
         )?;
         Ok(Self {
             block,
+            per_layer_position_bias: cfg.per_layer_position_bias(),
             shared: shared.clone(),
             final_layer_norm,
             device: device.clone(),
@@ -677,6 +692,9 @@ impl T5Stack {
                 position_bias.as_ref(),
                 encoder_hidden_states,
             )?;
+            if self.per_layer_position_bias {
+                position_bias = None;
+            }
             if self.offloaded {
                 block.cast_to(&Device::Cpu)?;
             }
