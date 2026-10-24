@@ -616,29 +616,23 @@ mod avx2 {
     pub(super) fn iq3_s_one(row: &[u8], ys: &[BlockQ8K]) -> f32 {
         let sign_bytes = load(&SIGN_BYTES);
         let sign_bits = load(&SIGN_BITS);
+        // code k's ninth index bit is bit k of its sub-block's qh byte, shifted up to 256
+        let qh_shift = _mm256_setr_epi32(8, 7, 6, 5, 4, 3, 2, 1);
+        let qh_bit = _mm256_set1_epi32(256);
         let mut acc = _mm256_setzero_ps();
         for (block, y) in row.as_chunks::<IQ3_S_BYTES>().0.iter().zip(ys) {
             let q8 = y.qs();
             let mut sumi = _mm256_setzero_si256();
             for ib32 in 0..QK_K / 32 {
-                let qs: &[u8; 8] = block[IQ3_S_QS + 8 * ib32..][..8]
-                    .try_into()
-                    .expect("8 grid bytes");
-                let qh = u32::from(block[IQ3_S_QH + ib32]);
-                // the index is 9 bits: a qs byte plus one qh bit
-                let grid = |k: usize| {
-                    IQ3S_GRID[(u32::from(qs[k]) | ((qh << (8 - k)) & 256)) as usize & 511] as i32
-                };
-                let q3 = _mm256_set_epi32(
-                    grid(7),
-                    grid(6),
-                    grid(5),
-                    grid(4),
-                    grid(3),
-                    grid(2),
-                    grid(1),
-                    grid(0),
+                // SAFETY: the sub-block's 8 grid bytes lie inside the block
+                let qs = unsafe { _mm_loadl_epi64(block[IQ3_S_QS + 8 * ib32..].as_ptr().cast()) };
+                let qh = _mm256_set1_epi32(i32::from(block[IQ3_S_QH + ib32]));
+                let idx = _mm256_or_si256(
+                    _mm256_cvtepu8_epi32(qs),
+                    _mm256_and_si256(_mm256_sllv_epi32(qh, qh_shift), qh_bit),
                 );
+                // SAFETY: every index is below 512, the grid's length
+                let q3 = unsafe { _mm256_i32gather_epi32::<4>(IQ3S_GRID.as_ptr().cast(), idx) };
                 let signs: &[u8; 4] = block[IQ3_S_SIGNS + 4 * ib32..][..4]
                     .try_into()
                     .expect("4 sign bytes");
