@@ -41,7 +41,8 @@ pub struct PagedAttentionOptions {
     #[arg(long = "pa-block-size")]
     pub block_size: Option<usize>,
 
-    /// KV cache storage: auto (the model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4
+    /// KV cache storage: auto (the model's dtype, or q3 when that buys GPU room for offloaded MoE experts), none (the
+    /// model's dtype), f8e4m3, q2..q8 (K and V at those bits), or qK/qV such as q8/q4
     #[arg(long = "pa-cache-type", default_value = "auto", value_parser = parse_cache_type)]
     #[serde(default)]
     pub cache_type: PagedCacheType,

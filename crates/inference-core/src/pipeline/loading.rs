@@ -472,11 +472,14 @@ pub(crate) struct ResolvedMapSetting {
 // shorter window); a longer `max_seq_len` asks for more, and a context-sized paged cache asks for its own size instead
 const PLANNED_OFFLOAD_CONTEXT: usize = 32 * 1024;
 // The planner tries caching each multiple of 1/this of a layer's experts, most first, and then none (every expert
-// on the CPU)
-const PLANNED_SLOT_STEPS: usize = 16;
+// on the CPU); fine enough that what a quantized cache frees becomes cached experts
+const PLANNED_SLOT_STEPS: usize = 64;
 // Longest prompt chunk an offloaded model's planner sizes: a chunk stages about every expert a layer routes to however
 // long it is, so prefill speeds up with the chunk well past the default
 const MAX_PLANNED_PROMPT_CHUNK: usize = 8192;
+// The paged cache an `auto` cache becomes when MoE experts leave the GPU: its room goes to cached experts, and 3-bit
+// K and V cost nothing measurable on the hybrid models tried (qwen4exp investigation Run 35)
+const OFFLOAD_CACHE_TYPE: crate::PagedCacheType = crate::PagedCacheType::Quant { k: 3, v: 3 };
 
 struct ExpertCachePlan<'a> {
     sizing: super::isq_flow::AutoDeviceMapSizingInputs<'a>,
@@ -685,6 +688,24 @@ impl ExpertCachePlan<'_> {
     }
 }
 
+// The cache an `auto` paged cache becomes for a model whose experts can leave the GPU: the offload type when an expert
+// cache was asked for or the weights do not fit resident beside an unquantized cache, else unchanged
+fn offload_cache_type(
+    cache: crate::PagedCacheType,
+    offloadable: bool,
+    expert_cache_asked: bool,
+    fits_resident: impl FnOnce() -> Result<bool>,
+) -> Result<crate::PagedCacheType> {
+    if cache != crate::PagedCacheType::Auto || !offloadable {
+        return Ok(cache);
+    }
+    Ok(if expert_cache_asked || !fits_resident()? {
+        OFFLOAD_CACHE_TYPE
+    } else {
+        cache
+    })
+}
+
 // The context an offload plan keeps room for: a context-sized paged cache's own size (0 when none), else a usable
 // default within the model's window, and never less than the map's `max_seq_len`
 fn planned_offload_context(max_seq_len: usize, requested: usize, window: usize) -> usize {
@@ -783,6 +804,33 @@ pub(crate) fn resolve_map_setting(
     };
     let max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
     let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
+    if let Some(cache) = paged_attn_config.as_ref().map(|cfg| cfg.cache_type) {
+        let probe = ExpertCachePlan {
+            sizing,
+            devices: available_devices,
+            dtype,
+            paged_attn_config,
+        };
+        let chosen = offload_cache_type(
+            cache,
+            probe.offloadable_experts()?.is_some(),
+            sizing.moe_expert_cache.is_some(),
+            || {
+                let context = probe.planned_context(params)?;
+                probe.fits(None, &context, probe.activations(params)?)
+            },
+        )?;
+        if chosen != cache
+            && let Some(cfg) = paged_attn_config.as_mut()
+        {
+            info!(
+                cache = %chosen,
+                "MoE experts leave the GPU; quantizing the KV cache so more of them stay cached (`--pa-cache-type none` \
+                 keeps the model's dtype)"
+            );
+            cfg.cache_type = chosen;
+        }
+    }
     let plan = ExpertCachePlan {
         sizing,
         devices: available_devices,
@@ -1386,6 +1434,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_auto_cache_is_quantized_only_when_experts_leave_the_gpu() -> Result<()> {
+        use crate::PagedCacheType;
+        let resident = || Ok(true);
+        let crowded = || Ok(false);
+        let q8 = PagedCacheType::Quant { k: 8, v: 8 };
+        assert_eq!(
+            offload_cache_type(PagedCacheType::Auto, true, false, crowded)?,
+            OFFLOAD_CACHE_TYPE
+        );
+        assert_eq!(
+            offload_cache_type(PagedCacheType::Auto, true, true, resident)?,
+            OFFLOAD_CACHE_TYPE
+        );
+        assert_eq!(
+            offload_cache_type(PagedCacheType::Auto, true, false, resident)?,
+            PagedCacheType::Auto
+        );
+        assert_eq!(
+            offload_cache_type(PagedCacheType::Auto, false, true, crowded)?,
+            PagedCacheType::Auto
+        );
+        for pinned in [PagedCacheType::Unquantized, q8] {
+            assert_eq!(offload_cache_type(pinned, true, true, crowded)?, pinned);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn only_an_explicitly_untied_head_lets_the_embedding_leave_the_device() {
         assert!(config_unties_embeddings(
             r#"{"tie_word_embeddings": false}"#
@@ -1499,14 +1575,14 @@ mod expert_slot_plan_tests {
     }
 
     #[test]
-    fn the_most_slots_that_fit_win_in_sixteenths_of_the_experts() {
-        assert_eq!(plan(Some(200), None), Some((192, 0)));
-        assert_eq!(plan(Some(15), None), Some((0, 0)));
+    fn the_most_slots_that_fit_win_in_sixty_fourths_of_the_experts() {
+        assert_eq!(plan(Some(202), None), Some((200, 0)));
+        assert_eq!(plan(Some(3), None), Some((0, 0)));
     }
 
     #[test]
     fn the_shorter_context_is_tried_only_when_the_longer_fits_nothing() {
-        assert_eq!(plan(None, Some(100)), Some((96, 1)));
+        assert_eq!(plan(None, Some(102)), Some((100, 1)));
         assert_eq!(plan(None, None), None);
     }
 
@@ -1518,9 +1594,9 @@ mod expert_slot_plan_tests {
             })
             .unwrap()
         };
-        assert_eq!(shrink(160, Some(150)), Some(144));
+        assert_eq!(shrink(160, Some(150)), Some(148));
         // never more than requested, even when more would fit
-        assert_eq!(shrink(40, Some(200)), Some(32));
+        assert_eq!(shrink(40, Some(200)), Some(36));
         assert_eq!(shrink(160, Some(0)), Some(0));
         assert_eq!(shrink(160, None), None);
     }

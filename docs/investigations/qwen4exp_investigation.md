@@ -1281,3 +1281,35 @@ q3 scoring better than q4 puts the noise of 288 positions near 1%; nothing here 
 other by more than that. The indexer layers stay BF16 whatever the main type, so QSA's block selection cannot move;
 only attention over the selected cells reads the quantized values. The 27B's finding carries over within this
 measure's resolution. At 262K tokens q3 takes about 3.0 GB of KV against 7.9 GB in BF16, roughly 45 expert slots.
+
+## Run 36 - 2026-10-24 10:06
+
+Question: with q3 costing nothing measurable (Run 35), does a q3 default for offloaded models buy cached experts, and
+so decode speed?
+
+Built: `--pa-cache-type auto` becomes q3 when MoE experts leave the GPU (an expert cache asked for, or the weights do
+not fit resident beside an unquantized cache), decided before the expert plan so slots and the prompt chunk are sized
+for it; `none` pins the model's dtype. Test `an_auto_cache_is_quantized_only_when_experts_leave_the_gpu`.
+
+No flags (planned context 32K, the paged cache under `--pa-memory-fraction` 0.9), `plan_measure.sh` (scratch), two
+prompts, two rounds:
+```
+none   96 slots   chunk 3072   KV pool 105K tokens   32.1 / 34.1, 33.9 / 34.3 tok/s
+q3     96 slots   chunk 4608   KV pool 219K tokens   34.1 / 32.5, 33.4 / 33.8
+```
+No slots gained: the planner stepped in sixteenths of a layer's experts (32 slots, ~3.5 GB), and q3's 0.6 GB at 32K is less
+than a step, so it went to the KV pool. In sixty-fourths (8 slots): 104 slots either way. A probe of the planner's estimate
+(removed after) against nvidia-smi: the prompt staging buffer (~1.5 GB) is allocated at the first prompt, so the KV
+pool, sized at load, takes its room and the staging then takes from the 10% the memory fraction holds back (21.7 GB in
+use after load, 23.6 GB after a 1.5K-token prompt). That 10% (~2.2 GB) is what keeps slots off the GPU here: with
+`--pa-context-len 32768` (a context-sized cache holds nothing back) and q3, 128 slots load and decode at 34.6 / 37.9
+against 33.7 / 35.0 at 104.
+
+An asked-for long context is where q3 pays:
+```
+--pa-context-len 131072    slots   decode tok/s (two prompts, two rounds)          mean
+none (BF16, 3.9 GB)        96      26.4 / 33.9, 30.7 / 34.7                        31.4
+q3 (1.5 GB)                120     36.9 / 35.9, 36.2 / 37.5                        36.6
+```
+Kept: the q3 default and the sixty-fourths. Open: the memory fraction's 10% (and the staging buffer it silently absorbs) is
+the next 20-odd slots for a model with no context asked for.
