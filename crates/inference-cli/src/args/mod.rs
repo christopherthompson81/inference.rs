@@ -270,6 +270,38 @@ pub enum Command {
         cmd: KernelsCommand,
     },
 
+    /// Reconstruct a scene from photos with WorldMirror 2.0: cameras, depth, normals, a point cloud and standard 3D
+    /// Gaussian splats, written to a folder with a meta.json of conventions and settings
+    Reconstruct {
+        /// The WorldMirror checkpoint folder (config.json and model.safetensors)
+        #[arg(long)]
+        model: PathBuf,
+
+        /// A folder of images (jpg, jpeg, png, webp, read in name order) or one image
+        #[arg(long)]
+        input: PathBuf,
+
+        /// The output folder, created if missing
+        #[arg(long)]
+        out: PathBuf,
+
+        /// Longest edge to infer at: the first image's, capped at this and floored to a multiple of 14
+        #[arg(long, default_value_t = inference_api::reconstruction::DEFAULT_TARGET_SIZE)]
+        target_size: usize,
+
+        /// Keep pixels at depth and normal discontinuities
+        #[arg(long)]
+        no_edge_mask: bool,
+
+        /// Keep pixels the model marks as sky
+        #[arg(long)]
+        no_sky_mask: bool,
+
+        /// Run on the CPU (slow) instead of the first CUDA device
+        #[arg(long)]
+        cpu: bool,
+    },
+
     /// Run performance benchmarks for base or LoRA model generation.
     Bench {
         #[command(subcommand)]

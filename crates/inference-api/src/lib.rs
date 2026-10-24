@@ -32,6 +32,7 @@ pub mod model_manager;
 pub mod models;
 pub use inference_protocol::openai;
 pub mod operations;
+pub mod reconstruction;
 pub mod registry;
 pub mod request_body;
 pub mod responses;

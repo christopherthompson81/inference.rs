@@ -2545,6 +2545,7 @@ dependencies = [
  "inference-nn",
  "inference-protocol",
  "inference-quant",
+ "inference-recon",
  "inference-selection",
  "inference-tensor",
  "itertools 0.14.0",

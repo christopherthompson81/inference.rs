@@ -25,3 +25,4 @@ anyhow.workspace = true
 
 [features]
 cuda = ["inference-tensor/cuda", "inference-nn/cuda"]
+metal = ["inference-tensor/metal", "inference-nn/metal"]
