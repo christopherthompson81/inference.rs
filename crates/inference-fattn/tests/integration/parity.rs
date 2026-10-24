@@ -257,10 +257,14 @@ fn prefill_after_a_cached_prefix() -> Result<()> {
 
 #[test]
 fn encoder_without_a_mask() -> Result<()> {
-    check(Case {
-        causal: false,
-        ..case(64, N_HEAD, 100, 100)
-    })
+    // without GQA only the last KV tile is bounds-checked: one full tile, then many with a partial last
+    for seq in [100, 1000] {
+        check(Case {
+            causal: false,
+            ..case(64, N_HEAD, seq, seq)
+        })?;
+    }
+    check(case(128, N_HEAD, 300, 300))
 }
 
 #[test]
