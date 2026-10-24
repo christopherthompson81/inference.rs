@@ -172,3 +172,25 @@ f32 trunk vs reference amp:   depth rel rms 3.1e-3, normal 6.5e-4, mask flips 0.
 bf16 trunk vs reference f32:  depth rel rms 1.16e-2, normal 5.5e-3, mask flips 0.0019%
 ```
 (depth max differences sit on the far sky). The trunk runs in f32: 300M parameters, ~20 views a panorama.
+
+## Run 8 - 2026-10-24 16:37
+
+Question: does a native `pred_pano_depth` (split, MoGe-2 per view, gradient-domain merge) reproduce the reference?
+
+`worldstereo/panorama.rs`: views at the directions of a once-subdivided icosahedron (utils3d's), OpenCV look-at with
+up +z; the two pole directions make that look-at degenerate, and the reference's cameras there are NaN (verified:
+views 12 and 22 of 42), so they see nothing and are skipped: 40 views. Each view as split_panorama_image(INTER_AREA)
+makes it (remap at half the panorama height with OpenCV's 1/32 sub-pixel steps, then INTER_AREA's enlarging
+coefficients to 512); MoGe-2 at fov 90; the merge as merge_panorama_depth_gpu (warped log distance, masked x/y
+gradients wrapping in x, 5-point Laplacian wrapping in x and edge-replicated in y, averaged over views) solved by LSMR
+(SciPy's algorithm, atol = btol = 1e-5) over the stencils, coarse to fine from 240 x 120; hole fill at the 0.999
+quantile; south-pole smoothing. Reference `dump_pano_depth.py` (scratch) on the sample repo's `case000` (1920 x 960),
+needing cupy/open3d/trimesh in the venv.
+```
+worldstereo::panorama::parity::pano_depth_matches_the_reference
+split views:        10.3% of values differ, max 5 levels (OpenCV's fixed-point remap and resize)
+merge alone (reference views and masks): distance rel rms 2.4e-4, max 1.1e-2; mask flips 0     16.7 s (CPU)
+full pano depth (our views, our MoGe):   distance rel rms 7.6e-4, max 6.8e-2                   41.2 s
+reference: 32 s
+```
+The merge's LSMR on the CPU is the slow part; a later move to the GPU.
