@@ -9,7 +9,7 @@ A mixture-of-experts model reads only a few of its experts per token, but the ex
 inference serve --format gguf -f Qwen3.6-35B-A3B-UD-IQ4_XS.gguf --moe-expert-cache 64
 ```
 
-It applies to GGUF experts on a CUDA device whose type the CPU expert kernels run (IQ3_S, IQ4_XS, IQ4_KSS, Q2_K-Q6_K); other weights and backends load as before.
+It applies to GGUF experts on a CUDA device whose type the CPU expert kernels run (IQ3_S, IQ4_XS, IQ4_KSS, IQ4_NL, Q2_K-Q6_K, Q8_0); other weights and backends load as before.
 
 ## Chosen automatically
 
@@ -42,4 +42,5 @@ Decode speed depends on how fast the CPU reads memory (misses) and on the cache'
 - Output can differ between runs at the same seed: whether a pick is served from the cache or by the CPU depends on when its background copy lands, and the two round activations differently.
 - Perplexity moves by a fraction of a percent: the CPU quantizes its activations per 256 values, the GPU kernels per 32.
 - LoRA adapters on the experts and tensor parallelism are not supported with offloaded experts.
+- A built-in MTP head's experts are offloaded and cached like a layer's. The prompt staging buffer fits the largest layer's experts, so a head file at a wider type than the model's experts (a Q8_0 head beside IQ4 experts) costs its full size in VRAM; requantizing only the head's experts (`llama-quantize --allow-requantize --tensor-type ffn_gate_exps=q2_k --tensor-type ffn_up_exps=q2_k --tensor-type ffn_down_exps=iq4_nl head.gguf out.gguf Q8_0`) frees that room without lowering acceptance in our runs.
 - A layer has at most four cache copies in flight; misses past that run on the CPU without being queued, so a speculative verify (many experts a step) does not back the copies up.

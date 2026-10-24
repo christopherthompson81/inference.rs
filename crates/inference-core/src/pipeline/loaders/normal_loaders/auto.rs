@@ -92,6 +92,28 @@ impl DeviceMappedModelLoader for AutoNormalLoader {
     fn num_layers(&self, config: &str) -> Result<usize> {
         Self::get_loader(config)?.num_layers(config)
     }
+    fn untied_embedding_size_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+    ) -> Result<Option<usize>> {
+        Self::get_loader(config)?.untied_embedding_size_in_bytes(
+            config,
+            dtype,
+            weight_pack_factor,
+            quantization,
+        )
+    }
+    fn non_mapped_layer_sizes_in_bytes(
+        &self,
+        config: &str,
+        dtype: DType,
+        weight_pack_factor: usize,
+    ) -> Result<Vec<usize>> {
+        Self::get_loader(config)?.non_mapped_layer_sizes_in_bytes(config, dtype, weight_pack_factor)
+    }
     fn layer_sizes_in_bytes(
         &self,
         config: &str,

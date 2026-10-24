@@ -160,6 +160,19 @@ macro_rules! qwen3_5_text_loader {
                 )?;
                 Ok(Some(embed_tokens * dtype.size_in_bytes()))
             }
+            fn non_mapped_layer_sizes_in_bytes(
+                &self,
+                config: &str,
+                dtype: DType,
+                weight_pack_factor: usize,
+            ) -> Result<Vec<usize>> {
+                if !mtp_requested(config)? {
+                    return Ok(Vec::new());
+                }
+                let cfg = parse_qwen35_text_config(config, $moe)?;
+                let head = super::qwen3_5::mtp_head_elems(&cfg, weight_pack_factor)?;
+                Ok(vec![head * dtype.size_in_bytes()])
+            }
             fn layer_sizes_in_bytes(
                 &self,
                 config: &str,
