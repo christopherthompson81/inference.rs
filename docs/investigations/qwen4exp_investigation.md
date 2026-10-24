@@ -1220,3 +1220,42 @@ activation load) win. nsys, kernel time a call:
 ```
 End to end: KLD 0.03292 against the F32-hc base (PPL 2.3421), decode at 128 slots 36.2 / 39.0 and 38.9 / 41.4 tok/s
 (before 34-39). Test `exact_q8_0_matvec_matches_the_dequantized_weight`.
+
+## Run 34 - 2026-10-24 09:22
+
+Question: should Flash-Next's attention KV live in host memory (basalt's `kv-resident`), so long contexts stop
+taking expert slots?
+
+What a QSA decode step reads (code map): the indexer scores every block's pooled key (one pass over the indexer
+layer, 64 B a context token a layer), then the main K/V of at most 2,051 selected cells a layer, copied into a compact
+cache before fattn. The indexer layers are 20% of the KV bytes (12 x 512 of 12 x 2,560 B a token in BF16) and would
+stay on the GPU; the main K/V is the candidate. Selection never leaves the device, and decode is graphed.
+
+How stable is the selection? A probe wrote each layer's selected blocks every decode step (graphs off), two 26K-token
+prompts (a code review, a guide rewritten as an essay), 200 greedy tokens, replayed through an LRU block cache
+(`qsa_sim.py`, scratch):
+```
+                         code (6,600 blocks a layer)    essay
+consecutive overlap      0.697 (min 0.216)               0.695 (min 0.265)
+LRU 512 blocks a layer   miss 0.650, 333 a step          0.657, 337
+LRU 768                  0.214, 110                      0.218, 112
+LRU 1024                 0.134,  69                      0.146,  75
+LRU 1536                 0.077,  40                      0.086,  44
+```
+Costs on this machine: zero-copy reads of every selected cell are 25-50 MB a token over PCIe 3 (q8 to BF16, about
+2-4 ms) on a link that already carries the expert fills (Run 12: ~250 MB a token). A GPU block cache needs 15-23% of
+the main KV resident to keep misses near 40-70 blocks a step, so it frees about 65% of the KV's VRAM (2.5 GB at a 128K
+BF16 context, ~23 expert slots), for a device-side cache inside graphs plus host paths for prefill's masked attention
+and the dense short-context path.
+
+The quantized cache already gets most of that VRAM with no PCIe traffic, and it works with QSA (the cell gather copies
+raw words of any cache dtype):
+```
+26K-token code prompt, 64 slots, --pa-context-len 40000
+auto (BF16)   1,200 MB for 40K tokens (30 KB a token)
+q8              733 MB (18.3 KB)    coherent, decode 26.7 tok/s
+q4              518 MB (13 KB)      coherent, decode 26.4 tok/s; the indexer layers (BF16) are now ~46% of it
+```
+Not built. What remains of the idea: the offload planner could pick a quantized cache when its savings buy expert
+slots (needs a decode-side quality check), the indexer layers could take a quantized cache (~0.8 GB at 262K with q4
+main KV, about 7 slots), and a KV that grows into the expert cache at runtime (basalt's elastic KV) is still open.
