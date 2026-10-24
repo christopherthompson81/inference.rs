@@ -25,11 +25,14 @@ fn cuda_supports_fp8(device: &Device) -> bool {
 }
 
 /// The paged KV cache's storage: the activation dtype, fp8 e4m3, or K and V quantized to `k`/`v` bits per value
-/// (`inference_paged_attn::kv_quant`). Written as `auto`, `f8e4m3`, `q4` (both 4 bits) or `q8/q4` (K/V).
+/// (`inference_paged_attn::kv_quant`). Written as `auto`, `none`, `f8e4m3`, `q4` (both 4 bits) or `q8/q4` (K/V).
+/// `auto` lets the loader quantize a cache that buys GPU room for offloaded MoE experts; `none` keeps the activation
+/// dtype regardless.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum PagedCacheType {
     #[default]
     Auto,
+    Unquantized,
     F8E4M3,
     Quant {
         k: u32,
@@ -46,7 +49,7 @@ impl PagedCacheType {
         match self {
             PagedCacheType::F8E4M3 => DType::F8E4M3,
             PagedCacheType::Quant { .. } => DType::U8,
-            PagedCacheType::Auto => act_dtype,
+            PagedCacheType::Auto | PagedCacheType::Unquantized => act_dtype,
         }
     }
 
@@ -70,7 +73,7 @@ impl PagedCacheType {
         layer_devices: &[Option<Device>],
     ) -> std::result::Result<(), String> {
         match self {
-            Self::Auto => Ok(()),
+            Self::Auto | Self::Unquantized => Ok(()),
             Self::F8E4M3 => validate_fp8(act_dtype, model_config, device, layer_devices),
             Self::Quant { k, v } => {
                 validate_quant(*k, *v, act_dtype, model_config, device, layer_devices)
@@ -212,13 +215,14 @@ impl FromStr for PagedCacheType {
         };
         match s {
             "auto" => Ok(Self::Auto),
+            "none" => Ok(Self::Unquantized),
             "f8e4m3" => Ok(Self::F8E4M3),
             other => {
                 let (k, v) = other.split_once(KV_SEPARATOR).unwrap_or((other, other));
                 match (quant_bits(k), quant_bits(v)) {
                     (Some(k), Some(v)) => Ok(Self::Quant { k, v }),
                     _ => Err(format!(
-                        "unexpected KV cache type `{other}`: expected `auto`, `f8e4m3`, `q2`..`q8`, or `qK/qV` (K/V bits)"
+                        "unexpected KV cache type `{other}`: expected `auto`, `none`, `f8e4m3`, `q2`..`q8`, or `qK/qV` (K/V bits)"
                     )),
                 }
             }
@@ -230,6 +234,7 @@ impl std::fmt::Display for PagedCacheType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Auto => f.write_str("auto"),
+            Self::Unquantized => f.write_str("none"),
             Self::F8E4M3 => f.write_str("f8e4m3"),
             Self::Quant { k, v } if k == v => write!(f, "{QUANT_PREFIX}{k}"),
             Self::Quant { k, v } => write!(f, "{QUANT_PREFIX}{k}{KV_SEPARATOR}{QUANT_PREFIX}{v}"),
@@ -265,7 +270,7 @@ impl utoipa::PartialSchema for PagedCacheType {
             ObjectBuilder::new()
                 .schema_type(SchemaType::Type(Type::String))
                 .description(Some(
-                    "KV cache storage: `auto` (the activation dtype), `f8e4m3`, `q2`..`q8` (K and V bits), or `qK/qV`.",
+                    "KV cache storage: `auto` (the activation dtype, or a quantized cache where that buys GPU room for offloaded MoE experts), `none` (the activation dtype), `f8e4m3`, `q2`..`q8` (K and V bits), or `qK/qV`.",
                 ))
                 .build(),
         ))

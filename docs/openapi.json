@@ -10989,7 +10989,7 @@
       },
       "PagedCacheType": {
         "type": "string",
-        "description": "KV cache storage: `auto` (the activation dtype), `f8e4m3`, `q2`..`q8` (K and V bits), or `qK/qV`."
+        "description": "KV cache storage: `auto` (the activation dtype, or a quantized cache where that buys GPU room for offloaded MoE experts), `none` (the activation dtype), `f8e4m3`, `q2`..`q8` (K and V bits), or `qK/qV`."
       },
       "PromptInput": {
         "oneOf": [
