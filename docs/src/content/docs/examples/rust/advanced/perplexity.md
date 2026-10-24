@@ -16,7 +16,12 @@ Run with: `cargo run --release --example perplexity -p inference-examples`
 //!
 //! Run with: `cargo run --release --example perplexity -p inference-examples`
 
-use std::{fs::read_to_string, path::PathBuf, time::Instant};
+use std::{
+    fs::{File, read_to_string},
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+    time::Instant,
+};
 
 use anyhow::Context;
 use anyhow::Result;
@@ -32,6 +37,11 @@ const WINDOW_HEADROOM: usize = 256;
 const PROMPT_CHUNKSIZE: usize = 1024;
 // llama-perplexity scores a window's second half, so a window needs a few tokens on each side
 const MIN_LLAMA_CPP_CTX: usize = 4;
+// llama-perplexity's `--kl-divergence-base` file opens with this, and skips base log-probs at or below the floor
+const KLD_BASE_MAGIC: &[u8; 8] = b"_logits_";
+const KLD_LOG_PROB_FLOOR: f32 = -16.0;
+// a row's logprob of its next token, from our logits against the engine's own, agrees to this
+const ROW_CHECK_TOLERANCE: f32 = 1e-3;
 
 /// Calculate perplexity of a model. By default, this uses the Llama 3.1 8B model.
 #[derive(Parser)]
@@ -78,6 +88,11 @@ struct Args {
     /// before it, printed as `PPL = <value>`.
     #[arg(long)]
     llama_cpp_ctx: Option<usize>,
+
+    /// Score against a `llama-perplexity --kl-divergence-base` file: its chunks' tokens, each chunk's second half,
+    /// printing our perplexity, the base's, the KL divergence from the base and how often the top token agrees.
+    #[arg(long)]
+    kld_base: Option<PathBuf>,
 }
 
 fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
@@ -143,6 +158,9 @@ async fn main() -> Result<()> {
         }
     };
 
+    if let Some(base) = &args.kld_base {
+        return kl_divergence(&model, base).await;
+    }
     let text = read_to_string(&args.file)?;
     if let Some(ctx) = args.llama_cpp_ctx {
         let perplexity = llama_cpp_window(&model, text, ctx).await?;
@@ -244,6 +262,145 @@ async fn llama_cpp_window(model: &Model, text: String, ctx: usize) -> Result<f64
         })
         .collect::<Result<Vec<_>>>()?;
     Ok((-logprobs.iter().sum::<f64>() / logprobs.len() as f64).exp())
+}
+
+fn read_i32(reader: &mut impl Read) -> Result<i32> {
+    let mut bytes = [0u8; 4];
+    reader.read_exact(&mut bytes)?;
+    Ok(i32::from_le_bytes(bytes))
+}
+
+// KL(base || ours) over one position as llama-perplexity computes it, our and the base's logprob of the next token,
+// and whether the two top tokens agree; `record` is the base's: its scale and floor as two f32, then a u16 per token
+fn score_row(logits: &[f32], record: &[u8], next: usize) -> (f64, f64, f64, bool) {
+    let (imax, max_logit) =
+        logits
+            .iter()
+            .copied()
+            .enumerate()
+            .fold(
+                (0, f32::NEG_INFINITY),
+                |m, (i, v)| if v > m.1 { (i, v) } else { m },
+            );
+    let log_sum_exp = logits
+        .iter()
+        .map(|v| f64::from((v - max_logit).exp()))
+        .sum::<f64>()
+        .ln() as f32;
+    let float = |at: usize| {
+        f32::from_le_bytes([record[at], record[at + 1], record[at + 2], record[at + 3]])
+    };
+    let (scale, floor) = (float(0), float(4));
+    let base = record[8..]
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| u16::from_le_bytes(*b))
+        .collect::<Vec<_>>();
+    let ours = |i: usize| logits[i] - max_logit - log_sum_exp;
+    let mut kld = 0.0;
+    let (mut imax_base, mut base_max) = (0, f32::NEG_INFINITY);
+    for (i, &q) in base.iter().take(logits.len()).enumerate() {
+        let p_log = scale * f32::from(q) + floor;
+        if p_log > base_max {
+            base_max = p_log;
+            imax_base = i;
+        }
+        if p_log > KLD_LOG_PROB_FLOOR {
+            kld += f64::from(p_log.exp() * (p_log - ours(i)));
+        }
+    }
+    let base_logprob = scale * f32::from(base[next]) + floor;
+    (
+        kld,
+        f64::from(ours(next)),
+        f64::from(base_logprob),
+        imax == imax_base,
+    )
+}
+
+async fn kl_divergence(model: &Model, path: &Path) -> Result<()> {
+    let mut reader = BufReader::new(File::open(path)?);
+    let mut magic = [0u8; 8];
+    reader.read_exact(&mut magic)?;
+    anyhow::ensure!(
+        &magic == KLD_BASE_MAGIC,
+        "{} is not a llama-perplexity KL divergence base",
+        path.display()
+    );
+    let n_ctx = usize::try_from(read_i32(&mut reader)?)?;
+    let n_vocab = usize::try_from(read_i32(&mut reader)?)?;
+    let n_chunk = usize::try_from(read_i32(&mut reader)?)?;
+    let mut tokens = Vec::with_capacity(n_chunk * n_ctx);
+    for _ in 0..n_chunk * n_ctx {
+        tokens.push(u32::try_from(read_i32(&mut reader)?)?);
+    }
+    // llama-perplexity scores positions first..n_ctx - 1 of each chunk, each predicting the next token
+    let first = n_ctx / 2;
+    let record = 2 * n_vocab.div_ceil(2) + 4;
+    let mut bytes = vec![0u8; record * 2];
+    let (mut klds, mut nll, mut nll_base, mut same_top) = (Vec::new(), 0.0, 0.0, 0usize);
+    for (c, chunk) in tokens.chunks(n_ctx).enumerate() {
+        let start = Instant::now();
+        let scored = model
+            .prompt_logits(PromptLogitsRequest {
+                model: None,
+                prompt: PromptInput::Tokens(chunk.to_vec()),
+                output: LogitsOutput::Logits,
+            })
+            .await?;
+        let logits = scored.logits.context("the engine returned no logits")?;
+        let vocab = scored.vocab_size;
+        anyhow::ensure!(
+            vocab <= n_vocab,
+            "our vocab ({vocab}) is wider than the base's ({n_vocab})"
+        );
+        for row in first..n_ctx - 1 {
+            reader.read_exact(&mut bytes)?;
+            let next = chunk[row + 1] as usize;
+            let (kld, logprob, base_logprob, same) =
+                score_row(&logits[row * vocab..][..vocab], &bytes, next);
+            if c == 0 && row == first {
+                let engine =
+                    scored.token_logprobs[row + 1].context("a scored token has no logprob")?;
+                anyhow::ensure!(
+                    (engine - logprob as f32).abs() < ROW_CHECK_TOLERANCE,
+                    "logits row {row} does not predict token {}: {logprob} against the engine's {engine}",
+                    row + 1
+                );
+            }
+            klds.push(kld);
+            nll -= logprob;
+            nll_base -= base_logprob;
+            same_top += usize::from(same);
+        }
+        let n = klds.len() as f64;
+        println!(
+            "chunk {}/{n_chunk}: PPL {:.4}, base {:.4}, mean KLD {:.5}, same top {:.2}% ({:.1}s)",
+            c + 1,
+            (nll / n).exp(),
+            (nll_base / n).exp(),
+            klds.iter().sum::<f64>() / n,
+            100.0 * same_top as f64 / n,
+            start.elapsed().as_secs_f32()
+        );
+    }
+    let n = klds.len() as f64;
+    let mean = klds.iter().sum::<f64>() / n;
+    klds.sort_by(f64::total_cmp);
+    let pick = |q: f64| klds[((klds.len() - 1) as f64 * q).round() as usize];
+    println!();
+    println!("{} positions over {n_chunk} chunks of {n_ctx}", klds.len());
+    println!(
+        "PPL            {:.4} (base {:.4})",
+        (nll / n).exp(),
+        (nll_base / n).exp()
+    );
+    println!("KLD mean       {mean:.5}");
+    println!("KLD median     {:.5}", pick(0.5));
+    println!("KLD p99        {:.5}", pick(0.99));
+    println!("same top-1     {:.2}%", 100.0 * same_top as f64 / n);
+    Ok(())
 }
 ```
 
