@@ -816,3 +816,75 @@ capture here is relaxed. Ten clean runs of the build without the probe neither f
 ran with something abnormal in flight (Run 19's garbage plan cells, this run's probe locking and printing inside a
 host function). Kept: a fill that fails now frees its slot (four failed fills used to stop the cache admitting
 experts at all), and fill errors name the step (the copy or the landing callback).
+
+## Run 23 - 2026-10-23 19:43
+
+Question: would basalt's frequency-ranked placement cut our misses, and does MTP pay now that the CPU share is
+smaller?
+
+Routing traces (a probe in the host function writing every decode step's routed experts per layer; removed after),
+three real prompts at 128 slots (code 400 tokens, prose 400, a translation and summary 88), replayed offline
+(`placement_sim.py`, scratch):
+```
+misses per routed pick            64 slots   128 slots
+LRU, 4 fills a step (ours)        0.290      0.154
+static profile, other prompts     0.932      0.822
+static profile, own prompt        0.265      0.095    (an oracle bound)
+decayed counts 0.85 / 0.95        0.286 / 0.277  0.152 / 0.150
+decayed 0.95 seeded by a profile  0.275      0.142
+```
+A profile taken over other prompts is barely better than random placement (64 random slots of 512 miss 0.875):
+which experts run hot is set by the content, and nothing carries across prompts. Our LRU is within 0.01 of basalt's
+decayed counts. Dead end for placement.
+
+MTP at 128 slots (`--mtp --mtp-n-predict 2|3`, the unsloth head GGUF), two prompts each:
+```
+base             34.4 / 37.1 tok/s
+MTP 2 drafts     24.9 / 22.5 tok/s   accept ~76%, 2.5 tokens a step
+MTP 3 drafts     26.7 / 20.8 tok/s   accept ~65%, 2.9 tokens a step
+per call (trace):  base step 1.55 misses, 239 us of CPU;  3-token verify 9.5 misses (8.1 distinct), 1,214 us;
+                   the head's own MoE layer misses 6.8 of 10 (1.7 ms a draft)
+fill cap 4 -> 12 / 32: verify misses 9.15 / 9.03, decode slower (16-18 tok/s, the fills crowd the bus)
+```
+A verify step's tokens cannot use the fills the step itself triggers, and the head's experts are mostly cold. Basalt
+gains from speculation with about 0.8% of its routes on the CPU; we are at about 15%. Dead end until the CPU share
+drops.
+
+(A first round of these numbers was void: a server from the trace run outlived its `kill`, because `$!` named the
+subshell of `cd ... && serve &`, and every later script's server failed to start beside it while its requests went to
+the old one. The script now refuses a port another server answers.)
+
+Where the step goes now (Run 22): about 400 us of GPU work a layer (19 ms of a 28 ms step at 128 slots) and the
+misses. The GPU side is the larger part: next, its kernel profile.
+
+Seeding the cache from the request's own prompt at turn start (the user's suggestion; basalt seeds its counts from
+the prompt): traces of prefill and decode routing for three long prompts (a code review of 1,655 tokens, a guide
+rewritten as an essay 1,098, a plan from notes 823; 300 tokens each), `seed_sim.py`:
+```
+miss rate, 128 slots                       code    essay   plan    mean
+LRU carried over (ours)                    0.177   0.128   0.166   0.157
+prompt-seeded, then LRU                    0.161   0.124   0.169   0.151
+prompt-seeded, then decayed counts         0.158   0.119   0.162   0.147
+prompt-seeded, then frozen                 0.454   0.321   0.365   0.380
+oracle: own decode profile, static         0.135   0.084   0.122   0.114
+(64 slots: 0.315, 0.313, 0.305, 0.587, 0.316)
+```
+The prompt routes differently from the reply (a cache frozen at the prompt's top experts misses 38%), and LRU
+catches up within a few tokens; the best practical policy saves about 6% of misses (about 0.5 ms a token). Not built.
+
+CPU expert bandwidth: the machine reads 23 GB/s on one thread and peaks at 35.8 GB/s on four (a standalone AVX2 sum
+over 2 GiB); the miss kernel holds about 22 GB/s on eight threads for every type pair tried (IQ3_S, IQ4_XS, Q4_K gate
+and up with IQ4_NL or Q8_0 down), so it is not decode-bound. Larger work items (`TILE_ELEMS` 32K/64K/128K) do not lift
+it and slow a single miss (130 to 155/285/542 us). Open: what holds it at 60% of the read peak.
+
+What holds it, by phase (one step of 3 misses, a probe in the bench): setup and quantize 6.5 us, gate/up 182 us
+(4.0 MB, 22 GB/s), quantize the gated rows 4.8 us, down 137 us (2.6 MB, 19 GB/s), weighted sum 1.4 us. The
+projections themselves, and single-token dots are decode-bound per thread (`single_thread_rate`): IQ3_S 3.87 GB/s,
+IQ4_XS 5.28 GB/s on cache-resident rows, while four tokens at once reach 11.6 GB/s per token. `iq3_s_one` looked up
+its 8 grid codes with scalar loads and `_mm256_set_epi32`; it now builds the 9-bit indices with a variable shift and
+gathers them (`_mm256_i32gather_epi32`), as llama.cpp's AVX2 kernel does:
+```
+single_thread_rate IQ3_S: 3.87 -> 4.44 GB/s
+flash_next_offload_misses, 3 misses: 116.6 / 117.0 -> 112.5 / 109.8 us an expert (two runs each)
+```
+About 5% off the CPU's share; the kernel still holds near 21 GB/s against the 33.5 GB/s eight threads read.
