@@ -828,6 +828,68 @@ mod tests {
         );
     }
 
+    // one Qwen3.8-Flash-Next decode step's misses as the UD-IQ4_XS GGUF stores them (IQ3_S gate/up, IQ4_NL down, 640 x
+    // 2560): the time and bandwidth per missed expert, by how many a layer misses
+    #[test]
+    #[ignore = "benchmark"]
+    fn flash_next_offload_misses() -> Result<()> {
+        const N_EXPERTS: usize = 512;
+        const ITERS: usize = 200;
+        let (hidden, inter) = (2560, INTER_32);
+        let bytes = |ty: GgufType, rows: usize, cols: usize, seed| {
+            let mut b = random_bytes(
+                N_EXPERTS * rows * cols / ty.block_size() * ty.type_size(),
+                seed,
+            );
+            for block in b.chunks_exact_mut(ty.type_size()) {
+                block[..2].copy_from_slice(&half::f16::from_f32(0.002).to_le_bytes());
+            }
+            b
+        };
+        let (gate, up, down) = (
+            bytes(GgufType::Iq3S, inter, hidden, 1),
+            bytes(GgufType::Iq3S, inter, hidden, 2),
+            bytes(GgufType::Iq4Nl, hidden, inter, 3),
+        );
+        let projection = |ty, bytes, rows, cols| CpuExpertProjection {
+            ty,
+            bytes,
+            rows,
+            cols,
+        };
+        let experts = CpuExperts {
+            gate: projection(GgufType::Iq3S, &gate, inter, hidden),
+            up: projection(GgufType::Iq3S, &up, inter, hidden),
+            down: projection(GgufType::Iq4Nl, &down, hidden, inter),
+            act: GluActivationType::Silu,
+        };
+        let per_expert = (gate.len() + up.len() + down.len()) / N_EXPERTS;
+        let xs = vec![0.01f32; hidden];
+        let mut out = vec![0f32; hidden];
+        for misses in [1, 3, 10] {
+            let (wall, cpu) = (std::time::Instant::now(), cpu_seconds());
+            for step in 0..ITERS {
+                let routes = (0..misses)
+                    .map(|k| CpuExpertRoute {
+                        token: 0,
+                        expert: (step * 37 + k * 131) % N_EXPERTS,
+                        weight: 0.1,
+                    })
+                    .collect::<Vec<_>>();
+                experts.forward(&xs, &routes, &mut out)?;
+            }
+            let secs = wall.elapsed().as_secs_f64();
+            println!(
+                "{misses:>2} misses: {:>7.1} us a step, {:>6.1} us an expert, {:>5.1} GB/s, {:>4.1} cores",
+                secs / ITERS as f64 * 1e6,
+                secs / (ITERS * misses) as f64 * 1e6,
+                (ITERS * misses * per_expert) as f64 / secs / 1e9,
+                (cpu_seconds() - cpu) / secs
+            );
+        }
+        Ok(())
+    }
+
     // one Qwen3.8-Flash-Next layer whose down experts are Q8_0 (IQ3_S gate/up, 512 experts over 640 x 2560): the
     // block kernels against the gather fallback a resident CPU layer of these types takes
     #[test]

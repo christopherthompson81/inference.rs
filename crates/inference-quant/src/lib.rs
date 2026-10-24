@@ -234,7 +234,7 @@ pub use gguf::cuda::{
     moe_weighted_reduce_flat_bf16, moe_weighted_reduce_flat_same_dtype,
 };
 #[cfg(feature = "cuda")]
-pub use gguf::expert_stack::{DeviceExpertStack, HostExpertStack};
+pub use gguf::expert_stack::{BounceRing, DeviceExpertStack, HostExpertStack};
 #[cfg(feature = "cuda")]
 pub use gguf::fast_mmq::{
     grouped as grouped_moe_mmq, grouped_from_glu_packed as grouped_moe_mmq_from_glu_packed,

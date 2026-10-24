@@ -10,7 +10,9 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use inference_quant::cpu_experts::{CpuExpertProjection, CpuExpertRoute, CpuExperts};
-use inference_quant::{DeviceExpertStack, GluActivationType, HostExpertStack, KernelWeight};
+use inference_quant::{
+    BounceRing, DeviceExpertStack, GluActivationType, HostExpertStack, KernelWeight,
+};
 use inference_tensor::cuda::cudarc::driver::{CudaSlice, CudaStream, result};
 
 use crate::cuda::mapped::{mapped_buffer, mapped_host, tensor_ptr};
@@ -32,9 +34,11 @@ const MISS_SLOT: u32 = 0;
 /// Which projection of a layer, in `[gate, up, down]` order.
 const PROJECTIONS: usize = 3;
 
-/// Prefill staging every offloaded layer shares on a device: room for all experts of the largest layer.
+/// Prefill staging every offloaded layer shares on a device: room for all experts of the largest layer, and the
+/// pinned chunks uploads from pageable experts go through.
 struct Staging {
     stacks: [DeviceExpertStack; PROJECTIONS],
+    ring: Mutex<BounceRing>,
 }
 
 static STAGING: Mutex<Vec<(usize, Arc<Staging>)>> = Mutex::new(Vec::new());
@@ -55,6 +59,7 @@ fn staging(
     };
     let staging = Arc::new(Staging {
         stacks: [stack(0)?, stack(1)?, stack(2)?],
+        ring: Mutex::new(BounceRing::new(&device.cuda_stream())?),
     });
     all.push((ordinal, staging.clone()));
     Ok(staging)
@@ -542,7 +547,12 @@ impl OffloadedExperts {
                     let src = &host.bytes()[used[p] * size..used[end - 1] * size + size];
                     // SAFETY: host experts live as long as the layer; the stream orders this copy after the previous
                     // layer's reads of the staging and before this layer's
-                    unsafe { view.fill_async(p, src, &main)? };
+                    if host.is_pageable() {
+                        let mut ring = staging.ring.lock().expect("bounce ring poisoned");
+                        unsafe { view.fill_bounced_async(p, src, &mut ring, &main)? };
+                    } else {
+                        unsafe { view.fill_async(p, src, &main)? };
+                    }
                     p = end;
                 }
                 // SAFETY: as the copies above, ordered on `main` before this layer's reads
