@@ -16,13 +16,18 @@ use crate::{
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 pub enum Activation {
+    #[serde(alias = "quick_gelu")]
     QuickGelu,
+    // exact (erf) GELU, as LAION's OpenCLIP ViT-H uses
+    #[serde(rename = "gelu")]
+    Gelu,
 }
 
 impl Module for Activation {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Activation::QuickGelu => xs * inference_tensor::nn::ops::sigmoid(&(xs * 1.702f64)?),
+            Activation::Gelu => xs.gelu_erf(),
         }
     }
 }

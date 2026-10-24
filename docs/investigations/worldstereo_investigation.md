@@ -56,3 +56,24 @@ f32  latents: max 1.9e-3 rel rms 6.6e-4    decoded (from the reference latents):
 bf16 latents: max 2.1e-2 rel rms 5.3e-3    decoded: max 3.7e-2 rel rms 4.7e-3
 ```
 f32 differs at the level of the reference's TF32 cuDNN convs; bf16 at bf16 rounding. Next: CLIP ViT-H.
+
+## Run 3 - 2026-10-24 14:47
+
+Question: does the shared CLIP vision tower reproduce the Wan I2V image condition?
+
+`wan/clip.rs`: inference-nn's `ClipVisionTransformer` (exact GELU added for OpenCLIP ViT-H), output of layer 30 of 32
+(the pipeline's `hidden_states[-2]`). Preprocessing found by reading the wrapper: `CLIPImageProcessor` is built with
+`do_rescale=False`, so the tower gets PIL-bicubic 224x224 pixels in 0..255 normalized as if they were 0..1 (values
+2..944 on the test image). The model is tuned on that input, so the port reproduces it. Dump `dump_wan_clip.py`
+(scratch): processor pixel values and the penultimate states in f32 and under bf16 autocast (the pipeline's mode).
+```
+wan::parity::image_encoder_matches_the_reference
+pixel values (ours from the JPEG): max 10.9 (~3 levels) rel rms 4.0e-3; PIL in Python reproduces them exactly, so this
+  is the image crate's JPEG decode against libjpeg-turbo, as in WorldMirror
+f32 penultimate (on the reference pixels): max 8.1e-4 rel rms 1.9e-5
+bf16 (whole tower in bf16) against the reference's autocast run: rel rms 9.4e-2
+reference autocast against reference f32: rel rms 1.9e-1
+```
+The 0..255 inputs make the reference's own bf16 run 19% off its f32 run; ours in bf16 sits inside that noise. The
+encoder runs in f32: one 632M-parameter forward per clip, and the precise values rather than another draw of rounding.
+Next: umT5-XXL.

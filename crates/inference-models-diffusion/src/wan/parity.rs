@@ -56,3 +56,55 @@ fn vae_matches_the_reference() -> Result<()> {
     }
     Ok(())
 }
+
+// WAN_DIR: the Wan diffusers folder; WAN_CLIP_REF: the dump (processor pixel values, f32/bf16 penultimate states);
+// WAN_CLIP_IMAGE: the image the dump started from
+#[test]
+#[ignore = "needs the Wan image encoder, a reference dump and a GPU"]
+fn image_encoder_matches_the_reference() -> Result<()> {
+    let (Some(dir), Some(dump), Some(image)) = (
+        env_path("WAN_DIR"),
+        env_path("WAN_CLIP_REF"),
+        env_path("WAN_CLIP_IMAGE"),
+    ) else {
+        return Ok(());
+    };
+    let device = Device::new_cuda(0)?;
+    let refs = inference_tensor::safetensors::load(dump, &Device::Cpu)?;
+    let enc_dir = dir.join("image_encoder");
+    let cfg: inference_nn::vision::clip::ClipConfig =
+        serde_json::from_str(&std::fs::read_to_string(enc_dir.join("config.json"))?)
+            .map_err(inference_tensor::Error::wrap)?;
+    let weights = enc_dir.join("model.safetensors");
+    // the pipeline's start frame: PIL bicubic to the 832x480 bucket
+    let img = image::open(&image)
+        .map_err(inference_tensor::Error::wrap)?
+        .to_rgb8();
+    let frame = inference_vision::pil_resize_bicubic(
+        img.as_raw(),
+        (img.width() as usize, img.height() as usize),
+        (832, 480),
+    );
+    for (name, dtype) in [("f32", DType::F32), ("bf16", DType::BF16)] {
+        // SAFETY: the weights file is not modified while the test runs
+        let vb = unsafe {
+            ShardedSafeTensors::sharded(
+                &[&weights],
+                DType::F32,
+                &device,
+                None,
+                std::sync::Arc::new(|_| true),
+            )?
+        };
+        let encoder = super::clip::WanImageEncoder::new(vb, &cfg, dtype)?;
+        let pixels = encoder.pixel_values(&frame, (832, 480), &device)?;
+        if name == "f32" {
+            let (max, rel) = compare(&pixels, &refs["pixel_values"])?;
+            println!("pixel values: max {max:.3e} rel rms {rel:.3e}");
+        }
+        let states = encoder.forward(&refs["pixel_values"].to_device(&device)?)?;
+        let (max, rel) = compare(&states.squeeze(0)?, &refs[&format!("{name}.penultimate")])?;
+        println!("{name} penultimate: max {max:.3e} rel rms {rel:.3e}");
+    }
+    Ok(())
+}
