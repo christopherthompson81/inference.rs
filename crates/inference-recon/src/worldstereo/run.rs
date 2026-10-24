@@ -76,12 +76,89 @@ pub struct StageReport {
     pub device_mib_at_end: u64,
 }
 
+/// How the reconstruction's frame (the first bank camera's, OpenCV) maps into the scene's (the panorama's centre at the
+/// origin, +z up, MoGe-2's metric scale): `scene = scale * rotation * recon + translation`, fitted on the cameras.
+#[derive(Debug, Serialize)]
+pub struct SceneTransform {
+    pub scale: f64,
+    pub rotation: [[f64; 3]; 3],
+    pub translation: [f64; 3],
+    /// how well the predicted cameras land on the given ones after the transform (scene units, degrees)
+    pub position_residual_median: f64,
+    pub rotation_residual_median_deg: f64,
+}
+
 #[derive(Debug, Serialize)]
 pub struct WorldGenReport {
     pub stages: Vec<StageReport>,
     pub clips: Vec<String>,
     pub frames: usize,
     pub reconstructed_frames: usize,
+    pub reconstruction_to_scene: Option<SceneTransform>,
+}
+
+// the transform from WorldMirror's frame to the scene's, from its predicted cameras and the given ones
+fn scene_transform(camera_params: &Path, given_c2w: &[Mat4]) -> Result<SceneTransform> {
+    let json: serde_json::Value = read_json(camera_params)?;
+    let predicted = json["extrinsics"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter_map(|e| serde_json::from_value::<Vec<Vec<f64>>>(e["matrix"].clone()).ok())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if predicted.len() != given_c2w.len() {
+        inference_tensor::bail!(
+            "{} holds {} cameras, {} were given",
+            camera_params.display(),
+            predicted.len(),
+            given_c2w.len()
+        );
+    }
+    let p = predicted
+        .iter()
+        .map(|m| [m[0][3], m[1][3], m[2][3]])
+        .collect::<Vec<_>>();
+    let q = given_c2w
+        .iter()
+        .map(|m| [m[0][3], m[1][3], m[2][3]])
+        .collect::<Vec<_>>();
+    let (scale, rotation, translation) = crate::geometry::similarity_fit(&p, &q);
+    let median = |mut v: Vec<f64>| {
+        v.sort_unstable_by(f64::total_cmp);
+        v[v.len() / 2]
+    };
+    let positions = p
+        .iter()
+        .zip(&q)
+        .map(|(a, b)| {
+            let m = [0, 1, 2].map(|i| {
+                scale * (0..3).map(|j| rotation[i][j] * a[j]).sum::<f64>() + translation[i]
+            });
+            (0..3).map(|d| (m[d] - b[d]).powi(2)).sum::<f64>().sqrt()
+        })
+        .collect::<Vec<_>>();
+    let angles = predicted
+        .iter()
+        .zip(given_c2w)
+        .map(|(a, b)| {
+            // the angle of (R * R_pred)^T R_given
+            let ra = [0, 1, 2]
+                .map(|i| [0, 1, 2].map(|j| (0..3).map(|k| rotation[i][k] * a[k][j]).sum::<f64>()));
+            let trace = (0..3)
+                .map(|i| (0..3).map(|k| ra[k][i] * b[k][i]).sum::<f64>())
+                .sum::<f64>();
+            ((trace - 1.0) / 2.0).clamp(-1.0, 1.0).acos().to_degrees()
+        })
+        .collect::<Vec<_>>();
+    Ok(SceneTransform {
+        scale,
+        rotation,
+        translation,
+        position_residual_median: median(positions),
+        rotation_residual_median_deg: median(angles),
+    })
 }
 
 #[derive(Serialize)]
@@ -428,6 +505,7 @@ pub fn generate_world(
 
     // 5. WorldMirror on the memory bank, the bank's cameras as priors
     let mut reconstructed = 0;
+    let mut transform = None;
     if let Some(wm_dir) = &models.worldmirror {
         let t = Instant::now();
         let model = WorldMirror::load(wm_dir, DType::BF16, device)?;
@@ -465,15 +543,17 @@ pub fn generate_world(
             target_size: RECONSTRUCT_TARGET_SIZE,
             ..Default::default()
         };
-        reconstruct_with_priors(
-            &model,
-            wm_dir,
-            frames,
-            None,
-            priors,
-            &out_dir.join("reconstruction"),
-            &options,
-        )?;
+        let recon_dir = out_dir.join("reconstruction");
+        reconstruct_with_priors(&model, wm_dir, frames, None, priors, &recon_dir, &options)?;
+        let given = memory
+            .frames
+            .iter()
+            .map(|f| invert4(&f.w2c))
+            .collect::<Vec<_>>();
+        transform = Some(scene_transform(
+            &recon_dir.join("camera_params.json"),
+            &given,
+        )?);
         stage("reconstruction (WorldMirror 2.0)", t, device);
     }
     let report = WorldGenReport {
@@ -481,6 +561,7 @@ pub fn generate_world(
         clips,
         frames: total_frames,
         reconstructed_frames: reconstructed,
+        reconstruction_to_scene: transform,
     };
     std::fs::write(
         out_dir.join("meta.json"),
