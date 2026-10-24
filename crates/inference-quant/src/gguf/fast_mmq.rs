@@ -1645,6 +1645,28 @@ mod tests {
         Ok(())
     }
 
+    // One token over short rows takes MMVQ's short-row kernel: Qwen3.8-Flash-Next's hyper-connection up projection
+    // (320 wide), a row count its blocks of four do not divide, and a k-quant
+    #[test]
+    fn short_row_mmvq_matches_mmq() -> Result<()> {
+        let cuda = Device::new_cuda(0)?;
+        for (dtype, rows, cols) in [
+            (GgmlDType::Q8_0, 10240, 320),
+            (GgmlDType::Q8_0, 2565, 640),
+            (GgmlDType::Q4K, 1001, 512),
+            (GgmlDType::Q8_0, 64, 1024),
+        ] {
+            let weight = QTensor::quantize_onto(&patterned((rows, cols), 7, 0.03)?, dtype, &cuda)?;
+            for xs_dtype in [DType::BF16, DType::F32] {
+                let xs = patterned((1, cols), 5, 0.2)?
+                    .to_dtype(xs_dtype)?
+                    .to_device(&cuda)?;
+                assert_close(&fast_mmvq::plain(&weight, &xs)?, &plain(&weight, &xs)?)?;
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn mmvq_q4k_rank4_unequal_qkv_matches_independent() -> Result<()> {
         let cuda = Device::new_cuda(0)?;

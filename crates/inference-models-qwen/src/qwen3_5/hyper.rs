@@ -32,6 +32,16 @@ impl GroupedRmsNorm {
     }
 
     pub(super) fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if inference_nn::cuda::hyper::supports(x) {
+            #[allow(clippy::cast_possible_truncation)]
+            return inference_nn::cuda::hyper::group_norm(
+                x,
+                &self.scale,
+                self.group,
+                self.eps as f32,
+            );
+        }
         let dims = x.dims().to_vec();
         let last = *dims.last().expect("a normed tensor has a last dimension");
         let mut grouped = dims.clone();
@@ -104,6 +114,14 @@ impl GatedResidual {
     #[allow(clippy::cast_precision_loss)]
     fn mixed(&self, normed: &Tensor) -> Result<Tensor> {
         let streams = self.streams as f64;
+        #[cfg(feature = "cuda")]
+        if inference_nn::cuda::hyper::supports(normed) {
+            use inference_nn::cuda::hyper;
+            #[allow(clippy::cast_possible_truncation)]
+            let down = hyper::scaled_silu(&self.mix_down.forward(normed)?, (1.0 / streams) as f32)?;
+            let up = self.mix_up.forward(&down)?.to_dtype(normed.dtype())?;
+            return hyper::mix(&up, normed, self.streams, self.hidden);
+        }
         let mix = (self.mix_down.forward(normed)? / streams)?;
         let mix = inference_tensor::nn::ops::sigmoid(
             &self
@@ -123,10 +141,17 @@ impl GatedResidual {
         let inject = self
             .inject
             .as_ref()
-            .expect("a block's hyper-connection writes back");
-        let inject = (inference_tensor::nn::ops::sigmoid(
-            &(inject.forward(&normed)? / self.streams as f64)?,
-        )? * 2.0)?;
+            .expect("a block's hyper-connection writes back")
+            .forward(&normed)?;
+        #[cfg(feature = "cuda")]
+        let inject = if inference_nn::cuda::hyper::supports(&inject) {
+            #[allow(clippy::cast_possible_truncation)]
+            inference_nn::cuda::hyper::inject_weights(&inject, (1.0 / self.streams as f64) as f32)?
+        } else {
+            (inference_tensor::nn::ops::sigmoid(&(inject / self.streams as f64)?)? * 2.0)?
+        };
+        #[cfg(not(feature = "cuda"))]
+        let inject = (inference_tensor::nn::ops::sigmoid(&(inject / self.streams as f64)?)? * 2.0)?;
         Ok(HyperRead {
             input: self.mixed(&normed)?,
             streams_in: streams_in.clone(),
@@ -162,6 +187,15 @@ impl HyperRead {
             .reshape(split)?
             .broadcast_mul(&self.inject.reshape(weights)?)?
             .reshape(flat)
+    }
+
+    /// `streams + output * inject_s` into every stream: the block's write-back.
+    pub(super) fn write_back(&self, streams: &Tensor, output: &Tensor) -> Result<Tensor> {
+        #[cfg(feature = "cuda")]
+        if inference_nn::cuda::hyper::supports(streams) {
+            return inference_nn::cuda::hyper::inject_add(streams, output, &self.inject);
+        }
+        streams + self.injection(output)?
     }
 
     pub(super) fn streams_in(&self) -> &Tensor {

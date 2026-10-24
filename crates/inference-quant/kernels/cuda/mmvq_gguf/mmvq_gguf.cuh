@@ -17,6 +17,10 @@
 #define K_SCALE_SIZE 12
 #define MMVQ_NWARPS_SINGLE_COL_PLAIN 8
 #define MMVQ_ROWS_PER_BLOCK_SINGLE_COL_PLAIN 2
+// Rows at most this wide leave most of a single-column block idle (a 320-wide Q8_0 row keeps 40 of its 256 threads
+// busy), so one token takes the short-row kernel: one warp a block, each over several rows.
+#define MMVQ_SHORT_ROW_MAX_COLS 512
+#define MMVQ_ROWS_PER_BLOCK_SHORT_ROWS 4
 #define MMVQ_NWARPS_SINGLE_COL_FUSED_GLU 4
 #define MMVQ_ROWS_PER_BLOCK_SINGLE_COL_FUSED_GLU 2
 #define MMVQ_NWARPS_SINGLE_COL_FUSED_QKV 8
@@ -682,14 +686,13 @@ static constexpr __device__ int mmvq_rows_per_cuda_block_fused_qkv_for(int ncols
 }
 
 template <typename dst_t, int qk, int qi, typename block_q_t, int vdr,
-          vec_dot_q_cuda_t vec_dot_q_cuda, int ncols_dst>
+          vec_dot_q_cuda_t vec_dot_q_cuda, int ncols_dst,
+          int nwarps = mmvq_nwarps_plain_for(ncols_dst),
+          int rows_per_cuda_block = mmvq_rows_per_cuda_block_plain_for(ncols_dst)>
 static __device__ void
 mmvq_core_impl(const void *__restrict__ vx, const block_q8_1 *__restrict__ y,
                dst_t *__restrict__ dst, const int ncols_x, const int nrows_x,
                const int stride_col_y, const int stride_col_dst) {
-
-  constexpr int nwarps = mmvq_nwarps_plain_for(ncols_dst);
-  constexpr int rows_per_cuda_block = mmvq_rows_per_cuda_block_plain_for(ncols_dst);
 
   const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
   const int row0 = rows_per_cuda_block * blockIdx.x;
@@ -709,6 +712,10 @@ mmvq_core_impl(const void *__restrict__ vx, const block_q8_1 *__restrict__ y,
 #pragma unroll
       for (int i = 0; i < rows_per_cuda_block; ++i) {
         const int row = row0 + i;
+        // the last block's rows past the matrix read nothing
+        if (rows_per_cuda_block > 2 && row >= nrows_x) {
+          continue;
+        }
         const int weight_kbx = row * blocks_per_row_x + kbx;
         tmp[j][i] +=
             vec_dot_q_cuda(vx, &y[j * stride_col_y + kby], weight_kbx, kqs);
@@ -1492,6 +1499,19 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
                           stride_col_y, stride_col_dst);                       \
   }
 
+#define MMVQ_PLAIN_SHORT_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot, \
+                               dst_tag, dst_c_type)                          \
+  extern "C" __global__ void __launch_bounds__(WARP_SIZE, 1)                  \
+      mmvq_gguf_##tag##_##dst_tag##_plain_short_cuda1(                       \
+          const void *__restrict__ vx, const void *__restrict__ vy,            \
+          dst_c_type *__restrict__ dst, const int ncols_x, const int nrows_x,  \
+          const int stride_col_y, const int stride_col_dst) {                  \
+    mmvq_core_impl<dst_c_type, qk_val, qi_val, block_q_t, vdr_val, vec_dot, 1, \
+                   1, MMVQ_ROWS_PER_BLOCK_SHORT_ROWS>(                        \
+        vx, (const block_q8_1 *)vy, dst, ncols_x, nrows_x, stride_col_y,       \
+        stride_col_dst);                                                       \
+  }
+
 #define MMVQ_FUSED_GLU_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot, \
                              dst_tag, dst_c_type, ncols)                       \
   extern "C" __global__ void __launch_bounds__(                                \
@@ -1556,6 +1576,12 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
 // -- plain entries for all 10 supported quant types, batch sizes 1..8, bf16 +
 // f16 + f32 --
 #define MMVQ_PLAIN_BATCH_SET(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot) \
+  MMVQ_PLAIN_SHORT_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,     \
+                         bf16, __nv_bfloat16)                                  \
+  MMVQ_PLAIN_SHORT_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,     \
+                         f16, half)                                            \
+  MMVQ_PLAIN_SHORT_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot,     \
+                         f32, float)                                           \
   MMVQ_PLAIN_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot, bf16,     \
                    __nv_bfloat16, 1)                                           \
   MMVQ_PLAIN_ENTRY(tag, block_q_t, qk_val, qi_val, vdr_val, vec_dot, bf16,     \
@@ -1668,6 +1694,16 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
   extern "C" void launch_mmvq_gguf_##tag##_##dst_tag##_plain(                  \
       const void *vx, const void *vy, void *dst, int ncols_x, int nrows_x,     \
       int stride_col_y, int stride_col_dst, int b_size, void *stream) {        \
+    cudaStream_t s = static_cast<cudaStream_t>(stream);                        \
+    if (b_size == 1 && ncols_x <= MMVQ_SHORT_ROW_MAX_COLS) {                   \
+      dim3 grid((unsigned int)((nrows_x + MMVQ_ROWS_PER_BLOCK_SHORT_ROWS - 1) / \
+                               MMVQ_ROWS_PER_BLOCK_SHORT_ROWS),                \
+                1, 1);                                                         \
+      mmvq_gguf_##tag##_##dst_tag##_plain_short_cuda1<<<grid, WARP_SIZE, 0, s>>>( \
+          vx, vy, (dst_c_type *)dst, ncols_x, nrows_x, stride_col_y,           \
+          stride_col_dst);                                                     \
+      return;                                                                  \
+    }                                                                          \
     const unsigned int rows_per_block =                                        \
         (b_size <= 1) ? MMVQ_ROWS_PER_BLOCK_SINGLE_COL_PLAIN : 2;             \
     const unsigned int nblocks =                                               \
@@ -1682,7 +1718,6 @@ static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t
     }                                                                          \
     dim3 grid(nblocks, 1, 1);                                                  \
     dim3 block(WARP_SIZE, nwarps, 1);                                          \
-    cudaStream_t s = static_cast<cudaStream_t>(stream);                        \
     switch (b_size) {                                                          \
     case 1:                                                                    \
       mmvq_gguf_##tag##_##dst_tag##_plain_cuda1<<<grid, block, 0, s>>>(        \

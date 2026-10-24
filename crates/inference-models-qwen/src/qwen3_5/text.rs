@@ -564,7 +564,8 @@ impl OutputNorm {
 }
 
 struct DecoderLayerOutput {
-    branch: Tensor,
+    // None when the layer already wrote its branch into the residual (a hyper-connection write-back)
+    branch: Option<Tensor>,
     residual: Tensor,
 }
 
@@ -611,11 +612,22 @@ struct LinearForwardContext<'a> {
 
 impl DecoderLayerOutput {
     fn add(self) -> Result<Tensor> {
-        self.branch + self.residual
+        match self.branch {
+            Some(branch) => branch + self.residual,
+            None => Ok(self.residual),
+        }
+    }
+
+    fn branch(&self) -> Result<&Tensor> {
+        self.branch.as_ref().ok_or_else(|| {
+            inference_tensor::Error::msg(
+                "a hyper-connection layer's output has no separate branch to norm",
+            )
+        })
     }
 
     fn add_and_norm(self, norm: &GemmaRmsNorm) -> Result<(Tensor, Tensor)> {
-        norm.forward_add_rms_norm(&self.branch, &self.residual)
+        norm.forward_add_rms_norm(self.branch()?, &self.residual)
     }
 
     fn add_and_prepare(
@@ -630,7 +642,7 @@ impl DecoderLayerOutput {
         if plan.needs_dense {
             let (fused, normalized) =
                 inference_quant::fused_add_rms_norm_quantized_with_normalized(
-                    &self.branch,
+                    self.branch()?,
                     &self.residual,
                     norm.weight(),
                     norm.eps() as f32,
@@ -647,7 +659,7 @@ impl DecoderLayerOutput {
             ))
         } else {
             let fused = inference_quant::fused_add_rms_norm_quantized(
-                &self.branch,
+                self.branch()?,
                 &self.residual,
                 norm.weight(),
                 norm.eps() as f32,
@@ -874,17 +886,17 @@ impl DecoderLayer {
                     self.mlp
                         .forward_with_add_rms_norm(mixer_out, residual, post_attention)?;
                 Ok(DecoderLayerOutput {
-                    branch: ffn_out,
+                    branch: Some(ffn_out),
                     residual: x,
                 })
             }
             (LayerNorms::Hyper { mlp, .. }, Some(read)) => {
-                let x = (read.streams_in() + read.injection(mixer_out)?)?;
+                let x = read.write_back(read.streams_in(), mixer_out)?;
                 let read = mlp.read(&x)?;
                 let ffn_out = self.mlp.forward(&read.input)?;
                 Ok(DecoderLayerOutput {
-                    branch: read.injection(&ffn_out)?,
-                    residual: x,
+                    branch: None,
+                    residual: read.write_back(&x, &ffn_out)?,
                 })
             }
             _ => inference_tensor::bail!(

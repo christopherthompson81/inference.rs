@@ -93,6 +93,68 @@ inference_tensor::kernel_library! {
             ratio: i32,
             stream: i64,
         ) -> i32;
+        pub fn hc_group_norm_bf16(
+            x: *const c_void,
+            scale: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            width: i32,
+            group: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
+        pub fn hc_mix_bf16(
+            mix: *const c_void,
+            normed: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            streams: i32,
+            hidden: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn hc_scaled_silu_bf16(x: *const c_void, out: *mut c_void, n: i64, scale: f32, stream: i64) -> i32;
+        pub fn hc_inject_weights_bf16(x: *const c_void, out: *mut c_void, n: i64, scale: f32, stream: i64) -> i32;
+        pub fn hc_inject_add_bf16(
+            streams_in: *const c_void,
+            output: *const c_void,
+            inject: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            streams: i32,
+            hidden: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn hc_group_norm_f32(
+            x: *const c_void,
+            scale: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            width: i32,
+            group: i32,
+            eps: f32,
+            stream: i64,
+        ) -> i32;
+        pub fn hc_mix_f32(
+            mix: *const c_void,
+            normed: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            streams: i32,
+            hidden: i32,
+            stream: i64,
+        ) -> i32;
+        pub fn hc_scaled_silu_f32(x: *const c_void, out: *mut c_void, n: i64, scale: f32, stream: i64) -> i32;
+        pub fn hc_inject_weights_f32(x: *const c_void, out: *mut c_void, n: i64, scale: f32, stream: i64) -> i32;
+        pub fn hc_inject_add_f32(
+            streams_in: *const c_void,
+            output: *const c_void,
+            inject: *const c_void,
+            out: *mut c_void,
+            rows: i32,
+            streams: i32,
+            hidden: i32,
+            stream: i64,
+        ) -> i32;
         pub fn qsa_decode_plan(
             table: *const u32,
             context_lens: *const u32,
