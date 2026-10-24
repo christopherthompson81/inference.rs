@@ -110,3 +110,29 @@ global attentions over 41.7K tokens, ~40% of the 3090's bf16 tensor peak), im2co
 channel planes, five 64-bit divisions an element), f32 sgemm 1.9 s, trunk bf16 GEMMs 1.1 s. Reference: 7.8 s forward
 (FlashAttention-2, cuDNN convs). Next for speed: a long-sequence non-causal attention path and a better im2col or
 direct 3x3 conv.
+
+## Run 5 - 2026-10-24 13:04
+
+Question: does a whole run (decode, preprocess, forward, masks, writers, `meta.json`) produce the reference's outputs?
+
+Preprocessing (`preprocess.rs`): the reference's adaptive size and resize rule, and PIL's 8-bit bicubic ported (Keys
+a = -0.5, support scaled by the downscale, coefficients rounded to 22 fractional bits, horizontal pass first). On the
+Park photos re-encoded by PIL as PNG, our input equals the reference's tensor exactly (0 values differ); from the JPEGs
+themselves 23.5% of values differ by up to 3 levels: the image crate's JPEG decoder against libjpeg-turbo, not the
+resize.
+
+Outputs (`output.rs`, `run.rs`): camera_params.json, depth npy/png, normal png, edge masks (depth rtol 0.03 AND normals
+1 degree, 3 x 3 max pools), the model's sky mask (`sigmoid(gs_depth_mask_logits) > 0.45`; the reference's default also
+ANDs skyseg.onnx), points voxel-merged at 0.002 and capped at 2M, splats voxel-pruned (weighted averages; once anything
+merges, every voxel's opacity is sum(w^2)/sum(w), as the reference) and capped at 5M, the top 2% by largest scale
+dropped. gaussians.ply is standard 3DGS with opacity as a logit (the reference writes [0, 1]).
+```
+reconstruct (ignored test), bf16 trunk
+Park, 3 x 960x545 JPEG       952 x 546   forward 2.9 s, total 4.4 s    789,727 points, 785,745 splats
+Building, 32 x 512^2 PNG     504 x 504   forward 17.5 s, total 26.9 s  2,000,000 points, 3,109,242 splats
+Building against the reference run (out-building-f32), compare_out.py (scratch):
+  cameras: c2w max |diff| 2.2e-3, translation extent 1.638 vs 1.636, fx rel 2.9e-3
+  depth npy: rel rms 9.4e-3 mean, 3.2e-2 max over 32 frames
+  splats 3,109,242 vs 3,098,474 (the reference's skyseg mask removes a little more); medians: scale_0 -6.933 vs
+  -6.937, f_dc_0 0.032 vs 0.027, rot_0 0.455 vs 0.472, sigmoid(opacity) 0.417 vs 0.412; x extent -1.50..1.49 both
+```

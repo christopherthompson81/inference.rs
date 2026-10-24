@@ -227,3 +227,68 @@ fn thirty_two_frames_forward() -> Result<()> {
     }
     Ok(())
 }
+
+// The reference's input tensor from the same files: PIL's bicubic ported bit for bit, the decode by the image crate
+#[test]
+#[ignore = "needs the reference dump and the sample images (WORLDMIRROR_IMAGES)"]
+fn preprocessing_matches_the_reference_input() -> Result<()> {
+    let (Some((_, reference)), Some(dir)) = (paths(), std::env::var_os("WORLDMIRROR_IMAGES"))
+    else {
+        return Ok(());
+    };
+    let refs = inference_tensor::safetensors::load(&reference, &Device::Cpu)?;
+    let mut files = std::fs::read_dir(dir)?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.sort();
+    let images = files
+        .iter()
+        .map(|f| {
+            let rgb = image::open(f)
+                .map_err(inference_tensor::Error::wrap)?
+                .to_rgb8();
+            Ok(super::preprocess::RgbImage {
+                width: rgb.width() as usize,
+                height: rgb.height() as usize,
+                pixels: rgb.into_raw(),
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let ours = super::preprocess::images_to_tensor(&images, 518, 14, &Device::Cpu)?;
+    let diff = ((&ours - &refs["input.img"])?.abs()? * 255.0)?;
+    let max = diff.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+    let off = diff
+        .gt(0.5)?
+        .to_dtype(DType::F32)?
+        .mean_all()?
+        .to_scalar::<f32>()?;
+    println!(
+        "input: max {max:.1} levels, {:.3}% of values differ",
+        off * 100.0
+    );
+    Ok(())
+}
+
+// A whole run on WORLDMIRROR_IMAGES into WORLDMIRROR_OUT, printing the report
+#[test]
+#[ignore = "needs the WorldMirror checkpoint, images and a GPU; writes files"]
+fn reconstruct_writes_every_output() -> Result<()> {
+    let (Some((dir, _)), Some(images), Some(out)) = (
+        paths(),
+        std::env::var_os("WORLDMIRROR_IMAGES"),
+        std::env::var_os("WORLDMIRROR_OUT"),
+    ) else {
+        return Ok(());
+    };
+    let device = Device::new_cuda(0)?;
+    let model = WorldMirror::load(&dir, DType::BF16, &device)?;
+    let report = super::run::reconstruct(
+        &model,
+        &dir,
+        std::path::Path::new(&images),
+        std::path::Path::new(&out),
+        &super::run::ReconstructOptions::default(),
+    )?;
+    println!("{report:?}");
+    Ok(())
+}

@@ -6,7 +6,10 @@ mod dinov2;
 mod dpt;
 mod gaussians;
 mod layers;
+pub mod output;
+pub mod preprocess;
 mod rope;
+pub mod run;
 mod trunk;
 
 use std::path::Path;
@@ -53,6 +56,7 @@ pub struct WorldMirror {
     normals: dpt::DptHead,
     gs_depth: dpt::DptHead,
     gaussians: gaussians::GaussianParams,
+    trunk_dtype: DType,
     device: Device,
 }
 
@@ -129,8 +133,17 @@ impl WorldMirror {
                 vb.pp("gs_head"),
             )?,
             gaussians: gaussians::GaussianParams::load(dpt::HEAD_FEATURES, vb.pp("gs_renderer"))?,
+            trunk_dtype,
             device: device.clone(),
         })
+    }
+
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    pub fn trunk_dtype(&self) -> DType {
+        self.trunk_dtype
     }
 
     /// Predicts everything for images `[frames, 3, H, W]` in [0, 1].

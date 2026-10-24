@@ -3174,6 +3174,7 @@ version = "0.0.26"
 dependencies = [
  "anyhow",
  "half",
+ "image",
  "inference-nn",
  "inference-tensor",
  "serde",
