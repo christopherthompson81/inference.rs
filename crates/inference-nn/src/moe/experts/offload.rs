@@ -242,7 +242,8 @@ impl Shared {
             let size = host.expert_bytes();
             let src = &host.bytes()[expert * size..][..size];
             // SAFETY: host experts live as long as the layer, and the slot is unread until the copy has landed
-            unsafe { cache.fill_async(slot, src, &self.copy_stream)? };
+            unsafe { cache.fill_async(slot, src, &self.copy_stream) }
+                .map_err(|err| err.context("expert cache copy"))?;
         }
         let stream = self.copy_stream.cu_stream();
         let landed = Box::into_raw(Box::new(Fill {
@@ -251,8 +252,9 @@ impl Shared {
             expert,
         }));
         // SAFETY: `landed` is reclaimed once by `fill_landed`
-        unsafe { result::stream::launch_host_function(stream, fill_landed, landed.cast()) }
-            .map_err(inference_tensor::Error::wrap)
+        unsafe { result::stream::launch_host_function(stream, fill_landed, landed.cast()) }.map_err(
+            |err| inference_tensor::Error::wrap(err).context("expert cache landing callback"),
+        )
     }
 }
 
@@ -277,6 +279,17 @@ unsafe extern "C" fn fill_landed(data: *mut std::ffi::c_void) {
     }
 }
 
+impl Shared {
+    // a fill that never queued: its slot goes back to the free pool instead of staying pending
+    fn release(&self, slot: usize, expert: usize) {
+        let mut state = self.state.lock().expect("expert cache poisoned");
+        state.pending[slot] = false;
+        if state.expert_in[slot] == Some(expert) {
+            state.expert_in[slot] = None;
+        }
+    }
+}
+
 // One thread issues every layer's cache fills: host functions may not call CUDA themselves
 fn fills() -> &'static Sender<Fill> {
     static FILLS: OnceLock<Sender<Fill>> = OnceLock::new();
@@ -291,8 +304,9 @@ fn fills() -> &'static Sender<Fill> {
                     expert,
                 } in receive
                 {
-                    if let Err(err) = shared.fill(slot, expert) {
+                    if let Err(err) = shared.clone().fill(slot, expert) {
                         tracing::error!("MoE expert cache fill failed: {err}");
+                        shared.release(slot, expert);
                     }
                 }
             })

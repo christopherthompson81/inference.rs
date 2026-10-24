@@ -467,7 +467,7 @@ pub(crate) struct ResolvedMapSetting {
 }
 
 // Context an automatic map keeps room for before it moves MoE experts to host memory (or less, for a model with a
-// shorter window); a longer `max_seq_len` asks for more
+// shorter window); a longer `max_seq_len` asks for more, and a context-sized paged cache asks for its own size instead
 const PLANNED_OFFLOAD_CONTEXT: usize = 32 * 1024;
 // The planner tries caching each multiple of 1/this of a layer's experts, most first, and then none (every expert
 // on the CPU)
@@ -606,12 +606,11 @@ impl ExpertCachePlan<'_> {
             }
             return Ok(fitting);
         }
-        let target = params.with_max_seq_len(
-            params
-                .max_seq_len()
-                .max(requested)
-                .max(PLANNED_OFFLOAD_CONTEXT.min(window)),
-        );
+        let target = params.with_max_seq_len(planned_offload_context(
+            params.max_seq_len(),
+            requested,
+            window,
+        ));
         let plan = plan_expert_slots(experts, [&target, params], |slots, params| {
             self.fits(slots, params, activations)
         })?;
@@ -626,6 +625,17 @@ impl ExpertCachePlan<'_> {
         }
         Ok(plan.map(|(slots, _)| slots))
     }
+}
+
+// The context an offload plan keeps room for: a context-sized paged cache's own size (0 when none), else a usable
+// default within the model's window, and never less than the map's `max_seq_len`
+fn planned_offload_context(max_seq_len: usize, requested: usize, window: usize) -> usize {
+    let planned = if requested > 0 {
+        requested
+    } else {
+        PLANNED_OFFLOAD_CONTEXT.min(window)
+    };
+    max_seq_len.max(planned)
 }
 
 // The most experts per layer to cache (with the context it fits), trying each multiple of 1/PLANNED_SLOT_STEPS of a
@@ -1373,7 +1383,21 @@ mod tests {
 
 #[cfg(test)]
 mod expert_slot_plan_tests {
-    use super::{plan_expert_slots, shrink_expert_slots};
+    use super::{
+        PLANNED_OFFLOAD_CONTEXT, plan_expert_slots, planned_offload_context, shrink_expert_slots,
+    };
+
+    #[test]
+    fn an_asked_context_replaces_the_planned_default() {
+        let window = 256 * 1024;
+        assert_eq!(
+            planned_offload_context(4096, 0, window),
+            PLANNED_OFFLOAD_CONTEXT
+        );
+        assert_eq!(planned_offload_context(4096, 8192, window), 8192);
+        assert_eq!(planned_offload_context(4096, 0, 2048), 4096);
+        assert_eq!(planned_offload_context(65536, 8192, window), 65536);
+    }
 
     const EXPERTS: usize = 256;
 
