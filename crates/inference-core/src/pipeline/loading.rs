@@ -738,6 +738,7 @@ pub(crate) fn resolve_map_setting(
         layer_sizes_in_bytes,
         non_mapped_size_in_bytes,
         total_model_size_in_bytes,
+        ..
     } = super::isq_flow::auto_device_map_sizes(sizing, dtype)?;
     let map = super::loaders::auto_device_map::get_device_layers(
         loader,

@@ -132,6 +132,16 @@ pub trait DeviceMappedModelLoader {
     ) -> Result<Option<usize>> {
         Ok(None)
     }
+    /// Decoder layers that load with the non-mapped weights (an MTP head) and are counted in `non_mapped_size_in_bytes`,
+    /// in order after the mapped layers.
+    fn non_mapped_layer_sizes_in_bytes(
+        &self,
+        _config: &str,
+        _dtype: DType,
+        _weight_pack_factor: usize,
+    ) -> Result<Vec<usize>> {
+        Ok(Vec::new())
+    }
     /// weight_pack_factor only applies to quantized weights.
     fn layer_sizes_in_bytes(
         &self,

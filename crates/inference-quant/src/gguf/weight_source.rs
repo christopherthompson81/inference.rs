@@ -993,12 +993,13 @@ impl QuantizedWeightSource for GgufWeightSource {
     fn layer_expert_bytes(&self) -> Result<Option<(Vec<usize>, usize)>> {
         let mut layers = Vec::<usize>::new();
         let mut experts = None;
+        let mut counted = std::collections::HashSet::<&str>::new();
         for (native_name, binding) in &self.bindings {
             let (Some(layer), Some(source)) = (binding.text_layer_index(), binding.direct_tensor())
             else {
                 continue;
             };
-            if !source.ends_with(EXPERT_TENSOR_SUFFIX) {
+            if !source.ends_with(EXPERT_TENSOR_SUFFIX) || !counted.insert(source) {
                 continue;
             }
             let info = self.archive.tensor_info(source)?;
@@ -1984,6 +1985,35 @@ mod tests {
         let one_factor =
             weights.elem_count() * DType::BF16.size_in_bytes() / source.pack_factor(DType::BF16)?;
         assert!(one_factor > resident[0]);
+        Ok(())
+    }
+
+    // An expert stack two names bind (an MTP head's) is one stack on the host and in the planner's staging
+    #[test]
+    fn layer_expert_bytes_count_a_stack_once() -> Result<()> {
+        let weights = Tensor::randn(0f32, 1f32, (4, 8, 64), &Device::Cpu)?;
+        let stack = QTensor::quantize(&weights, GgmlDType::Q8_0)?;
+        let mut file = NamedTempFile::new().map_err(Error::wrap)?;
+        gguf_file::write(
+            file.as_file_mut(),
+            &[],
+            &[("blk.0.ffn_up_exps.weight", &stack)],
+        )?;
+        file.as_file_mut().flush().map_err(Error::wrap)?;
+        let bindings = GgufBindingMap::new()
+            .with_binding(
+                "model.layers.0.mlp.experts.up_proj.weight",
+                GgufTensorBinding::tensor("blk.0.ffn_up_exps.weight"),
+            )
+            .with_binding(
+                "mtp.layers.0.mlp.experts.up_proj.weight",
+                GgufTensorBinding::tensor("blk.0.ffn_up_exps.weight"),
+            );
+        let archive = Arc::new(GgufArchive::open_file(file.path())?);
+        let source = GgufWeightSource::new(archive, &bindings, DType::BF16)?;
+        let (layers, experts) = source.layer_expert_bytes()?.unwrap();
+        assert_eq!(layers, [stack.storage_size_in_bytes()]);
+        assert_eq!(experts, 4);
         Ok(())
     }
 

@@ -963,3 +963,44 @@ hyper-connections in F32, and a stock llama.cpp base adds 0.01-0.02 of its own (
 activations; basalt's Q8_0 against it, 0.0456 and 95.6%). Ours at 0.0347 and 94.65% sits in that range: no sign of a
 numerics fault in today's kernels. Whether our own hc read (also q8_1 activations through MMVQ) carries the same
 noise needs an F32 reference, which this does not give.
+
+## Run 26 - 2026-10-23 22:33
+
+Question: does MTP pay at 128 slots once the head's experts stop missing (basalt keeps its head's experts resident at
+2 bits), and does the draft depth matter?
+
+First, Run 23's MTP rows were not at 128 slots: with the head file loaded the planner logged `requested=128 slots=64`
+for every MTP server, while the base ran at 128. Equal-slot runs at 64 (`spec_measure.sh`, two prompts, tok/s):
+```
+base                                  27.3 / 25.4
+MTP 2, head experts offloaded (Q8_0)  26.4 / 23.2
+MTP 2, head experts resident (Q8_0)   24.0 / 22.5     (a throwaway switch loading the head's MoE without the cache)
+MTP 1, head experts resident          25.3 / 23.5     accept ~80%, 1.8 tokens a step
+```
+Resident head experts change nothing measurable: the head's misses (about 1 ms a draft) are small beside the verify.
+
+Why the planner shrank the cache (probes in `ExpertCachePlan::fits`, removed after): the head counted 4,685 MiB more
+than it costs. Two faults, both fixed:
+- The loaders size the head inside `non_mapped_size_in_bytes` at the conservative pack factor with all 512 experts
+  resident (4,960 MiB); the source's own bytes for `blk.48` were dropped (the resident-bytes step truncates layers
+  past the loader's count) and its experts never left the budget. Loaders now report the head separately
+  (`non_mapped_layer_sizes_in_bytes`); the planner swaps in the source's bytes and offloads its experts like a mapped
+  layer's (slots, plus the staging max).
+- `layer_expert_bytes` counted a stack once per binding; the head's stacks are bound twice, so the head's experts
+  read as 5,100 MiB and the staging estimate followed. It now dedupes source tensors as `layer_resident_bytes` does.
+
+After: the Q8_0 head needs its full 2,550 MiB of experts staged (the largest layer sets the staging buffer, against
+1,537 MiB for the model's largest), so it gets 96 slots; a head with only its experts requantized (`llama-quantize
+--allow-requantize --tensor-type ffn_gate_exps=q2_k --tensor-type ffn_up_exps=q2_k --tensor-type
+ffn_down_exps=iq4_nl`, 1,072 MiB, 975 of it experts) fits 128 (22,065 of 22,374 MiB planned).
+```
+128 slots                              tok/s          accept
+base                                   36.7 / 39.3
+MTP 2, Q2_K/IQ4_NL head                36.9 / 36.4    76.4 / 74.7%  (Q8_0 head: ~75%, so the requant costs nothing)
+MTP 1, Q2_K/IQ4_NL head                33.9 / 34.7    80-82%
+MTP 2, Q8_0 head (planner: 96 slots)   31.5 / 29.6
+```
+MTP is break-even at best at equal slots. The verify is the cost, not the head: three tokens miss about 6x a single
+step's experts (Run 23), each distinct miss costs the CPU what it costs a plain step, and at ~15% of routes on the CPU
+the 2.5 tokens a step do not pay for it. A depth controller sized to the CPU share would pick no drafts here; not
+built. Kept: the two planner fixes (MTP servers now get the cache they fit) and an offload-guide note on head types.

@@ -148,7 +148,7 @@ impl AutoDeviceMapSizes {
     // Offloaded experts leave a layer's budget but for its cache slots (one more stays zeroed); the largest layer's
     // full stack is staged on the device for prompts
     fn without_offloaded_experts(
-        mut self,
+        self,
         inputs: &AutoDeviceMapSizingInputs<'_>,
         source: &dyn QuantizedWeightSource,
     ) -> Result<Self> {
@@ -158,23 +158,56 @@ impl AutoDeviceMapSizes {
         let Some((expert_bytes, experts)) = source.layer_expert_bytes()? else {
             return Ok(self);
         };
+        Ok(self.with_experts_cached(&expert_bytes, experts, slots))
+    }
+
+    fn with_experts_cached(mut self, expert_bytes: &[usize], experts: usize, slots: usize) -> Self {
         let cached = (slots + 1).min(experts + 1);
+        let mapped = self.layer_sizes_in_bytes.len();
         let mut staging = 0;
-        for (size, &bytes) in self.layer_sizes_in_bytes.iter_mut().zip(&expert_bytes) {
+        for (size, &bytes) in self.layer_sizes_in_bytes.iter_mut().zip(expert_bytes) {
             let kept = bytes / experts * cached;
             *size = size.saturating_sub(bytes) + kept;
+            staging = staging.max(bytes);
+        }
+        // an MTP head's experts stay in host memory too, cached like a mapped layer's
+        for (size, &bytes) in self
+            .non_mapped_layer_sizes_in_bytes
+            .iter_mut()
+            .zip(&expert_bytes[mapped.min(expert_bytes.len())..])
+        {
+            let kept = size.saturating_sub(bytes) + bytes / experts * cached;
+            self.non_mapped_size_in_bytes =
+                self.non_mapped_size_in_bytes.saturating_sub(*size) + kept;
+            *size = kept;
             staging = staging.max(bytes);
         }
         self.non_mapped_size_in_bytes += staging;
         self.total_model_size_in_bytes =
             self.layer_sizes_in_bytes.iter().sum::<usize>() + self.non_mapped_size_in_bytes;
-        Ok(self)
+        self
+    }
+
+    // Each layer's bytes as the source holds them; layers past the loader's count (an MTP head) are non-mapped
+    fn with_source_layers(mut self, mut resident: Vec<usize>) -> Self {
+        let extra = resident.split_off(self.layer_sizes_in_bytes.len());
+        for (size, bytes) in self.non_mapped_layer_sizes_in_bytes.iter_mut().zip(extra) {
+            self.non_mapped_size_in_bytes =
+                self.non_mapped_size_in_bytes.saturating_sub(*size) + bytes;
+            *size = bytes;
+        }
+        self.total_model_size_in_bytes =
+            resident.iter().sum::<usize>() + self.non_mapped_size_in_bytes;
+        self.layer_sizes_in_bytes = resident;
+        self
     }
 }
 
 pub(crate) struct AutoDeviceMapSizes {
     pub layer_sizes_in_bytes: Vec<usize>,
     pub non_mapped_size_in_bytes: usize,
+    // the decoder layers `non_mapped_size_in_bytes` includes, after the mapped ones
+    pub non_mapped_layer_sizes_in_bytes: Vec<usize>,
     pub total_model_size_in_bytes: usize,
 }
 
@@ -198,11 +231,17 @@ fn packed_sizes(
         quantization,
         inputs.matformer,
     )?;
+    let non_mapped_layer_sizes_in_bytes = inputs.loader.non_mapped_layer_sizes_in_bytes(
+        inputs.config,
+        dtype,
+        non_mapped_pack_factor,
+    )?;
     let total_model_size_in_bytes =
         layer_sizes_in_bytes.iter().sum::<usize>() + non_mapped_size_in_bytes;
     Ok(AutoDeviceMapSizes {
         layer_sizes_in_bytes,
         non_mapped_size_in_bytes,
+        non_mapped_layer_sizes_in_bytes,
         total_model_size_in_bytes,
     })
 }
@@ -243,14 +282,10 @@ pub(crate) fn auto_device_map_sizes(
             // One pack factor floors a mixed low-bit file to its least packed layer; the source knows each layer's bytes
             if matches!(sizing, AutoDeviceMapSizing::PreparedWeightSource)
                 && inputs.topology.is_none()
-                && let Some(mut resident) = source.layer_resident_bytes(dtype)?
-                // Layers past the loader's count (an MTP head) are sized as non-mapped
+                && let Some(resident) = source.layer_resident_bytes(dtype)?
                 && resident.len() >= sizes.layer_sizes_in_bytes.len()
             {
-                resident.truncate(sizes.layer_sizes_in_bytes.len());
-                sizes.total_model_size_in_bytes =
-                    resident.iter().sum::<usize>() + sizes.non_mapped_size_in_bytes;
-                sizes.layer_sizes_in_bytes = resident;
+                sizes = sizes.with_source_layers(resident);
             }
             sizes
                 .without_host_embedding(
@@ -327,6 +362,7 @@ pub(crate) fn auto_device_map_sizes(
                 return AutoDeviceMapSizes {
                     layer_sizes_in_bytes: inventory.layer_sizes_in_bytes,
                     non_mapped_size_in_bytes: inventory.non_mapped_size_in_bytes,
+                    non_mapped_layer_sizes_in_bytes: Vec::new(),
                     total_model_size_in_bytes: inventory.total_model_size_in_bytes,
                 }
                 .without_host_embedding(&inputs, dtype, pack_factor, None);
@@ -1066,5 +1102,22 @@ mod tests {
 
         assert!(err.to_string().contains("cannot be combined"));
         assert!(err.to_string().contains("UQFF weights take precedence"));
+    }
+    // Two mapped layers of 100 bytes (80 in experts) and an MTP head estimated at 500: the source holds the head at
+    // 300 (240 in experts), and with 2 of 4 experts cached the head keeps its slots, the largest stack its staging
+    #[test]
+    fn an_mtp_head_takes_the_source_bytes_and_offloads_its_experts() {
+        let sizes = AutoDeviceMapSizes {
+            layer_sizes_in_bytes: vec![100, 100],
+            non_mapped_size_in_bytes: 550,
+            non_mapped_layer_sizes_in_bytes: vec![500],
+            total_model_size_in_bytes: 750,
+        }
+        .with_source_layers(vec![100, 100, 300])
+        .with_experts_cached(&[80, 80, 240], 4, 2);
+        assert_eq!(sizes.layer_sizes_in_bytes, [80, 80]);
+        assert_eq!(sizes.non_mapped_layer_sizes_in_bytes, [240]);
+        assert_eq!(sizes.non_mapped_size_in_bytes, 50 + 240 + 240);
+        assert_eq!(sizes.total_model_size_in_bytes, 160 + 530);
     }
 }
