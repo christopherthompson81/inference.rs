@@ -32,8 +32,8 @@ use crate::worldmirror::{WorldMirror, preprocess::RgbImage};
 
 // the reference generates each view's aerial move first, the two turns then lean on it
 const TRAJECTORY_ORDER: [usize; 3] = [2, 0, 1];
-// WorldMirror runs on the memory bank as the reference's alignment stage calls it
-const RECONSTRUCT_TARGET_SIZE: usize = 832;
+// WorldMirror runs on the whole memory bank (~99 frames); the reference's 832 is ~200K tokens, past a 24 GB card
+const RECONSTRUCT_TARGET_SIZE: usize = 518;
 const DEFAULT_SEED: u64 = 1024;
 
 /// Where each model's weights live.
@@ -100,6 +100,31 @@ fn device_mib(device: &Device) -> u64 {
         .query(device)
         .map(|m| ((m.total() - m.available()) >> 20) as u64)
         .unwrap_or_default()
+}
+
+// Returns the memory pool's cached blocks to the driver once a stage's models are dropped: blocks cached for one stage's
+// sizes (umT5's weights) otherwise fragment the next stage's room
+fn release(device: &Device) -> Result<()> {
+    device.synchronize()?;
+    #[cfg(feature = "cuda")]
+    inference_nn::utils::memory_usage::MemoryUsage.trim_cuda_memory_pool(device, 0)?;
+    Ok(())
+}
+
+// A clip already written by an earlier run, loaded instead of generated again (the reference's skip_exist)
+fn load_clip(dir: &Path, frames: usize) -> Option<Vec<Rgb8>> {
+    (0..frames)
+        .map(|f| {
+            let img = image::open(dir.join(format!("frame_{f:02}.png")))
+                .ok()?
+                .to_rgb8();
+            Some(Rgb8 {
+                width: img.width() as usize,
+                height: img.height() as usize,
+                pixels: img.into_raw(),
+            })
+        })
+        .collect()
 }
 
 fn sharded(
@@ -170,6 +195,7 @@ pub fn generate_world(
     let t = Instant::now();
     let moge = MoGe::load(&models.moge, DType::F32, device)?;
     let depth = pano_depth(&moge, pano, device)?;
+    release(device)?;
     let scene = Scene::new(pano, &depth, options.outdoor);
     let (vw, vh) = trajectory::view_size();
     let k = trajectory::intrinsics(
@@ -240,6 +266,7 @@ pub fn generate_world(
             WanTextEncoder::new(sharded(&shards, DType::BF16, device)?, &cfg, tokenizer)?;
         encoder.encode(&options.prompt)?
     };
+    release(device)?;
     stage("caption (umT5-XXL)", t, device);
 
     // 4. the clip loop
@@ -286,6 +313,13 @@ pub fn generate_world(
         let name = format!("{view_id}_{traj_id}");
         let w2cs = plan.c2ws.iter().map(invert4).collect::<Vec<_>>();
         let ks = vec![k; w2cs.len()];
+        let dir = out_dir.join("clips").join(&name);
+        if let Some(done) = load_clip(&dir, w2cs.len()) {
+            memory.update(&view_id, &traj_id, &done, &w2cs, &ks);
+            total_frames += done.len();
+            clips.push(name);
+            continue;
+        }
         let mut features = |imgs: &[&Rgb8]| -> Vec<Vec<f32>> {
             imgs.iter()
                 .map(|img| {
@@ -361,7 +395,6 @@ pub fn generate_world(
                 pixels,
             })
             .collect::<Vec<_>>();
-        let dir = out_dir.join("clips").join(&name);
         std::fs::create_dir_all(&dir)?;
         for (f, img) in generated.iter().enumerate() {
             save_png(img, &dir.join(format!("frame_{f:02}.png")))?;
@@ -386,9 +419,11 @@ pub fn generate_world(
         memory.update(&view_id, &traj_id, &generated, &w2cs, &ks);
         total_frames += generated.len();
         clips.push(name);
+        release(device)?;
     }
     drop(pipeline);
     drop(moge);
+    release(device)?;
     stage("clips (WorldStereo-2)", t, device);
 
     // 5. WorldMirror on the memory bank, the bank's cameras as priors

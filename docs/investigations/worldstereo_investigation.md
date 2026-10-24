@@ -232,3 +232,27 @@ view0/traj0: per frame identical (shortcut frames 27-34 where forced), ref_index
 ```
 `inference worldgen` wires the stages (scene, trajectories, umT5 caption, clip loop, WorldMirror on the bank with
 camera priors); the first full run is on the sample repo's indoor `case000`.
+
+## Run 11 - 2026-10-24 17:39
+
+Question: does `inference worldgen` run a whole panorama (the sample repo's indoor `case000`, 1920 x 960) to clips and a
+reconstruction on the 3090, and where do time and memory go?
+
+`ws_run.sh` (scratch): the CLI with a 0.5 s nvidia-smi sampler; prompt written by hand for the scene (the reference
+captions each trajectory with Qwen3-VL), `--scene indoor`.
+```
+first run    7 of 9 clips, then CUDA out of memory (wall 1667 s, ~3.5 min a clip). Memory sat at ~22.1 GB from
+             the caption stage on: umT5's 11.4 GB went back to the CUDA memory pool, not the driver, and the clip loop ran
+             in a pool full of blocks cut for umT5 until one allocation found no room
+fix          the pool trimmed (cuMemPoolTrimTo 0) after each stage drops its models and after every clip; finished
+             clips are loaded from disk instead of generated again (the reference's skip_exist)
+second run   the last 2 clips, then WorldMirror on the 99 bank frames at 832 (the reference's size): out of memory
+             (~200K tokens; its four trunk feature maps alone ~6.5 GB)
+third run    WorldMirror at 518 (99 frames, ~77K tokens): forward 23.2 s, peak 12.3 GB above idle
+stages (third run; clips loaded from disk): scene 50.5 s, trajectories 14.2 s, umT5 33.3 s, clip models 37.9 s,
+reconstruction 30.8 s
+```
+Reconstruction check (WorldMirror's predicted cameras against the trajectory cameras it was given as priors, similarity
+fit over the 72 generated frames): position residual median 2.1 cm (max 8.0 cm) against a 69 cm mean camera spread;
+rotation residual median 1.0 deg (max 4.1). Outputs: 2.0M points, 4.9M Gaussians (318 MB standard 3DGS PLY).
+Next: write the reconstruction-to-scene transform into meta.json, per-clip timing on a clean run, the outdoor sample.
